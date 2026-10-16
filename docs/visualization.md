@@ -178,9 +178,18 @@ needs you, and the action in place. The first decision is open until you pick an
 | ------------ | ----------------------------------------------------- | ------------------------- | --------------- |
 | Question     | an open `ask`                                         | the question              | its options, or an answer in words |
 | Approval     | an issue in Needs You                                 | why it needs a person (the review's reasons) | Approve, Send back to Todo, Open the worktree |
+| Playbook change | an issue carrying a pending `propose_playbook_change` | who proposes it and for which repo, their reasons, and the diff against the playbook as it is now | Apply change, Reject… with a reason |
 | Conflict     | a worktree with a rebase stopped on a conflict        | the rebase and its base   | Open the worktree |
 | Waiting      | an agent session waiting for input in its terminal   | what it asks              | Open the worktree |
 | Land stopped | the track is stuck at Landing and no agent is working | why the land stopped      | Open the worktree, Send back to Todo |
+
+A playbook change is an Approval underneath (`crates/nitely-core/src/proposals.rs`): approving its
+issue applies the change and closes it: to the playbook Nitely keeps, or, when the repo commits its
+own `.nitely/playbook.toml`, as a commit on the integration branch the changed playbook names (built
+without touching any checkout's other files; a local edit of the playbook stops it). Canceling it
+with a reason rejects it. So the issue panel's Approve does the same. The diff (`PlaybookDiff`)
+is mono on the sunken surface, removed lines washed in `--fail-wash` and added ones in
+`--live-wash`, with a gap mark where unchanged lines are left out.
 
 Within a kind, decisions are ordered by urgency (the issue's `urgency`, so a blocker of urgent
 work rises), then by how long they have waited. The header says how many there are and the

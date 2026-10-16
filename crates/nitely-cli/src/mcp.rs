@@ -264,6 +264,16 @@ fn tools() -> Value {
             } }
         },
         {
+            "name": "propose_playbook_change",
+            "description": "Propose a change to the repo's playbook (.nitely/playbook.toml or the one Nitely keeps): the integration branch, gate commands, review focus and flags, approval paths. You never change the rules yourself: this files an issue in Needs You with the diff and your reasons, and only the human's approval puts it in effect. Refused when the result would not parse. A proposal while another is pending for the repo replaces it with a new issue that carries both changes.",
+            "inputSchema": { "type": "object", "required": ["change", "why"], "properties": {
+                "change": { "type": "string", "description": "TOML. With mode merge (the default), a fragment merged into the playbook, e.g. a [branch] table with integration = \"main\": tables merge key by key, other values (arrays too) are replaced. With mode replace, the whole new playbook (also how to remove a key)." },
+                "why": { "type": "string", "description": "What is wrong now and the evidence, for the human deciding." },
+                "mode": { "type": "string", "enum": ["merge", "replace"] },
+                "project": { "type": "string" }
+            } }
+        },
+        {
             "name": "file_issue",
             "description": "File a finding, follow-up or idea you will not handle now. Refused when an issue, open or closed, looks like the same work: a similar title, or bodies naming the same files (it lists them and why); set allow_similar only if it is really different.",
             "inputSchema": { "type": "object", "required": ["title", "kind", "body", "evidence"], "properties": {
@@ -587,6 +597,19 @@ fn run_tool(server: &Server, name: &str, args: &Value, session: &str) -> Result<
             json!(db.set_project_brief(&project(&db)?, brief, revision, &actor)?)
         }
         "mark_setup_complete" => json!(db.mark_setup_complete(&project(&db)?, req(args, "sha")?, &actor)?),
+        "propose_playbook_change" => {
+            let project = project(&db)?;
+            let root = playbook::repo_for_issue(&config, Some(&project), &server.cwd)?;
+            let normalized = paths::normalize(&root.to_string_lossy());
+            let repo = config
+                .repos
+                .iter()
+                .find(|r| paths::normalize(&r.root) == normalized)
+                .with_context(|| format!("{} is not connected to Nitely, so it has no playbook Nitely keeps; connect it first", root.display()))?;
+            let target = nitely_core::proposals::Target::of(&repo.name, &root);
+            let mode = nitely_core::proposals::Mode::parse(str_arg(args, "mode"))?;
+            json!(db.propose_playbook_change(&project, &target, mode, req(args, "change")?, req(args, "why")?, &actor)?)
+        }
         "file_issue" => {
             let project = project(&db)?;
             json!(db.create_issue(&new_issue(args, &project, &server.vendor)?, &actor)?)

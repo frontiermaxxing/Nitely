@@ -147,3 +147,18 @@ button.dd-title:hover { text-decoration: underline; text-decoration-color: var(-
   .at-work-row { grid-template-columns: 18px minmax(0, 1fr) 32px; row-gap: 2px; }
   .at-work-activity { grid-column: 2 / 4; grid-row: 2; }
 }
+
+/* A playbook change an agent proposed: its reasons, then the diff. */
+.pb-why { white-space: pre-wrap; color: var(--fg-2); }
+.pb-diff {
+  margin: 8px 0; padding: 8px 0; max-height: 320px; overflow: auto; background: var(--sunken);
+  border-radius: var(--radius); font-family: var(--font-mono); font-size: 12px; line-height: 1.5;
+}
+.pb-diff > span { display: block; padding: 0 12px; white-space: pre; }
+.pb-diff-op { display: inline-block; width: 1.5ch; color: var(--fg-3); user-select: none; }
+.pb-diff-add { background: var(--live-wash); }
+.pb-diff-add .pb-diff-op { color: var(--live); }
+.pb-diff-del { background: var(--fail-wash); }
+.pb-diff-del .pb-diff-op { color: var(--fail); }
+.pb-diff-gap { color: var(--fg-3); text-align: center; }
+.pb-applies { overflow-wrap: anywhere; }

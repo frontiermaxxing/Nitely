@@ -177,11 +177,32 @@ CREATE TABLE IF NOT EXISTS crew_control (  -- per project: paused, and the super
   heartbeat_at   INTEGER,
   status         TEXT
 );
+CREATE TABLE IF NOT EXISTS playbook_proposal ( -- a playbook change an agent proposed; only a human applies it
+  id         INTEGER PRIMARY KEY,
+  issue_key  TEXT NOT NULL,                -- the issue in Needs You that carries it
+  repo       TEXT NOT NULL,                -- the repo's name in Nitely's config
+  root       TEXT NOT NULL,
+  scope      TEXT NOT NULL,                -- the root, normalized: one pending proposal per repo
+  in_repo    INTEGER NOT NULL,             -- 1: the repo commits .nitely/playbook.toml
+  path       TEXT NOT NULL,                -- the file the playbook is read from
+  steps      TEXT NOT NULL,                -- JSON [{mode, change}], earlier pending proposals first
+  base       TEXT NOT NULL,                -- the playbook when proposed
+  proposed   TEXT NOT NULL,                -- the playbook after every step
+  why        TEXT NOT NULL,
+  status     TEXT NOT NULL,                -- pending | applied | rejected | superseded
+  created_by TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  decided_by TEXT,
+  decided_at INTEGER,
+  outcome    TEXT                          -- what applying did, or why it was rejected
+);
+CREATE INDEX IF NOT EXISTS playbook_proposal_issue ON playbook_proposal (issue_key);
+CREATE UNIQUE INDEX IF NOT EXISTS playbook_proposal_pending ON playbook_proposal (scope) WHERE status = 'pending';
 "#;
 
 /// Bumped when a table changes shape. Tables that only mirror Bitbucket or Linear are dropped
 /// and refilled by the next sync; tables Nitely owns get real migrations.
-const SCHEMA_VERSION: i64 = 12;
+const SCHEMA_VERSION: i64 = 13;
 
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -211,7 +232,7 @@ fn migrate(conn: &Connection) -> Result<()> {
             conn.execute_batch("ALTER TABLE review ADD COLUMN note TEXT NOT NULL DEFAULT '';")?;
         }
     }
-    // v12 adds issue.owner.
+    // v12 adds issue.owner; v13 adds playbook_proposal, which SCHEMA creates.
     add_column(conn, "issue", "owner", "TEXT NOT NULL DEFAULT 'agent'")?;
     Ok(())
 }

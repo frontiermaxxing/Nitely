@@ -27,6 +27,7 @@ import type {
   IssueDetail,
   IssueRecord,
   PrRecord,
+  PlaybookProposal,
   Project,
   ProjectBrief,
   Pulse,
@@ -275,6 +276,11 @@ const ISSUES: IssueSpec[] = [
     from: 26, to: 0.4, story: ["filed", "claim", "work", "work", "gate", "review", "pass"],
     notes: ["Availability grid", "Writing tests for the availability window"],
     live: { state: "idle", seen: 18, activity: "Review passed; waiting to land" }, branch: { ahead: 7, dirty_files: 0 }, checks: "pending",
+  },
+  {
+    key: "HAR-15", title: "Playbook change for harbor: the gate runs no tests", kind: "improvement", priority: 2, vendor: "claude",
+    from: 1.6, to: 1.6, story: ["filed"], owner: "human",
+    body: "claude proposes a change to the playbook Nitely keeps for harbor. Approving applies it; canceling it with a reason rejects it.",
   },
   { key: "HAR-12", title: "Email receipts in the guest's language", kind: "feature", priority: 3, from: 60, to: 60, story: ["filed"] },
   { key: "HAR-11", title: "Move image uploads to signed URLs", kind: "improvement", priority: 2, vendor: "cursor", from: 100, to: 3.5, story: ["filed", "claim", "work", "gate", "review", "pass", "land"] },
@@ -880,8 +886,43 @@ function detail(key: string): IssueDetail {
     timeline: world.timelines.get(issue.key) ?? [],
     prs: world.prs.get(issue.key) ?? [],
     reviews: world.reviews.get(issue.key) ?? [],
+    proposal: PROPOSALS.get(issue.key) ?? null,
   };
 }
+
+// Playbook changes agents proposed, by the issue that carries them (see HAR-15's story).
+const PROPOSALS = new Map<string, PlaybookProposal>([
+  [
+    "HAR-15",
+    {
+      id: 1,
+      issue_key: "HAR-15",
+      repo: "harbor",
+      path: "C:\\Users\\you\\AppData\\Roaming\\nitely\\playbooks\\harbor.toml",
+      in_repo: false,
+      why: "The gate has no commands, so every change lands untested. package.json has test and build scripts, and CI runs both (.github/workflows/ci.yml:18). Billing code under api/billing/ should wait for a person.",
+      status: "pending",
+      created_by: "claude:c:/development/harbor",
+      created_at: NOW - 1.6 * HOUR,
+      decided_by: null,
+      decided_at: null,
+      outcome: null,
+      diff: [
+        { op: " ", text: "[worktree]" },
+        { op: " ", text: 'setup = ["npm ci"]' },
+        { op: " ", text: "" },
+        { op: " ", text: "[gate]" },
+        { op: " ", text: "# Must pass before a change can land." },
+        { op: "-", text: "commands = []" },
+        { op: "+", text: 'commands = ["npm test", "npm run build"]' },
+        { op: "+", text: "" },
+        { op: "+", text: "[approval]" },
+        { op: "+", text: 'human_paths = [{ path = "^api/billing/", why = "money" }]' },
+      ],
+      stale: null,
+    },
+  ],
+]);
 
 /** Adds or removes a blocker, the way set_blocker does, and returns the issue's new relations. */
 function setBlocker(args: Record<string, unknown>) {
@@ -966,8 +1007,16 @@ function moveIssue(args: Record<string, unknown>) {
   const ts = Math.floor(Date.now() / 1000);
   const why = (args.evidence ?? args.reason) as string | null;
   world.timelines.get(issue.key)!.push({ ts, actor: "human", kind: "issue_moved", summary: `${issue.state} → ${to}${why ? `: ${why}` : ""}` });
-  issue.state = to;
-  issue.state_type = STATE_TYPE[to] ?? issue.state_type;
+  // Approving a proposed playbook change applies it (the playbook Nitely keeps) and closes the issue.
+  const proposal = PROPOSALS.get(issue.key);
+  const applies = proposal?.status === "pending" && to === "Approved";
+  if (proposal?.status === "pending" && (applies || to === "Canceled")) {
+    proposal.status = applies ? "applied" : "rejected";
+    proposal.outcome = applies ? `Applied to ${proposal.path}` : String(args.reason);
+  }
+  const landed = applies ? "Done" : to;
+  issue.state = landed;
+  issue.state_type = STATE_TYPE[landed] ?? issue.state_type;
   issue.updated_at = iso(ts);
   if (issue.state_type !== "started") issue.claimed_by = null;
   retrack(world, issue);

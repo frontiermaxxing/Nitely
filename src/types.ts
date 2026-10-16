@@ -232,6 +232,29 @@ export interface IssueDetail {
   timeline: TimelineEntry[];
   prs: PrRecord[];
   reviews: ReviewRecord[];
+  /** The playbook change the issue carries, when an agent proposed one (crates/nitely-core/src/proposals.rs). */
+  proposal?: PlaybookProposal | null;
+}
+
+/** A playbook change an agent proposed; approving its issue applies it, canceling rejects it. */
+export interface PlaybookProposal {
+  id: number;
+  issue_key: string;
+  repo: string;
+  path: string;
+  /** The repo commits its own .nitely/playbook.toml: approving commits the change on its integration branch. */
+  in_repo: boolean;
+  why: string;
+  status: "pending" | "applied" | "rejected" | "superseded";
+  created_by: string;
+  created_at: number;
+  decided_by: string | null;
+  decided_at: number | null;
+  outcome: string | null;
+  /** While pending, against the playbook as it is now. `@` stands for unchanged lines left out. */
+  diff: { op: " " | "+" | "-" | "@"; text: string }[];
+  /** While pending: why it no longer applies to the playbook as it is now. */
+  stale: string | null;
 }
 
 export interface ReviewRecord {

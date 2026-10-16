@@ -94,8 +94,9 @@ export function decisionsOf(board: Board, details: Map<string, IssueDetail>, now
     // The board can be older than the issue's detail (a snapshot started before the human moved
     // it): an issue the detail shows approved, or moved anywhere else, is no longer a decision.
     const i = details.get(listed.key)?.issue ?? listed;
-    const own = isOwnWork(i);
-    if (!own && !needsHuman(i)) continue;
+    // A playbook change is the human's own issue but a decision to approve, not work to do.
+    const own = isOwnWork(i) && details.get(i.key)?.proposal?.status !== "pending";
+    if (!own && !needsHuman(i) && !isOwnWork(i)) continue;
     const at = rowOf(i.key);
     out.push({ id: `${own ? "own" : "approve"}-${i.key}`, kind: own ? "own" : "approve", issue: i, row: at?.row ?? null, repo: at?.repo ?? null, ask: null, since: waitingSince(i, details.get(i.key)), urgency: urgencyOf(i) });
   }
@@ -128,15 +129,15 @@ const byUrgency = (a: Decision, b: Decision) => a.urgency - b.urgency || a.since
 
 /**
  * What the human did to a decision: approved it, sent it back to Todo, answered it, marked their
- * own work done, or handed it back to agents.
+ * own work done, or handed it back to agents; for a playbook change, applied or rejected it.
  */
-export type Move = "approve" | "todo" | "answer" | "done" | "handback";
+export type Move = "approve" | "todo" | "answer" | "done" | "handback" | "apply" | "reject";
 
 /** A decision the human just acted on, held in place until the Inbox moves on from it. */
 export interface Resolved {
   decision: Decision;
   move: Move;
-  /** The words of an answer. */
+  /** The words of an answer, why a playbook change was rejected, or what applying it does. */
   answer?: string;
   /** False while the call is still on its way; it failing puts the decision back. */
   done: boolean;
@@ -166,6 +167,10 @@ export function outcomeOf(r: Pick<Resolved, "move" | "answer" | "decision">): st
       return "Marked done.";
     case "handback":
       return "Handed back to agents. In Todo for the next one.";
+    case "apply":
+      return `Approved.${r.answer ? ` ${r.answer}` : ""}`;
+    case "reject":
+      return `Rejected${r.answer ? `: “${r.answer}”` : ""}.`;
   }
 }
 
@@ -180,6 +185,9 @@ export function trackAfter(track: Track, move: Move, now: number): Track {
     case "done":
       return { ...track, station: "done", stuck: null, asking: false, reached: { ...track.reached, done: now }, since: now };
     case "answer":
-      return { ...track, asking: false };
+    case "apply":
+    case "reject":
+      // Applying ends at Done or, for a committed playbook, back at Todo: the backend says which.
+      return { ...track, asking: false, stuck: null };
   }
 }

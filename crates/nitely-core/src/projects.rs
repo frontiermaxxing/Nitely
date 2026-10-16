@@ -23,6 +23,7 @@ const KEY_COLUMNS: &[(&str, &str)] = &[
     ("approval", "issue_key"),
     ("ask", "issue_key"),
     ("crew_worker", "issue_key"),
+    ("playbook_proposal", "issue_key"),
 ];
 
 /// `key` under its project's current prefix, given `Db::project_aliases`: `OLD-12` → `NEW-12`.

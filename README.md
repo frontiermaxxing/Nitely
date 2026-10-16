@@ -14,6 +14,8 @@ issue), `report`, `note` (with handoffs), `file_issue` (duplicate check, evidenc
 `update_issue` (Done needs evidence; only a human approves), `ask` and `get_answer`, and
 `get_project` / `set_project_brief` / `mark_setup_complete` for the project's brief (what agents
 learned about it, editable on the project's Brief view) and whether its setup sweep has run.
+`propose_playbook_change` files a change to the repo's playbook for the human to apply or reject in
+the Inbox; agents never change the rules themselves.
 
 ## Layout
 

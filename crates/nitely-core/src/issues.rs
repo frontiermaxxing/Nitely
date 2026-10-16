@@ -107,6 +107,8 @@ pub struct IssueDetail {
     pub timeline: Vec<TimelineEntry>,
     pub prs: Vec<crate::db::PrRecord>,
     pub reviews: Vec<crate::submit::ReviewRecord>,
+    /// The playbook change the issue carries, when an agent proposed one.
+    pub proposal: Option<crate::proposals::Proposal>,
 }
 
 /// Both directions of an issue's blocked-by relations, closed issues included.
@@ -924,6 +926,10 @@ impl Db {
         self.check_move(key, to, evidence, reason, actor)?;
         let issue = self.issue(key)?.with_context(|| format!("no issue {key}"))?;
         let (state, state_type) = parse_state(to)?;
+        // An issue carrying a playbook change: approving applies it, canceling rejects it.
+        if let Some(moved) = self.before_move(&issue.key, state, reason, actor)? {
+            return Ok(moved);
+        }
         let evidence = evidence.map(str::trim).filter(|e| !e.is_empty());
         let reason = reason.map(str::trim).filter(|r| !r.is_empty());
 
@@ -1013,6 +1019,7 @@ impl Db {
             bail!("{} is mirrored from {}; change it there", issue.key, issue.origin);
         }
         let owner = owner.trim();
+        self.check_owner_change(key, owner)?;
         if !OWNERS.contains(&owner) {
             bail!("owner must be one of {}", OWNERS.join(", "));
         }
@@ -1124,6 +1131,7 @@ impl Db {
             timeline: self.timeline(&issue.key)?,
             prs: self.prs_for_issue(&issue.key)?,
             reviews: self.reviews(&issue.key)?,
+            proposal: self.proposal_for_issue(&issue.key)?,
             issue,
         }))
     }

@@ -16,7 +16,8 @@ and when you learn something about the project as a whole that the next agent ne
 branch and worktree from the integration branch and runs setup. Work only in that worktree.
 2. `report` one line on what you are doing at each step; it shows live on the human's board.
 3. `file_issue` anything you find but will not fix now (it refuses likely duplicates); `file_issues` \
-files many at once, their blockers naming each other by ref.
+files many at once, their blockers naming each other by ref. When the playbook itself is wrong \
+(integration branch, gate, review rules), `propose_playbook_change`: never change the rules yourself.
 4. When only the human can decide, `ask`, move the issue to Needs You, and keep working on what does \
 not depend on the answer. Never set Approved: only the human approves.
 5. Commit, then `submit`: it runs the gate, has another vendor review the branch, opens the pull \
