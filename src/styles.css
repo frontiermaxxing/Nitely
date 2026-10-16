@@ -189,6 +189,86 @@ pre.file {
 }
 details summary { cursor: pointer; color: var(--fg-2); }
 
+/* ----- activity lanes ----- */
+.act-window { display: flex; gap: 2px; margin-left: auto; }
+.act-window button {
+  border: 0; background: none; padding: 2px 8px; border-radius: var(--radius-sm); cursor: pointer; color: var(--fg-3);
+  font-size: var(--text-sm); font-variant-numeric: tabular-nums;
+}
+.act-window button:hover { color: var(--fg); }
+.act-window button.on { color: var(--fg); background: var(--hover); font-weight: var(--weight-medium); }
+.act-window button:focus-visible, .act-mark:focus-visible { outline: 2px solid var(--focus); outline-offset: 0; }
+
+.act-chart {
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: 4px 14px 14px;
+  --who: 232px; --mark-bg: var(--surface);
+}
+.act-row { display: grid; grid-template-columns: var(--who) minmax(0, 1fr); align-items: center; min-height: 34px; margin: 0 -14px; padding: 0 14px; }
+.act-row:not(.act-axis):not(.act-band-row):hover { background: var(--hover); --mark-bg: var(--hover); }
+.act-who { display: flex; align-items: center; gap: 9px; min-width: 0; padding-right: 14px; }
+.act-who-text { min-width: 0; display: grid; gap: 1px; }
+.act-issues { display: flex; align-items: center; gap: 2px 10px; min-width: 0; flex-wrap: wrap; }
+.act-place { color: var(--fg-3); font-size: var(--text-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.act-issues .act-place { color: var(--fg-2); font-size: var(--text-sm); }
+.act-sub { color: var(--fg-2); font-size: var(--text-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.act-more { color: var(--fg-3); font-size: var(--text-xs); }
+.act-quiet .act-issues { opacity: 0.75; }
+
+/* The time track: everything in it is placed by percent of the window. */
+.act-track { position: relative; height: 26px; margin-right: 6px; }
+.act-track::after {
+  content: ""; position: absolute; right: 0; top: -4px; bottom: -4px; width: 1.5px; border-radius: 1px;
+  background: var(--fg-3); opacity: 0.5;
+}
+.act-grid { position: absolute; top: -4px; bottom: -4px; width: 1px; background: var(--line); }
+.act-unrecorded {
+  position: absolute; left: 0; top: -4px; bottom: -4px; width: var(--unrecorded, 0%);
+  background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--fg-3) 14%, transparent) 0 1px, transparent 1px 6px);
+}
+.act-base { position: absolute; left: 0; right: 0; top: 50%; height: 1px; background: var(--line); }
+.act-seg { position: absolute; top: 50%; transform: translateY(-50%); border-radius: 2px; min-width: 2px; }
+.act-seg-working { height: 8px; background: var(--live); }
+.act-seg-waiting { height: 8px; background: var(--attention); }
+.act-seg-idle { height: 3px; background: var(--fg-3); opacity: 0.5; }
+.act-seg-stale { height: 2px; background: repeating-linear-gradient(90deg, var(--line-strong) 0 3px, transparent 3px 6px); }
+.act-seg-seen { height: 6px; background: color-mix(in srgb, var(--fg-3) 34%, transparent); }
+.act-mark {
+  position: absolute; top: 50%; transform: translate(-50%, -50%); display: grid; place-items: center;
+  width: 14px; height: 14px; padding: 0; border: 0; background: none; border-radius: 50%; cursor: pointer; z-index: 1;
+}
+.act-mark:hover { z-index: 2; }
+.act-mark:disabled { cursor: default; }
+.act-mark-commit { width: 10px; height: 10px; }
+
+/* Axis and the aggregate band. */
+.act-axis { min-height: 30px; align-items: end; }
+.act-axis .act-track { height: 30px; }
+.act-axis .act-track::after { display: none; }
+.act-tick, .act-now-label, .act-unrecorded-label {
+  position: absolute; bottom: 3px; font-size: var(--text-xs); color: var(--fg-3); font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.act-tick { transform: translateX(-50%); }
+.act-now-label { right: 0; transform: translateX(40%); color: var(--fg-2); }
+.act-unrecorded-label {
+  bottom: auto; top: 0; left: 0; max-width: var(--unrecorded); overflow: hidden; text-overflow: ellipsis; padding-left: 2px;
+}
+.act-band-row { min-height: 40px; border-bottom: 1px solid var(--line); padding-bottom: 6px; margin-bottom: 2px; }
+.act-band-label { display: grid; gap: 0; font-size: var(--text-sm); font-weight: var(--weight-medium); }
+.act-band-label .muted { font-weight: 400; font-variant-numeric: tabular-nums; }
+.act-band { height: 30px; }
+.act-band svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.act-band-working { fill: color-mix(in srgb, var(--live) 42%, transparent); }
+.act-band-waiting { fill: var(--attention); }
+
+.act-group h2 { margin: 14px 0 2px; font-size: var(--text-sm); color: var(--fg-2); }
+.act-group:first-of-type h2 { margin-top: 10px; }
+
+.act-legend { display: grid; gap: 6px; margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--line); }
+.act-legend-part { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: var(--text-sm); color: var(--fg-2); }
+.act-legend-item { display: inline-flex; align-items: center; gap: 6px; }
+.act-swatch { position: static; transform: none; display: inline-block; width: 18px; flex: none; }
+.act-swatch.act-seg-stale, .act-swatch.act-seg-idle { align-self: center; }
+
 /* ----- browser preview ----- */
 .preview-foot { margin-top: auto; padding-top: 16px; }
 .preview-theme { display: flex; gap: 2px; padding: 6px 8px 0; }
@@ -231,4 +311,10 @@ details summary { cursor: pointer; color: var(--fg-2); }
   .list-row .kind { display: none; }
   .list-row .key { width: auto; }
   .kit-tracks { grid-template-columns: minmax(0, 1fr); }
+  .act-chart { --who: 96px; padding: 4px 10px 12px; }
+  .act-row { margin: 0 -10px; padding: 0 10px; }
+  .act-who { gap: 6px; padding-right: 8px; }
+  .act-sub, .act-more, .act-issues .ui-token:nth-child(n + 2) { display: none; }
+  .act-tick:nth-of-type(even) { display: none; }
+  .act-band-label .muted { display: none; }
 }

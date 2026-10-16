@@ -4,6 +4,7 @@ import "./ui.css";
 export { AgentMark } from "./AgentMark";
 export { CountBadge } from "./CountBadge";
 export { EmptyState } from "./EmptyState";
+export { EVENT_LABEL, EventMark } from "./EventMark";
 export { IssueToken } from "./IssueToken";
 export { Meter, type MeterPart } from "./Meter";
 export { PriorityMark } from "./PriorityMark";

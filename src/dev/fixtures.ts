@@ -8,6 +8,10 @@
 // failed gate as its last gate event, and so on.
 
 import type {
+  Activity,
+  ActivityLane,
+  ActivityMark,
+  ActivitySegment,
   AgentPlan,
   LinkedIssue,
   Applied,
@@ -768,6 +772,125 @@ function connectApply(args: Record<string, unknown>): Applied {
   return { project: plan.project_key, repo: plan.root, done: [`Created project ${plan.project_key}`, `Watching ${plan.root}`], failed: [] };
 }
 
+// ----- Activity: the night each agent had, from the same stories -----
+
+/** States were recorded from here on; earlier the preview shows only that a session was active. */
+const RECORDED_SINCE = NOW - 19 * HOUR;
+
+const MARK_OF: Record<string, ActivityMark["kind"] | undefined> = {
+  claimed: "start",
+  gate_passed: "gate_pass",
+  gate_failed: "gate_fail",
+  review_failed: "review_fail",
+  landed: "land",
+  land_failed: "land_fail",
+  ask: "ask",
+  handoff: "handoff",
+};
+
+function markKind(t: TimelineEntry): ActivityMark["kind"] | undefined {
+  if (t.kind === "submit") return t.summary?.includes("requested changes") ? "review_changes" : "review_pass";
+  return MARK_OF[t.kind];
+}
+
+/** What the agent is doing after an event, until its next one. */
+function stateAfter(t: TimelineEntry): ActivitySegment["state"] | "ended" {
+  if (t.kind === "ask") return "waiting";
+  if (t.kind === "landed") return "ended";
+  if (t.kind === "land_failed") return "idle";
+  if (t.kind === "submit" && !t.summary?.includes("requested changes")) return "idle";
+  return "working";
+}
+
+/** One lane per issue an agent worked on, built from its timeline so marks and the track agree. */
+function laneOf(spec: IssueSpec): ActivityLane | null {
+  if (!spec.vendor) return null;
+  const agent = `${spec.vendor}:c:/development/${repoOf(spec.key).name.toLowerCase()}-worktrees/${spec.key.toLowerCase()}`;
+  const own = world.timelines.get(spec.key)!.filter((t) => t.actor === agent);
+  const start = own.find((t) => t.kind === "claimed");
+  if (!start) return null;
+  const events = own.filter((t) => t.ts >= start.ts && t.kind !== "worktree" && t.kind !== "issue_moved");
+  const segments: ActivitySegment[] = [];
+  const span = (from: number, to: number, state: ActivitySegment["state"]) => {
+    // Work that runs on for hours with nothing recorded goes quiet, as it does in the app.
+    const quietAfter = state === "working" ? 80 * MIN : state === "idle" ? 30 * MIN : Infinity;
+    const busyTo = Math.min(to, from + quietAfter);
+    if (busyTo > from) segments.push({ from, to: busyTo, state });
+    if (to > busyTo) segments.push({ from: busyTo, to, state: "stale" });
+  };
+  let state = "working" as ActivitySegment["state"] | "ended";
+  for (const [n, t] of events.entries()) {
+    state = stateAfter(t);
+    const next = events[n + 1]?.ts;
+    if (state !== "ended" && next !== undefined) span(t.ts, next, state);
+  }
+  const last = events[events.length - 1];
+  const live = spec.live;
+  const lastSeen = live ? Math.round(NOW - live.seen * MIN) : last.ts + (state === "ended" ? 4 * MIN : 30 * MIN);
+  if (live && live.state !== "ended") span(last.ts, NOW, live.state);
+  else if (state !== "ended") span(last.ts, lastSeen, state);
+
+  const marks: ActivityMark[] = [];
+  for (const t of events) {
+    const kind = markKind(t);
+    if (!kind) continue;
+    // A commit or two before every gate.
+    if (kind === "gate_pass" || kind === "gate_fail") {
+      for (const back of rand() > 0.5 ? [7, 31] : [9]) {
+        if (t.ts - back * MIN > start.ts) marks.push({ ts: t.ts - back * MIN, kind: "commit", issue_key: spec.key, summary: "git commit" });
+      }
+    }
+    marks.push({ ts: t.ts, kind, issue_key: spec.key, summary: t.summary ?? "" });
+  }
+  marks.sort((a, b) => a.ts - b.ts);
+  return {
+    session_id: `${spec.vendor}-${spec.key.toLowerCase()}`,
+    vendor: spec.vendor,
+    cwd: worktreeOf(spec),
+    project: repoOf(spec.key).project,
+    place: worktreeOf(spec).split("\\").pop()!,
+    issues: [spec.key],
+    started_at: start.ts,
+    last_seen_at: lastSeen,
+    state: live?.state ?? (state === "ended" || NOW - lastSeen > 30 * MIN ? "ended" : (state as SessionState)),
+    segments,
+    marks,
+  };
+}
+
+const LANES = ISSUES.map(laneOf).filter((l): l is ActivityLane => l !== null);
+
+/** Before RECORDED_SINCE only activity is known, so those stretches read "seen". */
+function recordedOnly(segments: ActivitySegment[]): ActivitySegment[] {
+  return segments.flatMap((s): ActivitySegment[] => {
+    if (s.to <= RECORDED_SINCE) return s.state === "stale" ? [] : [{ ...s, state: "seen" }];
+    if (s.from >= RECORDED_SINCE) return [s];
+    return [...(s.state === "stale" ? [] : [{ from: s.from, to: RECORDED_SINCE, state: "seen" as const }]), { ...s, from: RECORDED_SINCE }];
+  });
+}
+
+const STATE_RANK: Record<string, number> = { waiting: 0, working: 1, idle: 2, ended: 3 };
+const PROJECT_RANK = (p: string | null) => REPOS.findIndex((r) => r.project === p);
+
+function activity(args: Record<string, unknown>): Activity {
+  const hours = Number(args.hours ?? 12);
+  const from = NOW - hours * HOUR;
+  const lanes = LANES.map((l): ActivityLane => ({
+    ...l,
+    segments: recordedOnly(l.segments)
+      .map((s) => ({ ...s, from: Math.max(s.from, from), to: Math.min(s.to, NOW) }))
+      .filter((s) => s.to > s.from),
+    marks: l.marks.filter((m) => m.ts >= from && m.ts <= NOW),
+  }))
+    .filter((l) => l.segments.length > 0 || l.marks.length > 0)
+    .sort(
+      (a, b) =>
+        PROJECT_RANK(a.project) - PROJECT_RANK(b.project) || STATE_RANK[a.state] - STATE_RANK[b.state] || b.last_seen_at - a.last_seen_at,
+    );
+  const keys = new Set(lanes.flatMap((l) => l.issues));
+  return { from, to: NOW, recorded_since: RECORDED_SINCE, lanes, issues: world.issues.filter((i) => keys.has(i.key)) };
+}
+
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** The preview's stand-in for Tauri's `invoke`: same command names and argument names. */
@@ -779,6 +902,8 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return snapshot();
       case "pulse":
         return pulse(Number(args.since), Number(args.dayStart));
+      case "activity":
+        return activity(args);
       case "projects":
         return world.projects;
       case "issues":

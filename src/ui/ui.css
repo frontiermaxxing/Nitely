@@ -25,6 +25,9 @@
 .ui-mark-dot-waiting { fill: var(--attention); }
 .ui-mark-dot-idle { fill: var(--fg-3); }
 
+/* ----- EventMark ----- */
+.ui-event { flex: none; display: block; overflow: visible; }
+
 /* ----- StationGlyph, IssueToken ----- */
 .ui-glyph { flex: none; display: block; }
 .ui-token {

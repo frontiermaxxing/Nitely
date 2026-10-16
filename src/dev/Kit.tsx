@@ -1,12 +1,14 @@
 // The browser preview's page of every shared primitive in every state (`#kit`). Look here first
 // when building a view, and add a row here when a primitive gains a state.
 
-import type { IssueRecord } from "../types";
+import type { IssueRecord, MarkKind } from "../types";
 import { nowSecs } from "../util";
 import {
   AgentMark,
   CountBadge,
   EmptyState,
+  EVENT_LABEL,
+  EventMark,
   IssueToken,
   Meter,
   PriorityMark,
@@ -181,6 +183,17 @@ export default function Kit() {
             </tr>
           </tbody>
         </table>
+      </section>
+
+      <section>
+        <h2>EventMark</h2>
+        <div className="kit-row">
+          {(Object.keys(EVENT_LABEL) as MarkKind[]).map((k) => (
+            <span key={k} className="kit-pair">
+              <EventMark kind={k} /> {EVENT_LABEL[k]}
+            </span>
+          ))}
+        </div>
       </section>
 
       <section>

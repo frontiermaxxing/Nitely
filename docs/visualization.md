@@ -90,6 +90,7 @@ Import from `./ui` (or `../ui`). Open the browser preview at `#kit` to see each 
 | `EmptyState`   | An empty track, one sentence, what would fill it.                            | Every list or page that can be empty. |
 | `PriorityMark` | Issue priority as three rising bars; urgent is red.                          | Issue rows. |
 | `SeverityMark` | A review finding's P0 to P3. Only P0 and P1 are red.                         | Review findings. |
+| `EventMark`    | Something that happened to an issue, as a 12px shape: ring started, dot commit, square gate, diamond review, target land, bar handoff, attention dot ask. Red only for failures. | Marks on a timeline (activity lanes), legends. |
 
 Helpers: `livenessOf(session, now)` (adds "stale" after 30 minutes quiet), `vendorOf(actor)`,
 `phaseOf(station)`, `stationColor(station, stuck)`, `describeTrack(track)` for hover text.
@@ -154,6 +155,25 @@ The primary button is ink (`--fg`), not a brand color, so the attention color st
 Its data is one `pulse` command (`crates/nitely-core/src/pulse.rs`), which reads only the database.
 Git state (rebase conflicts) and live sessions come from the snapshot the app already holds.
 
+## Activity lanes
+
+![Activity over 12 hours, light](img/activity-light.png)
+
+The Activity view answers "what did the agents do while I was away". One lane per agent session,
+grouped by project (projects with someone waiting on you first), time left to right, `now` at the
+right edge. Above the lanes, a band of how many agents were working (and, in the attention color,
+waiting on you) over the window.
+
+- **Segments** are the session's state: working (`--live`, thick), waiting for you (`--attention`,
+  thick), idle (thin), and stale, a dashed hairline once nothing was recorded for 30 minutes. A
+  gap with no segment means the session was not running.
+- **Before recording started** (session states are kept from the version that added them), the
+  window is hatched and lanes show only "seen" stretches: the session was active, its state is
+  unknown. The axis says when recording started. Never guess states for that stretch.
+- **Marks** are `EventMark`s. Hover says what, which issue, when; a click opens the issue.
+
+![Activity over 24 hours with the stretch before recording, dark](img/activity-24h-dark.png)
+
 ## Building a new view
 
 1. **Start from the question the view answers** and put the answer in its header: a one-line
@@ -183,8 +203,9 @@ and inside Tauri nothing changes.
 
 - Agents: `.claude/launch.json` has a `web` configuration (port 5173), so the Browser pane's
   `preview_start` with name `web` opens it. Or run `npm run dev -- --port <port> --strictPort`.
-- Routes are in the hash: `#pulse` (the default), `#inbox`, `#now`, `#project/NIT`, `#agents`, `#add`, `#kit`, and
-  `@KEY` opens an issue panel (`#now@NIT-29`).
+- Routes are in the hash: `#pulse` (the default), `#inbox`, `#now`, `#activity`, `#project/NIT`,
+  `#agents`, `#add`, `#kit`, and `@KEY` opens an issue panel (`#now@NIT-29`). `?hours=1|6|12|24`
+  opens Activity at that window.
 - Theme: the switch at the bottom of the sidebar, or `?theme=light|dark` in the URL, or the
   browser's color scheme. `[data-theme]` on `<html>` forces a theme.
 - The fixtures are three projects (NIT, AND, HAR), 40 issues across every state, nine agent
@@ -192,7 +213,9 @@ and inside Tauri nothing changes.
   findings, two open asks and two stuck worktrees. Each issue is written as a short story
   (`filed, claim, work, gate, review, changes, ...`) and its timeline, reviews, pull request and
   worktree are generated from that, so they agree. Answering an ask or moving an issue works and
-  changes the data until reload.
+  changes the data until reload. Activity lanes come from the same stories (one session per issue
+  an agent worked on), with states recorded only for the last 19 hours, so the 24h window shows
+  the not-recorded stretch.
 - If the preview suddenly fails with `reading 'invoke'` after a rebase or land, restart the dev
   server (with `--force`): Vite kept the files as they were mid-rebase.
 - For full-resolution screenshots without the pane, headless Edge works:

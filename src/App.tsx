@@ -5,6 +5,7 @@ import { AgentSetup, pendingChanges, setupErrors } from "./Agents";
 import { Inbox } from "./Inbox";
 import { Now } from "./Now";
 import { Pulse } from "./Pulse";
+import { Activity } from "./Activity";
 import { Backlog } from "./Backlog";
 import { IssuePanel } from "./IssuePanel";
 import { AddProject } from "./AddProject";
@@ -24,6 +25,7 @@ export type View =
   | { kind: "pulse" }
   | { kind: "inbox" }
   | { kind: "now" }
+  | { kind: "activity" }
   | { kind: "project"; key: string }
   | { kind: "add" }
   | { kind: "agents" }
@@ -40,7 +42,7 @@ function fromHash(hash: string): { view: View; issue: string | null } {
   }
   const [path, issue] = raw.split("@");
   const [kind, key] = path.split("/");
-  const plain = ["pulse", "inbox", "now", "add", "agents"].concat(isPreview ? ["kit"] : []);
+  const plain = ["pulse", "inbox", "now", "activity", "add", "agents"].concat(isPreview ? ["kit"] : []);
   const view: View =
     kind === "project" && key ? { kind: "project", key: key.toUpperCase() } : plain.includes(kind) ? ({ kind } as View) : { kind: "pulse" };
   return { view, issue: issue ? issue.toUpperCase() : null };
@@ -149,6 +151,7 @@ export function App() {
         <NavItem active={view.kind === "pulse"} onClick={() => setView({ kind: "pulse" })} label="Pulse" />
         <NavItem active={view.kind === "inbox"} onClick={() => setView({ kind: "inbox" })} label="Inbox" count={inboxCount} tone="attention" />
         <NavItem active={view.kind === "now"} onClick={() => setView({ kind: "now" })} label="Now" count={working} tone="live" />
+        <NavItem active={view.kind === "activity"} onClick={() => setView({ kind: "activity" })} label="Activity" />
         <div className="nav-heading">Projects</div>
         {projects.map((p) => (
           <NavItem
@@ -189,6 +192,7 @@ export function App() {
         {view.kind === "pulse" && <Pulse board={board} now={now} version={version} onOpenIssue={setOpenIssue} onGo={setView} />}
         {view.kind === "inbox" && board && <Inbox board={board} now={now} onOpenIssue={setOpenIssue} onChanged={changed} />}
         {view.kind === "now" && board && <Now board={board} now={now} onOpenIssue={setOpenIssue} onChanged={changed} />}
+        {view.kind === "activity" && <Activity now={now} version={version} projects={projects} onOpenIssue={setOpenIssue} />}
         {view.kind === "add" && (
           <AddProject
             onAdded={(key) => {
