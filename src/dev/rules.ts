@@ -103,7 +103,11 @@ function loosening(a: ReturnType<typeof effective>, b: ReturnType<typeof effecti
   if (a.always && !b.always) out.push("Every change no longer waits for a person.");
   for (const r of a.human.filter((r) => !b.human.some((n) => n.pattern === r.pattern))) out.push(`Changes to \`${r.pattern}\` (${r.reason}) no longer wait for a person.`);
   for (const r of a.blocked.filter((r) => !b.blocked.some((n) => n.pattern === r.pattern))) out.push(`Task branches may now change \`${r.pattern}\` (${r.reason}).`);
-  for (const f of a.flags.filter((f) => !b.flags.some((n) => n.name === f.name))) out.push(`The reviewer no longer answers ${f.name} (${f.question}).`);
+  for (const f of a.flags) {
+    const n = b.flags.find((x) => x.name === f.name);
+    if (!n) out.push(`The reviewer no longer answers ${f.name} (${f.question}).`);
+    else if (n.question.trim() !== f.question.trim()) out.push(`${f.name} now asks "${n.question.trim()}" instead of "${f.question.trim()}".`);
+  }
   if (a.cross && !b.cross) out.push("A review by the author's own vendor no longer waits for a person.");
   if (a.land === "human" && b.land !== "human") out.push("Changes no longer all wait for a person before they land.");
   return out;

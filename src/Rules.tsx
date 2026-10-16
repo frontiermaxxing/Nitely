@@ -335,12 +335,19 @@ function DryRunCard(props: { repo: string; stale: boolean }) {
   const [result, setResult] = useState<DryRun | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
+    let current = true;
+    setBranches(null);
+    setResult(null);
     invoke<string[]>("rules_branches", { repo: props.repo })
       .then((b) => {
+        if (!current) return;
         setBranches(b);
-        setBranch((cur) => cur || b[0] || "");
+        setBranch(b[0] ?? "");
       })
-      .catch((e) => setError(String(e)));
+      .catch((e) => current && setError(String(e)));
+    return () => {
+      current = false;
+    };
   }, [props.repo]);
 
   const run = async () => {
@@ -403,10 +410,16 @@ export function ProjectRules(props: { projectKey: string }) {
   const [views, setViews] = useState<RulesView[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
+    // A late answer for the project left behind must not show (and then save) under this one.
+    let current = true;
     setViews(null);
+    setError(null);
     invoke<RulesView[]>("rules", { project: props.projectKey })
-      .then(setViews)
-      .catch((e) => setError(String(e)));
+      .then((v) => current && setViews(v))
+      .catch((e) => current && setError(String(e)));
+    return () => {
+      current = false;
+    };
   }, [props.projectKey]);
 
   if (error) return <p className="error">{error}</p>;

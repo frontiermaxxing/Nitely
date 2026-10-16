@@ -225,8 +225,15 @@ pub fn loosening(old: &Playbook, new: &Playbook) -> Vec<String> {
     for r in gone(&old.approval.blocked_paths, &new.approval.blocked_paths) {
         out.push(format!("Task branches may now change {r}."));
     }
-    for f in old.review.flags.iter().filter(|f| !new.review.flags.iter().any(|n| n.name == f.name)) {
-        out.push(format!("The reviewer no longer answers {} ({}).", f.name, f.question));
+    for f in &old.review.flags {
+        match new.review.flags.iter().find(|n| n.name == f.name) {
+            None => out.push(format!("The reviewer no longer answers {} ({}).", f.name, f.question)),
+            // A reworded question can ask about less; only the person can tell.
+            Some(n) if n.question.trim() != f.question.trim() => {
+                out.push(format!("{} now asks \"{}\" instead of \"{}\".", f.name, n.question.trim(), f.question.trim()))
+            }
+            Some(_) => {}
+        }
     }
     if old.review.require_cross_vendor && !new.review.require_cross_vendor {
         out.push("A review by the author's own vendor no longer waits for a person.".to_string());
@@ -318,8 +325,12 @@ fn check_edit(edit: &RulesEdit) -> Result<()> {
         }
         regex::Regex::new(r.pattern.trim()).with_context(|| format!("`{}` is not a regular expression", r.pattern))?;
     }
-    for f in &edit.flags {
+    for (i, f) in edit.flags.iter().enumerate() {
         let name = f.name.trim();
+        // The reviewer's last answer for a name wins, so a second question could cancel the first.
+        if edit.flags[..i].iter().any(|g| g.name.trim() == name) {
+            bail!("two questions are named {name}; give each its own name");
+        }
         if name.is_empty() || !name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_') || name == "VERDICT" {
             bail!("a flag's name is uppercase letters, digits and _, and not VERDICT: `{name}`");
         }
@@ -437,7 +448,8 @@ pub fn dry_run(config: &crate::Config, repo_name: &str, branch: &str) -> Result<
     let repo = repo(config, repo_name)?;
     let root = Path::new(&repo.root);
     let pb = Playbook::load(root)?;
-    let base = pb.integration_branch().to_string();
+    // Measured as submit measures it: against origin's base when the local one is behind.
+    let base = crate::playbook::diff_base(root, pb.integration_branch());
     let files: Vec<String> = git(root, &["diff", "--name-only", "--no-renames", &format!("{base}...{branch}")])
         .with_context(|| format!("comparing {branch} with {base}"))?
         .lines()
@@ -512,6 +524,9 @@ mod tests {
         let loose = loosening(&old, &Playbook::default());
         assert_eq!(loose.len(), 5, "{loose:?}");
         assert!(loosening(&Playbook::default(), &old).is_empty(), "tightening needs no confirmation");
+        let reworded = Playbook::parse("[[review.flags]]\nname = \"MONEY\"\nquestion = \"only refunds\"\n").unwrap();
+        let asked = Playbook::parse("[[review.flags]]\nname = \"MONEY\"\nquestion = \"q\"\n").unwrap();
+        assert_eq!(loosening(&asked, &reworded).len(), 1, "a reworded question needs confirming");
         let d = RuleDefaults { land_by: Some(LandBy::Human), ..Default::default() };
         assert_eq!(defaults_loosening(&d, &RuleDefaults::default()).len(), 1);
     }
@@ -522,5 +537,8 @@ mod tests {
         assert!(check_edit(&bad_regex).is_err());
         let bad_flag = RulesEdit { flags: vec![Flag { name: "verdict".into(), question: "q".into(), reason: String::new() }], ..Default::default() };
         assert!(check_edit(&bad_flag).is_err());
+        let flag = |q: &str| Flag { name: "MONEY".into(), question: q.into(), reason: String::new() };
+        let twice = RulesEdit { flags: vec![flag("billing"), flag("payouts")], ..Default::default() };
+        assert!(check_edit(&twice).unwrap_err().to_string().contains("two questions"));
     }
 }
