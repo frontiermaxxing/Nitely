@@ -112,7 +112,7 @@ fn graphql(creds: &Credentials, query: &str, variables: Value) -> Result<Value> 
         .post("https://api.linear.app/graphql")
         .header("Authorization", &creds.linear.api_key)
         .header("Content-Type", "application/json")
-        .send_json(&json!({ "query": query, "variables": variables }))
+        .send_json(json!({ "query": query, "variables": variables }))
         .context("calling Linear")?;
     let status = res.status();
     let v: Value = res.body_mut().read_json().context("reading Linear's answer")?;
@@ -202,7 +202,10 @@ fn parse_labels(list: &Value) -> Result<(Vec<String>, Option<String>)> {
     Ok((names, next_cursor(list)))
 }
 
-pub fn parse_page(v: &Value) -> Result<(Vec<(LinearIssue, More)>, Option<String>)> {
+/// A page of issues, each with where its comments and labels continue, and the next page's cursor.
+pub type Page = (Vec<(LinearIssue, More)>, Option<String>);
+
+pub fn parse_page(v: &Value) -> Result<Page> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Node {
