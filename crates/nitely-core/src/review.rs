@@ -753,7 +753,14 @@ mod tests {
     fn finds_programs_on_path_or_by_path() {
         let dir = std::env::temp_dir().join(format!("nitely-which-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("scripts")).unwrap();
-        std::fs::write(dir.join("scripts").join("review"), "").unwrap();
+        let script = dir.join("scripts").join("review");
+        std::fs::write(&script, "").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert!(!program_exists("./scripts/review", &dir), "not executable yet");
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         assert!(program_exists(&crate::playbook::posix_sh(), &dir));
         assert!(!program_exists("nitely-no-such-reviewer", &dir));
         assert!(!program_exists("/nitely/no/such/reviewer", &dir));
