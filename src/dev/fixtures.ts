@@ -515,7 +515,8 @@ function build(): World {
       project: repo.project,
       title: spec.title,
       body: spec.body ?? "",
-      url: "",
+      // What the backend sends for a native issue: the app's own link.
+      url: `nitely://issue/${spec.key}`,
       state,
       state_type: STATE_TYPE[state],
       kind: spec.kind,
@@ -1056,6 +1057,8 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return pulse(Number(args.since), Number(args.dayStart));
       case "activity":
         return activity(args);
+      case "opened_link":
+        return null;
       case "projects":
         return world.projects;
       case "issues":

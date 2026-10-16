@@ -21,6 +21,7 @@ const Kit = import.meta.env.DEV ? lazy(() => import("./dev/Kit")) : () => null;
 // edits and relative times are caught by this slow fallback.
 const FALLBACK_MS = 30000;
 const CHANGED_EVENT = "nitely://changed";
+const OPEN_ISSUE_EVENT = "nitely://open-issue";
 const REFRESH_GAP_MS = 1000;
 
 export type View =
@@ -142,6 +143,19 @@ export function App() {
       unlisten.then((stop) => stop());
     };
   }, [refresh, changed]);
+
+  // A nitely://issue/KEY link opens that issue's panel: one that started the app is waiting in the
+  // backend (opened_link), later ones arrive as events while the app runs.
+  useEffect(() => {
+    invoke<string | null>("opened_link").then((key) => key && setOpenIssue(key), () => {});
+    const unlisten = listen<string>(OPEN_ISSUE_EVENT, (e) => {
+      setOpenIssue(e.payload);
+      invoke("opened_link").catch(() => {});
+    });
+    return () => {
+      unlisten.then((stop) => stop());
+    };
+  }, []);
 
   // The Inbox's decisions, counted the same way the Inbox lists them.
   const inboxDetails = useDecisionDetails(board);

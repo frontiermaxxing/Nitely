@@ -18,7 +18,9 @@ not depend on the answer. Never set Approved: only the human approves.
 5. Commit, then `submit`: it runs the gate, has another vendor review the branch, opens the pull \
 request, and moves the issue. Read its `next`.
 6. Once it is In Review (or the human approved it), `land` puts it on the integration branch.
-7. Before you stop, `note` with handoff: true: what is done, what is left, what you were unsure about.";
+7. Before you stop, `note` with handoff: true: what is done, what is left, what you were unsure about.
+8. Link every issue you name, in replies, commit messages, pull requests and notes: \
+[NIT-14](nitely://issue/NIT-14), the `url` the tools return. It opens the issue in the Nitely app.";
 
 /// The instructions for an agent working in `dir`: the workflow plus what Nitely knows about the
 /// repo, or None when `dir` is not in a repo Nitely watches.

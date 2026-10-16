@@ -158,14 +158,41 @@ pub struct NewIssue {
 const ISSUE_COLUMNS: &str = "key, origin, project, title, body, url, state, state_type, kind, source,
     priority, labels, evidence, claimed_by, created_at, updated_at";
 
+/// The scheme the app registers, so a link to an issue opens it in Nitely.
+pub const LINK_SCHEME: &str = "nitely";
+
+/// `nitely://issue/NIT-14`: the link that opens a native issue in the app. Agents put it wherever
+/// they name an issue (replies, commits, pull requests, notes), as Linear links are used.
+pub fn issue_link(key: &str) -> String {
+    format!("{LINK_SCHEME}://issue/{}", key.to_uppercase())
+}
+
+/// The issue key a `nitely://issue/KEY` link names, if it is one ("nitely://issue/nit-14/" works too).
+pub fn key_from_link(link: &str) -> Option<String> {
+    let rest = link.trim().strip_prefix(LINK_SCHEME)?.strip_prefix("://")?;
+    let key = rest.strip_prefix("issue/")?.trim_end_matches('/');
+    let (project, number) = key.split_once('-')?;
+    let ok = !project.is_empty()
+        && project.starts_with(|c: char| c.is_ascii_alphabetic())
+        && project.chars().all(|c| c.is_ascii_alphanumeric())
+        && !number.is_empty()
+        && number.chars().all(|c| c.is_ascii_digit());
+    ok.then(|| key.to_uppercase())
+}
+
 fn issue_from_row(r: &Row) -> rusqlite::Result<IssueRecord> {
+    let origin: String = r.get(1)?;
+    let key: String = r.get(0)?;
+    let stored: String = r.get(5)?;
+    // Native issues are not stored with a URL: theirs is the app's own link.
+    let url = if origin == "nitely" && stored.is_empty() { issue_link(&key) } else { stored };
     Ok(IssueRecord {
-        key: r.get(0)?,
-        origin: r.get(1)?,
+        key,
+        origin,
         project: r.get(2)?,
         title: r.get(3)?,
         body: r.get(4)?,
-        url: r.get(5)?,
+        url,
         state: r.get(6)?,
         state_type: r.get(7)?,
         kind: r.get(8)?,
@@ -1091,6 +1118,23 @@ mod tests {
         assert_eq!(db.answer_ask(ask.id, "yes", &Actor::Human).unwrap().answer.as_deref(), Some("yes"));
         assert!(db.open_asks().unwrap().is_empty());
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn native_issues_carry_their_app_link() {
+        assert_eq!(issue_link("nit-14"), "nitely://issue/NIT-14");
+        assert_eq!(key_from_link("nitely://issue/NIT-14"), Some("NIT-14".into()));
+        assert_eq!(key_from_link("nitely://issue/nit-14/"), Some("NIT-14".into()));
+        assert_eq!(key_from_link("nitely://issue/N2-7"), Some("N2-7".into()));
+        assert_eq!(key_from_link("nitely://issue/NIT-"), None);
+        assert_eq!(key_from_link("nitely://issue/14-NIT"), None);
+        assert_eq!(key_from_link("https://issue/NIT-14"), None);
+        assert_eq!(key_from_link("nitely://project/NIT"), None);
+        let (mut db, _dir) = db();
+        db.create_project("NIT", "Nitely").unwrap();
+        let issue = db.create_issue(&new("Links that open the app"), &Actor::Agent("claude:x".into())).unwrap();
+        assert_eq!(issue.url, issue_link(&issue.key));
+        assert_eq!(db.list_issues(Some("NIT"), false).unwrap()[0].url, issue.url);
     }
 
     #[test]

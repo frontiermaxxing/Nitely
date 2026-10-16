@@ -280,6 +280,12 @@ A project page has three views behind one switch (remembered): **List** (issues 
   while you type in a field.
 - **Esc** closes the issue panel.
 
+**Links.** A native issue's `url` is `nitely://issue/NIT-14` (crates/nitely-core/src/issues.rs,
+`issue_link`). The app registers the `nitely` scheme (Tauri's deep-link plugin; the installer at
+install time, and every run of the app for the current user on Windows and Linux), and a link opens
+that issue's panel, in the running window if there is one. Inside the app, issues open the panel
+directly; the link is for everywhere else: agents' replies, commits, pull requests and notes.
+
 A new view joins j/k by adding its item selector to `ITEMS` in `src/Palette.tsx`; the items must be
 focusable (a button or link) so Enter works and the focus ring shows.
 

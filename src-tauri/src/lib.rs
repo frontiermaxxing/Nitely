@@ -11,6 +11,14 @@ const WATCH_EVERY: Duration = Duration::from_millis(500);
 /// Sent to the frontend when anything it shows may have changed.
 const CHANGED_EVENT: &str = "nitely://changed";
 
+/// Sent to the frontend with an issue key when a `nitely://issue/KEY` link asks to open it.
+const OPEN_ISSUE_EVENT: &str = "nitely://open-issue";
+
+/// The issue a link asked for, kept until the frontend asks: a link that starts the app arrives
+/// before the page can listen for events.
+#[derive(Default)]
+struct PendingLink(std::sync::Mutex<Option<String>>);
+
 /// The person at the app is the human: the only place that can approve or answer an ask.
 const ME: Actor = Actor::Human;
 
@@ -42,6 +50,35 @@ async fn activity(hours: i64) -> Result<nitely_core::activity::Activity, String>
     let config = Config::load().map_err(err)?;
     let to = nitely_core::db::now();
     nitely_core::activity::activity(&config, &db()?, to - hours.clamp(1, 24 * 7) * 3600, to).map_err(err)
+}
+
+/// The issue a `nitely://` link asked to open and nobody has shown yet; taking it clears it.
+#[tauri::command]
+fn opened_link(pending: tauri::State<'_, PendingLink>) -> Option<String> {
+    pending.0.lock().ok()?.take()
+}
+
+/// Opens what a `nitely://issue/KEY` link names: keeps the key for the page, tells it at once if
+/// it is listening, and brings the window forward. Anything else is ignored.
+fn open_link(app: &tauri::AppHandle, url: &str) {
+    use tauri::{Emitter, Manager};
+    let Some(key) = nitely_core::issues::key_from_link(url) else { return };
+    if let Some(pending) = app.try_state::<PendingLink>() {
+        if let Ok(mut slot) = pending.0.lock() {
+            *slot = Some(key.clone());
+        }
+    }
+    app.emit(OPEN_ISSUE_EVENT, &key).ok();
+    focus_main(app);
+}
+
+fn focus_main(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    if let Some(w) = app.get_webview_window("main") {
+        w.unminimize().ok();
+        w.show().ok();
+        w.set_focus().ok();
+    }
 }
 
 #[tauri::command]
@@ -187,15 +224,40 @@ pub fn run() {
     });
 
     tauri::Builder::default()
+        // First, so a second launch (a link clicked while Nitely runs) is handed to this one; with
+        // its deep-link feature the link itself reaches on_open_url below.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| focus_main(app)))
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .manage(PendingLink::default())
         .setup(|app| {
+            use tauri_plugin_deep_link::DeepLinkExt;
+            // Installers register nitely:// at install; this registers it for the current user each
+            // time the app starts, so a dev build opens links too (Windows and Linux; macOS needs the
+            // bundled app).
+            #[cfg(any(windows, target_os = "linux"))]
+            if let Err(e) = app.deep_link().register_all() {
+                eprintln!("deep link: {e}");
+            }
+            let links = app.handle().clone();
+            app.deep_link().on_open_url(move |event| {
+                for url in event.urls() {
+                    open_link(&links, url.as_str());
+                }
+            });
+            if let Ok(Some(urls)) = app.deep_link().get_current() {
+                for url in urls {
+                    open_link(app.handle(), url.as_str());
+                }
+            }
             let handle = app.handle().clone();
             std::thread::spawn(move || watch(handle));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             snapshot,
+            opened_link,
             pulse,
             activity,
             sync_now,

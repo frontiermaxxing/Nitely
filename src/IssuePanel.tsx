@@ -114,7 +114,7 @@ export function IssuePanel(props: {
                 <AgentMark vendor={issue.claimed_by} size={14} /> {agentLabel(issue.claimed_by)}
               </span>
             )}
-            {issue.url && (
+            {issue.url && issue.origin !== "nitely" && (
               <a href={issue.url} onClick={openExternal(issue.url)}>
                 Open in {issue.origin}
               </a>

@@ -217,7 +217,14 @@ fn rechecked(previous: &[crate::review::Recheck]) -> Option<String> {
 
 /// The pull request description: approval, review, findings, and a marker line with the patch.
 pub fn describe(issue: &IssueRecord, s: &Submitted) -> String {
-    let mut lines = vec![format!("Nitely: **{}** {}", issue.key, issue.title), String::new()];
+    // A link with the app's own scheme; hosts that drop such links still show the key, and the
+    // second line keeps the link copyable.
+    let named = if issue.url.is_empty() { issue.key.clone() } else { format!("[{}]({})", issue.key, issue.url) };
+    let mut lines = vec![format!("Nitely: **{named}** {}", issue.title)];
+    if issue.url.starts_with(&format!("{}://", crate::issues::LINK_SCHEME)) {
+        lines.push(format!("Open it in Nitely: `{}`", issue.url));
+    }
+    lines.push(String::new());
     lines.push(if s.approver == "human" {
         "**Approval:** waits for a human. Approve it in Nitely's inbox.".to_string()
     } else {
