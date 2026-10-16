@@ -1,0 +1,15 @@
+[package]
+name = "nitely-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "nitely"
+path = "src/main.rs"
+
+[dependencies]
+nitely-core.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+clap.workspace = true
