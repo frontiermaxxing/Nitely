@@ -34,8 +34,17 @@ struct Proc {
 /// Processes whose executable, command line or working directory is inside `dir`, other than this
 /// process and the ones that started it. Empty when processes cannot be listed.
 pub fn holders(dir: &Path) -> Vec<Holder> {
-    let procs = list();
+    // A list without this process failed (a busy machine can time out the query), and taking it
+    // for "nothing holds the folder" would let land remove a worktree in use; so ask again.
     let me = std::process::id();
+    let mut procs = list();
+    for _ in 0..3 {
+        if procs.iter().any(|p| p.process_id == me) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        procs = list();
+    }
     let parents: HashMap<u32, u32> = procs.iter().map(|p| (p.process_id, p.parent_process_id)).collect();
     let mut mine = vec![me];
     while let Some(&parent) = parents.get(mine.last().unwrap()) {
@@ -115,7 +124,7 @@ fn list() -> Vec<Proc> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -131,6 +140,18 @@ mod tests {
         }
     }
 
+    /// `holders(dir)` once it names `pid`, or as it last was after a few seconds.
+    pub(crate) fn held_by(dir: &Path, pid: u32) -> Vec<Holder> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let found = holders(dir);
+            if found.iter().any(|h| h.pid == pid) || std::time::Instant::now() > deadline {
+                return found;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
     #[test]
     fn finds_a_process_that_names_the_folder() {
         let dir = std::env::temp_dir().join(format!("nitely-held-{}", std::process::id()));
@@ -142,7 +163,7 @@ mod tests {
         } else {
             std::process::Command::new("sh").args(["-c", &format!("sleep 30; : {path}")]).spawn().unwrap()
         };
-        let found = holders(&dir);
+        let found = held_by(&dir, child.id());
         child.kill().ok();
         child.wait().ok();
         assert!(found.iter().any(|h| h.pid == child.id()), "{found:?}");

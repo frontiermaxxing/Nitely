@@ -751,6 +751,8 @@ when_changed = ["billing"]
         let (a, wt) = f.submitted("Pulse view", "pulse.txt", "x");
         // A dev server started in the worktree, as the browser preview asks agents to do.
         let mut server = std::process::Command::new(playbook::posix_sh()).arg("-c").arg(format!("sleep 30; : {}", wt.display())).spawn().unwrap();
+        // Land sees it the way this does; wait until it shows (NIT-122).
+        assert!(crate::procs::tests::held_by(&wt, server.id()).iter().any(|h| h.pid == server.id()), "the server is listed");
         let r = f.land(&a);
         server.kill().ok();
         server.wait().ok();
