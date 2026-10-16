@@ -396,10 +396,10 @@ mod tests {
         let remote = base.join("remote.git");
         std::fs::create_dir_all(repo.join(".nitely")).unwrap();
         let sh = |dir: &Path, args: &[&str]| {
-            let o = Command::new("git").arg("-C").arg(dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).output().unwrap();
-            assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+            let o = playbook::run_git(Command::new("git").arg("-C").arg(dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args)).unwrap();
+            assert!(o.status.success(), "git {args:?}: {} {}", o.status, String::from_utf8_lossy(&o.stderr));
         };
-        Command::new("git").args(["init", "-q", "--bare"]).arg(&remote).output().unwrap();
+        playbook::run_git(Command::new("git").args(["init", "-q", "--bare"]).arg(&remote)).unwrap();
         sh(&repo, &["init", "-q", "-b", "main"]);
         sh(&repo, &["config", "user.name", "t"]);
         sh(&repo, &["config", "user.email", "t@t"]);

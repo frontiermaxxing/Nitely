@@ -485,11 +485,47 @@ pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<String> {
 }
 
 fn finish(cmd: &mut Command, args: &[&str]) -> Result<String> {
-    let out = cmd.output()?;
+    let out = run_git(cmd).with_context(|| format!("starting git {}", args.join(" ")))?;
     if !out.status.success() {
-        bail!("git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let why = if stderr.trim().is_empty() { format!("exited with {} and said nothing", exit_code(&out.status)) } else { stderr.trim().to_string() };
+        bail!("git {}: {why}", args.join(" "));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Runs a git command, again up to twice when git never ran. On a Windows machine starting many
+/// processes at once (parallel gates), starting git can fail with "Access is denied", or Git for
+/// Windows' `git.exe` launcher can fail to start the real git and exit with -1 having said and done
+/// nothing (NIT-116). Nothing ran either way, so running it again is safe; any other failure is
+/// git's own answer and is returned as it is.
+pub(crate) fn run_git(cmd: &mut Command) -> std::io::Result<std::process::Output> {
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let last = attempt == 3;
+        match cmd.output() {
+            Err(e) if !last && e.kind() == std::io::ErrorKind::PermissionDenied => {}
+            Ok(out) if !last && never_ran(&out) => {}
+            done => return done,
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100 * attempt));
+    }
+}
+
+/// A failed git that printed nothing at all with the launcher's -1: it never got to run.
+fn never_ran(out: &std::process::Output) -> bool {
+    cfg!(windows) && out.status.code() == Some(-1) && out.stdout.is_empty() && out.stderr.is_empty()
+}
+
+/// An exit status as a number, in hex on Windows, where a process that never ran reports an
+/// NTSTATUS like 0xc0000142.
+fn exit_code(status: &std::process::ExitStatus) -> String {
+    match status.code() {
+        Some(c) if cfg!(windows) => format!("{c} (0x{:08x})", c as u32),
+        Some(c) => c.to_string(),
+        None => status.to_string(),
+    }
 }
 
 /// A git call that talks to `origin` (push, fetch). It never waits for a prompt or a sign-in
