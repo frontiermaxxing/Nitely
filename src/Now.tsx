@@ -3,6 +3,7 @@ import { invoke } from "./backend";
 import type { View } from "./App";
 import type { Board, SyncStatus, TaskRow } from "./types";
 import { ago } from "./util";
+import { exampleRepoPath } from "./AddProject";
 import {
   AgentMark,
   EmptyState,
@@ -54,7 +55,7 @@ export function Now(props: {
       {board.repos.length === 0 && (
         <EmptyState title="No repos yet.">
           <p>Add one from the sidebar, or from a terminal:</p>
-          <pre className="file">nitely repo add C:\Development\AeraChromium --integration win-dev --name Aera</pre>
+          <pre className="file">nitely connect {exampleRepoPath()} --yes</pre>
         </EmptyState>
       )}
       {board.repos.map((repo) => {

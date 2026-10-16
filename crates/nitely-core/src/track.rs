@@ -46,7 +46,7 @@ pub fn station_of_state(state: &str, state_type: &str) -> &'static str {
         "Backlog" | "Todo" => "todo",
         "In Progress" => "working",
         "In Review" => "review",
-        "Needs You" | "Needs Andrew" => "needs",
+        "Needs You" => "needs",
         "Approved" => "landing",
         "Done" | "Canceled" | "Duplicate" => "done",
         _ => match state_type {

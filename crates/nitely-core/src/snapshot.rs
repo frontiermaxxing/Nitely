@@ -35,7 +35,7 @@ pub struct TaskRow {
 #[derive(Debug, Clone, Serialize)]
 pub struct Board {
     pub repos: Vec<RepoView>,
-    /// Issues waiting on the human (Needs You, or Needs Andrew in Linear) with no worktree on the board.
+    /// Issues waiting on the human (Needs You) with no worktree on the board.
     pub needs_me_issues: Vec<IssueRecord>,
     /// Agents' questions still waiting for an answer.
     pub asks: Vec<Ask>,

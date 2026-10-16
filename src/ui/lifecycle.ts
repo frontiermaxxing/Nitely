@@ -59,7 +59,6 @@ export function stationOfState(state: string, stateType = ""): Station {
     case "In Review":
       return "review";
     case "Needs You":
-    case "Needs Andrew":
       return "needs";
     case "Approved":
       return "landing";

@@ -1,0 +1,69 @@
+# A worked example of a full playbook, for a made-up monorepo: a desktop app in app/, its API
+# server in api/, the marketing site in site/ and documentation in docs/. Copy what fits into your
+# repo as .nitely/playbook.toml. Commands run through cmd /C on Windows and sh -c on macOS and
+# Linux, so they avoid shell-specific syntax.
+# {main} is the main checkout, {worktree} the task's worktree, {base} the integration branch.
+
+[branch]
+# Tasks branch from and land on develop; on macOS on mac-develop.
+integration = "develop"
+integration_macos = "mac-develop"
+pattern = "{vendor}/{key}-{slug}"
+
+[worktree]
+# Beside the main checkout: C:\Code\acme-worktrees\app-12-fix-login.
+dir = "../{repo}-worktrees/{key}-{slug}"
+setup = [
+  "npm ci",
+  # The app's native SDK is large; link the main checkout's copy instead of downloading it again.
+  "node scripts/link-sdk.mjs {main} {worktree}",
+]
+# Before land removes the worktree: git refuses to remove a folder that still holds the link.
+teardown = ["node scripts/unlink-sdk.mjs {worktree}"]
+
+[gate]
+# The app reads everything except docs/ and site/, so a change only there skips its steps.
+[[gate.steps]]
+run = "npm run build --workspace app"
+unless_only = ["^docs/", "^site/"]
+
+[[gate.steps]]
+run = "npm test --workspace app"
+unless_only = ["^docs/", "^site/"]
+
+[[gate.steps]]
+run = "npm run lint --workspace app"
+unless_only = ["^docs/", "^site/"]
+
+[[gate.steps]]
+run = "npm test --workspace api"
+when_changed = ["^api/"]
+
+[[gate.steps]]
+run = "npm run build --workspace site"
+when_changed = ["^site/"]
+
+[review]
+# Codex reviews Claude's branches; Claude reviews everyone else's.
+reviewer = { claude = "codex", codex = "claude", "*" = "codex" }
+
+[[review.flags]]
+name = "MONEY_OR_RELEASE"
+question = "the change alters how a customer is charged, credited or refunded, or what ships to users and how (release, update, deployment or production configuration), wherever that code lives"
+reason = "money or release logic"
+
+[[review.flags]]
+name = "SWEEPING_CHANGE"
+question = "the change rewrites customer-facing copy broadly enough to change how the app or site comes across: a reworded page or a new tone. A typo, one string, or a local wording fix is no"
+reason = "a sweeping copy change"
+
+[approval]
+# The reviewer's pass approves nearly everything; billing and releases wait for you.
+human_paths = [
+  { pattern = '(?i)(^|/)[^/]*(billing|invoice|payment|pricing|refund|subscription)[^/]*(/|$)', reason = "billing and money" },
+  { pattern = '^(deploy|installer)/', reason = "deploy and release" },
+  { pattern = '(?i)^scripts/[^/]*(release|deploy)[^/]*$', reason = "deploy and release" },
+  { pattern = '^api/(Dockerfile|fly\.toml)$', reason = "deploy and release (API server)" },
+]
+# The vendored SDK is updated by a script, never by hand.
+blocked_paths = [{ pattern = '^vendor/sdk(/|$)', reason = "vendor/sdk is updated by scripts/update-sdk.mjs" }]

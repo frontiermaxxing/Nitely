@@ -1,5 +1,5 @@
 //! The one-time move of a Linear project into native issues, so Linear can be retired (NIT-9).
-//! Keys stay as they are (AND-275 stays AND-275), with their state, priority, labels, body and
+//! Keys stay as they are (APP-275 stays APP-275), with their state, priority, labels, body and
 //! comments; the project's next number follows the highest one. `plan` shows everything it would
 //! do and changes nothing; `apply` does it in one transaction.
 
@@ -123,11 +123,16 @@ fn graphql(creds: &Credentials, query: &str, variables: Value) -> Result<Value> 
     Ok(v)
 }
 
-/// Every issue of the credentials' Linear project, in any state, with all its comments and
-/// labels; archived ones too unless `skip_archived`.
-pub fn fetch(creds: &Credentials, skip_archived: bool) -> Result<Vec<LinearIssue>> {
+/// Every issue of the Linear project `project_id` (the credentials' own when None), in any
+/// state, with all its comments and labels; archived ones too unless `skip_archived`.
+pub fn fetch(creds: &Credentials, project_id: Option<&str>, skip_archived: bool) -> Result<Vec<LinearIssue>> {
+    let mut creds = creds.clone();
+    if let Some(id) = project_id {
+        creds.linear.project_id = id.to_string();
+    }
+    let creds = &creds;
     if !creds.linear.usable() {
-        bail!("the credentials file has no usable Linear section (api_key and project_id)");
+        bail!("the credentials file needs a Linear api_key, and a project_id unless you name the Linear project");
     }
     let mut out = Vec::new();
     let mut after: Option<String> = None;
@@ -268,8 +273,7 @@ pub fn parse_page(v: &Value) -> Result<Page> {
 
 // ----- mapping -----
 
-/// The native state for a Linear state: the same name when Nitely has it ("Needs Andrew" is
-/// Needs You), else by its type. Approved becomes Needs You: in Nitely only a human approves,
+/// The native state for a Linear state: the same name when Nitely has it, else by its type. Approved becomes Needs You: in Nitely only a human approves,
 /// in the app, so a Linear approval is kept as a note to confirm rather than carried over.
 pub fn native_state(name: &str, kind: &str) -> &'static str {
     match parse_state(name) {
@@ -294,17 +298,43 @@ fn kind_of(labels: &[String]) -> Option<&'static str> {
     })
 }
 
-/// Who filed it, from Aera's `from:claude` / `from:andrew` labels; "linear" when no label says.
+/// Who filed it, from a `from:` label: an agent's name (`from:claude`) is kept, any other name
+/// is a person (`from:sam` is human); "linear" when no label says.
 fn source_of(labels: &[String]) -> String {
     labels
         .iter()
         .find_map(|l| l.strip_prefix("from:"))
-        .map(|who| match who.to_lowercase().as_str() {
-            "andrew" | "human" => "human".to_string(),
+        .map(|who| match who.trim().to_lowercase().as_str() {
+            "" => "linear".to_string(),
             w if crate::issues::SOURCES.contains(&w) => w.to_string(),
-            _ => "linear".to_string(),
+            _ => "human".to_string(),
         })
         .unwrap_or_else(|| "linear".into())
+}
+
+/// The native state for `issue`: the one you chose for its Linear state, else `native_state`.
+fn mapped_state(issue: &LinearIssue, overrides: &BTreeMap<String, &'static str>) -> &'static str {
+    overrides
+        .get(&issue.state_name.to_lowercase())
+        .copied()
+        .unwrap_or_else(|| native_state(&issue.state_name, &issue.state_type))
+}
+
+/// `"Needs Review=Needs You"` pairs, keyed by the Linear name in lowercase. Approved is refused:
+/// in Nitely only a human approves, in the app.
+pub fn parse_overrides(pairs: &[String]) -> Result<BTreeMap<String, &'static str>> {
+    let mut out = BTreeMap::new();
+    for pair in pairs {
+        let Some((linear, native)) = pair.split_once('=') else {
+            bail!("--state takes LINEAR=NITELY, e.g. \"Needs Review=Needs You\"; got {pair:?}");
+        };
+        let (native, _) = parse_state(native)?;
+        if native == "Approved" {
+            bail!("an import cannot approve: only a human approves, in Nitely");
+        }
+        out.insert(linear.trim().to_lowercase(), native);
+    }
+    Ok(out)
 }
 
 fn number_of(key: &str, project: &str) -> Option<i64> {
@@ -337,8 +367,9 @@ pub fn parse_iso(s: &str) -> Option<i64> {
 
 // ----- plan and apply -----
 
-/// What importing `issues` into `project` would do. Changes nothing.
-pub fn plan(db: &Db, issues: &[LinearIssue], project: &str, project_name: &str) -> Result<ImportPlan> {
+/// What importing `issues` into `project` would do, with `overrides` (from `parse_overrides`)
+/// choosing the native state for some Linear states. Changes nothing.
+pub fn plan(db: &Db, issues: &[LinearIssue], project: &str, project_name: &str, overrides: &BTreeMap<String, &'static str>) -> Result<ImportPlan> {
     let project = project.trim().to_uppercase();
     // Imported issues keep their Linear keys, so the key must be a project's own, not an old key
     // whose links now lead to another project's issues.
@@ -384,7 +415,7 @@ pub fn plan(db: &Db, issues: &[LinearIssue], project: &str, project_name: &str) 
         }
         out.create += 1;
         numbers.push((n, issue.identifier.clone()));
-        *states.entry((issue.state_name.clone(), native_state(&issue.state_name, &issue.state_type).to_string())).or_default() += 1;
+        *states.entry((issue.state_name.clone(), mapped_state(issue, overrides).to_string())).or_default() += 1;
         for l in &issue.labels {
             *out.labels.entry(l.clone()).or_default() += 1;
         }
@@ -393,7 +424,19 @@ pub fn plan(db: &Db, issues: &[LinearIssue], project: &str, project_name: &str) 
         out.comments += issue.comments.len();
         out.archived += usize::from(issue.archived);
         if issue.state_name.eq_ignore_ascii_case("approved") {
-            out.notes.push(format!("{} was Approved in Linear; it becomes Needs You with a note, to approve again in Nitely", issue.identifier));
+            out.notes.push(format!("{} was Approved in Linear; it becomes {} with a note, to approve again in Nitely", issue.identifier, mapped_state(issue, overrides)));
+        }
+    }
+    for (linear, native) in states.keys() {
+        if parse_state(linear).is_err() && !overrides.contains_key(&linear.to_lowercase()) {
+            out.notes.push(format!(
+                "Nitely has no state named {linear:?}; its issues become {native} by Linear's state type. To choose another, run again with --state \"{linear}=Needs You\" (or any state)"
+            ));
+        }
+    }
+    for linear in overrides.keys() {
+        if !states.keys().any(|(name, _)| name.to_lowercase() == *linear) {
+            out.notes.push(format!("no issue to import is in the Linear state {linear:?} that --state names"));
         }
     }
     numbers.sort();
@@ -406,9 +449,9 @@ pub fn plan(db: &Db, issues: &[LinearIssue], project: &str, project_name: &str) 
     Ok(out)
 }
 
-/// Imports `issues` into `project` as `plan` says, in one transaction: creates the project if
-/// needed, the issues with their keys, and their comments as timeline notes, replacing the
-/// Linear mirror rows of the same keys.
+/// Imports `issues` into `project` as `plan` says (its states included), in one transaction:
+/// creates the project if needed, the issues with their keys, and their comments as timeline
+/// notes, replacing the Linear mirror rows of the same keys.
 pub fn apply(db: &mut Db, issues: &[LinearIssue], plan: &ImportPlan, actor: &Actor) -> Result<Imported> {
     let project = plan.project.clone();
     let now = crate::db::now();
@@ -425,8 +468,12 @@ pub fn apply(db: &mut Db, issues: &[LinearIssue], plan: &ImportPlan, actor: &Act
         if plan.already_native.contains(&issue.identifier) {
             continue;
         }
-        let native = native_state(&issue.state_name, &issue.state_type);
-        let (state, state_type) = parse_state(native)?;
+        let native = plan
+            .states
+            .iter()
+            .find(|m| m.linear == issue.state_name)
+            .map_or_else(|| native_state(&issue.state_name, &issue.state_type).to_string(), |m| m.native.clone());
+        let (state, state_type) = parse_state(&native)?;
         let filed = parse_iso(&issue.created_at).unwrap_or(now);
         tx.execute(
             "INSERT INTO issue (key, origin, project, number, title, body, url, state, state_type, kind, source, priority, labels,
@@ -482,18 +529,18 @@ mod tests {
     fn page() -> Value {
         json!({ "data": { "issues": {
             "nodes": [
-                { "identifier": "AND-2", "title": "Tab strip flickers", "description": "Steps: switch profile.", "url": "https://linear.app/x/issue/AND-2",
+                { "identifier": "APP-2", "title": "Login button flickers", "description": "Steps: open the login page.", "url": "https://linear.app/acme/issue/APP-2",
                   "priority": 1, "createdAt": "2026-10-01T09:00:00.000Z", "updatedAt": "2026-10-02T09:00:00.000Z",
-                  "state": { "name": "Needs Andrew", "type": "started" }, "labels": { "nodes": [{ "name": "Bug" }, { "name": "tabs" }] },
+                  "state": { "name": "Needs Review", "type": "started" }, "labels": { "nodes": [{ "name": "Bug" }, { "name": "login" }] },
                   "comments": { "nodes": [
-                      { "body": "Second", "createdAt": "2026-10-02T08:00:00.000Z", "user": { "name": "Andrew" } },
+                      { "body": "Second", "createdAt": "2026-10-02T08:00:00.000Z", "user": { "name": "Sam" } },
                       { "body": "First", "createdAt": "2026-10-01T10:00:00.000Z", "user": null } ],
                       "pageInfo": { "hasNextPage": true, "endCursor": "k2" } } },
-                { "identifier": "AND-7", "title": "Reader mode", "description": null, "url": "https://linear.app/x/issue/AND-7",
+                { "identifier": "APP-7", "title": "Reader mode", "description": null, "url": "https://linear.app/acme/issue/APP-7",
                   "priority": 0, "createdAt": "2026-09-01T00:00:00Z", "updatedAt": "2026-09-02T00:00:00Z",
                   "state": { "name": "Shipped", "type": "completed" }, "labels": { "nodes": [{ "name": "Feature" }] },
                   "comments": { "nodes": [] }, "archivedAt": "2026-09-20T00:00:00Z" },
-                { "identifier": "AND-5", "title": "Ready to land", "url": "u", "priority": 2,
+                { "identifier": "APP-5", "title": "Ready to land", "url": "u", "priority": 2,
                   "createdAt": "2026-09-05T00:00:00Z", "updatedAt": "2026-09-06T00:00:00Z",
                   "state": { "name": "Approved", "type": "started" }, "labels": { "nodes": [] }, "comments": { "nodes": [] } },
                 { "identifier": "OPS-1", "title": "Another team", "url": "u", "priority": 0,
@@ -514,45 +561,54 @@ mod tests {
         assert_eq!(issues[0].comments.iter().map(|c| c.body.as_str()).collect::<Vec<_>>(), ["First", "Second"], "oldest first");
         assert_eq!(issues[0].comments[0].author, "someone");
 
-        // The mirror already holds AND-2 read-only.
-        let mirrored = IssueRecord { key: "AND-2".into(), title: "Tab strip flickers".into(), state: "Needs Andrew".into(), state_type: "started".into(), ..Default::default() };
+        // The mirror already holds APP-2 read-only.
+        let mirrored = IssueRecord { key: "APP-2".into(), title: "Login button flickers".into(), state: "Needs Review".into(), state_type: "started".into(), ..Default::default() };
         db.replace_issues("linear", &[mirrored]).unwrap();
 
-        let p = plan(&db, &issues, "and", "Aera").unwrap();
+        // A state Nitely does not have is mapped by its type, and called out in the notes.
+        let by_type = plan(&db, &issues, "app", "Acme", &BTreeMap::new()).unwrap();
+        assert_eq!(by_type.states.iter().find(|s| s.linear == "Needs Review").map(|s| s.native.as_str()), Some("In Progress"));
+        assert!(by_type.notes.iter().any(|n| n.contains("--state \"Needs Review=")));
+        assert!(parse_overrides(&["Needs Review=Approved".into()]).is_err(), "an import cannot approve");
+        assert!(parse_overrides(&["no equals sign".into()]).is_err());
+        let overrides = parse_overrides(&["needs review = needs-you".into()]).unwrap();
+        let p = plan(&db, &issues, "app", "Acme", &overrides).unwrap();
         assert!(!p.project_exists);
         assert_eq!((p.found, p.create, p.replaces_mirrored, p.comments, p.next_number), (4, 3, 1, 2, 8));
-        assert_eq!((p.first_key.as_deref(), p.last_key.as_deref()), (Some("AND-2"), Some("AND-7")));
+        assert_eq!((p.first_key.as_deref(), p.last_key.as_deref()), (Some("APP-2"), Some("APP-7")));
         assert_eq!(p.other_prefix, ["OPS-1"]);
         let state = |linear: &str| p.states.iter().find(|s| s.linear == linear).map(|s| s.native.clone());
-        assert_eq!(state("Needs Andrew").as_deref(), Some("Needs You"));
+        assert_eq!(state("Needs Review").as_deref(), Some("Needs You"));
         assert_eq!(state("Shipped").as_deref(), Some("Done"));
         assert_eq!(state("Approved").as_deref(), Some("Needs You"));
         assert_eq!(p.kinds.get("bug"), Some(&1));
         assert_eq!(p.sources.get("linear"), Some(&3));
         assert_eq!(p.archived, 1);
-        assert_eq!(source_of(&["from:andrew".into()]), "human");
+        assert_eq!(source_of(&["from:sam".into()]), "human");
         assert_eq!(source_of(&["x".into(), "from:claude".into()]), "claude");
-        assert_eq!(p.notes.len(), 1, "the Linear approval is called out");
-        assert!(db.project("AND").unwrap().is_none(), "planning changes nothing");
+        assert_eq!(p.notes.len(), 2, "{:?}", p.notes);
+        assert!(p.notes[0].contains("APP-5 was Approved"), "the Linear approval is called out");
+        assert!(p.notes[1].contains("\"Shipped\""), "and the state mapped by its type");
+        assert!(db.project("APP").unwrap().is_none(), "planning changes nothing");
 
         let done = apply(&mut db, &issues, &p, &Actor::Human).unwrap();
         assert_eq!((done.created, done.comments), (3, 2));
-        let a2 = db.issue("AND-2").unwrap().unwrap();
+        let a2 = db.issue("APP-2").unwrap().unwrap();
         assert_eq!((a2.origin.as_str(), a2.state.as_str(), a2.kind.as_deref(), a2.priority), ("nitely", "Needs You", Some("bug"), 1));
-        assert_eq!(a2.labels, ["Bug", "tabs"]);
-        let timeline = db.timeline("AND-2").unwrap();
+        assert_eq!(a2.labels, ["Bug", "login"]);
+        let timeline = db.timeline("APP-2").unwrap();
         assert_eq!(timeline.iter().map(|t| t.kind.as_str()).collect::<Vec<_>>(), ["issue_created", "note", "note", "imported"]);
         assert_eq!(timeline[1].actor, "linear:someone");
-        assert_eq!(db.issue("AND-7").unwrap().unwrap().state, "Done");
+        assert_eq!(db.issue("APP-7").unwrap().unwrap().state, "Done");
         assert!(db.issue("OPS-1").unwrap().is_none());
 
         // New issues continue after the highest imported number.
         let n = db
-            .create_issue(&NewIssue { project: "AND".into(), title: "Next".into(), body: "b".into(), kind: "bug".into(), source: "human".into(), evidence: "e".into(), ..Default::default() }, &Actor::Human)
+            .create_issue(&NewIssue { project: "APP".into(), title: "Next".into(), body: "b".into(), kind: "bug".into(), source: "human".into(), evidence: "e".into(), ..Default::default() }, &Actor::Human)
             .unwrap();
-        assert_eq!(n.key, "AND-8");
+        assert_eq!(n.key, "APP-8");
         // Run again: everything is native already, nothing is created twice.
-        let again = plan(&db, &issues, "AND", "Aera").unwrap();
+        let again = plan(&db, &issues, "APP", "Acme", &overrides).unwrap();
         assert_eq!((again.create, again.already_native.len()), (0, 3));
         std::fs::remove_dir_all(&dir).ok();
     }

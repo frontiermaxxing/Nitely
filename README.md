@@ -34,7 +34,7 @@ with C++", and WebView2 (already on Windows 11).
 ```powershell
 npm install
 cargo install --path crates/nitely-cli     # puts nitely.exe on PATH (~/.cargo/bin)
-nitely repo add C:\Development\AeraChromium --integration win-dev --name Aera
+nitely connect C:\Code\my-app --yes      # a repo you work in
 npm run tauri dev
 ```
 
@@ -44,12 +44,12 @@ prints where the database and config live (`%APPDATA%\Nitely`).
 ## Add a project
 
 In the app, choose **+ Add project** and pick a folder you already work in (for example
-`C:\Development\AeraChromium`). Nitely shows what it will do before it does anything:
+`C:\Code\my-app`). Nitely shows what it will do before it does anything:
 
 - creates the project (key and name editable) and watches the repo and its worktrees;
-- picks a playbook: the repo's own `.nitely/playbook.toml` if it has one, Aera's when it finds
-  `scripts/work/work.mjs`, otherwise one generated from the repo (its default branch, `cargo test`,
-  npm scripts). Generated and Aera playbooks are kept in Nitely's data folder, not in the repo;
+- picks a playbook: the repo's own `.nitely/playbook.toml` if it has one, otherwise one generated
+  from the repo (its default branch, `cargo test`, npm scripts). A generated playbook is kept in
+  Nitely's data folder, not in the repo;
 - connects every agent it finds, at user level, so nothing is written into the repo:
   - Claude Code: hooks in `~/.claude/settings.json` (existing hooks kept), the `nitely` skill in
     `~/.claude/skills/nitely`, and `claude mcp add --scope user nitely -- nitely mcp`;
@@ -62,8 +62,8 @@ integration branch, gate, workflow) from the session-start hook and the MCP serv
 changes only what is out of date. The CLI does the same:
 
 ```powershell
-nitely connect C:\Development\AeraChromium              # show the plan
-nitely connect C:\Development\AeraChromium --project AC --yes
+nitely connect C:\Code\my-app                 # show the plan
+nitely connect C:\Code\my-app --project APP --yes
 ```
 
 The skill, Codex instructions and hook and MCP registrations live in your home folder, so they go
@@ -90,8 +90,9 @@ shows on the issue's timeline and in the app. A repo without a playbook gets `ma
 branches and worktrees in `../{repo}-worktrees/`. Nitely's own is in [.nitely/playbook.toml](.nitely/playbook.toml).
 Gate steps can depend on what the branch changes (`when_changed`, `unless_only`), commands can use
 `{main}`, `{worktree}` and `{base}`, and `[approval] blocked_paths` lists paths no task branch may
-touch. [docs/playbooks/aera.toml](docs/playbooks/aera.toml) is Aera's `scripts/work` workflow as a
-playbook; copy it into the Aera repo as `.nitely/playbook.toml` to run Aera through Nitely.
+touch. [docs/playbooks/example.toml](docs/playbooks/example.toml) is a worked example of a full
+playbook for a made-up monorepo: per-OS branches, worktree setup and teardown, gate steps that skip
+what a change cannot affect, review flags, and paths that wait for you.
 
 ## GitHub
 
@@ -101,11 +102,23 @@ or `GITHUB_TOKEN` instead when set. A PR shows on the issue its branch names (`c
 
 ## Bitbucket and Linear
 
-Nitely reads `%USERPROFILE%\.aera-work\credentials.json`, the same file `scripts/work/credentials.mjs`
-uses, and never writes it. The app syncs every 60 seconds and on "Sync now"; `nitely sync` does the
+Nitely reads `credentials.json` in its data folder (`%APPDATA%\Nitely` on Windows; `nitely where`
+prints it) and never writes it:
+
+```json
+{
+  "bitbucket": { "email": "you@example.com", "apiToken": "…", "workspace": "acme", "repo": "my-app" },
+  "linear": { "apiKey": "lin_api_…", "projectId": "…" }
+}
+```
+
+Either section can be left out. The app syncs every 60 seconds and on "Sync now"; `nitely sync` does the
 same from a terminal and prints what it got. Both are read-only on Bitbucket and Linear. Pull
 requests come from each watched repo's Bitbucket `origin` plus the repo named in the credentials
-file; issues are the open ones in the Linear project the file names.
+file; issues are the open ones in the Linear project the file names. To leave Linear, `nitely
+import-linear --project APP` moves a Linear project into native issues once, keeping its keys; it
+shows what it would do until you add `--yes`, and `--state "Needs Review=Needs You"` chooses the
+Nitely state for a Linear state Nitely has no name for.
 
 ## Agents on other machines on your network
 
@@ -113,7 +126,7 @@ The backlog lives in the database on the machine that runs Nitely. `nitely serve
 other machines on the same local network (a Mac beside a Windows PC, say) reach it: it is the
 `nitely` MCP server over HTTP at `/mcp`, so Claude Code there needs no Nitely install.
 
-1. In the app, open **Other machines** and add one (say `mac`, default project AND). It shows that
+1. In the app, open **Other machines** and add one (say `mac`, default project APP). It shows that
    machine's token once, inside the command to run there, with a Copy button.
 2. Run `nitely serve` on this machine. It listens on port 7421 and announces itself on the network.
 3. On the other machine, run the copied command:

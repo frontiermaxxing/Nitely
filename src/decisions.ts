@@ -44,9 +44,9 @@ export function detailKeys(board: Board): string[] {
   return [...keys].sort();
 }
 
-/** The states that wait on a person (nitely-core's NEEDS_HUMAN). */
-const NEEDS_HUMAN = ["Needs You", "Needs Andrew"];
-export const needsHuman = (i: IssueRecord) => NEEDS_HUMAN.includes(i.state);
+/** The state that waits on a person (nitely-core's NEEDS_HUMAN). */
+const NEEDS_HUMAN = "Needs You";
+export const needsHuman = (i: IssueRecord) => i.state === NEEDS_HUMAN;
 
 const urgencyOf = (i: IssueRecord | null | undefined) => {
   const u = i ? i.urgency || i.priority : 0;
@@ -60,7 +60,7 @@ const parseTs = (iso: string) => {
 
 /** When the issue last moved to Needs You, from its timeline; else when it last changed. */
 function waitingSince(issue: IssueRecord, detail?: IssueDetail): number {
-  const moved = detail?.timeline.filter((e) => e.kind === "issue_moved" && NEEDS_HUMAN.some((n) => e.summary?.includes(`→ ${n}`))).pop();
+  const moved = detail?.timeline.filter((e) => e.kind === "issue_moved" && e.summary?.includes(`→ ${NEEDS_HUMAN}`)).pop();
   return moved?.ts ?? parseTs(issue.updated_at);
 }
 

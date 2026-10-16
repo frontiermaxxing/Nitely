@@ -45,7 +45,7 @@ pub struct ConnectPlan {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PlaybookPlan {
-    /// `repo` (the repo has its own), `existing` (Nitely already keeps one), `aera` or `generated`.
+    /// `repo` (the repo has its own), `existing` (Nitely already keeps one) or `generated`.
     pub source: String,
     pub path: String,
     /// The text Nitely will keep; empty when the repo's own is used.
@@ -192,7 +192,7 @@ pub fn apply(db: &Db, config: &mut Config, plan: &ConnectPlan) -> Result<Applied
     config.save()?;
     done.push(format!("watching {} for project {}", plan.root, plan.project_key));
 
-    if matches!(plan.playbook.source.as_str(), "aera" | "generated") {
+    if plan.playbook.source == "generated" {
         write(Path::new(&plan.playbook.path), &plan.playbook.text)?;
         done.push(format!("wrote its playbook to {}", plan.playbook.path));
     }
@@ -275,12 +275,7 @@ fn playbook_plan(root: &Path, repo_name: &str) -> Result<PlaybookPlan> {
     if stored.exists() {
         return Ok(PlaybookPlan { source: "existing".into(), path: stored.to_string_lossy().into_owned(), text: String::new() });
     }
-    let (source, text) = if root.join("scripts/work/work.mjs").exists() && root.join("aera").is_dir() {
-        ("aera", include_str!("../../../docs/playbooks/aera.toml").to_string())
-    } else {
-        ("generated", generated_playbook(root))
-    };
-    Ok(PlaybookPlan { source: source.into(), path: stored.to_string_lossy().into_owned(), text })
+    Ok(PlaybookPlan { source: "generated".into(), path: stored.to_string_lossy().into_owned(), text: generated_playbook(root) })
 }
 
 /// A starting playbook from what the repo has: its default branch and the usual test and build
@@ -594,7 +589,7 @@ fn run(command: &str) -> Result<()> {
     Ok(())
 }
 
-/// A free project key from the name: its capitals (AeraChromium: AC), else its first letters.
+/// A free project key from the name: its capitals (AcmeWeb: AW), else its first letters.
 fn suggest_key(db: &Db, name: &str) -> Result<String> {
     let letters: String = name.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
     let caps: String = letters.chars().filter(|c| c.is_ascii_uppercase()).collect();

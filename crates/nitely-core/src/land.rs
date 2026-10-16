@@ -2,7 +2,7 @@
 //! repo's common git dir. The branch is rebased onto the integration branch in its worktree, its
 //! review and approval are checked against exactly what it now changes, the gate runs there, and
 //! the main checkout is fast-forwarded to the checked commit and pushed. A rebase conflict stops
-//! the land with the rebase left in progress for the branch's owner. This is Aera's `land.mjs`.
+//! the land with the rebase left in progress for the branch's owner.
 
 use anyhow::{bail, Context, Result};
 use serde::Serialize;

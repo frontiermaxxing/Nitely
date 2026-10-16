@@ -17,7 +17,7 @@ pub struct RepoConfig {
     pub name: String,
     /// The main checkout. Linked worktrees are found through `git worktree list`.
     pub root: String,
-    /// Branch tasks are cut from and land on (`win-dev` / `mac-dev` for Aera).
+    /// Branch tasks are cut from and land on (`main`, or `win-dev` / `mac-dev` per OS).
     pub integration_branch: String,
     /// The project (issue prefix) this repo's work belongs to.
     #[serde(default, skip_serializing_if = "Option::is_none")]

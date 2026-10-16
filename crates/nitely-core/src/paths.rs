@@ -20,7 +20,7 @@ pub fn config_path() -> PathBuf {
 }
 
 /// A path in one comparable form: forward slashes, no trailing slash, lowercase on Windows.
-/// Git prints `C:/Development/x`, hooks send `C:\Development\x`; both must match.
+/// Git prints `C:/Code/x`, hooks send `C:\Code\x`; both must match.
 pub fn normalize(path: &str) -> String {
     let mut p = path.replace('\\', "/");
     while p.len() > 1 && p.ends_with('/') {

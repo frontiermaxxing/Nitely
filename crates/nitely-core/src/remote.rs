@@ -84,7 +84,7 @@ pub(crate) fn record(db: &Db, source: &str, result: &Result<usize>, errors: &mut
 }
 
 /// The Bitbucket repos to read: each configured repo's `origin`, plus the one named in the
-/// credentials file (the Aera repo) so it works before any repo is added.
+/// credentials file, so it works before any repo is added.
 fn bitbucket_repos(config: &Config, creds: &Credentials) -> BTreeSet<String> {
     let mut repos: BTreeSet<String> = config
         .repos
@@ -159,8 +159,7 @@ pub fn parse_bitbucket_page(page: &Value, slug: &str, my_account_id: &str) -> Ve
         .collect()
 }
 
-/// Open issues of the Aera project (completed, canceled and duplicate are left out, as
-/// `linear.mjs projectIssues` does).
+/// Open issues of the credentials' Linear project (completed, canceled and duplicate are left out).
 fn fetch_linear(creds: &Credentials) -> Result<Vec<IssueRecord>> {
     const QUERY: &str = "query($project: ID!, $after: String) {
       issues(first: 100, after: $after, filter: {

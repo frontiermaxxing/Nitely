@@ -40,7 +40,7 @@ impl Server {
         Server { vendor: "agent".into(), cwd: String::new(), exe: None, remote: Some(Remote { name: name.into(), project }) }
     }
 
-    /// One id per agent per directory, e.g. `claude:c:/development/nitely-worktrees/nit-3`; an
+    /// One id per agent per directory, e.g. `claude:c:/code/nitely-worktrees/nit-3`; an
     /// agent on another machine is `claude@mac`, after its token.
     fn agent(&self) -> String {
         match &self.remote {

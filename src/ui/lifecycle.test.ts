@@ -120,7 +120,7 @@ test("trackOf returns the backend's track when the issue carries one", () => {
 });
 
 test("states map to stations", () => {
-  assert.equal(stationOfState("Needs Andrew"), "needs");
+  assert.equal(stationOfState("Needs You"), "needs");
   assert.equal(stationOfState("Something new", "completed"), "done");
   assert.equal(stationOfState("Something new", "started"), "working");
 });

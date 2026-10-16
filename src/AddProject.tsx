@@ -7,9 +7,11 @@ import { AgentChanges, pendingChanges } from "./Agents";
 const PLAYBOOK_SOURCE: Record<string, string> = {
   repo: "the repo's own .nitely/playbook.toml",
   existing: "the one Nitely already keeps for it",
-  aera: "Aera's workflow (scripts/work), detected",
   generated: "a starting one from the repo's branch and scripts",
 };
+
+/** A made-up repo path in the platform's usual form, for placeholders and examples. */
+export const exampleRepoPath = () => (navigator.platform.startsWith("Win") ? "C:\\Code\\my-app" :"~/code/my-app");
 
 /** Pick a repo folder, see everything Nitely will set up, then add it. */
 export function AddProject(props: { onAdded: (projectKey: string) => void }) {
@@ -85,7 +87,7 @@ export function AddProject(props: { onAdded: (projectKey: string) => void }) {
           load(path, "", "");
         }}
       >
-        <input value={path} onChange={(e) => setPath(e.target.value)} placeholder="C:\Development\AeraChromium" />
+        <input value={path} onChange={(e) => setPath(e.target.value)} placeholder={exampleRepoPath()} />
         <button type="button" className="btn" onClick={choose}>Choose…</button>
         <button className="btn" disabled={busy || !path.trim()}>Look</button>
       </form>

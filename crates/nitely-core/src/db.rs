@@ -214,7 +214,7 @@ pub struct PrRecord {
     pub updated_at: String,
     pub comment_count: i64,
     pub approved_by: Vec<String>,
-    /// Approved by the account that owns the token (Andrew).
+    /// Approved by the account that owns the token (you).
     pub approved_by_me: bool,
     /// CI on the head commit: success, failure, pending, or empty when unknown.
     pub checks: String,

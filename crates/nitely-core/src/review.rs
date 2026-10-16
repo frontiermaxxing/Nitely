@@ -1,8 +1,7 @@
 //! Cross-vendor review: another agent reads the branch before it can land (Codex reviews Claude's
 //! branches, Claude reviews Codex's). Every reviewer gets the same prompt and must end with the same
 //! closing lines, so a review always has an explicit result; one without them is unfinished, not
-//! clean. This is Aera's `review.mjs` with the reviewers, commands and questions moved into the
-//! playbook.
+//! clean. The reviewers, their commands and the yes/no questions come from the playbook.
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};

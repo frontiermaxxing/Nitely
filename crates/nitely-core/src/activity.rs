@@ -4,7 +4,7 @@
 //!
 //! States come from `session_state`, which `Db::record` fills from the hooks. Before its first row
 //! nothing is known about states, and `recorded_since` says so rather than guessing. Issue events
-//! are written by the MCP server under one id per agent and folder (`claude:c:/development/nitely`),
+//! are written by the MCP server under one id per agent and folder (`claude:c:/code/nitely`),
 //! which every session of that agent in that folder shares; such an event goes to the session that
 //! named its issue in a tool call nearest in time. Codex is the other way round: its hooks only say
 //! when a turn ends, so its MCP id is the lane and its hook sessions in that folder are folded in.
@@ -131,7 +131,7 @@ fn overlap(a: &Session, b: &Session) -> bool {
     a.started_at - LIFETIME_SLACK_SECS <= b.last_seen_at && b.started_at - LIFETIME_SLACK_SECS <= a.last_seen_at
 }
 
-/// An id the MCP server or the CLI wrote under (`claude:c:/development/nitely`, `cli:...`), not a
+/// An id the MCP server or the CLI wrote under (`claude:c:/code/nitely`, `cli:...`), not a
 /// hook's session id.
 fn is_agent_id(s: &Session) -> bool {
     s.vendor == "cli" || s.id == format!("{}:{}", s.vendor, normalize(&s.cwd))

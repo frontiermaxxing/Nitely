@@ -1,7 +1,7 @@
 //! A project's playbook: how a task becomes a branch and a worktree, how the worktree is set up,
 //! and which commands gate a change. It lives in the repo at `.nitely/playbook.toml`, versioned
-//! with the code it governs, so every agent and every machine follows the same rules. This is the
-//! Aera `work.mjs` workflow made configurable; `review.rs` and `submit.rs` build on it.
+//! with the code it governs, so every agent and every machine follows the same rules. `review.rs`
+//! and `submit.rs` build on it.
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -51,7 +51,7 @@ pub struct LandRules {
 pub struct BranchRules {
     /// The branch tasks are cut from and land on.
     pub integration: String,
-    /// Per-OS overrides (Aera keeps `win-dev` and `mac-dev`).
+    /// Per-OS overrides (a repo can keep `win-dev` and `mac-dev`).
     pub integration_windows: Option<String>,
     pub integration_macos: Option<String>,
     /// `{vendor}`, `{key}` (lowercase) and `{slug}` are filled in.
@@ -73,8 +73,8 @@ pub struct WorktreeRules {
     #[serde(default)]
     pub setup_when_changed: Vec<String>,
     /// Run in the worktree, in order, before land removes it: undo what setup made that
-    /// `git worktree remove` cannot take down (Aera's sparse `src` worktree, a nested worktree git
-    /// refuses to remove with). A failure is reported and the removal still tried.
+    /// `git worktree remove` cannot take down (a sparse checkout of a submodule, a nested worktree
+    /// git refuses to remove with). A failure is reported and the removal still tried.
     #[serde(default)]
     pub teardown: Vec<String>,
 }
@@ -407,10 +407,9 @@ fn finish(cmd: &mut Command, args: &[&str]) -> Result<String> {
 }
 
 /// A git call that talks to `origin` (push, fetch). It never waits for a prompt or a sign-in
-/// window: nobody is there to answer one, and Git Credential Manager hung an Aera land that way
-/// on 2026-10-15. For an HTTPS bitbucket.org remote with a token in the credentials file, the
-/// configured helpers are replaced by an Authorization header for bitbucket.org only, as Aera's own
-/// pushWithToken answers with the token. Both go in through git's environment config
+/// window: nobody is there to answer one, and Git Credential Manager has hung a land that way.
+/// For an HTTPS bitbucket.org remote with a token in the credentials file, the configured helpers
+/// are replaced by an Authorization header for bitbucket.org only. Both go in through git's environment config
 /// (GIT_CONFIG_COUNT), so the token is on no command line and nothing prints it. Other hosts keep
 /// their helpers and fail fast if those cannot answer.
 pub(crate) fn git_remote(dir: &Path, args: &[&str]) -> Result<String> {
@@ -832,40 +831,34 @@ mod tests {
         assert!(rules.check_blocked(&files(&["src"])).unwrap_err().to_string().contains("C++ lane"));
     }
 
-    /// Aera's playbook must keep parsing, and must route paths the way scripts/work/approval.mjs does.
+    /// The worked example in docs must keep parsing, and must route paths the way it says.
     #[test]
-    fn aera_playbook_matches_its_scripts() {
-        let pb = Playbook::parse(include_str!("../../../docs/playbooks/aera.toml")).unwrap();
-        // The sparse src worktree setup adds must come down before land removes the worktree.
-        assert!(pb.worktree.setup.iter().any(|c| c.contains("ensureSrcCheckout")));
-        assert!(pb.worktree.teardown.iter().any(|c| c.contains("removeSrcCheckout")));
+    fn example_playbook_parses_and_routes() {
+        let pb = Playbook::parse(include_str!("../../../docs/playbooks/example.toml")).unwrap();
+        assert!(pb.unknown.is_empty(), "{:?}", pb.unknown);
+        assert!(pb.worktree.setup.iter().any(|c| c.contains("link-sdk")));
+        assert!(pb.worktree.teardown.iter().any(|c| c.contains("unlink-sdk")));
         let files = |f: &[&str]| f.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let human = |f: &str| !pb.approval.human_reasons(&files(&[f])).unwrap().is_empty();
-        // The cases in scripts/work/approval.test.mjs.
         for f in [
-            "aera/core/entitlement/paidFeatures.ts", "aera-api/src/lib/credits/reverse.ts", "aera-api/src/lib/billing/legacyEvents.ts",
-            "aera/newtab/components/settings/SubscriptionCard.tsx", "aera-website/src/app/pricing/page.tsx",
-            "deployment/win64/build-release.ps1", "deployment/win64/upload-release.ps1", "scripts/deploy_release.ps1",
-            "aera-api/deploy.sh", "aera-api/ecosystem.config.js", "installer/aera.nsi", "src/chrome/browser/aera/aera_update_service.cc",
+            "app/src/billing/Checkout.tsx", "api/src/invoices.ts", "site/src/pricing/page.tsx",
+            "deploy/release.ps1", "installer/acme.nsi", "scripts/deploy_site.sh", "api/Dockerfile",
         ] {
-            assert!(human(f), "{f} should wait for Andrew");
+            assert!(human(f), "{f} should wait for a human");
         }
-        for f in [
-            "aera/core/agent/prompts/character.md", "aera/ui/i18n/locales/en.json", "aera-website/messages/en.json",
-            "aera/core/auth/authFailure.ts", "CLAUDE.md", "AGENTS.md", "aera/test/holds.test.ts", "docs/knowledge/agent-workflow.md",
-            "scripts/work/land.mjs", "aera/core/board/holds.ts", "aera-api/src/app/api/onboarding/route.ts", "tools/something-new.py",
-        ] {
-            assert!(!human(f), "{f} should not wait for Andrew");
+        for f in ["app/src/login.ts", "api/src/users.ts", "site/messages/en.json", "AGENTS.md", "docs/setup.md", "tools/new.py"] {
+            assert!(!human(f), "{f} should not wait for a human");
         }
         assert!(!pb.approval.human_reasons(&[]).unwrap().is_empty(), "an empty branch is not approved by anyone");
-        assert!(pb.approval.check_blocked(&files(&["src"])).is_err());
+        assert!(pb.approval.check_blocked(&files(&["vendor/sdk/lib.h"])).is_err());
+        assert!(pb.approval.check_blocked(&files(&["vendor/other.h"])).is_ok());
         assert_eq!(pb.review.reviewer_for("claude"), Some("codex"));
         assert_eq!(pb.review.flags.len(), 2);
-        let docs_only = files(&["docs/a.md", "aera-website/app/page.tsx"]);
+        let docs_only = files(&["docs/a.md", "site/app/page.tsx"]);
         let skipped: Vec<bool> = pb.gate.steps.iter().map(|s| s.skip_reason(&docs_only).unwrap().is_some()).collect();
         assert_eq!(skipped, vec![true, true, true, true, false]);
         if !cfg!(target_os = "macos") {
-            assert_eq!(pb.integration_branch(), "win-dev");
+            assert_eq!(pb.integration_branch(), "develop");
         }
     }
 

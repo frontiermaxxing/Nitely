@@ -1,7 +1,7 @@
 //! `submit`: a finished branch becomes a reviewed pull request. It runs the gate, has the other
 //! vendor review the branch, decides whether a human must approve it, pushes, opens or updates the
 //! pull request, records the review for the exact patch so landing can check it, and moves the
-//! issue. This is Aera's `work.mjs pr`, driven by the repo's playbook.
+//! issue, as the repo's playbook says.
 
 use anyhow::{bail, Context, Result};
 use serde::Serialize;

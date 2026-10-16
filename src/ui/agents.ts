@@ -46,7 +46,7 @@ export const LIVENESS_LABEL: Record<Liveness, string> = {
 
 export type Vendor = "claude" | "codex" | "cursor" | "human" | "other";
 
-/** `claude:c:/development/nitely` or `claude` → `claude`; anything unknown → `other`. */
+/** `claude:c:/code/nitely` or `claude` → `claude`; anything unknown → `other`. */
 export function vendorOf(actorOrVendor: string | null | undefined): Vendor {
   // "claude:c:/repo/wt" here, "claude@mac" from another machine.
   const v = (actorOrVendor ?? "").split(/[:@]/)[0].toLowerCase();

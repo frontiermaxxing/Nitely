@@ -1,6 +1,5 @@
-//! Read-only access to the Aera agent-work credentials file
-//! (`%USERPROFILE%\.aera-work\credentials.json`, owned by `scripts/work/credentials.mjs`).
-//! Nitely never writes it and never prints its values.
+//! Read-only access to the credentials file for Bitbucket and Linear: `credentials.json` in
+//! Nitely's data folder, which you write. Nitely never writes it and never prints its values.
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -69,10 +68,7 @@ pub fn path() -> PathBuf {
     if let Some(p) = std::env::var_os("NITELY_CREDENTIALS") {
         return PathBuf::from(p);
     }
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".aera-work")
-        .join("credentials.json")
+    crate::paths::data_dir().join("credentials.json")
 }
 
 /// `Ok(None)` when the file does not exist: Nitely then shows git and agent state only.

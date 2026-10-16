@@ -133,7 +133,7 @@ enum Cmd {
     Connect {
         /// Any folder in the repo.
         path: String,
-        /// Project key, e.g. AERA; suggested from the name when omitted.
+        /// Project key, e.g. APP; suggested from the name when omitted.
         #[arg(long)]
         project: Option<String>,
         /// Project name; the repo's folder name when omitted.
@@ -148,16 +148,24 @@ enum Cmd {
         #[command(subcommand)]
         command: RepoCmd,
     },
-    /// Move the Linear project from ~/.aera-work/credentials.json into native issues, once,
-    /// keeping its keys (AND-275 stays AND-275), states, priorities, labels, bodies and comments.
-    /// Prints what it would do; changes nothing without --yes.
+    /// Move a Linear project into native issues, once, keeping its keys (APP-275 stays APP-275),
+    /// states, priorities, labels, bodies and comments. Reads the Linear API key from
+    /// credentials.json in Nitely's data folder (`nitely where`). Prints what it would do;
+    /// changes nothing without --yes.
     ImportLinear {
-        /// The project the issues go into; its key must be the Linear keys' prefix.
-        #[arg(long, default_value = "AND")]
+        /// The project the issues go into; its key must be the Linear keys' prefix (APP for APP-12).
+        #[arg(long)]
         project: String,
-        /// The project's name, if it is created.
-        #[arg(long, default_value = "Aera")]
-        name: String,
+        /// The project's name, if it is created; the key when omitted.
+        #[arg(long)]
+        name: Option<String>,
+        /// The Linear project's id; the credentials file's `linear.projectId` when omitted.
+        #[arg(long)]
+        linear_project: Option<String>,
+        /// The Nitely state for a Linear state Nitely has no name for, e.g.
+        /// --state "Needs Review=Needs You". Repeat for more. Others map by name, then by type.
+        #[arg(long = "state", value_name = "LINEAR=NITELY")]
+        states: Vec<String>,
         /// Import, rather than only show what would happen.
         #[arg(long)]
         yes: bool,
@@ -172,7 +180,7 @@ enum Cmd {
         #[arg(long, default_value_t = 12)]
         hours: i64,
     },
-    /// Pull PRs from Bitbucket and issues from Linear, using ~/.aera-work/credentials.json.
+    /// Pull PRs from Bitbucket and issues from Linear, using credentials.json in Nitely's data folder.
     Sync,
     /// Print where Nitely keeps its data.
     Where,
@@ -323,7 +331,7 @@ enum RepoCmd {
     Add {
         /// Path to the main checkout.
         root: String,
-        /// Branch tasks are cut from (e.g. win-dev).
+        /// Branch tasks are cut from (e.g. main).
         #[arg(long)]
         integration: String,
         /// Display name; defaults to the folder name.
@@ -775,13 +783,15 @@ fn run(cmd: Cmd) -> Result<()> {
             Ok(())
         }
         Cmd::Now => print_json(&nitely_core::snapshot(&Config::load()?, &Db::open_default()?)?),
-        Cmd::ImportLinear { project, name, yes, skip_archived } => {
+        Cmd::ImportLinear { project, name, linear_project, states, yes, skip_archived } => {
+            let overrides = nitely_core::linear_import::parse_overrides(&states)?;
             let creds = nitely_core::credentials::load()?
                 .ok_or_else(|| anyhow::anyhow!("no credentials file at {}", nitely_core::credentials::path().display()))?;
             eprintln!("reading every issue of the Linear project, with comments…");
-            let issues = nitely_core::linear_import::fetch(&creds, skip_archived)?;
+            let issues = nitely_core::linear_import::fetch(&creds, linear_project.as_deref(), skip_archived)?;
             let mut db = Db::open_default()?;
-            let plan = nitely_core::linear_import::plan(&db, &issues, &project, &name)?;
+            let name = name.unwrap_or_else(|| project.trim().to_uppercase());
+            let plan = nitely_core::linear_import::plan(&db, &issues, &project, &name, &overrides)?;
             print_json(&plan)?;
             if !yes {
                 eprintln!(

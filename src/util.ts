@@ -21,7 +21,7 @@ export function openExternal(url: string) {
 
 export const PRIORITY = ["", "Urgent", "High", "Medium", "Low"];
 
-/** `claude:c:/development/nitely` → `claude · nitely` */
+/** `claude:c:/code/nitely` → `claude · nitely` */
 export function agentLabel(id: string): string {
   const [vendor, ...rest] = id.split(":");
   const path = rest.join(":");

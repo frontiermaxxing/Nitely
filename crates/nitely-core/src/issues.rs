@@ -1,7 +1,6 @@
-//! Projects and the native backlog. The rules are the ones `scripts/work/linear.mjs` enforces in the
-//! Aera workflow, so agents file and move issues the same way they already do: a kind and a source
-//! on every issue, evidence to file or finish one, a reason to cancel, a duplicate check before
-//! filing, and Approved reserved for a human.
+//! Projects and the native backlog, with the rules every agent files and moves issues by: a kind
+//! and a source on every issue, evidence to file or finish one, a reason to cancel, a duplicate
+//! check before filing, and Approved reserved for a human.
 
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, OptionalExtension, Row, TransactionBehavior};
@@ -27,10 +26,10 @@ pub const STATES: &[(&str, &str)] = &[
     ("Duplicate", "canceled"),
 ];
 
-/// States that mean the next step is the human's. "Needs Andrew" is the Aera Linear name.
-pub const NEEDS_HUMAN: &[&str] = &["Needs You", "Needs Andrew"];
+/// The state that means the next step is the human's.
+pub const NEEDS_HUMAN: &str = "Needs You";
 
-/// Titles sharing this share of their words count as possible duplicates (`linear.mjs`: 60%).
+/// Titles sharing this share of their words count as possible duplicates.
 const SIMILAR_TITLE: f64 = 0.6;
 
 /// A claim older than this with no update is free for another agent to take.
@@ -80,7 +79,7 @@ impl IssueRecord {
     }
 
     pub fn needs_human(&self) -> bool {
-        NEEDS_HUMAN.contains(&self.state.as_str())
+        self.state == NEEDS_HUMAN
     }
 }
 
@@ -317,11 +316,10 @@ impl Deps {
     }
 }
 
-/// Accepts "in progress", "in-progress", "IN_PROGRESS", and "Needs Andrew" for Needs You.
+/// Accepts "in progress", "in-progress" and "IN_PROGRESS".
 pub fn parse_state(input: &str) -> Result<(&'static str, &'static str)> {
     let norm = |s: &str| s.to_lowercase().replace(['-', '_'], " ");
     let want = norm(input.trim());
-    let want = if want == "needs andrew" { "needs you".to_string() } else { want };
     STATES
         .iter()
         .find(|(name, _)| norm(name) == want)
@@ -366,7 +364,7 @@ pub fn iso(ts: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", secs / 3600, secs % 3600 / 60, secs % 60)
 }
 
-/// `claude/nit-12-fix-sidebar`: the branch name the Aera workflow uses for an issue.
+/// `claude/nit-12-fix-sidebar`: the default branch name for an issue.
 pub fn branch_name(vendor: &str, key: &str, title: &str) -> String {
     let slug: String = title
         .to_lowercase()
@@ -453,8 +451,7 @@ impl Db {
         if !KINDS.contains(&new.kind.as_str()) {
             bail!("kind must be one of {}", KINDS.join(", "));
         }
-        let source = if new.source == "andrew" { "human" } else { new.source.as_str() };
-        if !SOURCES.contains(&source) {
+        if !SOURCES.contains(&new.source.as_str()) {
             bail!("source must be one of {}", SOURCES.join(", "));
         }
         if !(0..=4).contains(&new.priority) {
@@ -512,7 +509,7 @@ impl Db {
                 state,
                 state_type,
                 new.kind,
-                source,
+                new.source,
                 new.priority,
                 new.evidence.trim(),
                 iso(ts)
@@ -1203,7 +1200,7 @@ mod tests {
         assert_eq!(iso(0), "1970-01-01T00:00:00Z");
         assert_eq!(iso(1_792_125_417), "2026-10-16T04:36:57Z");
         assert_eq!(branch_name("claude", "NIT-12", "Fix the sidebar's width!"), "claude/nit-12-fix-the-sidebar-s-width");
-        assert_eq!(parse_state("needs-andrew").unwrap().0, "Needs You");
+        assert_eq!(parse_state("needs-you").unwrap().0, "Needs You");
         assert!(title_similarity("Add the MCP server", "add mcp server now") >= 0.6);
     }
 }
