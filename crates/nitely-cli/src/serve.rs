@@ -522,9 +522,9 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(10));
             }
         };
-        // A client that sends half a request and stalls holds only its own connection.
+        // A client that sends half its headers and stalls holds only its own connection.
         let mut stalled = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-        stalled.write_all(b"POST /mcp HTTP/1.1\r\nContent-Length: 500\r\n\r\n{").unwrap();
+        stalled.write_all(b"POST /mcp HTTP/1.1\r\nContent-Length: 500\r\n").unwrap();
         let url = format!("http://127.0.0.1:{port}{MCP_PATH}");
         let init = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize",
             "params": { "protocolVersion": "2025-06-18", "clientInfo": { "name": "claude-code" } } });
@@ -572,7 +572,8 @@ mod tests {
         assert!(raw(&format!("POST /mcp HTTP/1.1\r\n{auth}Transfer-Encoding: chunked\r\n\r\n")).starts_with("HTTP/1.1 411"));
 
         // One address holds at most MAX_PER_ADDRESS connections; the next is told busy at once.
-        settle(1, "only the stalled client is left");
+        drop(stalled);
+        settle(0, "every earlier connection is closed");
         let held: Vec<_> = (0..MAX_PER_ADDRESS)
             .map(|_| {
                 let mut c = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
@@ -580,10 +581,9 @@ mod tests {
                 c
             })
             .collect();
-        settle(MAX_PER_ADDRESS, "the stalled client and the held ones fill the slots");
+        settle(MAX_PER_ADDRESS, "the held ones fill the slots");
         assert!(raw("GET /.well-known/nitely HTTP/1.1\r\n\r\n").starts_with("HTTP/1.1 503"), "these fill the address's slots");
         drop(held);
-        drop(stalled);
         std::env::remove_var("NITELY_HOME");
     }
 }
