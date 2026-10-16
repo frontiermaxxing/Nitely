@@ -33,6 +33,9 @@ pub struct Submitted {
     pub pushed: bool,
     pub pr_url: Option<String>,
     pub pr_error: Option<String>,
+    /// The land Nitely ran itself, when the playbook's `[land] by` lands without the author.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub land: Option<crate::land::Landed>,
     /// The issue's state afterwards.
     pub state: String,
     pub next: String,
@@ -114,6 +117,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         pushed: false,
         pr_url: None,
         pr_error: None,
+        land: None,
         state: issue.state.clone(),
         next: String::new(),
     };
@@ -123,7 +127,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         return Ok(out);
     }
 
-    out.reasons = pb.approval.human_reasons(&files)?;
+    out.reasons = pb.human_reasons(&files)?;
     if opts.skip_review {
         out.reasons.push("no review ran".into());
     } else {
@@ -153,7 +157,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         out.approver == "human" && verdict != "changes" && issue.state == "Approved" && db.standing_approval(&issue.key)?.is_some();
 
     let title = format!("{}: {}", issue.key, issue.title);
-    let body = describe(&issue, &out);
+    let body = describe(&issue, &out, pb.land.by);
     if !opts.local_only {
         match push(&worktree, &branch) {
             Ok(()) => out.pushed = true,
@@ -183,10 +187,12 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         Some(Some(counts)) => format!("{outcome} (previous round: {counts})"),
         _ => outcome,
     };
+    let outcome = if pb.land.by.by_nitely() && verdict != "changes" { format!("{outcome}; it {}", pb.land.by.describe()) } else { outcome };
     // The full description is on the pull request and in the app's review section.
     db.add_note(&issue.key, &format!("{outcome}. {pr_line}"), "submit", actor)?;
 
     let push_failed = !opts.local_only && !out.pushed;
+    let by_nitely = pb.land.by.by_nitely();
     let (state, next) = if verdict == "changes" {
         ("In Progress", "The review found P0 or P1 problems. Fix them, commit, and submit again.")
     } else if push_failed {
@@ -194,6 +200,8 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         ("In Progress", "The push failed, so the change is not handed in. Fix the remote or its access (ask the human if it is a permission error), then submit again.")
     } else if out.approval_stands {
         ("Approved", "The human approved this exact patch before and the review raised nothing new, so the approval stands. Call land.")
+    } else if out.approver == "human" && by_nitely {
+        ("Needs You", "It waits for the human's approval in the Nitely inbox, and Nitely lands it as soon as they approve it; you do not call land. Pick up other work meanwhile.")
     } else if out.approver == "human" {
         ("Needs You", "It waits for the human's approval in the Nitely inbox. Pick up other work meanwhile; once it is Approved, call land.")
     } else {
@@ -203,6 +211,16 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         out.state = db.move_issue(&issue.key, state, None, None, actor)?.state;
     }
     out.next = next.into();
+
+    // In a project that lands by Nitely, what is ready to land lands now, in this submit.
+    if by_nitely && matches!(state, "In Review" | "Approved") {
+        let root_dir = root.to_string_lossy().into_owned();
+        let landed = crate::land::land_now(db, config, &issue.key, &root_dir, !opts.local_only, actor);
+        let (state, next) = crate::land::after_auto_land(db, &issue.key, &landed, actor)?;
+        out.state = state;
+        out.next = next;
+        out.land = landed.ok();
+    }
     Ok(out)
 }
 
@@ -236,7 +254,7 @@ fn rechecked(previous: &[crate::review::Recheck]) -> Option<String> {
 }
 
 /// The pull request description: approval, review, findings, and a marker line with the patch.
-pub fn describe(issue: &IssueRecord, s: &Submitted) -> String {
+pub fn describe(issue: &IssueRecord, s: &Submitted, land_by: crate::playbook::LandBy) -> String {
     // A link with the app's own scheme; hosts that drop such links still show the key, and the
     // second line keeps the link copyable.
     let named = if issue.url.is_empty() { issue.key.clone() } else { format!("[{}]({})", issue.key, issue.url) };
@@ -253,6 +271,7 @@ pub fn describe(issue: &IssueRecord, s: &Submitted) -> String {
         "**Approval:** the review is enough under this repo's playbook.".to_string()
     });
     lines.extend(s.reasons.iter().map(|r| format!("- {r}")));
+    lines.push(format!("**Landing:** {}.", land_by.describe()));
     lines.push(String::new());
     match &s.review {
         Some(r) => {
@@ -463,11 +482,11 @@ reason = "money logic"
             assert_eq!(review.note, "same vendor: codex not installed");
             assert_eq!((s.approver.as_str(), s.state.as_str()), (approver, state), "{s:?}");
             assert_eq!(db.reviews(&issue.key).unwrap()[0].note, "same vendor: codex not installed");
-            assert!(describe(&issue, &s).contains("**Review** by claude (same vendor: codex not installed)"));
+            assert!(describe(&issue, &s, Default::default()).contains("**Review** by claude (same vendor: codex not installed)"));
             // A local bare remote is not a code host, so there is no PR, and it says why.
             assert!(s.pr_url.is_none() && s.pr_error.as_deref().unwrap().contains("not on GitHub"));
             assert_eq!(db.reviews(&issue.key).unwrap()[0].patch_id, s.patch_id);
-            assert!(describe(&issue, &s).contains(&format!("patch={}", s.patch_id)));
+            assert!(describe(&issue, &s, Default::default()).contains(&format!("patch={}", s.patch_id)));
         }
 
         // A second round checks the first round's finding and carries it while it is open.
@@ -488,7 +507,7 @@ reason = "money logic"
         let review = second.review.as_ref().unwrap();
         assert_eq!(review.previous.iter().map(|r| r.status.as_str()).collect::<Vec<_>>(), ["open"], "{review:?}");
         assert_eq!((review.findings.len(), review.findings[0].carried, review.verdict.as_str()), (1, true, "pass"));
-        assert!(describe(&issue, &second).contains("Previous round's findings: 1 still open."));
+        assert!(describe(&issue, &second, Default::default()).contains("Previous round's findings: 1 still open."));
         assert!(db.reviews(&issue.key).unwrap()[0].findings[0].carried);
 
         // A playbook that requires another vendor's review sends a same-vendor one to a human, and

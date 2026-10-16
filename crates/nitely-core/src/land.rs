@@ -103,6 +103,55 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
     Ok(report)
 }
 
+/// Who Nitely lands as when it lands a change itself, not the agent that wrote it.
+pub const AUTO_LANDER: &str = "nitely:auto-land";
+
+/// Lands `key` for a playbook whose `[land] by` lands without the author: in submit, once the
+/// review passes, and when a human approves.
+pub fn land_now(db: &mut Db, config: &crate::Config, key: &str, dir: &str, push: bool, actor: &Actor) -> Result<Landed> {
+    let opts = LandOptions { dir, issue_key: key, push, keep: false, break_lock: false };
+    db.log_event(actor, Some(key), None, "status", "Landing it automatically, as the playbook says")?;
+    land(db, config, &opts, actor)
+}
+
+/// Where an automatic land leaves the issue, and what to do next. A land that stopped (a rebase
+/// conflict, a failed gate, a change since the review) sends the issue back to In Progress with
+/// the reason; one that could not start (another land holds the lock) leaves it ready to land.
+pub fn after_auto_land(db: &mut Db, key: &str, landed: &Result<Landed>, actor: &Actor) -> Result<(String, String)> {
+    let state = |db: &Db| -> Result<String> { Ok(db.issue(key)?.map(|i| i.state).unwrap_or_default()) };
+    match landed {
+        Ok(r) if r.landed => Ok((state(db)?, format!("Nitely landed it on {} as the playbook says; nothing is left to do.", r.base))),
+        Ok(r) => {
+            let why = r.error.clone().unwrap_or_else(|| "it did not land".into());
+            db.add_note(key, &format!("The automatic land stopped: {}", why.lines().next().unwrap_or("")), "land", actor)?;
+            let issue = db.issue(key)?.with_context(|| format!("no issue {key}"))?;
+            if issue.origin == "nitely" && issue.state != "In Progress" {
+                db.move_issue(key, "In Progress", None, None, actor)?;
+            }
+            Ok((state(db)?, format!("Nitely tried to land it and stopped: {why}\nFix it, commit, and submit again.")))
+        }
+        Err(e) => Ok((state(db)?, format!("Nitely could not start the land ({e:#}); call land to land it."))),
+    }
+}
+
+/// After a human approves `key`: when its project's playbook lands by Nitely, Nitely lands it
+/// now. None when the playbook leaves the land to the author. `dir` helps find the repo when no
+/// repo is linked to the issue's project.
+pub fn land_on_approval(db: &mut Db, config: &crate::Config, key: &str, dir: &str) -> Result<Option<Landed>> {
+    let issue = db.issue(key)?.with_context(|| format!("no issue {key}"))?;
+    if issue.state != "Approved" {
+        return Ok(None);
+    }
+    let root = playbook::repo_for_issue(config, issue.project.as_deref(), dir)?;
+    if !Playbook::load(&root)?.land.by.by_nitely() {
+        return Ok(None);
+    }
+    let actor = Actor::Agent(AUTO_LANDER.into());
+    let landed = land_now(db, config, key, &root.to_string_lossy(), true, &actor);
+    after_auto_land(db, key, &landed, &actor)?;
+    landed.map(Some)
+}
+
 /// The playbook's `[land] after` steps that match what landed. A failure is a warning. Then, when
 /// a dependency file landed that no after step took care of, a warning that the main checkout's
 /// setup is stale: land fast-forwards it but never runs setup there (NIT-81).
@@ -283,7 +332,7 @@ fn check_approval(db: &Db, pb: &Playbook, key: &str, worktree: &Path, base: &str
     }
     let files: Vec<String> = git(worktree, &["diff", "--name-only", "--no-renames", &format!("{base}...HEAD")])?.lines().map(str::to_string).collect();
     pb.approval.check_blocked(&files)?;
-    let mut reasons = pb.approval.human_reasons(&files)?;
+    let mut reasons = pb.human_reasons(&files)?;
     if review.approver == "human" {
         reasons.extend(review.reasons.iter().cloned());
     }
@@ -678,6 +727,60 @@ when_changed = ["billing"]
         assert!(!stands(&db), "a second, different patch in that second");
         drop(db);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn lands_by_nitely_when_the_playbook_says_so() {
+        let mut f = fixture("auto");
+        let set_mode = |f: &Fixture, mode: &str| {
+            let path = f.repo.join(playbook::PLAYBOOK_PATH);
+            let pb = std::fs::read_to_string(&path).unwrap();
+            // Drop the mode a previous call set, then set this one.
+            let kept: Vec<&str> = pb.lines().filter(|l| *l != "[land]" && !l.starts_with("by = ")).collect();
+            let pb = kept.join("\n").replacen("[[land.after]]", &format!("[land]\nby = \"{mode}\"\n[[land.after]]"), 1);
+            std::fs::write(&path, pb).unwrap();
+            sh(&f.repo, &["commit", "-q", "-am", mode]);
+        };
+        set_mode(&f, "auto");
+        let state = |f: &Fixture, key: &str| f.db.issue(key).unwrap().unwrap().state;
+
+        // A passing review that needs no human lands in the same submit.
+        let (a, wt_a) = f.submitted("Sidebar polish", "sidebar.txt", "x");
+        assert_eq!(state(&f, &a), "Done");
+        assert!(!wt_a.exists() && f.repo.join("sidebar.txt").exists());
+
+        // One that needs a human waits, and lands as soon as they approve it.
+        let (b, _) = f.submitted("Billing fix", "billing.txt", "x");
+        let (c, _) = f.submitted("Billing again", "billing.txt", "y");
+        assert_eq!((state(&f, &b), state(&f, &c)), ("Needs You".to_string(), "Needs You".to_string()));
+        let dir = f.repo.to_string_lossy().into_owned();
+        let config = crate::Config::default();
+        assert!(land_on_approval(&mut f.db, &config, &b, &dir).unwrap().is_none(), "not approved yet");
+        f.db.move_issue(&b, "Approved", None, None, &Actor::Human).unwrap();
+        let r = land_on_approval(&mut f.db, &config, &b, &dir).unwrap().unwrap();
+        assert!(r.landed, "{r:?}");
+        assert_eq!(state(&f, &b), "Done");
+
+        // An automatic land that stops on a conflict sends the issue back with the reason.
+        f.db.move_issue(&c, "Approved", None, None, &Actor::Human).unwrap();
+        let r = land_on_approval(&mut f.db, &config, &c, &dir).unwrap().unwrap();
+        assert!(!r.landed && r.conflicts == ["billing.txt"], "{r:?}");
+        assert_eq!(state(&f, &c), "In Progress");
+
+        // "human" sends every change to a human, then lands it on approval.
+        set_mode(&f, "human");
+        let (d, _) = f.submitted("Header tweak", "header.txt", "x");
+        assert_eq!(state(&f, &d), "Needs You");
+        let reasons = &f.db.reviews(&d).unwrap()[0].reasons;
+        assert!(reasons.iter().any(|r| r.contains("lands only what a human approved")), "{reasons:?}");
+        f.db.move_issue(&d, "Approved", None, None, &Actor::Human).unwrap();
+        assert!(land_on_approval(&mut f.db, &config, &d, &dir).unwrap().unwrap().landed);
+
+        // "author" (the default) leaves the land to the agent.
+        set_mode(&f, "author");
+        let (e, _) = f.submitted("Footer tweak", "footer.txt", "x");
+        assert_eq!(state(&f, &e), "In Review");
+        std::fs::remove_dir_all(&f.base).ok();
     }
 
     #[test]

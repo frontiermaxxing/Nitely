@@ -167,7 +167,24 @@ async fn set_blocker(key: String, blocker: String, blocked: bool) -> Result<Rela
 async fn move_issue(key: String, state: String, evidence: Option<String>, reason: Option<String>) -> Result<IssueRecord, String> {
     let mut db = db()?;
     let key = db.current_key(&key).map_err(err)?;
-    db.move_issue(&key, &state, evidence.as_deref(), reason.as_deref(), &ME).map_err(err)
+    let moved = db.move_issue(&key, &state, evidence.as_deref(), reason.as_deref(), &ME).map_err(err)?;
+    if moved.state == "Approved" {
+        // A playbook that lands by Nitely lands an approved change now, without an agent coming
+        // back for it. The land takes minutes and is serial, so it runs off this call.
+        std::thread::spawn(move || {
+            let landed = Config::load().and_then(|config| {
+                let mut db = Db::open_default()?;
+                nitely_core::land::land_on_approval(&mut db, &config, &key, "")
+            });
+            if let Err(e) = landed {
+                if let Ok(db) = Db::open_default() {
+                    let actor = Actor::Agent(nitely_core::land::AUTO_LANDER.into());
+                    db.add_note(&key, &format!("Nitely could not land it after the approval: {e:#}"), "land", &actor).ok();
+                }
+            }
+        });
+    }
+    Ok(moved)
 }
 
 /// Makes an issue the human's own work (`human`) or hands it back to agents (`agent`).

@@ -43,10 +43,46 @@ pub struct Playbook {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LandRules {
+    /// Who lands a reviewed change. What needs a human stays with `[approval]` and `review.flags`.
+    #[serde(default)]
+    pub by: LandBy,
     /// Run in the main checkout after a change lands, in order, when what landed matches (e.g.
     /// rebuild and install a tool the agents use). A failure is a warning: the land stands.
     #[serde(default)]
     pub after: Vec<GateStep>,
+}
+
+/// Who lands a change once its review passes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LandBy {
+    /// The agent that wrote it calls land: a passing review moves it to In Review, an approval
+    /// to Approved.
+    #[default]
+    Author,
+    /// Nitely lands it in the same submit when the review passes and no human is needed, and as
+    /// soon as a human approves it otherwise. Nitely runs the review itself, so a reviewer that
+    /// merges is this mode too.
+    #[serde(alias = "reviewer")]
+    Auto,
+    /// Every change waits for a human, and Nitely lands it as soon as they approve it.
+    Human,
+}
+
+impl LandBy {
+    /// Whether Nitely lands the change itself rather than the author.
+    pub fn by_nitely(self) -> bool {
+        self != LandBy::Author
+    }
+
+    /// One line for the pull request and the issue's journey.
+    pub fn describe(self) -> &'static str {
+        match self {
+            LandBy::Author => "the agent that wrote it lands it once the review passes (and a human approves, when one must)",
+            LandBy::Auto => "lands automatically once the review passes, or once a human approves when one must",
+            LandBy::Human => "every change waits for a human, and lands automatically once they approve it",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -239,6 +275,18 @@ pub struct PathRule {
     pub pattern: String,
     /// Shown to the human, e.g. "billing and money".
     pub reason: String,
+}
+
+impl Playbook {
+    /// Why a change touching `files` needs a human: the approval rules, and a landing mode that
+    /// lands only what a human approved.
+    pub fn human_reasons(&self, files: &[String]) -> Result<Vec<String>> {
+        let mut reasons = self.approval.human_reasons(files)?;
+        if self.land.by == LandBy::Human {
+            reasons.push("this playbook lands only what a human approved".to_string());
+        }
+        Ok(reasons)
+    }
 }
 
 impl ApprovalRules {
@@ -764,6 +812,18 @@ mod tests {
         assert_eq!(p.branch.pattern, BranchRules::default().pattern);
         assert_eq!(p.branch.integration, "win-dev");
         assert_eq!(Playbook::parse("[gate]\ncomand = []\n").unwrap().unknown, ["gate.comand"]);
+    }
+
+    #[test]
+    fn reads_who_lands() {
+        let by = |toml: &str| Playbook::parse(toml).unwrap().land.by;
+        assert_eq!(by(""), LandBy::Author);
+        assert_eq!(by("[land]\nby = \"auto\"\n"), LandBy::Auto);
+        assert_eq!(by("[land]\nby = \"reviewer\"\n"), LandBy::Auto, "a reviewer that merges is auto: Nitely runs the review");
+        assert_eq!(by("[land]\nby = \"human\"\n"), LandBy::Human);
+        assert!(Playbook::parse("[land]\nby = \"robot\"\n").is_err());
+        let human = Playbook::parse("[land]\nby = \"human\"\n").unwrap();
+        assert_eq!(human.human_reasons(&["a.txt".into()]).unwrap(), ["this playbook lands only what a human approved"]);
     }
 
     fn issue() -> IssueRecord {
