@@ -22,7 +22,8 @@ const VIEWS: { label: string; view: View }[] = [
   { label: "Add project", view: { kind: "add" } },
 ];
 
-const KEY = /^[A-Za-z]+-\d+$/;
+/** An issue key: a project key (letters, then letters or digits), a dash, a number. */
+const KEY = /^[A-Za-z][A-Za-z0-9]*-\d+$/;
 
 /**
  * Ctrl+K (Cmd+K on a Mac): go to any view, project tab or open issue by typing. Arrow keys pick,
@@ -66,9 +67,15 @@ export function Palette(props: { projects: Project[]; onGo: (view: View) => void
       ...issues.map((i) => ({ id: `issue-${i.key}`, label: `${i.key} ${i.title}`, issue: i, run: open(i.key) })),
     ];
     const found = q ? all.filter((it) => it.label.toLowerCase().includes(q) || it.hint?.toLowerCase() === q) : all.filter((it) => !it.issue);
-    if (KEY.test(query.trim()) && !found.some((it) => it.issue?.key.toLowerCase() === q)) {
-      const key = query.trim().toUpperCase();
-      found.unshift({ id: `key-${key}`, label: `Open ${key}`, hint: "issue", run: open(key) });
+    // An exact key always comes first, so "nit-1" never opens NIT-100; one that no list shows
+    // (a closed issue) still opens.
+    if (KEY.test(query.trim())) {
+      const at = found.findIndex((it) => it.issue?.key.toLowerCase() === q);
+      if (at >= 0) found.unshift(...found.splice(at, 1));
+      else {
+        const key = query.trim().toUpperCase();
+        found.unshift({ id: `key-${key}`, label: `Open ${key}`, hint: "issue", run: open(key) });
+      }
     }
     return found.slice(0, 12);
   }, [query, issues, props]);
