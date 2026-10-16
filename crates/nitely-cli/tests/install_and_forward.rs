@@ -73,15 +73,20 @@ fn a_running_mcp_server_forwards_to_a_newly_installed_build() {
 }
 
 #[test]
-fn install_without_a_target_skips_its_own_folder_on_path() {
-    // As under `cargo run`, which puts the build's own folder first on PATH.
+fn install_without_a_target_skips_its_own_folders_on_path() {
+    // As under `cargo run`, which puts target/release/deps (holding a copy of the build) and
+    // target/release first on PATH.
     let dir = temp();
     let exe = if cfg!(windows) { "nitely.exe" } else { "nitely" };
     let built = Path::new(env!("CARGO_BIN_EXE_nitely"));
+    let release = dir.join("target").join("release");
+    std::fs::create_dir_all(release.join("deps")).unwrap();
+    std::fs::copy(built, release.join(exe)).unwrap();
+    std::fs::copy(built, release.join("deps").join(exe)).unwrap();
     let installed = dir.join("bin").join(exe);
     std::fs::write(&installed, b"an old nitely").unwrap();
-    let path = std::env::join_paths([built.parent().unwrap().to_path_buf(), dir.join("bin")]).unwrap();
-    let out = Command::new(built).arg("install").env("PATH", path).output().unwrap();
+    let path = std::env::join_paths([release.join("deps"), release.clone(), dir.join("bin")]).unwrap();
+    let out = Command::new(release.join(exe)).arg("install").env("PATH", path).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let report: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(report["replaced"], true, "{report}");

@@ -525,6 +525,7 @@ fn run(cmd: Cmd) -> Result<()> {
             let config = Config::load()?;
             let mut db = Db::open_default()?;
             let cwd = cwd()?;
+            nitely_core::install::check_current(&config, &cwd, env!("NITELY_COMMIT"))?;
             eprintln!("running the gate, then the review (this takes minutes)…");
             let opts = nitely_core::submit::SubmitOptions { dir: &cwd, issue_key: issue.as_deref(), skip_review: no_review, local_only: local };
             let s = nitely_core::submit::submit(&mut db, &config, &opts, &me)?;
@@ -539,6 +540,7 @@ fn run(cmd: Cmd) -> Result<()> {
             let config = Config::load()?;
             let mut db = Db::open_default()?;
             let cwd = cwd()?;
+            nitely_core::install::check_current(&config, &cwd, env!("NITELY_COMMIT"))?;
             let opts = nitely_core::land::LandOptions { dir: &cwd, issue_key: &key, push: !no_push, keep, break_lock };
             let r = nitely_core::land::land(&mut db, &config, &opts, &me)?;
             print_json(&r)?;

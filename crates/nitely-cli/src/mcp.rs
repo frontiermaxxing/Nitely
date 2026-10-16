@@ -346,11 +346,13 @@ fn run_tool(server: &Server, name: &str, args: &Value) -> Result<Value> {
             json!(playbook::run_gate(&db, &root, &worktree, key.as_deref(), &actor)?)
         }
         "submit" => {
+            nitely_core::install::check_current(&config, str_arg(args, "worktree").unwrap_or(&server.cwd), env!("NITELY_COMMIT"))?;
             let dir = str_arg(args, "worktree").unwrap_or(&server.cwd);
             let opts = nitely_core::submit::SubmitOptions { dir, issue_key: str_arg(args, "key"), skip_review: false, local_only: false };
             json!(nitely_core::submit::submit(&mut db, &config, &opts, &actor)?)
         }
         "land" => {
+            nitely_core::install::check_current(&config, &server.cwd, env!("NITELY_COMMIT"))?;
             let opts = nitely_core::land::LandOptions { dir: &server.cwd, issue_key: req(args, "key")?, push: true, keep: false, break_lock: false };
             json!(nitely_core::land::land(&mut db, &config, &opts, &actor)?)
         }
