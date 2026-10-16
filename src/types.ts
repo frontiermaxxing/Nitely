@@ -46,11 +46,20 @@ export interface RepoView {
 
 export interface IssueRecord {
   key: string;
+  origin: "nitely" | "linear" | string;
+  project: string | null;
   title: string;
+  body: string;
   url: string;
   state: string;
   state_type: string;
+  kind: string | null;
+  source: string | null;
+  priority: number;
   labels: string[];
+  evidence: string;
+  claimed_by: string | null;
+  created_at: string;
   updated_at: string;
 }
 
@@ -79,5 +88,35 @@ export interface SyncStatus {
 export interface Board {
   repos: RepoView[];
   needs_me_issues: IssueRecord[];
+  asks: Ask[];
   sync: SyncStatus[];
+}
+
+export interface Ask {
+  id: number;
+  issue_key: string | null;
+  asked_by: string;
+  question: string;
+  options: string[];
+  answer: string | null;
+  asked_at: number;
+  answered_at: number | null;
+}
+
+export interface Project {
+  key: string;
+  name: string;
+  open_issues: number;
+}
+
+export interface TimelineEntry {
+  ts: number;
+  actor: string;
+  kind: string;
+  summary: string | null;
+}
+
+export interface IssueDetail {
+  issue: IssueRecord;
+  timeline: TimelineEntry[];
 }

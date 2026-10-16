@@ -118,6 +118,14 @@ pub fn branch_state(worktree: &str, integration_branch: &str) -> Result<BranchSt
     })
 }
 
+/// The main checkout of the repo `dir` belongs to, also from inside a linked worktree.
+pub fn main_root(dir: &str) -> Option<String> {
+    let common = git(dir, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).ok()?;
+    let common = std::path::Path::new(common.trim());
+    let root = if common.file_name().is_some_and(|n| n == ".git") { common.parent()? } else { common };
+    Some(root.to_string_lossy().into_owned())
+}
+
 /// `workspace/repo` when the repo's `origin` is on Bitbucket.
 pub fn bitbucket_slug(repo_root: &str) -> Option<String> {
     parse_bitbucket_url(git(repo_root, &["remote", "get-url", "origin"]).ok()?.trim())

@@ -1,6 +1,9 @@
+mod mcp;
+
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
-use nitely_core::{db::NewEvent, hook, paths, Config, Db, RepoConfig};
+use nitely_core::issues::branch_name;
+use nitely_core::{db::NewEvent, hook, paths, resolve_project, Actor, Config, Db, NewIssue, RepoConfig};
 use std::io::Read;
 
 /// Nitely: what your coding agents are doing.
@@ -16,9 +19,11 @@ enum Cmd {
     /// Record an agent hook event. Reads the hook's JSON on stdin and always exits 0,
     /// so a Nitely problem never blocks the agent.
     Hook {
-        /// Which agent sent it. Only `claude` is supported in milestone 1.
+        /// Which agent sent it. Only `claude` is supported so far.
         vendor: String,
     },
+    /// Run the MCP server on stdio (register it as `nitely mcp` in your agent's MCP config).
+    Mcp,
     /// Report what you are doing, from the current directory's worktree.
     Status {
         /// One line, e.g. "running test:gate".
@@ -26,6 +31,28 @@ enum Cmd {
         /// Session to attach this to; defaults to one per directory.
         #[arg(long)]
         session: Option<String>,
+    },
+    /// Projects: a backlog with its own issue prefix.
+    Project {
+        #[command(subcommand)]
+        command: ProjectCmd,
+    },
+    /// Issues in a project's backlog.
+    Issue {
+        #[command(subcommand)]
+        command: IssueCmd,
+    },
+    /// Ask the human a question; it shows in the app until answered.
+    Ask {
+        question: String,
+        /// A possible answer; repeat for several.
+        #[arg(long = "option")]
+        options: Vec<String>,
+        #[arg(long)]
+        issue: Option<String>,
+        /// Wait for the answer and print it.
+        #[arg(long)]
+        wait: bool,
     },
     /// Manage the repos Nitely watches.
     Repo {
@@ -41,6 +68,84 @@ enum Cmd {
 }
 
 #[derive(Subcommand)]
+enum ProjectCmd {
+    /// Create a project, e.g. `nitely project create NIT Nitely`.
+    Create { key: String, name: String },
+    List,
+}
+
+#[derive(Subcommand)]
+enum IssueCmd {
+    /// File an issue. Fails when an open issue has a similar title, unless --allow-similar.
+    Create {
+        #[arg(long)]
+        title: String,
+        /// bug, feature, improvement, idea or live-check.
+        #[arg(long)]
+        kind: String,
+        /// Who found it: claude, codex, cursor or human.
+        #[arg(long)]
+        source: String,
+        /// What was seen or run; "none yet" for an idea.
+        #[arg(long)]
+        evidence: String,
+        /// What is wrong or wanted, and why.
+        #[arg(long)]
+        body: String,
+        /// 1 urgent, 2 high, 3 medium, 4 low; 0 or omitted for none.
+        #[arg(long, default_value_t = 0)]
+        priority: i64,
+        #[arg(long)]
+        project: Option<String>,
+        /// Starting state; Todo by default, Backlog for later.
+        #[arg(long)]
+        state: Option<String>,
+        #[arg(long)]
+        allow_similar: bool,
+    },
+    /// List open issues (add --all for closed ones too).
+    List {
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        all: bool,
+    },
+    /// Show an issue and its timeline.
+    Show { key: String },
+    /// Move an issue. Done needs --evidence; Canceled and Duplicate need --reason.
+    Move {
+        key: String,
+        state: String,
+        #[arg(long)]
+        evidence: Option<String>,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Add a note to an issue's timeline (--handoff for a handoff note).
+    Note {
+        key: String,
+        text: String,
+        #[arg(long)]
+        handoff: bool,
+    },
+    /// File every issue in a JSON array of {title, kind, body, evidence?, priority?, state?, source?},
+    /// skipping any that look like an open issue's duplicate.
+    Import {
+        file: String,
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Claim the most urgent Todo issue and print it.
+    Next {
+        #[arg(long)]
+        project: Option<String>,
+        /// Who is claiming, e.g. claude or codex.
+        #[arg(long, default_value = "cli")]
+        agent: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum RepoCmd {
     /// Watch a repo: its main checkout and all its worktrees.
     Add {
@@ -52,17 +157,30 @@ enum RepoCmd {
         /// Display name; defaults to the folder name.
         #[arg(long)]
         name: Option<String>,
+        /// The project this repo's work belongs to (its issue prefix).
+        #[arg(long)]
+        project: Option<String>,
     },
     List,
 }
 
 fn main() {
     let cli = Cli::parse();
-    if let Cmd::Hook { vendor } = &cli.command {
-        if let Err(e) = run_hook(vendor) {
-            eprintln!("nitely hook: {e:#}");
+    match &cli.command {
+        Cmd::Hook { vendor } => {
+            if let Err(e) = run_hook(vendor) {
+                eprintln!("nitely hook: {e:#}");
+            }
+            return;
         }
-        return;
+        Cmd::Mcp => {
+            if let Err(e) = mcp::serve() {
+                eprintln!("nitely mcp: {e:#}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        _ => {}
     }
     if let Err(e) = run(cli.command) {
         eprintln!("nitely: {e:#}");
@@ -81,11 +199,23 @@ fn run_hook(vendor: &str) -> Result<()> {
     Db::open_default()?.record(&event)
 }
 
+fn cwd() -> Result<String> {
+    Ok(std::env::current_dir()?.to_string_lossy().into_owned())
+}
+
+fn print_json<T: serde::Serialize>(v: &T) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(v)?);
+    Ok(())
+}
+
 fn run(cmd: Cmd) -> Result<()> {
+    // Agents run the CLI too, so it never acts as the human: approving and answering asks happen
+    // only in the app.
+    let me = Actor::Agent("cli".into());
     match cmd {
-        Cmd::Hook { .. } => unreachable!(),
+        Cmd::Hook { .. } | Cmd::Mcp => unreachable!(),
         Cmd::Status { text, session } => {
-            let cwd = std::env::current_dir()?.to_string_lossy().into_owned();
+            let cwd = cwd()?;
             let session_id = session.unwrap_or_else(|| format!("cli:{}", paths::normalize(&cwd)));
             Db::open_default()?.record(&NewEvent {
                 session_id,
@@ -96,32 +226,127 @@ fn run(cmd: Cmd) -> Result<()> {
                 state: "working".into(),
             })
         }
+        Cmd::Project { command } => {
+            let db = Db::open_default()?;
+            match command {
+                ProjectCmd::Create { key, name } => print_json(&db.create_project(&key, &name)?),
+                ProjectCmd::List => print_json(&db.projects()?),
+            }
+        }
+        Cmd::Issue { command } => {
+            let config = Config::load()?;
+            let mut db = Db::open_default()?;
+            match command {
+                IssueCmd::Create { title, kind, source, evidence, body, priority, project, state, allow_similar } => {
+                    let project = resolve_project(&config, &db, project.as_deref(), &cwd()?)?;
+                    let issue = db.create_issue(
+                        &NewIssue { project, title, body, kind, source, evidence, priority, allow_similar, state },
+                        &me,
+                    )?;
+                    print_json(&issue)
+                }
+                IssueCmd::List { project, all } => {
+                    let project = resolve_project(&config, &db, project.as_deref(), &cwd()?)?;
+                    for i in db.list_issues(Some(&project), all)? {
+                        println!("{:<9} {:<12} {}", i.key, i.state, i.title);
+                    }
+                    Ok(())
+                }
+                IssueCmd::Show { key } => {
+                    let issue = db.issue(&key)?.ok_or_else(|| anyhow::anyhow!("no issue {key}"))?;
+                    print_json(&serde_json::json!({ "issue": issue, "timeline": db.timeline(&issue.key)? }))
+                }
+                IssueCmd::Move { key, state, evidence, reason } => {
+                    print_json(&db.move_issue(&key, &state, evidence.as_deref(), reason.as_deref(), &me)?)
+                }
+                IssueCmd::Note { key, text, handoff } => {
+                    db.add_note(&key, &text, if handoff { "handoff" } else { "note" }, &me)
+                }
+                IssueCmd::Import { file, project } => {
+                    let project = resolve_project(&config, &db, project.as_deref(), &cwd()?)?;
+                    let text = std::fs::read_to_string(&file)?;
+                    let items: Vec<serde_json::Value> = serde_json::from_str(&text)?;
+                    let field = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    for item in items {
+                        let new = NewIssue {
+                            project: project.clone(),
+                            title: field(&item, "title"),
+                            kind: field(&item, "kind"),
+                            body: field(&item, "body"),
+                            evidence: Some(field(&item, "evidence")).filter(|e| !e.is_empty()).unwrap_or_else(|| "none yet".into()),
+                            source: Some(field(&item, "source")).filter(|s| !s.is_empty()).unwrap_or_else(|| "human".into()),
+                            priority: item.get("priority").and_then(|p| p.as_i64()).unwrap_or(0),
+                            state: Some(field(&item, "state")).filter(|s| !s.is_empty()),
+                            allow_similar: false,
+                        };
+                        match db.create_issue(&new, &me) {
+                            Ok(i) => println!("{:<9} {}", i.key, i.title),
+                            Err(e) => println!("skipped   {}: {}", new.title, e.to_string().lines().next().unwrap_or("")),
+                        }
+                    }
+                    Ok(())
+                }
+                IssueCmd::Next { project, agent } => {
+                    let project = resolve_project(&config, &db, project.as_deref(), &cwd()?)?;
+                    match db.next_task(&project, &agent)? {
+                        Some(i) => {
+                            let branch = branch_name(&agent, &i.key, &i.title);
+                            print_json(&serde_json::json!({ "issue": i, "branch": branch }))
+                        }
+                        None => {
+                            println!("nothing in Todo for {project}");
+                            Ok(())
+                        }
+                    }
+                }
+            }
+        }
+        Cmd::Ask { question, options, issue, wait } => {
+            let db = Db::open_default()?;
+            let ask = db.create_ask(&question, &options, issue.as_deref(), Some(&cwd()?), &me)?;
+            if !wait {
+                return print_json(&ask);
+            }
+            eprintln!("waiting for an answer to ask {} in the Nitely app…", ask.id);
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                if let Some(answer) = db.ask(ask.id)?.and_then(|a| a.answer) {
+                    println!("{answer}");
+                    return Ok(());
+                }
+            }
+        }
         Cmd::Repo { command } => {
             let mut config = Config::load()?;
             match command {
-                RepoCmd::Add { root, integration, name } => {
+                RepoCmd::Add { root, integration, name, project } => {
                     let root = std::fs::canonicalize(&root)
                         .map(|p| clean_path(&p.to_string_lossy()))
                         .unwrap_or(root);
                     let name = name.unwrap_or_else(|| {
                         root.replace('\\', "/").rsplit('/').next().unwrap_or("repo").to_string()
                     });
-                    config.upsert_repo(RepoConfig { name: name.clone(), root, integration_branch: integration });
+                    let project = match project {
+                        Some(p) => Some(
+                            Db::open_default()?
+                                .project(&p)?
+                                .ok_or_else(|| anyhow::anyhow!("no project {p}"))?
+                                .key,
+                        ),
+                        None => None,
+                    };
+                    config.upsert_repo(RepoConfig { name: name.clone(), root, integration_branch: integration, project });
                     config.save()?;
                     println!("watching {name}");
                 }
-                RepoCmd::List => println!("{}", serde_json::to_string_pretty(&config.repos)?),
+                RepoCmd::List => print_json(&config.repos)?,
             }
             Ok(())
         }
-        Cmd::Now => {
-            let views = nitely_core::snapshot(&Config::load()?, &Db::open_default()?)?;
-            println!("{}", serde_json::to_string_pretty(&views)?);
-            Ok(())
-        }
+        Cmd::Now => print_json(&nitely_core::snapshot(&Config::load()?, &Db::open_default()?)?),
         Cmd::Sync => {
             let report = nitely_core::remote::sync(&Config::load()?, &mut Db::open_default()?);
-            println!("{}", serde_json::to_string_pretty(&report)?);
+            print_json(&report)?;
             if !report.credentials_found {
                 eprintln!("no credentials file at {}", nitely_core::credentials::path().display());
             }

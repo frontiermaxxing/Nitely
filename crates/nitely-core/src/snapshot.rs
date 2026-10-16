@@ -8,11 +8,9 @@ use std::collections::HashSet;
 
 use crate::config::Config;
 use crate::db::{now, Db, IssueRecord, PrRecord, Session, SyncStatus};
+use crate::issues::Ask;
 use crate::git::{self, BranchState};
 use crate::paths::is_within;
-
-/// The Linear state that means the next step is Andrew's (`linear.mjs` vocabulary).
-pub const NEEDS_ANDREW: &str = "Needs Andrew";
 
 /// Sessions not seen for this long are left off the board.
 const SESSION_WINDOW_SECS: i64 = 24 * 3600;
@@ -30,15 +28,17 @@ pub struct TaskRow {
     pub issue: Option<IssueRecord>,
     /// The open PR for this branch, else its most recent merged or declined one.
     pub pr: Option<PrRecord>,
-    /// A rebase is stopped, the agent is waiting on a human, or the issue is in Needs Andrew.
+    /// A rebase is stopped, the agent is waiting on a human, or the issue waits on the human.
     pub needs_me: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Board {
     pub repos: Vec<RepoView>,
-    /// Issues in Needs Andrew that have no worktree on the board.
+    /// Issues waiting on the human (Needs You, or Needs Andrew in Linear) with no worktree on the board.
     pub needs_me_issues: Vec<IssueRecord>,
+    /// Agents' questions still waiting for an answer.
+    pub asks: Vec<Ask>,
     pub sync: Vec<SyncStatus>,
 }
 
@@ -112,7 +112,7 @@ pub fn snapshot(config: &Config, db: &Db) -> Result<Board> {
                 let pr = wt.branch.as_deref().and_then(|b| pr_for(&prs, slug.as_deref(), b));
                 let needs_me = state.as_ref().is_some_and(|s| s.rebase_in_progress)
                     || session.as_ref().is_some_and(|s| s.state == "waiting")
-                    || issue.as_ref().is_some_and(|i| i.state == NEEDS_ANDREW);
+                    || issue.as_ref().is_some_and(|i| i.needs_human());
                 TaskRow {
                     worktree: wt.path.clone(),
                     branch: wt.branch.clone(),
@@ -152,11 +152,11 @@ pub fn snapshot(config: &Config, db: &Db) -> Result<Board> {
         .collect();
     let needs_me_issues = issues
         .iter()
-        .filter(|i| i.state == NEEDS_ANDREW && !on_board.contains(i.key.as_str()))
+        .filter(|i| i.needs_human() && !on_board.contains(i.key.as_str()))
         .cloned()
         .collect();
 
-    Ok(Board { repos: views, needs_me_issues, sync: db.sync_statuses()? })
+    Ok(Board { repos: views, needs_me_issues, asks: db.open_asks()?, sync: db.sync_statuses()? })
 }
 
 /// `prs` is newest first. Without a known remote, the branch name alone decides.

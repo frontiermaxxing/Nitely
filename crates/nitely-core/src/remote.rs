@@ -9,7 +9,8 @@ use std::collections::BTreeSet;
 
 use crate::config::Config;
 use crate::credentials::{self, Credentials};
-use crate::db::{Db, IssueRecord, PrRecord};
+use crate::db::{Db, PrRecord};
+use crate::issues::IssueRecord;
 use crate::git;
 
 const MAX_PR_PAGES: usize = 4;
@@ -223,6 +224,7 @@ pub fn parse_linear_page(v: &Value) -> (Vec<IssueRecord>, Option<String>) {
     let issues = nodes
         .into_iter()
         .map(|n| IssueRecord {
+            origin: "linear".into(),
             key: n.identifier,
             title: n.title,
             url: n.url,
@@ -230,6 +232,7 @@ pub fn parse_linear_page(v: &Value) -> (Vec<IssueRecord>, Option<String>) {
             state_type: n.state.kind,
             labels: n.labels.nodes.into_iter().map(|l| l.name).collect(),
             updated_at: n.updated_at,
+            ..Default::default()
         })
         .collect();
     let next = if v.pointer("/data/issues/pageInfo/hasNextPage").and_then(Value::as_bool) == Some(true) {
