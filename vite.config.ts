@@ -22,7 +22,11 @@ function liveData(): Plugin {
     apply: "serve",
     configureServer(server) {
       server.middlewares.use("/__nitely/invoke", (req, res) => {
+        // A spawn that fails reports both `error` and `close`; answer once.
+        let answered = false;
         const reply = (status: number, body: unknown) => {
+          if (answered) return;
+          answered = true;
           res.statusCode = status;
           res.setHeader("Content-Type", "application/json");
           res.end(typeof body === "string" ? body : JSON.stringify(body));
