@@ -96,6 +96,28 @@ async fn connect_apply(path: String, key: Option<String>, name: Option<String>) 
     nitely_core::connect::apply(&db, &mut config, &plan).map_err(err)
 }
 
+/// What it takes to bring the agents' Nitely setup up to this version; empty when nothing watches a repo.
+#[tauri::command]
+async fn agent_setup() -> Result<Vec<nitely_core::connect::AgentPlan>, String> {
+    let config = Config::load().map_err(err)?;
+    nitely_core::connect::agent_setup(&config).map_err(err)
+}
+
+#[derive(Serialize)]
+struct AgentsUpdated {
+    done: Vec<String>,
+    failed: Vec<String>,
+}
+
+/// Updates the agents' setup, recomputed here like connect_apply.
+#[tauri::command]
+async fn agent_setup_apply() -> Result<AgentsUpdated, String> {
+    let config = Config::load().map_err(err)?;
+    let agents = nitely_core::connect::agent_setup(&config).map_err(err)?;
+    let (done, failed) = nitely_core::connect::apply_agents(&agents);
+    Ok(AgentsUpdated { done, failed })
+}
+
 fn run_sync() -> anyhow::Result<remote::SyncReport> {
     let config = Config::load()?;
     let mut db = Db::open_default()?;
@@ -153,7 +175,9 @@ pub fn run() {
             move_issue,
             answer_ask,
             connect_plan,
-            connect_apply
+            connect_apply,
+            agent_setup,
+            agent_setup_apply
         ])
         .run(tauri::generate_context!())
         .expect("error while running Nitely");

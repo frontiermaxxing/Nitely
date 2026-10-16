@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { Applied, ConnectPlan } from "./types";
+import { AgentChanges, pendingChanges } from "./Agents";
 
 const PLAYBOOK_SOURCE: Record<string, string> = {
   repo: "the repo's own .nitely/playbook.toml",
@@ -61,7 +62,7 @@ export function AddProject(props: { onAdded: (projectKey: string) => void }) {
     setBusy(false);
   };
 
-  const changes = plan?.agents.filter((a) => a.found).flatMap((a) => a.changes.filter((c) => c.action !== "unchanged")).length ?? 0;
+  const changes = plan ? pendingChanges(plan.agents) : 0;
 
   return (
     <div className="page">
@@ -114,29 +115,7 @@ export function AddProject(props: { onAdded: (projectKey: string) => void }) {
             )}
           </section>
 
-          {plan.agents.map((agent) => (
-            <section key={agent.agent}>
-              <h2>
-                {agent.agent} {!agent.found && <span className="muted small">not installed, skipped</span>}
-              </h2>
-              {agent.found &&
-                agent.changes.map((c) => (
-                  <div className="change" key={c.target}>
-                    <span className={`chip ${c.action}`}>{c.action}</span>
-                    <div>
-                      <div className="small">{c.why}</div>
-                      <div className="mono small muted">{c.target}</div>
-                      {(c.action === "create" || c.action === "update") && (
-                        <details>
-                          <summary className="small">Show {c.action === "update" ? "the new file" : "the file"}</summary>
-                          <pre className="file">{c.after}</pre>
-                        </details>
-                      )}
-                    </div>
-                  </div>
-                ))}
-            </section>
-          ))}
+          <AgentChanges agents={plan.agents} />
 
           {plan.warnings.map((w) => (
             <p key={w} className="error small">{w}</p>

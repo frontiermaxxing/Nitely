@@ -154,8 +154,19 @@ export interface ConnectPlan {
   integration_branch: string;
   playbook: { source: string; path: string; text: string };
   nitely: string;
-  agents: { agent: string; found: boolean; changes: ConnectChange[] }[];
+  agents: AgentPlan[];
   warnings: string[];
+}
+
+export interface AgentPlan {
+  agent: string;
+  found: boolean;
+  changes: ConnectChange[];
+}
+
+export interface AgentsUpdated {
+  done: string[];
+  failed: string[];
 }
 
 export interface Applied {

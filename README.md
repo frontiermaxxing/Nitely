@@ -64,6 +64,10 @@ nitely connect C:\Development\AeraChromium              # show the plan
 nitely connect C:\Development\AeraChromium --project AC --yes
 ```
 
+The skill, Codex instructions and hook and MCP registrations live in your home folder, so they go
+stale when a newer Nitely writes them differently. The app then shows a banner to review and update
+them; `nitely agents` shows the same, and `nitely agents --yes` updates them.
+
 Manual setup still works (`nitely project create`, `nitely repo add`, `nitely issue import`).
 Approving and answering asks happen only in the app, never through the CLI or MCP.
 

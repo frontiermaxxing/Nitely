@@ -82,6 +82,16 @@ impl Change {
         };
         Change { target: path.to_string_lossy().into_owned(), action: action.into(), why: why.into(), before, after }
     }
+
+    /// A JSON file, unchanged when it already holds the same value however it is formatted, so a
+    /// file the user or another tool reformatted is not reported as out of date.
+    fn json(path: &Path, why: &str, value: &Value) -> Change {
+        let mut c = Change::file(path, why, pretty(value));
+        if c.action == "update" && c.before.as_deref().and_then(|b| serde_json::from_str::<Value>(b).ok()).as_ref() == Some(value) {
+            c.action = "unchanged".into();
+        }
+        c
+    }
 }
 
 /// The folder agents keep their user-level config in. `NITELY_AGENT_HOME` overrides it for tests.
@@ -128,7 +138,7 @@ pub fn plan(db: &Db, config: &Config, path: &str, key: Option<&str>, name: Optio
     if nitely == "nitely" && which("nitely").is_none() {
         warnings.push("the nitely command is not on PATH; agents need it (cargo install --path crates/nitely-cli)".into());
     }
-    let agents = vec![claude_plan(&nitely)?, codex_plan(&nitely)?, cursor_plan(&nitely)?];
+    let agents = agent_plans(&nitely)?;
     if agents.iter().all(|a| !a.found) {
         warnings.push("no Claude Code, Codex or Cursor configuration was found in your home folder".into());
     }
@@ -178,7 +188,36 @@ pub fn apply(db: &Db, config: &mut Config, plan: &ConnectPlan) -> Result<Applied
         done.push(format!("wrote its playbook to {}", plan.playbook.path));
     }
 
-    for agent in plan.agents.iter().filter(|a| a.found) {
+    let (agents_done, agents_failed) = apply_agents(&plan.agents);
+    done.extend(agents_done);
+    failed.extend(agents_failed);
+    Ok(Applied { project: plan.project_key.clone(), repo: plan.repo_name.clone(), done, failed })
+}
+
+fn agent_plans(nitely: &str) -> Result<Vec<AgentPlan>> {
+    Ok(vec![claude_plan(nitely)?, codex_plan(nitely)?, cursor_plan(nitely)?])
+}
+
+/// What it would take to bring every installed agent's setup (MCP server, hooks, skill and
+/// instructions) up to this version of Nitely. The MCP server and hooks build their text when they
+/// run, so they are always current; the files `connect` wrote are not, and go stale when Nitely
+/// changes them. Empty when Nitely watches no repo, so a machine that never connected is not asked.
+pub fn agent_setup(config: &Config) -> Result<Vec<AgentPlan>> {
+    if config.repos.is_empty() {
+        return Ok(Vec::new());
+    }
+    agent_plans(&nitely_command())
+}
+
+/// How many changes `agents` still needs, for the agents that are installed.
+pub fn pending_changes(agents: &[AgentPlan]) -> usize {
+    agents.iter().filter(|a| a.found).flat_map(|a| &a.changes).filter(|c| c.action != "unchanged").count()
+}
+
+/// Makes the agents' changes. A failure for one does not stop the others; it is reported.
+pub fn apply_agents(agents: &[AgentPlan]) -> (Vec<String>, Vec<String>) {
+    let (mut done, mut failed) = (Vec::new(), Vec::new());
+    for agent in agents.iter().filter(|a| a.found) {
         for change in agent.changes.iter().filter(|c| c.action != "unchanged") {
             let result = if change.action == "run" { run(&change.after) } else { write(Path::new(&change.target), &change.after) };
             match result {
@@ -187,7 +226,7 @@ pub fn apply(db: &Db, config: &mut Config, plan: &ConnectPlan) -> Result<Applied
             }
         }
     }
-    Ok(Applied { project: plan.project_key.clone(), repo: plan.repo_name.clone(), done, failed })
+    (done, failed)
 }
 
 fn playbook_plan(root: &Path, repo_name: &str) -> Result<PlaybookPlan> {
@@ -277,7 +316,7 @@ fn claude_plan(nitely: &str) -> Result<AgentPlan> {
             }
         }
     }
-    changes.push(Change::file(&settings_path, "hooks that show each session's status, and give it the repo's instructions at start", pretty(&settings)));
+    changes.push(Change::json(&settings_path, "hooks that show each session's status, and give it the repo's instructions at start", &settings));
 
     let skill = dir.join("skills").join("nitely").join("SKILL.md");
     changes.push(Change::file(
@@ -355,7 +394,7 @@ fn cursor_plan(nitely: &str) -> Result<AgentPlan> {
     let mut mcp = read_json(&mcp_path)?;
     let servers = obj(&mut mcp, "mcpServers");
     servers.entry("nitely".to_string()).or_insert_with(|| json!({ "command": nitely, "args": ["mcp"] }));
-    changes.push(Change::file(&mcp_path, "the nitely MCP server, with its instructions", pretty(&mcp)));
+    changes.push(Change::json(&mcp_path, "the nitely MCP server, with its instructions", &mcp));
 
     let hooks_path = dir.join("hooks.json");
     let mut hooks_doc = read_json(&hooks_path)?;
@@ -373,7 +412,7 @@ fn cursor_plan(nitely: &str) -> Result<AgentPlan> {
             }
         }
     }
-    changes.push(Change::file(&hooks_path, "hooks that show each chat's status", pretty(&hooks_doc)));
+    changes.push(Change::json(&hooks_path, "hooks that show each chat's status", &hooks_doc));
     Ok(AgentPlan { agent: "Cursor".into(), found, changes })
 }
 
@@ -484,6 +523,37 @@ mod tests {
         let old = once.replace("v2", "v1");
         assert_eq!(with_block(&old, &block), once);
         assert_eq!(with_block("", &block), format!("{block}\n"));
+    }
+
+    #[test]
+    fn stale_agent_files_are_found_and_updated() {
+        let home = std::env::temp_dir().join(format!("nitely-home-{}-{}", std::process::id(), crate::db::now()));
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        // Registered already, so nothing runs `claude mcp add`; Codex and Cursor are not installed.
+        std::fs::write(home.join(".claude.json"), r#"{"mcpServers":{"nitely":{}}}"#).unwrap();
+        std::env::set_var("NITELY_AGENT_HOME", &home);
+
+        let first = agent_plans("nitely").unwrap();
+        assert_eq!(pending_changes(&first), 2, "the hooks and the skill are new");
+        assert!(apply_agents(&first).1.is_empty());
+        assert_eq!(pending_changes(&agent_plans("nitely").unwrap()), 0);
+
+        // Reformatting a JSON file is not a change; an old copy of the workflow is.
+        let settings = home.join(".claude").join("settings.json");
+        let compact = serde_json::to_string(&serde_json::from_str::<Value>(&std::fs::read_to_string(&settings).unwrap()).unwrap()).unwrap();
+        std::fs::write(&settings, compact).unwrap();
+        let skill = home.join(".claude").join("skills").join("nitely").join("SKILL.md");
+        std::fs::write(&skill, "an older workflow").unwrap();
+        let stale = agent_plans("nitely").unwrap();
+        let pending: Vec<&str> =
+            stale.iter().filter(|a| a.found).flat_map(|a| &a.changes).filter(|c| c.action != "unchanged").map(|c| c.target.as_str()).collect();
+        assert_eq!(pending, vec![skill.to_string_lossy()]);
+
+        assert!(apply_agents(&stale).1.is_empty());
+        assert!(std::fs::read_to_string(&skill).unwrap().contains(WORKFLOW));
+        assert_eq!(pending_changes(&agent_plans("nitely").unwrap()), 0);
+        std::env::remove_var("NITELY_AGENT_HOME");
+        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]

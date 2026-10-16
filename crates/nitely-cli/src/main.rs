@@ -96,6 +96,13 @@ enum Cmd {
         #[arg(long)]
         break_lock: bool,
     },
+    /// Bring every installed agent's Nitely setup (MCP server, hooks, skill, instructions) up to
+    /// this version of Nitely. Shows what is out of date; changes it only with --yes.
+    Agents {
+        /// Make the changes.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Add a repo to Nitely: create its project, watch it, keep a playbook for it, and connect
     /// Claude Code, Codex and Cursor (MCP server, hooks, instructions) at the user level.
     /// Shows every change; makes them only with --yes.
@@ -282,6 +289,15 @@ fn print_json<T: serde::Serialize>(v: &T) -> Result<()> {
     Ok(())
 }
 
+fn print_agent_changes(agents: &[nitely_core::connect::AgentPlan]) {
+    for agent in agents {
+        println!("\n{}{}", agent.agent, if agent.found { "" } else { " (not installed; skipped)" });
+        for c in &agent.changes {
+            println!("  {:<9} {}\n            {}", c.action, c.target, c.why);
+        }
+    }
+}
+
 fn run(cmd: Cmd) -> Result<()> {
     // Agents run the CLI too, so it never acts as the human: approving and answering asks happen
     // only in the app.
@@ -465,6 +481,36 @@ fn run(cmd: Cmd) -> Result<()> {
             }
             Ok(())
         }
+        Cmd::Agents { yes } => {
+            let config = Config::load()?;
+            if config.repos.is_empty() {
+                println!("Nitely watches no repo yet; nitely connect <path> sets the agents up");
+                return Ok(());
+            }
+            let agents = nitely_core::connect::agent_setup(&config)?;
+            let pending = nitely_core::connect::pending_changes(&agents);
+            print_agent_changes(&agents);
+            if pending == 0 {
+                println!("\nevery agent's setup is up to date");
+                return Ok(());
+            }
+            if !yes {
+                eprintln!("\n{pending} out of date; run again with --yes to update");
+                return Ok(());
+            }
+            let (done, failed) = nitely_core::connect::apply_agents(&agents);
+            println!();
+            for d in &done {
+                println!("done    {d}");
+            }
+            for f in &failed {
+                println!("FAILED  {f}");
+            }
+            if !failed.is_empty() {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
         Cmd::Connect { path, project, name, yes } => {
             let mut config = Config::load()?;
             let db = Db::open_default()?;
@@ -472,12 +518,7 @@ fn run(cmd: Cmd) -> Result<()> {
             let new = if plan.project_exists { "existing" } else { "new" };
             println!("{} → project {} ({}, {new}), integration branch {}", plan.root, plan.project_key, plan.project_name, plan.integration_branch);
             println!("playbook: {} ({})", plan.playbook.path, plan.playbook.source);
-            for agent in &plan.agents {
-                println!("\n{}{}", agent.agent, if agent.found { "" } else { " (not installed; skipped)" });
-                for c in &agent.changes {
-                    println!("  {:<9} {}\n            {}", c.action, c.target, c.why);
-                }
-            }
+            print_agent_changes(&plan.agents);
             for w in &plan.warnings {
                 eprintln!("warning: {w}");
             }

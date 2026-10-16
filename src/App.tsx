@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { Board, Project } from "./types";
+import type { AgentPlan, Board, Project } from "./types";
+import { AgentSetup, pendingChanges } from "./Agents";
 import { Inbox } from "./Inbox";
 import { Now } from "./Now";
 import { Backlog } from "./Backlog";
@@ -15,7 +16,7 @@ const FALLBACK_MS = 30000;
 const CHANGED_EVENT = "nitely://changed";
 const REFRESH_GAP_MS = 1000;
 
-export type View = { kind: "inbox" } | { kind: "now" } | { kind: "project"; key: string } | { kind: "add" };
+export type View = { kind: "inbox" } | { kind: "now" } | { kind: "project"; key: string } | { kind: "add" } | { kind: "agents" };
 
 export function App() {
   const [board, setBoard] = useState<Board | null>(null);
@@ -59,6 +60,15 @@ export function App() {
     refresh();
   }, [refresh]);
 
+  // What Nitely writes for agents changes only with Nitely itself, so this is checked at start and
+  // after the app changes it, not on every refresh.
+  const [agents, setAgents] = useState<AgentPlan[]>([]);
+  const loadAgents = useCallback(() => {
+    invoke<AgentPlan[]>("agent_setup").then(setAgents, (e) => console.error("agent setup:", e));
+  }, []);
+  useEffect(loadAgents, [loadAgents]);
+  const agentChanges = pendingChanges(agents);
+
   useEffect(() => {
     refresh();
     const id = setInterval(changed, FALLBACK_MS);
@@ -99,12 +109,23 @@ export function App() {
 
       <main className="content">
         {error && <p className="error banner">{error}</p>}
+        {agentChanges > 0 && view.kind !== "agents" && (
+          <p className="banner notice small">
+            Your agents have an older copy of Nitely's instructions or setup ({agentChanges} change
+            {agentChanges === 1 ? "" : "s"}).{" "}
+            <button className="link" onClick={() => setView({ kind: "agents" })}>
+              Review and update
+            </button>
+          </p>
+        )}
+        {view.kind === "agents" && <AgentSetup agents={agents} onUpdated={loadAgents} />}
         {view.kind === "inbox" && board && <Inbox board={board} now={now} onOpenIssue={setOpenIssue} onChanged={changed} />}
         {view.kind === "now" && board && <Now board={board} now={now} onOpenIssue={setOpenIssue} onChanged={changed} />}
         {view.kind === "add" && (
           <AddProject
             onAdded={(key) => {
               changed();
+              loadAgents();
               setView({ kind: "project", key });
             }}
           />
