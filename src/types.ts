@@ -81,6 +81,8 @@ export interface IssueRecord {
   labels: string[];
   evidence: string;
   claimed_by: string | null;
+  /** "human" for work only the human can do (next_task never hands it out); "agent" otherwise. */
+  owner?: "agent" | "human" | string;
   created_at: string;
   updated_at: string;
   /** Open issues that must close before this one can start; next_task skips it until then. */

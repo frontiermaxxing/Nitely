@@ -6,7 +6,7 @@ import type { Ask, Board, IssueDetail, IssueRecord, TaskRow } from "./types";
 import { VENDOR_LABEL, livenessOf, vendorOf } from "./ui/agents.ts";
 import { trackOf, type Track } from "./ui/lifecycle.ts";
 
-export type DecisionKind = "ask" | "approve" | "conflict" | "input" | "land";
+export type DecisionKind = "ask" | "approve" | "own" | "conflict" | "input" | "land";
 
 export interface Decision {
   /** Stable across refreshes, for React keys and the card's own state. */
@@ -26,6 +26,7 @@ export interface Decision {
 export const KIND_LABEL: Record<DecisionKind, string> = {
   ask: "question",
   approve: "approval",
+  own: "your own work",
   conflict: "conflict",
   input: "waiting agent",
   land: "stopped land",
@@ -47,6 +48,8 @@ export function detailKeys(board: Board): string[] {
 /** The state that waits on a person (nitely-core's NEEDS_HUMAN). */
 const NEEDS_HUMAN = "Needs You";
 export const needsHuman = (i: IssueRecord) => i.state === NEEDS_HUMAN;
+/** Open work only the human can do, outside Backlog: it waits on them whatever its state. */
+export const isOwnWork = (i: IssueRecord) => i.owner === "human" && !["completed", "canceled"].includes(i.state_type) && i.state !== "Backlog";
 
 const urgencyOf = (i: IssueRecord | null | undefined) => {
   const u = i ? i.urgency || i.priority : 0;
@@ -85,15 +88,16 @@ export function decisionsOf(board: Board, details: Map<string, IssueDetail>, now
   // The board lists an issue that waits on a person under its worktree row when it has one
   // (that row's needs_me is set), and in needs_me_issues only when it has none.
   const approvals = new Map<string, IssueRecord>();
-  for (const { row } of rows) if (row.issue && needsHuman(row.issue)) approvals.set(row.issue.key, row.issue);
+  for (const { row } of rows) if (row.issue && (needsHuman(row.issue) || isOwnWork(row.issue))) approvals.set(row.issue.key, row.issue);
   for (const i of board.needs_me_issues) if (!approvals.has(i.key)) approvals.set(i.key, i);
   for (const listed of approvals.values()) {
     // The board can be older than the issue's detail (a snapshot started before the human moved
     // it): an issue the detail shows approved, or moved anywhere else, is no longer a decision.
     const i = details.get(listed.key)?.issue ?? listed;
-    if (!needsHuman(i)) continue;
+    const own = isOwnWork(i);
+    if (!own && !needsHuman(i)) continue;
     const at = rowOf(i.key);
-    out.push({ id: `approve-${i.key}`, kind: "approve", issue: i, row: at?.row ?? null, repo: at?.repo ?? null, ask: null, since: waitingSince(i, details.get(i.key)), urgency: urgencyOf(i) });
+    out.push({ id: `${own ? "own" : "approve"}-${i.key}`, kind: own ? "own" : "approve", issue: i, row: at?.row ?? null, repo: at?.repo ?? null, ask: null, since: waitingSince(i, details.get(i.key)), urgency: urgencyOf(i) });
   }
   for (const { repo, row } of rows) {
     if (!row.needs_me) continue;
@@ -122,8 +126,11 @@ export function decisionsOf(board: Board, details: Map<string, IssueDetail>, now
 /** Most urgent first and, at the same urgency, the one that has waited longest first. */
 const byUrgency = (a: Decision, b: Decision) => a.urgency - b.urgency || a.since - b.since;
 
-/** What the human did to a decision: approved it, sent it back to Todo, or answered it. */
-export type Move = "approve" | "todo" | "answer";
+/**
+ * What the human did to a decision: approved it, sent it back to Todo, answered it, marked their
+ * own work done, or handed it back to agents.
+ */
+export type Move = "approve" | "todo" | "answer" | "done" | "handback";
 
 /** A decision the human just acted on, held in place until the Inbox moves on from it. */
 export interface Resolved {
@@ -155,6 +162,10 @@ export function outcomeOf(r: Pick<Resolved, "move" | "answer" | "decision">): st
       return "Sent back to Todo.";
     case "answer":
       return `Answered${r.answer ? `: “${r.answer}”` : ""}. Sent to ${VENDOR_LABEL[vendorOf(r.decision.ask?.asked_by ?? null)]}.`;
+    case "done":
+      return "Marked done.";
+    case "handback":
+      return "Handed back to agents. In Todo for the next one.";
   }
 }
 
@@ -164,7 +175,10 @@ export function trackAfter(track: Track, move: Move, now: number): Track {
     case "approve":
       return { ...track, station: "landing", stuck: null, asking: false, reached: { ...track.reached, landing: now }, since: now };
     case "todo":
+    case "handback":
       return { ...track, station: "todo", stuck: null, asking: false, since: now };
+    case "done":
+      return { ...track, station: "done", stuck: null, asking: false, reached: { ...track.reached, done: now }, since: now };
     case "answer":
       return { ...track, asking: false };
   }

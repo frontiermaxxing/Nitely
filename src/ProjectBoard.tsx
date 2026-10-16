@@ -268,6 +268,7 @@ function flagOf(c: Card): { text: string; tone: "attention" | "stuck" | "quiet" 
   if (c.row?.state?.rebase_in_progress) return { text: "Rebase stopped on a conflict", tone: "attention" };
   if (c.track.asking) return { text: "Asked you something", tone: "attention" };
   if (c.live === "waiting") return { text: "Waiting for you", tone: "attention" };
+  if (c.issue.owner === "human" && c.track.station !== "done") return { text: "Your own work: no agent takes it", tone: "attention" };
   if (c.track.stuck) return { text: c.track.stuck, tone: "stuck" };
   if (c.issue.blocked_by.length) return { text: `Blocked by ${c.issue.blocked_by.join(", ")}`, tone: "quiet" };
   return null;

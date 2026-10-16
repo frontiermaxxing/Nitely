@@ -813,7 +813,8 @@ impl Db {
 
     /// Makes an issue the human's own work, or hands it back to agents. Any agent may give an issue
     /// to the human; only the human hands one back. Giving an open issue to the human releases its
-    /// claim and puts it in Needs You, unless it waits in Backlog.
+    /// claim and puts it in Needs You, unless it waits in Backlog; handing one back from Needs You
+    /// puts it in Todo for the next agent.
     pub fn set_owner(&mut self, key: &str, owner: &str, actor: &Actor) -> Result<IssueRecord> {
         let issue = self.issue(key)?.with_context(|| format!("no issue {key}"))?;
         if issue.origin != "nitely" {
@@ -831,21 +832,26 @@ impl Db {
         }
         let to_human = owner == "human";
         let ready_for_human = to_human && issue.is_open() && issue.state != "Backlog" && !issue.needs_human();
+        let ready_for_agents = !to_human && issue.needs_human();
+        let (state, state_type) = match (ready_for_human, ready_for_agents) {
+            (true, _) => ("Needs You", "started"),
+            (_, true) => ("Todo", "unstarted"),
+            _ => (issue.state.as_str(), issue.state_type.as_str()),
+        };
         let ts = now();
         let tx = self.conn.transaction()?;
         tx.execute(
-            "UPDATE issue SET owner = ?2, updated_at = ?3,
-               state = CASE WHEN ?4 THEN 'Needs You' ELSE state END,
-               state_type = CASE WHEN ?4 THEN 'started' ELSE state_type END,
-               claimed_by = CASE WHEN ?5 THEN NULL ELSE claimed_by END,
-               claimed_at = CASE WHEN ?5 THEN NULL ELSE claimed_at END
+            "UPDATE issue SET owner = ?2, updated_at = ?3, state = ?4, state_type = ?5,
+               claimed_by = CASE WHEN ?6 THEN NULL ELSE claimed_by END,
+               claimed_at = CASE WHEN ?6 THEN NULL ELSE claimed_at END
              WHERE key = ?1",
-            params![issue.key, owner, iso(ts), ready_for_human, to_human],
+            params![issue.key, owner, iso(ts), state, state_type, to_human],
         )?;
-        let summary = match (to_human, ready_for_human) {
-            (true, true) => format!("Made the human's own work: {} → Needs You", issue.state),
+        let summary = match (to_human, state != issue.state) {
+            (true, true) => format!("Made the human's own work: {} → {state}", issue.state),
             (true, false) => "Made the human's own work".to_string(),
-            (false, _) => "Handed back to agents".to_string(),
+            (false, true) => format!("Handed back to agents: {} → {state}", issue.state),
+            (false, false) => "Handed back to agents".to_string(),
         };
         tx.execute(
             "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, ?2, ?3, 'owner_changed', ?4)",
@@ -1166,8 +1172,7 @@ mod tests {
         assert_eq!((given.state.as_str(), given.claimed_by.as_deref()), ("Needs You", None));
         assert!(db.set_owner(&code.key, "agent", &agent).unwrap_err().to_string().contains("only the human"));
         let back = db.set_owner(&code.key, "agent", &Actor::Human).unwrap();
-        assert_eq!((back.owner.as_str(), back.state.as_str()), ("agent", "Needs You"));
-        db.move_issue(&code.key, "Todo", None, None, &Actor::Human).unwrap();
+        assert_eq!((back.owner.as_str(), back.state.as_str()), ("agent", "Todo"), "handed back for the next agent");
         assert_eq!(db.next_task("NIT", "claude:a").unwrap().unwrap().key, code.key);
 
         // A Backlog issue stays in Backlog when it becomes the human's.

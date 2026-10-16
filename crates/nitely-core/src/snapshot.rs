@@ -35,7 +35,8 @@ pub struct TaskRow {
 #[derive(Debug, Clone, Serialize)]
 pub struct Board {
     pub repos: Vec<RepoView>,
-    /// Issues waiting on the human (Needs You) with no worktree on the board.
+    /// Issues waiting on the human (Needs You), and the human's own open work outside Backlog, with
+    /// no worktree on the board.
     pub needs_me_issues: Vec<IssueRecord>,
     /// Agents' questions still waiting for an answer.
     pub asks: Vec<Ask>,
@@ -182,7 +183,7 @@ pub fn snapshot(config: &Config, db: &Db) -> Result<Board> {
         .collect();
     let needs_me_issues = issues
         .iter()
-        .filter(|i| i.needs_human() && !on_board.contains(i.key.as_str()))
+        .filter(|i| (i.needs_human() || (i.is_humans() && i.is_open() && i.state != "Backlog")) && !on_board.contains(i.key.as_str()))
         .cloned()
         .collect();
 

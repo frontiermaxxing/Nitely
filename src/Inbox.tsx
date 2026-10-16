@@ -265,11 +265,12 @@ function without<V>(m: Map<string, V>, id: string): Map<string, V> {
   return n;
 }
 
-/** Questions first: an agent is blocked on each one. */
-const GROUP_ORDER: DecisionKind[] = ["ask", "approve", "conflict", "land", "input"];
+/** Questions first: an agent is blocked on each one. The human's own work blocks no agent directly, so it comes last. */
+const GROUP_ORDER: DecisionKind[] = ["ask", "approve", "conflict", "land", "input", "own"];
 const GROUP_LABEL: Record<DecisionKind, string> = {
   ask: "Questions",
   approve: "Approvals",
+  own: "Your own work",
   conflict: "Conflicts",
   input: "Waiting agents",
   land: "Stopped lands",
@@ -316,6 +317,8 @@ function eventOf(d: Decision, detail: IssueDetail | undefined): { text: string; 
         agent: review.reviewer,
       };
     }
+    case "own":
+      return { text: "Only you can do this", tone: null, agent: null };
     case "conflict":
       return { text: "Rebase stopped on a conflict", tone: "bad", agent };
     case "input":
@@ -386,7 +389,7 @@ function InboxRow(props: {
 }
 
 /** The kind's mark in the list: a filled "?" asks something; a ringed mark waits on a decision. */
-const KIND_CHAR: Record<DecisionKind, string> = { ask: "?", approve: "✓", conflict: "!", input: "…", land: "!" };
+const KIND_CHAR: Record<DecisionKind, string> = { ask: "?", approve: "✓", own: "•", conflict: "!", input: "…", land: "!" };
 
 function DecisionDetail(props: {
   decision: Decision;
@@ -431,6 +434,9 @@ function DecisionDetail(props: {
         option: d.kind === "ask" && d.ask ? (i) => d.ask!.options[i] !== undefined && answer(d.ask!.options[i]) : undefined,
         reply: d.kind === "ask" ? () => card.current?.querySelector<HTMLInputElement>(".dd-words input")?.focus() : undefined,
       };
+  const finish = () =>
+    props.onAct("done", () => invoke("move_issue", { key: issue!.key, state: "Done", evidence: "Done by the human, outside Nitely.", reason: null }));
+  const handBack = () => props.onAct("handback", () => invoke("set_owner", { key: issue!.key, owner: "agent" }));
   const reveal = async (path: string) => {
     if (isPreview) {
       setNote("In the app this opens the folder in Explorer.");
@@ -446,7 +452,9 @@ function DecisionDetail(props: {
     ? DONE_WORD[resolved.move]
     : d.kind === "ask"
       ? "waiting for your answer"
-      : live
+      : d.kind === "own"
+        ? "yours to do"
+        : live
         ? LIVENESS_LABEL[live]
         : "no session open";
 
@@ -499,6 +507,16 @@ function DecisionDetail(props: {
             </button>
           </div>
         )}
+        {!resolved && d.kind === "own" && issue && (
+          <div className="actions">
+            <button className="btn primary" disabled={busy} onClick={finish}>
+              Mark done
+            </button>
+            <button className="btn" disabled={busy} onClick={handBack}>
+              Hand back to agents
+            </button>
+          </div>
+        )}
         {d.kind === "approve" && issue && issue.origin !== "nitely" && <span className="muted small">In {originName(issue.origin)}. Act on it there.</span>}
         {!resolved && (d.kind === "conflict" || d.kind === "input" || d.kind === "land") && d.row && (
           <div className="actions">
@@ -532,12 +550,19 @@ function DecisionDetail(props: {
 }
 
 /** What the card's line of who and where says once the human acted. */
-const DONE_WORD: Record<Move, string> = { approve: "approved by you", todo: "sent back to Todo", answer: "answered" };
+const DONE_WORD: Record<Move, string> = {
+  approve: "approved by you",
+  todo: "sent back to Todo",
+  answer: "answered",
+  done: "done by you",
+  handback: "handed back to agents",
+};
 
 /** The kind of decision as the first word of its card, so a column of them scans at a glance. */
 const KIND_WORD: Record<DecisionKind, string> = {
   ask: "Question",
   approve: "Approval",
+  own: "Your work",
   conflict: "Conflict",
   input: "Waiting",
   land: "Land stopped",
@@ -586,6 +611,16 @@ function Body(props: { decision: Decision; detail?: IssueDetail; integration: st
             )}
             {pr?.checks && <ChecksMark checks={pr.checks} />}
           </p>
+        </>
+      );
+    }
+    case "own": {
+      // The issue's own words say what to do; the first paragraph is enough here.
+      const what = (d.issue?.body ?? "").split(/\n\s*\n/)[0].trim();
+      return (
+        <>
+          <p className="decision-matter">Only you can do this, so no agent will take it.</p>
+          {what && <p className="decision-why">{what}</p>}
         </>
       );
     }

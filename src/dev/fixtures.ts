@@ -36,6 +36,7 @@ import type {
   TimelineEntry,
 } from "../types";
 import { computeTrack } from "../ui/lifecycle";
+import { isOwnWork } from "../decisions";
 
 const NOW = Math.floor(Date.now() / 1000);
 const MIN = 60;
@@ -117,6 +118,8 @@ interface IssueSpec {
   body?: string;
   /** Reviewed by the author's own vendor, because the other one is not installed. */
   sameVendor?: boolean;
+  /** Work only the human can do: filed into Needs You, and never handed to an agent. */
+  owner?: "human";
 }
 
 const WORK = ["Reading the code around the change", "Writing the change", "Adding tests", "Fixing a failing test", "Tidying the diff before the gate"];
@@ -274,6 +277,10 @@ const ISSUES: IssueSpec[] = [
   { key: "HAR-10", title: "Calendar sync with Google", kind: "feature", priority: 3, from: 300, to: 300, story: ["filed"] },
   { key: "HAR-15", title: "Rate limit the public API", kind: "improvement", priority: 2, from: 12, to: 12, story: ["filed"] },
   { key: "HAR-16", title: "Mobile menu traps focus", kind: "bug", priority: 2, source: "human", from: 5, to: 5, story: ["filed"] },
+  {
+    key: "HAR-17", title: "Renew the payment provider's live API key", kind: "live-check", priority: 2, vendor: "claude", from: 4, to: 4, story: ["filed"], owner: "human",
+    body: "The provider's dashboard shows the live key expires on the 30th. Rotate it there and paste the new one into the deploy secrets; no agent can sign in to that dashboard.\n\nFound while checking why the staging checkout warned about the key.",
+  },
   { key: "HAR-9", title: "Price shows twice on small screens", kind: "bug", priority: 3, vendor: "cursor", from: 130, to: 75, story: ["filed", "claim", "work", "gate", "review", "pass", "land"] },
   {
     key: "HAR-8", title: "Live check: checkout on Safari", kind: "live-check", priority: 3, vendor: "cursor",
@@ -404,7 +411,7 @@ function build(): World {
     const reviews: ReviewRecord[] = [];
     const number = spec.story.some((s) => s === "changes" || s === "pass" || s === "passhuman") ? prNumber++ : 0;
     const url = number ? prUrl(spec, number) : "";
-    let state = spec.story.length === 1 && spec.from > 80 ? "Backlog" : "Todo";
+    let state = spec.owner === "human" ? "Needs You" : spec.story.length === 1 && spec.from > 80 ? "Backlog" : "Todo";
     let notes = 0;
     let lastAsk: Ask | null = null;
     let claimed: string | null = null;
@@ -442,7 +449,7 @@ function build(): World {
       const ts = Math.round(start + (end - start) * Math.min(1, f + (n > 0 && n < steps - 1 ? (rand() - 0.5) * 0.06 : 0)));
       switch (step) {
         case "filed":
-          timeline.push({ ts, actor: filer, kind: "issue_created", summary: `Filed as ${state}` });
+          timeline.push({ ts, actor: filer, kind: "issue_created", summary: `Filed as ${state}${spec.owner === "human" ? ", the human's own work" : ""}` });
           break;
         case "claim":
           claimed = agent;
@@ -532,6 +539,7 @@ function build(): World {
       labels: [],
       evidence: spec.kind === "bug" ? "Seen on the latest build; steps in the body." : "",
       claimed_by: STATE_TYPE[state] === "started" ? claimed : null,
+      owner: spec.owner ?? "agent",
       created_at: iso(timeline[0].ts),
       updated_at: iso(updated),
       blocked_by: [],
@@ -733,7 +741,7 @@ function snapshot(): Board {
   return {
     repos,
     // Only those without a worktree row, as in nitely-core: the others are flagged on their row.
-    needs_me_issues: world.issues.filter((i) => i.state === "Needs You" && !repos.some((r) => r.rows.some((row) => row.issue_key === i.key))),
+    needs_me_issues: world.issues.filter((i) => (i.state === "Needs You" || isOwnWork(i)) && !repos.some((r) => r.rows.some((row) => row.issue_key === i.key))),
     asks: world.asks.filter((a) => a.answer === null),
     sync: [
       { source: "github", last_attempt: NOW - 95, last_ok: NOW - 95, last_error: null },
@@ -937,6 +945,27 @@ function moveIssue(args: Record<string, unknown>) {
   if (issue.state_type !== "started") issue.claimed_by = null;
   retrack(world, issue);
   recount(world);
+}
+
+/** As nitely-core's set_owner, done by the human: handing work back from Needs You puts it in Todo. */
+function setOwner(args: Record<string, unknown>) {
+  const issue = world.issues.find((i) => i.key === args.key);
+  if (!issue) throw `no issue ${String(args.key)}`;
+  const owner = String(args.owner);
+  if (owner === issue.owner) return issue;
+  const ts = Math.floor(Date.now() / 1000);
+  const before = issue.state;
+  if (owner === "human" && issue.state !== "Backlog" && issue.state_type !== "completed" && issue.state_type !== "canceled") issue.state = "Needs You";
+  if (owner === "agent" && issue.state === "Needs You") issue.state = "Todo";
+  issue.state_type = STATE_TYPE[issue.state] ?? issue.state_type;
+  issue.owner = owner;
+  issue.claimed_by = null;
+  issue.updated_at = iso(ts);
+  const moved = issue.state !== before ? `: ${before} → ${issue.state}` : "";
+  world.timelines.get(issue.key)!.push({ ts, actor: "human", kind: "owner_changed", summary: `${owner === "human" ? "Made the human's own work" : "Handed back to agents"}${moved}` });
+  retrack(world, issue);
+  recount(world);
+  return issue;
 }
 
 function answerAsk(args: Record<string, unknown>) {
@@ -1204,6 +1233,8 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return moveIssue(args);
       case "set_blocker":
         return setBlocker(args);
+      case "set_owner":
+        return setOwner(args);
       case "answer_ask":
         return answerAsk(args);
       case "sync_now":

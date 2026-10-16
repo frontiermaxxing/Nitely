@@ -116,3 +116,20 @@ test("the track moves to where the move takes it", () => {
   assert.equal(trackAfter(t, "answer", NOW).asking, false);
   assert.equal(trackAfter(t, "answer", NOW).station, "needs");
 });
+
+test("the human's own work is its own kind of decision, in any open state outside Backlog", () => {
+  const own = (state: string) => ({ ...issue("X-9", state), owner: "human" });
+  assert.deepEqual(
+    decisionsOf(board([own("Needs You")]), new Map(), NOW).map((d) => [d.id, d.kind]),
+    [["own-X-9", "own"]],
+  );
+  assert.equal(decisionsOf(board([own("Todo")]), new Map(), NOW)[0]?.kind, "own");
+  assert.equal(decisionsOf(board([own("Backlog")]), new Map(), NOW).length, 0);
+  assert.equal(decisionsOf(board([{ ...own("Done"), state_type: "completed" }]), new Map(), NOW).length, 0);
+});
+
+test("marking your own work done or handing it back moves the track at once", () => {
+  const t: Track = { station: "needs", reached: { todo: 1, needs: 2 }, rounds: 0, stuck: null, asking: false, closed: null, backlog: false, since: 2 };
+  assert.equal(trackAfter(t, "done", NOW).station, "done");
+  assert.equal(trackAfter(t, "handback", NOW).station, "todo");
+});

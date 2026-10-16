@@ -154,6 +154,14 @@ async fn move_issue(key: String, state: String, evidence: Option<String>, reason
     db.move_issue(&key, &state, evidence.as_deref(), reason.as_deref(), &ME).map_err(err)
 }
 
+/// Makes an issue the human's own work (`human`) or hands it back to agents (`agent`).
+#[tauri::command]
+async fn set_owner(key: String, owner: String) -> Result<IssueRecord, String> {
+    let mut db = db()?;
+    let key = db.current_key(&key).map_err(err)?;
+    db.set_owner(&key, &owner, &ME).map_err(err)
+}
+
 #[tauri::command]
 async fn answer_ask(id: i64, answer: String) -> Result<Ask, String> {
     db()?.answer_ask(id, &answer, &ME).map_err(err)
@@ -327,6 +335,7 @@ pub fn run() {
             issue_detail,
             set_blocker,
             move_issue,
+            set_owner,
             answer_ask,
             connect_plan,
             connect_apply,
