@@ -418,12 +418,7 @@ fn write(path: &Path, text: &str) -> Result<()> {
 }
 
 fn run(command: &str) -> Result<()> {
-    let out = if cfg!(windows) {
-        crate::playbook::shell_free_command("cmd").args(["/C", command]).output()
-    } else {
-        crate::playbook::shell_free_command("sh").args(["-c", command]).output()
-    }
-    .with_context(|| format!("running {command}"))?;
+    let out = crate::playbook::shell_command(command).output().with_context(|| format!("running {command}"))?;
     if !out.status.success() {
         bail!("{}", String::from_utf8_lossy(&out.stderr).trim().lines().last().unwrap_or("failed"));
     }

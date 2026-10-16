@@ -290,17 +290,28 @@ pub(crate) fn shell_free_command(program: &str) -> Command {
     cmd
 }
 
+/// `command` run through the platform shell: cmd on Windows, sh elsewhere.
+pub(crate) fn shell_command(command: &str) -> Command {
+    let mut cmd;
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // Passed raw: Rust's argument quoting turns `"` into `\"`, which cmd keeps literally.
+        // /S strips only the outer quotes, so quotes inside the command reach the program as written.
+        cmd = shell_free_command("cmd");
+        cmd.args(["/D", "/S", "/C"]).raw_arg(format!("\"{command}\""));
+    }
+    #[cfg(not(windows))]
+    {
+        cmd = shell_free_command("sh");
+        cmd.args(["-c", command]);
+    }
+    cmd
+}
+
 /// Runs one playbook command through the platform shell.
 fn run_shell(command: &str, dir: &Path) -> Result<(bool, String, u64)> {
-    let mut cmd = if cfg!(windows) {
-        let mut c = shell_free_command("cmd");
-        c.args(["/C", command]);
-        c
-    } else {
-        let mut c = shell_free_command("sh");
-        c.args(["-c", command]);
-        c
-    };
+    let mut cmd = shell_command(command);
     let started = Instant::now();
     let out = cmd.current_dir(dir).output().with_context(|| format!("running {command}"))?;
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -608,10 +619,14 @@ mod tests {
         let sh = |args: &[&str]| assert!(Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap().status.success());
         sh(&["init", "-q", "-b", "main"]);
         sh(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"]);
+        // Commands run through cmd on Windows and sh elsewhere; the quotes must reach the program.
+        let find = if cfg!(windows) { r#"findstr /c:"main" setup.txt"# } else { r#"grep -q "main" setup.txt"# };
         std::fs::write(
             repo.join(PLAYBOOK_PATH),
-            "[worktree]\ndir = \"../wt/{key}\"\nsetup = [\"echo {base} > setup.txt\"]\n[gate]\ncommands = [\"grep -q main setup.txt\"]\n\
-             [[gate.steps]]\nrun = \"echo never\"\nwhen_changed = [\"^api/\"]\n[[gate.steps]]\nrun = \"false\"\n",
+            format!(
+                "[worktree]\ndir = \"../wt/{{key}}\"\nsetup = [\"echo {{base}} > setup.txt\"]\n[gate]\ncommands = [{find:?}]\n\
+                 [[gate.steps]]\nrun = \"echo never\"\nwhen_changed = [\"^api/\"]\n[[gate.steps]]\nrun = \"exit 1\"\n"
+            ),
         )
         .unwrap();
         let db = Db::open(&base.join("t.db")).unwrap();
