@@ -515,6 +515,11 @@ impl Supervisor {
         let mut i = 0;
         while i < self.preparing.len() {
             let exited = match self.preparing[i].process.exited() {
+                // A setup taken over from an earlier supervisor has no exit code: its record says.
+                Ok(Some(code)) if code < 0 => {
+                    let worktree = Path::new(self.preparing[i].agent_id.split_once(':').map_or("", |(_, w)| w));
+                    Some(if playbook::setup_passed(worktree) { Ok(0) } else { Err("its setup ended without passing".to_string()) })
+                }
                 Ok(Some(code)) => Some(Ok(code)),
                 Ok(None) if now - self.preparing[i].since > deadline => {
                     self.preparing[i].process.stop();
@@ -597,7 +602,7 @@ impl Supervisor {
             db.crew_worker_ended(id, None, "launch_failed", &why)?;
             return Ok(Start::LaunchFailed(why));
         };
-        db.crew_worker_working(id, &log)?;
+        db.crew_worker_working(id, &log, ts)?;
         let launch = Launch {
             agent: agent.into(),
             program,
@@ -637,13 +642,15 @@ impl Supervisor {
     fn adopt(&mut self, db: &mut Db, rules: &CrewRules, tick: &mut Tick) -> Result<()> {
         for w in db.crew_running(&self.project)? {
             if w.phase == "setup" {
-                // A setup an earlier supervisor started: watch it if it still runs. If it is gone, a
-                // worktree that is there is as far as `nitely start` would take it again (it does not
-                // set up an existing worktree twice); otherwise start the setup again.
+                // A setup an earlier supervisor started: watch it if it still runs. If it is gone,
+                // its worktree says how it went (`nitely start` would not set up an existing worktree
+                // again); with no worktree yet, start it again.
                 let Some(issue) = db.issue(&w.issue_key)? else { continue };
+                let worktree = Path::new(&w.worktree);
                 let process = match w.pid.and_then(|pid| self.agents.adopt(pid)) {
                     Some(p) => p,
-                    None if Path::new(&w.worktree).join(".git").exists() => Box::new(Done),
+                    None if playbook::setup_passed(worktree) => Box::new(Done(0)),
+                    None if worktree.join(".git").exists() => Box::new(Done(1)),
                     None => match self.prepare(db, w.id, &issue, &w.agent, Path::new(&w.log)) {
                         Ok(p) => p,
                         Err(e) => {
@@ -1300,8 +1307,12 @@ impl Db {
     }
 
     /// A worker's setup passed and its agent starts: its log is the agent's from now on.
-    fn crew_worker_working(&self, id: i64, log: &Path) -> Result<()> {
-        self.conn.execute("UPDATE crew_worker SET phase = 'work', log_path = ?2 WHERE id = ?1", rusqlite::params![id, log.to_string_lossy()])?;
+    /// Its time limit counts from here, not from the setup.
+    fn crew_worker_working(&self, id: i64, log: &Path, ts: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE crew_worker SET phase = 'work', log_path = ?2, started_at = ?3 WHERE id = ?1",
+            rusqlite::params![id, log.to_string_lossy(), ts],
+        )?;
         Ok(())
     }
 
@@ -1416,15 +1427,15 @@ impl Agents for SystemAgents {
     }
 }
 
-/// A setup that is known to be done.
-struct Done;
+/// A setup known to have ended, with this exit code.
+struct Done(i32);
 
 impl Process for Done {
     fn pid(&self) -> u32 {
         0
     }
     fn exited(&mut self) -> Result<Option<i32>> {
-        Ok(Some(0))
+        Ok(Some(self.0))
     }
     fn stop(&mut self) {}
 }
@@ -2051,6 +2062,19 @@ workers = 1
         let rows = f.db.crew_running("NIT").unwrap();
         assert_eq!((rows.len(), rows[0].phase.as_str(), rows[0].id), (1, "work", row.id), "the same row, now working");
         assert!(rows[0].log.ends_with("-claude.log"));
+
+        // A setup that ended without passing while no supervisor watched goes to a person.
+        let mut f = fixture(&format!("setup = [\"exit 1\"]\n{GATE}[crew]\nworkers = 1\n"));
+        let hung = Fake { installed: vec!["claude"], hang_setup: true, db: Some(f.base.join("t.db")), ..Default::default() };
+        Supervisor::new("NIT", &f.repo, &f.base.join("crew"), "nitely", Box::new(hung)).with_clock(|| NOON).tick(&mut f.db, false).unwrap();
+        let issue = f.db.issue("NIT-1").unwrap().unwrap();
+        let worktree = PathBuf::from(&f.db.crew_running("NIT").unwrap()[0].worktree);
+        playbook::start_task(&f.db, &f.repo, &issue, "claude", &Actor::Agent("cli".into())).unwrap();
+        assert!(worktree.join(".git").exists() && !playbook::setup_passed(&worktree));
+        let fake = Fake { installed: vec!["claude"], ..Default::default() };
+        let tick = supervisor(&f, &fake).tick(&mut f.db, false).unwrap();
+        assert!(!fake.prepares.borrow().contains(&"NIT-1".to_string()) && !tick.started.iter().any(|w| w.issue == "NIT-1"), "not set up again: {tick:?}");
+        assert_eq!(f.db.issue("NIT-1").unwrap().unwrap().state, "Needs You");
     }
 
     #[test]

@@ -153,6 +153,12 @@ fn setup_record(worktree: &Path) -> Option<PathBuf> {
     Some(if path.is_absolute() { path } else { worktree.join(path) })
 }
 
+/// Whether `worktree` exists and its setup passed: `start_task` records that only when every setup
+/// command passed, so a worktree whose setup failed or was cut off has no record.
+pub fn setup_passed(worktree: &Path) -> bool {
+    worktree.join(".git").exists() && setup_record(worktree).is_some_and(|r| r.exists())
+}
+
 /// FNV-1a over the names and contents of the dependency files present, stable across builds.
 fn setup_fingerprint(rules: &WorktreeRules, worktree: &Path) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
