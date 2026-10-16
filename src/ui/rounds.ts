@@ -44,6 +44,17 @@ export interface Journey {
   lands: LandRun[];
 }
 
+/** "Gate passed at 1a2b3c4" → "1a2b3c4". */
+function gateCommitOf(summary: string | null): string | null {
+  const m = summary?.match(/^Gate passed at (\S+)/);
+  return m ? m[1] : null;
+}
+
+/** The outcome a review record gives its round. */
+function outcomeOf(rec: ReviewRecord): RoundOutcome {
+  return rec.verdict === "changes" ? "changes" : rec.verdict === "pass" ? "passed" : "unreviewed";
+}
+
 /** "Review by codex started" → "codex". */
 function reviewerOf(summary: string | null): string | null {
   const m = summary?.match(/^Review by (\S+)/);
@@ -53,14 +64,19 @@ function reviewerOf(summary: string | null): string | null {
 /**
  * The rounds an issue went through, from its timeline and review records. A round opens with the
  * first gate or review after the last submit and closes with the next submit note; the review
- * record that submit wrote is matched to it by time. Without a timeline, each review record is a
- * round of its own.
+ * record that submit wrote is matched to it by time, and by the commit its gate passed at when
+ * two submits share a second. A submit that recorded its review but stopped before its note (the
+ * push or pull request stalled) still shows that review on the open round. Without a timeline,
+ * each review record is a round of its own.
  */
 export function journeyOf(timeline: TimelineEntry[] = [], reviews: ReviewRecord[] = []): Journey {
   const rounds: Round[] = [];
   const lands: LandRun[] = [];
   // The round in progress, if any (a holder, so the closure below and the loop share it).
   const cur: { round: Round | null } = { round: null };
+  // Per round: the commit its last passing gate ran at, and when its review started.
+  const commitOf = new Map<Round, string>();
+  const reviewStart = new Map<Round, number>();
   const openRound = (ts: number): Round => {
     if (!cur.round) {
       cur.round = { n: rounds.length + 1, start: ts, end: null, gates: [], outcome: "open", reviewer: null, review: null, pushFailed: false, waitsForHuman: false };
@@ -73,12 +89,18 @@ export function journeyOf(timeline: TimelineEntry[] = [], reviews: ReviewRecord[
     switch (e.kind) {
       case "gate_passed":
       case "gate_failed":
-        openRound(e.ts).gates.push({ ok: e.kind === "gate_passed", ts: e.ts, summary: e.summary });
+        {
+          const r = openRound(e.ts);
+          r.gates.push({ ok: e.kind === "gate_passed", ts: e.ts, summary: e.summary });
+          const commit = e.kind === "gate_passed" ? gateCommitOf(e.summary) : null;
+          if (commit) commitOf.set(r, commit);
+        }
         break;
       case "review_started": {
         const r = openRound(e.ts);
         r.outcome = "reviewing";
         r.reviewer = reviewerOf(e.summary) ?? r.reviewer;
+        reviewStart.set(r, e.ts);
         break;
       }
       case "review_failed": {
@@ -120,7 +142,7 @@ export function journeyOf(timeline: TimelineEntry[] = [], reviews: ReviewRecord[
         start: rec.ts,
         end: rec.ts,
         gates: [],
-        outcome: rec.verdict === "changes" ? "changes" : rec.verdict === "pass" ? "passed" : "unreviewed",
+        outcome: outcomeOf(rec),
         reviewer: rec.reviewer || null,
         review: rec,
         pushFailed: false,
@@ -130,15 +152,39 @@ export function journeyOf(timeline: TimelineEntry[] = [], reviews: ReviewRecord[
     return { rounds, lands };
   }
 
-  // Each closed round takes the latest record written at or before its submit note (and after
-  // the previous round's): submit records the review just before it adds the note, and the next
-  // round's review takes minutes, so it can never share or precede that second.
-  let next = 0;
+  // Each closed round takes the record written at or before its submit note (and after the
+  // previous round's): submit records the review just before it adds the note. Of those, the one
+  // for the commit the round's gate passed at, else the latest: two quick submits can share a
+  // second, and then only the commit tells their records apart.
+  const used = new Set<ReviewRecord>();
+  let floor = -Infinity;
+  const take = (r: Round, from: number, upTo: number): ReviewRecord | null => {
+    const fits = records.filter((rec) => !used.has(rec) && rec.ts >= Math.max(floor, from) && rec.ts <= upTo);
+    const commit = commitOf.get(r);
+    const rec = fits.filter((x) => commit && x.commit_sha === commit).pop() ?? fits.pop() ?? null;
+    if (rec) {
+      used.add(rec);
+      floor = rec.ts;
+    }
+    return rec;
+  };
   for (const r of rounds) {
-    if (r.end === null) continue;
-    let match: ReviewRecord | null = null;
-    while (next < records.length && records[next].ts <= r.end) match = records[next++];
-    r.review = match;
+    if (r.end !== null) r.review = take(r, -Infinity, r.end);
+  }
+
+  // A review is running, or its submit stopped after recording it: a record written since the
+  // review started is that review's.
+  const last = rounds[rounds.length - 1];
+  const started = last && last.end === null && last.outcome === "reviewing" ? reviewStart.get(last) : undefined;
+  if (last && started !== undefined) {
+    const rec = take(last, started, Infinity);
+    if (rec) {
+      last.review = rec;
+      last.outcome = outcomeOf(rec);
+      last.reviewer = rec.reviewer || last.reviewer;
+      last.waitsForHuman = rec.verdict !== "changes" && rec.approver === "human";
+      last.end = rec.ts;
+    }
   }
   return { rounds, lands };
 }
