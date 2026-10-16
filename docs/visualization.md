@@ -65,9 +65,13 @@ Branches off the track:
   Duplicate.
 
 Stations before the current one that were never reached are **skipped** (small hollow ring); most
-issues skip Needs you. All of this is computed in one place, `src/ui/lifecycle.ts`:
-`trackOf(issue, timeline?, reviews?)`. Without a timeline (list rows, Linear issues) only the
-station is known, from the state. Never compute stations anywhere else.
+issues skip Needs you. All of this is computed in one place, the backend's
+`crates/nitely-core/src/track.rs` (with its tests). It puts a `track` on every issue the app
+receives (`issues`, `issue_detail`, `snapshot`, `pulse`): open issues from their timelines, closed
+issues in lists from their state. On the frontend always call `trackOf(issue)` from
+`src/ui/lifecycle.ts`, which returns that `track`; its `computeTrack` mirrors the Rust rules only for
+the browser preview's sample data. A rule change goes into `track.rs` first, then `computeTrack`.
+Never compute stations anywhere else.
 
 ## Primitives (`src/ui/`)
 
@@ -130,6 +134,26 @@ Use roles, never raw colors. Both themes define every role.
 
 The primary button is ink (`--fg`), not a brand color, so the attention color stays free.
 
+## Pulse, the home screen
+
+`src/Pulse.tsx` is the reference for a whole view built from these parts. It answers, in order:
+
+1. **The glance:** four readouts (needs you, agents working, stuck, landed today), each a large
+   number in its role color (attention, live, stuck, ink) with what it counts under it, as links or
+   tokens. A zero turns `--fg-3` and says so in words ("Nothing needs you").
+2. **One flow per project:** the stations as columns on one line, each open issue a card at its
+   station (agent mark with live dot, key, two-line title). Todo and Done today show keys only,
+   because queued and finished work should stay quiet. Stuck work (a stuck track, a rebase conflict
+   from the board, or quiet for an hour at an agent's station) sits in a band under the stations,
+   on `--bg`, with red borders and the reason in red; quiet cards fade instead. Below 960px the
+   stations become rows.
+3. **Since you were last here:** counts that filter a feed (landed, filed, stuck, review rounds,
+   questions) and landed and submitted per hour over 24 hours. The last-seen time is saved when you
+   leave Pulse (`localStorage`), not while you read it.
+
+Its data is one `pulse` command (`crates/nitely-core/src/pulse.rs`), which reads only the database.
+Git state (rebase conflicts) and live sessions come from the snapshot the app already holds.
+
 ## Building a new view
 
 1. **Start from the question the view answers** and put the answer in its header: a one-line
@@ -159,7 +183,7 @@ and inside Tauri nothing changes.
 
 - Agents: `.claude/launch.json` has a `web` configuration (port 5173), so the Browser pane's
   `preview_start` with name `web` opens it. Or run `npm run dev -- --port <port> --strictPort`.
-- Routes are in the hash: `#inbox`, `#now`, `#project/NIT`, `#agents`, `#add`, `#kit`, and
+- Routes are in the hash: `#pulse` (the default), `#inbox`, `#now`, `#project/NIT`, `#agents`, `#add`, `#kit`, and
   `@KEY` opens an issue panel (`#now@NIT-29`).
 - Theme: the switch at the bottom of the sidebar, or `?theme=light|dark` in the URL, or the
   browser's color scheme. `[data-theme]` on `<html>` forces a theme.

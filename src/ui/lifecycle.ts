@@ -87,10 +87,19 @@ function movedTo(summary: string | null): string | null {
 }
 
 /**
- * The issue's track, from its state and, when given, its timeline and review records. Without a
- * timeline only the station is known, which is all a list row needs.
+ * The issue's track. The backend computes it (crates/nitely-core/src/track.rs) and sends it on
+ * every issue, so rows, the panel and Pulse agree; this falls back to `computeTrack` only for
+ * issues without one, such as the browser preview's sample data.
  */
 export function trackOf(issue: IssueRecord, timeline?: TimelineEntry[], reviews?: ReviewRecord[]): Track {
+  return issue.track ?? computeTrack(issue, timeline, reviews);
+}
+
+/**
+ * The track from the issue's state and, when given, its timeline and review records: the same
+ * rules as track.rs, for the preview's fixtures. Without a timeline only the station is known.
+ */
+export function computeTrack(issue: IssueRecord, timeline?: TimelineEntry[], reviews?: ReviewRecord[]): Track {
   const track: Track = {
     station: stationOfState(issue.state, issue.state_type),
     reached: {},

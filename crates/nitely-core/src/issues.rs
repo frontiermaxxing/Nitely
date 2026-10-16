@@ -9,6 +9,7 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
 use crate::db::{now, Db};
+use crate::track::{track_of, Track};
 
 pub const KINDS: &[&str] = &["bug", "feature", "improvement", "idea", "live-check"];
 pub const SOURCES: &[&str] = &["claude", "codex", "cursor", "human"];
@@ -63,6 +64,9 @@ pub struct IssueRecord {
     /// The priority it is worked at: its own, raised to that of the most urgent open issue it
     /// blocks, directly or through other blockers. Same scale as `priority`.
     pub urgency: i64,
+    /// Where it is on the lifecycle track (`track.rs`). Open issues and single lookups use their
+    /// timeline; closed issues in a list only their state.
+    pub track: Track,
 }
 
 impl IssueRecord {
@@ -489,6 +493,8 @@ impl Db {
         Ok(match issue {
             Some(mut i) => {
                 Deps::load(&self.conn)?.fill(&mut i);
+                let changes = self.change_reviews()?.get(&i.key.to_uppercase()).copied().unwrap_or(0);
+                i.track = track_of(&i, &self.timeline(&i.key)?, changes);
                 Some(i)
             }
             None => None,
@@ -510,6 +516,7 @@ impl Db {
         for i in &mut issues {
             deps.fill(i);
         }
+        self.fill_tracks(&mut issues)?;
         // Stable, so issues of equal urgency keep their priority and number order.
         issues.sort_by_key(|i| rank(i.urgency));
         Ok(issues)
@@ -735,6 +742,44 @@ impl Db {
             params![issue.key, actor.id(), ts],
         )?;
         Ok(())
+    }
+
+    /// Fills each issue's track: open issues from their timelines, read in one query; closed ones
+    /// from their state, which is all a list shows of them.
+    fn fill_tracks(&self, issues: &mut [IssueRecord]) -> Result<()> {
+        let mut timelines: HashMap<String, Vec<TimelineEntry>> = HashMap::new();
+        let mut stmt = self.conn.prepare(
+            "SELECT e.issue_key, e.ts, e.actor, e.type, e.summary FROM event e
+             JOIN issue i ON i.key = e.issue_key COLLATE NOCASE
+             WHERE i.state_type NOT IN ('completed', 'canceled')
+             ORDER BY e.ts, e.id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, TimelineEntry { ts: r.get(1)?, actor: r.get(2)?, kind: r.get(3)?, summary: r.get(4)? }))
+        })?;
+        for row in rows {
+            let (key, entry) = row?;
+            timelines.entry(key.to_uppercase()).or_default().push(entry);
+        }
+        let changes = self.change_reviews()?;
+        for i in issues.iter_mut() {
+            let key = i.key.to_uppercase();
+            let timeline = if i.is_open() { timelines.get(&key).map(Vec::as_slice).unwrap_or(&[]) } else { &[] };
+            i.track = track_of(i, timeline, changes.get(&key).copied().unwrap_or(0));
+        }
+        Ok(())
+    }
+
+    /// Review rounds that asked for changes, per issue key (uppercase).
+    fn change_reviews(&self) -> Result<HashMap<String, i64>> {
+        let mut stmt = self.conn.prepare("SELECT issue_key, COUNT(*) FROM review WHERE verdict = 'changes' GROUP BY issue_key")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?.to_uppercase(), r.get::<_, i64>(1)?)))?;
+        let mut counts = HashMap::new();
+        for row in rows {
+            let (key, n) = row?;
+            *counts.entry(key).or_insert(0) += n;
+        }
+        Ok(counts)
     }
 
     pub fn timeline(&self, key: &str) -> Result<Vec<TimelineEntry>> {

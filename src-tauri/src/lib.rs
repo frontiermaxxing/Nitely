@@ -29,6 +29,13 @@ async fn snapshot() -> Result<Board, String> {
     nitely_core::snapshot(&config, &db()?).map_err(err)
 }
 
+/// The Pulse home view in one read. `since` is when the person last looked and `day_start` the
+/// start of their local day, both in seconds.
+#[tauri::command]
+async fn pulse(since: i64, day_start: i64) -> Result<nitely_core::Pulse, String> {
+    nitely_core::pulse(&db()?, since, day_start).map_err(err)
+}
+
 #[tauri::command]
 async fn sync_now() -> Result<remote::SyncReport, String> {
     run_sync().map_err(err)
@@ -181,6 +188,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             snapshot,
+            pulse,
             sync_now,
             projects,
             create_project,

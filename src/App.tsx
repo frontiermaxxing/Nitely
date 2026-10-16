@@ -4,6 +4,7 @@ import type { AgentPlan, Board, Project } from "./types";
 import { AgentSetup, pendingChanges, setupErrors } from "./Agents";
 import { Inbox } from "./Inbox";
 import { Now } from "./Now";
+import { Pulse } from "./Pulse";
 import { Backlog } from "./Backlog";
 import { IssuePanel } from "./IssuePanel";
 import { AddProject } from "./AddProject";
@@ -20,6 +21,7 @@ const CHANGED_EVENT = "nitely://changed";
 const REFRESH_GAP_MS = 1000;
 
 export type View =
+  | { kind: "pulse" }
   | { kind: "inbox" }
   | { kind: "now" }
   | { kind: "project"; key: string }
@@ -38,9 +40,9 @@ function fromHash(hash: string): { view: View; issue: string | null } {
   }
   const [path, issue] = raw.split("@");
   const [kind, key] = path.split("/");
-  const plain = ["inbox", "now", "add", "agents"].concat(isPreview ? ["kit"] : []);
+  const plain = ["pulse", "inbox", "now", "add", "agents"].concat(isPreview ? ["kit"] : []);
   const view: View =
-    kind === "project" && key ? { kind: "project", key: key.toUpperCase() } : plain.includes(kind) ? ({ kind } as View) : { kind: "inbox" };
+    kind === "project" && key ? { kind: "project", key: key.toUpperCase() } : plain.includes(kind) ? ({ kind } as View) : { kind: "pulse" };
   return { view, issue: issue ? issue.toUpperCase() : null };
 }
 
@@ -144,6 +146,7 @@ export function App() {
           <BrandMark />
           Nitely
         </div>
+        <NavItem active={view.kind === "pulse"} onClick={() => setView({ kind: "pulse" })} label="Pulse" />
         <NavItem active={view.kind === "inbox"} onClick={() => setView({ kind: "inbox" })} label="Inbox" count={inboxCount} tone="attention" />
         <NavItem active={view.kind === "now"} onClick={() => setView({ kind: "now" })} label="Now" count={working} tone="live" />
         <div className="nav-heading">Projects</div>
@@ -183,6 +186,7 @@ export function App() {
           </p>
         )}
         {view.kind === "agents" && <AgentSetup agents={agents} onUpdated={loadAgents} onRecheck={loadAgents} />}
+        {view.kind === "pulse" && <Pulse board={board} now={now} version={version} onOpenIssue={setOpenIssue} onGo={setView} />}
         {view.kind === "inbox" && board && <Inbox board={board} now={now} onOpenIssue={setOpenIssue} onChanged={changed} />}
         {view.kind === "now" && board && <Now board={board} now={now} onOpenIssue={setOpenIssue} onChanged={changed} />}
         {view.kind === "add" && (

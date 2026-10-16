@@ -1,5 +1,7 @@
 // Mirrors nitely-core's snapshot types (crates/nitely-core/src/snapshot.rs).
 
+import type { Track } from "./ui/lifecycle";
+
 export type SessionState = "working" | "idle" | "waiting" | "ended";
 
 export interface Session {
@@ -67,6 +69,8 @@ export interface IssueRecord {
   blocks: string[];
   /** Its priority, raised to that of the most urgent open issue it blocks (same 0-4 scale). */
   urgency: number;
+  /** Where it is on the lifecycle track, computed by the backend (crates/nitely-core/src/track.rs). */
+  track?: Track;
 }
 
 export interface PrRecord {
@@ -191,4 +195,58 @@ export interface Applied {
   repo: string;
   done: string[];
   failed: string[];
+}
+
+// The Pulse home view (crates/nitely-core/src/pulse.rs).
+
+export interface GateRun {
+  ts: number;
+  passed: boolean;
+  summary: string | null;
+}
+
+export interface FlowIssue {
+  issue: IssueRecord;
+  /** Who works on it: an actor id like `claude:c:/...`, or a vendor. */
+  agent: string | null;
+  session: Session | null;
+  pr: PrRecord | null;
+  review: ReviewRecord | null;
+  gate: GateRun | null;
+  worktree: string | null;
+  last_activity: number;
+  /** At an agent's station, not stuck, and nothing happened for an hour. */
+  quiet: boolean;
+}
+
+export interface ProjectFlow {
+  key: string;
+  name: string;
+  issues: FlowIssue[];
+  done_today: FlowIssue[];
+}
+
+export interface Happening {
+  ts: number;
+  kind: "landed" | "filed" | "stuck" | "review" | "asked";
+  issue_key: string | null;
+  actor: string;
+  summary: string | null;
+}
+
+export interface PulseHour {
+  start: number;
+  landed: number;
+  submitted: number;
+}
+
+export interface Pulse {
+  now: number;
+  since: number;
+  projects: ProjectFlow[];
+  asks: Ask[];
+  approvals: IssueRecord[];
+  happened: Happening[];
+  throughput: PulseHour[];
+  landed_today: number;
 }

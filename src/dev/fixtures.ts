@@ -15,10 +15,13 @@ import type {
   Board,
   BranchState,
   ConnectPlan,
+  FlowIssue,
+  Happening,
   IssueDetail,
   IssueRecord,
   PrRecord,
   Project,
+  Pulse,
   RepoView,
   ReviewRecord,
   Session,
@@ -26,6 +29,7 @@ import type {
   TaskRow,
   TimelineEntry,
 } from "../types";
+import { computeTrack } from "../ui/lifecycle";
 
 const NOW = Math.floor(Date.now() / 1000);
 const MIN = 60;
@@ -472,6 +476,7 @@ function build(): World {
     }
   }
   link(world);
+  for (const i of world.issues) retrack(world, i);
   world.projects = Object.entries(PROJECT_NAMES).map(([key, name]) => ({ key, name, open_issues: 0 }));
   recount(world);
   return world;
@@ -504,6 +509,12 @@ function link(world: World) {
 function linked(world: World, key: string): LinkedIssue {
   const i = byKey(world, key);
   return { key: i.key, title: i.title, state: i.state, open: isOpen(i) };
+}
+
+/** The track the backend would send: computed from the issue's timeline and reviews. */
+function retrack(world: World, issue: IssueRecord) {
+  issue.track = undefined;
+  issue.track = computeTrack(issue, world.timelines.get(issue.key), world.reviews.get(issue.key));
 }
 
 function recount(world: World) {
@@ -588,6 +599,81 @@ function snapshot(): Board {
   };
 }
 
+// ----- Pulse: the same shape crates/nitely-core/src/pulse.rs returns -----
+
+const QUIET_SECS = 3600;
+const HAPPENING: Record<string, Happening["kind"]> = {
+  landed: "landed",
+  issue_created: "filed",
+  gate_failed: "stuck",
+  land_failed: "stuck",
+  review_failed: "stuck",
+  submit: "review",
+  ask: "asked",
+};
+
+function flowIssue(issue: IssueRecord, now: number): FlowIssue {
+  const spec = ISSUES.find((s) => s.key === issue.key)!;
+  const timeline = world.timelines.get(issue.key) ?? [];
+  const gate = [...timeline].reverse().find((t) => t.kind === "gate_passed" || t.kind === "gate_failed");
+  const s = spec.live ? session(spec, spec.live) : null;
+  const last = Math.max(timeline[timeline.length - 1]?.ts ?? 0, s?.last_seen_at ?? 0);
+  const track = issue.track!;
+  const atAgent = ["started", "working", "gate", "review", "landing"].includes(track.station);
+  const open = issue.state_type !== "completed" && issue.state_type !== "canceled";
+  return {
+    issue,
+    agent: issue.claimed_by ?? (spec.vendor ? `${spec.vendor}:c:/development/${repoOf(spec.key).name.toLowerCase()}-worktrees/${spec.key.toLowerCase()}` : null),
+    session: s,
+    pr: world.prs.get(issue.key)?.[0] ?? null,
+    review: world.reviews.get(issue.key)?.[0] ?? null,
+    gate: gate ? { ts: gate.ts, passed: gate.kind === "gate_passed", summary: gate.summary } : null,
+    worktree: spec.branch ? worktreeOf(spec) : null,
+    last_activity: last,
+    quiet: open && atAgent && !track.stuck && last > 0 && now - last > QUIET_SECS,
+  };
+}
+
+function pulse(sinceArg: number, dayStart: number): Pulse {
+  const now = Math.floor(Date.now() / 1000);
+  const since = Math.max(sinceArg || 0, now - 7 * 24 * HOUR);
+  const today = iso(dayStart);
+  const projects = world.projects.map((p) => {
+    const mine = issues({ project: p.key, includeClosed: true });
+    return {
+      key: p.key,
+      name: p.name,
+      issues: mine.filter((i) => i.state_type !== "completed" && i.state_type !== "canceled").map((i) => flowIssue(i, now)),
+      done_today: mine.filter((i) => i.state === "Done" && i.updated_at >= today).map((i) => flowIssue(i, now)),
+    };
+  });
+  const events = [...world.timelines.entries()].flatMap(([key, tl]) => tl.map((t) => ({ ...t, key })));
+  const happened: Happening[] = events
+    .filter((e) => e.ts >= since && HAPPENING[e.kind])
+    .sort((a, b) => b.ts - a.ts)
+    .slice(0, 300)
+    .map((e) => ({ ts: e.ts, kind: HAPPENING[e.kind], issue_key: e.key, actor: e.actor, summary: e.summary }));
+  const end = (Math.floor(now / HOUR) + 1) * HOUR;
+  const start = end - 24 * HOUR;
+  const throughput = Array.from({ length: 24 }, (_, h) => ({ start: start + h * HOUR, landed: 0, submitted: 0 }));
+  for (const e of events) {
+    if (e.ts < start || (e.kind !== "landed" && e.kind !== "submit")) continue;
+    const h = throughput[Math.min(23, Math.floor((e.ts - start) / HOUR))];
+    if (e.kind === "landed") h.landed++;
+    else h.submitted++;
+  }
+  return {
+    now,
+    since,
+    projects,
+    asks: world.asks.filter((a) => a.answer === null),
+    approvals: world.issues.filter((i) => i.state === "Needs You"),
+    happened,
+    throughput,
+    landed_today: events.filter((e) => e.kind === "landed" && e.ts >= dayStart).length,
+  };
+}
+
 const PRIORITY_ORDER = (p: number) => (p === 0 ? 9 : p);
 
 function issues(args: Record<string, unknown>): IssueRecord[] {
@@ -626,6 +712,7 @@ function moveIssue(args: Record<string, unknown>) {
   issue.state_type = STATE_TYPE[to] ?? issue.state_type;
   issue.updated_at = iso(ts);
   if (issue.state_type !== "started") issue.claimed_by = null;
+  retrack(world, issue);
   recount(world);
 }
 
@@ -636,6 +723,8 @@ function answerAsk(args: Record<string, unknown>) {
   ask.answer = String(args.answer);
   ask.answered_at = ts;
   if (ask.issue_key) world.timelines.get(ask.issue_key)?.push({ ts, actor: "human", kind: "answer", summary: ask.answer });
+  const issue = world.issues.find((i) => i.key === ask.issue_key);
+  if (issue) retrack(world, issue);
 }
 
 const AGENTS: AgentPlan[] = ["claude", "codex", "cursor"].map((agent) => ({
@@ -688,6 +777,8 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
     switch (cmd) {
       case "snapshot":
         return snapshot();
+      case "pulse":
+        return pulse(Number(args.since), Number(args.dayStart));
       case "projects":
         return world.projects;
       case "issues":
