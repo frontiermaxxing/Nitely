@@ -511,9 +511,13 @@ mod tests {
     use crate::issues::{Actor, NewIssue};
 
     fn db() -> (Db, std::path::PathBuf) {
+        // A counter as well as the time: Windows' clock can give two tests started together the
+        // same time, and then the same database.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "nitely-activity-{}-{}",
+            "nitely-activity-{}-{}-{}",
             std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
         ));
         (Db::open(&dir.join("t.db")).unwrap(), dir)
