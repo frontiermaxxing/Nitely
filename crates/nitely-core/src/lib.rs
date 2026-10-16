@@ -9,6 +9,7 @@ pub mod github;
 pub mod hook;
 pub mod issues;
 pub mod paths;
+pub mod playbook;
 pub mod remote;
 pub mod snapshot;
 

@@ -1,0 +1,14 @@
+# How work on Nitely flows. Read by `nitely start`, `nitely gate` and the start_task and run_gate
+# MCP tools. See crates/nitely-core/src/playbook.rs for every field.
+
+[branch]
+integration = "main"
+pattern = "{vendor}/{key}-{slug}"
+
+[worktree]
+# Beside the repo, so searches in the main checkout never walk task worktrees.
+dir = "../{repo}-worktrees/{key}-{slug}"
+setup = ["npm ci"]
+
+[gate]
+commands = ["cargo test --workspace", "cargo clippy --workspace -- -D warnings", "npm run build"]
