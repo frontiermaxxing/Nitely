@@ -271,6 +271,18 @@ A project page has three views behind one switch (remembered): **List** (issues 
   filled node is a worktree; a dashed fork and hollow node is a branch alone; a detached worktree
   has no fork. The node is attention when it waits on you, live while an agent works.
 
+## Keys
+
+- **Ctrl+K** (Cmd+K on a Mac), or "Go to…" at the top of the sidebar: the palette. Type part of a view,
+  project or issue; arrows pick, Enter goes, Esc closes. An exact key ("nit-12") opens that issue.
+- **j / k** move focus to the next or previous item on the page (list rows, Pulse cards, board
+  cards, decisions, lanes, branch lines, table rows, the feed); **Enter** opens it. They do nothing
+  while you type in a field.
+- **Esc** closes the issue panel.
+
+A new view joins j/k by adding its item selector to `ITEMS` in `src/Palette.tsx`; the items must be
+focusable (a button or link) so Enter works and the focus ring shows.
+
 ## The browser preview
 
 `npm run dev` in a plain browser runs the app on sample data: `src/backend.ts` sends every

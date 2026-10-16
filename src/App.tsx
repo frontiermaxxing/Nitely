@@ -11,6 +11,7 @@ import { ProjectPage, isProjectTab, type ProjectTab } from "./Project";
 import { IssuePanel } from "./IssuePanel";
 import { AddProject } from "./AddProject";
 import { nowSecs } from "./util";
+import { Palette, useKeys } from "./Palette";
 import { CountBadge, Loading } from "./ui";
 
 // The browser preview's page of every primitive in every state; never in a production build.
@@ -61,6 +62,9 @@ export function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [view, setView] = useState<View>(() => fromHash(location.hash).view);
   const [openIssue, setOpenIssue] = useState<string | null>(() => fromHash(location.hash).issue);
+  const [palette, setPalette] = useState(false);
+  const openPalette = useCallback(() => setPalette(true), []);
+  useKeys(openPalette);
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(nowSecs);
   // Bumped after any change made in the app, so open lists refetch at once.
@@ -153,6 +157,9 @@ export function App() {
           <BrandMark />
           Nitely
         </div>
+        <button className="nav-goto" onClick={openPalette} title="Go to a view, project or issue">
+          Go to… <kbd>{navigator.platform.startsWith("Mac") ? "⌘K" : "Ctrl K"}</kbd>
+        </button>
         <NavItem active={view.kind === "pulse"} onClick={() => setView({ kind: "pulse" })} label="Pulse" />
         <NavItem active={view.kind === "inbox"} onClick={() => setView({ kind: "inbox" })} label="Inbox" count={inboxCount} tone="attention" />
         <NavItem active={view.kind === "now"} onClick={() => setView({ kind: "now" })} label="Now" count={working} tone="live" />
@@ -231,6 +238,7 @@ export function App() {
         )}
       </main>
 
+      {palette && <Palette projects={projects} onGo={setView} onOpenIssue={setOpenIssue} onClose={() => setPalette(false)} />}
       {openIssue && (
         <IssuePanel issueKey={openIssue} now={now} version={version} onClose={() => setOpenIssue(null)} onChanged={changed} onOpenIssue={setOpenIssue} />
       )}

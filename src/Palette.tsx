@@ -1,0 +1,177 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import { invoke } from "./backend";
+import type { View } from "./App";
+import type { IssueRecord, Project } from "./types";
+import { IssueToken } from "./ui";
+import "./styles/palette.css";
+
+interface Item {
+  id: string;
+  label: string;
+  hint?: string;
+  issue?: IssueRecord;
+  run: () => void;
+}
+
+const VIEWS: { label: string; view: View }[] = [
+  { label: "Pulse", view: { kind: "pulse" } },
+  { label: "Inbox", view: { kind: "inbox" } },
+  { label: "Now", view: { kind: "now" } },
+  { label: "Activity", view: { kind: "activity" } },
+  { label: "Agent setup", view: { kind: "agents" } },
+  { label: "Add project", view: { kind: "add" } },
+];
+
+const KEY = /^[A-Za-z]+-\d+$/;
+
+/**
+ * Ctrl+K (Cmd+K on a Mac): go to any view, project tab or open issue by typing. Arrow keys pick,
+ * Enter goes, Esc closes. An exact key like "nit-12" opens that issue even if no list shows it.
+ */
+export function Palette(props: { projects: Project[]; onGo: (view: View) => void; onOpenIssue: (key: string) => void; onClose: () => void }) {
+  const [query, setQuery] = useState("");
+  const [picked, setPicked] = useState(0);
+  const [issues, setIssues] = useState<IssueRecord[]>([]);
+  const list = useRef<HTMLUListElement>(null);
+
+  useEffect(() => {
+    let live = true;
+    Promise.all(props.projects.map((p) => invoke<IssueRecord[]>("issues", { project: p.key, includeClosed: false }).catch(() => [])))
+      .then((all) => live && setIssues(all.flat()));
+    return () => {
+      live = false;
+    };
+  }, [props.projects]);
+
+  const items = useMemo<Item[]>(() => {
+    const q = query.trim().toLowerCase();
+    const go = (view: View) => () => {
+      props.onGo(view);
+      props.onClose();
+    };
+    const open = (key: string) => () => {
+      props.onOpenIssue(key);
+      props.onClose();
+    };
+    const all: Item[] = [
+      ...VIEWS.map((v) => ({ id: `view-${v.label}`, label: v.label, hint: "view", run: go(v.view) })),
+      ...props.projects.flatMap((p) =>
+        (["list", "board", "branches"] as const).map((tab) => ({
+          id: `project-${p.key}-${tab}`,
+          label: `${p.name} ${tab}`,
+          hint: p.key,
+          run: go({ kind: "project", key: p.key, tab }),
+        })),
+      ),
+      ...issues.map((i) => ({ id: `issue-${i.key}`, label: `${i.key} ${i.title}`, issue: i, run: open(i.key) })),
+    ];
+    const found = q ? all.filter((it) => it.label.toLowerCase().includes(q) || it.hint?.toLowerCase() === q) : all.filter((it) => !it.issue);
+    if (KEY.test(query.trim()) && !found.some((it) => it.issue?.key.toLowerCase() === q)) {
+      const key = query.trim().toUpperCase();
+      found.unshift({ id: `key-${key}`, label: `Open ${key}`, hint: "issue", run: open(key) });
+    }
+    return found.slice(0, 12);
+  }, [query, issues, props]);
+
+  useEffect(() => setPicked(0), [query]);
+  useEffect(() => {
+    list.current?.children[picked]?.scrollIntoView({ block: "nearest" });
+  }, [picked]);
+
+  const onKey = (e: React.KeyboardEvent) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setPicked((p) => Math.min(items.length - 1, p + 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setPicked((p) => Math.max(0, p - 1));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      items[picked]?.run();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      props.onClose();
+    }
+  };
+
+  return (
+    <div className="palette-veil" onMouseDown={props.onClose}>
+      <div className="palette" role="dialog" aria-label="Go to" onMouseDown={(e) => e.stopPropagation()}>
+        <input
+          autoFocus
+          className="palette-input"
+          placeholder="Go to a view, project or issue"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={onKey}
+          aria-controls="palette-list"
+          aria-activedescendant={items[picked] ? `palette-${items[picked].id}` : undefined}
+        />
+        <ul className="palette-list" id="palette-list" role="listbox" ref={list}>
+          {items.map((it, n) => (
+            <li
+              key={it.id}
+              id={`palette-${it.id}`}
+              role="option"
+              aria-selected={n === picked}
+              className={n === picked ? "on" : undefined}
+              onMouseEnter={() => setPicked(n)}
+              onClick={it.run}
+            >
+              {it.issue ? <IssueToken issue={it.issue} title /> : <span className="palette-label">{it.label}</span>}
+              {it.hint && <span className="palette-hint">{it.hint}</span>}
+            </li>
+          ))}
+          {items.length === 0 && <li className="palette-none">Nothing matches.</li>}
+        </ul>
+        <div className="palette-foot">↑↓ to pick · Enter to go · Esc to close · j and k move between items on a page</div>
+      </div>
+    </div>
+  );
+}
+
+/** Items j and k move between: whatever opens an issue or a row, in reading order. */
+const ITEMS = [
+  ".content .list-row",
+  ".content .fcard",
+  ".content .board-card .ui-token",
+  ".content .decision .ui-token",
+  ".content .act-row .ui-token",
+  ".content .bmap-line .ui-token",
+  ".content td.cell-issue .ui-token",
+  ".content .feed-row .ui-token",
+].join(", ");
+
+function typing(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null;
+  return !!el && (el.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName));
+}
+
+/** Moves focus to the next (1) or previous (-1) item on the page, from the focused one. */
+export function step(direction: 1 | -1) {
+  const all = [...document.querySelectorAll<HTMLElement>(ITEMS)].filter((el) => el.offsetParent !== null);
+  if (all.length === 0) return;
+  const at = all.indexOf(document.activeElement as HTMLElement);
+  const next = at < 0 ? (direction > 0 ? 0 : all.length - 1) : Math.max(0, Math.min(all.length - 1, at + direction));
+  all[next].focus();
+  all[next].scrollIntoView({ block: "nearest" });
+}
+
+/** The app's keys: Ctrl/Cmd+K opens the palette; j and k step through items unless you are typing. */
+export function useKeys(openPalette: () => void) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        openPalette();
+        return;
+      }
+      if (e.ctrlKey || e.metaKey || e.altKey || typing(e.target)) return;
+      if (e.key === "j") step(1);
+      else if (e.key === "k") step(-1);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [openPalette]);
+}
