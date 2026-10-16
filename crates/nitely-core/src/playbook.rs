@@ -61,9 +61,89 @@ pub struct WorktreeRules {
     /// Relative to the repo root. `{repo}`, `{key}`, `{slug}` and `{vendor}` are filled in.
     /// Keep it outside the repo so searches in the main checkout never walk task worktrees.
     pub dir: String,
-    /// Run in a new worktree, in order, before the agent starts (e.g. `npm ci`).
+    /// Run in a new worktree, in order, before the agent starts (e.g. `npm ci`). Run again
+    /// before a gate when a dependency file changed since (see `setup_when_changed`).
     #[serde(default)]
     pub setup: Vec<String>,
+    /// More files (relative to the worktree) whose change means setup must run again, besides the
+    /// usual lockfiles and manifests at the worktree's root (`SETUP_FILES`).
+    #[serde(default)]
+    pub setup_when_changed: Vec<String>,
+}
+
+/// Dependency files whose change, by a rebase or by the agent, makes a worktree's setup stale.
+const SETUP_FILES: &[&str] = &[
+    "package.json",
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "bun.lockb",
+    "Cargo.lock",
+    "requirements.txt",
+    "poetry.lock",
+    "uv.lock",
+    "Pipfile.lock",
+    "go.sum",
+    "Gemfile.lock",
+];
+
+/// Where a worktree keeps the fingerprint of the dependency files its setup last ran against:
+/// in its own git folder, so it is never committed and goes away with the worktree.
+fn setup_record(worktree: &Path) -> Option<PathBuf> {
+    let path = git(worktree, &["rev-parse", "--git-path", "nitely-setup"]).ok()?;
+    let path = PathBuf::from(path.trim());
+    Some(if path.is_absolute() { path } else { worktree.join(path) })
+}
+
+/// FNV-1a over the names and contents of the dependency files present, stable across builds.
+fn setup_fingerprint(rules: &WorktreeRules, worktree: &Path) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut eat = |bytes: &[u8]| {
+        for b in bytes {
+            hash ^= u64::from(*b);
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+    };
+    for name in SETUP_FILES.iter().copied().chain(rules.setup_when_changed.iter().map(String::as_str)) {
+        if let Ok(bytes) = std::fs::read(worktree.join(name)) {
+            eat(name.as_bytes());
+            eat(&[0]);
+            eat(&bytes);
+        }
+    }
+    format!("{hash:016x}")
+}
+
+/// Runs setup again when the dependency files changed since it last ran (a rebase brought a new
+/// dependency, or the agent added one), so the gate does not fail on a stale node_modules or
+/// target. A worktree from before this was recorded is taken as set up. Returns the setup results,
+/// and false when one failed.
+fn refresh_setup(rules: &WorktreeRules, worktree: &Path, main: &Path, base: &str) -> Result<(Vec<CommandResult>, bool)> {
+    if rules.setup.is_empty() {
+        return Ok((vec![], true));
+    }
+    let Some(record) = setup_record(worktree) else { return Ok((vec![], true)) };
+    let now = setup_fingerprint(rules, worktree);
+    match std::fs::read_to_string(&record) {
+        Ok(last) if last.trim() == now => return Ok((vec![], true)),
+        Ok(_) => {}
+        Err(_) => {
+            std::fs::write(&record, &now).ok();
+            return Ok((vec![], true));
+        }
+    }
+    let mut results = Vec::new();
+    for command in &rules.setup {
+        let command = expand(command, main, worktree, base);
+        let (ok, output, seconds) = run_shell(&command, worktree)?;
+        results.push(CommandResult { command: format!("{command} (setup again: a dependency file changed)"), ok, seconds, output, skipped: false });
+        if !ok {
+            return Ok((results, false));
+        }
+    }
+    std::fs::write(&record, &now).ok();
+    Ok((results, true))
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -189,7 +269,7 @@ impl Default for BranchRules {
 
 impl Default for WorktreeRules {
     fn default() -> Self {
-        WorktreeRules { dir: "../{repo}-worktrees/{key}-{slug}".into(), setup: vec![] }
+        WorktreeRules { dir: "../{repo}-worktrees/{key}-{slug}".into(), setup: vec![], setup_when_changed: vec![] }
     }
 }
 
@@ -422,6 +502,11 @@ pub fn start_task(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, 
             break;
         }
     }
+    if setup.iter().all(|r| r.ok) {
+        if let Some(record) = setup_record(&worktree) {
+            std::fs::write(record, setup_fingerprint(&playbook.worktree, &worktree)).ok();
+        }
+    }
     Ok(Started { issue: issue.key.clone(), branch, worktree: worktree_str, created: true, setup })
 }
 
@@ -461,8 +546,11 @@ pub fn run_gate(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<&s
         steps.push((step.run.clone(), step.skip_reason(&files)?));
     }
 
-    let mut results = Vec::new();
-    let mut passed = true;
+    // A stale setup fails the gate for reasons that are not the change's; set up again first.
+    let (mut results, mut passed) = refresh_setup(&playbook.worktree, worktree, repo_root, base)?;
+    if !passed {
+        steps.clear();
+    }
     for (command, skip) in steps {
         let command = expand(&command, repo_root, worktree, base);
         if let Some(why) = skip {
@@ -659,6 +747,16 @@ mod tests {
         assert!(gate.results[0].ok && gate.results[1].skipped && !gate.results[2].ok, "{gate:?}");
         let kinds: Vec<String> = db.timeline("NIT-3").unwrap().into_iter().map(|t| t.kind).collect();
         assert_eq!(kinds, vec!["worktree", "gate_failed"]);
+
+        // A dependency file changes (a rebase brought one): setup runs again before the gate, once.
+        let wt = Path::new(&started.worktree);
+        std::fs::remove_file(wt.join("setup.txt")).unwrap();
+        std::fs::write(wt.join("package-lock.json"), "{}").unwrap();
+        let gate = run_gate(&db, &repo, wt, Some("NIT-3"), &actor).unwrap();
+        assert!(gate.results[0].command.contains("setup again") && gate.results[0].ok, "{gate:?}");
+        assert!(wt.join("setup.txt").exists() && gate.results[1].ok, "the gate saw the fresh setup: {gate:?}");
+        let gate = run_gate(&db, &repo, wt, Some("NIT-3"), &actor).unwrap();
+        assert_eq!(gate.results.len(), 3, "nothing changed since: {gate:?}");
         std::fs::remove_dir_all(base).ok();
     }
 
