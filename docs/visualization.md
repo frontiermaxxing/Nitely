@@ -59,8 +59,8 @@ Branches off the track:
   went round four times reads as a coil before you read the label. The mini track draws a small
   arc over the same stretch.
 - **Stuck:** the last gate failed, the last land stopped, the review did not finish, or the
-  submit could not push the branch, and nothing has passed since (a later submit or a person
-  moving the issue clears a stopped review; the next submit clears a failed push). The current
+  submit could not push the branch, and nothing has passed since (a later submit or a move
+  clears a stopped review; a failed push holds until the next submit or a person moves it). The current
   station turns `--st-stuck` and the line onward breaks into dashes. A stuck worktree that waits
   on the human (a rebase conflict, an agent waiting for input) is the attention color instead,
   because it needs him.

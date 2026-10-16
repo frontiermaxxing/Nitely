@@ -152,7 +152,6 @@ export function computeTrack(issue: IssueRecord, timeline?: TimelineEntry[], rev
       case "review_started":
         reviewFailed = false;
         landFailed = false;
-        pushFailed = false;
         reach("review", e.ts);
         break;
       case "review_failed":
@@ -169,9 +168,9 @@ export function computeTrack(issue: IssueRecord, timeline?: TimelineEntry[], rev
           rounds++;
           current = "working";
         }
-        // A failed push leaves the change unseen and the issue In Progress: stuck until the next
-        // submit. "No pull request" alone (the push worked, opening the PR did not) can still land.
-        pushFailed = !changes && !!e.summary?.includes("push failed");
+        // A failed push leaves the change unseen: stuck until the next submit. "No pull request"
+        // alone (the push worked, opening the PR did not) can still land.
+        pushFailed = !!e.summary?.includes("push failed");
         break;
       }
       case "ask":
@@ -186,6 +185,7 @@ export function computeTrack(issue: IssueRecord, timeline?: TimelineEntry[], rev
         break;
       case "landed":
         landFailed = false;
+        pushFailed = false;
         reach("landing", e.ts);
         reach("done", e.ts);
         break;
@@ -195,8 +195,9 @@ export function computeTrack(issue: IssueRecord, timeline?: TimelineEntry[], rev
         // A person moving the issue after a stopped land or review has taken it from there.
         landFailed = false;
         reviewFailed = false;
-        // Submit itself moves the issue back to In Progress right after a failed push.
-        if (to !== "In Progress") pushFailed = false;
+        // A failed push is the exception unless a person moves it: submit itself moves the issue
+        // back to In Progress after one, and the branch is still unseen.
+        if (e.actor === "human") pushFailed = false;
         const s = stationOfState(to);
         if (to === "Todo" || to === "Backlog") current = "todo";
         else if (s === "working") {
@@ -223,8 +224,8 @@ export function computeTrack(issue: IssueRecord, timeline?: TimelineEntry[], rev
   if (open && landFailed) track.stuck = "Land stopped";
   // A resubmit can fail without moving the issue, so these hold at whatever station it shows.
   else if (open && gateFailed) track.stuck = "Gate failed";
-  else if (open && reviewFailed) track.stuck = "Review did not finish";
   else if (open && pushFailed) track.stuck = "Push failed";
+  else if (open && reviewFailed) track.stuck = "Review did not finish";
   return track;
 }
 

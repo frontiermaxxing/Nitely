@@ -101,13 +101,13 @@ export function decisionsOf(board: Board, details: Map<string, IssueDetail>, now
   // A land that stopped, with no agent working on it any more, is the human's to unstick.
   for (const { repo, row } of rows) {
     if (!row.issue || row.state?.rebase_in_progress || row.session?.state === "waiting") continue;
+    // The backend sends each issue's track; the preview's issues need their details for it.
     const detail = details.get(row.issue.key);
-    if (!detail) continue;
-    const track = trackOf(detail.issue, detail.timeline, detail.reviews);
-    if (track.station !== "landing" || track.stuck !== "Land stopped") continue;
+    const track = detail ? trackOf(detail.issue, detail.timeline, detail.reviews) : row.issue.track;
+    if (!track || track.station !== "landing" || track.stuck !== "Land stopped") continue;
     if (livenessOf(row.session, now) === "working") continue;
-    const stopped = detail.timeline.filter((e) => e.kind === "land_failed").pop();
-    out.push({ id: `land-${row.issue.key}`, kind: "land", issue: detail.issue, row, repo, ask: null, since: stopped?.ts ?? now, urgency: urgencyOf(detail.issue) });
+    const stopped = detail?.timeline.filter((e) => e.kind === "land_failed").pop();
+    out.push({ id: `land-${row.issue.key}`, kind: "land", issue: detail?.issue ?? row.issue, row, repo, ask: null, since: stopped?.ts ?? now, urgency: urgencyOf(detail?.issue ?? row.issue) });
   }
 
   return out.sort((a, b) => a.urgency - b.urgency || a.since - b.since);
