@@ -38,16 +38,18 @@ pub fn default_target(from: &Path) -> Option<PathBuf> {
     first_installed(&folders, from, exe).or_else(|| dirs::home_dir().map(|h| h.join(".cargo").join("bin").join(exe)))
 }
 
-/// The first `exe` in `dirs` that is neither `from` itself nor in a folder Cargo builds into:
-/// `target/<profile>`, or a `deps` folder beside the build or under `target/<profile>`.
+/// The first `exe` in `dirs` that is neither `from` itself nor in a folder Cargo builds into: a
+/// profile folder (Cargo keeps its `.fingerprint` there), or a `deps` folder beside the build or
+/// in a profile folder. Told by Cargo's marker rather than by name, so an install that happens to
+/// live under a folder called `target` still counts.
 fn first_installed(dirs: &[PathBuf], from: &Path, exe: &str) -> Option<PathBuf> {
     let real = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
     let (from, build_dir) = (real(from), from.parent().map(real));
-    let named = |p: Option<&Path>, name: &str| p.and_then(Path::file_name).is_some_and(|n| n.eq_ignore_ascii_case(name));
+    let profile = |p: &Path| p.join(".fingerprint").is_dir();
     let cargo_folder = |dir: &Path| {
         let dir = real(dir);
-        let deps_of = |profile: Option<&Path>| profile.is_some_and(|p| build_dir.as_deref() == Some(p) || named(p.parent(), "target"));
-        (named(Some(&dir), "deps") && deps_of(dir.parent())) || named(dir.parent(), "target")
+        let deps = dir.file_name().is_some_and(|n| n.eq_ignore_ascii_case("deps"));
+        profile(&dir) || (deps && dir.parent().is_some_and(|p| build_dir.as_deref() == Some(p) || profile(p)))
     };
     dirs.iter().filter(|d| !cargo_folder(d)).map(|d| d.join(exe)).find(|p| p.is_file() && real(p) != from)
 }
@@ -187,6 +189,7 @@ mod tests {
             std::fs::create_dir_all(dir.join(f)).unwrap();
             std::fs::write(dir.join(f).join(exe), "same build").unwrap();
         }
+        std::fs::create_dir_all(dir.join("repo/target/release/.fingerprint")).unwrap();
         let from = dir.join("repo/target/release").join(exe);
         let path: Vec<PathBuf> = folders.iter().map(|f| dir.join(f)).collect();
         // Identical to the build, and still the target: a second install is a no-op there.
@@ -203,6 +206,11 @@ mod tests {
         let beside = dir.join("bin").join("nitely-new.exe");
         std::fs::write(&beside, "new").unwrap();
         assert_eq!(first_installed(&[dir.join("bin")], &beside, exe), Some(dir.join("bin").join(exe)));
+        // An install under a folder that is only named `target` (cargo install --root ...	arget).
+        let tools = dir.join("tools/target/bin");
+        std::fs::create_dir_all(&tools).unwrap();
+        std::fs::write(tools.join(exe), "old").unwrap();
+        assert_eq!(first_installed(&[tools.clone(), dir.join("later")], &from, exe), Some(tools.join(exe)));
         std::fs::remove_dir_all(dir).ok();
     }
 
