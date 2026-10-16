@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import type { Board, Project } from "./types";
 import { Inbox } from "./Inbox";
 import { Now } from "./Now";
@@ -7,8 +8,10 @@ import { Backlog } from "./Backlog";
 import { IssuePanel } from "./IssuePanel";
 import { nowSecs } from "./util";
 
-// Polls for now; a file watcher pushing changes replaces this later.
-const REFRESH_MS = 4000;
+// The backend pushes CHANGED_EVENT the moment the database or a repo's refs change. Uncommitted
+// edits and relative times are caught by this slow fallback.
+const FALLBACK_MS = 30000;
+const CHANGED_EVENT = "nitely://changed";
 
 export type View = { kind: "inbox" } | { kind: "now" } | { kind: "project"; key: string };
 
@@ -34,16 +37,20 @@ export function App() {
     setNow(nowSecs());
   }, []);
 
-  useEffect(() => {
-    refresh();
-    const id = setInterval(refresh, REFRESH_MS);
-    return () => clearInterval(id);
-  }, [refresh]);
-
-  const changed = () => {
+  const changed = useCallback(() => {
     setVersion((v) => v + 1);
     refresh();
-  };
+  }, [refresh]);
+
+  useEffect(() => {
+    refresh();
+    const id = setInterval(changed, FALLBACK_MS);
+    const unlisten = listen(CHANGED_EVENT, changed);
+    return () => {
+      clearInterval(id);
+      unlisten.then((stop) => stop());
+    };
+  }, [refresh, changed]);
 
   const inboxCount =
     (board?.asks.length ?? 0) +
