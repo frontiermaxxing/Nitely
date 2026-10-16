@@ -399,6 +399,21 @@ pub fn start_task(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, 
     Ok(Started { issue: issue.key.clone(), branch, worktree: worktree_str, created: true, setup })
 }
 
+/// The ref a branch's changes are measured against: `origin/<base>` when the local `<base>` is
+/// behind it (or missing), so a stale local branch doesn't count already-merged work as this change.
+pub fn diff_base(worktree: &Path, base: &str) -> String {
+    let remote = format!("origin/{base}");
+    if git(worktree, &["rev-parse", "--verify", "--quiet", &format!("refs/remotes/{remote}")]).is_err() {
+        return base.to_string();
+    }
+    let local_exists = git(worktree, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{base}")]).is_ok();
+    if !local_exists || git(worktree, &["merge-base", "--is-ancestor", base, &remote]).is_ok() {
+        remote
+    } else {
+        base.to_string()
+    }
+}
+
 /// Runs the gate commands in `worktree` and records the outcome on the issue's timeline.
 /// Stops at the first failure, so the agent sees the error that matters.
 pub fn run_gate(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<&str>, actor: &Actor) -> Result<GateResult> {
@@ -407,9 +422,10 @@ pub fn run_gate(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<&s
         bail!("this repo's playbook has no gate commands; add them under [gate] in {PLAYBOOK_PATH}");
     }
     let base = playbook.integration_branch();
+    let since = diff_base(worktree, base);
     let commit = git(worktree, &["rev-parse", "--short", "HEAD"]).unwrap_or_default().trim().to_string();
     // --no-renames: a moved file counts as a change at both paths.
-    let files: Vec<String> = git(worktree, &["diff", "--name-only", "--no-renames", &format!("{base}...HEAD")])
+    let files: Vec<String> = git(worktree, &["diff", "--name-only", "--no-renames", &format!("{since}...HEAD")])
         .unwrap_or_default()
         .lines()
         .map(str::to_string)
@@ -613,6 +629,24 @@ mod tests {
         assert!(gate.results[0].ok && gate.results[1].skipped && !gate.results[2].ok, "{gate:?}");
         let kinds: Vec<String> = db.timeline("NIT-3").unwrap().into_iter().map(|t| t.kind).collect();
         assert_eq!(kinds, vec!["worktree", "gate_failed"]);
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn measures_against_the_newer_of_local_and_remote_base() {
+        let base = std::env::temp_dir().join(format!("nitely-db-{}-{}", std::process::id(), now()));
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let sh = |args: &[&str]| assert!(Command::new("git").arg("-C").arg(&repo).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).output().unwrap().status.success(), "{args:?}");
+        sh(&["init", "-q", "-b", "main"]);
+        sh(&["commit", "-q", "--allow-empty", "-m", "init"]);
+        assert_eq!(diff_base(&repo, "main"), "main", "no remote");
+        sh(&["commit", "-q", "--allow-empty", "-m", "merged elsewhere"]);
+        sh(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        sh(&["reset", "-q", "--hard", "HEAD~1"]);
+        assert_eq!(diff_base(&repo, "main"), "origin/main", "local main is behind");
+        sh(&["commit", "-q", "--allow-empty", "-m", "local only"]);
+        assert_eq!(diff_base(&repo, "main"), "main", "local main has diverged");
         std::fs::remove_dir_all(base).ok();
     }
 }

@@ -78,11 +78,16 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         bail!("{} has uncommitted changes; commit them first:\n{}", worktree.display(), dirty.trim_end());
     }
     let wt = worktree.to_string_lossy().into_owned();
-    if git(&worktree, &["rev-list", "--count", &format!("{base}..HEAD")])?.trim() == "0" {
+    if !opts.local_only {
+        // Best effort: measure against the remote's base, so work merged since the last pull isn't counted.
+        git(&worktree, &["fetch", "--quiet", "origin", &base]).ok();
+    }
+    let since = playbook::diff_base(&worktree, &base);
+    if git(&worktree, &["rev-list", "--count", &format!("{since}..HEAD")])?.trim() == "0" {
         bail!("{branch} has no changes against {base}; commit your work first");
     }
 
-    let files: Vec<String> = git(&worktree, &["diff", "--name-only", "--no-renames", &format!("{base}...HEAD")])?
+    let files: Vec<String> = git(&worktree, &["diff", "--name-only", "--no-renames", &format!("{since}...HEAD")])?
         .lines()
         .filter(|l| !l.is_empty())
         .map(str::to_string)
@@ -93,7 +98,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         issue: issue.key.clone(),
         branch: branch.clone(),
         base: base.clone(),
-        patch_id: patch_id(&worktree, &base)?,
+        patch_id: patch_id(&worktree, &since)?,
         commit: gate.commit.clone(),
         files: files.len(),
         gate,
@@ -120,7 +125,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         let vendor = vendor.unwrap_or_default();
         let reviewer = pb.review.reviewer_for(&vendor).context("the playbook names no reviewer for this branch")?.to_string();
         db.log_event(actor, Some(&issue.key), Some(&wt), "review_started", &format!("Review by {reviewer} started"))?;
-        let review = match pb.review.run(&reviewer, &worktree, &base) {
+        let review = match pb.review.run(&reviewer, &worktree, &since) {
             Ok(r) => r,
             Err(e) => {
                 db.log_event(actor, Some(&issue.key), Some(&wt), "review_failed", &format!("Review by {reviewer} did not finish"))?;
