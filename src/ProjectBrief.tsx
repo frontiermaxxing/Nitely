@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState, type KeyboardEvent, type ReactNode } from "react";
+import { Fragment, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { invoke } from "./backend";
 import type { ProjectBrief as Brief } from "./types";
 import { parseMarkdown, type Inline } from "./markdown";
@@ -13,10 +13,12 @@ import { agentLabel, ago, openExternal } from "./util";
 export function ProjectBrief(props: { projectKey: string; version: number; now: number; onOpenIssue: (key: string) => void }) {
   const [brief, setBrief] = useState<Brief | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // While editing: the text and the revision it started from.
-  const [draft, setDraft] = useState<{ text: string; from: number } | null>(null);
+  // While editing: the text, and the project and revision it started from.
+  const [draft, setDraft] = useState<{ text: string; project: string; from: number } | null>(null);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // The project on screen, so a save that answers after a switch changes nothing here.
+  const shown = useRef(props.projectKey);
 
   useEffect(() => {
     let live = true;
@@ -28,17 +30,22 @@ export function ProjectBrief(props: { projectKey: string; version: number; now: 
     };
   }, [props.projectKey, props.version]);
 
-  // A different project never keeps the last one's draft.
+  // A different project never shows, edits or saves the last one's brief.
   useEffect(() => {
+    shown.current = props.projectKey;
+    setBrief(null);
     setDraft(null);
     setSaveError(null);
   }, [props.projectKey]);
 
   const save = (revision: number) => {
-    if (!draft) return;
+    if (!draft || saving) return;
     setSaving(true);
-    invoke<Brief>("set_project_brief", { project: props.projectKey, brief: draft.text, revision })
+    const at = props.projectKey;
+    const here = () => shown.current === at;
+    invoke<Brief>("set_project_brief", { project: draft.project, brief: draft.text, revision })
       .then((b) => {
+        if (!here()) return;
         setBrief(b);
         setDraft(null);
         setSaveError(null);
@@ -46,9 +53,9 @@ export function ProjectBrief(props: { projectKey: string; version: number; now: 
       .catch((e) =>
         // Refused because someone wrote since: show their revision, so the choice above the
         // editor replaces the error. Anything else is shown as it came.
-        invoke<Brief>("project_brief", { project: props.projectKey })
-          .then((fresh) => (fresh.revision !== revision ? (setBrief(fresh), setSaveError(null)) : setSaveError(String(e))))
-          .catch(() => setSaveError(String(e))),
+        invoke<Brief>("project_brief", { project: draft.project })
+          .then((fresh) => here() && (fresh.revision !== revision ? (setBrief(fresh), setSaveError(null)) : setSaveError(String(e))))
+          .catch(() => here() && setSaveError(String(e))),
       )
       .finally(() => setSaving(false));
   };
@@ -67,7 +74,7 @@ export function ProjectBrief(props: { projectKey: string; version: number; now: 
   if (error) return <p className="error">{error}</p>;
   if (!brief) return <Loading />;
 
-  const edit = () => setDraft({ text: brief.brief, from: brief.revision });
+  const edit = () => setDraft({ text: brief.brief, project: brief.project, from: brief.revision });
   // Someone wrote since the draft started: saving would be refused, so offer the choice instead.
   const behind = draft && brief.revision !== draft.from;
 
@@ -92,7 +99,7 @@ export function ProjectBrief(props: { projectKey: string; version: number; now: 
           {behind && (
             <div className="brief-behind">
               <span>{brief.updated_by === "human" ? "You" : agentLabel(brief.updated_by ?? "someone")} changed the brief while you were editing.</span>
-              <button className="btn" onClick={() => setDraft({ text: brief.brief, from: brief.revision })}>
+              <button className="btn" onClick={() => setDraft({ text: brief.brief, project: brief.project, from: brief.revision })}>
                 Take theirs
               </button>
               <button className="btn" disabled={saving} onClick={() => save(brief.revision)}>
@@ -103,6 +110,8 @@ export function ProjectBrief(props: { projectKey: string; version: number; now: 
           <textarea
             aria-label="Project brief, in Markdown"
             value={draft.text}
+            // What is sent is what was typed when Save was pressed, so typing waits for it.
+            readOnly={saving}
             autoFocus
             spellCheck
             onChange={(e) => setDraft({ ...draft, text: e.target.value })}
