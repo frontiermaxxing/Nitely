@@ -1,4 +1,5 @@
 import type { Board, IssueRecord, PrRecord, RepoView, Session, TaskRow } from "./types";
+import { reposOf } from "./repos";
 import { ago } from "./util";
 import {
   AgentMark,
@@ -20,14 +21,7 @@ import {
 const IDLE_DAYS = 2;
 const DAY = 86400;
 
-/** The repos holding a project's work: the ones whose config names it, else the ones whose branches carry its keys. */
-export function reposOf(board: Board, projectKey: string): RepoView[] {
-  const key = projectKey.toUpperCase();
-  const named = board.repos.filter((r) => r.project?.toUpperCase() === key);
-  if (named.length) return named;
-  const ours = (k: string | null) => !!k && k.startsWith(`${key}-`);
-  return board.repos.filter((r) => !r.project && (r.rows.some((x) => ours(x.issue_key)) || r.branches.some((b) => ours(b.issue_key))));
-}
+export { reposOf } from "./repos";
 
 /** One branch on the map: a task worktree, a worktree with no branch, or a branch with no worktree. */
 interface Line {
@@ -234,6 +228,9 @@ function Spine(props: { repo: RepoView; main: TaskRow | null; now: number; alone
   const { repo, main, now } = props;
   const st = main?.state;
   const elsewhere = main?.branch && main.branch !== repo.integration_branch;
+  // Read, but on no branch: its commit and edits are not the integration branch's.
+  const detached = !!main && !main.branch && !!st;
+  const own = !elsewhere && !detached;
   return (
     <div className={`bmap-line bmap-spine${props.alone ? " bmap-last" : ""}`} role="row" title={repo.root}>
       <span className="bmap-graph" aria-hidden="true">
@@ -244,6 +241,10 @@ function Spine(props: { repo: RepoView; main: TaskRow | null; now: number; alone
         <span className="bmap-sub">
           {elsewhere ? (
             <span className="attention-ink">Main checkout is on {main?.branch}</span>
+          ) : detached ? (
+            <span className="attention-ink" title={st.last_commit_subject ? `At “${st.last_commit_subject}”` : undefined}>
+              Main checkout is detached
+            </span>
           ) : st ? (
             <>
               main checkout {st.rebase_in_progress ? <strong className="attention-ink">rebase stopped</strong> : st.dirty_files ? `${st.dirty_files} uncommitted` : "clean"}
@@ -255,12 +256,12 @@ function Spine(props: { repo: RepoView; main: TaskRow | null; now: number; alone
       </span>
       <span className="bmap-ab" role="cell" />
       <span className="bmap-issue bmap-subject" role="cell">
-        {st?.last_commit_subject && <span className="bmap-subject-text">{st.last_commit_subject}</span>}
+        {own && st?.last_commit_subject && <span className="bmap-subject-text">{st.last_commit_subject}</span>}
       </span>
       <span className="bmap-agent" role="cell" />
       <span className="bmap-pr" role="cell" />
-      <span className="bmap-age" role="cell" title={st?.last_commit_at ? `Last commit ${ago(now, st.last_commit_at)}` : undefined}>
-        {st?.last_commit_at ? short(now - st.last_commit_at) : ""}
+      <span className="bmap-age" role="cell" title={own && st?.last_commit_at ? `Last commit ${ago(now, st.last_commit_at)}` : undefined}>
+        {own && st?.last_commit_at ? short(now - st.last_commit_at) : ""}
       </span>
     </div>
   );
