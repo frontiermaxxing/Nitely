@@ -204,7 +204,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS playbook_proposal_pending ON playbook_proposal
 
 /// Bumped when a table changes shape. Tables that only mirror Bitbucket or Linear are dropped
 /// and refilled by the next sync; tables Nitely owns get real migrations.
-const SCHEMA_VERSION: i64 = 13;
+const SCHEMA_VERSION: i64 = 14;
 
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -236,7 +236,7 @@ fn migrate(conn: &Connection) -> Result<()> {
     }
     // v12 adds issue.owner; v13 adds playbook_proposal, which SCHEMA creates.
     add_column(conn, "issue", "owner", "TEXT NOT NULL DEFAULT 'agent'")?;
-    // v13 adds the event_issue_nocase index, which SCHEMA creates.
+    // v14 adds the event_issue_nocase index, which SCHEMA creates.
     Ok(())
 }
 
