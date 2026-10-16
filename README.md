@@ -179,3 +179,14 @@ an agent. [docs/claude-hooks.json](docs/claude-hooks.json) is the Claude Code pa
 up by hand.
 
 Agents can also report directly: `nitely status "running test:gate"` from inside a worktree.
+
+## Contributing
+
+Issues and pull requests are welcome; [CONTRIBUTING.md](CONTRIBUTING.md) says how. Commits need a
+`Signed-off-by` line (`git commit -s`, the Developer Certificate of Origin).
+
+## License
+
+Copyright 2026 Quixet LLC. Licensed under the [Apache License 2.0](LICENSE); see [NOTICE](NOTICE).
+A Nitely build includes open-source packages under their own licenses, listed in
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

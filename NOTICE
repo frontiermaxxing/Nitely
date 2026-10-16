@@ -1,0 +1,11 @@
+Nitely
+Copyright 2026 Quixet LLC
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+A Nitely build includes open-source software from third parties under their own licenses; they
+are listed in THIRD-PARTY-NOTICES.md.
+
+Claude and Claude Code are trademarks of Anthropic, Codex is a trademark of OpenAI, and Cursor is a
+trademark of Anysphere. Nitely is not affiliated with or endorsed by them. It shows each agent with
+two letters in a colour, not its owner's logo (src/ui/vendors/README.md).
