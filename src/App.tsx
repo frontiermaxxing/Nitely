@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { Board, Project } from "./types";
@@ -13,6 +13,7 @@ import { nowSecs } from "./util";
 // edits and relative times are caught by this slow fallback.
 const FALLBACK_MS = 30000;
 const CHANGED_EVENT = "nitely://changed";
+const REFRESH_GAP_MS = 1000;
 
 export type View = { kind: "inbox" } | { kind: "now" } | { kind: "project"; key: string } | { kind: "add" };
 
@@ -26,16 +27,31 @@ export function App() {
   // Bumped after any change made in the app, so open lists refetch at once.
   const [version, setVersion] = useState(0);
 
+  // One refresh at a time: a snapshot runs git in every worktree and can take seconds, so changes
+  // that arrive meanwhile queue a single follow-up refresh, at most one per REFRESH_GAP_MS, instead
+  // of piling up in parallel while agents are busy.
+  const running = useRef(false);
+  const again = useRef(false);
   const refresh = useCallback(async () => {
-    try {
-      const [b, p] = await Promise.all([invoke<Board>("snapshot"), invoke<Project[]>("projects")]);
-      setBoard(b);
-      setProjects(p);
-      setError(null);
-    } catch (e) {
-      setError(String(e));
+    if (running.current) {
+      again.current = true;
+      return;
     }
-    setNow(nowSecs());
+    running.current = true;
+    for (let first = true; first || again.current; first = false) {
+      if (!first) await new Promise((r) => setTimeout(r, REFRESH_GAP_MS));
+      again.current = false;
+      try {
+        const [b, p] = await Promise.all([invoke<Board>("snapshot"), invoke<Project[]>("projects")]);
+        setBoard(b);
+        setProjects(p);
+        setError(null);
+      } catch (e) {
+        setError(String(e));
+      }
+      setNow(nowSecs());
+    }
+    running.current = false;
   }, []);
 
   const changed = useCallback(() => {

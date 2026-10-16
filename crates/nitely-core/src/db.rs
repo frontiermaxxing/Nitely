@@ -216,12 +216,18 @@ impl Db {
             std::fs::create_dir_all(dir)?;
         }
         let conn = Connection::open(path)?;
-        // WAL so the app reads while hooks write; busy_timeout so parallel hooks wait, not fail.
-        conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        migrate(&conn)?;
-        conn.execute_batch(SCHEMA)?;
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        // Only an outdated database is written to here. Every app command opens the database, and
+        // a write on open moves `data_version`, which the app's watcher reads as a change: it would
+        // refresh, open the database again, and loop.
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if version < SCHEMA_VERSION {
+            // WAL (persistent) so the app reads while hooks write; busy_timeout so parallel hooks wait.
+            conn.pragma_update(None, "journal_mode", "WAL")?;
+            migrate(&conn)?;
+            conn.execute_batch(SCHEMA)?;
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        }
         Ok(Db { conn })
     }
 
