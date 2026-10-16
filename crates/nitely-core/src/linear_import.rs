@@ -273,12 +273,15 @@ pub fn parse_page(v: &Value) -> Result<Page> {
 
 // ----- mapping -----
 
-/// The native state for a Linear state: the same name when Nitely has it, else by its type. Approved becomes Needs You: in Nitely only a human approves,
-/// in the app, so a Linear approval is kept as a note to confirm rather than carried over.
+/// The native state for a Linear state: the same name when Nitely has it; Needs You for an open
+/// state named "Needs ..." ("Needs Review", "Needs Input": the usual way a Linear team says an
+/// issue waits on a person); else by its type. Approved becomes Needs You: in Nitely only a human
+/// approves, in the app, so a Linear approval is kept as a note to confirm rather than carried over.
 pub fn native_state(name: &str, kind: &str) -> &'static str {
     match parse_state(name) {
         Ok(("Approved", _)) => "Needs You",
         Ok((state, _)) => state,
+        Err(_) if waits_on_a_person(name, kind) => "Needs You",
         Err(_) => match kind {
             "backlog" | "triage" => "Backlog",
             "unstarted" => "Todo",
@@ -288,6 +291,12 @@ pub fn native_state(name: &str, kind: &str) -> &'static str {
             _ => "Todo",
         },
     }
+}
+
+/// An open Linear state named "Needs ...".
+fn waits_on_a_person(name: &str, kind: &str) -> bool {
+    let name = name.trim().to_lowercase();
+    name.starts_with("needs ") && !matches!(kind, "completed" | "canceled")
 }
 
 /// The issue kind from its labels (Bug, Feature, ...), if one names a Nitely kind.
@@ -345,14 +354,18 @@ pub fn overrides(config: &BTreeMap<String, String>, pairs: &[String]) -> Result<
     Ok(out)
 }
 
-/// Shows mirrored Linear issues in the Nitely state chosen for their Linear state, if one is.
+/// Shows mirrored Linear issues in the Nitely state chosen for their Linear state, if one is, and
+/// an open "Needs ..." state as Needs You; every other state keeps its Linear name.
 pub fn map_mirrored(issues: &mut [crate::issues::IssueRecord], overrides: &BTreeMap<String, &'static str>) {
     for issue in issues {
-        if let Some(native) = overrides.get(&issue.state.to_lowercase()) {
-            if let Ok((state, state_type)) = parse_state(native) {
-                issue.state = state.to_string();
-                issue.state_type = state_type.to_string();
-            }
+        let native = match overrides.get(&issue.state.to_lowercase()) {
+            Some(native) => *native,
+            None if parse_state(&issue.state).is_err() && waits_on_a_person(&issue.state, &issue.state_type) => "Needs You",
+            None => continue,
+        };
+        if let Ok((state, state_type)) = parse_state(native) {
+            issue.state = state.to_string();
+            issue.state_type = state_type.to_string();
         }
     }
 }
@@ -449,8 +462,9 @@ pub fn plan(db: &Db, issues: &[LinearIssue], project: &str, project_name: &str, 
     }
     for (linear, native) in states.keys() {
         if parse_state(linear).is_err() && !overrides.contains_key(&linear.to_lowercase()) {
+            let why = if linear.trim().to_lowercase().starts_with("needs ") && native == "Needs You" { "as its name says" } else { "by Linear's state type" };
             out.notes.push(format!(
-                "Nitely has no state named {linear:?}; its issues become {native} by Linear's state type. To choose another, run again with --state \"{linear}=Needs You\" (or any state)"
+                "Nitely has no state named {linear:?}; its issues become {native} {why}. To choose another, run again with --state \"{linear}=Todo\" (or any state)"
             ));
         }
     }
@@ -587,8 +601,10 @@ mod tests {
 
         // A state Nitely does not have is mapped by its type, and called out in the notes.
         let by_type = plan(&db, &issues, "app", "Acme", &BTreeMap::new()).unwrap();
-        assert_eq!(by_type.states.iter().find(|s| s.linear == "Needs Review").map(|s| s.native.as_str()), Some("In Progress"));
-        assert!(by_type.notes.iter().any(|n| n.contains("--state \"Needs Review=")));
+        assert_eq!(by_type.states.iter().find(|s| s.linear == "Needs Review").map(|s| s.native.as_str()), Some("Needs You"), "a Needs state waits on you");
+        assert!(by_type.notes.iter().any(|n| n.contains("as its name says") && n.contains("--state \"Needs Review=")));
+        assert_eq!(native_state("Blocked", "started"), "In Progress");
+        assert_eq!(native_state("Needs Review", "completed"), "Done");
         let none = BTreeMap::new();
         assert!(overrides(&none, &["Needs Review=Approved".into()]).is_err(), "an import cannot approve");
         assert!(overrides(&none, &["no equals sign".into()]).is_err());
@@ -596,10 +612,16 @@ mod tests {
         let overrides = overrides(&configured, &["needs review = needs-you".into()]).unwrap();
         assert_eq!((overrides["needs review"], overrides["blocked"]), ("Needs You", "Needs You"), "--state wins over the config");
 
-        // The mirror shows a mapped Linear state as its Nitely state, so it counts as waiting on you.
-        let mut mirror = vec![IssueRecord { key: "APP-9".into(), state: "Needs Review".into(), state_type: "started".into(), ..Default::default() }];
-        map_mirrored(&mut mirror, &overrides);
+        // The mirror shows a chosen Linear state as its Nitely state, and an open Needs state as
+        // Needs You; others keep their Linear name.
+        let row = |state: &str| IssueRecord { key: "APP-9".into(), state: state.into(), state_type: "started".into(), ..Default::default() };
+        let mut mirror = vec![row("Needs Input"), row("Blocked")];
+        map_mirrored(&mut mirror, &BTreeMap::new());
         assert!(mirror[0].needs_human() && mirror[0].state_type == "started");
+        assert_eq!(mirror[1].state, "Blocked");
+        let mut chosen = vec![row("Needs Review")];
+        map_mirrored(&mut chosen, &BTreeMap::from([("needs review".to_string(), "Todo")]));
+        assert_eq!(chosen[0].state, "Todo");
         let p = plan(&db, &issues, "app", "Acme", &overrides).unwrap();
         assert!(!p.project_exists);
         assert_eq!((p.found, p.create, p.replaces_mirrored, p.comments, p.next_number), (4, 3, 1, 2, 8));

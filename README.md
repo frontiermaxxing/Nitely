@@ -120,7 +120,8 @@ requests come from each watched repo's Bitbucket `origin` plus the repo named in
 file; issues are the open ones in the Linear project the file names. To leave Linear, `nitely
 import-linear --project APP` moves a Linear project into native issues once, keeping its keys; it
 shows what it would do until you add `--yes`, and `--state "Needs Review=Needs You"` chooses the
-Nitely state for a Linear state Nitely has no name for. To keep such a choice for the Linear mirror
+Nitely state for a Linear state Nitely has no name for (an open state named "Needs …" is Needs You
+unless you choose otherwise). To keep such a choice for the Linear mirror
 too, put it in `config.json` in the data folder: `"linear_states": { "Needs Review": "Needs You" }`.
 
 ## Agents on other machines on your network
