@@ -19,6 +19,8 @@ const KIND_LABEL: Record<string, string> = {
   review_started: "review",
   review_failed: "review failed",
   submit: "submitted",
+  landed: "landed",
+  land_failed: "land stopped",
 };
 
 /** One issue and its timeline, in a panel over the right side. */

@@ -7,6 +7,7 @@ pub mod db;
 pub mod git;
 pub mod github;
 pub mod hook;
+pub mod land;
 pub mod issues;
 pub mod paths;
 pub mod playbook;

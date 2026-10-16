@@ -81,6 +81,19 @@ enum Cmd {
         #[arg(long)]
         local: bool,
     },
+    /// Land a submitted issue: rebase, check its review and approval, gate, fast-forward, push.
+    Land {
+        key: String,
+        /// Land locally without pushing.
+        #[arg(long)]
+        no_push: bool,
+        /// Keep the worktree and branch afterwards.
+        #[arg(long)]
+        keep: bool,
+        /// Take over a lock left by a land that died.
+        #[arg(long)]
+        break_lock: bool,
+    },
     /// Manage the repos Nitely watches.
     Repo {
         #[command(subcommand)]
@@ -401,6 +414,19 @@ fn run(cmd: Cmd) -> Result<()> {
             print_json(&s)?;
             eprintln!("{}", s.next);
             if !s.gate.passed || s.review.as_ref().is_some_and(|r| r.verdict != "pass") {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+        Cmd::Land { key, no_push, keep, break_lock } => {
+            let config = Config::load()?;
+            let mut db = Db::open_default()?;
+            let cwd = cwd()?;
+            let opts = nitely_core::land::LandOptions { dir: &cwd, issue_key: &key, push: !no_push, keep, break_lock };
+            let r = nitely_core::land::land(&mut db, &config, &opts, &me)?;
+            print_json(&r)?;
+            if let Some(e) = &r.error {
+                eprintln!("land stopped: {e}");
                 std::process::exit(1);
             }
             Ok(())
