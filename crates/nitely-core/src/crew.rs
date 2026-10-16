@@ -876,7 +876,7 @@ pub fn nitely_on_path() -> Option<PathBuf> {
 /// window, its own process group, and nothing that ends it when the caller ends, so a crew outlives
 /// the app. Its output goes to `supervisor.log` in the project's crew folder. The caller should
 /// `try_wait` the child now and then, so an exited one does not linger.
-pub fn start_supervisor(nitely: &Path, project: &str, repo: &Path, dir: &Path) -> Result<std::process::Child> {
+pub fn start_supervisor(nitely: &Path, project: &str, repo: &Path, dir: &Path, take_over: Option<u32>) -> Result<std::process::Child> {
     use std::process::Stdio;
     let logs = dir.join(project.to_uppercase());
     std::fs::create_dir_all(&logs).with_context(|| format!("creating {}", logs.display()))?;
@@ -884,6 +884,9 @@ pub fn start_supervisor(nitely: &Path, project: &str, repo: &Path, dir: &Path) -
     let log = std::fs::OpenOptions::new().create(true).append(true).open(&log_path).with_context(|| format!("opening {}", log_path.display()))?;
     let mut cmd = std::process::Command::new(nitely);
     cmd.args(["crew", "run", "--managed", "--project", project, "--repo"]).arg(repo).current_dir(repo);
+    if let Some(from) = take_over {
+        cmd.args(["--take-over", &from.to_string()]);
+    }
     cmd.stdin(Stdio::null()).stdout(Stdio::from(log.try_clone()?)).stderr(Stdio::from(log));
     for (name, _) in std::env::vars() {
         if crate::review::is_session_marker(&name) {
@@ -990,13 +993,20 @@ impl Db {
     /// In one statement, so two supervisors starting at once (the app's and one handing over to a
     /// new build) cannot both win.
     pub fn crew_claim_supervisor(&self, project: &str, pid: u32) -> Result<()> {
+        self.crew_take_over(project, pid, None)
+    }
+
+    /// `crew_claim_supervisor`, also taking the crew from the live supervisor `from`: the one
+    /// handing over to this newer build.
+    pub fn crew_take_over(&self, project: &str, pid: u32, from: Option<u32>) -> Result<()> {
         let ts = now();
         let claimed = self.conn.execute(
             "INSERT INTO crew_control (project, supervisor_pid, heartbeat_at, status) VALUES (?1, ?2, ?3, 'starting')
              ON CONFLICT (project) DO UPDATE SET supervisor_pid = ?2, heartbeat_at = ?3, status = 'starting'
              WHERE crew_control.supervisor_pid IS NULL OR crew_control.heartbeat_at IS NULL
-                OR crew_control.heartbeat_at <= ?3 - ?4 OR crew_control.supervisor_pid = ?2",
-            rusqlite::params![project.to_uppercase(), pid, ts, HEARTBEAT_STALE_SECS],
+                OR crew_control.heartbeat_at <= ?3 - ?4 OR crew_control.supervisor_pid = ?2
+                OR crew_control.supervisor_pid = ?5",
+            rusqlite::params![project.to_uppercase(), pid, ts, HEARTBEAT_STALE_SECS, from],
         )?;
         if claimed == 0 {
             let other = self.crew_control(project)?.supervisor_pid.unwrap_or(0);
@@ -1772,8 +1782,13 @@ workers = 2
         let f = fixture(GATE);
         f.db.crew_claim_supervisor("NIT", 1).unwrap();
         assert!(f.db.crew_claim_supervisor("NIT", 2).unwrap_err().to_string().contains("pid 1"));
+        assert!(f.db.crew_take_over("NIT", 2, Some(7)).is_err(), "only from the one holding it");
+        f.db.crew_take_over("NIT", 2, Some(1)).unwrap();
+        assert_eq!(f.db.crew_control("NIT").unwrap().supervisor_pid, Some(2), "the new build holds it");
         f.db.crew_leave("NIT", 1).unwrap();
-        f.db.crew_claim_supervisor("NIT", 2).unwrap();
+        assert_eq!(f.db.crew_control("NIT").unwrap().supervisor_pid, Some(2), "the old one leaving does not clear it");
+        f.db.crew_leave("NIT", 2).unwrap();
+        f.db.crew_claim_supervisor("NIT", 3).unwrap();
     }
 
     #[test]

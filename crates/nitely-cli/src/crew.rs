@@ -32,6 +32,9 @@ pub enum CrewCmd {
         /// installed (the app then starts the new one, which takes over the running workers).
         #[arg(long)]
         managed: bool,
+        /// Take the crew from this supervisor (an older build handing over).
+        #[arg(long, hide = true)]
+        take_over: Option<u32>,
     },
     /// Print the crew's state as JSON: running workers, cap, today's count, paused.
     Status {
@@ -75,9 +78,9 @@ pub fn run(cmd: CrewCmd, me: &Actor) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&status)?);
             Ok(())
         }
-        CrewCmd::Run { project, repo, once, managed } => {
+        CrewCmd::Run { project, repo, once, managed, take_over } => {
             let (project, root) = crew_repo(&config, &db, project.as_deref(), repo.as_deref(), &cwd)?;
-            supervise(&mut db, &project, root, once, managed)
+            supervise(&mut db, &project, root, once, managed, take_over)
         }
     }
 }
@@ -100,7 +103,7 @@ fn crew_repo(config: &Config, db: &Db, project: Option<&str>, repo: Option<&str>
     }
 }
 
-fn supervise(db: &mut Db, project: &str, root: PathBuf, once: bool, managed: bool) -> Result<()> {
+fn supervise(db: &mut Db, project: &str, root: PathBuf, once: bool, managed: bool, take_over: Option<u32>) -> Result<()> {
     let presses = Arc::new(AtomicUsize::new(0));
     {
         let presses = presses.clone();
@@ -112,10 +115,10 @@ fn supervise(db: &mut Db, project: &str, root: PathBuf, once: bool, managed: boo
         }
     }
     // This build, as it was on disk when it started: `nitely install` replacing it ends a managed run.
-    let exe = std::env::current_exe().ok().and_then(|p| nitely_core::install::stamp(&p).map(|s| (p, s)));
+    let mut exe = std::env::current_exe().ok().and_then(|p| nitely_core::install::stamp(&p).map(|s| (p, s)));
     let mut awake = Awake::default();
-    let mut handover: Option<PathBuf> = None;
-    db.crew_claim_supervisor(project, std::process::id())?;
+    let mut handed_over = false;
+    db.crew_take_over(project, std::process::id(), take_over)?;
     // The heartbeat stays fresh through a long pass, so a second `crew run` never takes over.
     let done = Arc::new(AtomicBool::new(false));
     let beat = {
@@ -181,12 +184,17 @@ fn supervise(db: &mut Db, project: &str, root: PathBuf, once: bool, managed: boo
                 eprintln!("the crew is off and idle; leaving");
                 break;
             }
-            if exe.as_ref().is_some_and(|(path, at)| nitely_core::install::stamp(path).as_ref() != Some(at)) {
-                // Workers keep running; the new build takes them over, started here so the crew
-                // goes on with the app closed (the app's keeper would also start one).
+            if let Some((path, _)) = exe.clone().filter(|(path, at)| nitely_core::install::stamp(path).as_ref() != Some(at)) {
+                // The new build is started here, so the crew goes on with the app closed, and takes
+                // the crew and its running workers over; this one leaves only once it has.
                 eprintln!("a newer nitely is installed; handing over to it");
-                handover = exe.as_ref().map(|(path, _)| path.clone());
-                break;
+                if hand_over(db, &path, project, &root) {
+                    handed_over = true;
+                    break;
+                }
+                eprintln!("the new build did not take over; this one carries on");
+                // Not again for this build: only for the next install.
+                exe = nitely_core::install::stamp(&path).map(|s| (path, s));
             }
         }
         for _ in 0..TICK_SECS * 4 {
@@ -198,18 +206,38 @@ fn supervise(db: &mut Db, project: &str, root: PathBuf, once: bool, managed: boo
     }
     done.store(true, Ordering::SeqCst);
     beat.join().ok();
-    sup.leave(db)?;
-    if let Some(new) = handover {
-        // Left first, so the new build's claim finds the crew free.
-        match crew::start_supervisor(&new, project, &root, &paths::data_dir().join("crew")) {
-            Ok(child) => eprintln!("started {} (pid {})", new.display(), child.id()),
-            Err(e) => eprintln!("could not start the new build: {e:#}"),
-        }
+    // After a hand-over the crew is the new build's; leaving would only touch our own row anyway.
+    if !handed_over {
+        sup.leave(db)?;
     }
     if !once {
         eprintln!("crew for {project} stopped");
     }
     Ok(())
+}
+
+/// Starts `nitely` (a newer build) to take this crew over, and waits up to half a minute for it to
+/// hold the crew. True when it does.
+fn hand_over(db: &Db, nitely: &std::path::Path, project: &str, root: &std::path::Path) -> bool {
+    let mut child = match crew::start_supervisor(nitely, project, root, &paths::data_dir().join("crew"), Some(std::process::id())) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("could not start the new build: {e:#}");
+            return false;
+        }
+    };
+    let pid = child.id();
+    for _ in 0..120 {
+        if db.crew_control(project).ok().and_then(|c| c.supervisor_pid) == Some(pid) {
+            eprintln!("{} (pid {pid}) took the crew over", nitely.display());
+            return true;
+        }
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    false
 }
 
 /// Keeps the machine from sleeping while workers run, so a crew left overnight keeps working. The
