@@ -1148,9 +1148,13 @@ pub fn project_status(db: &Db, config: &crate::Config, project: &str, moment: &M
         .filter(|r| r.project.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(project)))
         .map(|r| r.root.as_str())
         .collect();
-    // The repo the supervisor says it follows, when it is one of the project's; else the first
-    // whose playbook has a crew.
-    let followed = db.crew_control(project)?.repo.filter(|r| roots.iter().any(|root| crate::paths::normalize(root) == crate::paths::normalize(r)));
+    // The repo a running supervisor says it follows, when it is one of the project's; else the
+    // first whose playbook has a crew (a supervisor that left says nothing about what runs next).
+    let live = !unsupervised(db, project)?;
+    let followed = db
+        .crew_control(project)?
+        .repo
+        .filter(|r| live && roots.iter().any(|root| crate::paths::normalize(root) == crate::paths::normalize(r)));
     let playbooks: Vec<Playbook> = followed
         .iter()
         .map(String::as_str)
@@ -2210,6 +2214,9 @@ workers = 1
         assert_eq!((s.cap, s.max_per_day), (3, 7), "the repo `crew run --repo` follows");
         db.crew_follows("NIT", Path::new("/elsewhere")).unwrap();
         assert_eq!(project_status(db, &config, "NIT", &NOON).unwrap().unwrap().cap, 1, "a repo no longer the project's is ignored");
+        db.crew_follows("NIT", &second.repo).unwrap();
+        db.crew_leave("NIT", 9).unwrap();
+        assert_eq!(project_status(db, &config, "NIT", &NOON).unwrap().unwrap().cap, 1, "once the supervisor left, its repo says nothing");
     }
 
     #[test]
