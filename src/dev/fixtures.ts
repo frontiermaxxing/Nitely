@@ -956,13 +956,13 @@ function setOwner(args: Record<string, unknown>) {
   const ts = Math.floor(Date.now() / 1000);
   const before = issue.state;
   if (owner === "human" && issue.state !== "Backlog" && issue.state_type !== "completed" && issue.state_type !== "canceled") issue.state = "Needs You";
-  if (owner === "agent" && issue.state === "Needs You") issue.state = "Todo";
+  if (owner === "agent" && issue.state !== "Backlog" && issue.state_type !== "completed" && issue.state_type !== "canceled") issue.state = "Todo";
   issue.state_type = STATE_TYPE[issue.state] ?? issue.state_type;
   issue.owner = owner;
   issue.claimed_by = null;
   issue.updated_at = iso(ts);
-  const moved = issue.state !== before ? `: ${before} → ${issue.state}` : "";
-  world.timelines.get(issue.key)!.push({ ts, actor: "human", kind: "owner_changed", summary: `${owner === "human" ? "Made the human's own work" : "Handed back to agents"}${moved}` });
+  world.timelines.get(issue.key)!.push({ ts, actor: "human", kind: "owner_changed", summary: owner === "human" ? "Made the human's own work" : "Handed back to agents" });
+  if (issue.state !== before) world.timelines.get(issue.key)!.push({ ts, actor: "human", kind: "issue_moved", summary: `${before} → ${issue.state}` });
   retrack(world, issue);
   recount(world);
   return issue;
