@@ -246,6 +246,9 @@ pub struct Session {
     pub last_seen_at: i64,
     pub last_activity: Option<String>,
     pub state: String,
+    /// The crew started it: it runs in a crew worker's worktree, since that worker started.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub crew: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -479,13 +482,16 @@ impl Db {
                 last_seen_at: r.get(4)?,
                 last_activity: r.get(5)?,
                 state: r.get(6)?,
+                crew: false,
             })
         })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let mut sessions: Vec<Session> = rows.collect::<rusqlite::Result<_>>()?;
+        self.mark_crew(&mut sessions);
+        Ok(sessions)
     }
 
     pub fn session(&self, id: &str) -> Result<Option<Session>> {
-        Ok(self
+        let session = self
             .conn
             .query_row(
                 "SELECT id, vendor, cwd, started_at, last_seen_at, last_activity, state
@@ -500,10 +506,14 @@ impl Db {
                         last_seen_at: r.get(4)?,
                         last_activity: r.get(5)?,
                         state: r.get(6)?,
+                        crew: false,
                     })
                 },
             )
-            .optional()?)
+            .optional()?;
+        let mut sessions: Vec<Session> = session.into_iter().collect();
+        self.mark_crew(&mut sessions);
+        Ok(sessions.pop())
     }
 }
 

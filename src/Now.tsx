@@ -118,7 +118,10 @@ function Card(props: { row: TaskRow; integration: string; now: number; onOpenIss
     <div className={`now-card${row.needs_me || live === "waiting" ? " needs-me" : ""}${quiet && !row.needs_me ? " quiet" : ""}`} title={row.worktree}>
       <div className="now-card-top">
         {vendor ? <AgentMark vendor={vendor} state={live} size={20} /> : <span className="now-card-nobody" />}
-        <span className="now-card-agent">{vendor ? VENDOR_NAME[vendorOf(vendor)] : "No agent"}</span>
+        <span className="now-card-agent" title={s?.crew ? "Started by the project's crew" : undefined}>
+          {vendor ? VENDOR_NAME[vendorOf(vendor)] : "No agent"}
+          {s?.crew && <span className="muted"> · crew</span>}
+        </span>
         <span className="now-card-branch">{row.branch ?? "detached"}</span>
         {row.pr && <PrMark pr={row.pr} link />}
         <span className="now-card-age">{s ? (live === "working" ? ago(now, s.started_at).replace(" ago", "") : livenessLabel(s, now)) : ""}</span>

@@ -12,6 +12,40 @@ export interface Session {
   last_seen_at: number;
   last_activity: string | null;
   state: SessionState;
+  /** The crew started it (docs/crew.md); absent otherwise. */
+  crew?: boolean;
+}
+
+/** One agent process a project's crew started. */
+export interface CrewWorker {
+  id: number;
+  project: string;
+  issue_key: string;
+  agent: string;
+  pid: number | null;
+  worktree: string;
+  log: string;
+  started_at: number;
+  ended_at: number | null;
+  exit_code: number | null;
+  /** landed, submitted, asked, failed, stopped or launch_failed, once it ended. */
+  outcome: string | null;
+  reason: string | null;
+}
+
+/** A project's crew, from `crew_status`; null when the project has none. */
+export interface CrewStatus {
+  project: string;
+  cap: number;
+  running: CrewWorker[];
+  started_today: number;
+  max_per_day: number;
+  paused: boolean;
+  /** A `nitely crew run` heartbeat is fresh. */
+  supervised: boolean;
+  /** What the supervisor last said, e.g. "working" or "quiet hours until 07:00". */
+  status: string | null;
+  recent: CrewWorker[];
 }
 
 export interface BranchState {

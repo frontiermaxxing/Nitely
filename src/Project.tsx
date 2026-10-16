@@ -4,6 +4,7 @@ import type { Board, IssueRecord, Project } from "./types";
 import { Backlog, Summary } from "./Backlog";
 import { BoardFilters, NO_FILTER, ProjectBoard, type Filters } from "./ProjectBoard";
 import { BranchMap } from "./BranchMap";
+import { CrewControl } from "./CrewControl";
 import { ProjectBrief } from "./ProjectBrief";
 import { ProjectSettings } from "./ProjectSettings";
 import { EmptyState, Loading } from "./ui";
@@ -88,6 +89,7 @@ export function ProjectPage(props: {
         <h1>
           {props.project?.name ?? props.projectKey} <span className="muted mono">{props.projectKey}</span>
         </h1>
+        <CrewControl projectKey={props.projectKey} version={props.version} now={props.now} />
         <div className="seg" role="tablist" aria-label="Project view">
           {PROJECT_TABS.map((t) => (
             <button key={t} role="tab" aria-selected={tab === t} className={tab === t ? "on" : undefined} onClick={() => pick(t)}>

@@ -401,9 +401,12 @@ fn sessions_in(db: &Db, from: i64, to: i64) -> Result<Vec<Session>> {
             last_seen_at: r.get(4)?,
             last_activity: r.get(5)?,
             state: r.get(6)?,
+            crew: false,
         })
     })?;
-    Ok(rows.collect::<rusqlite::Result<_>>()?)
+    let mut sessions: Vec<Session> = rows.collect::<rusqlite::Result<_>>()?;
+    db.mark_crew(&mut sessions);
+    Ok(sessions)
 }
 
 fn mark_kind(e: &Event) -> Option<&'static str> {

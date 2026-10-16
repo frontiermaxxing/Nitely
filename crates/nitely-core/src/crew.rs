@@ -843,9 +843,48 @@ fn worker_row(r: &rusqlite::Row) -> rusqlite::Result<CrewWorker> {
     })
 }
 
+/// The crew of a project as the app shows it: the crew of the first of its repos whose playbook
+/// has one. None when no repo has a crew, none is running and no supervisor is there, so a project
+/// that never used a crew shows nothing.
+pub fn project_status(db: &Db, config: &crate::Config, project: &str, moment: &Moment) -> Result<Option<CrewStatus>> {
+    let playbooks: Vec<Playbook> = config
+        .repos
+        .iter()
+        .filter(|r| r.project.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(project)))
+        .filter_map(|r| Playbook::load(Path::new(&r.root)).ok())
+        .collect();
+    let playbook = playbooks.iter().find(|p| p.crew.workers > 0).or(playbooks.first()).cloned().unwrap_or_default();
+    let status = status(db, project, &playbook, moment)?;
+    Ok((status.cap > 0 || !status.running.is_empty() || status.supervised).then_some(status))
+}
+
 const WORKER_COLUMNS: &str = "id, project, issue_key, agent, pid, worktree, log_path, started_at, ended_at, exit_code, outcome, reason, agent_id";
 
 impl Db {
+    /// Marks the sessions a crew worker runs: in its worktree, started once the worker had. A
+    /// database without the crew tables (an older one, read-only) marks none.
+    pub(crate) fn mark_crew(&self, sessions: &mut [crate::db::Session]) {
+        let Some(oldest) = sessions.iter().map(|s| s.started_at).min() else { return };
+        let workers: Vec<(String, i64, Option<i64>)> = (|| -> rusqlite::Result<_> {
+            let mut stmt = self.conn.prepare("SELECT worktree, started_at, ended_at FROM crew_worker WHERE ended_at IS NULL OR ended_at >= ?1")?;
+            let rows = stmt.query_map([oldest - 60], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            rows.collect()
+        })()
+        .unwrap_or_default();
+        if workers.is_empty() {
+            return;
+        }
+        let workers: Vec<(String, i64, Option<i64>)> = workers.into_iter().map(|(w, s, e)| (crate::paths::normalize(&w), s, e)).collect();
+        for s in sessions.iter_mut() {
+            let cwd = crate::paths::normalize(&s.cwd);
+            s.crew = workers.iter().any(|(wt, started, ended)| {
+                let inside = cwd == *wt || cwd.strip_prefix(wt.as_str()).is_some_and(|rest| rest.starts_with('/'));
+                // A minute's slack: the worker's row is written just before its process starts.
+                inside && s.started_at >= started - 60 && ended.is_none_or(|e| s.started_at <= e)
+            });
+        }
+    }
+
     /// Moves a claim to another agent id: the supervisor claims an issue, then hands it to the
     /// worker's own id once it knows where the worker will run.
     pub fn reassign_claim(&self, key: &str, agent: &str) -> Result<()> {
@@ -1601,6 +1640,26 @@ workers = 2
         assert_eq!(tick.ended.iter().map(|w| (w.issue.as_str(), w.outcome.as_str())).collect::<Vec<_>>(), [("NIT-1", "failed")]);
         let w = f.db.crew_workers_for("NIT-1").unwrap().into_iter().last().unwrap();
         assert!(w.reason.unwrap().contains("crew.timeout_minutes"));
+    }
+
+    #[test]
+    fn sessions_in_a_crew_worktree_are_marked() {
+        let mut f = fixture(&format!("{GATE}[crew]\nworkers = 1\n"));
+        let fake = Fake { installed: vec!["claude"], ..Default::default() };
+        supervisor(&f, &fake).tick(&mut f.db, false).unwrap();
+        let wt = fake.launches.borrow()[0].cwd.to_string_lossy().replace('/', "\\");
+        let repo = f.repo.to_string_lossy().into_owned();
+        let mut record = |id: &str, cwd: &str| {
+            let e = crate::db::NewEvent { session_id: id.into(), vendor: "claude".into(), cwd: cwd.into(), kind: "session_start".into(), summary: None, state: "working".into() };
+            f.db.record(&e).unwrap();
+        };
+        record("claude:worker", &format!("{wt}\\src"));
+        record("claude:person", &repo);
+        let marks: BTreeMap<String, bool> = f.db.sessions_since(0).unwrap().into_iter().map(|s| (s.id, s.crew)).collect();
+        assert_eq!(marks, BTreeMap::from([("claude:person".to_string(), false), ("claude:worker".to_string(), true)]));
+        assert!(f.db.session("claude:worker").unwrap().unwrap().crew);
+        let json = serde_json::to_value(f.db.session("claude:person").unwrap().unwrap()).unwrap();
+        assert!(json.get("crew").is_none(), "only crew sessions carry the field");
     }
 
     #[test]

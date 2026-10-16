@@ -8,6 +8,8 @@
 // failed gate as its last gate event, and so on.
 
 import type {
+  CrewStatus,
+  CrewWorker,
   Activity,
   ActivityLane,
   ActivityMark,
@@ -120,6 +122,8 @@ interface IssueSpec {
   sameVendor?: boolean;
   /** Work only the human can do: filed into Needs You, and never handed to an agent. */
   owner?: "human";
+  /** Its session was started by the project's crew (docs/crew.md). */
+  crew?: boolean;
 }
 
 const WORK = ["Reading the code around the change", "Writing the change", "Adding tests", "Fixing a failing test", "Tidying the diff before the gate"];
@@ -134,7 +138,7 @@ const ISSUES: IssueSpec[] = [
     body: "The first screen answers three questions before any detail: does anything need me, what is moving, what is stuck.",
   },
   {
-    key: "NIT-30", title: "Show review rounds and findings on the issue track", kind: "feature", priority: 2, vendor: "codex",
+    key: "NIT-30", title: "Show review rounds and findings on the issue track", kind: "feature", priority: 2, vendor: "codex", crew: true,
     from: 30, to: 0.2, story: ["filed", "claim", "work", "work", "gate", "review", "changes", "work", "work", "gate", "review"],
     notes: ["Mapping review records onto the track", "Fixing the P1 from review: the loop drew under the labels"],
     live: { state: "idle", seen: 6, activity: "Waiting for the review by claude" }, branch: { ahead: 6, dirty_files: 0 }, checks: "pending",
@@ -631,7 +635,30 @@ function session(spec: IssueSpec, live: Live): Session {
     last_seen_at: Math.round(NOW - live.seen * MIN),
     last_activity: live.activity,
     state: live.state,
+    ...(spec.crew ? { crew: true } : {}),
   };
+}
+
+// ----- The NIT crew: the specs marked crew are its running workers -----
+
+let crewPaused = false;
+
+function crewStatus(project: string): CrewStatus | null {
+  if (project.toUpperCase() !== "NIT") return null;
+  const running: CrewWorker[] = ISSUES.filter((s) => s.crew && s.live).map((s, i) => ({
+    id: 40 + i, project: "NIT", issue_key: s.key, agent: s.vendor ?? "claude", pid: 7100 + i, worktree: worktreeOf(s),
+    log: `C:\Users\you\AppData\Roaming\Nitely\crew\NIT\${s.key.toLowerCase()}-${s.vendor}.log`,
+    started_at: NOW - s.from * HOUR + 10 * MIN, ended_at: null, exit_code: null, outcome: null, reason: null,
+  }));
+  return {
+    project: "NIT", cap: 2, running, started_today: 3, max_per_day: 20, paused: crewPaused, supervised: true,
+    status: crewPaused ? "paused" : "working; nothing else ready", recent: [],
+  };
+}
+
+function crewPause(args: Record<string, unknown>): CrewStatus | null {
+  crewPaused = Boolean(args.paused);
+  return crewStatus(String(args.project));
 }
 
 /** `claude/nit-12-slug` → ["claude", "NIT-12"], as git::parse_branch does. */
@@ -1223,6 +1250,10 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return world.projects;
       case "project_brief":
         return projectBrief(String(args.project));
+      case "crew_status":
+        return crewStatus(String(args.project));
+      case "crew_pause":
+        return crewPause(args);
       case "set_project_brief":
         return setProjectBrief(args);
       case "issues":

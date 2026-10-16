@@ -123,6 +123,22 @@ async fn set_project_brief(project: String, brief: String, revision: i64) -> Res
     db()?.set_project_brief(&project, &brief, revision, &ME).map_err(err)
 }
 
+/// The project's crew (docs/crew.md): running workers, cap, today's count, paused, and what the
+/// supervisor last said. None when the project has no crew.
+#[tauri::command]
+async fn crew_status(project: String) -> Result<Option<nitely_core::crew::CrewStatus>, String> {
+    let config = Config::load().map_err(err)?;
+    nitely_core::crew::project_status(&db()?, &config, &project, &nitely_core::crew::Moment::now()).map_err(err)
+}
+
+/// Pauses the project's crew (running workers finish, none start) or resumes it.
+#[tauri::command]
+async fn crew_pause(project: String, paused: bool) -> Result<Option<nitely_core::crew::CrewStatus>, String> {
+    let db = db()?;
+    db.crew_pause(&project, paused, &ME).map_err(err)?;
+    nitely_core::crew::project_status(&db, &Config::load().map_err(err)?, &project, &nitely_core::crew::Moment::now()).map_err(err)
+}
+
 #[tauri::command]
 async fn issues(project: String, include_closed: bool) -> Result<Vec<IssueRecord>, String> {
     db()?.list_issues(Some(&project), include_closed).map_err(err)
@@ -331,6 +347,8 @@ pub fn run() {
             remove_project,
             project_brief,
             set_project_brief,
+            crew_status,
+            crew_pause,
             issues,
             issue_detail,
             set_blocker,

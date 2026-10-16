@@ -224,10 +224,10 @@ When a worker exits, the supervisor reads its issue:
   20 today", "no gate", "claude can't start: <reason>", or "not running: start `nitely crew run`"
   when no supervisor heartbeat is fresh. A playbook with `workers = 0` shows nothing.
 - **Now and Pulse:** crew workers are ordinary sessions there (their hooks and reports already put
-  them on the board), with a small "crew" marker. The hook records the marker from `NITELY_CREW`, which
-  the worker's processes inherit, so the session row knows a crew started it.
-- **Issue timeline:** `crew_started` and `crew_ended` entries with the outcome, and the worker's
-  log path, which opens the file.
+  them on the board), with "· crew" after the agent's name. A session is a crew session when it runs
+  in a crew worker's worktree from the time that worker started, so the hooks need nothing new.
+- **Issue timeline:** `crew_started` and `crew_ended` entries with the outcome and the worker's
+  log path (opening the file from the timeline is a follow-up).
 - **Inbox:** the retry-cap asks arrive like any other ask.
 
 ## Later

@@ -327,12 +327,13 @@ function RightNow({ data, board, ctx }: { data: PulseData; board: Board | null; 
                 // A mirrored issue's token is a link to its tracker: that click is the link's alone.
                 onClick={(e) => key && !(e.target as Element).closest("a") && ctx.onOpenIssue(key)}
                 disabled={!key}
-                title={[agentLabel(s.vendor), livenessLabel(s, ctx.now), s.last_activity].filter(Boolean).join(" · ")}
+                title={[agentLabel(s.vendor), s.crew ? "started by the crew" : null, livenessLabel(s, ctx.now), s.last_activity].filter(Boolean).join(" · ")}
               >
                 <span className="now-who">
                   <AgentMark vendor={s.vendor} state={live} />
                   <span className="now-who-name">
                     {agentLabel(s.vendor)}
+                    {s.crew && <span className="muted"> · crew</span>}
                     {where && <span className="muted"> · {where.toLowerCase()}</span>}
                   </span>
                 </span>

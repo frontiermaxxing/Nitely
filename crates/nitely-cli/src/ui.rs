@@ -15,6 +15,7 @@ pub const READ_ONLY: &[&str] = &[
     "snapshot",
     "projects",
     "project_brief",
+    "crew_status",
     "issues",
     "issue_detail",
     "pulse",
@@ -50,6 +51,10 @@ pub fn run(command: &str, args: &Value) -> Result<Value> {
         "snapshot" => json!(nitely_core::snapshot(&Config::load_read_only()?, &db()?)?),
         "projects" => json!(db()?.projects()?),
         "project_brief" => json!(db()?.project_brief(str_arg(args, "project")?)?),
+        "crew_status" => {
+            let moment = nitely_core::crew::Moment::now();
+            json!(nitely_core::crew::project_status(&db()?, &Config::load_read_only()?, str_arg(args, "project")?, &moment)?)
+        }
         "issues" => {
             let closed = args.get("includeClosed").and_then(Value::as_bool).unwrap_or(false);
             json!(db()?.list_issues(Some(str_arg(args, "project")?), closed)?)
