@@ -158,10 +158,11 @@ export function journeyOf(timeline: TimelineEntry[] = [], reviews: ReviewRecord[
   // second, and then only the commit tells their records apart.
   const used = new Set<ReviewRecord>();
   let floor = -Infinity;
-  const take = (r: Round, from: number, upTo: number): ReviewRecord | null => {
+  const take = (r: Round, from: number, upTo: number, sameCommitOnly = false): ReviewRecord | null => {
     const fits = records.filter((rec) => !used.has(rec) && rec.ts >= Math.max(floor, from) && rec.ts <= upTo);
     const commit = commitOf.get(r);
-    const rec = fits.filter((x) => commit && x.commit_sha === commit).pop() ?? fits.pop() ?? null;
+    const same = fits.filter((x) => commit && x.commit_sha === commit).pop();
+    const rec = same ?? (sameCommitOnly ? null : fits.pop()) ?? null;
     if (rec) {
       used.add(rec);
       floor = rec.ts;
@@ -173,11 +174,12 @@ export function journeyOf(timeline: TimelineEntry[] = [], reviews: ReviewRecord[
   }
 
   // A review is running, or its submit stopped after recording it: a record written since the
-  // review started is that review's.
+  // review started is that review's. When the round's gate named its commit, only a record for
+  // that commit: a retry can start in the same second a stalled submit recorded the last one.
   const last = rounds[rounds.length - 1];
   const started = last && last.end === null && last.outcome === "reviewing" ? reviewStart.get(last) : undefined;
   if (last && started !== undefined) {
-    const rec = take(last, started, Infinity);
+    const rec = take(last, started, Infinity, commitOf.has(last));
     if (rec) {
       last.review = rec;
       last.outcome = outcomeOf(rec);

@@ -60,3 +60,16 @@ test("NIT-41: two submits in one second each get their own record, by commit", (
     ["aaa1111", "bbb2222"],
   );
 });
+
+test("NIT-41: a retry started in the second a stalled submit recorded keeps reviewing", () => {
+  const timeline = [
+    ev(10, "gate_passed", "Gate passed at aaa1111"),
+    ev(20, "review_started", "Review by codex started"),
+    ev(80, "gate_passed", "Gate passed at bbb2222"),
+    ev(80, "review_started", "Review by codex started"),
+  ];
+  const { rounds } = journeyOf(timeline, [rec(80, "aaa1111", "changes")]);
+  assert.equal(rounds.length, 1);
+  assert.equal(rounds[0].outcome, "reviewing");
+  assert.equal(rounds[0].review, null);
+});
