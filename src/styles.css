@@ -136,9 +136,6 @@ tr.quiet .ui-mini-track { opacity: 0.6; }
 .cell-branch .branch { font-size: var(--text-sm); color: var(--fg-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .head-glance { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: var(--text-sm); color: var(--fg-2); }
 .head-glance span { display: inline-flex; align-items: center; gap: 6px; }
-.checks { display: inline-flex; align-items: center; gap: 4px; font-size: var(--text-sm); color: var(--fg-2); }
-.checks-failure { color: var(--sev-p0); }
-.checks-pending { color: var(--fg-3); }
 footer { display: flex; align-items: center; gap: 12px; margin-top: 28px; padding-top: 12px; border-top: 1px solid var(--line); }
 footer .btn { margin-left: auto; }
 .sync { display: flex; gap: 14px; flex-wrap: wrap; }

@@ -40,6 +40,8 @@ export interface Track {
   closed: "canceled" | "duplicate" | null;
   /** Still in Backlog: before Todo, drawn fainter. */
   backlog: boolean;
+  /** When the issue last arrived at its current station (unix seconds). Only known from a timeline. */
+  since?: number;
 }
 
 export function stationIndex(station: Station): number {
@@ -115,8 +117,10 @@ export function computeTrack(issue: IssueRecord, timeline?: TimelineEntry[], rev
   }
 
   let current: Station = "todo";
+  let since: number | undefined;
   const reach = (s: Station, ts: number) => {
     track.reached[s] ??= ts;
+    if (current !== s || since === undefined) since = ts;
     current = s;
   };
   let gateFailed = false;
@@ -167,6 +171,7 @@ export function computeTrack(issue: IssueRecord, timeline?: TimelineEntry[], rev
         if (changes) {
           rounds++;
           current = "working";
+          since = e.ts;
         }
         // A failed push leaves the change unseen: stuck until the next submit. "No pull request"
         // alone (the push worked, opening the PR did not) can still land.
@@ -199,10 +204,15 @@ export function computeTrack(issue: IssueRecord, timeline?: TimelineEntry[], rev
         // back to In Progress after one, and the branch is still unseen.
         if (e.actor === "human") pushFailed = false;
         const s = stationOfState(to);
-        if (to === "Todo" || to === "Backlog") current = "todo";
-        else if (s === "working") {
+        if (to === "Todo" || to === "Backlog") {
+          if (current !== "todo") since = e.ts;
+          current = "todo";
+        } else if (s === "working") {
           // Back from review to work: the "changes asked" loop.
-          if (stationIndex(current) >= stationIndex("review")) current = "working";
+          if (stationIndex(current) >= stationIndex("review")) {
+            current = "working";
+            since = e.ts;
+          }
           else if (!track.reached.started) reach("started", e.ts);
         } else reach(s, e.ts);
         break;
@@ -221,6 +231,7 @@ export function computeTrack(issue: IssueRecord, timeline?: TimelineEntry[], rev
   const open = track.station !== "done";
   // A stopped land keeps the issue's state (often In Review), but the work is at Landing.
   if (open && landFailed) track.station = "landing";
+  track.since = track.station === current ? since : track.reached[track.station];
   if (open && landFailed) track.stuck = "Land stopped";
   // A resubmit can fail without moving the issue, so these hold at whatever station it shows.
   else if (open && gateFailed) track.stuck = "Gate failed";

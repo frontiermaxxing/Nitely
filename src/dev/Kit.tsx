@@ -1,10 +1,12 @@
 // The browser preview's page of every shared primitive in every state (`#kit`). Look here first
 // when building a view, and add a row here when a primitive gains a state.
 
-import type { IssueRecord, MarkKind } from "../types";
+import type { IssueRecord, MarkKind, PrRecord } from "../types";
 import { nowSecs } from "../util";
 import {
   AgentMark,
+  AheadBehind,
+  ChecksMark,
   CountBadge,
   EmptyState,
   EVENT_LABEL,
@@ -12,6 +14,7 @@ import {
   FindingDots,
   IssueToken,
   Meter,
+  PrMark,
   PriorityMark,
   ResultMark,
   SeverityMark,
@@ -69,6 +72,22 @@ const ISSUE: IssueRecord = {
   blocked_by: [],
   blocks: [],
   urgency: 1,
+};
+
+const PR: PrRecord = {
+  provider: "github",
+  repo: "AndrewDavidRivers/nitely",
+  number: 41,
+  title: "NIT-29: Activity lanes",
+  url: "https://github.com/AndrewDavidRivers/nitely/pull/41",
+  state: "OPEN",
+  branch: "claude/nit-29-activity-lanes",
+  head_sha: "",
+  updated_at: "",
+  comment_count: 0,
+  approved_by: [],
+  approved_by_me: false,
+  checks: "success",
 };
 
 const VENDORS = ["claude", "codex", "cursor", "human", "other"];
@@ -228,6 +247,33 @@ export default function Kit() {
           />
           <Sparkline label="Events per hour" values={[2, 4, 3, 6, 9, 5, 7, 12, 8, 6, 10, 14]} />
           <Sparkline label="Landed per day" kind="bars" values={[1, 0, 2, 3, 1, 0, 0, 4, 2, 1, 3, 5, 2, 1]} />
+        </div>
+      </section>
+
+      <section>
+        <h2>PrMark, ChecksMark and AheadBehind</h2>
+        <div className="kit-row">
+          <PrMark pr={PR} link />
+          <PrMark pr={{ ...PR, number: 48, checks: "failure" }} link />
+          <PrMark pr={{ ...PR, number: 40, checks: "pending" }} link />
+          <PrMark pr={{ ...PR, number: 37, state: "MERGED" }} link />
+          <ChecksMark checks="success" label />
+          <ChecksMark checks="failure" label />
+          <ChecksMark checks="pending" label />
+        </div>
+        <div className="kit-row">
+          <span className="kit-pair">
+            <AheadBehind ahead={4} behind={0} base="main" max={40} /> 4 ahead
+          </span>
+          <span className="kit-pair">
+            <AheadBehind ahead={3} behind={7} base="main" max={40} /> behind too
+          </span>
+          <span className="kit-pair">
+            <AheadBehind ahead={0} behind={38} base="main" max={40} /> merged, far behind
+          </span>
+          <span className="kit-pair">
+            <AheadBehind ahead={null} behind={null} base="main" /> not counted
+          </span>
         </div>
       </section>
 

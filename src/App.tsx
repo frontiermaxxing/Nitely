@@ -7,7 +7,7 @@ import { decisionsOf } from "./decisions";
 import { Now } from "./Now";
 import { Pulse } from "./Pulse";
 import { Activity } from "./Activity";
-import { Backlog } from "./Backlog";
+import { ProjectPage, isProjectTab, type ProjectTab } from "./Project";
 import { IssuePanel } from "./IssuePanel";
 import { AddProject } from "./AddProject";
 import { nowSecs } from "./util";
@@ -27,12 +27,12 @@ export type View =
   | { kind: "inbox" }
   | { kind: "now" }
   | { kind: "activity" }
-  | { kind: "project"; key: string }
+  | { kind: "project"; key: string; tab?: ProjectTab }
   | { kind: "add" }
   | { kind: "agents" }
   | { kind: "kit" };
 
-// The view and the open issue live in the URL hash (`#now`, `#project/NIT`, `#inbox@NIT-12`), so
+// The view and the open issue live in the URL hash (`#now`, `#project/NIT/board`, `#inbox@NIT-12`), so
 // a reload keeps them and the browser preview can open any screen directly.
 function fromHash(hash: string): { view: View; issue: string | null } {
   let raw = hash.replace(/^#\/?/, "");
@@ -42,15 +42,18 @@ function fromHash(hash: string): { view: View; issue: string | null } {
     // A malformed escape: use the hash as it is rather than fail to start.
   }
   const [path, issue] = raw.split("@");
-  const [kind, key] = path.split("/");
+  const [kind, key, tab] = path.split("/");
   const plain = ["pulse", "inbox", "now", "activity", "add", "agents"].concat(isPreview ? ["kit"] : []);
   const view: View =
-    kind === "project" && key ? { kind: "project", key: key.toUpperCase() } : plain.includes(kind) ? ({ kind } as View) : { kind: "pulse" };
+    kind === "project" && key
+      ? { kind: "project", key: key.toUpperCase(), ...(isProjectTab(tab) ? { tab } : {}) }
+      : plain.includes(kind) ? ({ kind } as View) : { kind: "pulse" };
   return { view, issue: issue ? issue.toUpperCase() : null };
 }
 
 function toHash(view: View, issue: string | null): string {
-  return `#${view.kind === "project" ? `project/${view.key}` : view.kind}${issue ? `@${issue}` : ""}`;
+  const path = view.kind === "project" ? `project/${view.key}${view.tab ? `/${view.tab}` : ""}` : view.kind;
+  return `#${path}${issue ? `@${issue}` : ""}`;
 }
 
 export function App() {
@@ -208,9 +211,13 @@ export function App() {
           </Suspense>
         )}
         {view.kind === "project" && (
-          <Backlog
+          <ProjectPage
             project={projects.find((p) => p.key === view.key)}
             projectKey={view.key}
+            tab={view.tab}
+            onTab={(tab) => setView({ kind: "project", key: view.key, tab })}
+            board={board}
+            now={now}
             version={version}
             onOpenIssue={setOpenIssue}
           />

@@ -77,7 +77,8 @@ issues in lists from their state. On the frontend always call `trackOf(issue)` f
 the browser preview's sample data. A rule change goes into `track.rs` first, then `computeTrack`,
 with a case in `crates/nitely-core/src/track_cases.json`: both `cargo test` and `npm test` run every
 case there, so the two cannot drift apart.
-Never compute stations anywhere else.
+Never compute stations anywhere else. `track.since` is when the issue last arrived at its station
+(known only from a timeline): the board's "age in this column".
 
 ## Primitives (`src/ui/`)
 
@@ -95,6 +96,9 @@ Import from `./ui` (or `../ui`). Open the browser preview at `#kit` to see each 
 | `CountBadge`   | A count: `attention` (filled), `live`, or `quiet`.                           | Nav items and section headings. |
 | `EmptyState`   | An empty track, one sentence, what would fill it.                            | Every list or page that can be empty. |
 | `PriorityMark` | Issue priority as three rising bars; urgent is red.                          | Issue rows. |
+| `PrMark`       | A pull request's number and its checks; merged and declined fade.            | Cards and rows that mention a PR (`PrCell` in src/Pr.tsx has the long form). |
+| `ChecksMark`   | CI checks: a tick, a red cross, a dashed ring while they run. `label` adds words. | Next to a PR. |
+| `AheadBehind`  | Commits behind the base (faint, left) and ahead of it (right) around a tick. | Branches. Pass the same `max` to rows shown together. |
 | `SeverityMark` | A review finding's P0 to P3. Only P0 and P1 are red.                         | Review findings. |
 | `EventMark`    | Something that happened to an issue, as a 12px shape: ring started, dot commit, square gate, diamond review, target land, bar handoff, attention dot ask. Red only for failures. | Marks on a timeline (activity lanes), legends. |
 | `FindingDots`  | A review's findings, one small square each, most severe first; carried over is hollow. | A review round or verdict in a row. |
@@ -239,6 +243,28 @@ Avoid: pills or chips around labels, cards with a colored edge bar, shadows or g
 icons in tinted boxes, a second accent color, all-caps tracked labels, mono for prose, and
 animating anything that is not live.
 
+## The project views
+
+![The board, light](img/board-light.png)
+
+![The branch map, dark](img/branches-dark.png)
+
+A project page has three views behind one switch (remembered): **List** (issues grouped by state),
+**Board** and **Branches**.
+
+- **Board.** One column per station, in track order; the column heads are drawn as the track
+  itself, so position says how far an issue got. Empty columns fold to a strip. Cards hold the
+  `IssueToken`, priority, `AgentMark` with live state, title, at most one flag (rebase stopped,
+  asked you, waiting, stuck reason, blocked by), kind, `PrMark`, review rounds and age in the
+  column. Needs-you cards are washed in attention, stuck ones get a stuck-tinged edge, blocked
+  ones a dashed edge. Done keeps the last 7 days. In-flight issues load their timelines so
+  Started, Gate and stuck are exact.
+- **Branches.** Per repo: the integration branch as a spine (with the main checkout's state),
+  every task branch forking off it, then **Loose ends**: worktrees with no issue or no branch,
+  left after their issue closed, or idle 2+ days, and branches with no worktree. A solid fork and
+  filled node is a worktree; a dashed fork and hollow node is a branch alone; a detached worktree
+  has no fork. The node is attention when it waits on you, live while an agent works.
+
 ## The browser preview
 
 `npm run dev` in a plain browser runs the app on sample data: `src/backend.ts` sends every
@@ -249,12 +275,15 @@ and inside Tauri nothing changes.
   `preview_start` with name `web` opens it. Or run `npm run dev -- --port <port> --strictPort`.
 - Routes are in the hash: `#pulse` (the default), `#inbox`, `#now`, `#activity`, `#project/NIT`,
   `#agents`, `#add`, `#kit`, and `@KEY` opens an issue panel (`#now@NIT-29`). `?hours=1|6|12|24`
-  opens Activity at that window.
+  opens Activity at that window. A project's view follows its key: `#project/NIT/list`,
+  `#project/NIT/board`, `#project/NIT/branches`; without one, the last view picked.
 - Theme: the switch at the bottom of the sidebar, or `?theme=light|dark` in the URL, or the
   browser's color scheme. `[data-theme]` on `<html>` forces a theme.
 - The fixtures are three projects (NIT, AND, HAR), 40 issues across every state, nine agent
   sessions (working, idle, waiting, stale), pull requests with checks, review rounds with
-  findings, two open asks and two stuck worktrees. Each issue is written as a short story
+  findings, two open asks and two stuck worktrees. The repos also carry sprawl for the branch map:
+  a worktree left after its issue landed, a spike with no issue, a detached worktree, branches with
+  no worktree (merged, canceled, a person's own) and worktrees idle for days. Each issue is written as a short story
   (`filed, claim, work, gate, review, changes, ...`) and its timeline, reviews, pull request and
   worktree are generated from that, so they agree. Answering an ask or moving an issue works and
   changes the data until reload. Activity lanes come from the same stories (one session per issue

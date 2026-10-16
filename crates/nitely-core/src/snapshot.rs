@@ -6,7 +6,7 @@ use serde::Serialize;
 
 use std::collections::HashSet;
 
-use crate::config::Config;
+use crate::config::{Config, RepoConfig};
 use crate::db::{now, Db, IssueRecord, PrRecord, Session, SyncStatus};
 use crate::issues::Ask;
 use crate::git::{self, BranchState};
@@ -42,12 +42,30 @@ pub struct Board {
     pub sync: Vec<SyncStatus>,
 }
 
+/// A local branch with no worktree: left over after a land, parked, or made by hand.
+#[derive(Debug, Clone, Serialize)]
+pub struct BranchRow {
+    pub name: String,
+    pub vendor: Option<String>,
+    pub issue_key: Option<String>,
+    pub ahead: Option<u32>,
+    pub behind: Option<u32>,
+    pub last_commit_subject: Option<String>,
+    pub last_commit_at: Option<i64>,
+    pub issue: Option<IssueRecord>,
+    pub pr: Option<PrRecord>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RepoView {
     pub name: String,
     pub root: String,
     pub integration_branch: String,
+    /// The project (issue prefix) this repo's work belongs to, when the config names one.
+    pub project: Option<String>,
     pub rows: Vec<TaskRow>,
+    /// Local branches checked out in no worktree (the integration branch aside), newest first.
+    pub branches: Vec<BranchRow>,
     pub error: Option<String>,
     /// Sessions under this repo's root that match no worktree (e.g. a scratch folder).
     pub unmatched_sessions: Vec<Session>,
@@ -67,7 +85,9 @@ pub fn snapshot(config: &Config, db: &Db) -> Result<Board> {
                     name: repo.name.clone(),
                     root: repo.root.clone(),
                     integration_branch: repo.integration_branch.clone(),
+                    project: repo.project.clone(),
                     rows: vec![],
+                    branches: vec![],
                     error: Some(e.to_string()),
                     unmatched_sessions: vec![],
                 });
@@ -129,6 +149,8 @@ pub fn snapshot(config: &Config, db: &Db) -> Result<Board> {
             })
             .collect();
 
+        let branches = loose_branches(repo, &worktrees, &issues, &prs, slug.as_deref());
+
         let unmatched_sessions = sessions
             .iter()
             .zip(&claimed)
@@ -140,7 +162,9 @@ pub fn snapshot(config: &Config, db: &Db) -> Result<Board> {
             name: repo.name.clone(),
             root: repo.root.clone(),
             integration_branch: repo.integration_branch.clone(),
+            project: repo.project.clone(),
             rows,
+            branches,
             error: None,
             unmatched_sessions,
         });
@@ -157,6 +181,39 @@ pub fn snapshot(config: &Config, db: &Db) -> Result<Board> {
         .collect();
 
     Ok(Board { repos: views, needs_me_issues, asks: db.open_asks()?, sync: db.sync_statuses()? })
+}
+
+/// Branches no worktree has checked out. A repo whose branches cannot be listed shows none rather
+/// than failing the whole board.
+fn loose_branches(
+    repo: &RepoConfig,
+    worktrees: &[git::Worktree],
+    issues: &[IssueRecord],
+    prs: &[PrRecord],
+    slug: Option<&str>,
+) -> Vec<BranchRow> {
+    let checked_out: HashSet<&str> = worktrees.iter().filter_map(|w| w.branch.as_deref()).collect();
+    git::list_branches(&repo.root, &repo.integration_branch)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|b| b.name != repo.integration_branch && !checked_out.contains(b.name.as_str()))
+        .map(|b| {
+            let (vendor, issue_key) = git::parse_branch(&b.name);
+            let issue = issue_key.as_ref().and_then(|k| issues.iter().find(|i| &i.key == k).cloned());
+            let pr = pr_for(prs, slug, &b.name);
+            BranchRow {
+                name: b.name,
+                vendor,
+                issue_key,
+                ahead: b.ahead,
+                behind: b.behind,
+                last_commit_subject: b.last_commit_subject,
+                last_commit_at: b.last_commit_at,
+                issue,
+                pr,
+            }
+        })
+        .collect()
 }
 
 /// `prs` is newest first. Without a known remote, the branch name alone decides.

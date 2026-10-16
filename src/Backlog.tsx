@@ -1,57 +1,15 @@
-import { useEffect, useState } from "react";
-import { invoke } from "./backend";
-import type { IssueRecord, Project } from "./types";
+import type { IssueRecord } from "./types";
 import { agentLabel, nowSecs } from "./util";
-import { AgentMark, CountBadge, EmptyState, Meter, PriorityMark, Sparkline, StationGlyph, phaseOf, trackOf } from "./ui";
+import { AgentMark, CountBadge, Meter, PriorityMark, Sparkline, StationGlyph, phaseOf, trackOf } from "./ui";
 
 const GROUPS = ["Needs You", "In Progress", "In Review", "Approved", "Todo", "Backlog", "Done", "Canceled", "Duplicate"];
 const DAYS = 14;
 
-export function Backlog(props: {
-  project: Project | undefined;
-  projectKey: string;
-  version: number;
-  onOpenIssue: (key: string) => void;
-}) {
-  const [issues, setIssues] = useState<IssueRecord[] | null>(null);
-  const [showClosed, setShowClosed] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  // Closed issues are always loaded: the header counts what landed lately even while the list
-  // hides them.
-  useEffect(() => {
-    let live = true;
-    const load = () =>
-      invoke<IssueRecord[]>("issues", { project: props.projectKey, includeClosed: true })
-        .then((i) => live && (setIssues(i), setError(null)))
-        .catch((e) => live && setError(String(e)));
-    load();
-    return () => {
-      live = false;
-    };
-  }, [props.projectKey, props.version]);
-
-  const isClosed = (i: IssueRecord) => i.state_type === "completed" || i.state_type === "canceled";
-  const shown = issues?.filter((i) => showClosed || !isClosed(i)) ?? [];
-
+/** The project's issues as a list grouped by state. The project page loads them and owns the header. */
+export function Backlog(props: { issues: IssueRecord[]; showClosed: boolean; onOpenIssue: (key: string) => void }) {
+  const shown = props.issues.filter((i) => props.showClosed || !isClosed(i));
   return (
-    <div className="page">
-      <div className="page-head">
-        <h1>
-          {props.project?.name ?? props.projectKey} <span className="muted mono">{props.projectKey}</span>
-        </h1>
-        <label className="toggle">
-          <input type="checkbox" checked={showClosed} onChange={(e) => setShowClosed(e.target.checked)} />
-          Show closed
-        </label>
-      </div>
-      {issues && issues.length > 0 && <Summary issues={issues} />}
-      {error && <p className="error">{error}</p>}
-      {issues?.length === 0 && (
-        <EmptyState title="No issues yet.">
-          Agents file them with the <span className="mono">file_issue</span> tool, or run <span className="mono">nitely issue create</span>.
-        </EmptyState>
-      )}
+    <>
       {GROUPS.map((state) => {
         const group = shown.filter((i) => i.state === state);
         if (group.length === 0) return null;
@@ -75,12 +33,14 @@ export function Backlog(props: {
           </section>
         );
       })}
-    </div>
+    </>
   );
 }
 
+export const isClosed = (i: IssueRecord) => i.state_type === "completed" || i.state_type === "canceled";
+
 /** The project at a glance: open issues by whose move it is, and what landed each day. */
-function Summary({ issues }: { issues: IssueRecord[] }) {
+export function Summary({ issues }: { issues: IssueRecord[] }) {
   const open = issues.filter((i) => i.state_type !== "completed" && i.state_type !== "canceled");
   const count = (phase: string) => open.filter((i) => phaseOf(trackOf(i).station) === phase).length;
   const needs = count("human");

@@ -37,11 +37,29 @@ export interface TaskRow {
   needs_me: boolean;
 }
 
+/** A local branch that no worktree has checked out: left after a land, parked, or made by hand. */
+export interface BranchRow {
+  name: string;
+  vendor: string | null;
+  issue_key: string | null;
+  /** Null when git could not count them against the integration branch. */
+  ahead: number | null;
+  behind: number | null;
+  last_commit_subject: string | null;
+  last_commit_at: number | null;
+  issue: IssueRecord | null;
+  pr: PrRecord | null;
+}
+
 export interface RepoView {
   name: string;
   root: string;
   integration_branch: string;
+  /** The project (issue prefix) the repo's work belongs to, when its config names one. */
+  project: string | null;
   rows: TaskRow[];
+  /** Branches with no worktree, the integration branch aside, newest first. */
+  branches: BranchRow[];
   error: string | null;
   unmatched_sessions: Session[];
 }

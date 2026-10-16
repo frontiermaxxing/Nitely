@@ -1,8 +1,6 @@
 import type { PrRecord } from "./types";
 import { openExternal } from "./util";
-import { ResultMark } from "./ui";
-
-const CHECKS_LABEL = { success: "checks pass", failure: "checks fail", pending: "checks running" } as const;
+import { ChecksMark as ChecksIcon } from "./ui";
 
 /** A PR's number, state, CI checks and approvals, compact enough for a table cell. */
 export function PrCell({ pr }: { pr: PrRecord }) {
@@ -25,12 +23,7 @@ export function PrCell({ pr }: { pr: PrRecord }) {
   );
 }
 
-/** CI checks as a mark with its label. */
+/** CI checks as a mark with its label: the labelled form of the shared ChecksMark. */
 export function ChecksMark({ checks }: { checks: "success" | "failure" | "pending" }) {
-  return (
-    <span className={`checks checks-${checks}`} title={CHECKS_LABEL[checks]}>
-      <ResultMark result={checks === "success" ? "pass" : checks === "failure" ? "fail" : "pending"} />
-      {CHECKS_LABEL[checks]}
-    </span>
-  );
+  return <ChecksIcon checks={checks} label />;
 }

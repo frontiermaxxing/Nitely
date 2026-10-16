@@ -145,6 +145,26 @@ button.ui-token:focus-visible, a.ui-token:focus-visible { outline: 2px solid var
 .ui-result-fail { color: var(--sev-p0); }
 .ui-result-pending { color: var(--fg-3); }
 
+/* ----- ChecksMark, PrMark ----- */
+.ui-checks { display: inline-flex; align-items: center; gap: 4px; font-size: var(--text-sm); color: var(--fg-2); }
+.ui-checks svg { display: block; flex: none; }
+.ui-checks-failure { color: var(--sev-p0); }
+.ui-checks-pending { color: var(--fg-3); }
+.ui-pr { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
+.ui-pr-number { font-family: var(--font-mono); font-size: var(--text-sm); color: var(--fg-2); }
+.ui-pr-closed .ui-pr-number { color: var(--fg-3); }
+
+/* ----- AheadBehind ----- */
+.ui-ab { display: inline-flex; align-items: center; gap: 4px; font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.ui-ab svg { display: block; flex: none; }
+.ui-ab-n { min-width: 3ch; color: var(--fg-3); }
+.ui-ab-behind { text-align: right; }
+.ui-ab-ahead { color: var(--fg-2); }
+.ui-ab-bar-ahead { fill: var(--fg-2); }
+.ui-ab-bar-behind { fill: var(--fg-3); opacity: 0.5; }
+.ui-ab-base { fill: var(--line-strong); }
+.ui-ab-unknown { color: var(--fg-3); }
+
 @media (prefers-reduced-motion: reduce) {
   .ui-dot-working, .ui-mark-dot-working, .ui-st-current .ui-st-node::before { animation: none !important; }
 }

@@ -17,6 +17,7 @@ import type {
   Applied,
   Ask,
   Board,
+  BranchRow,
   BranchState,
   ConnectPlan,
   FlowIssue,
@@ -150,6 +151,25 @@ const ISSUES: IssueSpec[] = [
     ask: { question: "Should P2 and P3 review findings become issues automatically, or stay on the pull request?", options: ["File them as issues", "Leave them on the PR"] },
     live: { state: "idle", seen: 48, activity: "Asked: where should P2 findings go?" }, branch: { ahead: 2, dirty_files: 0 }, checks: "success",
   },
+  {
+    key: "NIT-44", title: "Tray count of what needs you", kind: "feature", priority: 2, vendor: "claude",
+    from: 50, to: 0.8, story: ["filed", "claim", "work", "gate", "review", "pass", "landfail"],
+    notes: ["Counting asks, Needs You and stuck worktrees for the tray"],
+    live: { state: "waiting", seen: 9, activity: "Land stopped on a conflict in src/App.tsx" },
+    branch: { ahead: 3, behind: 5, dirty_files: 1, rebase_in_progress: true }, checks: "success",
+  },
+  {
+    key: "NIT-45", title: "Keyboard shortcuts to move an issue between states", kind: "improvement", priority: 3, vendor: "cursor",
+    from: 7, to: 0.1, story: ["filed", "claim", "work", "work"],
+    notes: ["Mapping keys to states", "Editing src/IssuePanel.tsx"],
+    live: { state: "working", seen: 1, activity: "Editing src/IssuePanel.tsx" }, branch: { ahead: 1, dirty_files: 5 },
+  },
+  {
+    key: "NIT-46", title: "Export a project's backlog as JSON", kind: "feature", priority: 4, vendor: "codex",
+    from: 30, to: 4, story: ["filed", "claim", "work", "gatefail"],
+    notes: ["Writing the export command"],
+    live: { state: "idle", seen: 240, activity: "Gate failed: npm run build" }, branch: { ahead: 2, behind: 3, dirty_files: 0 },
+  },
   { key: "NIT-26", title: "Inbox groups asks by project", kind: "improvement", priority: 3, from: 26, to: 26, story: ["filed"] },
   { key: "NIT-25", title: "Command palette with instant search", kind: "feature", priority: 2, from: 120, to: 120, story: ["filed"] },
   {
@@ -163,6 +183,8 @@ const ISSUES: IssueSpec[] = [
   {
     key: "NIT-22", title: "Codex hooks miss the session end event", kind: "bug", priority: 2, vendor: "claude",
     from: 160, to: 52, story: ["filed", "claim", "work", "gatefail", "work", "gate", "review", "pass", "land"],
+    // Landed, but its worktree was never cleaned up: sprawl for the branch map.
+    branch: { ahead: 0, behind: 14, dirty_files: 0 },
   },
   {
     key: "NIT-21", title: "Gate output is cut at 4 KB in the timeline", kind: "bug", priority: 3, vendor: "codex",
@@ -255,6 +277,48 @@ const ISSUES: IssueSpec[] = [
     body: "Pay with a test card on Safari 18 on macOS and iOS; confirm the receipt arrives.",
   },
   { key: "HAR-7", title: "Seasonal pricing rules", kind: "feature", priority: 3, vendor: "cursor", from: 330, to: 140, story: ["filed", "claim", "work", "gate", "review", "changes", "work", "gate", "review", "pass", "land"] },
+];
+
+// ----- Sprawl: worktrees and branches no story accounts for -----
+
+/** A worktree outside the stories: a spike, a bisect, a person's own experiment. */
+interface LooseWorktree {
+  project: string;
+  /** Folder name under the repo's worktrees folder. */
+  folder: string;
+  /** Null for a detached HEAD. */
+  branch: string | null;
+  ahead: number;
+  behind: number;
+  dirty: number;
+  /** Hours since its last commit. */
+  idle: number;
+  subject: string;
+}
+
+const LOOSE_WORKTREES: LooseWorktree[] = [
+  { project: "NIT", folder: "spike-sqlite-wal", branch: "claude/spike-sqlite-wal", ahead: 3, behind: 22, dirty: 1, idle: 6 * 24, subject: "Try WAL checkpoints on every write" },
+  { project: "NIT", folder: "bisect-snapshot-slowdown", branch: null, ahead: 0, behind: 31, dirty: 0, idle: 9 * 24, subject: "Read worktrees in parallel" },
+  { project: "AND", folder: "profile-perf-trace", branch: "andrew/profile-perf-trace", ahead: 1, behind: 45, dirty: 5, idle: 4 * 24, subject: "Trace profile switch" },
+];
+
+/** A branch with no worktree: left after a land, parked, or made by hand. */
+interface LooseBranch {
+  project: string;
+  name: string;
+  ahead: number;
+  behind: number;
+  idle: number;
+  subject: string;
+}
+
+const LOOSE_BRANCHES: LooseBranch[] = [
+  { project: "NIT", name: "codex/nit-19-retry-a-failed-review-once", ahead: 2, behind: 38, idle: 90, subject: "Retry the review once on a timeout" },
+  { project: "NIT", name: "claude/nit-23-push-updates-from-the-event", ahead: 0, behind: 12, idle: 30, subject: "Push updates from the event store" },
+  { project: "NIT", name: "andrew/tauri-2-upgrade", ahead: 5, behind: 61, idle: 12 * 24, subject: "Bump tauri to 2.2" },
+  { project: "AND", name: "claude/and-262-memory-saver-for-background-tabs", ahead: 0, behind: 9, idle: 20, subject: "Discard background tabs after 10 minutes" },
+  { project: "AND", name: "codex/and-251-crash-in-the-pdf-viewer", ahead: 4, behind: 210, idle: 21 * 24, subject: "Guard the PDF viewer against a null frame" },
+  { project: "HAR", name: "cursor/har-11-move-image-uploads-to-signed", ahead: 0, behind: 6, idle: 3.5, subject: "Move image uploads to signed URLs" },
 ];
 
 // ----- Generating the data from the stories -----
@@ -554,6 +618,14 @@ function session(spec: IssueSpec, live: Live): Session {
   };
 }
 
+/** `claude/nit-12-slug` → ["claude", "NIT-12"], as git::parse_branch does. */
+function parseBranch(branch: string): [string | null, string | null] {
+  const slash = branch.indexOf("/");
+  const vendor = slash < 0 ? null : branch.slice(0, slash);
+  const m = /^([a-z]+)-(\d+)(-|$)/i.exec(branch.slice(slash + 1));
+  return [vendor, m ? `${m[1].toUpperCase()}-${m[2]}` : null];
+}
+
 function snapshot(): Board {
   const repos: RepoView[] = REPOS.map((repo) => {
     const main: TaskRow = {
@@ -594,15 +666,61 @@ function snapshot(): Board {
         session: s,
         issue,
         pr: world.prs.get(spec.key)?.[0] ?? null,
-        // As in nitely-core's snapshot: a conflict, an agent waiting for input, or an issue that waits on a person.
+        // As the backend decides it: a stopped rebase, an agent waiting, or the issue waiting on the human.
         needs_me: state.rebase_in_progress || s?.state === "waiting" || issue.state === "Needs You",
+      };
+    });
+    for (const loose of LOOSE_WORKTREES.filter((l) => l.project === repo.project)) {
+      const [vendor, key] = loose.branch ? parseBranch(loose.branch) : [null, null];
+      rows.push({
+        worktree: `C:\\Development\\${repo.name}-worktrees\\${loose.folder}`,
+        branch: loose.branch,
+        is_main: false,
+        vendor,
+        issue_key: key,
+        state: {
+          ahead: loose.ahead,
+          behind: loose.behind,
+          dirty_files: loose.dirty,
+          last_commit_subject: loose.subject,
+          last_commit_at: NOW - loose.idle * HOUR,
+          rebase_in_progress: false,
+        },
+        error: null,
+        session: null,
+        issue: null,
+        pr: null,
+        needs_me: false,
+      });
+    }
+    const branches: BranchRow[] = LOOSE_BRANCHES.filter((b) => b.project === repo.project).map((b) => {
+      const [vendor, key] = parseBranch(b.name);
+      return {
+        name: b.name,
+        vendor,
+        issue_key: key,
+        ahead: b.ahead,
+        behind: b.behind,
+        last_commit_subject: b.subject,
+        last_commit_at: NOW - b.idle * HOUR,
+        issue: world.issues.find((i) => i.key === key) ?? null,
+        pr: [...world.prs.values()].flat().find((p) => p.branch === b.name) ?? null,
       };
     });
     const unmatched: Session[] =
       repo.project === "HAR"
         ? [{ id: "cursor-harbor", vendor: "cursor", cwd: repo.root, started_at: NOW - 5 * HOUR, last_seen_at: NOW - 3 * HOUR, last_activity: "Read README.md", state: "ended" }]
         : [];
-    return { name: repo.name, root: repo.root, integration_branch: repo.integration, rows: [main, ...rows], error: null, unmatched_sessions: unmatched };
+    return {
+      name: repo.name,
+      root: repo.root,
+      integration_branch: repo.integration,
+      project: repo.project,
+      rows: [main, ...rows],
+      branches,
+      error: null,
+      unmatched_sessions: unmatched,
+    };
   });
   return {
     repos,

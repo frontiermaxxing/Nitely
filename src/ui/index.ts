@@ -2,11 +2,14 @@
 import "./ui.css";
 
 export { AgentMark } from "./AgentMark";
+export { AheadBehind } from "./AheadBehind";
+export { CHECKS_LABEL, ChecksMark } from "./ChecksMark";
 export { CountBadge } from "./CountBadge";
 export { EmptyState } from "./EmptyState";
 export { EVENT_LABEL, EventMark } from "./EventMark";
 export { IssueToken } from "./IssueToken";
 export { Meter, type MeterPart } from "./Meter";
+export { PrMark } from "./PrMark";
 export { PriorityMark } from "./PriorityMark";
 export { ResultMark } from "./ResultMark";
 export { FindingDots, SeverityMark } from "./SeverityMark";
