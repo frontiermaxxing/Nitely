@@ -476,9 +476,13 @@ pub fn parse_state(input: &str) -> Result<(&'static str, &'static str)> {
 /// "roku-tv" are one label. None when nothing usable is left.
 pub fn normalize_label(label: &str) -> Option<String> {
     let mut out = String::new();
-    for c in label.trim().chars() {
+    // Lowercased first, so a letter that lowercases to two characters ("İ" to "i" and a combining
+    // dot) is normalized once and for all: normalizing a normal label changes nothing.
+    for c in label.trim().to_lowercase().chars() {
         match c {
-            c if c.is_alphanumeric() => out.extend(c.to_lowercase()),
+            // Combining diacritical marks, which lowercasing can produce: dropped, not a dash.
+            '\u{300}'..='\u{36f}' => {}
+            c if c.is_alphanumeric() => out.push(c),
             '.' | '+' | ':' | '/' => out.push(c),
             _ if !out.ends_with('-') => out.push('-'),
             _ => {}
@@ -488,14 +492,14 @@ pub fn normalize_label(label: &str) -> Option<String> {
     (!out.is_empty() && out.chars().count() <= 40).then_some(out)
 }
 
-/// An issue's stored labels in their normal form, each once.
+/// An issue's stored labels in their normal form, each once. One that has no normal form (an
+/// import's label over 40 characters) is kept as it is, so no edit drops it.
 fn stored_labels(json: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for l in serde_json::from_str::<Vec<String>>(json).unwrap_or_default() {
-        if let Some(n) = normalize_label(&l) {
-            if !out.contains(&n) {
-                out.push(n);
-            }
+        let n = normalize_label(&l).unwrap_or(l);
+        if !out.contains(&n) {
+            out.push(n);
         }
     }
     out
@@ -1525,6 +1529,11 @@ mod tests {
         assert_eq!(normalize_label("  Roku TV "), Some("roku-tv".into()));
         assert_eq!(normalize_label("roku_tv"), Some("roku-tv".into()));
         assert_eq!(normalize_label("--"), None);
+        assert_eq!(normalize_label("İstanbul"), Some("istanbul".into()));
+        for l in ["İstanbul", "Roku TV", "ÉTÉ", "a/b.c+d"] {
+            let once = normalize_label(l).unwrap();
+            assert_eq!(normalize_label(&once).as_deref(), Some(once.as_str()), "normalizing {l} twice changes nothing");
+        }
 
         let a = db.create_issue(&NewIssue { labels: vec!["Roku".into(), "roku".into(), "Billing".into()], ..new("Channel store listing") }, &agent).unwrap();
         assert_eq!(a.labels, ["roku", "billing"], "normalized, each once");
@@ -1532,10 +1541,13 @@ mod tests {
         assert!(db.create_issue(&NewIssue { labels: vec!["!!".into()], ..new("Something unrelated to it") }, &agent).is_err());
         assert_eq!(db.project_labels("NIT").unwrap(), [("roku".to_string(), 2), ("billing".to_string(), 1)]);
 
-        // An import kept "Bug" as it was; it reads, filters and is removed as "bug".
-        db.conn.execute("UPDATE issue SET labels = '[\"Roku\",\"Bug\",\"billing\"]' WHERE key = ?1", [&a.key]).unwrap();
-        assert_eq!(db.issue(&a.key).unwrap().unwrap().labels, ["roku", "bug", "billing"]);
-        assert_eq!(db.change_labels(&a.key, &[], &["bug".into()], &agent).unwrap().labels, ["roku", "billing"]);
+        // An import kept "Bug" as it was; it reads, filters and is removed as "bug". One with no
+        // normal form (too long) survives other edits as it is.
+        let long = "x".repeat(41);
+        db.conn.execute(&format!("UPDATE issue SET labels = '[\"Roku\",\"Bug\",\"billing\",\"{long}\"]' WHERE key = ?1"), [&a.key]).unwrap();
+        assert_eq!(db.issue(&a.key).unwrap().unwrap().labels, ["roku", "bug", "billing", long.as_str()]);
+        assert_eq!(db.change_labels(&a.key, &[], &["bug".into()], &agent).unwrap().labels, ["roku", "billing", long.as_str()]);
+        db.conn.execute("UPDATE issue SET labels = '[\"Roku\",\"billing\"]' WHERE key = ?1", [&a.key]).unwrap();
         let changed = db.change_labels(&a.key, &["Tizen".into()], &["billing".into(), "absent".into()], &agent).unwrap();
         assert_eq!(changed.labels, ["roku", "tizen"]);
         let last = db.timeline(&a.key).unwrap().pop().unwrap();
