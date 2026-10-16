@@ -94,6 +94,23 @@ fn add_token_in(dir: &Path, name: &str, project: Option<&str>) -> Result<String>
     Ok(token)
 }
 
+/// Writes a new token to `<data folder>/relay-tokens/<name>.token` for the human to copy to that
+/// machine, so it never appears in output an agent might capture. Returns the file's path.
+pub fn write_token_file(name: &str, token: &str) -> Result<PathBuf> {
+    write_token_file_in(&crate::paths::data_dir(), name, token)
+}
+
+fn write_token_file_in(dir: &Path, name: &str, token: &str) -> Result<PathBuf> {
+    if !valid_name(name) {
+        bail!("not a token name: {name}");
+    }
+    let folder = dir.join("relay-tokens");
+    std::fs::create_dir_all(&folder)?;
+    let file = folder.join(format!("{name}.token"));
+    std::fs::write(&file, format!("{token}\n")).with_context(|| format!("writing {}", file.display()))?;
+    Ok(file)
+}
+
 /// The tokens, without their hashes.
 pub fn list_tokens() -> Result<Vec<Token>> {
     list_tokens_in(&crate::paths::data_dir())
@@ -195,6 +212,9 @@ mod tests {
         assert!(token.starts_with(TOKEN_PREFIX) && token.len() == TOKEN_PREFIX.len() + 64);
         let stored = std::fs::read_to_string(store_path(&dir)).unwrap();
         assert!(!stored.contains(&token), "only the hash is stored");
+        let file = write_token_file_in(&dir, "mac", &token).unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap().trim(), token);
+        assert!(write_token_file_in(&dir, "../x", &token).is_err(), "a name never leaves the folder");
         let t = verify_in(&dir, &token).unwrap().unwrap();
         assert_eq!((t.name.as_str(), t.project.as_deref()), ("mac", Some("AND")));
         assert!(verify_in(&dir, "nly_wrong").unwrap().is_none());

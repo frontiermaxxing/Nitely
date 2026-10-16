@@ -183,6 +183,7 @@ function Glance({ data, board, decisions, ctx, onGo }: { data: PulseData; board:
   const sessions: { s: Session; key: string | null }[] = [
     ...rows.filter((r) => r.session).map((r) => ({ s: r.session!, key: r.issue_key })),
     ...(board?.repos.flatMap((r) => r.unmatched_sessions) ?? []).map((s) => ({ s, key: null })),
+    ...(board?.remote_sessions ?? []).map((s) => ({ s, key: null })),
   ];
   const working = sessions.filter(({ s }) => livenessOf(s, ctx.now) === "working");
   const flows = data.projects.flatMap((p) => p.issues);

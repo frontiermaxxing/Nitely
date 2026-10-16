@@ -732,6 +732,10 @@ function snapshot(): Board {
       { source: "github", last_attempt: NOW - 95, last_ok: NOW - 95, last_error: null },
       { source: "bitbucket", last_attempt: NOW - 95, last_ok: NOW - 95, last_error: null },
     ],
+    // An agent on the Mac, reaching this machine's backlog through `nitely serve`.
+    remote_sessions: [
+      { id: "claude@mac", vendor: "claude", cwd: "remote:mac", started_at: NOW - 2 * HOUR, last_seen_at: NOW - 140, last_activity: "Filed AND-281: Mac sidebar flickers on resize", state: "working" },
+    ],
   };
 }
 

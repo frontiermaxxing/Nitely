@@ -119,6 +119,19 @@ a:hover { text-decoration-color: currentColor; }
 
 /* ----- now table ----- */
 .table-wrap { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); }
+
+/* Agents on other machines (nitely serve): one quiet row each. */
+.remote-list { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); }
+.remote-row {
+  display: grid; grid-template-columns: auto minmax(120px, max-content) auto auto 1fr auto;
+  align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-3);
+}
+.remote-row + .remote-row { border-top: 1px solid var(--line); }
+.remote-doing { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+@media (max-width: 640px) {
+  .remote-row { grid-template-columns: auto 1fr auto; }
+  .remote-row .remote-doing, .remote-row > .small:not(.remote-doing) { grid-column: 2 / -1; }
+}
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
 tbody tr:last-child td { border-bottom: 0; }

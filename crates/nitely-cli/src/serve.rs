@@ -1,22 +1,33 @@
 //! `nitely serve`: this machine's backlog for agents on others on the local network. It is the
 //! MCP server (`mcp.rs`) over Streamable HTTP at `/mcp`, so Claude Code elsewhere adds it with
-//! `claude mcp add --transport http` and needs no Nitely install. Every request must come from a
-//! private address and carry a token (`nitely tokens add`); the token's name is the agent's
+//! `claude mcp add --transport http` and needs no Nitely install. Every request must come from
+//! this machine's networks and carry a token (`nitely tokens add`); the token's name is the agent's
 //! identity. The server announces itself over mDNS as `_nitely._tcp`, which `nitely discover` and
 //! macOS's `dns-sd -B _nitely._tcp` find.
+//!
+//! The HTTP layer is deliberately small and strict: one thread per connection with a cap, read and
+//! write timeouts, a bounded header and body, Content-Length only, and the connection closed after
+//! each answer. A slow or hostile client ties up its own thread for seconds, never the server.
 
 use crate::mcp;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use nitely_core::relay::{self, DEFAULT_PORT, MCP_PATH, SERVICE_TYPE};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::io::Read;
-use std::net::{IpAddr, SocketAddr};
+use std::io::{Read, Write};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tiny_http::{Header, Method, Request, Response};
 
-/// Larger requests are refused; a tool call is a few kilobytes.
+/// Larger bodies are refused unread; a tool call is a few kilobytes.
 const MAX_BODY: usize = 1 << 20;
+/// The request line and headers together.
+const MAX_HEAD: usize = 16 << 10;
+/// Connections handled at once; past this, new ones get 503 at once.
+const MAX_CONNECTIONS: usize = 32;
+/// How long a connection may take to send its request or read its answer.
+const IO_TIMEOUT: Duration = Duration::from_secs(10);
 /// Open sessions kept; the oldest is dropped past this, and its client starts a new one.
 const MAX_SESSIONS: usize = 256;
 
@@ -26,13 +37,15 @@ struct Session {
     last_used: u64,
 }
 
+type Sessions = Arc<Mutex<HashMap<String, Session>>>;
+
 pub fn serve(listen: Option<&str>, advertise: bool) -> Result<()> {
     if relay::list_tokens()?.is_empty() {
         anyhow::bail!("no tokens yet, so nobody could connect. Make one per machine first: nitely tokens add mac --project AND");
     }
     let listen = listen.map(str::to_string).unwrap_or_else(|| format!("0.0.0.0:{DEFAULT_PORT}"));
-    let http = tiny_http::Server::http(&listen).map_err(|e| anyhow!("listening on {listen}: {e}"))?;
-    let port = http.server_addr().to_ip().map(|a| a.port()).unwrap_or(DEFAULT_PORT);
+    let listener = TcpListener::bind(&listen).with_context(|| format!("listening on {listen}"))?;
+    let port = listener.local_addr()?.port();
     let networks = networks();
     let _mdns = if advertise {
         match announce(port, &networks) {
@@ -49,77 +62,149 @@ pub fn serve(listen: Option<&str>, advertise: bool) -> Result<()> {
     for ip in lan_addresses(&networks) {
         println!("  {}", url(ip, port, MCP_PATH));
     }
-    println!("Only private addresses are answered, and only with a token. Ctrl+C stops it.");
-
-    let mut sessions: HashMap<String, Session> = HashMap::new();
-    let mut tick = 0u64;
-    for request in http.incoming_requests() {
-        tick += 1;
-        handle(request, &mut sessions, tick, &networks);
-    }
+    println!("Only this machine's networks are answered, and only with a token. Ctrl+C stops it.");
+    run(listener, Arc::new(networks));
     Ok(())
 }
 
-fn handle(mut request: Request, sessions: &mut HashMap<String, Session>, tick: u64, networks: &[(IpAddr, u8)]) {
-    let from = request.remote_addr().copied();
-    if !from.is_some_and(|a| relay::is_local_to(a.ip(), networks)) {
-        log(from, "-", "refused: not on the local network", 403);
-        let _ = request.respond(Response::from_string("Nitely answers only the local network.").with_status_code(403));
-        return;
+/// Accepts connections until the listener fails, each on its own thread.
+fn run(listener: TcpListener, networks: Arc<Vec<(IpAddr, u8)>>) {
+    let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
+    let active = Arc::new(AtomicUsize::new(0));
+    let tick = Arc::new(AtomicU64::new(0));
+    for stream in listener.incoming() {
+        let Ok(mut stream) = stream else { continue };
+        let peer = stream.peer_addr().ok();
+        if !peer.is_some_and(|a| relay::is_local_to(a.ip(), &networks)) {
+            // Nothing is said to an address outside the local network; the connection just closes.
+            log(peer, "-", "refused: not on the local network", 403);
+            continue;
+        }
+        if active.load(Ordering::SeqCst) >= MAX_CONNECTIONS {
+            let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
+            write_response(&mut stream, 503, "text/plain", &[], b"Busy; try again shortly.");
+            continue;
+        }
+        active.fetch_add(1, Ordering::SeqCst);
+        let (sessions, active, tick) = (sessions.clone(), active.clone(), tick.clone());
+        std::thread::spawn(move || {
+            connection(stream, peer, &sessions, tick.fetch_add(1, Ordering::SeqCst) + 1);
+            active.fetch_sub(1, Ordering::SeqCst);
+        });
     }
-    let path = request.url().split('?').next().unwrap_or("").to_string();
-    if path == "/.well-known/nitely" && *request.method() == Method::Get {
+}
+
+/// A request's line and headers, and whatever of the body came with them.
+struct Head {
+    method: String,
+    path: String,
+    headers: HashMap<String, String>,
+    rest: Vec<u8>,
+}
+
+impl Head {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers.get(&name.to_ascii_lowercase()).map(String::as_str)
+    }
+}
+
+fn read_head(stream: &mut TcpStream) -> std::result::Result<Head, (u16, &'static str)> {
+    let mut buf = Vec::with_capacity(1024);
+    let mut chunk = [0u8; 2048];
+    let end = loop {
+        if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            break i;
+        }
+        if buf.len() > MAX_HEAD {
+            return Err((431, "Request headers too large."));
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) => return Err((400, "Incomplete request.")),
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(_) => return Err((408, "Request timed out.")),
+        }
+    };
+    let text = std::str::from_utf8(&buf[..end]).map_err(|_| (400, "Request headers are not text."))?;
+    let mut lines = text.split("\r\n");
+    let mut first = lines.next().unwrap_or("").split(' ');
+    let (method, target) = (first.next().unwrap_or("").to_string(), first.next().unwrap_or("").to_string());
+    if method.is_empty() || !target.starts_with('/') {
+        return Err((400, "Bad request line."));
+    }
+    let mut headers = HashMap::new();
+    for line in lines {
+        if let Some((k, v)) = line.split_once(':') {
+            headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
+        }
+    }
+    let path = target.split('?').next().unwrap_or("").to_string();
+    Ok(Head { method, path, headers, rest: buf[end + 4..].to_vec() })
+}
+
+/// The body, by Content-Length only and within MAX_BODY; chunked or oversized bodies are refused
+/// without being read.
+fn read_body(stream: &mut TcpStream, head: &Head) -> std::result::Result<Vec<u8>, (u16, &'static str)> {
+    if head.header("transfer-encoding").is_some() {
+        return Err((411, "Send the body with a Content-Length."));
+    }
+    let len: usize = match head.header("content-length") {
+        Some(v) => v.trim().parse().map_err(|_| (400, "Bad Content-Length."))?,
+        None => return Err((411, "Send the body with a Content-Length.")),
+    };
+    if len > MAX_BODY {
+        return Err((413, "Request too large."));
+    }
+    let mut body = head.rest.clone();
+    body.truncate(len);
+    if body.len() < len {
+        let start = body.len();
+        body.resize(len, 0);
+        stream.read_exact(&mut body[start..]).map_err(|_| (408, "Request body timed out."))?;
+    }
+    Ok(body)
+}
+
+fn connection(mut stream: TcpStream, from: Option<SocketAddr>, sessions: &Sessions, tick: u64) {
+    let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
+    let head = match read_head(&mut stream) {
+        Ok(h) => h,
+        Err((status, message)) => return write_response(&mut stream, status, "text/plain", &[], message.as_bytes()),
+    };
+    if head.path == "/.well-known/nitely" && head.method == "GET" {
         let info = json!({ "name": "nitely", "version": env!("CARGO_PKG_VERSION"), "mcp": MCP_PATH, "auth": "bearer" });
-        let _ = request.respond(json_response(200, &info));
-        return;
+        return write_json(&mut stream, 200, &[], &info);
     }
-    if path != MCP_PATH {
-        let _ = request.respond(Response::from_string("Not found; the MCP endpoint is /mcp.").with_status_code(404));
-        return;
+    if head.path != MCP_PATH {
+        return write_response(&mut stream, 404, "text/plain", &[], b"Not found; the MCP endpoint is /mcp.");
     }
-    if *request.method() != Method::Post {
+    if head.method != "POST" {
         // No server-sent stream: every answer comes back on its POST.
-        let _ = request.respond(Response::from_string("").with_status_code(405).with_header(header("Allow", "POST")));
-        return;
+        return write_response(&mut stream, 405, "text/plain", &[("Allow", "POST")], b"");
     }
-    let token = match bearer(&request).map(|b| relay::verify(&b)) {
+    let bearer = head.header("authorization").and_then(|v| v.split_once(' ')).filter(|(s, _)| s.eq_ignore_ascii_case("bearer")).map(|(_, t)| t.trim().to_string());
+    let token = match bearer.map(|b| relay::verify(&b)) {
         Some(Ok(Some(t))) => t,
         Some(Err(e)) => {
             log(from, "-", &format!("token store unreadable: {e:#}"), 500);
-            let _ = request.respond(Response::from_string("Nitely could not read its tokens.").with_status_code(500));
-            return;
+            return write_response(&mut stream, 500, "text/plain", &[], b"Nitely could not read its tokens.");
         }
         _ => {
             log(from, "-", "refused: no valid token", 401);
-            let _ = request.respond(
-                Response::from_string("A Nitely token is required: Authorization: Bearer <token>.")
-                    .with_status_code(401)
-                    .with_header(header("WWW-Authenticate", "Bearer")),
-            );
-            return;
+            return write_response(&mut stream, 401, "text/plain", &[("WWW-Authenticate", "Bearer")], b"A Nitely token is required: Authorization: Bearer <token>.");
         }
     };
-    if request.body_length().is_some_and(|n| n > MAX_BODY) {
-        let _ = request.respond(Response::from_string("Request too large.").with_status_code(413));
-        return;
-    }
-    let mut body = Vec::new();
-    if request.as_reader().take(MAX_BODY as u64 + 1).read_to_end(&mut body).is_err() || body.len() > MAX_BODY {
-        let _ = request.respond(Response::from_string("Request unreadable or too large.").with_status_code(413));
-        return;
-    }
+    let body = match read_body(&mut stream, &head) {
+        Ok(b) => b,
+        Err((status, message)) => {
+            log(from, &token.name, message, status);
+            return write_response(&mut stream, status, "text/plain", &[], message.as_bytes());
+        }
+    };
     let msg: Value = match serde_json::from_slice(&body) {
         Ok(v @ Value::Object(_)) => v,
-        Ok(_) => {
-            let r = json!({ "jsonrpc": "2.0", "id": null, "error": { "code": -32600, "message": "send one JSON-RPC message per request" } });
-            let _ = request.respond(json_response(400, &r));
-            return;
-        }
-        Err(e) => {
-            let r = json!({ "jsonrpc": "2.0", "id": null, "error": { "code": -32700, "message": format!("parse error: {e}") } });
-            let _ = request.respond(json_response(400, &r));
-            return;
-        }
+        Ok(_) => return write_json(&mut stream, 400, &[], &json!({ "jsonrpc": "2.0", "id": null, "error": { "code": -32600, "message": "send one JSON-RPC message per request" } })),
+        Err(e) => return write_json(&mut stream, 400, &[], &json!({ "jsonrpc": "2.0", "id": null, "error": { "code": -32700, "message": format!("parse error: {e}") } })),
     };
     let method = msg.get("method").and_then(Value::as_str).unwrap_or("").to_string();
     let what = match msg.pointer("/params/name").and_then(Value::as_str) {
@@ -127,92 +212,98 @@ fn handle(mut request: Request, sessions: &mut HashMap<String, Session>, tick: u
         None => method.clone(),
     };
 
-    // A session starts at initialize and is named by the Mcp-Session-Id header after that.
-    let given = header_value(&request, "Mcp-Session-Id");
-    let (id, fresh) = if method == "initialize" {
-        (new_session_id(), true)
-    } else {
-        match given {
-            Some(id) if sessions.get(&id).is_some_and(|s| s.token == token.name) => (id, false),
-            Some(_) => {
-                log(from, &token.name, &format!("{what}: unknown session"), 404);
-                let _ = request.respond(Response::from_string("Unknown session; initialize again.").with_status_code(404));
-                return;
+    let (status, reply, session_id) = {
+        let mut sessions = sessions.lock().unwrap_or_else(|p| p.into_inner());
+        // A session starts at initialize and is named by the Mcp-Session-Id header after that.
+        let id = if method == "initialize" {
+            Some(new_session_id())
+        } else {
+            match head.header("mcp-session-id") {
+                Some(id) if sessions.get(id).is_some_and(|s| s.token == token.name) => Some(id.to_string()),
+                Some(_) => None,
+                // A client that keeps no session still gets its calls answered, as this token.
+                None => Some(String::new()),
             }
-            // A client that keeps no session still gets its calls answered, as this token.
-            None => (String::new(), true),
+        };
+        match id {
+            None => (404, None, None),
+            Some(id) => {
+                if !sessions.contains_key(&id) {
+                    if sessions.len() >= MAX_SESSIONS {
+                        if let Some(oldest) = sessions.iter().min_by_key(|(_, s)| s.last_used).map(|(k, _)| k.clone()) {
+                            sessions.remove(&oldest);
+                        }
+                    }
+                    sessions.insert(id.clone(), Session { token: token.name.clone(), server: mcp::Server::remote(&token.name, token.project.clone()), last_used: tick });
+                }
+                let session = sessions.get_mut(&id).expect("the session was just found or made");
+                session.last_used = tick;
+                let reply = mcp::handle(&mut session.server, &msg);
+                if id.is_empty() {
+                    sessions.remove(&id);
+                }
+                (if reply.is_some() { 200 } else { 202 }, reply, (method == "initialize").then_some(id))
+            }
         }
     };
-    if fresh {
-        if sessions.len() >= MAX_SESSIONS {
-            if let Some(oldest) = sessions.iter().min_by_key(|(_, s)| s.last_used).map(|(k, _)| k.clone()) {
-                sessions.remove(&oldest);
-            }
-        }
-        sessions.insert(id.clone(), Session { token: token.name.clone(), server: mcp::Server::remote(&token.name, token.project.clone()), last_used: tick });
-    }
-    let session = sessions.get_mut(&id).expect("the session was just found or made");
-    session.last_used = tick;
-    let reply = mcp::handle(&mut session.server, &msg);
-    if id.is_empty() {
-        sessions.remove(&id);
-    }
-    let status = if reply.is_some() { 200 } else { 202 };
     log(from, &token.name, &what, status);
-    let response = match reply {
-        Some(r) => json_response(200, &r),
-        None => Response::from_string("").with_status_code(202),
+    match (status, reply) {
+        (404, _) => write_response(&mut stream, 404, "text/plain", &[], b"Unknown session; initialize again."),
+        (_, Some(r)) => match &session_id {
+            Some(id) => write_json(&mut stream, 200, &[("Mcp-Session-Id", id)], &r),
+            None => write_json(&mut stream, 200, &[], &r),
+        },
+        _ => write_response(&mut stream, 202, "text/plain", &[], b""),
+    }
+}
+
+fn write_json(stream: &mut TcpStream, status: u16, headers: &[(&str, &str)], body: &Value) {
+    write_response(stream, status, "application/json", headers, body.to_string().as_bytes());
+}
+
+fn write_response(stream: &mut TcpStream, status: u16, content_type: &str, headers: &[(&str, &str)], body: &[u8]) {
+    let reason = match status {
+        200 => "OK",
+        202 => "Accepted",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        408 => "Request Timeout",
+        411 => "Length Required",
+        413 => "Payload Too Large",
+        431 => "Request Header Fields Too Large",
+        503 => "Service Unavailable",
+        _ => "Error",
     };
-    let response = if method == "initialize" { response.with_header(header("Mcp-Session-Id", &id)) } else { response };
-    let _ = request.respond(response);
-}
-
-fn bearer(request: &Request) -> Option<String> {
-    let value = header_value(request, "Authorization")?;
-    let (scheme, token) = value.split_once(' ')?;
-    scheme.eq_ignore_ascii_case("bearer").then(|| token.trim().to_string())
-}
-
-fn header_value(request: &Request, name: &str) -> Option<String> {
-    request.headers().iter().find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name)).map(|h| h.value.as_str().to_string())
-}
-
-fn header(name: &str, value: &str) -> Header {
-    Header::from_bytes(name.as_bytes(), value.as_bytes()).expect("a valid header")
-}
-
-fn json_response(status: u16, body: &Value) -> Response<std::io::Cursor<Vec<u8>>> {
-    Response::from_string(body.to_string()).with_status_code(status).with_header(header("Content-Type", "application/json"))
+    let mut out = format!("HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n", body.len());
+    for (k, v) in headers {
+        out.push_str(&format!("{k}: {v}\r\n"));
+    }
+    out.push_str("\r\n");
+    let _ = stream.write_all(out.as_bytes()).and_then(|_| stream.write_all(body)).and_then(|_| stream.flush());
+    let _ = stream.shutdown(std::net::Shutdown::Both);
 }
 
 fn new_session_id() -> String {
     let mut bytes = [0u8; 16];
-    getrandom_fill(&mut bytes);
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn getrandom_fill(bytes: &mut [u8]) {
     // Session ids name a session, they do not grant access (the token does), so the clock is a
     // fallback should the OS have no randomness to give.
-    if nitely_core::relay::random_bytes(bytes).is_err() {
+    if relay::random_bytes(&mut bytes).is_err() {
         let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
         for (i, b) in bytes.iter_mut().enumerate() {
             *b = (nanos >> ((i % 16) * 8)) as u8;
         }
     }
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// One line per request, without the token.
 fn log(from: Option<SocketAddr>, who: &str, what: &str, status: u16) {
     let from = from.map(|a| a.ip().to_string()).unwrap_or_else(|| "?".into());
-    let at = chrono_free_time();
-    println!("{at} {from} {who} {what} -> {status}");
-}
-
-fn chrono_free_time() -> String {
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let day = secs % 86_400;
-    format!("{:02}:{:02}:{:02}Z", day / 3600, day % 3600 / 60, day % 60)
+    println!("{:02}:{:02}:{:02}Z {from} {who} {what} -> {status}", day / 3600, day % 3600 / 60, day % 60);
 }
 
 /// This machine's networks: each interface's address and prefix length, loopback left out.
@@ -357,14 +448,12 @@ mod tests {
         db.create_project("AND", "Aera").unwrap();
         let token = relay::add_token("mac", Some("AND")).unwrap();
 
-        let http = tiny_http::Server::http("127.0.0.1:0").unwrap();
-        let port = http.server_addr().to_ip().unwrap().port();
-        std::thread::spawn(move || {
-            let mut sessions = HashMap::new();
-            for (tick, request) in http.incoming_requests().enumerate() {
-                handle(request, &mut sessions, tick as u64, &[]);
-            }
-        });
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || run(listener, Arc::new(vec![])));
+        // A client that sends half a request and stalls holds only its own connection.
+        let mut stalled = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stalled.write_all(b"POST /mcp HTTP/1.1\r\nContent-Length: 500\r\n\r\n{").unwrap();
         let url = format!("http://127.0.0.1:{port}{MCP_PATH}");
         let init = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize",
             "params": { "protocolVersion": "2025-06-18", "clientInfo": { "name": "claude-code" } } });
@@ -398,6 +487,19 @@ mod tests {
         // Another token cannot use this session.
         let other = relay::add_token("cloud", None).unwrap();
         assert_eq!(post(&url, Some(&other), Some(&sid), json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/list" })).0, 404);
+
+        // Oversized and chunked bodies are refused without being read.
+        let raw = |text: &str| {
+            let mut c = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            c.write_all(text.as_bytes()).unwrap();
+            let mut answer = String::new();
+            let _ = c.read_to_string(&mut answer);
+            answer
+        };
+        let auth = format!("Authorization: Bearer {token}\r\n");
+        assert!(raw(&format!("POST /mcp HTTP/1.1\r\n{auth}Content-Length: 99999999\r\n\r\n")).starts_with("HTTP/1.1 413"));
+        assert!(raw(&format!("POST /mcp HTTP/1.1\r\n{auth}Transfer-Encoding: chunked\r\n\r\n")).starts_with("HTTP/1.1 411"));
+        drop(stalled);
         std::env::remove_var("NITELY_HOME");
     }
 }

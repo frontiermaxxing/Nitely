@@ -40,6 +40,9 @@ pub struct Board {
     /// Agents' questions still waiting for an answer.
     pub asks: Vec<Ask>,
     pub sync: Vec<SyncStatus>,
+    /// Agents on other machines reaching this one through `nitely serve` (cwd `remote:<token>`),
+    /// which no repo here can place.
+    pub remote_sessions: Vec<Session>,
 }
 
 /// A local branch with no worktree: left over after a land, parked, or made by hand.
@@ -180,7 +183,8 @@ pub fn snapshot(config: &Config, db: &Db) -> Result<Board> {
         .cloned()
         .collect();
 
-    Ok(Board { repos: views, needs_me_issues, asks: db.open_asks()?, sync: db.sync_statuses()? })
+    let remote_sessions = sessions.iter().filter(|s| s.cwd.starts_with("remote:")).cloned().collect();
+    Ok(Board { repos: views, needs_me_issues, asks: db.open_asks()?, sync: db.sync_statuses()?, remote_sessions })
 }
 
 /// Branches no worktree has checked out. A repo whose branches cannot be listed shows none rather

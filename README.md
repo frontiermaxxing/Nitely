@@ -112,7 +112,7 @@ other machines on the same local network (a Mac beside a Windows PC, say) reach 
 `nitely` MCP server over HTTP at `/mcp`, so Claude Code there needs no Nitely install.
 
 ```powershell
-nitely tokens add mac --project AND    # once per machine; prints its token, shown only now
+nitely tokens add mac --project AND    # once per machine; writes its token to a file to copy over
 nitely serve                           # listens on port 7421 and announces itself on the network
 ```
 
@@ -120,13 +120,15 @@ On the other machine, find it and add it:
 
 ```bash
 nitely discover                        # or, on a Mac without Nitely: dns-sd -B _nitely._tcp
-claude mcp add --transport http nitely http://192.168.1.68:7421/mcp --header "Authorization: Bearer <token>"
+claude mcp add --transport http nitely http://192.168.1.68:7421/mcp --header "Authorization: Bearer $(cat mac.token)"
 ```
 
 - **Local network only.** Requests from addresses outside the machine's own networks (private
   ranges, link-local, or the same subnet as one of its interfaces) are refused, so a forwarded port
   never exposes the backlog. It speaks plain HTTP: keep it to a network you trust.
-- **A token per machine.** Tokens are stored only as hashes; `nitely tokens list` shows names and
+- **A token per machine.** `tokens add` writes the token to `relay-tokens/<name>.token` in Nitely's
+  data folder (`nitely where`) and never prints it; copy that file over, then delete it. Nitely
+  keeps only a hash; `nitely tokens list` shows names and
   projects, `nitely tokens remove mac` cuts that machine off. Its agents act as `claude@mac`, and the
   token's project is the default for their calls.
 - **The backlog, not the repo.** Remote agents get `next_task`, `list_issues`, `get_issue`,
@@ -136,6 +138,9 @@ claude mcp add --transport http nitely http://192.168.1.68:7421/mcp --header "Au
 - **Firewall.** The first time `nitely serve` listens, Windows may ask whether to allow it on private
   networks; allow it there, and only there.
 - `nitely discover` checks each announced address before listing it, so what it prints answers.
+- Remote agents show on Now under "On other machines", and count among the agents working on Pulse.
+- The server is small on purpose: one thread per connection (32 at most), 10-second timeouts, a
+  Content-Length body of at most 1 MB, and the connection closed after each answer.
 
 ## Hooks
 

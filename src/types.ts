@@ -121,6 +121,8 @@ export interface Board {
   needs_me_issues: IssueRecord[];
   asks: Ask[];
   sync: SyncStatus[];
+  /** Agents on other machines on the local network, reaching this one through `nitely serve`. */
+  remote_sessions: Session[];
 }
 
 export interface Ask {

@@ -202,8 +202,9 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum TokensCmd {
-    /// Make a token for a machine or agent (replacing its old one) and print it. It is shown only
-    /// this once; only its hash is kept.
+    /// Make a token for a machine or agent (replacing its old one). It is written to
+    /// <data folder>/relay-tokens/<name>.token for you to copy over, never printed; Nitely keeps
+    /// only its hash.
     Add {
         /// Who uses it, e.g. mac; its agents act as claude@mac.
         name: String,
@@ -436,12 +437,14 @@ fn run(cmd: Cmd) -> Result<()> {
         Cmd::Serve { listen, no_advertise } => serve::serve(Some(&listen), !no_advertise),
         Cmd::Tokens { command } => match command {
             TokensCmd::Add { name, project } => {
+                // The token goes to a file, never to output an agent might capture.
                 let token = nitely_core::relay::add_token(&name, project.as_deref())?;
-                println!("{token}");
-                eprintln!(
-                    "\nThat is {name}'s token; it is not shown again. On that machine, with Claude Code:\n  \
-                     claude mcp add --transport http nitely http://<this machine>:{port}/mcp --header \"Authorization: Bearer <token>\"\n\
-                     `nitely discover` (or `dns-sd -B _nitely._tcp` on a Mac) finds this machine's address once `nitely serve` runs.",
+                let file = nitely_core::relay::write_token_file(&name, &token)?;
+                println!("{name}'s token is in {}", file.display());
+                println!(
+                    "Copy that file to {name}, then there, with Claude Code:\n  \
+                     claude mcp add --transport http nitely http://<this machine>:{port}/mcp --header \"Authorization: Bearer $(cat {name}.token)\"\n\
+                     Delete the file here once it is copied. `nitely discover` (or `dns-sd -B _nitely._tcp` on a Mac) finds this machine's address while `nitely serve` runs.",
                     port = nitely_core::relay::DEFAULT_PORT
                 );
                 Ok(())

@@ -91,6 +91,7 @@ export function Now(props: {
           </section>
         );
       })}
+      {board.remote_sessions.length > 0 && <Remote sessions={board.remote_sessions} now={now} />}
       <footer>
         <SyncLine sync={board.sync} now={now} />
         <button className="btn" onClick={syncNow} disabled={syncing}>
@@ -216,4 +217,33 @@ function SyncLine({ sync, now }: { sync: SyncStatus[]; now: number }) {
 function sortRows(rows: TaskRow[]): TaskRow[] {
   const key = (r: TaskRow) => Math.max(r.session?.last_seen_at ?? 0, r.state?.last_commit_at ?? 0);
   return [...rows].sort((a, b) => Number(b.needs_me) - Number(a.needs_me) || key(b) - key(a));
+}
+
+/** Agents on other machines on the local network: they reach the backlog, not a worktree here. */
+function Remote({ sessions, now }: { sessions: Board["remote_sessions"]; now: number }) {
+  const sorted = [...sessions].sort((a, b) => b.last_seen_at - a.last_seen_at);
+  return (
+    <section>
+      <h2>
+        On other machines <span className="muted">· through nitely serve</span>
+      </h2>
+      <div className="remote-list">
+        {sorted.map((s) => {
+          const live = livenessOf(s, now);
+          return (
+            <div className="remote-row" key={s.id}>
+              <AgentMark vendor={s.id} state={live} />
+              <span className="remote-who">
+                {VENDOR_LABEL[vendorOf(s.id)]} <span className="muted">on {s.cwd.replace(/^remote:/, "")}</span>
+              </span>
+              <StateDot state={live} />
+              <span className="small">{livenessLabel(s, now)}</span>
+              <span className="remote-doing small">{s.last_activity ?? <span className="muted">–</span>}</span>
+              <span className="muted small">{ago(now, s.last_seen_at)}</span>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
 }
