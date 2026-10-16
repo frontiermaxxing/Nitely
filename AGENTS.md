@@ -54,4 +54,4 @@ Nitely tracks its own build. Its backlog is the **NIT** project in Nitely, reach
 - `src-tauri`: the desktop shell and its commands; `src`: the React frontend, with the shared visual
   primitives in `src/ui` and design tokens in `src/styles/tokens.css`
 - `docs/vision.md` is the end state and build order; `docs/design.md` is milestone 1; `docs/visualization.md` is
-  the visual language every view follows
+  the visual language every view follows; `docs/crew.md` is how Nitely runs agent workers itself
