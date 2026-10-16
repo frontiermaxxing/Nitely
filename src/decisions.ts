@@ -2,7 +2,9 @@
 // tell (why an approval waits, whether a land stopped), from issue details. The Inbox draws them.
 
 import type { Ask, Board, IssueDetail, IssueRecord, TaskRow } from "./types";
-import { livenessOf, trackOf } from "./ui";
+// Straight from the modules rather than ./ui, so node:test can load this file without the CSS.
+import { VENDOR_LABEL, livenessOf, vendorOf } from "./ui/agents.ts";
+import { trackOf, type Track } from "./ui/lifecycle.ts";
 
 export type DecisionKind = "ask" | "approve" | "conflict" | "input" | "land";
 
@@ -85,7 +87,11 @@ export function decisionsOf(board: Board, details: Map<string, IssueDetail>, now
   const approvals = new Map<string, IssueRecord>();
   for (const { row } of rows) if (row.issue && needsHuman(row.issue)) approvals.set(row.issue.key, row.issue);
   for (const i of board.needs_me_issues) if (!approvals.has(i.key)) approvals.set(i.key, i);
-  for (const i of approvals.values()) {
+  for (const listed of approvals.values()) {
+    // The board can be older than the issue's detail (a snapshot started before the human moved
+    // it): an issue the detail shows approved, or moved anywhere else, is no longer a decision.
+    const i = details.get(listed.key)?.issue ?? listed;
+    if (!needsHuman(i)) continue;
     const at = rowOf(i.key);
     out.push({ id: `approve-${i.key}`, kind: "approve", issue: i, row: at?.row ?? null, repo: at?.repo ?? null, ask: null, since: waitingSince(i, details.get(i.key)), urgency: urgencyOf(i) });
   }
@@ -110,5 +116,56 @@ export function decisionsOf(board: Board, details: Map<string, IssueDetail>, now
     out.push({ id: `land-${row.issue.key}`, kind: "land", issue: detail?.issue ?? row.issue, row, repo, ask: null, since: stopped?.ts ?? now, urgency: urgencyOf(detail?.issue ?? row.issue) });
   }
 
-  return out.sort((a, b) => a.urgency - b.urgency || a.since - b.since);
+  return out.sort(byUrgency);
+}
+
+/** Most urgent first and, at the same urgency, the one that has waited longest first. */
+const byUrgency = (a: Decision, b: Decision) => a.urgency - b.urgency || a.since - b.since;
+
+/** What the human did to a decision: approved it, sent it back to Todo, or answered it. */
+export type Move = "approve" | "todo" | "answer";
+
+/** A decision the human just acted on, held in place until the Inbox moves on from it. */
+export interface Resolved {
+  decision: Decision;
+  move: Move;
+  /** The words of an answer. */
+  answer?: string;
+  /** False while the call is still on its way; it failing puts the decision back. */
+  done: boolean;
+}
+
+/**
+ * The decisions the Inbox lists: the live ones without those it has moved on from (`gone`; the
+ * board can still name them for a moment), with each one just acted on held where it was, even
+ * once the board has dropped it.
+ */
+export function shownDecisions(live: Decision[], resolved: Map<string, Resolved>, gone: Set<string>): Decision[] {
+  const out = live.filter((d) => !gone.has(d.id) && !resolved.has(d.id));
+  for (const r of resolved.values()) out.push(r.decision);
+  return out.sort(byUrgency);
+}
+
+/** What the card says once the human acted: short, in the past tense, and what comes next. */
+export function outcomeOf(r: Pick<Resolved, "move" | "answer" | "decision">): string {
+  switch (r.move) {
+    case "approve":
+      return "Approved. Landing next.";
+    case "todo":
+      return "Sent back to Todo.";
+    case "answer":
+      return `Answered${r.answer ? `: “${r.answer}”` : ""}. Sent to ${VENDOR_LABEL[vendorOf(r.decision.ask?.asked_by ?? null)]}.`;
+  }
+}
+
+/** Where the issue goes on the track after the move, shown before the backend says so. */
+export function trackAfter(track: Track, move: Move, now: number): Track {
+  switch (move) {
+    case "approve":
+      return { ...track, station: "landing", stuck: null, asking: false, reached: { ...track.reached, landing: now }, since: now };
+    case "todo":
+      return { ...track, station: "todo", stuck: null, asking: false, since: now };
+    case "answer":
+      return { ...track, asking: false };
+  }
 }

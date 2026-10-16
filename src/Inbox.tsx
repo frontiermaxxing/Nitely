@@ -1,7 +1,7 @@
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke, isPreview } from "./backend";
-import { decisionsOf, detailKeys, type Decision, type DecisionKind } from "./decisions";
+import { decisionsOf, detailKeys, outcomeOf, shownDecisions, trackAfter, type Decision, type DecisionKind, type Move, type Resolved } from "./decisions";
 import { ChecksMark } from "./Pr";
 import type { Board, IssueDetail, TaskRow } from "./types";
 import { ago } from "./util";
@@ -13,6 +13,7 @@ import {
   IssueToken,
   describeFindings,
   LIVENESS_LABEL,
+  ResultMark,
   StationTrack,
   VENDOR_LABEL,
   journeyOf,
@@ -36,7 +37,20 @@ export function Inbox(props: {
   onChanged: () => void;
 }) {
   const { board, details, now } = props;
-  const decisions = decisionsOf(board, details, now);
+  const live = decisionsOf(board, details, now);
+  // A decision the human acts on resolves at once and says what happened, in place, before the
+  // next one takes its place; the board can take a moment longer to drop it, so those the Inbox
+  // has moved on from stay hidden until it does.
+  const [resolved, setResolved] = useState<Map<string, Resolved>>(new Map());
+  const [gone, setGone] = useState<Set<string>>(new Set());
+  const [failed, setFailed] = useState<Map<string, string>>(new Map());
+  const decisions = shownDecisions(live, resolved, gone);
+  const waiting = decisions.filter((d) => !resolved.has(d.id));
+  const liveIds = live.map((d) => d.id).join(" ");
+  useEffect(() => {
+    const ids = new Set(liveIds.split(" "));
+    setGone((g) => ([...g].every((id) => ids.has(id)) ? g : new Set([...g].filter((id) => ids.has(id)))));
+  }, [liveIds]);
   const groups = GROUP_ORDER.map((k) => ({ kind: k, items: decisions.filter((d) => d.kind === k) })).filter((g) => g.items.length > 0);
   const ordered = groups.flatMap((g) => g.items);
   const [picked, setPicked] = useState<string | null>(null);
@@ -46,7 +60,50 @@ export function Inbox(props: {
   useEffect(() => {
     if (open && open.id !== picked) setPicked(open.id);
   }, [open, picked]);
-  const oldest = decisions.length ? Math.min(...decisions.map((d) => d.since)) : null;
+  const oldest = waiting.length ? Math.min(...waiting.map((d) => d.since)) : null;
+
+  // The latest list, pick and resolutions, for the timer that moves on after a confirmation.
+  const latest = useRef({ ordered, picked: open?.id ?? null, resolved });
+  latest.current = { ordered, picked: open?.id ?? null, resolved };
+  const timers = useRef(new Set<number>());
+  useEffect(() => () => timers.current.forEach((t) => clearTimeout(t)), []);
+
+  const moveOn = (id: string) => {
+    const { ordered: list, picked: on, resolved: held } = latest.current;
+    const at = list.findIndex((x) => x.id === id);
+    const waits = (x: Decision) => x.id !== id && !held.has(x.id);
+    const next = list.slice(at + 1).find(waits) ?? list.slice(0, Math.max(at, 0)).reverse().find(waits) ?? null;
+    // Focus follows only when it was on this decision (its buttons are gone now) or nowhere.
+    const focus = document.activeElement;
+    const follow = !focus || focus === document.body || !!focus.closest(".inbox-detail, .inbox-row.on");
+    setGone((g) => new Set(g).add(id));
+    setResolved((m) => without(m, id));
+    if (on === id) {
+      setPicked(next?.id ?? null);
+      if (follow && next) requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-decision="${CSS.escape(next.id)}"]`)?.focus());
+    }
+  };
+
+  const act = async (d: Decision, move: Move, run: () => Promise<unknown>, answer?: string) => {
+    const started = Date.now();
+    setFailed((m) => without(m, d.id));
+    setResolved((m) => new Map(m).set(d.id, { decision: d, move, answer, done: false }));
+    try {
+      await run();
+    } catch (e) {
+      // The decision comes back as it was, with why.
+      setResolved((m) => without(m, d.id));
+      setFailed((m) => new Map(m).set(d.id, String(e)));
+      return;
+    }
+    setResolved((m) => (m.has(d.id) ? new Map(m).set(d.id, { ...m.get(d.id)!, done: true }) : m));
+    props.onChanged();
+    const t = window.setTimeout(() => {
+      timers.current.delete(t);
+      moveOn(d.id);
+    }, Math.max(HOLD_MS - (Date.now() - started), SETTLED_MS));
+    timers.current.add(t);
+  };
 
   if (decisions.length === 0) {
     return (
@@ -66,9 +123,11 @@ export function Inbox(props: {
         <div className="inbox-head">
           <div className="page-head">
             <h1>Inbox</h1>
-            <span className="head-note attention-ink">
-              {decisions.length} need{decisions.length === 1 ? "s" : ""} you
-            </span>
+            {waiting.length > 0 && (
+              <span className="head-note attention-ink">
+                {waiting.length} need{waiting.length === 1 ? "s" : ""} you
+              </span>
+            )}
           </div>
           <p className="inbox-sub">Only decisions an agent cannot make.{oldest !== null && ` Oldest ${ago(now, oldest).replace(" ago", "")}.`}</p>
         </div>
@@ -83,6 +142,7 @@ export function Inbox(props: {
                 key={d.id}
                 decision={d}
                 detail={d.issue ? details.get(d.issue.key) : undefined}
+                resolved={resolved.get(d.id)}
                 on={open?.id === d.id}
                 onStep={(by) => {
                   const at = ordered.findIndex((x) => x.id === d.id) + by;
@@ -112,13 +172,27 @@ export function Inbox(props: {
           decision={open}
           detail={open.issue ? details.get(open.issue.key) : undefined}
           integration={board.repos.find((r) => r.name === open.repo)?.integration_branch ?? null}
+          resolved={resolved.get(open.id)}
+          error={failed.get(open.id) ?? null}
           now={now}
           onOpenIssue={props.onOpenIssue}
-          onChanged={props.onChanged}
+          onAct={(move, run, answer) => act(open, move, run, answer)}
         />
       )}
     </div>
   );
+}
+
+/** How long a decision the human acted on stays, saying what happened, before the next one takes its place. */
+const HOLD_MS = 1500;
+/** And at least this long after the call came back, when it took longer than that. */
+const SETTLED_MS = 600;
+
+function without<V>(m: Map<string, V>, id: string): Map<string, V> {
+  if (!m.has(id)) return m;
+  const n = new Map(m);
+  n.delete(id);
+  return n;
 }
 
 /** Questions first: an agent is blocked on each one. */
@@ -188,6 +262,7 @@ function eventOf(d: Decision, detail: IssueDetail | undefined): { text: string; 
 function InboxRow(props: {
   decision: Decision;
   detail?: IssueDetail;
+  resolved?: Resolved;
   on: boolean;
   now: number;
   onPick: () => void;
@@ -196,10 +271,11 @@ function InboxRow(props: {
 }) {
   const { decision: d } = props;
   const issue = props.detail?.issue ?? d.issue;
-  const ev = eventOf(d, props.detail);
+  const done = props.resolved;
+  const ev = done ? { text: outcomeOf(done), tone: "good" as const, agent: null } : eventOf(d, props.detail);
   return (
     <button
-      className={`inbox-row${props.on ? " on" : ""}`}
+      className={`inbox-row${props.on ? " on" : ""}${done ? " resolved" : ""}`}
       data-decision={d.id}
       tabIndex={props.on ? 0 : -1}
       onClick={props.onPick}
@@ -216,8 +292,8 @@ function InboxRow(props: {
       }}
       aria-current={props.on ? "true" : undefined}
     >
-      <span className={`inbox-kind inbox-kind-${d.kind}`} aria-label={KIND_WORD[d.kind]}>
-        {KIND_CHAR[d.kind]}
+      <span className={`inbox-kind inbox-kind-${d.kind}`} aria-label={done ? "Done" : KIND_WORD[d.kind]}>
+        {done ? "✓" : KIND_CHAR[d.kind]}
       </span>
       <span className="inbox-row-text">
         <span className="inbox-row-top">
@@ -244,31 +320,28 @@ function DecisionDetail(props: {
   decision: Decision;
   detail?: IssueDetail;
   integration: string | null;
+  /** Set once the human acted on it: the card says what happened instead of offering it again. */
+  resolved?: Resolved;
+  /** Why the last action on it failed. */
+  error: string | null;
   now: number;
   onOpenIssue: (key: string) => void;
-  onChanged: () => void;
+  onAct: (move: Move, run: () => Promise<unknown>, answer?: string) => Promise<void>;
 }) {
-  const { decision: d, detail, now } = props;
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const { decision: d, detail, now, resolved } = props;
+  const busy = !!resolved;
+  const [revealError, setError] = useState<string | null>(null);
+  const error = props.error ?? revealError;
   const [note, setNote] = useState<string | null>(null);
   const issue = detail?.issue ?? d.issue;
-  const track = issue ? trackOf(issue, detail?.timeline, detail?.reviews) : null;
+  const at = issue ? trackOf(issue, detail?.timeline, detail?.reviews) : null;
+  // The track moves to where the move takes it at once, before the backend says so.
+  const track = at && resolved ? trackAfter(at, resolved.move, now) : at;
   const agent = d.kind === "ask" ? d.ask!.asked_by : (d.row?.session?.vendor ?? d.row?.vendor ?? null);
   const live = livenessOf(d.row?.session, now);
 
-  const act = async (run: () => Promise<unknown>) => {
-    setBusy(true);
-    try {
-      await run();
-      setError(null);
-      props.onChanged();
-    } catch (e) {
-      setError(String(e));
-    }
-    setBusy(false);
-  };
-  const move = (state: string) => act(() => invoke("move_issue", { key: issue!.key, state, evidence: null, reason: null }));
+  const move = (state: "Approved" | "Todo") =>
+    props.onAct(state === "Approved" ? "approve" : "todo", () => invoke("move_issue", { key: issue!.key, state, evidence: null, reason: null }));
   const reveal = async (path: string) => {
     if (isPreview) {
       setNote("In the app this opens the folder in Explorer.");
@@ -280,7 +353,13 @@ function DecisionDetail(props: {
       setError(String(e));
     }
   };
-  const status = d.kind === "ask" ? "waiting for your answer" : live ? LIVENESS_LABEL[live] : "no session open";
+  const status = resolved
+    ? DONE_WORD[resolved.move]
+    : d.kind === "ask"
+      ? "waiting for your answer"
+      : live
+        ? LIVENESS_LABEL[live]
+        : "no session open";
 
   return (
     <article className={`inbox-detail decision-${d.kind}`}>
@@ -312,8 +391,16 @@ function DecisionDetail(props: {
         </div>
       </div>
       <div className="dd-actions">
-        {d.kind === "ask" && d.ask && <Answer askId={d.ask.id} options={d.ask.options} busy={busy} act={act} />}
-        {d.kind === "approve" && issue?.origin === "nitely" && (
+        {resolved && (
+          <p className={`dd-outcome${resolved.done ? " done" : ""}`} role="status">
+            <ResultMark result={resolved.done ? "pass" : "pending"} size={16} />
+            {outcomeOf(resolved)}
+          </p>
+        )}
+        {!resolved && d.kind === "ask" && d.ask && (
+          <Answer askId={d.ask.id} options={d.ask.options} busy={busy} onAnswer={(value, run) => props.onAct("answer", run, value)} />
+        )}
+        {!resolved && d.kind === "approve" && issue?.origin === "nitely" && (
           <div className="actions">
             <button className="btn primary" disabled={busy} onClick={() => move("Approved")}>
               Approve
@@ -324,7 +411,7 @@ function DecisionDetail(props: {
           </div>
         )}
         {d.kind === "approve" && issue && issue.origin !== "nitely" && <span className="muted small">In {originName(issue.origin)}. Act on it there.</span>}
-        {(d.kind === "conflict" || d.kind === "input" || d.kind === "land") && d.row && (
+        {!resolved && (d.kind === "conflict" || d.kind === "input" || d.kind === "land") && d.row && (
           <div className="actions">
             <button className="btn primary" onClick={() => reveal(d.row!.worktree)}>
               Open the worktree
@@ -354,6 +441,9 @@ function DecisionDetail(props: {
     </article>
   );
 }
+
+/** What the card's line of who and where says once the human acted. */
+const DONE_WORD: Record<Move, string> = { approve: "approved by you", todo: "sent back to Todo", answer: "answered" };
 
 /** The kind of decision as the first word of its card, so a column of them scans at a glance. */
 const KIND_WORD: Record<DecisionKind, string> = {
@@ -468,7 +558,7 @@ function listReasons(reasons: string[]): string {
 /** Answers being typed, by ask, so picking another decision and coming back keeps the words. */
 const drafts = new Map<number, string>();
 
-function Answer(props: { askId: number; options: string[]; busy: boolean; act: (run: () => Promise<unknown>) => Promise<void> }) {
+function Answer(props: { askId: number; options: string[]; busy: boolean; onAnswer: (value: string, run: () => Promise<unknown>) => void }) {
   const [text, setTextState] = useState(() => drafts.get(props.askId) ?? "");
   const setText = (value: string) => {
     setTextState(value);
@@ -477,7 +567,7 @@ function Answer(props: { askId: number; options: string[]; busy: boolean; act: (
   };
   const answer = (value: string) => {
     if (value.trim())
-      props.act(async () => {
+      props.onAnswer(value.trim(), async () => {
         await invoke("answer_ask", { id: props.askId, answer: value.trim() });
         drafts.delete(props.askId);
       });

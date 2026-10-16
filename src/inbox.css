@@ -92,6 +92,15 @@ button.dd-title:hover { text-decoration: underline; text-decoration-color: var(-
 .dd-words input:focus { outline: none; }
 .dd-words:focus-within { border-color: var(--line-strong); }
 .dd-words .btn { min-height: 28px; }
+/* A decision the human just acted on: what happened, in place of its actions, until the next one takes its place. */
+.dd-outcome {
+  display: flex; align-items: center; gap: 10px; min-height: 38px; margin: 0; font-size: var(--text-md);
+  font-weight: var(--weight-medium); color: var(--fg-2); overflow-wrap: anywhere;
+}
+.dd-outcome.done { color: var(--fg); }
+.dd-outcome.done .ui-result { color: var(--live); }
+.inbox-row.resolved .inbox-kind { background: none; border: 1.5px solid var(--live); color: var(--live); }
+.inbox-row.resolved .inbox-row-title { color: var(--fg-2); }
 .dd-links { display: flex; flex-wrap: wrap; gap: 18px; font-size: var(--text-sm); }
 .dd-links .link { color: var(--fg-3); text-decoration: none; }
 .dd-links .link:hover { color: var(--fg); }

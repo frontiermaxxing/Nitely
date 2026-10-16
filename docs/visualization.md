@@ -181,7 +181,17 @@ needs you, and the action in place. The first decision is open until you pick an
 
 Within a kind, decisions are ordered by urgency (the issue's `urgency`, so a blocker of urgent
 work rises), then by how long they have waited. The header says how many there are and the
-oldest. The nav count is the same list (`useDecisionDetails` runs in the app). When nothing
+oldest.
+
+**Acting on a decision.** Approve, an answer or Send back to Todo resolves the decision at once:
+its actions give way to what happened ("Approved. Landing next.", "Sent back to Todo.", "Answered:
+…. Sent to Claude.") with a dashed ring while the call is on its way and a teal tick once it is
+done, the track moves to the new station, and its row in the list shows the tick and the same
+words. Only after that moment (1.5s, `HOLD_MS` in `src/Inbox.tsx`) does the next decision below it
+take its place, with focus. The board can still name the decision for a moment after (a snapshot
+that started before the move); `decisionsOf` trusts the issue's fresher detail, and the Inbox
+keeps a decision it moved on from hidden until the board drops it. If the call fails, the
+decision comes back as it was, with the error under it. The nav count is the same list (`useDecisionDetails` runs in the app). When nothing
 waits, the page says so and lists what the agents are doing instead. The design's keys to approve
 (A), answer (1–3) and send back (T) belong to NIT-54; the footer lists only keys that work.
 
