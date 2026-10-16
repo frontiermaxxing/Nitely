@@ -36,8 +36,8 @@ export function detailKeys(board: Board): string[] {
   for (const i of board.needs_me_issues) keys.add(i.key);
   for (const r of board.repos.flatMap((r) => r.rows)) {
     if (!r.issue || r.issue.origin !== "nitely") continue;
-    // A stopped land leaves the issue Approved or In Review; only those can hold one.
-    if (r.needs_me || needsHuman(r.issue) || r.issue.state === "Approved" || r.issue.state === "In Review") keys.add(r.issue.key);
+    // Any issue being worked on can hold a stopped land (its state does not always say so).
+    if (r.needs_me || r.issue.state_type === "started" || needsHuman(r.issue) || r.issue.state === "Approved") keys.add(r.issue.key);
   }
   return [...keys].sort();
 }

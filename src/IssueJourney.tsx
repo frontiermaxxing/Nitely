@@ -25,8 +25,8 @@ export function IssueJourney(props: { detail: IssueDetail; now: number }) {
   // The latest round that was reviewed is open to start with: it is what the issue stands on.
   const latest = [...rounds].reverse().find((r) => r.review && (r.review.findings.length > 0 || r.review.reasons.length > 0));
   const [open, setOpen] = useState<number | null>(latest?.n ?? null);
-  const pr = detail.prs[0];
-  if (rounds.length === 0 && !pr && lands.length === 0) return null;
+  const prs = detail.prs;
+  if (rounds.length === 0 && prs.length === 0 && lands.length === 0) return null;
   const waiting = detail.issue.state === "Needs You";
 
   return (
@@ -70,7 +70,7 @@ export function IssueJourney(props: { detail: IssueDetail; now: number }) {
           </>
         );
         return (
-          <div key={r.n} className={`journey-step${r.outcome === "changes" ? " journey-step-looped" : ""}${last && !pr && lands.length === 0 ? " journey-step-last" : ""}`}>
+          <div key={r.n} className={`journey-step${r.outcome === "changes" ? " journey-step-looped" : ""}${last && prs.length === 0 && lands.length === 0 ? " journey-step-last" : ""}`}>
             {expandable ? (
               <button
                 type="button"
@@ -117,8 +117,8 @@ export function IssueJourney(props: { detail: IssueDetail; now: number }) {
           </div>
         );
       })}
-      {pr && (
-        <div className={`journey-step${lands.length === 0 ? " journey-step-last" : ""}`}>
+      {prs.map((pr, k) => (
+        <div key={`${pr.provider}-${pr.repo}-${pr.number}`} className={`journey-step${k === prs.length - 1 && lands.length === 0 ? " journey-step-last" : ""}`}>
           <div className="journey-row">
             <span className={`journey-node journey-node-pr${pr.state === "MERGED" ? " journey-node-done" : ""}`} />
             <span className="journey-label">Pull request</span>
@@ -137,7 +137,7 @@ export function IssueJourney(props: { detail: IssueDetail; now: number }) {
             </span>
           </div>
         </div>
-      )}
+      ))}
       {lands.map((l, i) => (
         <div key={i} className={`journey-step${i === lands.length - 1 ? " journey-step-last" : ""}`}>
           <div className="journey-row">

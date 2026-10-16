@@ -19,6 +19,7 @@
   font-size: var(--text-sm); line-height: 1.5;
 }
 .decision-findings { display: inline-flex; align-items: center; gap: 6px; margin: 0 6px 0 4px; color: var(--fg-3); }
+.decision-changes { color: var(--st-stuck); }
 .decision-branch { color: var(--fg-3); font-variant-numeric: tabular-nums; }
 .decision .actions { margin: 12px 0 0 104px; }
 .decision-path { margin: 8px 0 0 104px; color: var(--fg-3); font-size: var(--text-xs); overflow-wrap: anywhere; }

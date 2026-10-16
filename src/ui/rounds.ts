@@ -50,8 +50,11 @@ function reviewerOf(summary: string | null): string | null {
   return m ? m[1] : null;
 }
 
-/** A review record written up to this long after the submit note still belongs to it. */
-const SKEW_SECS = 120;
+/**
+ * Submit records the review just before it adds its note, so a round's record is at or before the
+ * note; this allows for a clock tick between the two without reaching into the next round.
+ */
+const SKEW_SECS = 5;
 
 /**
  * The rounds an issue went through, from its timeline and review records. A round opens with the
@@ -62,13 +65,14 @@ const SKEW_SECS = 120;
 export function journeyOf(timeline: TimelineEntry[] = [], reviews: ReviewRecord[] = []): Journey {
   const rounds: Round[] = [];
   const lands: LandRun[] = [];
-  let open: Round | null = null;
+  // The round in progress, if any (a holder, so the closure below and the loop share it).
+  const cur: { round: Round | null } = { round: null };
   const openRound = (ts: number): Round => {
-    if (!open) {
-      open = { n: rounds.length + 1, start: ts, end: null, gates: [], outcome: "open", reviewer: null, review: null, pushFailed: false, waitsForHuman: false };
-      rounds.push(open);
+    if (!cur.round) {
+      cur.round = { n: rounds.length + 1, start: ts, end: null, gates: [], outcome: "open", reviewer: null, review: null, pushFailed: false, waitsForHuman: false };
+      rounds.push(cur.round);
     }
-    return open;
+    return cur.round;
   };
 
   for (const e of timeline) {
@@ -97,11 +101,17 @@ export function journeyOf(timeline: TimelineEntry[] = [], reviews: ReviewRecord[
         r.pushFailed = s.includes("push failed");
         r.waitsForHuman = s.includes("waits for a human");
         r.end = e.ts;
-        open = null;
+        cur.round = null;
         break;
       }
       case "land_failed":
       case "landed":
+        // Land runs the gate itself; gate runs since the last submit with no review belong to
+        // the land, not to a new round of work.
+        if (cur.round && cur.round.outcome === "open") {
+          rounds.pop();
+          cur.round = null;
+        }
         lands.push({ ok: e.kind === "landed", ts: e.ts, summary: e.summary });
         break;
     }
