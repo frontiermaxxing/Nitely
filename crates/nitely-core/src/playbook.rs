@@ -387,6 +387,24 @@ pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// A POSIX `sh` for tests' fake reviewers: `sh` on unix, and on Windows the one Git for Windows
+/// ships (found from `git --exec-path`, since its folder is often not on PATH).
+#[cfg(test)]
+pub(crate) fn posix_sh() -> String {
+    if !cfg!(windows) {
+        return "sh".into();
+    }
+    let exec = git(Path::new("."), &["--exec-path"]).unwrap_or_default();
+    // <git>/mingw64/libexec/git-core
+    let git_root = Path::new(exec.trim()).ancestors().nth(3).map(Path::to_path_buf).unwrap_or_default();
+    ["usr/bin/sh.exe", "bin/sh.exe"]
+        .iter()
+        .map(|p| git_root.join(p))
+        .find(|p| p.is_file())
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|| "sh".into())
+}
+
 pub(crate) fn shell_free_command(program: &str) -> Command {
     #[allow(unused_mut)]
     let mut cmd = Command::new(program);

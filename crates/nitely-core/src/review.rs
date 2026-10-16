@@ -480,10 +480,9 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
     fn runs_a_reviewer_command() {
         let mut r = rules();
-        r.commands.insert("fake".into(), vec!["sh".into(), "-c".into(), "cat > /dev/null; printf 'ok\\nVERDICT: clean\\nMONEY_OR_RELEASE: no\\n' > \"$0\"".into(), "{output}".into()]);
+        r.commands.insert("fake".into(), vec![crate::playbook::posix_sh(), "-c".into(), "cat > /dev/null; printf 'ok\\nVERDICT: clean\\nMONEY_OR_RELEASE: no\\n' > \"$0\"".into(), "{output}".into()]);
         let review = r.run("fake", &std::env::temp_dir(), "main", None).unwrap();
         assert_eq!(review.verdict, "pass");
         assert!(review.flagged.is_empty());

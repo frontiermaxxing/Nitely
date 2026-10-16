@@ -338,7 +338,7 @@ fn to_json<T: Serialize + ?Sized>(v: &T) -> String {
     serde_json::to_string(v).unwrap_or_else(|_| "[]".into())
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::issues::NewIssue;
@@ -356,6 +356,8 @@ mod tests {
         };
         Command::new("git").args(["init", "-q", "--bare"]).arg(&remote).output().unwrap();
         sh(&repo, &["init", "-q", "-b", "main"]);
+        sh(&repo, &["config", "user.name", "t"]);
+        sh(&repo, &["config", "user.email", "t@t"]);
         // The fake reviewer flags money whenever the diff touches a billing file, finds an edge case
         // in a first look at an edge file, and on a re-review says that finding is still open.
         std::fs::write(
@@ -380,15 +382,16 @@ echo "MONEY: $money"
 [worktree]
 dir = "../wt/{key}"
 [gate]
-commands = ["true"]
+commands = ["exit 0"]
 [review]
 reviewer = { "*" = "fake" }
-commands = { fake = ["sh", "review.sh"] }
+commands = { fake = ["{sh}", "review.sh"] }
 [[review.flags]]
 name = "MONEY"
 question = "the change alters billing"
 reason = "money logic"
-"#,
+"#
+            .replace("{sh}", &playbook::posix_sh()),
         )
         .unwrap();
         sh(&repo, &["add", "."]);

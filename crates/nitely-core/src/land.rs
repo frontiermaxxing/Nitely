@@ -439,7 +439,7 @@ fn first_line(e: &anyhow::Error) -> String {
     format!("{e:#}").lines().next().unwrap_or("").to_string()
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::issues::NewIssue;
@@ -467,16 +467,20 @@ mod tests {
         std::fs::create_dir_all(repo.join(".nitely")).unwrap();
         Command::new("git").args(["init", "-q", "--bare", "-b", "main"]).arg(&remote).output().unwrap();
         sh(&repo, &["init", "-q", "-b", "main"]);
+        // Land rebases and commits in its own git calls, which need an identity.
+        sh(&repo, &["config", "user.name", "t"]);
+        sh(&repo, &["config", "user.email", "t@t"]);
+        // `exit 0` and the fake reviewer run the same under cmd (Windows) and sh.
         std::fs::write(
             repo.join(playbook::PLAYBOOK_PATH),
             r#"
 [worktree]
 dir = "../wt/{key}"
 [gate]
-commands = ["true"]
+commands = ["exit 0"]
 [review]
 reviewer = { "*" = "fake" }
-commands = { fake = ["sh", "-c", "cat > /dev/null; echo 'Fine.'; echo 'VERDICT: clean'"] }
+commands = { fake = ["{sh}", "-c", "cat > /dev/null; echo 'Fine.'; echo 'VERDICT: clean'"] }
 [[approval.human_paths]]
 pattern = "billing"
 reason = "billing"
@@ -486,7 +490,8 @@ when_changed = ["sidebar"]
 [[land.after]]
 run = "exit 3"
 when_changed = ["billing"]
-"#,
+"#
+            .replace("{sh}", &playbook::posix_sh()),
         )
         .unwrap();
         std::fs::write(repo.join("shared.txt"), "one\n").unwrap();
@@ -547,14 +552,15 @@ when_changed = ["billing"]
         let mut f = fixture("held");
         let (a, wt) = f.submitted("Pulse view", "pulse.txt", "x");
         // A dev server started in the worktree, as the browser preview asks agents to do.
-        let mut server = std::process::Command::new("sh").arg("-c").arg(format!("sleep 30; : {}", wt.display())).spawn().unwrap();
+        let mut server = std::process::Command::new(playbook::posix_sh()).arg("-c").arg(format!("sleep 30; : {}", wt.display())).spawn().unwrap();
         let r = f.land(&a);
         server.kill().ok();
         server.wait().ok();
         assert!(r.landed, "{r:?}");
         assert!(r.held_by.iter().any(|h| h.pid == server.id()), "{r:?}");
         assert!(r.cleanup.as_deref().unwrap().contains("kept"), "{r:?}");
-        assert!(wt.exists() && sh(&f.repo, &["worktree", "list"]).contains(&*wt.to_string_lossy()), "kept whole and still registered");
+        let listed = crate::paths::normalize(&sh(&f.repo, &["worktree", "list"]));
+        assert!(wt.exists() && listed.contains(&crate::paths::normalize(&wt.to_string_lossy())), "kept whole and still registered");
         std::fs::remove_dir_all(&f.base).ok();
     }
 
