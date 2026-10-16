@@ -5,6 +5,8 @@ use std::time::Duration;
 
 /// Bitbucket and Linear are read this often; git and agent state on every board refresh.
 const SYNC_EVERY: Duration = Duration::from_secs(60);
+/// How often the app lands approved changes whose playbook lands by Nitely.
+const LAND_APPROVED_EVERY: Duration = Duration::from_secs(15);
 /// How often the watcher checks for changes; each check is a pragma and a few file stats.
 const WATCH_EVERY: Duration = Duration::from_millis(500);
 /// Sent to the frontend when anything it shows may have changed.
@@ -167,24 +169,7 @@ async fn set_blocker(key: String, blocker: String, blocked: bool) -> Result<Rela
 async fn move_issue(key: String, state: String, evidence: Option<String>, reason: Option<String>) -> Result<IssueRecord, String> {
     let mut db = db()?;
     let key = db.current_key(&key).map_err(err)?;
-    let moved = db.move_issue(&key, &state, evidence.as_deref(), reason.as_deref(), &ME).map_err(err)?;
-    if moved.state == "Approved" {
-        // A playbook that lands by Nitely lands an approved change now, without an agent coming
-        // back for it. The land takes minutes and is serial, so it runs off this call.
-        std::thread::spawn(move || {
-            let landed = Config::load().and_then(|config| {
-                let mut db = Db::open_default()?;
-                nitely_core::land::land_on_approval(&mut db, &config, &key, "")
-            });
-            if let Err(e) = landed {
-                if let Ok(db) = Db::open_default() {
-                    let actor = Actor::Agent(nitely_core::land::AUTO_LANDER.into());
-                    db.add_note(&key, &format!("Nitely could not land it after the approval: {e:#}"), "land", &actor).ok();
-                }
-            }
-        });
-    }
-    Ok(moved)
+    db.move_issue(&key, &state, evidence.as_deref(), reason.as_deref(), &ME).map_err(err)
 }
 
 /// Makes an issue the human's own work (`human`) or hands it back to agents (`agent`).
@@ -312,6 +297,19 @@ fn watch(app: tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // A playbook that lands by Nitely lands an approved change without an agent coming back for
+    // it. Each round lands what is approved and ready; a land that holds the lock, or an app that
+    // was closed, only delays it to a later round.
+    std::thread::spawn(|| {
+        let mut reported = std::collections::HashMap::new();
+        loop {
+            let round = Config::load().and_then(|config| nitely_core::land::land_approved(&mut Db::open_default()?, &config, &mut reported));
+            if let Err(e) = round {
+                eprintln!("land approved: {e:#}");
+            }
+            std::thread::sleep(LAND_APPROVED_EVERY);
+        }
+    });
     std::thread::spawn(|| loop {
         if let Err(e) = run_sync() {
             eprintln!("sync: {e:#}");

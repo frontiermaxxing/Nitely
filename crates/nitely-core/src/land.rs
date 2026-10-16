@@ -6,11 +6,11 @@
 
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 
 use crate::db::{now, Db};
-use crate::issues::Actor;
+use crate::issues::{Actor, IssueRecord};
 use crate::playbook::{self, git, git_remote, GateResult, Playbook};
 use crate::submit::patch_id;
 
@@ -107,24 +107,12 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
 /// Who Nitely lands as when it lands a change itself, not the agent that wrote it.
 pub const AUTO_LANDER: &str = "nitely:auto-land";
 
-/// How long an automatic land after an approval waits for another land to finish.
-const LOCK_WAIT: Duration = Duration::from_secs(30 * 60);
-
 /// Lands `key` for a playbook whose `[land] by` lands without the author: in submit, once the
-/// review passes, and when a human approves. With `wait`, a land that another one holds the lock
-/// for waits its turn (up to `LOCK_WAIT`), as an agent calling land again would.
-pub fn land_now(db: &mut Db, config: &crate::Config, key: &str, dir: &str, push: bool, wait: bool, actor: &Actor) -> Result<Landed> {
+/// review passes, and after a human approves it (`land_approved`).
+pub fn land_now(db: &mut Db, config: &crate::Config, key: &str, dir: &str, push: bool, actor: &Actor) -> Result<Landed> {
     let opts = LandOptions { dir, issue_key: key, push, keep: false, break_lock: false };
     db.log_event(actor, Some(key), None, "status", "Landing it automatically, as the playbook says")?;
-    let started = Instant::now();
-    loop {
-        match land(db, config, &opts, actor) {
-            Err(e) if wait && format!("{e:#}").contains("another land holds") && started.elapsed() < LOCK_WAIT => {
-                std::thread::sleep(Duration::from_secs(10));
-            }
-            landed => return landed,
-        }
-    }
+    land(db, config, &opts, actor)
 }
 
 /// Where an automatic land leaves the issue, and what to do next. A land that stopped (a rebase
@@ -153,40 +141,89 @@ pub fn after_auto_land(db: &mut Db, key: &str, landed: &Result<Landed>, actor: &
 }
 
 /// After a human approves `key`: when its project's playbook lands by Nitely, Nitely lands it
-/// now. None when the playbook leaves the land to the author. `dir` helps find the repo when no
-/// repo is linked to the issue's project.
+/// now. None when it is not Approved or the playbook leaves the land to the author. `dir` helps
+/// find the repo when no single repo is linked to the issue's project.
 pub fn land_on_approval(db: &mut Db, config: &crate::Config, key: &str, dir: &str) -> Result<Option<Landed>> {
     let issue = db.issue(key)?.with_context(|| format!("no issue {key}"))?;
     if issue.state != "Approved" {
         return Ok(None);
     }
-    let root = match playbook::repo_for_issue(config, issue.project.as_deref(), dir) {
-        Ok(root) => root,
-        // Several repos hold the project's work: the one with a branch that names the issue.
-        Err(e) => repo_with_branch(config, issue.project.as_deref(), key).ok_or(e)?,
-    };
+    let root = approval_repo(config, &issue, dir)?;
     if !Playbook::load(&root)?.land.by.by_nitely() {
         return Ok(None);
     }
     let actor = Actor::Agent(AUTO_LANDER.into());
-    let landed = land_now(db, config, key, &root.to_string_lossy(), true, true, &actor);
+    let landed = land_now(db, config, key, &root.to_string_lossy(), true, &actor);
     after_auto_land(db, key, &landed, &actor)?;
     landed.map(Some)
 }
 
-/// The repo linked to `project` that has a local branch naming `key`.
-fn repo_with_branch(config: &crate::Config, project: Option<&str>, key: &str) -> Option<PathBuf> {
-    let project = project?;
-    let names = |root: &Path| {
-        git(root, &["branch", "--format=%(refname:short)"])
-            .is_ok_and(|out| out.lines().any(|b| crate::git::parse_branch(b).1.is_some_and(|k| k.eq_ignore_ascii_case(key))))
-    };
-    config
-        .repos
-        .iter()
-        .filter(|r| r.project.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(project)))
-        .map(|r| PathBuf::from(&r.root))
-        .find(|root| names(root))
+/// Lands each Approved issue whose project's playbook lands by Nitely and whose approval covers
+/// its latest review. The app runs this every few seconds, so an approval lands even when another
+/// land held the lock at the time, or the app was closed since: a held lock only waits for the
+/// next round. `reported` keeps the last error noted per issue, so a lasting one (no repo found,
+/// a playbook that does not parse) goes on the issue once, not every round.
+pub fn land_approved(db: &mut Db, config: &crate::Config, reported: &mut HashMap<String, String>) -> Result<Vec<Landed>> {
+    let mut landed = Vec::new();
+    let approved: Vec<IssueRecord> =
+        db.list_issues(None, false)?.into_iter().filter(|i| i.state == "Approved" && i.origin == "nitely").collect();
+    for issue in approved {
+        if db.standing_approval(&issue.key)?.is_none() {
+            continue;
+        }
+        let ready = approval_repo(config, &issue, "").and_then(|root| Ok((Playbook::load(&root)?.land.by.by_nitely(), root)));
+        let result = match ready {
+            Ok((false, _)) => continue,
+            Ok((true, root)) if lock_held(&root) => continue,
+            Ok((true, root)) => land_on_approval(db, config, &issue.key, &root.to_string_lossy()),
+            Err(e) => Err(e),
+        };
+        match result {
+            Ok(Some(r)) => {
+                reported.remove(&issue.key);
+                landed.push(r);
+            }
+            Ok(None) => {}
+            Err(e) if format!("{e:#}").contains("another land holds") => {}
+            Err(e) => {
+                let msg = format!("Nitely could not land it after the approval: {e:#}");
+                if reported.get(&issue.key) != Some(&msg) {
+                    db.add_note(&issue.key, &msg, "land", &Actor::Agent(AUTO_LANDER.into()))?;
+                    reported.insert(issue.key.clone(), msg);
+                }
+            }
+        }
+    }
+    Ok(landed)
+}
+
+/// The repo an approved issue lands in: the one linked to its project, or the one `dir` is in.
+/// When several repos hold the project's work, the only one with a branch that names the issue.
+fn approval_repo(config: &crate::Config, issue: &IssueRecord, dir: &str) -> Result<PathBuf> {
+    playbook::repo_for_issue(config, issue.project.as_deref(), dir).or_else(|e| {
+        let project = issue.project.as_deref().ok_or_else(|| anyhow::anyhow!("{e:#}"))?;
+        let names = |root: &Path| {
+            git(root, &["branch", "--format=%(refname:short)"])
+                .is_ok_and(|out| out.lines().any(|b| crate::git::parse_branch(b).1.is_some_and(|k| k.eq_ignore_ascii_case(&issue.key))))
+        };
+        let with_branch: Vec<PathBuf> = config
+            .repos
+            .iter()
+            .filter(|r| r.project.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(project)))
+            .map(|r| PathBuf::from(&r.root))
+            .filter(|root| names(root))
+            .collect();
+        match with_branch.as_slice() {
+            [one] => Ok(one.clone()),
+            [] => Err(e),
+            _ => bail!("several repos linked to {project} have a branch naming {}; land it from the right one", issue.key),
+        }
+    })
+}
+
+/// Whether a land holds the repo's lock now.
+fn lock_held(root: &Path) -> bool {
+    git(root, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).is_ok_and(|common| PathBuf::from(common.trim()).join(LOCK_FILE).exists())
 }
 
 /// The playbook's `[land] after` steps that match what landed. A failure is a warning. Then, when
@@ -806,8 +843,9 @@ when_changed = ["billing"]
             project: Some("NIT".into()),
         };
         let two = crate::Config { repos: vec![linked(&other, "other"), linked(&f.repo, "repo")], ..Default::default() };
-        let r = land_on_approval(&mut f.db, &two, &b, "").unwrap().unwrap();
-        assert!(r.landed, "{r:?}");
+        let mut reported = HashMap::new();
+        let r = land_approved(&mut f.db, &two, &mut reported).unwrap();
+        assert!(r.len() == 1 && r[0].landed && r[0].issue == b, "{r:?}");
         let notes = f.db.timeline(&b).unwrap();
         assert!(notes.iter().any(|e| e.summary.as_deref().is_some_and(|s| s.contains("with warnings") && s.contains("exit 3"))), "{notes:?}");
         assert_eq!(state(&f, &b), "Done");
@@ -825,15 +863,16 @@ when_changed = ["billing"]
         let reasons = &f.db.reviews(&d).unwrap()[0].reasons;
         assert!(reasons.iter().any(|r| r.contains("lands only what a human approved")), "{reasons:?}");
         f.db.move_issue(&d, "Approved", None, None, &Actor::Human).unwrap();
-        // Another land holds the lock: the approval's land waits its turn instead of giving up.
+        // Another land holds the lock: the approval lands in a later round, once it is free.
         let lock = f.repo.join(".git").join(LOCK_FILE);
         std::fs::write(&lock, "NIT-9 pid 1").unwrap();
-        let release = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_secs(2));
-            std::fs::remove_file(lock).unwrap();
-        });
-        assert!(land_on_approval(&mut f.db, &config, &d, &dir).unwrap().unwrap().landed);
-        release.join().unwrap();
+        let linked = crate::Config { repos: vec![linked(&f.repo, "repo")], ..Default::default() };
+        assert!(land_approved(&mut f.db, &linked, &mut reported).unwrap().is_empty());
+        assert_eq!(state(&f, &d), "Approved");
+        std::fs::remove_file(&lock).unwrap();
+        let r = land_approved(&mut f.db, &linked, &mut reported).unwrap();
+        assert!(r.len() == 1 && r[0].landed, "{r:?}");
+        assert_eq!(state(&f, &d), "Done");
 
         // "author" (the default) leaves the land to the agent.
         set_mode(&f, "author");

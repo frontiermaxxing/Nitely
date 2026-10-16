@@ -215,7 +215,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     // In a project that lands by Nitely, what is ready to land lands now, in this submit.
     if by_nitely && matches!(state, "In Review" | "Approved") {
         let root_dir = root.to_string_lossy().into_owned();
-        let landed = crate::land::land_now(db, config, &issue.key, &root_dir, !opts.local_only, false, actor);
+        let landed = crate::land::land_now(db, config, &issue.key, &root_dir, !opts.local_only, actor);
         let (state, next) = crate::land::after_auto_land(db, &issue.key, &landed, actor)?;
         out.state = state;
         out.next = next;
