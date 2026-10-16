@@ -91,8 +91,15 @@ export function Palette(props: {
       ...issues.map((i): Item => ({ id: `issue-${i.key}`, label: `${i.key} ${i.title}`, issue: i, group: "Issues", run: open(i.key) })),
       ...issues.flatMap(actionsOf),
     ];
-    // With nothing typed, only where to go; issues and actions need a word of what you mean.
-    const found = q ? all.filter((it) => it.label.toLowerCase().includes(q) || it.hint?.toLowerCase() === q) : all.filter((it) => it.group === "Go to");
+    // With nothing typed, only where to go; issues and actions need a word of what you mean. A
+    // key in what you typed ("approve nit-1") gives the actions of that issue alone, never NIT-10's.
+    const named = q.split(/\s+/).find((w) => KEY.test(w));
+    const found = q
+      ? all.filter(
+          (it) =>
+            (it.label.toLowerCase().includes(q) || it.hint?.toLowerCase() === q) && (!named || it.group !== "Actions" || it.issue?.key.toLowerCase() === named),
+        )
+      : all.filter((it) => it.group === "Go to");
     // An exact key always comes first, so "nit-1" never opens NIT-100; one that no list shows
     // (a closed issue) still opens. Its actions follow it.
     const exact = KEY.test(query.trim());
@@ -288,21 +295,30 @@ export function KeysSheet(props: { onClose: () => void }) {
       ],
     ],
   ];
+  // While the sheet is open it has the keys: Esc or "?" closes it, and every other key stops here,
+  // so nothing behind it (an open decision, the issue sheet) is approved or answered. Captured on
+  // the window, before anything else sees the key.
+  const sheet = useRef<HTMLDivElement>(null);
   useEffect(() => {
+    const was = document.activeElement as HTMLElement | null;
+    sheet.current?.focus({ preventScroll: true });
     const onKey = (e: KeyboardEvent) => {
+      e.stopImmediatePropagation();
+      if (e.key === "Tab") e.preventDefault();
       if (e.key === "Escape" || e.key === "?") {
         e.preventDefault();
-        e.stopImmediatePropagation();
         props.onClose();
       }
     };
-    // Capture, so Esc closes this sheet and not the issue under it.
     window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      if (was?.isConnected) was.focus({ preventScroll: true });
+    };
   }, [props.onClose]);
   return (
     <div className="palette-veil" onMouseDown={props.onClose}>
-      <div className="palette keys-sheet" role="dialog" aria-modal="true" aria-label="Keys" onMouseDown={(e) => e.stopPropagation()}>
+      <div className="palette keys-sheet" role="dialog" aria-modal="true" aria-label="Keys" tabIndex={-1} ref={sheet} onMouseDown={(e) => e.stopPropagation()}>
         <div className="keys-head">
           <h2>Keys</h2>
           <p>Keys that change something act only on the decision or issue you have open, with the focus in it.</p>

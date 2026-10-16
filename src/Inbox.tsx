@@ -142,7 +142,8 @@ export function Inbox(props: {
   // a, t, 1-9 and r act on the open decision, and only while the focus is on it: its row or its
   // card. Never on one in the background.
   const onKeyDown = (e: React.KeyboardEvent) => {
-    if (e.ctrlKey || e.metaKey || e.altKey || typing(e.target)) return;
+    // A held key repeats: it must not go on to approve or answer the decisions that follow.
+    if (e.repeat || e.ctrlKey || e.metaKey || e.altKey || typing(e.target)) return;
     const on = (e.target as HTMLElement).closest(".inbox-row.on, .inbox-detail");
     if (!on) return;
     const k = keys.current;

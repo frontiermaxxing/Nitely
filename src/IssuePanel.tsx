@@ -94,7 +94,7 @@ export function IssuePanel(props: {
   const native = issue?.origin === "nitely";
   // Keys act only while the focus is in this sheet: a approve, t back to Todo, m then t, d or c.
   const onKeyDown = (e: React.KeyboardEvent) => {
-    if (!issue || !native || e.ctrlKey || e.metaKey || e.altKey || typing(e.target)) return;
+    if (!issue || !native || e.repeat || e.ctrlKey || e.metaKey || e.altKey || typing(e.target)) return;
     const key = e.key.toLowerCase();
     if (moving) {
       e.preventDefault();
