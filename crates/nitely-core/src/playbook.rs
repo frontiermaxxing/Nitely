@@ -408,11 +408,13 @@ pub(crate) fn git_remote(dir: &Path, args: &[&str]) -> Result<String> {
     let header = || crate::credentials::load().ok().flatten().and_then(|c| crate::credentials::git_auth_header(&c));
     if is_bitbucket_https(url.trim()) {
         if let Some(header) = header() {
-            cmd.env("GIT_CONFIG_COUNT", "2")
-                .env("GIT_CONFIG_KEY_0", "credential.helper")
-                .env("GIT_CONFIG_VALUE_0", "")
-                .env("GIT_CONFIG_KEY_1", "http.https://bitbucket.org/.extraHeader")
-                .env("GIT_CONFIG_VALUE_1", header);
+            // Appended after any environment config already set (safe.directory in a sandbox, say).
+            let n: usize = std::env::var("GIT_CONFIG_COUNT").ok().and_then(|c| c.trim().parse().ok()).unwrap_or(0);
+            cmd.env("GIT_CONFIG_COUNT", (n + 2).to_string())
+                .env(format!("GIT_CONFIG_KEY_{n}"), "credential.helper")
+                .env(format!("GIT_CONFIG_VALUE_{n}"), "")
+                .env(format!("GIT_CONFIG_KEY_{}", n + 1), "http.https://bitbucket.org/.extraHeader")
+                .env(format!("GIT_CONFIG_VALUE_{}", n + 1), header);
         }
     }
     finish(cmd.args(args), args)
