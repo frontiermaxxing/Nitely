@@ -79,6 +79,8 @@ export interface MirrorPreview {
   unavailable: string | null;
   counts: { backfill: string; publish: number; private: number; held: number }[];
   sample: { key: string; title: string; body: string; labels: string[] }[];
+  /** What went wrong publishing just now. */
+  last_error?: string | null;
 }
 
 /** An issue's place in the mirror. */

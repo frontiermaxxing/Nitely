@@ -388,14 +388,12 @@ async fn set_mirror(project: String, backfill: Option<String>) -> Result<nitely_
     let db = db()?;
     db.set_mirror(&project, backfill.as_deref(), &ME).map_err(err)?;
     let config = Config::load().map_err(err)?;
-    // Publish right away rather than at the next sync.
-    if backfill.is_some() {
-        let report = nitely_core::mirror::sync(&config, &db);
-        if let Some(e) = report.errors.first() {
-            return Err(e.clone());
-        }
-    }
-    nitely_core::mirror::preview(&config, &db, &project, false).map_err(err)
+    // Publish right away rather than at the next sync. A failure is shown on the card, which
+    // still shows the mirror as on, so it can be turned off again.
+    let errors = if backfill.is_some() { nitely_core::mirror::sync(&config, &db).errors } else { vec![] };
+    let mut preview = nitely_core::mirror::preview(&config, &db, &project, false).map_err(err)?;
+    preview.last_error = errors.first().cloned();
+    Ok(preview)
 }
 
 /// An issue's place in the mirror: mirrored (with its link), private, held back, or withdrawn.

@@ -55,6 +55,7 @@ export function MirrorSettings(props: { projectKey: string }) {
             </button>
             <span className="muted small">Published issues stay on {p.host}; new changes stop going there.</span>
           </div>
+          {p.last_error && <p className="error small">Some issues could not be published yet: {p.last_error}</p>}
         </>
       )}
       {p && !p.enabled && p.unavailable && <p className="settings-why">Not available: {p.unavailable}</p>}

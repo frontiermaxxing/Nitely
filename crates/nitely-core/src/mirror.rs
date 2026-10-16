@@ -220,6 +220,9 @@ pub trait Host {
     /// Posts a comment: its id, to take it down later.
     fn comment(&self, number: i64, body: &str) -> Result<i64>;
     fn delete_comment(&self, number: i64, id: i64) -> Result<()>;
+    /// Deletes the issue, edit history and all. Hosts keep an edited text's earlier versions, so
+    /// this is the only way to take one down for good; it needs admin rights on GitHub.
+    fn delete_issue(&self, number: i64) -> Result<()>;
 }
 
 struct GitHub {
@@ -264,6 +267,19 @@ impl Host for GitHub {
     }
     fn delete_comment(&self, _number: i64, id: i64) -> Result<()> {
         crate::github::Client::new().delete(&format!("{}/repos/{}/issues/comments/{id}", crate::github::API, self.slug))
+    }
+    fn delete_issue(&self, number: i64) -> Result<()> {
+        let client = crate::github::Client::new();
+        let issue = client.get(&format!("{}/repos/{}/issues/{number}", crate::github::API, self.slug))?;
+        let id = issue["node_id"].as_str().context("GitHub returned no issue id")?;
+        let done = client.send("POST", &format!("{}/graphql", crate::github::API), &json!({
+            "query": "mutation($id: ID!) { deleteIssue(input: { issueId: $id }) { clientMutationId } }",
+            "variables": { "id": id }
+        }))?;
+        if let Some(e) = done["errors"].as_array().and_then(|e| e.first()) {
+            bail!("GitHub would not delete the issue: {}", e["message"].as_str().unwrap_or("no reason given"));
+        }
+        Ok(())
     }
 }
 
@@ -329,6 +345,9 @@ impl Host for Bitbucket {
     }
     fn delete_comment(&self, number: i64, id: i64) -> Result<()> {
         crate::remote::bitbucket_delete(&format!("{}/issues/{number}/comments/{id}", self.api()), &self.auth)
+    }
+    fn delete_issue(&self, number: i64) -> Result<()> {
+        crate::remote::bitbucket_delete(&format!("{}/issues/{number}", self.api()), &self.auth)
     }
 }
 
@@ -472,6 +491,8 @@ pub struct Preview {
     pub counts: Vec<BackfillCount>,
     /// The first few issues as they would look on the host (with the backfill `open`).
     pub sample: Vec<Sample>,
+    /// What went wrong publishing just now, when turning it on could not publish everything.
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -581,62 +602,71 @@ pub fn sync_project(db: &Db, host: &dyn Host, project: &str, terms: &PrivateTerm
         if *budget == 0 {
             return Ok(());
         }
-        let known = db.issue_mirror(&issue.key)?;
-        let created = crate::linear_import::parse_iso(&issue.created_at).unwrap_or(0);
-        // A number counts only on the host and repo it was made on: after the origin moves, the
-        // issue is published anew there, and nothing is written to the old repo's issue.
-        let here = db.conn.query_row("SELECT host = ?2 AND repo = ?3 FROM issue_mirror WHERE issue_key = ?1", params![issue.key, host.name(), host.repo()], |r| r.get::<_, Option<bool>>(0)).optional()?.flatten().unwrap_or(false);
-        let published = known.as_ref().filter(|_| here).and_then(|m| m.number.map(|n| (n, m.status.clone())));
-        let eligible = published.is_some()
-            || created >= setting.enabled_at
-            || setting.backfill == "all"
-            || (setting.backfill == "open" && issue.is_open());
-        if !eligible {
-            continue;
+        // One issue the host refuses (deleted there, say) does not hold up the others.
+        if let Err(e) = sync_issue(db, host, &issue, &setting, terms, roots, budget, report) {
+            report.errors.push(format!("{}: {e:#}", issue.key));
         }
-        match decide(&issue, db.marked_private(&issue.key)?, terms, roots)? {
-            Decision::Publish(out) => {
-                let fingerprint = out.fingerprint();
-                let unchanged = db.conn.query_row("SELECT fingerprint = ?2 AND status = 'mirrored' FROM issue_mirror WHERE issue_key = ?1", params![issue.key, fingerprint], |r| r.get::<_, bool>(0)).optional()?.unwrap_or(false);
-                match published {
-                    None => {
-                        // Created open, its number saved, then closed: a failed close is retried on
-                        // the next sync instead of creating the issue again.
-                        let open = HostIssue { closed: None, ..out.clone() };
-                        let (number, url) = host.create(&open).with_context(|| format!("creating {}'s issue on {}", issue.key, host.name()))?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sync_issue(db: &Db, host: &dyn Host, issue: &IssueRecord, setting: &MirrorSetting, terms: &PrivateTerms, roots: &[String], budget: &mut usize, report: &mut MirrorReport) -> Result<()> {
+    let known = db.issue_mirror(&issue.key)?;
+    let created = crate::linear_import::parse_iso(&issue.created_at).unwrap_or(0);
+    // A number counts only on the host and repo it was made on: after the origin moves, the
+    // issue is published anew there, and nothing is written to the old repo's issue.
+    let here = db.conn.query_row("SELECT host = ?2 AND repo = ?3 FROM issue_mirror WHERE issue_key = ?1", params![issue.key, host.name(), host.repo()], |r| r.get::<_, Option<bool>>(0)).optional()?.flatten().unwrap_or(false);
+    let published = known.as_ref().filter(|_| here).and_then(|m| m.number.map(|n| (n, m.status.clone())));
+    let eligible = published.is_some()
+        || created >= setting.enabled_at
+        || setting.backfill == "all"
+        || (setting.backfill == "open" && issue.is_open());
+    if !eligible {
+        return Ok(());
+    }
+    match decide(issue, db.marked_private(&issue.key)?, terms, roots)? {
+        Decision::Publish(out) => {
+            let fingerprint = out.fingerprint();
+            let unchanged = db.conn.query_row("SELECT fingerprint = ?2 AND status = 'mirrored' FROM issue_mirror WHERE issue_key = ?1", params![issue.key, fingerprint], |r| r.get::<_, bool>(0)).optional()?.unwrap_or(false);
+            match published {
+                None => {
+                    // Created open, its number saved, then closed: a failed close is retried on
+                    // the next sync instead of creating the issue again.
+                    let open = HostIssue { closed: None, ..out.clone() };
+                    let (number, url) = host.create(&open).with_context(|| format!("creating {}'s issue on {}", issue.key, host.name()))?;
+                    *budget -= 1;
+                    report.created += 1;
+                    db.conn.execute("DELETE FROM mirror_comment WHERE issue_key = ?1", [&issue.key])?;
+                    db.conn.execute("UPDATE issue_mirror SET host = NULL, repo = NULL, number = NULL, url = NULL WHERE issue_key = ?1", [&issue.key])?;
+                    db.save_mirror(&issue.key, "mirrored", None, Some((host.name(), host.repo(), number, &url)), Some(&open.fingerprint()))?;
+                    // Comments start from now: a backfill does not replay old history.
+                    let last: i64 = db.conn.query_row("SELECT COALESCE(MAX(id), 0) FROM event WHERE issue_key = ?1 COLLATE NOCASE", [&issue.key], |r| r.get(0))?;
+                    db.conn.execute("UPDATE issue_mirror SET last_event = ?2 WHERE issue_key = ?1", params![issue.key, last])?;
+                    if out.closed.is_some() && *budget > 0 {
+                        host.update(number, &out).with_context(|| format!("closing {}'s issue on {}", issue.key, host.name()))?;
                         *budget -= 1;
-                        report.created += 1;
-                        db.conn.execute("DELETE FROM mirror_comment WHERE issue_key = ?1", [&issue.key])?;
-                        db.conn.execute("UPDATE issue_mirror SET host = NULL, repo = NULL, number = NULL, url = NULL WHERE issue_key = ?1", [&issue.key])?;
-                        db.save_mirror(&issue.key, "mirrored", None, Some((host.name(), host.repo(), number, &url)), Some(&open.fingerprint()))?;
-                        // Comments start from now: a backfill does not replay old history.
-                        let last: i64 = db.conn.query_row("SELECT COALESCE(MAX(id), 0) FROM event WHERE issue_key = ?1 COLLATE NOCASE", [&issue.key], |r| r.get(0))?;
-                        db.conn.execute("UPDATE issue_mirror SET last_event = ?2 WHERE issue_key = ?1", params![issue.key, last])?;
-                        if out.closed.is_some() && *budget > 0 {
-                            host.update(number, &out).with_context(|| format!("closing {}'s issue on {}", issue.key, host.name()))?;
-                            *budget -= 1;
-                            db.save_mirror(&issue.key, "mirrored", None, None, Some(&fingerprint))?;
-                        }
-                    }
-                    Some((number, _)) if !unchanged => {
-                        host.update(number, &out).with_context(|| format!("updating {}'s issue on {}", issue.key, host.name()))?;
-                        *budget -= 1;
-                        report.updated += 1;
                         db.save_mirror(&issue.key, "mirrored", None, None, Some(&fingerprint))?;
                     }
-                    Some(_) => {}
                 }
-                post_comments(db, host, &issue, terms, roots, budget, report)?;
+                Some((number, _)) if !unchanged => {
+                    host.update(number, &out).with_context(|| format!("updating {}'s issue on {}", issue.key, host.name()))?;
+                    *budget -= 1;
+                    report.updated += 1;
+                    db.save_mirror(&issue.key, "mirrored", None, None, Some(&fingerprint))?;
+                }
+                Some(_) => {}
             }
-            Decision::Private(why) | Decision::Held(why) if published.as_ref().is_some_and(|(_, s)| s == "mirrored") => {
-                let (number, _) = published.unwrap();
-                withdraw(db, host, &issue.key, number, &why)?;
-                *budget = budget.saturating_sub(1);
-                report.withdrawn += 1;
-            }
-            Decision::Private(why) => db.save_mirror(&issue.key, if published.is_some() { "withdrawn" } else { "private" }, Some(&why), None, None)?,
-            Decision::Held(why) => db.save_mirror(&issue.key, if published.is_some() { "withdrawn" } else { "held" }, Some(&why), None, None)?,
+            post_comments(db, host, issue, terms, roots, budget, report)?;
         }
+        Decision::Private(why) | Decision::Held(why) if published.as_ref().is_some_and(|(_, s)| s == "mirrored") => {
+            let (number, _) = published.unwrap();
+            withdraw(db, host, &issue.key, number, &why)?;
+            *budget = budget.saturating_sub(1);
+            report.withdrawn += 1;
+        }
+        Decision::Private(why) => db.save_mirror(&issue.key, if published.is_some() { "withdrawn" } else { "private" }, Some(&why), None, None)?,
+        Decision::Held(why) => db.save_mirror(&issue.key, if published.is_some() { "withdrawn" } else { "held" }, Some(&why), None, None)?,
     }
     Ok(())
 }
@@ -672,6 +702,13 @@ fn post_comments(db: &Db, host: &dyn Host, issue: &IssueRecord, terms: &PrivateT
 /// Takes a published issue down: its comments deleted, its title and text replaced with a note, and
 /// closed as not planned.
 fn withdraw(db: &Db, host: &dyn Host, key: &str, number: i64, why: &str) -> Result<()> {
+    // Deleted outright where the token may: an edited text stays readable in the host's history.
+    if host.delete_issue(number).is_ok() {
+        db.conn.execute("DELETE FROM mirror_comment WHERE issue_key = ?1", [key])?;
+        db.conn.execute("UPDATE issue_mirror SET number = NULL, url = NULL WHERE issue_key = ?1", [key])?;
+        db.save_mirror(key, "withdrawn", Some(&format!("{why}; deleted on {}", host.name())), None, None)?;
+        return Ok(());
+    }
     let ids: Vec<i64> = db.conn.prepare("SELECT host_id FROM mirror_comment WHERE issue_key = ?1")?.query_map([key], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
     for id in ids {
         host.delete_comment(number, id).with_context(|| format!("taking down a comment on {key}'s issue on {}", host.name()))?;
@@ -686,7 +723,8 @@ fn withdraw(db: &Db, host: &dyn Host, key: &str, number: i64, why: &str) -> Resu
         priority: 0,
     };
     host.update(number, &gone).with_context(|| format!("withdrawing {key}'s issue on {}", host.name()))?;
-    db.save_mirror(key, "withdrawn", Some(why), None, Some(&gone.fingerprint()))?;
+    let left = format!("{why}; its text is down, but {} keeps earlier versions in the issue's edit history: delete issue #{number} there to remove them", host.name());
+    db.save_mirror(key, "withdrawn", Some(&left), None, Some(&gone.fingerprint()))?;
     Ok(())
 }
 

@@ -7,6 +7,10 @@ use std::cell::RefCell;
 struct Fake {
     issues: RefCell<Vec<HostIssue>>,
     comments: RefCell<Vec<(i64, String)>>,
+    /// The token may delete issues (admin).
+    can_delete: bool,
+    /// Issue numbers the host refuses to update, as if deleted there.
+    gone: Vec<i64>,
 }
 
 impl Host for Fake {
@@ -25,6 +29,9 @@ impl Host for Fake {
         Ok((n, format!("https://github.com/someone/app/issues/{n}")))
     }
     fn update(&self, number: i64, issue: &HostIssue) -> Result<()> {
+        if self.gone.contains(&number) {
+            bail!("GitHub 404: Not Found");
+        }
         self.issues.borrow_mut()[number as usize - 1] = issue.clone();
         Ok(())
     }
@@ -34,6 +41,13 @@ impl Host for Fake {
     }
     fn delete_comment(&self, _number: i64, id: i64) -> Result<()> {
         self.comments.borrow_mut()[id as usize - 1].1 = "<deleted>".into();
+        Ok(())
+    }
+    fn delete_issue(&self, number: i64) -> Result<()> {
+        if !self.can_delete {
+            bail!("needs admin");
+        }
+        self.issues.borrow_mut()[number as usize - 1].title = "<deleted>".into();
         Ok(())
     }
 }
@@ -129,6 +143,8 @@ fn syncs_new_issues_updates_comments_and_withdraws() {
     assert_eq!(report.withdrawn, 1);
     assert!(fake.issues.borrow()[0].title.contains("withdrawn") && !fake.issues.borrow()[0].body.contains("Export"));
     assert!(fake.comments.borrow().iter().all(|(_, c)| c == "<deleted>"), "{:?}", fake.comments.borrow());
+    let reason = db.issue_mirror(&a.key).unwrap().unwrap().reason.unwrap();
+    assert!(reason.contains("edit history") && reason.contains("delete issue #1"), "the person is told what is left: {reason}");
     assert_eq!(db.issue_mirror(&a.key).unwrap().unwrap().status, "withdrawn");
 
     // A backfill of all publishes the older issue too.
@@ -183,6 +199,33 @@ fn a_rekey_keeps_private_marks_and_removing_a_project_forgets_the_mirror() {
     db.remove_project("APX", true).unwrap();
     db.create_project("APX", "Again").unwrap();
     assert!(db.mirror_setting("APX").unwrap().is_none(), "a project made again starts with the mirror off");
+    drop(db);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn a_token_that_may_delete_takes_a_withdrawn_issue_down_whole_and_one_refusal_does_not_stop_the_rest() {
+    let (mut db, dir) = db();
+    let roots = vec![ROOT.to_string()];
+    let agent = Actor::Agent("claude:x".into());
+    db.set_mirror("APP", Some("all"), &Actor::Human).unwrap();
+    let a = db.create_issue(&new("Add export", "Export the list."), &agent).unwrap();
+    let b = db.create_issue(&new("Fix sorting", "Sort by date."), &agent).unwrap();
+    let fake = Fake { can_delete: true, gone: vec![1], ..Default::default() };
+    let mut report = MirrorReport::default();
+    let run = |db: &Db, report: &mut MirrorReport| sync_project(db, &fake, "APP", &PrivateTerms::default(), &roots, &mut 30, report).unwrap();
+    run(&db, &mut report);
+    // Issue 1 was deleted on the host: its update fails, and issue 2 still updates.
+    db.move_issue(&a.key, "Backlog", None, None, &agent).unwrap();
+    db.move_issue(&b.key, "Backlog", None, None, &agent).unwrap();
+    run(&db, &mut report);
+    assert!(report.errors.iter().any(|e| e.starts_with(&a.key)), "{:?}", report.errors);
+    assert_eq!(report.updated, 1);
+    // With admin rights, withdrawing deletes the issue, edit history and all.
+    db.set_issue_private(&b.key, true, &Actor::Human).unwrap();
+    run(&db, &mut report);
+    assert_eq!(fake.issues.borrow()[1].title, "<deleted>");
+    assert!(db.issue_mirror(&b.key).unwrap().unwrap().reason.unwrap().contains("deleted on GitHub"));
     drop(db);
     std::fs::remove_dir_all(dir).ok();
 }
