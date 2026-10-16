@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { invoke } from "./backend";
 import type { View } from "./App";
@@ -37,9 +37,11 @@ function readSeen(now: number): number {
   return now - DAY;
 }
 
-function writeSeen() {
+/** Saves the time of the data last shown, so nothing that was never on screen is skipped next time. */
+function writeSeen(shown: number | null) {
+  if (!shown) return;
   try {
-    localStorage.setItem(SEEN_KEY, String(Math.floor(Date.now() / 1000)));
+    localStorage.setItem(SEEN_KEY, String(shown));
   } catch {
     // See readSeen.
   }
@@ -88,11 +90,13 @@ export function Pulse(props: { board: Board | null; now: number; version: number
   const [since] = useState(() => readSeen(Math.floor(Date.now() / 1000)));
   const [data, setData] = useState<PulseData | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // When the data on screen was read; "last seen" never moves past it.
+  const shown = useRef<number | null>(null);
 
   useEffect(() => {
     let live = true;
     invoke<PulseData>("pulse", { since, dayStart: localMidnight() })
-      .then((d) => live && (setData(d), setError(null)))
+      .then((d) => live && (setData(d), setError(null), (shown.current = d.now)))
       .catch((e) => live && setError(String(e)));
     return () => {
       live = false;
@@ -101,13 +105,14 @@ export function Pulse(props: { board: Board | null; now: number; version: number
 
   // "Since you were last here" moves on when you leave Pulse, not while you read it.
   useEffect(() => {
-    const onHide = () => document.visibilityState === "hidden" && writeSeen();
+    const save = () => writeSeen(shown.current);
+    const onHide = () => document.visibilityState === "hidden" && save();
     document.addEventListener("visibilitychange", onHide);
-    window.addEventListener("pagehide", writeSeen);
+    window.addEventListener("pagehide", save);
     return () => {
       document.removeEventListener("visibilitychange", onHide);
-      window.removeEventListener("pagehide", writeSeen);
-      writeSeen();
+      window.removeEventListener("pagehide", save);
+      save();
     };
   }, []);
 
@@ -217,6 +222,8 @@ function Glance({ data, board, ctx, onGo }: { data: PulseData; board: Board | nu
 
 /** One project on the track: a column per station, stuck work in its own band below. */
 function Flow({ flow, ctx, onBoard }: { flow: ProjectFlow; ctx: Context; onBoard: () => void }) {
+  // Done today expands in place: the project page lists open issues by default.
+  const [allDone, setAllDone] = useState(false);
   const at = (s: Station) =>
     s === "done" ? flow.done_today : flow.issues.filter((f) => trackOf(f.issue).station === s && !trackOf(f.issue).closed);
   const isStuck = (f: FlowIssue) => !!stuckReason(f, ctx.rows.get(f.issue.key), ctx.now);
@@ -257,11 +264,11 @@ function Flow({ flow, ctx, onBoard }: { flow: ProjectFlow; ctx: Context; onBoard
                 {s === "todo" || s === "done" ? (
                   // Queued and finished work stays quiet: keys only, the title on hover.
                   <div className="flow-keys">
-                    {moving.slice(0, KEYS).map((f) => (
+                    {moving.slice(0, s === "done" && allDone ? undefined : KEYS).map((f) => (
                       <IssueToken key={f.issue.key} issue={f.issue} onOpen={ctx.onOpenIssue} />
                     ))}
-                    {moving.length > KEYS && (
-                      <button className="flow-more" onClick={onBoard}>
+                    {moving.length > KEYS && !(s === "done" && allDone) && (
+                      <button className="flow-more" onClick={s === "done" ? () => setAllDone(true) : onBoard}>
                         +{moving.length - KEYS} more
                       </button>
                     )}
