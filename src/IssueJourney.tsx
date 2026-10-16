@@ -253,7 +253,7 @@ export function WhoHadIt(props: { detail: IssueDetail; now: number }) {
   }
   if (detail.issue.state === "Needs You") {
     const since = [...detail.timeline].reverse().find((e) => e.kind === "submit" || (e.kind === "issue_moved" && /→ Needs You/.test(e.summary ?? "")));
-    cells.push({ lane: "human", label: "Approve?", sub: since ? ago(now, since.ts).replace(" ago", "") : "now", tone: "needs" });
+    cells.push({ lane: "human", label: detail.issue.owner === "human" ? "Yours to do" : "Approve?", sub: since ? ago(now, since.ts).replace(" ago", "") : "now", tone: "needs" });
   }
   if (cells.length === 0) return null;
   const shown = cells.slice(-MAX_CELLS);

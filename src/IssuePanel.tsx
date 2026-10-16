@@ -84,9 +84,20 @@ export function IssuePanel(props: {
     }
   };
 
+  const handBack = async () => {
+    try {
+      await invoke("set_owner", { key: props.issueKey, owner: "agent" });
+      props.onChanged();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
   const issue = detail?.issue;
   const track = detail && trackOf(detail.issue, detail.timeline, detail.reviews);
-  const waiting = issue?.state === "Needs You";
+  // The human's own work waits on them in any open state, and is never an approval of a change.
+  const own = issue?.owner === "human" && issue.origin === "nitely" && !["completed", "canceled"].includes(issue.state_type);
+  const waiting = issue?.state === "Needs You" && !own;
   const waitedSince = detail ? [...detail.timeline].reverse().find((e) => e.kind === "submit" || (e.kind === "issue_moved" && /→ Needs You/.test(e.summary ?? ""))) : undefined;
   const review = detail?.reviews[0];
   const pr = detail?.prs[0];
@@ -167,6 +178,16 @@ export function IssuePanel(props: {
         </div>
         {issue && detail && (
           <div className="panel-rail">
+            {own && (
+              <div className="panel-waiting">
+                <p className="panel-waiting-head">Your own work</p>
+                <p className="panel-waiting-why">Only you can do this, so no agent will take it.</p>
+                <div className="actions">
+                  <button className="btn primary" onClick={() => move("Done", "Done by the human, outside Nitely.")}>Mark done</button>
+                  <button className="btn" onClick={handBack}>Hand back to agents</button>
+                </div>
+              </div>
+            )}
             {waiting && issue.origin === "nitely" && (
               <div className="panel-waiting">
                 <p className="panel-waiting-head">Waiting on you{waitedSince && ` · ${ago(props.now, waitedSince.ts).replace(" ago", "")}`}</p>
