@@ -120,6 +120,25 @@ fn remove_token_in(dir: &Path, name: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// Points machines whose default project is `from` at `to`, or at none when `to` is None.
+/// Returns how many changed.
+pub fn retarget_project(from: &str, to: Option<&str>) -> Result<usize> {
+    retarget_project_in(&crate::paths::data_dir(), from, to)
+}
+
+fn retarget_project_in(dir: &Path, from: &str, to: Option<&str>) -> Result<usize> {
+    let mut store = load(dir)?;
+    let mut changed = 0;
+    for t in store.tokens.iter_mut().filter(|t| t.project.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(from))) {
+        t.project = to.map(str::to_string);
+        changed += 1;
+    }
+    if changed > 0 {
+        save(dir, &store)?;
+    }
+    Ok(changed)
+}
+
 /// The token a request's bearer value matches, if any. Every stored hash is compared in full, in
 /// constant time, so timing says nothing about which part matched.
 pub fn verify(bearer: &str) -> Result<Option<Token>> {
@@ -252,6 +271,17 @@ pub fn is_local(ip: IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_project_key_change_follows_into_tokens() {
+        let dir = std::env::temp_dir().join(format!("nitely-relay-retarget-{}-{}", std::process::id(), crate::db::now()));
+        let token = add_token_in(&dir, "mac", Some("old")).unwrap();
+        add_token_in(&dir, "box", Some("other")).unwrap();
+        assert_eq!(retarget_project_in(&dir, "OLD", Some("NEW")).unwrap(), 1);
+        assert_eq!(verify_in(&dir, &token).unwrap().unwrap().project.as_deref(), Some("NEW"), "the token still works");
+        assert_eq!(retarget_project_in(&dir, "NEW", None).unwrap(), 1);
+        assert_eq!(verify_in(&dir, &token).unwrap().unwrap().project, None);
+    }
 
     #[test]
     fn tokens_are_shown_once_kept_hashed_and_checked() {

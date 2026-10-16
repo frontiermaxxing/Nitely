@@ -4,13 +4,14 @@ import type { Board, IssueRecord, Project } from "./types";
 import { Backlog, Summary } from "./Backlog";
 import { BoardFilters, NO_FILTER, ProjectBoard, type Filters } from "./ProjectBoard";
 import { BranchMap } from "./BranchMap";
+import { ProjectSettings } from "./ProjectSettings";
 import { EmptyState, Loading } from "./ui";
 import "./project.css";
 
-export const PROJECT_TABS = ["list", "board", "branches"] as const;
+export const PROJECT_TABS = ["list", "board", "branches", "settings"] as const;
 export type ProjectTab = (typeof PROJECT_TABS)[number];
 
-const TAB_LABEL: Record<ProjectTab, string> = { list: "List", board: "Board", branches: "Branches" };
+const TAB_LABEL: Record<ProjectTab, string> = { list: "List", board: "Board", branches: "Branches", settings: "Settings" };
 const TAB_KEY = "nitely.project.tab";
 
 export function isProjectTab(t: string | undefined): t is ProjectTab {
@@ -21,7 +22,7 @@ export function isProjectTab(t: string | undefined): t is ProjectTab {
 function rememberedTab(): ProjectTab {
   try {
     const t = localStorage.getItem(TAB_KEY) ?? undefined;
-    return isProjectTab(t) ? t : "list";
+    return isProjectTab(t) && t !== "settings" ? t : "list";
   } catch {
     return "list";
   }
@@ -48,6 +49,9 @@ export function ProjectPage(props: {
   now: number;
   version: number;
   onOpenIssue: (key: string) => void;
+  onChanged: () => void;
+  /** The project goes by another key now, or was removed (null). */
+  onMoved: (key: string | null) => void;
 }) {
   const tab = props.tab ?? rememberedTab();
   const [issues, setIssues] = useState<IssueRecord[] | null>(null);
@@ -71,9 +75,11 @@ export function ProjectPage(props: {
   useEffect(() => setFilters(NO_FILTER), [props.projectKey]);
 
   const pick = (t: ProjectTab) => {
-    remember(t);
+    // Settings is a place you visit, not a way to see the project: it is never the default.
+    if (t !== "settings") remember(t);
     props.onTab(t);
   };
+  const views = tab === "list" || tab === "board";
 
   return (
     <div className={`page${tab === "list" ? "" : " page-wide"}`}>
@@ -96,10 +102,14 @@ export function ProjectPage(props: {
         )}
         {tab === "board" && issues && <BoardFilters issues={issues} board={props.board} filters={filters} onChange={setFilters} />}
       </div>
-      {tab !== "branches" && issues && issues.length > 0 && <Summary issues={issues} />}
+      {views && issues && issues.length > 0 && <Summary issues={issues} />}
       {error && <p className="error">{error}</p>}
       {((tab !== "branches" && !issues) || (tab === "branches" && !props.board)) && !error && <Loading />}
-      {tab !== "branches" && issues?.length === 0 && (
+      {tab === "settings" && issues && props.project && (
+        <ProjectSettings project={props.project} issueCount={issues.length} onChanged={props.onChanged} onMoved={props.onMoved} />
+      )}
+      {views && issues?.length === 0 && (
+
         <EmptyState title="No issues yet.">
           Agents file them with the <span className="mono">file_issue</span> tool, or run <span className="mono">nitely issue create</span>.
         </EmptyState>

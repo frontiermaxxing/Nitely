@@ -385,13 +385,7 @@ impl Db {
     // ----- projects -----
 
     pub fn create_project(&self, key: &str, name: &str) -> Result<Project> {
-        let key = key.trim().to_uppercase();
-        let valid = (2..=10).contains(&key.len())
-            && key.starts_with(|c: char| c.is_ascii_uppercase())
-            && key.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
-        if !valid {
-            bail!("project key must be 2-10 letters or digits, starting with a letter (e.g. NIT)");
-        }
+        let key = crate::projects::valid_key(key)?;
         let taken: bool = self.conn.query_row(
             "SELECT EXISTS (SELECT 1 FROM project WHERE key = ?1)
                  OR EXISTS (SELECT 1 FROM issue WHERE key LIKE ?1 || '-%')",
@@ -400,6 +394,10 @@ impl Db {
         )?;
         if taken {
             bail!("{key} is already a project or an issue prefix");
+        }
+        // An earlier key of a project keeps its old links; a new project must not take them over.
+        if let Some(project) = self.alias_of(&format!("{key}-1"))? {
+            bail!("{key} was an earlier key of {}, and its old links still lead there", project.trim_end_matches("-1"));
         }
         self.conn.execute(
             "INSERT INTO project (key, name, created_at) VALUES (?1, ?2, ?3)",
@@ -525,15 +523,21 @@ impl Db {
         self.issue(&key)?.context("issue vanished after insert")
     }
 
+    /// An issue by its key, or by a key from before its project changed its key (`OLD-12`).
     pub fn issue(&self, key: &str) -> Result<Option<IssueRecord>> {
-        let issue = self
-            .conn
-            .query_row(
-                &format!("SELECT {ISSUE_COLUMNS} FROM issue WHERE key = ?1 COLLATE NOCASE"),
-                [key],
-                issue_from_row,
-            )
-            .optional()?;
+        let find = |key: &str| {
+            self.conn
+                .query_row(&format!("SELECT {ISSUE_COLUMNS} FROM issue WHERE key = ?1 COLLATE NOCASE"), [key], issue_from_row)
+                .optional()
+        };
+        let issue = match find(key)? {
+            Some(i) => Some(i),
+            None => match self.alias_of(key)? {
+                Some(current) => find(&current)?,
+                None => None,
+            },
+        };
+
         Ok(match issue {
             Some(mut i) => {
                 Deps::load(&self.conn)?.fill(&mut i);

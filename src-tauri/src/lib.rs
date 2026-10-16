@@ -96,6 +96,23 @@ async fn create_project(key: String, name: String) -> Result<Project, String> {
 }
 
 #[tauri::command]
+async fn rename_project(key: String, name: String) -> Result<Project, String> {
+    db()?.rename_project(&key, &name).map_err(err)
+}
+
+#[tauri::command]
+async fn rekey_project(key: String, new_key: String) -> Result<nitely_core::projects::Rekeyed, String> {
+    nitely_core::projects::rekey(&mut db()?, &key, &new_key).map_err(err)
+}
+
+/// `confirm` must repeat the key when the project still has issues: they are deleted with it.
+#[tauri::command]
+async fn remove_project(key: String, confirm: Option<String>) -> Result<nitely_core::projects::Removed, String> {
+    let with_issues = confirm.is_some_and(|c| c.trim().eq_ignore_ascii_case(&key));
+    nitely_core::projects::remove(&mut db()?, &key, with_issues).map_err(err)
+}
+
+#[tauri::command]
 async fn issues(project: String, include_closed: bool) -> Result<Vec<IssueRecord>, String> {
     db()?.list_issues(Some(&project), include_closed).map_err(err)
 }
@@ -288,7 +305,11 @@ pub fn run() {
             sync_now,
             projects,
             create_project,
+            rename_project,
+            rekey_project,
+            remove_project,
             issues,
+
             issue_detail,
             set_blocker,
             move_issue,

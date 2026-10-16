@@ -310,7 +310,15 @@ the sidebar's: three stations on a line, on the dark graphite tile.
 ![The branch map, dark](img/branches-dark.png)
 
 A project page has three views behind one switch (remembered): **List** (issues grouped by state),
-**Board** and **Branches**.
+**Board** and **Branches**, and **Settings** beside them (never remembered as the default).
+
+- **Settings** (`src/ProjectSettings.tsx`, `crates/nitely-core/src/projects.rs`): the project's
+  name; its key, where a new key re-keys every issue (NIT-12 becomes NX-12, with its timeline,
+  reviews, blockers and asks) and the old key stays an alias, so `nitely://issue/NIT-12` links, old
+  branches and pull requests still find the issue, refused while one of its issues is checked out
+  in a worktree or mirrored from another tracker; and removing it, which deletes its issues only
+  when the key is typed to confirm. Repos and machine tokens that name the project follow the new
+  key, or name none after a removal. The CLI has the same: `nitely project rename|rekey|remove`.
 
 - **Board.** One column per station, in track order; each head is the station's dot, its name and
   its count over a rule. Empty columns fold to a dashed strip with the name running down it. Cards hold the
@@ -360,7 +368,7 @@ and inside Tauri nothing changes.
   `#project/NIT/board`, `#project/NIT/branches`; without one, the last view picked.
 - Theme: the switch at the bottom of the sidebar, or `?theme=light|dark` in the URL, or the
   browser's color scheme. `[data-theme]` on `<html>` forces a theme.
-- The fixtures are three projects (NIT, AND, HAR), 40 issues across every state, nine agent
+- The fixtures are four projects (NIT, AND, HAR, and OLD with no issues, for trying Settings), 40 issues across every state, nine agent
   sessions (working, idle, waiting, stale), pull requests with checks, review rounds with
   findings, two open asks and two stuck worktrees. The repos also carry sprawl for the branch map:
   a worktree left after its issue landed, a spike with no issue, a detached worktree, branches with

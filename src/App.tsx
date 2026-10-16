@@ -299,6 +299,8 @@ export function App() {
             now={now}
             version={version}
             onOpenIssue={setOpenIssue}
+            onChanged={changed}
+            onMoved={(key) => setView(key ? { kind: "project", key, tab: "settings" } : { kind: "pulse" })}
           />
         )}
       </main>

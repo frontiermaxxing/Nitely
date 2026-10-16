@@ -59,7 +59,7 @@ export function Palette(props: { projects: Project[]; onGo: (view: View) => void
     const all: Item[] = [
       ...VIEWS.map((v) => ({ id: `view-${v.label}`, label: v.label, hint: "view", run: go(v.view) })),
       ...props.projects.flatMap((p) =>
-        (["list", "board", "branches"] as const).map((tab) => ({
+        (["list", "board", "branches", "settings"] as const).map((tab) => ({
           id: `project-${p.key}-${tab}`,
           label: `${p.name} ${tab}`,
           hint: p.key,

@@ -214,6 +214,18 @@ enum ProjectCmd {
     /// Create a project, e.g. `nitely project create NIT Nitely`.
     Create { key: String, name: String },
     List,
+    /// Give a project a new name, e.g. `nitely project rename NIT "Nitely app"`.
+    Rename { key: String, name: String },
+    /// Give a project a new key: every issue gets the new prefix (NIT-12 becomes NX-12), and the
+    /// old key keeps working in links and lookups. Refused while one of its issues is checked out.
+    Rekey { key: String, new_key: String },
+    /// Remove a project. Refused while it has issues, unless --delete-issues repeats its key,
+    /// which deletes them and everything recorded about them.
+    Remove {
+        key: String,
+        #[arg(long, value_name = "KEY")]
+        delete_issues: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -464,12 +476,23 @@ fn run(cmd: Cmd) -> Result<()> {
             })
         }
         Cmd::Project { command } => {
-            let db = Db::open_default()?;
+            let mut db = Db::open_default()?;
             match command {
                 ProjectCmd::Create { key, name } => print_json(&db.create_project(&key, &name)?),
                 ProjectCmd::List => print_json(&db.projects()?),
+                ProjectCmd::Rename { key, name } => print_json(&db.rename_project(&key, &name)?),
+                ProjectCmd::Rekey { key, new_key } => print_json(&nitely_core::projects::rekey(&mut db, &key, &new_key)?),
+                ProjectCmd::Remove { key, delete_issues } => {
+                    let with_issues = match delete_issues {
+                        Some(k) if k.eq_ignore_ascii_case(&key) => true,
+                        Some(k) => anyhow::bail!("--delete-issues must repeat the project's key ({key}), not {k}"),
+                        None => false,
+                    };
+                    print_json(&nitely_core::projects::remove(&mut db, &key, with_issues)?)
+                }
             }
         }
+
         Cmd::Issue { command } => {
             let config = Config::load()?;
             let mut db = Db::open_default()?;

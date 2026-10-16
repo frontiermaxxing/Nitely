@@ -65,7 +65,8 @@ const REPOS: RepoSpec[] = [
   { project: "HAR", name: "Harbor", root: "C:\\Development\\Harbor", integration: "main", provider: "github", slug: "AndrewDavidRivers/harbor" },
 ];
 
-const PROJECT_NAMES: Record<string, string> = { NIT: "Nitely", AND: "Aera", HAR: "Harbor" };
+// OLD has no issues, as a project left behind after a move, so removing and re-keying can be tried.
+const PROJECT_NAMES: Record<string, string> = { NIT: "Nitely", AND: "Aera", HAR: "Harbor", OLD: "Aera (old)" };
 
 type Step =
   | "filed"
@@ -860,7 +861,63 @@ function setBlocker(args: Record<string, unknown>) {
   return detail(key).relations;
 }
 
+// ----- projects: the same rules as crates/nitely-core/src/projects.rs -----
+
+function projectOf(key: unknown): Project {
+  const p = world.projects.find((x) => x.key === String(key).toUpperCase());
+  if (!p) throw `no project ${String(key)}`;
+  return p;
+}
+
+function renameProject(args: Record<string, unknown>) {
+  const p = projectOf(args.key);
+  const name = String(args.name ?? "").trim();
+  if (!name) throw "a project needs a name";
+  p.name = name;
+  return p;
+}
+
+function rekeyProject(args: Record<string, unknown>) {
+  const p = projectOf(args.key);
+  const to = String(args.newKey ?? "").trim().toUpperCase();
+  if (!/^[A-Z][A-Z0-9]{1,9}$/.test(to)) throw "project key must be 2-10 letters or digits, starting with a letter (e.g. NIT)";
+  if (to === p.key) throw `${p.key} already has that key`;
+  if (world.projects.some((x) => x.key === to) || world.issues.some((i) => i.key.startsWith(`${to}-`))) throw `${to} is already a project or an issue prefix`;
+  const busy = world.issues.filter((i) => i.project === p.key && i.state_type === "started").map((i) => i.key);
+  if (busy.length) throw `${busy.join(", ")} ${busy.length === 1 ? "is" : "are"} checked out in a worktree whose branch names ${p.key}; land or close ${busy.length === 1 ? "it" : "them"} first`;
+  const from = p.key;
+  const move = (k: string) => (k.startsWith(`${from}-`) ? `${to}${k.slice(from.length)}` : k);
+  let issues = 0;
+  for (const i of world.issues) {
+    if (i.project !== from) continue;
+    issues += 1;
+    i.key = move(i.key);
+    i.project = to;
+    i.blocked_by = i.blocked_by.map(move);
+    i.blocks = i.blocks.map(move);
+  }
+  for (const m of [world.timelines, world.reviews, world.prs] as Map<string, unknown>[]) {
+    for (const k of [...m.keys()].filter((k) => k.startsWith(`${from}-`))) {
+      m.set(move(k), m.get(k));
+      m.delete(k);
+    }
+  }
+  p.key = to;
+  return { from, to, issues, repos: 0, machines: MACHINES.filter((m) => m.project === from).map((m) => (m.project = to)).length };
+}
+
+function removeProject(args: Record<string, unknown>) {
+  const p = projectOf(args.key);
+  const own = world.issues.filter((i) => i.project === p.key);
+  const confirmed = String(args.confirm ?? "").trim().toUpperCase() === p.key;
+  if (own.length && !confirmed) throw `${p.key} has ${own.length} issue(s); remove it with its issues, or move them first`;
+  world.issues = world.issues.filter((i) => i.project !== p.key);
+  world.projects = world.projects.filter((x) => x !== p);
+  return { key: p.key, issues: own.length, repos: 0, machines: 0 };
+}
+
 function moveIssue(args: Record<string, unknown>) {
+
   const issue = world.issues.find((i) => i.key === args.key);
   if (!issue) throw `no issue ${String(args.key)}`;
   const to = String(args.state);
@@ -1085,6 +1142,12 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return null;
       case "create_project":
         return null;
+      case "rename_project":
+        return renameProject(args);
+      case "rekey_project":
+        return rekeyProject(args);
+      case "remove_project":
+        return removeProject(args);
       case "connect_plan":
         return connectPlan(args);
       case "connect_apply":

@@ -17,6 +17,7 @@ pub mod issues;
 pub mod paths;
 pub mod playbook;
 pub mod procs;
+pub mod projects;
 pub mod relay;
 pub mod remote;
 pub mod review;

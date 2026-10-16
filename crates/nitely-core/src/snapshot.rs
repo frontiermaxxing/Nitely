@@ -78,6 +78,8 @@ pub fn snapshot(config: &Config, db: &Db) -> Result<Board> {
     let sessions = db.sessions_since(now() - SESSION_WINDOW_SECS)?;
     let issues = db.issues()?;
     let prs = db.prs()?;
+    // Branches cut before a project changed its key still name the old one.
+    let aliases = db.project_aliases()?;
     let mut views = Vec::new();
 
     for repo in &config.repos {
@@ -125,6 +127,7 @@ pub fn snapshot(config: &Config, db: &Db) -> Result<Board> {
                     .as_deref()
                     .map(git::parse_branch)
                     .unwrap_or((None, None));
+                let issue_key = issue_key.map(|k| crate::projects::current_key(&aliases, &k));
                 let (state, error) = match git::branch_state(&wt.path, &repo.integration_branch) {
                     Ok(s) => (Some(s), None),
                     Err(e) => (None, Some(e.to_string())),
@@ -152,7 +155,7 @@ pub fn snapshot(config: &Config, db: &Db) -> Result<Board> {
             })
             .collect();
 
-        let branches = loose_branches(repo, &worktrees, &issues, &prs, slug.as_deref());
+        let branches = loose_branches(repo, &worktrees, &issues, &prs, &aliases, slug.as_deref());
 
         let unmatched_sessions = sessions
             .iter()
@@ -194,6 +197,7 @@ fn loose_branches(
     worktrees: &[git::Worktree],
     issues: &[IssueRecord],
     prs: &[PrRecord],
+    aliases: &std::collections::HashMap<String, String>,
     slug: Option<&str>,
 ) -> Vec<BranchRow> {
     let checked_out: HashSet<&str> = worktrees.iter().filter_map(|w| w.branch.as_deref()).collect();
@@ -203,7 +207,9 @@ fn loose_branches(
         .filter(|b| b.name != repo.integration_branch && !checked_out.contains(b.name.as_str()))
         .map(|b| {
             let (vendor, issue_key) = git::parse_branch(&b.name);
+            let issue_key = issue_key.map(|k| crate::projects::current_key(aliases, &k));
             let issue = issue_key.as_ref().and_then(|k| issues.iter().find(|i| &i.key == k).cloned());
+
             let pr = pr_for(prs, slug, &b.name);
             BranchRow {
                 name: b.name,

@@ -14,6 +14,11 @@ CREATE TABLE IF NOT EXISTS project (
   next_number INTEGER NOT NULL DEFAULT 1,
   created_at  INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS project_alias (  -- a key a project had before; its old links still resolve
+  old_key    TEXT PRIMARY KEY,
+  project    TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS issue (
   key        TEXT PRIMARY KEY,
   origin     TEXT NOT NULL,                -- 'nitely' (native) or 'linear' (mirrored, read-only)
@@ -139,7 +144,7 @@ CREATE TABLE IF NOT EXISTS ask (
 
 /// Bumped when a table changes shape. Tables that only mirror Bitbucket or Linear are dropped
 /// and refilled by the next sync; tables Nitely owns get real migrations.
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -159,7 +164,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         // v5 keys reviews by issue and patch; the old placeholder table was never written.
         conn.execute_batch("DROP TABLE IF EXISTS review;")?;
     }
-    // v6 adds issue_blocker and v7 session_state, which SCHEMA creates; nothing to drop.
+    // v6 adds issue_blocker, v7 session_state and v8 project_alias, which SCHEMA creates; nothing to drop.
     Ok(())
 }
 
@@ -366,13 +371,15 @@ impl Db {
 
     /// Pull requests whose branch names this issue (`claude/nit-7-...` for NIT-7), newest first.
     pub fn prs_for_issue(&self, key: &str) -> Result<Vec<PrRecord>> {
+        // A pull request opened before its project changed key names the old one in its branch.
+        let aliases = self.project_aliases()?;
         Ok(self
             .prs()?
             .into_iter()
             .filter(|p| {
                 crate::git::parse_branch(&p.branch)
                     .1
-                    .is_some_and(|k| k.eq_ignore_ascii_case(key))
+                    .is_some_and(|k| crate::projects::current_key(&aliases, &k).eq_ignore_ascii_case(key))
             })
             .collect())
     }
