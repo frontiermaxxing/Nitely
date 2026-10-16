@@ -93,3 +93,18 @@ fn install_without_a_target_skips_its_own_folders_on_path() {
     assert_eq!(std::fs::read(&installed).unwrap(), std::fs::read(built).unwrap(), "the build is now the one on PATH");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn install_from_a_file_beside_the_installed_one_replaces_it() {
+    let dir = temp();
+    let exe = if cfg!(windows) { "nitely.exe" } else { "nitely" };
+    let built = Path::new(env!("CARGO_BIN_EXE_nitely"));
+    let installed = dir.join("bin").join(exe);
+    std::fs::write(&installed, b"an old nitely").unwrap();
+    let new_build = dir.join("bin").join(if cfg!(windows) { "nitely-new.exe" } else { "nitely-new" });
+    std::fs::copy(built, &new_build).unwrap();
+    let out = Command::new(built).args(["install", "--from"]).arg(&new_build).env("PATH", dir.join("bin")).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(std::fs::read(&installed).unwrap(), std::fs::read(built).unwrap());
+    std::fs::remove_dir_all(&dir).ok();
+}

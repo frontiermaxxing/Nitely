@@ -26,16 +26,19 @@ pub struct Installed {
     pub still_running: usize,
 }
 
-/// The executable agents run as `nitely` to install `from` over: the first on PATH outside the
-/// folder `from` is in, else Cargo's install folder. `cargo run` puts its own target folders
-/// (`target/release` and `target/release/deps`, which holds a copy of the build) first on PATH on
-/// Windows, and installing a build over one of those would quietly change nothing.
+/// The executable agents run as `nitely` to install `from` over: the first on PATH that is
+/// neither `from` nor an identical copy of it, else Cargo's install folder. `cargo run` puts its
+/// own target folders first on PATH on Windows, and `target/release/deps` holds a copy of the
+/// build; installing over either would quietly change nothing.
 pub fn default_target(from: &Path) -> Option<PathBuf> {
     let exe = if cfg!(windows) { "nitely.exe" } else { "nitely" };
-    let build_dir = from.canonicalize().ok().and_then(|p| p.parent().map(Path::to_path_buf));
-    let in_build_dir = |p: &Path| build_dir.as_ref().is_some_and(|d| p.canonicalize().is_ok_and(|p| p.starts_with(d)));
+    let source = from.canonicalize().ok();
+    let source_bytes = std::fs::read(from).ok();
+    let is_the_build = |p: &Path| {
+        (source.is_some() && p.canonicalize().ok() == source) || (source_bytes.is_some() && std::fs::read(p).ok() == source_bytes)
+    };
     let on_path = std::env::var_os("PATH")
-        .and_then(|path| std::env::split_paths(&path).map(|d| d.join(exe)).find(|p| p.is_file() && !in_build_dir(p)));
+        .and_then(|path| std::env::split_paths(&path).map(|d| d.join(exe)).find(|p| p.is_file() && !is_the_build(p)));
     on_path.or_else(|| dirs::home_dir().map(|h| h.join(".cargo").join("bin").join(exe)))
 }
 
