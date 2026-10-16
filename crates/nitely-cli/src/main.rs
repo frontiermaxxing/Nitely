@@ -517,7 +517,7 @@ fn run(cmd: Cmd) -> Result<()> {
                         ),
                         None => None,
                     };
-                    config.upsert_repo(RepoConfig { name: name.clone(), root, integration_branch: integration, project });
+                    config.upsert_repo(RepoConfig { name: name.clone(), root, integration_branch: integration, project })?;
                     config.save()?;
                     println!("watching {name}");
                 }

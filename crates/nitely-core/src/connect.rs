@@ -169,7 +169,7 @@ pub fn apply(db: &Db, config: &mut Config, plan: &ConnectPlan) -> Result<Applied
         root: plan.root.clone(),
         integration_branch: plan.integration_branch.clone(),
         project: Some(plan.project_key.clone()),
-    });
+    })?;
     config.save()?;
     done.push(format!("watching {} for project {}", plan.root, plan.project_key));
 

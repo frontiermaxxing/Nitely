@@ -42,7 +42,10 @@ impl Config {
         let mut kept: Vec<RepoConfig> = Vec::new();
         for repo in self.repos.drain(..).rev() {
             match kept.iter().find(|k| paths::normalize(&k.root) == paths::normalize(&repo.root)) {
-                Some(newer) => adopt_playbook(data_dir, &repo.name, &newer.name),
+                // When its playbook can't be carried over, the old entry stays, still ahead of the new
+                // one for lookups, so the repo keeps its rules.
+                Some(newer) if adopt_playbook(data_dir, &repo.name, &newer.name).is_err() => kept.push(repo),
+                Some(_) => {}
                 None => kept.push(repo),
             }
         }
@@ -69,30 +72,37 @@ impl Config {
     }
 
     /// Adds a repo, or replaces the one with the same name or the same root.
-    pub fn upsert_repo(&mut self, repo: RepoConfig) {
-        self.upsert_repo_in(&paths::data_dir(), repo);
+    /// Fails, changing nothing, when the playbook kept for a replaced entry can't be carried over.
+    pub fn upsert_repo(&mut self, repo: RepoConfig) -> Result<()> {
+        self.upsert_repo_in(&paths::data_dir(), repo)
     }
 
-    fn upsert_repo_in(&mut self, data_dir: &Path, repo: RepoConfig) {
+    fn upsert_repo_in(&mut self, data_dir: &Path, repo: RepoConfig) -> Result<()> {
         let root = paths::normalize(&repo.root);
         for old in self.repos.iter().filter(|r| r.name != repo.name && paths::normalize(&r.root) == root) {
-            adopt_playbook(data_dir, &old.name, &repo.name);
+            adopt_playbook(data_dir, &old.name, &repo.name)?;
         }
         self.repos.retain(|r| r.name != repo.name && paths::normalize(&r.root) != root);
         self.repos.push(repo);
+        Ok(())
     }
 }
 
 /// When a repo's entry is replaced by one under another name, the playbook Nitely keeps for the old
 /// name goes with it; otherwise the repo would silently fall back to the defaults (no gate, no
 /// human approval). A playbook already kept for the new name wins.
-fn adopt_playbook(data_dir: &Path, from: &str, to: &str) {
+/// The copy is written beside and renamed, so a failure never leaves a partial playbook behind.
+fn adopt_playbook(data_dir: &Path, from: &str, to: &str) -> Result<()> {
     let (old, new) = (Playbook::stored_path_in(data_dir, from), Playbook::stored_path_in(data_dir, to));
-    if old != new && old.exists() && !new.exists() {
-        if let Err(e) = fs::copy(&old, &new) {
-            eprintln!("nitely: could not copy the playbook {} to {}: {e}", old.display(), new.display());
-        }
+    if old == new || !old.exists() || new.exists() {
+        return Ok(());
     }
+    let tmp = new.with_extension("nitely-tmp");
+    let copied = fs::copy(&old, &tmp).and_then(|_| fs::rename(&tmp, &new));
+    if copied.is_err() {
+        fs::remove_file(&tmp).ok();
+    }
+    copied.with_context(|| format!("carrying the playbook {} over to {}", old.display(), new.display()))
 }
 
 /// The project an agent in `cwd` works on: an explicit choice, then `NITELY_PROJECT`, then the
@@ -138,7 +148,7 @@ mod tests {
         std::fs::write(kept("Aera"), "[branch]\nintegration = \"win-dev\"\n").unwrap();
 
         let mut config = Config { repos: vec![repo("Aera", r"C:\Dev\AeraChromium"), repo("Nitely", "/dev/Nitely")] };
-        config.upsert_repo_in(&data, repo("AeraChromium", "C:/Dev/AeraChromium/"));
+        config.upsert_repo_in(&data, repo("AeraChromium", "C:/Dev/AeraChromium/")).unwrap();
         assert_eq!(names(&config), vec!["Nitely", "AeraChromium"]);
         assert!(std::fs::read_to_string(kept("AeraChromium")).unwrap().contains("win-dev"), "the gate and approval rules are kept");
 
@@ -152,6 +162,15 @@ mod tests {
         let mut alias = Config { repos: vec![repo("Old", "/dev/x"), repo("New", "/dev/x/")] };
         alias.dedupe_roots(&data);
         assert_eq!(std::fs::read_to_string(kept("New")).unwrap(), "old", "a dropped alias's playbook moves to the survivor");
+
+        // When the copy fails (here the destination is a folder), nothing is dropped.
+        std::fs::write(kept("Gone"), "rules").unwrap();
+        std::fs::create_dir_all(kept("Blocked").with_extension("nitely-tmp")).unwrap();
+        let mut failing = Config { repos: vec![repo("Gone", "/dev/y"), repo("Blocked", "/dev/y")] };
+        failing.dedupe_roots(&data);
+        assert_eq!(names(&failing), vec!["Gone", "Blocked"], "the old entry and its rules stay");
+        assert!(failing.upsert_repo_in(&data, repo("Blocked", "/dev/y")).is_err());
+        assert!(!kept("Blocked").exists());
         std::fs::remove_dir_all(data).ok();
     }
 }
