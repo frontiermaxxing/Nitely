@@ -98,6 +98,10 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
         Err(e) => {
             let msg = format!("{e:#}");
             db.log_event(actor, Some(&issue.key), None, "land_failed", &format!("Land stopped: {}", msg.lines().next().unwrap_or("")))?;
+            // An approval the app did not sign goes back to the person, so they can approve it again.
+            if msg.contains(crate::approval::UNSIGNED) && db.issue(&issue.key)?.is_some_and(|i| i.state == "Approved") {
+                db.move_issue(&issue.key, "Needs You", None, None, actor)?;
+            }
             report.error = Some(msg);
         }
     }
@@ -131,13 +135,21 @@ pub fn after_auto_land(db: &mut Db, key: &str, landed: &Result<Landed>, actor: &
             let why = r.error.clone().unwrap_or_else(|| "it did not land".into());
             db.add_note(key, &format!("The automatic land stopped: {}", why.lines().next().unwrap_or("")), "land", actor)?;
             let issue = db.issue(key)?.with_context(|| format!("no issue {key}"))?;
-            if issue.origin == "nitely" && issue.state != "In Progress" {
+            // Sent back to Needs You for an unsigned approval: the person approves it again.
+            if issue.origin == "nitely" && issue.state != "In Progress" && !why.contains(crate::approval::UNSIGNED) {
                 db.move_issue(key, "In Progress", None, None, actor)?;
             }
             Ok((state(db)?, format!("Nitely tried to land it and stopped: {why}\nFix it, commit, and submit again.")))
         }
         Err(e) => Ok((state(db)?, format!("Nitely could not start the land ({e:#}); call land to land it."))),
     }
+}
+
+/// Whether the app lands a change once the person approves it: when the playbook says Nitely lands,
+/// and always where only the app can check approvals (macOS, docs/approvals.md), since an agent's
+/// land cannot there.
+fn nitely_lands_approved(pb: &Playbook) -> bool {
+    pb.land.by.by_nitely() || !crate::approval::agents_can_verify()
 }
 
 /// After a human approves `key`: when its project's playbook lands by Nitely, Nitely lands it
@@ -149,7 +161,7 @@ pub fn land_on_approval(db: &mut Db, config: &crate::Config, key: &str, dir: &st
         return Ok(None);
     }
     let root = approval_repo(config, &issue, dir)?;
-    if !Playbook::load(&root)?.land.by.by_nitely() {
+    if !nitely_lands_approved(&Playbook::load(&root)?) {
         return Ok(None);
     }
     let actor = Actor::Agent(AUTO_LANDER.into());
@@ -168,10 +180,12 @@ pub fn land_approved(db: &mut Db, config: &crate::Config, reported: &mut HashMap
     let approved: Vec<IssueRecord> =
         db.list_issues(None, false)?.into_iter().filter(|i| i.state == "Approved" && i.origin == "nitely").collect();
     for issue in approved {
-        if db.standing_approval(&issue.key)?.is_none() {
+        let Some(at) = db.standing_approval(&issue.key)? else { continue };
+        // Approved a moment ago and not signed yet: the app signs right after the move.
+        if crate::db::now() - at < 10 && db.approval_unsigned_yet(&issue.key, at)? {
             continue;
         }
-        let ready = approval_repo(config, &issue, "").and_then(|root| Ok((Playbook::load(&root)?.land.by.by_nitely(), root)));
+        let ready = approval_repo(config, &issue, "").and_then(|root| Ok((nitely_lands_approved(&Playbook::load(&root)?), root)));
         let result = match ready {
             Ok((false, _)) => continue,
             // Another land is running: a later round lands it. A lock that old is probably left by a
@@ -435,7 +449,11 @@ fn check_approval(db: &Db, pb: &Playbook, key: &str, worktree: &Path, base: &str
         return Ok(format!("the {} review passed and no human approval is needed", review.reviewer));
     }
     match db.standing_approval(key)? {
-        Some(_) => Ok(format!("approved by a human in Nitely after the review ({})", reasons.join("; "))),
+        Some(at) => {
+            // Only the app can sign, so a database write does not make an approval.
+            db.check_signed_approval(key, &patch, at)?;
+            Ok(format!("approved by a human in Nitely after the review, signed by the app ({})", reasons.join("; ")))
+        }
         _ => bail!(
             "this change waits for a human ({}); it lands once they approve it in Nitely, after the review",
             reasons.join("; ")
@@ -844,7 +862,7 @@ when_changed = ["billing"]
         let dir = f.repo.to_string_lossy().into_owned();
         let config = crate::Config::default();
         assert!(land_on_approval(&mut f.db, &config, &b, &dir).unwrap().is_none(), "not approved yet");
-        f.db.move_issue(&b, "Approved", None, None, &Actor::Human).unwrap();
+        approve(&mut f.db, &b);
         // The app approves with no directory: with two repos linked to the project, the one with
         // the issue's branch lands it. Its after-land step fails, which the issue is told.
         let other = f.base.join("other");
@@ -865,7 +883,7 @@ when_changed = ["billing"]
         assert_eq!(state(&f, &b), "Done");
 
         // An automatic land that stops on a conflict sends the issue back with the reason.
-        f.db.move_issue(&c, "Approved", None, None, &Actor::Human).unwrap();
+        approve(&mut f.db, &c);
         let r = land_on_approval(&mut f.db, &config, &c, &dir).unwrap().unwrap();
         assert!(!r.landed && r.conflicts == ["billing.txt"], "{r:?}");
         assert_eq!(state(&f, &c), "In Progress");
@@ -876,7 +894,7 @@ when_changed = ["billing"]
         assert_eq!(state(&f, &d), "Needs You");
         let reasons = &f.db.reviews(&d).unwrap()[0].reasons;
         assert!(reasons.iter().any(|r| r.contains("lands only what a human approved")), "{reasons:?}");
-        f.db.move_issue(&d, "Approved", None, None, &Actor::Human).unwrap();
+        approve(&mut f.db, &d);
         // Another land holds the lock: the approval lands in a later round, once it is free.
         let lock = f.repo.join(".git").join(LOCK_FILE);
         std::fs::write(&lock, "NIT-9 pid 1").unwrap();
@@ -893,6 +911,16 @@ when_changed = ["billing"]
         let (e, _) = f.submitted("Footer tweak", "footer.txt", "x");
         assert_eq!(state(&f, &e), "In Review");
         std::fs::remove_dir_all(&f.base).ok();
+    }
+
+    /// The app's approval key in these tests.
+    const SECRET: [u8; 32] = [7; 32];
+
+    /// The person approves in the app: the move, and the app's signature.
+    fn approve(db: &mut Db, key: &str) {
+        crate::approval::trust_in_tests(Some(crate::approval::public_of(&SECRET)));
+        db.move_issue(key, "Approved", None, None, &Actor::Human).unwrap();
+        db.sign_approval(key, &SECRET).unwrap();
     }
 
     #[test]
@@ -916,7 +944,36 @@ when_changed = ["billing"]
         assert!(!r.landed && r.error.as_deref().unwrap().contains("waits for a human"), "{r:?}");
         // An agent cannot approve; only a human move counts.
         assert!(f.db.move_issue(&b, "Approved", None, None, &f.actor).is_err());
-        f.db.move_issue(&b, "Approved", None, None, &Actor::Human).unwrap();
+        // An approval with no valid signature goes back to the person when the app starts.
+        {
+            crate::approval::trust_in_tests(Some(crate::approval::public_of(&SECRET)));
+            f.db.conn.execute("UPDATE issue SET state = 'Approved', state_type = 'started' WHERE key = ?1", [&b]).unwrap();
+            f.db.conn
+                .execute("INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, 'human', ?2, 'issue_moved', 'Needs You → Approved')", rusqlite::params![now() - 60, b])
+                .unwrap();
+            let moved = f.db.unsigned_approvals_back_to_needs_you(&crate::approval::public_of(&SECRET)).unwrap();
+            assert_eq!(moved, [b.clone()]);
+            assert_eq!(f.db.issue(&b).unwrap().unwrap().state, "Needs You");
+        }
+        // Nor can it by writing the database as if the person had: the app did not sign that.
+        crate::approval::trust_in_tests(Some(crate::approval::public_of(&SECRET)));
+        f.db.conn.execute("UPDATE issue SET state = 'Approved', state_type = 'started' WHERE key = ?1", [&b]).unwrap();
+        f.db.conn
+            .execute("INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, 'human', ?2, 'issue_moved', 'Needs You → Approved')", rusqlite::params![now(), b])
+            .unwrap();
+        assert!(f.db.standing_approval(&b).unwrap().is_some(), "it looks approved");
+        let r = f.land(&b);
+        assert!(!r.landed && r.error.as_deref().unwrap().contains("not signed by this machine's Nitely app"), "{r:?}");
+        assert_eq!(f.db.issue(&b).unwrap().unwrap().state, "Needs You", "back to the person, to approve again");
+        f.db.conn.execute("UPDATE issue SET state = 'Approved' WHERE key = ?1", [&b]).unwrap();
+        // A signature from another key does not verify either.
+        let at = f.db.human_approval_at(&b).unwrap().unwrap();
+        let patch = f.db.reviews(&b).unwrap()[0].patch_id.clone();
+        let forged = crate::approval::sign(&[9; 32], &crate::approval::message(&b, &patch, at));
+        f.db.conn.execute("INSERT INTO approval (issue_key, patch_id, by, ts, signature) VALUES (?1, ?2, 'human', ?3, ?4)", rusqlite::params![b, patch, at, forged]).unwrap();
+        assert!(!f.land(&b).landed);
+        f.db.conn.execute("UPDATE issue SET state = 'Needs You' WHERE key = ?1", [&b]).unwrap();
+        approve(&mut f.db, &b);
         // Submitting the same patch again (after a clean rebase, say) keeps the approval.
         std::thread::sleep(std::time::Duration::from_millis(1100));
         f.submit(&wt_b);
@@ -931,7 +988,7 @@ when_changed = ["billing"]
 
         // A changed patch needs a new approval.
         let (c, wt_c) = f.submitted("Billing rounding", "billing-rounding.txt", "x");
-        f.db.move_issue(&c, "Approved", None, None, &Actor::Human).unwrap();
+        approve(&mut f.db, &c);
         std::thread::sleep(std::time::Duration::from_millis(1100));
         std::fs::write(wt_c.join("billing-rounding.txt"), "y").unwrap();
         sh(&wt_c, &["commit", "-q", "-am", "round again"]);

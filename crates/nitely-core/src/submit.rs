@@ -213,8 +213,10 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     }
     out.next = next.into();
 
-    // In a project that lands by Nitely, what is ready to land lands now, in this submit.
-    if by_nitely && matches!(state, "In Review" | "Approved") {
+    // In a project that lands by Nitely, what is ready to land lands now, in this submit. An
+    // approved change waits for the app where only the app can check approvals (macOS).
+    let app_lands = state == "Approved" && !crate::approval::agents_can_verify();
+    if by_nitely && matches!(state, "In Review" | "Approved") && !app_lands {
         let root_dir = root.to_string_lossy().into_owned();
         let landed = crate::land::land_now(db, config, &issue.key, &root_dir, !opts.local_only, actor);
         let (state, next) = crate::land::after_auto_land(db, &issue.key, &landed, actor)?;

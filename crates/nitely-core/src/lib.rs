@@ -2,6 +2,7 @@
 //! event store, the git worktree reader, and agent hook parsing.
 
 pub mod activity;
+pub mod approval;
 pub mod brief;
 pub mod config;
 pub mod connect;

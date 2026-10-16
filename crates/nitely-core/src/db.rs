@@ -126,12 +126,13 @@ CREATE TABLE IF NOT EXISTS sync_status (
   last_ok       INTEGER,
   last_error    TEXT
 );
-CREATE TABLE IF NOT EXISTS approval (     -- written only from the app UI
+CREATE TABLE IF NOT EXISTS approval (     -- written only from the app UI, signed (docs/approvals.md)
   id        INTEGER PRIMARY KEY,
   issue_key TEXT NOT NULL,
   patch_id  TEXT NOT NULL,
   by        TEXT NOT NULL,
-  ts        INTEGER NOT NULL
+  ts        INTEGER NOT NULL,
+  signature TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS ask (
   id          INTEGER PRIMARY KEY,
@@ -206,7 +207,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS playbook_proposal_pending ON playbook_proposal
 
 /// Bumped when a table changes shape. Tables that only mirror Bitbucket or Linear are dropped
 /// and refilled by the next sync; tables Nitely owns get real migrations.
-const SCHEMA_VERSION: i64 = 16;
+const SCHEMA_VERSION: i64 = 17;
 
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -243,6 +244,8 @@ fn migrate(conn: &Connection) -> Result<()> {
     add_column(conn, "crew_worker", "phase", "TEXT NOT NULL DEFAULT 'work'")?;
     // v16 adds crew_control.repo: the repo whose playbook a project's supervisor follows.
     add_column(conn, "crew_control", "repo", "TEXT")?;
+    // v17 adds approval.signature.
+    add_column(conn, "approval", "signature", "TEXT NOT NULL DEFAULT ''")?;
     Ok(())
 }
 

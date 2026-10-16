@@ -17,6 +17,9 @@ serde_ignored = "0.1"
 regex = "1"
 toml_edit = "0.23"
 sha2 = "0.10"
+ed25519-dalek = "2"
+# The approval key (approval.rs, docs/approvals.md).
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 getrandom = "0.3"
 if-addrs = "0.13"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

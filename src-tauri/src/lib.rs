@@ -204,7 +204,26 @@ async fn set_blocker(key: String, blocker: String, blocked: bool) -> Result<Rela
 async fn move_issue(key: String, state: String, evidence: Option<String>, reason: Option<String>) -> Result<IssueRecord, String> {
     let mut db = db()?;
     let key = db.current_key(&key).map_err(err)?;
-    db.move_issue(&key, &state, evidence.as_deref(), reason.as_deref(), &ME).map_err(err)
+    let approving = nitely_core::issues::parse_state(&state).map_err(err)?.0 == "Approved";
+    // The key first: an approval the app cannot sign would not let anything land.
+    let secret = if approving { Some(approval_key(&db)?) } else { None };
+    let moved = db.move_issue(&key, &state, evidence.as_deref(), reason.as_deref(), &ME).map_err(err)?;
+    // Approving a playbook proposal applies it and closes its issue at once: nothing to land.
+    if let Some(secret) = secret.filter(|_| moved.state == "Approved") {
+        db.sign_approval(&key, &secret).map_err(err)?;
+    }
+    Ok(moved)
+}
+
+/// The app's approval signing secret, kept in the OS keychain and made the first time, with its
+/// public half beside it for `land` to check with (docs/approvals.md).
+fn approval_key(db: &Db) -> Result<[u8; 32], String> {
+    let secret = nitely_core::approval::keychain_secret().map_err(err)?;
+    // A public half someone changed is put back and logged.
+    if nitely_core::approval::publish_public_key(&secret).map_err(err)? {
+        db.log_approval_key_restored().map_err(err)?;
+    }
+    Ok(secret)
 }
 
 /// Makes an issue the human's own work (`human`) or hands it back to agents (`agent`).
@@ -442,6 +461,19 @@ pub fn run() {
     });
 
     std::thread::spawn(keep_crews);
+
+    // The app made the keychain entries, so it reads them without the OS asking (macOS).
+    nitely_core::approval::keychain_is_silent();
+    // Make the approval key, or put its public half back if it was changed.
+    match db().and_then(|mut db| {
+        let secret = approval_key(&db)?;
+        // Approvals from before they were signed go back to the person, to approve again.
+        db.unsigned_approvals_back_to_needs_you(&nitely_core::approval::public_of(&secret)).map_err(err)
+    }) {
+        Ok(moved) if !moved.is_empty() => eprintln!("approval key: {} sent back to Needs You to approve again", moved.join(", ")),
+        Ok(_) => {}
+        Err(e) => eprintln!("approval key: {e}"),
+    }
 
     tauri::Builder::default()
         // First, so a second launch (a link clicked while Nitely runs) is handed to this one; with
