@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "./backend";
 import { crewTitle, crewWords } from "./crew";
 import type { CrewStatus } from "./types";
@@ -11,9 +11,14 @@ export function CrewControl(props: { projectKey: string; version: number; now: n
   const [crew, setCrew] = useState<CrewStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The project on screen now: a pause answered after a switch must not land on another project.
+  const shown = useRef(props.projectKey);
+  shown.current = props.projectKey;
 
   useEffect(() => {
     let live = true;
+    setCrew(null);
+    setError(null);
     invoke<CrewStatus | null>("crew_status", { project: props.projectKey })
       .then((c) => live && (setCrew(c), setError(null)))
       .catch((e) => live && setError(String(e)));
@@ -25,10 +30,12 @@ export function CrewControl(props: { projectKey: string; version: number; now: n
   if (!crew) return error ? <span className="crew error small" title={error}>Crew unavailable</span> : null;
   const words = crewWords(crew);
   const toggle = () => {
+    const project = props.projectKey;
+    const mine = () => shown.current === project;
     setBusy(true);
-    invoke<CrewStatus | null>("crew_pause", { project: props.projectKey, paused: !crew.paused })
-      .then((c) => (setCrew(c), setError(null)))
-      .catch((e) => setError(String(e)))
+    invoke<CrewStatus | null>("crew_pause", { project, paused: !crew.paused })
+      .then((c) => mine() && (setCrew(c), setError(null)))
+      .catch((e) => mine() && setError(String(e)))
       .finally(() => setBusy(false));
   };
 
