@@ -89,8 +89,9 @@ pub struct PreviousRound {
     pub in_history: bool,
 }
 
-/// A previous round's finding and what this round says about it: `fixed`, `open`, or
-/// `unchecked` when the reviewer did not say.
+/// A previous round's finding and what this round says about it: `fixed`; `open`, with current code
+/// that still shows it; `unchecked` when the reviewer did not say; or `unconfirmed` when it was
+/// called open (or left unchecked) but nothing it points at is on the branch any more.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Recheck {
     pub priority: u8,
@@ -226,8 +227,10 @@ regressions. Skip style. Do not edit anything.\n",
                 p.push_str(&format!("{}. [P{}] {}\n", i + 1, f.priority, f.text));
             }
             p.push_str(
-                "Answer each on its own line as `PREVIOUS <n>: fixed` or `PREVIOUS <n>: open`, with a few words after it \
-if useful. Do not list an open one again as a defect: it stays on record by itself.\n",
+                "Answer each on its own line as `PREVIOUS <n>: fixed` or `PREVIOUS <n>: open <file>:<line> `<code>``, \
+where file, line and code are from the current branch and still show the problem. The code a finding cites may have \
+moved or gone: check the problem itself, not the old line. If it no longer happens, it is fixed; an open answer that \
+cites no current code is not counted as open. Do not list an open one again as a defect: it stays on record by itself.\n",
             );
         }
         if let Some(prev) = previous.filter(|p| p.in_history) {
@@ -263,7 +266,12 @@ using P0 for data loss or security, P1 for a definite bug in normal use, P2 for 
     /// but lists none (and marks no previous finding open): both mean the review did not finish.
     /// Previous findings it marks open, or does not mention, are carried into `findings` with their
     /// old priority, so the verdict still counts them.
-    pub fn parse(&self, reviewer: &str, text: &str, seconds: u64, previous: Option<&PreviousRound>) -> Result<Review> {
+    ///
+    /// With `worktree`, a carried finding must point at code that is on the branch now: an open
+    /// answer must cite a current file:line (and any code it quotes must be there), and a finding
+    /// left unchecked must still name a file that exists. One that does not is `unconfirmed` and is
+    /// carried at P2 at most, so a branch whose fix moved or removed the cited code can pass.
+    pub fn parse(&self, reviewer: &str, text: &str, seconds: u64, previous: Option<&PreviousRound>, worktree: Option<&Path>) -> Result<Review> {
         let field = |name: &str, values: &[&str]| -> Option<String> {
             let prefix = format!("{}:", name.to_lowercase());
             text.lines()
@@ -287,18 +295,34 @@ using P0 for data loss or security, P1 for a definite bug in normal use, P2 for 
         }
         let mut findings = parse_findings(text);
         let statuses = parse_previous(text);
+        let code = worktree.map(CurrentCode::new);
         let previous: Vec<Recheck> = previous
-            .map(|prev| prev.findings.iter().enumerate().map(|(i, f)| Recheck {
-                priority: f.priority,
-                text: f.text.clone(),
-                status: statuses.get(&(i + 1)).cloned().unwrap_or_else(|| "unchecked".into()),
-            }).collect())
+            .map(|prev| {
+                prev.findings
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| {
+                        let (status, said) = statuses.get(&(i + 1)).cloned().unwrap_or_else(|| ("unchecked".into(), String::new()));
+                        // Open needs the reviewer's own pointer at current code; unchecked, the finding's.
+                        let evidence = if status == "open" { said.as_str() } else { f.text.as_str() };
+                        let status = match &code {
+                            Some(code) if status != "fixed" && !code.confirms(evidence) => "unconfirmed".to_string(),
+                            _ => status,
+                        };
+                        Recheck { priority: f.priority, text: f.text.clone(), status }
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
         if verdict == "findings" && findings.is_empty() && !previous.iter().any(|r| r.status == "open") {
             bail!("the {reviewer} review says it has findings but lists none as `- [Pn] ...`:\n{}", tail_lines(text));
         }
         for r in previous.iter().filter(|r| r.status != "fixed") {
-            findings.push(Finding { priority: r.priority, text: r.text.clone(), carried: true });
+            let unconfirmed = r.status == "unconfirmed";
+            const MARK: &str = " (unconfirmed: the code it cites is not on the branch now)";
+            let text = if unconfirmed && !r.text.ends_with(MARK) { format!("{}{MARK}", r.text) } else { r.text.clone() };
+            let priority = if unconfirmed { r.priority.max(2) } else { r.priority };
+            findings.push(Finding { priority, text, carried: true });
         }
         let closing = |l: &str| {
             let l = l.trim().to_uppercase();
@@ -378,21 +402,97 @@ using P0 for data loss or security, P1 for a definite bug in normal use, P2 for 
         if !status.success() {
             bail!("the {reviewer} review failed ({status}):\n{}", tail(&format!("{stdout}{stderr}")));
         }
-        self.parse(reviewer, &text, started.elapsed().as_secs(), previous)
+        self.parse(reviewer, &text, started.elapsed().as_secs(), previous, Some(worktree))
     }
 }
 
-/// `PREVIOUS <n>: fixed` and `PREVIOUS <n>: open` lines, by n; the last line for an n wins.
-fn parse_previous(text: &str) -> BTreeMap<usize, String> {
+/// The branch's code as it is now, to tell whether a finding still points at something.
+struct CurrentCode {
+    root: std::path::PathBuf,
+    /// Tracked files, relative and with `/`, for citations that give only a file name.
+    files: Vec<String>,
+}
+
+impl CurrentCode {
+    fn new(root: &Path) -> CurrentCode {
+        let files = crate::playbook::git(root, &["ls-files"]).map(|o| o.lines().map(str::to_string).collect()).unwrap_or_default();
+        CurrentCode { root: root.to_path_buf(), files }
+    }
+
+    /// Whether `text` cites a file on the branch (at a line it has), and, when it quotes code in
+    /// backticks, whether one of the cited files holds that code.
+    fn confirms(&self, text: &str) -> bool {
+        let cited: Vec<(String, Option<usize>)> = citations(text).into_iter().filter_map(|(p, line)| self.resolve(&p).map(|f| (f, line))).collect();
+        let present: Vec<String> = cited
+            .iter()
+            .filter_map(|(f, line)| {
+                let body = std::fs::read_to_string(self.root.join(f)).ok()?;
+                line.is_none_or(|n| n >= 1 && n <= body.lines().count()).then_some(body)
+            })
+            .collect();
+        if present.is_empty() {
+            return false;
+        }
+        let squash = |s: &str| s.split_whitespace().collect::<String>();
+        // A quote that is only a path is the citation itself, not code.
+        let lone_path = |q: &str| q.split_whitespace().count() == 1 && !citations(q).is_empty();
+        let quotes: Vec<String> = quoted(text).into_iter().filter(|q| !lone_path(q) && squash(q).len() >= 6).collect();
+        quotes.is_empty() || quotes.iter().any(|q| present.iter().any(|body| squash(body).contains(&squash(q))))
+    }
+
+    /// The tracked file a cited path names: as given, or the only tracked file ending with it.
+    fn resolve(&self, path: &str) -> Option<String> {
+        let path = path.replace('\\', "/").trim_start_matches("./").to_string();
+        if self.files.contains(&path) || (self.files.is_empty() && self.root.join(&path).is_file()) {
+            return Some(path);
+        }
+        let mut ends = self.files.iter().filter(|f| f.ends_with(&format!("/{path}")));
+        match (ends.next(), ends.next()) {
+            (Some(one), None) => Some(one.clone()),
+            _ => None,
+        }
+    }
+}
+
+/// `path/to/file.rs:120` and `file.rs` mentions in a text, with their line when given.
+fn citations(text: &str) -> Vec<(String, Option<usize>)> {
+    let mut out = Vec::new();
+    for word in text.split(|c: char| c.is_whitespace() || "`,;()[]\"'".contains(c)) {
+        let word = word.trim_end_matches(['.', ':']);
+        let (path, line) = match word.rsplit_once(':') {
+            Some((p, n)) if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) => (p, n.parse().ok()),
+            _ => (word, None),
+        };
+        // A file name: a dot, then a short extension of letters.
+        let file = path.rsplit_once('.').is_some_and(|(stem, ext)| {
+            !stem.is_empty() && !stem.ends_with('/') && (1..=5).contains(&ext.len()) && ext.chars().all(|c| c.is_ascii_alphabetic())
+        });
+        if file && !path.contains("://") {
+            out.push((path.to_string(), line));
+        }
+    }
+    out
+}
+
+/// The `backticked` pieces of a text.
+fn quoted(text: &str) -> Vec<String> {
+    text.split('`').skip(1).step_by(2).map(str::to_string).collect()
+}
+
+/// `PREVIOUS <n>: fixed` and `PREVIOUS <n>: open ...` lines, by n, with what the line says after
+/// the status (as written, for its citations); the last line for an n wins.
+fn parse_previous(text: &str) -> BTreeMap<usize, (String, String)> {
     let mut out = BTreeMap::new();
     for line in text.lines() {
-        let l = line.replace("**", "").replace('`', "").to_lowercase();
-        let Some(rest) = l.trim().trim_start_matches(['-', '*', ' ']).strip_prefix("previous ") else { continue };
+        let l = line.replace("**", "");
+        let l = l.trim().trim_start_matches(['-', '*', ' ']);
+        let Some(rest) = l.get(..9).filter(|p| p.eq_ignore_ascii_case("previous ")).map(|_| &l[9..]) else { continue };
         let Some((n, status)) = rest.split_once(':') else { continue };
         let Ok(n) = n.trim().trim_start_matches('#').parse::<usize>() else { continue };
-        let word: String = status.trim().chars().take_while(|c| c.is_ascii_alphabetic()).collect();
+        let status = status.trim().trim_start_matches('`');
+        let word: String = status.chars().take_while(|c| c.is_ascii_alphabetic()).collect::<String>().to_lowercase();
         if matches!(word.as_str(), "fixed" | "open") {
-            out.insert(n, word);
+            out.insert(n, (word.clone(), status[word.len()..].to_string()));
         }
     }
     out
@@ -608,7 +708,7 @@ mod tests {
         let p = rules().prompt("main", Some(&previous(true)));
         assert!(p.contains("git diff abc1234 HEAD"), "{p}");
         assert!(p.contains("1. [P1] Drops the last row: src/a.rs, f\n2. [P2] Empty name"), "{p}");
-        assert!(p.contains("`PREVIOUS <n>: fixed` or `PREVIOUS <n>: open`"), "{p}");
+        assert!(p.contains("`PREVIOUS <n>: fixed` or `PREVIOUS <n>: open <file>:<line>"), "{p}");
         assert!(p.contains("only if it is P0 or P1"), "{p}");
         assert!(p.contains("exactly these 2 lines:\nVERDICT: <findings or clean>\nMONEY_OR_RELEASE: <yes or no>"));
 
@@ -628,7 +728,7 @@ mod tests {
         let prev = previous(true);
         let text = "Two of three fixed.\n**PREVIOUS 1:** fixed, now keeps the row\n- PREVIOUS 2: open - still accepts \"\"\n\
 - [P3] New nit: src/d.rs\nVERDICT: findings\nMONEY_OR_RELEASE: no\n";
-        let r = rules().parse("codex", text, 3, Some(&prev)).unwrap();
+        let r = rules().parse("codex", text, 3, Some(&prev), None).unwrap();
         let statuses: Vec<&str> = r.previous.iter().map(|p| p.status.as_str()).collect();
         assert_eq!(statuses, ["fixed", "open", "unchecked"]);
         assert_eq!(r.summary, "Two of three fixed.");
@@ -638,36 +738,77 @@ mod tests {
 
         // An open P1 from the previous round still asks for changes, though nothing new was found.
         let text = "PREVIOUS 1: open\nPREVIOUS 2: fixed\nPREVIOUS 3: fixed\nVERDICT: findings\nMONEY_OR_RELEASE: no";
-        let r = rules().parse("codex", text, 3, Some(&prev)).unwrap();
+        let r = rules().parse("codex", text, 3, Some(&prev), None).unwrap();
         assert_eq!(r.verdict, "changes");
         assert_eq!(r.findings, vec![Finding { priority: 1, text: "Drops the last row: src/a.rs, f".into(), carried: true }]);
 
         // Everything fixed and nothing new is clean; an unfinished reply is still unfinished.
         let text = "PREVIOUS 1: fixed\nPREVIOUS 2: fixed\nPREVIOUS 3: fixed\nVERDICT: clean\nMONEY_OR_RELEASE: no";
-        let r = rules().parse("codex", text, 3, Some(&prev)).unwrap();
+        let r = rules().parse("codex", text, 3, Some(&prev), None).unwrap();
         assert!(r.findings.is_empty() && r.verdict == "pass");
-        assert!(rules().parse("codex", "PREVIOUS 1: fixed\nMONEY_OR_RELEASE: no", 1, Some(&prev)).is_err());
+        assert!(rules().parse("codex", "PREVIOUS 1: fixed\nMONEY_OR_RELEASE: no", 1, Some(&prev), None).is_err());
+    }
+
+    #[test]
+    fn an_open_finding_must_point_at_code_still_on_the_branch() {
+        let dir = std::env::temp_dir().join(format!("nitely-recheck-{}-{}", std::process::id(), crate::db::now()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let git = |args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap().status.success());
+        git(&["init", "-q"]);
+        std::fs::write(dir.join("src/proposals.rs"), "fn apply() {\n    let closed = true;\n}\n").unwrap();
+        git(&["add", "."]);
+        let f = |priority, text: &str| Finding { priority, text: text.into(), carried: false };
+        let prev = PreviousRound {
+            commit: "abc1234".into(),
+            findings: vec![
+                f(1, "Returns to Todo after a failed apply: crates/nitely-core/src/proposals.rs:488, apply"),
+                f(2, "Schema v10 column: crates/nitely-core/src/db.rs, migrate"),
+                f(1, "Apply is not atomic: src/proposals.rs, apply"),
+            ],
+            in_history: true,
+        };
+        let review = |text: &str| rules().parse("codex", &format!("{text}\nVERDICT: clean\nMONEY_OR_RELEASE: no"), 1, Some(&prev), Some(&dir)).unwrap();
+        let statuses = |r: &Review| r.previous.iter().map(|p| p.status.clone()).collect::<Vec<_>>();
+
+        // "Open" with no current code, at a line the file no longer has, or quoting code that is
+        // not there, is unconfirmed: carried, but at P2, so the branch can pass.
+        let r = review("PREVIOUS 1: open\nPREVIOUS 2: open proposals.rs:488 still returns to Todo\nPREVIOUS 3: open src/proposals.rs:2 `issue.state = Todo`");
+        assert_eq!(statuses(&r), ["unconfirmed", "unconfirmed", "unconfirmed"]);
+        assert_eq!(r.verdict, "pass");
+        assert!(r.findings.iter().all(|f| f.priority == 2 && f.carried && f.text.ends_with("not on the branch now)")), "{:?}", r.findings);
+
+        // Quoting the current code that still shows it keeps it open at its priority; a bare file
+        // name finds the tracked file.
+        let r = review("PREVIOUS 1: fixed\nPREVIOUS 2: fixed\nPREVIOUS 3: open proposals.rs:2 `let closed = true;` is set before the write");
+        assert_eq!(statuses(&r), ["fixed", "fixed", "open"]);
+        assert_eq!(r.verdict, "changes");
+
+        // Not mentioned: carried as it was while the file it names exists, unconfirmed once it is gone.
+        let r = review("PREVIOUS 1: fixed\nPREVIOUS 2: fixed");
+        assert_eq!(statuses(&r), ["fixed", "fixed", "unchecked"]);
+        assert_eq!(r.findings[0].priority, 1);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn parses_a_finished_review() {
         let text = "Looks mostly fine.\n- [P1] Off by one: src/a.rs, f: drops the last row\n- [P3] Typo: README\n- [P1] Off by one: src/a.rs, f: drops the last row\nVERDICT: findings\nMONEY_OR_RELEASE: **yes**\n";
-        let r = rules().parse("codex", text, 5, None).unwrap();
+        let r = rules().parse("codex", text, 5, None, None).unwrap();
         assert_eq!(r.verdict, "changes");
         assert_eq!(r.findings.len(), 2);
         assert_eq!(r.flagged, vec!["MONEY_OR_RELEASE"]);
         assert_eq!(r.summary, "Looks mostly fine.");
         assert_eq!(rules().flag_reasons(&r), vec!["codex review: money or release logic"]);
 
-        let clean = rules().parse("claude", "Nothing found.\n- [P3] nit: x\nVERDICT: findings\nMONEY_OR_RELEASE: no", 1, None).unwrap();
+        let clean = rules().parse("claude", "Nothing found.\n- [P3] nit: x\nVERDICT: findings\nMONEY_OR_RELEASE: no", 1, None, None).unwrap();
         assert_eq!(clean.verdict, "pass");
     }
 
     #[test]
     fn unfinished_reviews_fail() {
-        assert!(rules().parse("codex", "VERDICT: clean", 1, None).is_err(), "missing flag");
-        assert!(rules().parse("codex", "MONEY_OR_RELEASE: no", 1, None).is_err(), "missing verdict");
-        assert!(rules().parse("codex", "VERDICT: findings\nMONEY_OR_RELEASE: no", 1, None).is_err(), "findings but none listed");
+        assert!(rules().parse("codex", "VERDICT: clean", 1, None, None).is_err(), "missing flag");
+        assert!(rules().parse("codex", "MONEY_OR_RELEASE: no", 1, None, None).is_err(), "missing verdict");
+        assert!(rules().parse("codex", "VERDICT: findings\nMONEY_OR_RELEASE: no", 1, None, None).is_err(), "findings but none listed");
     }
 
     #[test]

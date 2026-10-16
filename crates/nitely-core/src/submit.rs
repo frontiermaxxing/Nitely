@@ -246,7 +246,7 @@ fn rechecked(previous: &[crate::review::Recheck]) -> Option<String> {
         return None;
     }
     let count = |status: &str| previous.iter().filter(|r| r.status == status).count();
-    let parts: Vec<String> = [("fixed", "fixed"), ("open", "still open"), ("unchecked", "not checked")]
+    let parts: Vec<String> = [("fixed", "fixed"), ("open", "still open"), ("unchecked", "not checked"), ("unconfirmed", "unconfirmed (its code is gone)")]
         .iter()
         .filter(|(status, _)| count(status) > 0)
         .map(|(status, label)| format!("{} {label}", count(status)))
@@ -410,7 +410,7 @@ mod tests {
 files=$(git diff main...HEAD --name-only)
 money=no; case "$files" in *billing*) money=yes;; esac
 case "$prompt" in
-  *"PREVIOUS <n>"*) echo "PREVIOUS 1: open"; echo "VERDICT: clean";;
+  *"PREVIOUS <n>"*) echo "PREVIOUS 1: open edge.txt:1 still empty"; echo "VERDICT: clean";;
   *) case "$files" in
        *edge*) echo "- [P2] Edge case: edge.txt, the empty line"; echo "VERDICT: findings";;
        *) echo "Fine."; echo "VERDICT: clean";;
