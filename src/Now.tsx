@@ -122,7 +122,11 @@ function Card(props: { row: TaskRow; integration: string; now: number; onOpenIss
         <span className="now-card-age">{s ? (live === "working" ? ago(now, s.started_at).replace(" ago", "") : livenessLabel(s, now)) : ""}</span>
       </div>
       {row.issue ? (
-        <button className="now-card-issue" onClick={() => props.onOpenIssue(row.issue!.key)}>
+        <button
+          className="now-card-issue"
+          // A mirrored issue's token is a link to its tracker: that click is the link's alone.
+          onClick={(e) => !(e.target as Element).closest("a") && props.onOpenIssue(row.issue!.key)}
+        >
           <IssueToken issue={row.issue} title />
         </button>
       ) : (

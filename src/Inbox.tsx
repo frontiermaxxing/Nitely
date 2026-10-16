@@ -466,11 +466,24 @@ function listReasons(reasons: string[]): string {
 }
 
 /** An ask's options as buttons, and a line for anything else. */
+/** Answers being typed, by ask, so picking another decision and coming back keeps the words. */
+const drafts = new Map<number, string>();
+
 function Answer(props: { askId: number; options: string[]; busy: boolean; act: (run: () => Promise<unknown>) => Promise<void> }) {
-  const [text, setText] = useState("");
-  const answer = (value: string) => {
-    if (value.trim()) props.act(() => invoke("answer_ask", { id: props.askId, answer: value.trim() }));
+  const [text, setTextState] = useState(() => drafts.get(props.askId) ?? "");
+  const setText = (value: string) => {
+    setTextState(value);
+    if (value) drafts.set(props.askId, value);
+    else drafts.delete(props.askId);
   };
+  const answer = (value: string) => {
+    if (value.trim())
+      props.act(async () => {
+        await invoke("answer_ask", { id: props.askId, answer: value.trim() });
+        drafts.delete(props.askId);
+      });
+  };
+
   return (
     <div className="dd-answer">
       {props.options.map((o, i) => (

@@ -314,7 +314,8 @@ function RightNow({ data, board, ctx }: { data: PulseData; board: Board | null; 
               <button
                 key={s.id}
                 className={`now-row${waiting ? " is-waiting" : ""}${live === "idle" || live === "stale" ? " is-quiet" : ""}`}
-                onClick={() => key && ctx.onOpenIssue(key)}
+                // A mirrored issue's token is a link to its tracker: that click is the link's alone.
+                onClick={(e) => key && !(e.target as Element).closest("a") && ctx.onOpenIssue(key)}
                 disabled={!key}
                 title={[agentLabel(s.vendor), livenessLabel(s, ctx.now), s.last_activity].filter(Boolean).join(" · ")}
               >
