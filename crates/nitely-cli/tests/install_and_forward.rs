@@ -71,3 +71,20 @@ fn a_running_mcp_server_forwards_to_a_newly_installed_build() {
     server.wait().ok();
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn install_without_a_target_skips_its_own_folder_on_path() {
+    // As under `cargo run`, which puts the build's own folder first on PATH.
+    let dir = temp();
+    let exe = if cfg!(windows) { "nitely.exe" } else { "nitely" };
+    let built = Path::new(env!("CARGO_BIN_EXE_nitely"));
+    let installed = dir.join("bin").join(exe);
+    std::fs::write(&installed, b"an old nitely").unwrap();
+    let path = std::env::join_paths([built.parent().unwrap().to_path_buf(), dir.join("bin")]).unwrap();
+    let out = Command::new(built).arg("install").env("PATH", path).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["replaced"], true, "{report}");
+    assert_eq!(std::fs::read(&installed).unwrap(), std::fs::read(built).unwrap(), "the build is now the one on PATH");
+    std::fs::remove_dir_all(&dir).ok();
+}

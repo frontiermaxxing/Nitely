@@ -26,10 +26,15 @@ pub struct Installed {
     pub still_running: usize,
 }
 
-/// The executable agents run as `nitely`: the one on PATH, else Cargo's install folder.
+/// The executable agents run as `nitely`: the first on PATH that is not this build itself, else
+/// Cargo's install folder. `cargo run` puts its own target folder first on PATH (on Windows), and
+/// installing a build over itself would quietly change nothing.
 pub fn default_target() -> Option<PathBuf> {
     let exe = if cfg!(windows) { "nitely.exe" } else { "nitely" };
-    let on_path = std::env::var_os("PATH").and_then(|path| std::env::split_paths(&path).map(|d| d.join(exe)).find(|p| p.is_file()));
+    let me = std::env::current_exe().ok().and_then(|p| p.canonicalize().ok());
+    let is_me = |p: &Path| me.is_some() && p.canonicalize().ok() == me;
+    let on_path = std::env::var_os("PATH")
+        .and_then(|path| std::env::split_paths(&path).map(|d| d.join(exe)).find(|p| p.is_file() && !is_me(p)));
     on_path.or_else(|| dirs::home_dir().map(|h| h.join(".cargo").join("bin").join(exe)))
 }
 

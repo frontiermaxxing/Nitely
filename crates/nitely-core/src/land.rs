@@ -41,6 +41,9 @@ pub struct Landed {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub after: Vec<playbook::CommandResult>,
     pub error: Option<String>,
+    /// The integration branch's head before this land, to tell what landed.
+    #[serde(skip)]
+    landed_from: Option<String>,
     /// Issues that waited on this one and have no open blocker left.
     pub unblocked: Vec<String>,
 }
@@ -67,11 +70,11 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
     let common = PathBuf::from(git(&root, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?.trim());
     let lock = Lock::take(&common.join(LOCK_FILE), &issue.key, opts.break_lock)?;
     let result = run(db, &root, &pb, &issue.key, opts, actor, &mut report);
-    drop(lock);
-    // After the lock: a long rebuild must not hold up the next land.
+    // Still under the lock, so the next land cannot change the main checkout mid-build.
     if result.is_ok() && report.landed {
         after_land(&root, &pb, &mut report);
     }
+    drop(lock);
 
     match result {
         Ok(()) => {
@@ -104,17 +107,19 @@ fn after_land(root: &Path, pb: &Playbook, report: &mut Landed) {
     if pb.land.after.is_empty() {
         return;
     }
-    let landed = report.commits.len();
-    let files: Vec<String> = git(root, &["diff", "--name-only", "--no-renames", &format!("HEAD~{landed}"), "HEAD"])
-        .unwrap_or_default()
-        .lines()
-        .map(str::to_string)
-        .collect();
+    // What landed, from the head before the fast-forward. When that cannot be told, every step
+    // runs: skipping a needed one silently is worse than running one more.
+    let files: Option<Vec<String>> = report
+        .landed_from
+        .as_deref()
+        .and_then(|from| git(root, &["diff", "--name-only", "--no-renames", from, "HEAD"]).ok())
+        .map(|out| out.lines().map(str::to_string).collect());
     for step in &pb.land.after {
         let command = playbook::expand(&step.run, root, root, &report.base);
-        let skip = match step.skip_reason(&files) {
-            Ok(skip) => skip,
-            Err(e) => Some(format!("its patterns do not parse: {}", first_line(&e))),
+        let skip = match files.as_deref().map(|f| step.skip_reason(f)) {
+            None => None,
+            Some(Ok(skip)) => skip,
+            Some(Err(e)) => Some(format!("its patterns do not parse: {}", first_line(&e))),
         };
         if let Some(why) = skip {
             report.after.push(playbook::CommandResult { command, ok: true, seconds: 0, output: format!("skipped: {why}"), skipped: true });
@@ -217,6 +222,7 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
     report.commits = git(root, &["log", "--oneline", &format!("{base}..{head}")])?.lines().map(str::to_string).collect();
     git(root, &["merge", "--ff-only", &head]).context("the main checkout refused the fast-forward (do uncommitted edits there overlap the change?)")?;
     report.landed = true;
+    report.landed_from = Some(before.clone());
     report.head = Some(git(root, &["rev-parse", "--short", "HEAD"])?.trim().to_string());
 
     if opts.push {
