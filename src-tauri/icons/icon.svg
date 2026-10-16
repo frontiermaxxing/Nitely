@@ -1,6 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <!-- Nitely's mark (BrandMark in src/App.tsx): three stations on a line, the lifecycle track in one
-       mark, on the app's dark graphite tile. `npx tauri icon src-tauri/icons/icon.svg` makes the sizes. -->
+       mark, on the app's dark graphite tile. `node scripts/app-icon.mjs` makes the sizes; the
+       small ones (16 to 48px) come from icon-small.svg. -->
   <rect x="64" y="64" width="896" height="896" rx="200" fill="#1b1b1a"/>
   <rect x="65.5" y="65.5" width="893" height="893" rx="198.5" fill="none" stroke="#363633" stroke-width="3"/>
   <path d="M280 512H744" stroke="#7c7b75" stroke-width="44" stroke-linecap="round"/>

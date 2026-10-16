@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- The app icon at 16 to 48px (icon.ico's small layers): the same three stations as icon.svg,
+       filling more of a tile with less margin, with a heavier line and brighter outer stations so
+       they still read on a taskbar. scripts/app-icon.mjs builds icon.ico from both files. -->
+  <rect x="16" y="16" width="992" height="992" rx="210" fill="#1b1b1a"/>
+  <path d="M226 512H798" stroke="#b6b5ae" stroke-width="88" stroke-linecap="round"/>
+  <circle cx="226" cy="512" r="110" fill="#b6b5ae"/>
+  <circle cx="512" cy="512" r="152" fill="#f2f1ec"/>
+  <circle cx="798" cy="512" r="96" fill="#1b1b1a" stroke="#b6b5ae" stroke-width="80"/>
+</svg>

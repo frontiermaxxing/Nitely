@@ -42,6 +42,10 @@ Nitely tracks its own build. Its backlog is the **NIT** project in Nitely, reach
   own port, your own Browser pane tab (`tabs_create`), and scratch files and browser profiles in a
   folder named after your issue (docs/visualization.md, "The browser preview"). Add `?data=live` to check a view
   against the real database, read-only (`cargo build -p nitely-cli` first)
+- The app icon is `src-tauri/icons/icon.svg` and, for 16 to 48px, `icon-small.svg`;
+  `node scripts/app-icon.mjs` makes the sizes. Windows embeds the icon in the exe when it is built,
+  so a new icon shows only after a rebuild (restart `npm run tauri dev`), and a pinned taskbar
+  shortcut can keep the old one until Windows refreshes its icon cache.
 - After landing a change to `crates/`, run `cargo run --release -p nitely-cli -- install` in the main
   checkout: it puts the new `nitely` where hooks and MCP run it, even while agents run the old one
   (`cargo install` fails then on Windows), and running MCP servers forward tool calls to it.

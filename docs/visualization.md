@@ -379,8 +379,10 @@ track with the station in its color and the branch's git state, then its last th
 the agent is doing, the last commit, when the session started). A card waiting on you is washed in
 amber; idle and stale ones fade.
 
-The app icon (`src-tauri/icons/icon.svg`, sizes made with `npx tauri icon`) is the same mark as
-the sidebar's: three stations on a line, on the dark graphite tile.
+The app icon (`src-tauri/icons/icon.svg`) is the same mark as the sidebar's: three stations on a
+line, on the dark graphite tile. At 16 to 48px (the taskbar, Alt+Tab) it is drawn again in
+`icon-small.svg`: less margin, a heavier line and brighter outer stations, which otherwise fade to
+one dot. `node scripts/app-icon.mjs` makes every size and puts both in `icon.ico`.
 
 ## The project views
 
