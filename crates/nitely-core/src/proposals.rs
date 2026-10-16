@@ -141,18 +141,63 @@ pub struct Proposed {
 /// Merges a TOML fragment into a playbook's text, keeping the text's comments and layout.
 fn merge(base: &str, change: &str) -> Result<String> {
     let mut doc: toml_edit::DocumentMut = base.parse().context("the current playbook is not valid TOML")?;
-    let patch: toml_edit::DocumentMut = change.parse().context("the change is not valid TOML")?;
+    let mut patch: toml_edit::DocumentMut = change.parse().context("the change is not valid TOML")?;
+    // Tables print in position order, and the fragment's start at 0: new ones go after every
+    // table the playbook has, in the fragment's own order.
+    let after = last_position(doc.as_table()) + 1;
+    shift_positions(patch.as_table_mut(), after);
     merge_table(doc.as_table_mut(), patch.as_table());
     Ok(doc.to_string())
 }
 
+fn last_position(table: &toml_edit::Table) -> isize {
+    let mut last = table.position().unwrap_or(0);
+    for (_, item) in table.iter() {
+        match item {
+            toml_edit::Item::Table(t) => last = last.max(last_position(t)),
+            toml_edit::Item::ArrayOfTables(a) => last = a.iter().map(last_position).fold(last, isize::max),
+            _ => {}
+        }
+    }
+    last
+}
+
+/// Moves the fragment's tables to `by` and after, each with a blank line above it.
+fn shift_positions(table: &mut toml_edit::Table, by: isize) {
+    let place = |t: &mut toml_edit::Table| {
+        if let Some(p) = t.position() {
+            t.set_position(p + by);
+        }
+        if t.decor().prefix().and_then(|p| p.as_str()).is_none_or(|p| !p.starts_with('\n')) {
+            t.decor_mut().set_prefix("\n");
+        }
+    };
+    for (_, item) in table.iter_mut() {
+        match item {
+            toml_edit::Item::Table(t) => {
+                place(t);
+                shift_positions(t, by);
+            }
+            toml_edit::Item::ArrayOfTables(a) => {
+                for t in a.iter_mut() {
+                    place(t);
+                    shift_positions(t, by);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn merge_table(into: &mut dyn toml_edit::TableLike, from: &dyn toml_edit::TableLike) {
     for (key, item) in from.iter() {
-        if let (Some(existing), Some(patch)) = (into.get_mut(key), item.as_table_like()) {
-            if let Some(existing) = existing.as_table_like_mut() {
-                merge_table(existing, patch);
-                continue;
+        if let Some(existing) = into.get_mut(key) {
+            match (existing.as_table_like_mut(), item.as_table_like()) {
+                (Some(existing), Some(patch)) => merge_table(existing, patch),
+                // Replacing the value in place keeps the key, and with it the comments above it.
+                _ => *existing = item.clone(),
             }
+            continue;
         }
         into.insert(key, item.clone());
     }
@@ -483,7 +528,12 @@ impl Db {
         }
         let id = self.conn.last_insert_rowid();
 
-        let summary: String = why.lines().next().unwrap_or(why).chars().take(70).collect();
+        // Titled after the first change's reason, with a count when later ones joined it.
+        let first = why_all.lines().next().unwrap_or(why);
+        let mut summary: String = first.chars().take(70).collect();
+        if steps.len() > 1 {
+            summary.push_str(&format!(" (and {} more)", steps.len() - 1));
+        }
         let applies = if target.in_repo {
             format!("{} commits its own {PLAYBOOK_PATH}, so approving commits the change to it on the integration branch the changed playbook names.", target.repo)
         } else {
@@ -651,6 +701,14 @@ mod tests {
         assert_eq!(pb.branch.integration, "main");
         assert_eq!(pb.gate.commands, vec!["npm test".to_string()]);
         assert_eq!(pb.review.focus, "money");
+        // New tables go after the existing ones, in the change's order, each table whole.
+        let out = merge(BASE, "[review]\nfocus = \"money\"\n\n[[review.flags]]\nname = \"MONEY\"\nquestion = \"q?\"\n\n[[approval.human_paths]]\npattern = \"^billing/\"\nreason = \"money\"\n").unwrap();
+        let at = |s: &str| out.find(s).unwrap_or_else(|| panic!("{s} in {out}"));
+        assert!(at("[gate]") < at("[review]") && at("[review]") < at("[[review.flags]]") && at("[[review.flags]]") < at("[[approval.human_paths]]"), "{out}");
+        assert!(out.contains("integration = \"master\"\n\n[gate]"), "{out}");
+        // A replaced value keeps the comment written above its key.
+        let out = merge(BASE, "[gate]\ncommands = [\"npm test\", \"npm run build\"]\n").unwrap();
+        assert!(out.contains("# must pass\ncommands = [\"npm test\", \"npm run build\"]"), "{out}");
         // Nested tables merge rather than replace each other.
         let out = merge("[a.b]\nx = 1\ny = 2\n", "[a.b]\ny = 3\n").unwrap();
         assert!(out.contains("x = 1") && out.contains("y = 3"), "{out}");

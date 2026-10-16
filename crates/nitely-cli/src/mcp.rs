@@ -241,6 +241,11 @@ fn tools() -> Value {
             } }
         },
         {
+            "name": "setup_guide",
+            "description": "The step-by-step first-run sweep that seeds a project's board from its repo: pre-flight checks (integration branch, gate, working tree), sweeping areas, filing issues, proposing review rules, writing the brief. Call it when asked to set up or onboard a project, or when get_project shows setup is null, and follow it.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
             "name": "get_project",
             "description": "The project's brief (what earlier agents learned about it: vision, state of each area, target order, open questions for the owner) and its setup marker (null until the first-run sweep has run; otherwise the commit it read). Read it before exploring the repo.",
             "inputSchema": { "type": "object", "properties": {
@@ -608,7 +613,8 @@ fn run_tool(server: &Server, name: &str, args: &Value, session: &str) -> Result<
                 "issue": issue,
                 "relations": db.relations(&issue.key)?,
                 "timeline": db.timeline(&issue.key)?,
-                "pull_requests": db.prs_for_issue(&issue.key)?
+                "pull_requests": db.prs_for_issue(&issue.key)?,
+                "proposal": db.proposal_for_issue(&issue.key)?
             })
         }
         "list_issues" => {
@@ -618,6 +624,7 @@ fn run_tool(server: &Server, name: &str, args: &Value, session: &str) -> Result<
             let issues: Vec<_> = db.list_issues(Some(&project), include_closed)?.into_iter().filter(|i| label.as_ref().is_none_or(|l| i.labels.contains(l))).collect();
             json!(issues)
         }
+        "setup_guide" => json!({ "guide": nitely_core::instructions::SETUP_GUIDE }),
         "get_project" => json!(db.project_brief(&project(&db)?)?),
         "set_project_brief" => {
             let revision = args.get("revision").and_then(Value::as_i64).ok_or_else(|| anyhow!("missing revision: pass the one get_project returned"))?;
@@ -765,6 +772,17 @@ mod tests {
         assert!(note.contains("New label for this project: roku-tv.") && note.contains("Close to labels it already uses: roku;"), "{note}");
         assert!(note.contains("In use: roku (4), tizen (2)."), "{note}");
         assert!(label_note(&[], &["ios".into()]).unwrap().starts_with("New label for this project: ios."));
+    }
+
+    #[test]
+    fn the_setup_guide_names_only_tools_that_exist() {
+        let names: Vec<String> = tools().as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
+        let guide = nitely_core::instructions::SETUP_GUIDE;
+        for tool in ["get_project", "propose_playbook_change", "ask", "file_issues", "list_issues", "set_project_brief", "mark_setup_complete", "note"] {
+            assert!(guide.contains(&format!("`{tool}`")), "the guide uses {tool}");
+            assert!(names.contains(&tool.to_string()), "{tool} is a tool");
+        }
+        assert!(names.contains(&"setup_guide".to_string()));
     }
 
     #[test]

@@ -34,6 +34,13 @@ State: Todo when an agent can do it now; Backlog for ideas, priority 4 and work 
 issue (or Todo with blocked_by naming it); owner human for work only the human can do; product \
 decisions go through `ask`.";
 
+/// The first-run sweep that seeds a new project's board from its repo: the `nitely-setup` skill
+/// `connect` installs for Claude Code, and what the `setup_guide` tool returns to every agent.
+pub const SETUP_GUIDE: &str = include_str!("setup_guide.md");
+
+/// The skill's description: when an agent should reach for it.
+pub const SETUP_DESCRIPTION: &str = "Set up a project in Nitely: sweep the repo once and seed its board with issues, a project brief and proposed review rules. Use it when asked to set up or onboard a project, or when get_project shows setup is null.";
+
 /// The instructions for an agent working in `dir`: the workflow plus what Nitely knows about the
 /// repo, or None when `dir` is not in a repo Nitely watches.
 pub fn for_dir(config: &Config, dir: &str) -> Option<String> {
@@ -50,4 +57,22 @@ pub fn for_dir(config: &Config, dir: &str) -> Option<String> {
         repo.name,
         pb.integration_branch()
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_setup_guides_example_rules_are_a_valid_playbook() {
+        let start = SETUP_GUIDE.find("```toml\n").expect("the guide shows example rules") + "```toml\n".len();
+        // The example is indented under a list item; TOML does not mind.
+        let example = &SETUP_GUIDE[start..start + SETUP_GUIDE[start..].find("```").unwrap()];
+        let pb = Playbook::parse(example).unwrap();
+        assert!(pb.unknown.is_empty(), "every key is one Nitely reads: {:?}", pb.unknown);
+        assert_eq!((pb.review.flags.len(), pb.approval.human_paths.len(), pb.approval.blocked_paths.len()), (1, 2, 1));
+        for rule in pb.approval.human_paths.iter().chain(&pb.approval.blocked_paths) {
+            regex::Regex::new(&rule.pattern).unwrap();
+        }
+    }
 }

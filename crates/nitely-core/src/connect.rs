@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::{Config, RepoConfig};
 use crate::db::Db;
-use crate::instructions::WORKFLOW;
+use crate::instructions::{SETUP_DESCRIPTION, SETUP_GUIDE, WORKFLOW};
 use crate::playbook::{git, Playbook, PLAYBOOK_PATH};
 
 const BLOCK_START: &str = "<!-- nitely:start -->";
@@ -396,6 +396,12 @@ fn claude_plan(nitely: &str, repoint: bool) -> Result<AgentPlan> {
         "a skill with the Nitely workflow",
         format!("---\nname: nitely\ndescription: How to take, report, submit and land work in a repo Nitely tracks. Use it whenever the nitely MCP tools are available or the session says the repo is connected to Nitely.\n---\n\n{WORKFLOW}\n"),
     ));
+    let setup = dir.join("skills").join("nitely-setup").join("SKILL.md");
+    changes.push(Change::file(
+        &setup,
+        "a skill for the first-run sweep that seeds a new project's board (/nitely-setup)",
+        format!("---\nname: nitely-setup\ndescription: {SETUP_DESCRIPTION}\n---\n\n{SETUP_GUIDE}"),
+    ));
 
     let claude_json = read_json(&home().join(".claude.json"))?;
     let registered = claude_json.pointer("/mcpServers/nitely");
@@ -658,8 +664,10 @@ mod tests {
         };
 
         let first = agent_plans("nitely", true);
-        assert_eq!(pending_changes(&first), 2, "the hooks and the skill are new");
+        assert_eq!(pending_changes(&first), 3, "the hooks and the two skills are new");
+        let setup = home.join(".claude").join("skills").join("nitely-setup").join("SKILL.md");
         assert!(apply_agents(&first).1.is_empty());
+        assert!(std::fs::read_to_string(&setup).unwrap().starts_with("---\nname: nitely-setup\n"));
         assert_eq!(pending_changes(&agent_plans("nitely", true)), 0);
 
         // Reformatting a JSON file is not a change; an old copy of the workflow is.
