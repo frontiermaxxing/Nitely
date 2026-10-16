@@ -1088,6 +1088,20 @@ function answerAsk(args: Record<string, unknown>) {
   if (issue) retrack(world, issue);
 }
 
+/**
+ * For checking live changes in the preview from the console: `nitelyDev.ask("NIT-28", "Keep the
+ * flag?")` adds an open question as an agent would, and the app hears of it the way it hears the
+ * backend's change event.
+ */
+(window as unknown as { nitelyDev: unknown }).nitelyDev = {
+  ask(issueKey: string, question: string, options: string[] = []) {
+    const id = Math.max(0, ...world.asks.map((a) => a.id)) + 1;
+    world.asks.push({ id, issue_key: issueKey, asked_by: "claude:c:/dev/preview", question, options, answer: null, asked_at: Math.floor(Date.now() / 1000), answered_at: null });
+    window.dispatchEvent(new CustomEvent("nitely://changed"));
+    return id;
+  },
+};
+
 const AGENTS: AgentPlan[] = ["claude", "codex", "cursor"].map((agent) => ({
   agent,
   found: true,
@@ -1352,6 +1366,13 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return setOwner(args);
       case "answer_ask":
         return answerAsk(args);
+      case "notify":
+        // The preview's notifier: src/dev/FakeToasts.tsx shows it on the page.
+        window.dispatchEvent(new CustomEvent("nitely:preview-notification", { detail: args }));
+        return null;
+      case "set_badge":
+        (window as unknown as { nitelyBadge?: unknown }).nitelyBadge = args.count;
+        return null;
       case "sync_now":
         return null;
       case "create_project":

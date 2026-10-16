@@ -214,6 +214,18 @@ it. If the call fails, the decision comes back as it was, with the error under i
 the same list (`useDecisionDetails` runs in the app). When nothing waits, the page says so and lists
 what the agents are doing instead. The footer lists the decision keys (see Keys).
 
+**Notifications.** A decision that starts waiting is told once outside the window as well
+(`src/notify.ts` decides, `useNotifications` in `src/Notifications.tsx` batches,
+`src-tauri/src/notify.rs` shows a Windows toast). They are the Inbox's own decisions, so the two
+never disagree. Several within four seconds come as one ("3 decisions waiting"); one alone says
+which issue and what it needs ("NIT-42 asks: keep the old flag?"). A click opens the Inbox on that
+decision, or on the list for a batch. What was told is remembered across restarts (approvals and the
+person's own work by issue, the rest by decision), the first run takes what already waits as told,
+and nothing is told while the Inbox has the window's focus, in quiet hours, or for a kind turned off
+under "Notifications" in the Inbox's head. The taskbar button carries the count of waiting decisions
+(an overlay on Windows). In the browser preview, `src/dev/FakeToasts.tsx` shows them in the corner,
+and `nitelyDev.ask("NIT-28", "…")` in the console adds a question to try it.
+
 ## Motion
 
 ![An approval resolving in the Inbox, dark](img/inbox-approved-dark.png)

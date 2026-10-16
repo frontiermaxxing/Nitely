@@ -512,3 +512,13 @@ details summary { cursor: pointer; color: var(--fg-2); }
 }
 .net-add input::placeholder { color: var(--fg-3); }
 .net-add input:focus, .net-add select:focus { outline: 2px solid var(--focus); outline-offset: -1px; }
+
+/* The preview's stand-in for OS notifications (src/dev/FakeToasts.tsx); never in the app. */
+.fake-toasts { position: fixed; right: 16px; bottom: 16px; z-index: 40; display: flex; flex-direction: column; gap: 8px; width: min(360px, calc(100vw - 32px)); }
+.fake-toast {
+  display: flex; flex-direction: column; gap: 3px; padding: 12px 14px; text-align: left; cursor: pointer;
+  background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--radius-lg); box-shadow: var(--shadow-float);
+  font-size: var(--text-sm); animation: ui-enter var(--dur) var(--ease);
+}
+.fake-toast-app { font-size: var(--text-xs); color: var(--fg-3); }
+.fake-toast-body { color: var(--fg-2); white-space: pre-line; }

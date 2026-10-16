@@ -37,8 +37,16 @@ async function liveInvoke<T>(cmd: string, args: Record<string, unknown>): Promis
   return body as T;
 }
 
-/** Listens for a backend event. The preview has no backend events; its data changes only when you act. */
+/**
+ * Listens for a backend event. The preview has no backend; there the sample data (src/dev) sends
+ * the same events as window events, so a change it makes or a fake notification's click arrives
+ * the way the app's would.
+ */
 export function listen<T>(event: string, handler: EventCallback<T>): Promise<UnlistenFn> {
-  if (isPreview) return Promise.resolve(() => {});
+  if (isPreview) {
+    const on = (e: Event) => handler({ event, id: 0, payload: (e as CustomEvent<T>).detail } as Parameters<EventCallback<T>>[0]);
+    window.addEventListener(event, on);
+    return Promise.resolve(() => window.removeEventListener(event, on));
+  }
   return tauriListen<T>(event, handler);
 }

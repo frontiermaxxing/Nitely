@@ -16,6 +16,8 @@ import { KeysSheet, Palette, useKeys } from "./Palette";
 import { reposOf } from "./BranchMap";
 import { CountBadge, Loading, livenessOf } from "./ui";
 import { WindowControls, ownTitleBar } from "./WindowControls";
+import { useNotifications } from "./Notifications";
+import { FakeToasts } from "./dev/FakeToasts";
 
 // The browser preview's page of every primitive in every state; never in a production build.
 const Kit = import.meta.env.DEV ? lazy(() => import("./dev/Kit")) : () => null;
@@ -25,6 +27,8 @@ const Kit = import.meta.env.DEV ? lazy(() => import("./dev/Kit")) : () => null;
 const FALLBACK_MS = 30000;
 const CHANGED_EVENT = "nitely://changed";
 const OPEN_ISSUE_EVENT = "nitely://open-issue";
+/** Sent with a decision's id when its notification is clicked (src-tauri/src/notify.rs). */
+const OPEN_DECISION_EVENT = "nitely://open-decision";
 const REFRESH_GAP_MS = 1000;
 
 export type View =
@@ -170,17 +174,34 @@ export function App() {
     };
   }, []);
 
+  // A click on a notification opens the Inbox on that decision (or on the first, for a batch).
+  const [inboxPick, setInboxPick] = useState<{ id: string; at: number } | null>(null);
+  useEffect(() => {
+    const unlisten = listen<string>(OPEN_DECISION_EVENT, (e) => {
+      setOpenIssue(null);
+      setView({ kind: "inbox" });
+      if (e.payload) setInboxPick({ id: e.payload, at: Date.now() });
+    });
+    return () => {
+      unlisten.then((stop) => stop());
+    };
+  }, []);
+  const focused = useWindowFocused();
+
   // The Inbox's decisions, counted the same way the Inbox lists them.
   const inboxDetails = useDecisionDetails(board);
   // What waits on the human: the Inbox lists it, and the nav badge, the Overview and Now count it.
   // null until the board has loaded: "nothing needs you" must never be said before it is known.
   const decisions = board ? decisionsOf(board, inboxDetails, now) : null;
+  // New ones are told outside the window too, except while the Inbox is in front of the person.
+  useNotifications(decisions, inboxDetails, focused && view.kind === "inbox" && !openIssue);
   const inboxCount = decisions?.length ?? 0;
   const working = board?.repos.flatMap((r) => r.rows).filter((r) => r.session?.state === "working").length ?? 0;
 
   return (
     <div className="shell">
       <WindowControls />
+      {isPreview && <FakeToasts />}
       <nav className="sidebar">
         {/* On Windows the brand row is where the window is dragged from, as a title bar would be. */}
         <div className="brand" data-tauri-drag-region={ownTitleBar || undefined}>
@@ -276,7 +297,7 @@ export function App() {
             <Loading />
           </div>
         )}
-        {view.kind === "inbox" && board && <Inbox board={board} details={inboxDetails} now={now} onOpenIssue={setOpenIssue} onChanged={changed} />}
+        {view.kind === "inbox" && board && <Inbox board={board} details={inboxDetails} now={now} pick={inboxPick} onOpenIssue={setOpenIssue} onChanged={changed} />}
         {view.kind === "now" && board && <Now board={board} needs={inboxCount} now={now} onOpenIssue={setOpenIssue} onChanged={changed} onGo={setView} />}
         {view.kind === "activity" && <Activity now={now} version={version} projects={projects} onOpenIssue={setOpenIssue} />}
         {view.kind === "network" && <Network board={board} projects={projects} now={now} />}
@@ -430,4 +451,21 @@ function PreviewFoot(props: { active: boolean; onKit: () => void }) {
       </p>
     </div>
   );
+}
+
+/** True while the window has the focus and shows: what the person sees now, they need not be told. */
+function useWindowFocused(): boolean {
+  const [focused, setFocused] = useState(() => document.hasFocus());
+  useEffect(() => {
+    const check = () => setFocused(document.hasFocus() && document.visibilityState === "visible");
+    window.addEventListener("focus", check);
+    window.addEventListener("blur", check);
+    document.addEventListener("visibilitychange", check);
+    return () => {
+      window.removeEventListener("focus", check);
+      window.removeEventListener("blur", check);
+      document.removeEventListener("visibilitychange", check);
+    };
+  }, []);
+  return focused;
 }

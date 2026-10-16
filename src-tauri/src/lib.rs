@@ -1,3 +1,5 @@
+mod notify;
+
 use nitely_core::issues::{Ask, Project, Relations};
 use nitely_core::{remote, rules, Actor, Board, Config, Db, IssueRecord};
 use serde::Serialize;
@@ -77,7 +79,7 @@ fn open_link(app: &tauri::AppHandle, url: &str) {
     focus_main(app);
 }
 
-fn focus_main(app: &tauri::AppHandle) {
+pub(crate) fn focus_main(app: &tauri::AppHandle) {
     use tauri::Manager;
     if let Some(w) = app.get_webview_window("main") {
         w.unminimize().ok();
@@ -413,6 +415,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            notify::notify,
+            notify::set_badge,
             snapshot,
             opened_link,
             pulse,

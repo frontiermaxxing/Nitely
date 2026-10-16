@@ -26,6 +26,7 @@ import {
   useFlip,
   vendorOf,
 } from "./ui";
+import { NotifySettingsPanel } from "./Notifications";
 import "./inbox.css";
 
 /**
@@ -38,10 +39,13 @@ export function Inbox(props: {
   /** From useDecisionDetails, which the app runs so the nav count and this page agree. */
   details: Map<string, IssueDetail>;
   now: number;
+  /** A decision to open, from a notification's click; `at` makes a second click on the same one count. */
+  pick?: { id: string; at: number } | null;
   onOpenIssue: (key: string) => void;
   onChanged: () => void;
 }) {
   const { board, details, now } = props;
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const live = decisionsOf(board, details, now);
   // A decision the human acts on resolves at once and says what happened, in place, before the
   // next one takes its place; the board can take a moment longer to drop it, so those the Inbox
@@ -64,7 +68,10 @@ export function Inbox(props: {
   }, [liveIds]);
   const groups = GROUP_ORDER.map((k) => ({ kind: k, items: decisions.filter((d) => d.kind === k) })).filter((g) => g.items.length > 0);
   const ordered = groups.flatMap((g) => g.items);
-  const [picked, setPicked] = useState<string | null>(null);
+  const [picked, setPicked] = useState<string | null>(props.pick?.id ?? null);
+  useEffect(() => {
+    if (props.pick) setPicked(props.pick.id);
+  }, [props.pick]);
   // The decision open stays open while others arrive: the first one is picked as soon as there is
   // one, and only when the picked one is settled does the pick move to the (new) first.
   const open = ordered.find((d) => d.id === picked) ?? ordered[0] ?? null;
@@ -133,7 +140,9 @@ export function Inbox(props: {
       <div className="page inbox">
         <div className="page-head">
           <h1>Inbox</h1>
+          <NotifyLink open={settingsOpen} onToggle={() => setSettingsOpen((o) => !o)} />
         </div>
+        {settingsOpen && <NotifySettingsPanel onClose={() => setSettingsOpen(false)} />}
         <EmptyState title="Nothing needs you.">Agents show up here when they ask something, wait on your approval, or get stuck.</EmptyState>
         <AtWork board={board} now={now} onOpenIssue={props.onOpenIssue} />
       </div>
@@ -168,8 +177,10 @@ export function Inbox(props: {
                 <Ticker value={waiting.length} /> need{waiting.length === 1 ? "s" : ""} you
               </span>
             )}
+            <NotifyLink open={settingsOpen} onToggle={() => setSettingsOpen((o) => !o)} />
           </div>
           <p className="inbox-sub">Only decisions an agent cannot make.{oldest !== null && ` Oldest ${ago(now, oldest).replace(" ago", "")}.`}</p>
+          {settingsOpen && <NotifySettingsPanel onClose={() => setSettingsOpen(false)} />}
         </div>
         {groups.map((g) => (
           <div key={g.kind} className="inbox-group">
@@ -264,6 +275,15 @@ function without<V>(m: Map<string, V>, id: string): Map<string, V> {
   const n = new Map(m);
   n.delete(id);
   return n;
+}
+
+/** Opens and closes the notification settings, from the Inbox's head. */
+function NotifyLink(props: { open: boolean; onToggle: () => void }) {
+  return (
+    <button className="link inbox-notify-link" aria-expanded={props.open} onClick={props.onToggle}>
+      Notifications
+    </button>
+  );
 }
 
 /** Questions first: an agent is blocked on each one. The human's own work blocks no agent directly, so it comes last. */
