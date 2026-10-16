@@ -50,6 +50,14 @@ pub fn install(from: &Path, to: &Path) -> Result<Installed> {
     // Copied beside the target first, so the swap below is two renames in one folder.
     let staged = dir.join(format!(".nitely-new-{}", std::process::id()));
     std::fs::copy(from, &staged).with_context(|| format!("copying {} to {}", from.display(), staged.display()))?;
+    // Whatever `from` was, agents must be able to run what is installed.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&staged)?.permissions();
+        perms.set_mode(perms.mode() | 0o755);
+        std::fs::set_permissions(&staged, perms)?;
+    }
     if to.exists() && cfg!(windows) {
         let aside = dir.join(format!("{OLD_PREFIX}{}.exe", crate::db::now()));
         if let Err(e) = std::fs::rename(to, &aside) {

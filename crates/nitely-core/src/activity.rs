@@ -572,6 +572,8 @@ mod tests {
         assert!(!is_commit("Bash: git commit --dry-run") && !is_commit("Read: docs/git commit.md") && !is_commit("Bash: git log"));
     }
 
+    // Folders are written the way `paths::normalize` leaves them on every platform (lowercase,
+    // forward slashes), so an MCP id like `claude:c:/development/nitely` matches on Linux too.
     #[test]
     fn issue_events_go_to_the_session_that_named_the_issue() {
         let (mut db, dir) = db();
@@ -581,7 +583,7 @@ mod tests {
             db.create_issue(&NewIssue { project: "NIT".into(), title: t.into(), body: "b".into(), kind: "feature".into(), source: "claude".into(), evidence: "e".into(), ..Default::default() }, &h).unwrap();
         }
         let t0 = now() - 4 * 3600;
-        let cwd = "C:\\Development\\Nitely";
+        let cwd = "c:/development/nitely";
         // Two Claude sessions in one folder, and the MCP id they share.
         session(&db, "claude:a", cwd, t0, t0 + 3000, "idle");
         session(&db, "claude:b", cwd, t0, t0 + 3000, "working");
@@ -617,7 +619,7 @@ mod tests {
     fn codex_work_before_its_first_turn_end_and_long_waits_are_kept() {
         let (db, dir) = db();
         let t0 = now() - 3 * 3600;
-        let cwd = "C:\\Development\\Harbor";
+        let cwd = "c:/development/harbor";
         // Codex reports work over MCP for an hour; its hook session appears at the first turn end.
         session(&db, "codex:c:/development/harbor", cwd, t0, t0 + 3600, "working");
         session(&db, "codex:thread-1", cwd, t0 + 3600, t0 + 3600, "idle");
@@ -658,7 +660,7 @@ mod tests {
         // An idle hook session left from yesterday does not swallow today's work in that folder.
         let y = t0 - 20 * 3600;
         session(&db, "claude:old", "C:\\Development\\Padre", y, y + 600, "idle");
-        session(&db, "claude:c:/development/padre", "C:\\Development\\Padre", t0, t0 + 1800, "working");
+        session(&db, "claude:c:/development/padre", "c:/development/padre", t0, t0 + 1800, "working");
         state(&db, "claude:c:/development/padre", t0, "working");
         event(&db, t0 + 900, "claude:c:/development/padre", "gate_passed", "Gate passed", None);
         let a = activity(&Config::default(), &db, t0 - 60, now()).unwrap();
