@@ -3,9 +3,9 @@ mod mcp;
 mod serve;
 mod ui;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use nitely_core::issues::branch_name;
+use nitely_core::issues::{branch_name, BatchItem};
 use nitely_core::playbook::{self, Playbook};
 use nitely_core::{db::NewEvent, hook, paths, resolve_project, Actor, Config, Db, NewIssue, RepoConfig};
 use std::io::Read;
@@ -280,6 +280,13 @@ enum IssueCmd {
         #[arg(long)]
         blocked_by: Vec<String>,
     },
+    /// File many issues at once from a JSON list (a file, or - for stdin). Each item has a `ref`
+    /// and file_issue's fields; its blocked_by may name refs of the same list. Prints each ref's key.
+    CreateMany {
+        file: String,
+        #[arg(long)]
+        project: Option<String>,
+    },
     /// List open issues (add --all for closed ones too).
     List {
         #[arg(long)]
@@ -527,6 +534,37 @@ fn run(cmd: Cmd) -> Result<()> {
                         &me,
                     )?;
                     print_json(&issue)
+                }
+                IssueCmd::CreateMany { file, project } => {
+                    let project = resolve_project(&config, &db, project.as_deref(), &cwd()?)?;
+                    let text = if file == "-" { std::io::read_to_string(std::io::stdin())? } else { std::fs::read_to_string(&file)? };
+                    let items: Vec<serde_json::Value> = serde_json::from_str(&text).context("the file must hold a JSON list of issues")?;
+                    let field = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    let opt = |v: &serde_json::Value, k: &str| Some(field(v, k)).filter(|s| !s.is_empty());
+                    let batch: Vec<BatchItem> = items
+                        .iter()
+                        .map(|item| BatchItem {
+                            local_ref: field(item, "ref"),
+                            issue: NewIssue {
+                                project: project.clone(),
+                                title: field(item, "title"),
+                                kind: field(item, "kind"),
+                                body: field(item, "body"),
+                                evidence: field(item, "evidence"),
+                                source: opt(item, "source").unwrap_or_else(|| "human".into()),
+                                priority: item.get("priority").and_then(|p| p.as_i64()).unwrap_or(0),
+                                allow_similar: item.get("allow_similar").and_then(|b| b.as_bool()).unwrap_or(false),
+                                state: opt(item, "state"),
+                                owner: opt(item, "owner"),
+                                blocked_by: item
+                                    .get("blocked_by")
+                                    .and_then(|b| b.as_array())
+                                    .map(|a| a.iter().filter_map(|k| k.as_str()).map(str::to_string).collect())
+                                    .unwrap_or_default(),
+                            },
+                        })
+                        .collect();
+                    print_json(&db.create_issues(&batch, &me)?)
                 }
                 IssueCmd::List { project, all } => {
                     let project = resolve_project(&config, &db, project.as_deref(), &cwd()?)?;

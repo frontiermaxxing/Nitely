@@ -180,6 +180,89 @@ pub struct NewIssue {
     pub blocked_by: Vec<String>,
 }
 
+/// One issue of a `file_issues` batch: a new issue, and the ref the batch's other items name it by
+/// in their `blocked_by`.
+#[derive(Debug, Clone, Default)]
+pub struct BatchItem {
+    pub local_ref: String,
+    pub issue: NewIssue,
+}
+
+/// What a batch filed: each ref's key (the new issue, or the one it duplicates), the issues filed in
+/// the order they were, and the items skipped as likely duplicates.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct BatchFiled {
+    pub keys: std::collections::BTreeMap<String, String>,
+    pub filed: Vec<Filed>,
+    pub skipped: Vec<Skipped>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Filed {
+    #[serde(rename = "ref")]
+    pub local_ref: String,
+    pub key: String,
+    pub title: String,
+    pub url: String,
+    #[serde(skip)]
+    pub project: String,
+    pub blocked_by: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Skipped {
+    #[serde(rename = "ref")]
+    pub local_ref: String,
+    pub title: String,
+    /// The open issues (or the earlier item) it likely duplicates.
+    pub duplicate_of: Vec<String>,
+    /// What the items that named its ref are blocked by instead.
+    pub stands_for: String,
+}
+
+/// A new issue that passed `check_new`, ready to insert.
+struct CheckedIssue {
+    project: String,
+    title: String,
+    body: String,
+    evidence: String,
+    kind: String,
+    source: String,
+    priority: i64,
+    owner: String,
+    state: &'static str,
+    state_type: &'static str,
+}
+
+/// Inserts a checked issue and its blockers, numbering it in its project; returns its key.
+fn insert_issue(tx: &rusqlite::Connection, c: &CheckedIssue, blockers: &[String], ts: i64, actor: &Actor) -> Result<String> {
+    let number: i64 = tx.query_row(
+        "UPDATE project SET next_number = next_number + 1 WHERE key = ?1 RETURNING next_number - 1",
+        [&c.project],
+        |r| r.get(0),
+    )?;
+    let key = format!("{}-{number}", c.project);
+    tx.execute(
+        "INSERT INTO issue (key, origin, project, number, title, body, state, state_type, kind, source,
+           priority, evidence, created_at, updated_at, owner)
+         VALUES (?1, 'nitely', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, ?13)",
+        params![key, c.project, number, c.title, c.body, c.state, c.state_type, c.kind, c.source, c.priority, c.evidence, iso(ts), c.owner],
+    )?;
+    let filed = if c.owner == "human" { format!("Filed as {}, the human's own work", c.state) } else { format!("Filed as {}", c.state) };
+    tx.execute(
+        "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, ?2, ?3, 'issue_created', ?4)",
+        params![ts, actor.id(), key, filed],
+    )?;
+    for blocker in blockers {
+        tx.execute("INSERT INTO issue_blocker (issue_key, blocker_key, created_at) VALUES (?1, ?2, ?3)", params![key, blocker, ts])?;
+        tx.execute(
+            "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, ?2, ?3, 'blocker_added', ?4)",
+            params![ts, actor.id(), key, format!("Blocked by {blocker}")],
+        )?;
+    }
+    Ok(key)
+}
+
 const ISSUE_COLUMNS: &str = "key, origin, project, title, body, url, state, state_type, kind, source,
     priority, labels, evidence, claimed_by, created_at, updated_at, owner";
 
@@ -447,6 +530,132 @@ impl Db {
     // ----- issues -----
 
     pub fn create_issue(&mut self, new: &NewIssue, actor: &Actor) -> Result<IssueRecord> {
+        let checked = self.check_new(new)?;
+        let blockers = self.native_blockers(&new.blocked_by)?;
+        if !new.allow_similar {
+            let similar = self.likely_duplicates(&checked.project, new)?;
+            if !similar.is_empty() {
+                let listed: Vec<String> = similar.iter().map(|i| format!("{} {}", i.key, i.title)).collect();
+                bail!("possible duplicates (file anyway with allow_similar):\n  {}", listed.join("\n  "));
+            }
+        }
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let key = insert_issue(&tx, &checked, &blockers, now(), actor)?;
+        tx.commit()?;
+        self.issue(&key)?.context("issue vanished after insert")
+    }
+
+    /// Files a batch of issues in one transaction, in dependency order: an item's `blocked_by` may
+    /// name another item's ref as well as an existing issue. Unknown refs, cycles and invalid items
+    /// refuse the whole batch before anything is filed. An item that looks like an open issue (or
+    /// an earlier item of the batch) is skipped unless it allows similar; items that named it are
+    /// blocked by the issue it duplicates instead.
+    pub fn create_issues(&mut self, items: &[BatchItem], actor: &Actor) -> Result<BatchFiled> {
+        if items.is_empty() {
+            bail!("give at least one issue");
+        }
+        let refs: Vec<&str> = items.iter().map(|i| i.local_ref.trim()).collect();
+        for (n, r) in refs.iter().enumerate() {
+            if r.is_empty() {
+                bail!("item {} has no ref; give every item a ref the others can name in blocked_by", n + 1);
+            }
+            if refs[..n].contains(r) {
+                bail!("two items have the ref {r}");
+            }
+        }
+        let index = |name: &str| refs.iter().position(|r| *r == name.trim());
+
+        // Check every item, and split its blockers into refs of this batch and existing issues.
+        let mut checked = Vec::with_capacity(items.len());
+        let mut local: Vec<Vec<usize>> = Vec::with_capacity(items.len());
+        let mut existing: Vec<Vec<String>> = Vec::with_capacity(items.len());
+        for (n, item) in items.iter().enumerate() {
+            let r = refs[n];
+            checked.push(self.check_new(&item.issue).with_context(|| format!("item {r}"))?);
+            let (mut mine, mut theirs) = (Vec::new(), Vec::new());
+            for b in &item.issue.blocked_by {
+                match index(b) {
+                    Some(i) if i == n => bail!("item {r} cannot block itself"),
+                    Some(i) if !mine.contains(&i) => mine.push(i),
+                    Some(_) => {}
+                    None => theirs.push(b.clone()),
+                }
+            }
+            let theirs = self
+                .native_blockers(&theirs)
+                .with_context(|| format!("item {r}: blocked_by names neither a ref of this batch nor an existing issue"))?;
+            local.push(mine);
+            existing.push(theirs);
+        }
+
+        // Dependency order (Kahn's), keeping the given order among items that are ready together.
+        let mut order: Vec<usize> = Vec::with_capacity(items.len());
+        let mut placed = vec![false; items.len()];
+        while order.len() < items.len() {
+            match (0..items.len()).find(|&i| !placed[i] && local[i].iter().all(|&b| placed[b])) {
+                Some(i) => {
+                    placed[i] = true;
+                    order.push(i);
+                }
+                None => {
+                    let stuck: Vec<&str> = (0..items.len()).filter(|&i| !placed[i]).map(|i| refs[i]).collect();
+                    bail!("the blockers of {} wait on each other in a cycle; nothing was filed", stuck.join(", "));
+                }
+            }
+        }
+
+        // Duplicates of open issues are found before the transaction; of earlier items, as it goes.
+        let mut duplicates: Vec<Vec<IssueRecord>> = Vec::with_capacity(items.len());
+        for (item, c) in items.iter().zip(&checked) {
+            duplicates.push(if item.issue.allow_similar { Vec::new() } else { self.likely_duplicates(&c.project, &item.issue)? });
+        }
+
+        let ts = now();
+        let mut out = BatchFiled::default();
+        // The key each ref stands for: the issue filed for it, or the one it duplicates.
+        let mut key_of: Vec<Option<String>> = vec![None; items.len()];
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for &i in &order {
+            let (item, c) = (&items[i], &checked[i]);
+            let earlier = if item.issue.allow_similar {
+                None
+            } else {
+                out.filed.iter().find(|f| f.project == c.project && title_similarity(&c.title, &f.title) >= SIMILAR_TITLE)
+            };
+            let dup_of: Vec<String> = match earlier {
+                Some(f) => vec![f.key.clone()],
+                None => duplicates[i].iter().map(|d| d.key.clone()).collect(),
+            };
+            if let Some(first) = dup_of.first() {
+                key_of[i] = Some(first.clone());
+                out.skipped.push(Skipped { local_ref: refs[i].to_string(), title: c.title.clone(), stands_for: first.clone(), duplicate_of: dup_of });
+                continue;
+            }
+            let mut blockers = existing[i].clone();
+            for &b in &local[i] {
+                let key = key_of[b].clone().context("a blocker was not filed before what it blocks")?;
+                if !blockers.contains(&key) {
+                    blockers.push(key);
+                }
+            }
+            let key = insert_issue(&tx, c, &blockers, ts, actor)?;
+            key_of[i] = Some(key.clone());
+            out.filed.push(Filed {
+                local_ref: refs[i].to_string(),
+                url: issue_link(&key),
+                key,
+                title: c.title.clone(),
+                project: c.project.clone(),
+                blocked_by: blockers,
+            });
+        }
+        tx.commit()?;
+        out.keys = refs.iter().zip(key_of).filter_map(|(r, k)| Some((r.to_string(), k?))).collect();
+        Ok(out)
+    }
+
+    /// Validates a new issue: everything but its blockers and the duplicate check.
+    fn check_new(&self, new: &NewIssue) -> Result<CheckedIssue> {
         let project = self
             .project(&new.project)?
             .with_context(|| format!("no project {}; create it with `nitely project create`", new.project))?;
@@ -463,7 +672,8 @@ impl Db {
         if !KINDS.contains(&new.kind.as_str()) {
             bail!("kind must be one of {}", KINDS.join(", "));
         }
-        if !SOURCES.contains(&new.source.as_str()) {
+        let source = if new.source == "andrew" { "human" } else { new.source.as_str() };
+        if !SOURCES.contains(&source) {
             bail!("source must be one of {}", SOURCES.join(", "));
         }
         if !(0..=4).contains(&new.priority) {
@@ -477,9 +687,24 @@ impl Db {
         if state == "Approved" {
             bail!("an issue cannot be filed as Approved");
         }
+        Ok(CheckedIssue {
+            project: project.key,
+            title: title.to_string(),
+            body: new.body.trim().to_string(),
+            evidence: new.evidence.trim().to_string(),
+            kind: new.kind.clone(),
+            source: source.to_string(),
+            priority: new.priority,
+            owner: owner.to_string(),
+            state,
+            state_type,
+        })
+    }
 
+    /// The keys of existing native issues, for blocked_by; refuses one that is missing or mirrored.
+    fn native_blockers(&self, keys: &[String]) -> Result<Vec<String>> {
         let mut blockers: Vec<String> = Vec::new();
-        for b in &new.blocked_by {
+        for b in keys {
             let blocker = self.issue(b.trim())?.with_context(|| format!("no issue {b} to be blocked by"))?;
             if blocker.origin != "nitely" {
                 bail!("{} is mirrored from {}, which drops it when it closes; only native issues can block", blocker.key, blocker.origin);
@@ -488,67 +713,13 @@ impl Db {
                 blockers.push(blocker.key);
             }
         }
+        Ok(blockers)
+    }
 
-        if !new.allow_similar {
-            let similar: Vec<String> = self
-                .list_issues(Some(&project.key), false)?
-                .into_iter()
-                .filter(|i| title_similarity(title, &i.title) >= SIMILAR_TITLE)
-                .map(|i| format!("{} {}", i.key, i.title))
-                .collect();
-            if !similar.is_empty() {
-                bail!(
-                    "possible duplicates (file anyway with allow_similar):\n  {}",
-                    similar.join("\n  ")
-                );
-            }
-        }
-
-        let ts = now();
-        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let number: i64 = tx.query_row(
-            "UPDATE project SET next_number = next_number + 1 WHERE key = ?1 RETURNING next_number - 1",
-            [&project.key],
-            |r| r.get(0),
-        )?;
-        let key = format!("{}-{number}", project.key);
-        tx.execute(
-            "INSERT INTO issue (key, origin, project, number, title, body, state, state_type, kind, source,
-               priority, evidence, created_at, updated_at, owner)
-             VALUES (?1, 'nitely', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, ?13)",
-            params![
-                key,
-                project.key,
-                number,
-                title,
-                new.body.trim(),
-                state,
-                state_type,
-                new.kind,
-                new.source,
-                new.priority,
-                new.evidence.trim(),
-                iso(ts),
-                owner
-            ],
-        )?;
-        let filed = if owner == "human" { format!("Filed as {state}, the human's own work") } else { format!("Filed as {state}") };
-        tx.execute(
-            "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, ?2, ?3, 'issue_created', ?4)",
-            params![ts, actor.id(), key, filed],
-        )?;
-        for blocker in &blockers {
-            tx.execute(
-                "INSERT INTO issue_blocker (issue_key, blocker_key, created_at) VALUES (?1, ?2, ?3)",
-                params![key, blocker, ts],
-            )?;
-            tx.execute(
-                "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, ?2, ?3, 'blocker_added', ?4)",
-                params![ts, actor.id(), key, format!("Blocked by {blocker}")],
-            )?;
-        }
-        tx.commit()?;
-        self.issue(&key)?.context("issue vanished after insert")
+    /// Open issues of `project` that a new issue likely duplicates.
+    fn likely_duplicates(&self, project: &str, new: &NewIssue) -> Result<Vec<IssueRecord>> {
+        let title = new.title.trim();
+        Ok(self.list_issues(Some(project), false)?.into_iter().filter(|i| title_similarity(title, &i.title) >= SIMILAR_TITLE).collect())
     }
 
     /// An issue by its key, or by a key from before its project changed its key (`OLD-12`).
@@ -1192,6 +1363,62 @@ mod tests {
         let own = db.create_issue(&own, &agent).unwrap();
         db.move_issue(&own.key, "In Progress", None, None, &Actor::Human).unwrap();
         assert_eq!(db.set_owner(&own.key, "agent", &Actor::Human).unwrap().state, "Todo");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn files_a_batch_in_dependency_order_with_local_refs() {
+        let (mut db, dir) = db();
+        db.create_project("NIT", "Nitely").unwrap();
+        let agent = Actor::Agent("claude:a".into());
+        let existing = db.create_issue(&new("Wire the settings page"), &agent).unwrap();
+        let item = |r: &str, title: &str, blocked_by: &[&str]| BatchItem {
+            local_ref: r.into(),
+            issue: NewIssue { blocked_by: blocked_by.iter().map(|b| b.to_string()).collect(), ..new(title) },
+        };
+
+        // "ui" comes first but waits on "api", which waits on "schema" and an existing issue.
+        let out = db
+            .create_issues(
+                &[
+                    item("ui", "Show invoices in the account view", &["api"]),
+                    item("api", "Invoice endpoint for the account", &["schema", &existing.key]),
+                    item("schema", "Store invoices with their line items", &[]),
+                ],
+                &agent,
+            )
+            .unwrap();
+        assert_eq!(out.filed.iter().map(|f| f.local_ref.as_str()).collect::<Vec<_>>(), ["schema", "api", "ui"]);
+        let key = |r: &str| out.keys[r].clone();
+        assert_eq!(db.issue(&key("api")).unwrap().unwrap().blocked_by, vec![existing.key.clone(), key("schema")]);
+        assert_eq!(db.issue(&key("ui")).unwrap().unwrap().blocked_by, vec![key("api")]);
+        assert!(out.skipped.is_empty());
+
+        // Cycles, unknown refs, a missing ref and an invalid item file nothing.
+        let before = db.list_issues(Some("NIT"), true).unwrap().len();
+        let cycle = db.create_issues(&[item("a", "Alpha thing to build", &["b"]), item("b", "Beta thing to build", &["a"])], &agent);
+        assert!(cycle.unwrap_err().to_string().contains("cycle"));
+        let unknown = db.create_issues(&[item("a", "Alpha thing to build", &["nope"])], &agent);
+        assert!(format!("{:#}", unknown.unwrap_err()).contains("no issue nope"));
+        assert!(db.create_issues(&[item("", "Alpha thing to build", &[])], &agent).is_err());
+        let mut bad = item("b", "Beta thing to build", &[]);
+        bad.issue.kind = "chore".into();
+        assert!(db.create_issues(&[item("a", "Alpha thing to build", &[]), bad], &agent).is_err());
+        assert_eq!(db.list_issues(Some("NIT"), true).unwrap().len(), before, "nothing was filed");
+
+        // A likely duplicate is skipped, and what named it waits on the issue it duplicates.
+        let out = db
+            .create_issues(&[item("dup", "Wire up the settings page", &[]), item("next", "Settings page keyboard shortcuts", &["dup"])], &agent)
+            .unwrap();
+        assert_eq!(out.skipped.len(), 1);
+        assert_eq!((out.skipped[0].local_ref.as_str(), out.skipped[0].stands_for.as_str()), ("dup", existing.key.as_str()));
+        assert_eq!(db.issue(&out.keys["next"]).unwrap().unwrap().blocked_by, vec![existing.key.clone()]);
+        // ...unless it allows similar; and a near-copy of an earlier item in the batch is skipped too.
+        let mut forced = item("again", "Wire up the settings page", &[]);
+        forced.issue.allow_similar = true;
+        let out = db.create_issues(&[forced, item("twice", "Wire up the settings pages", &[])], &agent).unwrap();
+        assert_eq!(out.filed.len(), 1);
+        assert_eq!(out.skipped[0].stands_for, out.keys["again"]);
         std::fs::remove_dir_all(dir).ok();
     }
 

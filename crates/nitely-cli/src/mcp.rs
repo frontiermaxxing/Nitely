@@ -5,7 +5,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use nitely_core::db::NewEvent;
-use nitely_core::issues::{branch_name, KINDS, OWNERS, SOURCES, STATES};
+use nitely_core::issues::{branch_name, BatchItem, KINDS, OWNERS, SOURCES, STATES};
 use nitely_core::playbook::{self, Playbook};
 use nitely_core::{paths, resolve_project, Actor, Config, Db, NewIssue};
 use serde_json::{json, Value};
@@ -280,6 +280,25 @@ fn tools() -> Value {
             } }
         },
         {
+            "name": "file_issues",
+            "description": "File many issues in one call, e.g. to seed a board. Give each a ref; its blocked_by may name refs of the same batch as well as existing issues. Nitely files the batch in one transaction, blockers first; an unknown ref, a cycle or an invalid item files nothing. An item that looks like an open issue (or an earlier item) is skipped, unless it sets allow_similar, and items that named it are blocked by that issue instead. Returns each ref's key, what was filed and what was skipped.",
+            "inputSchema": { "type": "object", "required": ["issues"], "properties": {
+                "project": { "type": "string", "description": "Project key for every item; defaults to this repo's project." },
+                "issues": { "type": "array", "items": { "type": "object", "required": ["ref", "title", "kind", "body", "evidence"], "properties": {
+                    "ref": { "type": "string", "description": "A name for this item that other items' blocked_by can use, e.g. \"schema\"." },
+                    "title": { "type": "string" },
+                    "kind": { "type": "string", "enum": KINDS },
+                    "body": { "type": "string" },
+                    "evidence": { "type": "string" },
+                    "priority": { "type": "integer", "minimum": 0, "maximum": 4 },
+                    "state": { "type": "string", "enum": ["Todo", "Backlog", "Needs You"] },
+                    "owner": { "type": "string", "enum": OWNERS },
+                    "allow_similar": { "type": "boolean" },
+                    "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Refs of this batch or existing issue keys." }
+                } } }
+            } }
+        },
+        {
             "name": "update_issue",
             "description": "Move an issue, change what blocks it, or make it the human's own work (owner human: next_task skips it, and an open issue goes to Needs You; only the human hands it back). Done needs evidence (what ran and what it showed); Canceled and Duplicate need a reason. Approved is set only by the human; move to Needs You and ask instead. An issue with an open blocker waits: next_task skips it until every blocker is Done or Canceled.",
             "inputSchema": { "type": "object", "required": ["key"], "properties": {
@@ -450,6 +469,23 @@ fn task_dir(config: &Config, db: &Db, args: &Value, cwd: &str) -> Result<String>
     }
 }
 
+/// A file_issue call, or one item of file_issues, as a new issue in `project`.
+fn new_issue(args: &Value, project: &str, vendor: &str) -> Result<NewIssue> {
+    Ok(NewIssue {
+        project: project.to_string(),
+        title: req(args, "title")?.into(),
+        kind: req(args, "kind")?.into(),
+        body: req(args, "body")?.into(),
+        evidence: req(args, "evidence")?.into(),
+        source: if SOURCES.contains(&vendor) { vendor.to_string() } else { "claude".into() },
+        priority: args.get("priority").and_then(Value::as_i64).unwrap_or(0),
+        allow_similar: args.get("allow_similar").and_then(Value::as_bool).unwrap_or(false),
+        state: str_arg(args, "state").map(str::to_string),
+        owner: str_arg(args, "owner").map(str::to_string),
+        blocked_by: keys_arg(args, "blocked_by"),
+    })
+}
+
 /// `session` is the session a report or ask counts toward (see `Server::session`).
 fn run_tool(server: &Server, name: &str, args: &Value, session: &str) -> Result<Value> {
     let config = Config::load()?;
@@ -553,24 +589,20 @@ fn run_tool(server: &Server, name: &str, args: &Value, session: &str) -> Result<
         "mark_setup_complete" => json!(db.mark_setup_complete(&project(&db)?, req(args, "sha")?, &actor)?),
         "file_issue" => {
             let project = project(&db)?;
-            let source = if SOURCES.contains(&server.vendor.as_str()) { server.vendor.clone() } else { "claude".into() };
-            let issue = db.create_issue(
-                &NewIssue {
-                    project,
-                    title: req(args, "title")?.into(),
-                    kind: req(args, "kind")?.into(),
-                    body: req(args, "body")?.into(),
-                    evidence: req(args, "evidence")?.into(),
-                    source,
-                    priority: args.get("priority").and_then(Value::as_i64).unwrap_or(0),
-                    allow_similar: args.get("allow_similar").and_then(Value::as_bool).unwrap_or(false),
-                    state: str_arg(args, "state").map(str::to_string),
-                    owner: str_arg(args, "owner").map(str::to_string),
-                    blocked_by: keys_arg(args, "blocked_by"),
-                },
-                &actor,
-            )?;
-            json!(issue)
+            json!(db.create_issue(&new_issue(args, &project, &server.vendor)?, &actor)?)
+        }
+        "file_issues" => {
+            let project = project(&db)?;
+            let list = args.get("issues").and_then(Value::as_array).context("issues must be a list")?;
+            let items = list
+                .iter()
+                .enumerate()
+                .map(|(n, item)| {
+                    let issue = new_issue(item, &project, &server.vendor).with_context(|| format!("item {}", n + 1))?;
+                    Ok(BatchItem { local_ref: str_arg(item, "ref").unwrap_or_default().to_string(), issue })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            json!(db.create_issues(&items, &actor)?)
         }
         "update_issue" => {
             let key = req(args, "key")?;
