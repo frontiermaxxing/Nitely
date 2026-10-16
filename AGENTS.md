@@ -24,6 +24,11 @@ Nitely tracks its own build. Its backlog is the **NIT** project in Nitely, reach
    `nitely land NIT-n`). It lands one branch at a time: rebase onto `main`, check the review still
    covers exactly this change, gate, fast-forward, push, clean up, and move the issue to Done. On a
    rebase conflict, resolve it in the worktree, then submit and land again.
+8. Nitely is public. Code, UI text, CLI help, sample data, tests, comments, docs and commit messages
+   never name another project Andrew works on, or its paths, branches, accounts or files: use
+   made-up examples (`C:\Code\my-app`, "Acme", project key `APP`). An issue on the board may mention
+   another repo as background; the code and docs describe the general case. Nitely's own repo, NIT
+   project and paths are fine where they belong. User-facing text speaks to "you", never to Andrew.
 
 ## Build and test
 
