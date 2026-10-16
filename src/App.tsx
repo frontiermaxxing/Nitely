@@ -6,6 +6,7 @@ import { Inbox } from "./Inbox";
 import { Now } from "./Now";
 import { Backlog } from "./Backlog";
 import { IssuePanel } from "./IssuePanel";
+import { AddProject } from "./AddProject";
 import { nowSecs } from "./util";
 
 // The backend pushes CHANGED_EVENT the moment the database or a repo's refs change. Uncommitted
@@ -13,7 +14,7 @@ import { nowSecs } from "./util";
 const FALLBACK_MS = 30000;
 const CHANGED_EVENT = "nitely://changed";
 
-export type View = { kind: "inbox" } | { kind: "now" } | { kind: "project"; key: string };
+export type View = { kind: "inbox" } | { kind: "now" } | { kind: "project"; key: string } | { kind: "add" };
 
 export function App() {
   const [board, setBoard] = useState<Board | null>(null);
@@ -75,13 +76,23 @@ export function App() {
             count={p.open_issues}
           />
         ))}
-        {projects.length === 0 && <p className="nav-empty">nitely project create NIT Nitely</p>}
+        <button className={`nav-item nav-add${view.kind === "add" ? " active" : ""}`} onClick={() => setView({ kind: "add" })}>
+          <span className="nav-label">+ Add project</span>
+        </button>
       </nav>
 
       <main className="content">
         {error && <p className="error banner">{error}</p>}
         {view.kind === "inbox" && board && <Inbox board={board} now={now} onOpenIssue={setOpenIssue} onChanged={changed} />}
         {view.kind === "now" && board && <Now board={board} now={now} onOpenIssue={setOpenIssue} onChanged={changed} />}
+        {view.kind === "add" && (
+          <AddProject
+            onAdded={(key) => {
+              changed();
+              setView({ kind: "project", key });
+            }}
+          />
+        )}
         {view.kind === "project" && (
           <Backlog
             project={projects.find((p) => p.key === view.key)}

@@ -183,14 +183,30 @@ impl Default for WorktreeRules {
 }
 
 impl Playbook {
-    /// The repo's playbook, or the defaults when it has none.
+    /// The repo's playbook: its own `.nitely/playbook.toml` when it has one, else the one Nitely
+    /// keeps for it (written when the repo was connected), else the defaults.
     pub fn load(repo_root: &Path) -> Result<Playbook> {
-        let path = repo_root.join(PLAYBOOK_PATH);
-        if !path.exists() {
-            return Ok(Playbook::default());
-        }
+        let Some(path) = Playbook::path_for(repo_root) else { return Ok(Playbook::default()) };
         let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         Playbook::parse(&text).with_context(|| format!("in {}", path.display()))
+    }
+
+    /// Where the repo's playbook is read from, if it has one.
+    pub fn path_for(repo_root: &Path) -> Option<PathBuf> {
+        let in_repo = repo_root.join(PLAYBOOK_PATH);
+        if in_repo.exists() {
+            return Some(in_repo);
+        }
+        let config = crate::Config::load().ok()?;
+        let root = crate::paths::normalize(&repo_root.to_string_lossy());
+        let repo = config.repos.iter().find(|r| crate::paths::normalize(&r.root) == root)?;
+        Some(Playbook::stored_path(&repo.name)).filter(|p| p.exists())
+    }
+
+    /// The playbook Nitely keeps for a connected repo that has none of its own.
+    pub fn stored_path(repo_name: &str) -> PathBuf {
+        let safe: String = repo_name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect();
+        crate::paths::data_dir().join("playbooks").join(format!("{safe}.toml"))
     }
 
     pub fn parse(text: &str) -> Result<Playbook> {

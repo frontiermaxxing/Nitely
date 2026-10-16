@@ -79,6 +79,23 @@ async fn answer_ask(id: i64, answer: String) -> Result<Ask, String> {
     db()?.answer_ask(id, &answer, &ME).map_err(err)
 }
 
+/// What adding a repo would do: its project, playbook, and every agent config change.
+#[tauri::command]
+async fn connect_plan(path: String, key: Option<String>, name: Option<String>) -> Result<nitely_core::connect::ConnectPlan, String> {
+    let config = Config::load().map_err(err)?;
+    nitely_core::connect::plan(&db()?, &config, &path, key.as_deref(), name.as_deref()).map_err(err)
+}
+
+/// Adds the repo. The plan is recomputed here rather than taken from the page, so what is written
+/// is what Nitely decides now.
+#[tauri::command]
+async fn connect_apply(path: String, key: Option<String>, name: Option<String>) -> Result<nitely_core::connect::Applied, String> {
+    let mut config = Config::load().map_err(err)?;
+    let db = db()?;
+    let plan = nitely_core::connect::plan(&db, &config, &path, key.as_deref(), name.as_deref()).map_err(err)?;
+    nitely_core::connect::apply(&db, &mut config, &plan).map_err(err)
+}
+
 fn run_sync() -> anyhow::Result<remote::SyncReport> {
     let config = Config::load()?;
     let mut db = Db::open_default()?;
@@ -120,6 +137,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let handle = app.handle().clone();
             std::thread::spawn(move || watch(handle));
@@ -133,7 +151,9 @@ pub fn run() {
             issues,
             issue_detail,
             move_issue,
-            answer_ask
+            answer_ask,
+            connect_plan,
+            connect_apply
         ])
         .run(tauri::generate_context!())
         .expect("error while running Nitely");

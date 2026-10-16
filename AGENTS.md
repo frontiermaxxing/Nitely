@@ -35,7 +35,7 @@ Nitely tracks its own build. Its backlog is the **NIT** project in Nitely, reach
 ## Layout
 
 - `crates/nitely-core`: database, issues and their rules, git reader, playbooks (`playbook.rs`),
-  GitHub/Bitbucket/Linear sync, snapshot
+  GitHub/Bitbucket/Linear sync, snapshot, `connect.rs` (adding a repo and wiring up its agents)
 - `crates/nitely-cli`: the `nitely` binary, including `nitely mcp` (`src/mcp.rs`)
 - `src-tauri`: the desktop shell and its commands; `src`: the React frontend
 - `docs/vision.md` is the end state and build order; `docs/design.md` is milestone 1
