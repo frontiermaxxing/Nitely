@@ -1175,6 +1175,7 @@ mod tests {
         assert!(db.set_owner(&code.key, "agent", &agent).unwrap_err().to_string().contains("only the human"));
         let back = db.set_owner(&code.key, "agent", &Actor::Human).unwrap();
         assert_eq!((back.owner.as_str(), back.state.as_str()), ("agent", "Todo"), "handed back for the next agent");
+        assert_eq!(back.track.station, "todo", "the track follows the moves");
         assert_eq!(db.next_task("NIT", "claude:a").unwrap().unwrap().key, code.key);
 
         // A Backlog issue stays in Backlog when it becomes the human's.
@@ -1184,7 +1185,6 @@ mod tests {
         assert_eq!(db.set_owner(&later.key, "human", &agent).unwrap().state, "Backlog");
         let kinds: Vec<String> = db.timeline(&code.key).unwrap().into_iter().map(|t| t.kind).collect();
         assert_eq!(kinds.iter().filter(|k| *k == "owner_changed").count(), 2);
-        assert_eq!(db.issue(&code.key).unwrap().unwrap().track.station, "todo", "the track follows the moves");
 
         // The human took it up themselves (In Progress); handing it back still readies it for agents.
         let mut own = new("Order the build server");
