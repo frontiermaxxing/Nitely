@@ -412,7 +412,7 @@ details summary { cursor: pointer; color: var(--fg-2); }
 .own-titlebar .sidebar { padding-top: 0; }
 .own-titlebar .brand { padding-top: 18px; }
 .own-titlebar .brand > * { pointer-events: none; }
-.titlebar-drag { position: fixed; top: 0; left: 0; right: 138px; height: var(--titlebar-h); z-index: 25; }
+.titlebar-drag { position: fixed; top: 0; left: 232px; right: 138px; height: var(--titlebar-h); z-index: 25; }
 .own-titlebar .content { margin-top: var(--titlebar-h); }
 .own-titlebar .panel-veil, .own-titlebar .palette-veil { top: var(--titlebar-h); }
 .caption { position: fixed; top: 0; right: 0; z-index: 30; display: flex; }
