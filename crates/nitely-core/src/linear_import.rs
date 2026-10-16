@@ -646,7 +646,7 @@ mod tests {
         assert_eq!((done.created, done.comments), (3, 2));
         let a2 = db.issue("APP-2").unwrap().unwrap();
         assert_eq!((a2.origin.as_str(), a2.state.as_str(), a2.kind.as_deref(), a2.priority), ("nitely", "Needs You", Some("bug"), 1));
-        assert_eq!(a2.labels, ["Bug", "login"]);
+        assert_eq!(a2.labels, ["bug", "login"], "labels read in Nitely's normal form");
         let timeline = db.timeline("APP-2").unwrap();
         assert_eq!(timeline.iter().map(|t| t.kind.as_str()).collect::<Vec<_>>(), ["issue_created", "note", "note", "imported"]);
         assert_eq!(timeline[1].actor, "linear:someone");

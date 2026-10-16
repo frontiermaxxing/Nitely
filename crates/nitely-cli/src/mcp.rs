@@ -675,6 +675,9 @@ fn run_tool(server: &Server, name: &str, args: &Value, session: &str) -> Result<
             if str_arg(args, "state").is_none() && add.is_empty() && remove.is_empty() && owner.is_none() && add_labels.is_empty() && remove_labels.is_empty() {
                 bail!("give a state, blocked_by, remove_blocked_by, labels, remove_labels or owner");
             }
+            // Refuse bad labels before anything changes.
+            nitely_core::issues::normalize_labels(&add_labels)?;
+            nitely_core::issues::normalize_labels(&remove_labels)?;
             if owner.is_some_and(|o| o != "human") {
                 bail!("only the human hands their own work back to agents; `ask` them if an agent should do {key}");
             }

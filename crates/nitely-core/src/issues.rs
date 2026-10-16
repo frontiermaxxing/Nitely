@@ -338,6 +338,10 @@ fn issue_from_row(r: &Row) -> rusqlite::Result<IssueRecord> {
     // A native issue's link is always the app's own. What is stored for it is where it came from
     // (an imported Linear issue's address), shown beside it but never handed out as its link.
     let (url, external_url) = if origin == "nitely" { (issue_link(&key), stored) } else { (stored, String::new()) };
+    // Native labels read in their normal form (an import may have stored "Bug"); a mirror's stay as
+    // its tracker spells them.
+    let labels: String = r.get(11)?;
+    let labels = if origin == "nitely" { stored_labels(&labels) } else { serde_json::from_str(&labels).unwrap_or_default() };
     Ok(IssueRecord {
         key,
         origin,
@@ -351,7 +355,7 @@ fn issue_from_row(r: &Row) -> rusqlite::Result<IssueRecord> {
         kind: r.get(8)?,
         source: r.get(9)?,
         priority: r.get(10)?,
-        labels: serde_json::from_str(&r.get::<_, String>(11)?).unwrap_or_default(),
+        labels,
         evidence: r.get(12)?,
         claimed_by: r.get(13)?,
         created_at: r.get(14)?,
@@ -484,8 +488,21 @@ pub fn normalize_label(label: &str) -> Option<String> {
     (!out.is_empty() && out.chars().count() <= 40).then_some(out)
 }
 
+/// An issue's stored labels in their normal form, each once.
+fn stored_labels(json: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for l in serde_json::from_str::<Vec<String>>(json).unwrap_or_default() {
+        if let Some(n) = normalize_label(&l) {
+            if !out.contains(&n) {
+                out.push(n);
+            }
+        }
+    }
+    out
+}
+
 /// Normalized labels, each once, in the order given; refuses one with nothing usable in it.
-fn normalize_labels(labels: &[String]) -> Result<Vec<String>> {
+pub fn normalize_labels(labels: &[String]) -> Result<Vec<String>> {
     let mut out: Vec<String> = Vec::new();
     for l in labels {
         let n = normalize_label(l).with_context(|| format!("\"{l}\" is not a usable label: give a short word such as ios or billing"))?;
@@ -1073,34 +1090,41 @@ impl Db {
 
     /// Adds and removes labels of a native issue. Removing one it does not carry is not an error.
     pub fn change_labels(&mut self, key: &str, add: &[String], remove: &[String], actor: &Actor) -> Result<IssueRecord> {
-        let issue = self.issue(key)?.with_context(|| format!("no issue {key}"))?;
-        if issue.origin != "nitely" {
-            bail!("{} is mirrored from {}; change its labels there", issue.key, issue.origin);
-        }
         let (add, remove) = (normalize_labels(add)?, normalize_labels(remove)?);
-        let mut labels: Vec<String> = issue.labels.iter().filter(|l| !remove.contains(l)).cloned().collect();
+        let key = self.current_key(key)?;
+        // Read and write under one immediate transaction, so two agents labelling the same issue
+        // at once both keep their changes.
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (key, origin, stored): (String, String, String) = tx
+            .query_row("SELECT key, origin, labels FROM issue WHERE key = ?1 COLLATE NOCASE", [&key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .optional()?
+            .with_context(|| format!("no issue {key}"))?;
+        if origin != "nitely" {
+            bail!("{key} is mirrored from {origin}; change its labels there");
+        }
+        // Labels stored before they were normalized (an import's "Bug") count as their normal form.
+        let before: Vec<String> = stored_labels(&stored);
+        let mut labels: Vec<String> = before.iter().filter(|l| !remove.contains(l)).cloned().collect();
         for l in &add {
             if !labels.contains(l) {
                 labels.push(l.clone());
             }
         }
-        if labels == issue.labels {
-            return Ok(issue);
+        let raw: Vec<String> = serde_json::from_str(&stored).unwrap_or_default();
+        if labels != raw {
+            let added: Vec<String> = labels.iter().filter(|l| !before.contains(l)).map(|l| format!("+{l}")).collect();
+            let removed: Vec<String> = before.iter().filter(|l| !labels.contains(l)).map(|l| format!("-{l}")).collect();
+            let ts = now();
+            tx.execute("UPDATE issue SET labels = ?2, updated_at = ?3 WHERE key = ?1", params![key, serde_json::to_string(&labels)?, iso(ts)])?;
+            if !added.is_empty() || !removed.is_empty() {
+                tx.execute(
+                    "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, ?2, ?3, 'labels_changed', ?4)",
+                    params![ts, actor.id(), key, format!("Labels {}", [added, removed].concat().join(" "))],
+                )?;
+            }
         }
-        let added: Vec<String> = labels.iter().filter(|l| !issue.labels.contains(l)).map(|l| format!("+{l}")).collect();
-        let removed: Vec<String> = issue.labels.iter().filter(|l| !labels.contains(l)).map(|l| format!("-{l}")).collect();
-        let ts = now();
-        let tx = self.conn.transaction()?;
-        tx.execute(
-            "UPDATE issue SET labels = ?2, updated_at = ?3 WHERE key = ?1",
-            params![issue.key, serde_json::to_string(&labels)?, iso(ts)],
-        )?;
-        tx.execute(
-            "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, ?2, ?3, 'labels_changed', ?4)",
-            params![ts, actor.id(), issue.key, format!("Labels {}", [added, removed].concat().join(" "))],
-        )?;
         tx.commit()?;
-        self.issue(&issue.key)?.context("issue vanished")
+        self.issue(&key)?.context("issue vanished")
     }
 
     /// Makes an issue the human's own work, or hands it back to agents. Any agent may give an issue
@@ -1508,6 +1532,10 @@ mod tests {
         assert!(db.create_issue(&NewIssue { labels: vec!["!!".into()], ..new("Something unrelated to it") }, &agent).is_err());
         assert_eq!(db.project_labels("NIT").unwrap(), [("roku".to_string(), 2), ("billing".to_string(), 1)]);
 
+        // An import kept "Bug" as it was; it reads, filters and is removed as "bug".
+        db.conn.execute("UPDATE issue SET labels = '[\"Roku\",\"Bug\",\"billing\"]' WHERE key = ?1", [&a.key]).unwrap();
+        assert_eq!(db.issue(&a.key).unwrap().unwrap().labels, ["roku", "bug", "billing"]);
+        assert_eq!(db.change_labels(&a.key, &[], &["bug".into()], &agent).unwrap().labels, ["roku", "billing"]);
         let changed = db.change_labels(&a.key, &["Tizen".into()], &["billing".into(), "absent".into()], &agent).unwrap();
         assert_eq!(changed.labels, ["roku", "tizen"]);
         let last = db.timeline(&a.key).unwrap().pop().unwrap();
