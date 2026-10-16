@@ -10,12 +10,18 @@ use nitely_core::playbook::{self, Playbook};
 use nitely_core::{paths, resolve_project, Actor, Config, Db, NewIssue};
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::time::SystemTime;
 
 const SUPPORTED_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
 struct Server {
     vendor: String,
     cwd: String,
+    /// The executable this server started from, and how that file looked then. When `nitely
+    /// install` puts a new build there, tool calls go to it (see `forward`).
+    exe: Option<(PathBuf, (u64, SystemTime))>,
 }
 
 impl Server {
@@ -30,7 +36,8 @@ impl Server {
 }
 
 pub fn serve() -> Result<()> {
-    let mut server = Server { vendor: "agent".into(), cwd: std::env::current_dir()?.to_string_lossy().into_owned() };
+    let exe = std::env::current_exe().ok().and_then(|p| nitely_core::install::stamp(&p).map(|s| (p, s)));
+    let mut server = Server { vendor: "agent".into(), cwd: std::env::current_dir()?.to_string_lossy().into_owned(), exe };
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout().lock();
     for line in stdin.lock().lines() {
@@ -60,7 +67,7 @@ fn handle(server: &mut Server, msg: &Value) -> Option<Value> {
         "initialize" => Ok(initialize(server, &params)),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tools() })),
-        "tools/call" => Ok(call_tool(server, &params)),
+        "tools/call" => Ok(forward(server, &params).unwrap_or_else(|| call_tool(server, &params))),
         _ => return Some(error_response(id, -32601, &format!("method not found: {method}"))),
     };
     Some(match result {
@@ -225,6 +232,49 @@ fn call_tool(server: &Server, params: &Value) -> Value {
         Ok(v) => json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&v).unwrap_or_default() }] }),
         Err(e) => json!({ "content": [{ "type": "text", "text": format!("{e:#}") }], "isError": true }),
     }
+}
+
+/// When the nitely this server started from has been replaced by a new build since (`nitely
+/// install`, which land runs for Nitely itself), runs the call in that build: an agent that has
+/// been running for hours gets the landed fixes without restarting. None when the build is the
+/// same, or the new one cannot take the call; then it runs here.
+fn forward(server: &Server, params: &Value) -> Option<Value> {
+    let (exe, stamp) = server.exe.as_ref()?;
+    if nitely_core::install::stamp(exe).as_ref() == Some(stamp) {
+        return None;
+    }
+    let mut cmd = Command::new(exe);
+    cmd.arg("mcp-call").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+    if std::path::Path::new(&server.cwd).is_dir() {
+        cmd.current_dir(&server.cwd);
+    }
+    let mut child = cmd.spawn().ok()?;
+    let request = json!({ "vendor": server.vendor, "cwd": server.cwd, "params": params });
+    child.stdin.take()?.write_all(request.to_string().as_bytes()).ok()?;
+    let out = child.wait_with_output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let mut result: Value = serde_json::from_slice(&out.stdout).ok()?;
+    // Says which build answered, for whoever debugs an agent's session.
+    result["_meta"] = json!({ "nitely_forwarded": exe.to_string_lossy() });
+    Some(result)
+}
+
+/// `nitely mcp-call`: runs one tool call given on stdin as {vendor, cwd, params} and prints its
+/// result. An older `nitely mcp` forwards calls here once a newer build is installed.
+pub fn call_once() -> Result<()> {
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let request: Value = serde_json::from_str(&input).context("mcp-call takes {vendor, cwd, params} on stdin")?;
+    let server = Server {
+        vendor: str_arg(&request, "vendor").unwrap_or("agent").to_string(),
+        cwd: req(&request, "cwd")?.to_string(),
+        exe: None,
+    };
+    let result = call_tool(&server, request.get("params").unwrap_or(&json!({})));
+    println!("{}", serde_json::to_string(&result)?);
+    Ok(())
 }
 
 fn str_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
@@ -408,7 +458,7 @@ mod tests {
 
     #[test]
     fn initialize_negotiates_and_detects_vendor() {
-        let mut s = Server { vendor: "agent".into(), cwd: "/w".into() };
+        let mut s = Server { vendor: "agent".into(), cwd: "/w".into(), exe: None };
         let r = handle(
             &mut s,
             &json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize",

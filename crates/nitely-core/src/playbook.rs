@@ -30,6 +30,17 @@ pub struct Playbook {
     pub review: crate::review::ReviewRules,
     #[serde(default)]
     pub approval: ApprovalRules,
+    #[serde(default)]
+    pub land: LandRules,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LandRules {
+    /// Run in the main checkout after a change lands, in order, when what landed matches (e.g.
+    /// rebuild and install a tool the agents use). A failure is a warning: the land stands.
+    #[serde(default)]
+    pub after: Vec<GateStep>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -314,7 +325,7 @@ pub(crate) fn shell_command(command: &str) -> Command {
 }
 
 /// Runs one playbook command through the platform shell.
-fn run_shell(command: &str, dir: &Path) -> Result<(bool, String, u64)> {
+pub(crate) fn run_shell(command: &str, dir: &Path) -> Result<(bool, String, u64)> {
     let mut cmd = shell_command(command);
     let started = Instant::now();
     let out = cmd.current_dir(dir).output().with_context(|| format!("running {command}"))?;
@@ -475,7 +486,7 @@ pub fn run_gate(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<&s
 }
 
 /// Fills `{main}` (the main checkout), `{worktree}` and `{base}` in a playbook command.
-fn expand(command: &str, main: &Path, worktree: &Path, base: &str) -> String {
+pub(crate) fn expand(command: &str, main: &Path, worktree: &Path, base: &str) -> String {
     let slash = |p: &Path| p.to_string_lossy().replace('\\', "/");
     command.replace("{main}", &slash(main)).replace("{worktree}", &slash(worktree)).replace("{base}", base)
 }

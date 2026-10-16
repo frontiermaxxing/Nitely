@@ -10,6 +10,7 @@ pub mod db;
 pub mod git;
 pub mod github;
 pub mod hook;
+pub mod install;
 pub mod land;
 pub mod issues;
 pub mod paths;

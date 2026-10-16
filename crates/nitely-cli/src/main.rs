@@ -27,6 +27,20 @@ enum Cmd {
     },
     /// Run the MCP server on stdio (register it as `nitely mcp` in your agent's MCP config).
     Mcp,
+    /// Run one MCP tool call given on stdin; a running `nitely mcp` forwards calls here once a
+    /// newer build is installed.
+    #[command(hide = true)]
+    McpCall,
+    /// Put this build (or --from) where agents run `nitely` from, even while agents run the old
+    /// one: on Windows the running one is moved aside, and old copies nothing runs are deleted.
+    Install {
+        /// The build to install; this executable by default.
+        #[arg(long)]
+        from: Option<std::path::PathBuf>,
+        /// Where to put it; the `nitely` on PATH by default, else ~/.cargo/bin.
+        #[arg(long)]
+        to: Option<std::path::PathBuf>,
+    },
     /// Report what you are doing, from the current directory's worktree.
     Status {
         /// One line, e.g. "running test:gate".
@@ -266,6 +280,13 @@ fn main() {
             }
             return;
         }
+        Cmd::McpCall => {
+            if let Err(e) = mcp::call_once() {
+                eprintln!("nitely mcp-call: {e:#}");
+                std::process::exit(1);
+            }
+            return;
+        }
         _ => {}
     }
     if let Err(e) = run(cli.command) {
@@ -327,7 +348,15 @@ fn run(cmd: Cmd) -> Result<()> {
     // only in the app.
     let me = Actor::Agent("cli".into());
     match cmd {
-        Cmd::Hook { .. } | Cmd::Mcp => unreachable!(),
+        Cmd::Hook { .. } | Cmd::Mcp | Cmd::McpCall => unreachable!(),
+        Cmd::Install { from, to } => {
+            let from = match from {
+                Some(f) => f,
+                None => std::env::current_exe()?,
+            };
+            let to = to.or_else(nitely_core::install::default_target).ok_or_else(|| anyhow::anyhow!("no home folder; pass --to"))?;
+            print_json(&nitely_core::install::install(&from, &to)?)
+        }
         Cmd::Status { text, session } => {
             let cwd = cwd()?;
             let session_id = session.unwrap_or_else(|| format!("cli:{}", paths::normalize(&cwd)));

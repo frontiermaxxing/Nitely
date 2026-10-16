@@ -37,6 +37,9 @@ pub struct Landed {
     /// Processes that kept the worktree from being removed (a dev server, a build, a shell).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub held_by: Vec<crate::procs::Holder>,
+    /// The playbook's `[land] after` steps, run in the main checkout once it landed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub after: Vec<playbook::CommandResult>,
     pub error: Option<String>,
     /// Issues that waited on this one and have no open blocker left.
     pub unblocked: Vec<String>,
@@ -65,6 +68,10 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
     let lock = Lock::take(&common.join(LOCK_FILE), &issue.key, opts.break_lock)?;
     let result = run(db, &root, &pb, &issue.key, opts, actor, &mut report);
     drop(lock);
+    // After the lock: a long rebuild must not hold up the next land.
+    if result.is_ok() && report.landed {
+        after_land(&root, &pb, &mut report);
+    }
 
     match result {
         Ok(()) => {
@@ -90,6 +97,38 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
         }
     }
     Ok(report)
+}
+
+/// The playbook's `[land] after` steps that match what landed. A failure is a warning.
+fn after_land(root: &Path, pb: &Playbook, report: &mut Landed) {
+    if pb.land.after.is_empty() {
+        return;
+    }
+    let landed = report.commits.len();
+    let files: Vec<String> = git(root, &["diff", "--name-only", "--no-renames", &format!("HEAD~{landed}"), "HEAD"])
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    for step in &pb.land.after {
+        let command = playbook::expand(&step.run, root, root, &report.base);
+        let skip = match step.skip_reason(&files) {
+            Ok(skip) => skip,
+            Err(e) => Some(format!("its patterns do not parse: {}", first_line(&e))),
+        };
+        if let Some(why) = skip {
+            report.after.push(playbook::CommandResult { command, ok: true, seconds: 0, output: format!("skipped: {why}"), skipped: true });
+            continue;
+        }
+        let result = match playbook::run_shell(&command, root) {
+            Ok((ok, output, seconds)) => playbook::CommandResult { command, ok, seconds, output, skipped: false },
+            Err(e) => playbook::CommandResult { command, ok: false, seconds: 0, output: format!("{e:#}"), skipped: false },
+        };
+        if !result.ok {
+            report.warnings.push(format!("the after-land step `{}` failed; the land stands", result.command));
+        }
+        report.after.push(result);
+    }
 }
 
 fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor: &Actor, report: &mut Landed) -> Result<()> {
@@ -435,6 +474,12 @@ commands = { fake = ["sh", "-c", "cat > /dev/null; echo 'Fine.'; echo 'VERDICT: 
 [[approval.human_paths]]
 pattern = "billing"
 reason = "billing"
+[[land.after]]
+run = "echo landed >> {main}/../after-sidebar.txt"
+when_changed = ["sidebar"]
+[[land.after]]
+run = "exit 3"
+when_changed = ["billing"]
 "#,
         )
         .unwrap();
@@ -517,6 +562,9 @@ reason = "billing"
         assert!(r.landed && r.pushed == Some(true), "{r:?}");
         assert_eq!(sh(&f.remote, &["rev-parse", "main"]), sh(&f.repo, &["rev-parse", "main"]));
         assert!(!wt_a.exists(), "the worktree is cleaned up: {:?}", r.cleanup);
+        // The after-land step for what landed ran in the main checkout; the other was skipped.
+        assert!(f.base.join("after-sidebar.txt").exists(), "{:?}", r.after);
+        assert_eq!(r.after.iter().map(|a| a.skipped).collect::<Vec<_>>(), [false, true]);
         assert_eq!(f.db.issue(&a).unwrap().unwrap().state, "Done");
 
         // b needs a human; it was reviewed before a landed, so it also rebases.
@@ -527,6 +575,8 @@ reason = "billing"
         f.db.move_issue(&b, "Approved", None, None, &Actor::Human).unwrap();
         let r = f.land(&b);
         assert!(r.landed, "{r:?}");
+        // A failing after-land step is a warning; the land stands.
+        assert!(r.warnings.iter().any(|w| w.contains("exit 3")), "{r:?}");
         assert!(r.approval.unwrap().contains("approved by a human"));
         assert!(Path::new(&f.repo.join("billing.txt")).exists() && Path::new(&f.repo.join("sidebar.txt")).exists());
         std::fs::remove_dir_all(&f.base).ok();

@@ -1,0 +1,73 @@
+//! A `nitely mcp` that keeps running while a new build is installed over it answers its next tool
+//! call from the new build.
+
+use serde_json::{json, Value};
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+fn temp() -> PathBuf {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let dir = std::env::temp_dir().join(format!("nitely-forward-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(dir.join("bin")).unwrap();
+    dir
+}
+
+fn call(stdin: &mut impl Write, stdout: &mut impl BufRead, id: u64, method: &str, params: Value) -> Value {
+    writeln!(stdin, "{}", json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })).unwrap();
+    stdin.flush().unwrap();
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    serde_json::from_str(&line).unwrap()
+}
+
+#[test]
+fn a_running_mcp_server_forwards_to_a_newly_installed_build() {
+    let dir = temp();
+    let exe = if cfg!(windows) { "nitely.exe" } else { "nitely" };
+    let installed = dir.join("bin").join(exe);
+    let built = Path::new(env!("CARGO_BIN_EXE_nitely"));
+    std::fs::copy(built, &installed).unwrap();
+
+    let mut server = Command::new(&installed)
+        .arg("mcp")
+        .env("NITELY_HOME", dir.join("home"))
+        .current_dir(&dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = server.stdin.take().unwrap();
+    let mut stdout = BufReader::new(server.stdout.take().unwrap());
+    call(&mut stdin, &mut stdout, 1, "initialize", json!({ "protocolVersion": "2025-06-18", "clientInfo": { "name": "claude-code" } }));
+    let ask = json!({ "name": "get_answer", "arguments": { "id": 41 } });
+
+    let before = call(&mut stdin, &mut stdout, 2, "tools/call", ask.clone());
+    assert!(before["result"]["content"][0]["text"].as_str().unwrap().contains("no ask 41"), "{before}");
+    assert!(before["result"].get("_meta").is_none(), "nothing newer yet: {before}");
+
+    // A new build: the same program with a byte appended, which both PE and ELF ignore.
+    let mut bytes = std::fs::read(built).unwrap();
+    bytes.push(0);
+    let new_build = dir.join("new-build");
+    std::fs::write(&new_build, bytes).unwrap();
+    let out = Command::new(built)
+        .args(["install", "--from"])
+        .arg(&new_build)
+        .arg("--to")
+        .arg(&installed)
+        .env("NITELY_HOME", dir.join("home"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["replaced"], true, "{report}");
+
+    let after = call(&mut stdin, &mut stdout, 3, "tools/call", ask);
+    assert!(after["result"]["content"][0]["text"].as_str().unwrap().contains("no ask 41"), "{after}");
+    assert!(after["result"]["_meta"]["nitely_forwarded"].is_string(), "answered by the new build: {after}");
+
+    drop(stdin);
+    server.wait().ok();
+    std::fs::remove_dir_all(&dir).ok();
+}

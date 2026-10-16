@@ -34,7 +34,9 @@ Nitely tracks its own build. Its backlog is the **NIT** project in Nitely, reach
 - `npm run dev` in a plain browser runs the frontend on sample data (`src/dev/fixtures.ts`); the
   Browser pane opens it with the `web` configuration in `.claude/launch.json`. Check every view you
   change there, in light and dark, wide and narrow
-- `cargo install --path crates/nitely-cli` refreshes the `nitely` binary that hooks and MCP use
+- Landing a change to `crates/` rebuilds `nitely` and installs it where hooks and MCP run it (the
+  playbook's `[[land.after]]`); running MCP servers forward tool calls to the new build. By hand:
+  `cargo run --release -p nitely-cli -- install` (`cargo install` fails while agents run it on Windows)
 
 ## Layout
 
