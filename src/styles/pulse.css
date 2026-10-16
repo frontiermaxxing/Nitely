@@ -65,7 +65,7 @@
   border: 1px dashed var(--line);
 }
 .flow-box.has-items { background: var(--hover); border-style: solid; }
-.flow-box.is-needs { background: var(--attention-wash); border-color: var(--attention); --mark-bg: var(--surface); }
+.flow-box.is-needs { background: var(--attention-wash); border-color: var(--attention); --mark-bg: var(--surface); --arrive: var(--attention); }
 .flow-box-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: 11.5px; color: var(--fg-2); margin-bottom: 1px; }
 .flow-box-head span:first-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .flow-box-count { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--fg-3); }

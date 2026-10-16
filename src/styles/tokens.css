@@ -90,10 +90,14 @@
   --radius: 7px;
   --radius-lg: 10px;
 
-  /* Motion. Things move only to say something is alive or just changed. */
+  /* Motion (docs/visualization.md, "Motion"). Things move only to say something is alive or just changed. */
   --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
   --dur-fast: 120ms;
   --dur: 200ms;
+  /* Travel: a dot along the track, a card to another column. */
+  --dur-travel: 420ms;
+  /* The highlight that marks where a change landed, fading out. */
+  --dur-mark: 1400ms;
   --breathe: 2.4s;
 
   --shadow-panel: -1px 0 0 var(--line), -20px 0 60px -20px rgba(40, 35, 20, 0.16);

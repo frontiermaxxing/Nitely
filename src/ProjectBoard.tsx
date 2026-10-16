@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, MouseEvent } from "react";
 import { invoke } from "./backend";
 import type { Board, IssueDetail, IssueRecord, PrRecord, TaskRow } from "./types";
@@ -15,6 +15,7 @@ import {
   livenessOf,
   stationColor,
   trackOf,
+  useFlip,
   vendorOf,
   type Liveness,
   type Station,
@@ -177,9 +178,11 @@ export function ProjectBoard(props: {
     return { station, cards: inCol, older };
   });
   const filtered = filters.kind || filters.agent;
+  const root = useRef<HTMLDivElement>(null);
+  useFlip(root);
 
   return (
-    <div className="board">
+    <div className="board" ref={root}>
       {columns.map(({ station, cards, older }, i) => (
         <Column
           key={station}
@@ -228,7 +231,7 @@ function Column(props: {
     .filter(Boolean)
     .join(" ");
   return (
-    <section className={cls} style={{ "--c": stationColor(station) } as CSSProperties} aria-label={`${label}: ${cards.length}`}>
+    <section className={cls} style={{ "--c": stationColor(station) } as CSSProperties} aria-label={`${label}: ${cards.length}`} data-flip-group={station}>
       <header className="board-col-head" title={empty ? `${label}: nothing here${props.filtered ? " with these filters" : ""}` : undefined}>
         <span className="board-track" aria-hidden="true">
           <span className="board-node" />
@@ -294,7 +297,7 @@ function BoardCard(props: { card: Card; now: number; onOpenIssue: (key: string) 
   };
   const where = STATION_LABEL[track.station];
   return (
-    <article className={cls} onClick={open}>
+    <article className={cls} onClick={open} data-flip={issue.key}>
       <div className="board-card-top">
         <IssueToken issue={issue} track={track} onOpen={props.onOpenIssue} />
         <PriorityMark priority={issue.priority} />

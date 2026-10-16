@@ -18,6 +18,7 @@ export { Sparkline } from "./Sparkline";
 export { StateDot } from "./StateDot";
 export { StationGlyph } from "./StationGlyph";
 export { StationTrack } from "./StationTrack";
+export { Ticker, enter, markArrived, reducedMotion, useFlip } from "./motion";
 export * from "./agents";
 export * from "./lifecycle";
 export * from "./rounds";

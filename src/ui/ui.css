@@ -175,6 +175,18 @@ button.ui-token:focus-visible, a.ui-token:focus-visible { outline: 2px solid var
 .ui-ab-base { fill: var(--line-strong); }
 .ui-ab-unknown { color: var(--fg-3); }
 
+/* ----- Motion (motion.tsx): where a change landed, a figure that ticks, something new coming in ----- */
+@keyframes ui-arrive { from { box-shadow: 0 0 0 2px color-mix(in srgb, var(--arrive, var(--live)) 50%, transparent); } }
+@keyframes ui-arrive-wash { from { background-color: var(--arrive-wash, var(--live-wash)); } }
+@keyframes ui-enter { from { opacity: 0; transform: translateY(6px); } }
+@keyframes ui-pop { from { transform: scale(0.4); opacity: 0; } }
+.ui-arrived { animation: ui-arrive var(--dur-mark) var(--ease); }
+.ui-ticker { display: inline-block; }
+.ui-st-node.ui-arrived { border-radius: 50%; }
+.ui-st::before { transform-origin: left center; }
+.ui-mini-cur { transition: cx var(--dur-travel) var(--ease), fill var(--dur) var(--ease); }
+
 @media (prefers-reduced-motion: reduce) {
   .ui-dot-working, .ui-mark-dot-working, .ui-st-current .ui-st-node::before { animation: none !important; }
+  .ui-mini-cur { transition: none; }
 }

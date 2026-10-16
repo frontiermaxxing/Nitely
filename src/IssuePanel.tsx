@@ -101,7 +101,7 @@ export function IssuePanel(props: {
               </div>
               {track && (
                 <div className="panel-track">
-                  <StationTrack track={track} size="full" now={props.now} />
+                  <StationTrack key={issue.key} track={track} size="full" now={props.now} />
                 </div>
               )}
               <WhoHadIt detail={detail} now={props.now} />

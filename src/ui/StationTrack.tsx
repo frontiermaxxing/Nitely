@@ -1,7 +1,8 @@
-import type { CSSProperties } from "react";
+import { useLayoutEffect, useRef, type CSSProperties } from "react";
 import { ago } from "../util";
 import type { Station, Track } from "./lifecycle";
 import { STATION_LABEL, STATIONS, describeTrack, phaseOf, stationColor, stationIndex } from "./lifecycle";
+import { EASE, duration, markArrived, reducedMotion } from "./motion";
 
 type Status = "passed" | "skipped" | "current" | "upcoming";
 
@@ -65,14 +66,49 @@ function MiniTrack({ track }: { track: Track }) {
       {STATIONS.map((s, i) =>
         i < cur ? (
           <circle key={s} cx={x(i)} cy={y} r="2.5" fill="var(--st-done)" />
-        ) : i === cur ? (
-          <circle key={s} cx={x(i)} cy={y} r="4.5" fill={color} stroke={wash} strokeWidth="3" paintOrder="stroke" />
-        ) : (
+        ) : i === cur ? null : (
           <circle key={s} cx={x(i)} cy={y} r="2.5" fill="var(--mark-bg, var(--surface))" stroke="var(--line-strong)" strokeWidth="1" />
         ),
       )}
+      {/* One element for the current dot, so a move travels along the line instead of jumping. */}
+      <circle className="ui-mini-cur" cx={x(cur)} cy={y} r="4.5" fill={color} stroke={wash} strokeWidth="3" paintOrder="stroke" />
     </svg>
   );
+}
+
+/**
+ * When the issue moves on while the track is shown, its dot travels from the old station to the
+ * new one and the line fills in behind it, station by station. With reduced motion the dot is at
+ * its new station at once, marked.
+ */
+function useTravel(list: React.RefObject<HTMLOListElement | null>, cur: number) {
+  const prev = useRef(cur);
+  useLayoutEffect(() => {
+    const was = prev.current;
+    prev.current = cur;
+    const ol = list.current;
+    if (!ol || was === cur || cur < 0 || was < 0) return;
+    const items = [...ol.children] as HTMLElement[];
+    const node = items[cur]?.querySelector<HTMLElement>(".ui-st-node");
+    if (!node) return;
+    if (reducedMotion()) {
+      markArrived(node);
+      return;
+    }
+    const travel = duration("--dur-travel", 420);
+    const step = items[1] ? items[1].getBoundingClientRect().left - items[0].getBoundingClientRect().left : 0;
+    node.animate([{ transform: `translateX(${(was - cur) * step}px)` }, { transform: "none" }], { duration: travel, easing: EASE });
+    const legs = cur - was;
+    for (let i = was + 1; i <= cur; i++) {
+      items[i].animate([{ transform: "scaleX(0)" }, { transform: "scaleX(1)" }], {
+        pseudoElement: "::before",
+        duration: travel / legs,
+        delay: ((i - was - 1) * travel) / legs,
+        easing: "linear",
+        fill: "backwards",
+      });
+    }
+  }, [list, cur]);
 }
 
 /** How many nested arcs the "changes asked" coil draws; more rounds than this still read as many. */
@@ -88,6 +124,8 @@ function FullTrack({ track, now }: { track: Track; now?: number }) {
   // Each round of changes is one more arc, so five rounds read as a coil, not a label.
   const looped = track.rounds > 0 && !track.closed;
   const coils = Math.min(track.rounds, MAX_COILS);
+  const stations = useRef<HTMLOListElement>(null);
+  useTravel(stations, cur);
   return (
     <div
       className={`ui-track${track.closed ? " ui-track-closed" : ""}${looped ? " ui-track-looped" : ""}`}
@@ -107,7 +145,7 @@ function FullTrack({ track, now }: { track: Track; now?: number }) {
           </span>
         </div>
       )}
-      <ol className="ui-track-stations" aria-label={describeTrack(track)}>
+      <ol ref={stations} className="ui-track-stations" aria-label={describeTrack(track)}>
         {STATIONS.map((s, i) => {
           const status = statusOf(track, s);
           const stuck = status === "current" && !!track.stuck;

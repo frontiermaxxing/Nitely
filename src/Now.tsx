@@ -11,6 +11,7 @@ import {
   STATION_LABEL,
   StateDot,
   StationTrack,
+  Ticker,
   VENDOR_LABEL,
   livenessLabel,
   livenessOf,
@@ -171,13 +172,19 @@ function Glance({ board, needs, now, onInbox }: { board: Board; needs: number; n
   if (rows.length === 0) return null;
   return (
     <>
-      <span className="head-note live-ink">{working} moving</span>
+      <span className="head-note live-ink">
+        <Ticker value={working} /> moving
+      </span>
       {needs > 0 && (
         <button className="link head-note attention-ink" onClick={onInbox}>
-          {needs} waiting on you
+          <Ticker value={needs} /> waiting on you
         </button>
       )}
-      {idle > 0 && <span className="head-note">{idle} idle session{idle === 1 ? "" : "s"}</span>}
+      {idle > 0 && (
+        <span className="head-note">
+          <Ticker value={idle} /> idle session{idle === 1 ? "" : "s"}
+        </span>
+      )}
     </>
   );
 }

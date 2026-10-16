@@ -31,8 +31,11 @@ product.
    agent moving it, **amber** is waiting on you, **red** has failed, **grey** is at rest (queued or
    done). The glyph, the mini track, the board columns, the flow boxes and the swimlanes all follow
    it. Amber is used only for what needs the human. Quiet things fade: done, canceled and stale go
-   to `--fg-3` or lower opacity. Live work moves a little (the breathing dot); nothing else
-   animates.
+   to `--fg-3` or lower opacity.
+6. **Changes move.** When something changes, because you acted or because an update arrived, it is
+   shown going from where it was to where it is, then marked where it landed: a dot travels along
+   the track, a card glides to its new column, a count ticks. Nothing is silently swapped in. Only
+   live work loops (the breathing dot). See [Motion](#motion).
 5. **Simple.** Few colors, no decoration, no chart junk, no pills around every label, no glows or
    drop shadows on cards. Light and dark are both first-class. Linear is the bar for polish.
 
@@ -183,17 +186,52 @@ Within a kind, decisions are ordered by urgency (the issue's `urgency`, so a blo
 work rises), then by how long they have waited. The header says how many there are and the
 oldest.
 
-**Acting on a decision.** Approve, an answer or Send back to Todo resolves the decision at once:
-its actions give way to what happened ("Approved. Landing next.", "Sent back to Todo.", "Answered:
-…. Sent to Claude.") with a dashed ring while the call is on its way and a teal tick once it is
-done, the track moves to the new station, and its row in the list shows the tick and the same
-words. Only after that moment (1.5s, `HOLD_MS` in `src/Inbox.tsx`) does the next decision below it
-take its place, with focus. The board can still name the decision for a moment after (a snapshot
-that started before the move); `decisionsOf` trusts the issue's fresher detail, and the Inbox
-keeps a decision it moved on from hidden until the board drops it. If the call fails, the
-decision comes back as it was, with the error under it. The nav count is the same list (`useDecisionDetails` runs in the app). When nothing
-waits, the page says so and lists what the agents are doing instead. The design's keys to approve
-(A), answer (1–3) and send back (T) belong to NIT-54; the footer lists only keys that work.
+**Acting on a decision.** Approve, an answer or Send back to Todo resolves the decision at once: its
+actions give way to what happened ("Approved. Landing next.", "Sent back to Todo.", "Answered: ….
+Sent to Claude.") with a dashed ring while the call is on its way and a teal tick once it is done,
+the track moves to the new station, and its row in the list shows the tick and the same words. Only
+after that moment (1.5s, `HOLD_MS` in `src/Inbox.tsx`) does the next decision below it take its
+place, with focus; the row fades and the rows below glide up (see Motion). The board can still name
+the decision for a moment after (a snapshot that started before the move); `decisionsOf` trusts the
+issue's fresher detail, and the Inbox keeps a decision it moved on from hidden until the board drops
+it. If the call fails, the decision comes back as it was, with the error under it. The nav count is
+the same list (`useDecisionDetails` runs in the app). When nothing waits, the page says so and lists
+what the agents are doing instead. The design's keys to approve (A), answer (1–3) and send back (T)
+belong to NIT-54; the footer lists only keys that work.
+
+## Motion
+
+![An approval resolving in the Inbox, dark](img/inbox-approved-dark.png)
+
+Andrew should see that something happened, and where, without reading. So a change is shown moving
+rather than redrawn, and quietly: short, one direction, then still. The primitives are in
+`src/ui/motion.tsx` (CSS transitions and the Web Animations API, no library); a view uses them
+instead of writing its own.
+
+- **What you cause gets feedback where you caused it.** The control gives way to what happened,
+  the item shows its new state (the track's dot travels to its new station, the answer settles
+  into the card), then the item leaves and only then does the next one take its place. The Inbox
+  is the reference: the decision says "Approved. Landing next." with a tick, the dot travels to
+  Landing, the row fades and the rows below glide up into the gap, and the next decision comes in.
+- **What arrives live is marked where it lands.** A card that moved to another column glides
+  there and gets a brief ring that fades (`markArrived`); a new Inbox decision fades in, washed in
+  amber; a count ticks: the new figure slides in from below when it went up, from above when it
+  went down (`Ticker`, which `CountBadge` uses). The mark follows the colour rule: teal by
+  default, amber (`--arrive`, `--arrive-wash`) on what needs the human.
+- **Lists use `useFlip`.** Give each item `data-flip="<stable key>"` (the issue key, the decision
+  id) and its column or box `data-flip-group`; items then glide when a render moves them, fade in
+  when they are new, and are marked when they change group. Stable React keys matter: an item
+  that remounts cannot move. The Board, the Overview's flow boxes and the Inbox list use it.
+- **The track travels.** `StationTrack` moves its current dot from the old station to the new one
+  and fills the line behind it, station by station, whenever the issue moves while it is shown.
+  Where one track can show a different issue (the issue sheet), key it by the issue so it does not
+  travel from one issue to the next.
+- **Nothing waits for an animation.** State changes first and the motion follows it; a click
+  during a glide works on the new state, and a glide cut short carries on from where it is. Only
+  the breathing dot loops. No bounce, no flash, no delay before an action.
+- **Reduced motion.** With `prefers-reduced-motion` the movement goes (things are where they end
+  up at once) but the feedback stays: the same mark where it landed, the same words. Check every
+  view you change with it on as well.
 
 ## Tokens (`src/styles/tokens.css`)
 
@@ -219,8 +257,10 @@ Use roles, never raw colors. Both themes define every role.
   `--weight-strong` 600.
 - **Space and shape:** `--space-1` to `--space-6` on a 4px step; `--radius-sm` 4, `--radius` 6,
   `--radius-lg` 10.
-- **Motion:** `--ease`, `--dur-fast` 120ms, `--dur` 200ms, `--breathe` 2.4s. Respect
-  `prefers-reduced-motion` (ui.css turns breathing off).
+- **Motion:** `--ease`, `--dur-fast` 120ms (hover, press), `--dur` 200ms (fades, ticks, things
+  coming in), `--dur-travel` 420ms (a dot along the track, a card to another column),
+  `--dur-mark` 1.4s (the highlight where a change landed, fading), `--breathe` 2.4s. Respect
+  `prefers-reduced-motion` (below).
 - **Overlays:** `--scrim` behind the palette and the issue sheet, `--shadow-float` under the
   palette, `--shadow-panel` beside the sheet.
 
@@ -295,7 +335,7 @@ waiting on you) over the window.
 Avoid: pills or chips around labels (a vendor's setup status is the one pill), cards with a colored
 edge bar, shadows or glows on cards (overlays have one), gradients, icons in tinted boxes, a second
 accent color, all-caps tracked labels (the kind over the Inbox's open decision is the one), mono for
-prose, and animating anything that is not live.
+prose, and motion that loops (other than the breathing dot), flashes, bounces or makes you wait.
 
 ## The sidebar and Now
 

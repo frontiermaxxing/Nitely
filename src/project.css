@@ -68,7 +68,7 @@
 .board-card-age { margin-left: auto; font-family: var(--font-mono); }
 
 /* What needs the human is washed in attention; stuck work gets a red-tinged edge; blocked a dashed one. */
-.board-card-needs { background: var(--attention-wash); border-color: var(--attention); --mark-bg: var(--bg); }
+.board-card-needs { background: var(--attention-wash); border-color: var(--attention); --mark-bg: var(--bg); --arrive: var(--attention); }
 .board-card-stuck { border-color: color-mix(in srgb, var(--fail) 55%, var(--line)); }
 .board-card-blocked { border-style: dashed; border-color: var(--line-strong); }
 .board-card-quiet .board-card-title { color: var(--fg-2); }

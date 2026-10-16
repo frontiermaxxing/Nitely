@@ -15,10 +15,13 @@ import {
   LIVENESS_LABEL,
   ResultMark,
   StationTrack,
+  Ticker,
   VENDOR_LABEL,
   journeyOf,
   livenessOf,
+  reducedMotion,
   trackOf,
+  useFlip,
   vendorOf,
 } from "./ui";
 import "./inbox.css";
@@ -44,6 +47,10 @@ export function Inbox(props: {
   const [resolved, setResolved] = useState<Map<string, Resolved>>(new Map());
   const [gone, setGone] = useState<Set<string>>(new Set());
   const [failed, setFailed] = useState<Map<string, string>>(new Map());
+  // Rows fading out after their confirmation, before the rows below glide up into the gap.
+  const [leaving, setLeaving] = useState<Set<string>>(new Set());
+  const list = useRef<HTMLDivElement>(null);
+  useFlip(list);
   const decisions = shownDecisions(live, resolved, gone);
   const waiting = decisions.filter((d) => !resolved.has(d.id));
   const liveIds = live.map((d) => d.id).join(" ");
@@ -69,20 +76,31 @@ export function Inbox(props: {
   useEffect(() => () => timers.current.forEach((t) => clearTimeout(t)), []);
 
   const moveOn = (id: string) => {
-    const { ordered: list, picked: on, resolved: held, liveIds: listed } = latest.current;
-    const at = list.findIndex((x) => x.id === id);
+    const { ordered: shown, picked: on, resolved: held } = latest.current;
+    const at = shown.findIndex((x) => x.id === id);
     const waits = (x: Decision) => x.id !== id && !held.has(x.id);
-    const next = list.slice(at + 1).find(waits) ?? list.slice(0, Math.max(at, 0)).reverse().find(waits) ?? null;
+    const next = shown.slice(at + 1).find(waits) ?? shown.slice(0, Math.max(at, 0)).reverse().find(waits) ?? null;
     // Focus follows only when it was on this decision (its buttons are gone now) or nowhere.
     const focus = document.activeElement;
     const follow = !focus || focus === document.body || !!focus.closest(".inbox-detail, .inbox-row.on");
-    // Hidden only while the board still names it: once dropped, it may come back as a new decision.
-    if (listed.split(" ").includes(id)) setGone((g) => new Set(g).add(id));
-    setResolved((m) => without(m, id));
+    // The next decision opens at once; the row done with fades, then leaves.
     if (on === id) {
       setPicked(next?.id ?? null);
       if (follow && next) requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-decision="${CSS.escape(next.id)}"]`)?.focus());
     }
+    const remove = () => {
+      // Hidden only while the board still names it: once dropped, it may come back as a new decision.
+      if (latest.current.liveIds.split(" ").includes(id)) setGone((g) => new Set(g).add(id));
+      setResolved((m) => without(m, id));
+      setLeaving((s) => withoutId(s, id));
+    };
+    if (reducedMotion()) return remove();
+    setLeaving((s) => new Set(s).add(id));
+    const t = window.setTimeout(() => {
+      timers.current.delete(t);
+      remove();
+    }, LEAVE_MS);
+    timers.current.add(t);
   };
 
   const act = async (d: Decision, move: Move, run: () => Promise<unknown>, answer?: string) => {
@@ -120,13 +138,13 @@ export function Inbox(props: {
 
   return (
     <div className="inbox-split">
-      <div className="inbox-list">
+      <div className="inbox-list" ref={list}>
         <div className="inbox-head">
           <div className="page-head">
             <h1>Inbox</h1>
             {waiting.length > 0 && (
               <span className="head-note attention-ink">
-                {waiting.length} need{waiting.length === 1 ? "s" : ""} you
+                <Ticker value={waiting.length} /> need{waiting.length === 1 ? "s" : ""} you
               </span>
             )}
           </div>
@@ -144,6 +162,7 @@ export function Inbox(props: {
                 decision={d}
                 detail={d.issue ? details.get(d.issue.key) : undefined}
                 resolved={resolved.get(d.id)}
+                leaving={leaving.has(d.id)}
                 on={open?.id === d.id}
                 onStep={(by) => {
                   const at = ordered.findIndex((x) => x.id === d.id) + by;
@@ -188,6 +207,15 @@ export function Inbox(props: {
 const HOLD_MS = 1500;
 /** And at least this long after the call came back, when it took longer than that. */
 const SETTLED_MS = 600;
+/** How long a row done with takes to fade before it leaves the list (--dur). */
+const LEAVE_MS = 200;
+
+function withoutId(s: Set<string>, id: string): Set<string> {
+  if (!s.has(id)) return s;
+  const n = new Set(s);
+  n.delete(id);
+  return n;
+}
 
 function without<V>(m: Map<string, V>, id: string): Map<string, V> {
   if (!m.has(id)) return m;
@@ -264,6 +292,7 @@ function InboxRow(props: {
   decision: Decision;
   detail?: IssueDetail;
   resolved?: Resolved;
+  leaving: boolean;
   on: boolean;
   now: number;
   onPick: () => void;
@@ -276,8 +305,9 @@ function InboxRow(props: {
   const ev = done ? { text: outcomeOf(done), tone: "good" as const, agent: null } : eventOf(d, props.detail);
   return (
     <button
-      className={`inbox-row${props.on ? " on" : ""}${done ? " resolved" : ""}`}
+      className={`inbox-row${props.on ? " on" : ""}${done ? " resolved" : ""}${props.leaving ? " leaving" : ""}`}
       data-decision={d.id}
+      data-flip={d.id}
       tabIndex={props.on ? 0 : -1}
       onClick={props.onPick}
       onKeyDown={(e) => {

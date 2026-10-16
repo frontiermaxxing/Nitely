@@ -14,10 +14,12 @@ import {
   Sparkline,
   StationGlyph,
   StationTrack,
+  Ticker,
   livenessLabel,
   livenessOf,
   phaseOf,
   trackOf,
+  useFlip,
   type Station,
 } from "./ui";
 import "./styles/pulse.css";
@@ -103,6 +105,9 @@ export function Pulse(props: {
   // the window is hidden counts only once the window shows again.
   const shown = useRef<number | null>(null);
   const latest = useRef<number | null>(null);
+  // Issues glide from one station box to the next as they move.
+  const flows = useRef<HTMLDivElement>(null);
+  useFlip(flows);
 
   useEffect(() => {
     let live = true;
@@ -164,7 +169,7 @@ export function Pulse(props: {
               <h2>
                 Flow <span className="head-note">open issues by station</span>
               </h2>
-              <div className="flows">
+              <div className="flows" ref={flows}>
                 {data.projects.map((p) => (
                   <Flow key={p.key} flow={p} ctx={ctx} onBoard={() => props.onGo({ kind: "project", key: p.key })} />
                 ))}
@@ -224,7 +229,7 @@ function Glance({ data, board, decisions, ctx, onGo }: { data: PulseData; board:
       <div className={`readout${known && needs ? " readout-attention" : " readout-calm"}`}>
         <span className="readout-top">
           <span className="readout-n" aria-label={known ? undefined : "not known yet"}>
-            {known ? needs : "–"}
+            {known ? <Ticker value={needs} /> : "–"}
           </span>
           <span className="readout-label">{!known ? "need you" : needs ? (needs === 1 ? "needs you" : "need you") : "Nothing needs you"}</span>
         </span>
@@ -242,7 +247,9 @@ function Glance({ data, board, decisions, ctx, onGo }: { data: PulseData; board:
       </div>
       <div className={`readout${working.length ? " readout-live" : " readout-calm"}`}>
         <span className="readout-top">
-          <span className="readout-n">{working.length}</span>
+          <span className="readout-n">
+            <Ticker value={working.length} />
+          </span>
           <span className="readout-label">{working.length === 1 ? "agent moving" : "agents moving"}</span>
         </span>
         <span className="readout-sub readout-marks">
@@ -255,7 +262,9 @@ function Glance({ data, board, decisions, ctx, onGo }: { data: PulseData; board:
       </div>
       <div className={`readout${stuck.length ? " readout-stuck" : " readout-calm"}`}>
         <span className="readout-top">
-          <span className="readout-n">{stuck.length}</span>
+          <span className="readout-n">
+            <Ticker value={stuck.length} />
+          </span>
           <span className="readout-label">stuck</span>
         </span>
         <span className="readout-sub">
@@ -268,7 +277,9 @@ function Glance({ data, board, decisions, ctx, onGo }: { data: PulseData; board:
       </div>
       <div className={`readout${done.length ? "" : " readout-calm"}`}>
         <span className="readout-top">
-          <span className="readout-n">{done.length}</span>
+          <span className="readout-n">
+            <Ticker value={done.length} />
+          </span>
           <span className="readout-label" title={`${data.landed_today} of them landed through Nitely; the rest were moved to Done`}>
             done today
           </span>
@@ -368,10 +379,10 @@ function Flow({ flow, ctx, onBoard }: { flow: ProjectFlow; ctx: Context; onBoard
           const here = at(s);
           const max = s === "done" && allDone ? here.length : CHIPS;
           return (
-            <div key={s} className={`flow-box${here.length ? " has-items" : ""}${s === "needs" && here.length ? " is-needs" : ""}`}>
+            <div key={s} className={`flow-box${here.length ? " has-items" : ""}${s === "needs" && here.length ? " is-needs" : ""}`} data-flip-group={`${flow.key}-${s}`}>
               <div className="flow-box-head">
                 <span>{s === "done" ? "Done today" : STATION_LABEL[s]}</span>
-                <span className="flow-box-count">{here.length}</span>
+                <Ticker className="flow-box-count" value={here.length} />
               </div>
               {here.slice(0, max).map((f) => (
                 <Chip key={f.issue.key} f={f} ctx={ctx} />
@@ -414,6 +425,7 @@ function Chip({ f, ctx }: { f: FlowIssue; ctx: Context }) {
       className={`fchip${reason ? (blocked ? " is-stuck" : " is-quiet") : ""}${done ? " is-done" : ""}`}
       onClick={() => ctx.onOpenIssue(f.issue.key)}
       title={hover}
+      data-flip={f.issue.key}
     >
       <StationGlyph track={blocked && !t.stuck ? { ...t, stuck: reason } : t} size={12} />
       <span className="fchip-key">{f.issue.key}</span>
