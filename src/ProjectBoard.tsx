@@ -138,7 +138,10 @@ export function ProjectBoard(props: {
       const track = d ? trackOf(issue, d.timeline, d.reviews) : trackOf(issue);
       const row = rows.get(issue.key) ?? null;
       const live = livenessOf(row?.session, now);
-      const fallback = Date.parse(track.station === "todo" ? issue.created_at : issue.updated_at) / 1000;
+      // Without a timeline: filed (Todo) or last changed; mirrored issues may lack either, then now.
+      const stamp = (iso: string) => (iso ? Date.parse(iso) / 1000 : NaN);
+      const known = [track.station === "todo" ? stamp(issue.created_at) : NaN, stamp(issue.updated_at)].find(Number.isFinite);
+      const fallback = known ?? now;
       return {
         issue,
         track,

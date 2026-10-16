@@ -10,6 +10,8 @@ import {
   StateDot,
   VENDOR_LABEL,
   livenessOf,
+  phaseOf,
+  stationOfState,
   vendorOf,
   type Liveness,
 } from "./ui";
@@ -93,31 +95,35 @@ function fromRow(r: TaskRow, now: number): Line {
 
 function linesOf(repo: RepoView, now: number): { flight: Line[]; loose: Line[] } {
   const worktrees = repo.rows.filter((r) => !r.is_main).map((r) => fromRow(r, now));
-  const branches: Line[] = repo.branches.map((b) => ({
-    id: `branch:${b.name}`,
-    branch: b.name,
-    worktree: null,
-    ahead: b.ahead,
-    behind: b.behind,
-    dirty: 0,
-    rebase: false,
-    issueKey: b.issue_key,
-    issue: b.issue,
-    vendor: b.vendor,
-    session: null,
-    live: null,
-    pr: b.pr,
-    last: b.last_commit_at,
-    subject: b.last_commit_subject,
-    needsMe: false,
-    error: null,
-    loose: b.ahead === 0 ? "No worktree · merged" : "No worktree",
-  }));
+  const branches: Line[] = repo.branches.map((b) => {
+    // The worktree may be gone while the issue still waits on the human (approval after a cleanup).
+    const needsMe = !!b.issue && phaseOf(stationOfState(b.issue.state, b.issue.state_type)) === "human";
+    return {
+      id: `branch:${b.name}`,
+      branch: b.name,
+      worktree: null,
+      ahead: b.ahead,
+      behind: b.behind,
+      dirty: 0,
+      rebase: false,
+      issueKey: b.issue_key,
+      issue: b.issue,
+      vendor: b.vendor,
+      session: null,
+      live: null,
+      pr: b.pr,
+      last: b.last_commit_at,
+      subject: b.last_commit_subject,
+      needsMe,
+      error: null,
+      loose: needsMe ? null : b.ahead === 0 ? "No worktree · merged" : "No worktree",
+    };
+  });
   const recent = (a: Line, b: Line) => (b.last ?? 0) - (a.last ?? 0);
-  const flight = worktrees
+  const flight = [...worktrees, ...branches]
     .filter((l) => !l.loose)
     .sort((a, b) => Number(b.needsMe) - Number(a.needsMe) || Number(b.live === "working") - Number(a.live === "working") || recent(a, b));
-  const loose = [...worktrees.filter((l) => l.loose).sort(recent), ...branches.sort(recent)];
+  const loose = [...worktrees, ...branches].filter((l) => l.loose).sort((a, b) => Number(!a.worktree) - Number(!b.worktree) || recent(a, b));
   return { flight, loose };
 }
 
