@@ -5,7 +5,7 @@
 //! link, a lookup by the old key and an old branch (`claude/nit-12-...`) still find the issue.
 
 use anyhow::{bail, Context, Result};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -54,10 +54,11 @@ pub struct Rekeyed {
     /// Issues that got the new key.
     pub issues: i64,
     /// Repos in the config, and machines allowed through `nitely serve`, that now name the new key.
-    #[serde(default)]
     pub repos: usize,
-    #[serde(default)]
     pub machines: usize,
+    /// What could not follow (a config file that would not save). The old key still reaches the
+    /// project there, through its alias.
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -66,34 +67,56 @@ pub struct Removed {
     /// Issues deleted with it (only when asked to).
     pub issues: i64,
     /// Repos and machines that named it and now name no project.
-    #[serde(default)]
     pub repos: usize,
-    #[serde(default)]
     pub machines: usize,
+    pub warnings: Vec<String>,
 }
 
-/// Re-keys a project in the database, then in the repos and machine tokens that name it.
+/// Re-keys a project: refused while a worktree has one of its issues checked out; then the
+/// database, then the repos and machine tokens that name it. The database is the change; the
+/// config and tokens follow as best they can, and an old key left in them still works.
 pub fn rekey(db: &mut Db, from: &str, to: &str) -> Result<Rekeyed> {
-    let mut done = db.rekey_project(from, to)?;
-    let mut config = crate::Config::load()?;
-    done.repos = config.retarget_project(&done.from, Some(&done.to));
-    if done.repos > 0 {
-        config.save()?;
+    let config = crate::Config::load()?;
+    let key = db.project_exact(from)?.with_context(|| format!("no project {from}"))?.key;
+    let busy = checked_out(&config, db, &key);
+    if !busy.is_empty() {
+        bail!("{}", checked_out_message(&key, &busy));
     }
-    done.machines = crate::relay::retarget_project(&done.from, Some(&done.to))?;
+    let mut done = db.rekey_project(&key, to)?;
+    let (repos, machines, warnings) = follow(config, &done.from, Some(&done.to));
+    (done.repos, done.machines, done.warnings) = (repos, machines, warnings);
     Ok(done)
 }
 
-/// Removes a project from the database; repos and machine tokens that named it name none.
+/// Removes a project (see `Db::remove_project`), refused while a worktree has one of its issues
+/// checked out; repos and machine tokens that named it then name none.
 pub fn remove(db: &mut Db, key: &str, with_issues: bool) -> Result<Removed> {
-    let mut done = db.remove_project(key, with_issues)?;
-    let mut config = crate::Config::load()?;
-    done.repos = config.retarget_project(&done.key, None);
-    if done.repos > 0 {
-        config.save()?;
+    let config = crate::Config::load()?;
+    let key = db.project_exact(key)?.with_context(|| format!("no project {key}"))?.key;
+    let busy = checked_out(&config, db, &key);
+    if !busy.is_empty() {
+        bail!("{}", checked_out_message(&key, &busy));
     }
-    done.machines = crate::relay::retarget_project(&done.key, None)?;
+    let mut done = db.remove_project(&key, with_issues)?;
+    let (repos, machines, warnings) = follow(config, &done.key, None);
+    (done.repos, done.machines, done.warnings) = (repos, machines, warnings);
     Ok(done)
+}
+
+/// Points the config's repos and the machine tokens that name `from` at `to` (or at none).
+fn follow(mut config: crate::Config, from: &str, to: Option<&str>) -> (usize, usize, Vec<String>) {
+    let mut warnings = vec![];
+    let repos = config.retarget_project(from, to);
+    if repos > 0 {
+        if let Err(e) = config.save() {
+            warnings.push(format!("repos still name {from} in the config: {e:#}"));
+        }
+    }
+    let machines = crate::relay::retarget_project(from, to).unwrap_or_else(|e| {
+        warnings.push(format!("machine tokens still name {from}: {e:#}"));
+        0
+    });
+    (repos, machines, warnings)
 }
 
 impl Db {
@@ -124,8 +147,13 @@ impl Db {
         Ok(project.map(|p| format!("{p}-{number}")))
     }
 
+    /// `key` as it is now: under the current prefix when it names an old one (`OLD-12` → `NEW-12`).
+    pub fn current_key(&self, key: &str) -> Result<String> {
+        Ok(self.alias_of(key.trim())?.unwrap_or_else(|| key.trim().to_string()))
+    }
+
     pub fn rename_project(&self, key: &str, name: &str) -> Result<crate::issues::Project> {
-        let project = self.project(key)?.with_context(|| format!("no project {key}"))?;
+        let project = self.project_exact(key)?.with_context(|| format!("no project {key}"))?;
         let name = name.trim();
         if name.is_empty() {
             bail!("a project needs a name");
@@ -136,36 +164,37 @@ impl Db {
 
     /// Gives a project a new key, and every one of its issues the new prefix.
     ///
-    /// Refused while any of its issues is checked out in an open task (that worktree's branch
-    /// names the old key), and when issues with the prefix are mirrored from another tracker
-    /// (their keys are the tracker's, not Nitely's).
+    /// Refused when issues with the prefix are mirrored from another tracker (their keys are the
+    /// tracker's, not Nitely's) and while one is checked out in an open task; `rekey` also
+    /// refuses while a worktree's branch names one. Every check and change runs in one immediate
+    /// transaction, so an issue filed meanwhile is either re-keyed with the rest or refused.
     pub fn rekey_project(&mut self, from: &str, to: &str) -> Result<Rekeyed> {
-        let project = self.project(from)?.with_context(|| format!("no project {from}"))?;
-        let from = project.key;
         let to = valid_key(to)?;
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let from: String = tx
+            .query_row("SELECT key FROM project WHERE key = ?1 COLLATE NOCASE", [from.trim()], |r| r.get(0))
+            .optional()?
+            .with_context(|| format!("no project {from}"))?;
         if to == from {
             bail!("{from} already has that key");
         }
-        let (taken, alias_of): (bool, Option<String>) = (
-            self.conn.query_row(
-                "SELECT EXISTS (SELECT 1 FROM project WHERE key = ?1)
-                     OR EXISTS (SELECT 1 FROM issue WHERE key LIKE ?1 || '-%')",
-                [&to],
-                |r| r.get(0),
-            )?,
-            self.conn
-                .query_row("SELECT project FROM project_alias WHERE old_key = ?1", [&to], |r| r.get(0))
-                .optional()?,
-        );
+        let taken: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM project WHERE key = ?1)
+                 OR EXISTS (SELECT 1 FROM issue WHERE key LIKE ?1 || '-%')",
+            [&to],
+            |r| r.get(0),
+        )?;
         if taken {
             bail!("{to} is already a project or an issue prefix");
         }
         // An old key can come back to the project that had it, but not go to another one, or its
         // old links would open the wrong issues.
-        if alias_of.as_deref().is_some_and(|p| p != from) {
-            bail!("{to} was an earlier key of {}, and its old links still lead there", alias_of.unwrap());
+        let earlier: Option<String> =
+            tx.query_row("SELECT project FROM project_alias WHERE old_key = ?1", [&to], |r| r.get(0)).optional()?;
+        if let Some(p) = earlier.filter(|p| *p != from) {
+            bail!("{to} was an earlier key of {p}, and its old links still lead there");
         }
-        let mirrored: i64 = self.conn.query_row(
+        let mirrored: i64 = tx.query_row(
             "SELECT COUNT(*) FROM issue WHERE key LIKE ?1 || '-%' AND origin <> 'nitely'",
             [&from],
             |r| r.get(0),
@@ -174,22 +203,14 @@ impl Db {
             bail!("{mirrored} issue(s) with the prefix {from} are mirrored from another tracker, which owns their keys");
         }
         let open: Vec<String> = {
-            let mut stmt = self.conn.prepare(
-                "SELECT issue_key FROM task WHERE closed_at IS NULL AND issue_key LIKE ?1 || '-%' ORDER BY issue_key",
-            )?;
+            let mut stmt =
+                tx.prepare("SELECT issue_key FROM task WHERE closed_at IS NULL AND issue_key LIKE ?1 || '-%' ORDER BY issue_key")?;
             let rows = stmt.query_map([&from], |r| r.get(0))?;
             rows.collect::<rusqlite::Result<_>>()?
         };
         if !open.is_empty() {
-            bail!(
-                "{} {} checked out in a worktree whose branch names {from}; land or close {} first",
-                open.join(", "),
-                if open.len() == 1 { "is" } else { "are" },
-                if open.len() == 1 { "it" } else { "them" }
-            );
+            bail!("{}", checked_out_message(&from, &open));
         }
-
-        let tx = self.conn.transaction()?;
         let issues: i64 = tx.query_row("SELECT COUNT(*) FROM issue WHERE project = ?1", [&from], |r| r.get(0))?;
         for (table, column) in KEY_COLUMNS {
             tx.execute(
@@ -206,27 +227,34 @@ impl Db {
             params![from, to, now()],
         )?;
         tx.commit()?;
-        Ok(Rekeyed { from, to, issues, repos: 0, machines: 0 })
+        Ok(Rekeyed { from, to, issues, repos: 0, machines: 0, warnings: vec![] })
     }
 
     /// Removes a project. Refused while it has issues, unless `with_issues`, which deletes them
-    /// and everything recorded about them; refused either way while one is checked out.
+    /// and everything recorded about them; refused either way while one is checked out in an
+    /// open task. The count and the delete share one immediate transaction, so an issue filed
+    /// meanwhile is never deleted without consent.
     pub fn remove_project(&mut self, key: &str, with_issues: bool) -> Result<Removed> {
-        let project = self.project(key)?.with_context(|| format!("no project {key}"))?;
-        let key = project.key;
-        let issues: i64 = self.conn.query_row("SELECT COUNT(*) FROM issue WHERE project = ?1", [&key], |r| r.get(0))?;
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let key: String = tx
+            .query_row("SELECT key FROM project WHERE key = ?1 COLLATE NOCASE", [key.trim()], |r| r.get(0))
+            .optional()?
+            .with_context(|| format!("no project {key}"))?;
+        let issues: i64 = tx.query_row("SELECT COUNT(*) FROM issue WHERE project = ?1", [&key], |r| r.get(0))?;
         if issues > 0 && !with_issues {
             bail!("{key} has {issues} issue(s); remove it with its issues, or move them first");
         }
-        let open: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM task WHERE closed_at IS NULL AND issue_key IN (SELECT key FROM issue WHERE project = ?1)",
-            [&key],
-            |r| r.get(0),
-        )?;
-        if open > 0 {
-            bail!("{open} of {key}'s issues are checked out in a worktree; land or close them first");
+        let open: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT issue_key FROM task WHERE closed_at IS NULL AND issue_key IN (SELECT key FROM issue WHERE project = ?1)
+                 ORDER BY issue_key",
+            )?;
+            let rows = stmt.query_map([&key], |r| r.get(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        if !open.is_empty() {
+            bail!("{}", checked_out_message(&key, &open));
         }
-        let tx = self.conn.transaction()?;
         let of_project = "(SELECT key FROM issue WHERE project = ?1)";
         for (table, column) in KEY_COLUMNS.iter().filter(|(t, _)| *t != "issue") {
             tx.execute(&format!("DELETE FROM {table} WHERE {column} IN {of_project}"), [&key])?;
@@ -235,8 +263,36 @@ impl Db {
         tx.execute("DELETE FROM project_alias WHERE project = ?1", [&key])?;
         tx.execute("DELETE FROM project WHERE key = ?1", [&key])?;
         tx.commit()?;
-        Ok(Removed { key, issues, repos: 0, machines: 0 })
+        Ok(Removed { key, issues, repos: 0, machines: 0, warnings: vec![] })
     }
+}
+
+/// "NIT-3 and NIT-7 are checked out ...": why a project cannot change while work is in flight.
+fn checked_out_message(key: &str, issues: &[String]) -> String {
+    let one = issues.len() == 1;
+    format!(
+        "{} {} checked out in a worktree whose branch names {key}; land or close {} first",
+        issues.join(", "),
+        if one { "is" } else { "are" },
+        if one { "it" } else { "them" }
+    )
+}
+
+/// The issues of `project` that a worktree of a configured repo has checked out (its branch
+/// names them). Those branches would keep the old key, so neither a re-key nor a removal may run.
+fn checked_out(config: &crate::Config, db: &Db, project: &str) -> Vec<String> {
+    let aliases = db.project_aliases().unwrap_or_default();
+    let mut keys: Vec<String> = config
+        .repos
+        .iter()
+        .flat_map(|repo| crate::git::list_worktrees(&repo.root).unwrap_or_default())
+        .filter_map(|wt| wt.branch.as_deref().and_then(|b| crate::git::parse_branch(b).1))
+        .map(|k| current_key(&aliases, &k))
+        .filter(|k| k.split_once('-').is_some_and(|(p, _)| p.eq_ignore_ascii_case(project)))
+        .collect();
+    keys.sort();
+    keys.dedup();
+    keys
 }
 
 #[cfg(test)]
@@ -281,7 +337,8 @@ mod tests {
 
         let r = db.rekey_project("old", "new").unwrap();
         assert_eq!((r.from.as_str(), r.to.as_str(), r.issues), ("OLD", "NEW", 2));
-        assert!(db.project("OLD").unwrap().is_none());
+        assert!(db.project_exact("OLD").unwrap().is_none());
+        assert_eq!(db.project("old").unwrap().unwrap().key, "NEW", "an old key still reaches the project");
         let moved = db.issue("NEW-2").unwrap().unwrap();
         assert_eq!(moved.project.as_deref(), Some("NEW"));
         assert_eq!(moved.blocked_by, vec!["NEW-1".to_string()]);
@@ -289,6 +346,12 @@ mod tests {
         // Old keys and links still find it.
         assert_eq!(db.issue("old-2").unwrap().unwrap().key, "NEW-2");
         assert_eq!(db.alias_of("OLD-7").unwrap().as_deref(), Some("NEW-7"));
+        assert_eq!(db.current_key("old-7").unwrap(), "NEW-7");
+        // Writes take old keys too (MCP update_issue always passes through change_blockers).
+        db.change_blockers("OLD-2", &[], &["OLD-1".to_string()], &Actor::Human).unwrap();
+        assert!(db.issue("NEW-2").unwrap().unwrap().blocked_by.is_empty());
+        db.change_blockers("old-2", &["old-1".to_string()], &[], &Actor::Human).unwrap();
+        assert_eq!(db.issue("NEW-2").unwrap().unwrap().blocked_by, vec!["NEW-1".to_string()]);
         // New issues continue the numbering under the new key.
         assert_eq!(issue(&mut db, "NEW", "Third", vec![]), "NEW-3");
         // The old key cannot be given to another project, but can come back to this one.

@@ -417,8 +417,21 @@ impl Db {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// A project by its key, or by a key it had before (so an old `NITELY_PROJECT`, config entry
+    /// or machine token still reaches it).
     pub fn project(&self, key: &str) -> Result<Option<Project>> {
-        Ok(self.projects()?.into_iter().find(|p| p.key.eq_ignore_ascii_case(key)))
+        if let Some(p) = self.project_exact(key)? {
+            return Ok(Some(p));
+        }
+        match self.project_aliases()?.get(&key.trim().to_uppercase()) {
+            Some(current) => self.project_exact(current),
+            None => Ok(None),
+        }
+    }
+
+    /// A project by its current key only.
+    pub fn project_exact(&self, key: &str) -> Result<Option<Project>> {
+        Ok(self.projects()?.into_iter().find(|p| p.key.eq_ignore_ascii_case(key.trim())))
     }
 
     // ----- issues -----
@@ -584,6 +597,12 @@ impl Db {
     /// only and drops one when it closes, so it cannot say when a blocker finished.
     pub fn change_blockers(&mut self, key: &str, add: &[String], remove: &[String], actor: &Actor) -> Result<()> {
         let ts = now();
+        // Keys from before a project changed its key name the same issues.
+        let aliases = self.project_aliases()?;
+        let current = |k: &str| crate::projects::current_key(&aliases, k.trim());
+        let key = &current(key);
+        let add: Vec<String> = add.iter().map(|k| current(k)).collect();
+        let remove: Vec<String> = remove.iter().map(|k| current(k)).collect();
         // Immediate: the cycle check and the insert see the same relations even with agents racing.
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let find = |k: &str| -> Result<(String, String)> {
@@ -592,7 +611,7 @@ impl Db {
                 .with_context(|| format!("no issue {k}"))
         };
         let (issue, origin) = find(key)?;
-        for b in remove {
+        for b in &remove {
             let b = b.trim().to_uppercase();
             let removed = tx.execute(
                 "DELETE FROM issue_blocker WHERE issue_key = ?1 AND blocker_key = ?2 COLLATE NOCASE",
@@ -609,7 +628,7 @@ impl Db {
         if !add.is_empty() && origin != "nitely" {
             bail!("{issue} is mirrored from {origin}; only native issues take blockers");
         }
-        for b in add {
+        for b in &add {
             let (blocker, blocker_origin) = find(b)?;
             if blocker_origin != "nitely" {
                 bail!("{blocker} is mirrored from {blocker_origin}, which drops it when it closes; only native issues can block");

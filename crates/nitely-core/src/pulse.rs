@@ -119,9 +119,11 @@ pub fn pulse(db: &Db, since: i64, day_start: i64) -> Result<Pulse> {
     let facts = db.open_issue_facts()?;
     let sessions = db.sessions_since(now - 24 * 3600)?;
     let mut prs_by_key: HashMap<String, Vec<PrRecord>> = HashMap::new();
+    // A branch cut before its project changed key names the old one.
+    let aliases = db.project_aliases()?;
     for pr in db.prs()? {
         if let (_, Some(key)) = git::parse_branch(&pr.branch) {
-            prs_by_key.entry(key).or_default().push(pr);
+            prs_by_key.entry(crate::projects::current_key(&aliases, &key)).or_default().push(pr);
         }
     }
     let today = iso(day_start);

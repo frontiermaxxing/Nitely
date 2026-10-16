@@ -522,18 +522,23 @@ fn run(cmd: Cmd) -> Result<()> {
                         "reviews": db.reviews(&issue.key)?,
                     }))
                 }
+                // A key from before its project changed key names the same issue.
                 IssueCmd::Move { key, state, evidence, reason } => {
+                    let key = db.current_key(&key)?;
                     print_json(&db.move_issue(&key, &state, evidence.as_deref(), reason.as_deref(), &me)?)
                 }
                 IssueCmd::Block { key, by } => {
+                    let key = db.current_key(&key)?;
                     db.change_blockers(&key, &by, &[], &me)?;
                     print_json(&db.relations(&key)?)
                 }
                 IssueCmd::Unblock { key, by } => {
+                    let key = db.current_key(&key)?;
                     db.change_blockers(&key, &[], &by, &me)?;
                     print_json(&db.relations(&key)?)
                 }
                 IssueCmd::Note { key, text, handoff } => {
+                    let key = db.current_key(&key)?;
                     db.add_note(&key, &text, if handoff { "handoff" } else { "note" }, &me)
                 }
                 IssueCmd::Import { file, project } => {

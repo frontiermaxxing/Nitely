@@ -8,11 +8,14 @@ interface Rekeyed {
   issues: number;
   repos: number;
   machines: number;
+  /** What could not follow the change, e.g. a config file that would not save. */
+  warnings: string[];
 }
 
 interface Removed {
   key: string;
   issues: number;
+  warnings: string[];
 }
 
 const KEY = /^[A-Z][A-Z0-9]{1,9}$/;
@@ -99,6 +102,9 @@ export function ProjectSettings(props: {
             run(
               () => invoke<Rekeyed>("rekey_project", { key: project.key, newKey }),
               (r) => {
+                setNote(
+                  [`${r.issues} issue${r.issues === 1 ? "" : "s"} now start with ${r.to}; ${r.from}-… links still open them.`, ...r.warnings].join(" "),
+                );
                 props.onChanged();
                 props.onMoved(r.to);
               },
@@ -126,7 +132,8 @@ export function ProjectSettings(props: {
             e.preventDefault();
             run(
               () => invoke<Removed>("remove_project", { key: project.key, confirm: needsConfirm ? confirm : null }),
-              () => {
+              (r) => {
+                if (r.warnings.length) window.alert(r.warnings.join("\n"));
                 props.onChanged();
                 props.onMoved(null);
               },

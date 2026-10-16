@@ -356,9 +356,41 @@ fn keys_arg(args: &Value, key: &str) -> Vec<String> {
     }
 }
 
+/// The call's issue keys and project as they are now: a key or project from before a project
+/// changed its key (an agent's notes, an old branch, a cached token) names the same thing.
+fn current_args(db: &Db, args: &Value) -> Result<Value> {
+    let aliases = db.project_aliases()?;
+    let mut args = args.clone();
+    if aliases.is_empty() {
+        return Ok(args);
+    }
+    let current = |s: &mut String| *s = nitely_core::projects::current_key(&aliases, s);
+    if let Some(Value::String(s)) = args.get_mut("key") {
+        current(s);
+    }
+    for field in ["blocked_by", "remove_blocked_by"] {
+        match args.get_mut(field) {
+            Some(Value::Array(list)) => list.iter_mut().for_each(|v| {
+                if let Value::String(s) = v {
+                    current(s)
+                }
+            }),
+            Some(Value::String(s)) => current(s),
+            _ => {}
+        }
+    }
+    if let Some(Value::String(p)) = args.get_mut("project") {
+        if let Some(now) = aliases.get(&p.trim().to_uppercase()) {
+            *p = now.clone();
+        }
+    }
+    Ok(args)
+}
+
 fn run_tool(server: &Server, name: &str, args: &Value) -> Result<Value> {
     let config = Config::load()?;
     let mut db = Db::open_default()?;
+    let args = &current_args(&db, args)?;
     let actor = server.actor();
     if server.remote.is_some() && LOCAL_ONLY.contains(&name) {
         bail!("{name} runs on the machine that holds the repo, so it is not available over the local network; do the work in your own checkout");
@@ -368,7 +400,9 @@ fn run_tool(server: &Server, name: &str, args: &Value) -> Result<Value> {
         Some(r) => str_arg(args, "project")
             .map(str::to_uppercase)
             .or_else(|| r.project.clone())
-            .with_context(|| format!("name the project: the token {} has no default project", r.name)),
+            .with_context(|| format!("name the project: the token {} has no default project", r.name))
+            // A token made before its project changed key still names the old one.
+            .and_then(|p| Ok(db.project(&p)?.map(|x| x.key).unwrap_or(p))),
         None => resolve_project(&config, db, str_arg(args, "project"), &server.cwd),
     };
 

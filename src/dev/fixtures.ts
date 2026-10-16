@@ -903,7 +903,7 @@ function rekeyProject(args: Record<string, unknown>) {
     }
   }
   p.key = to;
-  return { from, to, issues, repos: 0, machines: MACHINES.filter((m) => m.project === from).map((m) => (m.project = to)).length };
+  return { from, to, issues, repos: 0, machines: MACHINES.filter((m) => m.project === from).map((m) => (m.project = to)).length, warnings: [] };
 }
 
 function removeProject(args: Record<string, unknown>) {
@@ -913,7 +913,7 @@ function removeProject(args: Record<string, unknown>) {
   if (own.length && !confirmed) throw `${p.key} has ${own.length} issue(s); remove it with its issues, or move them first`;
   world.issues = world.issues.filter((i) => i.project !== p.key);
   world.projects = world.projects.filter((x) => x !== p);
-  return { key: p.key, issues: own.length, repos: 0, machines: 0 };
+  return { key: p.key, issues: own.length, repos: 0, machines: 0, warnings: [] };
 }
 
 function moveIssue(args: Record<string, unknown>) {

@@ -126,6 +126,8 @@ async fn issue_detail(key: String) -> Result<nitely_core::issues::IssueDetail, S
 #[tauri::command]
 async fn set_blocker(key: String, blocker: String, blocked: bool) -> Result<Relations, String> {
     let mut db = db()?;
+    // A panel opened from an old link (before its project changed key) still names the old key.
+    let key = db.current_key(&key).map_err(err)?;
     if blocked {
         db.add_blocker(&key, &blocker, &ME).map_err(err)?;
     } else {
@@ -136,9 +138,9 @@ async fn set_blocker(key: String, blocker: String, blocked: bool) -> Result<Rela
 
 #[tauri::command]
 async fn move_issue(key: String, state: String, evidence: Option<String>, reason: Option<String>) -> Result<IssueRecord, String> {
-    db()?
-        .move_issue(&key, &state, evidence.as_deref(), reason.as_deref(), &ME)
-        .map_err(err)
+    let mut db = db()?;
+    let key = db.current_key(&key).map_err(err)?;
+    db.move_issue(&key, &state, evidence.as_deref(), reason.as_deref(), &ME).map_err(err)
 }
 
 #[tauri::command]
