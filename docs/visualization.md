@@ -106,6 +106,7 @@ Import from `./ui` (or `../ui`). Open the browser preview at `#kit` to see each 
 | `EmptyState`   | An empty track, one sentence, what would fill it.                            | Every list or page that can be empty. |
 | `Loading`      | One quiet line, shown only after 300ms so fast reads never flash.            | Every view or panel before its first data. |
 | `PriorityMark` | Issue priority as three rising bars; urgent is red.                          | Issue rows. |
+| `Labels`       | An issue's labels as quiet `#words` (never pills); past `max`, a "+N".        | Issue rows and cards, the issue sheet. |
 | `PrMark`       | A pull request's number and its checks; merged and declined fade.            | Cards and rows that mention a PR (`PrCell` in src/Pr.tsx has the long form). |
 | `ChecksMark`   | CI checks: a tick, a red cross, a dashed ring while they run. `label` adds words. | Next to a PR. |
 | `AheadBehind`  | Commits behind the base (faint, left) and ahead of it (right) around a tick. | Branches. Pass the same `max` to rows shown together. |

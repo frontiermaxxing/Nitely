@@ -4,7 +4,7 @@ import type { IssueDetail, IssueRecord, LinkedIssue } from "./types";
 import { agentLabel, ago, openExternal, PRIORITY } from "./util";
 import { IssueJourney, WhoHadIt } from "./IssueJourney";
 import { typing } from "./Palette";
-import { AgentMark, IssueToken, Loading, PrMark, PriorityMark, StationGlyph, StationTrack, VENDOR_LABEL, trackOf, vendorOf } from "./ui";
+import { AgentMark, IssueToken, Labels, Loading, PrMark, PriorityMark, StationGlyph, StationTrack, VENDOR_LABEL, trackOf, vendorOf } from "./ui";
 import "./issue.css";
 
 const KIND_LABEL: Record<string, string> = {
@@ -241,6 +241,14 @@ export function IssuePanel(props: {
                   <dd>
                     {issue.priority > 0 && <PriorityMark priority={issue.priority} />}
                     {[issue.kind, issue.priority > 0 && PRIORITY[issue.priority]].filter(Boolean).join(" · ")}
+                  </dd>
+                </>
+              )}
+              {issue.labels.length > 0 && (
+                <>
+                  <dt>Labels</dt>
+                  <dd>
+                    <Labels labels={issue.labels} />
                   </dd>
                 </>
               )}

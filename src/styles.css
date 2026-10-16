@@ -448,7 +448,7 @@ details summary { cursor: pointer; color: var(--fg-2); }
   .panel-main, .panel-rail { overflow: visible; }
   .panel-main { padding: 16px 16px 24px; }
   .panel-rail { border-left: 0; border-top: 1px solid var(--line); }
-  .list-row .kind { display: none; }
+  .list-row .kind, .list-row .ui-labels { display: none; }
   .list-row .key { width: auto; }
   .kit-tracks { grid-template-columns: minmax(0, 1fr); }
   .act-chart { --who: 96px; padding: 4px 10px 12px; }

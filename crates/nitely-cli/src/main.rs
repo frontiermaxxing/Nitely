@@ -274,6 +274,9 @@ enum IssueCmd {
         /// `human` for work only the human can do; next_task never hands it out.
         #[arg(long)]
         owner: Option<String>,
+        /// An area or platform, e.g. ios or billing (repeatable).
+        #[arg(long = "label")]
+        labels: Vec<String>,
         #[arg(long)]
         allow_similar: bool,
         /// An issue that must close before this one can start (repeatable).
@@ -293,6 +296,17 @@ enum IssueCmd {
         project: Option<String>,
         #[arg(long)]
         all: bool,
+        /// Only issues with this label.
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Add or remove labels on an issue.
+    Label {
+        key: String,
+        #[arg(long)]
+        add: Vec<String>,
+        #[arg(long)]
+        remove: Vec<String>,
     },
     /// Show an issue with its timeline, pull requests and reviews.
     Show { key: String },
@@ -527,10 +541,10 @@ fn run(cmd: Cmd) -> Result<()> {
             let config = Config::load()?;
             let mut db = Db::open_default()?;
             match command {
-                IssueCmd::Create { title, kind, source, evidence, body, priority, project, state, owner, allow_similar, blocked_by } => {
+                IssueCmd::Create { title, kind, source, evidence, body, priority, project, state, owner, labels, allow_similar, blocked_by } => {
                     let project = resolve_project(&config, &db, project.as_deref(), &cwd()?)?;
                     let issue = db.create_issue(
-                        &NewIssue { project, title, body, kind, source, evidence, priority, allow_similar, state, owner, blocked_by },
+                        &NewIssue { project, title, body, kind, source, evidence, priority, allow_similar, state, owner, blocked_by, labels },
                         &me,
                     )?;
                     print_json(&issue)
@@ -541,6 +555,9 @@ fn run(cmd: Cmd) -> Result<()> {
                     let items: Vec<serde_json::Value> = serde_json::from_str(&text).context("the file must hold a JSON list of issues")?;
                     let field = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
                     let opt = |v: &serde_json::Value, k: &str| Some(field(v, k)).filter(|s| !s.is_empty());
+                    let strings = |v: &serde_json::Value, k: &str| -> Vec<String> {
+                        v.get(k).and_then(|b| b.as_array()).map(|a| a.iter().filter_map(|x| x.as_str()).map(str::to_string).collect()).unwrap_or_default()
+                    };
                     let batch: Vec<BatchItem> = items
                         .iter()
                         .map(|item| BatchItem {
@@ -556,19 +573,21 @@ fn run(cmd: Cmd) -> Result<()> {
                                 allow_similar: item.get("allow_similar").and_then(|b| b.as_bool()).unwrap_or(false),
                                 state: opt(item, "state"),
                                 owner: opt(item, "owner"),
-                                blocked_by: item
-                                    .get("blocked_by")
-                                    .and_then(|b| b.as_array())
-                                    .map(|a| a.iter().filter_map(|k| k.as_str()).map(str::to_string).collect())
-                                    .unwrap_or_default(),
+                                blocked_by: strings(item, "blocked_by"),
+                                labels: strings(item, "labels"),
                             },
                         })
                         .collect();
                     print_json(&db.create_issues(&batch, &me)?)
                 }
-                IssueCmd::List { project, all } => {
+                IssueCmd::Label { key, add, remove } => {
+                    let key = db.current_key(&key)?;
+                    print_json(&db.change_labels(&key, &add, &remove, &me)?)
+                }
+                IssueCmd::List { project, all, label } => {
                     let project = resolve_project(&config, &db, project.as_deref(), &cwd()?)?;
-                    for i in db.list_issues(Some(&project), all)? {
+                    let label = label.as_deref().and_then(nitely_core::issues::normalize_label);
+                    for i in db.list_issues(Some(&project), all)?.into_iter().filter(|i| label.as_ref().is_none_or(|l| i.labels.contains(l))) {
                         let blocked = if i.blocked_by.is_empty() { String::new() } else { format!("  (blocked by {})", i.blocked_by.join(", ")) };
                         println!("{:<9} {:<12} {}{blocked}", i.key, i.state, i.title);
                     }
@@ -621,6 +640,11 @@ fn run(cmd: Cmd) -> Result<()> {
                             owner: Some(field(&item, "owner")).filter(|s| !s.is_empty()),
                             allow_similar: false,
                             blocked_by: Vec::new(),
+                            labels: item
+                                .get("labels")
+                                .and_then(|a| a.as_array())
+                                .map(|a| a.iter().filter_map(|x| x.as_str()).map(str::to_string).collect())
+                                .unwrap_or_default(),
                         };
                         match db.create_issue(&new, &me) {
                             Ok(i) => println!("{:<9} {}", i.key, i.title),

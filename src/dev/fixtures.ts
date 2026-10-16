@@ -127,6 +127,17 @@ interface IssueSpec {
   crew?: boolean;
 }
 
+/** Areas and platforms on some issues, as agents label them. */
+const LABELS: Record<string, string[]> = {
+  "NIT-31": ["pulse", "home"],
+  "NIT-30": ["review"],
+  "HAR-14": ["booking", "mobile"],
+  "HAR-16": ["mobile", "a11y"],
+  "HAR-17": ["payments"],
+  "HAR-8": ["checkout", "safari", "payments"],
+  "HAR-15": ["api"],
+};
+
 const WORK = ["Reading the code around the change", "Writing the change", "Adding tests", "Fixing a failing test", "Tidying the diff before the gate"];
 
 const ISSUES: IssueSpec[] = [
@@ -546,7 +557,7 @@ function build(): World {
       kind: spec.kind,
       source: spec.source ?? vendor,
       priority: spec.priority,
-      labels: [],
+      labels: LABELS[spec.key] ?? [],
       evidence: spec.kind === "bug" ? "Seen on the latest build; steps in the body." : "",
       claimed_by: STATE_TYPE[state] === "started" ? claimed : null,
       owner: spec.owner ?? "agent",

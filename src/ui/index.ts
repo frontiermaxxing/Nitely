@@ -9,6 +9,7 @@ export { CountBadge } from "./CountBadge";
 export { EmptyState } from "./EmptyState";
 export { EVENT_LABEL, EventMark } from "./EventMark";
 export { IssueToken } from "./IssueToken";
+export { Labels } from "./Labels";
 export { Meter, type MeterPart } from "./Meter";
 export { PrMark } from "./PrMark";
 export { PriorityMark } from "./PriorityMark";

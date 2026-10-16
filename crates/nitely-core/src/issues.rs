@@ -178,6 +178,8 @@ pub struct NewIssue {
     pub owner: Option<String>,
     /// Issues that must close before this one can start.
     pub blocked_by: Vec<String>,
+    /// Areas and platforms, e.g. `ios`, `billing`; normalized by `normalize_label`.
+    pub labels: Vec<String>,
 }
 
 /// One issue of a `file_issues` batch: a new issue, and the ref the batch's other items name it by
@@ -249,6 +251,7 @@ struct CheckedIssue {
     source: String,
     priority: i64,
     owner: String,
+    labels: Vec<String>,
     state: &'static str,
     state_type: &'static str,
 }
@@ -269,9 +272,24 @@ fn insert_issue(tx: &rusqlite::Connection, c: &CheckedIssue, blockers: &[String]
     let key = format!("{}-{number}", c.project);
     tx.execute(
         "INSERT INTO issue (key, origin, project, number, title, body, state, state_type, kind, source,
-           priority, evidence, created_at, updated_at, owner)
-         VALUES (?1, 'nitely', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, ?13)",
-        params![key, c.project, number, c.title, c.body, c.state, c.state_type, c.kind, c.source, c.priority, c.evidence, iso(ts), c.owner],
+           priority, evidence, created_at, updated_at, owner, labels)
+         VALUES (?1, 'nitely', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, ?13, ?14)",
+        params![
+            key,
+            c.project,
+            number,
+            c.title,
+            c.body,
+            c.state,
+            c.state_type,
+            c.kind,
+            c.source,
+            c.priority,
+            c.evidence,
+            iso(ts),
+            c.owner,
+            serde_json::to_string(&c.labels)?
+        ],
     )?;
     let filed = if c.owner == "human" { format!("Filed as {}, the human's own work", c.state) } else { format!("Filed as {}", c.state) };
     tx.execute(
@@ -448,6 +466,34 @@ pub fn parse_state(input: &str) -> Result<(&'static str, &'static str)> {
             let names: Vec<&str> = STATES.iter().map(|(n, _)| *n).collect();
             format!("unknown state {input:?}; one of: {}", names.join(", "))
         })
+}
+
+/// A label as Nitely keeps it: lowercase, words joined by `-`, so "Roku TV", "roku_tv" and
+/// "roku-tv" are one label. None when nothing usable is left.
+pub fn normalize_label(label: &str) -> Option<String> {
+    let mut out = String::new();
+    for c in label.trim().chars() {
+        match c {
+            c if c.is_alphanumeric() => out.extend(c.to_lowercase()),
+            '.' | '+' | ':' | '/' => out.push(c),
+            _ if !out.ends_with('-') => out.push('-'),
+            _ => {}
+        }
+    }
+    let out = out.trim_matches('-').to_string();
+    (!out.is_empty() && out.chars().count() <= 40).then_some(out)
+}
+
+/// Normalized labels, each once, in the order given; refuses one with nothing usable in it.
+fn normalize_labels(labels: &[String]) -> Result<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    for l in labels {
+        let n = normalize_label(l).with_context(|| format!("\"{l}\" is not a usable label: give a short word such as ios or billing"))?;
+        if !out.contains(&n) {
+            out.push(n);
+        }
+    }
+    Ok(out)
 }
 
 /// RFC 3339 UTC from unix seconds (days-from-civil, Howard Hinnant's algorithm).
@@ -708,6 +754,7 @@ impl Db {
             source: source.to_string(),
             priority: new.priority,
             owner: owner.to_string(),
+            labels: normalize_labels(&new.labels)?,
             state,
             state_type,
         })
@@ -1006,6 +1053,54 @@ impl Db {
         )?;
         tx.commit()?;
         self.issue(&key)
+    }
+
+    /// Every label used on a project's native issues, open or closed, with how many issues carry
+    /// it: most used first. This is the project's vocabulary that agents reuse.
+    pub fn project_labels(&self, project: &str) -> Result<Vec<(String, usize)>> {
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for issue in self.list_issues(Some(project), true)? {
+            if issue.origin == "nitely" {
+                for l in issue.labels {
+                    *counts.entry(l).or_insert(0) += 1;
+                }
+            }
+        }
+        let mut out: Vec<(String, usize)> = counts.into_iter().collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        Ok(out)
+    }
+
+    /// Adds and removes labels of a native issue. Removing one it does not carry is not an error.
+    pub fn change_labels(&mut self, key: &str, add: &[String], remove: &[String], actor: &Actor) -> Result<IssueRecord> {
+        let issue = self.issue(key)?.with_context(|| format!("no issue {key}"))?;
+        if issue.origin != "nitely" {
+            bail!("{} is mirrored from {}; change its labels there", issue.key, issue.origin);
+        }
+        let (add, remove) = (normalize_labels(add)?, normalize_labels(remove)?);
+        let mut labels: Vec<String> = issue.labels.iter().filter(|l| !remove.contains(l)).cloned().collect();
+        for l in &add {
+            if !labels.contains(l) {
+                labels.push(l.clone());
+            }
+        }
+        if labels == issue.labels {
+            return Ok(issue);
+        }
+        let added: Vec<String> = labels.iter().filter(|l| !issue.labels.contains(l)).map(|l| format!("+{l}")).collect();
+        let removed: Vec<String> = issue.labels.iter().filter(|l| !labels.contains(l)).map(|l| format!("-{l}")).collect();
+        let ts = now();
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE issue SET labels = ?2, updated_at = ?3 WHERE key = ?1",
+            params![issue.key, serde_json::to_string(&labels)?, iso(ts)],
+        )?;
+        tx.execute(
+            "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, ?2, ?3, 'labels_changed', ?4)",
+            params![ts, actor.id(), issue.key, format!("Labels {}", [added, removed].concat().join(" "))],
+        )?;
+        tx.commit()?;
+        self.issue(&issue.key)?.context("issue vanished")
     }
 
     /// Makes an issue the human's own work, or hands it back to agents. Any agent may give an issue
@@ -1395,6 +1490,28 @@ mod tests {
         let own = db.create_issue(&own, &agent).unwrap();
         db.move_issue(&own.key, "In Progress", None, None, &Actor::Human).unwrap();
         assert_eq!(db.set_owner(&own.key, "agent", &Actor::Human).unwrap().state, "Todo");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn labels_are_normalized_counted_and_changed() {
+        let (mut db, dir) = db();
+        db.create_project("NIT", "Nitely").unwrap();
+        let agent = Actor::Agent("claude:a".into());
+        assert_eq!(normalize_label("  Roku TV "), Some("roku-tv".into()));
+        assert_eq!(normalize_label("roku_tv"), Some("roku-tv".into()));
+        assert_eq!(normalize_label("--"), None);
+
+        let a = db.create_issue(&NewIssue { labels: vec!["Roku".into(), "roku".into(), "Billing".into()], ..new("Channel store listing") }, &agent).unwrap();
+        assert_eq!(a.labels, ["roku", "billing"], "normalized, each once");
+        db.create_issue(&NewIssue { labels: vec!["roku".into()], ..new("Remote control focus order") }, &agent).unwrap();
+        assert!(db.create_issue(&NewIssue { labels: vec!["!!".into()], ..new("Something unrelated to it") }, &agent).is_err());
+        assert_eq!(db.project_labels("NIT").unwrap(), [("roku".to_string(), 2), ("billing".to_string(), 1)]);
+
+        let changed = db.change_labels(&a.key, &["Tizen".into()], &["billing".into(), "absent".into()], &agent).unwrap();
+        assert_eq!(changed.labels, ["roku", "tizen"]);
+        let last = db.timeline(&a.key).unwrap().pop().unwrap();
+        assert_eq!((last.kind.as_str(), last.summary.as_deref()), ("labels_changed", Some("Labels +tizen -billing")));
         std::fs::remove_dir_all(dir).ok();
     }
 

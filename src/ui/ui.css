@@ -193,3 +193,7 @@ button.ui-token:focus-visible, a.ui-token:focus-visible { outline: 2px solid var
   .ui-dot-working, .ui-mark-dot-working, .ui-st-current .ui-st-node::before { animation: none !important; }
   .ui-mini-cur { transition: none; }
 }
+
+/* Labels: quiet #words, never pills. */
+.ui-labels { display: inline-flex; gap: 6px; min-width: 0; overflow: hidden; white-space: nowrap; color: var(--fg-3); font-size: var(--text-xs); }
+.ui-label { overflow: hidden; text-overflow: ellipsis; }

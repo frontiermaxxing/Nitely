@@ -1,6 +1,6 @@
 import type { IssueRecord } from "./types";
 import { agentLabel, nowSecs } from "./util";
-import { AgentMark, CountBadge, Meter, PriorityMark, Sparkline, StationGlyph, phaseOf, trackOf } from "./ui";
+import { AgentMark, CountBadge, Labels, Meter, PriorityMark, Sparkline, StationGlyph, phaseOf, trackOf } from "./ui";
 
 const GROUPS = ["Needs You", "In Progress", "In Review", "Approved", "Todo", "Backlog", "Done", "Canceled", "Duplicate"];
 const DAYS = 14;
@@ -25,6 +25,7 @@ export function Backlog(props: { issues: IssueRecord[]; showClosed: boolean; onO
                   <StationGlyph track={trackOf(i)} />
                   <span className="mono key">{i.key}</span>
                   <span className="title">{i.title}</span>
+                  <Labels labels={i.labels} max={3} />
                   {i.kind && <span className="kind">{i.kind}</span>}
                   <span className="who">{i.claimed_by && <AgentMark vendor={i.claimed_by} title={agentLabel(i.claimed_by)} />}</span>
                 </button>

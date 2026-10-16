@@ -236,7 +236,8 @@ fn tools() -> Value {
             "description": "Open issues of a project, most urgent first.",
             "inputSchema": { "type": "object", "properties": {
                 "project": { "type": "string" },
-                "include_closed": { "type": "boolean" }
+                "include_closed": { "type": "boolean" },
+                "label": { "type": "string", "description": "Only issues with this label." }
             } }
         },
         {
@@ -286,7 +287,8 @@ fn tools() -> Value {
                 "owner": { "type": "string", "enum": OWNERS, "description": "human for work only the human can do (buy hardware, sign a contract, use a console only they can reach); next_task never hands it out. Defaults to agent." },
                 "project": { "type": "string" },
                 "allow_similar": { "type": "boolean" },
-                "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Issues that must close before this one can start, e.g. [\"NIT-9\"]." }
+                "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Issues that must close before this one can start, e.g. [\"NIT-9\"]." },
+                "labels": { "type": "array", "items": { "type": "string" }, "description": "Areas and platforms, e.g. [\"ios\", \"billing\"]: reuse the project's labels (list_issues shows them); kind and priority have their own fields." }
             } }
         },
         {
@@ -304,7 +306,8 @@ fn tools() -> Value {
                     "state": { "type": "string", "enum": ["Todo", "Backlog", "Needs You"] },
                     "owner": { "type": "string", "enum": OWNERS },
                     "allow_similar": { "type": "boolean" },
-                    "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Refs of this batch or existing issue keys." }
+                    "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Refs of this batch or existing issue keys." },
+                    "labels": { "type": "array", "items": { "type": "string" }, "description": "Areas and platforms; reuse the project's labels." }
                 } } }
             } }
         },
@@ -318,7 +321,9 @@ fn tools() -> Value {
                 "reason": { "type": "string" },
                 "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Issues to add as blockers of this one." },
                 "remove_blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Blockers to remove." },
-                "owner": { "type": "string", "enum": ["human"], "description": "human makes it the human's own work." }
+                "owner": { "type": "string", "enum": ["human"], "description": "human makes it the human's own work." },
+                "labels": { "type": "array", "items": { "type": "string" }, "description": "Labels to add (areas and platforms)." },
+                "remove_labels": { "type": "array", "items": { "type": "string" }, "description": "Labels to remove." }
             } }
         },
         {
@@ -493,7 +498,28 @@ fn new_issue(args: &Value, project: &str, vendor: &str) -> Result<NewIssue> {
         state: str_arg(args, "state").map(str::to_string),
         owner: str_arg(args, "owner").map(str::to_string),
         blocked_by: keys_arg(args, "blocked_by"),
+        labels: keys_arg(args, "labels"),
     })
+}
+
+/// When a call brings labels the project has not used before, a note naming the labels it already
+/// uses (and any close to the new ones), so agents keep one vocabulary.
+fn label_note(before: &[(String, usize)], given: &[String]) -> Option<String> {
+    let known: Vec<&str> = before.iter().map(|(l, _)| l.as_str()).collect();
+    let new: Vec<String> = given.iter().filter_map(|l| nitely_core::issues::normalize_label(l)).filter(|l| !known.contains(&l.as_str())).collect();
+    if new.is_empty() {
+        return None;
+    }
+    let mut note = format!("New label{} for this project: {}.", if new.len() == 1 { "" } else { "s" }, new.join(", "));
+    let close: Vec<&str> = known.iter().copied().filter(|k| new.iter().any(|n| n.contains(k) || k.contains(n.as_str()))).collect();
+    if !close.is_empty() {
+        note.push_str(&format!(" Close to labels it already uses: {}; use those if they mean the same.", close.join(", ")));
+    }
+    if !before.is_empty() {
+        let used: Vec<String> = before.iter().take(20).map(|(l, n)| format!("{l} ({n})")).collect();
+        note.push_str(&format!(" In use: {}.", used.join(", ")));
+    }
+    Some(note)
 }
 
 /// `session` is the session a report or ask counts toward (see `Server::session`).
@@ -588,7 +614,9 @@ fn run_tool(server: &Server, name: &str, args: &Value, session: &str) -> Result<
         "list_issues" => {
             let project = project(&db)?;
             let include_closed = args.get("include_closed").and_then(Value::as_bool).unwrap_or(false);
-            json!(db.list_issues(Some(&project), include_closed)?)
+            let label = str_arg(args, "label").and_then(nitely_core::issues::normalize_label);
+            let issues: Vec<_> = db.list_issues(Some(&project), include_closed)?.into_iter().filter(|i| label.as_ref().is_none_or(|l| i.labels.contains(l))).collect();
+            json!(issues)
         }
         "get_project" => json!(db.project_brief(&project(&db)?)?),
         "set_project_brief" => {
@@ -612,7 +640,13 @@ fn run_tool(server: &Server, name: &str, args: &Value, session: &str) -> Result<
         }
         "file_issue" => {
             let project = project(&db)?;
-            json!(db.create_issue(&new_issue(args, &project, &server.vendor)?, &actor)?)
+            let new = new_issue(args, &project, &server.vendor)?;
+            let before = db.project_labels(&project)?;
+            let mut out = json!(db.create_issue(&new, &actor)?);
+            if let Some(note) = label_note(&before, &new.labels) {
+                out["labels_note"] = json!(note);
+            }
+            out
         }
         "file_issues" => {
             let project = project(&db)?;
@@ -625,14 +659,21 @@ fn run_tool(server: &Server, name: &str, args: &Value, session: &str) -> Result<
                     Ok(BatchItem { local_ref: str_arg(item, "ref").unwrap_or_default().to_string(), issue })
                 })
                 .collect::<Result<Vec<_>>>()?;
-            json!(db.create_issues(&items, &actor)?)
+            let before = db.project_labels(&project)?;
+            let mut out = json!(db.create_issues(&items, &actor)?);
+            let given: Vec<String> = items.iter().flat_map(|i| i.issue.labels.clone()).collect();
+            if let Some(note) = label_note(&before, &given) {
+                out["labels_note"] = json!(note);
+            }
+            out
         }
         "update_issue" => {
             let key = req(args, "key")?;
             let (add, remove) = (keys_arg(args, "blocked_by"), keys_arg(args, "remove_blocked_by"));
             let owner = str_arg(args, "owner");
-            if str_arg(args, "state").is_none() && add.is_empty() && remove.is_empty() && owner.is_none() {
-                bail!("give a state, blocked_by, remove_blocked_by or owner");
+            let (add_labels, remove_labels) = (keys_arg(args, "labels"), keys_arg(args, "remove_labels"));
+            if str_arg(args, "state").is_none() && add.is_empty() && remove.is_empty() && owner.is_none() && add_labels.is_empty() && remove_labels.is_empty() {
+                bail!("give a state, blocked_by, remove_blocked_by, labels, remove_labels or owner");
             }
             if owner.is_some_and(|o| o != "human") {
                 bail!("only the human hands their own work back to agents; `ask` them if an agent should do {key}");
@@ -642,13 +683,23 @@ fn run_tool(server: &Server, name: &str, args: &Value, session: &str) -> Result<
                 db.check_move(key, state, str_arg(args, "evidence"), str_arg(args, "reason"), &actor)?;
             }
             db.change_blockers(key, &add, &remove, &actor)?;
+            let mut note = None;
+            if !add_labels.is_empty() || !remove_labels.is_empty() {
+                let project = db.issue(key)?.and_then(|i| i.project).unwrap_or_default();
+                note = label_note(&db.project_labels(&project)?, &add_labels);
+                db.change_labels(key, &add_labels, &remove_labels, &actor)?;
+            }
             if let Some(owner) = owner {
                 db.set_owner(key, owner, &actor)?;
             }
-            match str_arg(args, "state") {
+            let mut out = match str_arg(args, "state") {
                 Some(state) => json!(db.move_issue(key, state, str_arg(args, "evidence"), str_arg(args, "reason"), &actor)?),
                 None => json!(db.issue(key)?.with_context(|| format!("no issue {key}"))?),
+            };
+            if let Some(note) = note {
+                out["labels_note"] = json!(note);
             }
+            out
         }
         "report" => {
             let text = req(args, "text")?;
@@ -702,6 +753,16 @@ fn run_tool(server: &Server, name: &str, args: &Value, session: &str) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_label_names_the_ones_in_use() {
+        let before = vec![("roku".to_string(), 4), ("tizen".to_string(), 2)];
+        assert_eq!(label_note(&before, &["Roku".into(), "tizen".into()]), None, "known labels need no note");
+        let note = label_note(&before, &["roku-tv".into()]).unwrap();
+        assert!(note.contains("New label for this project: roku-tv.") && note.contains("Close to labels it already uses: roku;"), "{note}");
+        assert!(note.contains("In use: roku (4), tizen (2)."), "{note}");
+        assert!(label_note(&[], &["ios".into()]).unwrap().starts_with("New label for this project: ios."));
+    }
 
     #[test]
     fn initialize_negotiates_and_detects_vendor() {

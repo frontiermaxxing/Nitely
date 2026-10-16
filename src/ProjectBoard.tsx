@@ -8,6 +8,7 @@ import {
   IssueToken,
   LIVENESS_LABEL,
   PrMark,
+  Labels,
   PriorityMark,
   STATION_LABEL,
   STATIONS,
@@ -316,6 +317,7 @@ function BoardCard(props: { card: Card; now: number; onOpenIssue: (key: string) 
       {flag && <p className={`board-card-flag board-flag-${flag.tone}`}>{flag.text}</p>}
       <div className="board-card-foot">
         {issue.kind && <span className="board-card-kind">{issue.kind}</span>}
+        <Labels labels={issue.labels} max={2} />
         {c.pr && <PrMark pr={c.pr} link />}
         {track.rounds > 0 && !done && (
           <span className="board-card-rounds" title={`${track.rounds} round${track.rounds === 1 ? "" : "s"} of review changes`}>
