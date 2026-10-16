@@ -105,6 +105,8 @@ fn tool_summary(tool: &str, input: Option<&Value>) -> String {
         "Edit" | "Write" | "Read" | "MultiEdit" | "NotebookEdit" => field("file_path"),
         "Grep" | "Glob" => field("pattern"),
         "Task" | "Agent" => field("description"),
+        // The issue a Nitely tool acts on, so its events can be traced to this session.
+        t if t.starts_with("mcp__nitely__") => field("key"),
         _ => None,
     };
     match detail {
@@ -136,6 +138,16 @@ mod tests {
         assert_eq!(e.session_id, "claude:s1");
         assert_eq!(e.summary.as_deref(), Some("Bash: npm run test:gate"));
         assert_eq!(e.state, "working");
+    }
+
+    #[test]
+    fn nitely_tools_name_their_issue_but_not_their_text() {
+        let e = from_claude(&json!({
+            "session_id": "s1", "cwd": "/w", "hook_event_name": "PostToolUse",
+            "tool_name": "mcp__nitely__note", "tool_input": { "key": "NIT-27", "text": "private handoff" }
+        }))
+        .unwrap();
+        assert_eq!(e.summary.as_deref(), Some("mcp__nitely__note: NIT-27"));
     }
 
     #[test]

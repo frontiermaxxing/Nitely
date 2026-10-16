@@ -36,6 +36,14 @@ async fn pulse(since: i64, day_start: i64) -> Result<nitely_core::Pulse, String>
     nitely_core::pulse(&db()?, since, day_start).map_err(err)
 }
 
+/// What every agent session did over the last `hours`, for the Activity view.
+#[tauri::command]
+async fn activity(hours: i64) -> Result<nitely_core::activity::Activity, String> {
+    let config = Config::load().map_err(err)?;
+    let to = nitely_core::db::now();
+    nitely_core::activity::activity(&config, &db()?, to - hours.clamp(1, 24 * 7) * 3600, to).map_err(err)
+}
+
 #[tauri::command]
 async fn sync_now() -> Result<remote::SyncReport, String> {
     run_sync().map_err(err)
@@ -189,6 +197,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             snapshot,
             pulse,
+            activity,
             sync_now,
             projects,
             create_project,

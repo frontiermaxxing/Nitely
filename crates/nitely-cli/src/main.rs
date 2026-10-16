@@ -126,6 +126,11 @@ enum Cmd {
     },
     /// Print the Now board as JSON.
     Now,
+    /// Print what every agent session did over the last hours (the Activity view) as JSON.
+    Activity {
+        #[arg(long, default_value_t = 12)]
+        hours: i64,
+    },
     /// Pull PRs from Bitbucket and issues from Linear, using ~/.aera-work/credentials.json.
     Sync,
     /// Print where Nitely keeps its data.
@@ -604,6 +609,10 @@ fn run(cmd: Cmd) -> Result<()> {
             Ok(())
         }
         Cmd::Now => print_json(&nitely_core::snapshot(&Config::load()?, &Db::open_default()?)?),
+        Cmd::Activity { hours } => {
+            let to = nitely_core::db::now();
+            print_json(&nitely_core::activity::activity(&Config::load()?, &Db::open_default()?, to - hours * 3600, to)?)
+        }
         Cmd::Sync => {
             let report = nitely_core::remote::sync(&Config::load()?, &mut Db::open_default()?);
             print_json(&report)?;

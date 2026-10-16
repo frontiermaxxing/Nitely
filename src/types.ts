@@ -250,3 +250,59 @@ export interface Pulse {
   throughput: PulseHour[];
   landed_today: number;
 }
+
+// Mirrors crates/nitely-core/src/activity.rs: what every agent session did over a window.
+
+/** "seen": active before session states were recorded, so the state is unknown. */
+export type SegmentState = "working" | "waiting" | "idle" | "stale" | "seen";
+
+export interface ActivitySegment {
+  from: number;
+  to: number;
+  state: SegmentState;
+}
+
+export type MarkKind =
+  | "start"
+  | "commit"
+  | "gate_pass"
+  | "gate_fail"
+  | "submit"
+  | "review_pass"
+  | "review_changes"
+  | "review_fail"
+  | "land"
+  | "land_fail"
+  | "ask"
+  | "handoff";
+
+export interface ActivityMark {
+  ts: number;
+  kind: MarkKind;
+  issue_key: string | null;
+  summary: string;
+}
+
+export interface ActivityLane {
+  session_id: string;
+  vendor: string;
+  cwd: string;
+  project: string | null;
+  place: string;
+  /** Issues it worked on in the window, the most recent last. */
+  issues: string[];
+  started_at: number;
+  last_seen_at: number;
+  state: SessionState;
+  segments: ActivitySegment[];
+  marks: ActivityMark[];
+}
+
+export interface Activity {
+  from: number;
+  to: number;
+  /** When session states started being recorded; null while nothing is. */
+  recorded_since: number | null;
+  lanes: ActivityLane[];
+  issues: IssueRecord[];
+}

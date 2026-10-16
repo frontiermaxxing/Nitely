@@ -62,6 +62,13 @@ CREATE TABLE IF NOT EXISTS session (
   last_activity TEXT,
   state         TEXT NOT NULL              -- 'working' | 'idle' | 'waiting' | 'ended'
 );
+CREATE TABLE IF NOT EXISTS session_state ( -- one row each time a session's state changes
+  session_id TEXT NOT NULL,
+  ts         INTEGER NOT NULL,
+  state      TEXT NOT NULL                 -- as session.state
+);
+CREATE INDEX IF NOT EXISTS session_state_session ON session_state (session_id, ts);
+CREATE INDEX IF NOT EXISTS session_state_ts ON session_state (ts);
 CREATE TABLE IF NOT EXISTS event (
   id         INTEGER PRIMARY KEY,
   ts         INTEGER NOT NULL,
@@ -132,7 +139,7 @@ CREATE TABLE IF NOT EXISTS ask (
 
 /// Bumped when a table changes shape. Tables that only mirror Bitbucket or Linear are dropped
 /// and refilled by the next sync; tables Nitely owns get real migrations.
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -152,7 +159,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         // v5 keys reviews by issue and patch; the old placeholder table was never written.
         conn.execute_batch("DROP TABLE IF EXISTS review;")?;
     }
-    // v6 adds issue_blocker, which SCHEMA creates; nothing to drop.
+    // v6 adds issue_blocker and v7 session_state, which SCHEMA creates; nothing to drop.
     Ok(())
 }
 
@@ -243,10 +250,25 @@ impl Db {
         Db::open(&crate::paths::db_path())
     }
 
-    /// Stores the event and moves the session's heartbeat, in one transaction.
+    /// Stores the event and moves the session's heartbeat, in one transaction. A change of state
+    /// (or the first state seen for a session) is also kept in `session_state`, so the Activity
+    /// view can show what each session did over time.
     pub fn record(&mut self, e: &NewEvent) -> Result<()> {
         let ts = now();
         let tx = self.conn.transaction()?;
+        let last: Option<String> = tx
+            .query_row(
+                "SELECT state FROM session_state WHERE session_id = ?1 ORDER BY ts DESC, rowid DESC LIMIT 1",
+                [&e.session_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if last.as_deref() != Some(e.state.as_str()) {
+            tx.execute(
+                "INSERT INTO session_state (session_id, ts, state) VALUES (?1, ?2, ?3)",
+                params![e.session_id, ts, e.state],
+            )?;
+        }
         tx.execute(
             "INSERT INTO session (id, vendor, cwd, started_at, last_seen_at, last_activity, state)
              VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6)
@@ -431,6 +453,10 @@ mod tests {
         db.record(&e).unwrap();
         let s = db.session("claude:abc").unwrap().unwrap();
         assert_eq!(s.state, "idle");
+        // Two events, two states: both changes are kept; a repeat of the same state is not.
+        db.record(&e).unwrap();
+        let changes: i64 = db.conn.query_row("SELECT COUNT(*) FROM session_state WHERE session_id = 'claude:abc'", [], |r| r.get(0)).unwrap();
+        assert_eq!(changes, 2);
         assert_eq!(s.last_activity.as_deref(), Some("Bash: npm test"));
         std::fs::remove_dir_all(dir).ok();
     }
