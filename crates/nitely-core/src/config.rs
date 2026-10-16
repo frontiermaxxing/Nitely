@@ -16,6 +16,10 @@ pub struct Config {
     /// it where `--state` does not say otherwise.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub linear_states: BTreeMap<String, String>,
+    /// App-wide review and landing defaults for what a project's playbook leaves unset; only a
+    /// person changes them, in the app (`rules::save_defaults`).
+    #[serde(default, skip_serializing_if = "crate::rules::RuleDefaults::is_empty")]
+    pub rule_defaults: crate::rules::RuleDefaults,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

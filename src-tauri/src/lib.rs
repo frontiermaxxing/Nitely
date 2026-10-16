@@ -1,5 +1,5 @@
 use nitely_core::issues::{Ask, Project, Relations};
-use nitely_core::{remote, Actor, Board, Config, Db, IssueRecord};
+use nitely_core::{remote, rules, Actor, Board, Config, Db, IssueRecord};
 use serde::Serialize;
 use std::time::Duration;
 
@@ -281,6 +281,52 @@ async fn agent_setup_apply() -> Result<AgentsUpdated, String> {
     Ok(AgentsUpdated { done, failed })
 }
 
+/// The review and landing rules of each repo in a project (the project's Rules tab).
+#[tauri::command]
+async fn rules(project: String) -> Result<Vec<rules::RulesView>, String> {
+    rules::rules_for_project(&Config::load().map_err(err)?, &project).map_err(err)
+}
+
+/// What saving these rules would loosen of what sends changes to a person; empty when nothing.
+#[tauri::command]
+async fn rules_check(repo: String, edit: rules::RulesEdit) -> Result<Vec<String>, String> {
+    rules::check_rules(&Config::load().map_err(err)?, &repo, &edit).map_err(err)
+}
+
+/// Saves a repo's rules. Only the app saves them: a person, never an agent.
+#[tauri::command]
+async fn rules_save(repo: String, edit: rules::RulesEdit, confirm: bool) -> Result<rules::RulesView, String> {
+    rules::save_rules(&Config::load().map_err(err)?, &repo, &edit, confirm).map_err(err)
+}
+
+#[tauri::command]
+async fn rules_branches(repo: String) -> Result<Vec<String>, String> {
+    rules::recent_branches(&Config::load().map_err(err)?, &repo).map_err(err)
+}
+
+#[tauri::command]
+async fn rules_dry_run(repo: String, branch: String) -> Result<rules::DryRun, String> {
+    rules::dry_run(&Config::load().map_err(err)?, &repo, &branch).map_err(err)
+}
+
+#[tauri::command]
+async fn rule_defaults() -> Result<rules::DefaultsView, String> {
+    Ok(rules::defaults_view(&Config::load().map_err(err)?))
+}
+
+#[tauri::command]
+async fn rule_defaults_check(defaults: rules::RuleDefaults) -> Result<Vec<String>, String> {
+    Ok(rules::defaults_loosening(&Config::load().map_err(err)?.rule_defaults, &defaults))
+}
+
+/// Saves the app-wide defaults. Only the app saves them: a person, never an agent.
+#[tauri::command]
+async fn rule_defaults_save(defaults: rules::RuleDefaults, confirm: bool) -> Result<rules::DefaultsView, String> {
+    let mut config = Config::load().map_err(err)?;
+    rules::save_defaults(&mut config, defaults, confirm).map_err(err)?;
+    Ok(rules::defaults_view(&config))
+}
+
 fn run_sync() -> anyhow::Result<remote::SyncReport> {
     let config = Config::load()?;
     let mut db = Db::open_default()?;
@@ -393,6 +439,14 @@ pub fn run() {
             connect_apply,
             agent_setup,
             agent_setup_apply,
+            rules,
+            rules_check,
+            rules_save,
+            rules_branches,
+            rules_dry_run,
+            rule_defaults,
+            rule_defaults_check,
+            rule_defaults_save,
             network,
             network_add,
             network_remove

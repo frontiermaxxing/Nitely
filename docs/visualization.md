@@ -469,7 +469,7 @@ and inside Tauri nothing changes.
 - Routes are in the hash: `#overview` (the default; `#pulse` still works), `#inbox`, `#now`, `#activity`, `#project/NIT`,
   `#agents`, `#add`, `#kit`, and `@KEY` opens an issue panel (`#now@NIT-29`). `?hours=1|6|12|24`
   opens Activity at that window. A project's view follows its key: `#project/NIT/list`,
-  `#project/NIT/board`, `#project/NIT/branches`, `#project/NIT/brief`; without one, the last view picked.
+  `#project/NIT/board`, `#project/NIT/branches`, `#project/NIT/brief`, `#project/NIT/rules` (review and landing rules, with a dry run); without one, the last view picked. App-wide review and landing defaults are on `#agents`.
 - Theme: the switch at the bottom of the sidebar, or `?theme=light|dark` in the URL, or the
   browser's color scheme. `[data-theme]` on `<html>` forces a theme.
 - The fixtures are four projects (NIT, AND, HAR, and OLD with no issues, for trying Settings), 40 issues across every state, nine agent

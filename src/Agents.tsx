@@ -2,6 +2,7 @@ import { useState } from "react";
 import { invoke } from "./backend";
 import type { AgentPlan, AgentsUpdated, ConnectChange } from "./types";
 import { AgentMark, vendorInfo, vendorOf } from "./ui";
+import { RuleDefaultsCard } from "./Rules";
 
 /** Changes still needed by the installed agents. */
 export function pendingChanges(agents: AgentPlan[]): number {
@@ -124,6 +125,7 @@ export function AgentSetup(props: { agents: AgentPlan[]; onUpdated: () => void; 
           </button>
         </div>
       )}
+      <RuleDefaultsCard />
       {result && (
         <section>
           <h2>Done</h2>

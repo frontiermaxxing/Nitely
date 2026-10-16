@@ -1,0 +1,190 @@
+// The browser preview's review and landing rules (src/Rules.tsx): one repo that commits its own
+// playbook (read-only), one whose playbook Nitely keeps (editable, with rules that send changes to
+// a person), and one with no playbook yet. Saves change the data until reload; the loosening check
+// follows crates/nitely-core/src/rules.rs.
+import type { DefaultsView, DryRun, LandBy, RuleDefaults, RuleField, RulesEdit, RulesView } from "../types";
+
+const BUILT_IN_REVIEWER: Record<string, string> = { "*": "claude", claude: "codex", codex: "claude" };
+const REVIEWERS = [
+  { name: "claude", installed: true },
+  { name: "codex", installed: true },
+];
+
+let defaults: RuleDefaults = { require_cross_vendor: true };
+
+interface Stored {
+  repo: string;
+  project: string;
+  root: string;
+  source: RulesView["source"];
+  path: string;
+  integration: string;
+  edit: RulesEdit;
+}
+
+const EMPTY: RulesEdit = { always_human: false, human_paths: [], blocked_paths: [], flags: [], reviewer: null, require_cross_vendor: null, land_by: null, focus: null };
+
+const STORED: Stored[] = [
+  {
+    repo: "Nitely",
+    project: "NIT",
+    root: "C:\\Code\\Nitely",
+    source: "repo",
+    path: "C:\\Code\\Nitely\\.nitely\\playbook.toml",
+    integration: "main",
+    edit: { ...EMPTY, focus: "Only a human approves or answers asks. A change that breaks this is a P0 or P1 finding." },
+  },
+  {
+    repo: "Orbit",
+    project: "ORB",
+    root: "C:\\Code\\Orbit",
+    source: "stored",
+    path: "C:\\Users\\you\\AppData\\Roaming\\nitely\\playbooks\\Orbit.toml",
+    integration: "develop",
+    edit: {
+      ...EMPTY,
+      human_paths: [
+        { pattern: "^src/billing/", reason: "billing and money" },
+        { pattern: "^migrations/", reason: "database migrations" },
+      ],
+      blocked_paths: [{ pattern: "^vendor/", reason: "updated by its own sync" }],
+      flags: [{ name: "MONEY_OR_RELEASE", question: "the change alters pricing, payouts or the release process", reason: "" }],
+      land_by: "auto",
+    },
+  },
+  { repo: "Harbor", project: "HAR", root: "C:\\Code\\Harbor", source: "none", path: "C:\\Users\\you\\AppData\\Roaming\\nitely\\playbooks\\Harbor.toml", integration: "main", edit: { ...EMPTY } },
+];
+
+function field<T>(own: T | null, app: T | undefined, builtIn: T): RuleField<T> {
+  const inherited = app ?? builtIn;
+  const inherited_from = app === undefined ? "built-in" : "app";
+  return { value: own ?? inherited, from: own === null ? inherited_from : "project", inherited, inherited_from };
+}
+
+function view(s: Stored): RulesView {
+  const e = s.edit;
+  return {
+    repo: s.repo,
+    root: s.root,
+    source: s.source,
+    path: s.path,
+    editable: s.source !== "repo",
+    read_only:
+      s.source === "repo"
+        ? `${s.repo} commits its own .nitely/playbook.toml, and that file wins. Change it on a branch like any other file, or have an agent propose the change for you to approve.`
+        : null,
+    integration: s.integration,
+    always_human: e.always_human,
+    human_paths: e.human_paths,
+    blocked_paths: e.blocked_paths,
+    flags: e.flags,
+    reviewer: field(e.reviewer, defaults.reviewer, BUILT_IN_REVIEWER),
+    require_cross_vendor: field(e.require_cross_vendor, defaults.require_cross_vendor, false),
+    land_by: field<LandBy>(e.land_by, defaults.land_by, "author"),
+    focus: field(e.focus, defaults.focus, ""),
+    reviewers: REVIEWERS,
+  };
+}
+
+/** The effective rules an edit makes, for the loosening check. */
+function effective(e: RulesEdit, d: RuleDefaults) {
+  return {
+    always: e.always_human,
+    human: e.human_paths,
+    blocked: e.blocked_paths,
+    flags: e.flags,
+    cross: e.require_cross_vendor ?? d.require_cross_vendor ?? false,
+    land: e.land_by ?? d.land_by ?? "author",
+  };
+}
+
+function loosening(a: ReturnType<typeof effective>, b: ReturnType<typeof effective>): string[] {
+  const out: string[] = [];
+  if (a.always && !b.always) out.push("Every change no longer waits for a person.");
+  for (const r of a.human.filter((r) => !b.human.some((n) => n.pattern === r.pattern))) out.push(`Changes to \`${r.pattern}\` (${r.reason}) no longer wait for a person.`);
+  for (const r of a.blocked.filter((r) => !b.blocked.some((n) => n.pattern === r.pattern))) out.push(`Task branches may now change \`${r.pattern}\` (${r.reason}).`);
+  for (const f of a.flags.filter((f) => !b.flags.some((n) => n.name === f.name))) out.push(`The reviewer no longer answers ${f.name} (${f.question}).`);
+  if (a.cross && !b.cross) out.push("A review by the author's own vendor no longer waits for a person.");
+  if (a.land === "human" && b.land !== "human") out.push("Changes no longer all wait for a person before they land.");
+  return out;
+}
+
+function stored(repo: unknown): Stored {
+  const s = STORED.find((x) => x.repo === String(repo));
+  if (!s) throw `no repo ${String(repo)} in Nitely's config`;
+  return s;
+}
+
+export function rules(project: string): RulesView[] {
+  return STORED.filter((s) => s.project === project).map(view);
+}
+
+export function rulesCheck(args: Record<string, unknown>): string[] {
+  const s = stored(args.repo);
+  return loosening(effective(s.edit, defaults), effective(args.edit as RulesEdit, defaults));
+}
+
+export function rulesSave(args: Record<string, unknown>): RulesView {
+  const s = stored(args.repo);
+  if (s.source === "repo") throw `${s.repo} commits its own .nitely/playbook.toml; change it there`;
+  const edit = args.edit as RulesEdit;
+  const loose = loosening(effective(s.edit, defaults), effective(edit, defaults));
+  if (loose.length && !args.confirm) throw `this loosens what sends changes to a person; confirm it first: ${loose.join(" ")}`;
+  s.edit = structuredClone(edit);
+  if (s.source === "none") s.source = "stored";
+  return view(s);
+}
+
+export function rulesBranches(args: Record<string, unknown>): string[] {
+  const s = stored(args.repo);
+  const key = s.project.toLowerCase();
+  return [`claude/${key}-31-pulse-home`, `codex/${key}-30-review-rounds`, `claude/${key}-44-tray-count`, "spike/try-sqlite-fts"];
+}
+
+export function rulesDryRun(args: Record<string, unknown>): DryRun {
+  const s = stored(args.repo);
+  const branch = String(args.branch);
+  const e = effective(s.edit, defaults);
+  const files = branch.includes("44") ? ["src/billing/invoice.ts", "src/tray.ts"] : ["src/Pulse.tsx", "src/pulse.css", "src/types.ts"];
+  const vendor = branch.split("/")[0];
+  const reviewer = vendor === "codex" ? "claude" : "codex";
+  const reasons = files.flatMap((f) => e.human.filter((r) => new RegExp(r.pattern).test(f)).map((r) => `${r.reason}: ${f}`));
+  if (e.always) reasons.unshift("this playbook sends every change to a human");
+  if (e.land === "human") reasons.push("this playbook lands only what a human approved");
+  if (vendor !== "claude" && vendor !== "codex" && e.cross) reasons.push(`${reviewer} review (author's vendor unknown), and this playbook requires a review by another vendor`);
+  const outcome = reasons.length
+    ? e.land === "author"
+      ? "Once the review passes it waits for a person in Needs You; after they approve, the agent lands it."
+      : "Once the review passes it waits for a person in Needs You; Nitely lands it as soon as they approve."
+    : e.land === "author"
+      ? "Once the review passes it moves to In Review, and the agent lands it."
+      : "Once the review passes Nitely lands it in the same submit.";
+  return {
+    branch,
+    base: s.integration,
+    files,
+    reviewer,
+    reviewer_note: vendor === "claude" || vendor === "codex" ? "" : "author's vendor unknown",
+    reviewer_error: null,
+    reasons,
+    flags: e.flags.map((f) => `${f.name}: ${f.question}`),
+    blocked: null,
+    outcome,
+  };
+}
+
+export function ruleDefaults(): DefaultsView {
+  return { defaults, built_in_reviewer: BUILT_IN_REVIEWER, reviewers: REVIEWERS };
+}
+
+export function ruleDefaultsCheck(args: Record<string, unknown>): string[] {
+  return loosening(effective(EMPTY, defaults), effective(EMPTY, args.defaults as RuleDefaults));
+}
+
+export function ruleDefaultsSave(args: Record<string, unknown>): DefaultsView {
+  const next = args.defaults as RuleDefaults;
+  const loose = loosening(effective(EMPTY, defaults), effective(EMPTY, next));
+  if (loose.length && !args.confirm) throw `this loosens what sends changes to a person; confirm it first: ${loose.join(" ")}`;
+  defaults = structuredClone(next);
+  return ruleDefaults();
+}

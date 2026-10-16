@@ -7,13 +7,14 @@ import { BranchMap } from "./BranchMap";
 import { CrewControl } from "./CrewControl";
 import { ProjectBrief } from "./ProjectBrief";
 import { ProjectSettings } from "./ProjectSettings";
+import { ProjectRules } from "./Rules";
 import { EmptyState, Loading } from "./ui";
 import "./project.css";
 
-export const PROJECT_TABS = ["list", "board", "branches", "brief", "settings"] as const;
+export const PROJECT_TABS = ["list", "board", "branches", "brief", "rules", "settings"] as const;
 export type ProjectTab = (typeof PROJECT_TABS)[number];
 
-const TAB_LABEL: Record<ProjectTab, string> = { list: "List", board: "Board", branches: "Branches", brief: "Brief", settings: "Settings" };
+const TAB_LABEL: Record<ProjectTab, string> = { list: "List", board: "Board", branches: "Branches", brief: "Brief", rules: "Rules", settings: "Settings" };
 const TAB_KEY = "nitely.project.tab";
 
 export function isProjectTab(t: string | undefined): t is ProjectTab {
@@ -121,6 +122,7 @@ export function ProjectPage(props: {
         <ProjectBoard issues={issues} board={props.board} now={props.now} filters={filters} onOpenIssue={props.onOpenIssue} />
       )}
       {tab === "branches" && props.board && <BranchMap board={props.board} projectKey={props.projectKey} now={props.now} onOpenIssue={props.onOpenIssue} />}
+      {tab === "rules" && <ProjectRules projectKey={props.projectKey} />}
       {tab === "brief" && <ProjectBrief projectKey={props.projectKey} version={props.version} now={props.now} onOpenIssue={props.onOpenIssue} />}
     </div>
   );

@@ -7,6 +7,7 @@
 // data stays consistent: an issue In Review has passed a gate and a review, a stuck one has a
 // failed gate as its last gate event, and so on.
 
+import * as rulesFixture from "./rules";
 import type {
   CrewStatus,
   CrewWorker,
@@ -1369,6 +1370,22 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return connectApply(args);
       case "agent_setup":
         return AGENTS;
+      case "rules":
+        return rulesFixture.rules(String(args.project));
+      case "rules_check":
+        return rulesFixture.rulesCheck(args);
+      case "rules_save":
+        return rulesFixture.rulesSave(args);
+      case "rules_branches":
+        return rulesFixture.rulesBranches(args);
+      case "rules_dry_run":
+        return rulesFixture.rulesDryRun(args);
+      case "rule_defaults":
+        return rulesFixture.ruleDefaults();
+      case "rule_defaults_check":
+        return rulesFixture.ruleDefaultsCheck(args);
+      case "rule_defaults_save":
+        return rulesFixture.ruleDefaultsSave(args);
       case "agent_setup_apply":
         return { done: [], failed: [] };
       case "network":

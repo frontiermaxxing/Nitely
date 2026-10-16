@@ -425,3 +425,92 @@ export interface Activity {
   lanes: ActivityLane[];
   issues: IssueRecord[];
 }
+
+/** Who lands a reviewed change (`[land] by` in the playbook). */
+export type LandBy = "author" | "auto" | "human";
+
+export interface PathRule {
+  pattern: string;
+  reason: string;
+}
+
+/** A yes/no question the reviewer answers; a yes sends the change to a person. */
+export interface ReviewFlag {
+  name: string;
+  question: string;
+  reason: string;
+}
+
+/** A value and where it comes from: the project's playbook, the app-wide default, or Nitely's own. */
+export interface RuleField<T> {
+  value: T;
+  from: "project" | "app" | "built-in";
+  /** What it would be if the project did not set it, and where that comes from. */
+  inherited: T;
+  inherited_from: "app" | "built-in";
+}
+
+export interface ReviewerInfo {
+  name: string;
+  installed: boolean;
+}
+
+/** One repo's review and landing rules (crates/nitely-core/src/rules.rs). */
+export interface RulesView {
+  repo: string;
+  root: string;
+  source: "repo" | "stored" | "none";
+  path: string;
+  editable: boolean;
+  read_only: string | null;
+  integration: string;
+  always_human: boolean;
+  human_paths: PathRule[];
+  blocked_paths: PathRule[];
+  flags: ReviewFlag[];
+  reviewer: RuleField<Record<string, string>>;
+  require_cross_vendor: RuleField<boolean>;
+  land_by: RuleField<LandBy>;
+  focus: RuleField<string>;
+  reviewers: ReviewerInfo[];
+}
+
+/** A save from the Rules view; a null default-able value inherits again. */
+export interface RulesEdit {
+  always_human: boolean;
+  human_paths: PathRule[];
+  blocked_paths: PathRule[];
+  flags: ReviewFlag[];
+  reviewer: Record<string, string> | null;
+  require_cross_vendor: boolean | null;
+  land_by: LandBy | null;
+  focus: string | null;
+}
+
+/** App-wide defaults for what a playbook leaves unset; a missing key keeps Nitely's own. */
+export interface RuleDefaults {
+  reviewer?: Record<string, string>;
+  require_cross_vendor?: boolean;
+  land_by?: LandBy;
+  focus?: string;
+}
+
+export interface DefaultsView {
+  defaults: RuleDefaults;
+  built_in_reviewer: Record<string, string>;
+  reviewers: ReviewerInfo[];
+}
+
+/** What submit would decide for a branch under the rules as they are now. */
+export interface DryRun {
+  branch: string;
+  base: string;
+  files: string[];
+  reviewer: string | null;
+  reviewer_note: string;
+  reviewer_error: string | null;
+  reasons: string[];
+  flags: string[];
+  blocked: string | null;
+  outcome: string;
+}

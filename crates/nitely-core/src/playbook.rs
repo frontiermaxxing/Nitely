@@ -343,10 +343,20 @@ impl Default for WorktreeRules {
 impl Playbook {
     /// The repo's playbook: its own `.nitely/playbook.toml` when it has one, else the one Nitely
     /// keeps for it (written when the repo was connected), else the defaults.
+    /// What it leaves unset of the review and landing rules comes from the app-wide defaults
+    /// (`rules::RuleDefaults`).
     pub fn load(repo_root: &Path) -> Result<Playbook> {
-        let Some(path) = Playbook::path_for(repo_root) else { return Ok(Playbook::default()) };
+        // Tests build their own playbooks; the defaults of whoever runs them must not leak in.
+        let defaults = if cfg!(test) { Default::default() } else { crate::Config::load().map(|c| c.rule_defaults).unwrap_or_default() };
+        let Some(path) = Playbook::path_for(repo_root) else {
+            let mut pb = Playbook::default();
+            crate::rules::apply_defaults(&mut pb, "", &defaults);
+            return Ok(pb);
+        };
         let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-        Playbook::parse(&text).with_context(|| format!("in {}", path.display()))
+        let mut pb = Playbook::parse(&text).with_context(|| format!("in {}", path.display()))?;
+        crate::rules::apply_defaults(&mut pb, &text, &defaults);
+        Ok(pb)
     }
 
     /// Where the repo's playbook is read from, if it has one.

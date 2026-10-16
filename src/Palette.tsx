@@ -78,7 +78,7 @@ export function Palette(props: {
     const all: Item[] = [
       ...VIEWS.map((v): Item => ({ id: `view-${v.label}`, label: v.label, hint: "view", group: "Go to", run: go(v.view) })),
       ...props.projects.flatMap((p) =>
-        (["list", "board", "branches", "settings"] as const).map(
+        (["list", "board", "branches", "rules", "settings"] as const).map(
           (tab): Item => ({
             id: `project-${p.key}-${tab}`,
             label: `${p.name} ${tab}`,

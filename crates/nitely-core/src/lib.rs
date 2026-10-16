@@ -26,6 +26,7 @@ pub mod relay;
 pub mod remote;
 pub mod similar;
 pub mod review;
+pub mod rules;
 pub mod snapshot;
 pub mod track;
 pub mod pulse;
