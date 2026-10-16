@@ -1,4 +1,4 @@
-// Runs with `npm test` (node:test; Node strips the types, so there is no build step).
+// Runs with `npm test` (scripts/test.mjs: tsc, then node:test).
 // The cases live in crates/nitely-core/src/track_cases.json, which track.rs runs too: the
 // browser preview's computeTrack and the backend's track_of must agree on every one.
 
@@ -28,7 +28,8 @@ interface Case {
   };
 }
 
-const { cases } = JSON.parse(readFileSync(new URL("../../crates/nitely-core/src/track_cases.json", import.meta.url), "utf8")) as { cases: Case[] };
+// npm runs tests from the repo root; the compiled file lives elsewhere, so the path is from there.
+const { cases } = JSON.parse(readFileSync("crates/nitely-core/src/track_cases.json", "utf8")) as { cases: Case[] };
 
 /** The same prefix as BASE in track.rs. */
 const BASE = [
