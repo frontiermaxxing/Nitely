@@ -51,12 +51,6 @@ function reviewerOf(summary: string | null): string | null {
 }
 
 /**
- * Submit records the review just before it adds its note, so a round's record is at or before the
- * note; this allows for a clock tick between the two without reaching into the next round.
- */
-const SKEW_SECS = 5;
-
-/**
  * The rounds an issue went through, from its timeline and review records. A round opens with the
  * first gate or review after the last submit and closes with the next submit note; the review
  * record that submit wrote is matched to it by time. Without a timeline, each review record is a
@@ -136,13 +130,14 @@ export function journeyOf(timeline: TimelineEntry[] = [], reviews: ReviewRecord[
     return { rounds, lands };
   }
 
-  // Each closed round takes the latest record written before its submit note (and after the
-  // previous round's), since submit records the review just before it adds the note.
+  // Each closed round takes the latest record written at or before its submit note (and after
+  // the previous round's): submit records the review just before it adds the note, and the next
+  // round's review takes minutes, so it can never share or precede that second.
   let next = 0;
   for (const r of rounds) {
     if (r.end === null) continue;
     let match: ReviewRecord | null = null;
-    while (next < records.length && records[next].ts <= r.end + SKEW_SECS) match = records[next++];
+    while (next < records.length && records[next].ts <= r.end) match = records[next++];
     r.review = match;
   }
   return { rounds, lands };
