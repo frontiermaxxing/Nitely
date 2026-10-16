@@ -16,7 +16,7 @@ export function crewWords(s: CrewStatus): { text: string; attention: boolean } |
 
 /** The control's hover text: each running worker, and today's count against the cap. */
 export function crewTitle(s: CrewStatus, now: number): string {
-  const lines = s.running.map((w) => `${w.issue_key} · ${w.agent} · started ${minutesAgo(now, w.started_at)}`);
+  const lines = s.running.map((w) => `${w.issue_key} · ${w.agent} · ${w.phase === "setup" ? "setting up its worktree since" : "started"} ${minutesAgo(now, w.started_at)}`);
   lines.push(`${s.started_today} of ${s.max_per_day} started today`);
   return lines.join("\n");
 }

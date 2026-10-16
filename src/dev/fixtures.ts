@@ -671,7 +671,7 @@ function crewStatus(project: string): CrewStatus | null {
   const running: CrewWorker[] = ISSUES.filter((s) => s.crew && s.live).map((s, i) => ({
     id: 40 + i, project: "NIT", issue_key: s.key, agent: s.vendor ?? "claude", pid: 7100 + i, worktree: worktreeOf(s),
     log: `C:\Users\you\AppData\Roaming\Nitely\crew\NIT\${s.key.toLowerCase()}-${s.vendor}.log`,
-    started_at: NOW - s.from * HOUR + 10 * MIN, ended_at: null, exit_code: null, outcome: null, reason: null,
+    started_at: NOW - s.from * HOUR + 10 * MIN, ended_at: null, exit_code: null, outcome: null, reason: null, phase: "work",
   }));
   return {
     project: "NIT", cap: 2, running, started_today: 3, max_per_day: 20, paused: crewPaused, supervised: true,

@@ -20,6 +20,7 @@ agents = ["claude", "codex"]  # preference order; agents that are not installed 
 max_per_day = 20              # workers started per project per local day (default 20)
 quiet_hours = "01:00-07:00"   # local time; no new worker starts inside it (running ones finish)
 timeout_minutes = 180         # a worker running longer is stopped (never while it lands)
+setup_timeout_minutes = 30    # a worktree setup running longer is stopped; its issue goes to a person
 attempts = 3                  # failed workers on one issue before it goes to a human
 
 [crew.commands]               # optional: replaces the default command for an agent
@@ -60,8 +61,12 @@ start one, the crew's status says why.
    are running, the crew is not paused, it is outside quiet hours, today's count is under
    `max_per_day`, and the gate exists.
 3. **Claim.** For a free slot the supervisor claims the next issue itself (`next_task`'s query) and
-   runs `start_task` for it, so the worktree exists before the agent starts and the supervisor knows
-   which issue each worker holds. The claim is recorded under the worker's agent id
+   runs `nitely start <key> --agent <vendor>` for it in a process of its own (`start_task`: branch,
+   worktree, the playbook's setup), so the worktree exists before the agent starts and the
+   supervisor knows which issue each worker holds. The setup holds the slot but never the
+   supervisor: each tick looks whether it finished, a failed one sends the issue to Needs You with the
+   end of its log, and one past `setup_timeout_minutes` is stopped and does the same. It is recorded
+   (`crew_worker.phase = setup`), so a new supervisor watches it, or starts it again when it is gone. The claim is recorded under the worker's agent id
    (`claude:<worktree>`), the same id the worker's MCP server will use, so the worker's own `report`
    and `note` calls keep the claim fresh. Nothing ready: the slot stays empty until the next tick.
 4. **Start.** Launch the agent in the worktree with the brief (below) on stdin.

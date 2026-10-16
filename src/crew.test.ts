@@ -27,6 +27,6 @@ test("a crew that is not working says why, and asks for a person when only one c
 });
 
 test("the hover lists running workers and today's count", () => {
-  const w = { id: 1, project: "NIT", issue_key: "NIT-3", agent: "codex", pid: 9, worktree: "/w", log: "/l", started_at: 1000, ended_at: null, exit_code: null, outcome: null, reason: null };
+  const w = { id: 1, project: "NIT", issue_key: "NIT-3", agent: "codex", pid: 9, worktree: "/w", log: "/l", started_at: 1000, ended_at: null, exit_code: null, outcome: null, reason: null, phase: "work" };
   assert.equal(crewTitle({ ...base, running: [w] }, 1000 + 600), "NIT-3 · codex · started 10m ago\n2 of 20 started today");
 });

@@ -36,6 +36,8 @@ pub struct CrewRules {
     pub quiet_hours: Option<String>,
     /// A worker running longer is stopped, never while it lands.
     pub timeout_minutes: u64,
+    /// A worktree setup running longer is stopped, and its issue goes to a person.
+    pub setup_timeout_minutes: u64,
     /// Failed workers on one issue before it goes to a human.
     pub attempts: u32,
     /// Replaces the default command for an agent. `{worktree}`, `{repo}`, `{git_dir}`,
@@ -51,6 +53,7 @@ impl Default for CrewRules {
             max_per_day: None,
             quiet_hours: None,
             timeout_minutes: 180,
+            setup_timeout_minutes: 30,
             attempts: 3,
             commands: BTreeMap::new(),
         }
@@ -156,6 +159,19 @@ pub trait Agents {
     fn start(&self, launch: &Launch) -> Result<Box<dyn Process>>;
     /// A worker an earlier supervisor started, when its process `pid` is still running.
     fn adopt(&self, pid: u32) -> Option<Box<dyn Process>>;
+    /// Makes an issue's branch and worktree and runs the playbook's setup, in a process of its own,
+    /// so a slow or hung setup never holds the supervisor up. It exits 0 when setup passed.
+    fn prepare(&self, prep: &Prepare) -> Result<Box<dyn Process>>;
+}
+
+/// What `Agents::prepare` needs: `nitely start <key> --agent <vendor>` in the repo, output to `log`.
+#[derive(Debug, Clone)]
+pub struct Prepare {
+    pub nitely: String,
+    pub repo: PathBuf,
+    pub key: String,
+    pub vendor: String,
+    pub log: PathBuf,
 }
 
 /// What one tick did.
@@ -192,10 +208,23 @@ enum End {
 
 enum Start {
     Running(WorkerLine),
+    /// Its worktree is being set up in a process of its own.
+    Preparing,
     /// It cannot start on this issue now; others may.
     Wait(String),
     SetupFailed(String),
     LaunchFailed(String),
+}
+
+/// An issue whose worktree setup runs, before its worker starts.
+struct Preparing {
+    id: i64,
+    issue: IssueRecord,
+    agent: String,
+    agent_id: String,
+    since: i64,
+    log: PathBuf,
+    process: Box<dyn Process>,
 }
 
 struct Running {
@@ -222,6 +251,7 @@ pub struct Supervisor {
     /// can take minutes.
     interrupted: Box<dyn Fn() -> bool>,
     running: Vec<Running>,
+    preparing: Vec<Preparing>,
     /// Agents that would not start in this run, and why.
     disabled: BTreeMap<String, String>,
     /// Workers left by an earlier supervisor have been looked for.
@@ -255,6 +285,7 @@ impl Supervisor {
             clock: Box::new(Moment::now),
             interrupted: Box::new(|| false),
             running: Vec::new(),
+            preparing: Vec::new(),
             disabled: BTreeMap::new(),
             adopted: false,
             waiting: BTreeMap::new(),
@@ -277,8 +308,9 @@ impl Supervisor {
         Actor::Agent(format!("crew:{}", self.project))
     }
 
+    /// Workers running, and issues whose worktree is being set up for one.
     pub fn running(&self) -> usize {
-        self.running.len()
+        self.running.len() + self.preparing.len()
     }
 
     /// The issues of workers still running, and which of them are landing.
@@ -307,6 +339,9 @@ impl Supervisor {
             self.waiting.clear();
         }
         tick.cap = rules.workers;
+        if let Ok(p) = &playbook {
+            self.advance(db, p, !draining && !(self.interrupted)(), &mut tick)?;
+        }
         let status = match &playbook {
             Err(e) => Some(format!("the playbook does not read: {e:#}")),
             Ok(p) => self.why_not_starting(db, p, &moment, draining)?,
@@ -315,7 +350,7 @@ impl Supervisor {
             Some(why) => why,
             None => self.fill(db, playbook.as_ref().unwrap(), &mut tick)?,
         };
-        tick.running = self.running.len();
+        tick.running = self.running();
         db.crew_heartbeat(&self.project, std::process::id(), &tick.status)?;
         Ok(tick)
     }
@@ -346,7 +381,7 @@ impl Supervisor {
         if today >= rules.max_per_day() {
             return Ok(Some(format!("{today} of {} started today", rules.max_per_day())));
         }
-        if self.running.len() >= rules.workers as usize {
+        if self.running() >= rules.workers as usize {
             return Ok(Some("working".into()));
         }
         Ok(None)
@@ -356,7 +391,12 @@ impl Supervisor {
     fn fill(&mut self, db: &mut Db, playbook: &Playbook, tick: &mut Tick) -> Result<String> {
         let rules = &playbook.crew;
         let moment = (self.clock)();
-        while self.running.len() < rules.workers as usize {
+        loop {
+            // A setup that finished meanwhile (or at once) starts its worker before more are begun.
+            self.advance(db, playbook, true, tick)?;
+            if self.running() >= rules.workers as usize {
+                break;
+            }
             if (self.interrupted)() {
                 return Ok("stopping: waiting for running workers".into());
             }
@@ -399,31 +439,114 @@ impl Supervisor {
                 }
                 None => installed[0].clone(),
             };
-            let why = match self.start_worker(db, playbook, &issue, &agent) {
-                Ok(Start::Running(line)) => {
-                    tick.started.push(line);
-                    continue;
-                }
-                Ok(Start::Wait(why)) => {
-                    self.wait(db, &issue.key, why)?;
-                    continue;
-                }
-                Ok(Start::SetupFailed(why)) => {
-                    // A person has to look: starting it again would fail the same way every tick.
-                    db.add_note(&issue.key, &format!("The crew could not set up the worktree: {why}"), "handoff", &self.actor())?;
-                    db.move_issue(&issue.key, "Needs You", None, Some("the crew could not set up its worktree"), &self.actor())?;
-                    continue;
-                }
-                Ok(Start::LaunchFailed(why)) => why,
-                Err(e) => format!("{e:#}"),
-            };
-            // The agent would not start: the issue goes back, and this run stops using that agent
-            // instead of failing the same way on every tick.
-            self.disabled.insert(agent.clone(), first_line(&why).to_string());
-            db.add_note(&issue.key, &format!("The crew could not start a {agent} worker: {why}"), "note", &self.actor())?;
-            db.move_issue(&issue.key, "Todo", None, Some("the crew could not start a worker"), &self.actor())?;
+            let started = self.begin(db, playbook, &issue, &agent);
+            self.handle_start(db, &issue.key, &agent, started, tick)?;
         }
-        Ok("working".into())
+        Ok(if self.preparing.is_empty() { "working".into() } else { format!("working; setting up {}", self.preparing.iter().map(|p| p.issue.key.as_str()).collect::<Vec<_>>().join(", ")) })
+    }
+
+    /// What follows an attempt to start a worker on `key`.
+    fn handle_start(&mut self, db: &mut Db, key: &str, agent: &str, started: Result<Start>, tick: &mut Tick) -> Result<()> {
+        let why = match started {
+            Ok(Start::Running(line)) => {
+                tick.started.push(line);
+                return Ok(());
+            }
+            Ok(Start::Preparing) => return Ok(()),
+            Ok(Start::Wait(why)) => return self.wait(db, key, why),
+            Ok(Start::SetupFailed(why)) => {
+                // A person has to look: starting it again would fail the same way every tick.
+                db.add_note(key, &format!("The crew could not set up the worktree: {why}"), "handoff", &self.actor())?;
+                db.move_issue(key, "Needs You", None, Some("the crew could not set up its worktree"), &self.actor())?;
+                return Ok(());
+            }
+            Ok(Start::LaunchFailed(why)) => why,
+            Err(e) => format!("{e:#}"),
+        };
+        // The agent would not start: the issue goes back, and this run stops using that agent
+        // instead of failing the same way on every tick.
+        self.disabled.insert(agent.to_string(), first_line(&why).to_string());
+        db.add_note(key, &format!("The crew could not start a {agent} worker: {why}"), "note", &self.actor())?;
+        db.move_issue(key, "Todo", None, Some("the crew could not start a worker"), &self.actor())?;
+        Ok(())
+    }
+
+    /// Claims `issue` for `agent` and starts setting up its worktree in a process of its own.
+    fn begin(&mut self, db: &mut Db, playbook: &Playbook, issue: &IssueRecord, agent: &str) -> Result<Start> {
+        let worktree = playbook.worktree_for(&self.repo_root, agent, issue);
+        // The id the worker's own MCP server will use, so its reports keep the claim fresh.
+        let agent_id = format!("{agent}:{}", crate::paths::normalize(&worktree.to_string_lossy()));
+        db.reassign_claim(&issue.key, &agent_id)?;
+        if worktree.join(".git").exists() {
+            if let Some(why) = other_branch(&worktree, &playbook.branch_for(agent, issue), agent, &issue.key) {
+                return Ok(Start::Wait(why));
+            }
+        }
+        let ts = (self.clock)().ts;
+        let logs = self.dir.join(&self.project);
+        std::fs::create_dir_all(&logs).with_context(|| format!("creating {}", logs.display()))?;
+        let log = logs.join(format!("{ts}-{}-setup.log", issue.key.to_lowercase()));
+        let id = db.crew_worker_started(&self.project, &issue.key, agent, &agent_id, &worktree, &log, ts, "setup")?;
+        match self.prepare(db, id, issue, agent, &log) {
+            Ok(process) => {
+                self.preparing.push(Preparing { id, issue: issue.clone(), agent: agent.into(), agent_id, since: ts, log, process });
+                Ok(Start::Preparing)
+            }
+            Err(e) => {
+                db.crew_worker_ended(id, None, "launch_failed", &format!("{e:#}"))?;
+                Err(e)
+            }
+        }
+    }
+
+    /// Starts `nitely start` for `issue` and records its pid on the worker's row.
+    fn prepare(&self, db: &Db, id: i64, issue: &IssueRecord, agent: &str, log: &Path) -> Result<Box<dyn Process>> {
+        let prep = Prepare { nitely: self.nitely.clone(), repo: self.repo_root.clone(), key: issue.key.clone(), vendor: agent.into(), log: log.to_path_buf() };
+        let process = self.agents.prepare(&prep).with_context(|| format!("starting `{} start {}`", self.nitely, issue.key))?;
+        db.crew_worker_pid(id, process.pid())?;
+        Ok(process)
+    }
+
+    /// Starts the workers whose worktree setup finished, sends a failed or too slow one to a
+    /// person, and, when `start` is false (the crew is stopping), hands finished ones back.
+    fn advance(&mut self, db: &mut Db, playbook: &Playbook, start: bool, tick: &mut Tick) -> Result<()> {
+        let deadline = playbook.crew.setup_timeout_minutes.max(1) as i64 * 60;
+        let now = (self.clock)().ts;
+        let mut i = 0;
+        while i < self.preparing.len() {
+            let exited = match self.preparing[i].process.exited() {
+                Ok(Some(code)) => Some(Ok(code)),
+                Ok(None) if now - self.preparing[i].since > deadline => {
+                    self.preparing[i].process.stop();
+                    Some(Err(format!("it ran past {} minutes (crew.setup_timeout_minutes) and was stopped", deadline / 60)))
+                }
+                Ok(None) => None,
+                Err(e) => Some(Err(format!("{e:#}"))),
+            };
+            let Some(exited) = exited else {
+                i += 1;
+                continue;
+            };
+            let p = self.preparing.remove(i);
+            let started = match exited {
+                Ok(0) if !start => {
+                    db.crew_worker_ended(p.id, Some(0), "stopped", "the crew stopped once its worktree was ready")?;
+                    db.move_issue(&p.issue.key, "Todo", None, Some("the crew is stopping; its worktree is ready"), &self.actor())?;
+                    continue;
+                }
+                Ok(0) => self.launch(db, playbook, p.id, &p.issue, &p.agent, &p.agent_id),
+                Ok(code) => Ok(Start::SetupFailed(format!("`nitely start` exited with code {code}:\n{}", log_tail(&p.log)))),
+                Err(why) => Ok(Start::SetupFailed(format!("{why}\n{}", log_tail(&p.log)))),
+            };
+            match &started {
+                Ok(Start::SetupFailed(why)) => db.crew_worker_ended(p.id, None, "setup_failed", first_line(why))?,
+                Ok(Start::Wait(why)) => db.crew_worker_ended(p.id, None, "stopped", why)?,
+                Err(e) => db.crew_worker_ended(p.id, None, "launch_failed", &format!("{e:#}"))?,
+                _ => {}
+            }
+            self.handle_start(db, &p.issue.key, &p.agent, started, tick)?;
+        }
+        Ok(())
     }
 
     /// Hands `key` back and passes over it for the rest of this run.
@@ -442,27 +565,15 @@ impl Supervisor {
         s
     }
 
-    fn start_worker(&mut self, db: &mut Db, playbook: &Playbook, issue: &IssueRecord, agent: &str) -> Result<Start> {
+    /// Starts the agent in `issue`'s worktree, which its setup has made.
+    fn launch(&mut self, db: &mut Db, playbook: &Playbook, id: i64, issue: &IssueRecord, agent: &str, agent_id: &str) -> Result<Start> {
         let worktree = playbook.worktree_for(&self.repo_root, agent, issue);
-        // The id the worker's own MCP server will use, so its reports keep the claim fresh.
-        let agent_id = format!("{agent}:{}", crate::paths::normalize(&worktree.to_string_lossy()));
-        db.reassign_claim(&issue.key, &agent_id)?;
-        let actor = Actor::Agent(agent_id.clone());
-        let started = playbook::start_task(db, &self.repo_root, issue, agent, &actor)?;
-        // The worktree may already exist on someone else's branch (the folder pattern need not name
-        // the vendor): never put this agent on it.
-        // The same agent's branch for the issue under an older title is fine.
-        let on = playbook::git(Path::new(&started.worktree), &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
-        let on = on.trim().to_string();
-        let same = on == started.branch || crate::git::parse_branch(&on) == (Some(agent.to_string()), Some(issue.key.to_uppercase()));
-        if !same {
-            return Ok(Start::Wait(format!("its worktree {} is on {on}, not {}", started.worktree, started.branch)));
+        let wanted = playbook.branch_for(agent, issue);
+        if let Some(why) = other_branch(&worktree, &wanted, agent, &issue.key) {
+            return Ok(Start::Wait(why));
         }
-        let started = playbook::Started { branch: on, ..started };
-        if let Some(failed) = started.setup.iter().find(|r| !r.ok) {
-            return Ok(Start::SetupFailed(format!("{} failed:\n{}", failed.command, failed.output)));
-        }
-        let worktree = PathBuf::from(&started.worktree);
+        let branch = playbook::git(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]).map(|b| b.trim().to_string()).unwrap_or(wanted);
+        let agent_id = agent_id.to_string();
 
         let ts = (self.clock)().ts;
         let logs = self.dir.join(&self.project);
@@ -481,14 +592,18 @@ impl Supervisor {
                 .replace("{mcp_config}", &mcp_config.to_string_lossy())
                 .replace("{nitely}", &toml_string(&self.nitely))
         };
-        let Some(program) = self.agents.resolve(&command[0]) else { return Ok(Start::LaunchFailed(format!("{} is not installed", command[0]))) };
-        let id = db.crew_worker_started(&self.project, &issue.key, agent, &agent_id, &worktree, &log, ts)?;
+        let Some(program) = self.agents.resolve(&command[0]) else {
+            let why = format!("{} is not installed", command[0]);
+            db.crew_worker_ended(id, None, "launch_failed", &why)?;
+            return Ok(Start::LaunchFailed(why));
+        };
+        db.crew_worker_working(id, &log)?;
         let launch = Launch {
             agent: agent.into(),
             program,
             args: command[1..].iter().map(|a| fill(a)).collect(),
             cwd: worktree.clone(),
-            brief: brief(issue, &self.project, &worktree, &started.branch, &self.repo_root),
+            brief: brief(issue, &self.project, &worktree, &branch, &self.repo_root),
             log: log.clone(),
             env: vec![("NITELY_CREW".into(), id.to_string()), ("NITELY_PROJECT".into(), self.project.clone())],
         };
@@ -521,6 +636,27 @@ impl Supervisor {
     /// settled now.
     fn adopt(&mut self, db: &mut Db, rules: &CrewRules, tick: &mut Tick) -> Result<()> {
         for w in db.crew_running(&self.project)? {
+            if w.phase == "setup" {
+                // A setup an earlier supervisor started: watch it if it still runs. If it is gone, a
+                // worktree that is there is as far as `nitely start` would take it again (it does not
+                // set up an existing worktree twice); otherwise start the setup again.
+                let Some(issue) = db.issue(&w.issue_key)? else { continue };
+                let process = match w.pid.and_then(|pid| self.agents.adopt(pid)) {
+                    Some(p) => p,
+                    None if Path::new(&w.worktree).join(".git").exists() => Box::new(Done),
+                    None => match self.prepare(db, w.id, &issue, &w.agent, Path::new(&w.log)) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            db.crew_worker_ended(w.id, None, "launch_failed", &format!("{e:#}"))?;
+                            db.move_issue(&issue.key, "Todo", None, Some("the crew could not set up its worktree again"), &self.actor())?;
+                            continue;
+                        }
+                    },
+                };
+                let since = (self.clock)().ts;
+                self.preparing.push(Preparing { id: w.id, issue, agent: w.agent, agent_id: w.agent_id, since, log: PathBuf::from(w.log), process });
+                continue;
+            }
             let running = Running {
                 id: w.id,
                 issue: w.issue_key,
@@ -677,6 +813,13 @@ impl Supervisor {
     /// Stops every worker that is not landing: a note on its issue, and the issue back to Todo.
     /// Returns the issues still landing, which keep running.
     pub fn stop_all(&mut self, db: &mut Db) -> Result<Vec<String>> {
+        for mut p in std::mem::take(&mut self.preparing) {
+            p.process.stop();
+            db.crew_worker_ended(p.id, None, "stopped", "stopped while setting up its worktree")?;
+            if db.issue(&p.issue.key)?.is_some_and(|i| i.state == "In Progress" && i.claimed_by.as_deref() == Some(p.agent_id.as_str())) {
+                db.move_issue(&p.issue.key, "Todo", None, Some("the crew was stopped while setting up its worktree"), &self.actor())?;
+            }
+        }
         let mut landing = Vec::new();
         let mut i = 0;
         while i < self.running.len() {
@@ -725,6 +868,24 @@ Work only there; never edit or commit in {repo}.
 Then end. Do not take another issue: Nitely starts a new worker for it.
 "
     )
+}
+
+/// Why `agent` may not work in `worktree`: it is on another branch than `wanted` (the folder pattern
+/// need not name the vendor). The same agent's branch for the issue under an older title is fine.
+fn other_branch(worktree: &Path, wanted: &str, agent: &str, key: &str) -> Option<String> {
+    let on = playbook::git(worktree, &["rev-parse", "--abbrev-ref", "HEAD"]).ok()?;
+    let on = on.trim();
+    let same = on == wanted || crate::git::parse_branch(on) == (Some(agent.to_string()), Some(key.to_uppercase()));
+    (!same).then(|| format!("its worktree {} is on {on}, not {wanted}", worktree.display()))
+}
+
+/// The end of a setup log, for the note on the issue.
+fn log_tail(log: &Path) -> String {
+    let text = std::fs::read_to_string(log).unwrap_or_default();
+    let tail: Vec<&str> = text.lines().rev().take(30).collect::<Vec<_>>().into_iter().rev().collect();
+    let tail = tail.join("\n");
+    let start = tail.char_indices().rev().nth(1500).map_or(0, |(i, _)| i);
+    format!("{}\n(full log: {})", &tail[start..], log.display())
 }
 
 /// The vendors of the local branches that name `key` (`claude/nit-3-...` is claude's NIT-3).
@@ -791,6 +952,8 @@ pub struct CrewWorker {
     pub exit_code: Option<i32>,
     pub outcome: Option<String>,
     pub reason: Option<String>,
+    /// `setup` while its worktree is being set up, then `work`.
+    pub phase: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -840,6 +1003,7 @@ fn worker_row(r: &rusqlite::Row) -> rusqlite::Result<CrewWorker> {
         outcome: r.get(10)?,
         reason: r.get(11)?,
         agent_id: r.get(12)?,
+        phase: r.get(13)?,
     })
 }
 
@@ -922,7 +1086,7 @@ pub fn project_status(db: &Db, config: &crate::Config, project: &str, moment: &M
     Ok((status.cap > 0 || !status.running.is_empty() || status.supervised).then_some(status))
 }
 
-const WORKER_COLUMNS: &str = "id, project, issue_key, agent, pid, worktree, log_path, started_at, ended_at, exit_code, outcome, reason, agent_id";
+const WORKER_COLUMNS: &str = "id, project, issue_key, agent, pid, worktree, log_path, started_at, ended_at, exit_code, outcome, reason, agent_id, phase";
 
 impl Db {
     /// Marks the sessions a crew worker runs: in its worktree, started once the worker had. A
@@ -1127,12 +1291,18 @@ impl Db {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn crew_worker_started(&self, project: &str, issue: &str, agent: &str, agent_id: &str, worktree: &Path, log: &Path, ts: i64) -> Result<i64> {
+    fn crew_worker_started(&self, project: &str, issue: &str, agent: &str, agent_id: &str, worktree: &Path, log: &Path, ts: i64, phase: &str) -> Result<i64> {
         self.conn.execute(
-            "INSERT INTO crew_worker (project, issue_key, agent, agent_id, worktree, log_path, started_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            rusqlite::params![project, issue, agent, agent_id, worktree.to_string_lossy(), log.to_string_lossy(), ts],
+            "INSERT INTO crew_worker (project, issue_key, agent, agent_id, worktree, log_path, started_at, phase) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![project, issue, agent, agent_id, worktree.to_string_lossy(), log.to_string_lossy(), ts, phase],
         )?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    /// A worker's setup passed and its agent starts: its log is the agent's from now on.
+    fn crew_worker_working(&self, id: i64, log: &Path) -> Result<()> {
+        self.conn.execute("UPDATE crew_worker SET phase = 'work', log_path = ?2 WHERE id = ?1", rusqlite::params![id, log.to_string_lossy()])?;
+        Ok(())
     }
 
     fn crew_worker_pid(&self, id: i64, pid: u32) -> Result<()> {
@@ -1224,6 +1394,39 @@ impl Agents for SystemAgents {
     fn adopt(&self, pid: u32) -> Option<Box<dyn Process>> {
         pid_alive(pid).then(|| Box::new(Adopted(pid)) as Box<dyn Process>)
     }
+
+    fn prepare(&self, prep: &Prepare) -> Result<Box<dyn Process>> {
+        use std::process::Stdio;
+        let log = std::fs::File::create(&prep.log).with_context(|| format!("creating {}", prep.log.display()))?;
+        let program = self.resolve(&prep.nitely).unwrap_or_else(|| prep.nitely.clone());
+        let mut cmd = std::process::Command::new(program);
+        cmd.args(["start", &prep.key, "--agent", &prep.vendor]).current_dir(&prep.repo);
+        cmd.stdin(Stdio::null()).stdout(Stdio::from(log.try_clone()?)).stderr(Stdio::from(log));
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000 | 0x0000_0200); // CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        Ok(Box::new(SystemProcess(cmd.spawn().with_context(|| format!("starting {} start", prep.nitely))?)))
+    }
+}
+
+/// A setup that is known to be done.
+struct Done;
+
+impl Process for Done {
+    fn pid(&self) -> u32 {
+        0
+    }
+    fn exited(&mut self) -> Result<Option<i32>> {
+        Ok(Some(0))
+    }
+    fn stop(&mut self) {}
 }
 
 /// A worker whose process is no longer there.
@@ -1379,6 +1582,12 @@ mod tests {
         stopped: Rc<RefCell<Vec<u32>>>,
         /// Starting fails with this.
         fail_start: Option<&'static str>,
+        /// Where `prepare` finds the database.
+        db: Option<PathBuf>,
+        /// Issues whose setup was started, in order.
+        prepares: Rc<RefCell<Vec<String>>>,
+        /// Setups never finish.
+        hang_setup: bool,
     }
 
     struct FakeProcess {
@@ -1414,6 +1623,18 @@ mod tests {
         fn adopt(&self, pid: u32) -> Option<Box<dyn Process>> {
             let alive = (1001..=1000 + self.launches.borrow().len() as u32).contains(&pid) && !self.exits.borrow().contains_key(&pid);
             alive.then(|| Box::new(FakeProcess { pid, exits: self.exits.clone(), stopped: self.stopped.clone() }) as Box<dyn Process>)
+        }
+        /// Runs start_task here and now, as `nitely start` would, unless setups hang.
+        fn prepare(&self, prep: &Prepare) -> Result<Box<dyn Process>> {
+            let pid = 5000 + self.prepares.borrow().len() as u32;
+            self.prepares.borrow_mut().push(prep.key.clone());
+            if !self.hang_setup {
+                let db = Db::open(self.db.as_ref().expect("the fixture sets the database")).unwrap();
+                let issue = db.issue(&prep.key).unwrap().unwrap();
+                let started = playbook::start_task(&db, &prep.repo, &issue, &prep.vendor, &Actor::Agent("cli".into()))?;
+                self.exits.borrow_mut().insert(pid, if started.setup.iter().all(|r| r.ok) { 0 } else { 1 });
+            }
+            Ok(Box::new(FakeProcess { pid, exits: self.exits.clone(), stopped: self.stopped.clone() }))
         }
     }
 
@@ -1455,7 +1676,7 @@ mod tests {
     const NOON: Moment = Moment { ts: 1_000_000, minute_of_day: 12 * 60, day_start: 1_000_000 - 12 * 3600 };
 
     fn supervisor(f: &Fixture, fake: &Fake) -> Supervisor {
-        Supervisor::new("NIT", &f.repo, &f.base.join("crew"), "nitely", Box::new(fake.clone())).with_clock(|| NOON)
+        Supervisor::new("NIT", &f.repo, &f.base.join("crew"), "nitely", Box::new(Fake { db: Some(f.base.join("t.db")), ..fake.clone() })).with_clock(|| NOON)
     }
 
     const GATE: &str = "[gate]\ncommands = [\"echo ok\"]\n";
@@ -1720,7 +1941,7 @@ workers = 2
         let fake = Fake { installed: vec!["claude"], ..Default::default() };
         let clock = Rc::new(std::cell::Cell::new(NOON));
         let c = clock.clone();
-        let mut sup = Supervisor::new("NIT", &f.repo, &f.base.join("crew"), "nitely", Box::new(fake.clone())).with_clock(move || c.get());
+        let mut sup = Supervisor::new("NIT", &f.repo, &f.base.join("crew"), "nitely", Box::new(Fake { db: Some(f.base.join("t.db")), ..fake.clone() })).with_clock(move || c.get());
         sup.tick(&mut f.db, false).unwrap();
         std::fs::write(f.repo.join(".git").join(crate::land::LOCK_FILE), "NIT-2 pid 1 since now").unwrap();
         clock.set(Moment { ts: NOON.ts + 31 * 60, ..NOON });
@@ -1775,6 +1996,61 @@ workers = 2
         assert!(unsupervised(&on.db, "NIT").unwrap());
         on.db.crew_set_status("NIT", "the app could not start the supervisor: no nitely on PATH").unwrap();
         assert!(on.db.crew_control("NIT").unwrap().status.unwrap().starts_with("the app could not"));
+    }
+
+    #[test]
+    fn a_hung_setup_holds_its_slot_but_never_the_supervisor() {
+        let mut f = fixture(&format!("{GATE}[crew]
+workers = 2
+setup_timeout_minutes = 30
+"));
+        let fake = Fake { installed: vec!["claude"], hang_setup: true, db: Some(f.base.join("t.db")), ..Default::default() };
+        let clock = Rc::new(std::cell::Cell::new(NOON));
+        let c = clock.clone();
+        let mut sup = Supervisor::new("NIT", &f.repo, &f.base.join("crew"), "nitely", Box::new(fake.clone())).with_clock(move || c.get());
+
+        // Both setups hang: the tick returns, and their slots stay taken.
+        let tick = sup.tick(&mut f.db, false).unwrap();
+        assert!(tick.started.is_empty());
+        assert_eq!((sup.running(), tick.status.as_str()), (2, "working; setting up NIT-1, NIT-2"));
+        sup.tick(&mut f.db, false).unwrap();
+        assert_eq!(*fake.prepares.borrow(), ["NIT-1", "NIT-2"], "nothing more starts meanwhile");
+
+        // Past the setup timeout they are stopped and go to a person; the last issue gets a slot.
+        clock.set(Moment { ts: NOON.ts + 31 * 60, ..NOON });
+        sup.tick(&mut f.db, false).unwrap();
+        assert_eq!(*fake.stopped.borrow(), [5000, 5001]);
+        let one = f.db.issue("NIT-1").unwrap().unwrap();
+        assert_eq!(one.state, "Needs You");
+        let note = f.db.timeline("NIT-1").unwrap().into_iter().rev().find(|t| t.kind == "handoff").unwrap();
+        assert!(note.summary.unwrap().contains("crew.setup_timeout_minutes"));
+        assert_eq!(*fake.prepares.borrow(), ["NIT-1", "NIT-2", "NIT-3"]);
+
+        // A second Ctrl+C stops a setup too, and its issue goes back.
+        assert!(sup.stop_all(&mut f.db).unwrap().is_empty());
+        assert_eq!(*fake.stopped.borrow(), [5000, 5001, 5002]);
+        assert_eq!(f.db.issue("NIT-3").unwrap().unwrap().state, "Todo");
+        assert_eq!(sup.running(), 0);
+    }
+
+    #[test]
+    fn a_new_supervisor_picks_up_a_setup_the_old_one_left() {
+        let mut f = fixture(&format!("{GATE}[crew]
+workers = 1
+"));
+        let hung = Fake { installed: vec!["claude"], hang_setup: true, db: Some(f.base.join("t.db")), ..Default::default() };
+        Supervisor::new("NIT", &f.repo, &f.base.join("crew"), "nitely", Box::new(hung)).with_clock(|| NOON).tick(&mut f.db, false).unwrap();
+        let row = &f.db.crew_running("NIT").unwrap()[0];
+        assert_eq!((row.issue_key.as_str(), row.phase.as_str()), ("NIT-1", "setup"));
+
+        // That supervisor is gone and so is its setup: the next one runs the setup again and starts NIT-1.
+        let fake = Fake { installed: vec!["claude"], ..Default::default() };
+        let tick = supervisor(&f, &fake).tick(&mut f.db, false).unwrap();
+        assert_eq!(*fake.prepares.borrow(), ["NIT-1"]);
+        assert_eq!(tick.started.iter().map(|w| w.issue.as_str()).collect::<Vec<_>>(), ["NIT-1"]);
+        let rows = f.db.crew_running("NIT").unwrap();
+        assert_eq!((rows.len(), rows[0].phase.as_str(), rows[0].id), (1, "work", row.id), "the same row, now working");
+        assert!(rows[0].log.ends_with("-claude.log"));
     }
 
     #[test]

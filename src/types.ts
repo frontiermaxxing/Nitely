@@ -31,6 +31,8 @@ export interface CrewWorker {
   /** landed, submitted, asked, failed, stopped or launch_failed, once it ended. */
   outcome: string | null;
   reason: string | null;
+  /** "setup" while its worktree is being set up, then "work". */
+  phase: string;
 }
 
 /** A project's crew, from `crew_status`; null when the project has none. */
