@@ -49,15 +49,17 @@ function liveData(): Plugin {
             // spawn throws at once on arguments it cannot pass (a NUL byte, say).
             return reply(400, { error: `Could not run nitely ui: ${(e as Error).message}` });
           }
-          let out = "";
-          let err = "";
-          child.stdout.on("data", (c) => (out += c));
-          child.stderr.on("data", (c) => (err += c));
+          // Kept as bytes until the end, so a character split across chunks is decoded whole.
+          const out: Buffer[] = [];
+          const err: Buffer[] = [];
+          child.stdout.on("data", (c: Buffer) => out.push(c));
+          child.stderr.on("data", (c: Buffer) => err.push(c));
           child.on("error", (e) => reply(500, { error: `Could not run ${bin}: ${e.message}. Run \`cargo build -p nitely-cli\`, or set NITELY_BIN.` }));
           child.on("close", (code) => {
-            if (code === 0) reply(200, out);
+            const text = (b: Buffer[]) => Buffer.concat(b).toString("utf8");
+            if (code === 0) reply(200, text(out));
             // 2: refused because it would change something.
-            else reply(code === 2 ? 403 : 500, { error: err.trim() || `nitely ui exited with ${code}` });
+            else reply(code === 2 ? 403 : 500, { error: text(err).trim() || `nitely ui exited with ${code}` });
           });
         });
       });

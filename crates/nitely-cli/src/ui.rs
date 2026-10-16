@@ -45,7 +45,7 @@ pub fn run(command: &str, args: &Value) -> Result<Value> {
     }
     let db = || Db::open_read_only(&nitely_core::paths::db_path());
     Ok(match command {
-        "snapshot" => json!(nitely_core::snapshot(&Config::load()?, &db()?)?),
+        "snapshot" => json!(nitely_core::snapshot(&Config::load_read_only()?, &db()?)?),
         "projects" => json!(db()?.projects()?),
         "issues" => {
             let closed = args.get("includeClosed").and_then(Value::as_bool).unwrap_or(false);
@@ -59,9 +59,9 @@ pub fn run(command: &str, args: &Value) -> Result<Value> {
         "activity" => {
             let to = nitely_core::db::now();
             let hours = int_arg(args, "hours")?.clamp(1, 24 * 7);
-            json!(nitely_core::activity::activity(&Config::load()?, &db()?, to - hours * 3600, to)?)
+            json!(nitely_core::activity::activity(&Config::load_read_only()?, &db()?, to - hours * 3600, to)?)
         }
-        "agent_setup" => agents_without_files(&nitely_core::connect::agent_setup(&Config::load()?)),
+        "agent_setup" => agents_without_files(&nitely_core::connect::agent_setup(&Config::load_read_only()?)),
         // Links open the app's own window, never the preview.
         "opened_link" => Value::Null,
         _ => unreachable!("every allowed command is handled"),

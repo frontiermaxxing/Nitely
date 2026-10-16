@@ -36,6 +36,27 @@ impl Config {
         Ok(config)
     }
 
+    /// The config as it is on disk, with nothing tidied: `load` may carry a playbook over between
+    /// duplicate repo entries, which writes files. For `nitely ui`, which must not change anything.
+    pub fn load_read_only() -> Result<Config> {
+        let path = paths::config_path();
+        if !path.exists() {
+            return Ok(Config::default());
+        }
+        let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let mut config: Config = serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        // One entry per repo root, the last written, as `load` keeps; in memory only.
+        let mut kept: Vec<RepoConfig> = Vec::new();
+        for repo in config.repos.drain(..).rev() {
+            if !kept.iter().any(|k| paths::normalize(&k.root) == paths::normalize(&repo.root)) {
+                kept.push(repo);
+            }
+        }
+        kept.reverse();
+        config.repos = kept;
+        Ok(config)
+    }
+
     /// Keeps one entry per repo root, the last written. Older versions replaced repos by name only,
     /// so adding a watched repo under another name left a stale entry that lookups by root found first.
     fn dedupe_roots(&mut self, data_dir: &Path) {
