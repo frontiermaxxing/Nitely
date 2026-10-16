@@ -46,9 +46,15 @@ pub fn sync(config: &Config, db: &mut Db) -> SyncReport {
         report.pull_requests = result.ok();
     }
 
+    let watched = config.repos.iter().any(|r| git::bitbucket_slug(&r.root).is_some());
     let creds = match credentials::load() {
         Ok(Some(c)) => c,
-        Ok(None) => return report,
+        Ok(None) => {
+            if let Some(notice) = bitbucket_notice(watched, None, &credentials::path()) {
+                record(db, "bitbucket", &Err(anyhow::anyhow!(notice)), &mut report.errors);
+            }
+            return report;
+        }
         Err(e) => {
             report.errors.push(format!("{e:#}"));
             return report;
@@ -56,6 +62,9 @@ pub fn sync(config: &Config, db: &mut Db) -> SyncReport {
     };
     report.credentials_found = true;
 
+    if let Some(notice) = bitbucket_notice(watched, Some(&creds), &credentials::path()) {
+        record(db, "bitbucket", &Err(anyhow::anyhow!(notice)), &mut report.errors);
+    }
     if creds.bitbucket.usable() {
         let result = sync_bitbucket(config, &creds, db);
         record(db, "bitbucket", &result, &mut report.errors);
@@ -75,6 +84,22 @@ pub fn sync(config: &Config, db: &mut Db) -> SyncReport {
         report.issues = result.ok();
     }
     report
+}
+
+/// What to tell someone who watches a Bitbucket repo but has given Nitely no Bitbucket token, as
+/// after an upgrade that moved the credentials file: where Nitely reads it, and what it needs.
+fn bitbucket_notice(watched: bool, creds: Option<&Credentials>, path: &std::path::Path) -> Option<String> {
+    if !watched {
+        return None;
+    }
+    match creds {
+        None => Some(format!(
+            "no credentials file: Nitely reads the Bitbucket token (and Linear key) from {}; until it is there, Bitbucket pull requests are not synced and pushes use git's own sign-in",
+            path.display()
+        )),
+        Some(c) if !c.bitbucket.usable() => Some(format!("{} has no Bitbucket email and apiToken, so Bitbucket pull requests are not synced", path.display())),
+        Some(_) => None,
+    }
 }
 
 pub(crate) fn record(db: &Db, source: &str, result: &Result<usize>, errors: &mut Vec<String>) {
@@ -340,6 +365,19 @@ fn read_bitbucket(mut res: ureq::http::Response<ureq::Body>) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tells_a_bitbucket_user_where_the_credentials_go() {
+        let path = std::path::Path::new("/data/Nitely/credentials.json");
+        assert_eq!(bitbucket_notice(false, None, path), None, "no Bitbucket repo, nothing to say");
+        let missing = bitbucket_notice(true, None, path).unwrap();
+        assert!(missing.contains("/data/Nitely/credentials.json"), "{missing}");
+        let mut creds = Credentials::default();
+        assert!(bitbucket_notice(true, Some(&creds), path).unwrap().contains("apiToken"));
+        creds.bitbucket.email = "you@example.com".into();
+        creds.bitbucket.api_token = "t".into();
+        assert_eq!(bitbucket_notice(true, Some(&creds), path), None);
+    }
 
     #[test]
     fn parses_bitbucket_prs_and_my_approval() {
