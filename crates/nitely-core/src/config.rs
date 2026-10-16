@@ -29,7 +29,18 @@ impl Config {
             return Ok(Config::default());
         }
         let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-        serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+        let mut config: Config = serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        config.dedupe_roots();
+        Ok(config)
+    }
+
+    /// Keeps one entry per repo root, the last written. Older versions replaced repos by name only,
+    /// so adding a watched repo under another name left a stale entry that lookups by root found first.
+    fn dedupe_roots(&mut self) {
+        let mut seen = std::collections::HashSet::new();
+        let mut kept: Vec<RepoConfig> = self.repos.drain(..).rev().filter(|r| seen.insert(paths::normalize(&r.root))).collect();
+        kept.reverse();
+        self.repos = kept;
     }
 
     pub fn save(&self) -> Result<()> {
@@ -50,10 +61,33 @@ impl Config {
             .find(|r| paths::normalize(&r.root) == paths::normalize(&main))
     }
 
-    /// Adds a repo, or replaces the one with the same name.
+    /// Adds a repo, or replaces the one with the same name or the same root.
     pub fn upsert_repo(&mut self, repo: RepoConfig) {
-        self.repos.retain(|r| r.name != repo.name);
+        let root = paths::normalize(&repo.root);
+        self.repos.retain(|r| r.name != repo.name && paths::normalize(&r.root) != root);
         self.repos.push(repo);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn repo(name: &str, root: &str) -> RepoConfig {
+        RepoConfig { name: name.into(), root: root.into(), integration_branch: "main".into(), project: None }
+    }
+
+    #[test]
+    fn one_entry_per_root() {
+        let mut config = Config { repos: vec![repo("Aera", r"C:\Dev\AeraChromium"), repo("Nitely", "/dev/Nitely")] };
+        config.upsert_repo(repo("AeraChromium", "C:/Dev/AeraChromium/"));
+        let names: Vec<&str> = config.repos.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["Nitely", "AeraChromium"]);
+
+        let mut stale = Config { repos: vec![repo("Aera", r"C:\Dev\AeraChromium"), repo("Nitely", "/dev/Nitely"), repo("AeraChromium", "C:/Dev/AeraChromium")] };
+        stale.dedupe_roots();
+        let names: Vec<&str> = stale.repos.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["Nitely", "AeraChromium"], "the last written entry wins");
     }
 }
 
