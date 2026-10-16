@@ -390,6 +390,9 @@ mod tests {
         let old = db.issue("AND-1").unwrap().unwrap();
         assert_eq!((old.key.as_str(), old.origin.as_str()), ("AE-1", "nitely"), "the old link opens the native issue");
         assert!(db.issue("LIN-1").unwrap().is_some(), "other prefixes still mirror");
+        // Even a mirror row left from before (written past replace_issues) does not take the old link.
+        db.conn.execute("INSERT INTO issue (key, origin, title, state) VALUES ('AND-1', 'linear', 'Stale mirror', 'Todo')", []).unwrap();
+        assert_eq!(db.issue("AND-1").unwrap().unwrap().key, "AE-1");
     }
 
     #[test]

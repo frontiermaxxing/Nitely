@@ -543,12 +543,11 @@ impl Db {
                 .query_row(&format!("SELECT {ISSUE_COLUMNS} FROM issue WHERE key = ?1 COLLATE NOCASE"), [key], issue_from_row)
                 .optional()
         };
-        let issue = match find(key)? {
-            Some(i) => Some(i),
-            None => match self.alias_of(key)? {
-                Some(current) => find(&current)?,
-                None => None,
-            },
+        // An old key resolves through its alias first: it belongs to the project that had it, even
+        // if some other row (a mirror from an earlier sync) still carries it.
+        let issue = match self.alias_of(key)? {
+            Some(current) => find(&current)?.map_or_else(|| find(key), |i| Ok(Some(i)))?,
+            None => find(key)?,
         };
         Ok(match issue {
             Some(mut i) => {
