@@ -393,9 +393,11 @@ fn finish(cmd: &mut Command, args: &[&str]) -> Result<String> {
 
 /// A git call that talks to `origin` (push, fetch). It never waits for a prompt or a sign-in
 /// window: nobody is there to answer one, and Git Credential Manager hung an Aera land that way
-/// on 2026-10-15. For a bitbucket.org remote with a token in the credentials file, it answers with
-/// that token (`nitely git-credential`) instead of the configured helpers, as Aera's own
-/// pushWithToken does; other hosts keep their helpers and fail fast if those cannot answer.
+/// on 2026-10-15. For an HTTPS bitbucket.org remote with a token in the credentials file, the
+/// configured helpers are replaced by an Authorization header for bitbucket.org only, as Aera's own
+/// pushWithToken answers with the token. Both go in through git's environment config
+/// (GIT_CONFIG_COUNT), so the token is on no command line and nothing prints it. Other hosts keep
+/// their helpers and fail fast if those cannot answer.
 pub(crate) fn git_remote(dir: &Path, args: &[&str]) -> Result<String> {
     let mut cmd = shell_free_command("git");
     cmd.arg("-C").arg(dir).env("GIT_TERMINAL_PROMPT", "0").env("GCM_INTERACTIVE", "never");
@@ -403,26 +405,17 @@ pub(crate) fn git_remote(dir: &Path, args: &[&str]) -> Result<String> {
     // A push authenticates against the push URL, which can differ from the fetch URL.
     let url_args: &[&str] = if args.first() == Some(&"push") { &["remote", "get-url", "--push", "origin"] } else { &["remote", "get-url", "origin"] };
     let url = git(dir, url_args).unwrap_or_default();
-    let has_token = || crate::credentials::load().ok().flatten().is_some_and(|c| !c.bitbucket.api_token.is_empty());
-    if is_bitbucket_https(url.trim()) && has_token() {
-        // The helper answers only with this call's grant in both its environment and its
-        // arguments, so running `nitely git-credential` by hand never prints the token.
-        let grant = credential_grant();
-        cmd.env(crate::credentials::GRANT_ENV, &grant);
-        cmd.args(["-c", "credential.helper=", "-c", &format!("credential.helper={} --grant {grant}", credential_helper())]);
+    let header = || crate::credentials::load().ok().flatten().and_then(|c| crate::credentials::git_auth_header(&c));
+    if is_bitbucket_https(url.trim()) {
+        if let Some(header) = header() {
+            cmd.env("GIT_CONFIG_COUNT", "2")
+                .env("GIT_CONFIG_KEY_0", "credential.helper")
+                .env("GIT_CONFIG_VALUE_0", "")
+                .env("GIT_CONFIG_KEY_1", "http.https://bitbucket.org/.extraHeader")
+                .env("GIT_CONFIG_VALUE_1", header);
+        }
     }
     finish(cmd.args(args), args)
-}
-
-/// A fresh random value for one git call (std's hasher keys are seeded from the OS).
-fn credential_grant() -> String {
-    use std::hash::{BuildHasher, Hasher};
-    let half = || {
-        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
-        h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
-        h.finish()
-    };
-    format!("{:016x}{:016x}", half(), half())
 }
 
 /// Whether `url` is an HTTPS remote on bitbucket.org (SSH remotes use keys, not a helper).
@@ -431,16 +424,6 @@ pub(crate) fn is_bitbucket_https(url: &str) -> bool {
     let host = rest.split('/').next().unwrap_or("");
     let host = host.rsplit('@').next().unwrap_or(host);
     host.eq_ignore_ascii_case("bitbucket.org")
-}
-
-/// The helper git runs: this nitely binary when that is what runs (the CLI or MCP server), else
-/// `nitely` from PATH (the app, or tests).
-fn credential_helper() -> String {
-    let exe = std::env::current_exe().ok().filter(|p| p.file_stem().is_some_and(|s| s == "nitely"));
-    match exe {
-        Some(p) => format!("!\"{}\" git-credential", p.to_string_lossy().replace('\\', "/")),
-        None => "!nitely git-credential".into(),
-    }
 }
 
 /// A POSIX `sh` for tests' fake reviewers: `sh` on unix, and on Windows the one Git for Windows

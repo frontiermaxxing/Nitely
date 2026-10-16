@@ -50,28 +50,18 @@ impl Linear {
     }
 }
 
-/// Set by Nitely's own git calls (`playbook::git_remote`) to the grant it also passes the helper,
-/// so `nitely git-credential` answers git during those calls and nobody else.
-pub const GRANT_ENV: &str = "NITELY_CREDENTIAL_GRANT";
-
-/// Whether the helper was started by one of Nitely's own git calls: its environment carries the
-/// same grant as its `--grant` argument. This keeps the token out of anyone's output who runs the
-/// helper by hand; a process that can read the credentials file could of course read it directly.
-pub fn granted(arg: Option<&str>, env: Option<&str>) -> bool {
-    matches!((arg, env), (Some(a), Some(e)) if a.len() >= 32 && a == e)
-}
-
-/// What `nitely git-credential get` tells git for a request (git's credential protocol: `key=value`
-/// lines). Only an HTTPS request for bitbucket.org is answered, with the API token under Bitbucket's
-/// fixed username for tokens over Git (the account email works only for the REST API).
-pub fn git_answer(request: &str, creds: &Credentials) -> Option<String> {
-    let field = |k: &str| request.lines().find_map(|l| l.strip_prefix(k).and_then(|v| v.strip_prefix('=')));
-    let host = field("host")?;
-    let https = field("protocol").is_none_or(|p| p == "https");
-    if !https || !host.eq_ignore_ascii_case("bitbucket.org") || creds.bitbucket.api_token.is_empty() {
+/// The Authorization header git sends to bitbucket.org for Nitely's own pushes and fetches (Basic
+/// auth with Bitbucket's fixed username for API tokens over Git; the account email works only for
+/// the REST API). None without a token. It goes to git through its environment only, never on a
+/// command line and never printed (`playbook::git_remote`).
+pub fn git_auth_header(creds: &Credentials) -> Option<String> {
+    use base64::Engine;
+    let token = &creds.bitbucket.api_token;
+    if token.is_empty() {
         return None;
     }
-    Some(format!("username=x-bitbucket-api-token-auth\npassword={}\n", creds.bitbucket.api_token))
+    let pair = format!("x-bitbucket-api-token-auth:{token}");
+    Some(format!("Authorization: Basic {}", base64::engine::general_purpose::STANDARD.encode(pair)))
 }
 
 /// `NITELY_CREDENTIALS` overrides the path (tests, or a second account).
@@ -103,25 +93,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn answers_git_only_for_bitbucket_over_https() {
+    fn git_auth_header_is_basic_with_the_token_username() {
+        use base64::Engine;
+        assert_eq!(git_auth_header(&Credentials::default()), None);
         let mut creds = Credentials::default();
         creds.bitbucket.api_token = "tok".into();
-        let ask = |req: &str| git_answer(req, &creds);
-        assert_eq!(ask("protocol=https\nhost=bitbucket.org\n").as_deref(), Some("username=x-bitbucket-api-token-auth\npassword=tok\n"));
-        assert_eq!(ask("host=Bitbucket.org").as_deref(), Some("username=x-bitbucket-api-token-auth\npassword=tok\n"));
-        assert_eq!(ask("protocol=https\nhost=github.com\n"), None);
-        assert_eq!(ask("protocol=http\nhost=bitbucket.org\n"), None);
-        assert_eq!(ask("protocol=https\nhost=bitbucket.org.evil.com\n"), None);
-        assert_eq!(git_answer("protocol=https\nhost=bitbucket.org\n", &Credentials::default()), None);
-    }
-
-    #[test]
-    fn only_a_matching_grant_lets_the_helper_answer() {
-        let g = "0123456789abcdef0123456789abcdef";
-        assert!(granted(Some(g), Some(g)));
-        assert!(!granted(None, Some(g)));
-        assert!(!granted(Some(g), None));
-        assert!(!granted(Some(g), Some("0123456789abcdef0123456789abcdee")));
-        assert!(!granted(Some("x"), Some("x")), "too short to be a grant");
+        let header = git_auth_header(&creds).unwrap();
+        let encoded = header.strip_prefix("Authorization: Basic ").unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD.decode(encoded).unwrap();
+        assert_eq!(decoded, b"x-bitbucket-api-token-auth:tok");
     }
 }

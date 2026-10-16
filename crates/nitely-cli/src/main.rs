@@ -40,16 +40,6 @@ enum Cmd {
     /// newer build is installed.
     #[command(hide = true)]
     McpCall,
-    /// Git credential helper for Nitely's own pushes and fetches to bitbucket.org: answers `get`
-    /// with the API token, only inside those calls (they pass a matching --grant and environment).
-    #[command(hide = true)]
-    GitCredential {
-        /// The grant of the git call that runs this helper.
-        #[arg(long)]
-        grant: Option<String>,
-        /// get, store or erase; only get is answered.
-        operation: String,
-    },
     /// Put this build (or --from) where agents run `nitely` from, even while agents run the old
     /// one: on Windows the running one is moved aside, and old copies nothing runs are deleted.
     Install {
@@ -403,21 +393,6 @@ fn run(cmd: Cmd) -> Result<()> {
     let me = Actor::Agent("cli".into());
     match cmd {
         Cmd::Hook { .. } | Cmd::Mcp | Cmd::McpCall | Cmd::Ui { .. } => unreachable!(),
-        Cmd::GitCredential { grant, operation } => {
-            // Answer nothing (git then fails without prompting) unless it is a get, from one of
-            // Nitely's own git calls, that we can answer.
-            let mut request = String::new();
-            std::io::stdin().read_to_string(&mut request)?;
-            let env = std::env::var(nitely_core::credentials::GRANT_ENV).ok();
-            if operation == "get" && nitely_core::credentials::granted(grant.as_deref(), env.as_deref()) {
-                if let Some(creds) = nitely_core::credentials::load().ok().flatten() {
-                    if let Some(answer) = nitely_core::credentials::git_answer(&request, &creds) {
-                        print!("{answer}");
-                    }
-                }
-            }
-            Ok(())
-        }
         Cmd::Install { from, to } => {
             let from = match from {
                 Some(f) => f,
