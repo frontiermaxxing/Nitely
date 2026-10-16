@@ -17,6 +17,9 @@ pub struct RepoConfig {
     pub root: String,
     /// Branch tasks are cut from and land on (`win-dev` / `mac-dev` for Aera).
     pub integration_branch: String,
+    /// The project (issue prefix) this repo's work belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
 }
 
 impl Config {
@@ -38,9 +41,41 @@ impl Config {
         Ok(())
     }
 
+    /// The repo that `dir` is in: its main checkout or any of its linked worktrees, wherever
+    /// they live on disk.
+    pub fn repo_for_dir(&self, dir: &str) -> Option<&RepoConfig> {
+        let main = crate::git::main_root(dir)?;
+        self.repos
+            .iter()
+            .find(|r| paths::normalize(&r.root) == paths::normalize(&main))
+    }
+
     /// Adds a repo, or replaces the one with the same name.
     pub fn upsert_repo(&mut self, repo: RepoConfig) {
         self.repos.retain(|r| r.name != repo.name);
         self.repos.push(repo);
+    }
+}
+
+/// The project an agent in `cwd` works on: an explicit choice, then `NITELY_PROJECT`, then the
+/// project of the repo `cwd` is in, then the only project if there is exactly one.
+pub fn resolve_project(config: &Config, db: &crate::Db, explicit: Option<&str>, cwd: &str) -> Result<String> {
+    let chosen = explicit
+        .map(str::to_string)
+        .or_else(|| std::env::var("NITELY_PROJECT").ok().filter(|p| !p.is_empty()))
+        .or_else(|| config.repo_for_dir(cwd).and_then(|r| r.project.clone()));
+    if let Some(key) = chosen {
+        return db
+            .project(&key)?
+            .map(|p| p.key)
+            .with_context(|| format!("no project {key}; create it with `nitely project create {key} <name>`"));
+    }
+    let projects = db.projects()?;
+    match projects.as_slice() {
+        [only] => Ok(only.key.clone()),
+        [] => anyhow::bail!("no projects yet; create one with `nitely project create NIT Nitely`"),
+        _ => anyhow::bail!(
+            "several projects and {cwd} is not in a repo linked to one; pass a project, or link the repo with `nitely repo add <path> --project <KEY>`"
+        ),
     }
 }

@@ -1,22 +1,40 @@
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
+
+pub use crate::issues::IssueRecord;
 use serde::Serialize;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Schema from docs/design.md. Milestone 1 writes only `session` and `event`; the other tables
-/// exist so later milestones add columns, not a migration story.
+/// Schema from docs/design.md. `task`, `review` and `approval` are not written yet.
 const SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS project (
+  key         TEXT PRIMARY KEY,            -- issue prefix, e.g. NIT
+  name        TEXT NOT NULL,
+  next_number INTEGER NOT NULL DEFAULT 1,
+  created_at  INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS issue (
   key        TEXT PRIMARY KEY,
-  origin     TEXT NOT NULL,                -- 'linear' (mirrored) or 'nitely' (native, milestone 3)
+  origin     TEXT NOT NULL,                -- 'nitely' (native) or 'linear' (mirrored, read-only)
+  project    TEXT,
+  number     INTEGER,
   title      TEXT NOT NULL,
+  body       TEXT NOT NULL DEFAULT '',
   url        TEXT NOT NULL DEFAULT '',
-  state      TEXT NOT NULL,
-  state_type TEXT NOT NULL DEFAULT '',
+  state      TEXT NOT NULL,                -- display name: 'In Progress', 'Needs You', ...
+  state_type TEXT NOT NULL DEFAULT '',     -- backlog | unstarted | started | completed | canceled
+  kind       TEXT,
+  source     TEXT,
+  priority   INTEGER NOT NULL DEFAULT 0,   -- 0 none, 1 urgent, 2 high, 3 medium, 4 low (Linear's scale)
   labels     TEXT NOT NULL DEFAULT '[]',
+  evidence   TEXT NOT NULL DEFAULT '',
+  claimed_by TEXT,
+  claimed_at INTEGER,
+  created_at TEXT NOT NULL DEFAULT '',
   updated_at TEXT NOT NULL DEFAULT ''
 );
+CREATE INDEX IF NOT EXISTS issue_project ON issue (project, state_type);
 CREATE TABLE IF NOT EXISTS task (
   id            INTEGER PRIMARY KEY,
   issue_key     TEXT,
@@ -48,6 +66,7 @@ CREATE TABLE IF NOT EXISTS event (
   payload    TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS event_ts ON event (ts);
+CREATE INDEX IF NOT EXISTS event_issue ON event (issue_key, ts);
 CREATE TABLE IF NOT EXISTS review (
   id          INTEGER PRIMARY KEY,
   task_id     INTEGER NOT NULL,
@@ -90,7 +109,8 @@ CREATE TABLE IF NOT EXISTS approval (     -- written only from the app UI
 );
 CREATE TABLE IF NOT EXISTS ask (
   id          INTEGER PRIMARY KEY,
-  session_id  TEXT,
+  issue_key   TEXT,
+  asked_by    TEXT NOT NULL,
   cwd         TEXT,
   question    TEXT NOT NULL,
   options     TEXT NOT NULL DEFAULT '[]',
@@ -102,13 +122,17 @@ CREATE TABLE IF NOT EXISTS ask (
 
 /// Bumped when a table changes shape. Tables that only mirror Bitbucket or Linear are dropped
 /// and refilled by the next sync; tables Nitely owns get real migrations.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
     if version < 2 {
         // v1 (first scaffold) had placeholder issue and pull_request tables that were never written.
         conn.execute_batch("DROP TABLE IF EXISTS issue; DROP TABLE IF EXISTS pull_request;")?;
+    }
+    if version < 3 {
+        // v2's issue table only mirrored Linear (refilled by the next sync); ask was never written.
+        conn.execute_batch("DROP TABLE IF EXISTS issue; DROP TABLE IF EXISTS ask;")?;
     }
     Ok(())
 }
@@ -121,7 +145,7 @@ pub fn now() -> i64 {
 }
 
 pub struct Db {
-    conn: Connection,
+    pub(crate) conn: Connection,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -133,19 +157,6 @@ pub struct Session {
     pub last_seen_at: i64,
     pub last_activity: Option<String>,
     pub state: String,
-}
-
-/// An issue mirrored from Linear (or, later, owned by Nitely).
-#[derive(Debug, Clone, Serialize)]
-pub struct IssueRecord {
-    pub key: String,
-    pub title: String,
-    pub url: String,
-    pub state: String,
-    /// Linear's state category: backlog, unstarted, started, completed, canceled.
-    pub state_type: String,
-    pub labels: Vec<String>,
-    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -234,32 +245,6 @@ impl Db {
         Ok(())
     }
 
-    /// Replaces every issue from `origin` with `issues`, in one transaction.
-    pub fn replace_issues(&mut self, origin: &str, issues: &[IssueRecord]) -> Result<()> {
-        let tx = self.conn.transaction()?;
-        tx.execute("DELETE FROM issue WHERE origin = ?1", [origin])?;
-        {
-            let mut ins = tx.prepare(
-                "INSERT OR REPLACE INTO issue (key, origin, title, url, state, state_type, labels, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            )?;
-            for i in issues {
-                ins.execute(params![
-                    i.key,
-                    origin,
-                    i.title,
-                    i.url,
-                    i.state,
-                    i.state_type,
-                    serde_json::to_string(&i.labels)?,
-                    i.updated_at
-                ])?;
-            }
-        }
-        tx.commit()?;
-        Ok(())
-    }
-
     /// Replaces the stored pull requests of one remote repo.
     pub fn replace_prs(&mut self, provider: &str, repo: &str, prs: &[PrRecord]) -> Result<()> {
         let tx = self.conn.transaction()?;
@@ -289,24 +274,6 @@ impl Db {
         }
         tx.commit()?;
         Ok(())
-    }
-
-    pub fn issues(&self) -> Result<Vec<IssueRecord>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT key, title, url, state, state_type, labels, updated_at FROM issue")?;
-        let rows = stmt.query_map([], |r| {
-            Ok(IssueRecord {
-                key: r.get(0)?,
-                title: r.get(1)?,
-                url: r.get(2)?,
-                state: r.get(3)?,
-                state_type: r.get(4)?,
-                labels: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or_default(),
-                updated_at: r.get(6)?,
-            })
-        })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn prs(&self) -> Result<Vec<PrRecord>> {

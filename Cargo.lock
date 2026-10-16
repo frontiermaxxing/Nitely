@@ -2335,6 +2335,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "nitely-core",
+ "serde",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
@@ -2347,6 +2348,7 @@ dependencies = [
  "anyhow",
  "clap",
  "nitely-core",
+ "serde",
  "serde_json",
 ]
 

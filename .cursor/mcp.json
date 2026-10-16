@@ -1,0 +1,5 @@
+{
+  "mcpServers": {
+    "nitely": { "command": "nitely", "args": ["mcp"] }
+  }
+}

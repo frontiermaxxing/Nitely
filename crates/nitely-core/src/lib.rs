@@ -6,10 +6,12 @@ pub mod credentials;
 pub mod db;
 pub mod git;
 pub mod hook;
+pub mod issues;
 pub mod paths;
 pub mod remote;
 pub mod snapshot;
 
-pub use config::{Config, RepoConfig};
+pub use config::{resolve_project, Config, RepoConfig};
 pub use db::Db;
+pub use issues::{Actor, IssueRecord, NewIssue};
 pub use snapshot::{snapshot, Board, RepoView, TaskRow};

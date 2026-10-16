@@ -1,14 +1,17 @@
 # Nitely
 
-A small desktop app that shows what your coding agents are doing: their worktrees, branches,
-activity and what needs you. Design and milestones: [docs/design.md](docs/design.md).
+A desktop app for running a team of coding agents: a backlog they take work from, a live view of
+what each one is doing, and an inbox for the calls only you should make. Where it is going:
+[docs/vision.md](docs/vision.md). Milestone 1 design: [docs/design.md](docs/design.md). How agents
+work on this repo: [AGENTS.md](AGENTS.md).
 
-This is the start of milestone 1. It has the **Now** board (every worktree of every watched repo,
-with the agent working in it, what it last did, ahead/behind, uncommitted files, last commit, and a
-"needs you" flag for stopped rebases and agents waiting on a prompt), and the `nitely` CLI with the
-Claude Code hook. Each row also shows its Linear issue (title and state) and its Bitbucket pull
-request (state, approvals, comments). Issues in Needs Andrew flag their row, and ones with no
-worktree get their own list at the top. Task detail and the branch view come next.
+**Views:** Inbox (agents' questions with an answer box, issues waiting on you with Approve, stuck
+worktrees), Now (every worktree with its agent, PR and git state), and one backlog per project with
+an issue panel showing the full timeline.
+
+**For agents:** `nitely mcp` is an MCP server with `next_task` (atomic claim of the most urgent Todo
+issue), `report`, `note` (with handoffs), `file_issue` (duplicate check, evidence required),
+`update_issue` (Done needs evidence; only a human approves), `ask` and `get_answer`.
 
 ## Layout
 
@@ -35,6 +38,18 @@ npm run tauri dev
 
 `cargo test` runs the core tests. `nitely now` prints the same board as JSON, and `nitely where`
 prints where the database and config live (`%APPDATA%\Nitely`).
+
+## Track a project in Nitely
+
+```powershell
+nitely project create NIT Nitely
+nitely repo add C:\Development\Nitely --integration main --project NIT
+nitely issue import docs\seed-backlog.json --project NIT
+```
+
+`.mcp.json` (Claude Code) and `.cursor/mcp.json` (Cursor) register `nitely mcp` for this repo; the
+agent picks the project from the repo it runs in. Approving and answering asks happen only in the
+app, never through the CLI or MCP.
 
 ## Bitbucket and Linear
 
