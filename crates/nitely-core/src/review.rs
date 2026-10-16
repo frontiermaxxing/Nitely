@@ -557,7 +557,7 @@ mod tests {
         assert_eq!(codex[6..], commands["codex"][2..]);
         // Codex refuses to turn off a server it does not have, so none means no override.
         assert_eq!(without_nitely(&commands["codex"], &[]), commands["codex"]);
-        let path = vec![r"C:\Apps\Codex\codex.exe".to_string(), "exec".into(), "-".into()];
+        let path = vec!["/opt/Codex Tools/codex.exe".to_string(), "exec".into(), "-".into()];
         assert_eq!(without_nitely(&path, &["nitely".into()])[2..4], ["-c", "mcp_servers.nitely.enabled=false"]);
         let other = vec!["gemini".to_string(), "-p".into()];
         assert_eq!(without_nitely(&other, &["nitely".into()]), other);
@@ -567,7 +567,7 @@ mod tests {
     fn finds_codexs_nitely_servers() {
         let json = r#"[
             {"name": "nitely", "enabled": true, "transport": {"type": "stdio", "command": "nitely", "args": ["mcp"]}},
-            {"name": "board", "enabled": true, "transport": {"type": "stdio", "command": "C:\\Program Files\\Nitely\\nitely.exe", "args": ["mcp"]}},
+            {"name": "board", "enabled": true, "transport": {"type": "stdio", "command": "/opt/Nitely Tools/nitely", "args": ["mcp"]}},
             {"name": "off", "enabled": false, "transport": {"type": "stdio", "command": "nitely", "args": ["mcp"]}},
             {"name": "docs", "enabled": true, "transport": {"type": "stdio", "command": "node", "args": ["docs.js"]}},
             {"name": "web", "enabled": true, "transport": {"type": "streamable_http", "url": "http://localhost:1"}}
