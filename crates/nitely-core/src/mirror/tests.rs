@@ -229,3 +229,39 @@ fn a_token_that_may_delete_takes_a_withdrawn_issue_down_whole_and_one_refusal_do
     drop(db);
     std::fs::remove_dir_all(dir).ok();
 }
+
+#[test]
+fn turning_the_mirror_off_stops_a_sync_on_its_way() {
+    let (mut db, dir) = db();
+    let roots = vec![ROOT.to_string()];
+    let agent = Actor::Agent("claude:x".into());
+    db.set_mirror("APP", Some("all"), &Actor::Human).unwrap();
+    for t in ["Add export", "Fix sorting", "Speed up search"] {
+        db.create_issue(&new(t, "Body."), &agent).unwrap();
+    }
+    /// A host on which the first create turns the mirror off, as the person might mid-sync.
+    struct Stopper<'a> {
+        db: &'a Db,
+        fake: Fake,
+    }
+    impl Host for Stopper<'_> {
+        fn name(&self) -> &'static str { "GitHub" }
+        fn repo(&self) -> &str { "someone/app" }
+        fn check(&self) -> Result<()> { Ok(()) }
+        fn create(&self, issue: &HostIssue) -> Result<(i64, String)> {
+            self.db.set_mirror("APP", None, &Actor::Human).unwrap();
+            self.fake.create(issue)
+        }
+        fn update(&self, n: i64, issue: &HostIssue) -> Result<()> { self.fake.update(n, issue) }
+        fn comment(&self, n: i64, body: &str) -> Result<i64> { self.fake.comment(n, body) }
+        fn delete_comment(&self, n: i64, id: i64) -> Result<()> { self.fake.delete_comment(n, id) }
+        fn delete_issue(&self, n: i64) -> Result<()> { self.fake.delete_issue(n) }
+    }
+    let host = Stopper { db: &db, fake: Fake::default() };
+    let mut report = MirrorReport::default();
+    sync_project(&db, &host, "APP", &PrivateTerms::default(), &roots, &mut 30, &mut report).unwrap();
+    assert_eq!(report.created, 1, "nothing more once it is off");
+    drop(host);
+    drop(db);
+    std::fs::remove_dir_all(dir).ok();
+}

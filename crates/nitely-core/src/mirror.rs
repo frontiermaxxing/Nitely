@@ -598,10 +598,14 @@ pub fn sync(config: &Config, db: &Db) -> MirrorReport {
 /// One project's mirror, through `host`.
 pub fn sync_project(db: &Db, host: &dyn Host, project: &str, terms: &PrivateTerms, roots: &[String], budget: &mut usize, report: &mut MirrorReport) -> Result<()> {
     let Some(setting) = db.mirror_setting(project)? else { return Ok(()) };
-    for issue in db.list_issues(Some(project), true)? {
+    for listed in db.list_issues(Some(project), true)? {
         if *budget == 0 {
             return Ok(());
         }
+        // Read again right before acting on each: the mirror may have been turned off, or the issue
+        // labelled security or given to the human, while earlier ones were being sent.
+        let Some(setting) = db.mirror_setting(project)?.filter(|s| s.enabled_at == setting.enabled_at) else { return Ok(()) };
+        let Some(issue) = db.issue(&listed.key)? else { continue };
         // One issue the host refuses (deleted there, say) does not hold up the others.
         if let Err(e) = sync_issue(db, host, &issue, &setting, terms, roots, budget, report) {
             report.errors.push(format!("{}: {e:#}", issue.key));
