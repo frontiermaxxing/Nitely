@@ -511,6 +511,7 @@ impl Db {
                 allow_similar: true,
                 state: Some("Needs You".into()),
                 blocked_by: vec![],
+                labels: vec!["playbook".into()],
                 // Only the human decides it, so no agent is ever handed it.
                 owner: Some("human".into()),
             },

@@ -1,3 +1,6 @@
+// The MCP tool list is one json! literal, deeper than the default macro recursion allows.
+#![recursion_limit = "256"]
+
 mod crew;
 mod mcp;
 mod serve;
