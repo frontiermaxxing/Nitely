@@ -105,6 +105,38 @@ same from a terminal and prints what it got. Both are read-only on Bitbucket and
 requests come from each watched repo's Bitbucket `origin` plus the repo named in the credentials
 file; issues are the open ones in the Linear project the file names.
 
+## Agents on other machines on your network
+
+The backlog lives in the database on the machine that runs Nitely. `nitely serve` lets agents on
+other machines on the same local network (a Mac beside a Windows PC, say) reach it: it is the
+`nitely` MCP server over HTTP at `/mcp`, so Claude Code there needs no Nitely install.
+
+```powershell
+nitely tokens add mac --project AND    # once per machine; prints its token, shown only now
+nitely serve                           # listens on port 7421 and announces itself on the network
+```
+
+On the other machine, find it and add it:
+
+```bash
+nitely discover                        # or, on a Mac without Nitely: dns-sd -B _nitely._tcp
+claude mcp add --transport http nitely http://192.168.1.68:7421/mcp --header "Authorization: Bearer <token>"
+```
+
+- **Local network only.** Requests from addresses outside the machine's own networks (private
+  ranges, link-local, or the same subnet as one of its interfaces) are refused, so a forwarded port
+  never exposes the backlog. It speaks plain HTTP: keep it to a network you trust.
+- **A token per machine.** Tokens are stored only as hashes; `nitely tokens list` shows names and
+  projects, `nitely tokens remove mac` cuts that machine off. Its agents act as `claude@mac`, and the
+  token's project is the default for their calls.
+- **The backlog, not the repo.** Remote agents get `next_task`, `list_issues`, `get_issue`,
+  `file_issue`, `update_issue`, `report`, `note`, `ask` and `get_answer`. `start_task`, `run_gate`,
+  `submit` and `land` work in a repo on the machine that runs them, so they are not offered.
+  Approving stays in the app, as everywhere.
+- **Firewall.** The first time `nitely serve` listens, Windows may ask whether to allow it on private
+  networks; allow it there, and only there.
+- `nitely discover` checks each announced address before listing it, so what it prints answers.
+
 ## Hooks
 
 `nitely connect` installs them. The hooks (`nitely hook claude|codex|cursor`) record tool names,

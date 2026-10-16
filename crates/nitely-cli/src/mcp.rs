@@ -16,18 +16,45 @@ use std::time::SystemTime;
 
 const SUPPORTED_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
-struct Server {
+pub(crate) struct Server {
     vendor: String,
     cwd: String,
     /// The executable this server started from, and how that file looked then. When `nitely
     /// install` puts a new build there, tool calls go to it (see `forward`).
     exe: Option<(PathBuf, (u64, SystemTime))>,
+    /// Set for an agent on another machine, reaching this one through `nitely serve`.
+    remote: Option<Remote>,
 }
 
+/// An agent on another machine: the name of its token, and the project it works in by default.
+pub(crate) struct Remote {
+    pub name: String,
+    pub project: Option<String>,
+}
+
+/// Tools that work in a repo on this machine, so not for an agent elsewhere.
+const LOCAL_ONLY: &[&str] = &["start_task", "run_gate", "submit", "land"];
+
 impl Server {
-    /// One id per agent per directory, e.g. `claude:c:/development/nitely-worktrees/nit-3`.
+    pub(crate) fn remote(name: &str, project: Option<String>) -> Server {
+        Server { vendor: "agent".into(), cwd: String::new(), exe: None, remote: Some(Remote { name: name.into(), project }) }
+    }
+
+    /// One id per agent per directory, e.g. `claude:c:/development/nitely-worktrees/nit-3`; an
+    /// agent on another machine is `claude@mac`, after its token.
     fn agent(&self) -> String {
-        format!("{}:{}", self.vendor, paths::normalize(&self.cwd))
+        match &self.remote {
+            Some(r) => format!("{}@{}", self.vendor, r.name),
+            None => format!("{}:{}", self.vendor, paths::normalize(&self.cwd)),
+        }
+    }
+
+    /// Where the session records say the agent works.
+    fn place(&self) -> String {
+        match &self.remote {
+            Some(r) => format!("remote:{}", r.name),
+            None => self.cwd.clone(),
+        }
     }
 
     fn actor(&self) -> Actor {
@@ -37,7 +64,7 @@ impl Server {
 
 pub fn serve() -> Result<()> {
     let exe = std::env::current_exe().ok().and_then(|p| nitely_core::install::stamp(&p).map(|s| (p, s)));
-    let mut server = Server { vendor: "agent".into(), cwd: std::env::current_dir()?.to_string_lossy().into_owned(), exe };
+    let mut server = Server { vendor: "agent".into(), cwd: std::env::current_dir()?.to_string_lossy().into_owned(), exe, remote: None };
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout().lock();
     for line in stdin.lock().lines() {
@@ -57,7 +84,7 @@ pub fn serve() -> Result<()> {
     Ok(())
 }
 
-fn handle(server: &mut Server, msg: &Value) -> Option<Value> {
+pub(crate) fn handle(server: &mut Server, msg: &Value) -> Option<Value> {
     let id = msg.get("id").cloned();
     let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
     let params = msg.get("params").cloned().unwrap_or(json!({}));
@@ -66,8 +93,9 @@ fn handle(server: &mut Server, msg: &Value) -> Option<Value> {
     let result = match method {
         "initialize" => Ok(initialize(server, &params)),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tools() })),
-        "tools/call" => Ok(forward(server, &params).unwrap_or_else(|| call_tool(server, &params))),
+        "tools/list" => Ok(json!({ "tools": tools_for(server) })),
+        // A remote session runs here, in this build: its server is restarted to update.
+        "tools/call" => Ok(if server.remote.is_some() { None } else { forward(server, &params) }.unwrap_or_else(|| call_tool(server, &params))),
         _ => return Some(error_response(id, -32601, &format!("method not found: {method}"))),
     };
     Some(match result {
@@ -95,16 +123,49 @@ fn initialize(server: &mut Server, params: &Value) -> Value {
     let requested = params.get("protocolVersion").and_then(Value::as_str).unwrap_or("");
     let version = if SUPPORTED_VERSIONS.contains(&requested) { requested } else { SUPPORTED_VERSIONS[0] };
     // The repo's own instructions when Nitely watches it, else the general workflow.
-    let instructions = Config::load()
-        .ok()
-        .and_then(|c| nitely_core::instructions::for_dir(&c, &server.cwd))
-        .unwrap_or_else(|| nitely_core::instructions::WORKFLOW.to_string());
+    let instructions = match &server.remote {
+        Some(r) => remote_instructions(r),
+        None => Config::load()
+            .ok()
+            .and_then(|c| nitely_core::instructions::for_dir(&c, &server.cwd))
+            .unwrap_or_else(|| nitely_core::instructions::WORKFLOW.to_string()),
+    };
     json!({
         "protocolVersion": version,
         "capabilities": { "tools": {} },
         "serverInfo": { "name": "nitely", "version": env!("CARGO_PKG_VERSION") },
         "instructions": instructions
     })
+}
+
+/// What an agent on another machine is told: it reaches the backlog, not the repo flow.
+fn remote_instructions(r: &Remote) -> String {
+    let project = r.project.as_deref().map(|p| format!(" Its default project is {p}.")).unwrap_or_default();
+    format!(
+        "This is Nitely's backlog, reached over the local network as `{name}`.{project} Use `next_task` to claim work, \
+`report` what you are doing, `file_issue` what you find (it refuses likely duplicates), `note` with handoff: true \
+before you stop, and `ask` when only the human can decide. Starting worktrees, the gate, submit and land run on the \
+machine that holds the repo, so they are not available here: do the work in your own checkout and say in your \
+handoff note what branch it is on. Link every issue you name with the `url` the tools return. Never set Approved: \
+only the human approves.",
+        name = r.name
+    )
+}
+
+/// The tools this session may call: all of them here, the backlog ones from another machine.
+fn tools_for(server: &Server) -> Value {
+    let all = tools();
+    if server.remote.is_none() {
+        return all;
+    }
+    let kept: Vec<Value> = all
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|t| !t.get("name").and_then(Value::as_str).is_some_and(|n| LOCAL_ONLY.contains(&n)))
+        .cloned()
+        .collect();
+    json!(kept)
 }
 
 fn tools() -> Value {
@@ -271,6 +332,7 @@ pub fn call_once() -> Result<()> {
         vendor: str_arg(&request, "vendor").unwrap_or("agent").to_string(),
         cwd: req(&request, "cwd")?.to_string(),
         exe: None,
+        remote: None,
     };
     let result = call_tool(&server, request.get("params").unwrap_or(&json!({})));
     println!("{}", serde_json::to_string(&result)?);
@@ -298,14 +360,25 @@ fn run_tool(server: &Server, name: &str, args: &Value) -> Result<Value> {
     let config = Config::load()?;
     let mut db = Db::open_default()?;
     let actor = server.actor();
-    let project = |db: &Db| resolve_project(&config, db, str_arg(args, "project"), &server.cwd);
+    if server.remote.is_some() && LOCAL_ONLY.contains(&name) {
+        bail!("{name} runs on the machine that holds the repo, so it is not available over the local network; do the work in your own checkout");
+    }
+    let project = |db: &Db| match &server.remote {
+        // Another machine has no repo here to name the project: the call or its token does.
+        Some(r) => str_arg(args, "project")
+            .map(str::to_uppercase)
+            .or_else(|| r.project.clone())
+            .with_context(|| format!("name the project: the token {} has no default project", r.name)),
+        None => resolve_project(&config, db, str_arg(args, "project"), &server.cwd),
+    };
 
     Ok(match name {
         "next_task" => {
             let project = project(&db)?;
             match db.next_task(&project, &server.agent())? {
                 Some(issue) => {
-                    let branch = match playbook::repo_root(&config, &server.cwd) {
+                    let root = if server.remote.is_some() { None } else { playbook::repo_root(&config, &server.cwd) };
+                    let branch = match root {
                         Some(root) => Playbook::load(&root)?.branch_for(&server.vendor, &issue),
                         None => branch_name(&server.vendor, &issue.key, &issue.title),
                     };
@@ -412,7 +485,7 @@ fn run_tool(server: &Server, name: &str, args: &Value) -> Result<Value> {
             db.record(&NewEvent {
                 session_id: server.agent(),
                 vendor: server.vendor.clone(),
-                cwd: server.cwd.clone(),
+                cwd: server.place(),
                 kind: "status".into(),
                 summary: Some(text.into()),
                 state: "working".into(),
@@ -433,12 +506,12 @@ fn run_tool(server: &Server, name: &str, args: &Value) -> Result<Value> {
                 .and_then(Value::as_array)
                 .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
                 .unwrap_or_default();
-            let ask = db.create_ask(req(args, "question")?, &options, str_arg(args, "key"), Some(&server.cwd), &actor)?;
+            let ask = db.create_ask(req(args, "question")?, &options, str_arg(args, "key"), Some(&server.place()), &actor)?;
             // Show the agent as waiting on the board until it moves on.
             db.record(&NewEvent {
                 session_id: server.agent(),
                 vendor: server.vendor.clone(),
-                cwd: server.cwd.clone(),
+                cwd: server.place(),
                 kind: "ask".into(),
                 summary: Some(format!("Asked: {}", ask.question)),
                 state: "waiting".into(),
@@ -460,7 +533,7 @@ mod tests {
 
     #[test]
     fn initialize_negotiates_and_detects_vendor() {
-        let mut s = Server { vendor: "agent".into(), cwd: "/w".into(), exe: None };
+        let mut s = Server { vendor: "agent".into(), cwd: "/w".into(), exe: None, remote: None };
         let r = handle(
             &mut s,
             &json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize",

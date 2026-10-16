@@ -1,4 +1,5 @@
 mod mcp;
+mod serve;
 mod ui;
 
 use anyhow::{bail, Result};
@@ -175,6 +176,45 @@ enum Cmd {
     Sync,
     /// Print where Nitely keeps its data.
     Where,
+    /// Serve this machine's backlog to agents on other machines on the local network: the MCP
+    /// server over HTTP at /mcp, answered only for private addresses and with a token from
+    /// `nitely tokens add`, and announced over mDNS so `nitely discover` finds it.
+    Serve {
+        /// Address and port to listen on.
+        #[arg(long, default_value = "0.0.0.0:7421")]
+        listen: String,
+        /// Do not announce it over mDNS (clients then need its address).
+        #[arg(long)]
+        no_advertise: bool,
+    },
+    /// Tokens for `nitely serve`: one per machine or agent that reaches the backlog remotely.
+    Tokens {
+        #[command(subcommand)]
+        command: TokensCmd,
+    },
+    /// List Nitely servers announced on the local network, and how to connect an agent to one.
+    Discover {
+        /// Seconds to listen for announcements.
+        #[arg(long, default_value_t = 3)]
+        wait: u64,
+    },
+}
+
+#[derive(Subcommand)]
+enum TokensCmd {
+    /// Make a token for a machine or agent (replacing its old one) and print it. It is shown only
+    /// this once; only its hash is kept.
+    Add {
+        /// Who uses it, e.g. mac; its agents act as claude@mac.
+        name: String,
+        /// The project its agents work in unless a call names another, e.g. AND.
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// List the tokens (names and projects, never the tokens).
+    List,
+    /// Remove a token; agents using it are refused from then on.
+    Remove { name: String },
 }
 
 #[derive(Subcommand)]
@@ -393,6 +433,35 @@ fn run(cmd: Cmd) -> Result<()> {
     let me = Actor::Agent("cli".into());
     match cmd {
         Cmd::Hook { .. } | Cmd::Mcp | Cmd::McpCall | Cmd::Ui { .. } => unreachable!(),
+        Cmd::Serve { listen, no_advertise } => serve::serve(Some(&listen), !no_advertise),
+        Cmd::Tokens { command } => match command {
+            TokensCmd::Add { name, project } => {
+                let token = nitely_core::relay::add_token(&name, project.as_deref())?;
+                println!("{token}");
+                eprintln!(
+                    "\nThat is {name}'s token; it is not shown again. On that machine, with Claude Code:\n  \
+                     claude mcp add --transport http nitely http://<this machine>:{port}/mcp --header \"Authorization: Bearer <token>\"\n\
+                     `nitely discover` (or `dns-sd -B _nitely._tcp` on a Mac) finds this machine's address once `nitely serve` runs.",
+                    port = nitely_core::relay::DEFAULT_PORT
+                );
+                Ok(())
+            }
+            TokensCmd::List => print_json(&nitely_core::relay::list_tokens()?),
+            TokensCmd::Remove { name } => {
+                if !nitely_core::relay::remove_token(&name)? {
+                    bail!("no token named {name}");
+                }
+                println!("removed {name}'s token");
+                Ok(())
+            }
+        },
+        Cmd::Discover { wait } => {
+            let found = serve::discover(std::time::Duration::from_secs(wait))?;
+            if found.is_empty() {
+                eprintln!("No Nitely server answered on this network within {wait} s. Is `nitely serve` running there, and does its firewall allow it?");
+            }
+            print_json(&found)
+        }
         Cmd::Install { from, to } => {
             let from = match from {
                 Some(f) => f,
