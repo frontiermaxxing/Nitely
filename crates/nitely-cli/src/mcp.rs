@@ -108,7 +108,7 @@ fn tools() -> Value {
         },
         {
             "name": "get_issue",
-            "description": "An issue with its full timeline (state changes, notes, handoffs, questions and answers).",
+            "description": "An issue with its full timeline (state changes, notes, handoffs, questions and answers) and the pull requests whose branch names it, with their CI checks.",
             "inputSchema": { "type": "object", "required": ["key"], "properties": {
                 "key": { "type": "string", "description": "e.g. NIT-12" }
             } }
@@ -219,7 +219,7 @@ fn run_tool(server: &Server, name: &str, args: &Value) -> Result<Value> {
         "get_issue" => {
             let key = req(args, "key")?;
             let issue = db.issue(key)?.with_context(|| format!("no issue {key}"))?;
-            json!({ "issue": issue, "timeline": db.timeline(&issue.key)? })
+            json!({ "issue": issue, "timeline": db.timeline(&issue.key)?, "pull_requests": db.prs_for_issue(&issue.key)? })
         }
         "list_issues" => {
             let project = project(&db)?;

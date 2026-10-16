@@ -166,3 +166,8 @@ footer .btn { margin-left: auto; }
 .nav-item:focus-visible, .btn:focus-visible, .list-row:focus-visible, .link:focus-visible {
   outline: 2px solid var(--accent); outline-offset: -2px;
 }
+.chip.checks-success { color: var(--working); }
+.chip.checks-failure { color: var(--p1); }
+.chip.checks-pending { color: var(--waiting); }
+.pr-row { padding: 6px 0; border-bottom: 1px solid var(--line); }
+.pr-row:last-child { border-bottom: 0; }

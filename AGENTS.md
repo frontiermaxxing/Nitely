@@ -14,8 +14,9 @@ Nitely tracks its own build. Its backlog is the **NIT** project in Nitely, reach
    does not depend on the answer. Never set Approved; only Andrew can.
 5. Before you stop, leave a `note` with `handoff: true`: what is done, what is left, what you were
    unsure about.
-6. Open a pull request into `main`. Move the issue to In Review with the PR link, and to Done with
-   evidence once it is merged.
+6. Open a pull request into `main` from the branch `next_task` named; Nitely links it to the issue
+   by that name and shows its checks. Move the issue to In Review, and to Done with evidence once
+   it is merged.
 
 ## Build and test
 

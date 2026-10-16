@@ -131,9 +131,18 @@ pub fn bitbucket_slug(repo_root: &str) -> Option<String> {
     parse_bitbucket_url(git(repo_root, &["remote", "get-url", "origin"]).ok()?.trim())
 }
 
+/// `owner/repo` when the repo's `origin` is on GitHub.
+pub fn github_slug(repo_root: &str) -> Option<String> {
+    parse_host_url(git(repo_root, &["remote", "get-url", "origin"]).ok()?.trim(), "github.com")
+}
+
 /// Accepts `https://[user@]bitbucket.org/ws/repo[.git]` and `git@bitbucket.org:ws/repo[.git]`.
 pub fn parse_bitbucket_url(url: &str) -> Option<String> {
-    let rest = url.split_once("bitbucket.org")?.1.trim_start_matches([':', '/']);
+    parse_host_url(url, "bitbucket.org")
+}
+
+fn parse_host_url(url: &str, host: &str) -> Option<String> {
+    let rest = url.split_once(host)?.1.trim_start_matches([':', '/']);
     let mut parts = rest.trim_end_matches('/').trim_end_matches(".git").splitn(3, '/');
     let (ws, repo) = (parts.next()?, parts.next()?);
     (!ws.is_empty() && !repo.is_empty()).then(|| format!("{ws}/{repo}"))
@@ -183,6 +192,7 @@ mod tests {
         assert_eq!(parse_bitbucket_url("https://andrew@bitbucket.org/quixet/aera-browser.git"), want);
         assert_eq!(parse_bitbucket_url("git@bitbucket.org:quixet/aera-browser.git"), want);
         assert_eq!(parse_bitbucket_url("https://github.com/x/y.git"), None);
+        assert_eq!(parse_host_url("https://github.com/frontiermaxxing/Nitely", "github.com"), Some("frontiermaxxing/Nitely".into()));
     }
 
     #[test]

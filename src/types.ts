@@ -76,6 +76,7 @@ export interface PrRecord {
   comment_count: number;
   approved_by: string[];
   approved_by_me: boolean;
+  checks: "success" | "failure" | "pending" | "";
 }
 
 export interface SyncStatus {
@@ -119,4 +120,5 @@ export interface TimelineEntry {
 export interface IssueDetail {
   issue: IssueRecord;
   timeline: TimelineEntry[];
+  prs: PrRecord[];
 }

@@ -5,6 +5,7 @@ pub mod config;
 pub mod credentials;
 pub mod db;
 pub mod git;
+pub mod github;
 pub mod hook;
 pub mod issues;
 pub mod paths;

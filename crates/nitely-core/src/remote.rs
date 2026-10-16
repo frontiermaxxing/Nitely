@@ -17,7 +17,7 @@ const MAX_PR_PAGES: usize = 4;
 
 /// Verifies TLS against the OS certificate store, so a corporate or antivirus proxy that the
 /// system trusts works the same as it does in the browser. Honours HTTPS_PROXY.
-fn agent() -> ureq::Agent {
+pub(crate) fn agent() -> ureq::Agent {
     use ureq::tls::{RootCerts, TlsConfig};
     ureq::Agent::config_builder()
         .tls_config(TlsConfig::builder().root_certs(RootCerts::PlatformVerifier).build())
@@ -38,6 +38,14 @@ pub struct SyncReport {
 
 pub fn sync(config: &Config, db: &mut Db) -> SyncReport {
     let mut report = SyncReport::default();
+
+    // GitHub needs no credentials file: it uses a token from the environment or `gh`.
+    if config.repos.iter().any(|r| git::github_slug(&r.root).is_some()) {
+        let result = crate::github::sync(config, db);
+        record(db, "github", &result, &mut report.errors);
+        report.pull_requests = result.ok();
+    }
+
     let creds = match credentials::load() {
         Ok(Some(c)) => c,
         Ok(None) => return report,
@@ -51,7 +59,9 @@ pub fn sync(config: &Config, db: &mut Db) -> SyncReport {
     if creds.bitbucket.usable() {
         let result = sync_bitbucket(config, &creds, db);
         record(db, "bitbucket", &result, &mut report.errors);
-        report.pull_requests = result.ok();
+        if let Ok(n) = result {
+            report.pull_requests = Some(report.pull_requests.unwrap_or(0) + n);
+        }
     }
     if creds.linear.usable() {
         let result = fetch_linear(&creds).and_then(|issues| {
@@ -65,7 +75,7 @@ pub fn sync(config: &Config, db: &mut Db) -> SyncReport {
     report
 }
 
-fn record(db: &Db, source: &str, result: &Result<usize>, errors: &mut Vec<String>) {
+pub(crate) fn record(db: &Db, source: &str, result: &Result<usize>, errors: &mut Vec<String>) {
     let error = result.as_ref().err().map(|e| format!("{e:#}"));
     if let Some(e) = &error {
         errors.push(format!("{source}: {e}"));
@@ -147,6 +157,7 @@ pub fn parse_bitbucket_page(page: &Value, slug: &str, my_account_id: &str) -> Ve
                 approved_by: approved.iter().map(|p| s(p, &["user", "display_name"])).collect(),
                 approved_by_me: !my_account_id.is_empty()
                     && approved.iter().any(|p| s(p, &["user", "account_id"]) == my_account_id),
+                checks: String::new(),
             })
         })
         .collect()

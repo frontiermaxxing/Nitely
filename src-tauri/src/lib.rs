@@ -1,4 +1,5 @@
 use nitely_core::issues::{Ask, Project, TimelineEntry};
+use nitely_core::db::PrRecord;
 use nitely_core::{remote, Actor, Board, Config, Db, IssueRecord};
 use serde::Serialize;
 use std::time::Duration;
@@ -48,6 +49,7 @@ async fn issues(project: String, include_closed: bool) -> Result<Vec<IssueRecord
 struct IssueDetail {
     issue: IssueRecord,
     timeline: Vec<TimelineEntry>,
+    prs: Vec<PrRecord>,
 }
 
 #[tauri::command]
@@ -55,7 +57,8 @@ async fn issue_detail(key: String) -> Result<IssueDetail, String> {
     let db = db()?;
     let issue = db.issue(&key).map_err(err)?.ok_or_else(|| format!("no issue {key}"))?;
     let timeline = db.timeline(&issue.key).map_err(err)?;
-    Ok(IssueDetail { issue, timeline })
+    let prs = db.prs_for_issue(&issue.key).map_err(err)?;
+    Ok(IssueDetail { issue, timeline, prs })
 }
 
 #[tauri::command]

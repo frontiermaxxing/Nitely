@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { Board, IssueRecord, PrRecord, SyncStatus, TaskRow } from "./types";
+import type { Board, IssueRecord, SyncStatus, TaskRow } from "./types";
+import { PrCell } from "./Pr";
 import { ago, openExternal } from "./util";
 
 // A session quiet for this long reads as stale even if it never sent an end event.
@@ -133,25 +134,9 @@ function IssueLink({ issue, onOpenIssue }: { issue: IssueRecord; onOpenIssue: (k
   );
 }
 
-function PrCell({ pr }: { pr: PrRecord }) {
-  const approvals = pr.approved_by.length;
-  return (
-    <>
-      <a href={pr.url} onClick={openExternal(pr.url)}>
-        #{pr.number}
-      </a>{" "}
-      <span className={`chip pr-${pr.state.toLowerCase()}`}>{pr.state.toLowerCase()}</span>
-      <div className="small muted">
-        {pr.approved_by_me ? "you approved" : approvals ? `${approvals} approval${approvals === 1 ? "" : "s"}` : "no approvals"}
-        {pr.comment_count > 0 && ` · ${pr.comment_count} comments`}
-      </div>
-    </>
-  );
-}
-
 function SyncLine({ sync, now }: { sync: SyncStatus[]; now: number }) {
   if (sync.length === 0) {
-    return <span className="muted small">Bitbucket and Linear not synced yet (reads ~/.aera-work/credentials.json).</span>;
+    return <span className="muted small">Not synced with GitHub, Bitbucket or Linear yet.</span>;
   }
   return (
     <span className="small">

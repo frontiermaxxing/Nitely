@@ -51,6 +51,12 @@ nitely issue import docs\seed-backlog.json --project NIT
 agent picks the project from the repo it runs in. Approving and answering asks happen only in the
 app, never through the CLI or MCP.
 
+## GitHub
+
+Watched repos whose `origin` is on GitHub get their pull requests, approvals and CI checks synced,
+with no setup beyond a signed-in GitHub CLI (`gh auth login`). Nitely uses `NITELY_GITHUB_TOKEN`
+or `GITHUB_TOKEN` instead when set. A PR shows on the issue its branch names (`claude/nit-7-...`).
+
 ## Bitbucket and Linear
 
 Nitely reads `%USERPROFILE%\.aera-work\credentials.json`, the same file `scripts/work/credentials.mjs`
