@@ -174,8 +174,16 @@ pub fn land_approved(db: &mut Db, config: &crate::Config, reported: &mut HashMap
         let ready = approval_repo(config, &issue, "").and_then(|root| Ok((Playbook::load(&root)?.land.by.by_nitely(), root)));
         let result = match ready {
             Ok((false, _)) => continue,
-            Ok((true, root)) if lock_held(&root) => continue,
-            Ok((true, root)) => land_on_approval(db, config, &issue.key, &root.to_string_lossy()),
+            // Another land is running: a later round lands it. A lock that old is probably left by a
+            // land that died, which only a person can tell, so it is reported (once).
+            Ok((true, root)) => match lock_age(&root) {
+                Some(age) if age > LOCK_STALE_SECS => Err(anyhow::anyhow!(
+                    "the land lock in {} is over an hour old; if no land is running, land it with break_lock",
+                    root.display()
+                )),
+                Some(_) => continue,
+                None => land_on_approval(db, config, &issue.key, &root.to_string_lossy()),
+            },
             Err(e) => Err(e),
         };
         match result {
@@ -221,9 +229,11 @@ fn approval_repo(config: &crate::Config, issue: &IssueRecord, dir: &str) -> Resu
     })
 }
 
-/// Whether a land holds the repo's lock now.
-fn lock_held(root: &Path) -> bool {
-    git(root, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).is_ok_and(|common| PathBuf::from(common.trim()).join(LOCK_FILE).exists())
+/// How long the repo's land lock has been held, in seconds; None when no land holds it.
+fn lock_age(root: &Path) -> Option<u64> {
+    let common = git(root, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).ok()?;
+    let modified = std::fs::metadata(PathBuf::from(common.trim()).join(LOCK_FILE)).ok()?.modified().ok()?;
+    Some(modified.elapsed().map_or(0, |d| d.as_secs()))
 }
 
 /// The playbook's `[land] after` steps that match what landed. A failure is a warning. Then, when

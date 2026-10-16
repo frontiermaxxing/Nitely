@@ -297,19 +297,6 @@ fn watch(app: tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // A playbook that lands by Nitely lands an approved change without an agent coming back for
-    // it. Each round lands what is approved and ready; a land that holds the lock, or an app that
-    // was closed, only delays it to a later round.
-    std::thread::spawn(|| {
-        let mut reported = std::collections::HashMap::new();
-        loop {
-            let round = Config::load().and_then(|config| nitely_core::land::land_approved(&mut Db::open_default()?, &config, &mut reported));
-            if let Err(e) = round {
-                eprintln!("land approved: {e:#}");
-            }
-            std::thread::sleep(LAND_APPROVED_EVERY);
-        }
-    });
     std::thread::spawn(|| loop {
         if let Err(e) = run_sync() {
             eprintln!("sync: {e:#}");
@@ -347,6 +334,20 @@ pub fn run() {
             }
             let handle = app.handle().clone();
             std::thread::spawn(move || watch(handle));
+            // A playbook that lands by Nitely lands an approved change without an agent coming back
+            // for it. Each round lands what is approved and ready; a land that holds the lock, or an
+            // app that was closed, only delays it to a later round. Started here, in the one
+            // instance that runs, never in a second launch that only hands over a link.
+            std::thread::spawn(|| {
+                let mut reported = std::collections::HashMap::new();
+                loop {
+                    let round = Config::load().and_then(|config| nitely_core::land::land_approved(&mut Db::open_default()?, &config, &mut reported));
+                    if let Err(e) = round {
+                        eprintln!("land approved: {e:#}");
+                    }
+                    std::thread::sleep(LAND_APPROVED_EVERY);
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
