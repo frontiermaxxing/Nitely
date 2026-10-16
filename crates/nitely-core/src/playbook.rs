@@ -380,11 +380,50 @@ fn normalize_lexically(p: &Path) -> PathBuf {
 }
 
 pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<String> {
-    let out = shell_free_command("git").arg("-C").arg(dir).args(args).output()?;
+    finish(shell_free_command("git").arg("-C").arg(dir).args(args), args)
+}
+
+fn finish(cmd: &mut Command, args: &[&str]) -> Result<String> {
+    let out = cmd.output()?;
     if !out.status.success() {
         bail!("git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// A git call that talks to `origin` (push, fetch). It never waits for a prompt or a sign-in
+/// window: nobody is there to answer one, and Git Credential Manager hung an Aera land that way
+/// on 2026-10-15. For a bitbucket.org remote with a token in the credentials file, it answers with
+/// that token (`nitely git-credential`) instead of the configured helpers, as Aera's own
+/// pushWithToken does; other hosts keep their helpers and fail fast if those cannot answer.
+pub(crate) fn git_remote(dir: &Path, args: &[&str]) -> Result<String> {
+    let mut cmd = shell_free_command("git");
+    cmd.arg("-C").arg(dir).env("GIT_TERMINAL_PROMPT", "0").env("GCM_INTERACTIVE", "never");
+    cmd.args(["-c", "credential.interactive=never"]);
+    let url = git(dir, &["remote", "get-url", "origin"]).unwrap_or_default();
+    let has_token = || crate::credentials::load().ok().flatten().is_some_and(|c| !c.bitbucket.api_token.is_empty());
+    if is_bitbucket_https(url.trim()) && has_token() {
+        cmd.args(["-c", "credential.helper=", "-c", &format!("credential.helper={}", credential_helper())]);
+    }
+    finish(cmd.args(args), args)
+}
+
+/// Whether `url` is an HTTPS remote on bitbucket.org (SSH remotes use keys, not a helper).
+pub(crate) fn is_bitbucket_https(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://") else { return false };
+    let host = rest.split('/').next().unwrap_or("");
+    let host = host.rsplit('@').next().unwrap_or(host);
+    host.eq_ignore_ascii_case("bitbucket.org")
+}
+
+/// The helper git runs: this nitely binary when that is what runs (the CLI or MCP server), else
+/// `nitely` from PATH (the app, or tests).
+fn credential_helper() -> String {
+    let exe = std::env::current_exe().ok().filter(|p| p.file_stem().is_some_and(|s| s == "nitely"));
+    match exe {
+        Some(p) => format!("!\"{}\" git-credential", p.to_string_lossy().replace('\\', "/")),
+        None => "!nitely git-credential".into(),
+    }
 }
 
 /// A POSIX `sh` for tests' fake reviewers: `sh` on unix, and on Windows the one Git for Windows
@@ -639,6 +678,15 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_https_bitbucket_remotes_get_the_token_helper() {
+        assert!(is_bitbucket_https("https://bitbucket.org/quixet/aera-browser.git"));
+        assert!(is_bitbucket_https("https://someone@bitbucket.org/quixet/aera-browser.git"));
+        assert!(!is_bitbucket_https("https://github.com/frontiermaxxing/Nitely.git"));
+        assert!(!is_bitbucket_https("git@bitbucket.org:quixet/aera-browser.git"));
+        assert!(!is_bitbucket_https("https://bitbucket.org.evil.com/x.git"));
+    }
 
     #[test]
     fn partial_sections_keep_defaults() {

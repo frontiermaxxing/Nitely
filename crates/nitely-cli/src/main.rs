@@ -40,6 +40,13 @@ enum Cmd {
     /// newer build is installed.
     #[command(hide = true)]
     McpCall,
+    /// Git credential helper for Nitely's own pushes and fetches to bitbucket.org: answers `get`
+    /// with the API token from the credentials file. Nitely passes it to git only for those calls.
+    #[command(hide = true)]
+    GitCredential {
+        /// get, store or erase; only get is answered.
+        operation: String,
+    },
     /// Put this build (or --from) where agents run `nitely` from, even while agents run the old
     /// one: on Windows the running one is moved aside, and old copies nothing runs are deleted.
     Install {
@@ -393,6 +400,19 @@ fn run(cmd: Cmd) -> Result<()> {
     let me = Actor::Agent("cli".into());
     match cmd {
         Cmd::Hook { .. } | Cmd::Mcp | Cmd::McpCall | Cmd::Ui { .. } => unreachable!(),
+        Cmd::GitCredential { operation } => {
+            // Answer nothing (git then fails without prompting) unless it is a get we can answer.
+            let mut request = String::new();
+            std::io::stdin().read_to_string(&mut request)?;
+            if operation == "get" {
+                if let Some(creds) = nitely_core::credentials::load().ok().flatten() {
+                    if let Some(answer) = nitely_core::credentials::git_answer(&request, &creds) {
+                        print!("{answer}");
+                    }
+                }
+            }
+            Ok(())
+        }
         Cmd::Install { from, to } => {
             let from = match from {
                 Some(f) => f,

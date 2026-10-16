@@ -50,6 +50,19 @@ impl Linear {
     }
 }
 
+/// What `nitely git-credential get` tells git for a request (git's credential protocol: `key=value`
+/// lines). Only an HTTPS request for bitbucket.org is answered, with the API token under Bitbucket's
+/// fixed username for tokens over Git (the account email works only for the REST API).
+pub fn git_answer(request: &str, creds: &Credentials) -> Option<String> {
+    let field = |k: &str| request.lines().find_map(|l| l.strip_prefix(k).and_then(|v| v.strip_prefix('=')));
+    let host = field("host")?;
+    let https = field("protocol").is_none_or(|p| p == "https");
+    if !https || !host.eq_ignore_ascii_case("bitbucket.org") || creds.bitbucket.api_token.is_empty() {
+        return None;
+    }
+    Some(format!("username=x-bitbucket-api-token-auth\npassword={}\n", creds.bitbucket.api_token))
+}
+
 /// `NITELY_CREDENTIALS` overrides the path (tests, or a second account).
 pub fn path() -> PathBuf {
     if let Some(p) = std::env::var_os("NITELY_CREDENTIALS") {
@@ -72,4 +85,22 @@ pub fn load() -> Result<Option<Credentials>> {
     let creds = serde_json::from_str(&text)
         .map_err(|_| anyhow::anyhow!("{} is not valid JSON", path.display()))?;
     Ok(Some(creds))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn answers_git_only_for_bitbucket_over_https() {
+        let mut creds = Credentials::default();
+        creds.bitbucket.api_token = "tok".into();
+        let ask = |req: &str| git_answer(req, &creds);
+        assert_eq!(ask("protocol=https\nhost=bitbucket.org\n").as_deref(), Some("username=x-bitbucket-api-token-auth\npassword=tok\n"));
+        assert_eq!(ask("host=Bitbucket.org").as_deref(), Some("username=x-bitbucket-api-token-auth\npassword=tok\n"));
+        assert_eq!(ask("protocol=https\nhost=github.com\n"), None);
+        assert_eq!(ask("protocol=http\nhost=bitbucket.org\n"), None);
+        assert_eq!(ask("protocol=https\nhost=bitbucket.org.evil.com\n"), None);
+        assert_eq!(git_answer("protocol=https\nhost=bitbucket.org\n", &Credentials::default()), None);
+    }
 }

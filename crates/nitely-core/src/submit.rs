@@ -9,7 +9,7 @@ use std::path::Path;
 
 use crate::db::{now, Db};
 use crate::issues::{Actor, IssueRecord};
-use crate::playbook::{self, git, GateResult, Playbook};
+use crate::playbook::{self, git, git_remote, GateResult, Playbook};
 use crate::review::{PreviousRound, Review};
 
 #[derive(Debug, Clone, Serialize)]
@@ -80,7 +80,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     let wt = worktree.to_string_lossy().into_owned();
     if !opts.local_only {
         // Best effort: measure against the remote's base, so work merged since the last pull isn't counted.
-        git(&worktree, &["fetch", "--quiet", "origin", &base]).ok();
+        git_remote(&worktree, &["fetch", "--quiet", "origin", &base]).ok();
     }
     let since = playbook::diff_base(&worktree, &base);
     if git(&worktree, &["rev-list", "--count", &format!("{since}..HEAD")])?.trim() == "0" {
@@ -294,7 +294,7 @@ fn rebase_in_progress(worktree: &Path) -> bool {
 /// Pushes the branch. `--force-with-lease` lets a rebased branch replace its own old head but
 /// refuses when the remote moved to something this checkout has not seen.
 fn push(worktree: &Path, branch: &str) -> Result<()> {
-    git(worktree, &["push", "--force-with-lease", "-u", "origin", &format!("HEAD:refs/heads/{branch}")]).map(|_| ())
+    git_remote(worktree, &["push", "--force-with-lease", "-u", "origin", &format!("HEAD:refs/heads/{branch}")]).map(|_| ())
 }
 
 impl Db {

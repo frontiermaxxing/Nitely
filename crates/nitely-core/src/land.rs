@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::db::{now, Db};
 use crate::issues::Actor;
-use crate::playbook::{self, git, GateResult, Playbook};
+use crate::playbook::{self, git, git_remote, GateResult, Playbook};
 use crate::submit::patch_id;
 
 /// A lock older than this probably belongs to a land that died.
@@ -214,7 +214,7 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
 
     if opts.push {
         // The pull request should show the commits that land, not the ones from before the rebase.
-        if let Err(e) = git(root, &["push", "--force-with-lease", "origin", &format!("{head}:refs/heads/{branch}")]) {
+        if let Err(e) = git_remote(root, &["push", "--force-with-lease", "origin", &format!("{head}:refs/heads/{branch}")]) {
             report.warnings.push(format!("the pull request may still show the pre-rebase commits ({})", first_line(&e)));
         }
     }
@@ -226,12 +226,12 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
     report.head = Some(git(root, &["rev-parse", "--short", "HEAD"])?.trim().to_string());
 
     if opts.push {
-        match git(root, &["push", "origin", &base]) {
+        match git_remote(root, &["push", "origin", &base]) {
             Ok(_) => {
                 report.pushed = Some(true);
                 // The code host marks the pull request merged once its commits are on the base.
                 // Deleted only while it still points at what landed.
-                git(root, &["push", &format!("--force-with-lease=refs/heads/{branch}:{head}"), "origin", &format!(":refs/heads/{branch}")]).ok();
+                git_remote(root, &["push", &format!("--force-with-lease=refs/heads/{branch}:{head}"), "origin", &format!(":refs/heads/{branch}")]).ok();
             }
             Err(e) => {
                 report.pushed = Some(false);
