@@ -151,6 +151,9 @@ enum Cmd {
         /// Import, rather than only show what would happen.
         #[arg(long)]
         yes: bool,
+        /// Leave out issues archived in Linear (they are imported by default).
+        #[arg(long)]
+        skip_archived: bool,
     },
     /// Print the Now board as JSON.
     Now,
@@ -660,11 +663,11 @@ fn run(cmd: Cmd) -> Result<()> {
             Ok(())
         }
         Cmd::Now => print_json(&nitely_core::snapshot(&Config::load()?, &Db::open_default()?)?),
-        Cmd::ImportLinear { project, name, yes } => {
+        Cmd::ImportLinear { project, name, yes, skip_archived } => {
             let creds = nitely_core::credentials::load()?
                 .ok_or_else(|| anyhow::anyhow!("no credentials file at {}", nitely_core::credentials::path().display()))?;
             eprintln!("reading every issue of the Linear project, with comments…");
-            let issues = nitely_core::linear_import::fetch(&creds)?;
+            let issues = nitely_core::linear_import::fetch(&creds, skip_archived)?;
             let mut db = Db::open_default()?;
             let plan = nitely_core::linear_import::plan(&db, &issues, &project, &name)?;
             print_json(&plan)?;

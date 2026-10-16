@@ -15,7 +15,12 @@ use crate::issues::{parse_state, Actor, KINDS};
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct LinearIssue {
+    /// Linear's own id, to page through an issue's comments and labels.
+    #[serde(skip)]
+    pub id: String,
     pub identifier: String,
+    /// Archived in Linear (old finished work, usually).
+    pub archived: bool,
     pub title: String,
     pub description: String,
     pub url: String,
@@ -68,6 +73,8 @@ pub struct ImportPlan {
     pub kinds: BTreeMap<String, usize>,
     /// Who filed them, from `from:` labels, or "linear".
     pub sources: BTreeMap<String, usize>,
+    /// How many of the issues to create are archived in Linear.
+    pub archived: usize,
     pub comments: usize,
     /// The project's next issue number after the import.
     pub next_number: i64,
@@ -86,36 +93,65 @@ pub struct Imported {
 
 // ----- fetching -----
 
-const QUERY: &str = "query($project: ID!, $after: String) {
-  issues(first: 50, after: $after, includeArchived: false, filter: { project: { id: { eq: $project } } }) {
-    nodes { identifier title description url priority createdAt updatedAt
-            state { name type } labels { nodes { name } }
-            comments(first: 100) { nodes { body createdAt user { name } } } }
+// 25 issues with 50 comments and 50 labels each keeps a page well under Linear's complexity
+// limit; an issue with more is paged on its own (MORE_COMMENTS, MORE_LABELS).
+const QUERY: &str = "query($project: ID!, $after: String, $archived: Boolean) {
+  issues(first: 25, after: $after, includeArchived: $archived, filter: { project: { id: { eq: $project } } }) {
+    nodes { id identifier title description url priority createdAt updatedAt archivedAt
+            state { name type }
+            labels(first: 50) { nodes { name } pageInfo { hasNextPage endCursor } }
+            comments(first: 50) { nodes { body createdAt user { name } } pageInfo { hasNextPage endCursor } } }
     pageInfo { hasNextPage endCursor } } }";
+const MORE_COMMENTS: &str = "query($id: String!, $after: String) { issue(id: $id) {
+  comments(first: 50, after: $after) { nodes { body createdAt user { name } } pageInfo { hasNextPage endCursor } } } }";
+const MORE_LABELS: &str = "query($id: String!, $after: String) { issue(id: $id) {
+  labels(first: 50, after: $after) { nodes { name } pageInfo { hasNextPage endCursor } } } }";
 
-/// Every issue of the credentials' Linear project, in any state, with its comments.
-pub fn fetch(creds: &Credentials) -> Result<Vec<LinearIssue>> {
+fn graphql(creds: &Credentials, query: &str, variables: Value) -> Result<Value> {
+    let mut res = crate::remote::agent()
+        .post("https://api.linear.app/graphql")
+        .header("Authorization", &creds.linear.api_key)
+        .header("Content-Type", "application/json")
+        .send_json(&json!({ "query": query, "variables": variables }))
+        .context("calling Linear")?;
+    let status = res.status();
+    let v: Value = res.body_mut().read_json().context("reading Linear's answer")?;
+    if !status.is_success() || v.get("errors").is_some() {
+        let msg = v.pointer("/errors/0/message").and_then(Value::as_str).unwrap_or("request failed");
+        bail!("Linear {}: {msg}", status.as_u16());
+    }
+    Ok(v)
+}
+
+/// Every issue of the credentials' Linear project, in any state, with all its comments and
+/// labels; archived ones too unless `skip_archived`.
+pub fn fetch(creds: &Credentials, skip_archived: bool) -> Result<Vec<LinearIssue>> {
     if !creds.linear.usable() {
         bail!("the credentials file has no usable Linear section (api_key and project_id)");
     }
     let mut out = Vec::new();
     let mut after: Option<String> = None;
     loop {
-        let body = json!({ "query": QUERY, "variables": { "project": creds.linear.project_id, "after": after } });
-        let mut res = crate::remote::agent()
-            .post("https://api.linear.app/graphql")
-            .header("Authorization", &creds.linear.api_key)
-            .header("Content-Type", "application/json")
-            .send_json(&body)
-            .context("calling Linear")?;
-        let status = res.status();
-        let v: Value = res.body_mut().read_json().context("reading Linear's answer")?;
-        if !status.is_success() || v.get("errors").is_some() {
-            let msg = v.pointer("/errors/0/message").and_then(Value::as_str).unwrap_or("request failed");
-            bail!("Linear {}: {msg}", status.as_u16());
-        }
+        let v = graphql(creds, QUERY, json!({ "project": creds.linear.project_id, "after": after, "archived": !skip_archived }))?;
         let (issues, next) = parse_page(&v)?;
-        out.extend(issues);
+        for (mut issue, more) in issues {
+            let mut cursor = more.comments;
+            while let Some(c) = cursor {
+                let v = graphql(creds, MORE_COMMENTS, json!({ "id": issue.id, "after": c }))?;
+                let (comments, next) = parse_comments(v.pointer("/data/issue/comments").unwrap_or(&Value::Null))?;
+                issue.comments.extend(comments);
+                cursor = next;
+            }
+            let mut cursor = more.labels;
+            while let Some(c) = cursor {
+                let v = graphql(creds, MORE_LABELS, json!({ "id": issue.id, "after": c }))?;
+                let (labels, next) = parse_labels(v.pointer("/data/issue/labels").unwrap_or(&Value::Null))?;
+                issue.labels.extend(labels);
+                cursor = next;
+            }
+            issue.comments.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+            out.push(issue);
+        }
         match next {
             Some(cursor) => after = Some(cursor),
             None => break,
@@ -124,38 +160,20 @@ pub fn fetch(creds: &Credentials) -> Result<Vec<LinearIssue>> {
     Ok(out)
 }
 
-pub fn parse_page(v: &Value) -> Result<(Vec<LinearIssue>, Option<String>)> {
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Node {
-        identifier: String,
-        title: String,
-        #[serde(default)]
-        description: Option<String>,
-        #[serde(default)]
-        url: String,
-        #[serde(default)]
-        priority: f64,
-        created_at: String,
-        updated_at: String,
-        state: State,
-        labels: Nodes<Label>,
-        comments: Nodes<Comment>,
-    }
-    #[derive(Deserialize)]
-    struct State {
-        name: String,
-        #[serde(rename = "type")]
-        kind: String,
-    }
-    #[derive(Deserialize)]
-    struct Nodes<T> {
-        nodes: Vec<T>,
-    }
-    #[derive(Deserialize)]
-    struct Label {
-        name: String,
-    }
+/// Where an issue's comments and labels continue, when a page did not hold them all.
+#[derive(Debug, Default, PartialEq)]
+pub struct More {
+    pub comments: Option<String>,
+    pub labels: Option<String>,
+}
+
+fn next_cursor(list: &Value) -> Option<String> {
+    (list.pointer("/pageInfo/hasNextPage").and_then(Value::as_bool) == Some(true))
+        .then(|| list.pointer("/pageInfo/endCursor").and_then(Value::as_str).map(str::to_string))
+        .flatten()
+}
+
+fn parse_comments(list: &Value) -> Result<(Vec<LinearComment>, Option<String>)> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Comment {
@@ -167,32 +185,76 @@ pub fn parse_page(v: &Value) -> Result<(Vec<LinearIssue>, Option<String>)> {
     struct User {
         name: String,
     }
-    let nodes: Vec<Node> = serde_json::from_value(v.pointer("/data/issues/nodes").cloned().unwrap_or(json!([]))).context("Linear's issues have an unexpected shape")?;
-    let issues = nodes
+    let nodes: Vec<Comment> = serde_json::from_value(list.get("nodes").cloned().unwrap_or(json!([]))).context("Linear's comments have an unexpected shape")?;
+    let comments = nodes
         .into_iter()
-        .map(|n| {
-            let mut comments: Vec<LinearComment> = n
-                .comments
-                .nodes
-                .into_iter()
-                .map(|c| LinearComment { author: c.user.map_or_else(|| "someone".into(), |u| u.name), body: c.body, created_at: c.created_at })
-                .collect();
-            comments.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        .map(|c| LinearComment { author: c.user.map_or_else(|| "someone".into(), |u| u.name), body: c.body, created_at: c.created_at })
+        .collect();
+    Ok((comments, next_cursor(list)))
+}
+
+fn parse_labels(list: &Value) -> Result<(Vec<String>, Option<String>)> {
+    let names = list
+        .get("nodes")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|l| l.get("name").and_then(Value::as_str)).map(str::to_string).collect())
+        .unwrap_or_default();
+    Ok((names, next_cursor(list)))
+}
+
+pub fn parse_page(v: &Value) -> Result<(Vec<(LinearIssue, More)>, Option<String>)> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Node {
+        #[serde(default)]
+        id: String,
+        identifier: String,
+        #[serde(default)]
+        archived_at: Option<String>,
+        title: String,
+        #[serde(default)]
+        description: Option<String>,
+        #[serde(default)]
+        url: String,
+        #[serde(default)]
+        priority: f64,
+        created_at: String,
+        updated_at: String,
+        state: State,
+        labels: Value,
+        comments: Value,
+    }
+    #[derive(Deserialize)]
+    struct State {
+        name: String,
+        #[serde(rename = "type")]
+        kind: String,
+    }
+    let nodes: Vec<Node> = serde_json::from_value(v.pointer("/data/issues/nodes").cloned().unwrap_or(json!([]))).context("Linear's issues have an unexpected shape")?;
+    let mut issues = Vec::new();
+    for n in nodes {
+        let (mut comments, more_comments) = parse_comments(&n.comments)?;
+        comments.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        let (labels, more_labels) = parse_labels(&n.labels)?;
+        issues.push((
             LinearIssue {
+                id: n.id,
                 identifier: n.identifier,
+                archived: n.archived_at.is_some(),
                 title: n.title,
                 description: n.description.unwrap_or_default(),
                 url: n.url,
                 state_name: n.state.name,
                 state_type: n.state.kind,
                 priority: n.priority as i64,
-                labels: n.labels.nodes.into_iter().map(|l| l.name).collect(),
+                labels,
                 created_at: n.created_at,
                 updated_at: n.updated_at,
                 comments,
-            }
-        })
-        .collect();
+            },
+            More { comments: more_comments, labels: more_labels },
+        ));
+    }
     let next = if v.pointer("/data/issues/pageInfo/hasNextPage").and_then(Value::as_bool) == Some(true) {
         v.pointer("/data/issues/pageInfo/endCursor").and_then(Value::as_str).map(str::to_string)
     } else {
@@ -290,6 +352,7 @@ pub fn plan(db: &Db, issues: &[LinearIssue], project: &str, project_name: &str) 
         labels: BTreeMap::new(),
         kinds: BTreeMap::new(),
         sources: BTreeMap::new(),
+        archived: 0,
         comments: 0,
         next_number: 1,
         replaces_mirrored: 0,
@@ -318,6 +381,7 @@ pub fn plan(db: &Db, issues: &[LinearIssue], project: &str, project_name: &str) 
         *out.kinds.entry(kind_of(&issue.labels).unwrap_or("none").to_string()).or_default() += 1;
         *out.sources.entry(source_of(&issue.labels)).or_default() += 1;
         out.comments += issue.comments.len();
+        out.archived += usize::from(issue.archived);
         if issue.state_name.eq_ignore_ascii_case("approved") {
             out.notes.push(format!("{} was Approved in Linear; it becomes Needs You with a note, to approve again in Nitely", issue.identifier));
         }
@@ -413,11 +477,12 @@ mod tests {
                   "state": { "name": "Needs Andrew", "type": "started" }, "labels": { "nodes": [{ "name": "Bug" }, { "name": "tabs" }] },
                   "comments": { "nodes": [
                       { "body": "Second", "createdAt": "2026-10-02T08:00:00.000Z", "user": { "name": "Andrew" } },
-                      { "body": "First", "createdAt": "2026-10-01T10:00:00.000Z", "user": null } ] } },
+                      { "body": "First", "createdAt": "2026-10-01T10:00:00.000Z", "user": null } ],
+                      "pageInfo": { "hasNextPage": true, "endCursor": "k2" } } },
                 { "identifier": "AND-7", "title": "Reader mode", "description": null, "url": "https://linear.app/x/issue/AND-7",
                   "priority": 0, "createdAt": "2026-09-01T00:00:00Z", "updatedAt": "2026-09-02T00:00:00Z",
                   "state": { "name": "Shipped", "type": "completed" }, "labels": { "nodes": [{ "name": "Feature" }] },
-                  "comments": { "nodes": [] } },
+                  "comments": { "nodes": [] }, "archivedAt": "2026-09-20T00:00:00Z" },
                 { "identifier": "AND-5", "title": "Ready to land", "url": "u", "priority": 2,
                   "createdAt": "2026-09-05T00:00:00Z", "updatedAt": "2026-09-06T00:00:00Z",
                   "state": { "name": "Approved", "type": "started" }, "labels": { "nodes": [] }, "comments": { "nodes": [] } },
@@ -431,8 +496,11 @@ mod tests {
     fn plans_and_imports_a_linear_project_keeping_its_keys() {
         let dir = std::env::temp_dir().join(format!("nitely-linear-{}-{}", std::process::id(), crate::db::now()));
         let mut db = Db::open(&dir.join("t.db")).unwrap();
-        let (issues, next) = parse_page(&page()).unwrap();
+        let (paged, next) = parse_page(&page()).unwrap();
         assert_eq!(next.as_deref(), Some("c2"));
+        assert_eq!(paged[0].1, More { comments: Some("k2".into()), labels: None }, "more comments to page through");
+        assert!(paged[1].0.archived && !paged[0].0.archived);
+        let issues: Vec<LinearIssue> = paged.into_iter().map(|(i, _)| i).collect();
         assert_eq!(issues[0].comments.iter().map(|c| c.body.as_str()).collect::<Vec<_>>(), ["First", "Second"], "oldest first");
         assert_eq!(issues[0].comments[0].author, "someone");
 
@@ -451,6 +519,7 @@ mod tests {
         assert_eq!(state("Approved").as_deref(), Some("Needs You"));
         assert_eq!(p.kinds.get("bug"), Some(&1));
         assert_eq!(p.sources.get("linear"), Some(&3));
+        assert_eq!(p.archived, 1);
         assert_eq!(source_of(&["from:andrew".into()]), "human");
         assert_eq!(source_of(&["x".into(), "from:claude".into()]), "claude");
         assert_eq!(p.notes.len(), 1, "the Linear approval is called out");
