@@ -15,10 +15,17 @@ export function CrewControl(props: { projectKey: string; version: number; now: n
   const shown = useRef(props.projectKey);
   shown.current = props.projectKey;
 
-  useEffect(() => {
-    let live = true;
+  // Another project's crew must not show while this one loads; a refresh of the same project keeps
+  // the control mounted, so its button keeps focus.
+  const loaded = useRef(props.projectKey);
+  if (loaded.current !== props.projectKey) {
+    loaded.current = props.projectKey;
     setCrew(null);
     setError(null);
+  }
+
+  useEffect(() => {
+    let live = true;
     invoke<CrewStatus | null>("crew_status", { project: props.projectKey })
       .then((c) => live && (setCrew(c), setError(null)))
       .catch((e) => live && setError(String(e)));
