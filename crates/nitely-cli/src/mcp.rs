@@ -60,6 +60,22 @@ impl Server {
     fn actor(&self) -> Actor {
         Actor::Agent(self.agent())
     }
+
+    /// The session a tool call's report or ask counts toward. Codex names its thread on every
+    /// call (`_meta.threadId`), the same id its turn-end hook reports, so each thread is a session
+    /// of its own even when several work in one folder (NIT-36). Otherwise the agent id.
+    fn session(&self, params: &Value) -> String {
+        let meta = params.get("_meta");
+        let thread = meta
+            .and_then(|m| m.get("threadId"))
+            .or_else(|| meta.and_then(|m| m.pointer("/x-codex-turn-metadata/thread_id")))
+            .and_then(Value::as_str)
+            .filter(|t| !t.is_empty());
+        match thread {
+            Some(t) if self.vendor == "codex" && self.remote.is_none() => format!("codex:{t}"),
+            _ => self.agent(),
+        }
+    }
 }
 
 pub fn serve() -> Result<()> {
@@ -313,7 +329,7 @@ fn tools() -> Value {
 fn call_tool(server: &Server, params: &Value) -> Value {
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
-    match run_tool(server, name, &args) {
+    match run_tool(server, name, &args, &server.session(params)) {
         Ok(v) => json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&v).unwrap_or_default() }] }),
         Err(e) => json!({ "content": [{ "type": "text", "text": format!("{e:#}") }], "isError": true }),
     }
@@ -432,7 +448,8 @@ fn task_dir(config: &Config, db: &Db, args: &Value, cwd: &str) -> Result<String>
     }
 }
 
-fn run_tool(server: &Server, name: &str, args: &Value) -> Result<Value> {
+/// `session` is the session a report or ask counts toward (see `Server::session`).
+fn run_tool(server: &Server, name: &str, args: &Value, session: &str) -> Result<Value> {
     let config = Config::load()?;
     let mut db = Db::open_default()?;
     let args = &current_args(&db, args)?;
@@ -571,7 +588,7 @@ fn run_tool(server: &Server, name: &str, args: &Value) -> Result<Value> {
         "report" => {
             let text = req(args, "text")?;
             db.record(&NewEvent {
-                session_id: server.agent(),
+                session_id: session.to_string(),
                 vendor: server.vendor.clone(),
                 cwd: server.place(),
                 kind: "status".into(),
@@ -597,7 +614,7 @@ fn run_tool(server: &Server, name: &str, args: &Value) -> Result<Value> {
             let ask = db.create_ask(req(args, "question")?, &options, str_arg(args, "key"), Some(&server.place()), &actor)?;
             // Show the agent as waiting on the board until it moves on.
             db.record(&NewEvent {
-                session_id: server.agent(),
+                session_id: session.to_string(),
                 vendor: server.vendor.clone(),
                 cwd: server.place(),
                 kind: "ask".into(),
@@ -633,5 +650,18 @@ mod tests {
         assert!(handle(&mut s, &json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })).is_none());
         let tools = handle(&mut s, &json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" })).unwrap();
         assert!(tools["result"]["tools"].as_array().unwrap().len() >= 8);
+    }
+
+    #[test]
+    fn codex_calls_count_toward_their_thread() {
+        // What Codex 0.163 sends with each tool call (seen with a probe server).
+        let call = json!({ "name": "report", "_meta": { "threadId": "01a1-t1", "x-codex-turn-metadata": { "thread_id": "01a1-t1" } } });
+        let s = Server { vendor: "codex".into(), cwd: r"C:\Code\App".into(), exe: None, remote: None };
+        assert_eq!(s.session(&call), "codex:01a1-t1", "the id the turn-end hook reports");
+        let older = json!({ "name": "report", "_meta": { "x-codex-turn-metadata": { "thread_id": "t2" } } });
+        assert_eq!(s.session(&older), "codex:t2");
+        assert_eq!(s.session(&json!({ "name": "report" })), "codex:c:/code/app", "no thread: the agent id");
+        let claude = Server { vendor: "claude".into(), ..s };
+        assert_eq!(claude.session(&call), "claude:c:/code/app", "only Codex threads");
     }
 }

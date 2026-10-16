@@ -161,7 +161,9 @@ pub fn activity(config: &Config, db: &Db, from: i64, to: i64) -> Result<Activity
     // Hook sessions are the lanes. An agent id is folded into the hook sessions of its vendor in
     // its folder that ran around the same time, and is a lane of its own when there are none (an
     // agent without hooks). Codex's hooks only report turn ends, so for Codex the agent id is the
-    // lane and those hook sessions are folded into it instead.
+    // lane and those hook sessions are folded into it instead. A Codex that names its thread on
+    // each tool call has its reports recorded under the thread's own session (mcp.rs,
+    // `Server::session`), so it never has that agent id and each thread is a lane (NIT-36).
     let same_place = |a: &Session, b: &Session| a.vendor == b.vendor && normalize(&a.cwd) == normalize(&b.cwd);
     let mut lanes: Vec<LaneBuild> = Vec::new();
     let mut folded: Vec<&Session> = Vec::new();
@@ -618,6 +620,27 @@ mod tests {
         assert_eq!(b.issues, ["NIT-2"]);
         assert_eq!(b.segments.first().map(|s| (s.from, s.state.as_str())), Some((t0, "working")));
         assert!(b.segments.iter().any(|s| s.state == "stale"), "nothing since the gate");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn concurrent_codex_threads_in_one_folder_are_lanes_of_their_own() {
+        // Codex's MCP reports go under its thread's id, the one its turn-end hook uses (NIT-36).
+        let (db, dir) = db();
+        let t0 = now() - 3 * 3600;
+        let cwd = "c:/development/harbor";
+        session(&db, "codex:thread-a", cwd, t0, t0 + 1800, "idle");
+        session(&db, "codex:thread-b", cwd, t0 + 300, t0 + 2400, "working");
+        state(&db, "codex:thread-a", t0, "working");
+        state(&db, "codex:thread-a", t0 + 1800, "idle");
+        state(&db, "codex:thread-b", t0 + 300, "working");
+        event(&db, t0 + 600, "codex:thread-a", "status", "Fixing the parser", None);
+        event(&db, t0 + 2400, "codex:thread-b", "status", "Writing tests", None);
+        let a = activity(&Config::default(), &db, t0 - 60, t0 + 3000).unwrap();
+        let lane = |id: &str| a.lanes.iter().find(|l| l.session_id == id).unwrap_or_else(|| panic!("{id}: {:?}", a.lanes));
+        let at = |id: &str, t: i64| lane(id).segments.iter().find(|s| s.from <= t && t < s.to).map(|s| s.state.clone());
+        assert_eq!(at("codex:thread-a", t0 + 2000).as_deref(), Some("idle"), "a's turn ended");
+        assert_eq!(at("codex:thread-b", t0 + 2000).as_deref(), Some("working"), "b still works");
         std::fs::remove_dir_all(dir).ok();
     }
 
