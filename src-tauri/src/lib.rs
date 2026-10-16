@@ -158,7 +158,7 @@ struct NetworkInfo {
 #[tauri::command]
 async fn network() -> Result<NetworkInfo, String> {
     use nitely_core::relay;
-    Ok(NetworkInfo { tokens: relay::list_tokens().map_err(err)?, urls: relay::lan_urls(), port: relay::DEFAULT_PORT })
+    Ok(NetworkInfo { tokens: relay::list_tokens().map_err(err)?, urls: relay::lan_urls(), port: relay::serving_port().unwrap_or(relay::DEFAULT_PORT) })
 }
 
 #[derive(Serialize)]
@@ -176,7 +176,7 @@ async fn network_add(name: String, project: Option<String>) -> Result<NewMachine
     let token = relay::add_token(&name, project.as_deref()).map_err(err)?;
     let urls = relay::lan_urls();
     let commands = if urls.is_empty() {
-        vec![relay::claude_command(&format!("http://<this machine>:{}{}", relay::DEFAULT_PORT, relay::MCP_PATH), &token)]
+        vec![relay::claude_command(&format!("http://<this machine>:{}{}", relay::serving_port().unwrap_or(relay::DEFAULT_PORT), relay::MCP_PATH), &token)]
     } else {
         urls.iter().map(|u| relay::claude_command(u, &token)).collect()
     };

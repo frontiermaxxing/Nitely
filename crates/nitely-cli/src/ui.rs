@@ -67,7 +67,7 @@ pub fn run(command: &str, args: &Value) -> Result<Value> {
         "network" => json!({
             "tokens": nitely_core::relay::list_tokens()?,
             "urls": nitely_core::relay::lan_urls(),
-            "port": nitely_core::relay::DEFAULT_PORT,
+            "port": nitely_core::relay::serving_port().unwrap_or(nitely_core::relay::DEFAULT_PORT),
         }),
         // Links open the app's own window, never the preview.
         "opened_link" => Value::Null,

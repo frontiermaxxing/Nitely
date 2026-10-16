@@ -207,7 +207,26 @@ pub fn url(ip: IpAddr, port: u16, path: &str) -> String {
 
 /// The MCP URLs other machines would use for this one, IPv4 first (the server listens on IPv4).
 pub fn lan_urls() -> Vec<String> {
-    lan_addresses(&networks()).into_iter().filter(IpAddr::is_ipv4).map(|ip| url(ip, DEFAULT_PORT, MCP_PATH)).collect()
+    let port = serving_port().unwrap_or(DEFAULT_PORT);
+    lan_addresses(&networks()).into_iter().filter(IpAddr::is_ipv4).map(|ip| url(ip, port, MCP_PATH)).collect()
+}
+
+fn port_file() -> PathBuf {
+    crate::paths::data_dir().join("relay-port")
+}
+
+/// Records the port `nitely serve` listens on, so the app's setup commands name it.
+pub fn record_serving_port(port: u16) -> Result<()> {
+    let file = port_file();
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&file, port.to_string()).with_context(|| format!("writing {}", file.display()))
+}
+
+/// The port `nitely serve` last listened on, if it ever ran.
+pub fn serving_port() -> Option<u16> {
+    std::fs::read_to_string(port_file()).ok()?.trim().parse().ok()
 }
 
 /// The command that adds this machine's backlog to Claude Code on another machine.

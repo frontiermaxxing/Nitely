@@ -49,6 +49,9 @@ pub fn serve(listen: Option<&str>, advertise: bool) -> Result<()> {
     let listen = listen.map(str::to_string).unwrap_or_else(|| format!("0.0.0.0:{DEFAULT_PORT}"));
     let listener = TcpListener::bind(&listen).with_context(|| format!("listening on {listen}"))?;
     let port = listener.local_addr()?.port();
+    if let Err(e) = relay::record_serving_port(port) {
+        eprintln!("could not record the port for the app's setup commands ({e:#})");
+    }
     let networks = networks();
     let _mdns = if advertise {
         match announce(port, &networks) {
@@ -86,12 +89,14 @@ fn run(listener: TcpListener, networks: Arc<Vec<(IpAddr, u8)>>) {
         }
         let ip = peer.map(|a| a.ip()).expect("checked above");
         let admitted = {
+            // An address gets an entry only while it holds an admitted connection, so refused
+            // connections, from however many addresses, leave nothing behind.
             let mut held = per_address.lock().unwrap_or_else(|p| p.into_inner());
-            let mine = held.entry(ip).or_insert(0);
-            if active.load(Ordering::SeqCst) >= MAX_CONNECTIONS || *mine >= MAX_PER_ADDRESS {
+            let mine = held.get(&ip).copied().unwrap_or(0);
+            if active.load(Ordering::SeqCst) >= MAX_CONNECTIONS || mine >= MAX_PER_ADDRESS {
                 false
             } else {
-                *mine += 1;
+                held.insert(ip, mine + 1);
                 active.fetch_add(1, Ordering::SeqCst);
                 true
             }
