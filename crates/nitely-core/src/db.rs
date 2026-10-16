@@ -273,6 +273,7 @@ fn migrate(conn: &Connection) -> Result<()> {
     add_column(conn, "crew_control", "repo", "TEXT")?;
     // v17 adds approval.signature.
     add_column(conn, "approval", "signature", "TEXT NOT NULL DEFAULT ''")?;
+    // v18 adds mirror_project, issue_mirror, mirror_comment and issue_private, which SCHEMA creates.
     Ok(())
 }
 
@@ -316,7 +317,6 @@ fn upgrade(conn: &Connection) -> Result<()> {
             return Err(e);
         }
     }
-    // v18 adds mirror_project, issue_mirror, mirror_comment and issue_private, which SCHEMA creates.
     Ok(())
 }
 
