@@ -313,6 +313,23 @@ impl Supervisor {
         self.running.len() + self.preparing.len()
     }
 
+    /// Issues whose worktree is being set up.
+    pub fn setting_up(&self) -> usize {
+        self.preparing.len()
+    }
+
+    /// Settles the setups that finished, starting their workers, and nothing else: for a one-pass
+    /// run, which must not leave a setup it began without anyone to see it through.
+    pub fn finish_setups(&mut self, db: &mut Db) -> Result<Tick> {
+        let mut tick = Tick::default();
+        match Playbook::load(&self.repo_root) {
+            Ok(p) => self.advance(db, &p, !(self.interrupted)(), &mut tick)?,
+            Err(_) => self.advance(db, &Playbook::default(), false, &mut tick)?,
+        }
+        tick.running = self.running();
+        Ok(tick)
+    }
+
     /// The issues of workers still running, and which of them are landing.
     pub fn running_issues(&self) -> Vec<(String, bool)> {
         self.running.iter().map(|r| (r.issue.clone(), self.landing(&r.issue))).collect()
@@ -339,8 +356,11 @@ impl Supervisor {
             self.waiting.clear();
         }
         tick.cap = rules.workers;
-        if let Ok(p) = &playbook {
-            self.advance(db, p, !draining && !(self.interrupted)(), &mut tick)?;
+        match &playbook {
+            Ok(p) => self.advance(db, p, !draining && !(self.interrupted)(), &mut tick)?,
+            // Setups are still watched (and time out); finished ones go back, since no worker can
+            // start without a playbook.
+            Err(_) => self.advance(db, &Playbook::default(), false, &mut tick)?,
         }
         let status = match &playbook {
             Err(e) => Some(format!("the playbook does not read: {e:#}")),
@@ -660,8 +680,8 @@ impl Supervisor {
                         }
                     },
                 };
-                let since = (self.clock)().ts;
-                self.preparing.push(Preparing { id: w.id, issue, agent: w.agent, agent_id: w.agent_id, since, log: PathBuf::from(w.log), process });
+                // Its deadline counts from when the setup began, not from this supervisor.
+                self.preparing.push(Preparing { id: w.id, issue, agent: w.agent, agent_id: w.agent_id, since: w.started_at, log: PathBuf::from(w.log), process });
                 continue;
             }
             let running = Running {

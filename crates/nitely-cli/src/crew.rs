@@ -176,7 +176,23 @@ fn supervise(db: &mut Db, project: &str, root: PathBuf, once: bool, managed: boo
             Err(e) => eprintln!("crew pass failed: {e:#}"),
         }
         awake.set(sup.running() > 0);
-        if once || (pressed >= 1 && sup.running() == 0) {
+        if once {
+            // One pass, but the setups it began are seen through: their workers start (or their
+            // issues are settled) before it exits.
+            while sup.setting_up() > 0 {
+                std::thread::sleep(Duration::from_secs(1));
+                match sup.finish_setups(db) {
+                    Ok(tick) => {
+                        for w in &tick.started {
+                            eprintln!("{} ({}) started. Log: {}", w.issue, w.agent, w.log);
+                        }
+                    }
+                    Err(e) => eprintln!("crew pass failed: {e:#}"),
+                }
+            }
+            break;
+        }
+        if pressed >= 1 && sup.running() == 0 {
             break;
         }
         if managed {
