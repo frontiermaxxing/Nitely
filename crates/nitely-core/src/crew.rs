@@ -180,8 +180,15 @@ pub struct WorkerLine {
     pub log: String,
 }
 
-/// Vendors whose branches the crew recognises, besides the playbook's agents.
-const KNOWN_VENDORS: &[&str] = &["claude", "codex", "cursor"];
+/// How a worker ended.
+#[derive(Debug, Clone, Copy)]
+enum End {
+    Exited(i32),
+    /// Stopped by the supervisor at `timeout_minutes`.
+    TimedOut,
+    /// Its process was gone when a new supervisor looked (no exit code).
+    Gone,
+}
 
 enum Start {
     Running(WorkerLine),
@@ -196,6 +203,7 @@ struct Running {
     issue: String,
     agent: String,
     agent_id: String,
+    worktree: PathBuf,
     started_at: i64,
     log: PathBuf,
     process: Box<dyn Process>,
@@ -220,7 +228,21 @@ pub struct Supervisor {
     adopted: bool,
     /// Issues passed over for the rest of this run, and why.
     waiting: BTreeMap<String, String>,
+    /// Launch failures in a row, per agent.
+    launch_failures: BTreeMap<String, u32>,
+    /// The crew paused itself because no agent would start; a resume starts over.
+    self_paused: bool,
 }
+
+/// A worker that exits this soon, unsuccessfully and without one report, never got going: the
+/// agent itself is not working (signed out, a bad command).
+const LAUNCH_FAILURE_SECS: i64 = 120;
+
+/// Launch failures in a row before the crew stops using an agent.
+const LAUNCH_FAILURES_TO_DROP: u32 = 2;
+
+/// The answer to a crew ask that gives the issue to a new worker.
+pub const TRY_AGAIN: &str = "Try again";
 
 impl Supervisor {
     pub fn new(project: &str, repo_root: &Path, dir: &Path, nitely: &str, agents: Box<dyn Agents>) -> Supervisor {
@@ -236,6 +258,8 @@ impl Supervisor {
             disabled: BTreeMap::new(),
             adopted: false,
             waiting: BTreeMap::new(),
+            launch_failures: BTreeMap::new(),
+            self_paused: false,
         }
     }
 
@@ -267,14 +291,20 @@ impl Supervisor {
     pub fn tick(&mut self, db: &mut Db, draining: bool) -> Result<Tick> {
         let moment = (self.clock)();
         let mut tick = Tick::default();
-        if !self.adopted {
-            self.adopt(db, &mut tick)?;
-            self.adopted = true;
-        }
-        self.reap(db, &mut tick)?;
-
         let playbook = Playbook::load(&self.repo_root);
         let rules = playbook.as_ref().map(|p| p.crew.clone()).unwrap_or_default();
+        if !self.adopted {
+            self.adopt(db, &rules, &mut tick)?;
+            self.adopted = true;
+        }
+        self.reap(db, &rules, &mut tick)?;
+        self.retry_answered(db)?;
+        if self.self_paused && !db.crew_control(&self.project)?.paused {
+            // A person resumed the crew: give every agent another chance.
+            self.self_paused = false;
+            self.disabled.clear();
+            self.launch_failures.clear();
+        }
         tick.cap = rules.workers;
         let status = match &playbook {
             Err(e) => Some(format!("the playbook does not read: {e:#}")),
@@ -343,8 +373,14 @@ impl Supervisor {
             }
             let installed: Vec<String> = installed.into_iter().filter(|a| !self.disabled.contains_key(a)).collect();
             if installed.is_empty() {
+                // Nothing would start until someone fixes the agents: pause, so it shows as paused
+                // with the reason, and a resume tries every agent again.
                 let why: Vec<String> = self.disabled.iter().map(|(a, why)| format!("{a}: {why}")).collect();
-                return Ok(format!("no agent will start ({})", why.join("; ")));
+                if !self.self_paused {
+                    db.crew_pause(&self.project, true, &self.actor())?;
+                    self.self_paused = true;
+                }
+                return Ok(format!("paused: no agent will start ({})", why.join("; ")));
             }
             let skipped: Vec<String> = self.waiting.keys().cloned().collect();
             let Some(issue) = db.next_task_except(&self.project, self.actor().id(), &skipped)? else {
@@ -352,11 +388,8 @@ impl Supervisor {
             };
             // A second attempt continues the first one's branch, with the first one's agent: the
             // branch's prefix picks the reviewer, so another agent on it would review itself.
-            let earlier = KNOWN_VENDORS
-                .iter()
-                .map(|v| v.to_string())
-                .chain(rules.agents.iter().cloned())
-                .find(|v| branch_exists(&self.repo_root, &playbook.branch_for(v, &issue)));
+            let vendors = branch_vendors(&self.repo_root, &issue.key);
+            let earlier = vendors.iter().find(|v| installed.contains(v)).or(vendors.first()).cloned();
             let agent = match earlier {
                 Some(v) if installed.contains(&v) => v,
                 Some(v) => {
@@ -417,16 +450,20 @@ impl Supervisor {
         let started = playbook::start_task(db, &self.repo_root, issue, agent, &actor)?;
         // The worktree may already exist on someone else's branch (the folder pattern need not name
         // the vendor): never put this agent on it.
+        // The same agent's branch for the issue under an older title is fine.
         let on = playbook::git(Path::new(&started.worktree), &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
-        if on.trim() != started.branch {
-            return Ok(Start::Wait(format!("its worktree {} is on {}, not {}", started.worktree, on.trim(), started.branch)));
+        let on = on.trim().to_string();
+        let same = on == started.branch || crate::git::parse_branch(&on) == (Some(agent.to_string()), Some(issue.key.to_uppercase()));
+        if !same {
+            return Ok(Start::Wait(format!("its worktree {} is on {on}, not {}", started.worktree, started.branch)));
         }
+        let started = playbook::Started { branch: on, ..started };
         if let Some(failed) = started.setup.iter().find(|r| !r.ok) {
             return Ok(Start::SetupFailed(format!("{} failed:\n{}", failed.command, failed.output)));
         }
         let worktree = PathBuf::from(&started.worktree);
 
-        let ts = now();
+        let ts = (self.clock)().ts;
         let logs = self.dir.join(&self.project);
         std::fs::create_dir_all(&logs).with_context(|| format!("creating {}", logs.display()))?;
         prune_logs(&logs, LOGS_KEPT);
@@ -465,7 +502,7 @@ impl Supervisor {
         db.crew_worker_pid(id, process.pid())?;
         db.log_event(&self.actor(), Some(&issue.key), Some(&worktree.to_string_lossy()), "crew_started", &format!("Crew worker started ({agent}), log: {}", log.display()))?;
         let line = WorkerLine { issue: issue.key.clone(), agent: agent.into(), outcome: String::new(), log: log.to_string_lossy().into_owned() };
-        self.running.push(Running { id, issue: issue.key.clone(), agent: agent.into(), agent_id, started_at: ts, log, process });
+        self.running.push(Running { id, issue: issue.key.clone(), agent: agent.into(), agent_id, worktree, started_at: ts, log, process });
         Ok(Start::Running(line))
     }
 
@@ -481,13 +518,14 @@ impl Supervisor {
     /// Takes over the workers an earlier supervisor left running (it crashed, or its terminal was
     /// closed): they count toward the cap and are settled when they exit. Those that are gone are
     /// settled now.
-    fn adopt(&mut self, db: &mut Db, tick: &mut Tick) -> Result<()> {
+    fn adopt(&mut self, db: &mut Db, rules: &CrewRules, tick: &mut Tick) -> Result<()> {
         for w in db.crew_running(&self.project)? {
             let running = Running {
                 id: w.id,
                 issue: w.issue_key,
                 agent: w.agent,
                 agent_id: w.agent_id,
+                worktree: PathBuf::from(w.worktree),
                 started_at: w.started_at,
                 log: PathBuf::from(w.log),
                 process: Box::new(Gone),
@@ -495,7 +533,7 @@ impl Supervisor {
             match w.pid.and_then(|pid| self.agents.adopt(pid)) {
                 Some(process) => self.running.push(Running { process, ..running }),
                 None => {
-                    let outcome = self.settle(db, &running, None)?;
+                    let outcome = self.settle(db, rules, &running, End::Gone)?;
                     tick.ended.push(WorkerLine { issue: running.issue, agent: running.agent, outcome, log: running.log.to_string_lossy().into_owned() });
                 }
             }
@@ -503,20 +541,27 @@ impl Supervisor {
         Ok(())
     }
 
-    /// Settles every worker that exited.
-    fn reap(&mut self, db: &mut Db, tick: &mut Tick) -> Result<()> {
+    /// Settles every worker that exited, and stops (then settles) those past the timeout unless
+    /// they are landing.
+    fn reap(&mut self, db: &mut Db, rules: &CrewRules, tick: &mut Tick) -> Result<()> {
+        let deadline = rules.timeout_minutes.max(1) as i64 * 60;
+        let ts = (self.clock)().ts;
         let mut i = 0;
         while i < self.running.len() {
-            let code = match self.running[i].process.exited() {
-                Ok(Some(code)) => Some(code),
+            let end = match self.running[i].process.exited() {
+                Ok(Some(code)) => Some(End::Exited(code)),
+                Ok(None) if ts - self.running[i].started_at > deadline && !self.landing(&self.running[i].issue) => {
+                    self.running[i].process.stop();
+                    Some(End::TimedOut)
+                }
                 Ok(None) => None,
-                Err(_) => Some(-1),
+                Err(_) => Some(End::Exited(-1)),
             };
-            match code {
+            match end {
                 None => i += 1,
-                Some(code) => {
+                Some(end) => {
                     let w = self.running.remove(i);
-                    let outcome = self.settle(db, &w, Some(code))?;
+                    let outcome = self.settle(db, rules, &w, end)?;
                     tick.ended.push(WorkerLine { issue: w.issue, agent: w.agent, outcome, log: w.log.to_string_lossy().into_owned() });
                 }
             }
@@ -524,24 +569,99 @@ impl Supervisor {
         Ok(())
     }
 
-    /// Records how a worker ended, read from its issue's state.
-    fn settle(&self, db: &mut Db, w: &Running, code: Option<i32>) -> Result<String> {
+    /// Records how a worker ended, read from its issue's state, and deals with a worker that ended
+    /// without handing its issue on (docs/crew.md, Guardrails): a handoff note when it left none,
+    /// and the issue back to Todo, or to a person after `attempts` failures.
+    fn settle(&mut self, db: &mut Db, rules: &CrewRules, w: &Running, end: End) -> Result<String> {
         let issue = db.issue(&w.issue)?;
-        let state = issue.as_ref().map(|i| i.state.as_str()).unwrap_or("");
+        let state = issue.as_ref().map(|i| i.state.clone()).unwrap_or_default();
         let still_mine = issue.as_ref().is_some_and(|i| i.claimed_by.as_deref() == Some(w.agent_id.as_str()));
-        let outcome = match state {
+        let since = db.crew_worker_logged_at(w.id)?;
+        let timeline: Vec<_> = db.timeline(&w.issue)?.into_iter().filter(|t| t.ts >= since).collect();
+        let reported = timeline.iter().any(|t| t.actor == w.agent_id && t.kind == "status");
+        let elapsed = (self.clock)().ts - w.started_at;
+        let code = match end {
+            End::Exited(c) => Some(c),
+            _ => None,
+        };
+        let mut outcome = match state.as_str() {
             "Done" => "landed",
             "In Review" | "Approved" => "submitted",
             "Needs You" => "asked",
-            "In Progress" | "Todo" if still_mine || state == "Todo" => "failed",
+            "In Progress" if still_mine => "failed",
+            "Todo" => "failed",
             _ => "stopped",
         };
-        let minutes = (now() - w.started_at) / 60;
-        let code_text = code.map_or("no exit code".to_string(), |c| format!("exit code {c}"));
-        let reason = format!("{code_text} after {minutes} min, issue {state}");
+        if outcome == "failed" && matches!(end, End::Exited(c) if c != 0) && elapsed < LAUNCH_FAILURE_SECS && !reported {
+            outcome = "launch_failed";
+        }
+        let how = match end {
+            End::Exited(c) => format!("exit code {c} after {} min", elapsed / 60),
+            End::TimedOut => format!("stopped after {} min (crew.timeout_minutes)", elapsed / 60),
+            End::Gone => format!("gone while no supervisor watched, after at most {} min", elapsed / 60),
+        };
+        let reason = format!("{how}, issue {state}");
         db.crew_worker_ended(w.id, code, outcome, &reason)?;
         db.log_event(&self.actor(), Some(&w.issue), None, "crew_ended", &format!("Crew worker ({}) ended: {outcome}, {reason}. Log: {}", w.agent, w.log.display()))?;
+
+        if outcome == "launch_failed" {
+            // The agent never got going: not the issue's fault, so no attempt is counted.
+            let n = self.launch_failures.entry(w.agent.clone()).or_insert(0);
+            *n += 1;
+            if *n >= LAUNCH_FAILURES_TO_DROP {
+                self.disabled.insert(w.agent.clone(), format!("exited {n} times right after starting; see {}", w.log.display()));
+            }
+            if state == "In Progress" {
+                db.move_issue(&w.issue, "Todo", None, Some(&format!("the {} worker exited right after starting", w.agent)), &self.actor())?;
+            }
+            return Ok(outcome.into());
+        }
+        self.launch_failures.remove(&w.agent);
+        if outcome != "failed" {
+            return Ok(outcome.into());
+        }
+
+        if !timeline.iter().any(|t| t.kind == "handoff") {
+            let last = timeline.iter().rev().find(|t| t.actor == w.agent_id && t.kind == "status").and_then(|t| t.summary.clone());
+            let last = last.map_or("it made no report".to_string(), |s| format!("its last report: \"{s}\""));
+            let note = format!(
+                "A crew worker ({}) stopped without handing this issue on ({how}); {last}. Whatever it committed is on its branch in {}. Its log: {}",
+                w.agent,
+                w.worktree.display(),
+                w.log.display()
+            );
+            db.add_note(&w.issue, &note, "handoff", &self.actor())?;
+        }
+        let failures = db.crew_failures_since(&w.issue, self.reset_since(db, &w.issue)?)?;
+        if failures >= rules.attempts.max(1) {
+            let logs: Vec<String> = db.crew_workers_for(&w.issue)?.into_iter().filter(|x| x.outcome.as_deref() == Some("failed")).take(failures as usize).map(|x| x.log).collect();
+            let question = format!(
+                "The crew tried {} {failures} times without submitting it (last: {how}). Logs: {}. Answer \"{TRY_AGAIN}\" to give it to a new worker, or take it yourself.",
+                w.issue,
+                logs.join(", ")
+            );
+            db.move_issue(&w.issue, "Needs You", None, Some(&format!("the crew tried it {failures} times")), &self.actor())?;
+            db.create_ask(&question, &[TRY_AGAIN.to_string(), "I'll take it".to_string()], Some(&w.issue), None, &self.actor())?;
+        } else if state == "In Progress" {
+            db.move_issue(&w.issue, "Todo", None, Some(&format!("the {} worker stopped without submitting", w.agent)), &self.actor())?;
+        }
         Ok(outcome.into())
+    }
+
+    /// Failures count from the last time a person moved the issue or answered the crew about it.
+    fn reset_since(&self, db: &Db, key: &str) -> Result<i64> {
+        let moved = db.timeline(key)?.into_iter().filter(|t| t.actor == "human" && t.kind == "issue_moved").map(|t| t.ts).max().unwrap_or(0);
+        let answered = db.crew_ask_answers(key, self.actor().id())?.into_iter().flatten().max().unwrap_or(0);
+        Ok(moved.max(answered))
+    }
+
+    /// Issues the crew sent to a person whose latest crew ask was answered "Try again" go back to
+    /// Todo for a new worker.
+    fn retry_answered(&self, db: &mut Db) -> Result<()> {
+        for key in db.crew_retries(&self.project, self.actor().id())? {
+            db.move_issue(&key, "Todo", None, Some(&format!("the person answered \"{TRY_AGAIN}\"")), &self.actor())?;
+        }
+        Ok(())
     }
 
     /// Whether the repo's land lock names `issue`: that worker must not be stopped now.
@@ -604,8 +724,18 @@ Then end. Do not take another issue: Nitely starts a new worker for it.
     )
 }
 
-fn branch_exists(repo: &Path, branch: &str) -> bool {
-    playbook::git(repo, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_ok()
+/// The vendors of the local branches that name `key` (`claude/nit-3-...` is claude's NIT-3).
+fn branch_vendors(repo: &Path, key: &str) -> Vec<String> {
+    let refs = playbook::git(repo, &["for-each-ref", "--format=%(refname:short)", "refs/heads/"]).unwrap_or_default();
+    let mut vendors: Vec<String> = Vec::new();
+    for branch in refs.lines() {
+        if let (Some(vendor), Some(k)) = crate::git::parse_branch(branch.trim()) {
+            if k.eq_ignore_ascii_case(key) && !vendors.contains(&vendor) {
+                vendors.push(vendor);
+            }
+        }
+    }
+    vendors
 }
 
 /// `s` as a TOML string, for a `-c key=value` override.
@@ -692,6 +822,24 @@ pub fn status(db: &Db, project: &str, playbook: &Playbook, moment: &Moment) -> R
     })
 }
 
+fn worker_row(r: &rusqlite::Row) -> rusqlite::Result<CrewWorker> {
+    Ok(CrewWorker {
+        id: r.get(0)?,
+        project: r.get(1)?,
+        issue_key: r.get(2)?,
+        agent: r.get(3)?,
+        pid: r.get(4)?,
+        worktree: r.get(5)?,
+        log: r.get(6)?,
+        started_at: r.get(7)?,
+        ended_at: r.get(8)?,
+        exit_code: r.get(9)?,
+        outcome: r.get(10)?,
+        reason: r.get(11)?,
+        agent_id: r.get(12)?,
+    })
+}
+
 const WORKER_COLUMNS: &str = "id, project, issue_key, agent, pid, worktree, log_path, started_at, ended_at, exit_code, outcome, reason, agent_id";
 
 impl Db {
@@ -774,6 +922,70 @@ impl Db {
         Ok(())
     }
 
+    /// When a worker's row was written, in real time (its `started_at` follows the supervisor's
+    /// clock, which tests move).
+    fn crew_worker_logged_at(&self, id: i64) -> Result<i64> {
+        use rusqlite::OptionalExtension;
+        let key: Option<String> = self.conn.query_row("SELECT issue_key FROM crew_worker WHERE id = ?1", [id], |r| r.get(0)).optional()?;
+        let Some(key) = key else { return Ok(0) };
+        let ts: Option<i64> = self.conn.query_row(
+            "SELECT MAX(ts) FROM event WHERE issue_key = ?1 COLLATE NOCASE AND type = 'crew_started'",
+            [key],
+            |r| r.get(0),
+        )?;
+        Ok(ts.unwrap_or(0))
+    }
+
+    /// Crew workers on `key` that failed and ended after `since`.
+    pub fn crew_failures_since(&self, key: &str, since: i64) -> Result<u32> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM crew_worker WHERE issue_key = ?1 COLLATE NOCASE AND outcome = 'failed' AND ended_at > ?2",
+            rusqlite::params![key, since],
+            |r| r.get(0),
+        )?;
+        Ok(n as u32)
+    }
+
+    /// When each of `asked_by`'s asks about `key` was answered (None while open).
+    pub fn crew_ask_answers(&self, key: &str, asked_by: &str) -> Result<Vec<Option<i64>>> {
+        let mut stmt = self.conn.prepare("SELECT answered_at FROM ask WHERE issue_key = ?1 COLLATE NOCASE AND asked_by = ?2")?;
+        let rows = stmt.query_map(rusqlite::params![key, asked_by], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Issues of `project` in Needs You whose newest ask is the crew's, answered "Try again" since
+    /// the issue last went to Needs You.
+    pub fn crew_retries(&self, project: &str, asked_by: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT i.key, a.answered_at FROM issue i JOIN ask a ON a.issue_key = i.key
+             WHERE i.project = ?1 COLLATE NOCASE AND i.state = 'Needs You' AND a.asked_by = ?2 AND a.answer = ?3
+               AND a.id = (SELECT MAX(id) FROM ask WHERE issue_key = i.key)",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![project, asked_by, TRY_AGAIN], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        let mut keys = Vec::new();
+        for row in rows {
+            let (key, answered) = row?;
+            let into_needs_you = self
+                .timeline(&key)?
+                .into_iter()
+                .filter(|t| t.kind == "issue_moved" && t.summary.as_deref().is_some_and(|s| s.contains("→ Needs You")))
+                .map(|t| t.ts)
+                .max()
+                .unwrap_or(0);
+            if answered >= into_needs_you {
+                keys.push(key);
+            }
+        }
+        Ok(keys)
+    }
+
+    /// The crew's workers on one issue, newest first.
+    pub fn crew_workers_for(&self, key: &str) -> Result<Vec<CrewWorker>> {
+        let mut stmt = self.conn.prepare(&format!("SELECT {WORKER_COLUMNS} FROM crew_worker WHERE issue_key = ?1 COLLATE NOCASE ORDER BY id DESC"))?;
+        let rows = stmt.query_map([key], worker_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn crew_started_since(&self, project: &str, since: i64) -> Result<u32> {
         let n: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM crew_worker WHERE project = ?1 COLLATE NOCASE AND started_at >= ?2",
@@ -819,23 +1031,7 @@ impl Db {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {WORKER_COLUMNS} FROM crew_worker WHERE project = ?1 COLLATE NOCASE {filter} ORDER BY started_at DESC, id DESC LIMIT ?2"
         ))?;
-        let rows = stmt.query_map(rusqlite::params![project, limit as i64], |r| {
-            Ok(CrewWorker {
-                id: r.get(0)?,
-                project: r.get(1)?,
-                issue_key: r.get(2)?,
-                agent: r.get(3)?,
-                pid: r.get(4)?,
-                worktree: r.get(5)?,
-                log: r.get(6)?,
-                started_at: r.get(7)?,
-                ended_at: r.get(8)?,
-                exit_code: r.get(9)?,
-                outcome: r.get(10)?,
-                reason: r.get(11)?,
-                agent_id: r.get(12)?,
-            })
-        })?;
+        let rows = stmt.query_map(rusqlite::params![project, limit as i64], worker_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 }
@@ -1158,13 +1354,18 @@ mod tests {
         assert_eq!(tick.ended, [WorkerLine { issue: "NIT-1".into(), agent: "claude".into(), outcome: "submitted".into(), log: tick.ended[0].log.clone() }]);
         assert_eq!(tick.started.iter().map(|w| w.issue.as_str()).collect::<Vec<_>>(), ["NIT-3"]);
 
-        // Nothing else ready once the backlog is empty.
+        // The second worker reports, then exits with NIT-2 still In Progress: a failed attempt. The
+        // supervisor writes the handoff note it did not leave, and NIT-2 goes to the next worker.
+        let two = f.db.issue("NIT-2").unwrap().unwrap().claimed_by.unwrap();
+        f.db.add_note("NIT-2", "running the tests", "status", &Actor::Agent(two)).unwrap();
         fake.exits.borrow_mut().insert(1002, 1);
         let tick = sup.tick(&mut f.db, false).unwrap();
         assert_eq!(tick.ended[0].outcome, "failed", "exited with its issue still In Progress and claimed");
-        assert_eq!(tick.status, "working; nothing else ready");
+        let handoff = f.db.timeline("NIT-2").unwrap().into_iter().rev().find(|t| t.kind == "handoff").unwrap();
+        assert!(handoff.summary.as_deref().unwrap().contains("its last report: \"running the tests\""), "{handoff:?}");
+        assert_eq!(tick.started.iter().map(|w| w.issue.as_str()).collect::<Vec<_>>(), ["NIT-2"], "a second attempt");
         let status = status(&f.db, "NIT", &Playbook::load(&f.repo).unwrap(), &NOON).unwrap();
-        assert_eq!((status.running.len(), status.started_today, status.cap), (1, 3, 2));
+        assert_eq!((status.running.len(), status.started_today, status.cap), (2, 4, 2));
         assert!(status.supervised);
     }
 
@@ -1229,7 +1430,7 @@ mod tests {
         let mut sup = supervisor(&f, &fake);
         let tick = sup.tick(&mut f.db, false).unwrap();
         assert_eq!(tick.started.iter().map(|w| w.issue.as_str()).collect::<Vec<_>>(), ["NIT-3"], "{tick:?}");
-        assert!(tick.status.contains("NIT-1: its branch is claude's") && tick.status.contains("NIT-2: its worktree"), "{}", tick.status);
+        assert!(tick.status.contains("NIT-1: its branch is claude's") && tick.status.contains("NIT-2: its branch is cli's"), "{}", tick.status);
         for key in ["NIT-1", "NIT-2"] {
             let i = f.db.issue(key).unwrap().unwrap();
             assert_eq!((i.state.as_str(), i.claimed_by), ("Todo", None), "{key} is handed back");
@@ -1290,12 +1491,13 @@ workers = 2
         let fake = Fake { installed: vec!["claude"], fail_start: Some("Failed to authenticate"), ..Default::default() };
         let mut sup = supervisor(&f, &fake);
         let tick = sup.tick(&mut f.db, false).unwrap();
-        assert_eq!(tick.status, "no agent will start (claude: Failed to authenticate)");
+        assert_eq!(tick.status, "paused: no agent will start (claude: Failed to authenticate)");
+        assert!(f.db.crew_control("NIT").unwrap().paused, "the crew paused itself");
         let one = f.db.issue("NIT-1").unwrap().unwrap();
         assert_eq!((one.state.as_str(), one.claimed_by), ("Todo", None), "the issue goes back");
         assert_eq!(f.db.issue("NIT-2").unwrap().unwrap().state, "Todo", "and no other issue was taken");
         assert_eq!(f.db.crew_workers("NIT", 5).unwrap()[0].outcome.as_deref(), Some("launch_failed"));
-        assert!(sup.tick(&mut f.db, false).unwrap().status.starts_with("no agent will start"));
+        assert_eq!(sup.tick(&mut f.db, false).unwrap().status, "paused");
     }
 
     #[test]
@@ -1310,10 +1512,79 @@ workers = 2
         let mut next = supervisor(&f, &fake);
         let tick = next.tick(&mut f.db, false).unwrap();
         assert_eq!(tick.ended.iter().map(|w| (w.issue.as_str(), w.outcome.as_str())).collect::<Vec<_>>(), [("NIT-2", "failed")]);
-        assert_eq!(tick.started.iter().map(|w| w.issue.as_str()).collect::<Vec<_>>(), ["NIT-3"], "NIT-1's live worker holds the other slot");
+        assert_eq!(tick.started.iter().map(|w| w.issue.as_str()).collect::<Vec<_>>(), ["NIT-2"], "NIT-2 is back in Todo; NIT-1's live worker holds the other slot");
         assert_eq!(next.running(), 2);
         fake.exits.borrow_mut().insert(1001, 0);
         assert_eq!(next.tick(&mut f.db, false).unwrap().ended[0].issue, "NIT-1");
+    }
+
+    #[test]
+    fn an_issue_that_keeps_failing_goes_to_a_person_and_try_again_brings_it_back() {
+        let mut f = fixture(&format!("{GATE}[crew]\nworkers = 1\nattempts = 2\n"));
+        let fake = Fake { installed: vec!["claude"], ..Default::default() };
+        let mut sup = supervisor(&f, &fake);
+        let fail = |f: &mut Fixture, sup: &mut Supervisor, pid: u32| {
+            let agent = f.db.issue("NIT-1").unwrap().unwrap().claimed_by.unwrap();
+            f.db.add_note("NIT-1", "trying", "status", &Actor::Agent(agent)).unwrap();
+            fake.exits.borrow_mut().insert(pid, 1);
+            sup.tick(&mut f.db, false).unwrap()
+        };
+        sup.tick(&mut f.db, false).unwrap();
+        let tick = fail(&mut f, &mut sup, 1001);
+        assert_eq!(tick.started[0].issue, "NIT-1", "the first failure gives it to a new worker");
+        let tick = fail(&mut f, &mut sup, 1002);
+        assert_eq!(tick.ended[0].outcome, "failed");
+        assert_eq!(f.db.issue("NIT-1").unwrap().unwrap().state, "Needs You", "two failures: a person decides");
+        assert_eq!(tick.started[0].issue, "NIT-2", "and the crew moves on");
+        let ask = f.db.open_asks().unwrap().into_iter().find(|a| a.issue_key.as_deref() == Some("NIT-1")).unwrap();
+        assert!(ask.question.contains("tried NIT-1 2 times") && ask.options[0] == TRY_AGAIN, "{ask:?}");
+
+        // The person answers Try again: NIT-1 is back in Todo, its failures counted from now.
+        f.db.answer_ask(ask.id, TRY_AGAIN, &Actor::Human).unwrap();
+        fake.exits.borrow_mut().insert(1003, 0);
+        f.db.move_issue("NIT-2", "In Review", None, None, &Actor::Agent(f.db.issue("NIT-2").unwrap().unwrap().claimed_by.unwrap())).unwrap();
+        let tick = sup.tick(&mut f.db, false).unwrap();
+        assert_eq!(tick.started[0].issue, "NIT-1", "{tick:?}");
+        let tick = fail(&mut f, &mut sup, 1004);
+        assert_eq!(f.db.issue("NIT-1").unwrap().unwrap().state, "In Progress", "one failure since the answer: tried again: {tick:?}");
+    }
+
+    #[test]
+    fn an_agent_that_exits_at_once_twice_is_dropped_until_a_resume() {
+        let mut f = fixture(&format!("{GATE}[crew]\nworkers = 1\n"));
+        let fake = Fake { installed: vec!["claude"], ..Default::default() };
+        let mut sup = supervisor(&f, &fake);
+        sup.tick(&mut f.db, false).unwrap();
+        fake.exits.borrow_mut().insert(1001, 1);
+        let tick = sup.tick(&mut f.db, false).unwrap();
+        assert_eq!(tick.ended[0].outcome, "launch_failed");
+        assert_eq!(tick.started[0].issue, "NIT-1", "no attempt counted, and it is tried again");
+        assert!(!f.db.timeline("NIT-1").unwrap().iter().any(|t| t.kind == "handoff"), "nothing to hand off");
+        fake.exits.borrow_mut().insert(1002, 1);
+        let tick = sup.tick(&mut f.db, false).unwrap();
+        assert!(tick.status.starts_with("paused: no agent will start (claude: exited 2 times right after starting"), "{}", tick.status);
+        assert_eq!(f.db.issue("NIT-1").unwrap().unwrap().state, "Todo");
+        assert!(sup.tick(&mut f.db, false).unwrap().started.is_empty());
+        // A person resumes: claude gets another chance.
+        f.db.crew_pause("NIT", false, &Actor::Human).unwrap();
+        assert_eq!(sup.tick(&mut f.db, false).unwrap().started[0].issue, "NIT-1");
+    }
+
+    #[test]
+    fn a_worker_past_the_timeout_is_stopped_unless_it_is_landing() {
+        let mut f = fixture(&format!("{GATE}[crew]\nworkers = 2\ntimeout_minutes = 30\n"));
+        let fake = Fake { installed: vec!["claude"], ..Default::default() };
+        let clock = Rc::new(std::cell::Cell::new(NOON));
+        let c = clock.clone();
+        let mut sup = Supervisor::new("NIT", &f.repo, &f.base.join("crew"), "nitely", Box::new(fake.clone())).with_clock(move || c.get());
+        sup.tick(&mut f.db, false).unwrap();
+        std::fs::write(f.repo.join(".git").join(crate::land::LOCK_FILE), "NIT-2 pid 1 since now").unwrap();
+        clock.set(Moment { ts: NOON.ts + 31 * 60, ..NOON });
+        let tick = sup.tick(&mut f.db, false).unwrap();
+        assert_eq!(*fake.stopped.borrow(), [1001], "NIT-2 is landing");
+        assert_eq!(tick.ended.iter().map(|w| (w.issue.as_str(), w.outcome.as_str())).collect::<Vec<_>>(), [("NIT-1", "failed")]);
+        let w = f.db.crew_workers_for("NIT-1").unwrap().into_iter().last().unwrap();
+        assert!(w.reason.unwrap().contains("crew.timeout_minutes"));
     }
 
     #[test]

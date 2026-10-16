@@ -201,8 +201,9 @@ When a worker exits, the supervisor reads its issue:
 
 - **Retry cap.** When an issue reaches `attempts` (3) `failed` workers, it moves to Needs You with an
   ask instead of back to Todo: "The crew tried {key} three times without submitting. Last: {reason}.
-  Logs: {paths}." with options "Try again" and "I'll take it". Only failures since a person last
-  moved the issue count, so a person moving it back to Todo is the "try again".
+  Logs: {paths}." with options "Try again" and "I'll take it". Answering "Try again" puts it back
+  in Todo for a new worker. Only failures since a person last moved the issue or answered the crew
+  about it count, so moving it back to Todo by hand works too.
 - **Launch failures.** A worker that exits within 2 minutes with a non-zero code and without one
   report is a `launch_failed`: the agent itself is not working (signed out, not installed, a bad
   command). The issue goes back to Todo without counting an attempt. After 2 launch failures in a
