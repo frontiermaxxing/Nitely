@@ -48,8 +48,8 @@ Before anything leaves the machine:
 
 An issue that becomes private after it was published is **withdrawn**: its host issue is deleted
 when the token may (admin rights on GitHub). Otherwise its comments are deleted, its title and text
-are replaced with a note, and it is closed as not planned. Hosts keep an edited text's earlier
-versions, so the issue panel then says to delete the issue on the host to remove them. The issue panel shows each issue's place:
+are replaced with a note, and it is closed as not planned; but hosts keep an edited text's earlier
+versions, so the issue is marked **still public** and the issue panel says to delete it on the host. The issue panel shows each issue's place:
 its link on the host, or private, held back or withdrawn, and why.
 
 ## Running

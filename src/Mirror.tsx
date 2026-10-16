@@ -104,7 +104,7 @@ export function MirrorSettings(props: { projectKey: string }) {
   );
 }
 
-const STATUS_WORD: Record<string, string> = { private: "Private", held: "Held back", withdrawn: "Withdrawn", unpublished: "Not published" };
+const STATUS_WORD: Record<string, string> = { private: "Private", held: "Held back", withdrawn: "Withdrawn", unpublished: "Not published", exposed: "Still public" };
 
 /** An issue's place in the mirror, in the issue panel's facts: its link there, or why it is not. */
 export function MirrorFact(props: { issueKey: string; version: number }) {

@@ -54,6 +54,10 @@ impl Host for Fake {
 
 const ROOT: &str = r"C:\code\app";
 
+fn roots() -> Vec<String> {
+    vec![ROOT.to_string(), format!("{WORKTREES}C:\\code\\app-worktrees")]
+}
+
 fn db() -> (Db, std::path::PathBuf) {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -69,7 +73,7 @@ fn new(title: &str, body: &str) -> NewIssue {
 
 #[test]
 fn local_paths_and_agent_ids_go_out_neutral() {
-    let roots = vec![ROOT.to_string()];
+    let roots = roots();
     let text = r"Seen by claude:c:/code/app-worktrees/app-3 in C:\code\app-worktrees\app-3-x\src\lib.rs and C:\code\app\docs\a.md; also C:\Users\me\notes.txt and /Users/me/secret.txt";
     assert_eq!(sanitize_with_home(text, &roots, None), "Seen by claude in src/lib.rs and docs/a.md; also <local path> and <local path>");
     // Folders with spaces, and the home folder whole, even where no path follows it.
@@ -78,11 +82,15 @@ fn local_paths_and_agent_ids_go_out_neutral() {
         sanitize_with_home(r"Notes in C:\Users\Sam Lee\Private\notes.txt and in C:\Data\My Files\b.txt, from C:\Users\Sam Lee\My Files\c.txt.", &roots, home),
         "Notes in <local path> and in <local path>, from <local path>."
     );
+    // A sibling that only starts with the repo's name is not one of its worktrees; any Unix path goes.
+    assert_eq!(sanitize_with_home(r"See C:\code\app-secrets\archive\notes.txt", &roots, None), "See <local path>");
+    assert_eq!(sanitize_with_home("In /srv/customer/notes.txt and /Volumes/Private/x.md", &roots, None), "In <local path> and <local path>");
+    assert_eq!(sanitize_with_home("By claude:c:/Users/Sam Lee/app-worktrees/x today", &roots, None), "By claude today");
 }
 
 #[test]
 fn sensitive_issues_stay_private_and_private_terms_hold_one_back() {
-    let roots = vec![ROOT.to_string()];
+    let roots = roots();
     let none = PrivateTerms::default();
     let issue = |f: &dyn Fn(&mut IssueRecord)| {
         let mut i = IssueRecord { key: "APP-1".into(), project: Some("APP".into()), title: "Add export".into(), body: "Export the list.".into(), kind: Some("feature".into()), priority: 3, state: "Todo".into(), state_type: "unstarted".into(), owner: "agent".into(), ..Default::default() };
@@ -96,15 +104,15 @@ fn sensitive_issues_stay_private_and_private_terms_hold_one_back() {
     assert!(private(decide(&issue(&|i| (i.priority, i.kind) = (1, Some("bug".into()))), false, &none, &roots).unwrap()));
     let terms = PrivateTerms { all: vec!["export".into()], ..Default::default() };
     assert_eq!(decide(&issue(&|_| {}), false, &terms, &roots).unwrap(), Decision::Held("a private term (term 1 of the list for every project) is in its text".into()));
-    let Decision::Publish(out) = decide(&issue(&|i| i.labels = vec!["ios".into()]), false, &none, &roots).unwrap() else { panic!() };
-    assert_eq!(out.labels, ["feature", "priority: medium", "ios"]);
+    let Decision::Publish(out) = decide(&issue(&|i| i.labels = vec!["ios".into(), "c:/users/sam/private".into()]), false, &none, &roots).unwrap() else { panic!() };
+    assert_eq!(out.labels, ["feature", "priority: medium", "ios"], "a label holding a path is left out");
     assert!(out.body.ends_with("Tracked in Nitely as APP-1 (Todo, feature, medium priority). Nitely is where it is decided; comments here are not read."), "{}", out.body);
 }
 
 #[test]
 fn syncs_new_issues_updates_comments_and_withdraws() {
     let (mut db, dir) = db();
-    let roots = vec![ROOT.to_string()];
+    let roots = roots();
     let terms = PrivateTerms::default();
     let agent = Actor::Agent("claude:x".into());
     let old = db.create_issue(&new("Older work", "Filed before the mirror."), &agent).unwrap();
@@ -140,12 +148,13 @@ fn syncs_new_issues_updates_comments_and_withdraws() {
     // Made private after it was published: the text and the comments come down.
     db.set_issue_private(&a.key, true, &Actor::Human).unwrap();
     run(&db, &mut report);
-    assert_eq!(report.withdrawn, 1);
+    run(&db, &mut report);
     assert!(fake.issues.borrow()[0].title.contains("withdrawn") && !fake.issues.borrow()[0].body.contains("Export"));
     assert!(fake.comments.borrow().iter().all(|(_, c)| c == "<deleted>"), "{:?}", fake.comments.borrow());
-    let reason = db.issue_mirror(&a.key).unwrap().unwrap().reason.unwrap();
-    assert!(reason.contains("edit history") && reason.contains("delete issue #1"), "the person is told what is left: {reason}");
-    assert_eq!(db.issue_mirror(&a.key).unwrap().unwrap().status, "withdrawn");
+    let m = db.issue_mirror(&a.key).unwrap().unwrap();
+    assert_eq!(m.status, "exposed", "not reported as withdrawn while its history is readable");
+    assert!(m.reason.unwrap().contains("delete the issue there"), "the person is told what is left");
+    assert!(report.errors.iter().any(|e| e.contains("edit history")), "{:?}", report.errors);
 
     // A backfill of all publishes the older issue too.
     db.set_mirror("APP", Some("all"), &Actor::Human).unwrap();
@@ -157,7 +166,7 @@ fn syncs_new_issues_updates_comments_and_withdraws() {
 
 #[test]
 fn comments_read_for_outsiders() {
-    let roots = vec![ROOT.to_string()];
+    let roots = roots();
     assert_eq!(
         comment_for("submit", "Review by codex passed; ready to land. Pull request: https://x/pr/4", Some("https://x/pr/4"), &roots).as_deref(),
         Some("**Review:** Review by codex passed; ready to land. (https://x/pr/4)")
@@ -170,7 +179,7 @@ fn comments_read_for_outsiders() {
 #[test]
 fn a_number_from_another_repo_is_not_written_to() {
     let (mut db, dir) = db();
-    let roots = vec![ROOT.to_string()];
+    let roots = roots();
     let agent = Actor::Agent("claude:x".into());
     db.set_mirror("APP", Some("all"), &Actor::Human).unwrap();
     let a = db.create_issue(&new("Add export", "Export the list."), &agent).unwrap();
@@ -206,7 +215,7 @@ fn a_rekey_keeps_private_marks_and_removing_a_project_forgets_the_mirror() {
 #[test]
 fn a_token_that_may_delete_takes_a_withdrawn_issue_down_whole_and_one_refusal_does_not_stop_the_rest() {
     let (mut db, dir) = db();
-    let roots = vec![ROOT.to_string()];
+    let roots = roots();
     let agent = Actor::Agent("claude:x".into());
     db.set_mirror("APP", Some("all"), &Actor::Human).unwrap();
     let a = db.create_issue(&new("Add export", "Export the list."), &agent).unwrap();
@@ -233,7 +242,7 @@ fn a_token_that_may_delete_takes_a_withdrawn_issue_down_whole_and_one_refusal_do
 #[test]
 fn turning_the_mirror_off_stops_a_sync_on_its_way() {
     let (mut db, dir) = db();
-    let roots = vec![ROOT.to_string()];
+    let roots = roots();
     let agent = Actor::Agent("claude:x".into());
     db.set_mirror("APP", Some("all"), &Actor::Human).unwrap();
     for t in ["Add export", "Fix sorting", "Speed up search"] {

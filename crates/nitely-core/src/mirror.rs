@@ -61,6 +61,9 @@ pub enum Decision {
 /// Text with local paths and agent ids made neutral: a path inside one of `roots` (a repo's main
 /// checkout, or a worktree beside it) becomes repo-relative, any other absolute path `<local path>`,
 /// and an agent id like `claude:c:/code/app-worktrees/app-3` just `claude`.
+/// Marks an entry of `roots` as a folder of worktrees (`<folder>/<task>/…`), not a main checkout.
+pub const WORKTREES: &str = "worktrees:";
+
 pub fn sanitize(text: &str, roots: &[String]) -> String {
     sanitize_with_home(text, roots, dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).as_deref())
 }
@@ -68,7 +71,7 @@ pub fn sanitize(text: &str, roots: &[String]) -> String {
 /// As `sanitize`, with the home folder given: it is taken out whole first, so a user name with a
 /// space in it (`C:\Users\Sam Lee`) never goes out in part.
 pub fn sanitize_with_home(text: &str, roots: &[String], home: Option<&str>) -> String {
-    let agent = regex::Regex::new(r"\b(claude|codex|cursor|agent|crew|cli)(@[\w.-]+|:[A-Za-z]:[\\/][^\s,;)\]]*|:/[^\s,;)\]]*)").unwrap();
+    let agent = regex::Regex::new(r#"\b(claude|codex|cursor|agent|crew|cli)(@[\w.-]+|:[A-Za-z]:[\\/](?:[^\\/\n"'`<>|:]*[^\s\\/"'`<>|:][\\/])*[^\s\\/"'`<>|,;)\]]*|:/(?:[^/\n"'`<>|]*[^\s/"'`<>|]/)*[^\s/"'`<>|,;)\]]*)"#).unwrap();
     let mut text = agent.replace_all(text, "$1").into_owned();
     if let Some(home) = home.map(|h| h.trim_end_matches(['/', '\\'])).filter(|h| h.len() > 3) {
         // Both slash styles, any case: what is inside a repo root keeps its relative part below.
@@ -90,8 +93,8 @@ pub fn sanitize_with_home(text: &str, roots: &[String], home: Option<&str>) -> S
     // the last part, the file, ends at a space.
     // A folder's name may hold spaces but not end with one, so prose between two paths is not taken
     // for a folder.
-    let path = regex::Regex::new(r#"(?i)\b[A-Z]:[\\/](?:[^\\/\n"'`<>|:]*[^\s\\/"'`<>|:][\\/])*[^\s\\/"'`<>|,;)\]]*|(?:^|[\s"'`(\[])(/(?:Users|home|tmp|var|private|opt|mnt)/(?:[^/\n"'`<>|]*[^\s/"'`<>|]/)*[^\s/"'`<>|,;)\]]*)"#).unwrap();
-    let roots: Vec<String> = roots.iter().map(|r| normalize(r)).collect();
+    let path = regex::Regex::new(r#"(?i)\b[A-Z]:[\\/](?:[^\\/\n"'`<>|:]*[^\s\\/"'`<>|:][\\/])*[^\s\\/"'`<>|,;)\]]*|(?:^|[\s"'`(\[])(/[^\s/"'`<>|,;)\]]+/(?:[^/\n"'`<>|]*[^\s/"'`<>|]/)*[^\s/"'`<>|,;)\]]*)"#).unwrap();
+    let roots: Vec<String> = roots.iter().map(|r| match r.strip_prefix(WORKTREES) { Some(d) => format!("{WORKTREES}{}", normalize(d)), None => normalize(r) }).collect();
     let text = regex::Regex::new(r#"<home>(?:[\\/](?:[^\\/\n"'`<>|:]*[^\s\\/"'`<>|:][\\/])*[^\s\\/"'`<>|,;)\]]*)?"#).unwrap()
         .replace_all(&text, |c: &regex::Captures| {
             // A sentence's full stop after the path stays.
@@ -110,14 +113,11 @@ pub fn sanitize_with_home(text: &str, roots: &[String], home: Option<&str>) -> S
         let dots = ".".repeat(p.len() - trimmed.len());
         let p = trimmed;
         let n = normalize(p);
-        let relative = roots.iter().find_map(|r| {
-            // The repo itself, or a worktree beside it: `<root>-worktrees/<task>/…` keeps what is after the task folder.
-            if let Some(rest) = n.strip_prefix(&format!("{r}/")) {
-                return Some(rest.to_string());
-            }
-            let rest = n.strip_prefix(&format!("{r}-"))?;
-            let after_task = rest.split_once('/')?.1;
-            Some(after_task.split_once('/').map(|(_, inner)| inner.to_string()).unwrap_or_default())
+        let relative = roots.iter().find_map(|r| match r.strip_prefix(WORKTREES) {
+            // A worktree folder: what is inside a task's worktree, after the task's own folder.
+            Some(dir) => n.strip_prefix(&format!("{dir}/"))?.split_once('/').map(|(_, inner)| inner.to_string()),
+            // The repo's main checkout.
+            None => n.strip_prefix(&format!("{r}/")).map(str::to_string),
         });
         // Keep the original case for the relative part.
         let shown = match relative {
@@ -142,7 +142,8 @@ pub fn render(issue: &IssueRecord, roots: &[String]) -> HostIssue {
     if !priority.is_empty() {
         labels.push(format!("priority: {priority}"));
     }
-    labels.extend(issue.labels.iter().cloned());
+    // A label is a word; one that held a path is left out rather than published.
+    labels.extend(issue.labels.iter().filter(|l| sanitize(l, roots) == **l).cloned());
     let closed = match issue.state_type.as_str() {
         "completed" => Some("completed"),
         "canceled" => Some("not_planned"),
@@ -381,8 +382,20 @@ pub fn host_for(config: &Config, project: &str) -> Result<(Box<dyn Host>, String
 }
 
 /// Folders whose paths are rewritten repo-relative: each linked repo's main checkout.
+/// Folders whose paths are rewritten repo-relative: each linked repo's main checkout, and the folder
+/// its playbook puts worktrees in (marked `WORKTREES`).
 fn roots_of(config: &Config, project: &str) -> Vec<String> {
-    config.repos.iter().filter(|r| r.project.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(project))).map(|r| r.root.clone()).collect()
+    let probe = IssueRecord { key: "X-1".into(), title: "x".into(), ..Default::default() };
+    config
+        .repos
+        .iter()
+        .filter(|r| r.project.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(project)))
+        .flat_map(|r| {
+            let pb = crate::playbook::Playbook::load(Path::new(&r.root)).unwrap_or_default();
+            let worktrees = pb.worktree_for(Path::new(&r.root), "x", &probe).parent().map(|d| format!("{WORKTREES}{}", d.to_string_lossy()));
+            std::iter::once(r.root.clone()).chain(worktrees)
+        })
+        .collect()
 }
 
 // ----- state -----
@@ -689,6 +702,8 @@ fn sync_issue(db: &Db, host: &dyn Host, issue: &IssueRecord, setting: &MirrorSet
             *budget = budget.saturating_sub(1);
             report.withdrawn += 1;
         }
+        // Still public on the host (it could not be deleted): that stays said until it is.
+        Decision::Private(_) | Decision::Held(_) if published.as_ref().is_some_and(|(_, s)| s == "exposed") => {}
         Decision::Private(why) => db.save_mirror(&issue.key, if published.is_some() { "withdrawn" } else { "private" }, Some(&why), None, None)?,
         Decision::Held(why) => db.save_mirror(&issue.key, if published.is_some() { "withdrawn" } else { "held" }, Some(&why), None, None)?,
     }
@@ -747,9 +762,10 @@ fn withdraw(db: &Db, host: &dyn Host, key: &str, number: i64, why: &str) -> Resu
         priority: 0,
     };
     host.update(number, &gone).with_context(|| format!("withdrawing {key}'s issue on {}", host.name()))?;
-    let left = format!("{why}; its text is down, but {} keeps earlier versions in the issue's edit history: delete issue #{number} there to remove them", host.name());
-    db.save_mirror(key, "withdrawn", Some(&left), None, Some(&gone.fingerprint()))?;
-    Ok(())
+    // Not withdrawn: the earlier text is still readable in the host's edit history.
+    let left = format!("{why}, but Nitely could not delete issue #{number} on {}: its earlier text is still readable in the issue's edit history, so delete the issue there", host.name());
+    db.save_mirror(key, "exposed", Some(&left), None, Some(&gone.fingerprint()))?;
+    bail!("{key}: {left}")
 }
 
 /// Withdraws `key` from its host now, if it was published there, whether or not its project still
