@@ -34,6 +34,7 @@ export function Palette(props: { projects: Project[]; onGo: (view: View) => void
   const [picked, setPicked] = useState(0);
   const [issues, setIssues] = useState<IssueRecord[]>([]);
   const list = useRef<HTMLUListElement>(null);
+  const input = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     let live = true;
@@ -99,19 +100,23 @@ export function Palette(props: { projects: Project[]; onGo: (view: View) => void
       e.preventDefault();
       e.stopPropagation();
       props.onClose();
+    } else if (e.key === "Tab") {
+      // The palette is modal: focus stays in its input, so Esc and Enter always reach it.
+      e.preventDefault();
+      input.current?.focus();
     }
   };
 
   return (
     <div className="palette-veil" onMouseDown={props.onClose}>
-      <div className="palette" role="dialog" aria-label="Go to" onMouseDown={(e) => e.stopPropagation()}>
+      <div className="palette" role="dialog" aria-modal="true" aria-label="Go to" onMouseDown={(e) => e.stopPropagation()} onKeyDown={onKey}>
         <input
+          ref={input}
           autoFocus
           className="palette-input"
           placeholder="Go to a view, project or issue"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          onKeyDown={onKey}
           aria-controls="palette-list"
           aria-activedescendant={items[picked] ? `palette-${items[picked].id}` : undefined}
         />
@@ -142,6 +147,7 @@ export function Palette(props: { projects: Project[]; onGo: (view: View) => void
 const ITEMS = [
   ".content .list-row",
   ".content .fcard",
+  ".content .flow-keys .ui-token",
   ".content .board-card .ui-token",
   ".content .decision .ui-token",
   ".content .act-row .ui-token",
