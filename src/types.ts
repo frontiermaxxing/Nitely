@@ -246,7 +246,10 @@ export interface Pulse {
   projects: ProjectFlow[];
   asks: Ask[];
   approvals: IssueRecord[];
+  /** At most 300, newest first. */
   happened: Happening[];
+  /** Everything since `since`, counted per kind, past the list's limit. */
+  happened_counts: Record<Happening["kind"], number>;
   throughput: PulseHour[];
   landed_today: number;
 }

@@ -652,11 +652,12 @@ function pulse(sinceArg: number, dayStart: number): Pulse {
     };
   });
   const events = [...world.timelines.entries()].flatMap(([key, tl]) => tl.map((t) => ({ ...t, key })));
-  const happened: Happening[] = events
+  const all: Happening[] = events
     .filter((e) => e.ts >= since && HAPPENING[e.kind])
     .sort((a, b) => b.ts - a.ts)
-    .slice(0, 300)
     .map((e) => ({ ts: e.ts, kind: HAPPENING[e.kind], issue_key: e.key, actor: e.actor, summary: e.summary }));
+  const happened_counts = { landed: 0, filed: 0, stuck: 0, review: 0, asked: 0 };
+  for (const h of all) happened_counts[h.kind]++;
   const end = (Math.floor(now / HOUR) + 1) * HOUR;
   const start = end - 24 * HOUR;
   const throughput = Array.from({ length: 24 }, (_, h) => ({ start: start + h * HOUR, landed: 0, submitted: 0 }));
@@ -672,7 +673,8 @@ function pulse(sinceArg: number, dayStart: number): Pulse {
     projects,
     asks: world.asks.filter((a) => a.answer === null),
     approvals: world.issues.filter((i) => i.state === "Needs You"),
-    happened,
+    happened: all.slice(0, 300),
+    happened_counts,
     throughput,
     landed_today: events.filter((e) => e.kind === "landed" && e.ts >= dayStart).length,
   };

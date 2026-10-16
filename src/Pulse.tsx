@@ -90,13 +90,21 @@ export function Pulse(props: { board: Board | null; now: number; version: number
   const [since] = useState(() => readSeen(Math.floor(Date.now() / 1000)));
   const [data, setData] = useState<PulseData | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // When the data on screen was read; "last seen" never moves past it.
+  // When the data last seen on screen was read; "last seen" never moves past it. A refresh while
+  // the window is hidden counts only once the window shows again.
   const shown = useRef<number | null>(null);
+  const latest = useRef<number | null>(null);
 
   useEffect(() => {
     let live = true;
     invoke<PulseData>("pulse", { since, dayStart: localMidnight() })
-      .then((d) => live && (setData(d), setError(null), (shown.current = d.now)))
+      .then((d) => {
+        if (!live) return;
+        setData(d);
+        setError(null);
+        latest.current = d.now;
+        if (document.visibilityState === "visible") shown.current = d.now;
+      })
       .catch((e) => live && setError(String(e)));
     return () => {
       live = false;
@@ -106,7 +114,10 @@ export function Pulse(props: { board: Board | null; now: number; version: number
   // "Since you were last here" moves on when you leave Pulse, not while you read it.
   useEffect(() => {
     const save = () => writeSeen(shown.current);
-    const onHide = () => document.visibilityState === "hidden" && save();
+    const onHide = () => {
+      if (document.visibilityState === "hidden") save();
+      else shown.current = latest.current;
+    };
     document.addEventListener("visibilitychange", onHide);
     window.addEventListener("pagehide", save);
     return () => {
@@ -372,8 +383,10 @@ function Since({ data, ctx }: { data: PulseData; ctx: Context }) {
   const [all, setAll] = useState(false);
   const issues = new Map<string, IssueRecord>();
   for (const p of data.projects) for (const f of [...p.issues, ...p.done_today]) issues.set(f.issue.key, f.issue);
-  const count = (k: Happening["kind"]) => data.happened.filter((h) => h.kind === k).length;
+  const count = (k: Happening["kind"]) => data.happened_counts[k];
   const shown = data.happened.filter((h) => !filter || h.kind === filter);
+  // The list stops at the newest 300; the counts cover everything.
+  const total = filter ? count(filter) : Object.values(data.happened_counts).reduce((a, b) => a + b, 0);
   const landed = data.throughput.map((h) => h.landed);
   const submitted = data.throughput.map((h) => h.submitted);
   const kinds: Happening["kind"][] = ["landed", "filed", "stuck", "review", "asked"];
@@ -435,9 +448,14 @@ function Since({ data, ctx }: { data: PulseData; ctx: Context }) {
           })}
         </ol>
       )}
+      {all && total > shown.length && (
+        <p className="muted small since-cut">
+          The newest {shown.length} of {total}. The rest are on each issue's timeline.
+        </p>
+      )}
       {shown.length > 10 && (
         <button className="link small since-all" onClick={() => setAll(!all)}>
-          {all ? "Show fewer" : `Show all ${shown.length}`}
+          {all ? "Show fewer" : `Show all ${total > shown.length ? `latest ${shown.length}` : shown.length}`}
         </button>
       )}
     </section>

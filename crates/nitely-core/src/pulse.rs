@@ -32,8 +32,10 @@ pub struct Pulse {
     pub asks: Vec<Ask>,
     /// Issues waiting on the human's approval.
     pub approvals: Vec<IssueRecord>,
-    /// What happened since `since`, newest first.
+    /// What happened since `since`, newest first, at most `HAPPENED_LIMIT` of it.
     pub happened: Vec<Happening>,
+    /// How many of each kind happened since `since`, all of them, not only those in `happened`.
+    pub happened_counts: HappenedCounts,
     /// Landed and submitted per hour, oldest first, the last ending with the current hour.
     pub throughput: Vec<Hour>,
     pub landed_today: i64,
@@ -82,6 +84,15 @@ pub struct Happening {
     pub issue_key: Option<String>,
     pub actor: String,
     pub summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct HappenedCounts {
+    pub landed: i64,
+    pub filed: i64,
+    pub stuck: i64,
+    pub review: i64,
+    pub asked: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -174,6 +185,7 @@ pub fn pulse(db: &Db, since: i64, day_start: i64) -> Result<Pulse> {
         asks: db.open_asks()?,
         approvals,
         happened: db.happened_since(since)?,
+        happened_counts: db.happened_counts(since)?,
         throughput,
         landed_today,
     })
@@ -234,28 +246,57 @@ impl Db {
 
     /// Landings, new issues, failures, review rounds and questions since `since`, newest first.
     fn happened_since(&self, since: i64) -> Result<Vec<Happening>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT ts, type, issue_key, actor, summary FROM event
-             WHERE ts >= ?1 AND type IN ('landed', 'issue_created', 'gate_failed', 'land_failed', 'review_failed', 'submit', 'ask')
-             ORDER BY ts DESC, id DESC LIMIT ?2",
-        )?;
+        let mut stmt = self.conn.prepare(&format!("SELECT ts, kind, issue_key, actor, summary FROM ({HAPPENINGS}) ORDER BY ts DESC, id DESC LIMIT ?2"))?;
         let rows = stmt.query_map(rusqlite::params![since, HAPPENED_LIMIT], |r| {
-            let kind: String = r.get(1)?;
             Ok(Happening {
                 ts: r.get(0)?,
-                kind: match kind.as_str() {
-                    "landed" => "landed",
-                    "issue_created" => "filed",
-                    "submit" => "review",
-                    "ask" => "asked",
-                    _ => "stuck",
-                },
+                kind: kind_name(&r.get::<_, String>(1)?),
                 issue_key: r.get(2)?,
                 actor: r.get(3)?,
                 summary: r.get(4)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Every happening since `since` counted by kind, past the list's limit.
+    fn happened_counts(&self, since: i64) -> Result<HappenedCounts> {
+        let mut stmt = self.conn.prepare(&format!("SELECT kind, COUNT(*) FROM ({HAPPENINGS}) GROUP BY kind"))?;
+        let rows = stmt.query_map([since], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        let mut counts = HappenedCounts::default();
+        for row in rows {
+            let (kind, n) = row?;
+            match kind_name(&kind) {
+                "landed" => counts.landed += n,
+                "filed" => counts.filed += n,
+                "review" => counts.review += n,
+                "asked" => counts.asked += n,
+                _ => counts.stuck += n,
+            }
+        }
+        Ok(counts)
+    }
+}
+
+/// Happenings since ?1 as (ts, id, kind, issue_key, actor, summary). Questions not linked to an
+/// issue leave no event, so they come from the ask table.
+const HAPPENINGS: &str = "
+    SELECT ts, id,
+      CASE type WHEN 'landed' THEN 'landed' WHEN 'issue_created' THEN 'filed' WHEN 'submit' THEN 'review'
+                WHEN 'ask' THEN 'asked' ELSE 'stuck' END AS kind,
+      issue_key, actor, summary
+    FROM event
+    WHERE ts >= ?1 AND type IN ('landed', 'issue_created', 'gate_failed', 'land_failed', 'review_failed', 'submit', 'ask')
+    UNION ALL
+    SELECT asked_at, 0, 'asked', NULL, asked_by, question FROM ask WHERE issue_key IS NULL AND asked_at >= ?1";
+
+fn kind_name(kind: &str) -> &'static str {
+    match kind {
+        "landed" => "landed",
+        "filed" => "filed",
+        "review" => "review",
+        "asked" => "asked",
+        _ => "stuck",
     }
 }
 
@@ -284,6 +325,7 @@ mod tests {
             source: "claude".into(),
             evidence: "none yet".into(),
             priority: 2,
+            allow_similar: true,
             ..Default::default()
         };
         db.create_issue(&new, &Actor::Agent("claude:c:/x".into())).unwrap()
@@ -314,6 +356,7 @@ mod tests {
 
         let kinds: Vec<&str> = p.happened.iter().map(|h| h.kind).collect();
         assert!(kinds.contains(&"filed") && kinds.contains(&"stuck"));
+        assert_eq!((p.happened_counts.filed, p.happened_counts.stuck), (2, 1));
         assert_eq!(p.throughput.len(), HOURS as usize);
         assert_eq!(p.landed_today, 0);
     }
@@ -329,5 +372,19 @@ mod tests {
         let single = db.issue(&a.key).unwrap().unwrap();
         assert_eq!(listed[0].track, single.track);
         assert_eq!(single.track.stuck.as_deref(), Some("Gate failed"));
+    }
+
+    #[test]
+    fn standalone_asks_count_and_counts_pass_the_list_limit() {
+        let (mut db, _dir) = db();
+        let me = Actor::Agent("codex:c:/x".into());
+        db.create_ask("Which port should the preview use?", &[], None, None, &me).unwrap();
+        for n in 0..(HAPPENED_LIMIT + 5) {
+            file(&mut db, &format!("Issue number {n} about something distinct {n}"));
+        }
+        let p = pulse(&db, 0, 0).unwrap();
+        assert_eq!(p.happened.len() as i64, HAPPENED_LIMIT);
+        assert_eq!(p.happened_counts.filed, HAPPENED_LIMIT + 5);
+        assert_eq!(p.happened_counts.asked, 1);
     }
 }

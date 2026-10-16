@@ -134,6 +134,7 @@
 .feed-asked .feed-verb { color: var(--attention-ink); }
 .feed-what { color: var(--fg-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .since-all { margin-top: 8px; color: var(--fg-2); }
+.since-cut { margin: 8px 0 0; }
 
 /* ----- narrower windows ----- */
 @media (max-width: 1100px) {
