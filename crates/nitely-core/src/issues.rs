@@ -181,9 +181,8 @@ fn rank(priority: i64) -> i64 {
     if priority == 0 { 5 } else { priority }
 }
 
-/// Every blocked-by relation of a stored issue, with whether each issue is open and its priority.
-/// A blocker no longer stored (a Linear issue that left the mirror) counts as open: nothing says
-/// it finished.
+/// Every blocked-by relation, with whether each issue is open and its priority. Both ends are
+/// native issues, which are never deleted.
 struct Deps {
     /// (blocked issue, blocker)
     edges: Vec<(String, String)>,
@@ -194,11 +193,10 @@ struct Deps {
 impl Deps {
     fn load(conn: &rusqlite::Connection) -> Result<Deps> {
         let mut stmt = conn.prepare(
-            "SELECT r.issue_key, r.blocker_key, a.state_type, a.priority,
-                    COALESCE(b.state_type, 'unstarted'), COALESCE(b.priority, 0)
+            "SELECT r.issue_key, r.blocker_key, a.state_type, a.priority, b.state_type, b.priority
              FROM issue_blocker r
              JOIN issue a ON a.key = r.issue_key
-             LEFT JOIN issue b ON b.key = r.blocker_key
+             JOIN issue b ON b.key = r.blocker_key
              ORDER BY r.issue_key, r.blocker_key",
         )?;
         let mut deps = Deps { edges: Vec::new(), open: HashMap::new(), priority: HashMap::new() };
@@ -411,6 +409,9 @@ impl Db {
         let mut blockers: Vec<String> = Vec::new();
         for b in &new.blocked_by {
             let blocker = self.issue(b.trim())?.with_context(|| format!("no issue {b} to be blocked by"))?;
+            if blocker.origin != "nitely" {
+                bail!("{} is mirrored from {}, which drops it when it closes; only native issues can block", blocker.key, blocker.origin);
+            }
             if !blockers.contains(&blocker.key) {
                 blockers.push(blocker.key);
             }
@@ -524,8 +525,9 @@ impl Db {
     }
 
     /// Adds and removes blockers of `key` together: all of them or, on any error, none. Refuses a
-    /// blocker that is missing, is `key` itself, or already waits on `key`, and removing a blocker
-    /// `key` does not have.
+    /// blocker that is missing, mirrored, `key` itself, or already waiting on `key`, and removing a
+    /// blocker `key` does not have. Only native issues block: the Linear mirror holds open issues
+    /// only and drops one when it closes, so it cannot say when a blocker finished.
     pub fn change_blockers(&mut self, key: &str, add: &[String], remove: &[String], actor: &Actor) -> Result<()> {
         let ts = now();
         // Immediate: the cycle check and the insert see the same relations even with agents racing.
@@ -554,7 +556,10 @@ impl Db {
             bail!("{issue} is mirrored from {origin}; only native issues take blockers");
         }
         for b in add {
-            let (blocker, _) = find(b)?;
+            let (blocker, blocker_origin) = find(b)?;
+            if blocker_origin != "nitely" {
+                bail!("{blocker} is mirrored from {blocker_origin}, which drops it when it closes; only native issues can block");
+            }
             if blocker == issue {
                 bail!("{issue} cannot block itself");
             }
@@ -593,9 +598,8 @@ impl Db {
         };
         Ok(Relations {
             blocked_by: link(
-                "SELECT r.blocker_key, COALESCE(i.title, ''), COALESCE(i.state, 'Not synced'), COALESCE(i.state_type, '')
-                 FROM issue_blocker r LEFT JOIN issue i ON i.key = r.blocker_key
-                 WHERE r.issue_key = ?1 COLLATE NOCASE ORDER BY i.number, r.blocker_key",
+                "SELECT i.key, i.title, i.state, i.state_type FROM issue_blocker r JOIN issue i ON i.key = r.blocker_key
+                 WHERE r.issue_key = ?1 COLLATE NOCASE ORDER BY i.number, i.key",
             )?,
             blocks: link(
                 "SELECT i.key, i.title, i.state, i.state_type FROM issue_blocker r JOIN issue i ON i.key = r.issue_key
@@ -1014,7 +1018,7 @@ mod tests {
     }
 
     #[test]
-    fn a_blocker_that_left_the_mirror_still_blocks() {
+    fn mirrored_issues_cannot_block() {
         let (mut db, dir) = db();
         db.create_project("NIT", "Nitely").unwrap();
         let h = Actor::Human;
@@ -1022,11 +1026,10 @@ mod tests {
         db.replace_issues("linear", &[linear]).unwrap();
         let mut waits = new("Use the upstream fix");
         waits.blocked_by = vec!["AERA-5".into()];
-        db.create_issue(&waits, &h).unwrap();
-        db.replace_issues("linear", &[]).unwrap();
-        assert_eq!(db.issue("NIT-1").unwrap().unwrap().blocked_by, vec!["AERA-5"]);
-        assert!(db.next_task("NIT", "claude:a").unwrap().is_none());
-        assert_eq!(db.relations("NIT-1").unwrap().blocked_by[0].state, "Not synced");
+        assert!(db.create_issue(&waits, &h).is_err());
+        db.create_issue(&new("Use the upstream fix"), &h).unwrap();
+        assert!(db.add_blocker("NIT-1", "AERA-5", &h).is_err());
+        assert!(db.add_blocker("AERA-5", "NIT-1", &h).is_err());
         std::fs::remove_dir_all(dir).ok();
     }
 
