@@ -149,7 +149,7 @@ fn after_land(root: &Path, pb: &Playbook, report: &mut Landed) {
             "{} changed, and the main checkout {} has not run setup since; run `{}` there before using it (a [[land.after]] step can do it for you)",
             stale.join(", "),
             root.display(),
-            pb.worktree.setup.join(" && ")
+            pb.worktree.setup.iter().map(|c| playbook::expand(c, root, root, &report.base)).collect::<Vec<_>>().join(" && ")
         ));
     }
 }
