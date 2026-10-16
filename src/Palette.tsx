@@ -182,10 +182,10 @@ const ITEMS = [
   ".content .now-row:not(:disabled)",
   ".content .fchip",
   ".content .board-card .ui-token",
-  ".content .inbox-row",
+  ".content .inbox-row.on",
   ".content .act-row .ui-token",
   ".content .bmap-line .ui-token",
-  ".content .now-card-issue",
+  ".content button.now-card-issue",
   ".content .feed-row .ui-token",
 ].join(", ");
 

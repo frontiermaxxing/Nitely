@@ -40,8 +40,12 @@ export function Inbox(props: {
   const groups = GROUP_ORDER.map((k) => ({ kind: k, items: decisions.filter((d) => d.kind === k) })).filter((g) => g.items.length > 0);
   const ordered = groups.flatMap((g) => g.items);
   const [picked, setPicked] = useState<string | null>(null);
-  // The first decision is open until you pick one; a picked one that was settled hands over to the first.
+  // The decision open stays open while others arrive: the first one is picked as soon as there is
+  // one, and only when the picked one is settled does the pick move to the (new) first.
   const open = ordered.find((d) => d.id === picked) ?? ordered[0] ?? null;
+  useEffect(() => {
+    if (open && open.id !== picked) setPicked(open.id);
+  }, [open, picked]);
   const oldest = decisions.length ? Math.min(...decisions.map((d) => d.since)) : null;
 
   if (decisions.length === 0) {
@@ -80,6 +84,12 @@ export function Inbox(props: {
                 decision={d}
                 detail={d.issue ? details.get(d.issue.key) : undefined}
                 on={open?.id === d.id}
+                onStep={(by) => {
+                  const at = ordered.findIndex((x) => x.id === d.id) + by;
+                  const next = ordered[Math.max(0, Math.min(ordered.length - 1, at))];
+                  setPicked(next.id);
+                  document.querySelector<HTMLElement>(`[data-decision="${CSS.escape(next.id)}"]`)?.focus();
+                }}
                 now={now}
                 onPick={() => setPicked(d.id)}
                 onOpenIssue={props.onOpenIssue}
@@ -171,12 +181,17 @@ function eventOf(d: Decision, detail: IssueDetail | undefined): { text: string; 
   }
 }
 
+/**
+ * A decision in the list. Only the open one is a tab stop, so Tab goes from the list straight to
+ * its actions; j and k (and the arrow keys) move the pick, and focus follows it.
+ */
 function InboxRow(props: {
   decision: Decision;
   detail?: IssueDetail;
   on: boolean;
   now: number;
   onPick: () => void;
+  onStep: (by: 1 | -1) => void;
   onOpenIssue: (key: string) => void;
 }) {
   const { decision: d } = props;
@@ -185,14 +200,21 @@ function InboxRow(props: {
   return (
     <button
       className={`inbox-row${props.on ? " on" : ""}`}
+      data-decision={d.id}
+      tabIndex={props.on ? 0 : -1}
       onClick={props.onPick}
-      onFocus={props.onPick}
       onKeyDown={(e) => {
         if (e.key === "Enter" && issue) {
           e.preventDefault();
           props.onOpenIssue(issue.key);
+        } else if ((e.key === "j" || e.key === "ArrowDown" || e.key === "k" || e.key === "ArrowUp") && !e.ctrlKey && !e.metaKey && !e.altKey) {
+          // Handled here rather than by the page-wide j/k, which only moves focus.
+          e.preventDefault();
+          e.stopPropagation();
+          props.onStep(e.key === "j" || e.key === "ArrowDown" ? 1 : -1);
         }
       }}
+
       aria-current={props.on ? "true" : undefined}
     >
       <span className={`inbox-kind inbox-kind-${d.kind}`} aria-label={KIND_WORD[d.kind]}>
