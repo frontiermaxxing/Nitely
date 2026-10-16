@@ -304,6 +304,7 @@ impl Supervisor {
             self.self_paused = false;
             self.disabled.clear();
             self.launch_failures.clear();
+            self.waiting.clear();
         }
         tick.cap = rules.workers;
         let status = match &playbook {
@@ -621,7 +622,9 @@ impl Supervisor {
             return Ok(outcome.into());
         }
 
-        if !timeline.iter().any(|t| t.kind == "handoff") {
+        // Only this worker's own handoff counts: the supervisor's note on an earlier attempt can
+        // fall in the same second this one started.
+        if !timeline.iter().any(|t| t.kind == "handoff" && t.actor == w.agent_id) {
             let last = timeline.iter().rev().find(|t| t.actor == w.agent_id && t.kind == "status").and_then(|t| t.summary.clone());
             let last = last.map_or("it made no report".to_string(), |s| format!("its last report: \"{s}\""));
             let note = format!(
@@ -1124,7 +1127,18 @@ impl Process for Adopted {
         #[cfg(windows)]
         playbook::shell_free_command("taskkill").args(["/T", "/F", "/PID", &pid]).output().ok();
         #[cfg(unix)]
-        std::process::Command::new("kill").args(["-TERM", "--", &format!("-{pid}")]).output().ok();
+        {
+            // As for a child: SIGTERM to the group, then SIGKILL, so it is gone before its issue
+            // goes to another worker in the same worktree.
+            std::process::Command::new("kill").args(["-TERM", "--", &format!("-{pid}")]).output().ok();
+            for _ in 0..40 {
+                if !pid_alive(self.0) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            std::process::Command::new("kill").args(["-KILL", "--", &format!("-{pid}")]).output().ok();
+        }
     }
 }
 
@@ -1565,9 +1579,11 @@ workers = 2
         assert!(tick.status.starts_with("paused: no agent will start (claude: exited 2 times right after starting"), "{}", tick.status);
         assert_eq!(f.db.issue("NIT-1").unwrap().unwrap().state, "Todo");
         assert!(sup.tick(&mut f.db, false).unwrap().started.is_empty());
-        // A person resumes: claude gets another chance.
+        // A person resumes: claude gets another chance, on the issues passed over too.
+        sup.waiting.insert("NIT-2".into(), "passed over while claude would not start".into());
         f.db.crew_pause("NIT", false, &Actor::Human).unwrap();
         assert_eq!(sup.tick(&mut f.db, false).unwrap().started[0].issue, "NIT-1");
+        assert!(sup.waiting.is_empty());
     }
 
     #[test]
