@@ -123,12 +123,18 @@ export function App() {
             {agentChanges > 0
               ? `Your agents have an older copy of Nitely's instructions or setup (${agentChanges} change${agentChanges === 1 ? "" : "s"}).`
               : `Nitely could not read the setup of ${agentErrors} agent${agentErrors === 1 ? "" : "s"}.`}{" "}
-            <button className="link" onClick={() => setView({ kind: "agents" })}>
+            <button
+              className="link"
+              onClick={() => {
+                loadAgents();
+                setView({ kind: "agents" });
+              }}
+            >
               {agentChanges > 0 ? "Review and update" : "See why"}
             </button>
           </p>
         )}
-        {view.kind === "agents" && <AgentSetup agents={agents} onUpdated={loadAgents} />}
+        {view.kind === "agents" && <AgentSetup agents={agents} onUpdated={loadAgents} onRecheck={loadAgents} />}
         {view.kind === "inbox" && board && <Inbox board={board} now={now} onOpenIssue={setOpenIssue} onChanged={changed} />}
         {view.kind === "now" && board && <Now board={board} now={now} onOpenIssue={setOpenIssue} onChanged={changed} />}
         {view.kind === "add" && (

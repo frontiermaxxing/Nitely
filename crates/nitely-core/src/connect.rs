@@ -317,13 +317,18 @@ fn is_ours(command: &str, vendor: &str) -> bool {
     command.contains("nitely") && command.contains(&format!("hook {vendor}"))
 }
 
-/// When `hook` is Nitely's, points it at `command` (an older install may have used another path)
-/// and returns true.
+/// When `hook` is Nitely's, returns true, and points it at `command` when it is exactly what
+/// `connect` wrote for another install path. A command the user wrapped or chained is left as it is.
 fn point_at(hook: &mut Value, vendor: &str, command: &str) -> bool {
-    if !hook.get("command").and_then(Value::as_str).is_some_and(|c| is_ours(c, vendor)) {
+    let Some(current) = hook.get("command").and_then(Value::as_str) else { return false };
+    if !is_ours(current, vendor) {
         return false;
     }
-    hook["command"] = json!(command);
+    let exe = current.strip_suffix(&format!(" hook {vendor}")).map(|e| e.trim_matches('"'));
+    let plain = exe.is_some_and(|e| !e.contains('"') && Path::new(e).file_stem().is_some_and(|s| s == "nitely"));
+    if plain {
+        hook["command"] = json!(command);
+    }
     true
 }
 
@@ -627,6 +632,12 @@ mod tests {
         assert_eq!(pending_in(&moved), vec![settings.to_string_lossy().into_owned()]);
         assert!(apply_agents(&moved).1.is_empty());
         assert!(!std::fs::read_to_string(&settings).unwrap().contains("C:/old"));
+        let mut chained = json!({ "command": "nitely hook claude && notify-user" });
+        assert!(point_at(&mut chained, "claude", "nitely hook claude"), "still counts as Nitely's");
+        assert_eq!(chained["command"], "nitely hook claude && notify-user", "but is left as the user wrote it");
+        let mut spaced = json!({ "command": "\"C:/Program Files/Nitely/nitely.exe\" hook claude" });
+        point_at(&mut spaced, "claude", "nitely hook claude");
+        assert_eq!(spaced["command"], "nitely hook claude");
 
         // A moved MCP registration is left to the human, so its env and tokens survive.
         std::fs::write(&claude_json, r#"{"mcpServers":{"nitely":{"command":"C:/old/nitely.exe","args":["mcp"],"env":{"T":"x"}}}}"#).unwrap();

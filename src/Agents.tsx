@@ -46,7 +46,7 @@ export function AgentChanges(props: { agents: AgentPlan[] }) {
 }
 
 /** Brings the agents' setup up to this version of Nitely after it changed what it writes. */
-export function AgentSetup(props: { agents: AgentPlan[]; onUpdated: () => void }) {
+export function AgentSetup(props: { agents: AgentPlan[]; onUpdated: () => void; onRecheck: () => void }) {
   const [result, setResult] = useState<AgentsUpdated | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -77,13 +77,24 @@ export function AgentSetup(props: { agents: AgentPlan[]; onUpdated: () => void }
       {error && <p className="error">{error}</p>}
       {!result && pending === 0 && setupErrors(props.agents) === 0 && <p className="small">Every agent's setup is up to date.</p>}
       <AgentChanges agents={props.agents} />
-      {!result && automatic > 0 && (
-        <div className="actions">
+      <div className="actions">
+        {!result && automatic > 0 && (
           <button className="btn primary" disabled={busy} onClick={update}>
             Make {automatic} change{automatic === 1 ? "" : "s"}
           </button>
-        </div>
-      )}
+        )}
+        {/* After a file was fixed by hand, or once the update ran. */}
+        <button
+          className="btn"
+          disabled={busy}
+          onClick={() => {
+            setResult(null);
+            props.onRecheck();
+          }}
+        >
+          Check again
+        </button>
+      </div>
       {result && (
         <section>
           <h2>Done</h2>
