@@ -61,6 +61,12 @@ export interface IssueRecord {
   claimed_by: string | null;
   created_at: string;
   updated_at: string;
+  /** Open issues that must close before this one can start; next_task skips it until then. */
+  blocked_by: string[];
+  /** Open issues waiting on this one. */
+  blocks: string[];
+  /** Its priority, raised to that of the most urgent open issue it blocks (same 0-4 scale). */
+  urgency: number;
 }
 
 export interface PrRecord {
@@ -117,8 +123,17 @@ export interface TimelineEntry {
   summary: string | null;
 }
 
+/** An issue on the other end of a blocked-by relation, open or closed. */
+export interface LinkedIssue {
+  key: string;
+  title: string;
+  state: string;
+  open: boolean;
+}
+
 export interface IssueDetail {
   issue: IssueRecord;
+  relations: { blocked_by: LinkedIssue[]; blocks: LinkedIssue[] };
   timeline: TimelineEntry[];
   prs: PrRecord[];
   reviews: ReviewRecord[];

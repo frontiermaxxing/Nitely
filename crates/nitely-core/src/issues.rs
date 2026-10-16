@@ -6,7 +6,7 @@
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, OptionalExtension, Row, TransactionBehavior};
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::db::{now, Db};
 
@@ -56,6 +56,13 @@ pub struct IssueRecord {
     pub claimed_by: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// Open issues that must close before this one can start. `next_task` skips it until then.
+    pub blocked_by: Vec<String>,
+    /// Open issues waiting on this one.
+    pub blocks: Vec<String>,
+    /// The priority it is worked at: its own, raised to that of the most urgent open issue it
+    /// blocks, directly or through other blockers. Same scale as `priority`.
+    pub urgency: i64,
 }
 
 impl IssueRecord {
@@ -66,6 +73,22 @@ impl IssueRecord {
     pub fn needs_human(&self) -> bool {
         NEEDS_HUMAN.contains(&self.state.as_str())
     }
+}
+
+/// An issue on the other end of a blocked-by relation, open or closed.
+#[derive(Debug, Clone, Serialize)]
+pub struct LinkedIssue {
+    pub key: String,
+    pub title: String,
+    pub state: String,
+    pub open: bool,
+}
+
+/// Both directions of an issue's blocked-by relations, closed issues included.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Relations {
+    pub blocked_by: Vec<LinkedIssue>,
+    pub blocks: Vec<LinkedIssue>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -124,6 +147,8 @@ pub struct NewIssue {
     pub allow_similar: bool,
     /// Defaults to Todo, so `next_task` can hand it out.
     pub state: Option<String>,
+    /// Issues that must close before this one can start.
+    pub blocked_by: Vec<String>,
 }
 
 const ISSUE_COLUMNS: &str = "key, origin, project, title, body, url, state, state_type, kind, source,
@@ -147,7 +172,101 @@ fn issue_from_row(r: &Row) -> rusqlite::Result<IssueRecord> {
         claimed_by: r.get(13)?,
         created_at: r.get(14)?,
         updated_at: r.get(15)?,
+        ..Default::default()
     })
+}
+
+/// 0 (none) sorts after 4 (low).
+fn rank(priority: i64) -> i64 {
+    if priority == 0 { 5 } else { priority }
+}
+
+/// Every blocked-by relation between stored issues, with whether each issue is open and its
+/// priority. Relations to an issue no longer stored (a dropped Linear mirror) are left out.
+struct Deps {
+    /// (blocked issue, blocker)
+    edges: Vec<(String, String)>,
+    open: HashMap<String, bool>,
+    priority: HashMap<String, i64>,
+}
+
+impl Deps {
+    fn load(conn: &rusqlite::Connection) -> Result<Deps> {
+        let mut stmt = conn.prepare(
+            "SELECT r.issue_key, r.blocker_key, a.state_type, a.priority, b.state_type, b.priority
+             FROM issue_blocker r
+             JOIN issue a ON a.key = r.issue_key
+             JOIN issue b ON b.key = r.blocker_key
+             ORDER BY r.issue_key, r.blocker_key",
+        )?;
+        let mut deps = Deps { edges: Vec::new(), open: HashMap::new(), priority: HashMap::new() };
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?, r.get::<_, String>(4)?, r.get::<_, i64>(5)?))
+        })?;
+        for row in rows {
+            let (issue, blocker, issue_type, issue_priority, blocker_type, blocker_priority) = row?;
+            let open = |t: &str| !matches!(t, "completed" | "canceled");
+            deps.open.insert(issue.clone(), open(&issue_type));
+            deps.open.insert(blocker.clone(), open(&blocker_type));
+            deps.priority.insert(issue.clone(), issue_priority);
+            deps.priority.insert(blocker.clone(), blocker_priority);
+            deps.edges.push((issue, blocker));
+        }
+        Ok(deps)
+    }
+
+    fn is_open(&self, key: &str) -> bool {
+        self.open.get(key).copied().unwrap_or(false)
+    }
+
+    fn blocked_by(&self, key: &str) -> Vec<String> {
+        self.edges.iter().filter(|(i, b)| i == key && self.is_open(b)).map(|(_, b)| b.clone()).collect()
+    }
+
+    fn blocks(&self, key: &str) -> Vec<String> {
+        self.edges.iter().filter(|(i, b)| b == key && self.is_open(i)).map(|(i, _)| i.clone()).collect()
+    }
+
+    /// `priority`, raised to the most urgent open issue `key` blocks, directly or transitively.
+    fn urgency(&self, key: &str, priority: i64) -> i64 {
+        let mut best = rank(priority);
+        let mut seen = HashSet::from([key.to_string()]);
+        let mut todo = vec![key.to_string()];
+        while let Some(k) = todo.pop() {
+            for blocked in self.blocks(&k) {
+                if seen.insert(blocked.clone()) {
+                    best = best.min(rank(self.priority.get(&blocked).copied().unwrap_or(0)));
+                    todo.push(blocked);
+                }
+            }
+        }
+        if best == 5 { 0 } else { best }
+    }
+
+    /// Whether `from` waits on `to`, directly or through other blockers (open or closed).
+    fn waits_on(&self, from: &str, to: &str) -> bool {
+        let mut seen = HashSet::new();
+        let mut todo = vec![from.to_string()];
+        while let Some(k) = todo.pop() {
+            for (i, b) in &self.edges {
+                if *i == k {
+                    if b == to {
+                        return true;
+                    }
+                    if seen.insert(b.clone()) {
+                        todo.push(b.clone());
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn fill(&self, issue: &mut IssueRecord) {
+        issue.blocked_by = self.blocked_by(&issue.key);
+        issue.blocks = self.blocks(&issue.key);
+        issue.urgency = self.urgency(&issue.key, issue.priority);
+    }
 }
 
 /// Accepts "in progress", "in-progress", "IN_PROGRESS", and "Needs Andrew" for Needs You.
@@ -287,6 +406,14 @@ impl Db {
             bail!("an issue cannot be filed as Approved");
         }
 
+        let mut blockers: Vec<String> = Vec::new();
+        for b in &new.blocked_by {
+            let blocker = self.issue(b.trim())?.with_context(|| format!("no issue {b} to be blocked by"))?;
+            if !blockers.contains(&blocker.key) {
+                blockers.push(blocker.key);
+            }
+        }
+
         if !new.allow_similar {
             let similar: Vec<String> = self
                 .list_issues(Some(&project.key), false)?
@@ -333,22 +460,40 @@ impl Db {
             "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, ?2, ?3, 'issue_created', ?4)",
             params![ts, actor.id(), key, format!("Filed as {state}")],
         )?;
+        for blocker in &blockers {
+            tx.execute(
+                "INSERT INTO issue_blocker (issue_key, blocker_key, created_at) VALUES (?1, ?2, ?3)",
+                params![key, blocker, ts],
+            )?;
+            tx.execute(
+                "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, ?2, ?3, 'blocker_added', ?4)",
+                params![ts, actor.id(), key, format!("Blocked by {blocker}")],
+            )?;
+        }
         tx.commit()?;
         self.issue(&key)?.context("issue vanished after insert")
     }
 
     pub fn issue(&self, key: &str) -> Result<Option<IssueRecord>> {
-        Ok(self
+        let issue = self
             .conn
             .query_row(
                 &format!("SELECT {ISSUE_COLUMNS} FROM issue WHERE key = ?1 COLLATE NOCASE"),
                 [key],
                 issue_from_row,
             )
-            .optional()?)
+            .optional()?;
+        Ok(match issue {
+            Some(mut i) => {
+                Deps::load(&self.conn)?.fill(&mut i);
+                Some(i)
+            }
+            None => None,
+        })
     }
 
-    /// Every issue (native and mirrored); `project` narrows to one project's native issues.
+    /// Every issue (native and mirrored), most urgent first; `project` narrows to one project's
+    /// native issues.
     pub fn list_issues(&self, project: Option<&str>, include_closed: bool) -> Result<Vec<IssueRecord>> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {ISSUE_COLUMNS} FROM issue
@@ -357,7 +502,86 @@ impl Db {
              ORDER BY CASE priority WHEN 0 THEN 5 ELSE priority END, number, key"
         ))?;
         let rows = stmt.query_map(params![project, include_closed], issue_from_row)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let mut issues: Vec<IssueRecord> = rows.collect::<rusqlite::Result<_>>()?;
+        let deps = Deps::load(&self.conn)?;
+        for i in &mut issues {
+            deps.fill(i);
+        }
+        // Stable, so issues of equal urgency keep their priority and number order.
+        issues.sort_by_key(|i| rank(i.urgency));
+        Ok(issues)
+    }
+
+    /// Records that `key` cannot start before `blocker` closes. Refuses a relation that would make
+    /// two issues wait on each other.
+    pub fn add_blocker(&self, key: &str, blocker: &str, actor: &Actor) -> Result<()> {
+        let issue = self.issue(key)?.with_context(|| format!("no issue {key}"))?;
+        let blocker = self.issue(blocker)?.with_context(|| format!("no issue {blocker}"))?;
+        if issue.origin != "nitely" {
+            bail!("{} is mirrored from {}; only native issues take blockers", issue.key, issue.origin);
+        }
+        if issue.key == blocker.key {
+            bail!("{} cannot block itself", issue.key);
+        }
+        if Deps::load(&self.conn)?.waits_on(&blocker.key, &issue.key) {
+            bail!("{} already waits on {}, so {} cannot also wait on it", blocker.key, issue.key, issue.key);
+        }
+        let ts = now();
+        let added = self.conn.execute(
+            "INSERT OR IGNORE INTO issue_blocker (issue_key, blocker_key, created_at) VALUES (?1, ?2, ?3)",
+            params![issue.key, blocker.key, ts],
+        )?;
+        if added > 0 {
+            self.conn.execute(
+                "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, ?2, ?3, 'blocker_added', ?4)",
+                params![ts, actor.id(), issue.key, format!("Blocked by {}", blocker.key)],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn remove_blocker(&self, key: &str, blocker: &str, actor: &Actor) -> Result<()> {
+        let issue = self.issue(key)?.with_context(|| format!("no issue {key}"))?;
+        let blocker = blocker.trim().to_uppercase();
+        let removed = self.conn.execute(
+            "DELETE FROM issue_blocker WHERE issue_key = ?1 AND blocker_key = ?2 COLLATE NOCASE",
+            params![issue.key, blocker],
+        )?;
+        if removed == 0 {
+            bail!("{} is not blocked by {blocker}", issue.key);
+        }
+        self.conn.execute(
+            "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, ?2, ?3, 'blocker_removed', ?4)",
+            params![now(), actor.id(), issue.key, format!("No longer blocked by {blocker}")],
+        )?;
+        Ok(())
+    }
+
+    /// Both directions of `key`'s blocked-by relations, closed issues included.
+    pub fn relations(&self, key: &str) -> Result<Relations> {
+        let link = |sql: &str| -> Result<Vec<LinkedIssue>> {
+            let mut stmt = self.conn.prepare(sql)?;
+            let rows = stmt.query_map([key], |r| {
+                let state_type: String = r.get(3)?;
+                Ok(LinkedIssue {
+                    key: r.get(0)?,
+                    title: r.get(1)?,
+                    state: r.get(2)?,
+                    open: !matches!(state_type.as_str(), "completed" | "canceled"),
+                })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        };
+        Ok(Relations {
+            blocked_by: link(
+                "SELECT i.key, i.title, i.state, i.state_type FROM issue_blocker r JOIN issue i ON i.key = r.blocker_key
+                 WHERE r.issue_key = ?1 COLLATE NOCASE ORDER BY i.number, i.key",
+            )?,
+            blocks: link(
+                "SELECT i.key, i.title, i.state, i.state_type FROM issue_blocker r JOIN issue i ON i.key = r.issue_key
+                 WHERE r.blocker_key = ?1 COLLATE NOCASE ORDER BY i.number, i.key",
+            )?,
+        })
     }
 
     /// Kept for the snapshot and older callers: every stored issue, open or not.
@@ -411,26 +635,41 @@ impl Db {
             "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, ?2, ?3, 'issue_moved', ?4)",
             params![ts, actor.id(), issue.key, summary],
         )?;
+        // Closing a blocker readies the issues that waited only on it.
+        if issue.is_open() && matches!(state_type, "completed" | "canceled") {
+            let deps = Deps::load(&tx)?;
+            for waiting in issue.blocks.iter().filter(|k| deps.blocked_by(k).is_empty()) {
+                tx.execute(
+                    "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, ?2, ?3, 'unblocked', ?4)",
+                    params![ts, actor.id(), waiting, format!("Ready: {} is {state}", issue.key)],
+                )?;
+            }
+        }
         tx.commit()?;
         self.issue(&issue.key)?.context("issue vanished")
     }
 
     /// Claims the most urgent Todo issue of a project for `agent`, atomically: two agents asking at
-    /// once get different issues. A claim untouched for `CLAIM_TTL_SECS` counts as abandoned.
+    /// once get different issues. A claim untouched for `CLAIM_TTL_SECS` counts as abandoned. An
+    /// issue with an open blocker is skipped, and a blocker is as urgent as what it blocks.
     pub fn next_task(&mut self, project: &str, agent: &str) -> Result<Option<IssueRecord>> {
         let ts = now();
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let key: Option<String> = tx
-            .query_row(
-                "SELECT key FROM issue
+        let candidates: Vec<(String, i64, i64)> = {
+            let mut stmt = tx.prepare(
+                "SELECT key, priority, number FROM issue
                  WHERE project = ?1 COLLATE NOCASE AND origin = 'nitely'
-                   AND (state = 'Todo' OR (state = 'In Progress' AND claimed_at < ?2))
-                 ORDER BY CASE priority WHEN 0 THEN 5 ELSE priority END, number
-                 LIMIT 1",
-                params![project, ts - CLAIM_TTL_SECS],
-                |r| r.get(0),
-            )
-            .optional()?;
+                   AND (state = 'Todo' OR (state = 'In Progress' AND claimed_at < ?2))",
+            )?;
+            let rows = stmt.query_map(params![project, ts - CLAIM_TTL_SECS], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let deps = Deps::load(&tx)?;
+        let key = candidates
+            .into_iter()
+            .filter(|(k, _, _)| deps.blocked_by(k).is_empty())
+            .min_by_key(|(k, priority, number)| (rank(deps.urgency(k, *priority)), *number))
+            .map(|(k, _, _)| k);
         let Some(key) = key else {
             return Ok(None);
         };
@@ -666,6 +905,77 @@ mod tests {
         assert_eq!(first.claimed_by.as_deref(), Some("claude:a"));
         assert_eq!(db.next_task("NIT", "codex:b").unwrap().unwrap().key, "NIT-1");
         assert!(db.next_task("NIT", "cursor:c").unwrap().is_none());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn blocked_issues_wait_and_blockers_inherit_urgency() {
+        let (mut db, dir) = db();
+        db.create_project("NIT", "Nitely").unwrap();
+        let h = Actor::Human;
+        let mut base = new("Visual foundation");
+        base.priority = 3;
+        db.create_issue(&base, &h).unwrap(); // NIT-1
+        let mut view = new("Board view");
+        view.priority = 1;
+        view.blocked_by = vec!["nit-1".into()];
+        db.create_issue(&view, &h).unwrap(); // NIT-2, waits on NIT-1
+        let mut other = new("Unrelated cleanup");
+        other.priority = 2;
+        db.create_issue(&other, &h).unwrap(); // NIT-3
+
+        let blocked = db.issue("NIT-2").unwrap().unwrap();
+        assert_eq!(blocked.blocked_by, vec!["NIT-1"]);
+        let blocker = db.issue("NIT-1").unwrap().unwrap();
+        assert_eq!((blocker.blocks.clone(), blocker.priority, blocker.urgency), (vec!["NIT-2".to_string()], 3, 1));
+        let order: Vec<String> = db.list_issues(Some("NIT"), false).unwrap().into_iter().map(|i| i.key).collect();
+        assert_eq!(order, ["NIT-2", "NIT-1", "NIT-3"]);
+
+        // NIT-1 is as urgent as NIT-2, which it blocks, so it goes before NIT-3; NIT-2 is skipped.
+        assert_eq!(db.next_task("NIT", "claude:a").unwrap().unwrap().key, "NIT-1");
+        assert_eq!(db.next_task("NIT", "claude:b").unwrap().unwrap().key, "NIT-3");
+        assert!(db.next_task("NIT", "claude:c").unwrap().is_none());
+
+        db.move_issue("NIT-1", "Done", Some("landed"), None, &h).unwrap();
+        let ready = db.issue("NIT-2").unwrap().unwrap();
+        assert!(ready.blocked_by.is_empty());
+        assert!(db.timeline("NIT-2").unwrap().iter().any(|e| e.kind == "unblocked"));
+        assert_eq!(db.next_task("NIT", "claude:c").unwrap().unwrap().key, "NIT-2");
+        // The relation stays on record after the blocker closes.
+        assert!(!db.relations("NIT-2").unwrap().blocked_by[0].open);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn blockers_chain_and_refuse_cycles() {
+        let (mut db, dir) = db();
+        db.create_project("NIT", "Nitely").unwrap();
+        let h = Actor::Human;
+        for t in ["Foundation", "Board timeline", "Inbox redesign", "Review everything"] {
+            db.create_issue(&new(t), &h).unwrap();
+        }
+        db.add_blocker("NIT-2", "NIT-1", &h).unwrap();
+        db.add_blocker("NIT-3", "NIT-1", &h).unwrap();
+        db.add_blocker("NIT-4", "NIT-2", &h).unwrap();
+        db.add_blocker("NIT-4", "NIT-3", &h).unwrap();
+        db.add_blocker("NIT-4", "NIT-3", &h).unwrap(); // again: no-op
+        assert!(db.add_blocker("NIT-1", "NIT-4", &h).is_err(), "cycle through two levels");
+        assert!(db.add_blocker("NIT-1", "NIT-1", &h).is_err());
+        assert!(db.add_blocker("NIT-1", "NIT-99", &h).is_err());
+        let mut late = new("Something filed late");
+        late.blocked_by = vec!["NIT-99".into()];
+        assert!(db.create_issue(&late, &h).is_err(), "a missing blocker refuses the filing");
+
+        // Urgency flows down the chain: NIT-4 urgent makes NIT-1 urgent too.
+        db.conn.execute("UPDATE issue SET priority = 1 WHERE key = 'NIT-4'", []).unwrap();
+        assert_eq!(db.issue("NIT-1").unwrap().unwrap().urgency, 1);
+        assert_eq!(db.issue("NIT-4").unwrap().unwrap().blocked_by, vec!["NIT-2", "NIT-3"]);
+
+        db.remove_blocker("NIT-4", "nit-2", &h).unwrap();
+        assert!(db.remove_blocker("NIT-4", "NIT-2", &h).is_err());
+        assert_eq!(db.issue("NIT-4").unwrap().unwrap().blocked_by, vec!["NIT-3"]);
+        let rel = db.relations("NIT-1").unwrap();
+        assert_eq!(rel.blocks.iter().map(|l| l.key.as_str()).collect::<Vec<_>>(), ["NIT-2", "NIT-3"]);
         std::fs::remove_dir_all(dir).ok();
     }
 

@@ -35,6 +35,8 @@ pub struct Landed {
     pub conflicts: Vec<String>,
     pub cleanup: Option<String>,
     pub error: Option<String>,
+    /// Issues that waited on this one and have no open blocker left.
+    pub unblocked: Vec<String>,
 }
 
 pub struct LandOptions<'a> {
@@ -71,6 +73,11 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
             db.log_event(actor, Some(&issue.key), None, "landed", &format!("Landed {} on {base} at {}", report.branch, report.head.as_deref().unwrap_or("?")))?;
             if issue.origin == "nitely" && issue.state != "Done" {
                 db.move_issue(&issue.key, "Done", Some(&evidence), None, actor)?;
+            }
+            for waiting in &issue.blocks {
+                if db.issue(waiting)?.is_some_and(|i| i.blocked_by.is_empty()) {
+                    report.unblocked.push(waiting.clone());
+                }
             }
         }
         Err(e) => {

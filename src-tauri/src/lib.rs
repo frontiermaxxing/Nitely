@@ -1,4 +1,4 @@
-use nitely_core::issues::{Ask, Project, TimelineEntry};
+use nitely_core::issues::{Ask, Project, Relations, TimelineEntry};
 use nitely_core::db::PrRecord;
 use nitely_core::{remote, Actor, Board, Config, Db, IssueRecord};
 use serde::Serialize;
@@ -52,6 +52,7 @@ async fn issues(project: String, include_closed: bool) -> Result<Vec<IssueRecord
 #[derive(Serialize)]
 struct IssueDetail {
     issue: IssueRecord,
+    relations: Relations,
     timeline: Vec<TimelineEntry>,
     prs: Vec<PrRecord>,
     reviews: Vec<nitely_core::submit::ReviewRecord>,
@@ -61,10 +62,23 @@ struct IssueDetail {
 async fn issue_detail(key: String) -> Result<IssueDetail, String> {
     let db = db()?;
     let issue = db.issue(&key).map_err(err)?.ok_or_else(|| format!("no issue {key}"))?;
+    let relations = db.relations(&issue.key).map_err(err)?;
     let timeline = db.timeline(&issue.key).map_err(err)?;
     let prs = db.prs_for_issue(&issue.key).map_err(err)?;
     let reviews = db.reviews(&issue.key).map_err(err)?;
-    Ok(IssueDetail { issue, timeline, prs, reviews })
+    Ok(IssueDetail { issue, relations, timeline, prs, reviews })
+}
+
+/// Adds (`blocked` true) or removes a blocker of an issue.
+#[tauri::command]
+async fn set_blocker(key: String, blocker: String, blocked: bool) -> Result<Relations, String> {
+    let db = db()?;
+    if blocked {
+        db.add_blocker(&key, &blocker, &ME).map_err(err)?;
+    } else {
+        db.remove_blocker(&key, &blocker, &ME).map_err(err)?;
+    }
+    db.relations(&key).map_err(err)
 }
 
 #[tauri::command]
@@ -172,6 +186,7 @@ pub fn run() {
             create_project,
             issues,
             issue_detail,
+            set_blocker,
             move_issue,
             answer_ask,
             connect_plan,

@@ -105,7 +105,7 @@ fn tools() -> Value {
     json!([
         {
             "name": "next_task",
-            "description": "Claim the most urgent Todo issue in this repo's project and get it with a suggested branch name. Two agents never get the same issue. Returns null when nothing is ready.",
+            "description": "Claim the most urgent Todo issue in this repo's project and get it with a suggested branch name. Two agents never get the same issue. Issues with an open blocker are skipped, and a blocker is as urgent as what it blocks. Returns null when nothing is ready.",
             "inputSchema": { "type": "object", "properties": {
                 "project": { "type": "string", "description": "Project key; defaults to this repo's project." }
             } }
@@ -142,7 +142,7 @@ fn tools() -> Value {
         },
         {
             "name": "get_issue",
-            "description": "An issue with its full timeline (state changes, notes, handoffs, questions and answers) and the pull requests whose branch names it, with their CI checks.",
+            "description": "An issue with its full timeline (state changes, notes, handoffs, questions and answers), the issues it is blocked by and blocks, and the pull requests whose branch names it, with their CI checks.",
             "inputSchema": { "type": "object", "required": ["key"], "properties": {
                 "key": { "type": "string", "description": "e.g. NIT-12" }
             } }
@@ -166,17 +166,20 @@ fn tools() -> Value {
                 "priority": { "type": "integer", "minimum": 0, "maximum": 4, "description": "1 urgent, 2 high, 3 medium, 4 low, 0 none" },
                 "state": { "type": "string", "enum": ["Todo", "Backlog"] },
                 "project": { "type": "string" },
-                "allow_similar": { "type": "boolean" }
+                "allow_similar": { "type": "boolean" },
+                "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Issues that must close before this one can start, e.g. [\"NIT-9\"]." }
             } }
         },
         {
             "name": "update_issue",
-            "description": "Move an issue. Done needs evidence (what ran and what it showed); Canceled and Duplicate need a reason. Approved is set only by the human; move to Needs You and ask instead.",
-            "inputSchema": { "type": "object", "required": ["key", "state"], "properties": {
+            "description": "Move an issue, or change what blocks it. Done needs evidence (what ran and what it showed); Canceled and Duplicate need a reason. Approved is set only by the human; move to Needs You and ask instead. An issue with an open blocker waits: next_task skips it until every blocker is Done or Canceled.",
+            "inputSchema": { "type": "object", "required": ["key"], "properties": {
                 "key": { "type": "string" },
                 "state": { "type": "string", "enum": states },
                 "evidence": { "type": "string" },
-                "reason": { "type": "string" }
+                "reason": { "type": "string" },
+                "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Issues to add as blockers of this one." },
+                "remove_blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Blockers to remove." }
             } }
         },
         {
@@ -232,6 +235,15 @@ fn req<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     str_arg(args, key).ok_or_else(|| anyhow!("missing {key}"))
 }
 
+/// A list of issue keys; a single string counts as a list of one.
+fn keys_arg(args: &Value, key: &str) -> Vec<String> {
+    match args.get(key) {
+        Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).map(str::to_string).collect(),
+        Some(Value::String(s)) if !s.is_empty() => vec![s.clone()],
+        _ => Vec::new(),
+    }
+}
+
 fn run_tool(server: &Server, name: &str, args: &Value) -> Result<Value> {
     let config = Config::load()?;
     let mut db = Db::open_default()?;
@@ -253,7 +265,20 @@ fn run_tool(server: &Server, name: &str, args: &Value) -> Result<Value> {
                         "next": "Call start_task with this key for the branch and worktree, work there, report as you go, call submit when it is committed, and leave a handoff note before you stop."
                     })
                 }
-                None => json!({ "issue": null, "message": format!("Nothing in Todo for {project}.") }),
+                None => {
+                    let waiting: Vec<String> = db
+                        .list_issues(Some(&project), false)?
+                        .into_iter()
+                        .filter(|i| i.state == "Todo" && !i.blocked_by.is_empty())
+                        .map(|i| format!("{} (blocked by {})", i.key, i.blocked_by.join(", ")))
+                        .collect();
+                    let message = if waiting.is_empty() {
+                        format!("Nothing in Todo for {project}.")
+                    } else {
+                        format!("Nothing ready in {project}; waiting on blockers: {}.", waiting.join("; "))
+                    };
+                    json!({ "issue": null, "message": message })
+                }
             }
         }
         "start_task" => {
@@ -282,7 +307,12 @@ fn run_tool(server: &Server, name: &str, args: &Value) -> Result<Value> {
         "get_issue" => {
             let key = req(args, "key")?;
             let issue = db.issue(key)?.with_context(|| format!("no issue {key}"))?;
-            json!({ "issue": issue, "timeline": db.timeline(&issue.key)?, "pull_requests": db.prs_for_issue(&issue.key)? })
+            json!({
+                "issue": issue,
+                "relations": db.relations(&issue.key)?,
+                "timeline": db.timeline(&issue.key)?,
+                "pull_requests": db.prs_for_issue(&issue.key)?
+            })
         }
         "list_issues" => {
             let project = project(&db)?;
@@ -303,18 +333,29 @@ fn run_tool(server: &Server, name: &str, args: &Value) -> Result<Value> {
                     priority: args.get("priority").and_then(Value::as_i64).unwrap_or(0),
                     allow_similar: args.get("allow_similar").and_then(Value::as_bool).unwrap_or(false),
                     state: str_arg(args, "state").map(str::to_string),
+                    blocked_by: keys_arg(args, "blocked_by"),
                 },
                 &actor,
             )?;
             json!(issue)
         }
-        "update_issue" => json!(db.move_issue(
-            req(args, "key")?,
-            req(args, "state")?,
-            str_arg(args, "evidence"),
-            str_arg(args, "reason"),
-            &actor
-        )?),
+        "update_issue" => {
+            let key = req(args, "key")?;
+            let (add, remove) = (keys_arg(args, "blocked_by"), keys_arg(args, "remove_blocked_by"));
+            if str_arg(args, "state").is_none() && add.is_empty() && remove.is_empty() {
+                bail!("give a state, blocked_by or remove_blocked_by");
+            }
+            for b in &add {
+                db.add_blocker(key, b, &actor)?;
+            }
+            for b in &remove {
+                db.remove_blocker(key, b, &actor)?;
+            }
+            match str_arg(args, "state") {
+                Some(state) => json!(db.move_issue(key, state, str_arg(args, "evidence"), str_arg(args, "reason"), &actor)?),
+                None => json!(db.issue(key)?.with_context(|| format!("no issue {key}"))?),
+            }
+        }
         "report" => {
             let text = req(args, "text")?;
             db.record(&NewEvent {

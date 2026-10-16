@@ -167,6 +167,9 @@ enum IssueCmd {
         state: Option<String>,
         #[arg(long)]
         allow_similar: bool,
+        /// An issue that must close before this one can start (repeatable).
+        #[arg(long)]
+        blocked_by: Vec<String>,
     },
     /// List open issues (add --all for closed ones too).
     List {
@@ -185,6 +188,19 @@ enum IssueCmd {
         evidence: Option<String>,
         #[arg(long)]
         reason: Option<String>,
+    },
+    /// Record that an issue cannot start before others close; next_task skips it until then.
+    Block {
+        key: String,
+        /// The blocking issues.
+        #[arg(long = "by", required = true)]
+        by: Vec<String>,
+    },
+    /// Remove blockers from an issue.
+    Unblock {
+        key: String,
+        #[arg(long = "by", required = true)]
+        by: Vec<String>,
     },
     /// Add a note to an issue's timeline (--handoff for a handoff note).
     Note {
@@ -330,10 +346,10 @@ fn run(cmd: Cmd) -> Result<()> {
             let config = Config::load()?;
             let mut db = Db::open_default()?;
             match command {
-                IssueCmd::Create { title, kind, source, evidence, body, priority, project, state, allow_similar } => {
+                IssueCmd::Create { title, kind, source, evidence, body, priority, project, state, allow_similar, blocked_by } => {
                     let project = resolve_project(&config, &db, project.as_deref(), &cwd()?)?;
                     let issue = db.create_issue(
-                        &NewIssue { project, title, body, kind, source, evidence, priority, allow_similar, state },
+                        &NewIssue { project, title, body, kind, source, evidence, priority, allow_similar, state, blocked_by },
                         &me,
                     )?;
                     print_json(&issue)
@@ -341,7 +357,8 @@ fn run(cmd: Cmd) -> Result<()> {
                 IssueCmd::List { project, all } => {
                     let project = resolve_project(&config, &db, project.as_deref(), &cwd()?)?;
                     for i in db.list_issues(Some(&project), all)? {
-                        println!("{:<9} {:<12} {}", i.key, i.state, i.title);
+                        let blocked = if i.blocked_by.is_empty() { String::new() } else { format!("  (blocked by {})", i.blocked_by.join(", ")) };
+                        println!("{:<9} {:<12} {}{blocked}", i.key, i.state, i.title);
                     }
                     Ok(())
                 }
@@ -349,6 +366,7 @@ fn run(cmd: Cmd) -> Result<()> {
                     let issue = db.issue(&key)?.ok_or_else(|| anyhow::anyhow!("no issue {key}"))?;
                     print_json(&serde_json::json!({
                         "issue": issue,
+                        "relations": db.relations(&issue.key)?,
                         "timeline": db.timeline(&issue.key)?,
                         "prs": db.prs_for_issue(&issue.key)?,
                         "reviews": db.reviews(&issue.key)?,
@@ -356,6 +374,18 @@ fn run(cmd: Cmd) -> Result<()> {
                 }
                 IssueCmd::Move { key, state, evidence, reason } => {
                     print_json(&db.move_issue(&key, &state, evidence.as_deref(), reason.as_deref(), &me)?)
+                }
+                IssueCmd::Block { key, by } => {
+                    for b in &by {
+                        db.add_blocker(&key, b, &me)?;
+                    }
+                    print_json(&db.relations(&key)?)
+                }
+                IssueCmd::Unblock { key, by } => {
+                    for b in &by {
+                        db.remove_blocker(&key, b, &me)?;
+                    }
+                    print_json(&db.relations(&key)?)
                 }
                 IssueCmd::Note { key, text, handoff } => {
                     db.add_note(&key, &text, if handoff { "handoff" } else { "note" }, &me)
@@ -376,6 +406,7 @@ fn run(cmd: Cmd) -> Result<()> {
                             priority: item.get("priority").and_then(|p| p.as_i64()).unwrap_or(0),
                             state: Some(field(&item, "state")).filter(|s| !s.is_empty()),
                             allow_similar: false,
+                            blocked_by: Vec::new(),
                         };
                         match db.create_issue(&new, &me) {
                             Ok(i) => println!("{:<9} {}", i.key, i.title),
@@ -396,7 +427,10 @@ fn run(cmd: Cmd) -> Result<()> {
                             print_json(&serde_json::json!({ "issue": i, "branch": branch }))
                         }
                         None => {
-                            println!("nothing in Todo for {project}");
+                            println!("nothing ready in {project}");
+                            for i in db.list_issues(Some(&project), false)?.iter().filter(|i| i.state == "Todo" && !i.blocked_by.is_empty()) {
+                                println!("  {} waits on {}", i.key, i.blocked_by.join(", "));
+                            }
                             Ok(())
                         }
                     }

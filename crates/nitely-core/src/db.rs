@@ -35,6 +35,13 @@ CREATE TABLE IF NOT EXISTS issue (
   updated_at TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS issue_project ON issue (project, state_type);
+CREATE TABLE IF NOT EXISTS issue_blocker (  -- issue_key cannot start before blocker_key closes
+  issue_key   TEXT NOT NULL,
+  blocker_key TEXT NOT NULL,
+  created_at  INTEGER NOT NULL,
+  PRIMARY KEY (issue_key, blocker_key)
+);
+CREATE INDEX IF NOT EXISTS issue_blocker_blocker ON issue_blocker (blocker_key);
 CREATE TABLE IF NOT EXISTS task (
   id            INTEGER PRIMARY KEY,
   issue_key     TEXT,
@@ -125,7 +132,7 @@ CREATE TABLE IF NOT EXISTS ask (
 
 /// Bumped when a table changes shape. Tables that only mirror Bitbucket or Linear are dropped
 /// and refilled by the next sync; tables Nitely owns get real migrations.
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -145,6 +152,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         // v5 keys reviews by issue and patch; the old placeholder table was never written.
         conn.execute_batch("DROP TABLE IF EXISTS review;")?;
     }
+    // v6 adds issue_blocker, which SCHEMA creates; nothing to drop.
     Ok(())
 }
 
