@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { invoke } from "./backend";
+import type { View } from "./App";
 import type { Board, SyncStatus, TaskRow } from "./types";
 import { PrCell } from "./Pr";
 import { ago } from "./util";
@@ -17,7 +18,15 @@ import {
 } from "./ui";
 
 /** Every worktree of every watched repo, with the agent in it and its git and PR state. */
-export function Now(props: { board: Board; now: number; onOpenIssue: (key: string) => void; onChanged: () => void }) {
+export function Now(props: {
+  board: Board;
+  /** How many decisions wait on the human (the Inbox's count). */
+  needs: number;
+  now: number;
+  onOpenIssue: (key: string) => void;
+  onChanged: () => void;
+  onGo: (view: View) => void;
+}) {
   const { board, now } = props;
   const [showMain, setShowMain] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -33,7 +42,7 @@ export function Now(props: { board: Board; now: number; onOpenIssue: (key: strin
     <div className="page">
       <div className="page-head">
         <h1>Now</h1>
-        <Glance board={board} now={now} />
+        <Glance board={board} needs={props.needs} now={now} onInbox={() => props.onGo({ kind: "inbox" })} />
         <label className="toggle">
           <input type="checkbox" checked={showMain} onChange={(e) => setShowMain(e.target.checked)} />
           Show main checkouts
@@ -161,10 +170,10 @@ function Row(props: { row: TaskRow; integration: string; now: number; onOpenIssu
 }
 
 /** The page in one line: how many agents work, wait on you, or went quiet. */
-function Glance({ board, now }: { board: Board; now: number }) {
+function Glance({ board, needs, now, onInbox }: { board: Board; needs: number; now: number; onInbox: () => void }) {
   const rows = board.repos.flatMap((r) => r.rows);
   const count = (l: string) => rows.filter((r) => livenessOf(r.session, now) === l).length;
-  const stuck = rows.filter((r) => r.needs_me).length;
+  const stuck = needs;
   const working = count("working");
   const stale = count("stale");
   if (rows.length === 0) return null;
@@ -174,9 +183,9 @@ function Glance({ board, now }: { board: Board; now: number }) {
         <StateDot state="working" /> {working} working
       </span>
       {stuck > 0 && (
-        <span className="attention-ink">
+        <button className="link attention-ink" onClick={onInbox}>
           <StateDot state="waiting" /> {stuck} need{stuck === 1 ? "s" : ""} you
-        </span>
+        </button>
       )}
       {stale > 0 && (
         <span>

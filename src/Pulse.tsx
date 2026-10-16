@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { invoke } from "./backend";
 import type { View } from "./App";
+import { KIND_LABEL as DECISION_LABEL, type Decision, type DecisionKind } from "./decisions";
 import type { Board, FlowIssue, Happening, IssueRecord, ProjectFlow, Pulse as PulseData, Session, TaskRow } from "./types";
 import { agentLabel, ago } from "./util";
 import {
@@ -88,7 +89,15 @@ interface Context {
  * landed; each project's flow puts its open issues at their stations; and the bottom says what
  * happened since you last looked. One backend read (`pulse`), plus the board the app already has.
  */
-export function Pulse(props: { board: Board | null; now: number; version: number; onOpenIssue: (key: string) => void; onGo: (view: View) => void }) {
+export function Pulse(props: {
+  board: Board | null;
+  /** What waits on the human, the same list the Inbox shows and its badge counts. */
+  decisions: Decision[];
+  now: number;
+  version: number;
+  onOpenIssue: (key: string) => void;
+  onGo: (view: View) => void;
+}) {
   const [since] = useState(() => readSeen(Math.floor(Date.now() / 1000)));
   const [data, setData] = useState<PulseData | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -143,7 +152,7 @@ export function Pulse(props: { board: Board | null; now: number; version: number
       {error && <p className="error">{error}</p>}
       {data && (
         <>
-          <Glance data={data} board={props.board} ctx={ctx} onGo={props.onGo} />
+          <Glance data={data} board={props.board} decisions={props.decisions} ctx={ctx} onGo={props.onGo} />
           {data.projects.length === 0 && (
             <EmptyState title="No projects yet." action={<button className="btn" onClick={() => props.onGo({ kind: "add" })}>Add a project</button>}>
               Add a repo and connect your agents; their work shows up here as it moves.
@@ -160,10 +169,13 @@ export function Pulse(props: { board: Board | null; now: number; version: number
 }
 
 /** The four answers, before any detail. */
-function Glance({ data, board, ctx, onGo }: { data: PulseData; board: Board | null; ctx: Context; onGo: (view: View) => void }) {
+const DECISION_ORDER: DecisionKind[] = ["ask", "approve", "conflict", "input", "land"];
+
+function Glance({ data, board, decisions, ctx, onGo }: { data: PulseData; board: Board | null; decisions: Decision[]; ctx: Context; onGo: (view: View) => void }) {
   const rows = board?.repos.flatMap((r) => r.rows) ?? [];
-  const stuckTrees = rows.filter((r) => r.state?.rebase_in_progress || r.session?.state === "waiting");
-  const needs = data.asks.length + data.approvals.length + stuckTrees.length;
+  // "Need you" is the Inbox's list (decisionsOf), so this number and the Inbox badge never differ.
+  const needs = decisions.length;
+  const byKind = DECISION_ORDER.map((k) => ({ k, n: decisions.filter((d) => d.kind === k).length })).filter((x) => x.n > 0);
   const sessions: { s: Session; key: string | null }[] = [
     ...rows.filter((r) => r.session).map((r) => ({ s: r.session!, key: r.issue_key })),
     ...(board?.repos.flatMap((r) => r.unmatched_sessions) ?? []).map((s) => ({ s, key: null })),
@@ -180,21 +192,11 @@ function Glance({ data, board, ctx, onGo }: { data: PulseData; board: Board | nu
         <span className="readout-n">{needs}</span>
         <span className="readout-label">{needs ? (needs === 1 ? "needs you" : "need you") : "Nothing needs you"}</span>
         <span className="readout-sub">
-          {data.asks.length > 0 && (
-            <button className="link" onClick={() => onGo({ kind: "inbox" })}>
-              {plural(data.asks.length, "question", "questions")}
+          {byKind.map(({ k, n }) => (
+            <button key={k} className="link" onClick={() => onGo({ kind: "inbox" })}>
+              {plural(n, DECISION_LABEL[k], `${DECISION_LABEL[k]}s`)}
             </button>
-          )}
-          {data.approvals.length > 0 && (
-            <button className="link" onClick={() => onGo({ kind: "inbox" })}>
-              {plural(data.approvals.length, "approval", "approvals")}
-            </button>
-          )}
-          {stuckTrees.length > 0 && (
-            <button className="link" onClick={() => onGo({ kind: "now" })}>
-              {plural(stuckTrees.length, "worktree waiting", "worktrees waiting")}
-            </button>
-          )}
+          ))}
         </span>
       </div>
       <div className={`readout${working.length ? " readout-live" : " readout-calm"}`}>

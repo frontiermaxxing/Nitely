@@ -141,7 +141,9 @@ export function App() {
 
   // The Inbox's decisions, counted the same way the Inbox lists them.
   const inboxDetails = useDecisionDetails(board);
-  const inboxCount = board ? decisionsOf(board, inboxDetails, now).length : 0;
+  // What waits on the human: the Inbox lists it, and the nav badge, Pulse and Now count it.
+  const decisions = board ? decisionsOf(board, inboxDetails, now) : [];
+  const inboxCount = decisions.length;
   const working = board?.repos.flatMap((r) => r.rows).filter((r) => r.session?.state === "working").length ?? 0;
 
   return (
@@ -192,9 +194,9 @@ export function App() {
           </p>
         )}
         {view.kind === "agents" && <AgentSetup agents={agents} onUpdated={loadAgents} onRecheck={loadAgents} />}
-        {view.kind === "pulse" && <Pulse board={board} now={now} version={version} onOpenIssue={setOpenIssue} onGo={setView} />}
+        {view.kind === "pulse" && <Pulse board={board} decisions={decisions} now={now} version={version} onOpenIssue={setOpenIssue} onGo={setView} />}
         {view.kind === "inbox" && board && <Inbox board={board} details={inboxDetails} now={now} onOpenIssue={setOpenIssue} onChanged={changed} />}
-        {view.kind === "now" && board && <Now board={board} now={now} onOpenIssue={setOpenIssue} onChanged={changed} />}
+        {view.kind === "now" && board && <Now board={board} needs={inboxCount} now={now} onOpenIssue={setOpenIssue} onChanged={changed} onGo={setView} />}
         {view.kind === "activity" && <Activity now={now} version={version} projects={projects} onOpenIssue={setOpenIssue} />}
         {view.kind === "add" && (
           <AddProject

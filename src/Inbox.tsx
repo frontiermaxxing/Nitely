@@ -108,7 +108,7 @@ function Glance({ decisions, now }: { decisions: Decision[]; now: number }) {
   return (
     <span className="head-glance">
       <span className="attention-ink">
-        <StateDot state="waiting" /> {decisions.length} wait{decisions.length === 1 ? "s" : ""} on you
+        <StateDot state="waiting" /> {decisions.length} need{decisions.length === 1 ? "s" : ""} you
       </span>
       <span>{kinds.map(([k, n]) => `${n} ${n === 1 ? KIND_LABEL[k] : PLURAL[k]}`).join(", ")}</span>
       <span>oldest {ago(now, oldest).replace(" ago", "")}</span>

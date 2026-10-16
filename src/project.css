@@ -27,7 +27,8 @@
   display: flex; gap: 10px; align-items: flex-start; overflow-x: auto;
   margin: 0 -32px; padding: 2px 32px 20px;
 }
-.board-col { flex: 1 1 0; min-width: 180px; max-width: 340px; display: flex; flex-direction: column; gap: 8px; }
+/* 120px keeps seven occupied stations on one screen at 1280px (NIT-39); narrower windows stack them. */
+.board-col { flex: 1 1 0; min-width: 120px; max-width: 340px; display: flex; flex-direction: column; gap: 8px; }
 .board-col-empty { flex: 0 0 22px; min-width: 22px; }
 
 .board-col-head {
@@ -140,7 +141,7 @@
 .bmap-group-label strong { font-weight: var(--weight-medium); margin-right: 8px; }
 .bmap-none { margin: 10px 0 0; }
 
-@media (max-width: 760px) {
+@media (max-width: 1240px) {
   .board { flex-direction: column; align-items: stretch; margin: 0; padding: 0; overflow: visible; }
   .board-col { max-width: none; min-width: 0; }
   .board-col-empty { display: none; }
@@ -148,6 +149,9 @@
   .board-track { position: static; width: 10px; height: 10px; flex: none; }
   .board-track::before { display: none; }
   .board-node { position: static; display: block; }
+  .board-cards { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+}
+@media (max-width: 760px) {
   .board-filters { margin-left: 0; }
   .project-head .toggle { margin-left: 0; }
 }
