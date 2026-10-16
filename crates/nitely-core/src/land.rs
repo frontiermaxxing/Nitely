@@ -409,6 +409,7 @@ reason = "billing"
                         priority: 0,
                         allow_similar: true,
                         state: None,
+                        blocked_by: vec![],
                     },
                     &self.actor,
                 )

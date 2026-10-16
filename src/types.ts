@@ -148,7 +148,8 @@ export interface ReviewRecord {
   verdict: "pass" | "changes" | "none";
   approver: "agent" | "human";
   reasons: string[];
-  findings: { priority: number; text: string }[];
+  /** carried: raised in an earlier round and not fixed since. */
+  findings: { priority: number; text: string; carried?: boolean }[];
   ts: number;
 }
 

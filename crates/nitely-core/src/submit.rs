@@ -10,7 +10,7 @@ use std::path::Path;
 use crate::db::{now, Db};
 use crate::issues::{Actor, IssueRecord};
 use crate::playbook::{self, git, GateResult, Playbook};
-use crate::review::Review;
+use crate::review::{PreviousRound, Review};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Submitted {
@@ -124,8 +124,9 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         let (vendor, _) = crate::git::parse_branch(&branch);
         let vendor = vendor.unwrap_or_default();
         let reviewer = pb.review.reviewer_for(&vendor).context("the playbook names no reviewer for this branch")?.to_string();
+        let previous = previous_round(db, &issue.key, &worktree)?;
         db.log_event(actor, Some(&issue.key), Some(&wt), "review_started", &format!("Review by {reviewer} started"))?;
-        let review = match pb.review.run(&reviewer, &worktree, &since) {
+        let review = match pb.review.run(&reviewer, &worktree, &since, previous.as_ref()) {
             Ok(r) => r,
             Err(e) => {
                 db.log_event(actor, Some(&issue.key), Some(&wt), "review_failed", &format!("Review by {reviewer} did not finish"))?;
@@ -165,6 +166,10 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         (Some(r), _) => format!("Review by {} passed; ready to land", r.reviewer),
         (None, _) => "Submitted without a review; waits for a human".to_string(),
     };
+    let outcome = match out.review.as_ref().map(|r| rechecked(&r.previous)) {
+        Some(Some(counts)) => format!("{outcome} (previous round: {counts})"),
+        _ => outcome,
+    };
     // The full description is on the pull request and in the app's review section.
     db.add_note(&issue.key, &format!("{outcome}. {pr_line}"), "submit", actor)?;
 
@@ -186,6 +191,30 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     Ok(out)
 }
 
+/// The latest review that ran on the issue, for the next one to start from. Its commit counts as
+/// in the branch's history only when it is an ancestor of HEAD; after a rebase it is not.
+fn previous_round(db: &Db, key: &str, worktree: &Path) -> Result<Option<PreviousRound>> {
+    let Some(last) = db.reviews(key)?.into_iter().find(|r| !r.reviewer.is_empty()) else {
+        return Ok(None);
+    };
+    let in_history = git(worktree, &["merge-base", "--is-ancestor", &last.commit_sha, "HEAD"]).is_ok();
+    Ok(Some(PreviousRound { commit: last.commit_sha, findings: last.findings, in_history }))
+}
+
+/// "2 fixed, 1 still open" for a re-review's checks of the previous round; None when it had none.
+fn rechecked(previous: &[crate::review::Recheck]) -> Option<String> {
+    if previous.is_empty() {
+        return None;
+    }
+    let count = |status: &str| previous.iter().filter(|r| r.status == status).count();
+    let parts: Vec<String> = [("fixed", "fixed"), ("open", "still open"), ("unchecked", "not checked")]
+        .iter()
+        .filter(|(status, _)| count(status) > 0)
+        .map(|(status, label)| format!("{} {label}", count(status)))
+        .collect();
+    Some(parts.join(", "))
+}
+
 /// The pull request description: approval, review, findings, and a marker line with the patch.
 pub fn describe(issue: &IssueRecord, s: &Submitted) -> String {
     let mut lines = vec![format!("Nitely: **{}** {}", issue.key, issue.title), String::new()];
@@ -203,7 +232,13 @@ pub fn describe(issue: &IssueRecord, s: &Submitted) -> String {
             if !r.summary.is_empty() {
                 lines.push(format!("> {}", r.summary));
             }
-            lines.extend(r.findings.iter().map(|f| format!("- [P{}] {}", f.priority, f.text)));
+            if let Some(counts) = rechecked(&r.previous) {
+                lines.push(format!("Previous round's findings: {counts}."));
+            }
+            lines.extend(r.findings.iter().map(|f| {
+                let carried = if f.carried { " (open since an earlier round)" } else { "" };
+                format!("- [P{}] {}{carried}", f.priority, f.text)
+            }));
         }
         None => lines.push("**Review:** none ran.".into()),
     }
@@ -314,7 +349,24 @@ mod tests {
         };
         Command::new("git").args(["init", "-q", "--bare"]).arg(&remote).output().unwrap();
         sh(&repo, &["init", "-q", "-b", "main"]);
-        // The fake reviewer flags money whenever the diff touches a billing file.
+        // The fake reviewer flags money whenever the diff touches a billing file, finds an edge case
+        // in a first look at an edge file, and on a re-review says that finding is still open.
+        std::fs::write(
+            repo.join("review.sh"),
+            r#"prompt=$(cat)
+files=$(git diff main...HEAD --name-only)
+money=no; case "$files" in *billing*) money=yes;; esac
+case "$prompt" in
+  *"PREVIOUS <n>"*) echo "PREVIOUS 1: open"; echo "VERDICT: clean";;
+  *) case "$files" in
+       *edge*) echo "- [P2] Edge case: edge.txt, the empty line"; echo "VERDICT: findings";;
+       *) echo "Fine."; echo "VERDICT: clean";;
+     esac;;
+esac
+echo "MONEY: $money"
+"#,
+        )
+        .unwrap();
         std::fs::write(
             repo.join(playbook::PLAYBOOK_PATH),
             r#"
@@ -324,7 +376,7 @@ dir = "../wt/{key}"
 commands = ["true"]
 [review]
 reviewer = { "*" = "fake" }
-commands = { fake = ["sh", "-c", "cat > /dev/null; if git diff main...HEAD --name-only | grep -q billing; then m=yes; else m=no; fi; printf 'Fine.\nVERDICT: clean\nMONEY: %s\n' $m"] }
+commands = { fake = ["sh", "review.sh"] }
 [[review.flags]]
 name = "MONEY"
 question = "the change alters billing"
@@ -350,6 +402,7 @@ reason = "money logic"
             priority: 0,
             allow_similar: true,
             state: None,
+            blocked_by: vec![],
         };
         let config = crate::Config::default();
 
@@ -377,6 +430,27 @@ reason = "money logic"
             assert_eq!(db.reviews(&issue.key).unwrap()[0].patch_id, s.patch_id);
             assert!(describe(&issue, &s).contains(&format!("patch={}", s.patch_id)));
         }
+
+        // A second round checks the first round's finding and carries it while it is open.
+        let issue = db.create_issue(&new("Edge handling"), &actor).unwrap();
+        db.move_issue(&issue.key, "In Progress", None, None, &actor).unwrap();
+        let started = playbook::start_task(&db, &repo, &issue, "claude", &actor).unwrap();
+        let wt = Path::new(&started.worktree);
+        let opts = SubmitOptions { dir: started.worktree.as_str(), issue_key: None, skip_review: false, local_only: true };
+        std::fs::write(wt.join("edge.txt"), "x").unwrap();
+        sh(wt, &["add", "."]);
+        sh(wt, &["commit", "-q", "-m", "edge"]);
+        let first = submit(&mut db, &config, &opts, &actor).unwrap();
+        let review = first.review.as_ref().unwrap();
+        assert!(review.previous.is_empty() && !review.findings[0].carried, "{review:?}");
+        std::fs::write(wt.join("edge.txt"), "y").unwrap();
+        sh(wt, &["commit", "-q", "-am", "edge again"]);
+        let second = submit(&mut db, &config, &opts, &actor).unwrap();
+        let review = second.review.as_ref().unwrap();
+        assert_eq!(review.previous.iter().map(|r| r.status.as_str()).collect::<Vec<_>>(), ["open"], "{review:?}");
+        assert_eq!((review.findings.len(), review.findings[0].carried, review.verdict.as_str()), (1, true, "pass"));
+        assert!(describe(&issue, &second).contains("Previous round's findings: 1 still open."));
+        assert!(db.reviews(&issue.key).unwrap()[0].findings[0].carried);
 
         // A push that fails hands nothing in, so the issue stays In Progress.
         sh(&repo, &["remote", "set-url", "origin", &base.join("missing.git").to_string_lossy()]);

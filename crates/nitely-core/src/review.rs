@@ -66,6 +66,31 @@ impl Default for ReviewRules {
 pub struct Finding {
     pub priority: u8,
     pub text: String,
+    /// Raised in an earlier round and not fixed since; Nitely carries it forward, the reviewer
+    /// does not list it again.
+    #[serde(default)]
+    pub carried: bool,
+}
+
+/// What the previous review of the branch found, so the next one checks those findings first and
+/// reviews what changed since instead of starting over.
+#[derive(Debug, Clone)]
+pub struct PreviousRound {
+    /// The commit that round reviewed.
+    pub commit: String,
+    pub findings: Vec<Finding>,
+    /// Whether `commit` is still in the branch's history. After a rebase it is not, so there is no
+    /// diff since that round and the whole branch is reviewed again.
+    pub in_history: bool,
+}
+
+/// A previous round's finding and what this round says about it: `fixed`, `open`, or
+/// `unchecked` when the reviewer did not say.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Recheck {
+    pub priority: u8,
+    pub text: String,
+    pub status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +103,10 @@ pub struct Review {
     pub flagged: Vec<String>,
     pub summary: String,
     pub seconds: u64,
+    /// The previous round's findings, each marked fixed, open or unchecked. Open and unchecked
+    /// ones are also in `findings`, marked carried.
+    #[serde(default)]
+    pub previous: Vec<Recheck>,
 }
 
 impl ReviewRules {
@@ -85,11 +114,45 @@ impl ReviewRules {
         self.reviewer.get(vendor).or_else(|| self.reviewer.get("*")).map(String::as_str)
     }
 
-    pub fn prompt(&self, base: &str) -> String {
-        let mut p = format!(
-            "Review the changes on this branch against {base}. Run `git diff {base}...HEAD`, read the changed code and \
+    /// The reviewer's instructions. With a previous round, it first checks that round's findings,
+    /// then reviews what changed since, and raises new problems in code that round already saw
+    /// only at P0 or P1, so rounds converge instead of finding fresh edge cases each time.
+    pub fn prompt(&self, base: &str, previous: Option<&PreviousRound>) -> String {
+        let mut p = match previous {
+            None => format!(
+                "Review the changes on this branch against {base}. Run `git diff {base}...HEAD`, read the changed code and \
 its callers, and look for correctness bugs and regressions. Skip style. Do not edit anything.\n"
-        );
+            ),
+            Some(prev) if prev.in_history => format!(
+                "This branch was reviewed before, at commit {c}. Run `git diff {base}...HEAD` for the whole change and \
+`git diff {c} HEAD` for what changed since that review. Read the changed code and its callers, and look for \
+correctness bugs and regressions. Skip style. Do not edit anything.\n",
+                c = prev.commit
+            ),
+            Some(prev) => format!(
+                "This branch was reviewed before, at commit {c}, and has been rebased since, so review the whole change \
+again. Run `git diff {base}...HEAD`, read the changed code and its callers, and look for correctness bugs and \
+regressions. Skip style. Do not edit anything.\n",
+                c = prev.commit
+            ),
+        };
+        if let Some(prev) = previous.filter(|p| !p.findings.is_empty()) {
+            p.push_str("\nFirst, check each finding of that review against the current code:\n");
+            for (i, f) in prev.findings.iter().enumerate() {
+                p.push_str(&format!("{}. [P{}] {}\n", i + 1, f.priority, f.text));
+            }
+            p.push_str(
+                "Answer each on its own line as `PREVIOUS <n>: fixed` or `PREVIOUS <n>: open`, with a few words after it \
+if useful. Do not list an open one again as a defect: it stays on record by itself.\n",
+            );
+        }
+        if let Some(prev) = previous.filter(|p| p.in_history) {
+            p.push_str(&format!(
+                "\nThen review what changed since {c} and report any defect in it. The rest of the branch was already \
+reviewed: raise something new there only if it is P0 or P1.\n",
+                c = prev.commit
+            ));
+        }
         if !self.focus.trim().is_empty() {
             p.push_str(&format!("\n{}\n", self.focus.trim()));
         }
@@ -101,7 +164,7 @@ using P0 for data loss or security, P1 for a definite bug in normal use, P2 for 
         for f in &self.flags {
             p.push_str(&format!("{}: <yes or no>\n", f.name));
         }
-        p.push_str("VERDICT is findings if you listed any defect, otherwise clean.");
+        p.push_str("VERDICT is findings if you listed any new defect, otherwise clean.");
         for f in &self.flags {
             p.push_str(&format!(" {} is yes if {}", f.name, f.question.trim_end_matches('.')));
             p.push('.');
@@ -113,8 +176,10 @@ using P0 for data loss or security, P1 for a definite bug in normal use, P2 for 
     }
 
     /// Parses a reviewer's reply. Fails when a closing line is missing, or when it claims findings
-    /// but lists none: both mean the review did not finish.
-    pub fn parse(&self, reviewer: &str, text: &str, seconds: u64) -> Result<Review> {
+    /// but lists none (and marks no previous finding open): both mean the review did not finish.
+    /// Previous findings it marks open, or does not mention, are carried into `findings` with their
+    /// old priority, so the verdict still counts them.
+    pub fn parse(&self, reviewer: &str, text: &str, seconds: u64, previous: Option<&PreviousRound>) -> Result<Review> {
         let field = |name: &str, values: &[&str]| -> Option<String> {
             let prefix = format!("{}:", name.to_lowercase());
             text.lines()
@@ -136,13 +201,26 @@ using P0 for data loss or security, P1 for a definite bug in normal use, P2 for 
                 None => bail!("the {reviewer} review did not answer {}, so it is unfinished:\n{}", f.name, tail_lines(text)),
             }
         }
-        let findings = parse_findings(text);
-        if verdict == "findings" && findings.is_empty() {
+        let mut findings = parse_findings(text);
+        let statuses = parse_previous(text);
+        let previous: Vec<Recheck> = previous
+            .map(|prev| prev.findings.iter().enumerate().map(|(i, f)| Recheck {
+                priority: f.priority,
+                text: f.text.clone(),
+                status: statuses.get(&(i + 1)).cloned().unwrap_or_else(|| "unchecked".into()),
+            }).collect())
+            .unwrap_or_default();
+        if verdict == "findings" && findings.is_empty() && !previous.iter().any(|r| r.status == "open") {
             bail!("the {reviewer} review says it has findings but lists none as `- [Pn] ...`:\n{}", tail_lines(text));
+        }
+        for r in previous.iter().filter(|r| r.status != "fixed") {
+            findings.push(Finding { priority: r.priority, text: r.text.clone(), carried: true });
         }
         let closing = |l: &str| {
             let l = l.trim().to_uppercase();
-            l.starts_with("VERDICT:") || self.flags.iter().any(|f| l.starts_with(&format!("{}:", f.name)))
+            l.starts_with("VERDICT:")
+                || l.trim_start_matches(['-', '*', ' ']).starts_with("PREVIOUS ")
+                || self.flags.iter().any(|f| l.starts_with(&format!("{}:", f.name)))
         };
         let summary = text
             .lines()
@@ -151,7 +229,7 @@ using P0 for data loss or security, P1 for a definite bug in normal use, P2 for 
             .unwrap_or("")
             .to_string();
         let verdict = if findings.iter().any(|f| f.priority <= 1) { "changes" } else { "pass" };
-        Ok(Review { reviewer: reviewer.into(), verdict: verdict.into(), findings, flagged, summary, seconds })
+        Ok(Review { reviewer: reviewer.into(), verdict: verdict.into(), findings, flagged, summary, seconds, previous })
     }
 
     /// The human-facing reasons for the flags a review raised.
@@ -164,7 +242,7 @@ using P0 for data loss or security, P1 for a definite bug in normal use, P2 for 
     }
 
     /// Runs `reviewer` in `worktree` and parses its reply.
-    pub fn run(&self, reviewer: &str, worktree: &Path, base: &str) -> Result<Review> {
+    pub fn run(&self, reviewer: &str, worktree: &Path, base: &str, previous: Option<&PreviousRound>) -> Result<Review> {
         let command = self
             .commands
             .get(reviewer)
@@ -185,7 +263,7 @@ using P0 for data loss or security, P1 for a definite bug in normal use, P2 for 
         }
         let mut child = cmd.spawn().with_context(|| format!("starting the {reviewer} reviewer ({})", command[0]))?;
         let mut stdin = child.stdin.take().unwrap();
-        let prompt = self.prompt(base);
+        let prompt = self.prompt(base, previous);
         let writer = std::thread::spawn(move || stdin.write_all(prompt.as_bytes()));
         let mut stdout = child.stdout.take().unwrap();
         let mut stderr = child.stderr.take().unwrap();
@@ -218,8 +296,24 @@ using P0 for data loss or security, P1 for a definite bug in normal use, P2 for 
         if !status.success() {
             bail!("the {reviewer} review failed ({status}):\n{}", tail(&format!("{stdout}{stderr}")));
         }
-        self.parse(reviewer, &text, started.elapsed().as_secs())
+        self.parse(reviewer, &text, started.elapsed().as_secs(), previous)
     }
+}
+
+/// `PREVIOUS <n>: fixed` and `PREVIOUS <n>: open` lines, by n; the last line for an n wins.
+fn parse_previous(text: &str) -> BTreeMap<usize, String> {
+    let mut out = BTreeMap::new();
+    for line in text.lines() {
+        let l = line.replace("**", "").replace('`', "").to_lowercase();
+        let Some(rest) = l.trim().trim_start_matches(['-', '*', ' ']).strip_prefix("previous ") else { continue };
+        let Some((n, status)) = rest.split_once(':') else { continue };
+        let Ok(n) = n.trim().trim_start_matches('#').parse::<usize>() else { continue };
+        let word: String = status.trim().chars().take_while(|c| c.is_ascii_alphabetic()).collect();
+        if matches!(word.as_str(), "fixed" | "open") {
+            out.insert(n, word);
+        }
+    }
+    out
 }
 
 /// `- [Pn] text` lines, each once.
@@ -233,7 +327,7 @@ pub fn parse_findings(text: &str) -> Vec<Finding> {
         let Some(priority) = d.to_digit(10).filter(|p| *p <= 3) else { continue };
         let text = chars.as_str().trim().to_string();
         if !text.is_empty() && !out.iter().any(|f| f.text == text) {
-            out.push(Finding { priority: priority as u8, text });
+            out.push(Finding { priority: priority as u8, text, carried: false });
         }
     }
     out
@@ -296,30 +390,86 @@ mod tests {
 
     #[test]
     fn prompt_lists_every_closing_line() {
-        let p = rules().prompt("main");
+        let p = rules().prompt("main", None);
         assert!(p.contains("git diff main...HEAD"));
         assert!(p.contains("exactly these 2 lines:\nVERDICT: <findings or clean>\nMONEY_OR_RELEASE: <yes or no>"));
+        assert!(!p.contains("PREVIOUS"));
+    }
+
+    fn previous(in_history: bool) -> PreviousRound {
+        let f = |priority, text: &str| Finding { priority, text: text.into(), carried: false };
+        PreviousRound {
+            commit: "abc1234".into(),
+            findings: vec![f(1, "Drops the last row: src/a.rs, f"), f(2, "Empty name: src/b.rs, g"), f(2, "Slow loop: src/c.rs, h")],
+            in_history,
+        }
+    }
+
+    #[test]
+    fn a_re_review_checks_the_previous_round_first() {
+        let p = rules().prompt("main", Some(&previous(true)));
+        assert!(p.contains("git diff abc1234 HEAD"), "{p}");
+        assert!(p.contains("1. [P1] Drops the last row: src/a.rs, f\n2. [P2] Empty name"), "{p}");
+        assert!(p.contains("`PREVIOUS <n>: fixed` or `PREVIOUS <n>: open`"), "{p}");
+        assert!(p.contains("only if it is P0 or P1"), "{p}");
+        assert!(p.contains("exactly these 2 lines:\nVERDICT: <findings or clean>\nMONEY_OR_RELEASE: <yes or no>"));
+
+        // After a rebase there is no diff since that round: check the findings, review it all.
+        let rebased = rules().prompt("main", Some(&previous(false)));
+        assert!(rebased.contains("rebased since") && rebased.contains("PREVIOUS <n>"), "{rebased}");
+        assert!(!rebased.contains("git diff abc1234") && !rebased.contains("only if it is P0 or P1"), "{rebased}");
+
+        // A clean previous round leaves no checklist, but old code still only takes P0 or P1.
+        let clean = PreviousRound { findings: vec![], ..previous(true) };
+        let p = rules().prompt("main", Some(&clean));
+        assert!(!p.contains("PREVIOUS") && p.contains("only if it is P0 or P1"), "{p}");
+    }
+
+    #[test]
+    fn a_re_review_carries_what_is_not_fixed() {
+        let prev = previous(true);
+        let text = "Two of three fixed.\n**PREVIOUS 1:** fixed, now keeps the row\n- PREVIOUS 2: open - still accepts \"\"\n\
+- [P3] New nit: src/d.rs\nVERDICT: findings\nMONEY_OR_RELEASE: no\n";
+        let r = rules().parse("codex", text, 3, Some(&prev)).unwrap();
+        let statuses: Vec<&str> = r.previous.iter().map(|p| p.status.as_str()).collect();
+        assert_eq!(statuses, ["fixed", "open", "unchecked"]);
+        assert_eq!(r.summary, "Two of three fixed.");
+        let carried: Vec<(u8, bool)> = r.findings.iter().map(|f| (f.priority, f.carried)).collect();
+        assert_eq!(carried, [(3, false), (2, true), (2, true)]);
+        assert_eq!(r.verdict, "pass");
+
+        // An open P1 from the previous round still asks for changes, though nothing new was found.
+        let text = "PREVIOUS 1: open\nPREVIOUS 2: fixed\nPREVIOUS 3: fixed\nVERDICT: findings\nMONEY_OR_RELEASE: no";
+        let r = rules().parse("codex", text, 3, Some(&prev)).unwrap();
+        assert_eq!(r.verdict, "changes");
+        assert_eq!(r.findings, vec![Finding { priority: 1, text: "Drops the last row: src/a.rs, f".into(), carried: true }]);
+
+        // Everything fixed and nothing new is clean; an unfinished reply is still unfinished.
+        let text = "PREVIOUS 1: fixed\nPREVIOUS 2: fixed\nPREVIOUS 3: fixed\nVERDICT: clean\nMONEY_OR_RELEASE: no";
+        let r = rules().parse("codex", text, 3, Some(&prev)).unwrap();
+        assert!(r.findings.is_empty() && r.verdict == "pass");
+        assert!(rules().parse("codex", "PREVIOUS 1: fixed\nMONEY_OR_RELEASE: no", 1, Some(&prev)).is_err());
     }
 
     #[test]
     fn parses_a_finished_review() {
         let text = "Looks mostly fine.\n- [P1] Off by one: src/a.rs, f: drops the last row\n- [P3] Typo: README\n- [P1] Off by one: src/a.rs, f: drops the last row\nVERDICT: findings\nMONEY_OR_RELEASE: **yes**\n";
-        let r = rules().parse("codex", text, 5).unwrap();
+        let r = rules().parse("codex", text, 5, None).unwrap();
         assert_eq!(r.verdict, "changes");
         assert_eq!(r.findings.len(), 2);
         assert_eq!(r.flagged, vec!["MONEY_OR_RELEASE"]);
         assert_eq!(r.summary, "Looks mostly fine.");
         assert_eq!(rules().flag_reasons(&r), vec!["codex review: money or release logic"]);
 
-        let clean = rules().parse("claude", "Nothing found.\n- [P3] nit: x\nVERDICT: findings\nMONEY_OR_RELEASE: no", 1).unwrap();
+        let clean = rules().parse("claude", "Nothing found.\n- [P3] nit: x\nVERDICT: findings\nMONEY_OR_RELEASE: no", 1, None).unwrap();
         assert_eq!(clean.verdict, "pass");
     }
 
     #[test]
     fn unfinished_reviews_fail() {
-        assert!(rules().parse("codex", "VERDICT: clean", 1).is_err(), "missing flag");
-        assert!(rules().parse("codex", "MONEY_OR_RELEASE: no", 1).is_err(), "missing verdict");
-        assert!(rules().parse("codex", "VERDICT: findings\nMONEY_OR_RELEASE: no", 1).is_err(), "findings but none listed");
+        assert!(rules().parse("codex", "VERDICT: clean", 1, None).is_err(), "missing flag");
+        assert!(rules().parse("codex", "MONEY_OR_RELEASE: no", 1, None).is_err(), "missing verdict");
+        assert!(rules().parse("codex", "VERDICT: findings\nMONEY_OR_RELEASE: no", 1, None).is_err(), "findings but none listed");
     }
 
     #[test]
@@ -335,7 +485,7 @@ mod tests {
     fn runs_a_reviewer_command() {
         let mut r = rules();
         r.commands.insert("fake".into(), vec!["sh".into(), "-c".into(), "cat > /dev/null; printf 'ok\\nVERDICT: clean\\nMONEY_OR_RELEASE: no\\n' > \"$0\"".into(), "{output}".into()]);
-        let review = r.run("fake", &std::env::temp_dir(), "main").unwrap();
+        let review = r.run("fake", &std::env::temp_dir(), "main", None).unwrap();
         assert_eq!(review.verdict, "pass");
         assert!(review.flagged.is_empty());
     }
