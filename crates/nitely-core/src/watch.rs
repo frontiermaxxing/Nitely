@@ -49,22 +49,24 @@ impl Db {
     }
 }
 
-/// What moves when the config or any watched repo's refs, HEADs or worktree list change.
-pub fn repos_fingerprint() -> u64 {
-    files_fingerprint()
-}
-
-fn files_fingerprint() -> u64 {
+/// What moves when the config file or `config`'s repos' refs, HEADs or worktree lists change.
+/// Reads file times only, so it is safe where nothing may be written (`nitely ui`).
+pub fn repos_fingerprint(config: &Config) -> u64 {
     let mut h = DefaultHasher::new();
     stamp(&paths::config_path(), &mut h);
-    if let Ok(config) = Config::load() {
-        for repo in &config.repos {
-            for path in git_paths(Path::new(&repo.root)) {
-                stamp(&path, &mut h);
-            }
+    for repo in &config.repos {
+        for path in git_paths(Path::new(&repo.root)) {
+            stamp(&path, &mut h);
         }
     }
     h.finish()
+}
+
+fn files_fingerprint() -> u64 {
+    match Config::load() {
+        Ok(config) => repos_fingerprint(&config),
+        Err(_) => repos_fingerprint(&Config::default()),
+    }
 }
 
 /// What moves when branches, commits or worktrees change, for a repo's main checkout.

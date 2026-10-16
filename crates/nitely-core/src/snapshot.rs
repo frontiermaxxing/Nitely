@@ -120,7 +120,7 @@ fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> 
 /// Reads git for every repo: per repo its worktrees, branches and remote (in parallel), then one
 /// `git status` per worktree (in parallel across all repos).
 pub fn read_git(config: &Config) -> GitState {
-    let fingerprint = crate::watch::repos_fingerprint();
+    let fingerprint = crate::watch::repos_fingerprint(config);
     let heads = par_map(&config.repos, |repo: &RepoConfig| {
         let worktrees = git::list_worktrees(&repo.root).map_err(|e| e.to_string());
         let branches = git::list_branches(&repo.root, &repo.integration_branch).unwrap_or_default();
@@ -169,7 +169,7 @@ impl GitCache {
         let mut cached = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let same_repos = |s: &GitState| s.repos.iter().map(|r| &r.root).eq(config.repos.iter().map(|r| &r.root));
         if let Some(state) = cached.as_ref() {
-            if state.read_at.elapsed() < GIT_FRESH && same_repos(state) && state.fingerprint == crate::watch::repos_fingerprint() {
+            if state.read_at.elapsed() < GIT_FRESH && same_repos(state) && state.fingerprint == crate::watch::repos_fingerprint(config) {
                 return state.clone();
             }
         }
