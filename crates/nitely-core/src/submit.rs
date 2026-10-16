@@ -168,8 +168,12 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     // The full description is on the pull request and in the app's review section.
     db.add_note(&issue.key, &format!("{outcome}. {pr_line}"), "submit", actor)?;
 
+    let push_failed = !opts.local_only && !out.pushed;
     let (state, next) = if verdict == "changes" {
         ("In Progress", "The review found P0 or P1 problems. Fix them, commit, and submit again.")
+    } else if push_failed {
+        // Not handed in: nobody can see or merge the branch, so it must not look ready to land.
+        ("In Progress", "The push failed, so the change is not handed in. Fix the remote or its access (ask the human if it is a permission error), then submit again.")
     } else if out.approver == "human" {
         ("Needs You", "It waits for the human's approval in the Nitely inbox. Pick up other work meanwhile; once it is Approved, call land.")
     } else {
@@ -373,6 +377,21 @@ reason = "money logic"
             assert_eq!(db.reviews(&issue.key).unwrap()[0].patch_id, s.patch_id);
             assert!(describe(&issue, &s).contains(&format!("patch={}", s.patch_id)));
         }
+
+        // A push that fails hands nothing in, so the issue stays In Progress.
+        sh(&repo, &["remote", "set-url", "origin", &base.join("missing.git").to_string_lossy()]);
+        let issue = db.create_issue(&new("Header tweak"), &actor).unwrap();
+        db.move_issue(&issue.key, "In Progress", None, None, &actor).unwrap();
+        let started = playbook::start_task(&db, &repo, &issue, "claude", &actor).unwrap();
+        let wt = Path::new(&started.worktree);
+        std::fs::write(wt.join("header.txt"), "x").unwrap();
+        sh(wt, &["add", "."]);
+        sh(wt, &["commit", "-q", "-m", "header"]);
+        let opts = SubmitOptions { dir: started.worktree.as_str(), issue_key: None, skip_review: false, local_only: false };
+        let s = submit(&mut db, &config, &opts, &actor).unwrap();
+        assert!(!s.pushed && s.pr_error.as_deref().unwrap().contains("push failed"), "{s:?}");
+        assert_eq!(s.state, "In Progress");
+        assert!(s.next.contains("push failed"), "{}", s.next);
         std::fs::remove_dir_all(base).ok();
     }
 }
