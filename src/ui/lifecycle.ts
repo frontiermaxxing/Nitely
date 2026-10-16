@@ -197,8 +197,9 @@ export function trackOf(issue: IssueRecord, timeline?: TimelineEntry[], reviews?
   track.asking = openAsks > 0;
   const open = track.station !== "done";
   if (open && landFailed) track.stuck = "Land stopped";
-  else if (open && gateFailed && track.station === "gate") track.stuck = "Gate failed";
-  else if (open && reviewFailed && track.station === "review") track.stuck = "Review did not finish";
+  // A resubmit can fail without moving the issue, so these hold at whatever station it shows.
+  else if (open && gateFailed) track.stuck = "Gate failed";
+  else if (open && reviewFailed) track.stuck = "Review did not finish";
   return track;
 }
 

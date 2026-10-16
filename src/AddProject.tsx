@@ -40,7 +40,11 @@ export function AddProject(props: { onAdded: (projectKey: string) => void }) {
   useEffect(() => setApplied(null), [path]);
 
   const choose = async () => {
-    const picked = await open({ directory: true, title: "Choose a repo folder" });
+    const picked = await open({ directory: true, title: "Choose a repo folder" }).catch(() => {
+      // Only the desktop app has a folder picker; the browser preview does not.
+      setError("The folder picker needs the desktop app. Type the repo's path instead.");
+      return null;
+    });
     if (typeof picked === "string") {
       setPath(picked);
       setKey("");
