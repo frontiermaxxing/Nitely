@@ -346,16 +346,18 @@ needs a look) and the line "Local · live".
 
 **The title bar.** On Windows the app has no native title bar (`src-tauri/tauri.windows.conf.json`
 sets `decorations: false`, with the shadow kept for the window's edge and resize borders). The
-window is dragged by the sidebar's brand row and by an invisible strip over the top padding of the
-main pane (`data-tauri-drag-region`; a double-click maximizes and restores), and
-`src/WindowControls.tsx` draws minimize, maximize or restore, and close in the top right corner:
-46px by `--titlebar-h` (32px), ink glyphs that turn `--fg-3` when the window loses focus, a hover
-wash of `--fg`, and the platform's red (`--caption-close`) on close. Pages start 36px down so
-nothing that takes clicks sits under the buttons, and the issue sheet starts below them. Narrow, the
-sidebar's strip stops short of the buttons, which take its colour and height. Windows 11's Snap Layouts flyout does not appear on
-hover (no reliable way to get it with drawn buttons; Win+Z and Win+arrows still snap). The Mac keeps
-its native title bar for now, and the browser preview has none; `?chrome=win` in the preview draws
-it, inert, to check how it looks.
+sidebar runs to the top of the window; the main pane has an empty bar `--titlebar-h` (32px) high
+above it, so it scrolls below the bar and nothing clickable ever sits under the window's controls.
+The bar and the sidebar's brand row drag the window (`data-tauri-drag-region`; a double-click
+maximizes and restores), and `src/WindowControls.tsx` draws minimize, maximize or restore, and close
+at the bar's right: 46px wide, ink glyphs that turn `--fg-3` when the window loses focus, a hover
+wash of `--fg`, and the platform's red (`--caption-close`) on close. The issue sheet, the palette
+and their veils start below the bar, and the drag strip stays above the veils, so the window can be
+moved with one open. Narrow, the sidebar's strip is the bar: it stops short of the buttons, which
+take its colour and height. Windows 11's Snap Layouts flyout does not appear on hover (no reliable
+way to get it with drawn buttons; Win+Z and Win+arrows still snap). The Mac keeps its native title
+bar for now (NIT-111), and the browser preview has none; `?chrome=win` in the preview draws it,
+inert, to check how it looks.
 
 Now is a card per worktree, two columns, grouped by repo: the agent and branch, the issue, its mini
 track with the station in its color and the branch's git state, then its last three things (what

@@ -405,12 +405,16 @@ details summary { cursor: pointer; color: var(--fg-2); }
 .kit-swatch { width: 18px; height: 18px; border-radius: var(--radius-sm); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--fg) 12%, transparent); flex: none; }
 
 /* ----- the title bar the app draws on Windows (src/WindowControls.tsx) -----
-   No bar of its own: the window is dragged by the sidebar's brand row and by a strip over the top
-   padding of the main pane, and the caption buttons sit in the top right corner. */
+   A bar --titlebar-h high across the top of the main pane, empty but for the caption buttons at its
+   right: the main pane scrolls below it, so nothing clickable ever sits under the buttons or the
+   drag strip. The sidebar runs to the top of the window; its brand row drags too. Overlays start
+   below the bar, and the strip stays above their veils, so the window can be moved with one open. */
 .own-titlebar .sidebar { padding-top: 0; }
 .own-titlebar .brand { padding-top: 18px; }
 .own-titlebar .brand > * { pointer-events: none; }
-.titlebar-drag { position: fixed; top: 0; left: 232px; right: 138px; height: 26px; z-index: 5; }
+.titlebar-drag { position: fixed; top: 0; left: 0; right: 138px; height: var(--titlebar-h); z-index: 25; }
+.own-titlebar .content { margin-top: var(--titlebar-h); }
+.own-titlebar .panel-veil, .own-titlebar .palette-veil { top: var(--titlebar-h); }
 .caption { position: fixed; top: 0; right: 0; z-index: 30; display: flex; }
 .caption-btn {
   display: grid; place-items: center; width: 46px; height: var(--titlebar-h); padding: 0; border: 0; border-radius: 0;
@@ -422,9 +426,8 @@ details summary { cursor: pointer; color: var(--fg-2); }
 .caption-close:active { opacity: 0.85; }
 .caption-btn:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 .caption-blurred .caption-btn:not(:hover) { color: var(--fg-3); }
-/* Nothing that takes clicks sits under the buttons or the drag strip. */
-.own-titlebar .content > .banner:first-child { margin-top: var(--titlebar-h); }
-.own-titlebar .page { padding-top: 36px; }
+/* The bar takes the top of the pages' padding. */
+.own-titlebar .page { padding-top: 12px; }
 .own-titlebar .panel { top: var(--titlebar-h); }
 
 /* ----- narrow windows: the sidebar becomes a strip across the top ----- */
@@ -460,6 +463,8 @@ details summary { cursor: pointer; color: var(--fg-2); }
   .own-titlebar .brand { padding-top: 0; }
   .own-titlebar .caption { background: var(--sunken); border-bottom: 1px solid var(--line); }
   .own-titlebar .caption-btn { height: 46px; }
+  .own-titlebar .content { margin-top: 0; }
+  .own-titlebar .page { padding-top: 20px; }
   .titlebar-drag { display: none; }
 }
 @media (max-width: 1000px) and (min-width: 761px) {
