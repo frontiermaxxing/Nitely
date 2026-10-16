@@ -114,7 +114,9 @@ export function ProjectPage(props: {
       )}
       {views && issues?.length === 0 && (
         <EmptyState title="No issues yet.">
-          Agents file them with the <span className="mono">file_issue</span> tool, or run <span className="mono">nitely issue create</span>.
+          Seed the board from the repo: ask an agent there to run <span className="mono">/nitely-setup</span> (in Claude
+          Code; any agent can follow the <span className="mono">setup_guide</span> tool). It reads the repo without changing it
+          and files what it finds. Agents also file issues as they work.
         </EmptyState>
       )}
       {tab === "list" && issues && <Backlog issues={issues} showClosed={showClosed} onOpenIssue={props.onOpenIssue} />}

@@ -52,16 +52,43 @@ pub fn for_dir(config: &Config, dir: &str) -> Option<String> {
         0 => "The playbook has no gate commands yet.".to_string(),
         n => format!("`submit` and `land` run its gate ({n} commands)."),
     };
+    // Read-only, and skipped when the database cannot be read: this runs at every session start.
+    let offer = repo
+        .project
+        .as_deref()
+        .filter(|p| crate::Db::open_read_only(&crate::paths::db_path()).and_then(|db| db.project_brief(p)).is_ok_and(|b| b.setup.is_none()))
+        .map(|p| format!("\n\n{}", setup_offer(p)))
+        .unwrap_or_default();
     Some(format!(
-        "This repo ({}) is connected to Nitely.{project} Tasks branch from and land on {}. {gate}\n\n{WORKFLOW}",
+        "This repo ({}) is connected to Nitely.{project} Tasks branch from and land on {}. {gate}{offer}\n\n{WORKFLOW}",
         repo.name,
         pb.integration_branch()
     ))
 }
 
+/// What a session in a project nobody has set up is told: offer the sweep, and without a yes run
+/// only its cheap pre-flight, which catches a stale integration branch early.
+pub fn setup_offer(project: &str) -> String {
+    format!(
+        "{project} has not been set up: no sweep has read this repo yet. Offer the user, in one line, to seed the {project} \
+board from a sweep of the repo (the `setup_guide` tool; `/nitely-setup` in Claude Code), with its cost: one pass and a \
+few minutes for a small repo, up to about 5 agents and 20 to 30 minutes for a large one. Start the sweep only on a \
+yes, or when `next_task` handed you {project}'s setup issue. Without a yes, run only the guide's Phase 0 pre-flight \
+(integration branch, gate commands, working tree) and file what it finds."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_setup_offer_names_the_project_and_holds_back_the_full_sweep() {
+        let offer = setup_offer("SHOP");
+        assert!(offer.starts_with("SHOP has not been set up") && offer.contains("seed the SHOP board"), "{offer}");
+        assert!(offer.contains("only on a yes") && offer.contains("Phase 0 pre-flight"), "{offer}");
+        assert!(!offer.contains('\n'), "one paragraph");
+    }
 
     #[test]
     fn the_setup_guides_example_rules_are_a_valid_playbook() {

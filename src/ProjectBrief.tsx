@@ -142,7 +142,7 @@ export function ProjectBrief(props: { projectKey: string; version: number; now: 
         >
           The brief is what agents know about {brief.name} as a whole: the vision, the state of each area, the order to
           work in and the questions only you can answer. Agents read it before they explore the repo, and the setup sweep
-          writes the first one.
+          (<span className="mono">/nitely-setup</span>) writes the first one.
         </EmptyState>
       )}
     </div>
