@@ -850,43 +850,23 @@ impl Supervisor {
         Ok(outcome.into())
     }
 
-    /// Removes what `land` had to leave because the worker was still running in it: the worktree's
-    /// folder and the merged branch. Only what is safe: a worktree git still tracks is removed
-    /// without force (a dirty one stays), and the branch with `git branch -d`, which refuses
-    /// unmerged work.
+    /// Removes the worktree land kept whole while the worker ran in it, as land itself would have:
+    /// the playbook's teardown, `git worktree remove` without force (a dirty worktree stays), and
+    /// `git branch -d` (an unmerged branch stays). Only a worktree git still tracks is touched.
     fn clean_up_landed(&self, db: &Db, w: &Running) -> Result<()> {
-        let mut done = Vec::new();
-        if w.worktree.exists() {
-            let tracked = playbook::git(&self.repo_root, &["worktree", "list", "--porcelain"])
-                .unwrap_or_default()
-                .lines()
-                .filter_map(|l| l.strip_prefix("worktree "))
-                .any(|p| crate::paths::normalize(p) == crate::paths::normalize(&w.worktree.to_string_lossy()));
-            let removed = if tracked {
-                playbook::git(&self.repo_root, &["worktree", "remove", &w.worktree.to_string_lossy()]).is_ok()
-            } else {
-                // A process that just exited can hold files a moment longer on Windows.
-                (0..10).any(|_| std::fs::remove_dir_all(&w.worktree).is_ok() || {
-                    std::thread::sleep(std::time::Duration::from_millis(300));
-                    false
-                })
-            };
-            if removed {
-                done.push(format!("removed {}", w.worktree.display()));
-            }
+        let listed = playbook::git(&self.repo_root, &["worktree", "list", "--porcelain"]);
+        let tracked = listed.as_deref().is_ok_and(|l| {
+            l.lines()
+                .filter_map(|line| line.strip_prefix("worktree "))
+                .any(|p| crate::paths::normalize(p) == crate::paths::normalize(&w.worktree.to_string_lossy()))
+        });
+        if !tracked {
+            return Ok(());
         }
-        let refs = playbook::git(&self.repo_root, &["for-each-ref", "--format=%(refname:short)", "refs/heads/"]).unwrap_or_default();
-        for branch in refs.lines().map(str::trim) {
-            let (vendor, key) = crate::git::parse_branch(branch);
-            if vendor.as_deref() == Some(w.agent.as_str()) && key.is_some_and(|k| k.eq_ignore_ascii_case(&w.issue))
-                && playbook::git(&self.repo_root, &["branch", "-d", branch]).is_ok()
-            {
-                done.push(format!("deleted the merged branch {branch}"));
-            }
-        }
-        if !done.is_empty() {
-            db.log_event(&self.actor(), Some(&w.issue), None, "crew_cleaned", &format!("After the {} worker left: {}", w.agent, done.join("; ")))?;
-        }
+        let Ok(branch) = playbook::git(&w.worktree, &["rev-parse", "--abbrev-ref", "HEAD"]) else { return Ok(()) };
+        let pb = Playbook::load(&self.repo_root)?;
+        let (message, _) = crate::land::cleanup(&self.repo_root, &pb, &w.worktree, branch.trim(), false, false);
+        db.log_event(&self.actor(), Some(&w.issue), None, "crew_cleaned", &format!("After the {} worker left: {message}", w.agent))?;
         Ok(())
     }
 
@@ -1347,6 +1327,14 @@ impl Db {
             rusqlite::params![project, repo.to_string_lossy()],
         )?;
         Ok(())
+    }
+
+    /// Whether a crew worker is running in `worktree` now.
+    pub fn crew_worker_in(&self, worktree: &Path) -> Result<bool> {
+        let mut stmt = self.conn.prepare("SELECT worktree FROM crew_worker WHERE ended_at IS NULL")?;
+        let rows: Vec<String> = stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        let wanted = crate::paths::normalize(&worktree.to_string_lossy());
+        Ok(rows.iter().any(|w| crate::paths::normalize(w) == wanted))
     }
 
     pub fn crew_leave(&self, project: &str, pid: u32) -> Result<()> {
@@ -2265,27 +2253,40 @@ workers = 1
     }
 
     #[test]
-    fn a_landed_workers_leftover_worktree_and_branch_are_cleaned_up() {
+    fn a_landed_workers_worktree_and_branch_are_removed_once_it_exits() {
         let mut f = fixture(&format!("{GATE}[crew]\nworkers = 1\n"));
         let fake = Fake { installed: vec!["claude"], ..Default::default() };
         let mut sup = supervisor(&f, &fake);
         sup.tick(&mut f.db, false).unwrap();
         let worktree = fake.launches.borrow()[0].cwd.clone();
-        // Land merged the branch and unregistered the worktree, but could not delete its folder: the
-        // worker was still in it.
-        let git = |args: &[&str]| assert!(Command::new("git").arg("-C").arg(&f.repo).args(args).output().unwrap().status.success(), "{args:?}");
-        let admin = f.repo.join(".git").join("worktrees").join(worktree.file_name().unwrap());
-        std::fs::remove_dir_all(&admin).unwrap();
-        git(&["worktree", "prune"]);
+        // Land kept the worktree whole (the worker was in it) after merging the branch.
+        assert!(f.db.crew_worker_in(&worktree).unwrap(), "land sees the worker in it");
         let agent = f.db.issue("NIT-1").unwrap().unwrap().claimed_by.unwrap();
         f.db.move_issue("NIT-1", "Done", Some("landed"), None, &Actor::Agent(agent)).unwrap();
         fake.exits.borrow_mut().insert(1001, 0);
         let tick = sup.tick(&mut f.db, false).unwrap();
         assert_eq!(tick.ended[0].outcome, "landed");
-        assert!(!worktree.exists(), "the leftover folder is gone");
+        assert!(!worktree.exists(), "the worktree is gone");
         assert!(branch_vendors(&f.repo, "NIT-1").is_empty(), "and the merged branch");
         let note = f.db.timeline("NIT-1").unwrap().into_iter().find(|t| t.kind == "crew_cleaned").unwrap();
-        assert!(note.summary.unwrap().contains("deleted the merged branch claude/nit-1-first"));
+        assert!(note.summary.unwrap().contains("removed the worktree and the merged branch"));
+
+        // A dirty worktree stays, as land would leave it; one git does not track is never touched.
+        let mut f = fixture(&format!("{GATE}[crew]\nworkers = 2\n"));
+        let fake = Fake { installed: vec!["claude"], ..Default::default() };
+        let mut sup = supervisor(&f, &fake);
+        sup.tick(&mut f.db, false).unwrap();
+        let (dirty, loose) = (fake.launches.borrow()[0].cwd.clone(), fake.launches.borrow()[1].cwd.clone());
+        std::fs::write(dirty.join("notes.txt"), "not committed").unwrap();
+        std::fs::remove_dir_all(f.repo.join(".git").join("worktrees").join(loose.file_name().unwrap())).unwrap();
+        for (key, pid) in [("NIT-1", 1001), ("NIT-2", 1002)] {
+            let agent = f.db.issue(key).unwrap().unwrap().claimed_by.unwrap();
+            f.db.move_issue(key, "Done", Some("landed"), None, &Actor::Agent(agent)).unwrap();
+            fake.exits.borrow_mut().insert(pid, 0);
+        }
+        sup.tick(&mut f.db, false).unwrap();
+        assert!(dirty.join("notes.txt").exists(), "uncommitted work is kept");
+        assert!(loose.exists(), "an untracked folder is left alone");
     }
 
     #[test]

@@ -408,7 +408,14 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
         }
     }
 
-    let (cleanup, held_by) = cleanup(root, pb, &worktree, &branch, temporary, opts.keep);
+    // A crew worker runs in the worktree until land returns to it; the supervisor removes the
+    // worktree once the worker has exited (crew::Supervisor::clean_up_landed).
+    let crew_in_it = !temporary && db.crew_worker_in(&worktree)?;
+    let (cleanup, held_by) = if crew_in_it {
+        (format!("kept {} whole: the crew worker running in it removes it once it exits", worktree.display()), vec![])
+    } else {
+        cleanup(root, pb, &worktree, &branch, temporary, opts.keep)
+    };
     report.cleanup = Some(cleanup);
     report.held_by = held_by;
     Ok(())
@@ -504,7 +511,7 @@ impl Db {
 /// it, and git then stops halfway: the worktree unregistered, part of it deleted. So a worktree in
 /// use is kept whole, with the processes named; and when git still stops halfway, what is left is
 /// retried and then said plainly, with how to delete it.
-fn cleanup(root: &Path, pb: &Playbook, worktree: &Path, branch: &str, temporary: bool, keep: bool) -> (String, Vec<crate::procs::Holder>) {
+pub(crate) fn cleanup(root: &Path, pb: &Playbook, worktree: &Path, branch: &str, temporary: bool, keep: bool) -> (String, Vec<crate::procs::Holder>) {
     let issue = crate::IssueRecord { key: "x".into(), title: "x".into(), ..Default::default() };
     let layout_dir = pb.worktree_for(root, "x", &issue);
     let ours = layout_dir.parent().is_some_and(|d| worktree.starts_with(d));
