@@ -61,7 +61,10 @@ and worktree and runs setup; `nitely gate` (MCP: `run_gate`) runs the gate in th
 review it with a fixed closing format (`VERDICT`, plus the playbook's yes/no flags), decides whether
 a human must approve (`[approval]` paths, or a flag the reviewer raised), pushes, and opens or updates
 the pull request on GitHub or Bitbucket. The review is stored for that exact patch, so landing can
-check it. All of it shows on the issue's timeline and in the app. A repo without a playbook gets `main`, `{vendor}/{key}-{slug}`
+check it. `nitely land NIT-4` (MCP: `land`) is then the only writer of the integration branch:
+one land at a time under a lock, rebase, a review that must cover exactly the rebased change, a
+human approval in Nitely when the change needs one, the gate, a fast-forward and a push. All of it
+shows on the issue's timeline and in the app. A repo without a playbook gets `main`, `{vendor}/{key}-{slug}`
 branches and worktrees in `../{repo}-worktrees/`. Nitely's own is in [.nitely/playbook.toml](.nitely/playbook.toml).
 
 ## GitHub

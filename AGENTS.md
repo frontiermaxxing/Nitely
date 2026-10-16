@@ -20,7 +20,10 @@ Nitely tracks its own build. Its backlog is the **NIT** project in Nitely, reach
    updates the pull request into `main`, and moves the issue: back to In Progress when the review
    finds P0 or P1 problems (fix them and submit again), to Needs You when Andrew must approve, and
    to In Review otherwise. `run_gate` alone runs just the gate.
-7. Move the issue to Done with evidence once the pull request is merged.
+7. Once the review passed (and Andrew approved, when it waits for him), call `land` (or
+   `nitely land NIT-n`). It lands one branch at a time: rebase onto `main`, check the review still
+   covers exactly this change, gate, fast-forward, push, clean up, and move the issue to Done. On a
+   rebase conflict, resolve it in the worktree, then submit and land again.
 
 ## Build and test
 

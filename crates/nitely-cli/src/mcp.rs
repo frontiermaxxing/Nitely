@@ -132,6 +132,13 @@ fn tools() -> Value {
             } }
         },
         {
+            "name": "land",
+            "description": "Land a submitted issue on the integration branch: one land at a time, rebase onto the integration branch, check that the review covers exactly this change (and that the human approved it when the playbook says so), run the gate, fast-forward, push, clean up the worktree, and move the issue to Done. A rebase conflict is left in progress for you to resolve.",
+            "inputSchema": { "type": "object", "required": ["key"], "properties": {
+                "key": { "type": "string" }
+            } }
+        },
+        {
             "name": "get_issue",
             "description": "An issue with its full timeline (state changes, notes, handoffs, questions and answers) and the pull requests whose branch names it, with their CI checks.",
             "inputSchema": { "type": "object", "required": ["key"], "properties": {
@@ -265,6 +272,10 @@ fn run_tool(server: &Server, name: &str, args: &Value) -> Result<Value> {
             let dir = str_arg(args, "worktree").unwrap_or(&server.cwd);
             let opts = nitely_core::submit::SubmitOptions { dir, issue_key: str_arg(args, "key"), skip_review: false, local_only: false };
             json!(nitely_core::submit::submit(&mut db, &config, &opts, &actor)?)
+        }
+        "land" => {
+            let opts = nitely_core::land::LandOptions { dir: &server.cwd, issue_key: req(args, "key")?, push: true, keep: false, break_lock: false };
+            json!(nitely_core::land::land(&mut db, &config, &opts, &actor)?)
         }
         "get_issue" => {
             let key = req(args, "key")?;

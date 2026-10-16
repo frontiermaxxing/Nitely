@@ -165,9 +165,9 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     let (state, next) = if verdict == "changes" {
         ("In Progress", "The review found P0 or P1 problems. Fix them, commit, and submit again.")
     } else if out.approver == "human" {
-        ("Needs You", "It waits for the human's approval in the Nitely inbox. Pick up other work meanwhile.")
+        ("Needs You", "It waits for the human's approval in the Nitely inbox. Pick up other work meanwhile; once it is Approved, call land.")
     } else {
-        ("In Review", "The review passed and no human approval is needed. It is ready to land.")
+        ("In Review", "The review passed and no human approval is needed. Call land to put it on the integration branch.")
     };
     if issue.state != state && issue.origin == "nitely" {
         out.state = db.move_issue(&issue.key, state, None, None, actor)?.state;
