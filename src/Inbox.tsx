@@ -145,7 +145,8 @@ export function Inbox(props: {
     // A held key repeats: it must not go on to approve or answer the decisions that follow.
     if (e.repeat || e.ctrlKey || e.metaKey || e.altKey || typing(e.target)) return;
     const on = (e.target as HTMLElement).closest(".inbox-row.on, .inbox-detail");
-    if (!on) return;
+    // Not while an issue sheet covers the Inbox: the decision under it is not the one in view.
+    if (!on || document.querySelector(".panel")) return;
     const k = keys.current;
     const n = Number(e.key);
     const run =

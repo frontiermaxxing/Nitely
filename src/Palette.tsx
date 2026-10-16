@@ -374,9 +374,10 @@ export function step(direction: 1 | -1) {
 
 /**
  * The app's keys: Ctrl/Cmd+K opens the palette; "?" the sheet of keys; j and k step through items
- * unless you are typing or the palette is open.
+ * unless you are typing, the palette is open, or an issue sheet covers the page (they would move
+ * the focus to items behind it).
  */
-export function useKeys(openPalette: () => void, paletteOpen: boolean, openKeys: () => void) {
+export function useKeys(openPalette: () => void, paletteOpen: boolean, openKeys: () => void, covered: boolean) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
@@ -385,8 +386,7 @@ export function useKeys(openPalette: () => void, paletteOpen: boolean, openKeys:
         return;
       }
       if (paletteOpen || e.ctrlKey || e.metaKey || e.altKey || typing(e.target)) return;
-      if (e.key === "j") step(1);
-      else if (e.key === "k") step(-1);
+      if ((e.key === "j" || e.key === "k") && !covered) step(e.key === "j" ? 1 : -1);
       else if (e.key === "?") {
         e.preventDefault();
         openKeys();
@@ -394,5 +394,5 @@ export function useKeys(openPalette: () => void, paletteOpen: boolean, openKeys:
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [openPalette, paletteOpen, openKeys]);
+  }, [openPalette, paletteOpen, openKeys, covered]);
 }

@@ -73,7 +73,7 @@ export function App() {
   const [keys, setKeys] = useState(false);
   const openKeys = useCallback(() => setKeys(true), []);
   const closeKeys = useCallback(() => setKeys(false), []);
-  useKeys(openPalette, palette || keys, openKeys);
+  useKeys(openPalette, palette || keys, openKeys, !!openIssue);
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(nowSecs);
   // Bumped after any change made in the app, so open lists refetch at once.
