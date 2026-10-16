@@ -13,5 +13,6 @@ dirs.workspace = true
 ureq = { version = "3", features = ["json", "platform-verifier"] }
 base64 = "0.22"
 toml = "1"
+serde_ignored = "0.1"
 regex = "1"
 toml_edit = "0.23"

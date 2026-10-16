@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use crate::playbook::{shell_free_command, tail};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct ReviewRules {
     /// Who reviews whose branches: the branch's vendor to the reviewer. `*` covers the rest.
     pub reviewer: BTreeMap<String, String>,
@@ -31,7 +31,6 @@ pub struct ReviewRules {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Flag {
     /// An uppercase name, e.g. MONEY_OR_RELEASE; it becomes the reviewer's closing line.
     pub name: String,

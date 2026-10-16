@@ -18,7 +18,6 @@ pub const PLAYBOOK_PATH: &str = ".nitely/playbook.toml";
 const OUTPUT_TAIL: usize = 4000;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Playbook {
     #[serde(default)]
     pub branch: BranchRules,
@@ -32,10 +31,14 @@ pub struct Playbook {
     pub approval: ApprovalRules,
     #[serde(default)]
     pub land: LandRules,
+    /// Keys this nitely does not know, which it ignored: a typo, or a key a newer nitely reads.
+    /// Refusing them would break every older nitely still running the day a playbook starts
+    /// using a new key (NIT-50), so they are reported instead (see `unknown_warnings`).
+    #[serde(skip)]
+    pub unknown: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct LandRules {
     /// Run in the main checkout after a change lands, in order, when what landed matches (e.g.
     /// rebuild and install a tool the agents use). A failure is a warning: the land stands.
@@ -44,7 +47,7 @@ pub struct LandRules {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct BranchRules {
     /// The branch tasks are cut from and land on.
     pub integration: String,
@@ -56,7 +59,7 @@ pub struct BranchRules {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct WorktreeRules {
     /// Relative to the repo root. `{repo}`, `{key}`, `{slug}` and `{vendor}` are filled in.
     /// Keep it outside the repo so searches in the main checkout never walk task worktrees.
@@ -147,7 +150,6 @@ fn refresh_setup(rules: &WorktreeRules, worktree: &Path, main: &Path, base: &str
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct GateRules {
     /// Must all pass before a change can land. Run in the task's worktree, in order.
     #[serde(default)]
@@ -159,7 +161,7 @@ pub struct GateRules {
 
 /// A gate command that depends on what the branch changes (against the integration branch).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct GateStep {
     pub run: String,
     /// Runs only when a changed path matches one of these regular expressions.
@@ -203,7 +205,7 @@ impl GateStep {
 
 /// Which changes wait for a human. Everything else is approved by a passing review.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct ApprovalRules {
     /// Every change waits for a human.
     pub always_human: bool,
@@ -215,7 +217,6 @@ pub struct ApprovalRules {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PathRule {
     pub pattern: String,
     /// Shown to the human, e.g. "billing and money".
@@ -305,7 +306,19 @@ impl Playbook {
     }
 
     pub fn parse(text: &str) -> Result<Playbook> {
-        Ok(toml::from_str(text)?)
+        let mut unknown = Vec::new();
+        let de = toml::Deserializer::parse(text)?;
+        let mut playbook: Playbook = serde_ignored::deserialize(de, |path| unknown.push(path.to_string()))?;
+        playbook.unknown = unknown;
+        Ok(playbook)
+    }
+
+    /// One line per ignored key, for the results agents read.
+    pub fn unknown_warnings(&self) -> Vec<String> {
+        self.unknown
+            .iter()
+            .map(|k| format!("the playbook's `{k}` is not something this nitely knows, so it was ignored (a typo, or a key a newer nitely reads)"))
+            .collect()
     }
 
     pub fn integration_branch(&self) -> &str {
@@ -451,6 +464,8 @@ pub struct Started {
     /// False when the worktree already existed (starting is idempotent).
     pub created: bool,
     pub setup: Vec<CommandResult>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -469,6 +484,9 @@ pub struct GateResult {
     pub passed: bool,
     pub commit: String,
     pub results: Vec<CommandResult>,
+    /// Playbook keys this nitely ignored.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Creates the issue's branch and worktree from the integration branch and runs the setup
@@ -480,7 +498,7 @@ pub fn start_task(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, 
     let worktree_str = worktree.to_string_lossy().into_owned();
 
     if worktree.join(".git").exists() {
-        return Ok(Started { issue: issue.key.clone(), branch, worktree: worktree_str, created: false, setup: vec![] });
+        return Ok(Started { issue: issue.key.clone(), branch, worktree: worktree_str, created: false, setup: vec![], warnings: playbook.unknown_warnings() });
     }
 
     let base = playbook.integration_branch();
@@ -507,7 +525,7 @@ pub fn start_task(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, 
             std::fs::write(record, setup_fingerprint(&playbook.worktree, &worktree)).ok();
         }
     }
-    Ok(Started { issue: issue.key.clone(), branch, worktree: worktree_str, created: true, setup })
+    Ok(Started { issue: issue.key.clone(), branch, worktree: worktree_str, created: true, setup, warnings: playbook.unknown_warnings() })
 }
 
 /// The ref a branch's changes are measured against: `origin/<base>` when the local `<base>` is
@@ -570,7 +588,7 @@ pub fn run_gate(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<&s
         format!("Gate failed at {commit}: {}", results.last().map(|r| r.command.as_str()).unwrap_or(""))
     };
     db.log_event(actor, issue_key, Some(&worktree.to_string_lossy()), if passed { "gate_passed" } else { "gate_failed" }, &summary)?;
-    Ok(GateResult { passed, commit, results })
+    Ok(GateResult { passed, commit, results, warnings: playbook.unknown_warnings() })
 }
 
 /// Fills `{main}` (the main checkout), `{worktree}` and `{base}` in a playbook command.
@@ -600,7 +618,7 @@ mod tests {
         assert_eq!(p.worktree.dir, WorktreeRules::default().dir);
         assert_eq!(p.branch.pattern, BranchRules::default().pattern);
         assert_eq!(p.branch.integration, "win-dev");
-        assert!(Playbook::parse("[gate]\ncomand = []\n").is_err());
+        assert_eq!(Playbook::parse("[gate]\ncomand = []\n").unwrap().unknown, ["gate.comand"]);
     }
 
     fn issue() -> IssueRecord {
@@ -709,9 +727,16 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_keys() {
-        assert!(Playbook::parse("[gate]\ncomand = [\"x\"]").is_err());
+    fn reports_unknown_keys_instead_of_refusing_them() {
+        // A typo, a section a newer nitely added, and a key inside a list entry.
+        let pb = Playbook::parse("[gate]\ncomand = [\"x\"]\n[future]\nx = 1\n[[gate.steps]]\nrun = \"y\"\nnew_rule = true\n").unwrap();
+        let mut unknown = pb.unknown.clone();
+        unknown.sort();
+        assert_eq!(unknown, ["future", "gate.comand", "gate.steps.0.new_rule"]);
+        assert_eq!(pb.gate.steps[0].run, "y", "the known keys around them still count");
+        assert!(pb.unknown_warnings().iter().any(|w| w.contains("`gate.comand`") && w.contains("ignored")));
         assert_eq!(Playbook::parse("").unwrap().branch.integration, "main");
+        assert!(Playbook::parse("[gate]\ncommands = 3").is_err(), "a known key of the wrong type is still an error");
     }
 
     #[test]
