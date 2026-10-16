@@ -136,7 +136,9 @@ mod tests {
 
     #[test]
     fn the_database_is_opened_read_only() {
-        let dir = std::env::temp_dir().join(format!("nitely-ui-{}", std::process::id()));
+        // Process ids come back on Windows, so the time keeps an earlier run's file out of the way.
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("nitely-ui-{}-{nanos}", std::process::id()));
         let path = dir.join("t.db");
         assert!(Db::open_read_only(&path).is_err(), "no database is created");
         drop(Db::open(&path).unwrap());
