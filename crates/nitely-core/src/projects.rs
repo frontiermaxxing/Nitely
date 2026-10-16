@@ -315,7 +315,7 @@ fn checked_out(config: &crate::Config, db: &Db, project: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::issues::{Actor, NewIssue};
+    use crate::issues::{Actor, IssueRecord, NewIssue};
 
     fn db() -> Db {
         // A folder per test, so tests running at once never share a database.
@@ -376,6 +376,20 @@ mod tests {
         assert!(db.rekey_project("OTH", "OLD").is_err());
         db.rekey_project("NEW", "OLD").unwrap();
         assert_eq!(db.issue("NEW-1").unwrap().unwrap().key, "OLD-1");
+    }
+
+    #[test]
+    fn a_tracker_does_not_mirror_issues_back_under_an_old_key() {
+        let mut db = db();
+        db.create_project("AND", "Aera").unwrap();
+        issue(&mut db, "AND", "Native", vec![]);
+        db.rekey_project("AND", "AE").unwrap();
+        // Linear still has AND-1 and an unrelated LIN-1.
+        let mirrored = |key: &str| IssueRecord { key: key.into(), origin: "linear".into(), title: "From Linear".into(), state: "Todo".into(), ..Default::default() };
+        db.replace_issues("linear", &[mirrored("AND-1"), mirrored("LIN-1")]).unwrap();
+        let old = db.issue("AND-1").unwrap().unwrap();
+        assert_eq!((old.key.as_str(), old.origin.as_str()), ("AE-1", "nitely"), "the old link opens the native issue");
+        assert!(db.issue("LIN-1").unwrap().is_some(), "other prefixes still mirror");
     }
 
     #[test]

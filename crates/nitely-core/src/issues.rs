@@ -875,6 +875,10 @@ impl Db {
         if origin == "nitely" {
             bail!("native issues are never bulk-replaced");
         }
+        // A project's old key belongs to it: its links open the native issues under the new key,
+        // so a tracker that still has issues with that prefix does not mirror them back in.
+        let aliases = self.project_aliases()?;
+        let taken = |key: &str| key.split_once('-').is_some_and(|(p, _)| aliases.contains_key(&p.to_uppercase()));
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM issue WHERE origin = ?1", [origin])?;
         {
@@ -882,7 +886,7 @@ impl Db {
                 "INSERT OR IGNORE INTO issue (key, origin, title, url, state, state_type, labels, updated_at, priority)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )?;
-            for i in issues {
+            for i in issues.iter().filter(|i| !taken(&i.key)) {
                 ins.execute(params![
                     i.key,
                     origin,
