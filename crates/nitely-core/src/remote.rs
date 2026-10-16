@@ -64,7 +64,9 @@ pub fn sync(config: &Config, db: &mut Db) -> SyncReport {
         }
     }
     if creds.linear.usable() {
-        let result = fetch_linear(&creds).and_then(|issues| {
+        let result = fetch_linear(&creds).and_then(|mut issues| {
+            let overrides = crate::linear_import::overrides(&config.linear_states, &[])?;
+            crate::linear_import::map_mirrored(&mut issues, &overrides);
             let n = issues.len();
             db.replace_issues("linear", &issues)?;
             Ok(n)

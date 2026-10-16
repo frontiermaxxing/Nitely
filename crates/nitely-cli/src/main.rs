@@ -163,7 +163,8 @@ enum Cmd {
         #[arg(long)]
         linear_project: Option<String>,
         /// The Nitely state for a Linear state Nitely has no name for, e.g.
-        /// --state "Needs Review=Needs You". Repeat for more. Others map by name, then by type.
+        /// --state "Needs Review=Needs You". Repeat for more; it wins over the config's
+        /// linear_states. Others map by name, then by type.
         #[arg(long = "state", value_name = "LINEAR=NITELY")]
         states: Vec<String>,
         /// Import, rather than only show what would happen.
@@ -784,7 +785,7 @@ fn run(cmd: Cmd) -> Result<()> {
         }
         Cmd::Now => print_json(&nitely_core::snapshot(&Config::load()?, &Db::open_default()?)?),
         Cmd::ImportLinear { project, name, linear_project, states, yes, skip_archived } => {
-            let overrides = nitely_core::linear_import::parse_overrides(&states)?;
+            let overrides = nitely_core::linear_import::overrides(&Config::load()?.linear_states, &states)?;
             let creds = nitely_core::credentials::load()?
                 .ok_or_else(|| anyhow::anyhow!("no credentials file at {}", nitely_core::credentials::path().display()))?;
             eprintln!("reading every issue of the Linear project, with comments…");

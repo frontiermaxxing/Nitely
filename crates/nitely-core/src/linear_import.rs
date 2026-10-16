@@ -320,21 +320,41 @@ fn mapped_state(issue: &LinearIssue, overrides: &BTreeMap<String, &'static str>)
         .unwrap_or_else(|| native_state(&issue.state_name, &issue.state_type))
 }
 
-/// `"Needs Review=Needs You"` pairs, keyed by the Linear name in lowercase. Approved is refused:
-/// in Nitely only a human approves, in the app.
-pub fn parse_overrides(pairs: &[String]) -> Result<BTreeMap<String, &'static str>> {
+/// Chosen Nitely states for Linear state names, keyed by the Linear name in lowercase: the
+/// config's `linear_states`, then `"Needs Review=Needs You"` pairs (`--state`) over them. Approved
+/// is refused: in Nitely only a human approves, in the app.
+pub fn overrides(config: &BTreeMap<String, String>, pairs: &[String]) -> Result<BTreeMap<String, &'static str>> {
     let mut out = BTreeMap::new();
+    let mut add = |linear: &str, native: &str| -> Result<()> {
+        let (native, _) = parse_state(native)?;
+        if native == "Approved" {
+            bail!("a Linear state cannot become Approved: only a human approves, in Nitely");
+        }
+        out.insert(linear.trim().to_lowercase(), native);
+        Ok(())
+    };
+    for (linear, native) in config {
+        add(linear, native).with_context(|| format!("linear_states in {}", crate::paths::config_path().display()))?;
+    }
     for pair in pairs {
         let Some((linear, native)) = pair.split_once('=') else {
             bail!("--state takes LINEAR=NITELY, e.g. \"Needs Review=Needs You\"; got {pair:?}");
         };
-        let (native, _) = parse_state(native)?;
-        if native == "Approved" {
-            bail!("an import cannot approve: only a human approves, in Nitely");
-        }
-        out.insert(linear.trim().to_lowercase(), native);
+        add(linear, native)?;
     }
     Ok(out)
+}
+
+/// Shows mirrored Linear issues in the Nitely state chosen for their Linear state, if one is.
+pub fn map_mirrored(issues: &mut [crate::issues::IssueRecord], overrides: &BTreeMap<String, &'static str>) {
+    for issue in issues {
+        if let Some(native) = overrides.get(&issue.state.to_lowercase()) {
+            if let Ok((state, state_type)) = parse_state(native) {
+                issue.state = state.to_string();
+                issue.state_type = state_type.to_string();
+            }
+        }
+    }
 }
 
 fn number_of(key: &str, project: &str) -> Option<i64> {
@@ -367,7 +387,7 @@ pub fn parse_iso(s: &str) -> Option<i64> {
 
 // ----- plan and apply -----
 
-/// What importing `issues` into `project` would do, with `overrides` (from `parse_overrides`)
+/// What importing `issues` into `project` would do, with `overrides` (from `overrides`)
 /// choosing the native state for some Linear states. Changes nothing.
 pub fn plan(db: &Db, issues: &[LinearIssue], project: &str, project_name: &str, overrides: &BTreeMap<String, &'static str>) -> Result<ImportPlan> {
     let project = project.trim().to_uppercase();
@@ -436,7 +456,7 @@ pub fn plan(db: &Db, issues: &[LinearIssue], project: &str, project_name: &str, 
     }
     for linear in overrides.keys() {
         if !states.keys().any(|(name, _)| name.to_lowercase() == *linear) {
-            out.notes.push(format!("no issue to import is in the Linear state {linear:?} that --state names"));
+            out.notes.push(format!("no issue to import is in the Linear state {linear:?} that --state or linear_states names"));
         }
     }
     numbers.sort();
@@ -569,9 +589,17 @@ mod tests {
         let by_type = plan(&db, &issues, "app", "Acme", &BTreeMap::new()).unwrap();
         assert_eq!(by_type.states.iter().find(|s| s.linear == "Needs Review").map(|s| s.native.as_str()), Some("In Progress"));
         assert!(by_type.notes.iter().any(|n| n.contains("--state \"Needs Review=")));
-        assert!(parse_overrides(&["Needs Review=Approved".into()]).is_err(), "an import cannot approve");
-        assert!(parse_overrides(&["no equals sign".into()]).is_err());
-        let overrides = parse_overrides(&["needs review = needs-you".into()]).unwrap();
+        let none = BTreeMap::new();
+        assert!(overrides(&none, &["Needs Review=Approved".into()]).is_err(), "an import cannot approve");
+        assert!(overrides(&none, &["no equals sign".into()]).is_err());
+        let configured = BTreeMap::from([("Needs Review".to_string(), "Todo".to_string()), ("Blocked".to_string(), "Needs You".to_string())]);
+        let overrides = overrides(&configured, &["needs review = needs-you".into()]).unwrap();
+        assert_eq!((overrides["needs review"], overrides["blocked"]), ("Needs You", "Needs You"), "--state wins over the config");
+
+        // The mirror shows a mapped Linear state as its Nitely state, so it counts as waiting on you.
+        let mut mirror = vec![IssueRecord { key: "APP-9".into(), state: "Needs Review".into(), state_type: "started".into(), ..Default::default() }];
+        map_mirrored(&mut mirror, &overrides);
+        assert!(mirror[0].needs_human() && mirror[0].state_type == "started");
         let p = plan(&db, &issues, "app", "Acme", &overrides).unwrap();
         assert!(!p.project_exists);
         assert_eq!((p.found, p.create, p.replaces_mirrored, p.comments, p.next_number), (4, 3, 1, 2, 8));
@@ -586,9 +614,10 @@ mod tests {
         assert_eq!(p.archived, 1);
         assert_eq!(source_of(&["from:sam".into()]), "human");
         assert_eq!(source_of(&["x".into(), "from:claude".into()]), "claude");
-        assert_eq!(p.notes.len(), 2, "{:?}", p.notes);
+        assert_eq!(p.notes.len(), 3, "{:?}", p.notes);
         assert!(p.notes[0].contains("APP-5 was Approved"), "the Linear approval is called out");
         assert!(p.notes[1].contains("\"Shipped\""), "and the state mapped by its type");
+        assert!(p.notes[2].contains("\"blocked\""), "and a chosen state no issue is in");
         assert!(db.project("APP").unwrap().is_none(), "planning changes nothing");
 
         let done = apply(&mut db, &issues, &p, &Actor::Human).unwrap();

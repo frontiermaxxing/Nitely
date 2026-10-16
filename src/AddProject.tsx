@@ -11,7 +11,11 @@ const PLAYBOOK_SOURCE: Record<string, string> = {
 };
 
 /** A made-up repo path in the platform's usual form, for placeholders and examples. */
-export const exampleRepoPath = () => (navigator.platform.startsWith("Win") ? "C:\\Code\\my-app" :"~/code/my-app");
+export const exampleRepoPath = () => {
+  const platform = navigator.platform;
+  if (platform.startsWith("Win")) return "C:\\Code\\my-app";
+  return platform.startsWith("Mac") ? "/Users/you/code/my-app" : "/home/you/code/my-app";
+};
 
 /** Pick a repo folder, see everything Nitely will set up, then add it. */
 export function AddProject(props: { onAdded: (projectKey: string) => void }) {

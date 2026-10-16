@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -10,6 +11,11 @@ use crate::playbook::Playbook;
 pub struct Config {
     #[serde(default)]
     pub repos: Vec<RepoConfig>,
+    /// The Nitely state for a Linear state Nitely has no name for, e.g. `"Needs Review": "Needs
+    /// You"`: the Linear mirror shows those issues in that state, and `nitely import-linear` uses
+    /// it where `--state` does not say otherwise.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub linear_states: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,6 +176,10 @@ mod tests {
         RepoConfig { name: name.into(), root: root.into(), integration_branch: "main".into(), project: None }
     }
 
+    fn with_repos(repos: Vec<RepoConfig>) -> Config {
+        Config { repos, ..Default::default() }
+    }
+
     fn names(config: &Config) -> Vec<&str> {
         config.repos.iter().map(|r| r.name.as_str()).collect()
     }
@@ -179,27 +189,27 @@ mod tests {
         let data = std::env::temp_dir().join(format!("nitely-config-{}-{}", std::process::id(), crate::db::now()));
         std::fs::create_dir_all(data.join("playbooks")).unwrap();
         let kept = |name: &str| Playbook::stored_path_in(&data, name);
-        std::fs::write(kept("Aera"), "[branch]\nintegration = \"win-dev\"\n").unwrap();
+        std::fs::write(kept("Acme"), "[branch]\nintegration = \"develop\"\n").unwrap();
 
-        let mut config = Config { repos: vec![repo("Aera", r"C:\Dev\AeraChromium"), repo("Nitely", "/dev/Nitely")] };
-        config.upsert_repo_in(&data, repo("AeraChromium", "C:/Dev/AeraChromium/")).unwrap();
-        assert_eq!(names(&config), vec!["Nitely", "AeraChromium"]);
-        assert!(std::fs::read_to_string(kept("AeraChromium")).unwrap().contains("win-dev"), "the gate and approval rules are kept");
+        let mut config = with_repos(vec![repo("Acme", r"C:\Dev\AcmeWeb"), repo("Nitely", "/dev/Nitely")]);
+        config.upsert_repo_in(&data, repo("AcmeWeb", "C:/Dev/AcmeWeb/")).unwrap();
+        assert_eq!(names(&config), vec!["Nitely", "AcmeWeb"]);
+        assert!(std::fs::read_to_string(kept("AcmeWeb")).unwrap().contains("develop"), "the gate and approval rules are kept");
 
         // A playbook already kept for the surviving name is not overwritten.
         std::fs::write(kept("Old"), "old").unwrap();
-        let mut stale = Config { repos: vec![repo("Old", r"C:\Dev\AeraChromium"), repo("Nitely", "/dev/Nitely"), repo("AeraChromium", "C:/Dev/AeraChromium")] };
+        let mut stale = with_repos(vec![repo("Old", r"C:\Dev\AcmeWeb"), repo("Nitely", "/dev/Nitely"), repo("AcmeWeb", "C:/Dev/AcmeWeb")]);
         stale.dedupe_roots(&data);
-        assert_eq!(names(&stale), vec!["Nitely", "AeraChromium"], "the last written entry wins");
-        assert!(std::fs::read_to_string(kept("AeraChromium")).unwrap().contains("win-dev"));
+        assert_eq!(names(&stale), vec!["Nitely", "AcmeWeb"], "the last written entry wins");
+        assert!(std::fs::read_to_string(kept("AcmeWeb")).unwrap().contains("develop"));
 
-        let mut alias = Config { repos: vec![repo("Old", "/dev/x"), repo("New", "/dev/x/")] };
+        let mut alias = with_repos(vec![repo("Old", "/dev/x"), repo("New", "/dev/x/")]);
         alias.dedupe_roots(&data);
         assert_eq!(std::fs::read_to_string(kept("New")).unwrap(), "old", "a dropped alias's playbook moves to the survivor");
 
         // When the copy fails (here the old playbook is a folder), nothing is dropped.
         std::fs::create_dir_all(kept("Gone")).unwrap();
-        let mut failing = Config { repos: vec![repo("Gone", "/dev/y"), repo("Blocked", "/dev/y")] };
+        let mut failing = with_repos(vec![repo("Gone", "/dev/y"), repo("Blocked", "/dev/y")]);
         failing.dedupe_roots(&data);
         assert_eq!(names(&failing), vec!["Gone", "Blocked"], "the old entry and its rules stay");
         assert!(failing.upsert_repo_in(&data, repo("Blocked", "/dev/y")).is_err());
