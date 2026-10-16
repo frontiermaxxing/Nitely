@@ -299,9 +299,8 @@ fn check_approval(db: &Db, pb: &Playbook, key: &str, worktree: &Path, base: &str
     if reasons.is_empty() {
         return Ok(format!("the {} review passed and no human approval is needed", review.reviewer));
     }
-    let approved_at = db.human_approval_at(key)?;
-    match approved_at {
-        Some(at) if at >= review.ts => Ok(format!("approved by a human in Nitely after the review ({})", reasons.join("; "))),
+    match db.standing_approval(key)? {
+        Some(_) => Ok(format!("approved by a human in Nitely after the review ({})", reasons.join("; "))),
         _ => bail!(
             "this change waits for a human ({}); it lands once they approve it in Nitely, after the review",
             reasons.join("; ")
@@ -310,6 +309,23 @@ fn check_approval(db: &Db, pb: &Playbook, key: &str, worktree: &Path, base: &str
 }
 
 impl Db {
+    /// When the human approved the issue, if that approval covers its latest review: given after
+    /// it, or given after an earlier review of the same patch that every review since has
+    /// re-reviewed without asking for changes or raising a reason the approved one did not have.
+    /// A changed patch or a new reason needs a new approval.
+    pub fn standing_approval(&self, key: &str) -> Result<Option<i64>> {
+        let Some(at) = self.human_approval_at(key)? else { return Ok(None) };
+        let reviews = self.reviews(key)?;
+        let Some(approved) = reviews.iter().position(|r| r.ts <= at) else {
+            return Ok(reviews.is_empty().then_some(at));
+        };
+        let base = &reviews[approved];
+        let unchanged = reviews[..approved].iter().all(|r| {
+            r.patch_id == base.patch_id && r.verdict != "changes" && r.reasons.iter().all(|x| base.reasons.contains(x))
+        });
+        Ok((base.verdict != "changes" && unchanged).then_some(at))
+    }
+
     /// When a human last moved the issue to Approved, if it is still Approved.
     pub fn human_approval_at(&self, key: &str) -> Result<Option<i64>> {
         let Some(issue) = self.issue(key)? else { return Ok(None) };
@@ -611,7 +627,7 @@ when_changed = ["billing"]
     fn lands_reviewed_work_and_waits_for_human_approval() {
         let mut f = fixture("approve");
         let (a, wt_a) = f.submitted("Sidebar polish", "sidebar.txt", "x");
-        let (b, _) = f.submitted("Billing fix", "billing.txt", "x");
+        let (b, wt_b) = f.submitted("Billing fix", "billing.txt", "x");
 
         let r = f.land(&a);
         assert!(r.landed && r.pushed == Some(true), "{r:?}");
@@ -629,12 +645,27 @@ when_changed = ["billing"]
         // An agent cannot approve; only a human move counts.
         assert!(f.db.move_issue(&b, "Approved", None, None, &f.actor).is_err());
         f.db.move_issue(&b, "Approved", None, None, &Actor::Human).unwrap();
+        // Submitting the same patch again (after a clean rebase, say) keeps the approval.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        f.submit(&wt_b);
+        assert_eq!(f.db.issue(&b).unwrap().unwrap().state, "Approved");
+        assert!(f.db.standing_approval(&b).unwrap().is_some());
         let r = f.land(&b);
         assert!(r.landed, "{r:?}");
         // A failing after-land step is a warning; the land stands.
         assert!(r.warnings.iter().any(|w| w.contains("exit 3")), "{r:?}");
         assert!(r.approval.unwrap().contains("approved by a human"));
         assert!(Path::new(&f.repo.join("billing.txt")).exists() && Path::new(&f.repo.join("sidebar.txt")).exists());
+
+        // A changed patch needs a new approval.
+        let (c, wt_c) = f.submitted("Billing rounding", "billing-rounding.txt", "x");
+        f.db.move_issue(&c, "Approved", None, None, &Actor::Human).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::write(wt_c.join("billing-rounding.txt"), "y").unwrap();
+        sh(&wt_c, &["commit", "-q", "-am", "round again"]);
+        f.submit(&wt_c);
+        assert_eq!(f.db.issue(&c).unwrap().unwrap().state, "Needs You");
+        assert!(f.db.standing_approval(&c).unwrap().is_none());
         std::fs::remove_dir_all(&f.base).ok();
     }
 

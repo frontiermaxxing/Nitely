@@ -27,6 +27,9 @@ pub struct Submitted {
     /// `agent` when the review is enough, `human` when it waits for approval.
     pub approver: String,
     pub reasons: Vec<String>,
+    /// The human approved this exact patch before, and this review raised nothing new, so the
+    /// approval stands and the issue stays Approved.
+    pub approval_stands: bool,
     pub pushed: bool,
     pub pr_url: Option<String>,
     pub pr_error: Option<String>,
@@ -107,6 +110,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         review: None,
         approver: "human".into(),
         reasons: vec![],
+        approval_stands: false,
         pushed: false,
         pr_url: None,
         pr_error: None,
@@ -145,6 +149,8 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     out.approver = if out.reasons.is_empty() { "agent" } else { "human" }.into();
     let verdict = out.review.as_ref().map_or("none", |r| r.verdict.as_str()).to_string();
     db.record_review(&out)?;
+    out.approval_stands =
+        out.approver == "human" && verdict != "changes" && issue.state == "Approved" && db.standing_approval(&issue.key)?.is_some();
 
     let title = format!("{}: {}", issue.key, issue.title);
     let body = describe(&issue, &out);
@@ -168,6 +174,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     };
     let outcome = match (&out.review, out.approver.as_str()) {
         (Some(r), _) if r.verdict == "changes" => format!("Review by {}{} requested changes", r.reviewer, noted(&r.note)),
+        (Some(r), "human") if out.approval_stands => format!("Review by {}{} passed; the human's approval of this patch stands", r.reviewer, noted(&r.note)),
         (Some(r), "human") => format!("Review by {}{} passed; waits for a human", r.reviewer, noted(&r.note)),
         (Some(r), _) => format!("Review by {}{} passed; ready to land", r.reviewer, noted(&r.note)),
         (None, _) => "Submitted without a review; waits for a human".to_string(),
@@ -185,6 +192,8 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     } else if push_failed {
         // Not handed in: nobody can see or merge the branch, so it must not look ready to land.
         ("In Progress", "The push failed, so the change is not handed in. Fix the remote or its access (ask the human if it is a permission error), then submit again.")
+    } else if out.approval_stands {
+        ("Approved", "The human approved this exact patch before and the review raised nothing new, so the approval stands. Call land.")
     } else if out.approver == "human" {
         ("Needs You", "It waits for the human's approval in the Nitely inbox. Pick up other work meanwhile; once it is Approved, call land.")
     } else {
@@ -236,7 +245,9 @@ pub fn describe(issue: &IssueRecord, s: &Submitted) -> String {
         lines.push(format!("Open it in Nitely: `{}`", issue.url));
     }
     lines.push(String::new());
-    lines.push(if s.approver == "human" {
+    lines.push(if s.approval_stands {
+        "**Approval:** a human approved this exact patch in Nitely, and this review raised nothing new, so it stands.".to_string()
+    } else if s.approver == "human" {
         "**Approval:** waits for a human. Approve it in Nitely's inbox.".to_string()
     } else {
         "**Approval:** the review is enough under this repo's playbook.".to_string()
