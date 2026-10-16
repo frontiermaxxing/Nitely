@@ -176,7 +176,8 @@ pub struct Applied {
 
 /// Makes every change in the plan, for the agents that were found. A failure for one agent does not
 /// stop the others; it is reported.
-pub fn apply(db: &mut Db, config: &mut Config, plan: &ConnectPlan) -> Result<Applied> {
+/// `actor` is whoever connects: the human in the app, an agent through the CLI.
+pub fn apply(db: &mut Db, config: &mut Config, plan: &ConnectPlan, actor: &crate::Actor) -> Result<Applied> {
     let mut done = Vec::new();
     let mut failed = Vec::new();
     if !plan.project_exists {
@@ -200,7 +201,7 @@ pub fn apply(db: &mut Db, config: &mut Config, plan: &ConnectPlan) -> Result<App
     // A project nobody has set up gets its first issue: the sweep that seeds the board and
     // drafts the review rules. One per project, whatever number of repos join it.
     if db.project_brief(&plan.project_key)?.setup.is_none() {
-        match file_setup_issue(db, plan) {
+        match file_setup_issue(db, plan, actor) {
             Ok(Some(key)) => done.push(format!("filed {key}: an agent sweeps the repo, seeds the board and drafts the review rules")),
             Ok(None) => {}
             Err(e) => failed.push(format!("filing the setup issue ({e:#})")),
@@ -219,8 +220,11 @@ fn setup_title(project: &str) -> String {
 }
 
 /// Files the setup issue, unless an open one is there already. None when it was.
-fn file_setup_issue(db: &mut Db, plan: &ConnectPlan) -> Result<Option<String>> {
-    let title = setup_title(&plan.project_name);
+fn file_setup_issue(db: &mut Db, plan: &ConnectPlan, actor: &crate::Actor) -> Result<Option<String>> {
+    // The project's own name, which every repo joining it shares; the plan's is the folder's
+    // until the project exists.
+    let name = db.project(&plan.project_key)?.map(|p| p.name).unwrap_or_else(|| plan.project_name.clone());
+    let title = setup_title(&name);
     if db.list_issues(Some(&plan.project_key), false)?.iter().any(|i| i.title == title) {
         return Ok(None);
     }
@@ -241,13 +245,20 @@ fn file_setup_issue(db: &mut Db, plan: &ConnectPlan) -> Result<Option<String>> {
             title,
             body,
             kind: "feature".into(),
-            source: "human".into(),
+            // The agent's vendor when its id names one, as the MCP tools file; the human in the app.
+            source: match actor {
+                crate::Actor::Human => "human".into(),
+                crate::Actor::Agent(id) => match id.split(':').next() {
+                    Some(v) if crate::issues::SOURCES.contains(&v) => v.into(),
+                    _ => "claude".into(),
+                },
+            },
             evidence: format!("{} was connected with an empty board and no setup sweep yet.", plan.repo_name),
             priority: 1,
             allow_similar: true,
             ..Default::default()
         },
-        &crate::Actor::Human,
+        actor,
     )?;
     Ok(Some(issue.key))
 }
@@ -841,11 +852,21 @@ args = [\"nitely\", \"mcp\"]
             agents: vec![],
             warnings: vec![],
         };
-        let key = file_setup_issue(&mut db, &plan).unwrap().unwrap();
+        let key = file_setup_issue(&mut db, &plan, &crate::Actor::Human).unwrap().unwrap();
         let issue = db.issue(&key).unwrap().unwrap();
         assert_eq!((issue.state.as_str(), issue.owner.as_str(), issue.priority), ("Todo", "agent", 1));
         assert!(issue.body.contains("setup_guide") && issue.body.contains("always_human"), "{}", issue.body);
-        assert_eq!(file_setup_issue(&mut db, &plan).unwrap(), None, "a second repo joining does not file another");
+        assert_eq!(file_setup_issue(&mut db, &plan, &crate::Actor::Human).unwrap(), None, "a second repo joining does not file another");
+        // Another repo, named after its own folder, joins the same project: still one issue.
+        let other = ConnectPlan { repo_name: "shop-api".into(), project_name: "shop-api".into(), project_exists: true, ..plan.clone() };
+        let cli = crate::Actor::Agent("cli".into());
+        assert_eq!(file_setup_issue(&mut db, &other, &cli).unwrap(), None);
+        // Through the CLI, the issue is an agent's, never the human's.
+        db.move_issue(&key, "Canceled", None, Some("redo"), &crate::Actor::Human).unwrap();
+        let again = file_setup_issue(&mut db, &other, &cli).unwrap().unwrap();
+        let issue = db.issue(&again).unwrap().unwrap();
+        assert!(issue.title.contains("Set up Shop:"), "{}", issue.title);
+        assert_eq!(db.timeline(&again).unwrap()[0].actor, "cli");
         std::fs::remove_dir_all(&dir).ok();
     }
 

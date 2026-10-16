@@ -819,7 +819,7 @@ fn run(cmd: Cmd) -> Result<()> {
                 eprintln!("\nnothing changed; run again with --yes to apply");
                 return Ok(());
             }
-            let applied = nitely_core::connect::apply(&mut db, &mut config, &plan)?;
+            let applied = nitely_core::connect::apply(&mut db, &mut config, &plan, &me)?;
             println!();
             for d in &applied.done {
                 println!("done    {d}");
