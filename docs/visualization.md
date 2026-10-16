@@ -169,5 +169,7 @@ and inside Tauri nothing changes.
   (`filed, claim, work, gate, review, changes, ...`) and its timeline, reviews, pull request and
   worktree are generated from that, so they agree. Answering an ask or moving an issue works and
   changes the data until reload.
+- If the preview suddenly fails with `reading 'invoke'` after a rebase or land, restart the dev
+  server (with `--force`): Vite kept the files as they were mid-rebase.
 - For full-resolution screenshots without the pane, headless Edge works:
   `msedge --headless=new --window-size=1280,900 --virtual-time-budget=4000 --screenshot=out.png "http://localhost:5173/?theme=dark#now"`.

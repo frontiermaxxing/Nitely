@@ -9,6 +9,7 @@
 
 import type {
   AgentPlan,
+  LinkedIssue,
   Applied,
   Ask,
   Board,
@@ -323,12 +324,15 @@ function build(): World {
       state = to;
     };
     const review = (ts: number, verdict: "pass" | "changes", approver: "agent" | "human") => {
-      const findings =
+      const findings: ReviewRecord["findings"] =
         verdict === "changes"
           ? [FINDINGS[Math.floor(rand() * 2)], FINDINGS[2 + Math.floor(rand() * 2)]]
           : rand() > 0.5
             ? [FINDINGS[4 + Math.floor(rand() * 2)]]
             : [];
+      // A second round of changes carries a finding the first round raised and was not fixed.
+      const before = reviews.find((r) => r.verdict === "changes");
+      if (verdict === "changes" && before) findings.unshift({ ...before.findings[before.findings.length - 1], carried: true });
       reviews.unshift({
         issue_key: spec.key,
         patch_id: sha(),
@@ -439,6 +443,9 @@ function build(): World {
       claimed_by: STATE_TYPE[state] === "started" ? claimed : null,
       created_at: iso(timeline[0].ts),
       updated_at: iso(updated),
+      blocked_by: [],
+      blocks: [],
+      urgency: spec.priority,
     });
     world.timelines.set(spec.key, timeline);
     world.reviews.set(spec.key, reviews);
@@ -464,9 +471,39 @@ function build(): World {
       ]);
     }
   }
+  link(world);
   world.projects = Object.entries(PROJECT_NAMES).map(([key, name]) => ({ key, name, open_issues: 0 }));
   recount(world);
   return world;
+}
+
+/** Blocked-by relations: [blocked, blocker]. Closed blockers no longer block. */
+const BLOCKERS: [string, string][] = [
+  ["NIT-26", "NIT-31"],
+  ["NIT-28", "NIT-29"],
+  ["NIT-18", "NIT-20"],
+  ["AND-270", "AND-271"],
+  ["HAR-12", "HAR-15"],
+];
+
+const isOpen = (i: IssueRecord) => i.state_type !== "completed" && i.state_type !== "canceled";
+const byKey = (world: World, key: string) => world.issues.find((i) => i.key === key)!;
+
+/** Fills blocked_by, blocks and urgency the way the backend does: an issue is as urgent as the most urgent open issue it blocks. */
+function link(world: World) {
+  for (const [blocked, blocker] of BLOCKERS) {
+    const a = byKey(world, blocked);
+    const b = byKey(world, blocker);
+    if (!isOpen(a) || !isOpen(b)) continue;
+    a.blocked_by.push(b.key);
+    b.blocks.push(a.key);
+    if (a.priority > 0 && (b.urgency === 0 || a.priority < b.urgency)) b.urgency = a.priority;
+  }
+}
+
+function linked(world: World, key: string): LinkedIssue {
+  const i = byKey(world, key);
+  return { key: i.key, title: i.title, state: i.state, open: isOpen(i) };
 }
 
 function recount(world: World) {
@@ -563,7 +600,17 @@ function issues(args: Record<string, unknown>): IssueRecord[] {
 function detail(key: string): IssueDetail {
   const issue = world.issues.find((i) => i.key.toLowerCase() === key.toLowerCase());
   if (!issue) throw `no issue ${key}`;
-  return { issue, timeline: world.timelines.get(issue.key) ?? [], prs: world.prs.get(issue.key) ?? [], reviews: world.reviews.get(issue.key) ?? [] };
+  const relations = {
+    blocked_by: BLOCKERS.filter(([a]) => a === issue.key).map(([, b]) => linked(world, b)),
+    blocks: BLOCKERS.filter(([, b]) => b === issue.key).map(([a]) => linked(world, a)),
+  };
+  return {
+    issue,
+    relations,
+    timeline: world.timelines.get(issue.key) ?? [],
+    prs: world.prs.get(issue.key) ?? [],
+    reviews: world.reviews.get(issue.key) ?? [],
+  };
 }
 
 function moveIssue(args: Record<string, unknown>) {

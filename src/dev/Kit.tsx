@@ -61,6 +61,9 @@ const ISSUE: IssueRecord = {
   claimed_by: "claude:c:/development/nitely",
   created_at: "",
   updated_at: "",
+  blocked_by: [],
+  blocks: [],
+  urgency: 1,
 };
 
 const VENDORS = ["claude", "codex", "cursor", "human", "other"];
