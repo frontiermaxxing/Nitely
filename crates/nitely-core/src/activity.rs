@@ -205,19 +205,25 @@ pub fn activity(config: &Config, db: &Db, from: i64, to: i64) -> Result<Activity
     for e in &events {
         by_actor.entry(e.actor.as_str()).or_default().push(e.ts);
     }
+    // Each id's last event before the window: what it did last, and where its state was last said.
+    let last_before = |id: &str| -> Result<Option<i64>> {
+        Ok(conn.query_row("SELECT MAX(ts) FROM event WHERE actor = ?1 AND ts < ?2", params![id, from], |r| r.get(0))?)
+    };
     // Each id's state rows only mark changes of its own. Where a lane merges two ids (Codex's MCP
     // id and its turn-end hook), each event must say its id's state again, or a report after a
-    // turn end, or a turn end after a report, would change nothing.
-    let states_of = |id: &str| -> Result<Vec<(i64, String)>> {
-        Ok(reasserted(state_rows(db, id, from, to)?, by_actor.get(id).map(Vec::as_slice).unwrap_or(&[])))
+    // turn end, or a turn end after a report, would change nothing. That holds for the last event
+    // before the window too, or a report just before `from` would be lost to an earlier turn end
+    // (NIT-43).
+    let states_of = |id: &str, before: Option<i64>| -> Result<Vec<(i64, String)>> {
+        let events: Vec<i64> = before.into_iter().chain(by_actor.get(id).into_iter().flatten().copied()).collect();
+        Ok(reasserted(state_rows(db, id, from, to)?, &events))
     };
     for lane in &mut lanes {
         for m in lane.members.clone() {
-            let before: Option<i64> =
-                conn.query_row("SELECT MAX(ts) FROM event WHERE actor = ?1 AND ts < ?2", params![m.id, from], |r| r.get(0))?;
+            let before = last_before(&m.id)?;
             lane.activity.extend(before);
             let rank = u8::from(!is_agent_id(&m));
-            lane.rows.extend(states_of(&m.id)?.into_iter().map(|(ts, st)| (ts, rank, st)));
+            lane.rows.extend(states_of(&m.id, before)?.into_iter().map(|(ts, st)| (ts, rank, st)));
         }
     }
 
@@ -225,7 +231,7 @@ pub fn activity(config: &Config, db: &Db, from: i64, to: i64) -> Result<Activity
     // time; with two equally near (both running then) there is no telling which one changed.
     for s in &folded {
         let place: Vec<usize> = (0..lanes.len()).filter(|&i| same_place(&lanes[i].session, s) && overlap(&lanes[i].session, s)).collect();
-        for (ts, state) in states_of(&s.id)? {
+        for (ts, state) in states_of(&s.id, last_before(&s.id)?)? {
             if let Some(i) = nearest_lifetime(&lanes, &place, ts) {
                 lanes[i].rows.push((ts, 0, state));
             }
@@ -656,6 +662,12 @@ mod tests {
         let codex = a.lanes.iter().find(|l| l.session_id == "codex:c:/development/harbor").unwrap();
         let at = |t: i64| codex.segments.iter().find(|s| s.from <= t && t < s.to).map(|s| s.state.clone());
         assert_eq!((at(t0 + 4300).as_deref(), at(t0 + 4700).as_deref()), (Some("working"), Some("idle")), "{:?}", codex.segments);
+        // A window that starts after that report still starts working (NIT-43): the report before
+        // it says the MCP id's state again, after the earlier turn end.
+        let a = activity(&Config::default(), &db, t0 + 4100, now()).unwrap();
+        let codex = a.lanes.iter().find(|l| l.session_id == "codex:c:/development/harbor").unwrap();
+        let at = |t: i64| codex.segments.iter().find(|s| s.from <= t && t < s.to).map(|s| s.state.clone());
+        assert_eq!((at(t0 + 4100).as_deref(), at(t0 + 4700).as_deref()), (Some("working"), Some("idle")), "{:?}", codex.segments);
 
         // An idle hook session left from yesterday does not swallow today's work in that folder.
         let y = t0 - 20 * 3600;
