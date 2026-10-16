@@ -205,11 +205,11 @@ pub fn activity(config: &Config, db: &Db, from: i64, to: i64) -> Result<Activity
     for e in &events {
         by_actor.entry(e.actor.as_str()).or_default().push(e.ts);
     }
-    // An agent id's state rows only mark changes of its own, so once another member of the lane
-    // (Codex's turn-end hook) changed the state, the agent id's next report must say its state again.
-    let states_of = |id: &str, agent: bool| -> Result<Vec<(i64, String)>> {
-        let rows = state_rows(db, id, from, to)?;
-        Ok(if agent { reasserted(rows, by_actor.get(id).map(Vec::as_slice).unwrap_or(&[])) } else { rows })
+    // Each id's state rows only mark changes of its own. Where a lane merges two ids (Codex's MCP
+    // id and its turn-end hook), each event must say its id's state again, or a report after a
+    // turn end, or a turn end after a report, would change nothing.
+    let states_of = |id: &str| -> Result<Vec<(i64, String)>> {
+        Ok(reasserted(state_rows(db, id, from, to)?, by_actor.get(id).map(Vec::as_slice).unwrap_or(&[])))
     };
     for lane in &mut lanes {
         for m in lane.members.clone() {
@@ -217,7 +217,7 @@ pub fn activity(config: &Config, db: &Db, from: i64, to: i64) -> Result<Activity
                 conn.query_row("SELECT MAX(ts) FROM event WHERE actor = ?1 AND ts < ?2", params![m.id, from], |r| r.get(0))?;
             lane.activity.extend(before);
             let rank = u8::from(!is_agent_id(&m));
-            lane.rows.extend(states_of(&m.id, is_agent_id(&m))?.into_iter().map(|(ts, st)| (ts, rank, st)));
+            lane.rows.extend(states_of(&m.id)?.into_iter().map(|(ts, st)| (ts, rank, st)));
         }
     }
 
@@ -225,7 +225,7 @@ pub fn activity(config: &Config, db: &Db, from: i64, to: i64) -> Result<Activity
     // time; with two equally near (both running then) there is no telling which one changed.
     for s in &folded {
         let place: Vec<usize> = (0..lanes.len()).filter(|&i| same_place(&lanes[i].session, s) && overlap(&lanes[i].session, s)).collect();
-        for (ts, state) in states_of(&s.id, true)? {
+        for (ts, state) in states_of(&s.id)? {
             if let Some(i) = nearest_lifetime(&lanes, &place, ts) {
                 lanes[i].rows.push((ts, 0, state));
             }
@@ -643,6 +643,13 @@ mod tests {
         let a = activity(&Config::default(), &db, t0 - 60, now()).unwrap();
         let codex = a.lanes.iter().find(|l| l.session_id == "codex:c:/development/harbor").unwrap();
         assert!(codex.segments.iter().any(|s| s.from == t0 + 4000 && s.state == "working"), "{:?}", codex.segments);
+        // And the next turn end is idle again, though the hook's own state never changed.
+        event(&db, t0 + 4600, "codex:thread-1", "turn_end", "Turn finished", None);
+        db.conn.execute("UPDATE session SET last_seen_at = ?1 WHERE id = 'codex:thread-1'", [t0 + 4600]).unwrap();
+        let a = activity(&Config::default(), &db, t0 - 60, now()).unwrap();
+        let codex = a.lanes.iter().find(|l| l.session_id == "codex:c:/development/harbor").unwrap();
+        let at = |t: i64| codex.segments.iter().find(|s| s.from <= t && t < s.to).map(|s| s.state.clone());
+        assert_eq!((at(t0 + 4300).as_deref(), at(t0 + 4700).as_deref()), (Some("working"), Some("idle")), "{:?}", codex.segments);
 
         // An idle hook session left from yesterday does not swallow today's work in that folder.
         let y = t0 - 20 * 3600;
