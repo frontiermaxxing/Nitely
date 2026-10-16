@@ -57,6 +57,22 @@ pub fn sync(config: &Config, db: &mut Db) -> Result<usize> {
     Ok(total)
 }
 
+/// Opens the branch's pull request into `base`, or updates the open one. Returns its URL.
+pub fn open_pr(slug: &str, branch: &str, base: &str, title: &str, body: &str) -> Result<String> {
+    let client = Client::new();
+    let owner = slug.split('/').next().unwrap_or("");
+    let open = client.get(&format!("{API}/repos/{slug}/pulls?state=open&head={owner}:{branch}"))?;
+    let pr = match open.as_array().and_then(|a| a.first()).and_then(|p| p.get("number")).and_then(Value::as_i64) {
+        Some(n) => client.send("PATCH", &format!("{API}/repos/{slug}/pulls/{n}"), &serde_json::json!({ "title": title, "body": body }))?,
+        None => client.send(
+            "POST",
+            &format!("{API}/repos/{slug}/pulls"),
+            &serde_json::json!({ "title": title, "body": body, "head": branch, "base": base }),
+        )?,
+    };
+    pr.get("html_url").and_then(Value::as_str).map(str::to_string).context("GitHub returned no pull request URL")
+}
+
 struct Client {
     token: Option<String>,
     agent: ureq::Agent,
@@ -68,16 +84,40 @@ impl Client {
     }
 
     fn get(&self, url: &str) -> Result<Value> {
-        let mut req = self
-            .agent
-            .get(url)
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .header("User-Agent", "nitely");
-        if let Some(t) = &self.token {
-            req = req.header("Authorization", &format!("Bearer {t}"));
+        let mut req = self.agent.get(url);
+        for (k, v) in self.headers() {
+            req = req.header(k, &v);
         }
-        let mut res = req.call().with_context(|| format!("calling {}", url.split('?').next().unwrap_or(url)))?;
+        let res = req.call().with_context(|| format!("calling {}", url.split('?').next().unwrap_or(url)))?;
+        self.read(res)
+    }
+
+    fn send(&self, method: &str, url: &str, body: &Value) -> Result<Value> {
+        let mut req = match method {
+            "POST" => self.agent.post(url),
+            "PATCH" => self.agent.patch(url),
+            _ => self.agent.put(url),
+        };
+        for (k, v) in self.headers() {
+            req = req.header(k, &v);
+        }
+        let res = req.send_json(body).with_context(|| format!("calling {method} {url}"))?;
+        self.read(res)
+    }
+
+    fn headers(&self) -> Vec<(&'static str, String)> {
+        let mut h = vec![
+            ("Accept", "application/vnd.github+json".to_string()),
+            ("X-GitHub-Api-Version", "2022-11-28".to_string()),
+            ("User-Agent", "nitely".to_string()),
+        ];
+        if let Some(t) = &self.token {
+            h.push(("Authorization", format!("Bearer {t}")));
+        }
+        h
+    }
+
+    fn read(&self, mut res: ureq::http::Response<ureq::Body>) -> Result<Value> {
         let status = res.status();
         if !status.is_success() {
             let text = res.body_mut().read_to_string().unwrap_or_default();

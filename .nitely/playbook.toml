@@ -12,3 +12,18 @@ setup = ["npm ci"]
 
 [gate]
 commands = ["cargo test --workspace", "cargo clippy --workspace -- -D warnings", "npm run build"]
+
+[review]
+# The defaults: Codex reviews Claude's branches, Claude reviews everyone else's.
+focus = """Nitely's rules matter most here: only a human approves or answers asks (the CLI and MCP always \
+act as agents), hooks never block the agent and never record prompt text, and credentials are read, \
+never written or printed."""
+
+[[review.flags]]
+name = "TRUST_BOUNDARY"
+question = "the change alters who can approve, answer or move issues, or how credentials and tokens are read or sent"
+reason = "approval or credential handling"
+
+[approval]
+# A change to the rules themselves always waits for Andrew.
+human_paths = [{ pattern = '^\.nitely/playbook\.toml$', reason = "the playbook itself" }]

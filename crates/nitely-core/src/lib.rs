@@ -11,7 +11,9 @@ pub mod issues;
 pub mod paths;
 pub mod playbook;
 pub mod remote;
+pub mod review;
 pub mod snapshot;
+pub mod submit;
 
 pub use config::{resolve_project, Config, RepoConfig};
 pub use db::Db;

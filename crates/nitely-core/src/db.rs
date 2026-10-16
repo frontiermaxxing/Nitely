@@ -6,7 +6,7 @@ use serde::Serialize;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Schema from docs/design.md. `task`, `review` and `approval` are not written yet.
+/// Schema from docs/design.md. `task` and `approval` are not written yet.
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS project (
   key         TEXT PRIMARY KEY,            -- issue prefix, e.g. NIT
@@ -67,15 +67,17 @@ CREATE TABLE IF NOT EXISTS event (
 );
 CREATE INDEX IF NOT EXISTS event_ts ON event (ts);
 CREATE INDEX IF NOT EXISTS event_issue ON event (issue_key, ts);
-CREATE TABLE IF NOT EXISTS review (
+CREATE TABLE IF NOT EXISTS review (       -- one per submit; land checks the one for its patch
   id          INTEGER PRIMARY KEY,
-  task_id     INTEGER NOT NULL,
+  issue_key   TEXT NOT NULL,
   patch_id    TEXT NOT NULL,
-  reviewer    TEXT NOT NULL,
-  verdict     TEXT NOT NULL,
-  money_or_release INTEGER NOT NULL DEFAULT 0,
-  sweeping    INTEGER NOT NULL DEFAULT 0,
+  commit_sha  TEXT NOT NULL,
+  reviewer    TEXT NOT NULL,             -- '' when no review ran
+  verdict     TEXT NOT NULL,             -- pass | changes | none
+  approver    TEXT NOT NULL,             -- agent | human
+  reasons     TEXT NOT NULL DEFAULT '[]',
   findings    TEXT NOT NULL DEFAULT '[]',
+  flagged     TEXT NOT NULL DEFAULT '[]',
   ts          INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS pull_request (
@@ -123,7 +125,7 @@ CREATE TABLE IF NOT EXISTS ask (
 
 /// Bumped when a table changes shape. Tables that only mirror Bitbucket or Linear are dropped
 /// and refilled by the next sync; tables Nitely owns get real migrations.
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -138,6 +140,10 @@ fn migrate(conn: &Connection) -> Result<()> {
     if version < 4 {
         // v4 adds pull_request.checks; the table only mirrors code hosts.
         conn.execute_batch("DROP TABLE IF EXISTS pull_request;")?;
+    }
+    if version < 5 {
+        // v5 keys reviews by issue and patch; the old placeholder table was never written.
+        conn.execute_batch("DROP TABLE IF EXISTS review;")?;
     }
     Ok(())
 }

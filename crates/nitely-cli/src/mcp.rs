@@ -92,7 +92,7 @@ fn initialize(server: &mut Server, params: &Value) -> Value {
         "capabilities": { "tools": {} },
         "serverInfo": { "name": "nitely", "version": env!("CARGO_PKG_VERSION") },
         "instructions": "Nitely is the backlog and control room for this repo. Start work with next_task, \
-            then start_task to get the issue's branch and worktree, run_gate before you open a pull request, \
+            then start_task to get the issue's branch and worktree, and submit once the work is committed (it reviews and opens the pull request), \
             keep the human informed with report, leave a handoff note before you stop, file what you find \
             but will not fix now with file_issue, and use ask when only the human can decide."
     })
@@ -118,6 +118,14 @@ fn tools() -> Value {
         {
             "name": "run_gate",
             "description": "Run the playbook's gate commands (tests, build) in your worktree and record the result on the issue. Stops at the first failure and returns the end of its output. Pass before you open a pull request.",
+            "inputSchema": { "type": "object", "properties": {
+                "key": { "type": "string", "description": "The issue; defaults to the one your branch names." },
+                "worktree": { "type": "string", "description": "Defaults to the worktree you are in." }
+            } }
+        },
+        {
+            "name": "submit",
+            "description": "Hand in a finished branch: runs the gate, has another vendor review it (this takes minutes), decides whether the human must approve, pushes, opens or updates the pull request, and moves the issue (In Review, Needs You, or back to In Progress when the review finds P0/P1 problems). Commit everything first. Read `next` in the result for what to do after.",
             "inputSchema": { "type": "object", "properties": {
                 "key": { "type": "string", "description": "The issue; defaults to the one your branch names." },
                 "worktree": { "type": "string", "description": "Defaults to the worktree you are in." }
@@ -233,7 +241,7 @@ fn run_tool(server: &Server, name: &str, args: &Value) -> Result<Value> {
                     json!({
                         "issue": issue,
                         "branch": branch,
-                        "next": "Call start_task with this key for the branch and worktree, work there, report as you go, run_gate before the pull request, and leave a handoff note before you stop."
+                        "next": "Call start_task with this key for the branch and worktree, work there, report as you go, call submit when it is committed, and leave a handoff note before you stop."
                     })
                 }
                 None => json!({ "issue": null, "message": format!("Nothing in Todo for {project}.") }),
@@ -252,6 +260,11 @@ fn run_tool(server: &Server, name: &str, args: &Value) -> Result<Value> {
             let key = str_arg(args, "key").map(str::to_string).or(branch_key);
             let root = playbook::repo_root(&config, dir).with_context(|| format!("{dir} is not inside a git repo"))?;
             json!(playbook::run_gate(&db, &root, &worktree, key.as_deref(), &actor)?)
+        }
+        "submit" => {
+            let dir = str_arg(args, "worktree").unwrap_or(&server.cwd);
+            let opts = nitely_core::submit::SubmitOptions { dir, issue_key: str_arg(args, "key"), skip_review: false, local_only: false };
+            json!(nitely_core::submit::submit(&mut db, &config, &opts, &actor)?)
         }
         "get_issue" => {
             let key = req(args, "key")?;

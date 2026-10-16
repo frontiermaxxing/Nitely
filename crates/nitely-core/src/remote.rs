@@ -98,11 +98,7 @@ fn bitbucket_repos(config: &Config, creds: &Credentials) -> BTreeSet<String> {
 }
 
 fn sync_bitbucket(config: &Config, creds: &Credentials, db: &mut Db) -> Result<usize> {
-    let bb = &creds.bitbucket;
-    let auth = format!(
-        "Basic {}",
-        base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", bb.email, bb.api_token))
-    );
+    let auth = bitbucket_auth(creds);
     let me: Value = get_json("https://api.bitbucket.org/2.0/user", &auth)?;
     let my_id = me.get("account_id").and_then(Value::as_str).unwrap_or("").to_string();
 
@@ -254,13 +250,77 @@ pub fn parse_linear_page(v: &Value) -> (Vec<IssueRecord>, Option<String>) {
     (issues, next)
 }
 
+/// Opens the branch's pull request into `base` on the repo's code host, or updates the open one.
+/// Returns its URL.
+pub fn open_pr(repo_root: &str, branch: &str, base: &str, title: &str, body: &str) -> Result<String> {
+    if let Some(slug) = crate::git::github_slug(repo_root) {
+        return crate::github::open_pr(&slug, branch, base, title, body);
+    }
+    if let Some(slug) = crate::git::bitbucket_slug(repo_root) {
+        let creds = credentials::load()?.context("no Bitbucket credentials file")?;
+        return open_bitbucket_pr(&creds, &slug, branch, base, title, body);
+    }
+    bail!("origin is not on GitHub or Bitbucket, so there is nowhere to open a pull request")
+}
+
+fn bitbucket_auth(creds: &Credentials) -> String {
+    let bb = &creds.bitbucket;
+    format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", bb.email, bb.api_token)))
+}
+
+fn open_bitbucket_pr(creds: &Credentials, slug: &str, branch: &str, base: &str, title: &str, body: &str) -> Result<String> {
+    let auth = bitbucket_auth(creds);
+    let api = format!("https://api.bitbucket.org/2.0/repositories/{slug}/pullrequests");
+    let q = format!("source.branch.name=\"{branch}\" AND state=\"OPEN\"");
+    let open: Value = get_json(&format!("{api}?q={}", url_encode(&q)), &auth)?;
+    let existing = open.pointer("/values/0/id").and_then(Value::as_i64);
+    let pr = match existing {
+        Some(id) => send_json("PUT", &format!("{api}/{id}"), &auth, &serde_json::json!({ "title": title, "description": body }))?,
+        None => send_json(
+            "POST",
+            &api,
+            &auth,
+            &serde_json::json!({
+                "title": title,
+                "description": body,
+                "source": { "branch": { "name": branch } },
+                "destination": { "branch": { "name": base } },
+            }),
+        )?,
+    };
+    pr.pointer("/links/html/href").and_then(Value::as_str).map(str::to_string).context("Bitbucket returned no pull request URL")
+}
+
+fn url_encode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+fn send_json(method: &str, url: &str, auth: &str, body: &Value) -> Result<Value> {
+    let req = if method == "POST" { agent().post(url) } else { agent().put(url) };
+    let res = req
+        .header("Authorization", auth)
+        .header("Accept", "application/json")
+        .send_json(body)
+        .with_context(|| format!("calling {method} {url}"))?;
+    read_bitbucket(res)
+}
+
 fn get_json(url: &str, auth: &str) -> Result<Value> {
-    let mut res = agent()
+    let res = agent()
         .get(url)
         .header("Authorization", auth)
         .header("Accept", "application/json")
         .call()
         .with_context(|| format!("calling {}", url.split('?').next().unwrap_or(url)))?;
+    read_bitbucket(res)
+}
+
+fn read_bitbucket(mut res: ureq::http::Response<ureq::Body>) -> Result<Value> {
     let status = res.status();
     if !status.is_success() {
         let text = res.body_mut().read_to_string().unwrap_or_default();

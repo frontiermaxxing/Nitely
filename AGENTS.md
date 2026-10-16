@@ -15,11 +15,12 @@ Nitely tracks its own build. Its backlog is the **NIT** project in Nitely, reach
    does not depend on the answer. Never set Approved; only Andrew can.
 5. Before you stop, leave a `note` with `handoff: true`: what is done, what is left, what you were
    unsure about.
-6. Run `run_gate` (or `nitely gate`) before you open a pull request. It runs the tests, clippy and
-   the frontend build, and records the result on the issue.
-7. Open a pull request into `main` from the branch `start_task` made; Nitely links it to the issue
-   by that name and shows its checks. Move the issue to In Review, and to Done with evidence once
-   it is merged.
+6. When the work is committed, call `submit` (or `nitely submit`). It runs the gate, has the other
+   vendor review the branch (Codex reviews Claude, Claude reviews the rest), pushes, opens or
+   updates the pull request into `main`, and moves the issue: back to In Progress when the review
+   finds P0 or P1 problems (fix them and submit again), to Needs You when Andrew must approve, and
+   to In Review otherwise. `run_gate` alone runs just the gate.
+7. Move the issue to Done with evidence once the pull request is merged.
 
 ## Build and test
 
