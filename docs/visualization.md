@@ -70,7 +70,9 @@ issues skip Needs you. All of this is computed in one place, the backend's
 receives (`issues`, `issue_detail`, `snapshot`, `pulse`): open issues from their timelines, closed
 issues in lists from their state. On the frontend always call `trackOf(issue)` from
 `src/ui/lifecycle.ts`, which returns that `track`; its `computeTrack` mirrors the Rust rules only for
-the browser preview's sample data. A rule change goes into `track.rs` first, then `computeTrack`.
+the browser preview's sample data. A rule change goes into `track.rs` first, then `computeTrack`,
+with a case in `crates/nitely-core/src/track_cases.json`: both `cargo test` and `npm test` run every
+case there, so the two cannot drift apart.
 Never compute stations anywhere else.
 
 ## Primitives (`src/ui/`)

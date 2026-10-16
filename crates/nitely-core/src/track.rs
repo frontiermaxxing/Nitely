@@ -322,4 +322,56 @@ mod tests {
         assert_eq!((t.station, t.stuck.as_deref()), ("done", None));
         assert!(!t.reached.contains_key("needs"));
     }
+
+    /// Every case in track_cases.json, which src/ui/lifecycle.test.ts runs against the
+    /// frontend's computeTrack too, so the app and the browser preview cannot drift apart.
+    #[test]
+    fn shared_cases() {
+        let doc: serde_json::Value = serde_json::from_str(include_str!("track_cases.json")).unwrap();
+        let cases = doc["cases"].as_array().unwrap();
+        assert!(cases.len() >= 20);
+        for case in cases {
+            let name = case["name"].as_str().unwrap();
+            let mut events: Vec<(String, String, String)> = Vec::new();
+            if case["base"].as_bool().unwrap_or(false) {
+                events.extend(BASE.iter().map(|(k, s)| (k.to_string(), s.to_string(), "claude:x".to_string())));
+            }
+            for e in case["events"].as_array().unwrap() {
+                let e = e.as_array().unwrap();
+                let at = |i: usize| e.get(i).and_then(|v| v.as_str()).map(str::to_string);
+                events.push((at(0).unwrap(), at(1).unwrap_or_default(), at(2).unwrap_or_else(|| "claude:x".into())));
+            }
+            let timeline: Vec<TimelineEntry> = events
+                .into_iter()
+                .enumerate()
+                .map(|(n, (kind, summary, actor))| TimelineEntry { ts: n as i64 + 1, actor, kind, summary: (!summary.is_empty()).then_some(summary) })
+                .collect();
+            let t = track_of(&issue(case["state"].as_str().unwrap()), &timeline, case["change_reviews"].as_i64().unwrap_or(0));
+            let ex = &case["expect"];
+            if let Some(v) = ex.get("station") {
+                assert_eq!(t.station, v.as_str().unwrap(), "{name}: station");
+            }
+            if let Some(v) = ex.get("stuck") {
+                assert_eq!(t.stuck.as_deref(), v.as_str(), "{name}: stuck");
+            }
+            if let Some(v) = ex.get("closed") {
+                assert_eq!(t.closed, v.as_str(), "{name}: closed");
+            }
+            if let Some(v) = ex.get("rounds") {
+                assert_eq!(t.rounds, v.as_i64().unwrap(), "{name}: rounds");
+            }
+            if let Some(v) = ex.get("asking") {
+                assert_eq!(t.asking, v.as_bool().unwrap(), "{name}: asking");
+            }
+            if let Some(v) = ex.get("backlog") {
+                assert_eq!(t.backlog, v.as_bool().unwrap(), "{name}: backlog");
+            }
+            for s in ex.get("reached").and_then(|v| v.as_array()).into_iter().flatten() {
+                assert!(t.reached.contains_key(s.as_str().unwrap()), "{name}: reached {s}");
+            }
+            for s in ex.get("skipped").and_then(|v| v.as_array()).into_iter().flatten() {
+                assert!(!t.reached.contains_key(s.as_str().unwrap()), "{name}: skipped {s}");
+            }
+        }
+    }
 }

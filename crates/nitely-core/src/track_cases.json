@@ -1,0 +1,158 @@
+{
+  "about": "Lifecycle track cases. Both crates/nitely-core/src/track.rs (Rust tests) and src/ui/lifecycle.test.ts (computeTrack) run every case, so the backend and the browser preview agree. `base` prepends: filed, claimed, moved to In Progress, worktree, a status, gate passed, review started. Events are [kind, summary] or [kind, summary, actor]; the actor defaults to an agent. `expect` checks only the fields it names; `reached` lists stations that must have a time and `skipped` stations that must not. `frontend_pending` marks a rule track.rs has and computeTrack does not yet: the frontend test reports it as a TODO instead of failing, so remove the field when computeTrack catches up.",
+  "cases": [
+    {
+      "name": "state alone gives the station",
+      "state": "In Review",
+      "events": [],
+      "expect": { "station": "review", "stuck": null, "rounds": 0 }
+    },
+    {
+      "name": "change reviews count as rounds without a timeline",
+      "state": "Approved",
+      "events": [],
+      "change_reviews": 2,
+      "expect": { "station": "landing", "rounds": 2 }
+    },
+    {
+      "name": "backlog sits at todo, drawn as backlog",
+      "state": "Backlog",
+      "events": [],
+      "expect": { "station": "todo", "backlog": true }
+    },
+    {
+      "name": "duplicate is closed",
+      "state": "Duplicate",
+      "events": [],
+      "expect": { "station": "done", "closed": "duplicate" }
+    },
+    {
+      "name": "working after a status",
+      "state": "In Progress",
+      "events": [["issue_created", "Filed as Todo"], ["claimed", "Took the issue"], ["issue_moved", "Todo → In Progress"], ["worktree", "Started x from main"], ["status", "Writing the change"]],
+      "expect": { "station": "working", "stuck": null, "reached": ["todo", "started", "working"] }
+    },
+    {
+      "name": "changes asked goes back to Working",
+      "state": "In Progress",
+      "base": true,
+      "events": [["submit", "Review by codex requested changes. Pull request: x"], ["status", "Fixing"]],
+      "expect": { "station": "working", "rounds": 1, "stuck": null }
+    },
+    {
+      "name": "a second review is at Review",
+      "state": "In Progress",
+      "base": true,
+      "events": [["submit", "Review by codex requested changes."], ["status", "Fixing"], ["gate_passed", "Gate passed"], ["review_started", "Review by codex started"]],
+      "expect": { "station": "review", "rounds": 1 }
+    },
+    {
+      "name": "a failed gate is stuck at Gate",
+      "state": "In Progress",
+      "events": [["issue_created", "Filed as Todo"], ["claimed", "Took the issue"], ["issue_moved", "Todo → In Progress"], ["worktree", "Started x from main"], ["status", "Working"], ["gate_failed", "Gate failed"]],
+      "expect": { "station": "gate", "stuck": "Gate failed" }
+    },
+    {
+      "name": "a failed resubmit while In Review is stuck at Review",
+      "state": "In Review",
+      "base": true,
+      "events": [["submit", "Review by codex passed; ready to land."], ["issue_moved", "In Progress → In Review"], ["status", "Resubmitting"], ["gate_failed", "Gate failed"]],
+      "expect": { "station": "review", "stuck": "Gate failed" }
+    },
+    {
+      "name": "a stopped land is stuck at Landing after approval",
+      "state": "Approved",
+      "base": true,
+      "events": [["submit", "Review by codex passed; waits for a human."], ["issue_moved", "In Progress → Needs You"], ["issue_moved", "Needs You → Approved", "human"], ["land_failed", "Land stopped: rebase conflict"]],
+      "expect": { "station": "landing", "stuck": "Land stopped", "reached": ["needs", "landing"] }
+    },
+    {
+      "name": "a stopped land is at Landing even when the issue stays In Review",
+      "state": "In Review",
+      "base": true,
+      "events": [["submit", "Review by codex passed; ready to land."], ["issue_moved", "In Progress → In Review"], ["land_failed", "Land stopped"]],
+      "expect": { "station": "landing", "stuck": "Land stopped", "skipped": ["needs"] }
+    },
+    {
+      "name": "recovery after a stopped land clears it",
+      "state": "In Review",
+      "base": true,
+      "events": [["land_failed", "Land stopped"], ["status", "Rebased"], ["gate_passed", "Gate passed"], ["review_started", "Review started"], ["submit", "Review by codex passed; ready to land."], ["issue_moved", "In Progress → In Review"]],
+      "expect": { "station": "review", "stuck": null }
+    },
+    {
+      "name": "a move with evidence reaches Done",
+      "state": "Done",
+      "base": true,
+      "events": [["issue_moved", "In Progress → Done: tests passed → all green", "human"]],
+      "expect": { "station": "done", "stuck": null, "reached": ["done"] }
+    },
+    {
+      "name": "landed is done and never stuck",
+      "state": "Done",
+      "base": true,
+      "events": [["submit", "Review by codex passed; ready to land."], ["issue_moved", "In Progress → In Review"], ["gate_failed", "Gate failed"], ["landed", "Landed x on main"], ["issue_moved", "In Review → Done"]],
+      "expect": { "station": "done", "stuck": null, "skipped": ["needs"] }
+    },
+    {
+      "name": "an open ask is asking until answered",
+      "state": "In Progress",
+      "base": true,
+      "events": [["ask", "Which port?"]],
+      "expect": { "asking": true }
+    },
+    {
+      "name": "an answered ask is not asking",
+      "state": "In Progress",
+      "base": true,
+      "events": [["ask", "Which port?"], ["answer", "5182", "human"]],
+      "expect": { "asking": false }
+    },
+    {
+      "name": "NIT-31: a review that did not finish is stuck",
+      "state": "In Progress",
+      "base": true,
+      "events": [["review_failed", "Review by codex did not finish"]],
+      "expect": { "stuck": "Review did not finish" }
+    },
+    {
+      "name": "NIT-31: a later submit clears a review that did not finish",
+      "frontend_pending": "computeTrack gets the NIT-31 rules with NIT-26; drop this field once it lands",
+      "state": "Needs You",
+      "base": true,
+      "events": [["review_failed", "Review by codex did not finish"], ["submit", "Submitted without a review; waits for a human"], ["issue_moved", "In Progress → Needs You"]],
+      "expect": { "station": "needs", "stuck": null }
+    },
+    {
+      "name": "NIT-31: a move clears a review that did not finish",
+      "frontend_pending": "computeTrack gets the NIT-31 rules with NIT-26; drop this field once it lands",
+      "state": "Approved",
+      "base": true,
+      "events": [["review_failed", "Review by codex did not finish"], ["issue_moved", "In Progress → Approved", "human"]],
+      "expect": { "stuck": null }
+    },
+    {
+      "name": "NIT-31: a failed push is stuck",
+      "frontend_pending": "computeTrack gets the NIT-31 rules with NIT-26; drop this field once it lands",
+      "state": "In Progress",
+      "base": true,
+      "events": [["submit", "Review by codex passed; ready to land. No pull request: push failed: rejected"]],
+      "expect": { "stuck": "Push failed" }
+    },
+    {
+      "name": "NIT-31: the next submit clears a failed push",
+      "state": "In Review",
+      "base": true,
+      "events": [["submit", "No pull request: push failed: x"], ["submit", "Review by codex passed; ready to land. Pull request: y"], ["issue_moved", "In Progress → In Review"]],
+      "expect": { "stuck": null }
+    },
+    {
+      "name": "NIT-31: submit's own move back to In Progress keeps a failed push stuck",
+      "frontend_pending": "computeTrack gets the NIT-31 rules with NIT-26; drop this field once it lands",
+      "state": "In Progress",
+      "base": true,
+      "events": [["issue_moved", "In Progress → In Review"], ["submit", "No pull request: push failed: x"], ["issue_moved", "In Review → In Progress"]],
+      "expect": { "stuck": "Push failed" }
+    }
+  ]
+}

@@ -11,7 +11,7 @@ dir = "../{repo}-worktrees/{key}-{slug}"
 setup = ["npm ci"]
 
 [gate]
-commands = ["cargo test --workspace", "cargo clippy --workspace -- -D warnings", "npm run build"]
+commands = ["cargo test --workspace", "cargo clippy --workspace -- -D warnings", "npm test", "npm run build"]
 
 [review]
 # The defaults: Codex reviews Claude's branches, Claude reviews everyone else's.

@@ -28,6 +28,7 @@ Nitely tracks its own build. Its backlog is the **NIT** project in Nitely, reach
 ## Build and test
 
 - `cargo test --workspace` (core rules, MCP protocol), `cargo clippy --workspace`
+- `npm test` (frontend tests: `node --test` on `src/**/*.test.ts`, no build step)
 - `npm run build` (type-check and bundle the frontend)
 - `npm run tauri dev` runs the app with hot reload
 - `npm run dev` in a plain browser runs the frontend on sample data (`src/dev/fixtures.ts`); the
