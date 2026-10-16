@@ -136,8 +136,9 @@ fn compile(list: &str, terms: &[String]) -> Result<Vec<(usize, Matcher)>> {
 }
 
 /// Settings that keep every added line visible and parsed the same way, whatever the user's git
-/// config says: fixed `a/` and `b/` prefixes, no textconv, no external diff, unquoted paths.
-const DIFF: &[&str] = &["--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--src-prefix=a/", "--dst-prefix=b/"];
+/// config says: fixed `a/` and `b/` prefixes, no textconv, no external diff, unquoted paths, and
+/// every file as text, even one `.gitattributes` calls binary.
+const DIFF: &[&str] = &["--text", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--src-prefix=a/", "--dst-prefix=b/"];
 const PLAIN: &[&str] = &["-c", "core.quotepath=false", "-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false"];
 
 fn git_plain(worktree: &Path, args: &[&str]) -> Result<String> {
@@ -159,14 +160,24 @@ fn added(worktree: &Path, base: &str) -> Result<Vec<(String, String)>> {
         for (n, text) in message.lines().enumerate() {
             out.push((format!("commit {short} message line {}", n + 1), text.to_string()));
         }
-        let merge = git(worktree, &["rev-list", "--parents", "-n", "1", sha])?.split_whitespace().count() > 2;
-        // NUL-separated, so no path is quoted or split.
-        let paths = if merge {
-            git_plain(worktree, &["diff-tree", "-r", "-z", "--no-commit-id", "--name-only", "--cc", sha])?
-        } else {
-            git_plain(worktree, &["diff-tree", "-r", "-z", "--root", "--no-commit-id", "--name-only", "--no-renames", "--diff-filter=A", sha])?
+        let parents: Vec<String> = git(worktree, &["rev-list", "--parents", "-n", "1", sha])?.split_whitespace().skip(1).map(str::to_string).collect();
+        let merge = parents.len() > 1;
+        // The files it adds, NUL-separated so no path is quoted or split. A merge adds a file only
+        // when none of its parents has it.
+        let added_against = |from: Option<&str>| -> Result<Vec<String>> {
+            let mut args = vec!["diff-tree", "-r", "-z", "--no-commit-id", "--name-only", "--no-renames", "--diff-filter=A"];
+            match from {
+                Some(parent) => args.extend([parent, sha]),
+                None => args.extend(["--root", sha]),
+            }
+            Ok(git_plain(worktree, &args)?.split('\0').filter(|p| !p.is_empty()).map(str::to_string).collect())
         };
-        out.extend(paths.split('\0').filter(|p| !p.is_empty()).map(|f| (format!("path {f} (commit {short})"), f.to_string())));
+        let mut paths = added_against(parents.first().map(String::as_str))?;
+        for parent in parents.iter().skip(1) {
+            let also = added_against(Some(parent))?;
+            paths.retain(|p| also.contains(p));
+        }
+        out.extend(paths.into_iter().map(|f| (format!("path {f} (commit {short})"), f)));
         let mut args = vec!["diff-tree", "-p", "--unified=0", "--no-commit-id"];
         args.extend_from_slice(DIFF);
         args.push(if merge { "--cc" } else { "--root" });
@@ -188,7 +199,7 @@ fn patch_lines(patch: &str, short: &str) -> Vec<(String, String)> {
         if l.starts_with("diff --git ") || l.starts_with("diff --cc ") || l.starts_with("diff --combined ") {
             (in_hunk, file) = (false, None);
         } else if !in_hunk && l.starts_with("+++ ") {
-            file = l.strip_prefix("+++ b/").map(str::to_string);
+            file = header_path(l);
         } else if !in_hunk && l.starts_with("@@") {
             // `@@ -a,b +c,d @@`, or `@@@ -a -b +c,d @@@` for a merge: added lines count from c.
             columns = l.chars().take_while(|c| *c == '@').count().saturating_sub(1).max(1);
@@ -202,14 +213,63 @@ fn patch_lines(patch: &str, short: &str) -> Vec<(String, String)> {
                 continue;
             }
             if marks.len() == columns && marks.chars().all(|c| c == '+') {
-                if let Some(f) = &file {
-                    out.push((format!("{f}:{line} (commit {short})"), text.to_string()));
-                }
+                // Scanned even when the header could not be read: only the place is less exact.
+                let f = file.as_deref().unwrap_or("a file");
+                out.push((format!("{f}:{line} (commit {short})"), text.to_string()));
             }
             line += 1;
         }
     }
     out
+}
+
+/// The new side's path in a `+++ b/path` header, which git C-quotes (`+++ "b/a\tb"`) when the
+/// path holds a tab, a quote, a backslash or a control character.
+fn header_path(l: &str) -> Option<String> {
+    let rest = l.strip_prefix("+++ ")?;
+    let path = match rest.strip_prefix('"').and_then(|r| r.strip_suffix('"')) {
+        Some(quoted) => unquote(quoted),
+        None => rest.to_string(),
+    };
+    path.strip_prefix("b/").map(str::to_string)
+}
+
+/// Undoes git's C-style quoting: `\t`, `\n`, `\"`, `\\` and octal bytes such as `\303\251`.
+fn unquote(q: &str) -> String {
+    let mut bytes = Vec::new();
+    let mut chars = q.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            let mut buf = [0u8; 4];
+            bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            continue;
+        }
+        match chars.next() {
+            Some('t') => bytes.push(b'\t'),
+            Some('n') => bytes.push(b'\n'),
+            Some('r') => bytes.push(b'\r'),
+            Some('a') => bytes.push(7),
+            Some('b') => bytes.push(8),
+            Some('f') => bytes.push(12),
+            Some('v') => bytes.push(11),
+            Some(d @ '0'..='7') => {
+                let mut n = d.to_digit(8).unwrap_or(0);
+                for _ in 0..2 {
+                    if let Some(next) = chars.peek().and_then(|c| c.to_digit(8)) {
+                        n = n * 8 + next;
+                        chars.next();
+                    }
+                }
+                bytes.push(n as u8);
+            }
+            Some(other) => {
+                let mut buf = [0u8; 4];
+                bytes.extend_from_slice(other.encode_utf8(&mut buf).as_bytes());
+            }
+            None => {}
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 /// Every place the branch adds one of `terms`, checking the project's list and the list for
@@ -314,6 +374,11 @@ mod tests {
         std::fs::write(dir.join("d.txt"), "start\u{1e}ticket-7 end\n").unwrap();
         sh(&dir, &["add", "."]);
         sh(&dir, &["commit", "-q", "-m", "more"]);
+        // A file .gitattributes calls binary.
+        std::fs::write(dir.join(".gitattributes"), "*.dat -diff\n").unwrap();
+        std::fs::write(dir.join("notes.dat"), "see ticket-11\n").unwrap();
+        sh(&dir, &["add", "."]);
+        sh(&dir, &["commit", "-q", "-m", "binary by attribute"]);
         // A merge whose resolution adds a line in neither parent.
         sh(&dir, &["checkout", "-q", "-b", "side", "HEAD~1"]);
         std::fs::write(dir.join("e.txt"), "side\n").unwrap();
@@ -324,6 +389,12 @@ mod tests {
         std::fs::write(dir.join("e.txt"), "side\nresolved with ticket-9\n").unwrap();
         sh(&dir, &["add", "."]);
         sh(&dir, &["commit", "-q", "-m", "merge side"]);
+        // A name git has to quote, written straight to the index: Windows allows no `"` in a file name.
+        std::fs::write(dir.join("blob.txt"), "see ticket-12\n").unwrap();
+        let blob = sh(&dir, &["hash-object", "-w", "blob.txt"]).trim().to_string();
+        std::fs::remove_file(dir.join("blob.txt")).unwrap();
+        sh(&dir, &["-c", "core.protectNTFS=false", "update-index", "--add", "--cacheinfo", &format!("100644,{blob},we\"ird.txt")]);
+        sh(&dir, &["commit", "-q", "-m", "odd name"]);
         // The user's diff settings change nothing.
         sh(&dir, &["config", "diff.noprefix", "true"]);
 
@@ -334,6 +405,7 @@ mod tests {
         let hits = scan(&t, Some("app"), &dir, "main").unwrap();
         let at: Vec<&str> = hits.iter().map(|h| h.at.as_str()).collect();
         let first = sh(&dir, &["rev-parse", "--short=7", ":/Port the change"]).trim().to_string();
+        let merge = sh(&dir, &["rev-parse", "--short=7", ":/merge side"]).trim().to_string();
         assert!(at.contains(&format!("path bluebird/b.txt (commit {first})").as_str()), "{at:?}");
         assert!(at.contains(&format!("a.txt:3 (commit {first})").as_str()), "a path written with backslashes: {at:?}");
         assert!(at.iter().any(|a| a.starts_with("c.txt:1 (commit ")), "added, then removed in a later commit: {at:?}");
@@ -341,6 +413,9 @@ mod tests {
         assert!(at.iter().any(|a| a.starts_with("d.txt:1 ")), "{at:?}");
         assert!(at.iter().any(|a| a.starts_with("e.txt:2 ")), "the merge's own line: {at:?}");
         assert!(!at.iter().any(|a| a.starts_with("e.txt:1 ")), "a line from a parent is not the merge's: {at:?}");
+        assert!(at.iter().any(|a| a.starts_with("notes.dat:1 ")), "{at:?}");
+        assert!(at.iter().any(|a| a.starts_with("we\"ird.txt:1 ")), "{at:?}");
+        assert!(!at.iter().any(|a| a.starts_with("path bluebird.keep") && a.contains(&merge)), "the merge adds no file its parents have: {at:?}");
         assert!(at.iter().any(|a| a.starts_with("commit ") && a.ends_with("message line 3")), "{at:?}");
         assert!(!at.iter().any(|a| a.starts_with("a.txt:1 ")), "a line the branch did not add: {at:?}");
         assert_eq!(hits.iter().find(|h| h.at.starts_with("a.txt:3 ")).map(|h| (h.list.as_str(), h.term)), Some(("APP", 1)));
@@ -351,6 +426,13 @@ mod tests {
         assert!(!err.to_lowercase().contains("bluebird") || err.contains("path bluebird/"), "the term shows only as part of a path it is in: {err}");
         assert!(!err.to_lowercase().contains("secret-client"), "{err}");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn reads_quoted_headers() {
+        assert_eq!(header_path("+++ b/src/a.ts").as_deref(), Some("src/a.ts"));
+        assert_eq!(header_path("+++ \"b/we\\\"ird\\tname\\303\\251.txt\"").as_deref(), Some("we\"ird\tnameé.txt"));
+        assert_eq!(header_path("+++ /dev/null"), None);
     }
 
     #[test]
