@@ -255,7 +255,9 @@ impl Db {
     /// view can show what each session did over time.
     pub fn record(&mut self, e: &NewEvent) -> Result<()> {
         let ts = now();
-        let tx = self.conn.transaction()?;
+        // Immediate: the read of the last state and the writes after it hold one write lock, so
+        // a hook writing at the same moment waits (busy_timeout) instead of failing this one.
+        let tx = self.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let last: Option<String> = tx
             .query_row(
                 "SELECT state FROM session_state WHERE session_id = ?1 ORDER BY ts DESC, rowid DESC LIMIT 1",
