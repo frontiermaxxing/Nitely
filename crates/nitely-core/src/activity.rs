@@ -665,7 +665,7 @@ mod tests {
         // A window that starts after that report still starts working (NIT-43): the report before
         // it says the MCP id's state again, after the earlier turn end.
         let a = activity(&Config::default(), &db, t0 + 4100, now()).unwrap();
-        let codex = a.lanes.iter().find(|l| l.session_id == "codex:c:/development/harbor").unwrap();
+        let codex = a.lanes.iter().find(|l| l.session_id == "codex:c:/code/harbor").unwrap();
         let at = |t: i64| codex.segments.iter().find(|s| s.from <= t && t < s.to).map(|s| s.state.clone());
         assert_eq!((at(t0 + 4100).as_deref(), at(t0 + 4700).as_deref()), (Some("working"), Some("idle")), "{:?}", codex.segments);
 
