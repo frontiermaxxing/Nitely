@@ -1,4 +1,5 @@
 mod mcp;
+mod ui;
 
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
@@ -27,6 +28,14 @@ enum Cmd {
     },
     /// Run the MCP server on stdio (register it as `nitely mcp` in your agent's MCP config).
     Mcp,
+    /// Run one of the app's read commands and print its JSON, for the browser preview's live mode.
+    /// Only reads: commands that change anything are refused.
+    Ui {
+        /// The app command, e.g. snapshot, pulse, issue_detail.
+        command: String,
+        /// Its arguments as a JSON object with the page's names, e.g. '{"key":"NIT-12"}'.
+        args: Option<String>,
+    },
     /// Run one MCP tool call given on stdin; a running `nitely mcp` forwards calls here once a
     /// newer build is installed.
     #[command(hide = true)]
@@ -304,6 +313,24 @@ fn main() {
             }
             return;
         }
+        Cmd::Ui { command, args } => {
+            // Refused commands exit 2, so the preview can tell them from failures.
+            if !ui::READ_ONLY.contains(&command.as_str()) {
+                eprintln!("{}", ui::refusal(command));
+                std::process::exit(2);
+            }
+            let result = serde_json::from_str(args.as_deref().unwrap_or("{}"))
+                .map_err(anyhow::Error::from)
+                .and_then(|a| ui::run(command, &a));
+            match result {
+                Ok(v) => println!("{v}"),
+                Err(e) => {
+                    eprintln!("{e:#}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
         _ => {}
     }
     if let Err(e) = run(cli.command) {
@@ -365,7 +392,7 @@ fn run(cmd: Cmd) -> Result<()> {
     // only in the app.
     let me = Actor::Agent("cli".into());
     match cmd {
-        Cmd::Hook { .. } | Cmd::Mcp | Cmd::McpCall => unreachable!(),
+        Cmd::Hook { .. } | Cmd::Mcp | Cmd::McpCall | Cmd::Ui { .. } => unreachable!(),
         Cmd::Install { from, to } => {
             let from = match from {
                 Some(f) => f,

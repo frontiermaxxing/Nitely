@@ -227,9 +227,11 @@ function Glance({ data, board, decisions, ctx, onGo }: { data: PulseData; board:
           {stuck.length === 0 && <span className="muted">Everything open is moving</span>}
         </span>
       </div>
-      <div className={`readout${data.landed_today ? "" : " readout-calm"}`}>
-        <span className="readout-n">{data.landed_today}</span>
-        <span className="readout-label">landed today</span>
+      <div className={`readout${done.length ? "" : " readout-calm"}`}>
+        <span className="readout-n">{done.length}</span>
+        <span className="readout-label" title={`${data.landed_today} of them landed through Nitely; the rest were moved to Done`}>
+          done today
+        </span>
         <span className="readout-sub">
           {done.slice(0, 3).map((f) => (
             <IssueToken key={f.issue.key} issue={f.issue} onOpen={ctx.onOpenIssue} />
@@ -371,6 +373,7 @@ const KIND_LABEL: Record<Happening["kind"], string> = {
   review: "review rounds",
   asked: "questions",
 };
+const KIND_ONE: Record<Happening["kind"], string> = { ...KIND_LABEL, review: "review round", asked: "question" };
 
 function verb(h: Happening): string {
   const s = h.summary ?? "";
@@ -416,7 +419,7 @@ function Since({ data, ctx }: { data: PulseData; ctx: Context }) {
         <div className="since-counts" role="group" aria-label="Filter what happened">
           {kinds.map((k) => (
             <button key={k} className={`since-count since-${k}${filter === k ? " on" : ""}`} onClick={() => setFilter(filter === k ? null : k)} aria-pressed={filter === k}>
-              <span className="since-n">{count(k)}</span> {KIND_LABEL[k]}
+              <span className="since-n">{count(k)}</span> {count(k) === 1 ? KIND_ONE[k] : KIND_LABEL[k]}
             </button>
           ))}
         </div>

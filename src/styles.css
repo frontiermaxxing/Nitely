@@ -51,6 +51,7 @@ h3 { font-size: var(--text-sm); font-weight: 600; margin: 22px 0 8px; color: var
 }
 .banner.notice .link { color: inherit; font: inherit; font-weight: var(--weight-medium); }
 .banner.error { background: none; }
+.banner.live { color: var(--fg-2); background: var(--sunken); border: 1px solid var(--line); border-radius: var(--radius); padding: 7px 12px; }
 
 /* ----- shared ----- */
 .muted { color: var(--fg-2); }
@@ -238,8 +239,8 @@ details summary { cursor: pointer; color: var(--fg-2); }
 .act-mark-commit { width: 10px; height: 10px; }
 
 /* Axis and the aggregate band. */
-.act-axis { min-height: 30px; align-items: end; }
-.act-axis .act-track { height: 30px; }
+.act-axis { min-height: 38px; align-items: end; }
+.act-axis .act-track { height: 38px; }
 .act-axis .act-track::after { display: none; }
 .act-tick, .act-now-label, .act-unrecorded-label {
   position: absolute; bottom: 3px; font-size: var(--text-xs); color: var(--fg-3); font-variant-numeric: tabular-nums; white-space: nowrap;

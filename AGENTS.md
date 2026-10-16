@@ -35,7 +35,8 @@ Nitely tracks its own build. Its backlog is the **NIT** project in Nitely, reach
   Browser pane opens it with the `web` configuration in `.claude/launch.json`. Check every view you
   change there, in light and dark, wide and narrow. Other agents preview at the same time: use your
   own port, your own Browser pane tab (`tabs_create`), and scratch files and browser profiles in a
-  folder named after your issue (docs/visualization.md, "The browser preview")
+  folder named after your issue (docs/visualization.md, "The browser preview"). Add `?data=live` to check a view
+  against the real database, read-only (`cargo build -p nitely-cli` first)
 - After landing a change to `crates/`, run `cargo run --release -p nitely-cli -- install` in the main
   checkout: it puts the new `nitely` where hooks and MCP run it, even while agents run the old one
   (`cargo install` fails then on Windows), and running MCP servers forward tool calls to it.

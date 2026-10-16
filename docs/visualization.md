@@ -315,6 +315,13 @@ and inside Tauri nothing changes.
   the not-recorded stretch.
 - If the preview suddenly fails with `reading 'invoke'` after a rebase or land, restart the dev
   server (with `--force`): Vite kept the files as they were mid-rebase.
+- **Live data, read-only:** add `?data=live` (or use "Use live data" at the bottom of the sidebar) and
+  the preview reads your real Nitely database instead of the fixtures, to check a view against real
+  work. The dev server relays each read to `nitely ui <command> <args>` (vite.config.ts), which runs
+  this checkout's `target/debug/nitely` (build it with `cargo build -p nitely-cli`; `NITELY_BIN`
+  overrides). `nitely ui` runs only reads and refuses every command that changes Nitely itself
+  (approve, answer, move, add a project, agent setup, sync), so the preview can never act for the
+  human. A banner says the page is live and read-only.
 - **Several agents run previews at once**, so keep yours apart:
   - Use your own port (`--port <n> --strictPort`), and your own Browser pane tab: open it with
     `tabs_create` and pass its `tabId`, because the pane is shared and another agent may navigate

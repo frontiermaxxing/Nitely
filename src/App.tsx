@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
-import { invoke, isPreview, listen } from "./backend";
+import { invoke, isLive, isPreview, listen } from "./backend";
 import type { AgentPlan, Board, Project } from "./types";
 import { AgentSetup, pendingChanges, setupErrors } from "./Agents";
 import { Inbox, useDecisionDetails } from "./Inbox";
@@ -202,6 +202,12 @@ export function App() {
 
       <main className="content">
         {error && <p className="error banner">{error}</p>}
+        {isLive && (
+          <p className="banner live small" role="status">
+            Live data, read-only: this preview reads your real Nitely database. Approving, answering and moving are
+            refused here; use the app for those.
+          </p>
+        )}
         {agentsError && <p className="error banner small">Could not check your agents' Nitely setup: {agentsError}</p>}
         {(agentChanges > 0 || agentErrors > 0) && view.kind !== "agents" && (
           <p className="banner notice small">
@@ -294,6 +300,15 @@ function BrandMark() {
   );
 }
 
+/** This page with `?data=live` set or removed, keeping the theme and the view. */
+function liveHref(live: boolean): string {
+  const params = new URLSearchParams(location.search);
+  if (live) params.set("data", "live");
+  else params.delete("data");
+  const query = params.toString();
+  return `${location.pathname}${query ? `?${query}` : ""}${location.hash}`;
+}
+
 type Theme = "auto" | "light" | "dark";
 const THEME_KEY = "nitely.preview.theme";
 
@@ -332,7 +347,10 @@ function PreviewFoot(props: { active: boolean; onKit: () => void }) {
           </button>
         ))}
       </div>
-      <p className="preview-note">Sample data from src/dev/fixtures.ts</p>
+      <p className="preview-note">
+        {isLive ? "Live data, read-only. " : "Sample data from src/dev/fixtures.ts. "}
+        <a href={liveHref(!isLive)}>{isLive ? "Use sample data" : "Use live data"}</a>
+      </p>
     </div>
   );
 }

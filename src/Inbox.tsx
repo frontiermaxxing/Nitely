@@ -184,7 +184,7 @@ function DecisionCard(props: {
             </button>
           </>
         )}
-        {d.kind === "approve" && issue && issue.origin !== "nitely" && <span className="muted small">In {issue.origin}. Act on it there.</span>}
+        {d.kind === "approve" && issue && issue.origin !== "nitely" && <span className="muted small">In {originName(issue.origin)}. Act on it there.</span>}
         {(d.kind === "conflict" || d.kind === "input" || d.kind === "land") && d.row && (
           <button className="btn primary" onClick={() => reveal(d.row!.worktree)}>
             Open the worktree
@@ -240,6 +240,10 @@ function Body(props: { decision: Decision; detail?: IssueDetail; integration: st
       );
     }
     case "approve": {
+      // A mirrored issue waits for the human in its own tracker; Nitely ran no playbook on it.
+      if (d.issue && d.issue.origin !== "nitely") {
+        return <p className="decision-matter">It waits for you in {originName(d.issue.origin)} ({d.issue.state}).</p>;
+      }
       const { rounds } = journeyOf(detail?.timeline, detail?.reviews);
       const review = detail?.reviews[0];
       const reasons = review?.reasons ?? [];
@@ -380,4 +384,9 @@ function AtWork(props: { board: Board; now: number; onOpenIssue: (key: string) =
       )}
     </section>
   );
+}
+
+/** "linear" → "Linear": where a mirrored issue lives, as its tracker spells itself. */
+function originName(origin: string): string {
+  return origin === "linear" ? "Linear" : origin.charAt(0).toUpperCase() + origin.slice(1);
 }

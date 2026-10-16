@@ -88,6 +88,16 @@ pub struct LinkedIssue {
     pub open: bool,
 }
 
+/// One issue with everything the issue panel shows.
+#[derive(Debug, Clone, Serialize)]
+pub struct IssueDetail {
+    pub issue: IssueRecord,
+    pub relations: Relations,
+    pub timeline: Vec<TimelineEntry>,
+    pub prs: Vec<crate::db::PrRecord>,
+    pub reviews: Vec<crate::submit::ReviewRecord>,
+}
+
 /// Both directions of an issue's blocked-by relations, closed issues included.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct Relations {
@@ -807,6 +817,18 @@ impl Db {
             *counts.entry(key).or_insert(0) += n;
         }
         Ok(counts)
+    }
+
+    /// The issue panel's read: the issue, its relations, timeline, pull requests and reviews.
+    pub fn issue_detail(&self, key: &str) -> Result<Option<IssueDetail>> {
+        let Some(issue) = self.issue(key)? else { return Ok(None) };
+        Ok(Some(IssueDetail {
+            relations: self.relations(&issue.key)?,
+            timeline: self.timeline(&issue.key)?,
+            prs: self.prs_for_issue(&issue.key)?,
+            reviews: self.reviews(&issue.key)?,
+            issue,
+        }))
     }
 
     pub fn timeline(&self, key: &str) -> Result<Vec<TimelineEntry>> {
