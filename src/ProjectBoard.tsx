@@ -117,12 +117,14 @@ export function ProjectBoard(props: {
 }) {
   const { issues, board, now, filters } = props;
 
-  // Issues in an agent's hands load their timelines, so the board knows Started from Working
+  // Issues in an agent's hands (and the last week's Done) load their timelines, so the board knows Started from Working
   // from Gate, sees stuck work, and can tell how long each card has sat in its column.
   const [details, setDetails] = useState<Map<string, IssueDetail>>(new Map());
   useEffect(() => {
     let live = true;
-    const keys = issues.filter((i) => i.state_type === "started").map((i) => i.key);
+    // Recently landed ones too: their worktree is gone, so the timeline is where their PR is.
+    const recent = (i: IssueRecord) => i.state_type === "completed" && Date.now() / 1000 - Date.parse(i.updated_at) / 1000 < DONE_DAYS * DAY;
+    const keys = issues.filter((i) => i.state_type === "started" || recent(i)).map((i) => i.key);
     Promise.all(keys.map((key) => invoke<IssueDetail>("issue_detail", { key }).catch(() => null))).then((all) => {
       if (live) setDetails(new Map(all.filter((d): d is IssueDetail => !!d).map((d) => [d.issue.key, d])));
     });

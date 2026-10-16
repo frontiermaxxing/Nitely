@@ -83,7 +83,10 @@
 .bmap-repo { margin-bottom: 30px; }
 .bmap-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 16px; margin-bottom: 10px; }
 .bmap-head h2 { margin: 0; }
-.bmap { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); overflow: hidden; --mark-bg: var(--surface); }
+.bmap {
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); overflow: hidden; --mark-bg: var(--surface);
+  container-type: inline-size;
+}
 
 .bmap-cols, .bmap-line {
   display: grid; align-items: center; column-gap: 14px; padding-right: 16px;
@@ -147,7 +150,10 @@
   .board-node { position: static; display: block; }
   .board-filters { margin-left: 0; }
   .project-head .toggle { margin-left: 0; }
+}
 
+/* The map stacks each line once its table no longer fits, wherever the window is. */
+@container (max-width: 860px) {
   .bmap-cols { display: none; }
   .bmap-line {
     grid-template-columns: 40px minmax(0, 1fr) auto auto;

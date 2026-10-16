@@ -94,7 +94,10 @@ function fromRow(r: TaskRow, now: number): Line {
 }
 
 function linesOf(repo: RepoView, now: number): { flight: Line[]; loose: Line[] } {
-  const worktrees = repo.rows.filter((r) => !r.is_main).map((r) => fromRow(r, now));
+  // The main checkout is the spine, unless someone checked a task branch out there: then it is a line too.
+  const worktrees = repo.rows
+    .filter((r) => !r.is_main || (r.branch && r.branch !== repo.integration_branch))
+    .map((r) => fromRow(r, now));
   const branches: Line[] = repo.branches.map((b) => {
     // The worktree may be gone while the issue still waits on the human (approval after a cleanup).
     const needsMe = !!b.issue && phaseOf(stationOfState(b.issue.state, b.issue.state_type)) === "human";
