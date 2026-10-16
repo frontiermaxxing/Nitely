@@ -65,7 +65,7 @@ pub fn holders(dir: &Path) -> Vec<Holder> {
 /// Whether `text` names `dir` or a path inside it, in any spelling a process might use:
 /// `C:\x\y`, `C:/x/y`, Git Bash's `/c/x/y`, WSL's `/mnt/c/x/y`; case-insensitive on Windows.
 pub fn names_path(text: &str, dir: &str) -> bool {
-    let text = normalize(text);
+    let text = normalize(&spell_out(text));
     let mut spellings = Vec::new();
     // Long or 8.3 short (`RUNNER~1`): a process may have been given either (NIT-104).
     for dir in [dir.to_string(), crate::paths::long_path(dir), crate::paths::short_path(dir)] {
@@ -86,6 +86,33 @@ pub fn names_path(text: &str, dir: &str) -> bool {
             after.is_none_or(|c| !(c.is_alphanumeric() || matches!(c, '-' | '_' | '.')))
         })
     })
+}
+
+/// `text` with the 8.3 short names in its paths spelled out, so a path written in any mix of
+/// short and long names (`C:\Users\RUNNER~1\AppData\...\nit-3`) compares in its long form (NIT-135).
+/// A path runs from a drive letter to the next quote, `;` or `&`; a space ends it only where the
+/// rest no longer exists, which `long_path` keeps as given.
+fn spell_out(text: &str) -> String {
+    if !cfg!(windows) || !text.contains('~') {
+        return text.to_string();
+    }
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < text.len() {
+        let drive = i + 2 < bytes.len() && bytes[i].is_ascii_alphabetic() && bytes[i + 1] == b':' && matches!(bytes[i + 2], b'\\' | b'/');
+        if !drive || (i > 0 && bytes[i - 1].is_ascii_alphanumeric()) {
+            let c = text[i..].chars().next().unwrap_or(' ');
+            out.push(c);
+            i += c.len_utf8();
+            continue;
+        }
+        let end = text[i..].find(['"', '\'', ';', '&', '|', '\r', '\n']).map_or(text.len(), |n| i + n);
+        let path = &text[i..end];
+        out.push_str(&if path.contains('~') { crate::paths::long_path(path.trim_end()) + &path[path.trim_end().len()..] } else { path.to_string() });
+        i = end;
+    }
+    out
 }
 
 /// Forward slashes, one at a time, lowercase on Windows (where paths ignore case).
@@ -145,6 +172,23 @@ pub(crate) mod tests {
             assert!(names_path("wsl -- ls /mnt/c/code/nitely-worktrees/nit-27-lanes/src", dir));
             assert!(names_path("C:/CODE/Nitely-worktrees/nit-27-lanes", dir));
         }
+    }
+
+    #[test]
+    fn names_a_folder_written_in_a_mix_of_short_and_long_names() {
+        // As on the CI runner: the user folder short (RUNNER~1), the folders below it long, and land
+        // asking about git's fully long path (NIT-135). Program Files has a short name where the
+        // volume makes them; new folders here get none.
+        let Some(program_files) = std::env::var_os("ProgramFiles").map(|p| p.to_string_lossy().into_owned()) else { return };
+        let short = crate::paths::short_path(&program_files);
+        if !cfg!(windows) || short == program_files {
+            return;
+        }
+        let long = format!(r"{program_files}\Common Files\nit-3-x");
+        assert!(names_path(&format!(r#"sh -c "sleep 30; : {short}\Common Files\nit-3-x""#), &long));
+        assert!(names_path(&format!(r"node {short}\Common Files\nit-3-x\vite.js --port 5184"), &long));
+        assert!(names_path(&format!("cd {}/Common Files/nit-3-x && npm run dev", short.replace('\\', "/")), &long));
+        assert!(!names_path(&format!(r"cd {short}\Common Files\nit-3-xy"), &long), "another folder");
     }
 
     /// `holders(dir)` once it names `pid`, or as it last was after a few seconds.
