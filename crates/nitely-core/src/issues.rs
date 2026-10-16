@@ -755,6 +755,11 @@ impl Db {
     /// once get different issues. A claim untouched for `CLAIM_TTL_SECS` counts as abandoned. An
     /// issue with an open blocker is skipped, and a blocker is as urgent as what it blocks.
     pub fn next_task(&mut self, project: &str, agent: &str) -> Result<Option<IssueRecord>> {
+        self.next_task_except(project, agent, &[])
+    }
+
+    /// `next_task`, passing over the issues in `except` (the crew's, for issues it cannot start now).
+    pub fn next_task_except(&mut self, project: &str, agent: &str, except: &[String]) -> Result<Option<IssueRecord>> {
         let ts = now();
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let candidates: Vec<(String, i64, i64)> = {
@@ -769,7 +774,7 @@ impl Db {
         let deps = Deps::load(&tx)?;
         let key = candidates
             .into_iter()
-            .filter(|(k, _, _)| deps.blocked_by(k).is_empty())
+            .filter(|(k, _, _)| deps.blocked_by(k).is_empty() && !except.iter().any(|e| e.eq_ignore_ascii_case(k)))
             .min_by_key(|(k, priority, number)| (rank(deps.urgency(k, *priority)), *number))
             .map(|(k, _, _)| k);
         let Some(key) = key else {

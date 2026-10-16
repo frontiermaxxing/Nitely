@@ -6,7 +6,7 @@ use nitely_core::crew::{self, Moment, Supervisor, SystemAgents};
 use nitely_core::playbook::{self, Playbook};
 use nitely_core::{paths, resolve_project, Actor, Config, Db};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -106,7 +106,26 @@ fn supervise(db: &mut Db, project: &str, root: PathBuf, once: bool) -> Result<()
         .context("listening for Ctrl+C")?;
     }
     db.crew_claim_supervisor(project, std::process::id())?;
-    let mut sup = Supervisor::new(project, &root, &paths::data_dir().join("crew"), &nitely_command(), Box::new(SystemAgents));
+    // The heartbeat stays fresh through a long pass, so a second `crew run` never takes over.
+    let done = Arc::new(AtomicBool::new(false));
+    let beat = {
+        let (done, project) = (done.clone(), project.to_string());
+        std::thread::spawn(move || {
+            let Ok(db) = Db::open_default() else { return };
+            while !done.load(Ordering::SeqCst) {
+                db.crew_heartbeat_touch(&project, std::process::id()).ok();
+                for _ in 0..60 {
+                    if done.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+            }
+        })
+    };
+    let interrupted = presses.clone();
+    let mut sup = Supervisor::new(project, &root, &paths::data_dir().join("crew"), &nitely_command(), Box::new(SystemAgents))
+        .with_interrupt(move || interrupted.load(Ordering::SeqCst) > 0);
     eprintln!("crew for {project}, following {}", root.join(playbook::PLAYBOOK_PATH).display());
     eprintln!("Ctrl+C once: start no more workers and wait for the running ones. Twice: stop every worker that is not landing.");
 
@@ -153,6 +172,8 @@ fn supervise(db: &mut Db, project: &str, root: PathBuf, once: bool) -> Result<()
             std::thread::sleep(Duration::from_millis(250));
         }
     }
+    done.store(true, Ordering::SeqCst);
+    beat.join().ok();
     sup.leave(db)?;
     if !once {
         eprintln!("crew for {project} stopped");

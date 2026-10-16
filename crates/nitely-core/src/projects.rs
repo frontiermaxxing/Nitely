@@ -22,6 +22,7 @@ const KEY_COLUMNS: &[(&str, &str)] = &[
     ("review", "issue_key"),
     ("approval", "issue_key"),
     ("ask", "issue_key"),
+    ("crew_worker", "issue_key"),
 ];
 
 /// `key` under its project's current prefix, given `Db::project_aliases`: `OLD-12` → `NEW-12`.
@@ -239,6 +240,9 @@ impl Db {
         tx.execute("UPDATE project SET key = ?2 WHERE key = ?1", params![from, to])?;
         tx.execute("UPDATE project_alias SET project = ?2 WHERE project = ?1", params![from, to])?;
         tx.execute("UPDATE project_brief SET project = ?2 WHERE project = ?1", params![from, to])?;
+        tx.execute("UPDATE crew_worker SET project = ?2 WHERE project = ?1", params![from, to])?;
+        tx.execute("DELETE FROM crew_control WHERE project = ?1", [&to])?;
+        tx.execute("UPDATE crew_control SET project = ?2 WHERE project = ?1", params![from, to])?;
         tx.execute("DELETE FROM project_alias WHERE old_key = ?1", [&to])?;
         tx.execute(
             "INSERT OR REPLACE INTO project_alias (old_key, project, created_at) VALUES (?1, ?2, ?3)",
@@ -280,6 +284,7 @@ impl Db {
         tx.execute("DELETE FROM issue WHERE project = ?1", [&key])?;
         tx.execute("DELETE FROM project_alias WHERE project = ?1", [&key])?;
         tx.execute("DELETE FROM project_brief WHERE project = ?1", [&key])?;
+        tx.execute("DELETE FROM crew_control WHERE project = ?1", [&key])?;
         tx.execute("DELETE FROM project WHERE key = ?1", [&key])?;
         tx.commit()?;
         Ok(Removed { key, issues, repos: 0, machines: 0, warnings: vec![] })

@@ -180,8 +180,13 @@ pub struct WorkerLine {
     pub log: String,
 }
 
+/// Vendors whose branches the crew recognises, besides the playbook's agents.
+const KNOWN_VENDORS: &[&str] = &["claude", "codex", "cursor"];
+
 enum Start {
     Running(WorkerLine),
+    /// It cannot start on this issue now; others may.
+    Wait(String),
     SetupFailed(String),
     LaunchFailed(String),
 }
@@ -205,11 +210,16 @@ pub struct Supervisor {
     pub nitely: String,
     agents: Box<dyn Agents>,
     clock: Box<dyn Fn() -> Moment>,
+    /// True once the person asked to stop: checked before each start, since a worktree's setup
+    /// can take minutes.
+    interrupted: Box<dyn Fn() -> bool>,
     running: Vec<Running>,
     /// Agents that would not start in this run, and why.
     disabled: BTreeMap<String, String>,
     /// Workers left by an earlier supervisor have been looked for.
     adopted: bool,
+    /// Issues passed over for the rest of this run, and why.
+    waiting: BTreeMap<String, String>,
 }
 
 impl Supervisor {
@@ -221,14 +231,21 @@ impl Supervisor {
             nitely: nitely.into(),
             agents,
             clock: Box::new(Moment::now),
+            interrupted: Box::new(|| false),
             running: Vec::new(),
             disabled: BTreeMap::new(),
             adopted: false,
+            waiting: BTreeMap::new(),
         }
     }
 
     pub fn with_clock(mut self, clock: impl Fn() -> Moment + 'static) -> Supervisor {
         self.clock = Box::new(clock);
+        self
+    }
+
+    pub fn with_interrupt(mut self, interrupted: impl Fn() -> bool + 'static) -> Supervisor {
+        self.interrupted = Box::new(interrupted);
         self
     }
 
@@ -309,6 +326,9 @@ impl Supervisor {
         let rules = &playbook.crew;
         let moment = (self.clock)();
         while self.running.len() < rules.workers as usize {
+            if (self.interrupted)() {
+                return Ok("stopping: waiting for running workers".into());
+            }
             if db.crew_started_since(&self.project, moment.day_start)? >= rules.max_per_day() {
                 return Ok(format!("{} of {} started today", rules.max_per_day(), rules.max_per_day()));
             }
@@ -326,18 +346,32 @@ impl Supervisor {
                 let why: Vec<String> = self.disabled.iter().map(|(a, why)| format!("{a}: {why}")).collect();
                 return Ok(format!("no agent will start ({})", why.join("; ")));
             }
-            let Some(issue) = db.next_task(&self.project, self.actor().id())? else {
-                return Ok(if self.running.is_empty() { "nothing ready".into() } else { "working; nothing else ready".into() });
+            let skipped: Vec<String> = self.waiting.keys().cloned().collect();
+            let Some(issue) = db.next_task_except(&self.project, self.actor().id(), &skipped)? else {
+                return Ok(self.nothing_ready());
             };
-            // A second attempt continues the first one's branch when its agent is still on the list.
-            let agent = installed
+            // A second attempt continues the first one's branch, with the first one's agent: the
+            // branch's prefix picks the reviewer, so another agent on it would review itself.
+            let earlier = KNOWN_VENDORS
                 .iter()
-                .find(|a| branch_exists(&self.repo_root, &playbook.branch_for(a, &issue)))
-                .unwrap_or(&installed[0])
-                .clone();
+                .map(|v| v.to_string())
+                .chain(rules.agents.iter().cloned())
+                .find(|v| branch_exists(&self.repo_root, &playbook.branch_for(v, &issue)));
+            let agent = match earlier {
+                Some(v) if installed.contains(&v) => v,
+                Some(v) => {
+                    self.wait(db, &issue.key, format!("its branch is {v}'s, and {v} is not starting"))?;
+                    continue;
+                }
+                None => installed[0].clone(),
+            };
             let why = match self.start_worker(db, playbook, &issue, &agent) {
                 Ok(Start::Running(line)) => {
                     tick.started.push(line);
+                    continue;
+                }
+                Ok(Start::Wait(why)) => {
+                    self.wait(db, &issue.key, why)?;
                     continue;
                 }
                 Ok(Start::SetupFailed(why)) => {
@@ -358,6 +392,22 @@ impl Supervisor {
         Ok("working".into())
     }
 
+    /// Hands `key` back and passes over it for the rest of this run.
+    fn wait(&mut self, db: &mut Db, key: &str, why: String) -> Result<()> {
+        db.move_issue(key, "Todo", None, Some(&format!("the crew cannot start it: {why}")), &self.actor())?;
+        self.waiting.insert(key.to_string(), why);
+        Ok(())
+    }
+
+    fn nothing_ready(&self) -> String {
+        let mut s = if self.running.is_empty() { "nothing ready".to_string() } else { "working; nothing else ready".to_string() };
+        if !self.waiting.is_empty() {
+            let waits: Vec<String> = self.waiting.iter().map(|(k, why)| format!("{k}: {why}")).collect();
+            s.push_str(&format!(" (passed over {})", waits.join("; ")));
+        }
+        s
+    }
+
     fn start_worker(&mut self, db: &mut Db, playbook: &Playbook, issue: &IssueRecord, agent: &str) -> Result<Start> {
         let worktree = playbook.worktree_for(&self.repo_root, agent, issue);
         // The id the worker's own MCP server will use, so its reports keep the claim fresh.
@@ -365,6 +415,12 @@ impl Supervisor {
         db.reassign_claim(&issue.key, &agent_id)?;
         let actor = Actor::Agent(agent_id.clone());
         let started = playbook::start_task(db, &self.repo_root, issue, agent, &actor)?;
+        // The worktree may already exist on someone else's branch (the folder pattern need not name
+        // the vendor): never put this agent on it.
+        let on = playbook::git(Path::new(&started.worktree), &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
+        if on.trim() != started.branch {
+            return Ok(Start::Wait(format!("its worktree {} is on {}, not {}", started.worktree, on.trim(), started.branch)));
+        }
         if let Some(failed) = started.setup.iter().find(|r| !r.ok) {
             return Ok(Start::SetupFailed(format!("{} failed:\n{}", failed.command, failed.output)));
         }
@@ -426,7 +482,7 @@ impl Supervisor {
     /// closed): they count toward the cap and are settled when they exit. Those that are gone are
     /// settled now.
     fn adopt(&mut self, db: &mut Db, tick: &mut Tick) -> Result<()> {
-        for w in db.crew_workers(&self.project, 200)?.into_iter().filter(|w| w.ended_at.is_none()) {
+        for w in db.crew_running(&self.project)? {
             let running = Running {
                 id: w.id,
                 issue: w.issue_key,
@@ -509,8 +565,8 @@ impl Supervisor {
             let mut w = self.running.remove(i);
             w.process.stop();
             db.crew_worker_ended(w.id, None, "stopped", "stopped by the person running the crew")?;
-            let still_mine = db.issue(&w.issue)?.is_some_and(|i| i.claimed_by.as_deref() == Some(w.agent_id.as_str()));
-            if still_mine {
+            let still_working = db.issue(&w.issue)?.is_some_and(|i| i.state == "In Progress" && i.claimed_by.as_deref() == Some(w.agent_id.as_str()));
+            if still_working {
                 db.add_note(&w.issue, &format!("The crew was stopped while a {} worker had this issue. Its log: {}", w.agent, w.log.display()), "handoff", &self.actor())?;
                 db.move_issue(&w.issue, "Todo", None, Some("the crew was stopped"), &self.actor())?;
             }
@@ -626,7 +682,7 @@ pub fn status(db: &Db, project: &str, playbook: &Playbook, moment: &Moment) -> R
     Ok(CrewStatus {
         project: project.to_uppercase(),
         cap: playbook.crew.workers,
-        running: workers.iter().filter(|w| w.ended_at.is_none()).cloned().collect(),
+        running: db.crew_running(project)?,
         started_today: db.crew_started_since(project, moment.day_start)?,
         max_per_day: playbook.crew.max_per_day(),
         paused: control.paused,
@@ -699,6 +755,16 @@ impl Db {
         Ok(())
     }
 
+    /// Moves only the heartbeat, from a thread that keeps it fresh while a pass runs long (a
+    /// worktree's setup can take minutes).
+    pub fn crew_heartbeat_touch(&self, project: &str, pid: u32) -> Result<()> {
+        self.conn.execute(
+            "UPDATE crew_control SET heartbeat_at = ?3 WHERE project = ?1 COLLATE NOCASE AND supervisor_pid = ?2",
+            rusqlite::params![project, pid, now()],
+        )?;
+        Ok(())
+    }
+
     pub fn crew_leave(&self, project: &str, pid: u32) -> Result<()> {
         self.conn.execute(
             "UPDATE crew_control SET supervisor_pid = NULL, heartbeat_at = NULL, status = 'not running'
@@ -741,8 +807,17 @@ impl Db {
 
     /// A project's workers, newest first.
     pub fn crew_workers(&self, project: &str, limit: usize) -> Result<Vec<CrewWorker>> {
+        self.crew_worker_rows("", project, limit)
+    }
+
+    /// A project's workers that have not ended, however old.
+    pub fn crew_running(&self, project: &str) -> Result<Vec<CrewWorker>> {
+        self.crew_worker_rows("AND ended_at IS NULL", project, 1 << 30)
+    }
+
+    fn crew_worker_rows(&self, filter: &str, project: &str, limit: usize) -> Result<Vec<CrewWorker>> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT {WORKER_COLUMNS} FROM crew_worker WHERE project = ?1 COLLATE NOCASE ORDER BY started_at DESC, id DESC LIMIT ?2"
+            "SELECT {WORKER_COLUMNS} FROM crew_worker WHERE project = ?1 COLLATE NOCASE {filter} ORDER BY started_at DESC, id DESC LIMIT ?2"
         ))?;
         let rows = stmt.query_map(rusqlite::params![project, limit as i64], |r| {
             Ok(CrewWorker {
@@ -1143,16 +1218,51 @@ mod tests {
     }
 
     #[test]
+    fn never_puts_an_agent_on_another_vendors_branch() {
+        let mut f = fixture(&format!("{GATE}[crew]\nworkers = 3\n"));
+        let git = |args: &[&str]| assert!(Command::new("git").arg("-C").arg(&f.repo).args(args).output().unwrap().status.success(), "{args:?}");
+        // NIT-1 has a claude branch, but only codex is installed.
+        git(&["branch", "claude/nit-1-first"]);
+        // NIT-2's worktree folder is on a branch a person started by hand.
+        git(&["worktree", "add", "-q", "-b", "cli/nit-2-second", "../wt/nit-2"]);
+        let fake = Fake { installed: vec!["codex"], ..Default::default() };
+        let mut sup = supervisor(&f, &fake);
+        let tick = sup.tick(&mut f.db, false).unwrap();
+        assert_eq!(tick.started.iter().map(|w| w.issue.as_str()).collect::<Vec<_>>(), ["NIT-3"], "{tick:?}");
+        assert!(tick.status.contains("NIT-1: its branch is claude's") && tick.status.contains("NIT-2: its worktree"), "{}", tick.status);
+        for key in ["NIT-1", "NIT-2"] {
+            let i = f.db.issue(key).unwrap().unwrap();
+            assert_eq!((i.state.as_str(), i.claimed_by), ("Todo", None), "{key} is handed back");
+        }
+        assert!(sup.tick(&mut f.db, false).unwrap().started.is_empty(), "and passed over for the rest of the run");
+    }
+
+    #[test]
+    fn an_interrupt_stops_starting_between_workers() {
+        let mut f = fixture(&format!("{GATE}[crew]\nworkers = 3\n"));
+        let fake = Fake { installed: vec!["claude"], ..Default::default() };
+        let launches = fake.launches.clone();
+        let mut sup = supervisor(&f, &fake).with_interrupt(move || !launches.borrow().is_empty());
+        let tick = sup.tick(&mut f.db, false).unwrap();
+        assert_eq!(tick.started.len(), 1);
+        assert!(tick.status.starts_with("stopping"));
+    }
+
+    #[test]
     fn stopping_spares_a_landing_worker_and_returns_the_others_to_todo() {
-        let mut f = fixture(&format!("{GATE}[crew]\nworkers = 2\n"));
+        let mut f = fixture(&format!("{GATE}[crew]\nworkers = 3\n"));
         let fake = Fake { installed: vec!["claude"], ..Default::default() };
         let mut sup = supervisor(&f, &fake);
         sup.tick(&mut f.db, false).unwrap();
         // NIT-2's worker holds the land lock.
         std::fs::write(f.repo.join(".git").join(crate::land::LOCK_FILE), "NIT-2 pid 1 since now").unwrap();
+        // NIT-3's worker had submitted: stopping it must not requeue reviewed work.
+        let three = f.db.issue("NIT-3").unwrap().unwrap().claimed_by.unwrap();
+        f.db.move_issue("NIT-3", "In Review", None, None, &Actor::Agent(three)).unwrap();
         let landing = sup.stop_all(&mut f.db).unwrap();
         assert_eq!(landing, ["NIT-2"]);
-        assert_eq!(*fake.stopped.borrow(), [1001]);
+        assert_eq!(*fake.stopped.borrow(), [1001, 1003]);
+        assert_eq!(f.db.issue("NIT-3").unwrap().unwrap().state, "In Review");
         let one = f.db.issue("NIT-1").unwrap().unwrap();
         assert_eq!((one.state.as_str(), one.claimed_by), ("Todo", None));
         let kinds: Vec<String> = f.db.timeline("NIT-1").unwrap().into_iter().map(|t| t.kind).collect();
