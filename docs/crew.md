@@ -25,7 +25,7 @@ setup_timeout_minutes = 30    # a worktree setup running longer is stopped; its 
 attempts = 3                  # failed workers on one issue before it goes to a human
 
 [crew.commands]               # optional: replaces the default command for an agent
-codex = ["codex", "exec", "--sandbox", "workspace-write", "..."]
+codex = ["codex", "exec", "--sandbox", "danger-full-access", "..."]
 ```
 
 The section lives in the repo's playbook, so a crew belongs to a repo and works on that repo's
@@ -135,8 +135,7 @@ answer nobody gives. The user's hooks still load, so the worker shows on Now thr
 **Codex** (`codex exec` 0.163):
 
 ```
-codex exec --sandbox workspace-write --add-dir <repo>/.git
-           -c sandbox_workspace_write.network_access=true
+codex exec --sandbox danger-full-access
            -c approval_policy="never"
            -c mcp_servers.nitely.command="<this nitely>" -c mcp_servers.nitely.args=["mcp"]
            -c mcp_servers.nitely.default_tools_approval_mode="approve"
@@ -145,8 +144,15 @@ codex exec --sandbox workspace-write --add-dir <repo>/.git
 
 Checked on this machine: without `default_tools_approval_mode="approve"`, `codex exec` refuses every
 MCP call ("requires approval, but approval policy is never"); with it, the nitely tools work.
-`--add-dir <repo>/.git` because a worktree's commits are written to the main checkout's git folder.
-Codex is found in the Store app's folder on Windows, as the reviewer is.
+
+No sandbox, on purpose. The live check ([NIT-118](nitely://issue/NIT-118)) found that codex's
+`workspace-write` sandbox never lets git write under a `.git` folder, whatever `--add-dir` or
+`sandbox_workspace_write.writable_roots` say, and a worktree's index and commits live in the main
+checkout's `.git/worktrees/`: a sandboxed worker made its change and then could not `git add` it. So a
+codex worker runs with the trust Claude's `--permission-mode auto` gives a claude worker, which is
+also no OS sandbox. On Windows the sandbox also cannot enter folders under the user profile's
+`AppData`, so a repo kept there could not be worked in at all. Codex is found in the Store app's
+folder on Windows, as the reviewer is.
 
 Either command can be replaced per agent with `[crew.commands]`, e.g. to pick a model or loosen the
 sandbox. `{worktree}`, `{repo}` and `{mcp_config}` are filled in.
@@ -174,7 +180,9 @@ The same text for every agent, with the blanks filled in:
 > 5. Commit, then call submit. If the review sends it back (P0 or P1 findings), fix them, commit and
 >    submit again, up to three rounds; then file what is left and stop.
 > 6. When submit says it passed and no human approval is needed, call land. On a rebase conflict,
->    resolve it in the worktree, then submit and land again.
+>    resolve it in the worktree, then submit and land again. If land says it could not remove the
+>    worktree because a process still uses it, that process is you: Nitely removes it after you exit,
+>    so do not file it.
 > 7. Before you stop, for any reason, leave a note on {key} with handoff: true: what is done, what
 >    is left, what you were unsure about.
 >
@@ -222,7 +230,7 @@ When a worker exits, the supervisor reads its issue:
 
 | Issue after the worker | Outcome | What the supervisor does |
 | --- | --- | --- |
-| Done | `landed` | nothing |
+| Done | `landed` | removes what land had to leave while the worker ran in it: the worktree folder, and the merged branch (`git branch -d`) |
 | In Review, or Needs You after submit | `submitted` | nothing; a person approves, then land |
 | Needs You with an open ask from the worker | `asked` | nothing |
 | In Progress (or Todo), still claimed by the worker | `failed` | writes the handoff note if the worker left none since it started, from its last report, exit code and log path; clears the claim; moves the issue back to Todo |

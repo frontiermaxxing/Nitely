@@ -83,10 +83,11 @@ impl CrewRules {
                 "--output-format", "stream-json", "--verbose",
             ]),
             // Without default_tools_approval_mode, exec refuses every MCP call under approval_policy
-            // never. A worktree's commits are written to the main checkout's git folder.
+            // never. No sandbox: workspace-write never lets git write under a `.git` folder (not with
+            // --add-dir, not with writable_roots), so a worker could not commit in its worktree; this
+            // is the trust Claude's auto mode gets. Seen in the live check of NIT-118.
             "codex" => args(&[
-                "codex", "exec", "--sandbox", "workspace-write", "--add-dir", "{git_dir}",
-                "-c", "sandbox_workspace_write.network_access=true",
+                "codex", "exec", "--sandbox", "danger-full-access",
                 "-c", "approval_policy=\"never\"",
                 "-c", "mcp_servers.nitely.command={nitely}",
                 "-c", "mcp_servers.nitely.args=[\"mcp\"]",
@@ -813,6 +814,9 @@ impl Supervisor {
             return Ok(outcome.into());
         }
         self.launch_failures.remove(&w.agent);
+        if outcome == "landed" {
+            self.clean_up_landed(db, w)?;
+        }
         if outcome != "failed" {
             return Ok(outcome.into());
         }
@@ -844,6 +848,46 @@ impl Supervisor {
             db.move_issue(&w.issue, "Todo", None, Some(&format!("the {} worker stopped without submitting", w.agent)), &self.actor())?;
         }
         Ok(outcome.into())
+    }
+
+    /// Removes what `land` had to leave because the worker was still running in it: the worktree's
+    /// folder and the merged branch. Only what is safe: a worktree git still tracks is removed
+    /// without force (a dirty one stays), and the branch with `git branch -d`, which refuses
+    /// unmerged work.
+    fn clean_up_landed(&self, db: &Db, w: &Running) -> Result<()> {
+        let mut done = Vec::new();
+        if w.worktree.exists() {
+            let tracked = playbook::git(&self.repo_root, &["worktree", "list", "--porcelain"])
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| l.strip_prefix("worktree "))
+                .any(|p| crate::paths::normalize(p) == crate::paths::normalize(&w.worktree.to_string_lossy()));
+            let removed = if tracked {
+                playbook::git(&self.repo_root, &["worktree", "remove", &w.worktree.to_string_lossy()]).is_ok()
+            } else {
+                // A process that just exited can hold files a moment longer on Windows.
+                (0..10).any(|_| std::fs::remove_dir_all(&w.worktree).is_ok() || {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    false
+                })
+            };
+            if removed {
+                done.push(format!("removed {}", w.worktree.display()));
+            }
+        }
+        let refs = playbook::git(&self.repo_root, &["for-each-ref", "--format=%(refname:short)", "refs/heads/"]).unwrap_or_default();
+        for branch in refs.lines().map(str::trim) {
+            let (vendor, key) = crate::git::parse_branch(branch);
+            if vendor.as_deref() == Some(w.agent.as_str()) && key.is_some_and(|k| k.eq_ignore_ascii_case(&w.issue))
+                && playbook::git(&self.repo_root, &["branch", "-d", branch]).is_ok()
+            {
+                done.push(format!("deleted the merged branch {branch}"));
+            }
+        }
+        if !done.is_empty() {
+            db.log_event(&self.actor(), Some(&w.issue), None, "crew_cleaned", &format!("After the {} worker left: {}", w.agent, done.join("; ")))?;
+        }
+        Ok(())
     }
 
     /// Failures count from the last time a person moved the issue or answered the crew about it.
@@ -921,7 +965,7 @@ Work only there; never edit or commit in {repo}.
 3. File anything you find but will not fix with file_issue.
 4. If only the human can decide something, ask it, move {key} to Needs You, leave a handoff note and stop: do not wait for the answer.
 5. Commit, then call submit. If the review sends it back (P0 or P1 findings), fix them, commit and submit again, up to three rounds; then file what is left and stop.
-6. When submit says it passed and no human approval is needed, call land. On a rebase conflict, resolve it in the worktree, then submit and land again.
+6. When submit says it passed and no human approval is needed, call land. On a rebase conflict, resolve it in the worktree, then submit and land again. If land says it could not remove the worktree because a process still uses it, that process is you: Nitely removes it after you exit, so do not file it.
 7. Before you stop, for any reason, leave a note on {key} with handoff: true: what is done, what is left, what you were unsure about.
 
 Then end. Do not take another issue: Nitely starts a new worker for it.
@@ -1650,6 +1694,7 @@ mod tests {
         assert!(pb.crew.command_for("cursor").is_none());
         let codex = CrewRules::default().command_for("codex").unwrap();
         assert!(codex.iter().any(|a| a.contains("default_tools_approval_mode=\"approve\"")), "{codex:?}");
+        assert!(!codex.iter().any(|a| a == "workspace-write"), "a codex worker must be able to commit: {codex:?}");
     }
 
     #[test]
@@ -1668,7 +1713,7 @@ mod tests {
     fn the_brief_names_the_issue_the_worktree_and_the_rules() {
         let issue = IssueRecord { key: "NIT-7".into(), title: "Fix the thing".into(), ..Default::default() };
         let b = brief(&issue, "NIT", Path::new("/w/nit-7"), "codex/nit-7-fix", Path::new("/r"));
-        for part in ["NIT-7, \"Fix the thing\"", "/w/nit-7 (branch codex/nit-7-fix)", "never edit or commit in /r", "call land", "handoff: true", "Do not take another issue"] {
+        for part in ["NIT-7, \"Fix the thing\"", "/w/nit-7 (branch codex/nit-7-fix)", "never edit or commit in /r", "call land", "that process is you", "handoff: true", "Do not take another issue"] {
             assert!(b.contains(part), "{part} missing from:\n{b}");
         }
     }
@@ -2217,6 +2262,30 @@ workers = 1
         db.crew_follows("NIT", &second.repo).unwrap();
         db.crew_leave("NIT", 9).unwrap();
         assert_eq!(project_status(db, &config, "NIT", &NOON).unwrap().unwrap().cap, 1, "once the supervisor left, its repo says nothing");
+    }
+
+    #[test]
+    fn a_landed_workers_leftover_worktree_and_branch_are_cleaned_up() {
+        let mut f = fixture(&format!("{GATE}[crew]\nworkers = 1\n"));
+        let fake = Fake { installed: vec!["claude"], ..Default::default() };
+        let mut sup = supervisor(&f, &fake);
+        sup.tick(&mut f.db, false).unwrap();
+        let worktree = fake.launches.borrow()[0].cwd.clone();
+        // Land merged the branch and unregistered the worktree, but could not delete its folder: the
+        // worker was still in it.
+        let git = |args: &[&str]| assert!(Command::new("git").arg("-C").arg(&f.repo).args(args).output().unwrap().status.success(), "{args:?}");
+        let admin = f.repo.join(".git").join("worktrees").join(worktree.file_name().unwrap());
+        std::fs::remove_dir_all(&admin).unwrap();
+        git(&["worktree", "prune"]);
+        let agent = f.db.issue("NIT-1").unwrap().unwrap().claimed_by.unwrap();
+        f.db.move_issue("NIT-1", "Done", Some("landed"), None, &Actor::Agent(agent)).unwrap();
+        fake.exits.borrow_mut().insert(1001, 0);
+        let tick = sup.tick(&mut f.db, false).unwrap();
+        assert_eq!(tick.ended[0].outcome, "landed");
+        assert!(!worktree.exists(), "the leftover folder is gone");
+        assert!(branch_vendors(&f.repo, "NIT-1").is_empty(), "and the merged branch");
+        let note = f.db.timeline("NIT-1").unwrap().into_iter().find(|t| t.kind == "crew_cleaned").unwrap();
+        assert!(note.summary.unwrap().contains("deleted the merged branch claude/nit-1-first"));
     }
 
     #[test]
