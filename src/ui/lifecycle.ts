@@ -196,6 +196,8 @@ export function trackOf(issue: IssueRecord, timeline?: TimelineEntry[], reviews?
   track.rounds = Math.max(rounds, reviews?.filter((r) => r.verdict === "changes").length ?? 0);
   track.asking = openAsks > 0;
   const open = track.station !== "done";
+  // A stopped land keeps the issue's state (often In Review), but the work is at Landing.
+  if (open && landFailed) track.station = "landing";
   if (open && landFailed) track.stuck = "Land stopped";
   // A resubmit can fail without moving the issue, so these hold at whatever station it shows.
   else if (open && gateFailed) track.stuck = "Gate failed";
