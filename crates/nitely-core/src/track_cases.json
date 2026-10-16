@@ -117,7 +117,6 @@
     },
     {
       "name": "NIT-31: a later submit clears a review that did not finish",
-      "frontend_pending": "computeTrack gets the NIT-31 rules with NIT-26; drop this field once it lands",
       "state": "Needs You",
       "base": true,
       "events": [["review_failed", "Review by codex did not finish"], ["submit", "Submitted without a review; waits for a human"], ["issue_moved", "In Progress → Needs You"]],
@@ -125,7 +124,6 @@
     },
     {
       "name": "NIT-31: a move clears a review that did not finish",
-      "frontend_pending": "computeTrack gets the NIT-31 rules with NIT-26; drop this field once it lands",
       "state": "Approved",
       "base": true,
       "events": [["review_failed", "Review by codex did not finish"], ["issue_moved", "In Progress → Approved", "human"]],
@@ -133,7 +131,6 @@
     },
     {
       "name": "NIT-31: a failed push is stuck",
-      "frontend_pending": "computeTrack gets the NIT-31 rules with NIT-26; drop this field once it lands",
       "state": "In Progress",
       "base": true,
       "events": [["submit", "Review by codex passed; ready to land. No pull request: push failed: rejected"]],
@@ -148,7 +145,6 @@
     },
     {
       "name": "NIT-31: submit's own move back to In Progress keeps a failed push stuck",
-      "frontend_pending": "computeTrack gets the NIT-31 rules with NIT-26; drop this field once it lands",
       "state": "In Progress",
       "base": true,
       "events": [["issue_moved", "In Progress → In Review"], ["submit", "No pull request: push failed: x"], ["issue_moved", "In Review → In Progress"]],
