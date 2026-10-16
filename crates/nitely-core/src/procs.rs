@@ -65,7 +65,7 @@ pub fn holders(dir: &Path) -> Vec<Holder> {
 /// Whether `text` names `dir` or a path inside it, in any spelling a process might use:
 /// `C:\x\y`, `C:/x/y`, Git Bash's `/c/x/y`, WSL's `/mnt/c/x/y`; case-insensitive on Windows.
 pub fn names_path(text: &str, dir: &str) -> bool {
-    let text = normalize(&spell_out(text));
+    let texts = [normalize(text), normalize(&spell_out(text))];
     let mut spellings = Vec::new();
     // Long or 8.3 short (`RUNNER~1`): a process may have been given either (NIT-104).
     for dir in [dir.to_string(), crate::paths::long_path(dir), crate::paths::short_path(dir)] {
@@ -79,19 +79,22 @@ pub fn names_path(text: &str, dir: &str) -> bool {
         }
         spellings.push(dir);
     }
-    spellings.iter().any(|s| {
-        text.match_indices(s.as_str()).any(|(i, _)| {
-            let after = text[i + s.len()..].chars().next();
-            // A whole path component: not `nit-2` inside `nit-27-x`.
-            after.is_none_or(|c| !(c.is_alphanumeric() || matches!(c, '-' | '_' | '.')))
+    // As written, or with its short names spelled out.
+    texts.iter().any(|text| {
+        spellings.iter().any(|s| {
+            text.match_indices(s.as_str()).any(|(i, _)| {
+                let after = text[i + s.len()..].chars().next();
+                // A whole path component: not `nit-2` inside `nit-27-x`.
+                after.is_none_or(|c| !(c.is_alphanumeric() || matches!(c, '-' | '_' | '.')))
+            })
         })
     })
 }
 
 /// `text` with the 8.3 short names in its paths spelled out, so a path written in any mix of
 /// short and long names (`C:\Users\RUNNER~1\AppData\...\nit-3`) compares in its long form (NIT-135).
-/// A path runs from a drive letter to the next quote, `;` or `&`; a space ends it only where the
-/// rest no longer exists, which `long_path` keeps as given.
+/// A path runs from a drive letter to the next quote, `;`, `&` or `|`, and within that to the
+/// longest part ending at a space that exists; the rest is kept as given.
 fn spell_out(text: &str) -> String {
     if !cfg!(windows) || !text.contains('~') {
         return text.to_string();
@@ -109,7 +112,16 @@ fn spell_out(text: &str) -> String {
         }
         let end = text[i..].find(['"', '\'', ';', '&', '|', '\r', '\n']).map_or(text.len(), |n| i + n);
         let path = &text[i..end];
-        out.push_str(&if path.contains('~') { crate::paths::long_path(path.trim_end()) + &path[path.trim_end().len()..] } else { path.to_string() });
+        if path.contains('~') {
+            // The longest part up to a space that exists is the path (`...\COMMON~1 --watch`);
+            // without one, the part that exists of the whole is spelled out.
+            let cut = path.char_indices().filter(|(_, c)| c.is_whitespace()).map(|(k, _)| k).chain([path.len()]).rev().find(|&k| Path::new(&path[..k]).exists());
+            let cut = cut.unwrap_or(path.len());
+            out.push_str(&crate::paths::long_path(&path[..cut]));
+            out.push_str(&path[cut..]);
+        } else {
+            out.push_str(path);
+        }
         i = end;
     }
     out
@@ -189,6 +201,11 @@ pub(crate) mod tests {
         assert!(names_path(&format!(r"node {short}\Common Files\nit-3-x\vite.js --port 5184"), &long));
         assert!(names_path(&format!("cd {}/Common Files/nit-3-x && npm run dev", short.replace('\\', "/")), &long));
         assert!(!names_path(&format!(r"cd {short}\Common Files\nit-3-xy"), &long), "another folder");
+        // A short last folder followed by arguments, matched as written or spelled out.
+        let common = format!(r"{program_files}\Common Files");
+        let common_short = crate::paths::short_path(&common);
+        assert!(names_path(&format!("node {common_short} --watch"), &common), "{common_short}");
+        assert!(names_path(&format!(r"node {short}\Common Files --watch"), &common_short));
     }
 
     /// `holders(dir)` once it names `pid`, or as it last was after a few seconds.
