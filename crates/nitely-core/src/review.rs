@@ -133,9 +133,10 @@ impl ReviewRules {
         self.reviewer.get(vendor).or_else(|| self.reviewer.get("*")).map(String::as_str)
     }
 
-    /// Whether the reviewer's CLI is on this machine.
-    pub fn is_installed(&self, reviewer: &str) -> bool {
-        self.commands.get(reviewer).and_then(|c| c.first()).is_some_and(|p| program_exists(&resolve_program(p)))
+    /// Whether the reviewer's CLI is on this machine. A relative path counts from `worktree`,
+    /// where the reviewer runs.
+    pub fn is_installed(&self, reviewer: &str, worktree: &Path) -> bool {
+        self.commands.get(reviewer).and_then(|c| c.first()).is_some_and(|p| program_exists(&resolve_program(p), worktree))
     }
 
     /// Who reviews a branch by `vendor`, among the reviewers `installed` says can run. The
@@ -501,10 +502,10 @@ pub(crate) fn resolve_program(program: &str) -> String {
     program.to_string()
 }
 
-/// Whether `program` can be started: a path that exists, or a name found on PATH.
-fn program_exists(program: &str) -> bool {
-    let path = Path::new(program);
-    if path.components().count() > 1 {
+/// Whether `program` can be started from `dir`: a path that exists, or a name found on PATH.
+fn program_exists(program: &str, dir: &Path) -> bool {
+    let path = &dir.join(program);
+    if Path::new(program).components().count() > 1 {
         return path.is_file() || (cfg!(windows) && path.extension().is_none() && path.with_extension("exe").is_file());
     }
     which(program).is_some()
@@ -708,11 +709,18 @@ mod tests {
 
     #[test]
     fn finds_programs_on_path_or_by_path() {
-        assert!(program_exists(&crate::playbook::posix_sh()));
-        assert!(!program_exists("nitely-no-such-reviewer"));
-        assert!(!program_exists("/nitely/no/such/reviewer"));
+        let dir = std::env::temp_dir().join(format!("nitely-which-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(dir.join("scripts").join("review"), "").unwrap();
+        assert!(program_exists(&crate::playbook::posix_sh(), &dir));
+        assert!(!program_exists("nitely-no-such-reviewer", &dir));
+        assert!(!program_exists("/nitely/no/such/reviewer", &dir));
+        // A relative path counts from the worktree the reviewer runs in, not from Nitely's own.
+        assert!(program_exists("./scripts/review", &dir) && program_exists("scripts/review", &dir));
+        assert!(!program_exists("./scripts/review", &std::env::temp_dir()));
         let r = ReviewRules::default();
-        assert!(!r.is_installed("gemini"), "no command, not installed");
+        assert!(!r.is_installed("gemini", &dir), "no command, not installed");
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

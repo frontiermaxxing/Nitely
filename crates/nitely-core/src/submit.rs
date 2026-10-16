@@ -125,7 +125,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     } else {
         let (vendor, _) = crate::git::parse_branch(&branch);
         let vendor = vendor.unwrap_or_default();
-        let choice = pb.review.choose(&vendor, &|r| pb.review.is_installed(r))?;
+        let choice = pb.review.choose(&vendor, &|r| pb.review.is_installed(r, &worktree))?;
         let reviewer = choice.reviewer.clone();
         let previous = previous_round(db, &issue.key, &worktree)?;
         let started = format!("Review by {reviewer}{} started", noted(&choice.note));

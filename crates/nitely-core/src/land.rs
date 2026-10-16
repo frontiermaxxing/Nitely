@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use crate::db::{now, Db};
 use crate::issues::Actor;
 use crate::playbook::{self, git, git_remote, GateResult, Playbook};
+use crate::review::Choice;
 use crate::submit::patch_id;
 
 /// A lock older than this probably belongs to a land that died.
@@ -286,6 +287,11 @@ fn check_approval(db: &Db, pb: &Playbook, key: &str, worktree: &Path, base: &str
     let mut reasons = pb.approval.human_reasons(&files)?;
     if review.approver == "human" {
         reasons.extend(review.reasons.iter().cloned());
+    }
+    // A cross-vendor requirement added after a same-vendor review still applies.
+    let choice = Choice { reviewer: review.reviewer.clone(), same_vendor: review.note.starts_with("same vendor"), note: review.note.clone() };
+    if let Some(reason) = pb.review.independence_reason(&choice).filter(|r| !reasons.contains(r)) {
+        reasons.push(reason);
     }
     reasons.dedup();
     if reasons.is_empty() {
