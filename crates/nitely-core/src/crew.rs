@@ -843,6 +843,67 @@ fn worker_row(r: &rusqlite::Row) -> rusqlite::Result<CrewWorker> {
     })
 }
 
+/// The projects whose crew should be running, each with the repo whose playbook it follows: the
+/// first repo of the project whose playbook has `workers > 0`.
+pub fn supervisors_wanted(config: &crate::Config) -> Vec<(String, PathBuf)> {
+    let mut wanted: Vec<(String, PathBuf)> = Vec::new();
+    for repo in &config.repos {
+        let Some(project) = repo.project.as_deref().map(str::to_uppercase) else { continue };
+        if wanted.iter().any(|(p, _)| *p == project) {
+            continue;
+        }
+        if Playbook::load(Path::new(&repo.root)).is_ok_and(|p| p.crew.workers > 0) {
+            wanted.push((project, PathBuf::from(&repo.root)));
+        }
+    }
+    wanted
+}
+
+/// Whether no supervisor is running `project`'s crew: none ever did, it left, or its heartbeat is
+/// stale.
+pub fn unsupervised(db: &Db, project: &str) -> Result<bool> {
+    let c = db.crew_control(project)?;
+    Ok(!(c.supervisor_pid.is_some() && c.heartbeat_at.is_some_and(|h| now() - h < HEARTBEAT_STALE_SECS)))
+}
+
+/// The `nitely` the app starts supervisors with: the one on PATH, where `nitely install` puts new
+/// builds, so a supervisor that leaves for a new build is replaced by that build.
+pub fn nitely_on_path() -> Option<PathBuf> {
+    on_path("nitely")
+}
+
+/// Starts `nitely crew run --managed` for `project` in the background, apart from the caller: no
+/// window, its own process group, and nothing that ends it when the caller ends, so a crew outlives
+/// the app. Its output goes to `supervisor.log` in the project's crew folder. Returns its pid.
+pub fn start_supervisor(nitely: &Path, project: &str, repo: &Path, dir: &Path) -> Result<u32> {
+    use std::process::Stdio;
+    let logs = dir.join(project.to_uppercase());
+    std::fs::create_dir_all(&logs).with_context(|| format!("creating {}", logs.display()))?;
+    let log_path = logs.join("supervisor.log");
+    let log = std::fs::OpenOptions::new().create(true).append(true).open(&log_path).with_context(|| format!("opening {}", log_path.display()))?;
+    let mut cmd = std::process::Command::new(nitely);
+    cmd.args(["crew", "run", "--managed", "--project", project, "--repo"]).arg(repo).current_dir(repo);
+    cmd.stdin(Stdio::null()).stdout(Stdio::from(log.try_clone()?)).stderr(Stdio::from(log));
+    for (name, _) in std::env::vars() {
+        if crate::review::is_session_marker(&name) {
+            cmd.env_remove(name);
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // A hidden console of its own (so its Ctrl+C handling works) and its own process group.
+        cmd.creation_flags(0x0800_0000 | 0x0000_0200); // CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let child = cmd.spawn().with_context(|| format!("starting {} crew run", nitely.display()))?;
+    Ok(child.id())
+}
+
 /// The crew of a project as the app shows it: the crew of the first of its repos whose playbook
 /// has one. None when no repo has a crew, none is running and no supervisor is there, so a project
 /// that never used a crew shows nothing.
@@ -951,6 +1012,16 @@ impl Db {
         self.conn.execute(
             "UPDATE crew_control SET heartbeat_at = ?3 WHERE project = ?1 COLLATE NOCASE AND supervisor_pid = ?2",
             rusqlite::params![project, pid, now()],
+        )?;
+        Ok(())
+    }
+
+    /// What the crew says when no supervisor is there to say it, e.g. why the app could not start
+    /// one. A running supervisor overwrites it on its next pass.
+    pub fn crew_set_status(&self, project: &str, status: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO crew_control (project, status) VALUES (?1, ?2) ON CONFLICT (project) DO UPDATE SET status = ?2",
+            rusqlite::params![project.to_uppercase(), status],
         )?;
         Ok(())
     }
@@ -1660,6 +1731,32 @@ workers = 2
         assert!(f.db.session("claude:worker").unwrap().unwrap().crew);
         let json = serde_json::to_value(f.db.session("claude:person").unwrap().unwrap()).unwrap();
         assert!(json.get("crew").is_none(), "only crew sessions carry the field");
+    }
+
+    #[test]
+    fn the_app_wants_a_supervisor_for_each_project_with_a_crew() {
+        let off = fixture(GATE);
+        let on = fixture(&format!("{GATE}[crew]\nworkers = 1\n"));
+        let other = fixture(&format!("{GATE}[crew]\nworkers = 2\n"));
+        let repo = |name: &str, root: &Path, project: Option<&str>| crate::RepoConfig {
+            name: name.into(),
+            root: root.to_string_lossy().into_owned(),
+            integration_branch: "main".into(),
+            project: project.map(str::to_string),
+        };
+        let config = crate::Config {
+            repos: vec![repo("off", &off.repo, Some("OFF")), repo("on", &on.repo, Some("nit")), repo("second", &other.repo, Some("NIT")), repo("loose", &other.repo, None)],
+            ..Default::default()
+        };
+        assert_eq!(supervisors_wanted(&config), vec![("NIT".to_string(), on.repo.clone())], "one per project, the first repo with a crew");
+
+        assert!(unsupervised(&on.db, "NIT").unwrap());
+        on.db.crew_heartbeat("NIT", 42, "working").unwrap();
+        assert!(!unsupervised(&on.db, "NIT").unwrap());
+        on.db.crew_leave("NIT", 42).unwrap();
+        assert!(unsupervised(&on.db, "NIT").unwrap());
+        on.db.crew_set_status("NIT", "the app could not start the supervisor: no nitely on PATH").unwrap();
+        assert!(on.db.crew_control("NIT").unwrap().status.unwrap().starts_with("the app could not"));
     }
 
     #[test]

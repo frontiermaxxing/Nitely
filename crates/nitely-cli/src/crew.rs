@@ -28,6 +28,10 @@ pub enum CrewCmd {
         /// One pass, then exit (running workers keep running).
         #[arg(long)]
         once: bool,
+        /// Run for the app: exit when the crew is off and idle, or when a newer nitely is
+        /// installed (the app then starts the new one, which takes over the running workers).
+        #[arg(long)]
+        managed: bool,
     },
     /// Print the crew's state as JSON: running workers, cap, today's count, paused.
     Status {
@@ -71,9 +75,9 @@ pub fn run(cmd: CrewCmd, me: &Actor) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&status)?);
             Ok(())
         }
-        CrewCmd::Run { project, repo, once } => {
+        CrewCmd::Run { project, repo, once, managed } => {
             let (project, root) = crew_repo(&config, &db, project.as_deref(), repo.as_deref(), &cwd)?;
-            supervise(&mut db, &project, root, once)
+            supervise(&mut db, &project, root, once, managed)
         }
     }
 }
@@ -96,15 +100,20 @@ fn crew_repo(config: &Config, db: &Db, project: Option<&str>, repo: Option<&str>
     }
 }
 
-fn supervise(db: &mut Db, project: &str, root: PathBuf, once: bool) -> Result<()> {
+fn supervise(db: &mut Db, project: &str, root: PathBuf, once: bool, managed: bool) -> Result<()> {
     let presses = Arc::new(AtomicUsize::new(0));
     {
         let presses = presses.clone();
-        ctrlc::set_handler(move || {
+        // Started by the app there may be no console to listen on; the crew still runs.
+        if let Err(e) = ctrlc::set_handler(move || {
             presses.fetch_add(1, Ordering::SeqCst);
-        })
-        .context("listening for Ctrl+C")?;
+        }) {
+            eprintln!("not listening for Ctrl+C: {e}");
+        }
     }
+    // This build, as it was on disk when it started: `nitely install` replacing it ends a managed run.
+    let exe = std::env::current_exe().ok().and_then(|p| nitely_core::install::stamp(&p).map(|s| (p, s)));
+    let mut awake = Awake::default();
     db.crew_claim_supervisor(project, std::process::id())?;
     // The heartbeat stays fresh through a long pass, so a second `crew run` never takes over.
     let done = Arc::new(AtomicBool::new(false));
@@ -162,8 +171,20 @@ fn supervise(db: &mut Db, project: &str, root: PathBuf, once: bool) -> Result<()
             // A busy database or a git hiccup: say it and try again next pass.
             Err(e) => eprintln!("crew pass failed: {e:#}"),
         }
+        awake.set(sup.running() > 0);
         if once || (pressed >= 1 && sup.running() == 0) {
             break;
+        }
+        if managed {
+            if last_status.contains(": off:") && sup.running() == 0 {
+                eprintln!("the crew is off and idle; leaving");
+                break;
+            }
+            if exe.as_ref().is_some_and(|(path, at)| nitely_core::install::stamp(path).as_ref() != Some(at)) {
+                // Workers keep running; the app starts the new build, which takes them over.
+                eprintln!("a newer nitely is installed; leaving for it");
+                break;
+            }
         }
         for _ in 0..TICK_SECS * 4 {
             if presses.load(Ordering::SeqCst) != seen {
@@ -179,6 +200,55 @@ fn supervise(db: &mut Db, project: &str, root: PathBuf, once: bool) -> Result<()
         eprintln!("crew for {project} stopped");
     }
     Ok(())
+}
+
+/// Keeps the machine from sleeping while workers run, so a crew left overnight keeps working. The
+/// display may still turn off.
+#[derive(Default)]
+struct Awake {
+    on: bool,
+    #[cfg(target_os = "macos")]
+    caffeinate: Option<std::process::Child>,
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn SetThreadExecutionState(flags: u32) -> u32;
+}
+
+impl Awake {
+    fn set(&mut self, on: bool) {
+        if on == self.on {
+            return;
+        }
+        self.on = on;
+        #[cfg(windows)]
+        {
+            const ES_CONTINUOUS: u32 = 0x8000_0000;
+            const ES_SYSTEM_REQUIRED: u32 = 0x0000_0001;
+            // Per thread, and this loop's thread lives as long as the crew runs.
+            // SAFETY: takes flags only and has no memory effects.
+            unsafe { SetThreadExecutionState(if on { ES_CONTINUOUS | ES_SYSTEM_REQUIRED } else { ES_CONTINUOUS }) };
+        }
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(mut c) = self.caffeinate.take() {
+                c.kill().ok();
+                c.wait().ok();
+            }
+            if on {
+                // -w: it lets go by itself if this process dies.
+                self.caffeinate = std::process::Command::new("caffeinate").args(["-i", "-w", &std::process::id().to_string()]).spawn().ok();
+            }
+        }
+    }
+}
+
+impl Drop for Awake {
+    fn drop(&mut self) {
+        self.set(false);
+    }
 }
 
 /// How workers start the nitely MCP server: `nitely` when it is on PATH (so `nitely install`
