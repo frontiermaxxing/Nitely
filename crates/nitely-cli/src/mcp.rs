@@ -265,7 +265,7 @@ fn tools() -> Value {
         },
         {
             "name": "file_issue",
-            "description": "File a finding, follow-up or idea you will not handle now. Refused when an open issue has a similar title (it lists them); set allow_similar only if it is really different.",
+            "description": "File a finding, follow-up or idea you will not handle now. Refused when an issue, open or closed, looks like the same work: a similar title, or bodies naming the same files (it lists them and why); set allow_similar only if it is really different.",
             "inputSchema": { "type": "object", "required": ["title", "kind", "body", "evidence"], "properties": {
                 "title": { "type": "string" },
                 "kind": { "type": "string", "enum": KINDS },

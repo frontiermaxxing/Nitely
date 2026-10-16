@@ -8,6 +8,7 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
 use crate::db::{now, Db};
+use crate::similar;
 use crate::track::{track_of, Track};
 
 pub const KINDS: &[&str] = &["bug", "feature", "improvement", "idea", "live-check"];
@@ -31,9 +32,6 @@ pub const STATES: &[(&str, &str)] = &[
 
 /// The state that means the next step is the human's.
 pub const NEEDS_HUMAN: &str = "Needs You";
-
-/// Titles sharing this share of their words count as possible duplicates.
-const SIMILAR_TITLE: f64 = 0.6;
 
 /// A claim older than this with no update is free for another agent to take.
 const CLAIM_TTL_SECS: i64 = 6 * 3600;
@@ -206,6 +204,9 @@ pub struct Filed {
     pub url: String,
     #[serde(skip)]
     pub project: String,
+    /// Its place in the batch.
+    #[serde(skip)]
+    pub item: usize,
     pub blocked_by: Vec<String>,
 }
 
@@ -218,6 +219,22 @@ pub struct Skipped {
     pub duplicate_of: Vec<String>,
     /// What the items that named its ref are blocked by instead.
     pub stands_for: String,
+    /// Why it looked like `stands_for`.
+    pub why: String,
+}
+
+/// An issue a new one likely duplicates, and why it looked similar.
+struct Duplicate {
+    issue: IssueRecord,
+    why: String,
+}
+
+impl Duplicate {
+    /// `NIT-3 Inbox count is wrong (closed: Done): title shares "inbox", "count"`.
+    fn line(&self) -> String {
+        let closed = if self.issue.is_open() { String::new() } else { format!(" (closed: {})", self.issue.state) };
+        format!("{} {}{closed}: {}", self.issue.key, self.issue.title, self.why)
+    }
 }
 
 /// A new issue that passed `check_new`, ready to insert.
@@ -232,6 +249,12 @@ struct CheckedIssue {
     owner: String,
     state: &'static str,
     state_type: &'static str,
+}
+
+impl CheckedIssue {
+    fn text(&self) -> similar::Text<'_> {
+        similar::Text { title: &self.title, body: &self.body, evidence: &self.evidence }
+    }
 }
 
 /// Inserts a checked issue and its blockers, numbering it in its project; returns its key.
@@ -425,24 +448,6 @@ pub fn parse_state(input: &str) -> Result<(&'static str, &'static str)> {
         })
 }
 
-pub fn title_similarity(a: &str, b: &str) -> f64 {
-    let words = |s: &str| -> HashSet<String> {
-        s.to_lowercase()
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() || c == ' ' { c } else { ' ' })
-            .collect::<String>()
-            .split_whitespace()
-            .filter(|w| w.len() > 2)
-            .map(str::to_string)
-            .collect()
-    };
-    let (x, y) = (words(a), words(b));
-    if x.is_empty() || y.is_empty() {
-        return 0.0;
-    }
-    x.intersection(&y).count() as f64 / x.len().min(y.len()) as f64
-}
-
 /// RFC 3339 UTC from unix seconds (days-from-civil, Howard Hinnant's algorithm).
 pub fn iso(ts: i64) -> String {
     let days = ts.div_euclid(86_400);
@@ -535,8 +540,8 @@ impl Db {
         if !new.allow_similar {
             let similar = self.likely_duplicates(&checked.project, new)?;
             if !similar.is_empty() {
-                let listed: Vec<String> = similar.iter().map(|i| format!("{} {}", i.key, i.title)).collect();
-                bail!("possible duplicates (file anyway with allow_similar):\n  {}", listed.join("\n  "));
+                let listed: Vec<String> = similar.iter().map(Duplicate::line).collect();
+                bail!("possible duplicates (file anyway with allow_similar if it is different work):\n  {}", listed.join("\n  "));
             }
         }
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -605,7 +610,7 @@ impl Db {
         }
 
         // Duplicates of open issues are found before the transaction; of earlier items, as it goes.
-        let mut duplicates: Vec<Vec<IssueRecord>> = Vec::with_capacity(items.len());
+        let mut duplicates: Vec<Vec<Duplicate>> = Vec::with_capacity(items.len());
         for (item, c) in items.iter().zip(&checked) {
             duplicates.push(if item.issue.allow_similar { Vec::new() } else { self.likely_duplicates(&c.project, &item.issue)? });
         }
@@ -620,15 +625,19 @@ impl Db {
             let earlier = if item.issue.allow_similar {
                 None
             } else {
-                out.filed.iter().find(|f| f.project == c.project && title_similarity(&c.title, &f.title) >= SIMILAR_TITLE)
+                out.filed.iter().find_map(|f| {
+                    let e = &checked[f.item];
+                    let likeness = similar::compare(&c.text(), &e.text());
+                    (f.project == c.project && likeness.is_duplicate()).then(|| (f.key.clone(), format!("an earlier item of this batch: {}", likeness.why())))
+                })
             };
-            let dup_of: Vec<String> = match earlier {
-                Some(f) => vec![f.key.clone()],
-                None => duplicates[i].iter().map(|d| d.key.clone()).collect(),
+            let (dup_of, why): (Vec<String>, String) = match earlier {
+                Some((key, why)) => (vec![key], why),
+                None => (duplicates[i].iter().map(|d| d.issue.key.clone()).collect(), duplicates[i].first().map(|d| d.why.clone()).unwrap_or_default()),
             };
             if let Some(first) = dup_of.first() {
                 key_of[i] = Some(first.clone());
-                out.skipped.push(Skipped { local_ref: refs[i].to_string(), title: c.title.clone(), stands_for: first.clone(), duplicate_of: dup_of });
+                out.skipped.push(Skipped { local_ref: refs[i].to_string(), title: c.title.clone(), stands_for: first.clone(), duplicate_of: dup_of, why });
                 continue;
             }
             let mut blockers = existing[i].clone();
@@ -646,6 +655,7 @@ impl Db {
                 key,
                 title: c.title.clone(),
                 project: c.project.clone(),
+                item: i,
                 blocked_by: blockers,
             });
         }
@@ -716,10 +726,20 @@ impl Db {
         Ok(blockers)
     }
 
-    /// Open issues of `project` that a new issue likely duplicates.
-    fn likely_duplicates(&self, project: &str, new: &NewIssue) -> Result<Vec<IssueRecord>> {
-        let title = new.title.trim();
-        Ok(self.list_issues(Some(project), false)?.into_iter().filter(|i| title_similarity(title, &i.title) >= SIMILAR_TITLE).collect())
+    /// Issues of `project`, open or closed, that a new issue likely duplicates: the most alike first.
+    /// Closed ones count, so work already done or dropped is not filed again.
+    fn likely_duplicates(&self, project: &str, new: &NewIssue) -> Result<Vec<Duplicate>> {
+        let text = similar::Text { title: new.title.trim(), body: new.body.trim(), evidence: new.evidence.trim() };
+        let mut found: Vec<(f64, Duplicate)> = self
+            .list_issues(Some(project), true)?
+            .into_iter()
+            .filter_map(|issue| {
+                let likeness = similar::compare(&text, &similar::Text { title: &issue.title, body: &issue.body, evidence: &issue.evidence });
+                likeness.is_duplicate().then(|| (likeness.title, Duplicate { why: likeness.why(), issue }))
+            })
+            .collect();
+        found.sort_by(|a, b| b.0.total_cmp(&a.0));
+        Ok(found.into_iter().map(|(_, d)| d).collect())
     }
 
     /// An issue by its key, or by a key from before its project changed its key (`OLD-12`).
@@ -1367,6 +1387,31 @@ mod tests {
     }
 
     #[test]
+    fn the_duplicate_check_reads_bodies_and_closed_issues() {
+        let (mut db, dir) = db();
+        db.create_project("NIT", "Nitely").unwrap();
+        let agent = Actor::Agent("claude:a".into());
+        let process = db.create_issue(&new("Document and codify the deploy process"), &agent).unwrap();
+        // Sharing only "deploy" with it is not a duplicate.
+        db.create_issue(&new("Deploy /me/entitlements/ to production"), &agent).unwrap();
+
+        // Work already done is not filed again, and the refusal says it is closed and why.
+        let tray = NewIssue {
+            body: "src-tauri/src/tray.rs builds the count in count_needs and skips rows with a rebase in progress.".into(),
+            ..new("Tray badge ignores stuck worktrees")
+        };
+        let done = db.create_issue(&tray, &agent).unwrap();
+        db.move_issue(&done.key, "Done", Some("fixed"), None, &agent).unwrap();
+        let again = NewIssue { body: "count_needs in src-tauri/src/tray.rs only looks at sessions.".into(), ..new("Stuck worktrees missing from the tray count") };
+        let refused = db.create_issue(&again, &agent).unwrap_err().to_string();
+        assert!(refused.contains(&format!("{} Tray badge ignores stuck worktrees (closed: Done)", done.key)), "{refused}");
+        assert!(refused.contains("both name count_needs, src-tauri/src/tray.rs"), "{refused}");
+        assert!(!refused.contains(&process.key), "{refused}");
+        assert!(db.create_issue(&NewIssue { allow_similar: true, ..again }, &agent).is_ok(), "allow_similar still files it");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn files_a_batch_in_dependency_order_with_local_refs() {
         let (mut db, dir) = db();
         db.create_project("NIT", "Nitely").unwrap();
@@ -1555,6 +1600,5 @@ mod tests {
         assert_eq!(iso(1_792_125_417), "2026-10-16T04:36:57Z");
         assert_eq!(branch_name("claude", "NIT-12", "Fix the sidebar's width!"), "claude/nit-12-fix-the-sidebar-s-width");
         assert_eq!(parse_state("needs-you").unwrap().0, "Needs You");
-        assert!(title_similarity("Add the MCP server", "add mcp server now") >= 0.6);
     }
 }
