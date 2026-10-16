@@ -184,7 +184,7 @@ fn supervise(db: &mut Db, project: &str, root: PathBuf, once: bool, managed: boo
                 eprintln!("the crew is off and idle; leaving");
                 break;
             }
-            if let Some((path, _)) = exe.clone().filter(|(path, at)| nitely_core::install::stamp(path).as_ref() != Some(at)) {
+            if let Some((path, at)) = exe.clone().filter(|(path, at)| nitely_core::install::stamp(path).as_ref() != Some(at)) {
                 // The new build is started here, so the crew goes on with the app closed, and takes
                 // the crew and its running workers over; this one leaves only once it has.
                 eprintln!("a newer nitely is installed; handing over to it");
@@ -193,8 +193,10 @@ fn supervise(db: &mut Db, project: &str, root: PathBuf, once: bool, managed: boo
                     break;
                 }
                 eprintln!("the new build did not take over; this one carries on");
-                // Not again for this build: only for the next install.
-                exe = nitely_core::install::stamp(&path).map(|s| (path, s));
+                // Not again for this build, only for the next install; while the file is missing (an
+                // install between its renames), try again next pass.
+                let now = nitely_core::install::stamp(&path).unwrap_or(at);
+                exe = Some((path, now));
             }
         }
         for _ in 0..TICK_SECS * 4 {
@@ -237,6 +239,9 @@ fn hand_over(db: &Db, nitely: &std::path::Path, project: &str, root: &std::path:
         }
         std::thread::sleep(Duration::from_millis(250));
     }
+    // Too slow: it must not take over later while this one carries on.
+    child.kill().ok();
+    child.wait().ok();
     false
 }
 
