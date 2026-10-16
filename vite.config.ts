@@ -42,7 +42,13 @@ function liveData(): Plugin {
           } catch {
             return reply(400, { error: "the body is not JSON" });
           }
-          const child = spawn(bin, ["ui", String(cmd), JSON.stringify(args)], { windowsHide: true });
+          let child;
+          try {
+            child = spawn(bin, ["ui", String(cmd), JSON.stringify(args)], { windowsHide: true });
+          } catch (e) {
+            // spawn throws at once on arguments it cannot pass (a NUL byte, say).
+            return reply(400, { error: `Could not run nitely ui: ${(e as Error).message}` });
+          }
           let out = "";
           let err = "";
           child.stdout.on("data", (c) => (out += c));

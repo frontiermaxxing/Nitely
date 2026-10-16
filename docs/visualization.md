@@ -321,7 +321,9 @@ and inside Tauri nothing changes.
   this checkout's `target/debug/nitely` (build it with `cargo build -p nitely-cli`; `NITELY_BIN`
   overrides). `nitely ui` runs only reads and refuses every command that changes Nitely itself
   (approve, answer, move, add a project, agent setup, sync), so the preview can never act for the
-  human. A banner says the page is live and read-only.
+  human. It opens the database read-only (SQLite refuses writes; nothing is created or migrated),
+  and agent setup comes without config file contents or errors, which can hold credentials. A
+  banner says the page is live and read-only.
 - **Several agents run previews at once**, so keep yours apart:
   - Use your own port (`--port <n> --strictPort`), and your own Browser pane tab: open it with
     `tabs_create` and pass its `tabId`, because the pane is shared and another agent may navigate

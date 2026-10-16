@@ -19,14 +19,13 @@ pub const READ_ONLY: &[&str] = &[
     "pulse",
     "activity",
     "agent_setup",
-    "connect_plan",
     "opened_link",
 ];
 
 /// Why a command is refused, for the page to show.
 pub fn refusal(command: &str) -> String {
     format!(
-        "The live preview is read-only: `{command}` changes Nitely, so only the app can do it. Read-only commands: {}.",
+        "The live preview is read-only: `{command}` is not one of its reads, and changes are made only in the app. Its reads: {}.",
         READ_ONLY.join(", ")
     )
 }
@@ -44,7 +43,7 @@ pub fn run(command: &str, args: &Value) -> Result<Value> {
     if !READ_ONLY.contains(&command) {
         bail!(refusal(command));
     }
-    let db = Db::open_default;
+    let db = || Db::open_read_only(&nitely_core::paths::db_path());
     Ok(match command {
         "snapshot" => json!(nitely_core::snapshot(&Config::load()?, &db()?)?),
         "projects" => json!(db()?.projects()?),
@@ -62,42 +61,37 @@ pub fn run(command: &str, args: &Value) -> Result<Value> {
             let hours = int_arg(args, "hours")?.clamp(1, 24 * 7);
             json!(nitely_core::activity::activity(&Config::load()?, &db()?, to - hours * 3600, to)?)
         }
-        "agent_setup" => without_files(json!(nitely_core::connect::agent_setup(&Config::load()?))),
-        "connect_plan" => {
-            let opt = |n: &str| args.get(n).and_then(Value::as_str);
-            without_files(json!(nitely_core::connect::plan(&db()?, &Config::load()?, str_arg(args, "path")?, opt("key"), opt("name"))?))
-        }
+        "agent_setup" => agents_without_files(&nitely_core::connect::agent_setup(&Config::load()?)),
         // Links open the app's own window, never the preview.
         "opened_link" => Value::Null,
         _ => unreachable!("every allowed command is handled"),
     })
 }
 
-/// What a planned agent config change would write, and what is there now, are whole config files
-/// (~/.claude.json, Codex's config.toml, ...), which can hold tokens in MCP headers or environment
-/// settings. Credentials are never printed, so the preview gets each change without the files:
-/// its target, action and reason, enough for the setup banner and the list of changes.
-fn without_files(mut v: Value) -> Value {
-    fn walk(v: &mut Value) {
-        match v {
-            Value::Object(map) => {
-                if map.contains_key("target") && map.contains_key("action") {
-                    map.remove("before");
-                    if map.contains_key("after") {
-                        map.insert("after".into(), Value::String(HIDDEN.into()));
-                    }
-                }
-                map.values_mut().for_each(walk);
-            }
-            Value::Array(items) => items.iter_mut().for_each(walk),
-            _ => {}
-        }
-    }
-    walk(&mut v);
-    v
+/// Agent setup is read from whole config files (~/.claude.json, Codex's config.toml, ...), which
+/// can hold tokens in MCP headers or environment settings, and its file contents and read errors
+/// can quote them. Credentials are never printed, so the preview gets only fields that cannot hold
+/// them: each agent's name and whether it is installed, each change's target, action and reason,
+/// and whether its setup could be read at all. Built field by field, so a new field stays out.
+fn agents_without_files(agents: &[nitely_core::connect::AgentPlan]) -> Value {
+    json!(agents
+        .iter()
+        .map(|a| json!({
+            "agent": a.agent,
+            "found": a.found,
+            "error": a.error.as_ref().map(|_| UNREADABLE),
+            "changes": a.changes.iter().map(|c| json!({
+                "target": c.target,
+                "action": c.action,
+                "why": c.why,
+                "after": HIDDEN,
+            })).collect::<Vec<_>>(),
+        }))
+        .collect::<Vec<_>>())
 }
 
 const HIDDEN: &str = "(not shown in the live preview: config files can hold credentials)";
+const UNREADABLE: &str = "Nitely could not read this agent's setup; open the app to see why.";
 
 #[cfg(test)]
 mod tests {
@@ -105,20 +99,41 @@ mod tests {
 
     #[test]
     fn writes_are_refused_before_anything_runs() {
-        for command in ["move_issue", "answer_ask", "set_blocker", "create_project", "connect_apply", "agent_setup_apply", "sync_now", "approve", ""] {
+        for command in ["move_issue", "answer_ask", "set_blocker", "create_project", "connect_plan", "connect_apply", "agent_setup_apply", "sync_now", "approve", ""] {
             let e = run(command, &json!({ "key": "NIT-1", "state": "Approved", "id": 1, "answer": "yes" })).unwrap_err();
             assert!(e.to_string().contains("read-only"), "{command}: {e}");
         }
     }
 
     #[test]
-    fn config_files_never_reach_the_page() {
-        let plan = json!([{ "agent": "claude", "found": true, "changes": [
-            { "target": "~/.claude.json", "action": "update", "why": "MCP server", "before": "{\"token\":\"secret\"}", "after": "{\"token\":\"secret\"}" }
-        ] }]);
-        let out = without_files(plan).to_string();
+    fn config_files_and_their_errors_never_reach_the_page() {
+        use nitely_core::connect::{AgentPlan, Change};
+        let plan = vec![AgentPlan {
+            agent: "codex".into(),
+            found: true,
+            error: Some("config.toml line 3: token = \"secret\"".into()),
+            changes: vec![Change {
+                target: "~/.codex/config.toml".into(),
+                action: "update".into(),
+                why: "MCP server".into(),
+                before: Some("token = \"secret\"".into()),
+                after: "token = \"secret\"".into(),
+            }],
+        }];
+        let out = agents_without_files(&plan).to_string();
         assert!(!out.contains("secret"), "{out}");
-        assert!(out.contains("~/.claude.json") && out.contains("update") && out.contains(HIDDEN));
+        assert!(out.contains("config.toml") && out.contains("update") && out.contains(HIDDEN) && out.contains(UNREADABLE));
+    }
+
+    #[test]
+    fn the_database_is_opened_read_only() {
+        let dir = std::env::temp_dir().join(format!("nitely-ui-{}", std::process::id()));
+        let path = dir.join("t.db");
+        assert!(Db::open_read_only(&path).is_err(), "no database is created");
+        drop(Db::open(&path).unwrap());
+        let db = Db::open_read_only(&path).unwrap();
+        assert!(db.create_project("NIT", "Nitely").is_err(), "writes fail");
+        assert!(db.projects().unwrap().is_empty());
     }
 
     #[test]

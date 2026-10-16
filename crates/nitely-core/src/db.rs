@@ -250,6 +250,16 @@ impl Db {
         Db::open(&crate::paths::db_path())
     }
 
+    /// Opens the database so that SQLite itself refuses every write: no file is created, nothing is
+    /// migrated, and any write a read path might try fails. For `nitely ui`, the browser preview's
+    /// live data, which must never change Nitely. An outdated database fails to read instead of
+    /// being migrated; the app migrates it on its next start.
+    pub fn open_read_only(path: &Path) -> Result<Db> {
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        Ok(Db { conn })
+    }
+
     /// Stores the event and moves the session's heartbeat, in one transaction. A change of state
     /// (or the first state seen for a session) is also kept in `session_state`, so the Activity
     /// view can show what each session did over time.
