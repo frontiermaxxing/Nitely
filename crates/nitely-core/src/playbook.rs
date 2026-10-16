@@ -625,6 +625,9 @@ pub struct GateResult {
 /// Creates the issue's branch and worktree from the integration branch and runs the setup
 /// commands. Calling it again for the same issue returns the existing worktree.
 pub fn start_task(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, actor: &Actor) -> Result<Started> {
+    if issue.is_humans() && *actor != Actor::Human {
+        bail!("{} is the human's own work (owner: human), so agents do not start it; `ask` the human if an agent should take it", issue.key);
+    }
     let playbook = Playbook::load(repo_root)?;
     let branch = playbook.branch_for(vendor, issue);
     let worktree = playbook.worktree_for(repo_root, vendor, issue);
@@ -904,6 +907,8 @@ mod tests {
         assert!(Path::new(&started.worktree).join("setup.txt").exists());
         let again = start_task(&db, &repo, &issue(), "claude", &actor).unwrap();
         assert!(!again.created);
+        let humans = IssueRecord { owner: "human".into(), ..issue() };
+        assert!(start_task(&db, &repo, &humans, "claude", &actor).unwrap_err().to_string().contains("human's own work"));
 
         let gate = run_gate(&db, &repo, Path::new(&started.worktree), Some("NIT-3"), &actor).unwrap();
         assert!(!gate.passed);

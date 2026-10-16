@@ -583,6 +583,7 @@ when_changed = ["billing"]
                         allow_similar: true,
                         state: None,
                         blocked_by: vec![],
+                        ..Default::default()
                     },
                     &self.actor,
                 )

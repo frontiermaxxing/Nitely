@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS issue (
   evidence   TEXT NOT NULL DEFAULT '',
   claimed_by TEXT,
   claimed_at INTEGER,
+  owner      TEXT NOT NULL DEFAULT 'agent', -- 'human' for work only a human can do; next_task skips it
   created_at TEXT NOT NULL DEFAULT '',
   updated_at TEXT NOT NULL DEFAULT ''
 );
@@ -180,7 +181,7 @@ CREATE TABLE IF NOT EXISTS crew_control (  -- per project: paused, and the super
 
 /// Bumped when a table changes shape. Tables that only mirror Bitbucket or Linear are dropped
 /// and refilled by the next sync; tables Nitely owns get real migrations.
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 12;
 
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -209,6 +210,18 @@ fn migrate(conn: &Connection) -> Result<()> {
         if has_review && !has_note {
             conn.execute_batch("ALTER TABLE review ADD COLUMN note TEXT NOT NULL DEFAULT '';")?;
         }
+    }
+    // v12 adds issue.owner.
+    add_column(conn, "issue", "owner", "TEXT NOT NULL DEFAULT 'agent'")?;
+    Ok(())
+}
+
+/// Adds a column to a table that exists without it. SCHEMA creates new tables whole.
+fn add_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Result<()> {
+    let mut stmt = conn.prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))?;
+    let columns: Vec<String> = stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    if !columns.is_empty() && !columns.iter().any(|c| c == column) {
+        conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl};"))?;
     }
     Ok(())
 }
@@ -497,6 +510,24 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_v8_database_gets_issue_owners() {
+        let dir = std::env::temp_dir().join(format!("nitely-v8-{}-{}", std::process::id(), now()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(&SCHEMA.replace("  owner      TEXT NOT NULL DEFAULT 'agent', -- 'human' for work only a human can do; next_task skips it
+", "")).unwrap();
+            conn.execute_batch("INSERT INTO issue (key, origin, project, number, title, state) VALUES ('NIT-1', 'nitely', 'NIT', 1, 'Old', 'Todo');").unwrap();
+            conn.pragma_update(None, "user_version", 8).unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.issue("NIT-1").unwrap().unwrap().owner, "agent");
+        drop(db);
+        std::fs::remove_dir_all(dir).ok();
+    }
 
     #[test]
     fn record_updates_session_and_keeps_last_activity() {

@@ -12,6 +12,9 @@ use crate::track::{track_of, Track};
 
 pub const KINDS: &[&str] = &["bug", "feature", "improvement", "idea", "live-check"];
 pub const SOURCES: &[&str] = &["claude", "codex", "cursor", "human"];
+/// Who does an issue's work: agents, or only the human (buy hardware, sign a contract, rotate a
+/// credential in a console). `next_task` never hands out the human's own work.
+pub const OWNERS: &[&str] = &["agent", "human"];
 
 /// Native workflow states: (display name, Linear-style type).
 pub const STATES: &[(&str, &str)] = &[
@@ -59,6 +62,8 @@ pub struct IssueRecord {
     pub labels: Vec<String>,
     pub evidence: String,
     pub claimed_by: Option<String>,
+    /// `agent`, or `human` for work only the human can do (see `OWNERS`).
+    pub owner: String,
     pub created_at: String,
     pub updated_at: String,
     /// Open issues that must close before this one can start. `next_task` skips it until then.
@@ -80,6 +85,10 @@ impl IssueRecord {
 
     pub fn needs_human(&self) -> bool {
         self.state == NEEDS_HUMAN
+    }
+
+    pub fn is_humans(&self) -> bool {
+        self.owner == "human"
     }
 }
 
@@ -163,14 +172,16 @@ pub struct NewIssue {
     pub priority: i64,
     /// File even when an open issue has a similar title.
     pub allow_similar: bool,
-    /// Defaults to Todo, so `next_task` can hand it out.
+    /// Defaults to Todo, so `next_task` can hand it out; Needs You for the human's own work.
     pub state: Option<String>,
+    /// `agent` (the default) or `human`.
+    pub owner: Option<String>,
     /// Issues that must close before this one can start.
     pub blocked_by: Vec<String>,
 }
 
 const ISSUE_COLUMNS: &str = "key, origin, project, title, body, url, state, state_type, kind, source,
-    priority, labels, evidence, claimed_by, created_at, updated_at";
+    priority, labels, evidence, claimed_by, created_at, updated_at, owner";
 
 /// The scheme the app registers, so a link to an issue opens it in Nitely.
 pub const LINK_SCHEME: &str = "nitely";
@@ -219,6 +230,7 @@ fn issue_from_row(r: &Row) -> rusqlite::Result<IssueRecord> {
         claimed_by: r.get(13)?,
         created_at: r.get(14)?,
         updated_at: r.get(15)?,
+        owner: r.get(16)?,
         ..Default::default()
     })
 }
@@ -457,7 +469,11 @@ impl Db {
         if !(0..=4).contains(&new.priority) {
             bail!("priority is 0 (none), 1 (urgent), 2 (high), 3 (medium) or 4 (low)");
         }
-        let (state, state_type) = parse_state(new.state.as_deref().unwrap_or("Todo"))?;
+        let owner = new.owner.as_deref().map(str::trim).filter(|o| !o.is_empty()).unwrap_or("agent");
+        if !OWNERS.contains(&owner) {
+            bail!("owner must be one of {}", OWNERS.join(", "));
+        }
+        let (state, state_type) = parse_state(new.state.as_deref().unwrap_or(if owner == "human" { "Needs You" } else { "Todo" }))?;
         if state == "Approved" {
             bail!("an issue cannot be filed as Approved");
         }
@@ -498,8 +514,8 @@ impl Db {
         let key = format!("{}-{number}", project.key);
         tx.execute(
             "INSERT INTO issue (key, origin, project, number, title, body, state, state_type, kind, source,
-               priority, evidence, created_at, updated_at)
-             VALUES (?1, 'nitely', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)",
+               priority, evidence, created_at, updated_at, owner)
+             VALUES (?1, 'nitely', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, ?13)",
             params![
                 key,
                 project.key,
@@ -512,12 +528,14 @@ impl Db {
                 new.source,
                 new.priority,
                 new.evidence.trim(),
-                iso(ts)
+                iso(ts),
+                owner
             ],
         )?;
+        let filed = if owner == "human" { format!("Filed as {state}, the human's own work") } else { format!("Filed as {state}") };
         tx.execute(
             "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, ?2, ?3, 'issue_created', ?4)",
-            params![ts, actor.id(), key, format!("Filed as {state}")],
+            params![ts, actor.id(), key, filed],
         )?;
         for blocker in &blockers {
             tx.execute(
@@ -765,7 +783,7 @@ impl Db {
         let candidates: Vec<(String, i64, i64)> = {
             let mut stmt = tx.prepare(
                 "SELECT key, priority, number FROM issue
-                 WHERE project = ?1 COLLATE NOCASE AND origin = 'nitely'
+                 WHERE project = ?1 COLLATE NOCASE AND origin = 'nitely' AND owner != 'human'
                    AND (state = 'Todo' OR (state = 'In Progress' AND claimed_at < ?2))",
             )?;
             let rows = stmt.query_map(params![project, ts - CLAIM_TTL_SECS], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
@@ -791,6 +809,50 @@ impl Db {
         )?;
         tx.commit()?;
         self.issue(&key)
+    }
+
+    /// Makes an issue the human's own work, or hands it back to agents. Any agent may give an issue
+    /// to the human; only the human hands one back. Giving an open issue to the human releases its
+    /// claim and puts it in Needs You, unless it waits in Backlog.
+    pub fn set_owner(&mut self, key: &str, owner: &str, actor: &Actor) -> Result<IssueRecord> {
+        let issue = self.issue(key)?.with_context(|| format!("no issue {key}"))?;
+        if issue.origin != "nitely" {
+            bail!("{} is mirrored from {}; change it there", issue.key, issue.origin);
+        }
+        let owner = owner.trim();
+        if !OWNERS.contains(&owner) {
+            bail!("owner must be one of {}", OWNERS.join(", "));
+        }
+        if owner == issue.owner {
+            return Ok(issue);
+        }
+        if owner == "agent" && *actor != Actor::Human {
+            bail!("only the human hands their own work back to agents; `ask` them if an agent should do {}", issue.key);
+        }
+        let to_human = owner == "human";
+        let ready_for_human = to_human && issue.is_open() && issue.state != "Backlog" && !issue.needs_human();
+        let ts = now();
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE issue SET owner = ?2, updated_at = ?3,
+               state = CASE WHEN ?4 THEN 'Needs You' ELSE state END,
+               state_type = CASE WHEN ?4 THEN 'started' ELSE state_type END,
+               claimed_by = CASE WHEN ?5 THEN NULL ELSE claimed_by END,
+               claimed_at = CASE WHEN ?5 THEN NULL ELSE claimed_at END
+             WHERE key = ?1",
+            params![issue.key, owner, iso(ts), ready_for_human, to_human],
+        )?;
+        let summary = match (to_human, ready_for_human) {
+            (true, true) => format!("Made the human's own work: {} → Needs You", issue.state),
+            (true, false) => "Made the human's own work".to_string(),
+            (false, _) => "Handed back to agents".to_string(),
+        };
+        tx.execute(
+            "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, ?2, ?3, 'owner_changed', ?4)",
+            params![ts, actor.id(), issue.key, summary],
+        )?;
+        tx.commit()?;
+        self.issue(&issue.key)?.context("issue vanished")
     }
 
     /// A progress line, handoff note or comment on an issue's timeline. Refreshes a claim it holds.
@@ -1076,6 +1138,45 @@ mod tests {
         assert_eq!(first.claimed_by.as_deref(), Some("claude:a"));
         assert_eq!(db.next_task("NIT", "codex:b").unwrap().unwrap().key, "NIT-1");
         assert!(db.next_task("NIT", "cursor:c").unwrap().is_none());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn the_humans_own_work_is_never_handed_out() {
+        let (mut db, dir) = db();
+        db.create_project("NIT", "Nitely").unwrap();
+        let agent = Actor::Agent("claude:a".into());
+        let mut buy = new("Buy a test phone");
+        buy.owner = Some("human".into());
+        buy.priority = 1;
+        let buy = db.create_issue(&buy, &agent).unwrap();
+        assert_eq!((buy.owner.as_str(), buy.state.as_str()), ("human", "Needs You"), "filed straight to the human");
+        let mut bad = new("Something else entirely");
+        bad.owner = Some("robot".into());
+        assert!(db.create_issue(&bad, &agent).is_err());
+
+        // Moved back to Todo, it is still not handed out.
+        db.move_issue(&buy.key, "Todo", None, None, &Actor::Human).unwrap();
+        assert!(db.next_task("NIT", "claude:a").unwrap().is_none());
+
+        // An agent may give its claimed issue to the human; only the human hands it back.
+        let code = db.create_issue(&new("Wire the store console checks"), &agent).unwrap();
+        assert_eq!(db.next_task("NIT", "claude:a").unwrap().unwrap().key, code.key);
+        let given = db.set_owner(&code.key, "human", &agent).unwrap();
+        assert_eq!((given.state.as_str(), given.claimed_by.as_deref()), ("Needs You", None));
+        assert!(db.set_owner(&code.key, "agent", &agent).unwrap_err().to_string().contains("only the human"));
+        let back = db.set_owner(&code.key, "agent", &Actor::Human).unwrap();
+        assert_eq!((back.owner.as_str(), back.state.as_str()), ("agent", "Needs You"));
+        db.move_issue(&code.key, "Todo", None, None, &Actor::Human).unwrap();
+        assert_eq!(db.next_task("NIT", "claude:a").unwrap().unwrap().key, code.key);
+
+        // A Backlog issue stays in Backlog when it becomes the human's.
+        let mut later = new("Sign the hosting contract");
+        later.state = Some("Backlog".into());
+        let later = db.create_issue(&later, &agent).unwrap();
+        assert_eq!(db.set_owner(&later.key, "human", &agent).unwrap().state, "Backlog");
+        let kinds: Vec<String> = db.timeline(&code.key).unwrap().into_iter().map(|t| t.kind).collect();
+        assert_eq!(kinds.iter().filter(|k| *k == "owner_changed").count(), 2);
         std::fs::remove_dir_all(dir).ok();
     }
 

@@ -5,7 +5,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use nitely_core::db::NewEvent;
-use nitely_core::issues::{branch_name, KINDS, SOURCES, STATES};
+use nitely_core::issues::{branch_name, KINDS, OWNERS, SOURCES, STATES};
 use nitely_core::playbook::{self, Playbook};
 use nitely_core::{paths, resolve_project, Actor, Config, Db, NewIssue};
 use serde_json::{json, Value};
@@ -272,7 +272,8 @@ fn tools() -> Value {
                 "body": { "type": "string", "description": "What is wrong or wanted, and why. Include file paths and the branch or commit you saw it on." },
                 "evidence": { "type": "string", "description": "What you saw or ran; \"none yet\" for an idea." },
                 "priority": { "type": "integer", "minimum": 0, "maximum": 4, "description": "1 urgent, 2 high, 3 medium, 4 low, 0 none" },
-                "state": { "type": "string", "enum": ["Todo", "Backlog"] },
+                "state": { "type": "string", "enum": ["Todo", "Backlog", "Needs You"], "description": "Todo by default; Needs You by default for owner human." },
+                "owner": { "type": "string", "enum": OWNERS, "description": "human for work only the human can do (buy hardware, sign a contract, use a console only they can reach); next_task never hands it out. Defaults to agent." },
                 "project": { "type": "string" },
                 "allow_similar": { "type": "boolean" },
                 "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Issues that must close before this one can start, e.g. [\"NIT-9\"]." }
@@ -280,14 +281,15 @@ fn tools() -> Value {
         },
         {
             "name": "update_issue",
-            "description": "Move an issue, or change what blocks it. Done needs evidence (what ran and what it showed); Canceled and Duplicate need a reason. Approved is set only by the human; move to Needs You and ask instead. An issue with an open blocker waits: next_task skips it until every blocker is Done or Canceled.",
+            "description": "Move an issue, change what blocks it, or make it the human's own work (owner human: next_task skips it, and an open issue goes to Needs You; only the human hands it back). Done needs evidence (what ran and what it showed); Canceled and Duplicate need a reason. Approved is set only by the human; move to Needs You and ask instead. An issue with an open blocker waits: next_task skips it until every blocker is Done or Canceled.",
             "inputSchema": { "type": "object", "required": ["key"], "properties": {
                 "key": { "type": "string" },
                 "state": { "type": "string", "enum": states },
                 "evidence": { "type": "string" },
                 "reason": { "type": "string" },
                 "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Issues to add as blockers of this one." },
-                "remove_blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Blockers to remove." }
+                "remove_blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Blockers to remove." },
+                "owner": { "type": "string", "enum": ["human"], "description": "human makes it the human's own work." }
             } }
         },
         {
@@ -563,6 +565,7 @@ fn run_tool(server: &Server, name: &str, args: &Value, session: &str) -> Result<
                     priority: args.get("priority").and_then(Value::as_i64).unwrap_or(0),
                     allow_similar: args.get("allow_similar").and_then(Value::as_bool).unwrap_or(false),
                     state: str_arg(args, "state").map(str::to_string),
+                    owner: str_arg(args, "owner").map(str::to_string),
                     blocked_by: keys_arg(args, "blocked_by"),
                 },
                 &actor,
@@ -572,14 +575,21 @@ fn run_tool(server: &Server, name: &str, args: &Value, session: &str) -> Result<
         "update_issue" => {
             let key = req(args, "key")?;
             let (add, remove) = (keys_arg(args, "blocked_by"), keys_arg(args, "remove_blocked_by"));
-            if str_arg(args, "state").is_none() && add.is_empty() && remove.is_empty() {
-                bail!("give a state, blocked_by or remove_blocked_by");
+            let owner = str_arg(args, "owner");
+            if str_arg(args, "state").is_none() && add.is_empty() && remove.is_empty() && owner.is_none() {
+                bail!("give a state, blocked_by, remove_blocked_by or owner");
+            }
+            if owner.is_some_and(|o| o != "human") {
+                bail!("only the human hands their own work back to agents; `ask` them if an agent should do {key}");
             }
             // Check the move first, so a refused move leaves the blockers as they were.
             if let Some(state) = str_arg(args, "state") {
                 db.check_move(key, state, str_arg(args, "evidence"), str_arg(args, "reason"), &actor)?;
             }
             db.change_blockers(key, &add, &remove, &actor)?;
+            if let Some(owner) = owner {
+                db.set_owner(key, owner, &actor)?;
+            }
             match str_arg(args, "state") {
                 Some(state) => json!(db.move_issue(key, state, str_arg(args, "evidence"), str_arg(args, "reason"), &actor)?),
                 None => json!(db.issue(key)?.with_context(|| format!("no issue {key}"))?),

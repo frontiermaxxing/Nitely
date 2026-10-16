@@ -437,6 +437,7 @@ reason = "money logic"
             allow_similar: true,
             state: None,
             blocked_by: vec![],
+            ..Default::default()
         };
         let config = crate::Config::default();
 

@@ -268,9 +268,12 @@ enum IssueCmd {
         priority: i64,
         #[arg(long)]
         project: Option<String>,
-        /// Starting state; Todo by default, Backlog for later.
+        /// Starting state; Todo by default (Needs You for the human's own work), Backlog for later.
         #[arg(long)]
         state: Option<String>,
+        /// `human` for work only the human can do; next_task never hands it out.
+        #[arg(long)]
+        owner: Option<String>,
         #[arg(long)]
         allow_similar: bool,
         /// An issue that must close before this one can start (repeatable).
@@ -517,10 +520,10 @@ fn run(cmd: Cmd) -> Result<()> {
             let config = Config::load()?;
             let mut db = Db::open_default()?;
             match command {
-                IssueCmd::Create { title, kind, source, evidence, body, priority, project, state, allow_similar, blocked_by } => {
+                IssueCmd::Create { title, kind, source, evidence, body, priority, project, state, owner, allow_similar, blocked_by } => {
                     let project = resolve_project(&config, &db, project.as_deref(), &cwd()?)?;
                     let issue = db.create_issue(
-                        &NewIssue { project, title, body, kind, source, evidence, priority, allow_similar, state, blocked_by },
+                        &NewIssue { project, title, body, kind, source, evidence, priority, allow_similar, state, owner, blocked_by },
                         &me,
                     )?;
                     print_json(&issue)
@@ -577,6 +580,7 @@ fn run(cmd: Cmd) -> Result<()> {
                             source: Some(field(&item, "source")).filter(|s| !s.is_empty()).unwrap_or_else(|| "human".into()),
                             priority: item.get("priority").and_then(|p| p.as_i64()).unwrap_or(0),
                             state: Some(field(&item, "state")).filter(|s| !s.is_empty()),
+                            owner: Some(field(&item, "owner")).filter(|s| !s.is_empty()),
                             allow_similar: false,
                             blocked_by: Vec::new(),
                         };
