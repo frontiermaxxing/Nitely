@@ -939,7 +939,7 @@ mod tests {
             integration_branch: "main".into(),
             project: Some(project.into()),
         };
-        let mut config = crate::Config { repos: vec![repo("app", &app, "APP"), repo("site", &site, "WEB")] };
+        let mut config = crate::Config { repos: vec![repo("app", &app, "APP"), repo("site", &site, "WEB")], ..Default::default() };
         let same = |got: PathBuf, want: &str| assert_eq!(crate::paths::normalize(&got.to_string_lossy()), crate::paths::normalize(want));
 
         same(repo_for_issue(&config, Some("WEB"), &app).unwrap(), &site);
