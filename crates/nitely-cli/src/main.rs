@@ -354,7 +354,7 @@ fn run(cmd: Cmd) -> Result<()> {
                 Some(f) => f,
                 None => std::env::current_exe()?,
             };
-            let to = to.or_else(nitely_core::install::default_target).ok_or_else(|| anyhow::anyhow!("no home folder; pass --to"))?;
+            let to = to.or_else(|| nitely_core::install::default_target(&from)).ok_or_else(|| anyhow::anyhow!("no home folder; pass --to"))?;
             print_json(&nitely_core::install::install(&from, &to)?)
         }
         Cmd::Status { text, session } => {
