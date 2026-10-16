@@ -103,9 +103,9 @@ fn encode(rgba: &[u8], size: u32) -> Option<Vec<u8>> {
 fn read(source: &str) -> Option<Vec<u8>> {
     use windows::core::HSTRING;
     use windows::Win32::Foundation::SIZE;
-    use windows::Win32::Graphics::Gdi::{CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ};
+    use windows::Win32::Graphics::Gdi::{CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetObjectW, BITMAP, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ};
     use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
-    use windows::Win32::UI::Shell::{ExtractIconExW, IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_ICONONLY};
+    use windows::Win32::UI::Shell::{ExtractIconExW, IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_ICONONLY, SIIGBF_SCALEUP};
 
     let name = HSTRING::from(source);
     if !source.starts_with("shell:") {
@@ -121,7 +121,14 @@ fn read(source: &str) -> Option<Vec<u8>> {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         let factory: IShellItemImageFactory = SHCreateItemFromParsingName(&name, None).ok()?;
-        let bitmap = factory.GetImage(SIZE { cx: SIZE as i32, cy: SIZE as i32 }, SIIGBF_ICONONLY).ok()?;
+        // Scaled up when the icon is smaller, so it is always SIZE square; anything else is skipped.
+        let bitmap = factory.GetImage(SIZE { cx: SIZE as i32, cy: SIZE as i32 }, SIIGBF_ICONONLY | SIIGBF_SCALEUP).ok()?;
+        let mut dims = BITMAP::default();
+        let got = GetObjectW(HGDIOBJ(bitmap.0), std::mem::size_of::<BITMAP>() as i32, Some((&mut dims as *mut BITMAP).cast()));
+        if got == 0 || dims.bmWidth != SIZE as i32 || dims.bmHeight.unsigned_abs() != SIZE {
+            let _ = DeleteObject(HGDIOBJ(bitmap.0));
+            return None;
+        }
         let dc = CreateCompatibleDC(None);
         let mut info = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
