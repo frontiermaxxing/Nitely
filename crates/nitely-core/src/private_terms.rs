@@ -135,62 +135,78 @@ fn compile(list: &str, terms: &[String]) -> Result<Vec<(usize, Matcher)>> {
     Ok(out)
 }
 
+/// Settings that keep every added line visible and parsed the same way, whatever the user's git
+/// config says: fixed `a/` and `b/` prefixes, no textconv, no external diff, unquoted paths.
+const DIFF: &[&str] = &["--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--src-prefix=a/", "--dst-prefix=b/"];
+const PLAIN: &[&str] = &["-c", "core.quotepath=false", "-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false"];
+
+fn git_plain(worktree: &Path, args: &[&str]) -> Result<String> {
+    let all: Vec<&str> = PLAIN.iter().chain(args).copied().collect();
+    git(worktree, &all)
+}
+
 /// What the branch's commits add since `base` (a commit or branch), one commit at a time, since
 /// pushing and landing keep every commit: a term added in one commit and removed in a later one is
-/// still published. `(where, text)` for every added line, every new file's path, and every line of
-/// every commit message. Merge commits are scanned for their message only.
+/// still published. `(where, text)` for every line a commit adds (for a merge, the lines in none
+/// of its parents, as a conflict resolution adds), the path of every file it adds (binary and empty
+/// ones too), and every line of its message.
 fn added(worktree: &Path, base: &str) -> Result<Vec<(String, String)>> {
-    // Fixed prefixes and no textconv or external diff, whatever the user's git config says, so
-    // every added line is seen and parsed the same way.
-    let log = git(
-        worktree,
-        &[
-            "-c", "core.quotepath=false", "-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false",
-            "log", "--reverse", "--format=%x1e%h%x1f%B%x1f", "--patch", "--unified=0", "--no-color", "--no-ext-diff",
-            "--no-textconv", "--no-renames", "--src-prefix=a/", "--dst-prefix=b/", &format!("{base}..HEAD"),
-        ],
-    )?;
     let mut out = Vec::new();
-    for entry in log.split('\x1e') {
-        let mut parts = entry.splitn(3, '\x1f');
-        let (Some(hash), Some(message)) = (parts.next(), parts.next()) else { continue };
-        let hash = hash.trim();
+    let commits = git(worktree, &["rev-list", "--reverse", &format!("{base}..HEAD")])?;
+    for sha in commits.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let short = &sha[..sha.len().min(7)];
+        let message = git(worktree, &["log", "-1", "--format=%B", sha])?;
         for (n, text) in message.lines().enumerate() {
-            out.push((format!("commit {hash} message line {}", n + 1), text.to_string()));
+            out.push((format!("commit {short} message line {}", n + 1), text.to_string()));
         }
-        out.extend(patch_lines(parts.next().unwrap_or(""), hash));
+        let merge = git(worktree, &["rev-list", "--parents", "-n", "1", sha])?.split_whitespace().count() > 2;
+        // NUL-separated, so no path is quoted or split.
+        let paths = if merge {
+            git_plain(worktree, &["diff-tree", "-r", "-z", "--no-commit-id", "--name-only", "--cc", sha])?
+        } else {
+            git_plain(worktree, &["diff-tree", "-r", "-z", "--root", "--no-commit-id", "--name-only", "--no-renames", "--diff-filter=A", sha])?
+        };
+        out.extend(paths.split('\0').filter(|p| !p.is_empty()).map(|f| (format!("path {f} (commit {short})"), f.to_string())));
+        let mut args = vec!["diff-tree", "-p", "--unified=0", "--no-commit-id"];
+        args.extend_from_slice(DIFF);
+        args.push(if merge { "--cc" } else { "--root" });
+        args.push(sha);
+        out.extend(patch_lines(&git_plain(worktree, &args)?, short));
     }
     Ok(out)
 }
 
-/// Added lines and new files' paths in one commit's patch (`--unified=0`, `a/` and `b/` prefixes).
-fn patch_lines(patch: &str, hash: &str) -> Vec<(String, String)> {
+/// Added lines in one commit's patch (`--unified=0`, `a/` and `b/` prefixes). A merge's combined
+/// patch marks each line with one column per parent; a line is new only when every column is `+`.
+fn patch_lines(patch: &str, short: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut file: Option<String> = None;
-    let mut new_file = false;
+    let mut columns = 1;
     let mut line = 0usize;
     let mut in_hunk = false;
     for l in patch.lines() {
-        if l.starts_with("diff --git ") {
-            (in_hunk, file, new_file) = (false, None, false);
-        } else if !in_hunk && l == "--- /dev/null" {
-            new_file = true;
+        if l.starts_with("diff --git ") || l.starts_with("diff --cc ") || l.starts_with("diff --combined ") {
+            (in_hunk, file) = (false, None);
         } else if !in_hunk && l.starts_with("+++ ") {
             file = l.strip_prefix("+++ b/").map(str::to_string);
-            if let (true, Some(f)) = (new_file, &file) {
-                out.push((format!("path {f} (commit {hash})"), f.clone()));
-            }
-        } else if let Some(rest) = l.strip_prefix("@@ ") {
-            // @@ -a,b +c,d @@: added lines count from c.
-            line = rest.split_whitespace().find_map(|p| p.strip_prefix('+')).and_then(|p| p.split(',').next()).and_then(|n| n.parse().ok()).unwrap_or(0);
+        } else if !in_hunk && l.starts_with("@@") {
+            // `@@ -a,b +c,d @@`, or `@@@ -a -b +c,d @@@` for a merge: added lines count from c.
+            columns = l.chars().take_while(|c| *c == '@').count().saturating_sub(1).max(1);
+            line = l.split_whitespace().find_map(|p| p.strip_prefix('+')).and_then(|p| p.split(',').next()).and_then(|n| n.parse().ok()).unwrap_or(0);
             in_hunk = true;
+        } else if in_hunk && l.starts_with("@@") && l.chars().take_while(|c| *c == '@').count() == columns + 1 {
+            line = l.split_whitespace().find_map(|p| p.strip_prefix('+')).and_then(|p| p.split(',').next()).and_then(|n| n.parse().ok()).unwrap_or(0);
         } else if in_hunk {
-            if let Some(text) = l.strip_prefix('+') {
-                if let Some(f) = &file {
-                    out.push((format!("{f}:{line} (commit {hash})"), text.to_string()));
-                }
-                line += 1;
+            let (marks, text) = l.split_at(l.char_indices().nth(columns).map_or(l.len(), |(i, _)| i));
+            if marks.contains('-') {
+                continue;
             }
+            if marks.len() == columns && marks.chars().all(|c| c == '+') {
+                if let Some(f) = &file {
+                    out.push((format!("{f}:{line} (commit {short})"), text.to_string()));
+                }
+            }
+            line += 1;
         }
     }
     out
@@ -291,6 +307,23 @@ mod tests {
         sh(&dir, &["commit", "-q", "-m", "draft"]);
         std::fs::remove_file(dir.join("c.txt")).unwrap();
         sh(&dir, &["commit", "-q", "-am", "drop the draft"]);
+        // An empty file and a binary one have no lines, only a path.
+        std::fs::write(dir.join("bluebird.keep"), "").unwrap();
+        std::fs::write(dir.join("bluebird.bin"), [0u8, 159, 146, 150]).unwrap();
+        // A control character in a line hides nothing after it.
+        std::fs::write(dir.join("d.txt"), "start\u{1e}ticket-7 end\n").unwrap();
+        sh(&dir, &["add", "."]);
+        sh(&dir, &["commit", "-q", "-m", "more"]);
+        // A merge whose resolution adds a line in neither parent.
+        sh(&dir, &["checkout", "-q", "-b", "side", "HEAD~1"]);
+        std::fs::write(dir.join("e.txt"), "side\n").unwrap();
+        sh(&dir, &["add", "."]);
+        sh(&dir, &["commit", "-q", "-m", "side"]);
+        sh(&dir, &["checkout", "-q", "claude/app-1-x"]);
+        sh(&dir, &["merge", "-q", "--no-ff", "--no-commit", "side"]);
+        std::fs::write(dir.join("e.txt"), "side\nresolved with ticket-9\n").unwrap();
+        sh(&dir, &["add", "."]);
+        sh(&dir, &["commit", "-q", "-m", "merge side"]);
         // The user's diff settings change nothing.
         sh(&dir, &["config", "diff.noprefix", "true"]);
 
@@ -300,10 +333,14 @@ mod tests {
         let t = terms(&["bluebird"], &["c:/work/secret-client", "re:ticket-\\d+"]);
         let hits = scan(&t, Some("app"), &dir, "main").unwrap();
         let at: Vec<&str> = hits.iter().map(|h| h.at.as_str()).collect();
-        let first = sh(&dir, &["log", "-1", "--format=%h", "HEAD~2"]).trim().to_string();
+        let first = sh(&dir, &["rev-parse", "--short=7", ":/Port the change"]).trim().to_string();
         assert!(at.contains(&format!("path bluebird/b.txt (commit {first})").as_str()), "{at:?}");
         assert!(at.contains(&format!("a.txt:3 (commit {first})").as_str()), "a path written with backslashes: {at:?}");
         assert!(at.iter().any(|a| a.starts_with("c.txt:1 (commit ")), "added, then removed in a later commit: {at:?}");
+        assert!(at.iter().any(|a| a.starts_with("path bluebird.keep ")) && at.iter().any(|a| a.starts_with("path bluebird.bin ")), "{at:?}");
+        assert!(at.iter().any(|a| a.starts_with("d.txt:1 ")), "{at:?}");
+        assert!(at.iter().any(|a| a.starts_with("e.txt:2 ")), "the merge's own line: {at:?}");
+        assert!(!at.iter().any(|a| a.starts_with("e.txt:1 ")), "a line from a parent is not the merge's: {at:?}");
         assert!(at.iter().any(|a| a.starts_with("commit ") && a.ends_with("message line 3")), "{at:?}");
         assert!(!at.iter().any(|a| a.starts_with("a.txt:1 ")), "a line the branch did not add: {at:?}");
         assert_eq!(hits.iter().find(|h| h.at.starts_with("a.txt:3 ")).map(|h| (h.list.as_str(), h.term)), Some(("APP", 1)));
