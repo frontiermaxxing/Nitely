@@ -346,17 +346,17 @@ mod tests {
         let page = json!({ "values": [{
             "id": 2, "title": "AND-268 tooling", "state": "OPEN", "comment_count": 3,
             "updated_on": "2026-10-15T20:00:00Z",
-            "links": { "html": { "href": "https://bitbucket.org/quixet/aera-browser/pull-requests/2" } },
+            "links": { "html": { "href": "https://bitbucket.org/acme/my-app/pull-requests/2" } },
             "source": { "branch": { "name": "claude/and-268-tooling" }, "commit": { "hash": "abc123" } },
             "participants": [
-                { "approved": true, "user": { "display_name": "Andrew Rivers", "account_id": "me" } },
+                { "approved": true, "user": { "display_name": "Sam Lee", "account_id": "me" } },
                 { "approved": false, "user": { "display_name": "Bot", "account_id": "bot" } }
             ]
         }]});
-        let prs = parse_bitbucket_page(&page, "quixet/aera-browser", "me");
+        let prs = parse_bitbucket_page(&page, "acme/my-app", "me");
         assert_eq!(prs.len(), 1);
         assert_eq!(prs[0].branch, "claude/and-268-tooling");
-        assert_eq!(prs[0].approved_by, vec!["Andrew Rivers"]);
+        assert_eq!(prs[0].approved_by, vec!["Sam Lee"]);
         assert!(prs[0].approved_by_me);
     }
 
@@ -364,11 +364,11 @@ mod tests {
     fn parses_linear_page_and_cursor() {
         let v = json!({ "data": { "issues": {
             "nodes": [{ "identifier": "AND-12", "title": "Fix it", "url": "https://linear.app/x/issue/AND-12",
-                        "updatedAt": "2026-10-15T00:00:00Z", "state": { "name": "Needs Andrew", "type": "started" },
+                        "updatedAt": "2026-10-15T00:00:00Z", "state": { "name": "Needs Review", "type": "started" },
                         "labels": { "nodes": [{ "name": "bug" }, { "name": "from:claude" }] } }],
             "pageInfo": { "hasNextPage": true, "endCursor": "c1" } } } });
         let (issues, next) = parse_linear_page(&v);
-        assert_eq!(issues[0].state, "Needs Andrew");
+        assert_eq!(issues[0].state, "Needs Review");
         assert_eq!(issues[0].labels, vec!["bug", "from:claude"]);
         assert_eq!(next.as_deref(), Some("c1"));
     }

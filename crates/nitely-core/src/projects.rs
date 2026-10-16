@@ -388,18 +388,18 @@ mod tests {
     #[test]
     fn a_tracker_does_not_mirror_issues_back_under_an_old_key() {
         let mut db = db();
-        db.create_project("AND", "Aera").unwrap();
-        issue(&mut db, "AND", "Native", vec![]);
-        db.rekey_project("AND", "AE").unwrap();
-        // Linear still has AND-1 and an unrelated LIN-1.
+        db.create_project("APP", "Acme").unwrap();
+        issue(&mut db, "APP", "Native", vec![]);
+        db.rekey_project("APP", "AP").unwrap();
+        // Linear still has APP-1 and an unrelated LIN-1.
         let mirrored = |key: &str| IssueRecord { key: key.into(), origin: "linear".into(), title: "From Linear".into(), state: "Todo".into(), ..Default::default() };
-        db.replace_issues("linear", &[mirrored("AND-1"), mirrored("LIN-1")]).unwrap();
-        let old = db.issue("AND-1").unwrap().unwrap();
-        assert_eq!((old.key.as_str(), old.origin.as_str()), ("AE-1", "nitely"), "the old link opens the native issue");
+        db.replace_issues("linear", &[mirrored("APP-1"), mirrored("LIN-1")]).unwrap();
+        let old = db.issue("APP-1").unwrap().unwrap();
+        assert_eq!((old.key.as_str(), old.origin.as_str()), ("AP-1", "nitely"), "the old link opens the native issue");
         assert!(db.issue("LIN-1").unwrap().is_some(), "other prefixes still mirror");
         // Even a mirror row left from before (written past replace_issues) does not take the old link.
-        db.conn.execute("INSERT INTO issue (key, origin, title, state) VALUES ('AND-1', 'linear', 'Stale mirror', 'Todo')", []).unwrap();
-        assert_eq!(db.issue("AND-1").unwrap().unwrap().key, "AE-1");
+        db.conn.execute("INSERT INTO issue (key, origin, title, state) VALUES ('APP-1', 'linear', 'Stale mirror', 'Todo')", []).unwrap();
+        assert_eq!(db.issue("APP-1").unwrap().unwrap().key, "AP-1");
     }
 
     #[test]

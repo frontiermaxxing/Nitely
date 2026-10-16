@@ -44,7 +44,7 @@ mod tests {
 
     #[test]
     fn within_matches_mixed_separators() {
-        assert!(is_within(r"C:\Dev\wt\and-1\aera", "C:/Dev/wt/and-1"));
+        assert!(is_within(r"C:\Dev\wt\app-1\web", "C:/Dev/wt/app-1"));
         assert!(is_within("C:/Dev/wt/and-1/", "C:/Dev/wt/and-1"));
         assert!(!is_within("C:/Dev/wt/and-10", "C:/Dev/wt/and-1"));
     }

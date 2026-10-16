@@ -255,13 +255,13 @@ mod tests {
     #[test]
     fn latest_review_per_person_counts() {
         let reviews = json!([
-            { "user": { "login": "Andrew" }, "state": "CHANGES_REQUESTED" },
-            { "user": { "login": "andrew" }, "state": "COMMENTED" },
-            { "user": { "login": "Andrew" }, "state": "APPROVED" },
+            { "user": { "login": "Sam" }, "state": "CHANGES_REQUESTED" },
+            { "user": { "login": "sam" }, "state": "COMMENTED" },
+            { "user": { "login": "Sam" }, "state": "APPROVED" },
             { "user": { "login": "bot" }, "state": "APPROVED" },
             { "user": { "login": "bot" }, "state": "DISMISSED" }
         ]);
-        assert_eq!(approvals(&reviews, "andrew"), (vec!["Andrew".to_string()], true));
+        assert_eq!(approvals(&reviews, "sam"), (vec!["Sam".to_string()], true));
     }
 
     #[test]

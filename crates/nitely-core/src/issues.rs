@@ -1154,14 +1154,14 @@ mod tests {
         let (mut db, dir) = db();
         db.create_project("NIT", "Nitely").unwrap();
         let h = Actor::Human;
-        let linear = IssueRecord { key: "AERA-5".into(), title: "Upstream fix".into(), state: "Todo".into(), state_type: "unstarted".into(), ..Default::default() };
+        let linear = IssueRecord { key: "OPS-5".into(), title: "Upstream fix".into(), state: "Todo".into(), state_type: "unstarted".into(), ..Default::default() };
         db.replace_issues("linear", &[linear]).unwrap();
         let mut waits = new("Use the upstream fix");
-        waits.blocked_by = vec!["AERA-5".into()];
+        waits.blocked_by = vec!["OPS-5".into()];
         assert!(db.create_issue(&waits, &h).is_err());
         db.create_issue(&new("Use the upstream fix"), &h).unwrap();
-        assert!(db.add_blocker("NIT-1", "AERA-5", &h).is_err());
-        assert!(db.add_blocker("AERA-5", "NIT-1", &h).is_err());
+        assert!(db.add_blocker("NIT-1", "OPS-5", &h).is_err());
+        assert!(db.add_blocker("OPS-5", "NIT-1", &h).is_err());
         std::fs::remove_dir_all(dir).ok();
     }
 

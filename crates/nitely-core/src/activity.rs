@@ -571,7 +571,7 @@ mod tests {
         let keys: HashSet<String> = ["NIT-27", "NIT-2", "AND-5"].iter().map(|s| s.to_string()).collect();
         let prefixes: HashSet<String> = ["nit".to_string(), "and".to_string()].into();
         let k = |s: &str| issue_keys(s, &prefixes, &keys);
-        assert_eq!(k("Bash: cd C:/Development/Nitely-worktrees/nit-27-activity && cargo test"), ["NIT-27"]);
+        assert_eq!(k("Bash: cd C:/Code/Nitely-worktrees/nit-27-activity && cargo test"), ["NIT-27"]);
         assert_eq!(k("mcp__nitely__submit: NIT-27"), ["NIT-27"]);
         assert!(k("Read: nit-270 and-x utf-8").is_empty());
         assert!(is_commit("Bash: cd x && git add -A && git commit -q -F - <<'EOF'"));
@@ -579,7 +579,7 @@ mod tests {
     }
 
     // Folders are written the way `paths::normalize` leaves them on every platform (lowercase,
-    // forward slashes), so an MCP id like `claude:c:/development/nitely` matches on Linux too.
+    // forward slashes), so an MCP id like `claude:c:/code/nitely` matches on Linux too.
     #[test]
     fn issue_events_go_to_the_session_that_named_the_issue() {
         let (mut db, dir) = db();
@@ -589,19 +589,19 @@ mod tests {
             db.create_issue(&NewIssue { project: "NIT".into(), title: t.into(), body: "b".into(), kind: "feature".into(), source: "claude".into(), evidence: "e".into(), ..Default::default() }, &h).unwrap();
         }
         let t0 = now() - 4 * 3600;
-        let cwd = "c:/development/nitely";
+        let cwd = "c:/code/nitely";
         // Two Claude sessions in one folder, and the MCP id they share.
         session(&db, "claude:a", cwd, t0, t0 + 3000, "idle");
         session(&db, "claude:b", cwd, t0, t0 + 3000, "working");
-        session(&db, "claude:c:/development/nitely", cwd, t0, t0 + 3000, "working");
+        session(&db, "claude:c:/code/nitely", cwd, t0, t0 + 3000, "working");
         state(&db, "claude:a", t0, "working");
         state(&db, "claude:a", t0 + 2000, "idle");
         state(&db, "claude:b", t0, "working");
         event(&db, t0 + 100, "claude:a", "tool", "mcp__nitely__start_task: NIT-1", None);
         event(&db, t0 + 110, "claude:b", "tool", "mcp__nitely__start_task: NIT-2", None);
-        event(&db, t0 + 105, "claude:c:/development/nitely", "worktree", "Started claude/nit-1-lanes", Some("NIT-1"));
-        event(&db, t0 + 900, "claude:b", "tool", "Bash: cd C:/Development/Nitely-worktrees/nit-2-pulse && git commit -qm x", None);
-        event(&db, t0 + 1500, "claude:c:/development/nitely", "gate_failed", "Gate failed", Some("NIT-2"));
+        event(&db, t0 + 105, "claude:c:/code/nitely", "worktree", "Started claude/nit-1-lanes", Some("NIT-1"));
+        event(&db, t0 + 900, "claude:b", "tool", "Bash: cd C:/Code/Nitely-worktrees/nit-2-pulse && git commit -qm x", None);
+        event(&db, t0 + 1500, "claude:c:/code/nitely", "gate_failed", "Gate failed", Some("NIT-2"));
         event(&db, t0 + 1600, "human", "answer", "yes", Some("NIT-1"));
         let config = Config::default();
         let a = activity(&config, &db, t0 - 600, now()).unwrap();
@@ -625,13 +625,13 @@ mod tests {
     fn codex_work_before_its_first_turn_end_and_long_waits_are_kept() {
         let (db, dir) = db();
         let t0 = now() - 3 * 3600;
-        let cwd = "c:/development/harbor";
+        let cwd = "c:/code/harbor";
         // Codex reports work over MCP for an hour; its hook session appears at the first turn end.
-        session(&db, "codex:c:/development/harbor", cwd, t0, t0 + 3600, "working");
+        session(&db, "codex:c:/code/harbor", cwd, t0, t0 + 3600, "working");
         session(&db, "codex:thread-1", cwd, t0 + 3600, t0 + 3600, "idle");
-        state(&db, "codex:c:/development/harbor", t0, "working");
+        state(&db, "codex:c:/code/harbor", t0, "working");
         state(&db, "codex:thread-1", t0 + 3600, "idle");
-        event(&db, t0 + 600, "codex:c:/development/harbor", "gate_passed", "Gate passed", None);
+        event(&db, t0 + 600, "codex:c:/code/harbor", "gate_passed", "Gate passed", None);
         // A Claude session that asked something two hours ago and has waited since.
         session(&db, "claude:w", "C:\\Development\\Nitely", t0, t0 + 1200, "waiting");
         state(&db, "claude:w", t0, "working");
@@ -640,26 +640,26 @@ mod tests {
         let w = a.lanes.iter().find(|l| l.session_id == "claude:w").expect("still waiting, so still shown");
         assert_eq!(w.segments.iter().map(|s| s.state.as_str()).collect::<Vec<_>>(), ["waiting"]);
         let a = activity(&Config::default(), &db, t0 - 60, now()).unwrap();
-        let codex = a.lanes.iter().find(|l| l.session_id == "codex:c:/development/harbor").unwrap();
+        let codex = a.lanes.iter().find(|l| l.session_id == "codex:c:/code/harbor").unwrap();
         assert!(!a.lanes.iter().any(|l| l.session_id == "codex:thread-1"), "the hook session is folded in");
         assert_eq!(codex.segments.first().map(|s| (s.from, s.state.as_str())), Some((t0, "working")));
         assert_eq!(codex.marks.iter().map(|m| m.kind.as_str()).collect::<Vec<_>>(), ["gate_pass"]);
         assert_eq!((codex.state.as_str(), codex.last_seen_at), ("idle", t0 + 3600), "from the member seen last");
         // At the same second, the hook's idle beats the MCP id's working.
-        state(&db, "codex:c:/development/harbor", t0 + 3600, "working");
+        state(&db, "codex:c:/code/harbor", t0 + 3600, "working");
         let a = activity(&Config::default(), &db, t0 - 60, now()).unwrap();
-        let codex = a.lanes.iter().find(|l| l.session_id == "codex:c:/development/harbor").unwrap();
+        let codex = a.lanes.iter().find(|l| l.session_id == "codex:c:/code/harbor").unwrap();
         assert!(codex.segments.iter().any(|s| s.from == t0 + 3600 && s.state == "idle"), "{:?}", codex.segments);
         // A report after the turn ended is working again, though the MCP id's own state never changed.
-        event(&db, t0 + 4000, "codex:c:/development/harbor", "status", "Next turn", None);
+        event(&db, t0 + 4000, "codex:c:/code/harbor", "status", "Next turn", None);
         let a = activity(&Config::default(), &db, t0 - 60, now()).unwrap();
-        let codex = a.lanes.iter().find(|l| l.session_id == "codex:c:/development/harbor").unwrap();
+        let codex = a.lanes.iter().find(|l| l.session_id == "codex:c:/code/harbor").unwrap();
         assert!(codex.segments.iter().any(|s| s.from == t0 + 4000 && s.state == "working"), "{:?}", codex.segments);
         // And the next turn end is idle again, though the hook's own state never changed.
         event(&db, t0 + 4600, "codex:thread-1", "turn_end", "Turn finished", None);
         db.conn.execute("UPDATE session SET last_seen_at = ?1 WHERE id = 'codex:thread-1'", [t0 + 4600]).unwrap();
         let a = activity(&Config::default(), &db, t0 - 60, now()).unwrap();
-        let codex = a.lanes.iter().find(|l| l.session_id == "codex:c:/development/harbor").unwrap();
+        let codex = a.lanes.iter().find(|l| l.session_id == "codex:c:/code/harbor").unwrap();
         let at = |t: i64| codex.segments.iter().find(|s| s.from <= t && t < s.to).map(|s| s.state.clone());
         assert_eq!((at(t0 + 4300).as_deref(), at(t0 + 4700).as_deref()), (Some("working"), Some("idle")), "{:?}", codex.segments);
         // A window that starts after that report still starts working (NIT-43): the report before
@@ -671,13 +671,13 @@ mod tests {
 
         // An idle hook session left from yesterday does not swallow today's work in that folder.
         let y = t0 - 20 * 3600;
-        session(&db, "claude:old", "C:\\Development\\Padre", y, y + 600, "idle");
-        session(&db, "claude:c:/development/padre", "c:/development/padre", t0, t0 + 1800, "working");
-        state(&db, "claude:c:/development/padre", t0, "working");
-        event(&db, t0 + 900, "claude:c:/development/padre", "gate_passed", "Gate passed", None);
+        session(&db, "claude:old", "C:\\Code\\Ledger", y, y + 600, "idle");
+        session(&db, "claude:c:/code/ledger", "c:/code/ledger", t0, t0 + 1800, "working");
+        state(&db, "claude:c:/code/ledger", t0, "working");
+        event(&db, t0 + 900, "claude:c:/code/ledger", "gate_passed", "Gate passed", None);
         let a = activity(&Config::default(), &db, t0 - 60, now()).unwrap();
-        let padre = a.lanes.iter().find(|l| l.session_id == "claude:c:/development/padre").expect("a lane of its own");
-        assert_eq!(padre.marks.len(), 1);
+        let ledger = a.lanes.iter().find(|l| l.session_id == "claude:c:/code/ledger").expect("a lane of its own");
+        assert_eq!(ledger.marks.len(), 1);
         std::fs::remove_dir_all(dir).ok();
     }
 }

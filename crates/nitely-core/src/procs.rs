@@ -120,14 +120,14 @@ mod tests {
 
     #[test]
     fn names_a_folder_in_every_spelling() {
-        let dir = if cfg!(windows) { r"C:\Development\Nitely-worktrees\nit-27-lanes" } else { "/c/Development/Nitely-worktrees/nit-27-lanes" };
-        assert!(names_path("bash -c 'cd /c/Development/Nitely-worktrees/nit-27-lanes && npm run dev'", dir));
-        assert!(!names_path("cd /c/Development/Nitely-worktrees/nit-27-lanes-two && npm run dev", dir), "another worktree");
-        assert!(!names_path("cd /c/Development/Nitely && cargo test", dir));
+        let dir = if cfg!(windows) { r"C:\Code\Nitely-worktrees\nit-27-lanes" } else { "/c/Code/Nitely-worktrees/nit-27-lanes" };
+        assert!(names_path("bash -c 'cd /c/Code/Nitely-worktrees/nit-27-lanes && npm run dev'", dir));
+        assert!(!names_path("cd /c/Code/Nitely-worktrees/nit-27-lanes-two && npm run dev", dir), "another worktree");
+        assert!(!names_path("cd /c/Code/Nitely && cargo test", dir));
         if cfg!(windows) {
-            assert!(names_path(r#""node" "C:\Development\Nitely-worktrees\nit-27-lanes\node_modules\.bin\\..\vite\bin\vite.js" --port 5184"#, dir));
-            assert!(names_path("wsl -- ls /mnt/c/development/nitely-worktrees/nit-27-lanes/src", dir));
-            assert!(names_path("C:/DEVELOPMENT/Nitely-worktrees/nit-27-lanes", dir));
+            assert!(names_path(r#""node" "C:\Code\Nitely-worktrees\nit-27-lanes\node_modules\.bin\\..\vite\bin\vite.js" --port 5184"#, dir));
+            assert!(names_path("wsl -- ls /mnt/c/code/nitely-worktrees/nit-27-lanes/src", dir));
+            assert!(names_path("C:/CODE/Nitely-worktrees/nit-27-lanes", dir));
         }
     }
 

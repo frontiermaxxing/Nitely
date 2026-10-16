@@ -66,7 +66,7 @@ const ISSUE: IssueRecord = {
   priority: 1,
   labels: [],
   evidence: "",
-  claimed_by: "claude:c:/development/nitely",
+  claimed_by: "claude:c:/code/nitely",
   created_at: "",
   updated_at: "",
   blocked_by: [],
@@ -76,10 +76,10 @@ const ISSUE: IssueRecord = {
 
 const PR: PrRecord = {
   provider: "github",
-  repo: "AndrewDavidRivers/nitely",
+  repo: "frontiermaxxing/Nitely",
   number: 41,
   title: "NIT-29: Activity lanes",
-  url: "https://github.com/AndrewDavidRivers/nitely/pull/41",
+  url: "https://github.com/frontiermaxxing/Nitely/pull/41",
   state: "OPEN",
   branch: "claude/nit-29-activity-lanes",
   head_sha: "",
@@ -172,7 +172,7 @@ export default function Kit() {
         <h2>IssueToken</h2>
         <div className="kit-row">
           <IssueToken issue={ISSUE} onOpen={() => {}} />
-          <IssueToken issue={{ ...ISSUE, key: "AND-268", state: "Needs You" }} onOpen={() => {}} />
+          <IssueToken issue={{ ...ISSUE, key: "ORB-268", state: "Needs You" }} onOpen={() => {}} />
           <IssueToken issue={{ ...ISSUE, key: "NIT-22", state: "Done", state_type: "completed" }} />
         </div>
         <div className="kit-row kit-wide">

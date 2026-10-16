@@ -61,13 +61,13 @@ interface RepoSpec {
 }
 
 const REPOS: RepoSpec[] = [
-  { project: "NIT", name: "Nitely", root: "C:\\Development\\Nitely", integration: "main", provider: "github", slug: "AndrewDavidRivers/nitely" },
-  { project: "AND", name: "Aera", root: "C:\\Development\\AeraChromium", integration: "win-dev", provider: "bitbucket", slug: "aera/aera-chromium" },
-  { project: "HAR", name: "Harbor", root: "C:\\Development\\Harbor", integration: "main", provider: "github", slug: "AndrewDavidRivers/harbor" },
+  { project: "NIT", name: "Nitely", root: "C:\\Code\\Nitely", integration: "main", provider: "github", slug: "frontiermaxxing/Nitely" },
+  { project: "ORB", name: "Orbit", root: "C:\\Code\\Orbit", integration: "develop", provider: "bitbucket", slug: "orbit-team/orbit" },
+  { project: "HAR", name: "Harbor", root: "C:\\Code\\Harbor", integration: "main", provider: "github", slug: "harbor-app/harbor" },
 ];
 
 // OLD has no issues, as a project left behind after a move, so removing and re-keying can be tried.
-const PROJECT_NAMES: Record<string, string> = { NIT: "Nitely", AND: "Aera", HAR: "Harbor", OLD: "Aera (old)" };
+const PROJECT_NAMES: Record<string, string> = { NIT: "Nitely", ORB: "Orbit", HAR: "Harbor", OLD: "Orbit (old)" };
 
 type Step =
   | "filed"
@@ -199,50 +199,50 @@ const ISSUES: IssueSpec[] = [
   { key: "NIT-18", title: "Playbook editor with a dry run", kind: "feature", priority: 3, from: 230, to: 230, story: ["filed"] },
   { key: "NIT-17", title: "Linear import keeps duplicate labels", kind: "bug", priority: 4, from: 250, to: 240, story: ["filed", "dup"] },
 
-  // ----- Aera -----
+  // ----- Orbit -----
   {
-    key: "AND-275", title: "Tab strip flickers when a profile switches", kind: "bug", priority: 1, vendor: "claude",
+    key: "ORB-275", title: "Tab strip flickers when a profile switches", kind: "bug", priority: 1, vendor: "claude",
     from: 14, to: 0.15, story: ["filed", "claim", "work", "work", "gate", "work"],
-    notes: ["Reproduced: the strip repaints twice on profile switch", "Rebasing on win-dev before submit"],
-    live: { state: "idle", seen: 8, activity: "Rebasing on win-dev before submit" },
+    notes: ["Reproduced: the strip repaints twice on profile switch", "Rebasing on develop before submit"],
+    live: { state: "idle", seen: 8, activity: "Rebasing on develop before submit" },
     branch: { ahead: 3, behind: 7, dirty_files: 2, rebase_in_progress: true },
   },
   {
-    key: "AND-271", title: "Sync settings across profiles", kind: "feature", priority: 2, vendor: "codex",
+    key: "ORB-271", title: "Sync settings across profiles", kind: "feature", priority: 2, vendor: "codex",
     from: 28, to: 0.1, story: ["filed", "claim", "work", "work", "ask", "work"],
     notes: ["Reading the sync service", "Handling the locked-profile case"],
     ask: { question: "The sync API returns 409 for a locked profile. Retry quietly, or show the person a banner?", options: [] },
     live: { state: "working", seen: 0.7, activity: "Running unit_tests --gtest_filter=Sync*" }, branch: { ahead: 5, dirty_files: 6 },
   },
   {
-    key: "AND-268", title: "Crash on startup with an empty bookmarks file", kind: "bug", priority: 1, vendor: "codex",
+    key: "ORB-268", title: "Crash on startup with an empty bookmarks file", kind: "bug", priority: 1, vendor: "codex",
     from: 40, to: 4, story: ["filed", "claim", "work", "gate", "review", "passhuman"],
     branch: { ahead: 1, dirty_files: 0 }, checks: "success",
     body: "A zero-byte Bookmarks file makes the parser return null and startup dereferences it.",
   },
   {
-    key: "AND-266", title: "Download shelf ignores the new theme", kind: "bug", priority: 3, vendor: "codex",
+    key: "ORB-266", title: "Download shelf ignores the new theme", kind: "bug", priority: 3, vendor: "codex",
     from: 50, to: 0.9, story: ["filed", "claim", "work", "work", "gatefail"],
     notes: ["Theme colors now come from the provider", "Gate failed in browser_tests, looking"],
     live: { state: "idle", seen: 52, activity: "Gate failed: browser_tests (3 failures)" }, branch: { ahead: 2, dirty_files: 1 },
   },
-  { key: "AND-270", title: "Reader mode for long articles", kind: "feature", priority: 3, from: 70, to: 70, story: ["filed"] },
-  { key: "AND-272", title: "Telemetry opt-out is not saved", kind: "bug", priority: 2, source: "human", from: 18, to: 18, story: ["filed"] },
-  { key: "AND-273", title: "Extensions page loads slowly with 40 or more extensions", kind: "improvement", priority: 3, from: 44, to: 44, story: ["filed"] },
-  { key: "AND-274", title: "Prefetch on hover for the new tab page", kind: "idea", priority: 4, from: 90, to: 90, story: ["filed"] },
+  { key: "ORB-270", title: "Reader mode for long articles", kind: "feature", priority: 3, from: 70, to: 70, story: ["filed"] },
+  { key: "ORB-272", title: "Telemetry opt-out is not saved", kind: "bug", priority: 2, source: "human", from: 18, to: 18, story: ["filed"] },
+  { key: "ORB-273", title: "Extensions page loads slowly with 40 or more extensions", kind: "improvement", priority: 3, from: 44, to: 44, story: ["filed"] },
+  { key: "ORB-274", title: "Prefetch on hover for the new tab page", kind: "idea", priority: 4, from: 90, to: 90, story: ["filed"] },
   {
-    key: "AND-265", title: "Pinned tabs lose their favicons after restart", kind: "bug", priority: 2, vendor: "claude",
+    key: "ORB-265", title: "Pinned tabs lose their favicons after restart", kind: "bug", priority: 2, vendor: "claude",
     from: 80, to: 1.2, story: ["filed", "claim", "work", "gate", "review", "passhuman", "approve", "landfail"],
     branch: { ahead: 2, behind: 4, dirty_files: 0 }, checks: "success",
   },
   {
-    key: "AND-260", title: "Live check: sign-in on a clean profile", kind: "live-check", priority: 2, vendor: "claude",
+    key: "ORB-260", title: "Live check: sign-in on a clean profile", kind: "live-check", priority: 2, vendor: "claude",
     from: 36, to: 2, story: ["filed", "claim", "work", "gate", "review", "pass"],
     live: { state: "idle", seen: 25, activity: "Review passed; waiting to land" }, branch: { ahead: 1, dirty_files: 0 }, checks: "success",
   },
   {
     // Five review rounds, four of them asking for changes: the issue track must read as a loop.
-    key: "AND-258", title: "Password autofill inside cross-origin iframes", kind: "feature", priority: 2, vendor: "codex",
+    key: "ORB-258", title: "Password autofill inside cross-origin iframes", kind: "feature", priority: 2, vendor: "codex",
     from: 96, to: 2.2,
     story: [
       "filed", "claim", "work", "gate", "review", "changes", "work", "gatefail", "work", "gate", "review", "changes",
@@ -251,10 +251,10 @@ const ISSUES: IssueSpec[] = [
     notes: ["Frame origin checks in the autofill agent", "Fixing review: the origin check ran after the fill", "Gate failed in components_unittests", "Fixing review: carried P1 on sandboxed frames", "Fixing review: test names", "Fixing review: last nit"],
     live: { state: "idle", seen: 130, activity: "Submitted; waits for a human" }, branch: { ahead: 11, dirty_files: 0 }, checks: "success",
   },
-  { key: "AND-263", title: "Update the Windows installer icon", kind: "improvement", priority: 4, vendor: "codex", from: 150, to: 100, story: ["filed", "claim", "work", "gate", "review", "pass", "land"] },
-  { key: "AND-262", title: "Memory saver for background tabs", kind: "feature", priority: 2, vendor: "claude", from: 300, to: 20, story: ["filed", "claim", "work", "gate", "review", "changes", "work", "gate", "review", "passhuman", "approve", "land"] },
-  { key: "AND-261", title: "Spellcheck underlines in the omnibox", kind: "bug", priority: 3, vendor: "codex", from: 110, to: 60, story: ["filed", "claim", "work", "gate", "review", "pass", "land"] },
-  { key: "AND-259", title: "Drag a tab into a new window on a second monitor", kind: "bug", priority: 3, vendor: "claude", from: 260, to: 150, story: ["filed", "claim", "work", "gatefail", "work", "gate", "review", "pass", "land"] },
+  { key: "ORB-263", title: "Update the Windows installer icon", kind: "improvement", priority: 4, vendor: "codex", from: 150, to: 100, story: ["filed", "claim", "work", "gate", "review", "pass", "land"] },
+  { key: "ORB-262", title: "Memory saver for background tabs", kind: "feature", priority: 2, vendor: "claude", from: 300, to: 20, story: ["filed", "claim", "work", "gate", "review", "changes", "work", "gate", "review", "passhuman", "approve", "land"] },
+  { key: "ORB-261", title: "Spellcheck underlines in the omnibox", kind: "bug", priority: 3, vendor: "codex", from: 110, to: 60, story: ["filed", "claim", "work", "gate", "review", "pass", "land"] },
+  { key: "ORB-259", title: "Drag a tab into a new window on a second monitor", kind: "bug", priority: 3, vendor: "claude", from: 260, to: 150, story: ["filed", "claim", "work", "gatefail", "work", "gate", "review", "pass", "land"] },
 
   // ----- Harbor -----
   {
@@ -303,7 +303,7 @@ interface LooseWorktree {
 const LOOSE_WORKTREES: LooseWorktree[] = [
   { project: "NIT", folder: "spike-sqlite-wal", branch: "claude/spike-sqlite-wal", ahead: 3, behind: 22, dirty: 1, idle: 6 * 24, subject: "Try WAL checkpoints on every write" },
   { project: "NIT", folder: "bisect-snapshot-slowdown", branch: null, ahead: 0, behind: 31, dirty: 0, idle: 9 * 24, subject: "Read worktrees in parallel" },
-  { project: "AND", folder: "profile-perf-trace", branch: "andrew/profile-perf-trace", ahead: 1, behind: 45, dirty: 5, idle: 4 * 24, subject: "Trace profile switch" },
+  { project: "ORB", folder: "profile-perf-trace", branch: "sam/profile-perf-trace", ahead: 1, behind: 45, dirty: 5, idle: 4 * 24, subject: "Trace profile switch" },
 ];
 
 /** A branch with no worktree: left after a land, parked, or made by hand. */
@@ -319,9 +319,9 @@ interface LooseBranch {
 const LOOSE_BRANCHES: LooseBranch[] = [
   { project: "NIT", name: "codex/nit-19-retry-a-failed-review-once", ahead: 2, behind: 38, idle: 90, subject: "Retry the review once on a timeout" },
   { project: "NIT", name: "claude/nit-23-push-updates-from-the-event", ahead: 0, behind: 12, idle: 30, subject: "Push updates from the event store" },
-  { project: "NIT", name: "andrew/tauri-2-upgrade", ahead: 5, behind: 61, idle: 12 * 24, subject: "Bump tauri to 2.2" },
-  { project: "AND", name: "claude/and-262-memory-saver-for-background-tabs", ahead: 0, behind: 9, idle: 20, subject: "Discard background tabs after 10 minutes" },
-  { project: "AND", name: "codex/and-251-crash-in-the-pdf-viewer", ahead: 4, behind: 210, idle: 21 * 24, subject: "Guard the PDF viewer against a null frame" },
+  { project: "NIT", name: "sam/tauri-2-upgrade", ahead: 5, behind: 61, idle: 12 * 24, subject: "Bump tauri to 2.2" },
+  { project: "ORB", name: "claude/orb-262-memory-saver-for-background-tabs", ahead: 0, behind: 9, idle: 20, subject: "Discard background tabs after 10 minutes" },
+  { project: "ORB", name: "codex/orb-251-crash-in-the-pdf-viewer", ahead: 4, behind: 210, idle: 21 * 24, subject: "Guard the PDF viewer against a null frame" },
   { project: "HAR", name: "cursor/har-11-move-image-uploads-to-signed", ahead: 0, behind: 6, idle: 3.5, subject: "Move image uploads to signed URLs" },
 ];
 
@@ -368,7 +368,7 @@ function repoOf(key: string): RepoSpec {
 
 function worktreeOf(spec: IssueSpec): string {
   const repo = repoOf(spec.key);
-  return `C:\\Development\\${repo.name}-worktrees\\${spec.key.toLowerCase()}-${slugOf(spec.title)}`;
+  return `C:\\Code\\${repo.name}-worktrees\\${spec.key.toLowerCase()}-${slugOf(spec.title)}`;
 }
 
 function branchOf(spec: IssueSpec): string {
@@ -395,8 +395,8 @@ function build(): World {
     const other = vendor === "claude" ? "codex" : "claude";
     const reviewer = spec.sameVendor ? vendor : other;
     const reviewNote = spec.sameVendor ? `same vendor: ${other} not installed` : "";
-    const agent = `${vendor}:c:/development/${repo.name.toLowerCase()}-worktrees/${spec.key.toLowerCase()}`;
-    const filer = spec.source === "human" ? "human" : `${spec.vendor ?? (rand() > 0.5 ? "claude" : "codex")}:c:/development/${repo.name.toLowerCase()}`;
+    const agent = `${vendor}:c:/code/${repo.name.toLowerCase()}-worktrees/${spec.key.toLowerCase()}`;
+    const filer = spec.source === "human" ? "human" : `${spec.vendor ?? (rand() > 0.5 ? "claude" : "codex")}:c:/code/${repo.name.toLowerCase()}`;
     const start = NOW - spec.from * HOUR;
     const end = NOW - spec.to * HOUR;
     const steps = spec.story.length;
@@ -461,7 +461,7 @@ function build(): World {
           timeline.push({ ts, actor: agent, kind: "gate_passed", summary: "Gate passed (3 commands)" });
           break;
         case "gatefail":
-          timeline.push({ ts, actor: agent, kind: "gate_failed", summary: repo.project === "AND" ? "Gate failed at `autoninja -C out/Default browser_tests`: 3 failures" : "Gate failed at `npm run build`: 2 type errors" });
+          timeline.push({ ts, actor: agent, kind: "gate_failed", summary: repo.project === "ORB" ? "Gate failed at `autoninja -C out/Default browser_tests`: 3 failures" : "Gate failed at `npm run build`: 2 type errors" });
           break;
         case "review":
           timeline.push({ ts, actor: agent, kind: "review_started", summary: `Review by ${reviewer}${reviewNote ? ` (${reviewNote})` : ""} started` });
@@ -555,7 +555,7 @@ function build(): World {
           head_sha: sha(),
           updated_at: iso(updated),
           comment_count: reviews.length > 1 ? reviews.length : 0,
-          approved_by: approved ? ["AndrewDavidRivers"] : [],
+          approved_by: approved ? ["sam-lee"] : [],
           approved_by_me: approved,
           checks: done ? "success" : spec.checks ?? "success",
         },
@@ -574,7 +574,7 @@ const BLOCKERS: [string, string][] = [
   ["NIT-26", "NIT-31"],
   ["NIT-28", "NIT-29"],
   ["NIT-18", "NIT-20"],
-  ["AND-270", "AND-271"],
+  ["ORB-270", "ORB-271"],
   ["HAR-12", "HAR-15"],
 ];
 
@@ -681,7 +681,7 @@ function snapshot(): Board {
     for (const loose of LOOSE_WORKTREES.filter((l) => l.project === repo.project)) {
       const [vendor, key] = loose.branch ? parseBranch(loose.branch) : [null, null];
       rows.push({
-        worktree: `C:\\Development\\${repo.name}-worktrees\\${loose.folder}`,
+        worktree: `C:\\Code\\${repo.name}-worktrees\\${loose.folder}`,
         branch: loose.branch,
         is_main: false,
         vendor,
@@ -741,7 +741,7 @@ function snapshot(): Board {
     ],
     // An agent on the Mac, reaching this machine's backlog through `nitely serve`.
     remote_sessions: [
-      { id: "claude@mac", vendor: "claude", cwd: "remote:mac", started_at: NOW - 2 * HOUR, last_seen_at: NOW - 140, last_activity: "Filed AND-281: Mac sidebar flickers on resize", state: "working" },
+      { id: "claude@mac", vendor: "claude", cwd: "remote:mac", started_at: NOW - 2 * HOUR, last_seen_at: NOW - 140, last_activity: "Filed ORB-281: Mac sidebar flickers on resize", state: "working" },
     ],
   };
 }
@@ -770,7 +770,7 @@ function flowIssue(issue: IssueRecord, now: number): FlowIssue {
   const open = issue.state_type !== "completed" && issue.state_type !== "canceled";
   return {
     issue,
-    agent: issue.claimed_by ?? (spec.vendor ? `${spec.vendor}:c:/development/${repoOf(spec.key).name.toLowerCase()}-worktrees/${spec.key.toLowerCase()}` : null),
+    agent: issue.claimed_by ?? (spec.vendor ? `${spec.vendor}:c:/code/${repoOf(spec.key).name.toLowerCase()}-worktrees/${spec.key.toLowerCase()}` : null),
     session: s,
     pr: world.prs.get(issue.key)?.[0] ?? null,
     review: world.reviews.get(issue.key)?.[0] ?? null,
@@ -1024,7 +1024,7 @@ function stateAfter(t: TimelineEntry): ActivitySegment["state"] | "ended" {
 /** One lane per issue an agent worked on, built from its timeline so marks and the track agree. */
 function laneOf(spec: IssueSpec): ActivityLane | null {
   if (!spec.vendor) return null;
-  const agent = `${spec.vendor}:c:/development/${repoOf(spec.key).name.toLowerCase()}-worktrees/${spec.key.toLowerCase()}`;
+  const agent = `${spec.vendor}:c:/code/${repoOf(spec.key).name.toLowerCase()}-worktrees/${spec.key.toLowerCase()}`;
   const own = world.timelines.get(spec.key)!.filter((t) => t.actor === agent);
   const start = own.find((t) => t.kind === "claimed");
   if (!start) return null;
@@ -1114,12 +1114,12 @@ const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** Machines allowed through `nitely serve` in the preview; the Mac is the one on the Now board. */
 const MACHINES: { name: string; project: string | null; created_at: number }[] = [
-  { name: "mac", project: "AND", created_at: NOW - 3 * 24 * HOUR },
+  { name: "mac", project: "ORB", created_at: NOW - 3 * 24 * HOUR },
   { name: "cloud-box", project: null, created_at: NOW - 9 * 24 * HOUR },
 ];
 
 // Briefs: NIT has had its setup sweep and a brief an agent wrote and you edited; HAR has a brief
-// you started by hand but no sweep; AND has neither, so the empty state shows.
+// you started by hand but no sweep; ORB has neither, so the empty state shows.
 const BRIEFS: Record<string, Pick<ProjectBrief, "brief" | "revision" | "updated_at" | "updated_by" | "setup">> = {
   NIT: {
     brief: [
@@ -1151,7 +1151,7 @@ const BRIEFS: Record<string, Pick<ProjectBrief, "brief" | "revision" | "updated_
     revision: 3,
     updated_at: NOW - 5 * HOUR,
     updated_by: "human",
-    setup: { sha: "4f0a3ec9b2d1e7a8c6f5", at: NOW - 2 * 24 * HOUR, by: "claude:c:/development/nitely" },
+    setup: { sha: "4f0a3ec9b2d1e7a8c6f5", at: NOW - 2 * 24 * HOUR, by: "claude:c:/code/nitely" },
   },
   HAR: {
     brief: "# Harbor\n\nPhoto sharing for small teams. Uploads move to signed URLs before anything else ships.\n",

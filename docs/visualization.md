@@ -1,12 +1,12 @@
 # Visualization: how Nitely shows work
 
-**Status:** set by NIT-24, 2026-10-16; redrawn by NIT-61 to Andrew's "Nitely Redesign" (Claude
+**Status:** set by NIT-24, 2026-10-16; redrawn by NIT-61 to the "Nitely Redesign" (Claude
 Design, 2026-10-16). Every view builds on this: the Overview, the issue track, the decision Inbox,
 activity lanes, the board and the branch map. If a view needs something this file does not cover,
 extend the file in the same change.
 
-Andrew runs many agents across several projects. Nitely is useful only if he can tell, in a few
-seconds, **what needs him, what is moving and what is stuck**. Showing that clearly is the
+You run many agents across several projects. Nitely is useful only if you can tell, in a few
+seconds, **what needs you, what is moving and what is stuck**. Showing that clearly is the
 product.
 
 ![The Overview, dark](img/overview-dark.png)
@@ -17,7 +17,7 @@ product.
 
 ## Principles
 
-1. **Answer at a glance.** The top of every screen says whether anything needs Andrew, what is
+1. **Answer at a glance.** The top of every screen says whether anything needs you, what is
    moving and what is stuck, before any detail. One line is enough: see the header of Now
    (`5 moving  2 waiting on you  4 idle sessions`) and the summary on a project page.
 2. **Shape before text.** State is shown by position, color and form: where a token sits on the
@@ -72,7 +72,7 @@ Branches off the track:
   clears a stopped review; a failed push holds until the next submit or a person moves it). The current
   station turns `--st-stuck` and the line onward breaks into dashes. A stuck worktree that waits
   on the human (a rebase conflict, an agent waiting for input) is the attention color instead,
-  because it needs him.
+  because it needs them.
 - **Asked you:** an open `ask`. An attention dot on the current station (and on the glyph).
 - **Closed:** Canceled or Duplicate. The whole track fades and the station reads Canceled or
   Duplicate.
@@ -202,7 +202,7 @@ what the agents are doing instead. The footer lists the decision keys (see Keys)
 
 ![An approval resolving in the Inbox, dark](img/inbox-approved-dark.png)
 
-Andrew should see that something happened, and where, without reading. So a change is shown moving
+You should see that something happened, and where, without reading. So a change is shown moving
 rather than redrawn, and quietly: short, one direction, then still. The primitives are in
 `src/ui/motion.tsx` (CSS transitions and the Web Animations API, no library); a view uses them
 instead of writing its own.

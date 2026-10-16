@@ -755,9 +755,9 @@ args = [\"nitely\", \"mcp\"]
     fn suggests_free_keys() {
         let path = std::env::temp_dir().join(format!("nitely-connect-{}-{}.db", std::process::id(), crate::db::now()));
         let db = Db::open(&path).unwrap();
-        assert_eq!(suggest_key(&db, "AeraChromium").unwrap(), "AC");
-        db.create_project("AC", "x").unwrap();
-        assert_eq!(suggest_key(&db, "AeraChromium").unwrap(), "AC1");
+        assert_eq!(suggest_key(&db, "AcmeWeb").unwrap(), "AW");
+        db.create_project("AW", "x").unwrap();
+        assert_eq!(suggest_key(&db, "AcmeWeb").unwrap(), "AW1");
         assert_eq!(suggest_key(&db, "nitely").unwrap(), "NIT");
         std::fs::remove_file(&path).ok();
     }

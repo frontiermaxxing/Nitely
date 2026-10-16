@@ -323,7 +323,7 @@ mod tests {
         let new = NewIssue {
             project: "NIT".into(),
             title: title.into(),
-            body: "So Andrew sees the flow.".into(),
+            body: "So you see the flow.".into(),
             kind: "feature".into(),
             source: "claude".into(),
             evidence: "none yet".into(),

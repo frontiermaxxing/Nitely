@@ -451,8 +451,8 @@ mod tests {
         // This test owns NITELY_HOME for its process; no other test in this crate reads it.
         std::env::set_var("NITELY_HOME", &home);
         let db = nitely_core::Db::open_default().unwrap();
-        db.create_project("AND", "Aera").unwrap();
-        let token = relay::add_token("mac", Some("AND")).unwrap();
+        db.create_project("APP", "Acme").unwrap();
+        let token = relay::add_token("mac", Some("APP")).unwrap();
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -481,13 +481,13 @@ mod tests {
         let call = |id: i64, name: &str, args: Value| json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": name, "arguments": args } });
         let (_, _, filed) = post(&url, Some(&token), Some(&sid), call(3, "file_issue", json!({ "title": "Filed from the Mac", "kind": "bug", "body": "b", "evidence": "e" })));
         let text = filed["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("AND-1"), "the token's project is the default: {text}");
-        let issue = db.issue("AND-1").unwrap().unwrap();
+        assert!(text.contains("APP-1"), "the token's project is the default: {text}");
+        let issue = db.issue("APP-1").unwrap().unwrap();
         assert_eq!(issue.source.as_deref(), Some("claude"));
-        let timeline = db.timeline("AND-1").unwrap();
+        let timeline = db.timeline("APP-1").unwrap();
         assert!(timeline.iter().any(|e| e.actor == "claude@mac"), "the agent is named after its token: {timeline:?}");
 
-        let (_, _, land) = post(&url, Some(&token), Some(&sid), call(4, "land", json!({ "key": "AND-1" })));
+        let (_, _, land) = post(&url, Some(&token), Some(&sid), call(4, "land", json!({ "key": "APP-1" })));
         assert_eq!(land["result"]["isError"], true);
 
         // Another token cannot use this session.

@@ -747,10 +747,10 @@ mod tests {
 
     #[test]
     fn only_https_bitbucket_remotes_get_the_token_helper() {
-        assert!(is_bitbucket_https("https://bitbucket.org/quixet/aera-browser.git"));
-        assert!(is_bitbucket_https("https://someone@bitbucket.org/quixet/aera-browser.git"));
+        assert!(is_bitbucket_https("https://bitbucket.org/acme/my-app.git"));
+        assert!(is_bitbucket_https("https://someone@bitbucket.org/acme/my-app.git"));
         assert!(!is_bitbucket_https("https://github.com/frontiermaxxing/Nitely.git"));
-        assert!(!is_bitbucket_https("git@bitbucket.org:quixet/aera-browser.git"));
+        assert!(!is_bitbucket_https("git@bitbucket.org:acme/my-app.git"));
         assert!(!is_bitbucket_https("https://bitbucket.org.evil.com/x.git"));
     }
 
@@ -784,8 +784,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(pb.branch_for("claude", &issue()), "claude/nit-3-playbook-engine-start-a-task");
-        let wt = pb.worktree_for(Path::new("/dev/AeraChromium"), "claude", &issue());
-        assert_eq!(wt, PathBuf::from("/dev/AeraChromium-worktrees/nit-3-playbook-engine-start-a-task"));
+        let wt = pb.worktree_for(Path::new("/dev/my-app"), "claude", &issue());
+        assert_eq!(wt, PathBuf::from("/dev/my-app-worktrees/nit-3-playbook-engine-start-a-task"));
         if !cfg!(windows) && !cfg!(target_os = "macos") {
             assert_eq!(pb.integration_branch(), "win-dev");
         }
@@ -818,19 +818,19 @@ mod tests {
             unless_only: unless.iter().map(|s| s.to_string()).collect(),
         };
         let files = |f: &[&str]| f.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        let api = step(&["^aera-api/"], &[]);
-        assert!(api.skip_reason(&files(&["aera/x.ts"])).unwrap().is_some());
-        assert!(api.skip_reason(&files(&["aera/x.ts", "aera-api/y.ts"])).unwrap().is_none());
-        let aera = step(&[], &["^docs/", "^aera-website/"]);
-        assert!(aera.skip_reason(&files(&["docs/a.md", "aera-website/b.tsx"])).unwrap().is_some());
-        assert!(aera.skip_reason(&files(&["docs/a.md", "aera/c.ts"])).unwrap().is_none());
-        assert!(aera.skip_reason(&[]).unwrap().is_none(), "an empty diff runs everything");
+        let api = step(&["^api/"], &[]);
+        assert!(api.skip_reason(&files(&["app/x.ts"])).unwrap().is_some());
+        assert!(api.skip_reason(&files(&["app/x.ts", "api/y.ts"])).unwrap().is_none());
+        let app = step(&[], &["^docs/", "^site/"]);
+        assert!(app.skip_reason(&files(&["docs/a.md", "site/b.tsx"])).unwrap().is_some());
+        assert!(app.skip_reason(&files(&["docs/a.md", "app/c.ts"])).unwrap().is_none());
+        assert!(app.skip_reason(&[]).unwrap().is_none(), "an empty diff runs everything");
 
         let rules = ApprovalRules {
             blocked_paths: vec![PathRule { pattern: "^src$".into(), reason: "src lands through the C++ lane".into() }],
             ..Default::default()
         };
-        assert!(rules.check_blocked(&files(&["src/x.cc", "aera/y.ts"])).is_ok());
+        assert!(rules.check_blocked(&files(&["src/x.cc", "app/y.ts"])).is_ok());
         assert!(rules.check_blocked(&files(&["src"])).unwrap_err().to_string().contains("C++ lane"));
     }
 
