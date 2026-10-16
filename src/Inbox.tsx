@@ -1,31 +1,44 @@
 import { useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./backend";
 import type { Ask, Board, IssueRecord } from "./types";
 import { agentLabel, ago } from "./util";
+import { AgentMark, CountBadge, EmptyState, IssueToken, StateDot, livenessOf } from "./ui";
 
 /** Everything waiting on the human, each with its action in place. */
 export function Inbox(props: { board: Board; now: number; onOpenIssue: (key: string) => void; onChanged: () => void }) {
   const { board, now } = props;
   const flagged = board.repos.flatMap((r) => r.rows.filter((row) => row.needs_me).map((row) => ({ repo: r.name, row })));
-  const empty = board.asks.length === 0 && board.needs_me_issues.length === 0 && flagged.length === 0;
+  const total = board.asks.length + board.needs_me_issues.length + flagged.length;
+  // The issues the board knows, so a question can show its issue as a token.
+  const known = new Map<string, IssueRecord>();
+  for (const i of [...board.repos.flatMap((r) => r.rows.map((row) => row.issue)), ...board.needs_me_issues]) if (i) known.set(i.key, i);
 
   return (
     <div className="page">
-      <h1>Inbox</h1>
-      {empty && <p className="muted">Nothing needs you. Agents will show up here when they ask something or wait on an approval.</p>}
+      <div className="page-head">
+        <h1>Inbox</h1>
+        {total > 0 && <span className="head-note">{total === 1 ? "1 thing waits on you" : `${total} things wait on you`}</span>}
+      </div>
+      {total === 0 && (
+        <EmptyState title="Nothing needs you.">Agents show up here when they ask something, wait on your approval, or get stuck.</EmptyState>
+      )}
 
       {board.asks.length > 0 && (
         <section>
-          <h2>Questions</h2>
+          <h2>
+            Questions <CountBadge count={board.asks.length} tone="attention" />
+          </h2>
           {board.asks.map((a) => (
-            <AskCard key={a.id} ask={a} now={now} onOpenIssue={props.onOpenIssue} onChanged={props.onChanged} />
+            <AskCard key={a.id} ask={a} issue={a.issue_key ? known.get(a.issue_key) : undefined} now={now} onOpenIssue={props.onOpenIssue} onChanged={props.onChanged} />
           ))}
         </section>
       )}
 
       {board.needs_me_issues.length > 0 && (
         <section>
-          <h2>Waiting on you</h2>
+          <h2>
+            Waiting on your approval <CountBadge count={board.needs_me_issues.length} tone="attention" />
+          </h2>
           {board.needs_me_issues.map((i) => (
             <WaitingIssue key={i.key} issue={i} onOpenIssue={props.onOpenIssue} onChanged={props.onChanged} />
           ))}
@@ -34,25 +47,28 @@ export function Inbox(props: { board: Board; now: number; onOpenIssue: (key: str
 
       {flagged.length > 0 && (
         <section>
-          <h2>Stuck worktrees</h2>
+          <h2>
+            Stuck worktrees <CountBadge count={flagged.length} tone="attention" />
+          </h2>
           {flagged.map(({ repo, row }) => (
             <div className="card" key={row.worktree}>
-              <div className="card-title">
-                {row.issue_key ? (
-                  <button className="link mono" onClick={() => props.onOpenIssue(row.issue_key!)}>{row.issue_key}</button>
+              <div className="card-meta">
+                {row.issue ? (
+                  <IssueToken issue={row.issue} onOpen={props.onOpenIssue} />
                 ) : (
-                  <span className="mono">{row.branch ?? "detached"}</span>
+                  <span className="mono">{row.issue_key ?? row.branch ?? "detached"}</span>
                 )}
-                <span className="muted"> · {repo}</span>
+                <span>{repo}</span>
+                {row.session && <AgentMark vendor={row.session.vendor} state={livenessOf(row.session, now)} />}
               </div>
-              <p>
+              <p className="card-title">
                 {row.state?.rebase_in_progress
                   ? "A rebase stopped on a conflict in this worktree."
                   : row.session?.state === "waiting"
                     ? `The agent is waiting for input: ${row.session.last_activity ?? ""}`
                     : row.issue?.title}
               </p>
-              <p className="muted small mono">{row.worktree}</p>
+              <p className="muted small mono path">{row.worktree}</p>
             </div>
           ))}
         </section>
@@ -61,7 +77,7 @@ export function Inbox(props: { board: Board; now: number; onOpenIssue: (key: str
   );
 }
 
-function AskCard(props: { ask: Ask; now: number; onOpenIssue: (key: string) => void; onChanged: () => void }) {
+function AskCard(props: { ask: Ask; issue?: IssueRecord; now: number; onOpenIssue: (key: string) => void; onChanged: () => void }) {
   const { ask } = props;
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
@@ -82,12 +98,18 @@ function AskCard(props: { ask: Ask; now: number; onOpenIssue: (key: string) => v
   return (
     <div className="card">
       <div className="card-meta">
-        {agentLabel(ask.asked_by)} · {ago(props.now, ask.asked_at)}
-        {ask.issue_key && (
-          <>
-            {" · "}
-            <button className="link mono" onClick={() => props.onOpenIssue(ask.issue_key!)}>{ask.issue_key}</button>
-          </>
+        <StateDot state="waiting" title="Waiting for your answer" />
+        <AgentMark vendor={ask.asked_by} />
+        <span>{agentLabel(ask.asked_by)}</span>
+        <span>{ago(props.now, ask.asked_at)}</span>
+        {props.issue ? (
+          <IssueToken issue={props.issue} onOpen={props.onOpenIssue} />
+        ) : (
+          ask.issue_key && (
+            <button className="link mono" onClick={() => props.onOpenIssue(ask.issue_key!)}>
+              {ask.issue_key}
+            </button>
+          )
         )}
       </div>
       <p className="card-title">{ask.question}</p>
@@ -105,7 +127,9 @@ function AskCard(props: { ask: Ask; now: number; onOpenIssue: (key: string) => v
           }}
         >
           <input value={text} onChange={(e) => setText(e.target.value)} placeholder={ask.options.length ? "Or type an answer" : "Type an answer"} />
-          <button className="btn primary" disabled={busy || !text.trim()}>Send</button>
+          <button className="btn primary" disabled={busy || !text.trim()}>
+            Send
+          </button>
         </form>
       </div>
       {error && <p className="error small">{error}</p>}
@@ -126,13 +150,19 @@ function WaitingIssue(props: { issue: IssueRecord; onOpenIssue: (key: string) =>
   };
   return (
     <div className="card">
-      <div className="card-title">
-        <button className="link mono" onClick={() => props.onOpenIssue(issue.key)}>{issue.key}</button> {issue.title}
+      <div className="card-meta">
+        <IssueToken issue={issue} onOpen={props.onOpenIssue} />
+        {issue.kind && <span>{issue.kind}</span>}
       </div>
+      <p className="card-title">{issue.title}</p>
       {issue.origin === "nitely" ? (
         <div className="actions">
-          <button className="btn primary" onClick={() => move("Approved")}>Approve</button>
-          <button className="btn" onClick={() => move("Todo")}>Send back to Todo</button>
+          <button className="btn primary" onClick={() => move("Approved")}>
+            Approve
+          </button>
+          <button className="btn quiet" onClick={() => move("Todo")}>
+            Send back to Todo
+          </button>
         </div>
       ) : (
         <p className="muted small">In Linear. Act on it there.</p>

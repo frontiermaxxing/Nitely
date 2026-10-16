@@ -1,5 +1,6 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { MouseEvent } from "react";
+import { isPreview } from "./backend";
 
 export function ago(now: number, ts: number): string {
   const s = Math.max(0, Math.round(now - ts));
@@ -13,7 +14,8 @@ export function ago(now: number, ts: number): string {
 export function openExternal(url: string) {
   return (e: MouseEvent) => {
     e.preventDefault();
-    openUrl(url).catch(() => {});
+    if (isPreview) window.open(url, "_blank", "noopener");
+    else openUrl(url).catch(() => {});
   };
 }
 

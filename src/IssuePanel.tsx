@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./backend";
 import type { IssueDetail, ReviewRecord } from "./types";
 import { agentLabel, ago, openExternal, PRIORITY } from "./util";
 import { PrCell } from "./Pr";
+import { AgentMark, PriorityMark, SeverityMark, StationGlyph, StationTrack, trackOf } from "./ui";
 
 const KIND_LABEL: Record<string, string> = {
   issue_created: "filed",
@@ -63,22 +64,39 @@ export function IssuePanel(props: { issueKey: string; now: number; version: numb
   };
 
   const issue = detail?.issue;
+  const track = detail && trackOf(detail.issue, detail.timeline, detail.reviews);
   return (
     <aside className="panel">
       <div className="panel-head">
-        <span className="mono muted">{props.issueKey}</span>
+        <span className="panel-key">
+          {track && <StationGlyph track={track} />}
+          <span className="mono muted">{props.issueKey}</span>
+        </span>
         <button className="btn ghost" onClick={props.onClose} title="Close (Esc)">✕</button>
       </div>
       {error && <p className="error small">{error}</p>}
       {issue && (
         <>
           <h2 className="panel-title">{issue.title}</h2>
+          {track && (
+            <div className="panel-track">
+              <StationTrack track={track} size="full" now={props.now} />
+            </div>
+          )}
           <div className="facts">
-            <span className="tag strong">{issue.state}</span>
-            {issue.kind && <span className="tag">{issue.kind}</span>}
-            {issue.priority > 0 && <span className="tag">{PRIORITY[issue.priority]}</span>}
-            {issue.source && <span className="tag">from {issue.source}</span>}
-            {issue.claimed_by && <span className="tag">{agentLabel(issue.claimed_by)}</span>}
+            <span className="fact strong">{issue.state}</span>
+            {issue.kind && <span className="fact">{issue.kind}</span>}
+            {issue.priority > 0 && (
+              <span className="fact">
+                <PriorityMark priority={issue.priority} /> {PRIORITY[issue.priority]}
+              </span>
+            )}
+            {issue.source && <span className="fact">from {issue.source}</span>}
+            {issue.claimed_by && (
+              <span className="fact">
+                <AgentMark vendor={issue.claimed_by} size={14} /> {agentLabel(issue.claimed_by)}
+              </span>
+            )}
             {issue.url && (
               <a href={issue.url} onClick={openExternal(issue.url)}>
                 Open in {issue.origin}
@@ -134,6 +152,9 @@ export function IssuePanel(props: { issueKey: string; now: number; version: numb
           <ol className="timeline">
             {detail.timeline.map((t, n) => (
               <li key={n} className={`tl-${t.kind}`}>
+                <span className="tl-mark">
+                  <AgentMark vendor={t.actor} size={14} title={agentLabel(t.actor)} />
+                </span>
                 <div className="tl-meta">
                   <span className="tl-kind">{KIND_LABEL[t.kind] ?? t.kind}</span> {agentLabel(t.actor)} ·{" "}
                   {ago(props.now, t.ts)}
@@ -157,7 +178,7 @@ function LatestReview(props: { review: ReviewRecord; now: number }) {
       <h3>Review</h3>
       <div className="review">
         <div>
-          <span className={`chip ${r.verdict === "changes" ? "bad" : r.verdict === "pass" ? "good" : ""}`}>{verdict}</span>
+          <span className={`verdict verdict-${r.verdict}`}>{verdict}</span>
           {r.reviewer && <span className="muted small"> by {r.reviewer}</span>}
           <span className="muted small"> · {ago(props.now, r.ts)} · <span className="mono">{r.commit_sha}</span></span>
         </div>
@@ -175,7 +196,7 @@ function LatestReview(props: { review: ReviewRecord; now: number }) {
           <ul className="small findings">
             {r.findings.map((f) => (
               <li key={f.text}>
-                <span className={`prio-tag p${f.priority}`}>P{f.priority}</span> {f.text}
+                <SeverityMark priority={f.priority} /> {f.text}
               </li>
             ))}
           </ul>

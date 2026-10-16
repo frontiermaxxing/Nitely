@@ -1,6 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { invoke, isPreview, listen } from "./backend";
 import type { AgentPlan, Board, Project } from "./types";
 import { AgentSetup, pendingChanges, setupErrors } from "./Agents";
 import { Inbox } from "./Inbox";
@@ -9,6 +8,10 @@ import { Backlog } from "./Backlog";
 import { IssuePanel } from "./IssuePanel";
 import { AddProject } from "./AddProject";
 import { nowSecs } from "./util";
+import { CountBadge } from "./ui";
+
+// The browser preview's page of every primitive in every state; never in a production build.
+const Kit = import.meta.env.DEV ? lazy(() => import("./dev/Kit")) : () => null;
 
 // The backend pushes CHANGED_EVENT the moment the database or a repo's refs change. Uncommitted
 // edits and relative times are caught by this slow fallback.
@@ -16,13 +19,34 @@ const FALLBACK_MS = 30000;
 const CHANGED_EVENT = "nitely://changed";
 const REFRESH_GAP_MS = 1000;
 
-export type View = { kind: "inbox" } | { kind: "now" } | { kind: "project"; key: string } | { kind: "add" } | { kind: "agents" };
+export type View =
+  | { kind: "inbox" }
+  | { kind: "now" }
+  | { kind: "project"; key: string }
+  | { kind: "add" }
+  | { kind: "agents" }
+  | { kind: "kit" };
+
+// The view and the open issue live in the URL hash (`#now`, `#project/NIT`, `#inbox@NIT-12`), so
+// a reload keeps them and the browser preview can open any screen directly.
+function fromHash(hash: string): { view: View; issue: string | null } {
+  const [path, issue] = decodeURIComponent(hash.replace(/^#\/?/, "")).split("@");
+  const [kind, key] = path.split("/");
+  const plain = ["inbox", "now", "add", "agents"].concat(isPreview ? ["kit"] : []);
+  const view: View =
+    kind === "project" && key ? { kind: "project", key: key.toUpperCase() } : plain.includes(kind) ? ({ kind } as View) : { kind: "inbox" };
+  return { view, issue: issue ? issue.toUpperCase() : null };
+}
+
+function toHash(view: View, issue: string | null): string {
+  return `#${view.kind === "project" ? `project/${view.key}` : view.kind}${issue ? `@${issue}` : ""}`;
+}
 
 export function App() {
   const [board, setBoard] = useState<Board | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
-  const [view, setView] = useState<View>({ kind: "inbox" });
-  const [openIssue, setOpenIssue] = useState<string | null>(null);
+  const [view, setView] = useState<View>(() => fromHash(location.hash).view);
+  const [openIssue, setOpenIssue] = useState<string | null>(() => fromHash(location.hash).issue);
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(nowSecs);
   // Bumped after any change made in the app, so open lists refetch at once.
@@ -78,6 +102,20 @@ export function App() {
   const agentErrors = setupErrors(agents);
 
   useEffect(() => {
+    const next = toHash(view, openIssue);
+    if (location.hash !== next) history.replaceState(null, "", next);
+  }, [view, openIssue]);
+  useEffect(() => {
+    const onHash = () => {
+      const h = fromHash(location.hash);
+      setView(h.view);
+      setOpenIssue(h.issue);
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+
+  useEffect(() => {
     refresh();
     const id = setInterval(changed, FALLBACK_MS);
     const unlisten = listen(CHANGED_EVENT, changed);
@@ -96,9 +134,12 @@ export function App() {
   return (
     <div className="shell">
       <nav className="sidebar">
-        <div className="brand">Nitely</div>
-        <NavItem active={view.kind === "inbox"} onClick={() => setView({ kind: "inbox" })} label="Inbox" count={inboxCount} alert />
-        <NavItem active={view.kind === "now"} onClick={() => setView({ kind: "now" })} label="Now" count={working} />
+        <div className="brand">
+          <BrandMark />
+          Nitely
+        </div>
+        <NavItem active={view.kind === "inbox"} onClick={() => setView({ kind: "inbox" })} label="Inbox" count={inboxCount} tone="attention" />
+        <NavItem active={view.kind === "now"} onClick={() => setView({ kind: "now" })} label="Now" count={working} tone="live" />
         <div className="nav-heading">Projects</div>
         {projects.map((p) => (
           <NavItem
@@ -111,8 +152,9 @@ export function App() {
           />
         ))}
         <button className={`nav-item nav-add${view.kind === "add" ? " active" : ""}`} onClick={() => setView({ kind: "add" })}>
-          <span className="nav-label">+ Add project</span>
+          <span className="nav-label">Add project</span>
         </button>
+        {isPreview && <PreviewFoot active={view.kind === "kit"} onKit={() => setView({ kind: "kit" })} />}
       </nav>
 
       <main className="content">
@@ -146,6 +188,11 @@ export function App() {
             }}
           />
         )}
+        {view.kind === "kit" && (
+          <Suspense fallback={null}>
+            <Kit />
+          </Suspense>
+        )}
         {view.kind === "project" && (
           <Backlog
             project={projects.find((p) => p.key === view.key)}
@@ -169,13 +216,68 @@ function NavItem(props: {
   label: string;
   hint?: string;
   count?: number;
-  alert?: boolean;
+  tone?: "attention" | "live";
 }) {
   return (
-    <button className={`nav-item${props.active ? " active" : ""}`} onClick={props.onClick}>
+    <button className={`nav-item${props.active ? " active" : ""}`} onClick={props.onClick} aria-current={props.active ? "page" : undefined}>
       <span className="nav-label">{props.label}</span>
       {props.hint && <span className="nav-hint">{props.hint}</span>}
-      {!!props.count && <span className={`nav-count${props.alert ? " alert" : ""}`}>{props.count}</span>}
+      <CountBadge count={props.count ?? 0} tone={props.tone} />
     </button>
+  );
+}
+
+/** Three stations on a line: the lifecycle track, which is the whole app in one mark. */
+function BrandMark() {
+  return (
+    <svg width="22" height="10" viewBox="0 0 22 10" aria-hidden="true">
+      <path d="M3 5H19" stroke="var(--fg-3)" strokeWidth="1.5" strokeLinecap="round" />
+      <circle cx="3.5" cy="5" r="2.5" fill="var(--fg-3)" />
+      <circle cx="11" cy="5" r="3.5" fill="var(--fg)" />
+      <circle cx="18.5" cy="5" r="2.5" fill="var(--sunken)" stroke="var(--fg-3)" strokeWidth="1.5" />
+    </svg>
+  );
+}
+
+type Theme = "auto" | "light" | "dark";
+const THEME_KEY = "nitely.preview.theme";
+
+/** `?theme=dark` in the URL wins, so a screenshot tool can pick the theme; then the last choice. */
+function readTheme(): Theme {
+  try {
+    const t = new URLSearchParams(location.search).get("theme") ?? localStorage.getItem(THEME_KEY);
+    return t === "light" || t === "dark" ? t : "auto";
+  } catch {
+    return "auto";
+  }
+}
+
+/** The preview's own corner: a theme switch and the kit page. */
+function PreviewFoot(props: { active: boolean; onKit: () => void }) {
+  const [theme, setTheme] = useState<Theme>(readTheme);
+  useEffect(() => {
+    if (theme === "auto") delete document.documentElement.dataset.theme;
+    else document.documentElement.dataset.theme = theme;
+    try {
+      localStorage.setItem(THEME_KEY, theme);
+    } catch {
+      // Private windows may refuse storage; the switch still works for this page.
+    }
+  }, [theme]);
+  return (
+    <div className="preview-foot">
+      <div className="nav-heading">Preview</div>
+      <button className={`nav-item${props.active ? " active" : ""}`} onClick={props.onKit}>
+        <span className="nav-label">Visual kit</span>
+      </button>
+      <div className="preview-theme" role="group" aria-label="Theme">
+        {(["auto", "light", "dark"] as const).map((t) => (
+          <button key={t} className={theme === t ? "on" : undefined} onClick={() => setTheme(t)} aria-pressed={theme === t}>
+            {t === "auto" ? "Auto" : t === "light" ? "Light" : "Dark"}
+          </button>
+        ))}
+      </div>
+      <p className="preview-note">Sample data from src/dev/fixtures.ts</p>
+    </div>
   );
 }

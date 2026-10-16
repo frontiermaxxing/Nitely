@@ -1,0 +1,130 @@
+/* Styles of the shared primitives in src/ui. Tokens are in src/styles/tokens.css. */
+
+@keyframes ui-breathe {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.8); }
+}
+
+/* ----- StateDot ----- */
+.ui-dot {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex: none; vertical-align: middle;
+}
+.ui-dot-working { background: var(--live); animation: ui-breathe var(--breathe) ease-in-out infinite; }
+.ui-dot-waiting { background: var(--attention); }
+.ui-dot-idle { box-shadow: inset 0 0 0 1.5px var(--fg-3); }
+.ui-dot-stale { box-shadow: inset 0 0 0 1.5px var(--fg-3); opacity: 0.45; }
+.ui-dot-ended { background: var(--line-strong); transform: scale(0.75); }
+
+/* ----- AgentMark ----- */
+.ui-mark { flex: none; overflow: visible; vertical-align: middle; }
+.ui-mark-letter { font: 700 8.5px var(--font); fill: var(--on-vendor); pointer-events: none; }
+.ui-mark-stale { opacity: 0.45; }
+.ui-mark-ended { opacity: 0.3; }
+.ui-mark-dot { stroke: var(--mark-bg, var(--surface)); transform-box: fill-box; transform-origin: center; }
+.ui-mark-dot-working { fill: var(--live); animation: ui-breathe var(--breathe) ease-in-out infinite; }
+.ui-mark-dot-waiting { fill: var(--attention); }
+.ui-mark-dot-idle { fill: var(--fg-3); }
+
+/* ----- StationGlyph, IssueToken ----- */
+.ui-glyph { flex: none; display: block; }
+.ui-token {
+  display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%;
+  font: inherit; color: inherit; background: none; border: 0; padding: 1px 3px; margin: -1px -3px;
+  border-radius: var(--radius-sm); text-decoration: none; text-align: left;
+}
+button.ui-token, a.ui-token { cursor: pointer; }
+button.ui-token:hover, a.ui-token:hover { background: var(--hover); }
+button.ui-token:focus-visible, a.ui-token:focus-visible { outline: 2px solid var(--focus); outline-offset: 0; }
+.ui-token-key { font-family: var(--font-mono); font-size: var(--text-sm); color: var(--fg-2); white-space: nowrap; }
+.ui-token-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
+.ui-token-kind { color: var(--fg-3); font-size: var(--text-xs); white-space: nowrap; }
+.ui-token-quiet .ui-token-title, .ui-token-quiet .ui-token-key { color: var(--fg-3); }
+
+/* ----- StationTrack ----- */
+.ui-mini-track { display: inline-block; vertical-align: middle; flex: none; }
+
+.ui-track { position: relative; --node: 14px; }
+.ui-track-looped { padding-top: 34px; }
+.ui-track-stations {
+  display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); list-style: none; margin: 0; padding: 0;
+}
+.ui-st { position: relative; display: flex; flex-direction: column; align-items: center; gap: 5px; min-width: 0; }
+/* The line into each station from the one before it. */
+.ui-st::before {
+  content: ""; position: absolute; top: calc(var(--node) / 2 - 1px); left: -50%; right: 50%; height: 2px;
+  background: var(--line); border-radius: 1px;
+}
+.ui-st:first-child::before { display: none; }
+.ui-st-behind::before, .ui-st-current::before { background: var(--line-strong); }
+.ui-st-stuck + .ui-st::before {
+  background: repeating-linear-gradient(90deg, var(--st-stuck) 0 3px, transparent 3px 7px);
+  opacity: 0.7;
+}
+.ui-st-node { position: relative; z-index: 1; display: grid; place-items: center; width: var(--node); height: var(--node); }
+.ui-st-node::before { content: ""; display: block; border-radius: 50%; box-sizing: border-box; }
+.ui-st-upcoming .ui-st-node::before { width: 8px; height: 8px; background: var(--track-bg, var(--surface)); box-shadow: inset 0 0 0 1.5px var(--line-strong); }
+.ui-st-skipped .ui-st-node::before { width: 6px; height: 6px; background: var(--track-bg, var(--surface)); box-shadow: inset 0 0 0 1.5px var(--line-strong); }
+.ui-st-passed .ui-st-node::before { width: 8px; height: 8px; background: var(--c); opacity: 0.55; }
+.ui-st-current .ui-st-node::before {
+  width: 14px; height: 14px; background: var(--c);
+  box-shadow: 0 0 0 3px var(--track-bg, var(--surface)), 0 0 0 4.5px color-mix(in srgb, var(--c) 35%, transparent);
+}
+.ui-st-current.ui-phase-agent:not(.ui-st-stuck) .ui-st-node::before { animation: ui-breathe var(--breathe) ease-in-out infinite; }
+.ui-st-ask {
+  position: absolute; right: -4px; top: -4px; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--attention); box-shadow: 0 0 0 2px var(--track-bg, var(--surface));
+}
+.ui-st-label {
+  font-size: var(--text-xs); line-height: 1.25; color: var(--fg-3); text-align: center; overflow-wrap: anywhere;
+}
+.ui-st-current .ui-st-label { color: var(--fg); font-weight: var(--weight-medium); }
+.ui-st-skipped .ui-st-label { opacity: 0.6; }
+.ui-st-time { font-size: 10.5px; line-height: 1.2; min-height: 13px; color: var(--fg-3); font-variant-numeric: tabular-nums; text-align: center; }
+.ui-st-stuck .ui-st-label, .ui-st-stuck .ui-st-time { color: var(--st-stuck); }
+.ui-track-closed .ui-st { opacity: 0.6; }
+
+/* The "changes asked" loop: from Review back over to Working. */
+.ui-track-loop {
+  position: absolute; top: 18px; height: 16px; box-sizing: border-box;
+  border: 1.5px dashed var(--st-changes); border-bottom: 0; border-radius: 9px 9px 0 0;
+}
+.ui-track-loop::after {
+  content: ""; position: absolute; left: -4.75px; bottom: -3px;
+  border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 5px solid var(--st-changes);
+}
+.ui-track-loop span {
+  position: absolute; left: 50%; top: -18px; transform: translateX(-50%);
+  color: var(--st-changes); font-size: var(--text-xs); line-height: 14px; white-space: nowrap;
+}
+
+/* ----- Sparkline, Meter, CountBadge ----- */
+.ui-spark { display: inline-block; vertical-align: middle; overflow: visible; flex: none; }
+.ui-meter { display: flex; gap: 2px; height: 6px; flex: none; }
+.ui-meter-seg { display: block; min-width: 3px; border-radius: 3px; }
+.ui-count {
+  display: inline-block; min-width: 18px; height: 18px; line-height: 18px; padding: 0 6px; border-radius: 9px;
+  font-size: 11.5px; font-variant-numeric: tabular-nums; text-align: center; flex: none;
+}
+.ui-count-quiet { color: var(--fg-3); padding: 0; text-align: right; }
+.ui-count-live { color: var(--live); font-weight: var(--weight-medium); padding: 0; text-align: right; }
+.ui-count-attention { background: var(--attention); color: var(--on-attention); font-weight: var(--weight-strong); }
+
+/* ----- EmptyState ----- */
+.ui-empty { display: grid; justify-items: start; gap: 4px; padding: var(--space-5) 0; }
+.ui-empty-glyph { margin-bottom: var(--space-2); }
+.ui-empty-title { margin: 0; font-weight: var(--weight-medium); }
+.ui-empty-detail { color: var(--fg-2); max-width: 60ch; line-height: 1.5; }
+.ui-empty-detail p { margin: 0 0 6px; }
+.ui-empty-action { margin-top: var(--space-2); }
+
+/* ----- PriorityMark, SeverityMark ----- */
+.ui-prio { flex: none; display: block; }
+.ui-sev { font: var(--weight-strong) 10.5px var(--font-mono); white-space: nowrap; }
+.ui-sev-p0 { color: var(--sev-p0); }
+.ui-sev-p1 { color: var(--sev-p1); }
+.ui-sev-p2 { color: var(--sev-p2); }
+.ui-sev-p3 { color: var(--sev-p3); }
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-dot-working, .ui-mark-dot-working, .ui-st-current .ui-st-node::before { animation: none !important; }
+}

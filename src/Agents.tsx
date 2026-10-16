@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./backend";
 import type { AgentPlan, AgentsUpdated } from "./types";
 
 /** Changes still needed by the installed agents. */

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./backend";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { Applied, ConnectPlan } from "./types";
 import { AgentChanges, pendingChanges } from "./Agents";

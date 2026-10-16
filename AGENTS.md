@@ -30,6 +30,9 @@ Nitely tracks its own build. Its backlog is the **NIT** project in Nitely, reach
 - `cargo test --workspace` (core rules, MCP protocol), `cargo clippy --workspace`
 - `npm run build` (type-check and bundle the frontend)
 - `npm run tauri dev` runs the app with hot reload
+- `npm run dev` in a plain browser runs the frontend on sample data (`src/dev/fixtures.ts`); the
+  Browser pane opens it with the `web` configuration in `.claude/launch.json`. Check every view you
+  change there, in light and dark, wide and narrow
 - `cargo install --path crates/nitely-cli` refreshes the `nitely` binary that hooks and MCP use
 
 ## Layout
@@ -37,5 +40,7 @@ Nitely tracks its own build. Its backlog is the **NIT** project in Nitely, reach
 - `crates/nitely-core`: database, issues and their rules, git reader, playbooks (`playbook.rs`),
   GitHub/Bitbucket/Linear sync, snapshot, `connect.rs` (adding a repo and wiring up its agents)
 - `crates/nitely-cli`: the `nitely` binary, including `nitely mcp` (`src/mcp.rs`)
-- `src-tauri`: the desktop shell and its commands; `src`: the React frontend
-- `docs/vision.md` is the end state and build order; `docs/design.md` is milestone 1
+- `src-tauri`: the desktop shell and its commands; `src`: the React frontend, with the shared visual
+  primitives in `src/ui` and design tokens in `src/styles/tokens.css`
+- `docs/vision.md` is the end state and build order; `docs/design.md` is milestone 1; `docs/visualization.md` is
+  the visual language every view follows

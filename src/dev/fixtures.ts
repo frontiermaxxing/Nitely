@@ -1,0 +1,671 @@
+// The browser preview's backend: realistic sample data for every command the app calls, so
+// `npm run dev` in a plain browser shows every view. Only loaded when src/backend.ts finds no
+// Tauri; never part of a production build. Times are relative to when the page loaded.
+//
+// Each issue is written as a short story (filed, claim, work, gate, review, changes, pass, ...)
+// and its timeline, review records, pull request and worktree are generated from it, so the
+// data stays consistent: an issue In Review has passed a gate and a review, a stuck one has a
+// failed gate as its last gate event, and so on.
+
+import type {
+  AgentPlan,
+  Applied,
+  Ask,
+  Board,
+  BranchState,
+  ConnectPlan,
+  IssueDetail,
+  IssueRecord,
+  PrRecord,
+  Project,
+  RepoView,
+  ReviewRecord,
+  Session,
+  SessionState,
+  TaskRow,
+  TimelineEntry,
+} from "../types";
+
+const NOW = Math.floor(Date.now() / 1000);
+const MIN = 60;
+const HOUR = 3600;
+const iso = (ts: number) => new Date(ts * 1000).toISOString().replace(/\.\d+Z$/, "Z");
+
+// A small seeded generator, so the preview looks the same on every load.
+let seed = 24;
+function rand() {
+  seed = (seed * 1664525 + 1013904223) % 4294967296;
+  return seed / 4294967296;
+}
+
+type Vendor = "claude" | "codex" | "cursor";
+
+interface RepoSpec {
+  project: string;
+  name: string;
+  root: string;
+  integration: string;
+  provider: "github" | "bitbucket";
+  slug: string;
+}
+
+const REPOS: RepoSpec[] = [
+  { project: "NIT", name: "Nitely", root: "C:\\Development\\Nitely", integration: "main", provider: "github", slug: "AndrewDavidRivers/nitely" },
+  { project: "AND", name: "Aera", root: "C:\\Development\\AeraChromium", integration: "win-dev", provider: "bitbucket", slug: "aera/aera-chromium" },
+  { project: "HAR", name: "Harbor", root: "C:\\Development\\Harbor", integration: "main", provider: "github", slug: "AndrewDavidRivers/harbor" },
+];
+
+const PROJECT_NAMES: Record<string, string> = { NIT: "Nitely", AND: "Aera", HAR: "Harbor" };
+
+type Step =
+  | "filed"
+  | "claim"
+  | "work"
+  | "note"
+  | "gate"
+  | "gatefail"
+  | "review"
+  | "reviewfail"
+  | "changes"
+  | "pass"
+  | "passhuman"
+  | "approve"
+  | "land"
+  | "landfail"
+  | "ask"
+  | "answer"
+  | "cancel"
+  | "dup";
+
+interface Live {
+  state: SessionState;
+  /** Minutes since the session was last seen. */
+  seen: number;
+  activity: string;
+}
+
+interface IssueSpec {
+  key: string;
+  title: string;
+  kind: string;
+  priority: number;
+  vendor?: Vendor;
+  source?: string;
+  /** Hours ago the issue was filed, and hours ago its last step happened. */
+  from: number;
+  to: number;
+  story: Step[];
+  /** Progress lines the agent reported while working. */
+  notes?: string[];
+  ask?: { question: string; options: string[] };
+  /** The agent session in the issue's worktree, if one is open. */
+  live?: Live;
+  branch?: Partial<BranchState>;
+  checks?: PrRecord["checks"];
+  body?: string;
+}
+
+const WORK = ["Reading the code around the change", "Writing the change", "Adding tests", "Fixing a failing test", "Tidying the diff before the gate"];
+
+const ISSUES: IssueSpec[] = [
+  // ----- Nitely -----
+  {
+    key: "NIT-31", title: "Pulse home: one glance at what needs you, what moves, what is stuck", kind: "feature", priority: 1, vendor: "claude",
+    from: 20, to: 0.05, story: ["filed", "claim", "work", "work", "work", "work"],
+    notes: ["Laying out the three bands: needs you, moving, stuck", "Wiring the bands to the snapshot", "Editing src/views/Pulse.tsx"],
+    live: { state: "working", seen: 0.3, activity: "Editing src/views/Pulse.tsx" }, branch: { ahead: 4, dirty_files: 3 },
+    body: "The first screen answers three questions before any detail: does anything need me, what is moving, what is stuck.",
+  },
+  {
+    key: "NIT-30", title: "Show review rounds and findings on the issue track", kind: "feature", priority: 2, vendor: "codex",
+    from: 30, to: 0.2, story: ["filed", "claim", "work", "work", "gate", "review", "changes", "work", "work", "gate", "review"],
+    notes: ["Mapping review records onto the track", "Fixing the P1 from review: the loop drew under the labels"],
+    live: { state: "idle", seen: 6, activity: "Waiting for the review by claude" }, branch: { ahead: 6, dirty_files: 0 }, checks: "pending",
+  },
+  {
+    key: "NIT-29", title: "Activity lanes per agent over the last 24 hours", kind: "feature", priority: 2, vendor: "claude",
+    from: 46, to: 1.5, story: ["filed", "claim", "work", "work", "gate", "review", "changes", "work", "gate", "review", "changes", "work", "gate", "review", "pass"],
+    notes: ["One lane per session, events as ticks", "Bucketing events per 15 minutes", "Fixing review: lanes overlapped at narrow widths"],
+    live: { state: "idle", seen: 12, activity: "Submitted; review passed" }, branch: { ahead: 9, dirty_files: 0 }, checks: "success",
+  },
+  { key: "NIT-28", title: "Board and branch map for a project", kind: "feature", priority: 2, from: 22, to: 22, story: ["filed"] },
+  {
+    key: "NIT-27", title: "Land queue shows who is landing and what waits", kind: "feature", priority: 2, vendor: "claude",
+    from: 70, to: 3, story: ["filed", "claim", "work", "gate", "review", "passhuman", "approve"],
+    notes: ["Reading land.rs to see where the lock is held"], branch: { ahead: 5, dirty_files: 0 }, checks: "success",
+  },
+  {
+    key: "NIT-33", title: "Decide where review findings below P1 go", kind: "improvement", priority: 3, vendor: "claude",
+    from: 9, to: 0.7, story: ["filed", "claim", "work", "gate", "review", "passhuman", "ask"],
+    notes: ["Listing where P2 and P3 findings end up today"],
+    ask: { question: "Should P2 and P3 review findings become issues automatically, or stay on the pull request?", options: ["File them as issues", "Leave them on the PR"] },
+    live: { state: "idle", seen: 48, activity: "Asked: where should P2 findings go?" }, branch: { ahead: 2, dirty_files: 0 }, checks: "success",
+  },
+  { key: "NIT-26", title: "Inbox groups asks by project", kind: "improvement", priority: 3, from: 26, to: 26, story: ["filed"] },
+  { key: "NIT-25", title: "Command palette with instant search", kind: "feature", priority: 2, from: 120, to: 120, story: ["filed"] },
+  {
+    key: "NIT-24", title: "Visual foundation: design language, shared primitives, browser preview", kind: "feature", priority: 1, vendor: "claude",
+    from: 60, to: 5, story: ["filed", "claim", "work", "work", "gate", "review", "changes", "work", "gate", "review", "pass", "land"],
+  },
+  {
+    key: "NIT-23", title: "Push updates from the event store instead of polling", kind: "improvement", priority: 2, vendor: "codex",
+    from: 140, to: 30, story: ["filed", "claim", "work", "gate", "review", "pass", "land"],
+  },
+  {
+    key: "NIT-22", title: "Codex hooks miss the session end event", kind: "bug", priority: 2, vendor: "claude",
+    from: 160, to: 52, story: ["filed", "claim", "work", "gatefail", "work", "gate", "review", "pass", "land"],
+  },
+  {
+    key: "NIT-21", title: "Gate output is cut at 4 KB in the timeline", kind: "bug", priority: 3, vendor: "codex",
+    from: 34, to: 2.5, story: ["filed", "claim", "work", "gate", "review", "pass"], branch: { ahead: 2, dirty_files: 0 }, checks: "failure",
+  },
+  { key: "NIT-20", title: "Approvals signed with a key in the OS keychain", kind: "feature", priority: 1, from: 200, to: 200, story: ["filed"] },
+  { key: "NIT-19", title: "Retry a failed review once before failing submit", kind: "improvement", priority: 3, from: 180, to: 90, story: ["filed", "cancel"] },
+  { key: "NIT-18", title: "Playbook editor with a dry run", kind: "feature", priority: 3, from: 230, to: 230, story: ["filed"] },
+  { key: "NIT-17", title: "Linear import keeps duplicate labels", kind: "bug", priority: 4, from: 250, to: 240, story: ["filed", "dup"] },
+
+  // ----- Aera -----
+  {
+    key: "AND-275", title: "Tab strip flickers when a profile switches", kind: "bug", priority: 1, vendor: "claude",
+    from: 14, to: 0.15, story: ["filed", "claim", "work", "work", "gate", "work"],
+    notes: ["Reproduced: the strip repaints twice on profile switch", "Rebasing on win-dev before submit"],
+    live: { state: "idle", seen: 8, activity: "Rebasing on win-dev before submit" },
+    branch: { ahead: 3, behind: 7, dirty_files: 2, rebase_in_progress: true },
+  },
+  {
+    key: "AND-271", title: "Sync settings across profiles", kind: "feature", priority: 2, vendor: "codex",
+    from: 28, to: 0.1, story: ["filed", "claim", "work", "work", "ask", "work"],
+    notes: ["Reading the sync service", "Handling the locked-profile case"],
+    ask: { question: "The sync API returns 409 for a locked profile. Retry quietly, or show the person a banner?", options: [] },
+    live: { state: "working", seen: 0.7, activity: "Running unit_tests --gtest_filter=Sync*" }, branch: { ahead: 5, dirty_files: 6 },
+  },
+  {
+    key: "AND-268", title: "Crash on startup with an empty bookmarks file", kind: "bug", priority: 1, vendor: "codex",
+    from: 40, to: 4, story: ["filed", "claim", "work", "gate", "review", "passhuman"],
+    branch: { ahead: 1, dirty_files: 0 }, checks: "success",
+    body: "A zero-byte Bookmarks file makes the parser return null and startup dereferences it.",
+  },
+  {
+    key: "AND-266", title: "Download shelf ignores the new theme", kind: "bug", priority: 3, vendor: "codex",
+    from: 50, to: 0.9, story: ["filed", "claim", "work", "work", "gatefail"],
+    notes: ["Theme colors now come from the provider", "Gate failed in browser_tests, looking"],
+    live: { state: "idle", seen: 52, activity: "Gate failed: browser_tests (3 failures)" }, branch: { ahead: 2, dirty_files: 1 },
+  },
+  { key: "AND-270", title: "Reader mode for long articles", kind: "feature", priority: 3, from: 70, to: 70, story: ["filed"] },
+  { key: "AND-272", title: "Telemetry opt-out is not saved", kind: "bug", priority: 2, source: "human", from: 18, to: 18, story: ["filed"] },
+  { key: "AND-273", title: "Extensions page loads slowly with 40 or more extensions", kind: "improvement", priority: 3, from: 44, to: 44, story: ["filed"] },
+  { key: "AND-274", title: "Prefetch on hover for the new tab page", kind: "idea", priority: 4, from: 90, to: 90, story: ["filed"] },
+  {
+    key: "AND-265", title: "Pinned tabs lose their favicons after restart", kind: "bug", priority: 2, vendor: "claude",
+    from: 80, to: 1.2, story: ["filed", "claim", "work", "gate", "review", "passhuman", "approve", "landfail"],
+    branch: { ahead: 2, behind: 4, dirty_files: 0 }, checks: "success",
+  },
+  {
+    key: "AND-260", title: "Live check: sign-in on a clean profile", kind: "live-check", priority: 2, vendor: "claude",
+    from: 36, to: 2, story: ["filed", "claim", "work", "gate", "review", "pass"],
+    live: { state: "idle", seen: 25, activity: "Review passed; waiting to land" }, branch: { ahead: 1, dirty_files: 0 }, checks: "success",
+  },
+  { key: "AND-263", title: "Update the Windows installer icon", kind: "improvement", priority: 4, vendor: "codex", from: 150, to: 100, story: ["filed", "claim", "work", "gate", "review", "pass", "land"] },
+  { key: "AND-262", title: "Memory saver for background tabs", kind: "feature", priority: 2, vendor: "claude", from: 300, to: 20, story: ["filed", "claim", "work", "gate", "review", "changes", "work", "gate", "review", "passhuman", "approve", "land"] },
+  { key: "AND-261", title: "Spellcheck underlines in the omnibox", kind: "bug", priority: 3, vendor: "codex", from: 110, to: 60, story: ["filed", "claim", "work", "gate", "review", "pass", "land"] },
+  { key: "AND-259", title: "Drag a tab into a new window on a second monitor", kind: "bug", priority: 3, vendor: "claude", from: 260, to: 150, story: ["filed", "claim", "work", "gatefail", "work", "gate", "review", "pass", "land"] },
+
+  // ----- Harbor -----
+  {
+    key: "HAR-14", title: "Booking form loses the date on back navigation", kind: "bug", priority: 2, vendor: "cursor",
+    from: 16, to: 0.06, story: ["filed", "claim", "work", "work"],
+    notes: ["The date lives in component state; moving it to the URL", "Needs the staging migration to test"],
+    live: { state: "waiting", seen: 3, activity: "Waiting for input: run the migration against staging?" }, branch: { ahead: 2, dirty_files: 4 },
+  },
+  {
+    key: "HAR-13", title: "Show availability for the next 14 days", kind: "feature", priority: 2, vendor: "cursor",
+    from: 26, to: 0.4, story: ["filed", "claim", "work", "work", "gate", "review", "pass"],
+    notes: ["Availability grid", "Writing tests for the availability window"],
+    live: { state: "idle", seen: 18, activity: "Review passed; waiting to land" }, branch: { ahead: 7, dirty_files: 0 }, checks: "pending",
+  },
+  { key: "HAR-12", title: "Email receipts in the guest's language", kind: "feature", priority: 3, from: 60, to: 60, story: ["filed"] },
+  { key: "HAR-11", title: "Move image uploads to signed URLs", kind: "improvement", priority: 2, vendor: "cursor", from: 100, to: 3.5, story: ["filed", "claim", "work", "gate", "review", "pass", "land"] },
+  { key: "HAR-10", title: "Calendar sync with Google", kind: "feature", priority: 3, from: 300, to: 300, story: ["filed"] },
+  { key: "HAR-15", title: "Rate limit the public API", kind: "improvement", priority: 2, from: 12, to: 12, story: ["filed"] },
+  { key: "HAR-16", title: "Mobile menu traps focus", kind: "bug", priority: 2, source: "human", from: 5, to: 5, story: ["filed"] },
+  { key: "HAR-9", title: "Price shows twice on small screens", kind: "bug", priority: 3, vendor: "cursor", from: 130, to: 75, story: ["filed", "claim", "work", "gate", "review", "pass", "land"] },
+  {
+    key: "HAR-8", title: "Live check: checkout on Safari", kind: "live-check", priority: 3, vendor: "cursor",
+    from: 20, to: 1, story: ["filed", "claim", "work", "gate", "review", "passhuman"], branch: { ahead: 1, dirty_files: 0 }, checks: "success",
+    body: "Pay with a test card on Safari 18 on macOS and iOS; confirm the receipt arrives.",
+  },
+  { key: "HAR-7", title: "Seasonal pricing rules", kind: "feature", priority: 3, vendor: "cursor", from: 330, to: 140, story: ["filed", "claim", "work", "gate", "review", "changes", "work", "gate", "review", "pass", "land"] },
+];
+
+// ----- Generating the data from the stories -----
+
+const STATE_TYPE: Record<string, string> = {
+  Backlog: "backlog",
+  Todo: "unstarted",
+  "In Progress": "started",
+  "In Review": "started",
+  "Needs You": "started",
+  Approved: "started",
+  Done: "completed",
+  Canceled: "canceled",
+  Duplicate: "canceled",
+};
+
+const FINDINGS = [
+  { priority: 1, text: "The cleanup in useEffect runs after the panel unmounts, so the listener leaks when it closes mid-load." },
+  { priority: 1, text: "The rebase check reads the wrong worktree when two share a branch name prefix." },
+  { priority: 2, text: "The sparkline divides by zero for an all-zero series." },
+  { priority: 2, text: "Narrow widths wrap the station labels onto three lines." },
+  { priority: 3, text: "The helper name says lanes but returns buckets." },
+  { priority: 3, text: "Two tests share a fixture file and can race." },
+];
+
+interface World {
+  issues: IssueRecord[];
+  timelines: Map<string, TimelineEntry[]>;
+  reviews: Map<string, ReviewRecord[]>;
+  prs: Map<string, PrRecord[]>;
+  asks: Ask[];
+  projects: Project[];
+  repos: RepoSpec[];
+}
+
+function slugOf(title: string) {
+  return title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").split("-").slice(0, 5).join("-");
+}
+
+function repoOf(key: string): RepoSpec {
+  return REPOS.find((r) => key.startsWith(`${r.project}-`))!;
+}
+
+function worktreeOf(spec: IssueSpec): string {
+  const repo = repoOf(spec.key);
+  return `C:\\Development\\${repo.name}-worktrees\\${spec.key.toLowerCase()}-${slugOf(spec.title)}`;
+}
+
+function branchOf(spec: IssueSpec): string {
+  return `${spec.vendor ?? "claude"}/${spec.key.toLowerCase()}-${slugOf(spec.title)}`;
+}
+
+function prUrl(spec: IssueSpec, number: number) {
+  const repo = repoOf(spec.key);
+  return repo.provider === "github" ? `https://github.com/${repo.slug}/pull/${number}` : `https://bitbucket.org/${repo.slug}/pull-requests/${number}`;
+}
+
+function sha() {
+  return Math.floor(rand() * 0xfffffff).toString(16).padStart(7, "0");
+}
+
+let askId = 1;
+let prNumber = 40;
+
+function build(): World {
+  const world: World = { issues: [], timelines: new Map(), reviews: new Map(), prs: new Map(), asks: [], projects: [], repos: REPOS };
+  for (const spec of ISSUES) {
+    const repo = repoOf(spec.key);
+    const vendor = spec.vendor ?? "claude";
+    const reviewer = vendor === "claude" ? "codex" : "claude";
+    const agent = `${vendor}:c:/development/${repo.name.toLowerCase()}-worktrees/${spec.key.toLowerCase()}`;
+    const filer = spec.source === "human" ? "human" : `${spec.vendor ?? (rand() > 0.5 ? "claude" : "codex")}:c:/development/${repo.name.toLowerCase()}`;
+    const start = NOW - spec.from * HOUR;
+    const end = NOW - spec.to * HOUR;
+    const steps = spec.story.length;
+    const timeline: TimelineEntry[] = [];
+    const reviews: ReviewRecord[] = [];
+    const number = spec.story.some((s) => s === "changes" || s === "pass" || s === "passhuman") ? prNumber++ : 0;
+    const url = number ? prUrl(spec, number) : "";
+    let state = spec.story.length === 1 && spec.from > 80 ? "Backlog" : "Todo";
+    let notes = 0;
+    let lastAsk: Ask | null = null;
+    let claimed: string | null = null;
+    const move = (ts: number, to: string, actor = agent) => {
+      timeline.push({ ts, actor, kind: "issue_moved", summary: `${state} → ${to}` });
+      state = to;
+    };
+    const review = (ts: number, verdict: "pass" | "changes", approver: "agent" | "human") => {
+      const findings =
+        verdict === "changes"
+          ? [FINDINGS[Math.floor(rand() * 2)], FINDINGS[2 + Math.floor(rand() * 2)]]
+          : rand() > 0.5
+            ? [FINDINGS[4 + Math.floor(rand() * 2)]]
+            : [];
+      reviews.unshift({
+        issue_key: spec.key,
+        patch_id: sha(),
+        commit_sha: sha(),
+        reviewer,
+        verdict,
+        approver,
+        reasons: approver === "human" ? [spec.kind === "live-check" ? "a live check needs a person" : "touches a path the playbook keeps for a human"] : [],
+        findings,
+        ts,
+      });
+    };
+
+    spec.story.forEach((step, n) => {
+      // Spread the steps between filing and the last step, a little unevenly.
+      const f = steps === 1 ? 0 : n / (steps - 1);
+      const ts = Math.round(start + (end - start) * Math.min(1, f + (n > 0 && n < steps - 1 ? (rand() - 0.5) * 0.06 : 0)));
+      switch (step) {
+        case "filed":
+          timeline.push({ ts, actor: filer, kind: "issue_created", summary: `Filed as ${state}` });
+          break;
+        case "claim":
+          claimed = agent;
+          timeline.push({ ts, actor: agent, kind: "claimed", summary: "Took the issue" });
+          move(ts, "In Progress");
+          timeline.push({ ts: ts + 4, actor: agent, kind: "worktree", summary: `Started ${branchOf(spec)} from ${repo.integration}` });
+          break;
+        case "work":
+          timeline.push({ ts, actor: agent, kind: "status", summary: spec.notes?.[notes] ?? WORK[notes % WORK.length] });
+          notes++;
+          break;
+        case "note":
+          timeline.push({ ts, actor: agent, kind: "handoff", summary: "Done: the change and its tests. Left: the narrow layout. Unsure: whether the empty state needs an action." });
+          break;
+        case "gate":
+          timeline.push({ ts, actor: agent, kind: "gate_passed", summary: "Gate passed (3 commands)" });
+          break;
+        case "gatefail":
+          timeline.push({ ts, actor: agent, kind: "gate_failed", summary: repo.project === "AND" ? "Gate failed at `autoninja -C out/Default browser_tests`: 3 failures" : "Gate failed at `npm run build`: 2 type errors" });
+          break;
+        case "review":
+          timeline.push({ ts, actor: agent, kind: "review_started", summary: `Review by ${reviewer} started` });
+          break;
+        case "reviewfail":
+          timeline.push({ ts, actor: agent, kind: "review_failed", summary: `Review by ${reviewer} did not finish` });
+          break;
+        case "changes":
+          review(ts, "changes", "agent");
+          timeline.push({ ts, actor: agent, kind: "submit", summary: `Review by ${reviewer} requested changes. Pull request: ${url}` });
+          break;
+        case "pass":
+          review(ts, "pass", "agent");
+          timeline.push({ ts, actor: agent, kind: "submit", summary: `Review by ${reviewer} passed; ready to land. Pull request: ${url}` });
+          move(ts + 2, "In Review");
+          break;
+        case "passhuman":
+          review(ts, "pass", "human");
+          timeline.push({ ts, actor: agent, kind: "submit", summary: `Review by ${reviewer} passed; waits for a human. Pull request: ${url}` });
+          move(ts + 2, "Needs You");
+          break;
+        case "approve":
+          move(ts, "Approved", "human");
+          break;
+        case "landfail":
+          timeline.push({ ts, actor: agent, kind: "land_failed", summary: `Land stopped: rebase conflict in chrome/browser/ui/tabs/pinned_tab_codec.cc` });
+          break;
+        case "land":
+          timeline.push({ ts, actor: agent, kind: "landed", summary: `Landed ${branchOf(spec)} on ${repo.integration} at ${sha()}` });
+          move(ts + 2, "Done");
+          claimed = null;
+          break;
+        case "ask":
+          lastAsk = { id: askId++, issue_key: spec.key, asked_by: agent, question: spec.ask!.question, options: spec.ask!.options, answer: null, asked_at: ts, answered_at: null };
+          timeline.push({ ts, actor: agent, kind: "ask", summary: spec.ask!.question });
+          break;
+        case "answer":
+          timeline.push({ ts, actor: "human", kind: "answer", summary: spec.ask?.options[0] ?? "Yes" });
+          lastAsk = null;
+          break;
+        case "cancel":
+          timeline.push({ ts, actor: "human", kind: "issue_moved", summary: `${state} → Canceled` });
+          state = "Canceled";
+          break;
+        case "dup":
+          timeline.push({ ts, actor: "human", kind: "issue_moved", summary: `${state} → Duplicate` });
+          state = "Duplicate";
+          break;
+      }
+    });
+
+    if (lastAsk) world.asks.push(lastAsk);
+    timeline.sort((a, b) => a.ts - b.ts);
+    const updated = timeline[timeline.length - 1].ts;
+    world.issues.push({
+      key: spec.key,
+      origin: "nitely",
+      project: repo.project,
+      title: spec.title,
+      body: spec.body ?? "",
+      url: "",
+      state,
+      state_type: STATE_TYPE[state],
+      kind: spec.kind,
+      source: spec.source ?? vendor,
+      priority: spec.priority,
+      labels: [],
+      evidence: spec.kind === "bug" ? "Seen on the latest build; steps in the body." : "",
+      claimed_by: STATE_TYPE[state] === "started" ? claimed : null,
+      created_at: iso(timeline[0].ts),
+      updated_at: iso(updated),
+    });
+    world.timelines.set(spec.key, timeline);
+    world.reviews.set(spec.key, reviews);
+    if (number) {
+      const done = state === "Done";
+      const approved = spec.story.includes("approve");
+      world.prs.set(spec.key, [
+        {
+          provider: repo.provider,
+          repo: repo.slug,
+          number,
+          title: `${spec.key}: ${spec.title}`,
+          url,
+          state: done ? "MERGED" : "OPEN",
+          branch: branchOf(spec),
+          head_sha: sha(),
+          updated_at: iso(updated),
+          comment_count: reviews.length > 1 ? reviews.length : 0,
+          approved_by: approved ? ["AndrewDavidRivers"] : [],
+          approved_by_me: approved,
+          checks: done ? "success" : spec.checks ?? "success",
+        },
+      ]);
+    }
+  }
+  world.projects = Object.entries(PROJECT_NAMES).map(([key, name]) => ({ key, name, open_issues: 0 }));
+  recount(world);
+  return world;
+}
+
+function recount(world: World) {
+  for (const p of world.projects) {
+    p.open_issues = world.issues.filter((i) => i.project === p.key && i.state_type !== "completed" && i.state_type !== "canceled").length;
+  }
+}
+
+const world = build();
+
+// ----- Commands -----
+
+function session(spec: IssueSpec, live: Live): Session {
+  return {
+    id: `${spec.vendor}-${spec.key.toLowerCase()}`,
+    vendor: spec.vendor ?? "claude",
+    cwd: worktreeOf(spec),
+    started_at: NOW - spec.from * HOUR + 10 * MIN,
+    last_seen_at: Math.round(NOW - live.seen * MIN),
+    last_activity: live.activity,
+    state: live.state,
+  };
+}
+
+function snapshot(): Board {
+  const repos: RepoView[] = REPOS.map((repo) => {
+    const main: TaskRow = {
+      worktree: repo.root,
+      branch: repo.integration,
+      is_main: true,
+      vendor: null,
+      issue_key: null,
+      state: { ahead: 0, behind: 0, dirty_files: 0, last_commit_subject: "Land the last task", last_commit_at: NOW - 3 * HOUR, rebase_in_progress: false },
+      error: null,
+      session: null,
+      issue: null,
+      pr: null,
+      needs_me: false,
+    };
+    const rows = ISSUES.filter((s) => s.key.startsWith(`${repo.project}-`) && s.branch).map((spec): TaskRow => {
+      const issue = world.issues.find((i) => i.key === spec.key)!;
+      const s = spec.live ? session(spec, spec.live) : null;
+      const timeline = world.timelines.get(spec.key)!;
+      const lastStatus = [...timeline].reverse().find((t) => t.kind === "status" || t.kind === "gate_passed" || t.kind === "gate_failed");
+      const state: BranchState = {
+        ahead: 0,
+        behind: 0,
+        dirty_files: 0,
+        last_commit_subject: lastStatus?.summary ?? spec.title,
+        last_commit_at: lastStatus?.ts ?? null,
+        rebase_in_progress: false,
+        ...spec.branch,
+      };
+      return {
+        worktree: worktreeOf(spec),
+        branch: branchOf(spec),
+        is_main: false,
+        vendor: spec.vendor ?? null,
+        issue_key: spec.key,
+        state,
+        error: null,
+        session: s,
+        issue,
+        pr: world.prs.get(spec.key)?.[0] ?? null,
+        needs_me: state.rebase_in_progress || s?.state === "waiting",
+      };
+    });
+    const unmatched: Session[] =
+      repo.project === "HAR"
+        ? [{ id: "cursor-harbor", vendor: "cursor", cwd: repo.root, started_at: NOW - 5 * HOUR, last_seen_at: NOW - 3 * HOUR, last_activity: "Read README.md", state: "ended" }]
+        : [];
+    return { name: repo.name, root: repo.root, integration_branch: repo.integration, rows: [main, ...rows], error: null, unmatched_sessions: unmatched };
+  });
+  return {
+    repos,
+    needs_me_issues: world.issues.filter((i) => i.state === "Needs You"),
+    asks: world.asks.filter((a) => a.answer === null),
+    sync: [
+      { source: "github", last_attempt: NOW - 95, last_ok: NOW - 95, last_error: null },
+      { source: "bitbucket", last_attempt: NOW - 95, last_ok: NOW - 95, last_error: null },
+    ],
+  };
+}
+
+const PRIORITY_ORDER = (p: number) => (p === 0 ? 9 : p);
+
+function issues(args: Record<string, unknown>): IssueRecord[] {
+  const closed = !!args.includeClosed;
+  return world.issues
+    .filter((i) => i.project === args.project && (closed || (i.state_type !== "completed" && i.state_type !== "canceled")))
+    .sort((a, b) => PRIORITY_ORDER(a.priority) - PRIORITY_ORDER(b.priority) || b.updated_at.localeCompare(a.updated_at));
+}
+
+function detail(key: string): IssueDetail {
+  const issue = world.issues.find((i) => i.key.toLowerCase() === key.toLowerCase());
+  if (!issue) throw `no issue ${key}`;
+  return { issue, timeline: world.timelines.get(issue.key) ?? [], prs: world.prs.get(issue.key) ?? [], reviews: world.reviews.get(issue.key) ?? [] };
+}
+
+function moveIssue(args: Record<string, unknown>) {
+  const issue = world.issues.find((i) => i.key === args.key);
+  if (!issue) throw `no issue ${String(args.key)}`;
+  const to = String(args.state);
+  if (to === "Done" && !args.evidence) throw "Done needs evidence: what ran and what it showed";
+  if ((to === "Canceled" || to === "Duplicate") && !args.reason) throw `${to} needs a reason`;
+  const ts = Math.floor(Date.now() / 1000);
+  world.timelines.get(issue.key)!.push({ ts, actor: "human", kind: "issue_moved", summary: `${issue.state} → ${to}` });
+  issue.state = to;
+  issue.state_type = STATE_TYPE[to] ?? issue.state_type;
+  issue.updated_at = iso(ts);
+  if (issue.state_type !== "started") issue.claimed_by = null;
+  recount(world);
+}
+
+function answerAsk(args: Record<string, unknown>) {
+  const ask = world.asks.find((a) => a.id === args.id);
+  if (!ask) throw "no such question";
+  const ts = Math.floor(Date.now() / 1000);
+  ask.answer = String(args.answer);
+  ask.answered_at = ts;
+  if (ask.issue_key) world.timelines.get(ask.issue_key)?.push({ ts, actor: "human", kind: "answer", summary: ask.answer });
+}
+
+const AGENTS: AgentPlan[] = ["claude", "codex", "cursor"].map((agent) => ({
+  agent,
+  found: true,
+  changes: [
+    { target: `~/.${agent}/skills/nitely/SKILL.md`, action: "unchanged", why: "The nitely skill: how to take, report, submit and land work", after: "" },
+    { target: agent === "codex" ? "~/.codex/config.toml" : `~/.${agent}/settings.json`, action: "unchanged", why: "Hooks that report sessions to Nitely", after: "" },
+    { target: agent === "codex" ? "~/.codex/config.toml" : `~/.${agent}.json`, action: "unchanged", why: "The nitely MCP server", after: "" },
+  ],
+}));
+
+function connectPlan(args: Record<string, unknown>): ConnectPlan {
+  const path = String(args.path ?? "");
+  const name = (args.name as string | null) || path.split(/[\\/]/).filter(Boolean).pop() || "Project";
+  const key = (args.key as string | null) || name.replace(/[^A-Za-z]/g, "").slice(0, 3).toUpperCase() || "NEW";
+  return {
+    root: path,
+    repo_name: name,
+    project_key: key,
+    project_name: name,
+    project_exists: world.projects.some((p) => p.key === key),
+    integration_branch: "main",
+    playbook: {
+      source: "generated",
+      path: `%APPDATA%\\nitely\\playbooks\\${key.toLowerCase()}.toml`,
+      text: `integration = "main"\n\n[worktree]\nsetup = ["npm ci"]\n\n[gate]\ncommands = ["npm test", "npm run build"]\n\n[review]\nclaude = "codex"\n"*" = "claude"\n`,
+    },
+    nitely: "C:\\Users\\you\\.cargo\\bin\\nitely.exe",
+    agents: AGENTS.map((a) => ({
+      ...a,
+      changes: [{ target: `${path}\\AGENTS.md`, action: "update" as const, why: "Adds how this repo's agents take work from Nitely", after: "## Working with Nitely\n\nTake work with next_task, report as you go, submit when done.\n" }],
+    })),
+    warnings: [],
+  };
+}
+
+function connectApply(args: Record<string, unknown>): Applied {
+  const plan = connectPlan(args);
+  if (!world.projects.some((p) => p.key === plan.project_key)) world.projects.push({ key: plan.project_key, name: plan.project_name, open_issues: 0 });
+  return { project: plan.project_key, repo: plan.root, done: [`Created project ${plan.project_key}`, `Watching ${plan.root}`], failed: [] };
+}
+
+const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** The preview's stand-in for Tauri's `invoke`: same command names and argument names. */
+export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown>): Promise<T> {
+  await delay(cmd === "sync_now" ? 700 : 40);
+  const result: unknown = (() => {
+    switch (cmd) {
+      case "snapshot":
+        return snapshot();
+      case "projects":
+        return world.projects;
+      case "issues":
+        return issues(args);
+      case "issue_detail":
+        return detail(String(args.key));
+      case "move_issue":
+        return moveIssue(args);
+      case "answer_ask":
+        return answerAsk(args);
+      case "sync_now":
+        return null;
+      case "create_project":
+        return null;
+      case "connect_plan":
+        return connectPlan(args);
+      case "connect_apply":
+        return connectApply(args);
+      case "agent_setup":
+        return AGENTS;
+      case "agent_setup_apply":
+        return { done: [], failed: [] };
+      default:
+        throw `The preview has no fixture for "${cmd}". Add one in src/dev/fixtures.ts.`;
+    }
+  })();
+  // Callers own what they get back, as they would a fresh copy from Tauri.
+  return structuredClone(result) as T;
+}

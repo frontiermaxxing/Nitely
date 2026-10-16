@@ -1,0 +1,163 @@
+/* Nitely's design tokens. docs/visualization.md says what each role is for; use roles, never raw
+   colors, in views and primitives. Light is the default, dark follows the system, and
+   [data-theme] on <html> forces either one (the browser preview's theme switch sets it). */
+
+:root {
+  /* Surfaces: a warm graphite neutral, never the stock cool gray. */
+  --bg: #f6f6f4;
+  --surface: #ffffff;
+  --sunken: #efefec;
+  --hover: #ebebe7;
+  --line: #e4e3df;
+  --line-strong: #cbcac4;
+
+  /* Text, in three steps. --fg-3 is for things that should fade: done, stale, hints. */
+  --fg: #1d1d1b;
+  --fg-2: #5d5c57;
+  --fg-3: #6f6e68;
+
+  /* The one attention color. Only for what needs the human: an open ask, Needs You, a stuck
+     worktree waiting on them. Never for decoration, links or the primary button. */
+  --attention: #d68a00;
+  --attention-ink: #9a5b00;
+  --attention-wash: #fbf1dd;
+  --on-attention: #1d1d1b;
+
+  /* Live work: an agent working right now. Also the color of the agent's stations. */
+  --live: #0d8068;
+
+  /* Stations of the lifecycle track. The agent's stations step through one teal ramp, so the
+     track reads as one movement; the human's station is the attention color; done fades. */
+  --st-todo: #b4b3ad;
+  --st-started: #74b5a6;
+  --st-working: var(--live);
+  --st-gate: #0c7764;
+  --st-review: #0a6656;
+  --st-needs: var(--attention);
+  --st-landing: #08574a;
+  --st-done: #9a9992;
+  --st-stuck: #c0453a;
+  --st-changes: #0a6656;
+  --st-closed: #b4b3ad;
+
+  /* Agents. Muted so that a screen full of agents stays calm; each also has its own shape. */
+  --vendor-claude: #b25d43;
+  --vendor-codex: #3f566b;
+  --vendor-cursor: #6a6e32;
+  --vendor-human: var(--fg);
+  --vendor-other: #7d7c76;
+  --on-vendor: #ffffff;
+
+  /* Review finding severity. Only P0 and P1 block, so only they are red. */
+  --sev-p0: #d1291f;
+  --sev-p1: #c0453a;
+  --sev-p2: var(--fg-2);
+  --sev-p3: var(--fg-3);
+
+  /* Type. The system face (Segoe UI Variable on Windows); mono only for data: keys, branches,
+     paths, hashes. */
+  --font: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: "Cascadia Mono", "Cascadia Code", ui-monospace, Menlo, Consolas, monospace;
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-md: 13.5px;
+  --text-lg: 15px;
+  --text-xl: 20px;
+  --text-2xl: 28px;
+  --weight-medium: 550;
+  --weight-strong: 650;
+
+  /* Spacing on a 4px step. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  --radius-sm: 4px;
+  --radius: 6px;
+  --radius-lg: 10px;
+
+  /* Motion. Things move only to say something is alive or just changed. */
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --dur-fast: 120ms;
+  --dur: 200ms;
+  --breathe: 2.4s;
+
+  --shadow-panel: -1px 0 0 var(--line), -12px 0 32px -16px rgba(29, 29, 27, 0.18);
+  --focus: var(--fg-2);
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #151514;
+    --surface: #1c1c1a;
+    --sunken: #111110;
+    --hover: #262624;
+    --line: #2b2b28;
+    --line-strong: #43423e;
+    --fg: #ecebe6;
+    --fg-2: #a6a59e;
+    --fg-3: #87867f;
+    --attention: #f0a830;
+    --attention-ink: #f4b955;
+    --attention-wash: #2e2412;
+    --on-attention: #1d1d1b;
+    --live: #3cc4a3;
+    --st-todo: #5a5954;
+    --st-started: #3d7d6f;
+    --st-gate: #34ad90;
+    --st-review: #2e9a80;
+    --st-landing: #29876f;
+    --st-done: #74736d;
+    --st-stuck: #e0766a;
+    --st-changes: #2e9a80;
+    --st-closed: #5a5954;
+    --vendor-claude: #c97a5e;
+    --vendor-codex: #7f98ae;
+    --vendor-cursor: #a3a85a;
+    --vendor-other: #8f8e88;
+    --on-vendor: #151514;
+    --sev-p0: #f0675c;
+    --sev-p1: #e0766a;
+    --shadow-panel: -1px 0 0 var(--line), -12px 0 32px -12px rgba(0, 0, 0, 0.55);
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: #151514;
+  --surface: #1c1c1a;
+  --sunken: #111110;
+  --hover: #262624;
+  --line: #2b2b28;
+  --line-strong: #43423e;
+  --fg: #ecebe6;
+  --fg-2: #a6a59e;
+  --fg-3: #87867f;
+  --attention: #f0a830;
+  --attention-ink: #f4b955;
+  --attention-wash: #2e2412;
+  --on-attention: #1d1d1b;
+  --live: #3cc4a3;
+  --st-todo: #5a5954;
+  --st-started: #3d7d6f;
+  --st-gate: #34ad90;
+  --st-review: #2e9a80;
+  --st-landing: #29876f;
+  --st-done: #74736d;
+  --st-stuck: #e0766a;
+  --st-changes: #2e9a80;
+  --st-closed: #5a5954;
+  --vendor-claude: #c97a5e;
+  --vendor-codex: #7f98ae;
+  --vendor-cursor: #a3a85a;
+  --vendor-other: #8f8e88;
+  --on-vendor: #151514;
+  --sev-p0: #f0675c;
+  --sev-p1: #e0766a;
+  --shadow-panel: -1px 0 0 var(--line), -12px 0 32px -12px rgba(0, 0, 0, 0.55);
+  color-scheme: dark;
+}
