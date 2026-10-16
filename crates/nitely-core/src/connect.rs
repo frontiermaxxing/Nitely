@@ -317,6 +317,17 @@ fn is_ours(command: &str, vendor: &str) -> bool {
     command.contains("nitely") && command.contains(&format!("hook {vendor}"))
 }
 
+/// Whether `word` is just a nitely executable as `shell_word` writes it: a path to `nitely` or
+/// `nitely.exe`, quoted when it has spaces. Anything else (a chain, a wrapper) is the user's.
+fn is_nitely_exe(word: &str) -> bool {
+    let path = match word.strip_prefix('"').and_then(|w| w.strip_suffix('"')) {
+        Some(inner) => inner,
+        None if word.contains(char::is_whitespace) => return false,
+        None => word,
+    };
+    !path.contains('"') && Path::new(path).file_stem().is_some_and(|s| s == "nitely")
+}
+
 /// When `hook` is Nitely's, returns true, and points it at `command` when it is exactly what
 /// `connect` wrote for another install path. A command the user wrapped or chained is left as it is.
 fn point_at(hook: &mut Value, vendor: &str, command: &str) -> bool {
@@ -324,9 +335,7 @@ fn point_at(hook: &mut Value, vendor: &str, command: &str) -> bool {
     if !is_ours(current, vendor) {
         return false;
     }
-    let exe = current.strip_suffix(&format!(" hook {vendor}")).map(|e| e.trim_matches('"'));
-    let plain = exe.is_some_and(|e| !e.contains('"') && Path::new(e).file_stem().is_some_and(|s| s == "nitely"));
-    if plain {
+    if current.strip_suffix(&format!(" hook {vendor}")).is_some_and(is_nitely_exe) {
         hook["command"] = json!(command);
     }
     true
@@ -425,13 +434,16 @@ fn codex_plan(nitely: &str) -> Result<AgentPlan> {
     }
     let notify = [nitely, "hook", "codex"];
     let mut notify_warning = None;
-    match doc.get("notify").and_then(|n| n.as_array()) {
-        Some(a) if a.iter().map(|v| v.as_str()).eq(notify.iter().map(|s| Some(*s))) => {}
-        Some(a) if !(a.iter().any(|v| v.as_str() == Some("codex")) && a.iter().any(|v| v.as_str().is_some_and(|s| s.contains("nitely")))) => {
-            notify_warning = Some("Codex already runs another notify program, so Nitely does not see when its turns end".to_string())
+    match doc.get("notify").and_then(|n| n.as_array()).map(|a| a.iter().map(|v| v.as_str().unwrap_or("")).collect::<Vec<_>>()) {
+        Some(a) if a == notify => {}
+        // Not set, or exactly what connect wrote for another install path.
+        None => doc["notify"] = toml_edit::value(notify.into_iter().collect::<toml_edit::Array>()),
+        Some(a) if a.len() == 3 && is_nitely_exe(&shell_word(a[0])) && a[1..] == ["hook", "codex"] => {
+            doc["notify"] = toml_edit::value(notify.into_iter().collect::<toml_edit::Array>())
         }
-        // Not set, or Nitely's with an older command.
-        _ => doc["notify"] = toml_edit::value(notify.into_iter().collect::<toml_edit::Array>()),
+        // Nitely inside the user's own wrapper is left alone.
+        Some(a) if a.iter().any(|s| s.contains("nitely")) => {}
+        Some(_) => notify_warning = Some("Codex already runs another notify program, so Nitely does not see when its turns end".to_string()),
     }
     let mut c = Change::file(&config_path, "the nitely MCP server, and a notify hook that shows when a turn ends", doc.to_string());
     if let Some(w) = notify_warning {
@@ -635,6 +647,10 @@ mod tests {
         let mut chained = json!({ "command": "nitely hook claude && notify-user" });
         assert!(point_at(&mut chained, "claude", "nitely hook claude"), "still counts as Nitely's");
         assert_eq!(chained["command"], "nitely hook claude && notify-user", "but is left as the user wrote it");
+        let mut prefixed = json!({ "command": "echo ready && C:/tools/nitely.exe hook claude" });
+        point_at(&mut prefixed, "claude", "nitely hook claude");
+        assert_eq!(prefixed["command"], "echo ready && C:/tools/nitely.exe hook claude");
+        assert!(!is_nitely_exe("python") && is_nitely_exe("C:/old/nitely.exe") && is_nitely_exe("\"C:/My Tools/nitely.exe\""));
         let mut spaced = json!({ "command": "\"C:/Program Files/Nitely/nitely.exe\" hook claude" });
         point_at(&mut spaced, "claude", "nitely hook claude");
         assert_eq!(spaced["command"], "nitely hook claude");
