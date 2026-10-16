@@ -25,7 +25,14 @@ request, and moves the issue. Read its `next`.
 6. Once it is In Review (or the human approved it), `land` puts it on the integration branch.
 7. Before you stop, `note` with handoff: true: what is done, what is left, what you were unsure about.
 8. Link every issue you name, in replies, commit messages, pull requests and notes: \
-[NIT-14](nitely://issue/NIT-14), the `url` the tools return. It opens the issue in the Nitely app.";
+[NIT-14](nitely://issue/NIT-14), the `url` the tools return. It opens the issue in the Nitely app.
+
+Priority when you file: 1 exploitable today, data loss or a leak, a production job silently stopped, \
+or a broken release; 2 a user-visible bug, a blocker for shipping, or a missing safety net (CI, \
+environment switching); 3 correctness or debt that matters but can wait; 4 cleanup and nice-to-haves. \
+State: Todo when an agent can do it now; Backlog for ideas, priority 4 and work waiting on another \
+issue (or Todo with blocked_by naming it); owner human for work only the human can do; product \
+decisions go through `ask`.";
 
 /// The instructions for an agent working in `dir`: the workflow plus what Nitely knows about the
 /// repo, or None when `dir` is not in a repo Nitely watches.

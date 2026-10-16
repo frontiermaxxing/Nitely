@@ -281,7 +281,7 @@ fn tools() -> Value {
                 "kind": { "type": "string", "enum": KINDS },
                 "body": { "type": "string", "description": "What is wrong or wanted, and why. Include file paths and the branch or commit you saw it on." },
                 "evidence": { "type": "string", "description": "What you saw or ran; \"none yet\" for an idea." },
-                "priority": { "type": "integer", "minimum": 0, "maximum": 4, "description": "1 urgent, 2 high, 3 medium, 4 low, 0 none" },
+                "priority": { "type": "integer", "minimum": 0, "maximum": 4, "description": "1 urgent, 2 high, 3 medium, 4 low, 0 none; the priority rubric in the instructions says which" },
                 "state": { "type": "string", "enum": ["Todo", "Backlog", "Needs You"], "description": "Todo by default; Needs You by default for owner human." },
                 "owner": { "type": "string", "enum": OWNERS, "description": "human for work only the human can do (buy hardware, sign a contract, use a console only they can reach); next_task never hands it out. Defaults to agent." },
                 "project": { "type": "string" },
