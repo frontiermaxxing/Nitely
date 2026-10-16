@@ -5,6 +5,9 @@ use anyhow::Result;
 use serde::Serialize;
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::config::{Config, RepoConfig};
 use crate::db::{now, Db, IssueRecord, PrRecord, Session, SyncStatus};
@@ -75,7 +78,123 @@ pub struct RepoView {
     pub unmatched_sessions: Vec<Session>,
 }
 
+/// What git says about every configured repo, read once and shared by the board until the repos
+/// change. Reading it is the slow part of a snapshot (each git process costs 0.1-0.8s on Windows),
+/// so it starts as few processes as it can and runs them side by side.
+pub struct GitState {
+    repos: Vec<RepoGit>,
+    /// `watch::repos_fingerprint` when it was read, and when.
+    fingerprint: u64,
+    read_at: Instant,
+}
+
+struct RepoGit {
+    root: String,
+    worktrees: Result<Vec<git::Worktree>, String>,
+    /// Every local branch with its counts and last commit, from one `for-each-ref`.
+    branches: Vec<git::BranchRef>,
+    /// Per worktree, in the order of `worktrees`.
+    states: Vec<Result<BranchState, String>>,
+    slug: Option<String>,
+}
+
+/// Git processes run side by side at most; more only queue up in the OS.
+const GIT_LANES: usize = 8;
+
+/// Runs `f` over `items` on up to `GIT_LANES` threads; results keep the order of `items`.
+fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let next = AtomicUsize::new(0);
+    let out: Vec<Mutex<Option<R>>> = items.iter().map(|_| Mutex::new(None)).collect();
+    std::thread::scope(|s| {
+        for _ in 0..GIT_LANES.min(items.len()) {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some(item) = items.get(i) else { break };
+                *out[i].lock().unwrap() = Some(f(item));
+            });
+        }
+    });
+    out.into_iter().map(|m| m.into_inner().unwrap().expect("every item ran")).collect()
+}
+
+/// Reads git for every repo: per repo its worktrees, branches and remote (in parallel), then one
+/// `git status` per worktree (in parallel across all repos).
+pub fn read_git(config: &Config) -> GitState {
+    let fingerprint = crate::watch::repos_fingerprint();
+    let heads = par_map(&config.repos, |repo: &RepoConfig| {
+        let worktrees = git::list_worktrees(&repo.root).map_err(|e| e.to_string());
+        let branches = git::list_branches(&repo.root, &repo.integration_branch).unwrap_or_default();
+        let slug = git::bitbucket_slug(&repo.root).or_else(|| git::github_slug(&repo.root));
+        (worktrees, branches, slug)
+    });
+    let jobs: Vec<(usize, &git::Worktree, &RepoConfig, &[git::BranchRef])> = heads
+        .iter()
+        .enumerate()
+        .flat_map(|(r, (worktrees, branches, _))| {
+            let repo = &config.repos[r];
+            worktrees.iter().flatten().map(move |wt| (r, wt, repo, branches.as_slice()))
+        })
+        .collect();
+    let mut states = par_map(&jobs, |(_, wt, repo, branches)| {
+        let line = wt.branch.as_deref().and_then(|b| branches.iter().find(|x| x.name == b));
+        git::worktree_state(&wt.path, &repo.integration_branch, line).map_err(|e| e.to_string())
+    })
+    .into_iter();
+    let repos = heads
+        .into_iter()
+        .zip(&config.repos)
+        .map(|((worktrees, branches, slug), repo)| {
+            let n = worktrees.as_ref().map_or(0, Vec::len);
+            RepoGit { root: repo.root.clone(), states: states.by_ref().take(n).collect(), worktrees, branches, slug }
+        })
+        .collect();
+    GitState { repos, fingerprint, read_at: Instant::now() }
+}
+
+/// Git state reused across snapshots: while no ref, HEAD, worktree list or the config moved, and
+/// for at most `GIT_FRESH`, a snapshot reads only the database. Uncommitted edits (which move
+/// none of those) show within `GIT_FRESH`, as the app's fallback refresh asks for a new one.
+pub struct GitCache(Mutex<Option<Arc<GitState>>>);
+
+const GIT_FRESH: Duration = Duration::from_secs(25);
+
+impl GitCache {
+    pub const fn new() -> GitCache {
+        GitCache(Mutex::new(None))
+    }
+
+    /// The cached state when it is still current for `config`, else a fresh read. The lock is
+    /// held while reading, so refreshes that arrive together share one read.
+    pub fn get(&self, config: &Config) -> Arc<GitState> {
+        let mut cached = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let same_repos = |s: &GitState| s.repos.iter().map(|r| &r.root).eq(config.repos.iter().map(|r| &r.root));
+        if let Some(state) = cached.as_ref() {
+            if state.read_at.elapsed() < GIT_FRESH && same_repos(state) && state.fingerprint == crate::watch::repos_fingerprint() {
+                return state.clone();
+            }
+        }
+        let state = Arc::new(read_git(config));
+        *cached = Some(state.clone());
+        state
+    }
+}
+
+impl Default for GitCache {
+    fn default() -> Self {
+        GitCache::new()
+    }
+}
+
 pub fn snapshot(config: &Config, db: &Db) -> Result<Board> {
+    build(config, db, &read_git(config))
+}
+
+/// A snapshot that reuses `cache`'s git state while the repos have not changed.
+pub fn snapshot_cached(config: &Config, db: &Db, cache: &GitCache) -> Result<Board> {
+    build(config, db, &cache.get(config))
+}
+
+fn build(config: &Config, db: &Db, git_state: &GitState) -> Result<Board> {
     let sessions = db.sessions_since(now() - SESSION_WINDOW_SECS)?;
     let issues = db.issues()?;
     let prs = db.prs()?;
@@ -83,8 +202,8 @@ pub fn snapshot(config: &Config, db: &Db) -> Result<Board> {
     let aliases = db.project_aliases()?;
     let mut views = Vec::new();
 
-    for repo in &config.repos {
-        let worktrees = match git::list_worktrees(&repo.root) {
+    for (repo, g) in config.repos.iter().zip(&git_state.repos) {
+        let worktrees = match &g.worktrees {
             Ok(w) => w,
             Err(e) => {
                 views.push(RepoView {
@@ -94,7 +213,7 @@ pub fn snapshot(config: &Config, db: &Db) -> Result<Board> {
                     project: repo.project.clone(),
                     rows: vec![],
                     branches: vec![],
-                    error: Some(e.to_string()),
+                    error: Some(e.clone()),
                     unmatched_sessions: vec![],
                 });
                 continue;
@@ -118,20 +237,21 @@ pub fn snapshot(config: &Config, db: &Db) -> Result<Board> {
             }
         }
 
-        let slug = git::bitbucket_slug(&repo.root).or_else(|| git::github_slug(&repo.root));
+        let slug = g.slug.clone();
         let rows = worktrees
             .iter()
             .zip(session_for)
-            .map(|(wt, session)| {
+            .zip(&g.states)
+            .map(|((wt, session), git_state)| {
                 let (vendor, issue_key) = wt
                     .branch
                     .as_deref()
                     .map(git::parse_branch)
                     .unwrap_or((None, None));
                 let issue_key = issue_key.map(|k| crate::projects::current_key(&aliases, &k));
-                let (state, error) = match git::branch_state(&wt.path, &repo.integration_branch) {
-                    Ok(s) => (Some(s), None),
-                    Err(e) => (None, Some(e.to_string())),
+                let (state, error) = match git_state {
+                    Ok(s) => (Some(s.clone()), None),
+                    Err(e) => (None, Some(e.clone())),
                 };
                 let issue = issue_key
                     .as_ref()
@@ -156,7 +276,7 @@ pub fn snapshot(config: &Config, db: &Db) -> Result<Board> {
             })
             .collect();
 
-        let branches = loose_branches(repo, &worktrees, &issues, &prs, &aliases, slug.as_deref());
+        let branches = loose_branches(repo, worktrees, &g.branches, &issues, &prs, &aliases, slug.as_deref());
 
         let unmatched_sessions = sessions
             .iter()
@@ -196,16 +316,17 @@ pub fn snapshot(config: &Config, db: &Db) -> Result<Board> {
 fn loose_branches(
     repo: &RepoConfig,
     worktrees: &[git::Worktree],
+    branches: &[git::BranchRef],
     issues: &[IssueRecord],
     prs: &[PrRecord],
     aliases: &std::collections::HashMap<String, String>,
     slug: Option<&str>,
 ) -> Vec<BranchRow> {
     let checked_out: HashSet<&str> = worktrees.iter().filter_map(|w| w.branch.as_deref()).collect();
-    git::list_branches(&repo.root, &repo.integration_branch)
-        .unwrap_or_default()
-        .into_iter()
+    branches
+        .iter()
         .filter(|b| b.name != repo.integration_branch && !checked_out.contains(b.name.as_str()))
+        .cloned()
         .map(|b| {
             let (vendor, issue_key) = git::parse_branch(&b.name);
             let issue_key = issue_key.map(|k| crate::projects::current_key(aliases, &k));
@@ -237,4 +358,20 @@ fn pr_for(prs: &[PrRecord], slug: Option<&str>, branch: &str) -> Option<PrRecord
         .find(|p| p.state == "OPEN")
         .or(matching.first())
         .map(|p| (*p).clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn par_map_keeps_order_and_runs_everything() {
+        let items: Vec<u32> = (0..50).collect();
+        let out = par_map(&items, |n| {
+            std::thread::sleep(Duration::from_millis(u64::from(50 - n) % 7));
+            n * 2
+        });
+        assert_eq!(out, items.iter().map(|n| n * 2).collect::<Vec<_>>());
+        assert!(par_map(&Vec::<u32>::new(), |n| *n).is_empty());
+    }
 }

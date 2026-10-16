@@ -31,11 +31,15 @@ fn db() -> Result<Db, String> {
     Db::open_default().map_err(err)
 }
 
+/// Git state shared by every snapshot until a repo changes, so a database change (an agent's
+/// report, a move) refreshes the board without running git.
+static GIT: nitely_core::snapshot::GitCache = nitely_core::snapshot::GitCache::new();
+
 /// The Now board. Git calls block, so this runs on Tauri's async pool, off the UI thread.
 #[tauri::command]
 async fn snapshot() -> Result<Board, String> {
     let config = Config::load().map_err(err)?;
-    nitely_core::snapshot(&config, &db()?).map_err(err)
+    nitely_core::snapshot::snapshot_cached(&config, &db()?, &GIT).map_err(err)
 }
 
 /// The Pulse home view in one read. `since` is when the person last looked and `day_start` the

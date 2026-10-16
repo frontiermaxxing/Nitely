@@ -87,6 +87,8 @@ CREATE TABLE IF NOT EXISTS event (
 );
 CREATE INDEX IF NOT EXISTS event_ts ON event (ts);
 CREATE INDEX IF NOT EXISTS event_issue ON event (issue_key, ts);
+-- Lookups by issue key ignore case (`issue_key = ?1 COLLATE NOCASE`), which event_issue cannot serve.
+CREATE INDEX IF NOT EXISTS event_issue_nocase ON event (issue_key COLLATE NOCASE, ts);
 CREATE TABLE IF NOT EXISTS review (       -- one per submit; land checks the one for its patch
   id          INTEGER PRIMARY KEY,
   issue_key   TEXT NOT NULL,
@@ -234,6 +236,7 @@ fn migrate(conn: &Connection) -> Result<()> {
     }
     // v12 adds issue.owner; v13 adds playbook_proposal, which SCHEMA creates.
     add_column(conn, "issue", "owner", "TEXT NOT NULL DEFAULT 'agent'")?;
+    // v13 adds the event_issue_nocase index, which SCHEMA creates.
     Ok(())
 }
 

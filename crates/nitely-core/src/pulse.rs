@@ -194,13 +194,17 @@ pub fn pulse(db: &Db, since: i64, day_start: i64) -> Result<Pulse> {
 }
 
 impl Db {
-    /// One pass over the events of open issues.
+    /// One pass over the events of open issues. Matched to the open issues here rather than
+    /// joined in SQL, as in `fill_tracks`: a case-insensitive join compares every event with
+    /// every issue.
     fn open_issue_facts(&self) -> Result<HashMap<String, Facts>> {
+        let open: std::collections::HashSet<String> = {
+            let mut stmt = self.conn.prepare("SELECT key FROM issue WHERE state_type NOT IN ('completed', 'canceled')")?;
+            let keys = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            keys.map(|k| k.map(|k| k.to_uppercase())).collect::<rusqlite::Result<_>>()?
+        };
         let mut stmt = self.conn.prepare(
-            "SELECT e.issue_key, e.ts, e.actor, e.type, e.summary, e.cwd FROM event e
-             JOIN issue i ON i.key = e.issue_key COLLATE NOCASE
-             WHERE i.state_type NOT IN ('completed', 'canceled')
-             ORDER BY e.ts, e.id",
+            "SELECT issue_key, ts, actor, type, summary, cwd FROM event WHERE issue_key IS NOT NULL ORDER BY ts, id",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok((
@@ -215,7 +219,11 @@ impl Db {
         let mut facts: HashMap<String, Facts> = HashMap::new();
         for row in rows {
             let (key, ts, actor, kind, summary, cwd) = row?;
-            let f = facts.entry(key.to_uppercase()).or_default();
+            let key = key.to_uppercase();
+            if !open.contains(&key) {
+                continue;
+            }
+            let f = facts.entry(key).or_default();
             f.last = f.last.max(ts);
             match kind.as_str() {
                 "gate_passed" | "gate_failed" => f.gate = Some(GateRun { ts, passed: kind == "gate_passed", summary }),

@@ -1088,19 +1088,23 @@ impl Db {
     /// Fills each issue's track: open issues from their timelines, read in one query; closed ones
     /// from their state, which is all a list shows of them.
     fn fill_tracks(&self, issues: &mut [IssueRecord]) -> Result<()> {
+        // Only open issues need their timeline. Every event that names an issue, in order, matched
+        // here rather than joined in SQL: a case-insensitive join to `issue` cannot use an index,
+        // and SQLite then compares every event with every issue (seconds once agents have been busy).
+        let open: HashSet<String> = issues.iter().filter(|i| i.is_open()).map(|i| i.key.to_uppercase()).collect();
         let mut timelines: HashMap<String, Vec<TimelineEntry>> = HashMap::new();
         let mut stmt = self.conn.prepare(
-            "SELECT e.issue_key, e.ts, e.actor, e.type, e.summary FROM event e
-             JOIN issue i ON i.key = e.issue_key COLLATE NOCASE
-             WHERE i.state_type NOT IN ('completed', 'canceled')
-             ORDER BY e.ts, e.id",
+            "SELECT issue_key, ts, actor, type, summary FROM event WHERE issue_key IS NOT NULL ORDER BY ts, id",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok((r.get::<_, String>(0)?, TimelineEntry { ts: r.get(1)?, actor: r.get(2)?, kind: r.get(3)?, summary: r.get(4)? }))
         })?;
         for row in rows {
             let (key, entry) = row?;
-            timelines.entry(key.to_uppercase()).or_default().push(entry);
+            let key = key.to_uppercase();
+            if open.contains(&key) {
+                timelines.entry(key).or_default().push(entry);
+            }
         }
         let changes = self.change_reviews()?;
         for i in issues.iter_mut() {

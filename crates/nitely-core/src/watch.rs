@@ -49,6 +49,11 @@ impl Db {
     }
 }
 
+/// What moves when the config or any watched repo's refs, HEADs or worktree list change.
+pub fn repos_fingerprint() -> u64 {
+    files_fingerprint()
+}
+
 fn files_fingerprint() -> u64 {
     let mut h = DefaultHasher::new();
     stamp(&paths::config_path(), &mut h);
