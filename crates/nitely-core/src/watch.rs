@@ -115,6 +115,19 @@ mod tests {
     }
 
     #[test]
+    fn opening_the_database_is_not_a_change() {
+        let path = std::env::temp_dir().join(format!("nitely-watch-open-{}-{}.db", std::process::id(), crate::db::now()));
+        let watcher_db = Db::open(&path).unwrap();
+        let before = watcher_db.data_version().unwrap();
+        for _ in 0..3 {
+            let other = Db::open(&path).unwrap();
+            other.projects().unwrap();
+        }
+        assert_eq!(watcher_db.data_version().unwrap(), before, "every app command opens the database; that must not wake the watcher");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn ref_changes_change_the_fingerprint() {
         let repo = std::env::temp_dir().join(format!("nitely-watch-repo-{}-{}", std::process::id(), crate::db::now()));
         std::fs::create_dir_all(&repo).unwrap();
