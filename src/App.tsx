@@ -15,6 +15,7 @@ import { HOME_LABEL, nowSecs } from "./util";
 import { KeysSheet, Palette, useKeys } from "./Palette";
 import { reposOf } from "./BranchMap";
 import { CountBadge, Loading, livenessOf } from "./ui";
+import { WindowControls, ownTitleBar } from "./WindowControls";
 
 // The browser preview's page of every primitive in every state; never in a production build.
 const Kit = import.meta.env.DEV ? lazy(() => import("./dev/Kit")) : () => null;
@@ -179,8 +180,10 @@ export function App() {
 
   return (
     <div className="shell">
+      <WindowControls />
       <nav className="sidebar">
-        <div className="brand">
+        {/* On Windows the brand row is where the window is dragged from, as a title bar would be. */}
+        <div className="brand" data-tauri-drag-region={ownTitleBar || undefined}>
           <BrandMark />
           Nitely
         </div>

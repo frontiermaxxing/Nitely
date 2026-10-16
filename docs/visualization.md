@@ -344,6 +344,19 @@ their repos (amber waiting on you first, then teal working, at most five), "+ Ad
 the foot Agent setup with a dot per installed agent (teal up to date, amber an update is ready, red
 needs a look) and the line "Local · live".
 
+**The title bar.** On Windows the app has no native title bar (`src-tauri/tauri.windows.conf.json`
+sets `decorations: false`, with the shadow kept for the window's edge and resize borders). The
+window is dragged by the sidebar's brand row and by an invisible strip over the top padding of the
+main pane (`data-tauri-drag-region`; a double-click maximizes and restores), and
+`src/WindowControls.tsx` draws minimize, maximize or restore, and close in the top right corner:
+46px by `--titlebar-h` (32px), ink glyphs that turn `--fg-3` when the window loses focus, a hover
+wash of `--fg`, and the platform's red (`--caption-close`) on close. Pages start 36px down so
+nothing that takes clicks sits under the buttons, and the issue sheet starts below them. Narrow, the
+sidebar's strip stops short of the buttons, which take its colour and height. Windows 11's Snap Layouts flyout does not appear on
+hover (no reliable way to get it with drawn buttons; Win+Z and Win+arrows still snap). The Mac keeps
+its native title bar for now, and the browser preview has none; `?chrome=win` in the preview draws
+it, inert, to check how it looks.
+
 Now is a card per worktree, two columns, grouped by repo: the agent and branch, the issue, its mini
 track with the station in its color and the branch's git state, then its last three things (what
 the agent is doing, the last commit, when the session started). A card waiting on you is washed in

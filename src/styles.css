@@ -404,6 +404,29 @@ details summary { cursor: pointer; color: var(--fg-2); }
 .kit-color { display: flex; align-items: center; gap: 10px; font-size: var(--text-sm); }
 .kit-swatch { width: 18px; height: 18px; border-radius: var(--radius-sm); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--fg) 12%, transparent); flex: none; }
 
+/* ----- the title bar the app draws on Windows (src/WindowControls.tsx) -----
+   No bar of its own: the window is dragged by the sidebar's brand row and by a strip over the top
+   padding of the main pane, and the caption buttons sit in the top right corner. */
+.own-titlebar .sidebar { padding-top: 0; }
+.own-titlebar .brand { padding-top: 18px; }
+.own-titlebar .brand > * { pointer-events: none; }
+.titlebar-drag { position: fixed; top: 0; left: 232px; right: 138px; height: 26px; z-index: 5; }
+.caption { position: fixed; top: 0; right: 0; z-index: 30; display: flex; }
+.caption-btn {
+  display: grid; place-items: center; width: 46px; height: var(--titlebar-h); padding: 0; border: 0; border-radius: 0;
+  background: transparent; color: var(--fg); cursor: default; transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+.caption-btn:hover { background: color-mix(in srgb, var(--fg) 8%, transparent); }
+.caption-btn:active { background: color-mix(in srgb, var(--fg) 14%, transparent); }
+.caption-close:hover, .caption-close:active { background: var(--caption-close); color: var(--on-caption-close); }
+.caption-close:active { opacity: 0.85; }
+.caption-btn:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.caption-blurred .caption-btn:not(:hover) { color: var(--fg-3); }
+/* Nothing that takes clicks sits under the buttons or the drag strip. */
+.own-titlebar .content > .banner:first-child { margin-top: var(--titlebar-h); }
+.own-titlebar .page { padding-top: 36px; }
+.own-titlebar .panel { top: var(--titlebar-h); }
+
 /* ----- narrow windows: the sidebar becomes a strip across the top ----- */
 @media (max-width: 760px) {
   .shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
@@ -431,6 +454,13 @@ details summary { cursor: pointer; color: var(--fg-2); }
   .act-sub, .act-more, .act-issues .ui-token:nth-child(n + 2) { display: none; }
   .act-tick:nth-of-type(even) { display: none; }
   .act-band-label .muted { display: none; }
+  /* The strip across the top is the title bar: it stops short of the caption buttons, which sit
+     on the strip's colour at its full height. */
+  .own-titlebar .sidebar { padding-top: 8px; margin-right: 138px; }
+  .own-titlebar .brand { padding-top: 0; }
+  .own-titlebar .caption { background: var(--sunken); border-bottom: 1px solid var(--line); }
+  .own-titlebar .caption-btn { height: 46px; }
+  .titlebar-drag { display: none; }
 }
 @media (max-width: 1000px) and (min-width: 761px) {
   .panel { grid-template-columns: minmax(0, 1fr); overflow-y: auto; width: calc(100vw - 60px); }

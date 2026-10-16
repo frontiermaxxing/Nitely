@@ -99,6 +99,11 @@
   /* The highlight that marks where a change landed, fading out. */
   --dur-mark: 1400ms;
   --breathe: 2.4s;
+  /* The window's own title bar on Windows (src/WindowControls.tsx): its height, and the close
+     button's hover, which is the platform's red in both themes. */
+  --titlebar-h: 32px;
+  --caption-close: #c42b1c;
+  --on-caption-close: #fff;
 
   --shadow-panel: -1px 0 0 var(--line), -20px 0 60px -20px rgba(40, 35, 20, 0.16);
   --shadow-float: 0 20px 60px rgba(40, 35, 20, 0.16);
