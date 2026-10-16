@@ -64,13 +64,35 @@ fn moved_to(summary: Option<&str>) -> Option<&str> {
     (!to.is_empty()).then_some(to)
 }
 
-/// Arrives at station `s`; `since` keeps when the issue last arrived at the station it is at.
-fn reach(t: &mut Track, current: &mut &'static str, since: &mut Option<i64>, s: &'static str, ts: i64) {
-    t.reached.entry(s).or_insert(ts);
-    if *current != s || since.is_none() {
-        *since = Some(ts);
+/// Where the walk through the timeline is: the station the events put the issue at, when it last
+/// arrived there, and when it last arrived at each station (the state can put the issue at a
+/// station the events have since left, NIT-44).
+struct Walk {
+    current: &'static str,
+    since: Option<i64>,
+    arrived: BTreeMap<&'static str, i64>,
+}
+
+impl Walk {
+    /// Moves to `s` at `ts`, restarting the time there unless already there.
+    fn arrive(&mut self, s: &'static str, ts: i64) {
+        if self.current != s || self.since.is_none() {
+            self.restart(s, ts);
+        }
     }
-    *current = s;
+
+    /// Moves to `s` at `ts` and restarts the time there, even when already there.
+    fn restart(&mut self, s: &'static str, ts: i64) {
+        self.current = s;
+        self.since = Some(ts);
+        self.arrived.insert(s, ts);
+    }
+}
+
+/// Arrives at station `s`; `since` keeps when the issue last arrived at the station it is at.
+fn reach(t: &mut Track, w: &mut Walk, s: &'static str, ts: i64) {
+    t.reached.entry(s).or_insert(ts);
+    w.arrive(s, ts);
 }
 
 /// The track from the issue's state and timeline (oldest first). `change_reviews` is how many
@@ -92,34 +114,33 @@ pub fn track_of(issue: &IssueRecord, timeline: &[TimelineEntry], change_reviews:
         return t;
     }
 
-    let mut current = "todo";
-    let mut since: Option<i64> = None;
+    let mut w = Walk { current: "todo", since: None, arrived: BTreeMap::new() };
     let (mut gate_failed, mut review_failed, mut land_failed, mut push_failed) = (false, false, false, false);
     let (mut open_asks, mut rounds) = (0i64, 0i64);
 
     for e in timeline {
         let summary = e.summary.as_deref().unwrap_or("");
         match e.kind.as_str() {
-            "issue_created" => reach(&mut t, &mut current, &mut since, "todo", e.ts),
-            "claimed" | "worktree" => reach(&mut t, &mut current, &mut since, "started", e.ts),
+            "issue_created" => reach(&mut t, &mut w, "todo", e.ts),
+            "claimed" | "worktree" => reach(&mut t, &mut w, "started", e.ts),
             "status" | "note" | "handoff" => {
-                if t.reached.contains_key("started") && index(current) <= index("working") {
-                    reach(&mut t, &mut current, &mut since, "working", e.ts);
+                if t.reached.contains_key("started") && index(w.current) <= index("working") {
+                    reach(&mut t, &mut w, "working", e.ts);
                 }
             }
             "gate_passed" => {
                 gate_failed = false;
                 land_failed = false;
-                reach(&mut t, &mut current, &mut since, "gate", e.ts);
+                reach(&mut t, &mut w, "gate", e.ts);
             }
             "gate_failed" => {
                 gate_failed = true;
-                reach(&mut t, &mut current, &mut since, "gate", e.ts);
+                reach(&mut t, &mut w, "gate", e.ts);
             }
             "review_started" => {
                 review_failed = false;
                 land_failed = false;
-                reach(&mut t, &mut current, &mut since, "review", e.ts);
+                reach(&mut t, &mut w, "review", e.ts);
             }
             "review_failed" => review_failed = true,
             "submit" => {
@@ -131,21 +152,20 @@ pub fn track_of(issue: &IssueRecord, timeline: &[TimelineEntry], change_reviews:
                 // only sign that the work went back from Review to Working.
                 if summary.contains("requested changes") {
                     rounds += 1;
-                    current = "working";
-                    since = Some(e.ts);
+                    w.restart("working", e.ts);
                 }
             }
             "ask" => open_asks += 1,
             "answer" => open_asks = (open_asks - 1).max(0),
             "land_failed" => {
                 land_failed = true;
-                reach(&mut t, &mut current, &mut since, "landing", e.ts);
+                reach(&mut t, &mut w, "landing", e.ts);
             }
             "landed" => {
                 land_failed = false;
                 push_failed = false;
-                reach(&mut t, &mut current, &mut since, "landing", e.ts);
-                reach(&mut t, &mut current, &mut since, "done", e.ts);
+                reach(&mut t, &mut w, "landing", e.ts);
+                reach(&mut t, &mut w, "done", e.ts);
             }
             "issue_moved" => {
                 let Some(to) = moved_to(e.summary.as_deref()) else { continue };
@@ -159,19 +179,15 @@ pub fn track_of(issue: &IssueRecord, timeline: &[TimelineEntry], change_reviews:
                 }
                 let s = station_of_state(to, "");
                 if to == "Todo" || to == "Backlog" {
-                    if current != "todo" {
-                        since = Some(e.ts);
-                    }
-                    current = "todo";
+                    w.arrive("todo", e.ts);
                 } else if s == "working" {
-                    if index(current) >= index("review") {
-                        current = "working";
-                        since = Some(e.ts);
+                    if index(w.current) >= index("review") {
+                        w.arrive("working", e.ts);
                     } else if !t.reached.contains_key("started") {
-                        reach(&mut t, &mut current, &mut since, "started", e.ts);
+                        reach(&mut t, &mut w, "started", e.ts);
                     }
                 } else {
-                    reach(&mut t, &mut current, &mut since, s, e.ts);
+                    reach(&mut t, &mut w, s, e.ts);
                 }
             }
             _ => {}
@@ -181,7 +197,7 @@ pub fn track_of(issue: &IssueRecord, timeline: &[TimelineEntry], change_reviews:
     // The state is authoritative once the issue leaves the agent's hands; while it is In
     // Progress, the events say how far the work got.
     if t.station == "working" {
-        t.station = if index(current) >= index("started") { current } else { "working" };
+        t.station = if index(w.current) >= index("started") { w.current } else { "working" };
     }
     if matches!(t.station, "landing" | "needs" | "review") {
         let last = timeline.last().map_or(0, |e| e.ts);
@@ -202,7 +218,7 @@ pub fn track_of(issue: &IssueRecord, timeline: &[TimelineEntry], change_reviews:
             t.stuck = Some("Review did not finish".into());
         }
     }
-    t.since = if t.station == current { since } else { t.reached.get(t.station).copied() };
+    t.since = if t.station == w.current { w.since } else { w.arrived.get(t.station).or(t.reached.get(t.station)).copied() };
     t
 }
 

@@ -52,7 +52,8 @@ function rowsByIssue(board: Board | null): Map<string, TaskRow> {
   const out = new Map<string, TaskRow>();
   const seen = (r: TaskRow) => Math.max(r.session?.last_seen_at ?? 0, r.state?.last_commit_at ?? 0);
   for (const r of board?.repos.flatMap((repo) => repo.rows) ?? []) {
-    if (r.is_main || !r.issue_key) continue;
+    // The main checkout counts too: a task branch checked out there carries its agent (NIT-44).
+    if (!r.issue_key) continue;
     const had = out.get(r.issue_key);
     if (!had || seen(r) > seen(had)) out.set(r.issue_key, r);
   }
@@ -150,7 +151,9 @@ export function ProjectBoard(props: {
         live,
         row,
         pr: row?.pr ?? d?.prs[0] ?? null,
-        since: track.since ?? fallback,
+        // A closed issue's track in the list has no timeline; its detail's does, so a second move
+        // to Done does not restart its age (NIT-44).
+        since: track.since ?? d?.issue.track?.since ?? fallback,
         needsYou: track.station === "needs" || track.asking || !!row?.needs_me,
       };
     });

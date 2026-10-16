@@ -171,6 +171,13 @@
       "expect": { "station": "gate", "since": 3 }
     },
     {
+      "name": "since: the state's station counts from the last arrival there, not the first",
+      "state": "In Review",
+      "base": true,
+      "events": [["submit", "Review by codex requested changes."], ["status", "Fixing"], ["gate_passed", ""], ["review_started", ""], ["submit", "Review by codex passed; ready to land."], ["issue_moved", "In Progress → In Review"], ["status", "Resubmitting"], ["gate_failed", "Gate failed"]],
+      "expect": { "station": "review", "stuck": "Gate failed", "since": 11 }
+    },
+    {
       "name": "since: unknown without a timeline",
       "state": "In Review",
       "events": [],
