@@ -3,6 +3,7 @@ mod mcp;
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use nitely_core::issues::branch_name;
+use nitely_core::playbook::{self, Playbook};
 use nitely_core::{db::NewEvent, hook, paths, resolve_project, Actor, Config, Db, NewIssue, RepoConfig};
 use std::io::Read;
 
@@ -53,6 +54,20 @@ enum Cmd {
         /// Wait for the answer and print it.
         #[arg(long)]
         wait: bool,
+    },
+    /// Create an issue's branch and worktree from the integration branch, per the repo's
+    /// playbook (.nitely/playbook.toml), and run its setup commands. Prints the worktree.
+    Start {
+        key: String,
+        /// Who the branch is for, e.g. claude or cursor.
+        #[arg(long, default_value = "cli")]
+        agent: String,
+    },
+    /// Run the playbook's gate commands in the current worktree and record the result.
+    Gate {
+        /// The issue; defaults to the one the branch names.
+        #[arg(long)]
+        issue: Option<String>,
     },
     /// Manage the repos Nitely watches.
     Repo {
@@ -287,10 +302,14 @@ fn run(cmd: Cmd) -> Result<()> {
                     Ok(())
                 }
                 IssueCmd::Next { project, agent } => {
-                    let project = resolve_project(&config, &db, project.as_deref(), &cwd()?)?;
+                    let cwd = cwd()?;
+                    let project = resolve_project(&config, &db, project.as_deref(), &cwd)?;
                     match db.next_task(&project, &agent)? {
                         Some(i) => {
-                            let branch = branch_name(&agent, &i.key, &i.title);
+                            let branch = match playbook::repo_root(&config, &cwd) {
+                                Some(root) => Playbook::load(&root)?.branch_for(&agent, &i),
+                                None => branch_name(&agent, &i.key, &i.title),
+                            };
                             print_json(&serde_json::json!({ "issue": i, "branch": branch }))
                         }
                         None => {
@@ -315,6 +334,45 @@ fn run(cmd: Cmd) -> Result<()> {
                     return Ok(());
                 }
             }
+        }
+        Cmd::Start { key, agent } => {
+            let config = Config::load()?;
+            let db = Db::open_default()?;
+            let cwd = cwd()?;
+            let issue = db.issue(&key)?.ok_or_else(|| anyhow::anyhow!("no issue {key}"))?;
+            let root = playbook::repo_root(&config, &cwd).ok_or_else(|| anyhow::anyhow!("{cwd} is not inside a git repo"))?;
+            let started = playbook::start_task(&db, &root, &issue, &agent, &me)?;
+            for r in &started.setup {
+                eprintln!("{} {} ({}s)", if r.ok { "ok  " } else { "FAIL" }, r.command, r.seconds);
+                if !r.ok {
+                    eprintln!("{}", r.output);
+                }
+            }
+            println!("{}", started.worktree);
+            if started.setup.iter().any(|r| !r.ok) {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+        Cmd::Gate { issue } => {
+            let config = Config::load()?;
+            let db = Db::open_default()?;
+            let cwd = cwd()?;
+            let (worktree, branch_key) = playbook::current_worktree(&cwd)?;
+            let root = playbook::repo_root(&config, &cwd).ok_or_else(|| anyhow::anyhow!("{cwd} is not inside a git repo"))?;
+            let key = issue.or(branch_key);
+            let gate = playbook::run_gate(&db, &root, &worktree, key.as_deref(), &me)?;
+            for r in &gate.results {
+                eprintln!("{} {} ({}s)", if r.ok { "ok  " } else { "FAIL" }, r.command, r.seconds);
+                if !r.ok {
+                    eprintln!("{}", r.output);
+                }
+            }
+            println!("gate {} at {}", if gate.passed { "passed" } else { "failed" }, gate.commit);
+            if !gate.passed {
+                std::process::exit(1);
+            }
+            Ok(())
         }
         Cmd::Repo { command } => {
             let mut config = Config::load()?;
