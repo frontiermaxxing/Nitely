@@ -67,7 +67,7 @@ pub struct AgentPlan {
 pub struct Change {
     /// A file path, or the command to run.
     pub target: String,
-    /// `create`, `update`, `unchanged` or `run`.
+    /// `create`, `update`, `unchanged`, `run`, or `manual` (the human makes it; `after` says how).
     pub action: String,
     pub why: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -227,12 +227,20 @@ pub fn pending_changes(agents: &[AgentPlan]) -> usize {
     agents.iter().filter(|a| a.found).flat_map(|a| &a.changes).filter(|c| c.action != "unchanged").count()
 }
 
-/// Makes the agents' changes. A failure for one does not stop the others; it is reported.
+/// Makes the agents' changes. A failure for one does not stop the others; it is reported, as are
+/// agents whose setup could not be read and changes only the human can make.
 pub fn apply_agents(agents: &[AgentPlan]) -> (Vec<String>, Vec<String>) {
     let (mut done, mut failed) = (Vec::new(), Vec::new());
     for agent in agents.iter().filter(|a| a.found) {
+        if let Some(e) = &agent.error {
+            failed.push(format!("{}: its setup could not be read ({e})", agent.agent));
+        }
         for change in agent.changes.iter().filter(|c| c.action != "unchanged") {
-            let result = if change.action == "run" { run(&change.after) } else { write(Path::new(&change.target), &change.after) };
+            let result = match change.action.as_str() {
+                "run" => run(&change.after),
+                "manual" => Err(anyhow::anyhow!("not changed by Nitely; {}", change.after)),
+                _ => write(Path::new(&change.target), &change.after),
+            };
             match result {
                 Ok(()) => done.push(format!("{}: {}", agent.agent, change.why)),
                 Err(e) => failed.push(format!("{}: {} ({e:#})", agent.agent, change.why)),
@@ -296,9 +304,13 @@ fn generated_playbook(root: &Path) -> String {
     )
 }
 
+/// The nitely executable as a shell word: quoted when its path has spaces.
+fn shell_word(nitely: &str) -> String {
+    if nitely.contains(' ') { format!("\"{nitely}\"") } else { nitely.to_string() }
+}
+
 fn hook_command(nitely: &str, vendor: &str) -> String {
-    let exe = if nitely.contains(' ') { format!("\"{nitely}\"") } else { nitely.to_string() };
-    format!("{exe} hook {vendor}")
+    format!("{} hook {vendor}", shell_word(nitely))
 }
 
 fn is_ours(command: &str, vendor: &str) -> bool {
@@ -354,13 +366,21 @@ fn claude_plan(nitely: &str) -> Result<AgentPlan> {
     let claude_json = read_json(&home().join(".claude.json"))?;
     let registered = claude_json.pointer("/mcpServers/nitely");
     let current = registered.is_some_and(|s| s.get("command") == Some(&json!(nitely)) && s.get("args") == Some(&json!(["mcp"])));
-    let add = format!("claude mcp add --scope user nitely -- {nitely} mcp");
-    let (action, why, command) = match (registered, current) {
-        (None, _) => ("run", "register the nitely MCP server for every project", add),
-        (Some(_), true) => ("unchanged", "register the nitely MCP server for every project", add),
-        (Some(_), false) => ("run", "register the nitely MCP server again, with the current command", format!("claude mcp remove --scope user nitely && {add}")),
-    };
-    changes.push(Change { target: command.clone(), action: action.into(), why: why.into(), before: None, after: command });
+    let add = format!("claude mcp add --scope user nitely -- {} mcp", shell_word(nitely));
+    let why = "register the nitely MCP server for every project";
+    changes.push(match (registered, current) {
+        (None, _) => Change { target: add.clone(), action: "run".into(), why: why.into(), before: None, after: add },
+        (Some(_), true) => Change { target: add.clone(), action: "unchanged".into(), why: why.into(), before: None, after: add },
+        // Registering again would drop the entry's other settings (env, tokens), and Claude Code
+        // rewrites ~/.claude.json itself, so the human makes this one edit.
+        (Some(_), false) => Change {
+            target: home().join(".claude.json").to_string_lossy().into_owned(),
+            action: "manual".into(),
+            why: "the nitely MCP server is registered with another command".into(),
+            before: None,
+            after: format!("in mcpServers.nitely, set command to \"{nitely}\" and args to [\"mcp\"], keeping the rest"),
+        },
+    });
     Ok(AgentPlan { agent: "Claude Code".into(), found, changes, error: None })
 }
 
@@ -608,17 +628,20 @@ mod tests {
         assert!(apply_agents(&moved).1.is_empty());
         assert!(!std::fs::read_to_string(&settings).unwrap().contains("C:/old"));
 
-        // So is the MCP registration (not run here: it would call claude).
-        std::fs::write(&claude_json, r#"{"mcpServers":{"nitely":{"command":"C:/old/nitely.exe","args":["mcp"]}}}"#).unwrap();
-        let mcp = agent_plans("nitely").into_iter().next().unwrap().changes.pop().unwrap();
-        assert_eq!(mcp.action, "run");
-        assert!(mcp.after.starts_with("claude mcp remove --scope user nitely && claude mcp add"));
+        // A moved MCP registration is left to the human, so its env and tokens survive.
+        std::fs::write(&claude_json, r#"{"mcpServers":{"nitely":{"command":"C:/old/nitely.exe","args":["mcp"],"env":{"T":"x"}}}}"#).unwrap();
+        let moved = agent_plans("nitely");
+        assert_eq!(moved[0].changes.last().unwrap().action, "manual");
+        assert_eq!(pending_changes(&moved), 1);
+        assert!(apply_agents(&moved).1[0].contains("set command to \"nitely\""));
+        assert!(std::fs::read_to_string(&claude_json).unwrap().contains("C:/old"), "left as it was");
 
-        // A config that can't be read is that agent's error, not a failed check.
+        // A config that can't be read is that agent's error, reported as a failure, not a failed check.
         std::fs::write(&settings, "{ not json").unwrap();
         let broken = agent_plans("nitely");
         assert!(broken[0].error.as_deref().is_some_and(|e| e.contains("not valid JSON")));
         assert_eq!(broken.len(), 3);
+        assert!(apply_agents(&broken).1[0].contains("could not be read"));
         std::env::remove_var("NITELY_AGENT_HOME");
         std::fs::remove_dir_all(&home).ok();
     }

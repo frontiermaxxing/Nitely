@@ -187,7 +187,7 @@ footer .btn { margin-left: auto; }
 .change:last-child { border-bottom: 0; }
 .change .chip { margin-left: 0; justify-self: start; height: fit-content; }
 .chip.create, .chip.run { color: var(--working); }
-.chip.update { color: var(--waiting); }
+.chip.update, .chip.manual { color: var(--waiting); }
 .chip.unchanged { color: var(--idle); }
 pre.file { max-height: 280px; overflow: auto; background: var(--sidebar); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; font-size: 11.5px; }
 .nav-add { color: var(--muted); }

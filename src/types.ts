@@ -139,7 +139,7 @@ export interface ReviewRecord {
 
 export interface ConnectChange {
   target: string;
-  action: "create" | "update" | "unchanged" | "run";
+  action: "create" | "update" | "unchanged" | "run" | "manual";
   why: string;
   before?: string;
   after: string;

@@ -29,6 +29,7 @@ export function AgentChanges(props: { agents: AgentPlan[] }) {
                 <div>
                   <div className="small">{c.why}</div>
                   <div className="mono small muted">{c.target}</div>
+                  {c.action === "manual" && <div className="small">Nitely leaves this to you: {c.after}</div>}
                   {(c.action === "create" || c.action === "update") && (
                     <details>
                       <summary className="small">Show {c.action === "update" ? "the new file" : "the file"}</summary>
@@ -50,6 +51,9 @@ export function AgentSetup(props: { agents: AgentPlan[]; onUpdated: () => void }
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const pending = pendingChanges(props.agents);
+  const automatic = props.agents
+    .filter((a) => a.found)
+    .flatMap((a) => a.changes.filter((c) => c.action !== "unchanged" && c.action !== "manual")).length;
 
   const update = async () => {
     setBusy(true);
@@ -73,10 +77,10 @@ export function AgentSetup(props: { agents: AgentPlan[]; onUpdated: () => void }
       {error && <p className="error">{error}</p>}
       {!result && pending === 0 && setupErrors(props.agents) === 0 && <p className="small">Every agent's setup is up to date.</p>}
       <AgentChanges agents={props.agents} />
-      {!result && pending > 0 && (
+      {!result && automatic > 0 && (
         <div className="actions">
           <button className="btn primary" disabled={busy} onClick={update}>
-            Make {pending} change{pending === 1 ? "" : "s"}
+            Make {automatic} change{automatic === 1 ? "" : "s"}
           </button>
         </div>
       )}
