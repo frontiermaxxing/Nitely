@@ -460,7 +460,12 @@ impl CurrentCode {
         let root = crate::paths::normalize(&self.root.to_string_lossy());
         let lowered = crate::paths::normalize(&path);
         if let Some(rest) = lowered.strip_prefix(&format!("{root}/")) {
-            path = path[path.len() - rest.len()..].to_string();
+            // The same tail in the citation's own case; normalizing can spell an 8.3 short name
+            // out, so the lengths need not match, and then the tracked file is found by name.
+            path = match path.len().checked_sub(rest.len()).and_then(|i| path.get(i..)) {
+                Some(tail) if tail.eq_ignore_ascii_case(rest) => tail.to_string(),
+                _ => self.files.iter().find(|f| f.eq_ignore_ascii_case(rest)).cloned().unwrap_or_else(|| rest.to_string()),
+            };
         }
         if self.files.contains(&path) || (self.files.is_empty() && self.root.join(&path).is_file()) {
             return Some(path);

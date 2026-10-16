@@ -68,8 +68,11 @@ pub fn names_path(text: &str, dir: &str) -> bool {
     let text = normalize(text);
     let mut spellings = Vec::new();
     // Long or 8.3 short (`RUNNER~1`): a process may have been given either (NIT-104).
-    for dir in [crate::paths::long_path(dir), crate::paths::short_path(dir)] {
+    for dir in [dir.to_string(), crate::paths::long_path(dir), crate::paths::short_path(dir)] {
         let dir = normalize(&dir);
+        if spellings.contains(&dir) {
+            continue;
+        }
         if let Some((drive, rest)) = dir.split_once(":/").filter(|(d, _)| d.len() == 1) {
             spellings.push(format!("/{drive}/{rest}"));
             spellings.push(format!("/mnt/{drive}/{rest}"));

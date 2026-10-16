@@ -142,7 +142,8 @@ mod tests {
         let top = std::env::temp_dir().join(format!("nitely-long-folder-name-{}", std::process::id()));
         let long = top.join("inner-folder");
         std::fs::create_dir_all(&long).unwrap();
-        let long_text = long.to_string_lossy().into_owned();
+        // Spelled out first: the temp folder itself can be a short path (the CI runner's is).
+        let long_text = long_path(&long.to_string_lossy());
         let short = short_path(&long_text);
         // Only volumes with 8.3 names enabled have a short spelling to check.
         if cfg!(windows) && short != long_text {
@@ -161,6 +162,8 @@ mod tests {
                 assert_eq!(normalize(&format!(r"{short}\Nitely\not-there")), normalize(&format!("{program_files}/Nitely/not-there")));
                 assert!(crate::procs::names_path(&format!(r#"node "{short}\Nitely\x\vite.js""#), &format!(r"{program_files}\Nitely\x")));
                 assert!(crate::procs::names_path(&format!("node {program_files}/Nitely/x/vite.js"), &format!(r"{short}\Nitely\x")));
+                // A mixed spelling (short folder, long names below it) still matches itself.
+                assert!(crate::procs::names_path(&format!(r"cd {short}\Common Files\x"), &format!(r"{short}\Common Files")));
             }
         }
         assert_eq!(long_path(&long_text), long_text, "a long path stays as it is");
