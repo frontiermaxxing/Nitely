@@ -470,3 +470,11 @@ details summary { cursor: pointer; color: var(--fg-2); }
   .page.page-form { padding: 20px 16px 40px; }
   .vendor-card .change { grid-template-columns: minmax(0, 1fr); gap: 4px; }
 }
+
+/* Other machines: the add form's fields match the rest of the app's inputs. */
+.net-add input, .net-add select {
+  min-height: 30px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--surface);
+  font-size: 12.5px; color: var(--fg);
+}
+.net-add input::placeholder { color: var(--fg-3); }
+.net-add input:focus, .net-add select:focus { outline: 2px solid var(--focus); outline-offset: -1px; }
