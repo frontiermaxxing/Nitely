@@ -97,7 +97,9 @@ fn adopt_playbook(data_dir: &Path, from: &str, to: &str) -> Result<()> {
     if old == new || !old.exists() || new.exists() {
         return Ok(());
     }
-    let tmp = new.with_extension("nitely-tmp");
+    // Unique per process and call: two processes loading the config at once must not share it.
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let tmp = new.with_extension(format!("nitely-tmp-{}-{nanos}", std::process::id()));
     let copied = fs::copy(&old, &tmp).and_then(|_| fs::rename(&tmp, &new));
     if copied.is_err() {
         fs::remove_file(&tmp).ok();
@@ -163,9 +165,8 @@ mod tests {
         alias.dedupe_roots(&data);
         assert_eq!(std::fs::read_to_string(kept("New")).unwrap(), "old", "a dropped alias's playbook moves to the survivor");
 
-        // When the copy fails (here the destination is a folder), nothing is dropped.
-        std::fs::write(kept("Gone"), "rules").unwrap();
-        std::fs::create_dir_all(kept("Blocked").with_extension("nitely-tmp")).unwrap();
+        // When the copy fails (here the old playbook is a folder), nothing is dropped.
+        std::fs::create_dir_all(kept("Gone")).unwrap();
         let mut failing = Config { repos: vec![repo("Gone", "/dev/y"), repo("Blocked", "/dev/y")] };
         failing.dedupe_roots(&data);
         assert_eq!(names(&failing), vec!["Gone", "Blocked"], "the old entry and its rules stay");
