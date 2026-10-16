@@ -140,11 +140,21 @@ CREATE TABLE IF NOT EXISTS ask (
   asked_at    INTEGER NOT NULL,
   answered_at INTEGER
 );
+CREATE TABLE IF NOT EXISTS project_brief ( -- what agents learned about a project, and when setup swept it
+  project    TEXT PRIMARY KEY,
+  brief      TEXT NOT NULL DEFAULT '',
+  revision   INTEGER NOT NULL DEFAULT 0,   -- bumped on every write of brief
+  updated_at INTEGER,
+  updated_by TEXT,
+  setup_sha  TEXT,                         -- the commit the setup sweep read; NULL until it ran
+  setup_at   INTEGER,
+  setup_by   TEXT
+);
 "#;
 
 /// Bumped when a table changes shape. Tables that only mirror Bitbucket or Linear are dropped
 /// and refilled by the next sync; tables Nitely owns get real migrations.
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -164,7 +174,8 @@ fn migrate(conn: &Connection) -> Result<()> {
         // v5 keys reviews by issue and patch; the old placeholder table was never written.
         conn.execute_batch("DROP TABLE IF EXISTS review;")?;
     }
-    // v6 adds issue_blocker, v7 session_state and v8 project_alias, which SCHEMA creates; nothing to drop.
+    // v6 adds issue_blocker, v7 session_state, v8 project_alias and v9 project_brief, which SCHEMA
+    // creates; nothing to drop.
     Ok(())
 }
 

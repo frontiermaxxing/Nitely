@@ -7,7 +7,10 @@ use crate::playbook::Playbook;
 
 /// The workflow every connected agent follows, independent of the repo.
 pub const WORKFLOW: &str = "\
-Nitely tracks this work. Use the `nitely` MCP tools; do not track work anywhere else.
+Nitely tracks this work. Use the `nitely` MCP tools; do not track work anywhere else. `get_project` \
+returns the project's brief, what earlier agents learned about it: read it before exploring the repo, \
+and when you learn something about the project as a whole that the next agent needs, add it with \
+`set_project_brief`.
 
 1. `next_task` claims the most urgent Todo issue. Then `start_task` with its key creates the issue's \
 branch and worktree from the integration branch and runs setup. Work only in that worktree.

@@ -319,8 +319,8 @@ the sidebar's: three stations on a line, on the dark graphite tile.
 
 ![The branch map, dark](img/branches-dark.png)
 
-A project page has three views behind one switch (remembered): **List** (issues grouped by state),
-**Board** and **Branches**, and **Settings** beside them (never remembered as the default).
+A project page has four views behind one switch (remembered): **List** (issues grouped by state),
+**Board**, **Branches** and **Brief**, and **Settings** beside them (never remembered as the default).
 
 - **Settings** (`src/ProjectSettings.tsx`, `crates/nitely-core/src/projects.rs`): the project's
   name; its key, where a new key re-keys every issue (NIT-12 becomes NX-12, with its timeline,
@@ -342,6 +342,13 @@ A project page has three views behind one switch (remembered): **List** (issues 
   left after their issue closed, or idle 2+ days, and branches with no worktree. A solid fork and
   filled node is a worktree; a dashed fork and hollow node is a branch alone; a detached worktree
   has no fork. The node is attention when it waits on you, live while an agent works.
+- **Brief.** The project's brief (crates/nitely-core/src/brief.rs), which agents read with
+  `get_project` before they explore the repo and write with `set_project_brief`. A line on top
+  says whether the setup sweep has run (by whom, at which commit) and who edited the brief last;
+  under it the Markdown, rendered by `src/markdown.ts` (headings, lists with task boxes, tables,
+  code, links; `nitely://issue/` links open the issue). Edit opens it as text; a save passes the
+  revision it started from, and when an agent wrote meanwhile the editor says so and offers
+  "Take theirs" or "Keep mine" instead of overwriting either.
 
 ## Keys
 
@@ -374,7 +381,7 @@ and inside Tauri nothing changes.
 - Routes are in the hash: `#overview` (the default; `#pulse` still works), `#inbox`, `#now`, `#activity`, `#project/NIT`,
   `#agents`, `#add`, `#kit`, and `@KEY` opens an issue panel (`#now@NIT-29`). `?hours=1|6|12|24`
   opens Activity at that window. A project's view follows its key: `#project/NIT/list`,
-  `#project/NIT/board`, `#project/NIT/branches`; without one, the last view picked.
+  `#project/NIT/board`, `#project/NIT/branches`, `#project/NIT/brief`; without one, the last view picked.
 - Theme: the switch at the bottom of the sidebar, or `?theme=light|dark` in the URL, or the
   browser's color scheme. `[data-theme]` on `<html>` forces a theme.
 - The fixtures are four projects (NIT, AND, HAR, and OLD with no issues, for trying Settings), 40 issues across every state, nine agent

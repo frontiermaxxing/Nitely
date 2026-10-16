@@ -113,6 +113,17 @@ async fn remove_project(key: String, confirm: Option<String>) -> Result<nitely_c
 }
 
 #[tauri::command]
+async fn project_brief(project: String) -> Result<nitely_core::brief::ProjectBrief, String> {
+    db()?.project_brief(&project).map_err(err)
+}
+
+/// Saves the human's edit of a project's brief; refused when an agent wrote it since `revision`.
+#[tauri::command]
+async fn set_project_brief(project: String, brief: String, revision: i64) -> Result<nitely_core::brief::ProjectBrief, String> {
+    db()?.set_project_brief(&project, &brief, revision, &ME).map_err(err)
+}
+
+#[tauri::command]
 async fn issues(project: String, include_closed: bool) -> Result<Vec<IssueRecord>, String> {
     db()?.list_issues(Some(&project), include_closed).map_err(err)
 }
@@ -310,6 +321,8 @@ pub fn run() {
             rename_project,
             rekey_project,
             remove_project,
+            project_brief,
+            set_project_brief,
             issues,
             issue_detail,
             set_blocker,

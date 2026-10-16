@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 pub const READ_ONLY: &[&str] = &[
     "snapshot",
     "projects",
+    "project_brief",
     "issues",
     "issue_detail",
     "pulse",
@@ -48,6 +49,7 @@ pub fn run(command: &str, args: &Value) -> Result<Value> {
     Ok(match command {
         "snapshot" => json!(nitely_core::snapshot(&Config::load_read_only()?, &db()?)?),
         "projects" => json!(db()?.projects()?),
+        "project_brief" => json!(db()?.project_brief(str_arg(args, "project")?)?),
         "issues" => {
             let closed = args.get("includeClosed").and_then(Value::as_bool).unwrap_or(false);
             json!(db()?.list_issues(Some(str_arg(args, "project")?), closed)?)

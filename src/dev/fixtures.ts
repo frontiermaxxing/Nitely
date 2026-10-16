@@ -26,6 +26,7 @@ import type {
   IssueRecord,
   PrRecord,
   Project,
+  ProjectBrief,
   Pulse,
   RepoView,
   ReviewRecord,
@@ -1112,6 +1113,65 @@ const MACHINES: { name: string; project: string | null; created_at: number }[] =
   { name: "cloud-box", project: null, created_at: NOW - 9 * 24 * HOUR },
 ];
 
+// Briefs: NIT has had its setup sweep and a brief an agent wrote and you edited; HAR has a brief
+// you started by hand but no sweep; AND has neither, so the empty state shows.
+const BRIEFS: Record<string, Pick<ProjectBrief, "brief" | "revision" | "updated_at" | "updated_by" | "setup">> = {
+  NIT: {
+    brief: [
+      "# Vision",
+      "",
+      "*Inferred from the code and docs/vision.md, not confirmed by the owner.* One person runs a team of coding agents from a desktop app: agents take issues, work in their own worktrees, get reviewed by another vendor and land one at a time, and the human sees at a glance what needs them.",
+      "",
+      "# State of each area",
+      "",
+      "| Area | State |",
+      "|---|---|",
+      "| Core rules (`crates/nitely-core`) | Solid: issues, blockers, gate, review, land. Well tested. |",
+      "| MCP server | Complete for the loop. |",
+      "| App views | Overview, Inbox, Now and Activity; the board and branch map are next ([NIT-28](nitely://issue/NIT-28)). |",
+      "| Onboarding | Connect works; the board starts empty. |",
+      "",
+      "# Target order",
+      "",
+      "1. Onboarding a new repo: the setup sweep and drafted review rules.",
+      "2. Per-project review and landing settings.",
+      "3. Agents on other machines.",
+      "",
+      "# Questions for the owner",
+      "",
+      "- [x] Should agents ever approve their own playbook changes? **No.**",
+      "- [ ] Is Bitbucket still needed once the last mirrored project moves?",
+      "- [ ] Which agents should review which by default?",
+    ].join("\n"),
+    revision: 3,
+    updated_at: NOW - 5 * HOUR,
+    updated_by: "human",
+    setup: { sha: "4f0a3ec9b2d1e7a8c6f5", at: NOW - 2 * 24 * HOUR, by: "claude:c:/development/nitely" },
+  },
+  HAR: {
+    brief: "# Harbor\n\nPhoto sharing for small teams. Uploads move to signed URLs before anything else ships.\n",
+    revision: 1,
+    updated_at: NOW - 26 * HOUR,
+    updated_by: "human",
+    setup: null,
+  },
+};
+
+function projectBrief(key: string): ProjectBrief {
+  const p = world.projects.find((x) => x.key === key.toUpperCase());
+  if (!p) throw `no project ${key}`;
+  const b = BRIEFS[p.key] ?? { brief: "", revision: 0, updated_at: null, updated_by: null, setup: null };
+  return { project: p.key, name: p.name, open_issues: world.issues.filter((i) => i.project === p.key && !["completed", "canceled"].includes(i.state_type)).length, ...b };
+}
+
+function setProjectBrief(args: Record<string, unknown>): ProjectBrief {
+  const current = projectBrief(String(args.project));
+  if (Number(args.revision) !== current.revision)
+    throw `the brief changed since you read it (you read revision ${args.revision}; it is now ${current.revision} by ${current.updated_by ?? "someone"}). Read it again with get_project and merge your changes into it`;
+  BRIEFS[current.project] = { brief: String(args.brief), revision: current.revision + 1, updated_at: Math.floor(Date.now() / 1000), updated_by: "human", setup: current.setup };
+  return projectBrief(current.project);
+}
+
 /** The preview's stand-in for Tauri's `invoke`: same command names and argument names. */
 export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown>): Promise<T> {
   await delay(cmd === "sync_now" ? 700 : 40);
@@ -1127,6 +1187,10 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return null;
       case "projects":
         return world.projects;
+      case "project_brief":
+        return projectBrief(String(args.project));
+      case "set_project_brief":
+        return setProjectBrief(args);
       case "issues":
         return issues(args);
       case "issue_detail":

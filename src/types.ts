@@ -162,6 +162,19 @@ export interface Project {
   open_issues: number;
 }
 
+/** What agents learned about a project, and when the setup sweep read it (crates/nitely-core/src/brief.rs). */
+export interface ProjectBrief {
+  project: string;
+  name: string;
+  open_issues: number;
+  brief: string;
+  /** Bumped on every write; a save passes the one it read and is refused if someone wrote since. */
+  revision: number;
+  updated_at: number | null;
+  updated_by: string | null;
+  setup: { sha: string; at: number; by: string } | null;
+}
+
 export interface TimelineEntry {
   ts: number;
   actor: string;

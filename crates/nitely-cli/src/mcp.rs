@@ -142,8 +142,8 @@ fn initialize(server: &mut Server, params: &Value) -> Value {
 fn remote_instructions(r: &Remote) -> String {
     let project = r.project.as_deref().map(|p| format!(" Its default project is {p}.")).unwrap_or_default();
     format!(
-        "This is Nitely's backlog, reached over the local network as `{name}`.{project} Use `next_task` to claim work, \
-`report` what you are doing, `file_issue` what you find (it refuses likely duplicates), `note` with handoff: true \
+        "This is Nitely's backlog, reached over the local network as `{name}`.{project} Read the project's brief with \
+`get_project` first, use `next_task` to claim work, `report` what you are doing, `file_issue` what you find (it refuses likely duplicates), `note` with handoff: true \
 before you stop, and `ask` when only the human can decide. Starting worktrees, the gate, submit and land run on the \
 machine that holds the repo, so they are not available here: do the work in your own checkout and say in your \
 handoff note what branch it is on. Link every issue you name with the `url` the tools return. Never set Approved: \
@@ -221,6 +221,30 @@ fn tools() -> Value {
             "inputSchema": { "type": "object", "properties": {
                 "project": { "type": "string" },
                 "include_closed": { "type": "boolean" }
+            } }
+        },
+        {
+            "name": "get_project",
+            "description": "The project's brief (what earlier agents learned about it: vision, state of each area, target order, open questions for the owner) and its setup marker (null until the first-run sweep has run; otherwise the commit it read). Read it before exploring the repo.",
+            "inputSchema": { "type": "object", "properties": {
+                "project": { "type": "string" }
+            } }
+        },
+        {
+            "name": "set_project_brief",
+            "description": "Replace the project's brief (Markdown). Pass the revision get_project returned; it is refused when someone, such as the human, edited it since, so read it again and merge. Mark what you inferred rather than read as inference.",
+            "inputSchema": { "type": "object", "required": ["brief", "revision"], "properties": {
+                "brief": { "type": "string" },
+                "revision": { "type": "integer", "description": "The revision you read; 0 when the project has no brief yet." },
+                "project": { "type": "string" }
+            } }
+        },
+        {
+            "name": "mark_setup_complete",
+            "description": "Record that the first-run setup sweep of this project is done, with the commit it read (`git rev-parse` of the integration branch). A refresh calls it again with the new commit.",
+            "inputSchema": { "type": "object", "required": ["sha"], "properties": {
+                "sha": { "type": "string" },
+                "project": { "type": "string" }
             } }
         },
         {
@@ -501,6 +525,13 @@ fn run_tool(server: &Server, name: &str, args: &Value) -> Result<Value> {
             let include_closed = args.get("include_closed").and_then(Value::as_bool).unwrap_or(false);
             json!(db.list_issues(Some(&project), include_closed)?)
         }
+        "get_project" => json!(db.project_brief(&project(&db)?)?),
+        "set_project_brief" => {
+            let revision = args.get("revision").and_then(Value::as_i64).ok_or_else(|| anyhow!("missing revision: pass the one get_project returned"))?;
+            let brief = args.get("brief").and_then(Value::as_str).ok_or_else(|| anyhow!("missing brief"))?;
+            json!(db.set_project_brief(&project(&db)?, brief, revision, &actor)?)
+        }
+        "mark_setup_complete" => json!(db.mark_setup_complete(&project(&db)?, req(args, "sha")?, &actor)?),
         "file_issue" => {
             let project = project(&db)?;
             let source = if SOURCES.contains(&server.vendor.as_str()) { server.vendor.clone() } else { "claude".into() };

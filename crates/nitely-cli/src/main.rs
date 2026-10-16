@@ -226,6 +226,8 @@ enum ProjectCmd {
         #[arg(long, value_name = "KEY")]
         delete_issues: Option<String>,
     },
+    /// A project's brief and setup marker; the repo's project when no key is given.
+    Show { key: Option<String> },
 }
 
 #[derive(Subcommand)]
@@ -489,6 +491,10 @@ fn run(cmd: Cmd) -> Result<()> {
                         None => false,
                     };
                     print_json(&nitely_core::projects::remove(&mut db, &key, with_issues)?)
+                }
+                ProjectCmd::Show { key } => {
+                    let key = resolve_project(&Config::load()?, &db, key.as_deref(), &cwd()?)?;
+                    print_json(&db.project_brief(&key)?)
                 }
             }
         }

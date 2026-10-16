@@ -4,14 +4,15 @@ import type { Board, IssueRecord, Project } from "./types";
 import { Backlog, Summary } from "./Backlog";
 import { BoardFilters, NO_FILTER, ProjectBoard, type Filters } from "./ProjectBoard";
 import { BranchMap } from "./BranchMap";
+import { ProjectBrief } from "./ProjectBrief";
 import { ProjectSettings } from "./ProjectSettings";
 import { EmptyState, Loading } from "./ui";
 import "./project.css";
 
-export const PROJECT_TABS = ["list", "board", "branches", "settings"] as const;
+export const PROJECT_TABS = ["list", "board", "branches", "brief", "settings"] as const;
 export type ProjectTab = (typeof PROJECT_TABS)[number];
 
-const TAB_LABEL: Record<ProjectTab, string> = { list: "List", board: "Board", branches: "Branches", settings: "Settings" };
+const TAB_LABEL: Record<ProjectTab, string> = { list: "List", board: "Board", branches: "Branches", brief: "Brief", settings: "Settings" };
 const TAB_KEY = "nitely.project.tab";
 
 export function isProjectTab(t: string | undefined): t is ProjectTab {
@@ -37,8 +38,8 @@ function remember(tab: ProjectTab) {
 }
 
 /**
- * A project: its issues as a list or a board by station, and the branch map of its repos. The
- * header says how the project stands before any of them.
+ * A project: its issues as a list or a board by station, the branch map of its repos, its brief,
+ * and its settings. The header says how the project stands before any of them.
  */
 export function ProjectPage(props: {
   project: Project | undefined;
@@ -82,7 +83,7 @@ export function ProjectPage(props: {
   const views = tab === "list" || tab === "board";
 
   return (
-    <div className={`page${tab === "list" ? "" : " page-wide"}`}>
+    <div className={`page${tab === "board" || tab === "branches" ? " page-wide" : ""}`}>
       <div className="page-head project-head">
         <h1>
           {props.project?.name ?? props.projectKey} <span className="muted mono">{props.projectKey}</span>
@@ -103,8 +104,8 @@ export function ProjectPage(props: {
         {tab === "board" && issues && <BoardFilters issues={issues} board={props.board} filters={filters} onChange={setFilters} />}
       </div>
       {views && issues && issues.length > 0 && <Summary issues={issues} />}
-      {error && <p className="error">{error}</p>}
-      {((tab !== "branches" && !issues) || (tab === "branches" && !props.board)) && !error && <Loading />}
+      {tab !== "brief" && error && <p className="error">{error}</p>}
+      {((views && !issues) || (tab === "settings" && !issues) || (tab === "branches" && !props.board)) && !error && <Loading />}
       {tab === "settings" && issues && props.project && (
         <ProjectSettings project={props.project} issueCount={issues.length} onChanged={props.onChanged} onMoved={props.onMoved} />
       )}
@@ -118,6 +119,7 @@ export function ProjectPage(props: {
         <ProjectBoard issues={issues} board={props.board} now={props.now} filters={filters} onOpenIssue={props.onOpenIssue} />
       )}
       {tab === "branches" && props.board && <BranchMap board={props.board} projectKey={props.projectKey} now={props.now} onOpenIssue={props.onOpenIssue} />}
+      {tab === "brief" && <ProjectBrief projectKey={props.projectKey} version={props.version} now={props.now} onOpenIssue={props.onOpenIssue} />}
     </div>
   );
 }

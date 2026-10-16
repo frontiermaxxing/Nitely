@@ -11,7 +11,9 @@ an issue panel showing the full timeline.
 
 **For agents:** `nitely mcp` is an MCP server with `next_task` (atomic claim of the most urgent Todo
 issue), `report`, `note` (with handoffs), `file_issue` (duplicate check, evidence required),
-`update_issue` (Done needs evidence; only a human approves), `ask` and `get_answer`.
+`update_issue` (Done needs evidence; only a human approves), `ask` and `get_answer`, and
+`get_project` / `set_project_brief` / `mark_setup_complete` for the project's brief (what agents
+learned about it, editable on the project's Brief view) and whether its setup sweep has run.
 
 ## Layout
 
@@ -130,7 +132,7 @@ claude mcp add --transport http nitely http://192.168.1.68:7421/mcp --header "Au
   projects, and removing a machine (in the app, or `nitely tokens remove mac`) cuts it off. Its
   agents act as `claude@mac`, and the token's project is the default for their calls.
 - **The backlog, not the repo.** Remote agents get `next_task`, `list_issues`, `get_issue`,
-  `file_issue`, `update_issue`, `report`, `note`, `ask` and `get_answer`. `start_task`, `run_gate`,
+  `file_issue`, `update_issue`, `report`, `note`, `ask`, `get_answer` and the project brief tools. `start_task`, `run_gate`,
   `submit` and `land` work in a repo on the machine that runs them, so they are not offered.
   Approving stays in the app, as everywhere.
 - **Firewall.** The first time `nitely serve` listens, Windows may ask whether to allow it on private
