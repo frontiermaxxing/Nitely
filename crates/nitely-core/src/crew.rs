@@ -295,7 +295,8 @@ impl Supervisor {
             interrupted: Box::new(|| false),
             tokens: Box::new(|project, since| {
                 let config = crate::Config::load().unwrap_or_default();
-                crate::usage::project_tokens_since(&crate::usage::scan(&config, since), project, since)
+                let Ok(db) = Db::open_default() else { return 0 };
+                crate::usage::project_tokens_since(&crate::usage::scan(&config, &db, since), project, since)
             }),
             running: Vec::new(),
             preparing: Vec::new(),
@@ -1146,7 +1147,7 @@ pub fn project_status(db: &Db, config: &crate::Config, project: &str, moment: &M
         .filter_map(|r| Playbook::load(Path::new(&r.root)).ok())
         .collect();
     let playbook = playbooks.iter().find(|p| p.crew.workers > 0).or(playbooks.first()).cloned().unwrap_or_default();
-    let tokens = crate::usage::project_tokens_since(&crate::usage::scan(config, moment.day_start), project, moment.day_start);
+    let tokens = crate::usage::project_tokens_since(&crate::usage::scan(config, db, moment.day_start), project, moment.day_start);
     let status = status(db, project, &playbook, moment, tokens)?;
     Ok((status.cap > 0 || !status.running.is_empty() || status.supervised).then_some(status))
 }

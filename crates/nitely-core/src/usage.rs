@@ -97,8 +97,9 @@ struct FileState {
     /// Claude writes a response once per content block, each with the same usage: one per id.
     claude_ids: HashMap<String, usize>,
     codex: CodexState,
-    /// A Codex session in a folder no watched repo holds: never read past its first line.
-    skip: bool,
+    /// A Codex session's folder, from its first line, while no watched repo holds it: it is not
+    /// read further, and is checked again on the next scan (a repo may be linked since).
+    unwanted_cwd: Option<String>,
 }
 
 #[derive(Default, Clone)]
@@ -215,8 +216,11 @@ fn read_file(path: &Path, codex: bool, wanted: &dyn Fn(&str) -> bool, files: &mu
     if len < state.offset {
         *state = FileState::default(); // rewritten or truncated: start over
     }
-    if state.skip {
-        return Vec::new();
+    if let Some(cwd) = &state.unwanted_cwd {
+        if !wanted(cwd) {
+            return Vec::new();
+        }
+        state.unwanted_cwd = None;
     }
     if codex && state.offset == 0 && len > 0 {
         let first = std::fs::File::open(path).ok().and_then(|f| {
@@ -228,8 +232,8 @@ fn read_file(path: &Path, codex: bool, wanted: &dyn Fn(&str) -> bool, files: &mu
             .and_then(|l| serde_json::from_str::<serde_json::Value>(l).ok())
             .filter(|v| v["type"] == "session_meta")
             .and_then(|v| v["payload"]["cwd"].as_str().map(str::to_string));
-        if cwd.is_some_and(|c| !wanted(&c)) {
-            state.skip = true;
+        if let Some(c) = cwd.filter(|c| !wanted(c)) {
+            state.unwanted_cwd = Some(c);
             return Vec::new();
         }
     }
@@ -288,15 +292,38 @@ fn jsonl_in(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// Where a repo's agents work: its main checkout and the folder its playbook puts worktrees in.
+struct Place {
+    project: String,
+    root: String,
+    worktrees: Option<String>,
+}
+
+fn places(config: &Config) -> Vec<Place> {
+    config
+        .repos
+        .iter()
+        .filter_map(|r| {
+            let project = r.project.clone()?;
+            let pb = crate::playbook::Playbook::load(Path::new(&r.root)).unwrap_or_default();
+            let probe = crate::IssueRecord { key: "X-1".into(), title: "x".into(), ..Default::default() };
+            let worktrees = pb.worktree_for(Path::new(&r.root), "x", &probe).parent().map(|p| normalize(&p.to_string_lossy()));
+            Some(Place { project, root: normalize(&r.root), worktrees })
+        })
+        .collect()
+}
+
 /// The usage of every session in the repos Nitely watches, from files written since `since`,
-/// read from `claude` and `codex` (the agents' home folders).
-pub fn scan_in(config: &Config, since: i64, claude: Option<&Path>, codex: Option<&Path>) -> Vec<Attributed> {
-    let roots: Vec<String> = config.repos.iter().map(|r| claude_folder(&r.root)).collect();
+/// read from `claude` and `codex` (the agents' home folders). `aliases` are projects' earlier
+/// keys, so branches named before a re-key still find their issue.
+pub fn scan_in(config: &Config, aliases: &HashMap<String, String>, since: i64, claude: Option<&Path>, codex: Option<&Path>) -> Vec<Attributed> {
+    let places = places(config);
+    let roots: Vec<String> = places.iter().flat_map(|p| std::iter::once(claude_folder(&p.root)).chain(p.worktrees.as_deref().map(claude_folder))).collect();
     let mut paths: Vec<(PathBuf, bool)> = Vec::new();
     if let Some(dir) = claude.map(|c| c.join("projects")) {
         for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
             let name = e.file_name().to_string_lossy().to_string();
-            // A repo's own folder and its worktrees' (`<root>-worktrees-…`) start with its name.
+            // A repo's own folder, and its worktrees' (the worktree folder's name, then `-` and more).
             if roots.iter().any(|r| name.eq_ignore_ascii_case(r) || name.to_lowercase().starts_with(&format!("{}-", r.to_lowercase()))) {
                 let mut files = Vec::new();
                 jsonl_in(&e.path(), 2, &mut files);
@@ -313,15 +340,15 @@ pub fn scan_in(config: &Config, since: i64, claude: Option<&Path>, codex: Option
     let files = guard.get_or_insert_with(HashMap::new);
     let mut out = Vec::new();
     let mut projects: HashMap<String, Option<String>> = HashMap::new();
-    let wanted = |cwd: &str| project_of(config, cwd).is_some();
+    let wanted = |cwd: &str| project_of(&places, cwd).is_some();
     for (path, is_codex) in paths {
         for u in read_file(&path, is_codex, &wanted, files) {
             if u.ts < since {
                 continue;
             }
-            let project = projects.entry(u.cwd.clone()).or_insert_with(|| project_of(config, &u.cwd)).clone();
+            let project = projects.entry(u.cwd.clone()).or_insert_with(|| project_of(&places, &u.cwd)).clone();
             let Some(project) = project else { continue };
-            let issue = issue_of(&u, &project);
+            let issue = issue_of(&u, &project, aliases);
             out.push(Attributed { usage: u, project: Some(project), issue });
         }
     }
@@ -329,33 +356,35 @@ pub fn scan_in(config: &Config, since: i64, claude: Option<&Path>, codex: Option
 }
 
 /// As `scan_in`, from the agents' usual folders.
-pub fn scan(config: &Config, since: i64) -> Vec<Attributed> {
-    scan_in(config, since, claude_home().as_deref(), codex_home().as_deref())
+pub fn scan(config: &Config, db: &Db, since: i64) -> Vec<Attributed> {
+    let aliases = db.project_aliases().unwrap_or_default();
+    scan_in(config, &aliases, since, claude_home().as_deref(), codex_home().as_deref())
 }
 
-/// The project of the watched repo `cwd` is in: its main checkout or a worktree beside it
-/// (`<root>-worktrees/…`), the longest root that matches. Worktrees are often gone by the time
-/// their usage is read, so this goes by the path, not by asking git.
-fn project_of(config: &Config, cwd: &str) -> Option<String> {
+/// The project of the watched repo `cwd` is in: its main checkout or a worktree in the folder its
+/// playbook puts them, the longest match. Worktrees are often gone by the time their usage is
+/// read, so this goes by the path, not by asking git.
+fn project_of(places: &[Place], cwd: &str) -> Option<String> {
     let dir = normalize(cwd);
-    config
-        .repos
+    let under = |base: &str| dir == base || dir.starts_with(&format!("{base}/"));
+    places
         .iter()
-        .filter(|r| r.project.is_some())
-        .filter(|r| {
-            let root = normalize(&r.root);
-            dir == root || dir.starts_with(&format!("{root}/")) || dir.starts_with(&format!("{root}-"))
+        .filter_map(|p| {
+            let len = [Some(p.root.as_str()), p.worktrees.as_deref()].into_iter().flatten().filter(|b| under(b)).map(str::len).max()?;
+            Some((len, p.project.clone()))
         })
-        .max_by_key(|r| r.root.len())
-        .and_then(|r| r.project.clone())
+        .max_by_key(|(len, _)| *len)
+        .map(|(_, project)| project)
 }
 
-/// The issue a session worked on: the one its branch names, else its worktree folder.
-fn issue_of(u: &Usage, project: &str) -> Option<String> {
+/// The issue a session worked on: the one its branch names, else its worktree folder, under the
+/// project's key now (a key from before a re-key is followed through `aliases`).
+fn issue_of(u: &Usage, project: &str, aliases: &HashMap<String, String>) -> Option<String> {
     let folder = normalize(&u.cwd).rsplit('/').next().unwrap_or_default().to_string();
     let found = [u.branch.as_str(), folder.as_str()]
         .into_iter()
         .filter_map(|s| crate::git::parse_branch(s).1)
+        .map(|k| crate::projects::current_key(aliases, &k))
         .find(|k| k.split('-').next().is_some_and(|p| p.eq_ignore_ascii_case(project)));
     found
 }
@@ -514,15 +543,21 @@ pub fn project_spend(db: &Db, records: &[Attributed], project: &str, today_start
 pub fn spend_of_issue(config: &Config, db: &Db, key: &str) -> Result<IssueSpend> {
     let issue = db.issue(key)?.ok_or_else(|| anyhow::anyhow!("no issue {key}"))?;
     let since = crate::linear_import::parse_iso(&issue.created_at).unwrap_or(0) - 86_400;
-    Ok(issue_spend(&scan(config, since.max(0)), &issue.key))
+    Ok(issue_spend(&scan(config, db, since.max(0)), &issue.key))
 }
 
-/// A project's spend over `days` days ending today (`today_start` is local midnight). Usage from
-/// two weeks before the window is read too, for the issues that landed in it.
+/// A project's spend over `days` days ending today (`today_start` is local midnight). The issues
+/// that landed in the window count all their usage, so it is read from when the oldest was filed.
 pub fn spend_of_project(config: &Config, db: &Db, project: &str, today_start: i64, days: usize) -> Result<ProjectSpend> {
     let days = days.clamp(1, 90);
     let from = today_start - (days as i64 - 1) * 86_400;
-    project_spend(db, &scan(config, from - 14 * 86_400), project, today_start, days)
+    let mut since = from;
+    for (key, _) in db.landed_since(project, from)? {
+        if let Some(created) = db.issue(&key)?.and_then(|i| crate::linear_import::parse_iso(&i.created_at)) {
+            since = since.min(created - 86_400);
+        }
+    }
+    project_spend(db, &scan(config, db, since.max(0)), project, today_start, days)
 }
 
 impl Db {
@@ -563,6 +598,16 @@ mod tests {
         assert_eq!((state.records[0].output, state.records[0].tokens()), (80, 95));
         assert_eq!(state.records[0].cache_read, 1000);
         assert!(!format!("{:?}", state.records).contains("secret"), "no text is kept");
+    }
+
+    #[test]
+    fn a_sibling_folder_is_not_the_repo_but_its_worktrees_are() {
+        let places = vec![Place { project: "NIT".into(), root: normalize(r"C:\code\app"), worktrees: Some(normalize(r"C:\code\app-worktrees")) }];
+        assert_eq!(project_of(&places, r"C:\code\app\src").as_deref(), Some("NIT"));
+        assert_eq!(project_of(&places, r"C:\code\app-worktrees\nit-3-x").as_deref(), Some("NIT"));
+        assert_eq!(project_of(&places, r"C:\code\app-other"), None, "another checkout that only starts with the name");
+        let custom = vec![Place { project: "NIT".into(), root: normalize(r"C:\code\app"), worktrees: Some(normalize(r"D:\trees")) }];
+        assert_eq!(project_of(&custom, r"D:\trees\nit-3-x").as_deref(), Some("NIT"), "a playbook's own worktree folder");
     }
 
     #[test]
@@ -609,7 +654,8 @@ mod tests {
         )
         .unwrap();
         let config = Config { repos: vec![crate::RepoConfig { name: "app".into(), root: root.into(), integration_branch: "main".into(), project: Some("NIT".into()) }], ..Default::default() };
-        let records = scan_in(&config, 0, Some(&claude), Some(&codex));
+        let none = HashMap::new();
+        let records = scan_in(&config, &none, 0, Some(&claude), Some(&codex));
         assert_eq!(records.len(), 2, "the other repo's session is not read");
         let spend = issue_spend(&records, "NIT-3");
         assert_eq!((spend.tokens, spend.calls, spend.sessions), (65, 1, 1));
@@ -618,8 +664,13 @@ mod tests {
         // A line added later is read without reading the file again from the start.
         let mut f = std::fs::OpenOptions::new().append(true).open(&file).unwrap();
         std::io::Write::write_all(&mut f, (claude_line("m2", "2026-10-16T12:00:00Z", "claude/nit-3-x", r"C:\dev\app-worktrees\nit-3-x", 1, 9) + "\n").as_bytes()).unwrap();
-        let records = scan_in(&config, 0, Some(&claude), Some(&codex));
+        let records = scan_in(&config, &none, 0, Some(&claude), Some(&codex));
         assert_eq!(issue_spend(&records, "NIT-3").tokens, 85);
+
+        // After a re-key, the old branch's usage belongs to the issue under its new key.
+        let renamed = Config { repos: vec![crate::RepoConfig { project: Some("APP".into()), ..config.repos[0].clone() }], ..Default::default() };
+        let aliases = HashMap::from([("NIT".to_string(), "APP".to_string())]);
+        assert_eq!(issue_spend(&scan_in(&renamed, &aliases, 0, Some(&claude), Some(&codex)), "APP-3").tokens, 85);
 
         let db = Db::open(&base.join("t.db")).unwrap();
         db.conn.execute("INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, 'a', 'NIT-3', 'landed', 'x')", [crate::linear_import::parse_iso("2026-10-16T13:00:00Z").unwrap()]).unwrap();

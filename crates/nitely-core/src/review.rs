@@ -57,7 +57,8 @@ impl Default for ReviewRules {
                     "claude".to_string(),
                     args(&["claude", "-p", "--allowedTools", "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*)"]),
                 ),
-                ("codex".to_string(), args(&["codex", "exec", "--sandbox", "read-only", "--ephemeral", "-o", "{output}", "-"])),
+                // Not --ephemeral: the session log is how a review's tokens count toward the issue (usage.rs).
+                ("codex".to_string(), args(&["codex", "exec", "--sandbox", "read-only", "-o", "{output}", "-"])),
             ]),
             flags: vec![],
             focus: String::new(),
