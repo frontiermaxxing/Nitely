@@ -17,6 +17,10 @@ setup = [
   # npm ci in root and aera/ when their lockfiles changed since the last install.
   "node --input-type=module -e \"const m = await import('./scripts/work/git.mjs'); m.installDeps(process.cwd())\"",
 ]
+# Before land removes the worktree: git refuses to remove one that holds the sparse src worktree.
+teardown = [
+  "node --input-type=module -e \"const m = await import('./scripts/work/git.mjs'); console.log(m.removeSrcCheckout(process.cwd(), '{main}'))\"",
+]
 
 [gate]
 # What aera/ reads: everything except docs/ and aera-website/ (checked 2026-10-16 in land.mjs).

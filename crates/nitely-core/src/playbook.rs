@@ -72,6 +72,11 @@ pub struct WorktreeRules {
     /// usual lockfiles and manifests at the worktree's root (`SETUP_FILES`).
     #[serde(default)]
     pub setup_when_changed: Vec<String>,
+    /// Run in the worktree, in order, before land removes it: undo what setup made that
+    /// `git worktree remove` cannot take down (Aera's sparse `src` worktree, a nested worktree git
+    /// refuses to remove with). A failure is reported and the removal still tried.
+    #[serde(default)]
+    pub teardown: Vec<String>,
 }
 
 /// Dependency files whose change, by a rebase or by the agent, makes a worktree's setup stale.
@@ -270,7 +275,7 @@ impl Default for BranchRules {
 
 impl Default for WorktreeRules {
     fn default() -> Self {
-        WorktreeRules { dir: "../{repo}-worktrees/{key}-{slug}".into(), setup: vec![], setup_when_changed: vec![] }
+        WorktreeRules { dir: "../{repo}-worktrees/{key}-{slug}".into(), setup: vec![], setup_when_changed: vec![], teardown: vec![] }
     }
 }
 
@@ -774,6 +779,9 @@ mod tests {
     #[test]
     fn aera_playbook_matches_its_scripts() {
         let pb = Playbook::parse(include_str!("../../../docs/playbooks/aera.toml")).unwrap();
+        // The sparse src worktree setup adds must come down before land removes the worktree.
+        assert!(pb.worktree.setup.iter().any(|c| c.contains("ensureSrcCheckout")));
+        assert!(pb.worktree.teardown.iter().any(|c| c.contains("removeSrcCheckout")));
         let files = |f: &[&str]| f.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let human = |f: &str| !pb.approval.human_reasons(&files(&[f])).unwrap().is_empty();
         // The cases in scripts/work/approval.test.mjs.

@@ -325,6 +325,7 @@ fn cleanup(root: &Path, pb: &Playbook, worktree: &Path, branch: &str, temporary:
         );
         return (message, held);
     }
+    let teardown = teardown(root, pb, worktree);
     let removed = match git(root, &["worktree", "remove", &path]) {
         Ok(_) => Ok(()),
         Err(e) => finish_removal(root, worktree, &e),
@@ -337,7 +338,21 @@ fn cleanup(root: &Path, pb: &Playbook, worktree: &Path, branch: &str, temporary:
         },
         Err(message) => message,
     };
-    (message, vec![])
+    (if teardown.is_empty() { message } else { format!("{message}; {}", teardown.join("; ")) }, vec![])
+}
+
+/// Runs the playbook's worktree teardown in the worktree, returning what failed.
+fn teardown(root: &Path, pb: &Playbook, worktree: &Path) -> Vec<String> {
+    let mut failed = Vec::new();
+    for command in &pb.worktree.teardown {
+        let command = playbook::expand(command, root, worktree, pb.integration_branch());
+        match playbook::run_shell(&command, worktree) {
+            Ok((true, _, _)) => {}
+            Ok((false, output, _)) => failed.push(format!("teardown `{command}` failed: {}", output.trim().lines().last().unwrap_or(""))),
+            Err(e) => failed.push(format!("teardown `{command}` did not run: {}", first_line(&e))),
+        }
+    }
+    failed
 }
 
 /// After `git worktree remove` failed: Ok when the folder could be deleted after all, else what is
@@ -476,6 +491,7 @@ mod tests {
             r#"
 [worktree]
 dir = "../wt/{key}"
+teardown = ["echo torn >> {main}/../teardown.txt"]
 [gate]
 commands = ["exit 0"]
 [review]
@@ -574,6 +590,7 @@ when_changed = ["billing"]
         assert!(r.landed && r.pushed == Some(true), "{r:?}");
         assert_eq!(sh(&f.remote, &["rev-parse", "main"]), sh(&f.repo, &["rev-parse", "main"]));
         assert!(!wt_a.exists(), "the worktree is cleaned up: {:?}", r.cleanup);
+        assert!(f.base.join("teardown.txt").exists(), "the playbook's teardown ran first: {:?}", r.cleanup);
         // The after-land step for what landed ran in the main checkout; the other was skipped.
         assert!(f.base.join("after-sidebar.txt").exists(), "{:?}", r.after);
         assert_eq!(r.after.iter().map(|a| a.skipped).collect::<Vec<_>>(), [false, true]);
