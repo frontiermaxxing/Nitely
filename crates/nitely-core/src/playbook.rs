@@ -96,6 +96,16 @@ const SETUP_FILES: &[&str] = &[
     "Gemfile.lock",
 ];
 
+/// The dependency files among `files` (paths relative to the repo root): what makes a checkout's
+/// setup stale when it changes.
+pub fn setup_files_in(rules: &WorktreeRules, files: &[String]) -> Vec<String> {
+    files
+        .iter()
+        .filter(|f| SETUP_FILES.contains(&f.as_str()) || rules.setup_when_changed.iter().any(|w| w.trim_start_matches("./") == f.as_str()))
+        .cloned()
+        .collect()
+}
+
 /// Where a worktree keeps the fingerprint of the dependency files its setup last ran against:
 /// in its own git folder, so it is never committed and goes away with the worktree.
 fn setup_record(worktree: &Path) -> Option<PathBuf> {

@@ -102,11 +102,10 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
     Ok(report)
 }
 
-/// The playbook's `[land] after` steps that match what landed. A failure is a warning.
+/// The playbook's `[land] after` steps that match what landed. A failure is a warning. Then, when
+/// a dependency file landed that no after step took care of, a warning that the main checkout's
+/// setup is stale: land fast-forwards it but never runs setup there (NIT-81).
 fn after_land(root: &Path, pb: &Playbook, report: &mut Landed) {
-    if pb.land.after.is_empty() {
-        return;
-    }
     // What landed, from the head before the fast-forward. When that cannot be told, every step
     // runs: skipping a needed one silently is worse than running one more.
     let files: Option<Vec<String>> = report
@@ -114,6 +113,7 @@ fn after_land(root: &Path, pb: &Playbook, report: &mut Landed) {
         .as_deref()
         .and_then(|from| git(root, &["diff", "--name-only", "--no-renames", from, "HEAD"]).ok())
         .map(|out| out.lines().map(str::to_string).collect());
+    let mut covered: Vec<&playbook::GateStep> = Vec::new();
     for step in &pb.land.after {
         let command = playbook::expand(&step.run, root, root, &report.base);
         let skip = match files.as_deref().map(|f| step.skip_reason(f)) {
@@ -129,10 +129,28 @@ fn after_land(root: &Path, pb: &Playbook, report: &mut Landed) {
             Ok((ok, output, seconds)) => playbook::CommandResult { command, ok, seconds, output, skipped: false },
             Err(e) => playbook::CommandResult { command, ok: false, seconds: 0, output: format!("{e:#}"), skipped: false },
         };
-        if !result.ok {
+        if result.ok {
+            covered.push(step);
+        } else {
             report.warnings.push(format!("the after-land step `{}` failed; the land stands", result.command));
         }
         report.after.push(result);
+    }
+
+    if pb.worktree.setup.is_empty() {
+        return;
+    }
+    let Some(files) = files else { return };
+    // A dependency file counts as handled when an after step that names it by pattern ran and passed.
+    let names = |step: &playbook::GateStep, file: &str| step.when_changed.iter().any(|p| regex::Regex::new(p).is_ok_and(|r| r.is_match(file)));
+    let stale: Vec<String> = playbook::setup_files_in(&pb.worktree, &files).into_iter().filter(|f| !covered.iter().any(|s| names(s, f))).collect();
+    if !stale.is_empty() {
+        report.warnings.push(format!(
+            "{} changed, and the main checkout {} has not run setup since; run `{}` there before using it (a [[land.after]] step can do it for you)",
+            stale.join(", "),
+            root.display(),
+            pb.worktree.setup.join(" && ")
+        ));
     }
 }
 
@@ -608,6 +626,29 @@ when_changed = ["billing"]
         assert!(r.warnings.iter().any(|w| w.contains("exit 3")), "{r:?}");
         assert!(r.approval.unwrap().contains("approved by a human"));
         assert!(Path::new(&f.repo.join("billing.txt")).exists() && Path::new(&f.repo.join("sidebar.txt")).exists());
+        std::fs::remove_dir_all(&f.base).ok();
+    }
+
+    #[test]
+    fn warns_when_a_dependency_landed_that_no_after_step_set_up() {
+        let mut f = fixture("deps");
+        // Setup in worktrees, and an after step that takes care of Cargo.lock but not package-lock.json.
+        let pb = std::fs::read_to_string(f.repo.join(playbook::PLAYBOOK_PATH))
+            .unwrap()
+            .replace("teardown = [", "setup = [\"exit 0\"]\nteardown = [")
+            + "[[land.after]]\nrun = \"exit 0\"\nwhen_changed = ['^Cargo\\.lock$']\n";
+        std::fs::write(f.repo.join(playbook::PLAYBOOK_PATH), pb).unwrap();
+        sh(&f.repo, &["commit", "-q", "-am", "setup"]);
+
+        let (a, _) = f.submitted("Add a dependency", "package-lock.json", "{}");
+        let r = f.land(&a);
+        assert!(r.landed, "{r:?}");
+        let warning = r.warnings.iter().find(|w| w.contains("package-lock.json")).unwrap_or_else(|| panic!("{r:?}"));
+        assert!(warning.contains("`exit 0`"), "names the setup to run: {warning}");
+
+        let (b, _) = f.submitted("Bump a crate", "Cargo.lock", "x");
+        let r = f.land(&b);
+        assert!(r.landed && r.warnings.is_empty(), "the after step set it up: {r:?}");
         std::fs::remove_dir_all(&f.base).ok();
     }
 
