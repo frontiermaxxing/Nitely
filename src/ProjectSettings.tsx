@@ -102,9 +102,9 @@ export function ProjectSettings(props: {
             run(
               () => invoke<Rekeyed>("rekey_project", { key: project.key, newKey }),
               (r) => {
-                setNote(
-                  [`${r.issues} issue${r.issues === 1 ? "" : "s"} now start with ${r.to}; ${r.from}-… links still open them.`, ...r.warnings].join(" "),
-                );
+                setNote(`${r.issues} issue${r.issues === 1 ? "" : "s"} now start with ${r.to}; ${r.from}-… links still open them.`);
+                // The view moves to the new key at once, so what could not follow is said now.
+                if (r.warnings.length) window.alert(r.warnings.join("\n"));
                 props.onChanged();
                 props.onMoved(r.to);
               },

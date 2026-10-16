@@ -77,6 +77,13 @@ pub struct Removed {
 /// config and tokens follow as best they can, and an old key left in them still works.
 pub fn rekey(db: &mut Db, from: &str, to: &str) -> Result<Rekeyed> {
     let config = crate::Config::load()?;
+    let to_key = valid_key(to)?;
+    let from_key = from.trim().to_uppercase();
+    // Run again after the database changed but a config or token file did not: finish those.
+    if db.project_exact(&from_key)?.is_none() && db.project_aliases()?.get(&from_key) == Some(&to_key) {
+        let (repos, machines, warnings) = follow(config, &from_key, Some(&to_key));
+        return Ok(Rekeyed { from: from_key, to: to_key, issues: 0, repos, machines, warnings });
+    }
     let key = db.project_exact(from)?.with_context(|| format!("no project {from}"))?.key;
     let busy = checked_out(&config, db, &key);
     if !busy.is_empty() {
@@ -92,6 +99,16 @@ pub fn rekey(db: &mut Db, from: &str, to: &str) -> Result<Rekeyed> {
 /// checked out; repos and machine tokens that named it then name none.
 pub fn remove(db: &mut Db, key: &str, with_issues: bool) -> Result<Removed> {
     let config = crate::Config::load()?;
+    let wanted = key.trim().to_uppercase();
+    // Run again after the project went but a config or token file still names it: finish those.
+    if db.project(&wanted)?.is_none() {
+        let named = config.repos.iter().any(|r| r.project.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(&wanted)))
+            || crate::relay::list_tokens()?.iter().any(|t| t.project.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(&wanted)));
+        if named {
+            let (repos, machines, warnings) = follow(config, &wanted, None);
+            return Ok(Removed { key: wanted, issues: 0, repos, machines, warnings });
+        }
+    }
     let key = db.project_exact(key)?.with_context(|| format!("no project {key}"))?.key;
     let busy = checked_out(&config, db, &key);
     if !busy.is_empty() {
@@ -162,13 +179,13 @@ impl Db {
         self.project(&project.key)?.context("project vanished after rename")
     }
 
-    /// Gives a project a new key, and every one of its issues the new prefix.
+    /// Gives a project a new key, and every one of its issues the new prefix. Only through
+    /// `projects::rekey`, which first refuses while a worktree's branch names one of its issues.
     ///
     /// Refused when issues with the prefix are mirrored from another tracker (their keys are the
-    /// tracker's, not Nitely's) and while one is checked out in an open task; `rekey` also
-    /// refuses while a worktree's branch names one. Every check and change runs in one immediate
+    /// tracker's, not Nitely's), and while one is in an open task row. Every check and change runs in one immediate
     /// transaction, so an issue filed meanwhile is either re-keyed with the rest or refused.
-    pub fn rekey_project(&mut self, from: &str, to: &str) -> Result<Rekeyed> {
+    pub(crate) fn rekey_project(&mut self, from: &str, to: &str) -> Result<Rekeyed> {
         let to = valid_key(to)?;
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let from: String = tx
@@ -230,11 +247,11 @@ impl Db {
         Ok(Rekeyed { from, to, issues, repos: 0, machines: 0, warnings: vec![] })
     }
 
-    /// Removes a project. Refused while it has issues, unless `with_issues`, which deletes them
-    /// and everything recorded about them; refused either way while one is checked out in an
-    /// open task. The count and the delete share one immediate transaction, so an issue filed
+    /// Removes a project. Only through `projects::remove`, which first refuses while a worktree's
+    /// branch names one of its issues. Refused while it has issues, unless `with_issues`, which
+    /// deletes them and everything recorded about them, and while one is in an open task row. The count and the delete share one immediate transaction, so an issue filed
     /// meanwhile is never deleted without consent.
-    pub fn remove_project(&mut self, key: &str, with_issues: bool) -> Result<Removed> {
+    pub(crate) fn remove_project(&mut self, key: &str, with_issues: bool) -> Result<Removed> {
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let key: String = tx
             .query_row("SELECT key FROM project WHERE key = ?1 COLLATE NOCASE", [key.trim()], |r| r.get(0))

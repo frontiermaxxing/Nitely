@@ -340,7 +340,14 @@ pub fn parse_iso(s: &str) -> Option<i64> {
 /// What importing `issues` into `project` would do. Changes nothing.
 pub fn plan(db: &Db, issues: &[LinearIssue], project: &str, project_name: &str) -> Result<ImportPlan> {
     let project = project.trim().to_uppercase();
-    let existing = db.project(&project)?;
+    // Imported issues keep their Linear keys, so the key must be a project's own, not an old key
+    // whose links now lead to another project's issues.
+    let existing = db.project_exact(&project)?;
+    if existing.is_none() {
+        if let Some(now) = db.project(&project)? {
+            bail!("{project} was an earlier key of {}; import into {} or another key", now.key, now.key);
+        }
+    }
     let mut out = ImportPlan {
         project_exists: existing.is_some(),
         project_name: existing.map(|p| p.name).unwrap_or_else(|| project_name.to_string()),
