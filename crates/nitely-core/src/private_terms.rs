@@ -29,7 +29,8 @@ pub struct PrivateTerms {
 /// person can find it; the matched text itself is never reported.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Hit {
-    /// `src/app.ts:12`, `path src/acme/x.ts`, or `commit 1a2b3c4 message line 2`.
+    /// `src/app.ts:12 (commit 1a2b3c4)`, `path src/acme/x.ts (commit 1a2b3c4)`, or
+    /// `commit 1a2b3c4 message line 2`.
     pub at: String,
     /// `every project` or the project key.
     pub list: String,
@@ -134,24 +135,51 @@ fn compile(list: &str, terms: &[String]) -> Result<Vec<(usize, Matcher)>> {
     Ok(out)
 }
 
-/// What `branch` adds against `base` (a commit or branch): `(where, text)` for every added line,
-/// every new or renamed file's path, and every line of the commit messages.
+/// What the branch's commits add since `base` (a commit or branch), one commit at a time, since
+/// pushing and landing keep every commit: a term added in one commit and removed in a later one is
+/// still published. `(where, text)` for every added line, every new file's path, and every line of
+/// every commit message. Merge commits are scanned for their message only.
 fn added(worktree: &Path, base: &str) -> Result<Vec<(String, String)>> {
+    // Fixed prefixes and no textconv or external diff, whatever the user's git config says, so
+    // every added line is seen and parsed the same way.
+    let log = git(
+        worktree,
+        &[
+            "-c", "core.quotepath=false", "-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false",
+            "log", "--reverse", "--format=%x1e%h%x1f%B%x1f", "--patch", "--unified=0", "--no-color", "--no-ext-diff",
+            "--no-textconv", "--no-renames", "--src-prefix=a/", "--dst-prefix=b/", &format!("{base}..HEAD"),
+        ],
+    )?;
     let mut out = Vec::new();
-    let quiet = ["-c", "core.quotepath=false"];
-    let paths = git(worktree, &[quiet[0], quiet[1], "diff", "--name-only", "--diff-filter=AR", &format!("{base}...HEAD")])?;
-    out.extend(paths.lines().filter(|l| !l.is_empty()).map(|p| (format!("path {p}"), p.to_string())));
+    for entry in log.split('\x1e') {
+        let mut parts = entry.splitn(3, '\x1f');
+        let (Some(hash), Some(message)) = (parts.next(), parts.next()) else { continue };
+        let hash = hash.trim();
+        for (n, text) in message.lines().enumerate() {
+            out.push((format!("commit {hash} message line {}", n + 1), text.to_string()));
+        }
+        out.extend(patch_lines(parts.next().unwrap_or(""), hash));
+    }
+    Ok(out)
+}
 
-    let diff = git(worktree, &[quiet[0], quiet[1], "diff", "--no-color", "--no-ext-diff", "--unified=0", "--no-renames", &format!("{base}...HEAD")])?;
+/// Added lines and new files' paths in one commit's patch (`--unified=0`, `a/` and `b/` prefixes).
+fn patch_lines(patch: &str, hash: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
     let mut file: Option<String> = None;
+    let mut new_file = false;
     let mut line = 0usize;
     let mut in_hunk = false;
-    for l in diff.lines() {
+    for l in patch.lines() {
         if l.starts_with("diff --git ") {
-            in_hunk = false;
-            file = None;
+            (in_hunk, file, new_file) = (false, None, false);
+        } else if !in_hunk && l == "--- /dev/null" {
+            new_file = true;
         } else if !in_hunk && l.starts_with("+++ ") {
             file = l.strip_prefix("+++ b/").map(str::to_string);
+            if let (true, Some(f)) = (new_file, &file) {
+                out.push((format!("path {f} (commit {hash})"), f.clone()));
+            }
         } else if let Some(rest) = l.strip_prefix("@@ ") {
             // @@ -a,b +c,d @@: added lines count from c.
             line = rest.split_whitespace().find_map(|p| p.strip_prefix('+')).and_then(|p| p.split(',').next()).and_then(|n| n.parse().ok()).unwrap_or(0);
@@ -159,21 +187,13 @@ fn added(worktree: &Path, base: &str) -> Result<Vec<(String, String)>> {
         } else if in_hunk {
             if let Some(text) = l.strip_prefix('+') {
                 if let Some(f) = &file {
-                    out.push((format!("{f}:{line}"), text.to_string()));
+                    out.push((format!("{f}:{line} (commit {hash})"), text.to_string()));
                 }
                 line += 1;
             }
         }
     }
-
-    let log = git(worktree, &["log", "--format=%h%x1f%B%x1e", &format!("{base}..HEAD")])?;
-    for entry in log.split('\x1e') {
-        let Some((hash, message)) = entry.trim_start().split_once('\x1f') else { continue };
-        for (n, text) in message.lines().enumerate() {
-            out.push((format!("commit {hash} message line {}", n + 1), text.to_string()));
-        }
-    }
-    Ok(out)
+    out
 }
 
 /// Every place the branch adds one of `terms`, checking the project's list and the list for
@@ -212,9 +232,10 @@ pub fn check_with(terms: &PrivateTerms, project: Option<&str>, worktree: &Path, 
         return Ok(());
     }
     let mut msg = format!(
-        "the branch adds {} you keep out of this repo. Remove {} (and from commit messages: reword or squash those commits), then try again. \
-         The list is in Nitely's project settings; it is not shown here.",
+        "the branch adds {} you keep out of this repo. Every commit is pushed, so take {} out of the commits that add {}: \
+         amend, or rebase and reword or squash them, then try again. The list is in Nitely's project settings; it is not shown here.",
         if hits.len() == 1 { "a private term".to_string() } else { format!("private terms in {} places", hits.len()) },
+        if hits.len() == 1 { "it" } else { "them" },
         if hits.len() == 1 { "it" } else { "them" },
     );
     for h in hits.iter().take(SHOWN) {
@@ -264,6 +285,14 @@ mod tests {
         std::fs::write(dir.join("bluebird/b.txt"), "clean\n").unwrap();
         sh(&dir, &["add", "."]);
         sh(&dir, &["commit", "-q", "-m", "Port the change\n\nas in the BLUEBIRD repo"]);
+        // A term a later commit takes out again is still in the pushed history.
+        std::fs::write(dir.join("c.txt"), "draft for ticket-42\n").unwrap();
+        sh(&dir, &["add", "."]);
+        sh(&dir, &["commit", "-q", "-m", "draft"]);
+        std::fs::remove_file(dir.join("c.txt")).unwrap();
+        sh(&dir, &["commit", "-q", "-am", "drop the draft"]);
+        // The user's diff settings change nothing.
+        sh(&dir, &["config", "diff.noprefix", "true"]);
 
         let none = scan(&PrivateTerms::default(), Some("APP"), &dir, "main").unwrap();
         assert!(none.is_empty(), "no list, nothing to find");
@@ -271,15 +300,17 @@ mod tests {
         let t = terms(&["bluebird"], &["c:/work/secret-client", "re:ticket-\\d+"]);
         let hits = scan(&t, Some("app"), &dir, "main").unwrap();
         let at: Vec<&str> = hits.iter().map(|h| h.at.as_str()).collect();
-        assert!(at.contains(&"path bluebird/b.txt"), "{at:?}");
-        assert!(at.contains(&"a.txt:3"), "a path written with backslashes: {at:?}");
+        let first = sh(&dir, &["log", "-1", "--format=%h", "HEAD~2"]).trim().to_string();
+        assert!(at.contains(&format!("path bluebird/b.txt (commit {first})").as_str()), "{at:?}");
+        assert!(at.contains(&format!("a.txt:3 (commit {first})").as_str()), "a path written with backslashes: {at:?}");
+        assert!(at.iter().any(|a| a.starts_with("c.txt:1 (commit ")), "added, then removed in a later commit: {at:?}");
         assert!(at.iter().any(|a| a.starts_with("commit ") && a.ends_with("message line 3")), "{at:?}");
-        assert!(!at.contains(&"a.txt:1"), "a line the branch did not add: {at:?}");
-        assert_eq!(hits.iter().find(|h| h.at == "a.txt:3").map(|h| (h.list.as_str(), h.term)), Some(("APP", 1)));
+        assert!(!at.iter().any(|a| a.starts_with("a.txt:1 ")), "a line the branch did not add: {at:?}");
+        assert_eq!(hits.iter().find(|h| h.at.starts_with("a.txt:3 ")).map(|h| (h.list.as_str(), h.term)), Some(("APP", 1)));
         assert!(scan(&t, Some("OTHER"), &dir, "main").unwrap().iter().all(|h| h.list == "every project"), "another project's list does not apply");
 
         let err = check_with(&t, Some("APP"), &dir, "main").unwrap_err().to_string();
-        assert!(err.contains("a.txt:3: term 1 of APP's list"), "{err}");
+        assert!(err.contains(&format!("a.txt:3 (commit {first}): term 1 of APP's list")), "{err}");
         assert!(!err.to_lowercase().contains("bluebird") || err.contains("path bluebird/"), "the term shows only as part of a path it is in: {err}");
         assert!(!err.to_lowercase().contains("secret-client"), "{err}");
         std::fs::remove_dir_all(&dir).ok();
