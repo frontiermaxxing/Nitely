@@ -32,14 +32,8 @@ jobs:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: 0
     steps:
-      # The runner's TEMP is an 8.3 short path (C:\Users\RUNNER~1\...), and tests compare the temp
-      # folders they create with the long paths git prints. The runner's own temp folder is long.
-      - name: Long temp path
-        shell: bash
-        run: |
-          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
-          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
-
+      # The runner's TEMP is an 8.3 short path (C:\Users\RUNNER~1\...), which the tests run under
+      # on purpose: paths::normalize spells short names out (NIT-104).
       - uses: actions/checkout@v5
 
       # rustup installs the toolchain rust-toolchain.toml pins, with clippy.

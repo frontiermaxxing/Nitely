@@ -66,11 +66,15 @@ pub fn holders(dir: &Path) -> Vec<Holder> {
 /// `C:\x\y`, `C:/x/y`, Git Bash's `/c/x/y`, WSL's `/mnt/c/x/y`; case-insensitive on Windows.
 pub fn names_path(text: &str, dir: &str) -> bool {
     let text = normalize(text);
-    let dir = normalize(dir);
-    let mut spellings = vec![dir.clone()];
-    if let Some((drive, rest)) = dir.split_once(":/").filter(|(d, _)| d.len() == 1) {
-        spellings.push(format!("/{drive}/{rest}"));
-        spellings.push(format!("/mnt/{drive}/{rest}"));
+    let mut spellings = Vec::new();
+    // Long or 8.3 short (`RUNNER~1`): a process may have been given either (NIT-104).
+    for dir in [crate::paths::long_path(dir), crate::paths::short_path(dir)] {
+        let dir = normalize(&dir);
+        if let Some((drive, rest)) = dir.split_once(":/").filter(|(d, _)| d.len() == 1) {
+            spellings.push(format!("/{drive}/{rest}"));
+            spellings.push(format!("/mnt/{drive}/{rest}"));
+        }
+        spellings.push(dir);
     }
     spellings.iter().any(|s| {
         text.match_indices(s.as_str()).any(|(i, _)| {
