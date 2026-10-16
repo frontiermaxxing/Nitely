@@ -371,7 +371,7 @@ fn keep_crews_once(started: &mut std::collections::HashMap<String, std::time::In
             db.crew_set_status(&project, "the app could not start the crew: no nitely on PATH (run `nitely install`)")?;
             continue;
         };
-        match crew::start_supervisor(&nitely, &project, &root, &nitely_core::paths::data_dir().join("crew")) {
+        match crew::start_supervisor(&nitely, &project, &root, &nitely_core::paths::data_dir().join("crew"), None) {
             Ok(child) => {
                 eprintln!("crew: started the {project} supervisor (pid {})", child.id());
                 children.push(child);
