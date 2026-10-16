@@ -993,6 +993,8 @@ pub struct CrewControl {
     pub supervisor_pid: Option<u32>,
     pub heartbeat_at: Option<i64>,
     pub status: Option<String>,
+    /// The repo whose playbook the supervisor follows.
+    pub repo: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1081,7 +1083,7 @@ pub fn supervisors_wanted(config: &crate::Config) -> Vec<(String, PathBuf)> {
         if wanted.iter().any(|(p, _)| *p == project) {
             continue;
         }
-        if Playbook::load(Path::new(&repo.root)).is_ok_and(|p| p.crew.workers > 0) {
+        if Playbook::load_with(Path::new(&repo.root), config).is_ok_and(|p| p.crew.workers > 0) {
             wanted.push((project, PathBuf::from(&repo.root)));
         }
     }
@@ -1140,13 +1142,23 @@ pub fn start_supervisor(nitely: &Path, project: &str, repo: &Path, dir: &Path, t
 /// has one. None when no repo has a crew, none is running and no supervisor is there, so a project
 /// that never used a crew shows nothing.
 pub fn project_status(db: &Db, config: &crate::Config, project: &str, moment: &Moment) -> Result<Option<CrewStatus>> {
-    let playbooks: Vec<Playbook> = config
+    let roots: Vec<&str> = config
         .repos
         .iter()
         .filter(|r| r.project.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(project)))
-        .filter_map(|r| Playbook::load(Path::new(&r.root)).ok())
+        .map(|r| r.root.as_str())
         .collect();
-    let playbook = playbooks.iter().find(|p| p.crew.workers > 0).or(playbooks.first()).cloned().unwrap_or_default();
+    // The repo the supervisor says it follows, when it is one of the project's; else the first
+    // whose playbook has a crew.
+    let followed = db.crew_control(project)?.repo.filter(|r| roots.iter().any(|root| crate::paths::normalize(root) == crate::paths::normalize(r)));
+    let playbooks: Vec<Playbook> = followed
+        .iter()
+        .map(String::as_str)
+        .chain(roots.iter().copied())
+        .filter_map(|root| Playbook::load_with(Path::new(root), config).ok())
+        .collect();
+    let first_with_crew = if followed.is_some() { playbooks.first() } else { playbooks.iter().find(|p| p.crew.workers > 0) };
+    let playbook = first_with_crew.or(playbooks.first()).cloned().unwrap_or_default();
     let tokens = crate::usage::project_tokens_since(&crate::usage::scan(config, db, moment.day_start), project, moment.day_start);
     let status = status(db, project, &playbook, moment, tokens)?;
     Ok((status.cap > 0 || !status.running.is_empty() || status.supervised).then_some(status))
@@ -1159,22 +1171,27 @@ impl Db {
     /// database without the crew tables (an older one, read-only) marks none.
     pub(crate) fn mark_crew(&self, sessions: &mut [crate::db::Session]) {
         let Some(oldest) = sessions.iter().map(|s| s.started_at).min() else { return };
-        let workers: Vec<(String, i64, Option<i64>)> = (|| -> rusqlite::Result<_> {
-            let mut stmt = self.conn.prepare("SELECT worktree, started_at, ended_at FROM crew_worker WHERE ended_at IS NULL OR ended_at >= ?1")?;
-            let rows = stmt.query_map([oldest - 60], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        let workers: Vec<(String, i64, Option<i64>, String)> = (|| -> rusqlite::Result<_> {
+            let mut stmt = self.conn.prepare("SELECT worktree, started_at, ended_at, agent_id FROM crew_worker WHERE ended_at IS NULL OR ended_at >= ?1")?;
+            let rows = stmt.query_map([oldest - 60], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
             rows.collect()
         })()
         .unwrap_or_default();
         if workers.is_empty() {
             return;
         }
-        let workers: Vec<(String, i64, Option<i64>)> = workers.into_iter().map(|(w, s, e)| (crate::paths::normalize(&w), s, e)).collect();
+        let workers: Vec<(String, i64, Option<i64>, String)> = workers.into_iter().map(|(w, s, e, a)| (crate::paths::normalize(&w), s, e, a)).collect();
         for s in sessions.iter_mut() {
             let cwd = crate::paths::normalize(&s.cwd);
-            s.crew = workers.iter().any(|(wt, started, ended)| {
+            s.crew = workers.iter().any(|(wt, started, ended, agent_id)| {
                 let inside = cwd == *wt || cwd.strip_prefix(wt.as_str()).is_some_and(|rest| rest.starts_with('/'));
                 // A minute's slack: the worker's row is written just before its process starts.
-                inside && s.started_at >= started - 60 && ended.is_none_or(|e| s.started_at <= e)
+                let began_in_it = s.started_at >= started - 60 && ended.is_none_or(|e| s.started_at <= e);
+                // A worker's reports go to a session named after its agent id, which an earlier
+                // session in the same worktree may already have started: it counts while the worker
+                // is there.
+                let reports_in_it = s.id == *agent_id && s.last_seen_at >= started - 60 && ended.is_none_or(|e| s.last_seen_at <= e + 60);
+                inside && (began_in_it || reports_in_it)
             });
         }
     }
@@ -1191,7 +1208,7 @@ impl Db {
         let row = self
             .conn
             .query_row(
-                "SELECT paused, changed_by, changed_at, supervisor_pid, heartbeat_at, status FROM crew_control WHERE project = ?1 COLLATE NOCASE",
+                "SELECT paused, changed_by, changed_at, supervisor_pid, heartbeat_at, status, repo FROM crew_control WHERE project = ?1 COLLATE NOCASE",
                 [project],
                 |r| {
                     Ok(CrewControl {
@@ -1201,6 +1218,7 @@ impl Db {
                         supervisor_pid: r.get(3)?,
                         heartbeat_at: r.get(4)?,
                         status: r.get(5)?,
+                        repo: r.get(6)?,
                     })
                 },
             )
@@ -1270,6 +1288,15 @@ impl Db {
         self.conn.execute(
             "INSERT INTO crew_control (project, status) VALUES (?1, ?2) ON CONFLICT (project) DO UPDATE SET status = ?2",
             rusqlite::params![project.to_uppercase(), status],
+        )?;
+        Ok(())
+    }
+
+    /// Records the repo whose playbook `project`'s supervisor follows, for the app's crew status.
+    pub fn crew_follows(&self, project: &str, repo: &Path) -> Result<()> {
+        self.conn.execute(
+            "UPDATE crew_control SET repo = ?2 WHERE project = ?1 COLLATE NOCASE",
+            rusqlite::params![project, repo.to_string_lossy()],
         )?;
         Ok(())
     }
@@ -2058,6 +2085,14 @@ workers = 2
         let marks: BTreeMap<String, bool> = f.db.sessions_since(0).unwrap().into_iter().map(|s| (s.id, s.crew)).collect();
         assert_eq!(marks, BTreeMap::from([("claude:person".to_string(), false), ("claude:worker".to_string(), true)]));
         assert!(f.db.session("claude:worker").unwrap().unwrap().crew);
+
+        // A worker's reports go to the session named after its agent id, which may have started
+        // before it, in an earlier attempt or a person's session: it counts while the worker runs.
+        let agent_id = f.db.crew_running("NIT").unwrap()[0].agent_id.clone();
+        let reused = crate::db::NewEvent { session_id: agent_id.clone(), vendor: "claude".into(), cwd: wt.clone(), kind: "status".into(), summary: None, state: "working".into() };
+        f.db.record(&reused).unwrap();
+        f.db.conn.execute("UPDATE session SET started_at = started_at - 86400 WHERE id = ?1", [&agent_id]).unwrap();
+        assert!(f.db.session(&agent_id).unwrap().unwrap().crew);
         let json = serde_json::to_value(f.db.session("claude:person").unwrap().unwrap()).unwrap();
         assert!(json.get("crew").is_none(), "only crew sessions carry the field");
     }
@@ -2154,6 +2189,27 @@ workers = 1
         let tick = supervisor(&f, &fake).tick(&mut f.db, false).unwrap();
         assert!(!fake.prepares.borrow().contains(&"NIT-1".to_string()) && !tick.started.iter().any(|w| w.issue == "NIT-1"), "not set up again: {tick:?}");
         assert_eq!(f.db.issue("NIT-1").unwrap().unwrap().state, "Needs You");
+    }
+
+    #[test]
+    fn the_status_reads_the_repo_the_supervisor_follows() {
+        let first = fixture(&format!("{GATE}[crew]\nworkers = 1\n"));
+        let second = fixture(&format!("{GATE}[crew]\nworkers = 3\nmax_per_day = 7\n"));
+        let repo = |name: &str, root: &Path| crate::RepoConfig {
+            name: name.into(),
+            root: root.to_string_lossy().into_owned(),
+            integration_branch: "main".into(),
+            project: Some("NIT".into()),
+        };
+        let config = crate::Config { repos: vec![repo("first", &first.repo), repo("second", &second.repo)], ..Default::default() };
+        let db = &first.db;
+        db.crew_heartbeat("NIT", 9, "working").unwrap();
+        assert_eq!(project_status(db, &config, "NIT", &NOON).unwrap().unwrap().cap, 1, "the first repo with a crew");
+        db.crew_follows("NIT", &second.repo).unwrap();
+        let s = project_status(db, &config, "NIT", &NOON).unwrap().unwrap();
+        assert_eq!((s.cap, s.max_per_day), (3, 7), "the repo `crew run --repo` follows");
+        db.crew_follows("NIT", Path::new("/elsewhere")).unwrap();
+        assert_eq!(project_status(db, &config, "NIT", &NOON).unwrap().unwrap().cap, 1, "a repo no longer the project's is ignored");
     }
 
     #[test]

@@ -121,6 +121,7 @@ fn supervise(db: &mut Db, project: &str, root: PathBuf, once: bool, managed: boo
     let mut awake = Awake::default();
     let mut handed_over = false;
     db.crew_take_over(project, std::process::id(), take_over)?;
+    db.crew_follows(project, &root)?;
     // The heartbeat stays fresh through a long pass, so a second `crew run` never takes over.
     let done = Arc::new(AtomicBool::new(false));
     let beat = {
@@ -183,6 +184,11 @@ fn supervise(db: &mut Db, project: &str, root: PathBuf, once: bool, managed: boo
             // issues are settled) before it exits.
             while sup.setting_up() > 0 {
                 std::thread::sleep(Duration::from_secs(1));
+                if presses.load(Ordering::SeqCst) >= 2 {
+                    // Ctrl+C twice: stop the setups instead of waiting them out.
+                    sup.stop_all(db)?;
+                    break;
+                }
                 match sup.finish_setups(db) {
                     Ok(tick) => {
                         for w in &tick.started {

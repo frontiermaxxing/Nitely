@@ -178,7 +178,8 @@ CREATE TABLE IF NOT EXISTS crew_control (  -- per project: paused, and the super
   changed_at     INTEGER,
   supervisor_pid INTEGER,
   heartbeat_at   INTEGER,
-  status         TEXT
+  status         TEXT,
+  repo           TEXT                      -- the repo whose playbook the supervisor follows
 );
 CREATE TABLE IF NOT EXISTS playbook_proposal ( -- a playbook change an agent proposed; only a human applies it
   id         INTEGER PRIMARY KEY,
@@ -205,7 +206,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS playbook_proposal_pending ON playbook_proposal
 
 /// Bumped when a table changes shape. Tables that only mirror Bitbucket or Linear are dropped
 /// and refilled by the next sync; tables Nitely owns get real migrations.
-const SCHEMA_VERSION: i64 = 15;
+const SCHEMA_VERSION: i64 = 16;
 
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -240,6 +241,8 @@ fn migrate(conn: &Connection) -> Result<()> {
     // v14 adds the event_issue_nocase index, which SCHEMA creates.
     // v15 adds crew_worker.phase: a worker's worktree setup is recorded too, so a new supervisor finds it.
     add_column(conn, "crew_worker", "phase", "TEXT NOT NULL DEFAULT 'work'")?;
+    // v16 adds crew_control.repo: the repo whose playbook a project's supervisor follows.
+    add_column(conn, "crew_control", "repo", "TEXT")?;
     Ok(())
 }
 

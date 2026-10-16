@@ -352,16 +352,27 @@ impl Playbook {
     /// What it leaves unset of the review and landing rules comes from the app-wide defaults
     /// (`rules::RuleDefaults`).
     pub fn load(repo_root: &Path) -> Result<Playbook> {
+        Playbook::load_from(repo_root, crate::Config::load().ok().as_ref())
+    }
+
+    /// `load` with a config the caller already read, so nothing more is read and nothing written
+    /// (`Config::load` may tidy files): for read-only callers like the live preview.
+    pub fn load_with(repo_root: &Path, config: &crate::Config) -> Result<Playbook> {
+        Playbook::load_from(repo_root, Some(config))
+    }
+
+    fn load_from(repo_root: &Path, config: Option<&crate::Config>) -> Result<Playbook> {
         // Tests build their own playbooks; the defaults of whoever runs them must not leak in.
-        let defaults = if cfg!(test) { Default::default() } else { crate::Config::load().map(|c| c.rule_defaults).unwrap_or_default() };
-        let Some(path) = Playbook::path_for(repo_root) else {
+        let none = crate::rules::RuleDefaults::default();
+        let defaults = if cfg!(test) { &none } else { config.map(|c| &c.rule_defaults).unwrap_or(&none) };
+        let Some(path) = Playbook::path_in(repo_root, config) else {
             let mut pb = Playbook::default();
-            crate::rules::apply_defaults(&mut pb, "", &defaults);
+            crate::rules::apply_defaults(&mut pb, "", defaults);
             return Ok(pb);
         };
         let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         let mut pb = Playbook::parse(&text).with_context(|| format!("in {}", path.display()))?;
-        crate::rules::apply_defaults(&mut pb, &text, &defaults);
+        crate::rules::apply_defaults(&mut pb, &text, defaults);
         Ok(pb)
     }
 
@@ -371,7 +382,15 @@ impl Playbook {
         if in_repo.exists() {
             return Some(in_repo);
         }
-        let config = crate::Config::load().ok()?;
+        Playbook::path_in(repo_root, crate::Config::load().ok().as_ref())
+    }
+
+    fn path_in(repo_root: &Path, config: Option<&crate::Config>) -> Option<PathBuf> {
+        let in_repo = repo_root.join(PLAYBOOK_PATH);
+        if in_repo.exists() {
+            return Some(in_repo);
+        }
+        let config = config?;
         let root = crate::paths::normalize(&repo_root.to_string_lossy());
         let repo = config.repos.iter().find(|r| crate::paths::normalize(&r.root) == root)?;
         Some(Playbook::stored_path(&repo.name)).filter(|p| p.exists())
