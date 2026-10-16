@@ -109,7 +109,18 @@ export function Palette(props: { projects: Project[]; onGo: (view: View) => void
 
   return (
     <div className="palette-veil" onMouseDown={props.onClose}>
-      <div className="palette" role="dialog" aria-modal="true" aria-label="Go to" onMouseDown={(e) => e.stopPropagation()} onKeyDown={onKey}>
+      <div
+        className="palette"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Go to"
+        onKeyDown={onKey}
+        onMouseDown={(e) => {
+          e.stopPropagation();
+          // A click anywhere but the input keeps the focus in the input, so the keys keep working.
+          if (e.target !== input.current) e.preventDefault();
+        }}
+      >
         <input
           ref={input}
           autoFocus
@@ -171,8 +182,8 @@ export function step(direction: 1 | -1) {
   all[next].scrollIntoView({ block: "nearest" });
 }
 
-/** The app's keys: Ctrl/Cmd+K opens the palette; j and k step through items unless you are typing. */
-export function useKeys(openPalette: () => void) {
+/** The app's keys: Ctrl/Cmd+K opens the palette; j and k step through items unless you are typing or the palette is open. */
+export function useKeys(openPalette: () => void, paletteOpen: boolean) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
@@ -180,11 +191,11 @@ export function useKeys(openPalette: () => void) {
         openPalette();
         return;
       }
-      if (e.ctrlKey || e.metaKey || e.altKey || typing(e.target)) return;
+      if (paletteOpen || e.ctrlKey || e.metaKey || e.altKey || typing(e.target)) return;
       if (e.key === "j") step(1);
       else if (e.key === "k") step(-1);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [openPalette]);
+  }, [openPalette, paletteOpen]);
 }

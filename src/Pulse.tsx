@@ -93,7 +93,7 @@ interface Context {
 export function Pulse(props: {
   board: Board | null;
   /** What waits on the human, the same list the Inbox shows and its badge counts. */
-  decisions: Decision[];
+  decisions: Decision[] | null;
   now: number;
   version: number;
   onOpenIssue: (key: string) => void;
@@ -173,11 +173,13 @@ export function Pulse(props: {
 /** The four answers, before any detail. */
 const DECISION_ORDER: DecisionKind[] = ["ask", "approve", "conflict", "input", "land"];
 
-function Glance({ data, board, decisions, ctx, onGo }: { data: PulseData; board: Board | null; decisions: Decision[]; ctx: Context; onGo: (view: View) => void }) {
+function Glance({ data, board, decisions, ctx, onGo }: { data: PulseData; board: Board | null; decisions: Decision[] | null; ctx: Context; onGo: (view: View) => void }) {
   const rows = board?.repos.flatMap((r) => r.rows) ?? [];
   // "Need you" is the Inbox's list (decisionsOf), so this number and the Inbox badge never differ.
-  const needs = decisions.length;
-  const byKind = DECISION_ORDER.map((k) => ({ k, n: decisions.filter((d) => d.kind === k).length })).filter((x) => x.n > 0);
+  // Until the board is in, the count is unknown, which is not the same as zero.
+  const known = decisions !== null;
+  const needs = decisions?.length ?? 0;
+  const byKind = DECISION_ORDER.map((k) => ({ k, n: decisions?.filter((d) => d.kind === k).length ?? 0 })).filter((x) => x.n > 0);
   const sessions: { s: Session; key: string | null }[] = [
     ...rows.filter((r) => r.session).map((r) => ({ s: r.session!, key: r.issue_key })),
     ...(board?.repos.flatMap((r) => r.unmatched_sessions) ?? []).map((s) => ({ s, key: null })),
@@ -190,10 +192,13 @@ function Glance({ data, board, decisions, ctx, onGo }: { data: PulseData; board:
 
   return (
     <div className="glance">
-      <div className={`readout${needs ? " readout-attention" : " readout-calm"}`}>
-        <span className="readout-n">{needs}</span>
-        <span className="readout-label">{needs ? (needs === 1 ? "needs you" : "need you") : "Nothing needs you"}</span>
+      <div className={`readout${!known ? " readout-calm" : needs ? " readout-attention" : " readout-calm"}`}>
+        <span className="readout-n" aria-label={known ? undefined : "not known yet"}>
+          {known ? needs : "–"}
+        </span>
+        <span className="readout-label">{!known ? "need you" : needs ? (needs === 1 ? "needs you" : "need you") : "Nothing needs you"}</span>
         <span className="readout-sub">
+          {!known && <span className="muted">Reading the board</span>}
           {byKind.map(({ k, n }) => (
             <button key={k} className="link" onClick={() => onGo({ kind: "inbox" })}>
               {plural(n, DECISION_LABEL[k], `${DECISION_LABEL[k]}s`)}

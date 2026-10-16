@@ -64,7 +64,7 @@ export function App() {
   const [openIssue, setOpenIssue] = useState<string | null>(() => fromHash(location.hash).issue);
   const [palette, setPalette] = useState(false);
   const openPalette = useCallback(() => setPalette(true), []);
-  useKeys(openPalette);
+  useKeys(openPalette, palette);
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(nowSecs);
   // Bumped after any change made in the app, so open lists refetch at once.
@@ -146,8 +146,9 @@ export function App() {
   // The Inbox's decisions, counted the same way the Inbox lists them.
   const inboxDetails = useDecisionDetails(board);
   // What waits on the human: the Inbox lists it, and the nav badge, Pulse and Now count it.
-  const decisions = board ? decisionsOf(board, inboxDetails, now) : [];
-  const inboxCount = decisions.length;
+  // null until the board has loaded: "nothing needs you" must never be said before it is known.
+  const decisions = board ? decisionsOf(board, inboxDetails, now) : null;
+  const inboxCount = decisions?.length ?? 0;
   const working = board?.repos.flatMap((r) => r.rows).filter((r) => r.session?.state === "working").length ?? 0;
 
   return (
