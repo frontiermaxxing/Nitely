@@ -400,7 +400,8 @@ fn claude_plan(nitely: &str, repoint: bool) -> Result<AgentPlan> {
     changes.push(Change::file(
         &setup,
         "a skill for the first-run sweep that seeds a new project's board (/nitely-setup)",
-        format!("---\nname: nitely-setup\ndescription: {SETUP_DESCRIPTION}\n---\n\n{SETUP_GUIDE}"),
+        // Quoted: the description has a colon, which a plain YAML value may not.
+        format!("---\nname: nitely-setup\ndescription: {}\n---\n\n{SETUP_GUIDE}", Value::String(SETUP_DESCRIPTION.into())),
     ));
 
     let claude_json = read_json(&home().join(".claude.json"))?;
@@ -667,7 +668,8 @@ mod tests {
         assert_eq!(pending_changes(&first), 3, "the hooks and the two skills are new");
         let setup = home.join(".claude").join("skills").join("nitely-setup").join("SKILL.md");
         assert!(apply_agents(&first).1.is_empty());
-        assert!(std::fs::read_to_string(&setup).unwrap().starts_with("---\nname: nitely-setup\n"));
+        let written = std::fs::read_to_string(&setup).unwrap();
+        assert!(written.starts_with("---\nname: nitely-setup\ndescription: \"Set up a project in Nitely: "), "{written}");
         assert_eq!(pending_changes(&agent_plans("nitely", true)), 0);
 
         // Reformatting a JSON file is not a change; an old copy of the workflow is.
