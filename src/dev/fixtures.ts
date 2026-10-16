@@ -478,6 +478,11 @@ function build(): World {
           timeline.push({ ts, actor: agent, kind: "claimed", summary: "Took the issue" });
           move(ts, "In Progress");
           timeline.push({ ts: ts + 4, actor: agent, kind: "worktree", summary: `Started ${branchOf(spec)} from ${repo.integration}` });
+          if (spec.crew)
+            timeline.push({
+              ts: ts + 6, actor: "crew:NIT", kind: "crew_started",
+              summary: `Crew worker started (${spec.vendor}), log: C:\\Users\\you\\AppData\\Roaming\\Nitely\\crew\\NIT\\${spec.key.toLowerCase()}-${spec.vendor}.log`,
+            });
           break;
         case "work":
           timeline.push({ ts, actor: agent, kind: "status", summary: spec.notes?.[notes] ?? WORK[notes % WORK.length] });
@@ -1352,6 +1357,8 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return crewStatus(String(args.project));
       case "crew_pause":
         return crewPause(args);
+      case "open_crew_log":
+        throw "The preview has no logs to open; the app opens them.";
       case "set_project_brief":
         return setProjectBrief(args);
       case "issues":

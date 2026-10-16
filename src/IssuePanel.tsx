@@ -24,7 +24,28 @@ const KIND_LABEL: Record<string, string> = {
   submit: "submitted",
   landed: "landed",
   land_failed: "land stopped",
+  crew_started: "crew started",
+  crew_ended: "crew ended",
 };
+
+/** The worker log a crew entry names (docs/crew.md), e.g. `... log: C:\\...\\crew\\NIT\\1-nit-3-codex.log`. */
+export function crewLog(t: { kind: string; summary: string | null }): string | null {
+  if (t.kind !== "crew_started" && t.kind !== "crew_ended") return null;
+  return t.summary?.match(/\blog: (.+\.log)$/i)?.[1] ?? null;
+}
+
+/** Opens a crew worker's log; the app refuses anything outside Nitely's crew folder. */
+function CrewLogLink({ path }: { path: string }) {
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <div className="tl-text">
+      <button className="link" title={path} onClick={() => invoke("open_crew_log", { path }).then(() => setError(null), (e) => setError(String(e)))}>
+        Open log
+      </button>
+      {error && <span className="error small"> {error}</span>}
+    </div>
+  );
+}
 
 /** One issue and its timeline, in a panel over the right side. */
 export function IssuePanel(props: {
@@ -168,6 +189,7 @@ export function IssuePanel(props: {
                         <span className="tl-kind">{KIND_LABEL[t.kind] ?? t.kind}</span> {agentLabel(t.actor)} · {ago(props.now, t.ts)}
                       </div>
                       {t.summary && <div className="tl-text">{t.summary}</div>}
+                      {crewLog(t) && <CrewLogLink path={crewLog(t)!} />}
                     </li>
                   ))}
                   {detail.timeline.length === 0 && <li className="muted small">Nothing recorded yet.</li>}

@@ -11,6 +11,10 @@ const SYNC_EVERY: Duration = Duration::from_secs(60);
 const LAND_APPROVED_EVERY: Duration = Duration::from_secs(15);
 /// How often the watcher checks for changes; each check is a pragma and a few file stats.
 const WATCH_EVERY: Duration = Duration::from_millis(500);
+/// How often the app checks that every project with a crew has a supervisor running.
+const KEEP_CREWS_EVERY: Duration = Duration::from_secs(20);
+/// A supervisor the app started gets this long to show its heartbeat before it is started again.
+const CREW_START_GRACE: Duration = Duration::from_secs(90);
 /// Sent to the frontend when anything it shows may have changed.
 const CHANGED_EVENT: &str = "nitely://changed";
 
@@ -335,6 +339,62 @@ fn run_sync() -> anyhow::Result<remote::SyncReport> {
     Ok(remote::sync(&config, &mut db))
 }
 
+/// Keeps a supervisor running for every project whose playbook has a crew (docs/crew.md): it starts
+/// `nitely crew run --managed` apart from the app, so the crew outlives the app, and starts it again
+/// when it dies or leaves for a newer build.
+fn keep_crews() {
+    let mut started: std::collections::HashMap<String, std::time::Instant> = Default::default();
+    let mut children: Vec<std::process::Child> = Vec::new();
+    loop {
+        // Reaps the supervisors that exited, so none lingers as a zombie on Unix.
+        children.retain_mut(|c| matches!(c.try_wait(), Ok(None)));
+        if let Err(e) = keep_crews_once(&mut started, &mut children) {
+            eprintln!("crew: {e:#}");
+        }
+        std::thread::sleep(KEEP_CREWS_EVERY);
+    }
+}
+
+fn keep_crews_once(started: &mut std::collections::HashMap<String, std::time::Instant>, children: &mut Vec<std::process::Child>) -> anyhow::Result<()> {
+    use nitely_core::crew;
+    let wanted = crew::supervisors_wanted(&Config::load()?);
+    if wanted.is_empty() {
+        return Ok(());
+    }
+    let db = Db::open_default()?;
+    for (project, root) in wanted {
+        if !crew::unsupervised(&db, &project)? || started.get(&project).is_some_and(|t| t.elapsed() < CREW_START_GRACE) {
+            continue;
+        }
+        started.insert(project.clone(), std::time::Instant::now());
+        let Some(nitely) = crew::nitely_on_path() else {
+            db.crew_set_status(&project, "the app could not start the crew: no nitely on PATH (run `nitely install`)")?;
+            continue;
+        };
+        match crew::start_supervisor(&nitely, &project, &root, &nitely_core::paths::data_dir().join("crew"), None) {
+            Ok(child) => {
+                eprintln!("crew: started the {project} supervisor (pid {})", child.id());
+                children.push(child);
+            }
+            Err(e) => db.crew_set_status(&project, &format!("the app could not start the crew: {e:#}"))?,
+        }
+    }
+    Ok(())
+}
+
+/// Opens a crew worker's log (docs/crew.md), named in its issue's timeline. Only `.log` files in
+/// Nitely's crew folder open: the path comes from the page.
+#[tauri::command]
+async fn open_crew_log(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let crew_dir = nitely_core::paths::data_dir().join("crew").canonicalize().map_err(|e| format!("no crew logs yet: {e}"))?;
+    let log = std::path::Path::new(&path).canonicalize().map_err(|e| format!("{path}: {e}"))?;
+    if !log.starts_with(&crew_dir) || log.extension().is_none_or(|e| e != "log") {
+        return Err(format!("{path} is not a crew log"));
+    }
+    app.opener().open_path(log.to_string_lossy(), None::<&str>).map_err(|e| e.to_string())
+}
+
 /// Pushes a change event to the frontend whenever the database or a watched repo changes.
 fn watch(app: tauri::AppHandle) {
     use tauri::Emitter;
@@ -367,6 +427,8 @@ pub fn run() {
         }
         std::thread::sleep(SYNC_EVERY);
     });
+
+    std::thread::spawn(keep_crews);
 
     tauri::Builder::default()
         // First, so a second launch (a link clicked while Nitely runs) is handed to this one; with
@@ -433,6 +495,7 @@ pub fn run() {
             set_project_brief,
             crew_status,
             crew_pause,
+            open_crew_log,
             issues,
             issue_detail,
             set_blocker,

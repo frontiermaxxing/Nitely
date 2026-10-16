@@ -41,6 +41,17 @@ nitely crew status [--project NIT]  workers running, cap, paused, today's count,
 nitely crew pause | resume [--project NIT]
 ```
 
+**Nobody has to run it.** While the app runs, it checks every 20 seconds that each project whose
+playbook has `workers > 0` has a supervisor with a fresh heartbeat, and when one has none it starts
+`nitely crew run --managed` (the `nitely` on PATH) apart from itself: no window, its own process
+group, output to `supervisor.log` in the project's crew folder. It outlives the app, so closing the
+app does not stop the crew; pause it, or set `workers = 0`, for that. A managed supervisor leaves by
+itself when the crew is off and idle. When `nitely install` puts a newer build in place, it starts
+that build to take the crew over and leaves once the new one holds it (its workers keep running,
+and the new one adopts them), with or without the app open; if the new build does not take over,
+the old one carries on. If the app cannot
+start one, the crew's status says why.
+
 `crew run` is a loop that ticks every 10 seconds:
 
 1. **Reap.** For each worker it started, check whether the process exited; if so, settle it (see
@@ -184,7 +195,7 @@ The same text for every agent, with the blanks filled in:
 - Workers start in their own process group (`process_group(0)`), so the terminal's SIGINT reaches
   only the supervisor. Stopping a worker sends SIGTERM to its group, then SIGKILL after 10 seconds.
 - Sleep: `crew run` holds a `caffeinate -i -w <pid>` while workers run.
-- Running without a terminal (a login item through launchd, or the app starting the supervisor) is
+- Running without the app open at all (a login item through launchd, a scheduled task on Windows) is
   a follow-up; the supervisor itself needs nothing platform-specific for it.
 
 ## Guardrails
@@ -226,14 +237,13 @@ When a worker exits, the supervisor reads its issue:
 - **Now and Pulse:** crew workers are ordinary sessions there (their hooks and reports already put
   them on the board), with "· crew" after the agent's name. A session is a crew session when it runs
   in a crew worker's worktree from the time that worker started, so the hooks need nothing new.
-- **Issue timeline:** `crew_started` and `crew_ended` entries with the outcome and the worker's
-  log path (opening the file from the timeline is a follow-up).
+- **Issue timeline:** `crew_started` and `crew_ended` entries with the outcome, and "Open log" under
+  each, which opens the worker's log (the app opens only `.log` files in its crew folder).
 - **Inbox:** the retry-cap asks arrive like any other ask.
 
 ## Later
 
-- The app starting and supervising `crew run` itself (and a login item on Mac / a scheduled task on
-  Windows), so a crew survives a closed terminal.
+- A login item on Mac / a scheduled task on Windows, so a crew starts without the app being opened.
 - One supervisor for every project with a crew.
 - Spend: per-worker token and cost totals from the logs, shown on Pulse; a cost cap per day.
 - Picking the agent per issue (labels, kind) instead of one preference order.
