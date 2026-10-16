@@ -13,8 +13,10 @@ issue carries evidence: a file and line, a command and what it printed, or "infe
 
 ## Before you start
 
-1. `get_project`. If `setup` is set, this project was swept before (at `setup.sha`): tell the user,
-   and sweep again only if they say so. Read the brief either way.
+1. `get_project`, and read the brief. If `setup` is set, this project was swept before (at
+   `setup.sha`): this is a refresh. Say so, and with the user's go-ahead follow **Refresh** at the
+   end instead of the phases (asked for a refresh, as with `/nitely-setup --refresh`, go straight
+   there).
 2. Tell the user what the sweep costs and ask to go ahead. Scale from: a repo of about 200k lines
    took about 5 parallel read-only agents, 20 to 30 minutes and roughly 800k tokens, and filed
    about 90 issues. A small repo (a few thousand lines) takes one pass and a few minutes.
@@ -166,3 +168,30 @@ whether to file all of them or only priorities 1 to 3.
   in Needs You, what was not verified, and the Phase 0 question if it is still open.
 - **Leave a handoff**: `note` with `handoff: true` on the first issue to do (or on the stale-branch issue):
   what the sweep covered, what it did not, and what was not verified.
+
+## Refresh: sweep a project that was set up before
+
+A board drifts after its first sweep: new TODOs and branches, plans that moved on, issues fixed by
+the way. A refresh files only what is new, and run straight after a sweep it files nothing.
+
+1. **What changed.** `get_project` gives the commit the last sweep read (`setup.sha`). Read
+   `git log --oneline <sha>..<integration branch>` and `git diff --stat <sha>..<integration branch>`,
+   plus branches created since, the working tree, and the agents' memory files changed since. That
+   is where most new work is.
+2. **Pre-flight again** (Phase 0): the integration branch, the gate and the working tree. Propose
+   only what is wrong now.
+3. **Sweep the changed areas fully** (Phases 1 to 3, restricted to the areas the diff touches), and
+   the rest lightly: only the hunt list's quickest checks.
+4. **Check every candidate against the board**: `list_issues` with `include_closed: true`. Work
+   already filed, finished or canceled is never filed again; `file_issue` and `file_issues` also
+   refuse what looks like an existing issue, so read `skipped`.
+   - The same problem, still open, with new evidence (another file:line, more places, a changed
+     cause): `note` on that issue with the new evidence, instead of a new issue.
+   - Evidence that an open issue is fixed: `note` that, with the commit or file that shows it. Do
+     not close it; whoever owns it does.
+   - Unchanged evidence: nothing. No note, no issue.
+5. **File what is new** (Phases 4 and 5).
+6. **Update the brief**: `get_project`, then `set_project_brief` with its revision, changing the
+   state of each area and the target order where they moved. Keep what the owner wrote.
+7. `mark_setup_complete` with the commit you swept, and tell the user what is new: issues filed,
+   notes added, and what you think is fixed.

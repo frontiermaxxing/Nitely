@@ -298,7 +298,7 @@ fn tools() -> Value {
         },
         {
             "name": "file_issues",
-            "description": "File many issues in one call, e.g. to seed a board. Give each a ref; its blocked_by may name refs of the same batch as well as existing issues. Nitely files the batch in one transaction, blockers first; an unknown ref, a cycle or an invalid item files nothing. An item that looks like an open issue (or an earlier item) is skipped, unless it sets allow_similar, and items that named it are blocked by that issue instead. Returns each ref's key, what was filed and what was skipped.",
+            "description": "File many issues in one call, e.g. to seed a board. Give each a ref; its blocked_by may name refs of the same batch as well as existing issues. Nitely files the batch in one transaction, blockers first; an unknown ref, a cycle or an invalid item files nothing. An item that looks like an existing issue, open or closed (or an earlier item), is skipped, unless it sets allow_similar, and items that named it are blocked by that issue instead. Returns each ref's key, what was filed and what was skipped.",
             "inputSchema": { "type": "object", "required": ["issues"], "properties": {
                 "project": { "type": "string", "description": "Project key for every item; defaults to this repo's project." },
                 "issues": { "type": "array", "items": { "type": "object", "required": ["ref", "title", "kind", "body", "evidence"], "properties": {
