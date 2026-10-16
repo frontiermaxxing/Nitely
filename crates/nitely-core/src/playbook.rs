@@ -205,8 +205,12 @@ impl Playbook {
 
     /// The playbook Nitely keeps for a connected repo that has none of its own.
     pub fn stored_path(repo_name: &str) -> PathBuf {
+        Playbook::stored_path_in(&crate::paths::data_dir(), repo_name)
+    }
+
+    pub(crate) fn stored_path_in(data_dir: &Path, repo_name: &str) -> PathBuf {
         let safe: String = repo_name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect();
-        crate::paths::data_dir().join("playbooks").join(format!("{safe}.toml"))
+        data_dir.join("playbooks").join(format!("{safe}.toml"))
     }
 
     pub fn parse(text: &str) -> Result<Playbook> {

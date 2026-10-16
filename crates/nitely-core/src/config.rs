@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::path::Path;
 
 use crate::paths;
+use crate::playbook::Playbook;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -30,15 +32,20 @@ impl Config {
         }
         let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         let mut config: Config = serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-        config.dedupe_roots();
+        config.dedupe_roots(&paths::data_dir());
         Ok(config)
     }
 
     /// Keeps one entry per repo root, the last written. Older versions replaced repos by name only,
     /// so adding a watched repo under another name left a stale entry that lookups by root found first.
-    fn dedupe_roots(&mut self) {
-        let mut seen = std::collections::HashSet::new();
-        let mut kept: Vec<RepoConfig> = self.repos.drain(..).rev().filter(|r| seen.insert(paths::normalize(&r.root))).collect();
+    fn dedupe_roots(&mut self, data_dir: &Path) {
+        let mut kept: Vec<RepoConfig> = Vec::new();
+        for repo in self.repos.drain(..).rev() {
+            match kept.iter().find(|k| paths::normalize(&k.root) == paths::normalize(&repo.root)) {
+                Some(newer) => adopt_playbook(data_dir, &repo.name, &newer.name),
+                None => kept.push(repo),
+            }
+        }
         kept.reverse();
         self.repos = kept;
     }
@@ -63,31 +70,28 @@ impl Config {
 
     /// Adds a repo, or replaces the one with the same name or the same root.
     pub fn upsert_repo(&mut self, repo: RepoConfig) {
+        self.upsert_repo_in(&paths::data_dir(), repo);
+    }
+
+    fn upsert_repo_in(&mut self, data_dir: &Path, repo: RepoConfig) {
         let root = paths::normalize(&repo.root);
+        for old in self.repos.iter().filter(|r| r.name != repo.name && paths::normalize(&r.root) == root) {
+            adopt_playbook(data_dir, &old.name, &repo.name);
+        }
         self.repos.retain(|r| r.name != repo.name && paths::normalize(&r.root) != root);
         self.repos.push(repo);
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn repo(name: &str, root: &str) -> RepoConfig {
-        RepoConfig { name: name.into(), root: root.into(), integration_branch: "main".into(), project: None }
-    }
-
-    #[test]
-    fn one_entry_per_root() {
-        let mut config = Config { repos: vec![repo("Aera", r"C:\Dev\AeraChromium"), repo("Nitely", "/dev/Nitely")] };
-        config.upsert_repo(repo("AeraChromium", "C:/Dev/AeraChromium/"));
-        let names: Vec<&str> = config.repos.iter().map(|r| r.name.as_str()).collect();
-        assert_eq!(names, vec!["Nitely", "AeraChromium"]);
-
-        let mut stale = Config { repos: vec![repo("Aera", r"C:\Dev\AeraChromium"), repo("Nitely", "/dev/Nitely"), repo("AeraChromium", "C:/Dev/AeraChromium")] };
-        stale.dedupe_roots();
-        let names: Vec<&str> = stale.repos.iter().map(|r| r.name.as_str()).collect();
-        assert_eq!(names, vec!["Nitely", "AeraChromium"], "the last written entry wins");
+/// When a repo's entry is replaced by one under another name, the playbook Nitely keeps for the old
+/// name goes with it; otherwise the repo would silently fall back to the defaults (no gate, no
+/// human approval). A playbook already kept for the new name wins.
+fn adopt_playbook(data_dir: &Path, from: &str, to: &str) {
+    let (old, new) = (Playbook::stored_path_in(data_dir, from), Playbook::stored_path_in(data_dir, to));
+    if old != new && old.exists() && !new.exists() {
+        if let Err(e) = fs::copy(&old, &new) {
+            eprintln!("nitely: could not copy the playbook {} to {}: {e}", old.display(), new.display());
+        }
     }
 }
 
@@ -111,5 +115,43 @@ pub fn resolve_project(config: &Config, db: &crate::Db, explicit: Option<&str>, 
         _ => anyhow::bail!(
             "several projects and {cwd} is not in a repo linked to one; pass a project, or link the repo with `nitely repo add <path> --project <KEY>`"
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn repo(name: &str, root: &str) -> RepoConfig {
+        RepoConfig { name: name.into(), root: root.into(), integration_branch: "main".into(), project: None }
+    }
+
+    fn names(config: &Config) -> Vec<&str> {
+        config.repos.iter().map(|r| r.name.as_str()).collect()
+    }
+
+    #[test]
+    fn one_entry_per_root_and_the_playbook_moves_with_it() {
+        let data = std::env::temp_dir().join(format!("nitely-config-{}-{}", std::process::id(), crate::db::now()));
+        std::fs::create_dir_all(data.join("playbooks")).unwrap();
+        let kept = |name: &str| Playbook::stored_path_in(&data, name);
+        std::fs::write(kept("Aera"), "[branch]\nintegration = \"win-dev\"\n").unwrap();
+
+        let mut config = Config { repos: vec![repo("Aera", r"C:\Dev\AeraChromium"), repo("Nitely", "/dev/Nitely")] };
+        config.upsert_repo_in(&data, repo("AeraChromium", "C:/Dev/AeraChromium/"));
+        assert_eq!(names(&config), vec!["Nitely", "AeraChromium"]);
+        assert!(std::fs::read_to_string(kept("AeraChromium")).unwrap().contains("win-dev"), "the gate and approval rules are kept");
+
+        // A playbook already kept for the surviving name is not overwritten.
+        std::fs::write(kept("Old"), "old").unwrap();
+        let mut stale = Config { repos: vec![repo("Old", r"C:\Dev\AeraChromium"), repo("Nitely", "/dev/Nitely"), repo("AeraChromium", "C:/Dev/AeraChromium")] };
+        stale.dedupe_roots(&data);
+        assert_eq!(names(&stale), vec!["Nitely", "AeraChromium"], "the last written entry wins");
+        assert!(std::fs::read_to_string(kept("AeraChromium")).unwrap().contains("win-dev"));
+
+        let mut alias = Config { repos: vec![repo("Old", "/dev/x"), repo("New", "/dev/x/")] };
+        alias.dedupe_roots(&data);
+        assert_eq!(std::fs::read_to_string(kept("New")).unwrap(), "old", "a dropped alias's playbook moves to the survivor");
+        std::fs::remove_dir_all(data).ok();
     }
 }

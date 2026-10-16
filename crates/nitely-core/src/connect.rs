@@ -97,8 +97,12 @@ pub fn plan(db: &Db, config: &Config, path: &str, key: Option<&str>, name: Optio
     let root = crate::git::main_root(&dir.to_string_lossy()).with_context(|| format!("{} is not in a git repo", dir.display()))?;
     let root = root.strip_prefix(r"\\?\").unwrap_or(&root).to_string();
     let root_path = PathBuf::from(&root);
-    let repo_name = root_path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "repo".into());
     let existing = config.repos.iter().find(|r| crate::paths::normalize(&r.root) == crate::paths::normalize(&root));
+    // A repo Nitely already watches keeps its name, and with it the playbook kept under that name.
+    let repo_name = match existing {
+        Some(r) => r.name.clone(),
+        None => root_path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "repo".into()),
+    };
 
     let project_name = name.map(str::to_string).filter(|n| !n.trim().is_empty()).unwrap_or_else(|| repo_name.clone());
     let project_key = match key.map(|k| k.trim().to_uppercase()).filter(|k| !k.is_empty()) {
