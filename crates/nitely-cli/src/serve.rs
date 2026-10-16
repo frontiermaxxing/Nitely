@@ -33,6 +33,14 @@ const IO_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_PER_ADDRESS: usize = 4;
 /// Open sessions kept; the oldest is dropped past this, and its client starts a new one.
 const MAX_SESSIONS: usize = 256;
+/// After answering, how long and how much of what the client still sends is read and dropped
+/// before the connection closes. Closing with unread data makes Windows reset the connection,
+/// and the client can lose the answer it was about to read (NIT-120).
+const LINGER: Duration = Duration::from_secs(2);
+const MAX_DRAIN: usize = MAX_BODY;
+/// Refusals sent "busy" that may linger at once, each on a thread of its own; past this a busy
+/// refusal closes without lingering, so a flood cannot hold the accept loop or start threads.
+const MAX_LINGERING_REFUSALS: usize = 8;
 
 struct Session {
     token: String,
@@ -74,11 +82,29 @@ pub fn serve(listen: Option<&str>, advertise: bool) -> Result<()> {
     Ok(())
 }
 
+/// The connections being handled, overall and per address.
+#[derive(Default)]
+struct Slots {
+    active: AtomicUsize,
+    per_address: Mutex<HashMap<IpAddr, usize>>,
+    lingering: AtomicUsize,
+}
+
+impl Slots {
+    /// Connections `ip` holds now.
+    #[cfg(test)]
+    fn held(&self, ip: IpAddr) -> usize {
+        self.per_address.lock().unwrap_or_else(|p| p.into_inner()).get(&ip).copied().unwrap_or(0)
+    }
+}
+
 /// Accepts connections until the listener fails, each on its own thread.
 fn run(listener: TcpListener, networks: Arc<Vec<(IpAddr, u8)>>) {
+    run_with(listener, networks, Arc::new(Slots::default()));
+}
+
+fn run_with(listener: TcpListener, networks: Arc<Vec<(IpAddr, u8)>>, slots: Arc<Slots>) {
     let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
-    let active = Arc::new(AtomicUsize::new(0));
-    let per_address: Arc<Mutex<HashMap<IpAddr, usize>>> = Arc::new(Mutex::new(HashMap::new()));
     let tick = Arc::new(AtomicU64::new(0));
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
@@ -92,26 +118,37 @@ fn run(listener: TcpListener, networks: Arc<Vec<(IpAddr, u8)>>) {
         let admitted = {
             // An address gets an entry only while it holds an admitted connection, so refused
             // connections, from however many addresses, leave nothing behind.
-            let mut held = per_address.lock().unwrap_or_else(|p| p.into_inner());
+            let mut held = slots.per_address.lock().unwrap_or_else(|p| p.into_inner());
             let mine = held.get(&ip).copied().unwrap_or(0);
-            if active.load(Ordering::SeqCst) >= MAX_CONNECTIONS || mine >= MAX_PER_ADDRESS {
+            if slots.active.load(Ordering::SeqCst) >= MAX_CONNECTIONS || mine >= MAX_PER_ADDRESS {
                 false
             } else {
                 held.insert(ip, mine + 1);
-                active.fetch_add(1, Ordering::SeqCst);
+                slots.active.fetch_add(1, Ordering::SeqCst);
                 true
             }
         };
         if !admitted {
             let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
             write_response(&mut stream, 503, "text/plain", &[], b"Busy; try again shortly.");
+            if slots.lingering.fetch_add(1, Ordering::SeqCst) < MAX_LINGERING_REFUSALS {
+                let slots = slots.clone();
+                std::thread::spawn(move || {
+                    linger(&mut stream);
+                    slots.lingering.fetch_sub(1, Ordering::SeqCst);
+                });
+            } else {
+                slots.lingering.fetch_sub(1, Ordering::SeqCst);
+            }
             continue;
         }
-        let (sessions, active, per_address, tick) = (sessions.clone(), active.clone(), per_address.clone(), tick.clone());
+        let (sessions, slots, tick) = (sessions.clone(), slots.clone(), tick.clone());
         std::thread::spawn(move || {
-            connection(stream, peer, &sessions, tick.fetch_add(1, Ordering::SeqCst) + 1);
-            active.fetch_sub(1, Ordering::SeqCst);
-            let mut held = per_address.lock().unwrap_or_else(|p| p.into_inner());
+            connection(&mut stream, peer, &sessions, tick.fetch_add(1, Ordering::SeqCst) + 1);
+            linger(&mut stream);
+            drop(stream);
+            slots.active.fetch_sub(1, Ordering::SeqCst);
+            let mut held = slots.per_address.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(n) = held.get_mut(&ip) {
                 *n -= 1;
                 if *n == 0 {
@@ -207,47 +244,47 @@ fn read_body(stream: &mut TcpStream, head: &Head, deadline: Instant) -> std::res
     Ok(body)
 }
 
-fn connection(mut stream: TcpStream, from: Option<SocketAddr>, sessions: &Sessions, tick: u64) {
+fn connection(stream: &mut TcpStream, from: Option<SocketAddr>, sessions: &Sessions, tick: u64) {
     let deadline = Instant::now() + IO_TIMEOUT;
     let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
-    let head = match read_head(&mut stream, deadline) {
+    let head = match read_head(stream, deadline) {
         Ok(h) => h,
-        Err((status, message)) => return write_response(&mut stream, status, "text/plain", &[], message.as_bytes()),
+        Err((status, message)) => return write_response(stream, status, "text/plain", &[], message.as_bytes()),
     };
     if head.path == "/.well-known/nitely" && head.method == "GET" {
         let info = json!({ "name": "nitely", "version": env!("CARGO_PKG_VERSION"), "mcp": MCP_PATH, "auth": "bearer" });
-        return write_json(&mut stream, 200, &[], &info);
+        return write_json(stream, 200, &[], &info);
     }
     if head.path != MCP_PATH {
-        return write_response(&mut stream, 404, "text/plain", &[], b"Not found; the MCP endpoint is /mcp.");
+        return write_response(stream, 404, "text/plain", &[], b"Not found; the MCP endpoint is /mcp.");
     }
     if head.method != "POST" {
         // No server-sent stream: every answer comes back on its POST.
-        return write_response(&mut stream, 405, "text/plain", &[("Allow", "POST")], b"");
+        return write_response(stream, 405, "text/plain", &[("Allow", "POST")], b"");
     }
     let bearer = head.header("authorization").and_then(|v| v.split_once(' ')).filter(|(s, _)| s.eq_ignore_ascii_case("bearer")).map(|(_, t)| t.trim().to_string());
     let token = match bearer.map(|b| relay::verify(&b)) {
         Some(Ok(Some(t))) => t,
         Some(Err(e)) => {
             log(from, "-", &format!("token store unreadable: {e:#}"), 500);
-            return write_response(&mut stream, 500, "text/plain", &[], b"Nitely could not read its tokens.");
+            return write_response(stream, 500, "text/plain", &[], b"Nitely could not read its tokens.");
         }
         _ => {
             log(from, "-", "refused: no valid token", 401);
-            return write_response(&mut stream, 401, "text/plain", &[("WWW-Authenticate", "Bearer")], b"A Nitely token is required: Authorization: Bearer <token>.");
+            return write_response(stream, 401, "text/plain", &[("WWW-Authenticate", "Bearer")], b"A Nitely token is required: Authorization: Bearer <token>.");
         }
     };
-    let body = match read_body(&mut stream, &head, deadline) {
+    let body = match read_body(stream, &head, deadline) {
         Ok(b) => b,
         Err((status, message)) => {
             log(from, &token.name, message, status);
-            return write_response(&mut stream, status, "text/plain", &[], message.as_bytes());
+            return write_response(stream, status, "text/plain", &[], message.as_bytes());
         }
     };
     let msg: Value = match serde_json::from_slice(&body) {
         Ok(v @ Value::Object(_)) => v,
-        Ok(_) => return write_json(&mut stream, 400, &[], &json!({ "jsonrpc": "2.0", "id": null, "error": { "code": -32600, "message": "send one JSON-RPC message per request" } })),
-        Err(e) => return write_json(&mut stream, 400, &[], &json!({ "jsonrpc": "2.0", "id": null, "error": { "code": -32700, "message": format!("parse error: {e}") } })),
+        Ok(_) => return write_json(stream, 400, &[], &json!({ "jsonrpc": "2.0", "id": null, "error": { "code": -32600, "message": "send one JSON-RPC message per request" } })),
+        Err(e) => return write_json(stream, 400, &[], &json!({ "jsonrpc": "2.0", "id": null, "error": { "code": -32700, "message": format!("parse error: {e}") } })),
     };
     let method = msg.get("method").and_then(Value::as_str).unwrap_or("").to_string();
     let what = match msg.pointer("/params/name").and_then(Value::as_str) {
@@ -291,12 +328,12 @@ fn connection(mut stream: TcpStream, from: Option<SocketAddr>, sessions: &Sessio
     };
     log(from, &token.name, &what, status);
     match (status, reply) {
-        (404, _) => write_response(&mut stream, 404, "text/plain", &[], b"Unknown session; initialize again."),
+        (404, _) => write_response(stream, 404, "text/plain", &[], b"Unknown session; initialize again."),
         (_, Some(r)) => match &session_id {
-            Some(id) => write_json(&mut stream, 200, &[("Mcp-Session-Id", id)], &r),
-            None => write_json(&mut stream, 200, &[], &r),
+            Some(id) => write_json(stream, 200, &[("Mcp-Session-Id", id)], &r),
+            None => write_json(stream, 200, &[], &r),
         },
-        _ => write_response(&mut stream, 202, "text/plain", &[], b""),
+        _ => write_response(stream, 202, "text/plain", &[], b""),
     }
 }
 
@@ -325,7 +362,22 @@ fn write_response(stream: &mut TcpStream, status: u16, content_type: &str, heade
     }
     out.push_str("\r\n");
     let _ = stream.write_all(out.as_bytes()).and_then(|_| stream.write_all(body)).and_then(|_| stream.flush());
-    let _ = stream.shutdown(std::net::Shutdown::Both);
+    // Says the answer is complete; the read side stays open for `linger`.
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+}
+
+/// Reads and drops what the client still sends (the rest of a refused request) until it closes,
+/// for at most LINGER and MAX_DRAIN, so the close is a clean one and the client gets its answer.
+fn linger(stream: &mut TcpStream) {
+    let deadline = Instant::now() + LINGER;
+    let mut chunk = [0u8; 8192];
+    let mut drained = 0;
+    while drained < MAX_DRAIN && time_left(stream, deadline).is_ok() {
+        match stream.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => drained += n,
+        }
+    }
 }
 
 fn new_session_id() -> String {
@@ -457,7 +509,19 @@ mod tests {
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        std::thread::spawn(move || run(listener, Arc::new(vec![])));
+        let slots = Arc::new(Slots::default());
+        let server_slots = slots.clone();
+        std::thread::spawn(move || run_with(listener, Arc::new(vec![]), server_slots));
+        let localhost: IpAddr = [127, 0, 0, 1].into();
+        // The server frees a slot just after its client sees the connection close, so wait for
+        // the count rather than for a fixed time (NIT-105).
+        let settle = |want: usize, why: &str| {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while slots.held(localhost) != want {
+                assert!(Instant::now() < deadline, "{why}: the address holds {} connections, not {want}", slots.held(localhost));
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
         // A client that sends half a request and stalls holds only its own connection.
         let mut stalled = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         stalled.write_all(b"POST /mcp HTTP/1.1\r\nContent-Length: 500\r\n\r\n{").unwrap();
@@ -508,6 +572,7 @@ mod tests {
         assert!(raw(&format!("POST /mcp HTTP/1.1\r\n{auth}Transfer-Encoding: chunked\r\n\r\n")).starts_with("HTTP/1.1 411"));
 
         // One address holds at most MAX_PER_ADDRESS connections; the next is told busy at once.
+        settle(1, "only the stalled client is left");
         let held: Vec<_> = (0..MAX_PER_ADDRESS)
             .map(|_| {
                 let mut c = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
@@ -515,7 +580,7 @@ mod tests {
                 c
             })
             .collect();
-        std::thread::sleep(Duration::from_millis(200));
+        settle(MAX_PER_ADDRESS, "the stalled client and the held ones fill the slots");
         assert!(raw("GET /.well-known/nitely HTTP/1.1\r\n\r\n").starts_with("HTTP/1.1 503"), "these fill the address's slots");
         drop(held);
         drop(stalled);
