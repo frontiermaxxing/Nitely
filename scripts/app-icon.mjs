@@ -16,7 +16,8 @@ const KEEP = ["128x128.png", "128x128@2x.png", "64x64.png", "icon.icns", "icon.p
 
 function render(svg) {
   const out = mkdtempSync(join(tmpdir(), "nitely-icon-"));
-  const r = spawnSync(process.platform === "win32" ? "npx.cmd" : "npx", ["tauri", "icon", join(ICONS, svg), "-o", out], { stdio: "inherit", shell: process.platform === "win32" });
+  // The CLI's own entry through node, with no shell in between, so paths with spaces stay whole.
+  const r = spawnSync(process.execPath, ["node_modules/@tauri-apps/cli/tauri.js", "icon", join(ICONS, svg), "-o", out], { stdio: "inherit" });
   if (r.status !== 0) process.exit(r.status ?? 1);
   return out;
 }
