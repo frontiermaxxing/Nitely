@@ -448,7 +448,10 @@ mod tests {
 
     #[test]
     fn record_updates_session_and_keeps_last_activity() {
-        let dir = std::env::temp_dir().join(format!("nitely-test-{}", std::process::id()));
+        // Its own folder per run: Windows reuses process ids, and a database left by an earlier run
+        // with the same id doubled the state changes counted below.
+        let dir = std::env::temp_dir().join(format!("nitely-test-{}-{}", std::process::id(), now()));
+        std::fs::remove_dir_all(&dir).ok();
         let mut db = Db::open(&dir.join("t.db")).unwrap();
         let mut e = NewEvent {
             session_id: "claude:abc".into(),
