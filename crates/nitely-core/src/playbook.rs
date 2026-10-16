@@ -400,12 +400,29 @@ pub(crate) fn git_remote(dir: &Path, args: &[&str]) -> Result<String> {
     let mut cmd = shell_free_command("git");
     cmd.arg("-C").arg(dir).env("GIT_TERMINAL_PROMPT", "0").env("GCM_INTERACTIVE", "never");
     cmd.args(["-c", "credential.interactive=never"]);
-    let url = git(dir, &["remote", "get-url", "origin"]).unwrap_or_default();
+    // A push authenticates against the push URL, which can differ from the fetch URL.
+    let url_args: &[&str] = if args.first() == Some(&"push") { &["remote", "get-url", "--push", "origin"] } else { &["remote", "get-url", "origin"] };
+    let url = git(dir, url_args).unwrap_or_default();
     let has_token = || crate::credentials::load().ok().flatten().is_some_and(|c| !c.bitbucket.api_token.is_empty());
     if is_bitbucket_https(url.trim()) && has_token() {
-        cmd.args(["-c", "credential.helper=", "-c", &format!("credential.helper={}", credential_helper())]);
+        // The helper answers only with this call's grant in both its environment and its
+        // arguments, so running `nitely git-credential` by hand never prints the token.
+        let grant = credential_grant();
+        cmd.env(crate::credentials::GRANT_ENV, &grant);
+        cmd.args(["-c", "credential.helper=", "-c", &format!("credential.helper={} --grant {grant}", credential_helper())]);
     }
     finish(cmd.args(args), args)
+}
+
+/// A fresh random value for one git call (std's hasher keys are seeded from the OS).
+fn credential_grant() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let half = || {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
+        h.finish()
+    };
+    format!("{:016x}{:016x}", half(), half())
 }
 
 /// Whether `url` is an HTTPS remote on bitbucket.org (SSH remotes use keys, not a helper).

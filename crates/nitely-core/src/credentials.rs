@@ -50,6 +50,17 @@ impl Linear {
     }
 }
 
+/// Set by Nitely's own git calls (`playbook::git_remote`) to the grant it also passes the helper,
+/// so `nitely git-credential` answers git during those calls and nobody else.
+pub const GRANT_ENV: &str = "NITELY_CREDENTIAL_GRANT";
+
+/// Whether the helper was started by one of Nitely's own git calls: its environment carries the
+/// same grant as its `--grant` argument. This keeps the token out of anyone's output who runs the
+/// helper by hand; a process that can read the credentials file could of course read it directly.
+pub fn granted(arg: Option<&str>, env: Option<&str>) -> bool {
+    matches!((arg, env), (Some(a), Some(e)) if a.len() >= 32 && a == e)
+}
+
 /// What `nitely git-credential get` tells git for a request (git's credential protocol: `key=value`
 /// lines). Only an HTTPS request for bitbucket.org is answered, with the API token under Bitbucket's
 /// fixed username for tokens over Git (the account email works only for the REST API).
@@ -102,5 +113,15 @@ mod tests {
         assert_eq!(ask("protocol=http\nhost=bitbucket.org\n"), None);
         assert_eq!(ask("protocol=https\nhost=bitbucket.org.evil.com\n"), None);
         assert_eq!(git_answer("protocol=https\nhost=bitbucket.org\n", &Credentials::default()), None);
+    }
+
+    #[test]
+    fn only_a_matching_grant_lets_the_helper_answer() {
+        let g = "0123456789abcdef0123456789abcdef";
+        assert!(granted(Some(g), Some(g)));
+        assert!(!granted(None, Some(g)));
+        assert!(!granted(Some(g), None));
+        assert!(!granted(Some(g), Some("0123456789abcdef0123456789abcdee")));
+        assert!(!granted(Some("x"), Some("x")), "too short to be a grant");
     }
 }

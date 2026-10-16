@@ -41,9 +41,12 @@ enum Cmd {
     #[command(hide = true)]
     McpCall,
     /// Git credential helper for Nitely's own pushes and fetches to bitbucket.org: answers `get`
-    /// with the API token from the credentials file. Nitely passes it to git only for those calls.
+    /// with the API token, only inside those calls (they pass a matching --grant and environment).
     #[command(hide = true)]
     GitCredential {
+        /// The grant of the git call that runs this helper.
+        #[arg(long)]
+        grant: Option<String>,
         /// get, store or erase; only get is answered.
         operation: String,
     },
@@ -400,11 +403,13 @@ fn run(cmd: Cmd) -> Result<()> {
     let me = Actor::Agent("cli".into());
     match cmd {
         Cmd::Hook { .. } | Cmd::Mcp | Cmd::McpCall | Cmd::Ui { .. } => unreachable!(),
-        Cmd::GitCredential { operation } => {
-            // Answer nothing (git then fails without prompting) unless it is a get we can answer.
+        Cmd::GitCredential { grant, operation } => {
+            // Answer nothing (git then fails without prompting) unless it is a get, from one of
+            // Nitely's own git calls, that we can answer.
             let mut request = String::new();
             std::io::stdin().read_to_string(&mut request)?;
-            if operation == "get" {
+            let env = std::env::var(nitely_core::credentials::GRANT_ENV).ok();
+            if operation == "get" && nitely_core::credentials::granted(grant.as_deref(), env.as_deref()) {
                 if let Some(creds) = nitely_core::credentials::load().ok().flatten() {
                     if let Some(answer) = nitely_core::credentials::git_answer(&request, &creds) {
                         print!("{answer}");
