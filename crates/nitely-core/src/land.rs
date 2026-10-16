@@ -349,6 +349,8 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
 
     let head = rev(root, &branch)?;
     report.approval = Some(check_approval(db, pb, key, &worktree, &base)?);
+    let project = db.issue(key)?.and_then(|i| i.project);
+    crate::private_terms::check(project.as_deref(), &worktree, &base)?;
 
     let gate = playbook::run_gate(db, root, &worktree, Some(key), actor)?;
     let passed = gate.passed;

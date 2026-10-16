@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "./backend";
 import type { Project } from "./types";
+import { PrivateTerms } from "./PrivateTerms";
 
 interface Rekeyed {
   from: string;
@@ -118,6 +119,8 @@ export function ProjectSettings(props: {
         </form>
         {!keyOk && key.trim() !== "" && <p className="settings-hint">2 to 10 letters or digits, starting with a letter.</p>}
       </section>
+
+      <PrivateTerms projectKey={project.key} />
 
       <section className="settings-card settings-danger">
         <h2>Remove project</h2>

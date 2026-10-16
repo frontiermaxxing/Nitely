@@ -951,6 +951,27 @@ function projectOf(key: unknown): Project {
   return p;
 }
 
+// What submit and land keep out of each project's repos (crates/nitely-core/src/private_terms.rs).
+let PRIVATE_TERMS: { all: string[]; projects: Record<string, string[]> } = { all: ["C:\\Users\\sam\\notes"], projects: { NIT: ["Bluebird", "re:CLIENT-\\d+"] } };
+
+function setPrivateTerms(args: Record<string, unknown>) {
+  const t = args.terms as typeof PRIVATE_TERMS;
+  const tidy = (l: string[]) => [...new Set(l.map((x) => x.trim()).filter(Boolean))];
+  const bad = [t.all, ...Object.values(t.projects)].flat().find((x) => {
+    if (!x.startsWith("re:")) return false;
+    try {
+      new RegExp(x.slice(3));
+      return false;
+    } catch {
+      return true;
+    }
+  });
+  if (bad !== undefined) throw new Error("a private term is not a valid regular expression");
+  const projects = Object.fromEntries(Object.entries(t.projects).map(([k, l]) => [k.toUpperCase(), tidy(l)]).filter(([, l]) => l.length));
+  PRIVATE_TERMS = { all: tidy(t.all), projects };
+  return PRIVATE_TERMS;
+}
+
 function renameProject(args: Record<string, unknown>) {
   const p = projectOf(args.key);
   const name = String(args.name ?? "").trim();
@@ -1323,6 +1344,10 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return null;
       case "rename_project":
         return renameProject(args);
+      case "private_terms":
+        return PRIVATE_TERMS;
+      case "set_private_terms":
+        return setPrivateTerms(args);
       case "rekey_project":
         return rekeyProject(args);
       case "remove_project":

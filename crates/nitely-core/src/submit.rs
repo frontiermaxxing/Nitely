@@ -101,6 +101,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         .map(str::to_string)
         .collect();
     pb.approval.check_blocked(&files)?;
+    crate::private_terms::check(issue.project.as_deref(), &worktree, &since)?;
     let gate = playbook::run_gate(db, &root, &worktree, Some(&issue.key), actor)?;
     let mut out = Submitted {
         issue: issue.key.clone(),

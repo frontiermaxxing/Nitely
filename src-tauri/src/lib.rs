@@ -111,6 +111,18 @@ async fn rekey_project(key: String, new_key: String) -> Result<nitely_core::proj
     nitely_core::projects::rekey(&mut db()?, &key, &new_key).map_err(err)
 }
 
+/// The words, paths and patterns submit and land keep out of each project's repos. Only the app
+/// reads or writes them; no MCP tool or CLI command does (crates/nitely-core/src/private_terms.rs).
+#[tauri::command]
+async fn private_terms() -> Result<nitely_core::private_terms::PrivateTerms, String> {
+    nitely_core::private_terms::load().map_err(err)
+}
+
+#[tauri::command]
+async fn set_private_terms(terms: nitely_core::private_terms::PrivateTerms) -> Result<nitely_core::private_terms::PrivateTerms, String> {
+    nitely_core::private_terms::save(&terms).map_err(err)
+}
+
 /// `confirm` must repeat the key when the project still has issues: they are deleted with it.
 #[tauri::command]
 async fn remove_project(key: String, confirm: Option<String>) -> Result<nitely_core::projects::Removed, String> {
@@ -365,6 +377,8 @@ pub fn run() {
             rename_project,
             rekey_project,
             remove_project,
+            private_terms,
+            set_private_terms,
             project_brief,
             set_project_brief,
             crew_status,

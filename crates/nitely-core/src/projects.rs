@@ -135,6 +135,9 @@ fn follow(mut config: crate::Config, from: &str, to: Option<&str>) -> (usize, us
         warnings.push(format!("machine tokens still name {from}: {e:#}"));
         0
     });
+    if let Err(e) = crate::private_terms::retarget(from, to) {
+        warnings.push(format!("the private terms kept for {from} did not follow: {e:#}"));
+    }
     (repos, machines, warnings)
 }
 

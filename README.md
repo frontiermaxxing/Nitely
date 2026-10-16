@@ -96,6 +96,15 @@ touch. [docs/playbooks/example.toml](docs/playbooks/example.toml) is a worked ex
 playbook for a made-up monorepo: per-OS branches, worktree setup and teardown, gate steps that skip
 what a change cannot affect, review flags, and paths that wait for you.
 
+## Private terms
+
+If you work on public code next to private work, list what must never reach a project's repos
+(another project's name, a client, a local folder) in the project's **Settings** in the app, or for
+every project at once. `submit` and `land` refuse a branch that adds one to a line, a new file path
+or a commit message, and say only where (`src/app.ts:12: term 2 of APP's list`). The list stays in
+Nitely's data folder on this machine; no MCP tool or CLI command shows it, so it never reaches an
+agent's context.
+
 ## GitHub
 
 Watched repos whose `origin` is on GitHub get their pull requests, approvals and CI checks synced,

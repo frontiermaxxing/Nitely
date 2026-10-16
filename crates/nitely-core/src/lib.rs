@@ -18,6 +18,7 @@ pub mod linear_import;
 pub mod issues;
 pub mod paths;
 pub mod playbook;
+pub mod private_terms;
 pub mod procs;
 pub mod proposals;
 pub mod projects;
