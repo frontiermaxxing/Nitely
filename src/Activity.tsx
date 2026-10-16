@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "./backend";
 import type { Activity as ActivityData, ActivityLane, ActivityMark, ActivitySegment, IssueRecord, MarkKind, Project, SegmentState } from "./types";
-import { AgentMark, EmptyState, EVENT_LABEL, EventMark, IssueToken, StateDot, STALE_SECS, VENDOR_LABEL, vendorOf, type Liveness } from "./ui";
+import { AgentMark, EmptyState, EVENT_LABEL, EventMark, IssueToken, StateDot, VENDOR_LABEL, livenessFrom, vendorOf, type Liveness } from "./ui";
 
 const WINDOWS = [1, 6, 12, 24] as const;
 type Hours = (typeof WINDOWS)[number];
@@ -270,9 +270,7 @@ function initialHours(): Hours {
 }
 
 function liveness(lane: ActivityLane, now: number): Liveness {
-  if (lane.state === "ended") return "ended";
-  if (now - lane.last_seen_at > STALE_SECS) return "stale";
-  return lane.state;
+  return livenessFrom(lane.state, lane.last_seen_at, now);
 }
 
 function groupLanes(lanes: ActivityLane[], projects: Project[]) {

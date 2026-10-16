@@ -11,6 +11,8 @@
 }
 .ui-dot-working { background: var(--live); animation: ui-breathe var(--breathe) ease-in-out infinite; }
 .ui-dot-waiting { background: var(--attention); }
+/* A long wait gets louder: a ring of the same color, never a fade. */
+.ui-dot-long { box-shadow: 0 0 0 2px var(--mark-bg, var(--surface)), 0 0 0 3.5px var(--attention); }
 .ui-dot-idle { box-shadow: inset 0 0 0 1.5px var(--fg-3); }
 .ui-dot-stale { box-shadow: inset 0 0 0 1.5px var(--fg-3); opacity: 0.45; }
 .ui-dot-ended { background: var(--line-strong); transform: scale(0.75); }

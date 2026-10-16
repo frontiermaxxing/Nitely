@@ -257,7 +257,7 @@ const ISSUES: IssueSpec[] = [
     key: "HAR-14", title: "Booking form loses the date on back navigation", kind: "bug", priority: 2, vendor: "cursor",
     from: 16, to: 0.06, story: ["filed", "claim", "work", "work"],
     notes: ["The date lives in component state; moving it to the URL", "Needs the staging migration to test"],
-    live: { state: "waiting", seen: 3, activity: "Waiting for input: run the migration against staging?" }, branch: { ahead: 2, dirty_files: 4 },
+    live: { state: "waiting", seen: 42, activity: "Waiting for input: run the migration against staging?" }, branch: { ahead: 2, dirty_files: 4 },
   },
   {
     key: "HAR-13", title: "Show availability for the next 14 days", kind: "feature", priority: 2, vendor: "cursor",

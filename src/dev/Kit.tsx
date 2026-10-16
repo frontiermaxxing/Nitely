@@ -208,6 +208,12 @@ export default function Kit() {
                 <td key={l ?? "none"}>{l && <StateDot state={l} />}</td>
               ))}
             </tr>
+            <tr>
+              <th>long wait</th>
+              {LIVENESS.map((l) => (
+                <td key={l ?? "none"}>{l === "waiting" && <StateDot state="waiting" long />}</td>
+              ))}
+            </tr>
           </tbody>
         </table>
       </section>

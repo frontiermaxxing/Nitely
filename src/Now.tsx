@@ -7,7 +7,7 @@ import {
   AgentMark,
   EmptyState,
   IssueToken,
-  LIVENESS_LABEL,
+  livenessLabel,
   StateDot,
   StationTrack,
   VENDOR_LABEL,
@@ -120,7 +120,7 @@ function Row(props: { row: TaskRow; integration: string; now: number; onOpenIssu
             <div className="cell-line">
               <AgentMark vendor={s?.vendor ?? row.vendor} state={live} />
               <span>{VENDOR_LABEL[vendorOf(s?.vendor ?? row.vendor)]}</span>
-              <span className={live === "waiting" ? "attention-ink" : "muted"}>{live ? LIVENESS_LABEL[live] : "no session"}</span>
+              <span className={live === "waiting" ? "attention-ink" : "muted"}>{livenessLabel(s, now)}</span>
               {s && <span className="muted">· {ago(now, s.last_seen_at)}</span>}
             </div>
             <div className="cell-sub">

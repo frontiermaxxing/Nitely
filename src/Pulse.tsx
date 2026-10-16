@@ -13,8 +13,10 @@ import {
   STATIONS,
   Sparkline,
   StateDot,
+  livenessLabel,
   livenessOf,
   stationColor,
+  waitedLong,
   trackOf,
   type Station,
 } from "./ui";
@@ -343,7 +345,9 @@ function Card({ f, ctx }: { f: FlowIssue; ctx: Context }) {
             ↺{t.rounds}
           </span>
         )}
-        {(t.asking || waiting) && <StateDot state="waiting" title={waiting ? "Waiting for your input" : "Asked you something"} />}
+        {(t.asking || waiting) && (
+          <StateDot state="waiting" long={waitedLong(session, ctx.now)} title={waiting ? `Waiting for your input: ${livenessLabel(session, ctx.now)}` : "Asked you something"} />
+        )}
       </span>
       <span className="fcard-title">{f.issue.title}</span>
       {reason && <span className="fcard-why">{reason}</span>}
