@@ -6,12 +6,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
+/// A process using a folder, by name and pid only: its command line is matched but never kept,
+/// since it can carry a token or password.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Holder {
     pub pid: u32,
     pub name: String,
-    /// Its command line, cut to a readable length.
-    pub command: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -31,8 +31,6 @@ struct Proc {
     cwd: Option<String>,
 }
 
-const COMMAND_MAX: usize = 140;
-
 /// Processes whose executable, command line or working directory is inside `dir`, other than this
 /// process and the ones that started it. Empty when processes cannot be listed.
 pub fn holders(dir: &Path) -> Vec<Holder> {
@@ -51,16 +49,7 @@ pub fn holders(dir: &Path) -> Vec<Holder> {
         .into_iter()
         .filter(|p| !mine.contains(&p.process_id))
         .filter(|p| [&p.executable_path, &p.command_line, &p.cwd].into_iter().flatten().any(|text| names_path(text, &dir)))
-        .map(|p| {
-            let command = p.command_line.or(p.executable_path).unwrap_or_default();
-            let command: String = command.split_whitespace().collect::<Vec<_>>().join(" ");
-            let command = if command.chars().count() > COMMAND_MAX {
-                format!("{}…", command.chars().take(COMMAND_MAX - 1).collect::<String>())
-            } else {
-                command
-            };
-            Holder { pid: p.process_id, name: p.name.unwrap_or_default(), command }
-        })
+        .map(|p| Holder { pid: p.process_id, name: p.name.unwrap_or_default() })
         .collect()
 }
 
