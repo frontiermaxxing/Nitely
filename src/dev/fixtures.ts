@@ -180,7 +180,7 @@ const ISSUES: IssueSpec[] = [
     from: 50, to: 0.8, story: ["filed", "claim", "work", "gate", "review", "pass", "landfail"],
     notes: ["Counting asks, Needs You and stuck worktrees for the tray"],
     live: { state: "waiting", seen: 9, activity: "Land stopped on a conflict in src/App.tsx" },
-    branch: { ahead: 3, behind: 5, dirty_files: 1, rebase_in_progress: true }, checks: "success",
+    branch: { ahead: 3, behind: 5, dirty_files: 1, rebase_in_progress: true, rebase_started_at: NOW - 9 * MIN }, checks: "success",
   },
   {
     key: "NIT-45", title: "Keyboard shortcuts to move an issue between states", kind: "improvement", priority: 3, vendor: "cursor",
@@ -225,7 +225,7 @@ const ISSUES: IssueSpec[] = [
     from: 14, to: 0.15, story: ["filed", "claim", "work", "work", "gate", "work"],
     notes: ["Reproduced: the strip repaints twice on profile switch", "Rebasing on develop before submit"],
     live: { state: "idle", seen: 8, activity: "Rebasing on develop before submit" },
-    branch: { ahead: 3, behind: 7, dirty_files: 2, rebase_in_progress: true },
+    branch: { ahead: 3, behind: 7, dirty_files: 2, rebase_in_progress: true, rebase_started_at: NOW - 48 * MIN },
   },
   {
     key: "ORB-271", title: "Sync settings across profiles", kind: "feature", priority: 2, vendor: "codex",

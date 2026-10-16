@@ -55,6 +55,8 @@ export interface BranchState {
   last_commit_subject: string | null;
   last_commit_at: number | null;
   rebase_in_progress: boolean;
+  /** When the stopped rebase began (unix seconds); null when there is none or it is not known. */
+  rebase_started_at?: number | null;
 }
 
 export interface TaskRow {

@@ -133,3 +133,27 @@ test("marking your own work done or handing it back moves the track at once", ()
   assert.equal(trackAfter(t, "done", NOW).station, "done");
   assert.equal(trackAfter(t, "handback", NOW).station, "todo");
 });
+
+test("a fresh rebase conflict waits from when the rebase stopped, not from the branch's last commit", () => {
+  const row = {
+    worktree: "C:/code/app-worktrees/x-7",
+    branch: "claude/x-7-y",
+    is_main: false,
+    vendor: "claude",
+    issue_key: "X-7",
+    state: { ahead: 2, behind: 9, dirty_files: 1, last_commit_subject: "old work", last_commit_at: NOW - 5 * 86400, rebase_in_progress: true, rebase_started_at: NOW - 120 },
+    error: null,
+    session: null,
+    issue: issue("X-7", "In Progress"),
+    pr: null,
+    needs_me: true,
+  };
+  const b: Board = { ...board([]), repos: [{ name: "app", root: "C:/code/app", integration_branch: "main", project: "X", rows: [row], branches: [], error: null, unmatched_sessions: [] }] } as unknown as Board;
+  const [d] = decisionsOf(b, new Map(), NOW);
+  assert.equal(d.kind, "conflict");
+  assert.equal(d.since, NOW - 120);
+  // Without the rebase's time (an older backend), the last commit is the best guess left.
+  const old = { ...row, state: { ...row.state, rebase_started_at: null } };
+  const b2 = { ...b, repos: [{ ...b.repos[0], rows: [old] }] } as unknown as Board;
+  assert.equal(decisionsOf(b2, new Map(), NOW)[0].since, NOW - 5 * 86400);
+});

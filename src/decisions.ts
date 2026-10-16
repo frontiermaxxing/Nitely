@@ -106,7 +106,8 @@ export function decisionsOf(board: Board, details: Map<string, IssueDetail>, now
     // A row flagged only because its issue waits for approval is the approval above.
     if (!conflict && row.session?.state !== "waiting") continue;
     const issue = row.issue ?? issueOf(row.issue_key);
-    const since = conflict ? row.state?.last_commit_at ?? row.session?.last_seen_at ?? now : row.session?.last_seen_at ?? now;
+    // A conflict waits from when its rebase stopped; a branch's last commit can be days older.
+    const since = conflict ? (row.state?.rebase_started_at ?? row.state?.last_commit_at ?? row.session?.last_seen_at ?? now) : (row.session?.last_seen_at ?? now);
     out.push({ id: `${conflict ? "conflict" : "input"}-${row.worktree}`, kind: conflict ? "conflict" : "input", issue, row, repo, ask: null, since, urgency: urgencyOf(issue) });
   }
   // A land that stopped, with no agent working on it any more, is the human's to unstick.
