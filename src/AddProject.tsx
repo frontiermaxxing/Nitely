@@ -74,7 +74,6 @@ export function AddProject(props: { onAdded: (projectKey: string) => void }) {
         <h1>Add a project</h1>
       </div>
       <p className="page-lead">
-
         Point Nitely at a repo you already work in. It creates the project, watches the repo and its worktrees, and
         connects your agents so they take work from Nitely and report back. Nothing is written into the repo.
       </p>

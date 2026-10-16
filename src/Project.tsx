@@ -109,7 +109,6 @@ export function ProjectPage(props: {
         <ProjectSettings project={props.project} issueCount={issues.length} onChanged={props.onChanged} onMoved={props.onMoved} />
       )}
       {views && issues?.length === 0 && (
-
         <EmptyState title="No issues yet.">
           Agents file them with the <span className="mono">file_issue</span> tool, or run <span className="mono">nitely issue create</span>.
         </EmptyState>

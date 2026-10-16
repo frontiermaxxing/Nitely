@@ -492,7 +492,6 @@ fn run(cmd: Cmd) -> Result<()> {
                 }
             }
         }
-
         Cmd::Issue { command } => {
             let config = Config::load()?;
             let mut db = Db::open_default()?;

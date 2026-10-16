@@ -3,7 +3,6 @@ import { invoke } from "./backend";
 import type { AgentPlan, AgentsUpdated, ConnectChange } from "./types";
 import { AgentMark, VENDOR_LABEL, vendorOf } from "./ui";
 
-
 /** Changes still needed by the installed agents. */
 export function pendingChanges(agents: AgentPlan[]): number {
   return agents.filter((a) => a.found).flatMap((a) => a.changes.filter((c) => c.action !== "unchanged")).length;
@@ -125,7 +124,6 @@ export function AgentSetup(props: { agents: AgentPlan[]; onUpdated: () => void; 
           </button>
         </div>
       )}
-
       {result && (
         <section>
           <h2>Done</h2>

@@ -93,7 +93,6 @@ button.journey-toggle:focus-visible { outline: 2px solid var(--focus); outline-o
   background: var(--surface); white-space: nowrap;
 }
 .who-label { font-size: 11.5px; font-weight: var(--weight-medium); color: var(--fg); }
-
 .who-sub { font-family: var(--font-mono); font-size: 10.5px; color: var(--fg-3); }
 .who-ok { border-color: var(--live); background: var(--live-wash); }
 .who-ok .who-label { color: var(--live); }

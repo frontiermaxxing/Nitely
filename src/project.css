@@ -141,7 +141,6 @@
   .board-col { max-width: none; min-width: 0; }
   .board-col-empty { display: none; }
   .board-col-empty { border: 0; }
-
   .board-cards { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
 }
 @media (max-width: 760px) {

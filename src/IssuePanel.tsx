@@ -4,7 +4,6 @@ import type { IssueDetail, IssueRecord, LinkedIssue } from "./types";
 import { agentLabel, ago, openExternal, PRIORITY } from "./util";
 import { IssueJourney, WhoHadIt } from "./IssueJourney";
 import { AgentMark, IssueToken, Loading, PrMark, PriorityMark, StationGlyph, StationTrack, VENDOR_LABEL, trackOf, vendorOf } from "./ui";
-
 import "./issue.css";
 
 const KIND_LABEL: Record<string, string> = {
@@ -261,7 +260,6 @@ export function IssuePanel(props: {
 const capital = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
 /** "Imported from Linear" for a Linear address, else the host. */
-
 function externalName(url: string): string {
   try {
     const host = new URL(url).hostname.replace(/^www\./, "");

@@ -362,7 +362,6 @@ and inside Tauri nothing changes.
 - Agents: `.claude/launch.json` has a `web` configuration (port 5173), so the Browser pane's
   `preview_start` with name `web` opens it. Or run `npm run dev -- --port <port> --strictPort`.
 - Routes are in the hash: `#overview` (the default; `#pulse` still works), `#inbox`, `#now`, `#activity`, `#project/NIT`,
-
   `#agents`, `#add`, `#kit`, and `@KEY` opens an issue panel (`#now@NIT-29`). `?hours=1|6|12|24`
   opens Activity at that window. A project's view follows its key: `#project/NIT/list`,
   `#project/NIT/board`, `#project/NIT/branches`; without one, the last view picked.

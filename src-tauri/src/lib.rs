@@ -309,7 +309,6 @@ pub fn run() {
             rekey_project,
             remove_project,
             issues,
-
             issue_detail,
             set_blocker,
             move_issue,

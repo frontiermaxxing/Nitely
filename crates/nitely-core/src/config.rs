@@ -104,7 +104,6 @@ impl Config {
     }
 
     /// Adds a repo, or replaces the one with the same name or the same root.
-
     /// Fails, changing nothing, when the playbook kept for a replaced entry can't be carried over.
     pub fn upsert_repo(&mut self, repo: RepoConfig) -> Result<()> {
         self.upsert_repo_in(&paths::data_dir(), repo)

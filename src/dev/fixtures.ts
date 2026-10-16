@@ -917,7 +917,6 @@ function removeProject(args: Record<string, unknown>) {
 }
 
 function moveIssue(args: Record<string, unknown>) {
-
   const issue = world.issues.find((i) => i.key === args.key);
   if (!issue) throw `no issue ${String(args.key)}`;
   const to = String(args.state);

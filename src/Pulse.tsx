@@ -201,7 +201,6 @@ function openSessions(board: Board | null, now: number): { s: Session; key: stri
     // Agents on other machines reach the backlog through nitely serve, not a worktree here.
     ...(board?.remote_sessions ?? []).map((s) => ({ s, key: null })),
   ].filter(({ s }) => livenessOf(s, now) !== "ended");
-
 }
 
 function Glance({ data, board, decisions, ctx, onGo }: { data: PulseData; board: Board | null; decisions: Decision[] | null; ctx: Context; onGo: (view: View) => void }) {

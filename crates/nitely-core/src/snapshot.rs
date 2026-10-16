@@ -209,7 +209,6 @@ fn loose_branches(
             let (vendor, issue_key) = git::parse_branch(&b.name);
             let issue_key = issue_key.map(|k| crate::projects::current_key(aliases, &k));
             let issue = issue_key.as_ref().and_then(|k| issues.iter().find(|i| &i.key == k).cloned());
-
             let pr = pr_for(prs, slug, &b.name);
             BranchRow {
                 name: b.name,

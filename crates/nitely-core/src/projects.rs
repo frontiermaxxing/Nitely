@@ -36,7 +36,6 @@ pub fn current_key(aliases: &HashMap<String, String>, key: &str) -> String {
 }
 
 /// A project key: 2-10 letters or digits, starting with a letter, upper-cased.
-
 pub fn valid_key(key: &str) -> Result<String> {
     let key = key.trim().to_uppercase();
     let valid = (2..=10).contains(&key.len())
@@ -237,7 +236,6 @@ impl Db {
         tx.execute("DELETE FROM project WHERE key = ?1", [&key])?;
         tx.commit()?;
         Ok(Removed { key, issues, repos: 0, machines: 0 })
-
     }
 }
 

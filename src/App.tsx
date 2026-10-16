@@ -51,7 +51,6 @@ function fromHash(hash: string): { view: View; issue: string | null } {
   const plain = ["pulse", "inbox", "now", "activity", "add", "agents", "network"].concat(isPreview ? ["kit"] : []);
   // The home view was called Pulse; old links still land on it.
   const named = kind === "overview" ? "pulse" : kind;
-
   const view: View =
     kind === "project" && key
       ? { kind: "project", key: key.toUpperCase(), ...(isProjectTab(tab) ? { tab } : {}) }

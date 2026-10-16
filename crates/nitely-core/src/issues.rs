@@ -537,7 +537,6 @@ impl Db {
                 None => None,
             },
         };
-
         Ok(match issue {
             Some(mut i) => {
                 Deps::load(&self.conn)?.fill(&mut i);

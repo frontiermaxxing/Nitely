@@ -258,7 +258,6 @@ footer .btn { margin-left: auto; }
 .panel-rule { height: 1px; background: var(--line); }
 .panel-rail .body { font-size: var(--text-md); color: var(--fg-2); margin: 0; }
 .panel-moves { margin-top: 0; }
-
 .facts { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; font-size: var(--text-sm); color: var(--fg-2); }
 .fact { display: inline-flex; align-items: center; gap: 5px; }
 .fact.strong { color: var(--fg); font-weight: var(--weight-medium); }

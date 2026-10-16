@@ -214,7 +214,6 @@ function InboxRow(props: {
           props.onStep(e.key === "j" || e.key === "ArrowDown" ? 1 : -1);
         }
       }}
-
       aria-current={props.on ? "true" : undefined}
     >
       <span className={`inbox-kind inbox-kind-${d.kind}`} aria-label={KIND_WORD[d.kind]}>
@@ -483,7 +482,6 @@ function Answer(props: { askId: number; options: string[]; busy: boolean; act: (
         drafts.delete(props.askId);
       });
   };
-
   return (
     <div className="dd-answer">
       {props.options.map((o, i) => (
