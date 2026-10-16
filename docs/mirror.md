@@ -11,7 +11,8 @@ comment there saying "approved" means nothing (approvals are signed in the app, 
 
 Off by default, per project. Only the person turns it on, in the project's settings in the app
 (`set_mirror`; an agent's call is refused). The card says where it would publish, or why it cannot
-(no GitHub or Bitbucket origin, issues turned off on the repo, a token that cannot write issues),
+(no GitHub or Bitbucket origin, issues turned off on the repo, a GitHub token without admin rights,
+which a withdrawal needs to delete an issue with its edit history),
 and how many issues each choice would publish now:
 
 - **only issues filed from now on** (the default),

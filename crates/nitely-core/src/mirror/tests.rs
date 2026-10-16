@@ -75,7 +75,7 @@ fn local_paths_and_agent_ids_go_out_neutral() {
     // Folders with spaces, and the home folder whole, even where no path follows it.
     let home = Some(r"C:\Users\Sam Lee");
     assert_eq!(
-        sanitize_with_home(r"Notes in C:\Users\Sam Lee\Private\notes.txt and in C:\Data\My Files\b.txt, from C:\Users\Sam Lee.", &roots, home),
+        sanitize_with_home(r"Notes in C:\Users\Sam Lee\Private\notes.txt and in C:\Data\My Files\b.txt, from C:\Users\Sam Lee\My Files\c.txt.", &roots, home),
         "Notes in <local path> and in <local path>, from <local path>."
     );
 }

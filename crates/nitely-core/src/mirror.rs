@@ -92,13 +92,23 @@ pub fn sanitize_with_home(text: &str, roots: &[String], home: Option<&str>) -> S
     // for a folder.
     let path = regex::Regex::new(r#"(?i)\b[A-Z]:[\\/](?:[^\\/\n"'`<>|:]*[^\s\\/"'`<>|:][\\/])*[^\s\\/"'`<>|,;)\]]*|(?:^|[\s"'`(\[])(/(?:Users|home|tmp|var|private|opt|mnt)/(?:[^/\n"'`<>|]*[^\s/"'`<>|]/)*[^\s/"'`<>|,;)\]]*)"#).unwrap();
     let roots: Vec<String> = roots.iter().map(|r| normalize(r)).collect();
-    let text = regex::Regex::new(r#"<home>(?:[\\/][^\s"'`<>|,;)\]]*)*"#).unwrap().replace_all(&text, "<local path>").into_owned();
+    let text = regex::Regex::new(r#"<home>(?:[\\/](?:[^\\/\n"'`<>|:]*[^\s\\/"'`<>|:][\\/])*[^\s\\/"'`<>|,;)\]]*)?"#).unwrap()
+        .replace_all(&text, |c: &regex::Captures| {
+            // A sentence's full stop after the path stays.
+            let dots = c[0].len() - c[0].trim_end_matches('.').len();
+            format!("<local path>{}", ".".repeat(dots))
+        })
+        .into_owned();
     path.replace_all(&text, |c: &regex::Captures| {
         let whole = c.get(0).unwrap().as_str();
         let (lead, p) = match c.get(1) {
             Some(m) => (&whole[..m.start() - c.get(0).unwrap().start()], m.as_str()),
             None => ("", whole),
         };
+        // A sentence's full stop after the path stays.
+        let trimmed = p.trim_end_matches('.');
+        let dots = ".".repeat(p.len() - trimmed.len());
+        let p = trimmed;
         let n = normalize(p);
         let relative = roots.iter().find_map(|r| {
             // The repo itself, or a worktree beside it: `<root>-worktrees/<task>/…` keeps what is after the task folder.
@@ -114,7 +124,7 @@ pub fn sanitize_with_home(text: &str, roots: &[String], home: Option<&str>) -> S
             Some(rel) if !rel.is_empty() => p.replace('\\', "/")[p.len() - rel.len()..].to_string(),
             _ => "<local path>".to_string(),
         };
-        format!("{lead}{shown}")
+        format!("{lead}{shown}{dots}")
     })
     .into_owned()
 }
@@ -241,8 +251,9 @@ impl Host for GitHub {
         if repo["has_issues"] == false {
             bail!("issues are turned off on github.com/{}; turn them on in the repo's settings to mirror", self.slug);
         }
-        if repo["permissions"]["push"] == false && repo["permissions"]["triage"] != true {
-            bail!("the GitHub token cannot write issues on {} (it needs triage or write access)", self.slug);
+        // Admin, so a withdrawn issue can be deleted: an edited text stays readable in its history.
+        if repo["permissions"]["admin"] != true {
+            bail!("the GitHub token needs admin rights on {}, so an issue made private later can be deleted with its edit history", self.slug);
         }
         Ok(())
     }
@@ -527,7 +538,15 @@ pub fn preview(config: &Config, db: &Db, project: &str, check_host: bool) -> Res
         }
         Err(e) => p.unavailable = Some(format!("{e:#}")),
     }
-    let terms = crate::private_terms::load().context("the private terms could not be read, so nothing would be checked before publishing")?;
+    let terms = match crate::private_terms::load() {
+        Ok(t) => t,
+        Err(e) => {
+            // The card still shows whether the mirror is on; nothing is counted, and the sync
+            // publishes nothing until the list reads again.
+            p.unavailable = Some(format!("the private terms could not be read, so nothing would be checked before publishing: {e:#}"));
+            return Ok(p);
+        }
+    };
     let roots = roots_of(config, &project);
     let issues = db.list_issues(Some(&project), true)?;
     for backfill in BACKFILLS {
@@ -606,6 +625,7 @@ pub fn sync_project(db: &Db, host: &dyn Host, project: &str, terms: &PrivateTerm
         // labelled security or given to the human, while earlier ones were being sent.
         let Some(setting) = db.mirror_setting(project)?.filter(|s| s.enabled_at == setting.enabled_at) else { return Ok(()) };
         let Some(issue) = db.issue(&listed.key)? else { continue };
+        SyncLock::beat();
         // One issue the host refuses (deleted there, say) does not hold up the others.
         if let Err(e) = sync_issue(db, host, &issue, &setting, terms, roots, budget, report) {
             report.errors.push(format!("{}: {e:#}", issue.key));
@@ -685,7 +705,7 @@ fn post_comments(db: &Db, host: &dyn Host, issue: &IssueRecord, terms: &PrivateT
     let pr = db.prs_for_issue(&issue.key)?.into_iter().next().map(|p| p.url);
     let project = issue.project.as_deref().unwrap_or_default();
     for (id, kind, summary) in events {
-        if *budget == 0 {
+        if *budget == 0 || db.mirror_setting(project)?.is_none() {
             return Ok(());
         }
         if COMMENTED.contains(&kind.as_str()) {
@@ -739,9 +759,9 @@ pub fn withdraw_now(config: &Config, db: &Db, key: &str) -> Result<()> {
     let (Some(number), "mirrored") = (m.number, m.status.as_str()) else { return Ok(()) };
     let issue = db.issue(key)?.with_context(|| format!("no issue {key}"))?;
     let (host, _) = host_for(config, issue.project.as_deref().unwrap_or_default())?;
-    let repo: Option<String> = db.conn.query_row("SELECT repo FROM issue_mirror WHERE issue_key = ?1", [&issue.key], |r| r.get(0))?;
-    if repo.as_deref() != Some(host.repo()) {
-        bail!("{key} was published on {}, which is no longer this project's repo; take it down there", repo.unwrap_or_default());
+    let (on, repo): (Option<String>, Option<String>) = db.conn.query_row("SELECT host, repo FROM issue_mirror WHERE issue_key = ?1", [&issue.key], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    if on.as_deref() != Some(host.name()) || repo.as_deref() != Some(host.repo()) {
+        bail!("{key} was published on {} {}, which is no longer this project's repo; take it down there", on.unwrap_or_default(), repo.unwrap_or_default());
     }
     let _lock = SyncLock::take().context("a mirror sync is running; try again in a moment")?;
     withdraw(db, host.as_ref(), &issue.key, number, "marked private")
@@ -759,6 +779,16 @@ impl SyncLock {
             std::fs::remove_file(&path).ok();
         }
         std::fs::OpenOptions::new().write(true).create_new(true).open(&path).ok().map(|_| SyncLock(path))
+    }
+}
+
+impl SyncLock {
+    /// Marks the lock fresh: a sync that keeps writing is never taken for a dead one.
+    fn beat() {
+        let path = crate::paths::data_dir().join("mirror.lock");
+        if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&path) {
+            f.set_modified(std::time::SystemTime::now()).ok();
+        }
     }
 }
 
