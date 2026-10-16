@@ -31,6 +31,9 @@ pub struct Playbook {
     pub approval: ApprovalRules,
     #[serde(default)]
     pub land: LandRules,
+    /// Agent workers Nitely starts itself (docs/crew.md); off unless `workers` is set.
+    #[serde(default)]
+    pub crew: crate::crew::CrewRules,
     /// Keys this nitely does not know, which it ignored: a typo, or a key a newer nitely reads.
     /// Refusing them would break every older nitely still running the day a playbook starts
     /// using a new key (NIT-50), so they are reported instead (see `unknown_warnings`).

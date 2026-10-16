@@ -19,3 +19,4 @@ toml_edit = "0.23"
 sha2 = "0.10"
 getrandom = "0.3"
 if-addrs = "0.13"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

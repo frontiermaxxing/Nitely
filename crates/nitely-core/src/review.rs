@@ -401,7 +401,7 @@ fn nitely_servers(json: &str) -> Vec<String> {
 }
 
 /// Variables that make a CLI think it runs inside another agent's session.
-fn is_session_marker(name: &str) -> bool {
+pub(crate) fn is_session_marker(name: &str) -> bool {
     name == "CLAUDECODE"
         || name == "CLAUDE_PID"
         || name.starts_with("CLAUDE_CODE_SESSION")
@@ -414,7 +414,7 @@ fn is_session_marker(name: &str) -> bool {
 }
 
 /// On Windows the Codex CLI ships inside the Codex Store app and is not on PATH.
-fn resolve_program(program: &str) -> String {
+pub(crate) fn resolve_program(program: &str) -> String {
     #[cfg(windows)]
     if program == "codex" && which(program).is_none() {
         let out = shell_free_command("powershell")

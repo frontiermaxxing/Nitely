@@ -150,11 +150,36 @@ CREATE TABLE IF NOT EXISTS project_brief ( -- what agents learned about a projec
   setup_at   INTEGER,
   setup_by   TEXT
 );
+CREATE TABLE IF NOT EXISTS crew_worker (   -- one per agent process the crew started (docs/crew.md)
+  id          INTEGER PRIMARY KEY,
+  project     TEXT NOT NULL,
+  issue_key   TEXT NOT NULL,
+  agent       TEXT NOT NULL,             -- claude | codex
+  agent_id    TEXT NOT NULL,             -- the id its MCP calls act as, e.g. 'codex:c:/x-worktrees/nit-3'
+  pid         INTEGER,
+  worktree    TEXT NOT NULL,
+  log_path    TEXT NOT NULL,
+  started_at  INTEGER NOT NULL,
+  ended_at    INTEGER,
+  exit_code   INTEGER,
+  outcome     TEXT,                      -- landed | submitted | asked | failed | stopped | launch_failed
+  reason      TEXT
+);
+CREATE INDEX IF NOT EXISTS crew_worker_project ON crew_worker (project, started_at);
+CREATE TABLE IF NOT EXISTS crew_control (  -- per project: paused, and the supervisor's heartbeat
+  project        TEXT PRIMARY KEY,
+  paused         INTEGER NOT NULL DEFAULT 0,
+  changed_by     TEXT,
+  changed_at     INTEGER,
+  supervisor_pid INTEGER,
+  heartbeat_at   INTEGER,
+  status         TEXT
+);
 "#;
 
 /// Bumped when a table changes shape. Tables that only mirror Bitbucket or Linear are dropped
 /// and refilled by the next sync; tables Nitely owns get real migrations.
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -174,8 +199,8 @@ fn migrate(conn: &Connection) -> Result<()> {
         // v5 keys reviews by issue and patch; the old placeholder table was never written.
         conn.execute_batch("DROP TABLE IF EXISTS review;")?;
     }
-    // v6 adds issue_blocker, v7 session_state, v8 project_alias and v9 project_brief, which SCHEMA
-    // creates; nothing to drop.
+    // v6 adds issue_blocker, v7 session_state, v8 project_alias, v9 project_brief and v10 crew_worker
+    // and crew_control, which SCHEMA creates; nothing to drop.
     Ok(())
 }
 

@@ -209,6 +209,11 @@ When a worker exits, the supervisor reads its issue:
   row for an agent, the supervisor stops using it and says why in `crew status` and the app; with no
   agent left, the crew pauses itself with that reason.
 - **Timeout.** A worker past `timeout_minutes` is stopped (unless landing) and settled as `failed`.
+- **Setup failures.** When `start_task`'s setup fails for an issue, it goes to Needs You with the
+  failing command's output in a handoff note: starting it again would fail the same way every tick.
+- **An agent that will not start at all** (the program is missing, or the process cannot be
+  spawned) is dropped for the rest of the run, the issue goes back to Todo, and the status says
+  "no agent will start (claude: ...)" once none is left.
 - **No gate, no crew** (above). **Daily cap and quiet hours** only stop new starts.
 
 ## What the app shows

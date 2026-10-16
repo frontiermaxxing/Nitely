@@ -1,3 +1,4 @@
+mod crew;
 mod mcp;
 mod serve;
 mod ui;
@@ -119,6 +120,11 @@ enum Cmd {
         /// Take over a lock left by a land that died.
         #[arg(long)]
         break_lock: bool,
+    },
+    /// The project's crew: agent workers Nitely starts and keeps running itself (docs/crew.md).
+    Crew {
+        #[command(subcommand)]
+        command: crew::CrewCmd,
     },
     /// Bring every installed agent's Nitely setup (MCP server, hooks, skill, instructions) up to
     /// this version of Nitely. Shows what is out of date; changes it only with --yes.
@@ -694,6 +700,7 @@ fn run(cmd: Cmd) -> Result<()> {
             }
             Ok(())
         }
+        Cmd::Crew { command } => crew::run(command, &me),
         Cmd::Agents { yes } => {
             let config = Config::load()?;
             if config.repos.is_empty() {

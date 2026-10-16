@@ -5,6 +5,7 @@ pub mod activity;
 pub mod brief;
 pub mod config;
 pub mod connect;
+pub mod crew;
 pub mod instructions;
 pub mod credentials;
 pub mod db;
