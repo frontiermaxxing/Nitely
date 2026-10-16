@@ -121,4 +121,18 @@ export interface IssueDetail {
   issue: IssueRecord;
   timeline: TimelineEntry[];
   prs: PrRecord[];
+  reviews: ReviewRecord[];
+}
+
+export interface ReviewRecord {
+  issue_key: string;
+  patch_id: string;
+  commit_sha: string;
+  /** Empty when no review ran. */
+  reviewer: string;
+  verdict: "pass" | "changes" | "none";
+  approver: "agent" | "human";
+  reasons: string[];
+  findings: { priority: number; text: string }[];
+  ts: number;
 }

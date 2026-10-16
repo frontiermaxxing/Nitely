@@ -1,7 +1,7 @@
 //! A project's playbook: how a task becomes a branch and a worktree, how the worktree is set up,
 //! and which commands gate a change. It lives in the repo at `.nitely/playbook.toml`, versioned
 //! with the code it governs, so every agent and every machine follows the same rules. This is the
-//! Aera `work.mjs` workflow made configurable; review and landing come next.
+//! Aera `work.mjs` workflow made configurable; `review.rs` and `submit.rs` build on it.
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -26,6 +26,10 @@ pub struct Playbook {
     pub worktree: WorktreeRules,
     #[serde(default)]
     pub gate: GateRules,
+    #[serde(default)]
+    pub review: crate::review::ReviewRules,
+    #[serde(default)]
+    pub approval: ApprovalRules,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,6 +61,47 @@ pub struct GateRules {
     /// Must all pass before a change can land. Run in the task's worktree.
     #[serde(default)]
     pub commands: Vec<String>,
+}
+
+/// Which changes wait for a human. Everything else is approved by a passing review.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ApprovalRules {
+    /// Every change waits for a human.
+    pub always_human: bool,
+    /// Changed paths that need a human, as regular expressions over `/`-separated repo paths.
+    pub human_paths: Vec<PathRule>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PathRule {
+    pub pattern: String,
+    /// Shown to the human, e.g. "billing and money".
+    pub reason: String,
+}
+
+impl ApprovalRules {
+    /// The reasons a human must approve a change to `files`; empty when the review is enough.
+    pub fn human_reasons(&self, files: &[String]) -> Result<Vec<String>> {
+        let mut reasons = Vec::new();
+        if self.always_human {
+            reasons.push("this playbook sends every change to a human".to_string());
+        }
+        if files.is_empty() {
+            reasons.push("the branch changes no files".to_string());
+        }
+        for rule in &self.human_paths {
+            let re = regex::Regex::new(&rule.pattern).with_context(|| format!("approval pattern {}", rule.pattern))?;
+            for f in files {
+                let f = f.replace('\\', "/");
+                if re.is_match(&f) {
+                    reasons.push(format!("{}: {f}", rule.reason));
+                }
+            }
+        }
+        Ok(reasons)
+    }
 }
 
 impl Default for BranchRules {
@@ -149,7 +194,7 @@ fn normalize_lexically(p: &Path) -> PathBuf {
     out
 }
 
-fn git(dir: &Path, args: &[&str]) -> Result<String> {
+pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<String> {
     let out = shell_free_command("git").arg("-C").arg(dir).args(args).output()?;
     if !out.status.success() {
         bail!("git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
@@ -157,7 +202,7 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-fn shell_free_command(program: &str) -> Command {
+pub(crate) fn shell_free_command(program: &str) -> Command {
     #[allow(unused_mut)]
     let mut cmd = Command::new(program);
     #[cfg(windows)]
@@ -186,7 +231,7 @@ fn run_shell(command: &str, dir: &Path) -> Result<(bool, String, u64)> {
     Ok((out.status.success(), tail(&text), started.elapsed().as_secs()))
 }
 
-fn tail(s: &str) -> String {
+pub(crate) fn tail(s: &str) -> String {
     if s.len() <= OUTPUT_TAIL {
         return s.to_string();
     }
@@ -351,6 +396,25 @@ mod tests {
         if !cfg!(windows) && !cfg!(target_os = "macos") {
             assert_eq!(pb.integration_branch(), "win-dev");
         }
+    }
+
+    #[test]
+    fn classifies_paths_for_human_approval() {
+        let pb = Playbook::parse(
+            r#"
+            [[approval.human_paths]]
+            pattern = "(^|/)[^/]*(billing|payment)[^/]*(/|$)"
+            reason = "billing and money"
+            "#,
+        )
+        .unwrap();
+        let files = |f: &[&str]| f.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(pb.approval.human_reasons(&files(&["src/ui/sidebar.tsx"])).unwrap().is_empty());
+        assert_eq!(
+            pb.approval.human_reasons(&files(&["src\\billing\\plan.ts", "README.md"])).unwrap(),
+            vec!["billing and money: src/billing/plan.ts".to_string()]
+        );
+        assert_eq!(pb.approval.human_reasons(&[]).unwrap().len(), 1);
     }
 
     #[test]

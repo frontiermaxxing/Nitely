@@ -57,7 +57,11 @@ A repo's `.nitely/playbook.toml` says how a task becomes work: the branch it is 
 branch and worktree names, the commands that set up a new worktree, and the gate that must pass
 before a pull request. `nitely start NIT-3 --agent claude` (MCP: `start_task`) creates the branch
 and worktree and runs setup; `nitely gate` (MCP: `run_gate`) runs the gate in the current worktree.
-Both show on the issue's timeline. A repo without a playbook gets `main`, `{vendor}/{key}-{slug}`
+`nitely submit` (MCP: `submit`) hands in a committed branch: it runs the gate, has another vendor
+review it with a fixed closing format (`VERDICT`, plus the playbook's yes/no flags), decides whether
+a human must approve (`[approval]` paths, or a flag the reviewer raised), pushes, and opens or updates
+the pull request on GitHub or Bitbucket. The review is stored for that exact patch, so landing can
+check it. All of it shows on the issue's timeline and in the app. A repo without a playbook gets `main`, `{vendor}/{key}-{slug}`
 branches and worktrees in `../{repo}-worktrees/`. Nitely's own is in [.nitely/playbook.toml](.nitely/playbook.toml).
 
 ## GitHub

@@ -50,6 +50,7 @@ struct IssueDetail {
     issue: IssueRecord,
     timeline: Vec<TimelineEntry>,
     prs: Vec<PrRecord>,
+    reviews: Vec<nitely_core::submit::ReviewRecord>,
 }
 
 #[tauri::command]
@@ -58,7 +59,8 @@ async fn issue_detail(key: String) -> Result<IssueDetail, String> {
     let issue = db.issue(&key).map_err(err)?.ok_or_else(|| format!("no issue {key}"))?;
     let timeline = db.timeline(&issue.key).map_err(err)?;
     let prs = db.prs_for_issue(&issue.key).map_err(err)?;
-    Ok(IssueDetail { issue, timeline, prs })
+    let reviews = db.reviews(&issue.key).map_err(err)?;
+    Ok(IssueDetail { issue, timeline, prs, reviews })
 }
 
 #[tauri::command]

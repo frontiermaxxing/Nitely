@@ -69,6 +69,18 @@ enum Cmd {
         #[arg(long)]
         issue: Option<String>,
     },
+    /// Hand in the current worktree's branch: gate, cross-vendor review, push, pull request.
+    Submit {
+        /// The issue; defaults to the one the branch names.
+        #[arg(long)]
+        issue: Option<String>,
+        /// Skip the review; the change then waits for a human's approval.
+        #[arg(long)]
+        no_review: bool,
+        /// Do not push or open a pull request.
+        #[arg(long)]
+        local: bool,
+    },
     /// Manage the repos Nitely watches.
     Repo {
         #[command(subcommand)]
@@ -125,7 +137,7 @@ enum IssueCmd {
         #[arg(long)]
         all: bool,
     },
-    /// Show an issue and its timeline.
+    /// Show an issue with its timeline, pull requests and reviews.
     Show { key: String },
     /// Move an issue. Done needs --evidence; Canceled and Duplicate need --reason.
     Move {
@@ -269,7 +281,12 @@ fn run(cmd: Cmd) -> Result<()> {
                 }
                 IssueCmd::Show { key } => {
                     let issue = db.issue(&key)?.ok_or_else(|| anyhow::anyhow!("no issue {key}"))?;
-                    print_json(&serde_json::json!({ "issue": issue, "timeline": db.timeline(&issue.key)? }))
+                    print_json(&serde_json::json!({
+                        "issue": issue,
+                        "timeline": db.timeline(&issue.key)?,
+                        "prs": db.prs_for_issue(&issue.key)?,
+                        "reviews": db.reviews(&issue.key)?,
+                    }))
                 }
                 IssueCmd::Move { key, state, evidence, reason } => {
                     print_json(&db.move_issue(&key, &state, evidence.as_deref(), reason.as_deref(), &me)?)
@@ -370,6 +387,20 @@ fn run(cmd: Cmd) -> Result<()> {
             }
             println!("gate {} at {}", if gate.passed { "passed" } else { "failed" }, gate.commit);
             if !gate.passed {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+        Cmd::Submit { issue, no_review, local } => {
+            let config = Config::load()?;
+            let mut db = Db::open_default()?;
+            let cwd = cwd()?;
+            eprintln!("running the gate, then the review (this takes minutes)…");
+            let opts = nitely_core::submit::SubmitOptions { dir: &cwd, issue_key: issue.as_deref(), skip_review: no_review, local_only: local };
+            let s = nitely_core::submit::submit(&mut db, &config, &opts, &me)?;
+            print_json(&s)?;
+            eprintln!("{}", s.next);
+            if !s.gate.passed || s.review.as_ref().is_some_and(|r| r.verdict != "pass") {
                 std::process::exit(1);
             }
             Ok(())

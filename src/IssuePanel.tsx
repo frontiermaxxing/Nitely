@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { IssueDetail } from "./types";
+import type { IssueDetail, ReviewRecord } from "./types";
 import { agentLabel, ago, openExternal, PRIORITY } from "./util";
 import { PrCell } from "./Pr";
 
@@ -13,6 +13,12 @@ const KIND_LABEL: Record<string, string> = {
   handoff: "handoff",
   ask: "asked",
   answer: "answered",
+  worktree: "started",
+  gate_passed: "gate passed",
+  gate_failed: "gate failed",
+  review_started: "review",
+  review_failed: "review failed",
+  submit: "submitted",
 };
 
 /** One issue and its timeline, in a panel over the right side. */
@@ -112,6 +118,7 @@ export function IssuePanel(props: { issueKey: string; now: number; version: numb
               <button type="button" className="btn ghost" onClick={() => setPending(null)}>Back</button>
             </form>
           )}
+          {detail.reviews[0] && <LatestReview review={detail.reviews[0]} now={props.now} />}
           {detail.prs.length > 0 && (
             <>
               <h3>Pull requests</h3>
@@ -139,5 +146,41 @@ export function IssuePanel(props: { issueKey: string; now: number; version: numb
         </>
       )}
     </aside>
+  );
+}
+
+function LatestReview(props: { review: ReviewRecord; now: number }) {
+  const r = props.review;
+  const verdict = r.verdict === "pass" ? "passed" : r.verdict === "changes" ? "changes requested" : "no review ran";
+  return (
+    <>
+      <h3>Review</h3>
+      <div className="review">
+        <div>
+          <span className={`chip ${r.verdict === "changes" ? "bad" : r.verdict === "pass" ? "good" : ""}`}>{verdict}</span>
+          {r.reviewer && <span className="muted small"> by {r.reviewer}</span>}
+          <span className="muted small"> · {ago(props.now, r.ts)} · <span className="mono">{r.commit_sha}</span></span>
+        </div>
+        <div className="small">
+          {r.approver === "human" ? "Waits for your approval:" : "No approval needed from you."}
+        </div>
+        {r.reasons.length > 0 && (
+          <ul className="small reasons">
+            {r.reasons.map((x) => (
+              <li key={x}>{x}</li>
+            ))}
+          </ul>
+        )}
+        {r.findings.length > 0 && (
+          <ul className="small findings">
+            {r.findings.map((f) => (
+              <li key={f.text}>
+                <span className={`prio-tag p${f.priority}`}>P{f.priority}</span> {f.text}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </>
   );
 }
