@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "./backend";
 import type { IssueDetail, IssueRecord, LinkedIssue } from "./types";
 import { agentLabel, ago, openExternal, PRIORITY } from "./util";
 import { IssueJourney, WhoHadIt } from "./IssueJourney";
+import { typing } from "./Palette";
 import { AgentMark, IssueToken, Loading, PrMark, PriorityMark, StationGlyph, StationTrack, VENDOR_LABEL, trackOf, vendorOf } from "./ui";
 import "./issue.css";
 
@@ -39,6 +40,18 @@ export function IssuePanel(props: {
   // Done needs evidence and Canceled a reason, typed in place.
   const [pending, setPending] = useState<"Done" | "Canceled" | null>(null);
   const [why, setWhy] = useState("");
+  // After "m", the next key picks where the issue moves.
+  const [moving, setMoving] = useState(false);
+  // The sheet takes the focus when it opens, so its keys act on this issue and nothing behind it;
+  // closing gives the focus back to where it was.
+  const sheet = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const was = document.activeElement as HTMLElement | null;
+    sheet.current?.focus({ preventScroll: true });
+    return () => {
+      if (was?.isConnected) was.focus({ preventScroll: true });
+    };
+  }, [props.issueKey]);
 
   useEffect(() => {
     let live = true;
@@ -53,7 +66,7 @@ export function IssuePanel(props: {
   }, [props.issueKey, props.version]);
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && props.onClose();
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && !e.defaultPrevented && props.onClose();
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [props.onClose]);
@@ -78,10 +91,34 @@ export function IssuePanel(props: {
   const review = detail?.reviews[0];
   const pr = detail?.prs[0];
   const lastGate = detail ? [...detail.timeline].reverse().find((e) => e.kind === "gate_passed" || e.kind === "gate_failed") : undefined;
+  const native = issue?.origin === "nitely";
+  // Keys act only while the focus is in this sheet: a approve, t back to Todo, m then t, d or c.
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (!issue || !native || e.ctrlKey || e.metaKey || e.altKey || typing(e.target)) return;
+    const key = e.key.toLowerCase();
+    if (moving) {
+      e.preventDefault();
+      setMoving(false);
+      if (key === "t" && issue.state !== "Todo") move("Todo");
+      else if (key === "d" && issue.state !== "Done") setPending("Done");
+      else if (key === "c" && issue.state !== "Canceled") setPending("Canceled");
+      return;
+    }
+    if (key === "a" && waiting) {
+      e.preventDefault();
+      move("Approved");
+    } else if (key === "t" && issue.state !== "Todo") {
+      e.preventDefault();
+      move("Todo");
+    } else if (key === "m") {
+      e.preventDefault();
+      setMoving(true);
+    }
+  };
   return (
     <>
       <div className="panel-veil" onMouseDown={props.onClose} aria-hidden="true" />
-      <aside className="panel" aria-label={`Issue ${props.issueKey}`}>
+      <aside className="panel" aria-label={`Issue ${props.issueKey}`} ref={sheet} tabIndex={-1} onKeyDown={onKeyDown} onBlur={() => setMoving(false)}>
         <div className="panel-main">
           <div className="panel-head">
             <span className="panel-crumb">
@@ -138,8 +175,12 @@ export function IssuePanel(props: {
                   {review?.reviewer && review.verdict === "pass" && ` ${VENDOR_LABEL[vendorOf(review.reviewer)]} passed it.`}
                 </p>
                 <div className="actions">
-                  <button className="btn primary" onClick={() => move("Approved")}>Approve</button>
-                  <button className="btn" onClick={() => move("Todo")}>Back to Todo</button>
+                  <button className="btn primary" onClick={() => move("Approved")} title="Approve (a)">
+                    Approve <kbd>a</kbd>
+                  </button>
+                  <button className="btn" onClick={() => move("Todo")} title="Back to Todo (t)">
+                    Back to Todo <kbd>t</kbd>
+                  </button>
                 </div>
               </div>
             )}
@@ -224,6 +265,11 @@ export function IssuePanel(props: {
               <p className="small">
                 <span className="muted">Evidence: </span>
                 {issue.evidence}
+              </p>
+            )}
+            {moving && (
+              <p className="panel-moving" role="status">
+                Move to: <kbd>t</kbd> Todo · <kbd>d</kbd> Done… · <kbd>c</kbd> Cancel… · <kbd>esc</kbd> stay
               </p>
             )}
             {issue.origin === "nitely" && (

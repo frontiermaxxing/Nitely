@@ -1,4 +1,5 @@
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { typing } from "./Palette";
 import { useEffect, useRef, useState } from "react";
 import { invoke, isPreview } from "./backend";
 import { decisionsOf, detailKeys, outcomeOf, shownDecisions, trackAfter, type Decision, type DecisionKind, type Move, type Resolved } from "./decisions";
@@ -51,6 +52,8 @@ export function Inbox(props: {
   const [leaving, setLeaving] = useState<Set<string>>(new Set());
   const list = useRef<HTMLDivElement>(null);
   useFlip(list);
+  // What the open decision's keys do, set by its card each render.
+  const keys = useRef<DecisionKeys>({});
   const decisions = shownDecisions(live, resolved, gone);
   const waiting = decisions.filter((d) => !resolved.has(d.id));
   const liveIds = live.map((d) => d.id).join(" ");
@@ -136,8 +139,23 @@ export function Inbox(props: {
     );
   }
 
+  // a, t, 1-9 and r act on the open decision, and only while the focus is on it: its row or its
+  // card. Never on one in the background.
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.ctrlKey || e.metaKey || e.altKey || typing(e.target)) return;
+    const on = (e.target as HTMLElement).closest(".inbox-row.on, .inbox-detail");
+    if (!on) return;
+    const k = keys.current;
+    const n = Number(e.key);
+    const run =
+      e.key === "a" ? k.approve : e.key === "t" ? k.todo : e.key === "r" ? k.reply : Number.isInteger(n) && n >= 1 && n <= 9 ? () => k.option?.(n - 1) : undefined;
+    if (!run) return;
+    e.preventDefault();
+    run();
+  };
+
   return (
-    <div className="inbox-split">
+    <div className="inbox-split" onKeyDown={onKeyDown}>
       <div className="inbox-list" ref={list}>
         <div className="inbox-head">
           <div className="page-head">
@@ -184,6 +202,18 @@ export function Inbox(props: {
           <span>
             <kbd>↵</kbd> open issue
           </span>
+          <span>
+            <kbd>a</kbd> approve
+          </span>
+          <span>
+            <kbd>t</kbd> send back
+          </span>
+          <span>
+            <kbd>1–9</kbd> answer
+          </span>
+          <span>
+            <kbd>?</kbd> all keys
+          </span>
         </div>
       </div>
       {open && (
@@ -197,10 +227,19 @@ export function Inbox(props: {
           now={now}
           onOpenIssue={props.onOpenIssue}
           onAct={(move, run, answer) => act(open, move, run, answer)}
+          keys={keys}
         />
       )}
     </div>
   );
+}
+
+/** The open decision's keys; a key it does not offer is left out. */
+interface DecisionKeys {
+  approve?: () => void;
+  todo?: () => void;
+  option?: (i: number) => void;
+  reply?: () => void;
 }
 
 /** How long a decision the human acted on stays, saying what happened, before the next one takes its place. */
@@ -358,6 +397,7 @@ function DecisionDetail(props: {
   now: number;
   onOpenIssue: (key: string) => void;
   onAct: (move: Move, run: () => Promise<unknown>, answer?: string) => Promise<void>;
+  keys: React.MutableRefObject<DecisionKeys>;
 }) {
   const { decision: d, detail, now, resolved } = props;
   const busy = !!resolved;
@@ -373,6 +413,22 @@ function DecisionDetail(props: {
 
   const move = (state: "Approved" | "Todo") =>
     props.onAct(state === "Approved" ? "approve" : "todo", () => invoke("move_issue", { key: issue!.key, state, evidence: null, reason: null }));
+  const native = issue?.origin === "nitely";
+  const card = useRef<HTMLElement>(null);
+  const answer = (value: string) => {
+    if (!d.ask || !value.trim()) return;
+    const id = d.ask.id;
+    props.onAct("answer", () => invoke("answer_ask", { id, answer: value.trim() }).then(() => drafts.delete(id)), value.trim());
+  };
+  // The keys do what the card's buttons do, and nothing once it is resolved.
+  props.keys.current = resolved
+    ? {}
+    : {
+        approve: d.kind === "approve" && native ? () => move("Approved") : undefined,
+        todo: (d.kind === "approve" || d.kind === "land") && native && issue ? () => move("Todo") : undefined,
+        option: d.kind === "ask" && d.ask ? (i) => d.ask!.options[i] !== undefined && answer(d.ask!.options[i]) : undefined,
+        reply: d.kind === "ask" ? () => card.current?.querySelector<HTMLInputElement>(".dd-words input")?.focus() : undefined,
+      };
   const reveal = async (path: string) => {
     if (isPreview) {
       setNote("In the app this opens the folder in Explorer.");
@@ -393,7 +449,7 @@ function DecisionDetail(props: {
         : "no session open";
 
   return (
-    <article className={`inbox-detail decision-${d.kind}`}>
+    <article className={`inbox-detail decision-${d.kind}`} ref={card}>
       <div className="dd-context">
         <span className="dd-kind">{KIND_WORD[d.kind]}</span>
         {issue && <span className="mono muted">{issue.key}</span>}
@@ -429,7 +485,7 @@ function DecisionDetail(props: {
           </p>
         )}
         {!resolved && d.kind === "ask" && d.ask && (
-          <Answer askId={d.ask.id} options={d.ask.options} busy={busy} onAnswer={(value, run) => props.onAct("answer", run, value)} />
+          <Answer askId={d.ask.id} options={d.ask.options} busy={busy} onAnswer={answer} />
         )}
         {!resolved && d.kind === "approve" && issue?.origin === "nitely" && (
           <div className="actions">
@@ -589,24 +645,17 @@ function listReasons(reasons: string[]): string {
 /** Answers being typed, by ask, so picking another decision and coming back keeps the words. */
 const drafts = new Map<number, string>();
 
-function Answer(props: { askId: number; options: string[]; busy: boolean; onAnswer: (value: string, run: () => Promise<unknown>) => void }) {
+function Answer(props: { askId: number; options: string[]; busy: boolean; onAnswer: (value: string) => void }) {
   const [text, setTextState] = useState(() => drafts.get(props.askId) ?? "");
   const setText = (value: string) => {
     setTextState(value);
     if (value) drafts.set(props.askId, value);
     else drafts.delete(props.askId);
   };
-  const answer = (value: string) => {
-    if (value.trim())
-      props.onAnswer(value.trim(), async () => {
-        await invoke("answer_ask", { id: props.askId, answer: value.trim() });
-        drafts.delete(props.askId);
-      });
-  };
   return (
     <div className="dd-answer">
       {props.options.map((o, i) => (
-        <button key={o} className={`dd-option${i === 0 ? " primary" : ""}`} disabled={props.busy} onClick={() => answer(o)}>
+        <button key={o} className={`dd-option${i === 0 ? " primary" : ""}`} disabled={props.busy} onClick={() => props.onAnswer(o)} title={i < 9 ? `Answer (${i + 1})` : undefined}>
           <span className="dd-option-n">{i + 1}</span>
           {o}
         </button>
@@ -615,7 +664,7 @@ function Answer(props: { askId: number; options: string[]; busy: boolean; onAnsw
         className="dd-words"
         onSubmit={(e) => {
           e.preventDefault();
-          answer(text);
+          props.onAnswer(text);
         }}
       >
         <input value={text} onChange={(e) => setText(e.target.value)} placeholder={props.options.length ? "Or answer in your words…" : "Your answer…"} />

@@ -196,8 +196,7 @@ the decision for a moment after (a snapshot that started before the move); `deci
 issue's fresher detail, and the Inbox keeps a decision it moved on from hidden until the board drops
 it. If the call fails, the decision comes back as it was, with the error under it. The nav count is
 the same list (`useDecisionDetails` runs in the app). When nothing waits, the page says so and lists
-what the agents are doing instead. The design's keys to approve (A), answer (1–3) and send back (T)
-belong to NIT-54; the footer lists only keys that work.
+what the agents are doing instead. The footer lists the decision keys (see Keys).
 
 ## Motion
 
@@ -394,12 +393,28 @@ A project page has four views behind one switch (remembered): **List** (issues g
 
 - **Ctrl+K** (Cmd+K on a Mac), or "Go to…" at the top of the sidebar: the palette. Type part of a view,
   project or issue; arrows pick, Enter goes, Esc closes. An exact key ("nit-12") opens that issue.
-  Results come in groups ("Go to", "Issues") with a count of matches.
+  Results come in groups ("Go to", "Issues", "Actions") with a count of matches. Actions are what
+  you can do to an issue you named: "Approve NIT-12" when it waits on you, "Move NIT-12 to Todo"
+  or "to Backlog", through the same `move_issue` the Inbox uses. They show only once you type;
+  the palette says what happened ("Approved NIT-12. Landing next.") and closes. Done and Canceled
+  need words of why, so they stay on the issue sheet.
 - **j / k** move focus to the next or previous item on the page (list rows, the Overview's rows and
   chips, board cards, the Inbox's decisions, lanes, branch lines, Now's cards, the feed); **Enter**
   opens it (on an Inbox row, focus picks it and Enter opens its issue). They do nothing while you
   type in a field.
-- **Esc** closes the issue panel.
+- **On the decision open in the Inbox** (its row or its card focused): **a** approves, **t** sends
+  it back to Todo (an approval or a stopped land), **1–9** answers a question with that option,
+  **r** puts the cursor in the answer field. They do what the buttons do, so the decision resolves
+  in place as it does on a click.
+- **In an open issue:** the sheet takes the focus when it opens and gives it back when it closes.
+  **a** approves when it waits on you, **t** sends it back to Todo, **m** then **t**, **d** or **c**
+  moves it to Todo, or opens Done… or Cancel… for the words they need (Esc stays).
+- **?** opens the sheet of every key. **Esc** closes it, the palette, or the issue sheet.
+
+Keys that change something act only on the decision or issue that is open and has the focus,
+never on one in the background, and never while you type in a field: approving stays a deliberate
+act. The keys live in `src/Palette.tsx` (`useKeys`, `KeysSheet`, the palette's `actionsOf`), the
+Inbox (`onKeyDown` over the decisions) and `src/IssuePanel.tsx`.
 
 **Links.** A native issue's `url` is `nitely://issue/NIT-14` (crates/nitely-core/src/issues.rs,
 `issue_link`). The app registers the `nitely` scheme (Tauri's deep-link plugin; the installer at

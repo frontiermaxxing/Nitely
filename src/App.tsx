@@ -12,7 +12,7 @@ import { ProjectPage, isProjectTab, type ProjectTab } from "./Project";
 import { IssuePanel } from "./IssuePanel";
 import { AddProject } from "./AddProject";
 import { HOME_LABEL, nowSecs } from "./util";
-import { Palette, useKeys } from "./Palette";
+import { KeysSheet, Palette, useKeys } from "./Palette";
 import { reposOf } from "./BranchMap";
 import { CountBadge, Loading, livenessOf } from "./ui";
 
@@ -70,7 +70,10 @@ export function App() {
   const [openIssue, setOpenIssue] = useState<string | null>(() => fromHash(location.hash).issue);
   const [palette, setPalette] = useState(false);
   const openPalette = useCallback(() => setPalette(true), []);
-  useKeys(openPalette, palette);
+  const [keys, setKeys] = useState(false);
+  const openKeys = useCallback(() => setKeys(true), []);
+  const closeKeys = useCallback(() => setKeys(false), []);
+  useKeys(openPalette, palette || keys, openKeys);
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(nowSecs);
   // Bumped after any change made in the app, so open lists refetch at once.
@@ -304,7 +307,8 @@ export function App() {
         )}
       </main>
 
-      {palette && <Palette projects={projects} onGo={setView} onOpenIssue={setOpenIssue} onClose={() => setPalette(false)} />}
+      {palette && <Palette projects={projects} onGo={setView} onOpenIssue={setOpenIssue} onChanged={changed} onClose={() => setPalette(false)} />}
+      {keys && <KeysSheet onClose={closeKeys} />}
       {openIssue && (
         <IssuePanel issueKey={openIssue} now={now} version={version} onClose={() => setOpenIssue(null)} onChanged={changed} onOpenIssue={setOpenIssue} />
       )}

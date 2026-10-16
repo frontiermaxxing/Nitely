@@ -3,16 +3,25 @@ import { invoke } from "./backend";
 import type { View } from "./App";
 import { HOME_LABEL } from "./util";
 import type { IssueRecord, Project } from "./types";
-import { IssueToken } from "./ui";
+import { IssueToken, ResultMark } from "./ui";
 import "./styles/palette.css";
+
+type Group = "Go to" | "Issues" | "Actions";
 
 interface Item {
   id: string;
   label: string;
   hint?: string;
   issue?: IssueRecord;
-  run: () => void;
+  group: Group;
+  /** Goes somewhere. */
+  run?: () => void;
+  /** Changes something; resolves to what happened, said in the palette before it closes. */
+  act?: () => Promise<string>;
 }
+
+/** How long the palette says what an action did before it closes. */
+const SAID_MS = 900;
 
 const VIEWS: { label: string; view: View }[] = [
   { label: HOME_LABEL, view: { kind: "pulse" } },
@@ -27,12 +36,22 @@ const VIEWS: { label: string; view: View }[] = [
 const KEY = /^[A-Za-z][A-Za-z0-9]*-\d+$/;
 
 /**
- * Ctrl+K (Cmd+K on a Mac): go to any view, project tab or open issue by typing. Arrow keys pick,
- * Enter goes, Esc closes. An exact key like "nit-12" opens that issue even if no list shows it.
+ * Ctrl+K (Cmd+K on a Mac): go to any view, project tab or open issue by typing, or act on an issue
+ * ("Approve NIT-12", "Move NIT-12 to Todo"). Arrow keys pick, Enter goes, Esc closes. An exact key
+ * like "nit-12" opens that issue even if no list shows it. Actions show only for what you typed.
  */
-export function Palette(props: { projects: Project[]; onGo: (view: View) => void; onOpenIssue: (key: string) => void; onClose: () => void }) {
+export function Palette(props: {
+  projects: Project[];
+  onGo: (view: View) => void;
+  onOpenIssue: (key: string) => void;
+  onChanged: () => void;
+  onClose: () => void;
+}) {
   const [query, setQuery] = useState("");
   const [picked, setPicked] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [said, setSaid] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [issues, setIssues] = useState<IssueRecord[]>([]);
   const list = useRef<HTMLUListElement>(null);
   const input = useRef<HTMLInputElement>(null);
@@ -57,32 +76,55 @@ export function Palette(props: { projects: Project[]; onGo: (view: View) => void
       props.onClose();
     };
     const all: Item[] = [
-      ...VIEWS.map((v) => ({ id: `view-${v.label}`, label: v.label, hint: "view", run: go(v.view) })),
+      ...VIEWS.map((v): Item => ({ id: `view-${v.label}`, label: v.label, hint: "view", group: "Go to", run: go(v.view) })),
       ...props.projects.flatMap((p) =>
-        (["list", "board", "branches", "settings"] as const).map((tab) => ({
-          id: `project-${p.key}-${tab}`,
-          label: `${p.name} ${tab}`,
-          hint: p.key,
-          run: go({ kind: "project", key: p.key, tab }),
-        })),
+        (["list", "board", "branches", "settings"] as const).map(
+          (tab): Item => ({
+            id: `project-${p.key}-${tab}`,
+            label: `${p.name} ${tab}`,
+            hint: p.key,
+            group: "Go to",
+            run: go({ kind: "project", key: p.key, tab }),
+          }),
+        ),
       ),
-      ...issues.map((i) => ({ id: `issue-${i.key}`, label: `${i.key} ${i.title}`, issue: i, run: open(i.key) })),
+      ...issues.map((i): Item => ({ id: `issue-${i.key}`, label: `${i.key} ${i.title}`, issue: i, group: "Issues", run: open(i.key) })),
+      ...issues.flatMap(actionsOf),
     ];
-    const found = q ? all.filter((it) => it.label.toLowerCase().includes(q) || it.hint?.toLowerCase() === q) : all.filter((it) => !it.issue);
+    // With nothing typed, only where to go; issues and actions need a word of what you mean.
+    const found = q ? all.filter((it) => it.label.toLowerCase().includes(q) || it.hint?.toLowerCase() === q) : all.filter((it) => it.group === "Go to");
     // An exact key always comes first, so "nit-1" never opens NIT-100; one that no list shows
-    // (a closed issue) still opens.
-    if (KEY.test(query.trim())) {
-      const at = found.findIndex((it) => it.issue?.key.toLowerCase() === q);
+    // (a closed issue) still opens. Its actions follow it.
+    const exact = KEY.test(query.trim());
+    if (exact) {
+      const at = found.findIndex((it) => it.issue?.key.toLowerCase() === q && it.group === "Issues");
       if (at >= 0) found.unshift(...found.splice(at, 1));
       else {
         const key = query.trim().toUpperCase();
-        found.unshift({ id: `key-${key}`, label: `Open ${key}`, hint: "issue", run: open(key) });
+        found.unshift({ id: `key-${key}`, label: `Open ${key}`, hint: "issue", group: "Issues", run: open(key) });
       }
     }
-    return found.slice(0, 12);
+    const order: Group[] = exact ? ["Issues", "Actions", "Go to"] : ["Go to", "Issues", "Actions"];
+    return order.flatMap((g) => found.filter((it) => it.group === g)).slice(0, 12);
   }, [query, issues, props]);
 
   useEffect(() => setPicked(0), [query]);
+
+  const run = async (it: Item | undefined) => {
+    if (!it || busy) return;
+    if (it.run) return it.run();
+    if (!it.act) return;
+    setBusy(true);
+    setError(null);
+    try {
+      setSaid(await it.act());
+      props.onChanged();
+      setTimeout(props.onClose, SAID_MS);
+    } catch (e) {
+      setError(String(e));
+      setBusy(false);
+    }
+  };
   useEffect(() => {
     list.current?.children[picked]?.scrollIntoView({ block: "nearest" });
   }, [picked]);
@@ -96,7 +138,7 @@ export function Palette(props: { projects: Project[]; onGo: (view: View) => void
       setPicked((p) => Math.max(0, p - 1));
     } else if (e.key === "Enter") {
       e.preventDefault();
-      items[picked]?.run();
+      run(items[picked]);
     } else if (e.key === "Escape") {
       e.preventDefault();
       e.stopPropagation();
@@ -133,30 +175,42 @@ export function Palette(props: { projects: Project[]; onGo: (view: View) => void
             aria-controls="palette-list"
             aria-activedescendant={items[picked] ? `palette-${items[picked].id}` : undefined}
           />
-          {query.trim() && (
+          {query.trim() && !said && (
             <span className="palette-count">
               {items.length} match{items.length === 1 ? "" : "es"}
             </span>
           )}
         </div>
-        <ul className="palette-list" id="palette-list" role="listbox" ref={list}>
-          {items.map((it, n) => (
-            <li
-              key={it.id}
-              id={`palette-${it.id}`}
-              role="option"
-              aria-selected={n === picked}
-              className={`${n === picked ? "on" : ""}${n === 0 || !it.issue !== !items[n - 1].issue ? " palette-first" : ""}`}
-              data-group={n === 0 || !it.issue !== !items[n - 1].issue ? (it.issue ? "Issues" : "Go to") : undefined}
-              onMouseEnter={() => setPicked(n)}
-              onClick={it.run}
-            >
-              {it.issue ? <IssueToken issue={it.issue} title /> : <span className="palette-label">{it.label}</span>}
-              {it.hint && <span className="palette-hint">{it.hint}</span>}
-            </li>
-          ))}
-          {items.length === 0 && <li className="palette-none">Nothing matches.</li>}
-        </ul>
+        {said ? (
+          <p className="palette-said" role="status">
+            <ResultMark result="pass" size={16} />
+            {said}
+          </p>
+        ) : (
+          <ul className="palette-list" id="palette-list" role="listbox" ref={list}>
+            {items.map((it, n) => {
+              const first = n === 0 || it.group !== items[n - 1].group;
+              return (
+                <li
+                  key={it.id}
+                  id={`palette-${it.id}`}
+                  role="option"
+                  aria-selected={n === picked}
+                  aria-disabled={busy || undefined}
+                  className={`${n === picked ? "on" : ""}${first ? " palette-first" : ""}`}
+                  data-group={first ? it.group : undefined}
+                  onMouseEnter={() => setPicked(n)}
+                  onClick={() => run(it)}
+                >
+                  {it.issue && it.group === "Issues" ? <IssueToken issue={it.issue} title /> : <span className="palette-label">{it.label}</span>}
+                  {it.hint && <span className="palette-hint">{it.hint}</span>}
+                </li>
+              );
+            })}
+            {items.length === 0 && <li className="palette-none">Nothing matches.</li>}
+          </ul>
+        )}
+        {error && <p className="palette-error error small">{error}</p>}
         <div className="palette-foot">
           <span>
             <kbd>↑↓</kbd> pick
@@ -170,7 +224,104 @@ export function Palette(props: { projects: Project[]; onGo: (view: View) => void
           <span>
             <kbd>j k</kbd> move between items on a page
           </span>
+          <span>
+            <kbd>?</kbd> all keys
+          </span>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * What you can do to an issue from the palette, with the same commands the Inbox and the issue
+ * sheet use: approve one that waits on you, or send one back to Todo or the Backlog. Done and
+ * Canceled need words of why, so they stay on the issue sheet.
+ */
+function actionsOf(i: IssueRecord): Item[] {
+  if (i.origin !== "nitely") return [];
+  const move = (state: string, said: string) => async () => {
+    await invoke("move_issue", { key: i.key, state, evidence: null, reason: null });
+    return said;
+  };
+  const out: Item[] = [];
+  if (i.state === "Needs You") {
+    out.push({ id: `approve-${i.key}`, label: `Approve ${i.key} ${i.title}`, hint: "approve", group: "Actions", issue: i, act: move("Approved", `Approved ${i.key}. Landing next.`) });
+  }
+  for (const state of ["Todo", "Backlog"]) {
+    if (i.state !== state) {
+      out.push({ id: `move-${i.key}-${state}`, label: `Move ${i.key} to ${state}`, hint: "move", group: "Actions", issue: i, act: move(state, `Moved ${i.key} to ${state}.`) });
+    }
+  }
+  return out;
+}
+
+/** Every key the app answers to, in one sheet: "?" opens it, Esc closes it. */
+export function KeysSheet(props: { onClose: () => void }) {
+  const mod = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl";
+  const groups: [string, [string, string][]][] = [
+    [
+      "Anywhere",
+      [
+        [`${mod} K`, "Go to a view, project or issue, or act on one"],
+        ["j k", "Next or previous item on the page"],
+        ["↵", "Open it"],
+        ["?", "This sheet"],
+        ["esc", "Close the sheet, the palette or the issue"],
+      ],
+    ],
+    [
+      "On the decision open in the Inbox",
+      [
+        ["a", "Approve"],
+        ["t", "Send back to Todo"],
+        ["1–9", "Answer with that option"],
+        ["r", "Answer in your own words"],
+      ],
+    ],
+    [
+      "In an open issue",
+      [
+        ["a", "Approve, when it waits on you"],
+        ["t", "Back to Todo"],
+        ["m then t d c", "Move it: Todo, Done…, Cancel…"],
+      ],
+    ],
+  ];
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" || e.key === "?") {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        props.onClose();
+      }
+    };
+    // Capture, so Esc closes this sheet and not the issue under it.
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [props.onClose]);
+  return (
+    <div className="palette-veil" onMouseDown={props.onClose}>
+      <div className="palette keys-sheet" role="dialog" aria-modal="true" aria-label="Keys" onMouseDown={(e) => e.stopPropagation()}>
+        <div className="keys-head">
+          <h2>Keys</h2>
+          <p>Keys that change something act only on the decision or issue you have open, with the focus in it.</p>
+        </div>
+        {groups.map(([title, keys]) => (
+          <section key={title} className="keys-group">
+            <h3>{title}</h3>
+            <dl>
+              {keys.map(([k, what]) => (
+                <div key={k} className="keys-row">
+                  <dt>
+                    {k.split(" ").map((part, i) => (part === "then" ? <span key={i}>then</span> : <kbd key={i}>{part}</kbd>))}
+                  </dt>
+                  <dd>{what}</dd>
+                </div>
+              ))}
+            </dl>
+          </section>
+        ))}
       </div>
     </div>
   );
@@ -189,7 +340,8 @@ const ITEMS = [
   ".content .feed-row .ui-token",
 ].join(", ");
 
-function typing(target: EventTarget | null): boolean {
+/** True when a key goes into a field, so it is a letter and not a command. */
+export function typing(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null;
   return !!el && (el.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName));
 }
@@ -204,8 +356,11 @@ export function step(direction: 1 | -1) {
   all[next].scrollIntoView({ block: "nearest" });
 }
 
-/** The app's keys: Ctrl/Cmd+K opens the palette; j and k step through items unless you are typing or the palette is open. */
-export function useKeys(openPalette: () => void, paletteOpen: boolean) {
+/**
+ * The app's keys: Ctrl/Cmd+K opens the palette; "?" the sheet of keys; j and k step through items
+ * unless you are typing or the palette is open.
+ */
+export function useKeys(openPalette: () => void, paletteOpen: boolean, openKeys: () => void) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
@@ -216,8 +371,12 @@ export function useKeys(openPalette: () => void, paletteOpen: boolean) {
       if (paletteOpen || e.ctrlKey || e.metaKey || e.altKey || typing(e.target)) return;
       if (e.key === "j") step(1);
       else if (e.key === "k") step(-1);
+      else if (e.key === "?") {
+        e.preventDefault();
+        openKeys();
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [openPalette, paletteOpen]);
+  }, [openPalette, paletteOpen, openKeys]);
 }

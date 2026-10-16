@@ -104,3 +104,12 @@ button.journey-toggle:focus-visible { outline: 2px solid var(--focus); outline-o
 .who-pass .who-label, .who-pass .who-sub { color: var(--bg); }
 .who-needs { border-color: var(--attention); background: var(--attention-wash); }
 .who-needs .who-label { color: var(--attention-ink); }
+
+/* The keys on the sheet: shown on its buttons, and the choice after "m". */
+.panel:focus { outline: none; }
+.panel .btn kbd { margin-left: 6px; border: 0; padding: 0; font-family: var(--font-mono); font-size: var(--text-xs); color: inherit; opacity: 0.55; }
+.panel-moving { margin: 0; font-size: var(--text-sm); color: var(--fg-2); animation: ui-enter var(--dur) var(--ease); }
+.panel-moving kbd { border: 0; padding: 0; font-family: var(--font-mono); font-size: var(--text-xs); color: var(--fg); }
+@media (prefers-reduced-motion: reduce) {
+  .panel-moving { animation: none; }
+}
