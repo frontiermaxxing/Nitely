@@ -6,7 +6,8 @@
 //! nothing is known about states, and `recorded_since` says so rather than guessing. Issue events
 //! are written by the MCP server under one id per agent and folder (`claude:c:/development/nitely`),
 //! which every session of that agent in that folder shares; such an event goes to the session that
-//! named its issue in a tool call nearest in time.
+//! named its issue in a tool call nearest in time. Codex is the other way round: its hooks only say
+//! when a turn ends, so its MCP id is the lane and its hook sessions in that folder are folded in.
 
 use anyhow::Result;
 use rusqlite::params;
@@ -90,24 +91,27 @@ struct Event {
 
 struct LaneBuild {
     session: Session,
+    /// Every session whose own events and states are this lane's: the session itself, and for
+    /// Codex the hook sessions folded into its MCP id.
+    members: Vec<Session>,
     /// (ts, issue key) for each issue its own tool calls named.
     touches: Vec<(i64, String)>,
     /// When it did anything: its own events and the ones it was given.
     activity: Vec<i64>,
-    rows: Vec<(i64, String)>,
-    /// States written under the agent id this session was folded with.
-    folded_rows: Vec<(i64, String)>,
+    /// (ts, rank, state): at the same second a hook's state (rank 1) beats an MCP id's (rank 0),
+    /// since the hook's is the finer record.
+    rows: Vec<(i64, u8, String)>,
     marks: Vec<Mark>,
 }
 
 impl LaneBuild {
     fn new(session: &Session) -> LaneBuild {
-        LaneBuild { session: session.clone(), touches: vec![], activity: vec![], rows: vec![], folded_rows: vec![], marks: vec![] }
+        LaneBuild { session: session.clone(), members: vec![session.clone()], touches: vec![], activity: vec![], rows: vec![], marks: vec![] }
     }
 
     /// Seconds from `ts` to the session's lifetime; 0 inside it.
     fn distance(&self, ts: i64) -> i64 {
-        (self.session.started_at - ts).max(ts - self.session.last_seen_at).max(0)
+        self.members.iter().map(|m| (m.started_at - ts).max(ts - m.last_seen_at).max(0)).min().unwrap_or(i64::MAX)
     }
 }
 
@@ -120,6 +124,11 @@ fn nearest_lifetime(lanes: &[LaneBuild], candidates: &[usize], ts: i64) -> Optio
         [i] if best <= LIFETIME_SLACK_SECS => Some(i),
         _ => None,
     }
+}
+
+/// Whether two sessions' lifetimes come within `LIFETIME_SLACK_SECS` of each other.
+fn overlap(a: &Session, b: &Session) -> bool {
+    a.started_at - LIFETIME_SLACK_SECS <= b.last_seen_at && b.started_at - LIFETIME_SLACK_SECS <= a.last_seen_at
 }
 
 /// An id the MCP server or the CLI wrote under (`claude:c:/development/nitely`, `cli:...`), not a
@@ -150,24 +159,38 @@ pub fn activity(config: &Config, db: &Db, from: i64, to: i64) -> Result<Activity
     };
 
     // Hook sessions are the lanes. An agent id is folded into the hook sessions of its vendor in
-    // its folder, and is a lane of its own only when there are none (an agent without hooks).
+    // its folder that ran around the same time, and is a lane of its own when there are none (an
+    // agent without hooks). Codex's hooks only report turn ends, so for Codex the agent id is the
+    // lane and those hook sessions are folded into it instead.
     let same_place = |a: &Session, b: &Session| a.vendor == b.vendor && normalize(&a.cwd) == normalize(&b.cwd);
     let mut lanes: Vec<LaneBuild> = Vec::new();
+    let mut folded: Vec<&Session> = Vec::new();
+    let codex_ids: Vec<&Session> = sessions.iter().filter(|s| is_agent_id(s) && s.vendor == "codex").collect();
     for s in sessions.iter().filter(|s| !is_agent_id(s)) {
-        lanes.push(LaneBuild::new(s));
+        match lanes.iter_mut().find(|l| codex_ids.iter().any(|c| c.id == l.session.id) && same_place(&l.session, s) && overlap(&l.session, s)) {
+            Some(lane) => lane.members.push(s.clone()),
+            None => match codex_ids.iter().find(|c| s.vendor == "codex" && same_place(c, s) && overlap(c, s)) {
+                Some(c) => {
+                    let mut lane = LaneBuild::new(c);
+                    lane.members.push(s.clone());
+                    lanes.push(lane);
+                }
+                None => lanes.push(LaneBuild::new(s)),
+            },
+        }
     }
-    let folded: Vec<&Session> = sessions
-        .iter()
-        .filter(|s| is_agent_id(s))
-        .filter(|s| {
-            let has_hooks = lanes.iter().any(|l| same_place(&l.session, s));
-            if !has_hooks {
-                lanes.push(LaneBuild::new(s));
-            }
-            has_hooks
-        })
-        .collect();
-    let index: HashMap<String, usize> = lanes.iter().enumerate().map(|(i, l)| (l.session.id.clone(), i)).collect();
+    for s in sessions.iter().filter(|s| is_agent_id(s)) {
+        if lanes.iter().any(|l| l.session.id == s.id) {
+            continue;
+        }
+        if lanes.iter().any(|l| same_place(&l.session, s) && overlap(&l.session, s)) {
+            folded.push(s);
+        } else {
+            lanes.push(LaneBuild::new(s));
+        }
+    }
+    let index: HashMap<String, usize> =
+        lanes.iter().enumerate().flat_map(|(i, l)| l.members.iter().map(move |m| (m.id.clone(), i))).collect();
 
     // What each lane did itself.
     for e in &events {
@@ -179,19 +202,22 @@ pub fn activity(config: &Config, db: &Db, from: i64, to: i64) -> Result<Activity
         }
     }
     for lane in &mut lanes {
-        let before: Option<i64> =
-            conn.query_row("SELECT MAX(ts) FROM event WHERE actor = ?1 AND ts < ?2", params![lane.session.id, from], |r| r.get(0))?;
-        lane.activity.extend(before);
-        lane.rows = state_rows(db, &lane.session.id, from, to)?;
+        for m in lane.members.clone() {
+            let before: Option<i64> =
+                conn.query_row("SELECT MAX(ts) FROM event WHERE actor = ?1 AND ts < ?2", params![m.id, from], |r| r.get(0))?;
+            lane.activity.extend(before);
+            let rank = u8::from(!is_agent_id(&m));
+            lane.rows.extend(state_rows(db, &m.id, from, to)?.into_iter().map(|(ts, st)| (ts, rank, st)));
+        }
     }
 
-    // An agent id's states go to the one hook session of that agent and folder nearest the time;
-    // with two equally near (both running then) there is no telling which one changed.
+    // A folded agent id's states go to the one hook session of that agent and folder nearest the
+    // time; with two equally near (both running then) there is no telling which one changed.
     for s in &folded {
-        let place: Vec<usize> = (0..lanes.len()).filter(|&i| same_place(&lanes[i].session, s)).collect();
+        let place: Vec<usize> = (0..lanes.len()).filter(|&i| same_place(&lanes[i].session, s) && overlap(&lanes[i].session, s)).collect();
         for (ts, state) in state_rows(db, &s.id, from, to)? {
             if let Some(i) = nearest_lifetime(&lanes, &place, ts) {
-                lanes[i].folded_rows.push((ts, state));
+                lanes[i].rows.push((ts, 0, state));
             }
         }
     }
@@ -218,10 +244,8 @@ pub fn activity(config: &Config, db: &Db, from: i64, to: i64) -> Result<Activity
     let mut out: Vec<Lane> = lanes
         .into_iter()
         .filter_map(|mut l| {
-            // The hook's own state wins a tie: it is the finer record of the two.
-            let mut rows = std::mem::take(&mut l.folded_rows);
-            rows.append(&mut l.rows);
-            rows.sort_by_key(|(ts, _)| *ts);
+            l.rows.sort_by_key(|(ts, rank, _)| (*ts, *rank));
+            let rows: Vec<(i64, String)> = l.rows.iter().map(|(ts, _, st)| (*ts, st.clone())).collect();
             l.activity.sort_unstable();
             let recorded_from = recorded_since.unwrap_or(to);
             let mut segments = seen(&l.activity, from, recorded_from.min(to));
@@ -240,6 +264,8 @@ pub fn activity(config: &Config, db: &Db, from: i64, to: i64) -> Result<Activity
             }
             issues.sort_by_key(|(t, _)| *t);
             let cwd = l.session.cwd.clone();
+            let latest = l.members.iter().max_by_key(|m| m.last_seen_at).unwrap_or(&l.session).clone();
+            let started_at = l.members.iter().map(|m| m.started_at).min().unwrap_or(l.session.started_at);
             let project = config
                 .repos
                 .iter()
@@ -254,9 +280,9 @@ pub fn activity(config: &Config, db: &Db, from: i64, to: i64) -> Result<Activity
                 project,
                 place,
                 issues: issues.into_iter().map(|(_, k)| k).collect(),
-                started_at: l.session.started_at,
-                last_seen_at: l.session.last_seen_at,
-                state: l.session.state,
+                started_at,
+                last_seen_at: latest.last_seen_at,
+                state: latest.state,
                 segments,
                 marks: l.marks,
             })
@@ -307,7 +333,9 @@ fn attribute(lanes: &[LaneBuild], e: &Event) -> Option<usize> {
         return None;
     }
     let of_vendor = |l: &LaneBuild| vendor == "cli" || l.session.vendor == vendor;
-    let in_place: Vec<usize> = (0..lanes.len()).filter(|&i| of_vendor(&lanes[i]) && normalize(&lanes[i].session.cwd) == place).collect();
+    let in_place: Vec<usize> = (0..lanes.len())
+        .filter(|&i| of_vendor(&lanes[i]) && lanes[i].members.iter().any(|m| normalize(&m.cwd) == place))
+        .collect();
     let candidates: Vec<usize> = if in_place.is_empty() { (0..lanes.len()).filter(|&i| of_vendor(&lanes[i])).collect() } else { in_place };
     if let Some(key) = &e.issue {
         let nearest = candidates
@@ -577,14 +605,26 @@ mod tests {
         let w = a.lanes.iter().find(|l| l.session_id == "claude:w").expect("still waiting, so still shown");
         assert_eq!(w.segments.iter().map(|s| s.state.as_str()).collect::<Vec<_>>(), ["waiting"]);
         let a = activity(&Config::default(), &db, t0 - 60, now()).unwrap();
-        let codex = a.lanes.iter().find(|l| l.session_id == "codex:thread-1").unwrap();
+        let codex = a.lanes.iter().find(|l| l.session_id == "codex:c:/development/harbor").unwrap();
+        assert!(!a.lanes.iter().any(|l| l.session_id == "codex:thread-1"), "the hook session is folded in");
         assert_eq!(codex.segments.first().map(|s| (s.from, s.state.as_str())), Some((t0, "working")));
         assert_eq!(codex.marks.iter().map(|m| m.kind.as_str()).collect::<Vec<_>>(), ["gate_pass"]);
+        assert_eq!((codex.state.as_str(), codex.last_seen_at), ("idle", t0 + 3600), "from the member seen last");
         // At the same second, the hook's idle beats the MCP id's working.
         state(&db, "codex:c:/development/harbor", t0 + 3600, "working");
         let a = activity(&Config::default(), &db, t0 - 60, now()).unwrap();
-        let codex = a.lanes.iter().find(|l| l.session_id == "codex:thread-1").unwrap();
+        let codex = a.lanes.iter().find(|l| l.session_id == "codex:c:/development/harbor").unwrap();
         assert!(codex.segments.iter().any(|s| s.from == t0 + 3600 && s.state == "idle"), "{:?}", codex.segments);
+
+        // An idle hook session left from yesterday does not swallow today's work in that folder.
+        let y = t0 - 20 * 3600;
+        session(&db, "claude:old", "C:\\Development\\Padre", y, y + 600, "idle");
+        session(&db, "claude:c:/development/padre", "C:\\Development\\Padre", t0, t0 + 1800, "working");
+        state(&db, "claude:c:/development/padre", t0, "working");
+        event(&db, t0 + 900, "claude:c:/development/padre", "gate_passed", "Gate passed", None);
+        let a = activity(&Config::default(), &db, t0 - 60, now()).unwrap();
+        let padre = a.lanes.iter().find(|l| l.session_id == "claude:c:/development/padre").expect("a lane of its own");
+        assert_eq!(padre.marks.len(), 1);
         std::fs::remove_dir_all(dir).ok();
     }
 }
