@@ -91,6 +91,7 @@ CREATE TABLE IF NOT EXISTS pull_request (
   comment_count  INTEGER NOT NULL DEFAULT 0,
   approved_by    TEXT NOT NULL DEFAULT '[]',
   approved_by_me INTEGER NOT NULL DEFAULT 0,
+  checks         TEXT NOT NULL DEFAULT '',  -- success | failure | pending | '' (none or unknown)
   PRIMARY KEY (provider, repo, number)
 );
 CREATE INDEX IF NOT EXISTS pull_request_branch ON pull_request (branch);
@@ -122,7 +123,7 @@ CREATE TABLE IF NOT EXISTS ask (
 
 /// Bumped when a table changes shape. Tables that only mirror Bitbucket or Linear are dropped
 /// and refilled by the next sync; tables Nitely owns get real migrations.
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -133,6 +134,10 @@ fn migrate(conn: &Connection) -> Result<()> {
     if version < 3 {
         // v2's issue table only mirrored Linear (refilled by the next sync); ask was never written.
         conn.execute_batch("DROP TABLE IF EXISTS issue; DROP TABLE IF EXISTS ask;")?;
+    }
+    if version < 4 {
+        // v4 adds pull_request.checks; the table only mirrors code hosts.
+        conn.execute_batch("DROP TABLE IF EXISTS pull_request;")?;
     }
     Ok(())
 }
@@ -174,6 +179,8 @@ pub struct PrRecord {
     pub approved_by: Vec<String>,
     /// Approved by the account that owns the token (Andrew).
     pub approved_by_me: bool,
+    /// CI on the head commit: success, failure, pending, or empty when unknown.
+    pub checks: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -252,8 +259,8 @@ impl Db {
         {
             let mut ins = tx.prepare(
                 "INSERT OR REPLACE INTO pull_request (provider, repo, number, title, url, state, branch,
-                   head_sha, updated_at, comment_count, approved_by, approved_by_me)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                   head_sha, updated_at, comment_count, approved_by, approved_by_me, checks)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             )?;
             for p in prs {
                 ins.execute(params![
@@ -268,7 +275,8 @@ impl Db {
                     p.updated_at,
                     p.comment_count,
                     serde_json::to_string(&p.approved_by)?,
-                    p.approved_by_me
+                    p.approved_by_me,
+                    p.checks
                 ])?;
             }
         }
@@ -279,7 +287,7 @@ impl Db {
     pub fn prs(&self) -> Result<Vec<PrRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT provider, repo, number, title, url, state, branch, head_sha, updated_at,
-                    comment_count, approved_by, approved_by_me
+                    comment_count, approved_by, approved_by_me, checks
              FROM pull_request ORDER BY updated_at DESC",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -296,9 +304,23 @@ impl Db {
                 comment_count: r.get(9)?,
                 approved_by: serde_json::from_str(&r.get::<_, String>(10)?).unwrap_or_default(),
                 approved_by_me: r.get(11)?,
+                checks: r.get(12)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Pull requests whose branch names this issue (`claude/nit-7-...` for NIT-7), newest first.
+    pub fn prs_for_issue(&self, key: &str) -> Result<Vec<PrRecord>> {
+        Ok(self
+            .prs()?
+            .into_iter()
+            .filter(|p| {
+                crate::git::parse_branch(&p.branch)
+                    .1
+                    .is_some_and(|k| k.eq_ignore_ascii_case(key))
+            })
+            .collect())
     }
 
     pub fn set_sync_status(&self, source: &str, error: Option<&str>) -> Result<()> {

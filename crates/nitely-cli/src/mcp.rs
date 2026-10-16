@@ -6,6 +6,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use nitely_core::db::NewEvent;
 use nitely_core::issues::{branch_name, KINDS, SOURCES, STATES};
+use nitely_core::playbook::{self, Playbook};
 use nitely_core::{paths, resolve_project, Actor, Config, Db, NewIssue};
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
@@ -91,6 +92,7 @@ fn initialize(server: &mut Server, params: &Value) -> Value {
         "capabilities": { "tools": {} },
         "serverInfo": { "name": "nitely", "version": env!("CARGO_PKG_VERSION") },
         "instructions": "Nitely is the backlog and control room for this repo. Start work with next_task, \
+            then start_task to get the issue's branch and worktree, run_gate before you open a pull request, \
             keep the human informed with report, leave a handoff note before you stop, file what you find \
             but will not fix now with file_issue, and use ask when only the human can decide."
     })
@@ -107,8 +109,23 @@ fn tools() -> Value {
             } }
         },
         {
+            "name": "start_task",
+            "description": "Create the issue's branch and worktree from the integration branch, following the repo's playbook (.nitely/playbook.toml), and run its setup commands. Safe to call again: it returns the existing worktree. Work only inside the returned worktree.",
+            "inputSchema": { "type": "object", "required": ["key"], "properties": {
+                "key": { "type": "string", "description": "e.g. NIT-12" }
+            } }
+        },
+        {
+            "name": "run_gate",
+            "description": "Run the playbook's gate commands (tests, build) in your worktree and record the result on the issue. Stops at the first failure and returns the end of its output. Pass before you open a pull request.",
+            "inputSchema": { "type": "object", "properties": {
+                "key": { "type": "string", "description": "The issue; defaults to the one your branch names." },
+                "worktree": { "type": "string", "description": "Defaults to the worktree you are in." }
+            } }
+        },
+        {
             "name": "get_issue",
-            "description": "An issue with its full timeline (state changes, notes, handoffs, questions and answers).",
+            "description": "An issue with its full timeline (state changes, notes, handoffs, questions and answers) and the pull requests whose branch names it, with their CI checks.",
             "inputSchema": { "type": "object", "required": ["key"], "properties": {
                 "key": { "type": "string", "description": "e.g. NIT-12" }
             } }
@@ -208,18 +225,38 @@ fn run_tool(server: &Server, name: &str, args: &Value) -> Result<Value> {
         "next_task" => {
             let project = project(&db)?;
             match db.next_task(&project, &server.agent())? {
-                Some(issue) => json!({
-                    "issue": issue,
-                    "branch": branch_name(&server.vendor, &issue.key, &issue.title),
-                    "next": "Work on a branch with this name in its own worktree, report as you go, and leave a handoff note before you stop."
-                }),
+                Some(issue) => {
+                    let branch = match playbook::repo_root(&config, &server.cwd) {
+                        Some(root) => Playbook::load(&root)?.branch_for(&server.vendor, &issue),
+                        None => branch_name(&server.vendor, &issue.key, &issue.title),
+                    };
+                    json!({
+                        "issue": issue,
+                        "branch": branch,
+                        "next": "Call start_task with this key for the branch and worktree, work there, report as you go, run_gate before the pull request, and leave a handoff note before you stop."
+                    })
+                }
                 None => json!({ "issue": null, "message": format!("Nothing in Todo for {project}.") }),
             }
+        }
+        "start_task" => {
+            let key = req(args, "key")?;
+            let issue = db.issue(key)?.with_context(|| format!("no issue {key}"))?;
+            let root = playbook::repo_root(&config, &server.cwd)
+                .with_context(|| format!("{} is not inside a git repo", server.cwd))?;
+            json!(playbook::start_task(&db, &root, &issue, &server.vendor, &actor)?)
+        }
+        "run_gate" => {
+            let dir = str_arg(args, "worktree").unwrap_or(&server.cwd);
+            let (worktree, branch_key) = playbook::current_worktree(dir)?;
+            let key = str_arg(args, "key").map(str::to_string).or(branch_key);
+            let root = playbook::repo_root(&config, dir).with_context(|| format!("{dir} is not inside a git repo"))?;
+            json!(playbook::run_gate(&db, &root, &worktree, key.as_deref(), &actor)?)
         }
         "get_issue" => {
             let key = req(args, "key")?;
             let issue = db.issue(key)?.with_context(|| format!("no issue {key}"))?;
-            json!({ "issue": issue, "timeline": db.timeline(&issue.key)? })
+            json!({ "issue": issue, "timeline": db.timeline(&issue.key)?, "pull_requests": db.prs_for_issue(&issue.key)? })
         }
         "list_issues" => {
             let project = project(&db)?;

@@ -92,7 +92,7 @@ pub fn snapshot(config: &Config, db: &Db) -> Result<Board> {
             }
         }
 
-        let slug = git::bitbucket_slug(&repo.root);
+        let slug = git::bitbucket_slug(&repo.root).or_else(|| git::github_slug(&repo.root));
         let rows = worktrees
             .iter()
             .zip(session_for)
@@ -163,7 +163,7 @@ pub fn snapshot(config: &Config, db: &Db) -> Result<Board> {
 fn pr_for(prs: &[PrRecord], slug: Option<&str>, branch: &str) -> Option<PrRecord> {
     let matching: Vec<&PrRecord> = prs
         .iter()
-        .filter(|p| p.branch == branch && slug.is_none_or(|s| p.repo == s))
+        .filter(|p| p.branch == branch && slug.is_none_or(|s| p.repo.eq_ignore_ascii_case(s)))
         .collect();
     matching
         .iter()

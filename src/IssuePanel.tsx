@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { IssueDetail } from "./types";
 import { agentLabel, ago, openExternal, PRIORITY } from "./util";
+import { PrCell } from "./Pr";
 
 const KIND_LABEL: Record<string, string> = {
   issue_created: "filed",
@@ -110,6 +111,17 @@ export function IssuePanel(props: { issueKey: string; now: number; version: numb
               <button className="btn primary" disabled={!why.trim()}>{pending === "Done" ? "Mark done" : "Cancel issue"}</button>
               <button type="button" className="btn ghost" onClick={() => setPending(null)}>Back</button>
             </form>
+          )}
+          {detail.prs.length > 0 && (
+            <>
+              <h3>Pull requests</h3>
+              {detail.prs.map((pr) => (
+                <div key={`${pr.provider}-${pr.repo}-${pr.number}`} className="pr-row">
+                  <PrCell pr={pr} />
+                  <div className="small">{pr.title}</div>
+                </div>
+              ))}
+            </>
           )}
           <h3>Timeline</h3>
           <ol className="timeline">

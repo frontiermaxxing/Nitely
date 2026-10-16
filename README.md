@@ -51,6 +51,21 @@ nitely issue import docs\seed-backlog.json --project NIT
 agent picks the project from the repo it runs in. Approving and answering asks happen only in the
 app, never through the CLI or MCP.
 
+## Playbooks
+
+A repo's `.nitely/playbook.toml` says how a task becomes work: the branch it is cut from, the
+branch and worktree names, the commands that set up a new worktree, and the gate that must pass
+before a pull request. `nitely start NIT-3 --agent claude` (MCP: `start_task`) creates the branch
+and worktree and runs setup; `nitely gate` (MCP: `run_gate`) runs the gate in the current worktree.
+Both show on the issue's timeline. A repo without a playbook gets `main`, `{vendor}/{key}-{slug}`
+branches and worktrees in `../{repo}-worktrees/`. Nitely's own is in [.nitely/playbook.toml](.nitely/playbook.toml).
+
+## GitHub
+
+Watched repos whose `origin` is on GitHub get their pull requests, approvals and CI checks synced,
+with no setup beyond a signed-in GitHub CLI (`gh auth login`). Nitely uses `NITELY_GITHUB_TOKEN`
+or `GITHUB_TOKEN` instead when set. A PR shows on the issue its branch names (`claude/nit-7-...`).
+
 ## Bitbucket and Linear
 
 Nitely reads `%USERPROFILE%\.aera-work\credentials.json`, the same file `scripts/work/credentials.mjs`
