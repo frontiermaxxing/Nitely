@@ -362,7 +362,7 @@ fn point_at(hook: &mut Value, vendor: &str, command: &str, repoint: bool) -> boo
 
 /// Whether an MCP server entry is exactly what `connect` writes, for any install path: a nitely
 /// executable run with `mcp`. A launcher the user put there (a WSL wrapper, an env script) is not.
-fn is_nitely_mcp(command: Option<&str>, args: Option<Vec<&str>>) -> bool {
+pub(crate) fn is_nitely_mcp(command: Option<&str>, args: Option<Vec<&str>>) -> bool {
     command.is_some_and(|c| is_nitely_exe(&shell_word(c))) && args == Some(vec!["mcp"])
 }
 

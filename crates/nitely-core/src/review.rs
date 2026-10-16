@@ -250,16 +250,14 @@ using P0 for data loss or security, P1 for a definite bug in normal use, P2 for 
         let started = Instant::now();
         let out_file = std::env::temp_dir().join(format!("nitely-review-{}-{}.txt", std::process::id(), crate::db::now()));
         let uses_file = command.iter().any(|a| a.contains("{output}"));
+        let program = resolve_program(&command[0]);
+        let codex_servers = if cli_name(&command[0]) == "codex" { codex_nitely_servers(&program, worktree) } else { vec![] };
+        let command = without_nitely(command, &codex_servers);
         let args: Vec<String> = command[1..].iter().map(|a| a.replace("{output}", &out_file.to_string_lossy())).collect();
 
-        let mut cmd = shell_free_command(&resolve_program(&command[0]));
+        let mut cmd = shell_free_command(&program);
         cmd.args(&args).current_dir(worktree).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        // A reviewer started from inside an agent session must not think it is that session.
-        for (name, _) in std::env::vars() {
-            if is_session_marker(&name) {
-                cmd.env_remove(name);
-            }
-        }
+        without_session_markers(&mut cmd);
         let mut child = cmd.spawn().with_context(|| format!("starting the {reviewer} reviewer ({})", command[0]))?;
         let mut stdin = child.stdin.take().unwrap();
         let prompt = self.prompt(base, previous);
@@ -336,6 +334,71 @@ fn tail_lines(text: &str) -> String {
     let t = text.trim();
     let start = t.char_indices().rev().nth(800).map_or(0, |(i, _)| i);
     t[start..].to_string()
+}
+
+/// A reviewer started from inside an agent session must not think it is that session.
+fn without_session_markers(cmd: &mut std::process::Command) {
+    for (name, _) in std::env::vars() {
+        if is_session_marker(&name) {
+            cmd.env_remove(name);
+        }
+    }
+}
+
+/// The CLI a command runs, e.g. `codex` for `C:\...\codex.exe`.
+fn cli_name(program: &str) -> String {
+    Path::new(program).file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default()
+}
+
+/// The reviewer's command with Nitely's MCP server taken away: a reviewer reads the diff and
+/// answers, and one that can report, note or move issues is a second actor on the board. Claude
+/// starts with no MCP servers at all. Codex cannot drop its server table from the command line and
+/// refuses to turn off a server it does not have, so each server in `codex_servers` (the Nitely
+/// ones Codex has, from `codex_nitely_servers`) is turned off by name. Other commands are as given.
+pub fn without_nitely(command: &[String], codex_servers: &[String]) -> Vec<String> {
+    let mut out = command.to_vec();
+    match cli_name(&command[0]).as_str() {
+        "claude" if !command.iter().any(|a| a == "--strict-mcp-config") => out.insert(1, "--strict-mcp-config".into()),
+        "codex" => {
+            let at = command.iter().position(|a| a == "exec").map_or(1, |i| i + 1);
+            for (i, name) in codex_servers.iter().enumerate() {
+                out.splice(at + 2 * i..at + 2 * i, ["-c".to_string(), format!("mcp_servers.{name}.enabled=false")]);
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// The MCP servers Codex would start in `worktree` (user and project config) that are Nitely's:
+/// named `nitely`, or a nitely executable run with `mcp`. Empty when Codex cannot list them.
+fn codex_nitely_servers(program: &str, worktree: &Path) -> Vec<String> {
+    let mut cmd = shell_free_command(program);
+    cmd.args(["mcp", "list", "--json"]).current_dir(worktree).stdin(Stdio::null()).stderr(Stdio::null());
+    without_session_markers(&mut cmd);
+    cmd.output().ok().filter(|o| o.status.success()).map(|o| nitely_servers(&String::from_utf8_lossy(&o.stdout))).unwrap_or_default()
+}
+
+/// The Nitely servers in `codex mcp list --json` output. Only plain names are kept, since a name
+/// goes into a `-c` key path.
+fn nitely_servers(json: &str) -> Vec<String> {
+    let Ok(serde_json::Value::Array(servers)) = serde_json::from_str(json) else { return vec![] };
+    servers
+        .iter()
+        .filter(|s| s.get("enabled").and_then(serde_json::Value::as_bool) != Some(false))
+        .filter_map(|s| {
+            let name = s.get("name")?.as_str()?;
+            let transport = s.get("transport");
+            let command = transport.and_then(|t| t.get("command")).and_then(serde_json::Value::as_str);
+            let args = transport
+                .and_then(|t| t.get("args"))
+                .and_then(serde_json::Value::as_array)
+                .and_then(|a| a.iter().map(serde_json::Value::as_str).collect::<Option<Vec<_>>>());
+            let ours = name == "nitely" || crate::connect::is_nitely_mcp(command, args);
+            let plain = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+            (ours && plain).then(|| name.to_string())
+        })
+        .collect()
 }
 
 /// Variables that make a CLI think it runs inside another agent's session.
@@ -477,6 +540,40 @@ mod tests {
         assert_eq!(r.reviewer_for("claude"), Some("codex"));
         assert_eq!(r.reviewer_for("codex"), Some("claude"));
         assert_eq!(r.reviewer_for("cursor"), Some("claude"));
+    }
+
+    #[test]
+    fn reviewers_start_without_nitely() {
+        let commands = ReviewRules::default().commands;
+        let claude = without_nitely(&commands["claude"], &[]);
+        assert_eq!(claude[..3], ["claude", "--strict-mcp-config", "-p"]);
+        assert_eq!(without_nitely(&claude, &[]), claude, "added once");
+
+        let codex = without_nitely(&commands["codex"], &["nitely".into(), "nit_dev".into()]);
+        assert_eq!(
+            codex[..6],
+            ["codex", "exec", "-c", "mcp_servers.nitely.enabled=false", "-c", "mcp_servers.nit_dev.enabled=false"]
+        );
+        assert_eq!(codex[6..], commands["codex"][2..]);
+        // Codex refuses to turn off a server it does not have, so none means no override.
+        assert_eq!(without_nitely(&commands["codex"], &[]), commands["codex"]);
+        let path = vec![r"C:\Apps\Codex\codex.exe".to_string(), "exec".into(), "-".into()];
+        assert_eq!(without_nitely(&path, &["nitely".into()])[2..4], ["-c", "mcp_servers.nitely.enabled=false"]);
+        let other = vec!["gemini".to_string(), "-p".into()];
+        assert_eq!(without_nitely(&other, &["nitely".into()]), other);
+    }
+
+    #[test]
+    fn finds_codexs_nitely_servers() {
+        let json = r#"[
+            {"name": "nitely", "enabled": true, "transport": {"type": "stdio", "command": "nitely", "args": ["mcp"]}},
+            {"name": "board", "enabled": true, "transport": {"type": "stdio", "command": "C:\\Program Files\\Nitely\\nitely.exe", "args": ["mcp"]}},
+            {"name": "off", "enabled": false, "transport": {"type": "stdio", "command": "nitely", "args": ["mcp"]}},
+            {"name": "docs", "enabled": true, "transport": {"type": "stdio", "command": "node", "args": ["docs.js"]}},
+            {"name": "web", "enabled": true, "transport": {"type": "streamable_http", "url": "http://localhost:1"}}
+        ]"#;
+        assert_eq!(nitely_servers(json), ["nitely", "board"]);
+        assert!(nitely_servers("not json").is_empty());
     }
 
     #[test]
