@@ -137,11 +137,12 @@ pub fn plan(db: &Db, config: &Config, path: &str, key: Option<&str>, name: Optio
         warnings.push(format!("there is no local branch {integration_branch}; edit the playbook's integration branch before starting tasks"));
     }
 
-    let nitely = nitely_command();
-    if nitely == "nitely" && which("nitely").is_none() {
-        warnings.push("the nitely command is not on PATH; agents need it (cargo install --path crates/nitely-cli)".into());
+    let resolved = nitely_command();
+    if resolved.is_none() {
+        warnings.push(format!("{UNRESOLVED}; new agent entries will run `nitely`, and entries that point at another install are left as they are"));
     }
-    let agents = agent_plans(&nitely);
+    let nitely = resolved.clone().unwrap_or_else(|| "nitely".into());
+    let agents = agent_plans(&nitely, resolved.is_some());
     for a in &agents {
         if let Some(e) = &a.error {
             warnings.push(format!("{} is skipped: {e}", a.agent));
@@ -202,10 +203,13 @@ pub fn apply(db: &Db, config: &mut Config, plan: &ConnectPlan) -> Result<Applied
     Ok(Applied { project: plan.project_key.clone(), repo: plan.repo_name.clone(), done, failed })
 }
 
+const UNRESOLVED: &str = "the nitely command is neither on PATH nor beside this app (cargo install --path crates/nitely-cli)";
+
 /// One plan per agent. An agent whose setup cannot be read gets its error instead of changes, so
-/// one broken config file does not hide what the others need.
-fn agent_plans(nitely: &str) -> Vec<AgentPlan> {
-    [("Claude Code", claude_plan(nitely)), ("Codex", codex_plan(nitely)), ("Cursor", cursor_plan(nitely))]
+/// one broken config file does not hide what the others need. `repoint` lets entries that run
+/// Nitely from another install path be pointed at `nitely`; it is off when `nitely` is only a guess.
+fn agent_plans(nitely: &str, repoint: bool) -> Vec<AgentPlan> {
+    [("Claude Code", claude_plan(nitely, repoint)), ("Codex", codex_plan(nitely, repoint)), ("Cursor", cursor_plan(nitely, repoint))]
         .into_iter()
         .map(|(agent, plan)| plan.unwrap_or_else(|e| AgentPlan { agent: agent.into(), found: true, changes: Vec::new(), error: Some(format!("{e:#}")) }))
         .collect()
@@ -215,11 +219,24 @@ fn agent_plans(nitely: &str) -> Vec<AgentPlan> {
 /// instructions) up to this version of Nitely. The MCP server and hooks build their text when they
 /// run, so they are always current; the files `connect` wrote are not, and go stale when Nitely
 /// changes them. Empty when Nitely watches no repo, so a machine that never connected is not asked.
+///
+/// When Nitely cannot find its own command it proposes nothing, and each installed agent reports
+/// that as its error: rewriting working entries to a command that may not run would break them.
 pub fn agent_setup(config: &Config) -> Vec<AgentPlan> {
     if config.repos.is_empty() {
         return Vec::new();
     }
-    agent_plans(&nitely_command())
+    setup_for(nitely_command())
+}
+
+fn setup_for(nitely: Option<String>) -> Vec<AgentPlan> {
+    match nitely {
+        Some(n) => agent_plans(&n, true),
+        None => agent_plans("nitely", false)
+            .into_iter()
+            .map(|a| AgentPlan { changes: Vec::new(), error: a.found.then(|| format!("not checked: {UNRESOLVED}")), ..a })
+            .collect(),
+    }
 }
 
 /// How many changes `agents` still needs, for the agents that are installed.
@@ -233,7 +250,7 @@ pub fn apply_agents(agents: &[AgentPlan]) -> (Vec<String>, Vec<String>) {
     let (mut done, mut failed) = (Vec::new(), Vec::new());
     for agent in agents.iter().filter(|a| a.found) {
         if let Some(e) = &agent.error {
-            failed.push(format!("{}: its setup could not be read ({e})", agent.agent));
+            failed.push(format!("{}: left as it is ({e})", agent.agent));
         }
         for change in agent.changes.iter().filter(|c| c.action != "unchanged") {
             let result = match change.action.as_str() {
@@ -318,30 +335,38 @@ fn is_ours(command: &str, vendor: &str) -> bool {
 }
 
 /// Whether `word` is just a nitely executable as `shell_word` writes it: a path to `nitely` or
-/// `nitely.exe`, quoted when it has spaces. Anything else (a chain, a wrapper) is the user's.
+/// `nitely.exe`, quoted when it has spaces. Anything else (a chain such as `prep&&nitely.exe`, a
+/// wrapper) is the user's.
 fn is_nitely_exe(word: &str) -> bool {
     let path = match word.strip_prefix('"').and_then(|w| w.strip_suffix('"')) {
         Some(inner) => inner,
-        None if word.contains(char::is_whitespace) => return false,
+        None if word.contains(|c: char| c.is_whitespace() || matches!(c, '&' | '|' | ';' | '<' | '>')) => return false,
         None => word,
     };
     !path.contains('"') && Path::new(path).file_stem().is_some_and(|s| s == "nitely")
 }
 
-/// When `hook` is Nitely's, returns true, and points it at `command` when it is exactly what
-/// `connect` wrote for another install path. A command the user wrapped or chained is left as it is.
-fn point_at(hook: &mut Value, vendor: &str, command: &str) -> bool {
+/// When `hook` is Nitely's, returns true, and (with `repoint`) points it at `command` when it is
+/// exactly what `connect` wrote for another install path. A command the user wrapped or chained is
+/// left as it is.
+fn point_at(hook: &mut Value, vendor: &str, command: &str, repoint: bool) -> bool {
     let Some(current) = hook.get("command").and_then(Value::as_str) else { return false };
     if !is_ours(current, vendor) {
         return false;
     }
-    if current.strip_suffix(&format!(" hook {vendor}")).is_some_and(is_nitely_exe) {
+    if repoint && current.strip_suffix(&format!(" hook {vendor}")).is_some_and(is_nitely_exe) {
         hook["command"] = json!(command);
     }
     true
 }
 
-fn claude_plan(nitely: &str) -> Result<AgentPlan> {
+/// Whether an MCP server entry is exactly what `connect` writes, for any install path: a nitely
+/// executable run with `mcp`. A launcher the user put there (a WSL wrapper, an env script) is not.
+fn is_nitely_mcp(command: Option<&str>, args: Option<Vec<&str>>) -> bool {
+    command.is_some_and(|c| is_nitely_exe(&shell_word(c))) && args == Some(vec!["mcp"])
+}
+
+fn claude_plan(nitely: &str, repoint: bool) -> Result<AgentPlan> {
     let dir = home().join(".claude");
     let found = dir.is_dir() || home().join(".claude.json").exists();
     let mut changes = Vec::new();
@@ -355,7 +380,7 @@ fn claude_plan(nitely: &str) -> Result<AgentPlan> {
         let mut present = false;
         for entry in list.as_array_mut().into_iter().flatten() {
             for h in entry.get_mut("hooks").and_then(Value::as_array_mut).into_iter().flatten() {
-                present |= point_at(h, "claude", &command);
+                present |= point_at(h, "claude", &command, repoint);
             }
         }
         if !present {
@@ -380,9 +405,11 @@ fn claude_plan(nitely: &str) -> Result<AgentPlan> {
     let claude_json = read_json(&home().join(".claude.json"))?;
     let registered = claude_json.pointer("/mcpServers/nitely");
     let current = registered.is_some_and(|s| s.get("command") == Some(&json!(nitely)) && s.get("args") == Some(&json!(["mcp"])));
+    // Another install path is worth fixing; the user's own launcher is not ours to judge.
+    let moved = repoint && registered.is_some_and(|s| is_nitely_mcp(s.get("command").and_then(Value::as_str), str_args(s.get("args"))));
     let add = format!("claude mcp add --scope user nitely -- {} mcp", shell_word(nitely));
     let why = "register the nitely MCP server for every project";
-    changes.push(match (registered, current) {
+    changes.push(match (registered, current || !moved) {
         (None, _) => Change { target: add.clone(), action: "run".into(), why: why.into(), before: None, after: add },
         (Some(_), true) => Change { target: add.clone(), action: "unchanged".into(), why: why.into(), before: None, after: add },
         // Registering again would drop the entry's other settings (env, tokens), and Claude Code
@@ -398,7 +425,7 @@ fn claude_plan(nitely: &str) -> Result<AgentPlan> {
     Ok(AgentPlan { agent: "Claude Code".into(), found, changes, error: None })
 }
 
-fn codex_plan(nitely: &str) -> Result<AgentPlan> {
+fn codex_plan(nitely: &str, repoint: bool) -> Result<AgentPlan> {
     let dir = home().join(".codex");
     let found = dir.is_dir();
     let mut changes = Vec::new();
@@ -418,17 +445,20 @@ fn codex_plan(nitely: &str) -> Result<AgentPlan> {
     }
     match doc["mcp_servers"].get_mut("nitely").and_then(|i| i.as_table_like_mut()) {
         None => doc["mcp_servers"]["nitely"] = toml_edit::Item::Table(server),
-        // Only the command and args are rewritten, and only when they differ, so the rest of the
-        // entry and its formatting stay as the user left them.
+        // An entry with no command is filled in. One that runs nitely from another install path
+        // gets the new command; anything else (the user's launcher) is left alone. Only the command
+        // changes, so the rest of the entry and its formatting stay as the user left them.
         Some(t) => {
-            if t.get("command").and_then(|v| v.as_str()) != Some(nitely) {
-                t.insert("command", toml_edit::value(nitely));
-            }
+            let command = t.get("command").and_then(|v| v.as_str()).map(str::to_string);
             let args: Option<Vec<&str>> = t.get("args").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str()).collect());
-            if args != Some(vec!["mcp"]) {
+            let moved = repoint && command.as_deref() != Some(nitely) && is_nitely_mcp(command.as_deref(), args);
+            if command.is_none() {
+                t.insert("command", toml_edit::value(nitely));
                 let mut a = toml_edit::Array::new();
                 a.push("mcp");
                 t.insert("args", toml_edit::value(a));
+            } else if moved {
+                t.insert("command", toml_edit::value(nitely));
             }
         }
     }
@@ -439,7 +469,9 @@ fn codex_plan(nitely: &str) -> Result<AgentPlan> {
         // Not set, or exactly what connect wrote for another install path.
         None => doc["notify"] = toml_edit::value(notify.into_iter().collect::<toml_edit::Array>()),
         Some(a) if a.len() == 3 && is_nitely_exe(&shell_word(a[0])) && a[1..] == ["hook", "codex"] => {
-            doc["notify"] = toml_edit::value(notify.into_iter().collect::<toml_edit::Array>())
+            if repoint {
+                doc["notify"] = toml_edit::value(notify.into_iter().collect::<toml_edit::Array>())
+            }
         }
         // Nitely inside the user's own wrapper is left alone.
         Some(a) if a.iter().any(|s| s.contains("nitely")) => {}
@@ -460,7 +492,7 @@ fn codex_plan(nitely: &str) -> Result<AgentPlan> {
     Ok(AgentPlan { agent: "Codex".into(), found, changes, error: None })
 }
 
-fn cursor_plan(nitely: &str) -> Result<AgentPlan> {
+fn cursor_plan(nitely: &str, repoint: bool) -> Result<AgentPlan> {
     let dir = home().join(".cursor");
     let found = dir.is_dir();
     let mut changes = Vec::new();
@@ -472,8 +504,14 @@ fn cursor_plan(nitely: &str) -> Result<AgentPlan> {
     if !server.is_object() {
         *server = json!({});
     }
-    server["command"] = json!(nitely);
-    server["args"] = json!(["mcp"]);
+    // As for Codex: fill in a missing command, repoint another install path, leave a launcher.
+    let command = server.get("command").and_then(Value::as_str).map(str::to_string);
+    if command.is_none() {
+        server["command"] = json!(nitely);
+        server["args"] = json!(["mcp"]);
+    } else if repoint && command.as_deref() != Some(nitely) && is_nitely_mcp(command.as_deref(), str_args(server.get("args"))) {
+        server["command"] = json!(nitely);
+    }
     changes.push(Change::json(&mcp_path, "the nitely MCP server, with its instructions", &mcp));
 
     let hooks_path = dir.join("hooks.json");
@@ -487,7 +525,7 @@ fn cursor_plan(nitely: &str) -> Result<AgentPlan> {
         let list = hooks.entry(event.to_string()).or_insert_with(|| json!([]));
         let mut present = false;
         for h in list.as_array_mut().into_iter().flatten() {
-            present |= point_at(h, "cursor", &command);
+            present |= point_at(h, "cursor", &command, repoint);
         }
         if !present {
             if let Some(a) = list.as_array_mut() {
@@ -508,6 +546,11 @@ fn with_block(text: &str, block: &str) -> String {
     }
     let sep = if text.is_empty() || text.ends_with("\n\n") { "" } else if text.ends_with('\n') { "\n" } else { "\n\n" };
     format!("{text}{sep}{block}\n")
+}
+
+/// A JSON array of strings, as `is_nitely_mcp` takes it; None when it is not one.
+fn str_args(v: Option<&Value>) -> Option<Vec<&str>> {
+    v?.as_array()?.iter().map(Value::as_str).collect()
 }
 
 fn read_json(path: &Path) -> Result<Value> {
@@ -570,10 +613,10 @@ fn suggest_key(db: &Db, name: &str) -> Result<String> {
     bail!("no free project key for {name}; choose one")
 }
 
-/// `nitely` when it is on PATH; else the full path of the binary next to this one, if any.
-fn nitely_command() -> String {
+/// `nitely` when it is on PATH; else the full path of the binary next to this one; else None.
+fn nitely_command() -> Option<String> {
     if which("nitely").is_some() {
-        return "nitely".into();
+        return Some("nitely".into());
     }
     let exe = if cfg!(windows) { "nitely.exe" } else { "nitely" };
     std::env::current_exe()
@@ -581,7 +624,6 @@ fn nitely_command() -> String {
         .and_then(|p| p.parent().map(|d| d.join(exe)))
         .filter(|p| p.exists())
         .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_else(|| "nitely".into())
 }
 
 fn which(program: &str) -> Option<PathBuf> {
@@ -620,10 +662,10 @@ mod tests {
             plans.iter().filter(|a| a.found).flat_map(|a| &a.changes).filter(|c| c.action != "unchanged").map(|c| c.target.clone()).collect()
         };
 
-        let first = agent_plans("nitely");
+        let first = agent_plans("nitely", true);
         assert_eq!(pending_changes(&first), 2, "the hooks and the skill are new");
         assert!(apply_agents(&first).1.is_empty());
-        assert_eq!(pending_changes(&agent_plans("nitely")), 0);
+        assert_eq!(pending_changes(&agent_plans("nitely", true)), 0);
 
         // Reformatting a JSON file is not a change; an old copy of the workflow is.
         let settings = home.join(".claude").join("settings.json");
@@ -631,44 +673,85 @@ mod tests {
         std::fs::write(&settings, compact).unwrap();
         let skill = home.join(".claude").join("skills").join("nitely").join("SKILL.md");
         std::fs::write(&skill, "an older workflow").unwrap();
-        let stale = agent_plans("nitely");
+        let stale = agent_plans("nitely", true);
         assert_eq!(pending_in(&stale), vec![skill.to_string_lossy().into_owned()]);
         assert!(apply_agents(&stale).1.is_empty());
         assert!(std::fs::read_to_string(&skill).unwrap().contains(WORKFLOW));
-        assert_eq!(pending_changes(&agent_plans("nitely")), 0);
+        assert_eq!(pending_changes(&agent_plans("nitely", true)), 0);
 
         // Hooks written by an install at another path are pointed at the current command.
         let text = std::fs::read_to_string(&settings).unwrap();
         std::fs::write(&settings, text.replace("\"nitely hook claude\"", "\"C:/old/nitely.exe hook claude\"")).unwrap();
-        let moved = agent_plans("nitely");
+        let moved = agent_plans("nitely", true);
         assert_eq!(pending_in(&moved), vec![settings.to_string_lossy().into_owned()]);
         assert!(apply_agents(&moved).1.is_empty());
         assert!(!std::fs::read_to_string(&settings).unwrap().contains("C:/old"));
         let mut chained = json!({ "command": "nitely hook claude && notify-user" });
-        assert!(point_at(&mut chained, "claude", "nitely hook claude"), "still counts as Nitely's");
+        assert!(point_at(&mut chained, "claude", "nitely hook claude", true), "still counts as Nitely's");
         assert_eq!(chained["command"], "nitely hook claude && notify-user", "but is left as the user wrote it");
         let mut prefixed = json!({ "command": "echo ready && C:/tools/nitely.exe hook claude" });
-        point_at(&mut prefixed, "claude", "nitely hook claude");
+        point_at(&mut prefixed, "claude", "nitely hook claude", true);
         assert_eq!(prefixed["command"], "echo ready && C:/tools/nitely.exe hook claude");
         assert!(!is_nitely_exe("python") && is_nitely_exe("C:/old/nitely.exe") && is_nitely_exe("\"C:/My Tools/nitely.exe\""));
+        for chain in ["preflight&&C:/tools/nitely.exe", "a|nitely", "a;nitely", "<in nitely", "x>nitely.exe"] {
+            assert!(!is_nitely_exe(chain), "{chain}");
+        }
+        let mut glued = json!({ "command": "preflight&&C:/tools/nitely.exe hook claude" });
+        assert!(point_at(&mut glued, "claude", "nitely hook claude", true));
+        assert_eq!(glued["command"], "preflight&&C:/tools/nitely.exe hook claude", "the chain survives");
         let mut spaced = json!({ "command": "\"C:/Program Files/Nitely/nitely.exe\" hook claude" });
-        point_at(&mut spaced, "claude", "nitely hook claude");
+        point_at(&mut spaced, "claude", "nitely hook claude", true);
         assert_eq!(spaced["command"], "nitely hook claude");
 
         // A moved MCP registration is left to the human, so its env and tokens survive.
         std::fs::write(&claude_json, r#"{"mcpServers":{"nitely":{"command":"C:/old/nitely.exe","args":["mcp"],"env":{"T":"x"}}}}"#).unwrap();
-        let moved = agent_plans("nitely");
+        let moved = agent_plans("nitely", true);
         assert_eq!(moved[0].changes.last().unwrap().action, "manual");
         assert_eq!(pending_changes(&moved), 1);
         assert!(apply_agents(&moved).1[0].contains("set command to \"nitely\""));
         assert!(std::fs::read_to_string(&claude_json).unwrap().contains("C:/old"), "left as it was");
+        // A launcher the user registered is theirs; only Nitely's own entries move.
+        std::fs::write(&claude_json, r#"{"mcpServers":{"nitely":{"command":"wsl","args":["nitely","mcp"]}}}"#).unwrap();
+        assert_eq!(agent_plans("nitely", true)[0].changes.last().unwrap().action, "unchanged");
+
+        // Codex and Cursor the same way: another install path is repointed, a launcher is not.
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        std::fs::create_dir_all(home.join(".cursor")).unwrap();
+        let codex = home.join(".codex").join("config.toml");
+        let cursor = home.join(".cursor").join("mcp.json");
+        std::fs::write(&codex, "[mcp_servers.nitely]
+command = \"C:/old/nitely.exe\"
+args = [\"mcp\"]
+env = { T = \"x\" }
+").unwrap();
+        std::fs::write(&cursor, r#"{"mcpServers":{"nitely":{"command":"wsl","args":["nitely","mcp"]}}}"#).unwrap();
+        let plans = agent_plans("nitely", true);
+        let (codex_after, cursor_after) = (&plans[1].changes[0].after, &plans[2].changes[0].after);
+        assert!(codex_after.contains("command = \"nitely\"") && codex_after.contains("T = \"x\""), "{codex_after}");
+        assert!(cursor_after.contains("\"wsl\"") && !cursor_after.contains("\"command\": \"nitely\""), "{cursor_after}");
+        std::fs::write(&codex, "[mcp_servers.nitely]
+command = \"wsl\"
+args = [\"nitely\", \"mcp\"]
+").unwrap();
+        std::fs::write(&cursor, r#"{"mcpServers":{"nitely":{"command":"C:/old/nitely.exe","args":["mcp"]}}}"#).unwrap();
+        let plans = agent_plans("nitely", true);
+        assert!(plans[1].changes[0].after.contains("command = \"wsl\""), "{}", plans[1].changes[0].after);
+        assert!(plans[2].changes[0].after.contains("\"command\": \"nitely\""), "{}", plans[2].changes[0].after);
+
+        // When nitely cannot be found, working paths are not repointed to a guess, and the refresh
+        // proposes nothing: each installed agent says why instead.
+        assert!(agent_plans("nitely", false)[2].changes[0].after.contains("C:/old/nitely.exe"));
+        let unresolved = setup_for(None);
+        assert!(unresolved.iter().all(|a| a.changes.is_empty()));
+        assert!(unresolved.iter().all(|a| a.error.as_deref().is_some_and(|e| e.contains("neither on PATH"))));
+        assert_eq!(pending_changes(&unresolved), 0);
 
         // A config that can't be read is that agent's error, reported as a failure, not a failed check.
         std::fs::write(&settings, "{ not json").unwrap();
-        let broken = agent_plans("nitely");
+        let broken = agent_plans("nitely", true);
         assert!(broken[0].error.as_deref().is_some_and(|e| e.contains("not valid JSON")));
         assert_eq!(broken.len(), 3);
-        assert!(apply_agents(&broken).1[0].contains("could not be read"));
+        assert!(apply_agents(&broken).1[0].contains("not valid JSON"));
         std::env::remove_var("NITELY_AGENT_HOME");
         std::fs::remove_dir_all(&home).ok();
     }
