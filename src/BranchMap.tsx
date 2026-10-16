@@ -244,6 +244,7 @@ function Spine(props: { repo: RepoView; main: TaskRow | null; now: number; alone
           ) : detached ? (
             <span className="attention-ink" title={st.last_commit_subject ? `At “${st.last_commit_subject}”` : undefined}>
               Main checkout is detached
+              {st.rebase_in_progress ? ", rebase stopped" : st.dirty_files ? `, ${st.dirty_files} uncommitted` : ""}
             </span>
           ) : st ? (
             <>
