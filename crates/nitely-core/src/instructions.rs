@@ -65,9 +65,11 @@ mod tests {
 
     #[test]
     fn the_setup_guides_example_rules_are_a_valid_playbook() {
-        let start = SETUP_GUIDE.find("```toml\n").expect("the guide shows example rules") + "```toml\n".len();
+        // A Windows checkout has the file with CRLF line ends.
+        let guide = SETUP_GUIDE.replace("\r\n", "\n");
+        let start = guide.find("```toml\n").expect("the guide shows example rules") + "```toml\n".len();
         // The example is indented under a list item; TOML does not mind.
-        let example = &SETUP_GUIDE[start..start + SETUP_GUIDE[start..].find("```").unwrap()];
+        let example = &guide[start..start + guide[start..].find("```").unwrap()];
         let pb = Playbook::parse(example).unwrap();
         assert!(pb.unknown.is_empty(), "every key is one Nitely reads: {:?}", pb.unknown);
         assert_eq!((pb.review.flags.len(), pb.approval.human_paths.len(), pb.approval.blocked_paths.len()), (1, 2, 1));
