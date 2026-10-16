@@ -30,7 +30,13 @@ export type View =
 // The view and the open issue live in the URL hash (`#now`, `#project/NIT`, `#inbox@NIT-12`), so
 // a reload keeps them and the browser preview can open any screen directly.
 function fromHash(hash: string): { view: View; issue: string | null } {
-  const [path, issue] = decodeURIComponent(hash.replace(/^#\/?/, "")).split("@");
+  let raw = hash.replace(/^#\/?/, "");
+  try {
+    raw = decodeURIComponent(raw);
+  } catch {
+    // A malformed escape: use the hash as it is rather than fail to start.
+  }
+  const [path, issue] = raw.split("@");
   const [kind, key] = path.split("/");
   const plain = ["inbox", "now", "add", "agents"].concat(isPreview ? ["kit"] : []);
   const view: View =

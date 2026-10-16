@@ -128,6 +128,8 @@ function Row(props: { row: TaskRow; integration: string; now: number; onOpenIssu
               {s?.last_activity ?? (st?.rebase_in_progress ? "" : <span className="muted">–</span>)}
             </div>
           </>
+        ) : st?.rebase_in_progress ? (
+          <strong>Rebase stopped on a conflict.</strong>
         ) : (
           <span className="muted">–</span>
         )}

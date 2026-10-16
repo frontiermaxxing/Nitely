@@ -573,7 +573,8 @@ function moveIssue(args: Record<string, unknown>) {
   if (to === "Done" && !args.evidence) throw "Done needs evidence: what ran and what it showed";
   if ((to === "Canceled" || to === "Duplicate") && !args.reason) throw `${to} needs a reason`;
   const ts = Math.floor(Date.now() / 1000);
-  world.timelines.get(issue.key)!.push({ ts, actor: "human", kind: "issue_moved", summary: `${issue.state} → ${to}` });
+  const why = (args.evidence ?? args.reason) as string | null;
+  world.timelines.get(issue.key)!.push({ ts, actor: "human", kind: "issue_moved", summary: `${issue.state} → ${to}${why ? `: ${why}` : ""}` });
   issue.state = to;
   issue.state_type = STATE_TYPE[to] ?? issue.state_type;
   issue.updated_at = iso(ts);

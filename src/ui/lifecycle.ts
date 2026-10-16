@@ -77,10 +77,13 @@ function closedOf(issue: IssueRecord): Track["closed"] {
   return null;
 }
 
-/** "Todo → In Progress" → "In Progress" */
+/** "Todo → In Progress" → "In Progress"; "In Progress → Done: tests passed" → "Done". */
 function movedTo(summary: string | null): string | null {
-  const parts = summary?.split("→");
-  return parts && parts.length > 1 ? parts[parts.length - 1].trim() : null;
+  const arrow = summary?.indexOf("→") ?? -1;
+  if (!summary || arrow < 0) return null;
+  const rest = summary.slice(arrow + 1);
+  const colon = rest.indexOf(":");
+  return (colon < 0 ? rest : rest.slice(0, colon)).trim() || null;
 }
 
 /**
@@ -129,6 +132,7 @@ export function trackOf(issue: IssueRecord, timeline?: TimelineEntry[], reviews?
         break;
       case "gate_passed":
         gateFailed = false;
+        landFailed = false;
         reach("gate", e.ts);
         break;
       case "gate_failed":
@@ -137,13 +141,19 @@ export function trackOf(issue: IssueRecord, timeline?: TimelineEntry[], reviews?
         break;
       case "review_started":
         reviewFailed = false;
+        landFailed = false;
         reach("review", e.ts);
         break;
       case "review_failed":
         reviewFailed = true;
         break;
       case "submit":
-        if (e.summary?.includes("requested changes")) rounds++;
+        // Submit leaves a rejected issue In Progress without a move, so the note is the only
+        // sign that the work went back from Review to Working.
+        if (e.summary?.includes("requested changes")) {
+          rounds++;
+          current = "working";
+        }
         break;
       case "ask":
         openAsks++;
@@ -163,6 +173,8 @@ export function trackOf(issue: IssueRecord, timeline?: TimelineEntry[], reviews?
       case "issue_moved": {
         const to = movedTo(e.summary);
         if (!to) break;
+        // A person moving the issue after a stopped land has taken it from there.
+        landFailed = false;
         const s = stationOfState(to);
         if (to === "Todo" || to === "Backlog") current = "todo";
         else if (s === "working") {
