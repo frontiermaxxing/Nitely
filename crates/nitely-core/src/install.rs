@@ -26,20 +26,30 @@ pub struct Installed {
     pub still_running: usize,
 }
 
-/// The executable agents run as `nitely` to install `from` over: the first on PATH that is
-/// neither `from` nor an identical copy of it, else Cargo's install folder. `cargo run` puts its
-/// own target folders first on PATH on Windows, and `target/release/deps` holds a copy of the
-/// build; installing over either would quietly change nothing.
+/// The executable agents run as `nitely` to install `from` over: the first on PATH outside
+/// Cargo's own build folders, else Cargo's install folder. `cargo run` puts its target folders
+/// first on PATH on Windows, and `target/<profile>/deps` holds a copy of the build; installing
+/// over either would quietly change nothing. A PATH copy identical to the build is still the
+/// target, so installing the same build twice changes nothing rather than overwriting a later
+/// copy (NIT-52).
 pub fn default_target(from: &Path) -> Option<PathBuf> {
     let exe = if cfg!(windows) { "nitely.exe" } else { "nitely" };
-    let source = from.canonicalize().ok();
-    let source_bytes = std::fs::read(from).ok();
-    let is_the_build = |p: &Path| {
-        (source.is_some() && p.canonicalize().ok() == source) || (source_bytes.is_some() && std::fs::read(p).ok() == source_bytes)
+    let folders: Vec<PathBuf> = std::env::var_os("PATH").map(|path| std::env::split_paths(&path).collect()).unwrap_or_default();
+    first_installed(&folders, from, exe).or_else(|| dirs::home_dir().map(|h| h.join(".cargo").join("bin").join(exe)))
+}
+
+/// The first `exe` in `dirs` that is not in a folder Cargo builds into: the build's own folder
+/// and its `deps`, or any `target/<profile>` and `target/<profile>/deps`.
+fn first_installed(dirs: &[PathBuf], from: &Path, exe: &str) -> Option<PathBuf> {
+    let real = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let build_dir = from.parent().map(real);
+    let cargo_folder = |dir: &Path| {
+        let dir = real(dir);
+        let named = |p: Option<&Path>, name: &str| p.and_then(Path::file_name).is_some_and(|n| n.eq_ignore_ascii_case(name));
+        let profile = if named(Some(&dir), "deps") { dir.parent() } else { Some(dir.as_path()) };
+        build_dir.as_deref().is_some_and(|b| profile == Some(b)) || named(profile.and_then(Path::parent), "target")
     };
-    let on_path = std::env::var_os("PATH")
-        .and_then(|path| std::env::split_paths(&path).map(|d| d.join(exe)).find(|p| p.is_file() && !is_the_build(p)));
-    on_path.or_else(|| dirs::home_dir().map(|h| h.join(".cargo").join("bin").join(exe)))
+    dirs.iter().filter(|d| !cargo_folder(d)).map(|d| d.join(exe)).find(|p| p.is_file())
 }
 
 /// Code whose change makes a nitely build out of date for Nitely's own repo.
@@ -167,6 +177,30 @@ pub fn stamp(path: &Path) -> Option<(u64, std::time::SystemTime)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn installs_over_the_first_path_copy_outside_cargos_folders() {
+        let dir = std::env::temp_dir().join(format!("nitely-target-{}-{}", std::process::id(), crate::db::now()));
+        let exe = "nitely-test.exe";
+        let folders = ["repo/target/release", "repo/target/release/deps", "bin", "later"];
+        for f in folders {
+            std::fs::create_dir_all(dir.join(f)).unwrap();
+            std::fs::write(dir.join(f).join(exe), "same build").unwrap();
+        }
+        let from = dir.join("repo/target/release").join(exe);
+        let path: Vec<PathBuf> = folders.iter().map(|f| dir.join(f)).collect();
+        // Identical to the build, and still the target: a second install is a no-op there.
+        assert_eq!(first_installed(&path, &from, exe), Some(dir.join("bin").join(exe)));
+        // A build under a custom target folder: its own folder and deps are still skipped.
+        let custom = dir.join("out");
+        std::fs::create_dir_all(custom.join("deps")).unwrap();
+        std::fs::write(custom.join(exe), "x").unwrap();
+        std::fs::write(custom.join("deps").join(exe), "x").unwrap();
+        let path = vec![custom.clone(), custom.join("deps"), dir.join("later")];
+        assert_eq!(first_installed(&path, &custom.join(exe), exe), Some(dir.join("later").join(exe)));
+        assert_eq!(first_installed(&[dir.join("nowhere")], &from, exe), None);
+        std::fs::remove_dir_all(dir).ok();
+    }
 
     #[test]
     fn a_build_older_than_landed_nitely_code_is_stale() {
