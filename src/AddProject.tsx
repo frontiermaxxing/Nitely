@@ -119,6 +119,17 @@ export function AddProject(props: { onAdded: (projectKey: string) => void }) {
               Playbook: {PLAYBOOK_SOURCE[plan.playbook.source] ?? plan.playbook.source}, kept at{" "}
               <span className="mono">{plan.playbook.path}</span>.
             </p>
+            {(plan.playbook.source === "generated" || !plan.project_exists) && (
+              <p className="small">
+                {plan.playbook.source === "generated" && "Until you approve its review rules, every change waits for you. "}
+                {!plan.project_exists && (
+                  <>
+                    Nitely files a first issue: an agent sweeps the repo without changing it, seeds the board and proposes those
+                    rules for you to approve in the Inbox (in Claude Code, <span className="mono">/nitely-setup</span>).
+                  </>
+                )}
+              </p>
+            )}
             {plan.playbook.text && (
               <details>
                 <summary className="small">Show the playbook</summary>

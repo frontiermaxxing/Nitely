@@ -176,7 +176,7 @@ pub struct Applied {
 
 /// Makes every change in the plan, for the agents that were found. A failure for one agent does not
 /// stop the others; it is reported.
-pub fn apply(db: &Db, config: &mut Config, plan: &ConnectPlan) -> Result<Applied> {
+pub fn apply(db: &mut Db, config: &mut Config, plan: &ConnectPlan) -> Result<Applied> {
     let mut done = Vec::new();
     let mut failed = Vec::new();
     if !plan.project_exists {
@@ -197,10 +197,59 @@ pub fn apply(db: &Db, config: &mut Config, plan: &ConnectPlan) -> Result<Applied
         done.push(format!("wrote its playbook to {}", plan.playbook.path));
     }
 
+    // A project nobody has set up gets its first issue: the sweep that seeds the board and
+    // drafts the review rules. One per project, whatever number of repos join it.
+    if db.project_brief(&plan.project_key)?.setup.is_none() {
+        match file_setup_issue(db, plan) {
+            Ok(Some(key)) => done.push(format!("filed {key}: an agent sweeps the repo, seeds the board and drafts the review rules")),
+            Ok(None) => {}
+            Err(e) => failed.push(format!("filing the setup issue ({e:#})")),
+        }
+    }
+
     let (agents_done, agents_failed) = apply_agents(&plan.agents);
     done.extend(agents_done);
     failed.extend(agents_failed);
     Ok(Applied { project: plan.project_key.clone(), repo: plan.repo_name.clone(), done, failed })
+}
+
+/// The title of the first issue of a project nobody has set up.
+fn setup_title(project: &str) -> String {
+    format!("Set up {project}: sweep the repo, seed the board and draft its review rules")
+}
+
+/// Files the setup issue, unless an open one is there already. None when it was.
+fn file_setup_issue(db: &mut Db, plan: &ConnectPlan) -> Result<Option<String>> {
+    let title = setup_title(&plan.project_name);
+    if db.list_issues(Some(&plan.project_key), false)?.iter().any(|i| i.title == title) {
+        return Ok(None);
+    }
+    let safe = if plan.playbook.source == "generated" {
+        "Until rules are approved, every change waits for you (the playbook's approval.always_human); the proposal turns that off along with the rules it drafts."
+    } else {
+        "The repo already has a playbook; propose only what it is missing."
+    };
+    let body = format!(
+        "Nitely just connected {repo} ({root}) to {key}, and its board is empty. Run the first-run setup sweep: in Claude Code `/nitely-setup`, in any agent the `setup_guide` tool. It reads the repo without changing it, checks the integration branch and the gate first, files what it finds, proposes the review and approval rules (review.focus, approval.human_paths, review.flags, approval.blocked_paths) with propose_playbook_change for the human to approve, and writes the project brief. {safe}\n\nWhen the sweep is done, move this issue to Done with what it filed as evidence.",
+        repo = plan.repo_name,
+        root = plan.root,
+        key = plan.project_key,
+    );
+    let issue = db.create_issue(
+        &crate::NewIssue {
+            project: plan.project_key.clone(),
+            title,
+            body,
+            kind: "feature".into(),
+            source: "human".into(),
+            evidence: format!("{} was connected with an empty board and no setup sweep yet.", plan.repo_name),
+            priority: 1,
+            allow_similar: true,
+            ..Default::default()
+        },
+        &crate::Actor::Human,
+    )?;
+    Ok(Some(issue.key))
 }
 
 const UNRESOLVED: &str = "the nitely command is neither on PATH nor beside this app (cargo install --path crates/nitely-cli)";
@@ -309,7 +358,10 @@ fn generated_playbook(root: &Path) -> String {
          # in the repo, which then takes precedence.\n\n\
          [branch]\nintegration = {branch:?}\n\n\
          [worktree]\nsetup = [{}]\n\n\
-         [gate]\n# Must pass before a change can land.{}\ncommands = [{}]\n",
+         [gate]\n# Must pass before a change can land.{}\ncommands = [{}]\n\n\
+         [approval]\n# Every change waits for you until this project's review rules are approved. The setup\n\
+         # sweep drafts them; approving its proposal puts them in place of this line.\n\
+         always_human = true\n",
         list(&setup),
         if gate.is_empty() { " Nothing was detected; add your test and build commands." } else { "" },
         list(&gate)
@@ -773,6 +825,31 @@ args = [\"nitely\", \"mcp\"]
     }
 
     #[test]
+    fn a_new_project_gets_one_setup_issue() {
+        let dir = std::env::temp_dir().join(format!("nitely-setup-issue-{}-{}", std::process::id(), crate::db::now()));
+        let mut db = Db::open(&dir.join("t.db")).unwrap();
+        db.create_project("SHOP", "Shop").unwrap();
+        let plan = ConnectPlan {
+            root: "C:/code/shop".into(),
+            repo_name: "shop".into(),
+            project_key: "SHOP".into(),
+            project_name: "Shop".into(),
+            project_exists: false,
+            integration_branch: "main".into(),
+            playbook: PlaybookPlan { source: "generated".into(), path: "shop.toml".into(), text: String::new() },
+            nitely: "nitely".into(),
+            agents: vec![],
+            warnings: vec![],
+        };
+        let key = file_setup_issue(&mut db, &plan).unwrap().unwrap();
+        let issue = db.issue(&key).unwrap().unwrap();
+        assert_eq!((issue.state.as_str(), issue.owner.as_str(), issue.priority), ("Todo", "agent", 1));
+        assert!(issue.body.contains("setup_guide") && issue.body.contains("always_human"), "{}", issue.body);
+        assert_eq!(file_setup_issue(&mut db, &plan).unwrap(), None, "a second repo joining does not file another");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn generates_a_playbook_from_the_repo() {
         let dir = std::env::temp_dir().join(format!("nitely-gen-{}-{}", std::process::id(), crate::db::now()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -783,6 +860,8 @@ args = [\"nitely\", \"mcp\"]
         assert_eq!(pb.branch.integration, "trunk");
         assert_eq!(pb.worktree.setup, vec!["npm ci"]);
         assert_eq!(pb.gate.commands, vec!["npm test", "npm run build"]);
+        assert!(pb.approval.always_human, "a new repo's changes wait for a human until its rules are approved");
+        assert!(pb.unknown.is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 }

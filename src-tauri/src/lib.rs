@@ -213,9 +213,9 @@ async fn connect_plan(path: String, key: Option<String>, name: Option<String>) -
 #[tauri::command]
 async fn connect_apply(path: String, key: Option<String>, name: Option<String>) -> Result<nitely_core::connect::Applied, String> {
     let mut config = Config::load().map_err(err)?;
-    let db = db()?;
+    let mut db = db()?;
     let plan = nitely_core::connect::plan(&db, &config, &path, key.as_deref(), name.as_deref()).map_err(err)?;
-    nitely_core::connect::apply(&db, &mut config, &plan).map_err(err)
+    nitely_core::connect::apply(&mut db, &mut config, &plan).map_err(err)
 }
 
 /// What it takes to bring the agents' Nitely setup up to this version; empty when nothing watches a repo.

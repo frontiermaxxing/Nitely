@@ -1112,7 +1112,7 @@ function connectPlan(args: Record<string, unknown>): ConnectPlan {
     playbook: {
       source: "generated",
       path: `%APPDATA%\\nitely\\playbooks\\${key.toLowerCase()}.toml`,
-      text: `integration = "main"\n\n[worktree]\nsetup = ["npm ci"]\n\n[gate]\ncommands = ["npm test", "npm run build"]\n\n[review]\nclaude = "codex"\n"*" = "claude"\n`,
+      text: `[branch]\nintegration = "main"\n\n[worktree]\nsetup = ["npm ci"]\n\n[gate]\n# Must pass before a change can land.\ncommands = ["npm test", "npm run build"]\n\n[approval]\n# Every change waits for you until this project's review rules are approved. The setup\n# sweep drafts them; approving its proposal puts them in place of this line.\nalways_human = true\n`,
     },
     nitely: "C:\\Users\\you\\.cargo\\bin\\nitely.exe",
     agents: AGENTS.map((a) => ({
@@ -1126,7 +1126,9 @@ function connectPlan(args: Record<string, unknown>): ConnectPlan {
 function connectApply(args: Record<string, unknown>): Applied {
   const plan = connectPlan(args);
   if (!world.projects.some((p) => p.key === plan.project_key)) world.projects.push({ key: plan.project_key, name: plan.project_name, open_issues: 0 });
-  return { project: plan.project_key, repo: plan.root, done: [`Created project ${plan.project_key}`, `Watching ${plan.root}`], failed: [] };
+  const done = [`created project ${plan.project_key} (${plan.project_name})`, `watching ${plan.root} for project ${plan.project_key}`];
+  if (!plan.project_exists) done.push(`filed ${plan.project_key}-1: an agent sweeps the repo, seeds the board and drafts the review rules`);
+  return { project: plan.project_key, repo: plan.root, done, failed: [] };
 }
 
 // ----- Activity: the night each agent had, from the same stories -----

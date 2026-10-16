@@ -806,7 +806,7 @@ fn run(cmd: Cmd) -> Result<()> {
         }
         Cmd::Connect { path, project, name, yes } => {
             let mut config = Config::load()?;
-            let db = Db::open_default()?;
+            let mut db = Db::open_default()?;
             let plan = nitely_core::connect::plan(&db, &config, &path, project.as_deref(), name.as_deref())?;
             let new = if plan.project_exists { "existing" } else { "new" };
             println!("{} → project {} ({}, {new}), integration branch {}", plan.root, plan.project_key, plan.project_name, plan.integration_branch);
@@ -819,7 +819,7 @@ fn run(cmd: Cmd) -> Result<()> {
                 eprintln!("\nnothing changed; run again with --yes to apply");
                 return Ok(());
             }
-            let applied = nitely_core::connect::apply(&db, &mut config, &plan)?;
+            let applied = nitely_core::connect::apply(&mut db, &mut config, &plan)?;
             println!();
             for d in &applied.done {
                 println!("done    {d}");
