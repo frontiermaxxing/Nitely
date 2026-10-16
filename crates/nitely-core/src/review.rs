@@ -75,7 +75,14 @@ pub struct Finding {
     /// does not list it again.
     #[serde(default)]
     pub carried: bool,
+    /// The priority it was raised at, when it is carried lower because the code it cites was not on
+    /// the branch: a later round that confirms it open restores this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raised_as: Option<u8>,
 }
+
+/// Appended to a carried finding whose cited code was not on the branch.
+const UNCONFIRMED: &str = " (unconfirmed: the code it cites is not on the branch now)";
 
 /// What the previous review of the branch found, so the next one checks those findings first and
 /// reviews what changed since instead of starting over.
@@ -309,7 +316,9 @@ using P0 for data loss or security, P1 for a definite bug in normal use, P2 for 
                             Some(code) if status != "fixed" && !code.confirms(evidence) => "unconfirmed".to_string(),
                             _ => status,
                         };
-                        Recheck { priority: f.priority, text: f.text.clone(), status }
+                        // Judged at the priority it was raised at, whatever an earlier round carried it at.
+                        let text = f.text.strip_suffix(UNCONFIRMED).unwrap_or(&f.text).to_string();
+                        Recheck { priority: f.raised_as.unwrap_or(f.priority), text, status }
                     })
                     .collect()
             })
@@ -318,11 +327,13 @@ using P0 for data loss or security, P1 for a definite bug in normal use, P2 for 
             bail!("the {reviewer} review says it has findings but lists none as `- [Pn] ...`:\n{}", tail_lines(text));
         }
         for r in previous.iter().filter(|r| r.status != "fixed") {
-            let unconfirmed = r.status == "unconfirmed";
-            const MARK: &str = " (unconfirmed: the code it cites is not on the branch now)";
-            let text = if unconfirmed && !r.text.ends_with(MARK) { format!("{}{MARK}", r.text) } else { r.text.clone() };
-            let priority = if unconfirmed { r.priority.max(2) } else { r.priority };
-            findings.push(Finding { priority, text, carried: true });
+            let finding = if r.status == "unconfirmed" {
+                let priority = r.priority.max(2);
+                Finding { priority, text: format!("{}{UNCONFIRMED}", r.text), carried: true, raised_as: (priority != r.priority).then_some(r.priority) }
+            } else {
+                Finding { priority: r.priority, text: r.text.clone(), carried: true, raised_as: None }
+            };
+            findings.push(finding);
         }
         let closing = |l: &str| {
             let l = l.trim().to_uppercase();
@@ -442,7 +453,13 @@ impl CurrentCode {
 
     /// The tracked file a cited path names: as given, or the only tracked file ending with it.
     fn resolve(&self, path: &str) -> Option<String> {
-        let path = path.replace('\\', "/").trim_start_matches("./").to_string();
+        let mut path = path.replace('\\', "/").trim_start_matches("./").to_string();
+        // An absolute path inside the worktree, made relative to it.
+        let root = crate::paths::normalize(&self.root.to_string_lossy());
+        let lowered = crate::paths::normalize(&path);
+        if let Some(rest) = lowered.strip_prefix(&format!("{root}/")) {
+            path = path[path.len() - rest.len()..].to_string();
+        }
         if self.files.contains(&path) || (self.files.is_empty() && self.root.join(&path).is_file()) {
             return Some(path);
         }
@@ -463,10 +480,14 @@ fn citations(text: &str) -> Vec<(String, Option<usize>)> {
             Some((p, n)) if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) => (p, n.parse().ok()),
             _ => (word, None),
         };
-        // A file name: a dot, then a short extension of letters.
-        let file = path.rsplit_once('.').is_some_and(|(stem, ext)| {
+        // A file name: a dot, then a short extension of letters; with a line number, any name
+        // (Dockerfile:1, .gitignore:3); a dotfile or a path with a slash on its own.
+        let has_ext = path.rsplit_once('.').is_some_and(|(stem, ext)| {
             !stem.is_empty() && !stem.ends_with('/') && (1..=5).contains(&ext.len()) && ext.chars().all(|c| c.is_ascii_alphabetic())
         });
+        let named = path.chars().any(|c| c.is_ascii_alphabetic());
+        let dotfile = path.starts_with('.') && path.len() > 1 && path[1..].chars().all(|c| c.is_ascii_alphanumeric() || "_-.".contains(c));
+        let file = has_ext || dotfile || (named && (line.is_some() || path.contains('/')));
         if file && !path.contains("://") {
             out.push((path.to_string(), line));
         }
@@ -485,7 +506,7 @@ fn parse_previous(text: &str) -> BTreeMap<usize, (String, String)> {
     let mut out = BTreeMap::new();
     for line in text.lines() {
         let l = line.replace("**", "");
-        let l = l.trim().trim_start_matches(['-', '*', ' ']);
+        let l = l.trim().trim_start_matches(['-', '*', ' ', '`']);
         let Some(rest) = l.get(..9).filter(|p| p.eq_ignore_ascii_case("previous ")).map(|_| &l[9..]) else { continue };
         let Some((n, status)) = rest.split_once(':') else { continue };
         let Ok(n) = n.trim().trim_start_matches('#').parse::<usize>() else { continue };
@@ -509,7 +530,7 @@ pub fn parse_findings(text: &str) -> Vec<Finding> {
         let Some(priority) = d.to_digit(10).filter(|p| *p <= 3) else { continue };
         let text = chars.as_str().trim().to_string();
         if !text.is_empty() && !out.iter().any(|f| f.text == text) {
-            out.push(Finding { priority: priority as u8, text, carried: false });
+            out.push(Finding { priority: priority as u8, text, carried: false, raised_as: None });
         }
     }
     out
@@ -695,7 +716,7 @@ mod tests {
     }
 
     fn previous(in_history: bool) -> PreviousRound {
-        let f = |priority, text: &str| Finding { priority, text: text.into(), carried: false };
+        let f = |priority, text: &str| Finding { priority, text: text.into(), carried: false, raised_as: None };
         PreviousRound {
             commit: "abc1234".into(),
             findings: vec![f(1, "Drops the last row: src/a.rs, f"), f(2, "Empty name: src/b.rs, g"), f(2, "Slow loop: src/c.rs, h")],
@@ -740,7 +761,7 @@ mod tests {
         let text = "PREVIOUS 1: open\nPREVIOUS 2: fixed\nPREVIOUS 3: fixed\nVERDICT: findings\nMONEY_OR_RELEASE: no";
         let r = rules().parse("codex", text, 3, Some(&prev), None).unwrap();
         assert_eq!(r.verdict, "changes");
-        assert_eq!(r.findings, vec![Finding { priority: 1, text: "Drops the last row: src/a.rs, f".into(), carried: true }]);
+        assert_eq!(r.findings, vec![Finding { priority: 1, text: "Drops the last row: src/a.rs, f".into(), carried: true, raised_as: None }]);
 
         // Everything fixed and nothing new is clean; an unfinished reply is still unfinished.
         let text = "PREVIOUS 1: fixed\nPREVIOUS 2: fixed\nPREVIOUS 3: fixed\nVERDICT: clean\nMONEY_OR_RELEASE: no";
@@ -757,7 +778,7 @@ mod tests {
         git(&["init", "-q"]);
         std::fs::write(dir.join("src/proposals.rs"), "fn apply() {\n    let closed = true;\n}\n").unwrap();
         git(&["add", "."]);
-        let f = |priority, text: &str| Finding { priority, text: text.into(), carried: false };
+        let f = |priority, text: &str| Finding { priority, text: text.into(), carried: false, raised_as: None };
         let prev = PreviousRound {
             commit: "abc1234".into(),
             findings: vec![
@@ -784,9 +805,26 @@ mod tests {
         assert_eq!(r.verdict, "changes");
 
         // Not mentioned: carried as it was while the file it names exists, unconfirmed once it is gone.
-        let r = review("PREVIOUS 1: fixed\nPREVIOUS 2: fixed");
-        assert_eq!(statuses(&r), ["fixed", "fixed", "unchecked"]);
+        let r = review("`PREVIOUS 1: fixed`\nPREVIOUS 2: fixed");
+        assert_eq!(statuses(&r), ["fixed", "fixed", "unchecked"], "a backticked answer counts");
         assert_eq!(r.findings[0].priority, 1);
+
+        // Carried lower, a finding keeps the priority it was raised at: confirmed open later (here
+        // by an absolute path), it blocks again at P1, without the unconfirmed mark.
+        let first = review("PREVIOUS 1: open\nPREVIOUS 2: fixed\nPREVIOUS 3: fixed");
+        assert_eq!((first.findings[0].priority, first.findings[0].raised_as), (2, Some(1)));
+        let next = PreviousRound { commit: "def5678".into(), findings: first.findings.clone(), in_history: true };
+        let absolute = dir.join("src").join("proposals.rs");
+        let text = format!("PREVIOUS 1: open {}:2 `let closed = true;`\nVERDICT: clean\nMONEY_OR_RELEASE: no", absolute.display());
+        let r = rules().parse("codex", &text, 1, Some(&next), Some(&dir)).unwrap();
+        assert_eq!(statuses(&r), ["open"]);
+        assert_eq!((r.findings[0].priority, r.verdict.as_str()), (1, "changes"));
+        assert!(!r.findings[0].text.contains("unconfirmed"), "{:?}", r.findings);
+
+        // Files without an extension count when cited with a line.
+        std::fs::write(dir.join("Dockerfile"), "FROM scratch\n").unwrap();
+        git(&["add", "."]);
+        assert!(CurrentCode::new(&dir).confirms("Dockerfile:1 `FROM scratch`"));
         std::fs::remove_dir_all(&dir).ok();
     }
 
