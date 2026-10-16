@@ -49,7 +49,8 @@ pub struct Landed {
 }
 
 pub struct LandOptions<'a> {
-    /// Any directory in the repo.
+    /// Where the land was asked from. The repo linked to the issue's project wins; this directory's
+    /// repo counts when none is (see `playbook::repo_for_issue`).
     pub dir: &'a str,
     pub issue_key: &'a str,
     /// Push the integration branch to origin (and delete the landed remote branch).
@@ -61,10 +62,10 @@ pub struct LandOptions<'a> {
 }
 
 pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Actor) -> Result<Landed> {
-    let root = playbook::repo_root(config, opts.dir).with_context(|| format!("{} is not inside a git repo", opts.dir))?;
+    let issue = db.issue(opts.issue_key)?.with_context(|| format!("no issue {}", opts.issue_key))?;
+    let root = playbook::repo_for_issue(config, issue.project.as_deref(), opts.dir)?;
     let pb = Playbook::load(&root)?;
     let base = pb.integration_branch().to_string();
-    let issue = db.issue(opts.issue_key)?.with_context(|| format!("no issue {}", opts.issue_key))?;
     let mut report = Landed { issue: issue.key.clone(), base: base.clone(), ..Default::default() };
 
     let common = PathBuf::from(git(&root, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?.trim());

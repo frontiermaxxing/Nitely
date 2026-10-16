@@ -387,6 +387,27 @@ fn current_args(db: &Db, args: &Value) -> Result<Value> {
     Ok(args)
 }
 
+/// The worktree a run_gate or submit call is about: the one it names, else the one this session is
+/// in, unless the key names an issue whose worktree is elsewhere (another task's, or in the repo
+/// linked to the issue's project).
+fn task_dir(config: &Config, db: &Db, args: &Value, cwd: &str) -> Result<String> {
+    if let Some(worktree) = str_arg(args, "worktree") {
+        return Ok(worktree.to_string());
+    }
+    let Some(key) = str_arg(args, "key") else { return Ok(cwd.to_string()) };
+    if playbook::current_worktree(cwd).is_ok_and(|(_, k)| k.is_some_and(|k| k.eq_ignore_ascii_case(key))) {
+        return Ok(cwd.to_string());
+    }
+    let issue = db.issue(key)?.with_context(|| format!("no issue {key}"))?;
+    let root = playbook::repo_for_issue(config, issue.project.as_deref(), cwd)?;
+    match playbook::issue_worktree(&root, &issue.key)? {
+        Some(worktree) => Ok(worktree.to_string_lossy().into_owned()),
+        // The call comes from that repo: it means this checkout, as before.
+        None if playbook::repo_root(config, cwd).is_some_and(|r| paths::normalize(&r.to_string_lossy()) == paths::normalize(&root.to_string_lossy())) => Ok(cwd.to_string()),
+        None => bail!("{key} has no worktree in {}; call start_task first", root.display()),
+    }
+}
+
 fn run_tool(server: &Server, name: &str, args: &Value) -> Result<Value> {
     let config = Config::load()?;
     let mut db = Db::open_default()?;
@@ -411,7 +432,7 @@ fn run_tool(server: &Server, name: &str, args: &Value) -> Result<Value> {
             let project = project(&db)?;
             match db.next_task(&project, &server.agent())? {
                 Some(issue) => {
-                    let root = if server.remote.is_some() { None } else { playbook::repo_root(&config, &server.cwd) };
+                    let root = if server.remote.is_some() { None } else { playbook::repo_for_issue(&config, issue.project.as_deref(), &server.cwd).ok() };
                     let branch = match root {
                         Some(root) => Playbook::load(&root)?.branch_for(&server.vendor, &issue),
                         None => branch_name(&server.vendor, &issue.key, &issue.title),
@@ -441,26 +462,28 @@ fn run_tool(server: &Server, name: &str, args: &Value) -> Result<Value> {
         "start_task" => {
             let key = req(args, "key")?;
             let issue = db.issue(key)?.with_context(|| format!("no issue {key}"))?;
-            let root = playbook::repo_root(&config, &server.cwd)
-                .with_context(|| format!("{} is not inside a git repo", server.cwd))?;
+            let root = playbook::repo_for_issue(&config, issue.project.as_deref(), &server.cwd)?;
             json!(playbook::start_task(&db, &root, &issue, &server.vendor, &actor)?)
         }
         "run_gate" => {
-            let dir = str_arg(args, "worktree").unwrap_or(&server.cwd);
-            let (worktree, branch_key) = playbook::current_worktree(dir)?;
+            let dir = task_dir(&config, &db, args, &server.cwd)?;
+            let (worktree, branch_key) = playbook::current_worktree(&dir)?;
             let key = str_arg(args, "key").map(str::to_string).or(branch_key);
-            let root = playbook::repo_root(&config, dir).with_context(|| format!("{dir} is not inside a git repo"))?;
+            let root = playbook::repo_root(&config, &dir).with_context(|| format!("{dir} is not inside a git repo"))?;
             json!(playbook::run_gate(&db, &root, &worktree, key.as_deref(), &actor)?)
         }
         "submit" => {
-            nitely_core::install::check_current(&config, str_arg(args, "worktree").unwrap_or(&server.cwd), env!("NITELY_COMMIT"))?;
-            let dir = str_arg(args, "worktree").unwrap_or(&server.cwd);
-            let opts = nitely_core::submit::SubmitOptions { dir, issue_key: str_arg(args, "key"), skip_review: false, local_only: false };
+            let dir = task_dir(&config, &db, args, &server.cwd)?;
+            nitely_core::install::check_current(&config, &dir, env!("NITELY_COMMIT"))?;
+            let opts = nitely_core::submit::SubmitOptions { dir: &dir, issue_key: str_arg(args, "key"), skip_review: false, local_only: false };
             json!(nitely_core::submit::submit(&mut db, &config, &opts, &actor)?)
         }
         "land" => {
-            nitely_core::install::check_current(&config, &server.cwd, env!("NITELY_COMMIT"))?;
-            let opts = nitely_core::land::LandOptions { dir: &server.cwd, issue_key: req(args, "key")?, push: true, keep: false, break_lock: false };
+            let key = req(args, "key")?;
+            let issue = db.issue(key)?.with_context(|| format!("no issue {key}"))?;
+            let root = playbook::repo_for_issue(&config, issue.project.as_deref(), &server.cwd)?;
+            nitely_core::install::check_current(&config, &root.to_string_lossy(), env!("NITELY_COMMIT"))?;
+            let opts = nitely_core::land::LandOptions { dir: &server.cwd, issue_key: key, push: true, keep: false, break_lock: false };
             json!(nitely_core::land::land(&mut db, &config, &opts, &actor)?)
         }
         "get_issue" => {

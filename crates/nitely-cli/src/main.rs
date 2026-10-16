@@ -608,7 +608,7 @@ fn run(cmd: Cmd) -> Result<()> {
             let db = Db::open_default()?;
             let cwd = cwd()?;
             let issue = db.issue(&key)?.ok_or_else(|| anyhow::anyhow!("no issue {key}"))?;
-            let root = playbook::repo_root(&config, &cwd).ok_or_else(|| anyhow::anyhow!("{cwd} is not inside a git repo"))?;
+            let root = playbook::repo_for_issue(&config, issue.project.as_deref(), &cwd)?;
             let started = playbook::start_task(&db, &root, &issue, &agent, &me)?;
             for w in &started.warnings {
                 eprintln!("warning: {w}");

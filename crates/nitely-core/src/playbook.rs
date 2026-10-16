@@ -531,6 +531,53 @@ pub fn repo_root(config: &crate::Config, dir: &str) -> Option<PathBuf> {
         .or_else(|| crate::git::main_root(dir).map(PathBuf::from))
 }
 
+/// The main checkout an issue's work happens in: the repo linked to the issue's project, so an
+/// agent working across projects starts, gates and lands in the right one. When several repos name
+/// the project, the one `dir` is in; when none does, the repo `dir` is in, unless that repo holds
+/// another project's work.
+pub fn repo_for_issue(config: &crate::Config, project: Option<&str>, dir: &str) -> Result<PathBuf> {
+    let here = config.repo_for_dir(dir);
+    let Some(project) = project else {
+        return repo_root(config, dir).with_context(|| format!("{dir} is not inside a git repo"));
+    };
+    let is_project = |r: &crate::config::RepoConfig| r.project.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(project));
+    let linked: Vec<&crate::config::RepoConfig> = config.repos.iter().filter(|r| is_project(r)).collect();
+    match linked.as_slice() {
+        [one] => return Ok(PathBuf::from(&one.root)),
+        [] => {}
+        many => {
+            if let Some(here) = here.filter(|h| is_project(h)) {
+                return Ok(PathBuf::from(&here.root));
+            }
+            let names: Vec<&str> = many.iter().map(|r| r.name.as_str()).collect();
+            bail!("several repos are linked to {project} ({}); call this from inside the one the issue belongs to", names.join(", "));
+        }
+    }
+    if let Some(here) = here {
+        if let Some(other) = here.project.as_deref().filter(|p| !p.eq_ignore_ascii_case(project)) {
+            bail!(
+                "{dir} is in {}, which holds {other}'s work, and no repo is linked to {project}; link one with `nitely repo add <path> --project {project}`",
+                here.name
+            );
+        }
+    }
+    repo_root(config, dir).with_context(|| format!("{dir} is not inside a git repo, and no repo is linked to {project}"))
+}
+
+/// The worktree of `root` whose branch names the issue; None when there is none.
+pub fn issue_worktree(root: &Path, key: &str) -> Result<Option<PathBuf>> {
+    let named: Vec<PathBuf> = crate::git::list_worktrees(&root.to_string_lossy())?
+        .into_iter()
+        .filter(|w| !w.is_main && w.branch.as_deref().is_some_and(|b| crate::git::parse_branch(b).1.is_some_and(|k| k.eq_ignore_ascii_case(key))))
+        .map(|w| PathBuf::from(w.path))
+        .collect();
+    match named.as_slice() {
+        [] => Ok(None),
+        [one] => Ok(Some(one.clone())),
+        _ => bail!("several worktrees of {} have a branch that names {key}; pass the worktree", root.display()),
+    }
+}
+
 /// The worktree `dir` is in, and the issue its branch names (`claude/nit-3-...` is NIT-3).
 pub fn current_worktree(dir: &str) -> Result<(PathBuf, Option<String>)> {
     let dir = Path::new(dir);
@@ -878,6 +925,46 @@ mod tests {
         assert!(wt.join("setup.txt").exists() && gate.results[1].ok, "the gate saw the fresh setup: {gate:?}");
         let gate = run_gate(&db, &repo, wt, Some("NIT-3"), &actor).unwrap();
         assert_eq!(gate.results.len(), 3, "nothing changed since: {gate:?}");
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn finds_the_repo_of_the_issues_project_not_the_callers() {
+        let base = std::env::temp_dir().join(format!("nitely-repos-{}-{}", std::process::id(), now()));
+        let init = |name: &str| {
+            let dir = base.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            let sh = |args: &[&str]| assert!(Command::new("git").arg("-C").arg(&dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).output().unwrap().status.success(), "{args:?}");
+            sh(&["init", "-q", "-b", "main"]);
+            sh(&["commit", "-q", "--allow-empty", "-m", "init"]);
+            dir.to_string_lossy().into_owned()
+        };
+        let (app, site, loose) = (init("app"), init("site"), init("loose"));
+        let repo = |name: &str, root: &str, project: &str| crate::RepoConfig {
+            name: name.into(),
+            root: root.into(),
+            integration_branch: "main".into(),
+            project: Some(project.into()),
+        };
+        let mut config = crate::Config { repos: vec![repo("app", &app, "APP"), repo("site", &site, "WEB")] };
+        let same = |got: PathBuf, want: &str| assert_eq!(crate::paths::normalize(&got.to_string_lossy()), crate::paths::normalize(want));
+
+        same(repo_for_issue(&config, Some("WEB"), &app).unwrap(), &site);
+        same(repo_for_issue(&config, Some("web"), &loose).unwrap(), &site);
+        same(repo_for_issue(&config, None, &app).unwrap(), &app);
+        let refused = repo_for_issue(&config, Some("OPS"), &app).unwrap_err().to_string();
+        assert!(refused.contains("holds APP's work") && refused.contains("--project OPS"), "{refused}");
+        same(repo_for_issue(&config, Some("OPS"), &loose).unwrap(), &loose);
+
+        config.repos.push(repo("app-2", &loose, "APP"));
+        same(repo_for_issue(&config, Some("APP"), &loose).unwrap(), &loose);
+        assert!(repo_for_issue(&config, Some("APP"), &site).unwrap_err().to_string().contains("several repos"));
+
+        let worktree = base.join("app-nit-3");
+        let out = Command::new("git").arg("-C").arg(&app).args(["worktree", "add", "-q", "-b", "claude/nit-3-x"]).arg(&worktree).arg("main").output().unwrap();
+        assert!(out.status.success(), "{out:?}");
+        same(issue_worktree(Path::new(&app), "NIT-3").unwrap().unwrap(), &worktree.to_string_lossy());
+        assert!(issue_worktree(Path::new(&app), "NIT-4").unwrap().is_none());
         std::fs::remove_dir_all(base).ok();
     }
 
