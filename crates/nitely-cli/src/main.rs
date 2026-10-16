@@ -489,6 +489,9 @@ fn run(cmd: Cmd) -> Result<()> {
             let issue = db.issue(&key)?.ok_or_else(|| anyhow::anyhow!("no issue {key}"))?;
             let root = playbook::repo_root(&config, &cwd).ok_or_else(|| anyhow::anyhow!("{cwd} is not inside a git repo"))?;
             let started = playbook::start_task(&db, &root, &issue, &agent, &me)?;
+            for w in &started.warnings {
+                eprintln!("warning: {w}");
+            }
             for r in &started.setup {
                 eprintln!("{} {} ({}s)", if r.ok { "ok  " } else { "FAIL" }, r.command, r.seconds);
                 if !r.ok {
@@ -509,6 +512,9 @@ fn run(cmd: Cmd) -> Result<()> {
             let root = playbook::repo_root(&config, &cwd).ok_or_else(|| anyhow::anyhow!("{cwd} is not inside a git repo"))?;
             let key = issue.or(branch_key);
             let gate = playbook::run_gate(&db, &root, &worktree, key.as_deref(), &me)?;
+            for w in &gate.warnings {
+                eprintln!("warning: {w}");
+            }
             for r in &gate.results {
                 eprintln!("{} {} ({}s)", if r.ok { "ok  " } else { "FAIL" }, r.command, r.seconds);
                 if !r.ok {
