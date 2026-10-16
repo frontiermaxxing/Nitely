@@ -14,6 +14,7 @@ pub mod land;
 pub mod issues;
 pub mod paths;
 pub mod playbook;
+pub mod procs;
 pub mod remote;
 pub mod review;
 pub mod snapshot;

@@ -34,6 +34,9 @@ pub struct Landed {
     /// Files left conflicted by a rebase that stopped.
     pub conflicts: Vec<String>,
     pub cleanup: Option<String>,
+    /// Processes that kept the worktree from being removed (a dev server, a build, a shell).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub held_by: Vec<crate::procs::Holder>,
     pub error: Option<String>,
     /// Issues that waited on this one and have no open blocker left.
     pub unblocked: Vec<String>,
@@ -192,7 +195,9 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
         }
     }
 
-    report.cleanup = Some(cleanup(root, pb, &worktree, &branch, temporary, opts.keep));
+    let (cleanup, held_by) = cleanup(root, pb, &worktree, &branch, temporary, opts.keep);
+    report.cleanup = Some(cleanup);
+    report.held_by = held_by;
     Ok(())
 }
 
@@ -250,21 +255,71 @@ impl Db {
 
 /// Removes the task's worktree and branch once landed: always for a worktree land added itself,
 /// and for one the playbook's layout made (under its worktree folder) unless `keep`.
-fn cleanup(root: &Path, pb: &Playbook, worktree: &Path, branch: &str, temporary: bool, keep: bool) -> String {
+///
+/// A process using the worktree (a dev server, a build) makes Windows refuse to delete files in
+/// it, and git then stops halfway: the worktree unregistered, part of it deleted. So a worktree in
+/// use is kept whole, with the processes named; and when git still stops halfway, what is left is
+/// retried and then said plainly, with how to delete it.
+fn cleanup(root: &Path, pb: &Playbook, worktree: &Path, branch: &str, temporary: bool, keep: bool) -> (String, Vec<crate::procs::Holder>) {
     let issue = crate::IssueRecord { key: "x".into(), title: "x".into(), ..Default::default() };
     let layout_dir = pb.worktree_for(root, "x", &issue);
     let ours = layout_dir.parent().is_some_and(|d| worktree.starts_with(d));
     if !(temporary || (ours && !keep)) {
-        return format!("kept {} (not made by start_task, or --keep)", worktree.display());
+        return (format!("kept {} (not made by start_task, or --keep)", worktree.display()), vec![]);
     }
-    match git(root, &["worktree", "remove", &worktree.to_string_lossy()]) {
-        Ok(_) if temporary => "removed the temporary worktree".into(),
-        Ok(_) => match git(root, &["branch", "-d", branch]) {
+    let path = worktree.to_string_lossy().into_owned();
+    let held = crate::procs::holders(worktree);
+    if !held.is_empty() {
+        let names: Vec<String> = held.iter().map(|h| format!("{} (pid {})", h.name, h.pid)).collect();
+        let message = format!(
+            "kept {path} whole because {} still use{} it; stop {}, then run `git worktree remove \"{path}\"` and `git branch -d {branch}` in {}",
+            names.join(", "),
+            if held.len() == 1 { "s" } else { "" },
+            if held.len() == 1 { "it" } else { "them" },
+            root.display()
+        );
+        return (message, held);
+    }
+    let removed = match git(root, &["worktree", "remove", &path]) {
+        Ok(_) => Ok(()),
+        Err(e) => finish_removal(root, worktree, &e),
+    };
+    let message = match removed {
+        Ok(()) if temporary => "removed the temporary worktree".into(),
+        Ok(()) => match git(root, &["branch", "-d", branch]) {
             Ok(_) => "removed the worktree and the merged branch".into(),
             Err(e) => format!("removed the worktree; kept the branch ({})", first_line(&e)),
         },
-        Err(e) => format!("kept the worktree ({})", first_line(&e)),
+        Err(message) => message,
+    };
+    (message, vec![])
+}
+
+/// After `git worktree remove` failed: Ok when the folder could be deleted after all, else what is
+/// left and how to delete it. A worktree git still lists was not touched and is kept as it is.
+fn finish_removal(root: &Path, worktree: &Path, error: &anyhow::Error) -> std::result::Result<(), String> {
+    let path = worktree.to_string_lossy().into_owned();
+    let same = |p: &Path| crate::paths::normalize(&p.to_string_lossy()) == crate::paths::normalize(&path);
+    if list_worktrees(root).map(|w| w.iter().any(|(p, _)| same(p))).unwrap_or(true) {
+        return Err(format!("kept the worktree ({})", first_line(error)));
     }
+    // Unregistered and partly deleted: files just closed are often free a moment later.
+    for attempt in 0..3 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(700));
+        }
+        if !worktree.exists() || std::fs::remove_dir_all(worktree).is_ok() {
+            git(root, &["worktree", "prune"]).ok();
+            return Ok(());
+        }
+    }
+    git(root, &["worktree", "prune"]).ok();
+    Err(format!(
+        "git unregistered the worktree but could not delete all of {path} ({}); nothing in it is needed any more. \
+Close whatever still uses it, then delete the folder (PowerShell: `Remove-Item -Recurse -Force \"{path}\"`; sh: `rm -rf \"{path}\"`). \
+The merged branch was kept; delete it with `git branch -d` once the folder is gone",
+        first_line(error)
+    ))
 }
 
 struct Lock(PathBuf);
@@ -434,6 +489,22 @@ reason = "billing"
             let opts = LandOptions { dir: &dir, issue_key: key, push: true, keep: false, break_lock: false };
             land(&mut self.db, &crate::Config::default(), &opts, &self.actor).unwrap()
         }
+    }
+
+    #[test]
+    fn keeps_a_worktree_a_process_still_uses() {
+        let mut f = fixture("held");
+        let (a, wt) = f.submitted("Pulse view", "pulse.txt", "x");
+        // A dev server started in the worktree, as the browser preview asks agents to do.
+        let mut server = std::process::Command::new("sh").arg("-c").arg(format!("sleep 30; : {}", wt.display())).spawn().unwrap();
+        let r = f.land(&a);
+        server.kill().ok();
+        server.wait().ok();
+        assert!(r.landed, "{r:?}");
+        assert!(r.held_by.iter().any(|h| h.pid == server.id()), "{r:?}");
+        assert!(r.cleanup.as_deref().unwrap().contains("kept"), "{r:?}");
+        assert!(wt.exists() && sh(&f.repo, &["worktree", "list"]).contains(&*wt.to_string_lossy()), "kept whole and still registered");
+        std::fs::remove_dir_all(&f.base).ok();
     }
 
     #[test]
