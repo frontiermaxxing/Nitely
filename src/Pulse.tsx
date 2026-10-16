@@ -419,7 +419,11 @@ function Since({ data, ctx }: { data: PulseData; ctx: Context }) {
         </div>
       </div>
       {shown.length === 0 ? (
-        <p className="muted small">Nothing {filter ? `${KIND_LABEL[filter]} ` : ""}since then.</p>
+        <p className="muted small">
+          {total === 0
+            ? `Nothing ${filter ? `${KIND_LABEL[filter]} ` : ""}since then.`
+            : `${total} ${filter ? KIND_LABEL[filter] : "events"}, all older than the newest ${data.happened.length} events. Each is on its issue's timeline.`}
+        </p>
       ) : (
         <ol className="feed">
           {(all ? shown : shown.slice(0, 10)).map((h, n) => {
@@ -448,7 +452,7 @@ function Since({ data, ctx }: { data: PulseData; ctx: Context }) {
           })}
         </ol>
       )}
-      {all && total > shown.length && (
+      {(all || shown.length <= 10) && shown.length > 0 && total > shown.length && (
         <p className="muted small since-cut">
           The newest {shown.length} of {total}. The rest are on each issue's timeline.
         </p>

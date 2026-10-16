@@ -278,17 +278,18 @@ impl Db {
     }
 }
 
-/// Happenings since ?1 as (ts, id, kind, issue_key, actor, summary). Questions not linked to an
-/// issue leave no event, so they come from the ask table.
+/// Happenings since ?1 as (ts, id, kind, issue_key, actor, summary). Questions come from the ask
+/// table, one row each: `ask` events are written once for a linked question and again by the MCP
+/// server's session record (for every question), so they would count some questions twice.
 const HAPPENINGS: &str = "
     SELECT ts, id,
       CASE type WHEN 'landed' THEN 'landed' WHEN 'issue_created' THEN 'filed' WHEN 'submit' THEN 'review'
-                WHEN 'ask' THEN 'asked' ELSE 'stuck' END AS kind,
+                ELSE 'stuck' END AS kind,
       issue_key, actor, summary
     FROM event
-    WHERE ts >= ?1 AND type IN ('landed', 'issue_created', 'gate_failed', 'land_failed', 'review_failed', 'submit', 'ask')
+    WHERE ts >= ?1 AND type IN ('landed', 'issue_created', 'gate_failed', 'land_failed', 'review_failed', 'submit')
     UNION ALL
-    SELECT asked_at, 0, 'asked', NULL, asked_by, question FROM ask WHERE issue_key IS NULL AND asked_at >= ?1";
+    SELECT asked_at, id, 'asked', issue_key, asked_by, question FROM ask WHERE asked_at >= ?1";
 
 fn kind_name(kind: &str) -> &'static str {
     match kind {
@@ -378,13 +379,28 @@ mod tests {
     fn standalone_asks_count_and_counts_pass_the_list_limit() {
         let (mut db, _dir) = db();
         let me = Actor::Agent("codex:c:/x".into());
-        db.create_ask("Which port should the preview use?", &[], None, None, &me).unwrap();
+        // As the MCP server does: the ask, then a session event of the same kind.
+        for key in [None, Some("NIT-1")] {
+            if key.is_some() {
+                file(&mut db, "The issue a question is about");
+            }
+            let ask = db.create_ask("Which port should the preview use?", &[], key, None, &me).unwrap();
+            db.record(&crate::db::NewEvent {
+                session_id: "codex:1".into(),
+                vendor: "codex".into(),
+                cwd: "c:/x".into(),
+                kind: "ask".into(),
+                summary: Some(format!("Asked: {}", ask.question)),
+                state: "waiting".into(),
+            })
+            .unwrap();
+        }
         for n in 0..(HAPPENED_LIMIT + 5) {
             file(&mut db, &format!("Issue number {n} about something distinct {n}"));
         }
         let p = pulse(&db, 0, 0).unwrap();
         assert_eq!(p.happened.len() as i64, HAPPENED_LIMIT);
-        assert_eq!(p.happened_counts.filed, HAPPENED_LIMIT + 5);
-        assert_eq!(p.happened_counts.asked, 1);
+        assert_eq!(p.happened_counts.filed, HAPPENED_LIMIT + 6);
+        assert_eq!(p.happened_counts.asked, 2);
     }
 }
