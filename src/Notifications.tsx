@@ -5,7 +5,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "./backend";
 import type { Decision } from "./decisions";
-import { DEFAULT_SETTINGS, NOTIFY_KINDS, freshDecisions, messageOf, type Fresh, type NotifySettings, type Seen } from "./notify";
+import { DEFAULT_SETTINGS, NOTIFY_KINDS, freshDecisions, inQuiet, messageOf, type Fresh, type NotifySettings, type Seen } from "./notify";
 import type { IssueDetail } from "./types";
 
 /** Decisions that arrive within this long of each other become one notification. */
@@ -56,7 +56,7 @@ export function useNotifySettings(): [NotifySettings, (s: NotifySettings) => voi
  * Notifies about new decisions and keeps the taskbar count. `decisions` is null until the board
  * has loaded; `inboxInView` is true while the window has focus on the Inbox, which lists them all.
  */
-export function useNotifications(decisions: Decision[] | null, details: Map<string, IssueDetail>, inboxInView: boolean) {
+export function useNotifications(decisions: Decision[] | null, details: Map<string, IssueDetail>, now: number, inboxInView: boolean) {
   const [settings] = useNotifySettings();
   const pending = useRef<Fresh[]>([]);
   const timer = useRef<number | null>(null);
@@ -65,6 +65,8 @@ export function useNotifications(decisions: Decision[] | null, details: Map<stri
 
   const ids = decisions?.map((d) => d.id).join(" ") ?? null;
   const detailIds = [...details.keys()].join(" ");
+  // At least once a minute, so a decision that keeps waiting stays seen and is never told again.
+  const minute = Math.floor(now / 60);
   useEffect(() => {
     if (!decisions) return;
     const now = Math.floor(Date.now() / 1000);
@@ -75,15 +77,17 @@ export function useNotifications(decisions: Decision[] | null, details: Map<stri
     if (timer.current !== null) return;
     timer.current = window.setTimeout(() => {
       timer.current = null;
-      // Only what still waits, and nothing if the person has the Inbox in front of them by now.
+      // Only what still waits and is still wanted, and nothing if the person has the Inbox in front
+      // of them by now or quiet hours began.
       const still = new Set(latest.current.decisions?.map((d) => d.id));
-      const batch = pending.current.filter((f) => still.has(f.decision.id));
+      const wanted = loadSettings();
+      const batch = pending.current.filter((f) => still.has(f.decision.id) && wanted.kinds[f.kind]);
       pending.current = [];
-      if (batch.length === 0 || latest.current.inboxInView) return;
+      if (batch.length === 0 || latest.current.inboxInView || inQuiet(wanted, new Date())) return;
       invoke("notify", messageOf(batch)).catch(() => {});
     }, BATCH_MS);
     // Runs when the list, its details or the settings change, not on every render.
-  }, [ids, detailIds, settings, inboxInView]);
+  }, [ids, detailIds, settings, inboxInView, minute]);
   useEffect(() => () => void (timer.current !== null && clearTimeout(timer.current)), []);
 
   const count = decisions?.length ?? 0;

@@ -194,7 +194,7 @@ export function App() {
   // null until the board has loaded: "nothing needs you" must never be said before it is known.
   const decisions = board ? decisionsOf(board, inboxDetails, now) : null;
   // New ones are told outside the window too, except while the Inbox is in front of the person.
-  useNotifications(decisions, inboxDetails, focused && view.kind === "inbox" && !openIssue);
+  useNotifications(decisions, inboxDetails, now, focused && view.kind === "inbox" && !openIssue);
   const inboxCount = decisions?.length ?? 0;
   const working = board?.repos.flatMap((r) => r.rows).filter((r) => r.session?.state === "working").length ?? 0;
 

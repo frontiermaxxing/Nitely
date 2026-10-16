@@ -131,9 +131,10 @@ export function freshDecisions(
   for (const d of decisions) {
     const id = seenId(d);
     const known = seen !== null && id in next;
-    // An approval says whether the crew gave up only once its detail is read: until then it waits
-    // unseen, so it is told as what it is.
-    if (!known && seen !== null && d.kind === "approve" && d.issue && !details.has(d.issue.key)) continue;
+    // An issue waiting on the person is told as what it is only once its detail is read (whether
+    // the crew gave up; whether it is a playbook change to approve or their own work): until then
+    // it waits unseen.
+    if (!known && seen !== null && (d.kind === "approve" || d.kind === "own") && d.issue && !details.has(d.issue.key)) continue;
     next[id] = now;
     if (seen === null || known || opts.inboxInView || quiet) continue;
     const kind = kindOf(d, d.issue ? details.get(d.issue.key) : undefined);

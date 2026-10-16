@@ -107,3 +107,21 @@ test("an issue that turns from the person's own work into an approval once its d
   assert.equal(first.fresh.length, 0);
   assert.equal(run([decision("approve", "X-13")], first.seen).fresh.length, 0);
 });
+
+test("a playbook change waiting for approval is told once its detail is read, not swallowed as the person's own work", () => {
+  const own = decision("own", "X-14");
+  const before = freshDecisions([own], new Map(), {}, DEFAULT_SETTINGS, NOW, { inboxInView: false, at: new Date(2026, 9, 16, 15, 0) });
+  assert.equal("waits-X-14" in before.seen, false);
+  const after = run([decision("approve", "X-14")], before.seen);
+  assert.equal(after.fresh.length, 1);
+});
+
+test("a decision that keeps waiting stays seen as long as it waits", () => {
+  const a = decision("approve", "X-15");
+  let seen: Record<string, number> = { "waits-X-15": NOW };
+  for (let t = 1; t <= 30; t++) {
+    const r = freshDecisions([a], all([a]), seen, DEFAULT_SETTINGS, NOW + t * 60, { inboxInView: false, at: new Date(2026, 9, 16, 15, 0) });
+    assert.equal(r.fresh.length, 0);
+    seen = r.seen;
+  }
+});
