@@ -162,6 +162,7 @@ export interface AgentPlan {
   agent: string;
   found: boolean;
   changes: ConnectChange[];
+  error?: string;
 }
 
 export interface AgentsUpdated {

@@ -292,6 +292,9 @@ fn print_json<T: serde::Serialize>(v: &T) -> Result<()> {
 fn print_agent_changes(agents: &[nitely_core::connect::AgentPlan]) {
     for agent in agents {
         println!("\n{}{}", agent.agent, if agent.found { "" } else { " (not installed; skipped)" });
+        if let Some(e) = &agent.error {
+            println!("  ERROR     {e}");
+        }
         for c in &agent.changes {
             println!("  {:<9} {}\n            {}", c.action, c.target, c.why);
         }
@@ -487,10 +490,14 @@ fn run(cmd: Cmd) -> Result<()> {
                 println!("Nitely watches no repo yet; nitely connect <path> sets the agents up");
                 return Ok(());
             }
-            let agents = nitely_core::connect::agent_setup(&config)?;
+            let agents = nitely_core::connect::agent_setup(&config);
             let pending = nitely_core::connect::pending_changes(&agents);
             print_agent_changes(&agents);
             if pending == 0 {
+                if agents.iter().any(|a| a.error.is_some()) {
+                    eprintln!("\nfix the errors above, then run again");
+                    std::process::exit(1);
+                }
                 println!("\nevery agent's setup is up to date");
                 return Ok(());
             }

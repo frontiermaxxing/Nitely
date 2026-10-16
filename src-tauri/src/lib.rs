@@ -100,7 +100,7 @@ async fn connect_apply(path: String, key: Option<String>, name: Option<String>) 
 #[tauri::command]
 async fn agent_setup() -> Result<Vec<nitely_core::connect::AgentPlan>, String> {
     let config = Config::load().map_err(err)?;
-    nitely_core::connect::agent_setup(&config).map_err(err)
+    Ok(nitely_core::connect::agent_setup(&config))
 }
 
 #[derive(Serialize)]
@@ -113,7 +113,7 @@ struct AgentsUpdated {
 #[tauri::command]
 async fn agent_setup_apply() -> Result<AgentsUpdated, String> {
     let config = Config::load().map_err(err)?;
-    let agents = nitely_core::connect::agent_setup(&config).map_err(err)?;
+    let agents = nitely_core::connect::agent_setup(&config);
     let (done, failed) = nitely_core::connect::apply_agents(&agents);
     Ok(AgentsUpdated { done, failed })
 }

@@ -7,6 +7,11 @@ export function pendingChanges(agents: AgentPlan[]): number {
   return agents.filter((a) => a.found).flatMap((a) => a.changes.filter((c) => c.action !== "unchanged")).length;
 }
 
+/** Agents whose setup could not be read, e.g. a config file that is not valid JSON. */
+export function setupErrors(agents: AgentPlan[]): number {
+  return agents.filter((a) => a.error).length;
+}
+
 /** Each agent's config changes, with the new file behind a disclosure. */
 export function AgentChanges(props: { agents: AgentPlan[] }) {
   return (
@@ -16,6 +21,7 @@ export function AgentChanges(props: { agents: AgentPlan[] }) {
           <h2>
             {agent.agent} {!agent.found && <span className="muted small">not installed, skipped</span>}
           </h2>
+          {agent.error && <p className="error small">{agent.error}</p>}
           {agent.found &&
             agent.changes.map((c) => (
               <div className="change" key={c.target}>
@@ -65,7 +71,7 @@ export function AgentSetup(props: { agents: AgentPlan[]; onUpdated: () => void }
         changes what it writes there, agents keep the old copy until it is updated here.
       </p>
       {error && <p className="error">{error}</p>}
-      {!result && pending === 0 && <p className="small">Every agent's setup is up to date.</p>}
+      {!result && pending === 0 && setupErrors(props.agents) === 0 && <p className="small">Every agent's setup is up to date.</p>}
       <AgentChanges agents={props.agents} />
       {!result && pending > 0 && (
         <div className="actions">

@@ -58,6 +58,9 @@ pub struct AgentPlan {
     /// Whether the agent seems installed (its config folder exists).
     pub found: bool,
     pub changes: Vec<Change>,
+    /// Why its setup could not be read, e.g. a config file that is not valid JSON.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -138,7 +141,12 @@ pub fn plan(db: &Db, config: &Config, path: &str, key: Option<&str>, name: Optio
     if nitely == "nitely" && which("nitely").is_none() {
         warnings.push("the nitely command is not on PATH; agents need it (cargo install --path crates/nitely-cli)".into());
     }
-    let agents = agent_plans(&nitely)?;
+    let agents = agent_plans(&nitely);
+    for a in &agents {
+        if let Some(e) = &a.error {
+            warnings.push(format!("{} is skipped: {e}", a.agent));
+        }
+    }
     if agents.iter().all(|a| !a.found) {
         warnings.push("no Claude Code, Codex or Cursor configuration was found in your home folder".into());
     }
@@ -194,17 +202,22 @@ pub fn apply(db: &Db, config: &mut Config, plan: &ConnectPlan) -> Result<Applied
     Ok(Applied { project: plan.project_key.clone(), repo: plan.repo_name.clone(), done, failed })
 }
 
-fn agent_plans(nitely: &str) -> Result<Vec<AgentPlan>> {
-    Ok(vec![claude_plan(nitely)?, codex_plan(nitely)?, cursor_plan(nitely)?])
+/// One plan per agent. An agent whose setup cannot be read gets its error instead of changes, so
+/// one broken config file does not hide what the others need.
+fn agent_plans(nitely: &str) -> Vec<AgentPlan> {
+    [("Claude Code", claude_plan(nitely)), ("Codex", codex_plan(nitely)), ("Cursor", cursor_plan(nitely))]
+        .into_iter()
+        .map(|(agent, plan)| plan.unwrap_or_else(|e| AgentPlan { agent: agent.into(), found: true, changes: Vec::new(), error: Some(format!("{e:#}")) }))
+        .collect()
 }
 
 /// What it would take to bring every installed agent's setup (MCP server, hooks, skill and
 /// instructions) up to this version of Nitely. The MCP server and hooks build their text when they
 /// run, so they are always current; the files `connect` wrote are not, and go stale when Nitely
 /// changes them. Empty when Nitely watches no repo, so a machine that never connected is not asked.
-pub fn agent_setup(config: &Config) -> Result<Vec<AgentPlan>> {
+pub fn agent_setup(config: &Config) -> Vec<AgentPlan> {
     if config.repos.is_empty() {
-        return Ok(Vec::new());
+        return Vec::new();
     }
     agent_plans(&nitely_command())
 }
@@ -292,6 +305,16 @@ fn is_ours(command: &str, vendor: &str) -> bool {
     command.contains("nitely") && command.contains(&format!("hook {vendor}"))
 }
 
+/// When `hook` is Nitely's, points it at `command` (an older install may have used another path)
+/// and returns true.
+fn point_at(hook: &mut Value, vendor: &str, command: &str) -> bool {
+    if !hook.get("command").and_then(Value::as_str).is_some_and(|c| is_ours(c, vendor)) {
+        return false;
+    }
+    hook["command"] = json!(command);
+    true
+}
+
 fn claude_plan(nitely: &str) -> Result<AgentPlan> {
     let dir = home().join(".claude");
     let found = dir.is_dir() || home().join(".claude.json").exists();
@@ -303,9 +326,12 @@ fn claude_plan(nitely: &str) -> Result<AgentPlan> {
     let hooks = obj(&mut settings, "hooks");
     for (event, matcher) in CLAUDE_EVENTS {
         let list = hooks.entry(event.to_string()).or_insert_with(|| json!([]));
-        let present = list.as_array().into_iter().flatten().any(|entry| {
-            entry.get("hooks").and_then(Value::as_array).into_iter().flatten().any(|h| h.get("command").and_then(Value::as_str).is_some_and(|c| is_ours(c, "claude")))
-        });
+        let mut present = false;
+        for entry in list.as_array_mut().into_iter().flatten() {
+            for h in entry.get_mut("hooks").and_then(Value::as_array_mut).into_iter().flatten() {
+                present |= point_at(h, "claude", &command);
+            }
+        }
         if !present {
             let mut entry = json!({ "hooks": [{ "type": "command", "command": command, "timeout": 5 }] });
             if let Some(m) = matcher {
@@ -325,16 +351,17 @@ fn claude_plan(nitely: &str) -> Result<AgentPlan> {
         format!("---\nname: nitely\ndescription: How to take, report, submit and land work in a repo Nitely tracks. Use it whenever the nitely MCP tools are available or the session says the repo is connected to Nitely.\n---\n\n{WORKFLOW}\n"),
     ));
 
-    let registered = read_json(&home().join(".claude.json"))?.pointer("/mcpServers/nitely").is_some();
+    let claude_json = read_json(&home().join(".claude.json"))?;
+    let registered = claude_json.pointer("/mcpServers/nitely");
+    let current = registered.is_some_and(|s| s.get("command") == Some(&json!(nitely)) && s.get("args") == Some(&json!(["mcp"])));
     let add = format!("claude mcp add --scope user nitely -- {nitely} mcp");
-    changes.push(Change {
-        target: add.clone(),
-        action: if registered { "unchanged" } else { "run" }.into(),
-        why: "register the nitely MCP server for every project".into(),
-        before: None,
-        after: add,
-    });
-    Ok(AgentPlan { agent: "Claude Code".into(), found, changes })
+    let (action, why, command) = match (registered, current) {
+        (None, _) => ("run", "register the nitely MCP server for every project", add),
+        (Some(_), true) => ("unchanged", "register the nitely MCP server for every project", add),
+        (Some(_), false) => ("run", "register the nitely MCP server again, with the current command", format!("claude mcp remove --scope user nitely && {add}")),
+    };
+    changes.push(Change { target: command.clone(), action: action.into(), why: why.into(), before: None, after: command });
+    Ok(AgentPlan { agent: "Claude Code".into(), found, changes, error: None })
 }
 
 fn codex_plan(nitely: &str) -> Result<AgentPlan> {
@@ -355,20 +382,31 @@ fn codex_plan(nitely: &str) -> Result<AgentPlan> {
         t.set_implicit(true);
         doc["mcp_servers"] = toml_edit::Item::Table(t);
     }
-    if doc["mcp_servers"].get("nitely").is_none() {
-        doc["mcp_servers"]["nitely"] = toml_edit::Item::Table(server);
+    match doc["mcp_servers"].get_mut("nitely").and_then(|i| i.as_table_like_mut()) {
+        None => doc["mcp_servers"]["nitely"] = toml_edit::Item::Table(server),
+        // Only the command and args are rewritten, and only when they differ, so the rest of the
+        // entry and its formatting stay as the user left them.
+        Some(t) => {
+            if t.get("command").and_then(|v| v.as_str()) != Some(nitely) {
+                t.insert("command", toml_edit::value(nitely));
+            }
+            let args: Option<Vec<&str>> = t.get("args").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str()).collect());
+            if args != Some(vec!["mcp"]) {
+                let mut a = toml_edit::Array::new();
+                a.push("mcp");
+                t.insert("args", toml_edit::value(a));
+            }
+        }
     }
+    let notify = [nitely, "hook", "codex"];
     let mut notify_warning = None;
     match doc.get("notify").and_then(|n| n.as_array()) {
-        None => {
-            let mut a = toml_edit::Array::new();
-            a.push(nitely);
-            a.push("hook");
-            a.push("codex");
-            doc["notify"] = toml_edit::value(a);
+        Some(a) if a.iter().map(|v| v.as_str()).eq(notify.iter().map(|s| Some(*s))) => {}
+        Some(a) if !(a.iter().any(|v| v.as_str() == Some("codex")) && a.iter().any(|v| v.as_str().is_some_and(|s| s.contains("nitely")))) => {
+            notify_warning = Some("Codex already runs another notify program, so Nitely does not see when its turns end".to_string())
         }
-        Some(a) if a.iter().any(|v| v.as_str() == Some("codex")) && a.iter().any(|v| v.as_str().is_some_and(|s| s.contains("nitely"))) => {}
-        Some(_) => notify_warning = Some("Codex already runs another notify program, so Nitely does not see when its turns end".to_string()),
+        // Not set, or Nitely's with an older command.
+        _ => doc["notify"] = toml_edit::value(notify.into_iter().collect::<toml_edit::Array>()),
     }
     let mut c = Change::file(&config_path, "the nitely MCP server, and a notify hook that shows when a turn ends", doc.to_string());
     if let Some(w) = notify_warning {
@@ -382,7 +420,7 @@ fn codex_plan(nitely: &str) -> Result<AgentPlan> {
         "{BLOCK_START}\n## Repos connected to Nitely\n\nWhen the `nitely` MCP tools are available, the repo is tracked by Nitely:\n\n{WORKFLOW}\n{BLOCK_END}"
     );
     changes.push(Change::file(&agents_md, "the Nitely workflow in Codex's global instructions", with_block(&existing, &block)));
-    Ok(AgentPlan { agent: "Codex".into(), found, changes })
+    Ok(AgentPlan { agent: "Codex".into(), found, changes, error: None })
 }
 
 fn cursor_plan(nitely: &str) -> Result<AgentPlan> {
@@ -393,7 +431,12 @@ fn cursor_plan(nitely: &str) -> Result<AgentPlan> {
     let mcp_path = dir.join("mcp.json");
     let mut mcp = read_json(&mcp_path)?;
     let servers = obj(&mut mcp, "mcpServers");
-    servers.entry("nitely".to_string()).or_insert_with(|| json!({ "command": nitely, "args": ["mcp"] }));
+    let server = servers.entry("nitely".to_string()).or_insert_with(|| json!({}));
+    if !server.is_object() {
+        *server = json!({});
+    }
+    server["command"] = json!(nitely);
+    server["args"] = json!(["mcp"]);
     changes.push(Change::json(&mcp_path, "the nitely MCP server, with its instructions", &mcp));
 
     let hooks_path = dir.join("hooks.json");
@@ -405,7 +448,10 @@ fn cursor_plan(nitely: &str) -> Result<AgentPlan> {
     let hooks = obj(&mut hooks_doc, "hooks");
     for event in CURSOR_EVENTS {
         let list = hooks.entry(event.to_string()).or_insert_with(|| json!([]));
-        let present = list.as_array().into_iter().flatten().any(|h| h.get("command").and_then(Value::as_str).is_some_and(|c| is_ours(c, "cursor")));
+        let mut present = false;
+        for h in list.as_array_mut().into_iter().flatten() {
+            present |= point_at(h, "cursor", &command);
+        }
         if !present {
             if let Some(a) = list.as_array_mut() {
                 a.push(json!({ "command": command }));
@@ -413,7 +459,7 @@ fn cursor_plan(nitely: &str) -> Result<AgentPlan> {
         }
     }
     changes.push(Change::json(&hooks_path, "hooks that show each chat's status", &hooks_doc));
-    Ok(AgentPlan { agent: "Cursor".into(), found, changes })
+    Ok(AgentPlan { agent: "Cursor".into(), found, changes, error: None })
 }
 
 /// `text` with the Nitely block replaced, or appended when it has none.
@@ -530,13 +576,17 @@ mod tests {
         let home = std::env::temp_dir().join(format!("nitely-home-{}-{}", std::process::id(), crate::db::now()));
         std::fs::create_dir_all(home.join(".claude")).unwrap();
         // Registered already, so nothing runs `claude mcp add`; Codex and Cursor are not installed.
-        std::fs::write(home.join(".claude.json"), r#"{"mcpServers":{"nitely":{}}}"#).unwrap();
+        let claude_json = home.join(".claude.json");
+        std::fs::write(&claude_json, r#"{"mcpServers":{"nitely":{"type":"stdio","command":"nitely","args":["mcp"]}}}"#).unwrap();
         std::env::set_var("NITELY_AGENT_HOME", &home);
+        let pending_in = |plans: &[AgentPlan]| -> Vec<String> {
+            plans.iter().filter(|a| a.found).flat_map(|a| &a.changes).filter(|c| c.action != "unchanged").map(|c| c.target.clone()).collect()
+        };
 
-        let first = agent_plans("nitely").unwrap();
+        let first = agent_plans("nitely");
         assert_eq!(pending_changes(&first), 2, "the hooks and the skill are new");
         assert!(apply_agents(&first).1.is_empty());
-        assert_eq!(pending_changes(&agent_plans("nitely").unwrap()), 0);
+        assert_eq!(pending_changes(&agent_plans("nitely")), 0);
 
         // Reformatting a JSON file is not a change; an old copy of the workflow is.
         let settings = home.join(".claude").join("settings.json");
@@ -544,14 +594,31 @@ mod tests {
         std::fs::write(&settings, compact).unwrap();
         let skill = home.join(".claude").join("skills").join("nitely").join("SKILL.md");
         std::fs::write(&skill, "an older workflow").unwrap();
-        let stale = agent_plans("nitely").unwrap();
-        let pending: Vec<&str> =
-            stale.iter().filter(|a| a.found).flat_map(|a| &a.changes).filter(|c| c.action != "unchanged").map(|c| c.target.as_str()).collect();
-        assert_eq!(pending, vec![skill.to_string_lossy()]);
-
+        let stale = agent_plans("nitely");
+        assert_eq!(pending_in(&stale), vec![skill.to_string_lossy().into_owned()]);
         assert!(apply_agents(&stale).1.is_empty());
         assert!(std::fs::read_to_string(&skill).unwrap().contains(WORKFLOW));
-        assert_eq!(pending_changes(&agent_plans("nitely").unwrap()), 0);
+        assert_eq!(pending_changes(&agent_plans("nitely")), 0);
+
+        // Hooks written by an install at another path are pointed at the current command.
+        let text = std::fs::read_to_string(&settings).unwrap();
+        std::fs::write(&settings, text.replace("\"nitely hook claude\"", "\"C:/old/nitely.exe hook claude\"")).unwrap();
+        let moved = agent_plans("nitely");
+        assert_eq!(pending_in(&moved), vec![settings.to_string_lossy().into_owned()]);
+        assert!(apply_agents(&moved).1.is_empty());
+        assert!(!std::fs::read_to_string(&settings).unwrap().contains("C:/old"));
+
+        // So is the MCP registration (not run here: it would call claude).
+        std::fs::write(&claude_json, r#"{"mcpServers":{"nitely":{"command":"C:/old/nitely.exe","args":["mcp"]}}}"#).unwrap();
+        let mcp = agent_plans("nitely").into_iter().next().unwrap().changes.pop().unwrap();
+        assert_eq!(mcp.action, "run");
+        assert!(mcp.after.starts_with("claude mcp remove --scope user nitely && claude mcp add"));
+
+        // A config that can't be read is that agent's error, not a failed check.
+        std::fs::write(&settings, "{ not json").unwrap();
+        let broken = agent_plans("nitely");
+        assert!(broken[0].error.as_deref().is_some_and(|e| e.contains("not valid JSON")));
+        assert_eq!(broken.len(), 3);
         std::env::remove_var("NITELY_AGENT_HOME");
         std::fs::remove_dir_all(&home).ok();
     }

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { AgentPlan, Board, Project } from "./types";
-import { AgentSetup, pendingChanges } from "./Agents";
+import { AgentSetup, pendingChanges, setupErrors } from "./Agents";
 import { Inbox } from "./Inbox";
 import { Now } from "./Now";
 import { Backlog } from "./Backlog";
@@ -63,11 +63,19 @@ export function App() {
   // What Nitely writes for agents changes only with Nitely itself, so this is checked at start and
   // after the app changes it, not on every refresh.
   const [agents, setAgents] = useState<AgentPlan[]>([]);
+  const [agentsError, setAgentsError] = useState<string | null>(null);
   const loadAgents = useCallback(() => {
-    invoke<AgentPlan[]>("agent_setup").then(setAgents, (e) => console.error("agent setup:", e));
+    invoke<AgentPlan[]>("agent_setup").then(
+      (a) => {
+        setAgents(a);
+        setAgentsError(null);
+      },
+      (e) => setAgentsError(String(e)),
+    );
   }, []);
   useEffect(loadAgents, [loadAgents]);
   const agentChanges = pendingChanges(agents);
+  const agentErrors = setupErrors(agents);
 
   useEffect(() => {
     refresh();
@@ -109,12 +117,14 @@ export function App() {
 
       <main className="content">
         {error && <p className="error banner">{error}</p>}
-        {agentChanges > 0 && view.kind !== "agents" && (
+        {agentsError && <p className="error banner small">Could not check your agents' Nitely setup: {agentsError}</p>}
+        {(agentChanges > 0 || agentErrors > 0) && view.kind !== "agents" && (
           <p className="banner notice small">
-            Your agents have an older copy of Nitely's instructions or setup ({agentChanges} change
-            {agentChanges === 1 ? "" : "s"}).{" "}
+            {agentChanges > 0
+              ? `Your agents have an older copy of Nitely's instructions or setup (${agentChanges} change${agentChanges === 1 ? "" : "s"}).`
+              : `Nitely could not read the setup of ${agentErrors} agent${agentErrors === 1 ? "" : "s"}.`}{" "}
             <button className="link" onClick={() => setView({ kind: "agents" })}>
-              Review and update
+              {agentChanges > 0 ? "Review and update" : "See why"}
             </button>
           </p>
         )}
