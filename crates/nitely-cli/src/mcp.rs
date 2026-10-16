@@ -596,7 +596,9 @@ fn run_tool(server: &Server, name: &str, args: &Value, session: &str) -> Result<
                 state: "working".into(),
             })?;
             if let Some(key) = str_arg(args, "key") {
-                db.add_note(key, text, "status", &actor)?;
+                // Written by the session the report counts toward, so Activity puts the issue on
+                // that Codex thread's lane rather than guessing between threads in one folder.
+                db.add_note_from(key, text, "status", &actor, session)?;
             }
             json!({ "ok": true })
         }

@@ -636,11 +636,14 @@ mod tests {
         state(&db, "codex:thread-b", t0 + 300, "working");
         event(&db, t0 + 600, "codex:thread-a", "status", "Fixing the parser", None);
         event(&db, t0 + 2400, "codex:thread-b", "status", "Writing tests", None);
+        // A keyed report's note is written under the thread too, so the issue is that lane's.
+        event(&db, t0 + 600, "codex:thread-a", "status", "Fixing the parser", Some("HAR-7"));
         let a = activity(&Config::default(), &db, t0 - 60, t0 + 3000).unwrap();
         let lane = |id: &str| a.lanes.iter().find(|l| l.session_id == id).unwrap_or_else(|| panic!("{id}: {:?}", a.lanes));
         let at = |id: &str, t: i64| lane(id).segments.iter().find(|s| s.from <= t && t < s.to).map(|s| s.state.clone());
         assert_eq!(at("codex:thread-a", t0 + 2000).as_deref(), Some("idle"), "a's turn ended");
         assert_eq!(at("codex:thread-b", t0 + 2000).as_deref(), Some("working"), "b still works");
+        assert_eq!((lane("codex:thread-a").issues.clone(), lane("codex:thread-b").issues.clone()), (vec!["HAR-7".to_string()], vec![]));
         std::fs::remove_dir_all(dir).ok();
     }
 

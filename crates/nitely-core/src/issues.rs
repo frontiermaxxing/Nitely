@@ -795,6 +795,12 @@ impl Db {
 
     /// A progress line, handoff note or comment on an issue's timeline. Refreshes a claim it holds.
     pub fn add_note(&self, key: &str, text: &str, kind: &str, actor: &Actor) -> Result<()> {
+        self.add_note_from(key, text, kind, actor, actor.id())
+    }
+
+    /// `add_note`, written under `session` (the Codex thread an agent's report came from) while
+    /// `actor` still keeps its claim fresh.
+    pub fn add_note_from(&self, key: &str, text: &str, kind: &str, actor: &Actor, session: &str) -> Result<()> {
         let issue = self.issue(key)?.with_context(|| format!("no issue {key}"))?;
         if text.trim().is_empty() {
             bail!("a note needs text");
@@ -802,7 +808,7 @@ impl Db {
         let ts = now();
         self.conn.execute(
             "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![ts, actor.id(), issue.key, kind, text.trim()],
+            params![ts, session, issue.key, kind, text.trim()],
         )?;
         self.conn.execute(
             "UPDATE issue SET claimed_at = ?3 WHERE key = ?1 AND claimed_by = ?2",
