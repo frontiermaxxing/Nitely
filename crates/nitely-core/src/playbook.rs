@@ -981,4 +981,19 @@ mod tests {
         assert_eq!(diff_base(&repo, "main"), "main", "local main has diverged");
         std::fs::remove_dir_all(base).ok();
     }
+
+    /// CI on GitHub runs Nitely's own gate: every gate command is a `- run:` step of the workflow,
+    /// spelled the same, and the workflow runs no other cargo or npm command.
+    #[test]
+    fn ci_runs_the_same_gate_as_the_playbook() {
+        let pb = Playbook::parse(include_str!("../../../.nitely/playbook.toml")).unwrap();
+        let ci = include_str!("../../../.github/workflows/ci.yml");
+        let runs: Vec<&str> = ci.lines().filter_map(|l| l.trim().strip_prefix("- run: ")).map(str::trim).collect();
+        for command in pb.gate.commands.iter().chain(pb.gate.steps.iter().map(|s| &s.run)) {
+            assert!(runs.contains(&command.as_str()), "the CI workflow does not run the gate command {command:?}");
+        }
+        for run in runs.iter().filter(|r| r.starts_with("cargo ") || r.starts_with("npm ")) {
+            assert!(*run == "npm ci" || pb.gate.commands.iter().any(|c| c == run), "the CI workflow runs {run:?}, which the gate does not");
+        }
+    }
 }

@@ -1,0 +1,62 @@
+# The gate from .nitely/playbook.toml, on every pull request into main and every push to main.
+# Each gate command is one step, spelled exactly as the playbook spells it: a test in
+# crates/nitely-core/src/playbook.rs fails when the two differ. The frontend builds first because
+# the Tauri crate embeds dist/ when it compiles.
+
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: Gate (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Add macos-latest when Mac becomes a target (NIT-13).
+        os: [windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # Tests make throwaway git repos; some commit without passing an identity.
+      - name: Git identity
+        run: |
+          git config --global user.name "Nitely CI"
+          git config --global user.email "ci@example.com"
+
+      - run: npm ci
+
+      - run: npm run build
+
+      - run: npm test
+
+      - run: cargo test --workspace
+
+      - run: cargo clippy --workspace -- -D warnings
