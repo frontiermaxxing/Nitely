@@ -63,20 +63,21 @@ export function Inbox(props: {
   const oldest = waiting.length ? Math.min(...waiting.map((d) => d.since)) : null;
 
   // The latest list, pick and resolutions, for the timer that moves on after a confirmation.
-  const latest = useRef({ ordered, picked: open?.id ?? null, resolved });
-  latest.current = { ordered, picked: open?.id ?? null, resolved };
+  const latest = useRef({ ordered, picked: open?.id ?? null, resolved, liveIds });
+  latest.current = { ordered, picked: open?.id ?? null, resolved, liveIds };
   const timers = useRef(new Set<number>());
   useEffect(() => () => timers.current.forEach((t) => clearTimeout(t)), []);
 
   const moveOn = (id: string) => {
-    const { ordered: list, picked: on, resolved: held } = latest.current;
+    const { ordered: list, picked: on, resolved: held, liveIds: listed } = latest.current;
     const at = list.findIndex((x) => x.id === id);
     const waits = (x: Decision) => x.id !== id && !held.has(x.id);
     const next = list.slice(at + 1).find(waits) ?? list.slice(0, Math.max(at, 0)).reverse().find(waits) ?? null;
     // Focus follows only when it was on this decision (its buttons are gone now) or nowhere.
     const focus = document.activeElement;
     const follow = !focus || focus === document.body || !!focus.closest(".inbox-detail, .inbox-row.on");
-    setGone((g) => new Set(g).add(id));
+    // Hidden only while the board still names it: once dropped, it may come back as a new decision.
+    if (listed.split(" ").includes(id)) setGone((g) => new Set(g).add(id));
     setResolved((m) => without(m, id));
     if (on === id) {
       setPicked(next?.id ?? null);
