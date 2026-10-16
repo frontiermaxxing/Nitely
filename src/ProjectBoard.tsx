@@ -117,12 +117,11 @@ export function ProjectBoard(props: {
 }) {
   const { issues, board, now, filters } = props;
 
-  // Issues in an agent's hands (and the last week's Done) load their timelines, so the board knows Started from Working
-  // from Gate, sees stuck work, and can tell how long each card has sat in its column.
+  // Every issue arrives with its track (station, stuck, since). The details add pull requests for
+  // issues whose worktree may be gone: in an agent's hands, or landed in the last week.
   const [details, setDetails] = useState<Map<string, IssueDetail>>(new Map());
   useEffect(() => {
     let live = true;
-    // Recently landed ones too: their worktree is gone, so the timeline is where their PR is.
     const recent = (i: IssueRecord) => i.state_type === "completed" && Date.now() / 1000 - Date.parse(i.updated_at) / 1000 < DONE_DAYS * DAY;
     const keys = issues.filter((i) => i.state_type === "started" || recent(i)).map((i) => i.key);
     Promise.all(keys.map((key) => invoke<IssueDetail>("issue_detail", { key }).catch(() => null))).then((all) => {
@@ -137,7 +136,7 @@ export function ProjectBoard(props: {
     const rows = rowsByIssue(board);
     return issues.map((issue): Card => {
       const d = details.get(issue.key);
-      const track = d ? trackOf(issue, d.timeline, d.reviews) : trackOf(issue);
+      const track = trackOf(issue, d?.timeline, d?.reviews);
       const row = rows.get(issue.key) ?? null;
       const live = livenessOf(row?.session, now);
       // Without a timeline: filed (Todo) or last changed; mirrored issues may lack either, then now.

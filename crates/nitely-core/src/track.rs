@@ -25,11 +25,14 @@ pub struct Track {
     pub closed: Option<&'static str>,
     /// Still in Backlog, before Todo.
     pub backlog: bool,
+    /// When the issue last arrived at its current station (unix seconds). Only known from a timeline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since: Option<i64>,
 }
 
 impl Default for Track {
     fn default() -> Track {
-        Track { station: "todo", reached: BTreeMap::new(), rounds: 0, stuck: None, asking: false, closed: None, backlog: false }
+        Track { station: "todo", reached: BTreeMap::new(), rounds: 0, stuck: None, asking: false, closed: None, backlog: false, since: None }
     }
 }
 
@@ -61,8 +64,12 @@ fn moved_to(summary: Option<&str>) -> Option<&str> {
     (!to.is_empty()).then_some(to)
 }
 
-fn reach(t: &mut Track, current: &mut &'static str, s: &'static str, ts: i64) {
+/// Arrives at station `s`; `since` keeps when the issue last arrived at the station it is at.
+fn reach(t: &mut Track, current: &mut &'static str, since: &mut Option<i64>, s: &'static str, ts: i64) {
     t.reached.entry(s).or_insert(ts);
+    if *current != s || since.is_none() {
+        *since = Some(ts);
+    }
     *current = s;
 }
 
@@ -86,32 +93,33 @@ pub fn track_of(issue: &IssueRecord, timeline: &[TimelineEntry], change_reviews:
     }
 
     let mut current = "todo";
+    let mut since: Option<i64> = None;
     let (mut gate_failed, mut review_failed, mut land_failed, mut push_failed) = (false, false, false, false);
     let (mut open_asks, mut rounds) = (0i64, 0i64);
 
     for e in timeline {
         let summary = e.summary.as_deref().unwrap_or("");
         match e.kind.as_str() {
-            "issue_created" => reach(&mut t, &mut current, "todo", e.ts),
-            "claimed" | "worktree" => reach(&mut t, &mut current, "started", e.ts),
+            "issue_created" => reach(&mut t, &mut current, &mut since, "todo", e.ts),
+            "claimed" | "worktree" => reach(&mut t, &mut current, &mut since, "started", e.ts),
             "status" | "note" | "handoff" => {
                 if t.reached.contains_key("started") && index(current) <= index("working") {
-                    reach(&mut t, &mut current, "working", e.ts);
+                    reach(&mut t, &mut current, &mut since, "working", e.ts);
                 }
             }
             "gate_passed" => {
                 gate_failed = false;
                 land_failed = false;
-                reach(&mut t, &mut current, "gate", e.ts);
+                reach(&mut t, &mut current, &mut since, "gate", e.ts);
             }
             "gate_failed" => {
                 gate_failed = true;
-                reach(&mut t, &mut current, "gate", e.ts);
+                reach(&mut t, &mut current, &mut since, "gate", e.ts);
             }
             "review_started" => {
                 review_failed = false;
                 land_failed = false;
-                reach(&mut t, &mut current, "review", e.ts);
+                reach(&mut t, &mut current, &mut since, "review", e.ts);
             }
             "review_failed" => review_failed = true,
             "submit" => {
@@ -124,19 +132,20 @@ pub fn track_of(issue: &IssueRecord, timeline: &[TimelineEntry], change_reviews:
                 if summary.contains("requested changes") {
                     rounds += 1;
                     current = "working";
+                    since = Some(e.ts);
                 }
             }
             "ask" => open_asks += 1,
             "answer" => open_asks = (open_asks - 1).max(0),
             "land_failed" => {
                 land_failed = true;
-                reach(&mut t, &mut current, "landing", e.ts);
+                reach(&mut t, &mut current, &mut since, "landing", e.ts);
             }
             "landed" => {
                 land_failed = false;
                 push_failed = false;
-                reach(&mut t, &mut current, "landing", e.ts);
-                reach(&mut t, &mut current, "done", e.ts);
+                reach(&mut t, &mut current, &mut since, "landing", e.ts);
+                reach(&mut t, &mut current, &mut since, "done", e.ts);
             }
             "issue_moved" => {
                 let Some(to) = moved_to(e.summary.as_deref()) else { continue };
@@ -150,15 +159,19 @@ pub fn track_of(issue: &IssueRecord, timeline: &[TimelineEntry], change_reviews:
                 }
                 let s = station_of_state(to, "");
                 if to == "Todo" || to == "Backlog" {
+                    if current != "todo" {
+                        since = Some(e.ts);
+                    }
                     current = "todo";
                 } else if s == "working" {
                     if index(current) >= index("review") {
                         current = "working";
+                        since = Some(e.ts);
                     } else if !t.reached.contains_key("started") {
-                        reach(&mut t, &mut current, "started", e.ts);
+                        reach(&mut t, &mut current, &mut since, "started", e.ts);
                     }
                 } else {
-                    reach(&mut t, &mut current, s, e.ts);
+                    reach(&mut t, &mut current, &mut since, s, e.ts);
                 }
             }
             _ => {}
@@ -189,6 +202,7 @@ pub fn track_of(issue: &IssueRecord, timeline: &[TimelineEntry], change_reviews:
             t.stuck = Some("Review did not finish".into());
         }
     }
+    t.since = if t.station == current { since } else { t.reached.get(t.station).copied() };
     t
 }
 
@@ -256,6 +270,20 @@ mod tests {
             0,
         );
         assert_eq!(t.station, "review");
+    }
+
+    #[test]
+    fn since_is_the_last_arrival_at_the_station() {
+        // Review started at 7; changes asked at 8 sends it back to Working from then.
+        let t = track_of(&issue("In Progress"), &with(&[("submit", "Review by codex requested changes."), ("status", "Fixing")]), 0);
+        assert_eq!((t.station, t.since), ("working", Some(8)));
+        // Moved back to Todo at 8: its age in Todo counts from the move, not from filing.
+        let t = track_of(&issue("Todo"), &with(&[("issue_moved", "In Review → Todo")]), 0);
+        assert_eq!((t.station, t.since), ("todo", Some(8)));
+        // Repeated gate results keep the first arrival at Gate.
+        let t = track_of(&issue("In Progress"), &tl(&[("issue_created", ""), ("claimed", ""), ("gate_failed", ""), ("gate_failed", "")]), 0);
+        assert_eq!((t.station, t.since), ("gate", Some(3)));
+        assert_eq!(track_of(&issue("In Review"), &[], 0).since, None);
     }
 
     #[test]
