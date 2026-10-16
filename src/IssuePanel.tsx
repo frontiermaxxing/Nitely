@@ -2,8 +2,9 @@ import { useEffect, useState } from "react";
 import { invoke } from "./backend";
 import type { IssueDetail, IssueRecord, LinkedIssue } from "./types";
 import { agentLabel, ago, openExternal, PRIORITY } from "./util";
-import { IssueJourney } from "./IssueJourney";
-import { AgentMark, IssueToken, Loading, PriorityMark, StationGlyph, StationTrack, trackOf } from "./ui";
+import { IssueJourney, WhoHadIt } from "./IssueJourney";
+import { AgentMark, IssueToken, Loading, PrMark, PriorityMark, StationGlyph, StationTrack, VENDOR_LABEL, trackOf, vendorOf } from "./ui";
+
 import "./issue.css";
 
 const KIND_LABEL: Record<string, string> = {
@@ -73,74 +74,166 @@ export function IssuePanel(props: {
 
   const issue = detail?.issue;
   const track = detail && trackOf(detail.issue, detail.timeline, detail.reviews);
+  const waiting = issue?.state === "Needs You";
+  const waitedSince = detail ? [...detail.timeline].reverse().find((e) => e.kind === "submit" || (e.kind === "issue_moved" && /→ Needs You/.test(e.summary ?? ""))) : undefined;
+  const review = detail?.reviews[0];
+  const pr = detail?.prs[0];
+  const lastGate = detail ? [...detail.timeline].reverse().find((e) => e.kind === "gate_passed" || e.kind === "gate_failed") : undefined;
   return (
-    <aside className="panel">
-      <div className="panel-head">
-        <span className="panel-key">
-          {track && <StationGlyph track={track} />}
-          <span className="mono muted">{props.issueKey}</span>
-        </span>
-        <button className="btn ghost" onClick={props.onClose} title="Close (Esc)">✕</button>
-      </div>
-      {error && <p className="error small">{error}</p>}
-      {!issue && !error && <Loading />}
-      {issue && (
-        <>
-          <h2 className="panel-title">{issue.title}</h2>
-          {track && (
-            <div className="panel-track">
-              <StationTrack track={track} size="full" now={props.now} />
-            </div>
-          )}
-          <IssueJourney key={issue.key} detail={detail} now={props.now} />
-          <Relations
-            issueKey={issue.key}
-            relations={detail.relations}
-            editable={issue.origin === "nitely"}
-            onOpenIssue={props.onOpenIssue}
-            onChanged={props.onChanged}
-          />
-          <div className="facts">
-            <span className="fact strong">{issue.state}</span>
-            {issue.kind && <span className="fact">{issue.kind}</span>}
-            {issue.priority > 0 && (
-              <span className="fact">
-                <PriorityMark priority={issue.priority} /> {PRIORITY[issue.priority]}
-              </span>
-            )}
-            {issue.source && <span className="fact">from {issue.source}</span>}
-            {issue.claimed_by && (
-              <span className="fact">
-                <AgentMark vendor={issue.claimed_by} size={14} /> {agentLabel(issue.claimed_by)}
-              </span>
-            )}
-            {issue.url && issue.origin !== "nitely" && (
-              <a href={issue.url} onClick={openExternal(issue.url)}>
-                Open in {issue.origin}
-              </a>
-            )}
-            {issue.external_url && (
-              <a href={issue.external_url} onClick={openExternal(issue.external_url)}>
-                {externalName(issue.external_url)}
-              </a>
-            )}
+    <>
+      <div className="panel-veil" onMouseDown={props.onClose} aria-hidden="true" />
+      <aside className="panel" aria-label={`Issue ${props.issueKey}`}>
+        <div className="panel-main">
+          <div className="panel-head">
+            <span className="panel-crumb">
+              {issue?.project && <span>{issue.project}</span>}
+              {issue?.project && <span>/</span>}
+              <span className="mono">{props.issueKey}</span>
+            </span>
+            <button className="btn ghost" onClick={props.onClose} title="Close (Esc)">✕</button>
           </div>
-          {issue.body && <p className="body">{issue.body}</p>}
-          {issue.evidence && (
-            <p className="small">
-              <span className="muted">Evidence: </span>
-              {issue.evidence}
-            </p>
+          {error && <p className="error small">{error}</p>}
+          {!issue && !error && <Loading />}
+          {issue && (
+            <>
+              <div className="panel-title-row">
+                {track && <StationGlyph track={track} size={16} />}
+                <h2 className="panel-title">{issue.title}</h2>
+              </div>
+              {track && (
+                <div className="panel-track">
+                  <StationTrack track={track} size="full" now={props.now} />
+                </div>
+              )}
+              <WhoHadIt detail={detail} now={props.now} />
+              <IssueJourney key={issue.key} detail={detail} now={props.now} />
+              <details className="panel-timeline">
+                <summary>
+                  Timeline <span className="muted">· {detail.timeline.length} event{detail.timeline.length === 1 ? "" : "s"}</span>
+                </summary>
+                <ol className="timeline">
+                  {detail.timeline.map((t, n) => (
+                    <li key={n} className={`tl-${t.kind}`}>
+                      <span className="tl-mark">
+                        <AgentMark vendor={t.actor} size={14} title={agentLabel(t.actor)} />
+                      </span>
+                      <div className="tl-meta">
+                        <span className="tl-kind">{KIND_LABEL[t.kind] ?? t.kind}</span> {agentLabel(t.actor)} · {ago(props.now, t.ts)}
+                      </div>
+                      {t.summary && <div className="tl-text">{t.summary}</div>}
+                    </li>
+                  ))}
+                  {detail.timeline.length === 0 && <li className="muted small">Nothing recorded yet.</li>}
+                </ol>
+              </details>
+            </>
           )}
-          {issue.origin === "nitely" && (
-            <div className="actions">
-              {issue.state === "Needs You" && <button className="btn primary" onClick={() => move("Approved")}>Approve</button>}
-              {issue.state !== "Todo" && <button className="btn" onClick={() => move("Todo")}>Todo</button>}
-              {issue.state !== "Done" && <button className="btn" onClick={() => setPending("Done")}>Done…</button>}
-              {issue.state !== "Canceled" && <button className="btn" onClick={() => setPending("Canceled")}>Cancel…</button>}
-            </div>
-          )}
-          {pending && (
+        </div>
+        {issue && detail && (
+          <div className="panel-rail">
+            {waiting && issue.origin === "nitely" && (
+              <div className="panel-waiting">
+                <p className="panel-waiting-head">Waiting on you{waitedSince && ` · ${ago(props.now, waitedSince.ts).replace(" ago", "")}`}</p>
+                <p className="panel-waiting-why">
+                  {review?.reasons.length ? `${capital(review.reasons.slice(0, 2).join("; "))}.` : "The playbook wants a person to approve before it lands."}
+                  {review?.reviewer && review.verdict === "pass" && ` ${VENDOR_LABEL[vendorOf(review.reviewer)]} passed it.`}
+                </p>
+                <div className="actions">
+                  <button className="btn primary" onClick={() => move("Approved")}>Approve</button>
+                  <button className="btn" onClick={() => move("Todo")}>Back to Todo</button>
+                </div>
+              </div>
+            )}
+            <dl className="panel-facts">
+              <dt>State</dt>
+              <dd>{issue.state}</dd>
+              {issue.claimed_by && (
+                <>
+                  <dt>Agent</dt>
+                  <dd>
+                    <AgentMark vendor={issue.claimed_by} size={16} /> {VENDOR_LABEL[vendorOf(issue.claimed_by)]}
+                  </dd>
+                </>
+              )}
+              {review?.reviewer && (
+                <>
+                  <dt>Reviewer</dt>
+                  <dd>
+                    <AgentMark vendor={review.reviewer} size={16} /> {VENDOR_LABEL[vendorOf(review.reviewer)]}
+                  </dd>
+                </>
+              )}
+              {pr && (
+                <>
+                  <dt>Branch</dt>
+                  <dd className="mono path">{pr.branch}</dd>
+                  <dt>Pull request</dt>
+                  <dd>
+                    <PrMark pr={pr} link /> <span className="muted">{pr.state.toLowerCase()}</span>
+                  </dd>
+                </>
+              )}
+              {(issue.kind || issue.priority > 0) && (
+                <>
+                  <dt>Kind</dt>
+                  <dd>
+                    {issue.priority > 0 && <PriorityMark priority={issue.priority} />}
+                    {[issue.kind, issue.priority > 0 && PRIORITY[issue.priority]].filter(Boolean).join(" · ")}
+                  </dd>
+                </>
+              )}
+              {issue.source && (
+                <>
+                  <dt>Filed by</dt>
+                  <dd>{issue.source}</dd>
+                </>
+              )}
+              {lastGate && (
+                <>
+                  <dt>Gate</dt>
+                  <dd className={lastGate.kind === "gate_failed" ? "error" : "live-ink"} title={lastGate.summary ?? undefined}>
+                    {lastGate.kind === "gate_failed" ? "failed" : "passed"} {ago(props.now, lastGate.ts)}
+                  </dd>
+                </>
+              )}
+            </dl>
+            <Relations
+              issueKey={issue.key}
+              relations={detail.relations}
+              editable={issue.origin === "nitely"}
+              onOpenIssue={props.onOpenIssue}
+              onChanged={props.onChanged}
+            />
+            {(issue.url && issue.origin !== "nitely") || issue.external_url ? (
+              <div className="facts">
+                {issue.url && issue.origin !== "nitely" && (
+                  <a href={issue.url} onClick={openExternal(issue.url)}>
+                    Open in {issue.origin}
+                  </a>
+                )}
+                {issue.external_url && (
+                  <a href={issue.external_url} onClick={openExternal(issue.external_url)}>
+                    {externalName(issue.external_url)}
+                  </a>
+                )}
+              </div>
+            ) : null}
+            {(issue.body || issue.evidence) && <div className="panel-rule" />}
+            {issue.body && <p className="body">{issue.body}</p>}
+            {issue.evidence && (
+              <p className="small">
+                <span className="muted">Evidence: </span>
+                {issue.evidence}
+              </p>
+            )}
+            {issue.origin === "nitely" && (
+              <div className="actions panel-moves">
+                {!waiting && issue.state !== "Todo" && <button className="btn" onClick={() => move("Todo")}>Back to Todo</button>}
+                {issue.state !== "Done" && <button className="btn" onClick={() => setPending("Done")}>Done…</button>}
+                {issue.state !== "Canceled" && <button className="btn" onClick={() => setPending("Canceled")}>Cancel…</button>}
+              </div>
+            )}
+            {pending && (
             <form
               className="answer"
               onSubmit={(e) => {
@@ -157,34 +250,18 @@ export function IssuePanel(props: {
               <button className="btn primary" disabled={!why.trim()}>{pending === "Done" ? "Mark done" : "Cancel issue"}</button>
               <button type="button" className="btn ghost" onClick={() => setPending(null)}>Back</button>
             </form>
-          )}
-          <details className="panel-timeline">
-            <summary>
-              Timeline <span className="muted">· {detail.timeline.length} event{detail.timeline.length === 1 ? "" : "s"}</span>
-            </summary>
-          <ol className="timeline">
-            {detail.timeline.map((t, n) => (
-              <li key={n} className={`tl-${t.kind}`}>
-                <span className="tl-mark">
-                  <AgentMark vendor={t.actor} size={14} title={agentLabel(t.actor)} />
-                </span>
-                <div className="tl-meta">
-                  <span className="tl-kind">{KIND_LABEL[t.kind] ?? t.kind}</span> {agentLabel(t.actor)} ·{" "}
-                  {ago(props.now, t.ts)}
-                </div>
-                {t.summary && <div className="tl-text">{t.summary}</div>}
-              </li>
-            ))}
-            {detail.timeline.length === 0 && <li className="muted small">Nothing recorded yet.</li>}
-          </ol>
-          </details>
-        </>
-      )}
-    </aside>
+            )}
+          </div>
+        )}
+      </aside>
+    </>
   );
 }
 
+const capital = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
 /** "Imported from Linear" for a Linear address, else the host. */
+
 function externalName(url: string): string {
   try {
     const host = new URL(url).hostname.replace(/^www\./, "");

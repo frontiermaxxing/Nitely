@@ -1,35 +1,42 @@
 /* The Ctrl+K palette (src/Palette.tsx). */
 .palette-veil {
   position: fixed; inset: 0; z-index: 20; display: flex; justify-content: center; align-items: flex-start;
-  padding: 12vh 16px 16px; background: color-mix(in srgb, var(--fg) 18%, transparent);
+  padding: 110px 16px 16px; background: var(--scrim);
 }
 .palette {
-  width: min(560px, 100%); background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--radius-lg);
-  box-shadow: 0 8px 24px -12px rgba(0, 0, 0, 0.35); overflow: hidden; --mark-bg: var(--surface);
+  width: min(660px, 100%); background: var(--surface); border: 1px solid var(--line-strong); border-radius: 12px;
+  box-shadow: var(--shadow-float); overflow: hidden; --mark-bg: var(--surface);
 }
-.palette-input {
-  width: 100%; border: 0; border-bottom: 1px solid var(--line); background: none; padding: 13px 16px; font-size: var(--text-lg);
-}
+.palette-search { display: flex; align-items: center; gap: 10px; height: 54px; padding: 0 18px; border-bottom: 1px solid var(--line); }
+.palette-input { flex: 1; min-width: 0; border: 0; background: none; padding: 0; font-size: 16px; }
+.palette-input::placeholder { color: var(--fg-3); }
 .palette-input:focus { outline: none; }
-.palette-list { list-style: none; margin: 0; padding: 6px; max-height: 50vh; overflow-y: auto; }
+.palette-count { color: var(--fg-3); font-size: 11.5px; white-space: nowrap; }
+.palette-list { list-style: none; margin: 0; padding: 8px; max-height: 52vh; overflow-y: auto; }
 .palette-list li {
-  display: flex; align-items: center; gap: 10px; min-height: 34px; padding: 6px 10px; border-radius: var(--radius); cursor: pointer;
+  position: relative; display: flex; align-items: center; gap: 12px; height: 38px; padding: 0 10px; border-radius: 7px;
+  cursor: pointer; font-size: 13.5px;
 }
-.palette-list li.on { background: var(--hover); --mark-bg: var(--hover); }
-.palette-list .ui-token { pointer-events: none; min-width: 0; flex: 1; }
+/* A group's first row carries the group's name above it. */
+.palette-list li.palette-first { margin-top: 26px; }
+.palette-list li.palette-first:first-child { margin-top: 22px; }
+.palette-list li.palette-first::before {
+  content: attr(data-group); position: absolute; left: 10px; top: -20px; font-size: var(--text-xs); color: var(--fg-3);
+  letter-spacing: 0.02em; cursor: default;
+}
+.palette-list li.on { background: var(--hover); box-shadow: inset 0 0 0 1px var(--line-strong); --mark-bg: var(--hover); }
+.palette-list .ui-token { pointer-events: none; min-width: 0; flex: 1; gap: 10px; }
+.palette-list .ui-token-title { color: var(--fg-2); }
 .palette-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.palette-hint { color: var(--fg-3); font-size: var(--text-xs); white-space: nowrap; }
+.palette-hint { color: var(--fg-3); font-size: 11.5px; white-space: nowrap; }
 .palette-none { color: var(--fg-3); cursor: default; }
-.palette-foot { padding: 8px 16px; border-top: 1px solid var(--line); color: var(--fg-3); font-size: var(--text-xs); }
-
-.nav-goto {
-  display: flex; align-items: center; justify-content: space-between; width: 100%; margin: 0 0 10px; padding: 5px 8px;
-  border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--fg-3);
-  font-size: var(--text-sm); cursor: pointer; text-align: left;
+.palette-foot {
+  display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 11px 18px; border-top: 1px solid var(--line); background: var(--sunken);
+  color: var(--fg-3); font-size: 11.5px;
 }
-.nav-goto:hover { color: var(--fg-2); border-color: var(--line-strong); }
+.palette-foot kbd { border: 0; padding: 0; color: var(--fg-2); font-size: 11.5px; margin-right: 3px; }
+
 .nav-goto:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
-.nav-goto kbd { font: inherit; font-size: var(--text-xs); color: var(--fg-3); }
 @media (max-width: 760px) {
   .nav-goto { display: none; }
 }

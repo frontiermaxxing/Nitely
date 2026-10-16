@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { IssueDetail } from "./types";
 import { ChecksMark } from "./Pr";
 import { ago, openExternal } from "./util";
-import { FindingDots, ResultMark, SeverityMark, VENDOR_LABEL, journeyOf, vendorOf, type Round } from "./ui";
+import { AgentMark, FindingDots, ResultMark, SeverityMark, VENDOR_LABEL, journeyOf, vendorOf, type Round } from "./ui";
 import "./issue.css";
 
 const OUTCOME: Record<Round["outcome"], string> = {
@@ -174,5 +174,122 @@ function Chevron({ open }: { open: boolean }) {
     <svg className={`journey-chevron${open ? " open" : ""}`} width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
       <path d="M3.5 2 6.5 5 3.5 8" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
+  );
+}
+
+type CellTone = "step" | "ok" | "fail" | "changes" | "pass" | "needs";
+interface Cell {
+  lane: string;
+  label: string;
+  sub: string;
+  tone: CellTone;
+}
+
+/** The most recent steps the swimlanes show; older ones are on the timeline. */
+const MAX_CELLS = 12;
+
+/**
+ * Who had the issue, read left to right: the agent that wrote it, the gate that checked it, the
+ * agent that reviewed it, and you. Each step is a cell in its owner's lane, in time order, so a
+ * hand-off reads as a step down and a round of changes as the work coming back up.
+ */
+export function WhoHadIt(props: { detail: IssueDetail; now: number }) {
+  const { detail, now } = props;
+  const { rounds } = journeyOf(detail.timeline, detail.reviews);
+  const cells: Cell[] = [];
+  const author = detail.issue.claimed_by ?? detail.timeline.find((e) => e.kind === "claimed" || e.kind === "worktree")?.actor ?? null;
+  const authorLane = author ? vendorOf(author) : "other";
+  let started = false;
+  let submits = 0;
+  for (const e of detail.timeline) {
+    const at = ago(now, e.ts).replace(" ago", "");
+    switch (e.kind) {
+      case "claimed":
+      case "worktree":
+        if (!started) cells.push({ lane: authorLane, label: "Started", sub: at, tone: "step" });
+        started = true;
+        break;
+      case "gate_passed":
+      case "gate_failed": {
+        // Runs back to back are one cell: "✕ ✓ Pass" reads as failed, then fixed.
+        const ok = e.kind === "gate_passed";
+        const prev = cells[cells.length - 1];
+        const marks = prev?.lane === "gate" ? `${prev.label.replace(/ (Pass|Failed)$/, "")} ` : "";
+        if (prev?.lane === "gate") cells.pop();
+        cells.push({ lane: "gate", label: `${marks}${ok ? "✓ Pass" : "✕ Failed"}`, sub: at, tone: ok ? "ok" : "fail" });
+        break;
+      }
+      case "submit": {
+        submits += 1;
+        cells.push({ lane: authorLane, label: submits === 1 ? "Submitted" : "Fixed", sub: at, tone: "step" });
+        const r = rounds.find((x) => x.end === e.ts);
+        const reviewer = r?.reviewer ?? r?.review?.reviewer;
+        if (r && reviewer && r.outcome !== "unreviewed") {
+          const found = r.review?.findings.length ?? 0;
+          const lane = vendorOf(reviewer) === authorLane ? `${vendorOf(reviewer)}-review` : vendorOf(reviewer);
+          if (r.outcome === "changes") cells.push({ lane, label: "Changes", sub: `${found} found`, tone: "changes" });
+          else if (r.outcome === "passed") cells.push({ lane, label: "Passed", sub: found ? `${found} found` : "clean", tone: "pass" });
+          else if (r.outcome === "review-failed") cells.push({ lane, label: "Didn't finish", sub: at, tone: "fail" });
+        }
+        break;
+      }
+      case "ask":
+        cells.push({ lane: "human", label: "Asked", sub: at, tone: "needs" });
+        break;
+      case "answer":
+        cells.push({ lane: "human", label: "Answered", sub: at, tone: "step" });
+        break;
+      case "issue_moved":
+        if (e.actor === "human" && /→ Approved/.test(e.summary ?? "")) cells.push({ lane: "human", label: "Approved", sub: at, tone: "pass" });
+        break;
+      case "landed":
+        cells.push({ lane: authorLane, label: "Landed", sub: at, tone: "pass" });
+        break;
+      case "land_failed":
+        cells.push({ lane: authorLane, label: "Land stopped", sub: at, tone: "fail" });
+        break;
+    }
+  }
+  if (detail.issue.state === "Needs You") {
+    const since = [...detail.timeline].reverse().find((e) => e.kind === "submit" || (e.kind === "issue_moved" && /→ Needs You/.test(e.summary ?? "")));
+    cells.push({ lane: "human", label: "Approve?", sub: since ? ago(now, since.ts).replace(" ago", "") : "now", tone: "needs" });
+
+  }
+  if (cells.length === 0) return null;
+  const shown = cells.slice(-MAX_CELLS);
+  const lanes = [authorLane, "gate", ...new Set(shown.map((c) => c.lane).filter((l) => l !== authorLane && l !== "gate" && l !== "human")), "human"].filter(
+    (l, i, all) => all.indexOf(l) === i && (l === authorLane || shown.some((c) => c.lane === l)),
+  );
+  const name = (lane: string) => (lane === "gate" ? "Gate" : lane === "human" ? "You" : VENDOR_LABEL[vendorOf(lane.replace(/-review$/, ""))]);
+  const reviewerNote = lanes.find((l) => l !== authorLane && l !== "gate" && l !== "human");
+  return (
+    <section className="who">
+      <h2>
+        Who had it{" "}
+        <span className="head-note">
+          {[author && `${VENDOR_LABEL[vendorOf(author)]} wrote it`, shown.some((c) => c.lane === "gate") && "the gate checked it", reviewerNote && `${name(reviewerNote)} reviewed it`]
+            .filter(Boolean)
+            .join(", ")}
+          . Read left to right.
+        </span>
+      </h2>
+      <div className="who-grid" style={{ gridTemplateColumns: `84px repeat(${shown.length}, minmax(0, 1fr))` }}>
+        {lanes.map((lane, row) => (
+          <div key={lane} className="who-lane" style={{ gridRow: row + 1 }}>
+            {lane !== "gate" && lane !== "human" ? <AgentMark vendor={lane.replace(/-review$/, "")} size={16} /> : <span className="who-lane-blank" />}
+            <span>{name(lane)}</span>
+          </div>
+        ))}
+        {lanes.map((lane, row) => (
+          <div key={`rule-${lane}`} className="who-rule" style={{ gridRow: row + 1 }} />
+        ))}
+        {shown.map((c, i) => (
+          <div key={i} className={`who-cell who-${c.tone}`} style={{ gridRow: lanes.indexOf(c.lane) + 1, gridColumn: i + 2 }} title={`${name(c.lane)}: ${c.label} · ${c.sub}`}>
+            <span className="who-label">{c.label}</span>
+            <span className="who-sub">{c.sub}</span>
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }

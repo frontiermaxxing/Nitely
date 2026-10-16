@@ -11,8 +11,9 @@ import { Activity } from "./Activity";
 import { ProjectPage, isProjectTab, type ProjectTab } from "./Project";
 import { IssuePanel } from "./IssuePanel";
 import { AddProject } from "./AddProject";
-import { nowSecs } from "./util";
+import { HOME_LABEL, nowSecs } from "./util";
 import { Palette, useKeys } from "./Palette";
+import { reposOf } from "./BranchMap";
 import { CountBadge, Loading, livenessOf } from "./ui";
 
 // The browser preview's page of every primitive in every state; never in a production build.
@@ -48,15 +49,18 @@ function fromHash(hash: string): { view: View; issue: string | null } {
   const [path, issue] = raw.split("@");
   const [kind, key, tab] = path.split("/");
   const plain = ["pulse", "inbox", "now", "activity", "add", "agents", "network"].concat(isPreview ? ["kit"] : []);
+  // The home view was called Pulse; old links still land on it.
+  const named = kind === "overview" ? "pulse" : kind;
+
   const view: View =
     kind === "project" && key
       ? { kind: "project", key: key.toUpperCase(), ...(isProjectTab(tab) ? { tab } : {}) }
-      : plain.includes(kind) ? ({ kind } as View) : { kind: "pulse" };
+      : plain.includes(named) ? ({ kind: named } as View) : { kind: "pulse" };
   return { view, issue: issue ? issue.toUpperCase() : null };
 }
 
 function toHash(view: View, issue: string | null): string {
-  const path = view.kind === "project" ? `project/${view.key}${view.tab ? `/${view.tab}` : ""}` : view.kind;
+  const path = view.kind === "project" ? `project/${view.key}${view.tab ? `/${view.tab}` : ""}` : view.kind === "pulse" ? "overview" : view.kind;
   return `#${path}${issue ? `@${issue}` : ""}`;
 }
 
@@ -165,7 +169,7 @@ export function App() {
 
   // The Inbox's decisions, counted the same way the Inbox lists them.
   const inboxDetails = useDecisionDetails(board);
-  // What waits on the human: the Inbox lists it, and the nav badge, Pulse and Now count it.
+  // What waits on the human: the Inbox lists it, and the nav badge, the Overview and Now count it.
   // null until the board has loaded: "nothing needs you" must never be said before it is known.
   const decisions = board ? decisionsOf(board, inboxDetails, now) : null;
   const inboxCount = decisions?.length ?? 0;
@@ -179,9 +183,9 @@ export function App() {
           Nitely
         </div>
         <button className="nav-goto" onClick={openPalette} title="Go to a view, project or issue">
-          Go to… <kbd>{navigator.platform.startsWith("Mac") ? "⌘K" : "Ctrl K"}</kbd>
+          <span>Go to…</span> <kbd>{navigator.platform.startsWith("Mac") ? "⌘K" : "Ctrl K"}</kbd>
         </button>
-        <NavItem active={view.kind === "pulse"} onClick={() => setView({ kind: "pulse" })} label="Pulse" />
+        <NavItem active={view.kind === "pulse"} onClick={() => setView({ kind: "pulse" })} label={HOME_LABEL} />
         <NavItem active={view.kind === "inbox"} onClick={() => setView({ kind: "inbox" })} label="Inbox" count={inboxCount} tone="attention" />
         <NavItem active={view.kind === "now"} onClick={() => setView({ kind: "now" })} label="Now" count={working} tone="live" />
         <NavItem active={view.kind === "activity"} onClick={() => setView({ kind: "activity" })} label="Activity" />
@@ -194,19 +198,45 @@ export function App() {
         />
         <div className="nav-heading">Projects</div>
         {projects.map((p) => (
-          <NavItem
+          <button
             key={p.key}
-            active={view.kind === "project" && view.key === p.key}
+            className={`nav-item nav-project${view.kind === "project" && view.key === p.key ? " active" : ""}`}
             onClick={() => setView({ kind: "project", key: p.key })}
-            label={p.name}
-            hint={p.key}
-            count={p.open_issues}
-          />
+            aria-current={view.kind === "project" && view.key === p.key ? "page" : undefined}
+            title={`${p.name}: ${p.open_issues} open`}
+          >
+            <span className="nav-label">{p.name}</span>
+            <LiveDots states={board ? liveStates(board, p.key, now) : []} />
+            <span className="nav-hint">{p.key}</span>
+          </button>
         ))}
         <button className={`nav-item nav-add${view.kind === "add" ? " active" : ""}`} onClick={() => setView({ kind: "add" })}>
-          <span className="nav-label">Add project</span>
+          <span className="nav-label">+ Add project</span>
         </button>
-        {isPreview && <PreviewFoot active={view.kind === "kit"} onKit={() => setView({ kind: "kit" })} />}
+        <div className="nav-foot">
+          <button
+            className={`nav-item${view.kind === "agents" ? " active" : ""}`}
+            onClick={() => {
+              loadAgents();
+              setView({ kind: "agents" });
+            }}
+            aria-current={view.kind === "agents" ? "page" : undefined}
+          >
+            <span className="nav-label">Agent setup</span>
+            <span className="nav-dots" aria-hidden="true">
+              {agents
+                .filter((a) => a.found || a.error)
+                .map((a) => (
+                  <span key={a.agent} className={`nav-dot nav-dot-${setupTone(a)}`} title={`${a.agent}: ${SETUP_WORDS[setupTone(a)]}`} />
+                ))}
+            </span>
+          </button>
+          <div className="nav-status">
+            <span className={`nav-dot nav-dot-${error ? "fail" : "ok"}`} />
+            {error ? "Local · not reading" : isLive ? "Local · live data" : isPreview ? "Local · sample data" : "Local · live"}
+          </div>
+          {isPreview && <PreviewFoot active={view.kind === "kit"} onKit={() => setView({ kind: "kit" })} />}
+        </div>
       </nav>
 
       <main className="content">
@@ -296,6 +326,35 @@ function NavItem(props: {
       <CountBadge count={props.count ?? 0} tone={props.tone} />
     </button>
   );
+}
+
+/** Each agent session in the project's repos that is working (teal) or waiting on you (amber). */
+function liveStates(board: Board, projectKey: string, now: number): ("working" | "waiting")[] {
+  const states = reposOf(board, projectKey).flatMap((r) => r.rows.map((x) => livenessOf(x.session, now)));
+  return [...states.filter((s) => s === "waiting"), ...states.filter((s) => s === "working")] as ("working" | "waiting")[];
+}
+
+const MAX_DOTS = 5;
+
+function LiveDots(props: { states: ("working" | "waiting")[] }) {
+  if (!props.states.length) return null;
+  const waiting = props.states.filter((s) => s === "waiting").length;
+  const label = `${props.states.length - waiting} working, ${waiting} waiting on you`;
+  return (
+    <span className="nav-dots" title={label} aria-label={label}>
+      {props.states.slice(0, MAX_DOTS).map((s, i) => (
+        <span key={i} className={`nav-dot nav-dot-${s === "waiting" ? "warn" : "ok"}`} />
+      ))}
+    </span>
+  );
+}
+
+type SetupTone = "ok" | "warn" | "fail";
+const SETUP_WORDS: Record<SetupTone, string> = { ok: "up to date", warn: "an update is ready", fail: "needs a look" };
+
+function setupTone(a: AgentPlan): SetupTone {
+  if (a.error) return "fail";
+  return a.changes.some((c) => c.action !== "unchanged") ? "warn" : "ok";
 }
 
 /** Three stations on a line: the lifecycle track, which is the whole app in one mark. */

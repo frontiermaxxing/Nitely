@@ -69,9 +69,12 @@ export function AddProject(props: { onAdded: (projectKey: string) => void }) {
   const changes = plan ? pendingChanges(plan.agents) : 0;
 
   return (
-    <div className="page">
-      <h1>Add a project</h1>
-      <p className="muted">
+    <div className="page page-form">
+      <div className="page-head">
+        <h1>Add a project</h1>
+      </div>
+      <p className="page-lead">
+
         Point Nitely at a repo you already work in. It creates the project, watches the repo and its worktrees, and
         connects your agents so they take work from Nitely and report back. Nothing is written into the repo.
       </p>

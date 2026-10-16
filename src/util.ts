@@ -26,9 +26,13 @@ export function agentLabel(id: string): string {
   const [vendor, ...rest] = id.split(":");
   const path = rest.join(":");
   const last = path.split("/").filter(Boolean).pop();
-  return last ? `${vendor} · ${last}` : vendor;
+  const name = vendor ? vendor[0].toUpperCase() + vendor.slice(1) : vendor;
+  return last ? `${name} · ${last}` : name;
 }
 
 export function nowSecs() {
   return Date.now() / 1000;
 }
+
+/** The home view's name in the sidebar, the palette and its own header. */
+export const HOME_LABEL = "Overview";

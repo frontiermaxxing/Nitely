@@ -1,41 +1,87 @@
 import type { Track } from "./lifecycle";
-import { STATIONS, stationColor, stationIndex } from "./lifecycle";
+import { phaseOf } from "./lifecycle";
 
 const C = 7;
-const R = 5.6;
-const PIE = 3.3;
+const R = 5.25;
 
-/** A pie wedge from 12 o'clock, `f` of the way round. */
-function wedge(f: number): string {
-  const a = f * 2 * Math.PI;
-  const x = C + PIE * Math.sin(a);
-  const y = C - PIE * Math.cos(a);
-  return `M${C} ${C} L${C} ${C - PIE} A${PIE} ${PIE} 0 ${f > 0.5 ? 1 : 0} 1 ${x.toFixed(2)} ${y.toFixed(2)} Z`;
+/** The glyph's form: one of seven, which say where the issue is and whose move it is. */
+export type GlyphKind = "backlog" | "todo" | "active" | "needs" | "landing" | "done" | "failed" | "closed";
+
+export function glyphKindOf(t: Track): GlyphKind {
+  if (t.closed) return "closed";
+  if (t.stuck) return "failed";
+  if (t.backlog) return "backlog";
+  if (t.station === "landing") return "landing";
+  const phase = phaseOf(t.station);
+  return phase === "queued" ? "todo" : phase === "human" ? "needs" : phase === "done" ? "done" : "active";
 }
 
 /**
- * The track folded into one glyph: a ring that fills as the issue moves from Todo to Done,
- * colored by whose move it is. Stuck is red, closed is struck through, Backlog is dashed.
+ * Where an issue stands, as one 14px mark that follows the colour rule: a grey ring is queued
+ * (dashed in Backlog), a teal ring with a dot is an agent moving it, an amber ring with a halo
+ * waits on you, solid teal is landing, solid grey is done, red has failed, struck through is closed.
  */
 export function StationGlyph(props: { track: Track; size?: number }) {
   const t = props.track;
   const size = props.size ?? 14;
-  const color = t.closed ? "var(--st-closed)" : stationColor(t.station, !!t.stuck);
-  const f = stationIndex(t.station) / (STATIONS.length - 1);
+  const kind = glyphKindOf(t);
   return (
-    <svg className="ui-glyph" width={size} height={size} viewBox="0 0 14 14" aria-hidden="true">
-      <circle cx={C} cy={C} r={R} fill="none" stroke={color} strokeWidth="1.5" strokeDasharray={t.backlog ? "2 1.6" : undefined} />
-      {t.closed ? (
-        <path d="M4.3 9.7 9.7 4.3" stroke={color} strokeWidth="1.5" strokeLinecap="round" />
-      ) : f >= 1 ? (
-        <>
-          <circle cx={C} cy={C} r={R} fill={color} />
-          <path d="M4.6 7.2 6.3 8.8 9.4 5.5" fill="none" stroke="var(--surface)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-        </>
-      ) : (
-        f > 0 && <path d={wedge(f)} fill={color} />
+    <svg className={`ui-glyph ui-glyph-${kind}`} width={size} height={size} viewBox="0 0 14 14" aria-hidden="true">
+      {shape(kind)}
+      {t.asking && kind !== "needs" && kind !== "closed" && (
+        <circle cx="11.8" cy="2.2" r="2.3" fill="var(--attention)" stroke="var(--mark-bg, var(--surface))" strokeWidth="1.2" />
       )}
-      {t.asking && !t.closed && <circle cx="11.6" cy="2.6" r="2.4" fill="var(--attention)" stroke="var(--surface)" strokeWidth="1.2" />}
     </svg>
   );
+}
+
+function ring(color: string, dashed = false) {
+  return <circle cx={C} cy={C} r={R} fill="none" stroke={color} strokeWidth="1.5" strokeDasharray={dashed ? "2.2 1.7" : undefined} />;
+}
+
+function shape(kind: GlyphKind) {
+  switch (kind) {
+    case "backlog":
+      return ring("var(--st-todo)", true);
+    case "todo":
+      return ring("var(--st-todo)");
+    case "active":
+      return (
+        <>
+          {ring("var(--live)")}
+          <circle cx={C} cy={C} r="2.6" fill="var(--live)" />
+        </>
+      );
+    case "needs":
+      return (
+        <>
+          <circle cx={C} cy={C} r="7" fill="var(--attention-wash)" />
+          {ring("var(--attention)")}
+          <circle cx={C} cy={C} r="3" fill="var(--attention)" />
+        </>
+      );
+    case "landing":
+      return (
+        <>
+          <circle cx={C} cy={C} r="6" fill="var(--live)" />
+          <circle cx={C} cy={C} r="2.2" fill="var(--mark-bg, var(--surface))" />
+        </>
+      );
+    case "failed":
+      return (
+        <>
+          {ring("var(--fail)")}
+          <circle cx={C} cy={C} r="2.6" fill="var(--fail)" />
+        </>
+      );
+    case "closed":
+      return (
+        <>
+          {ring("var(--st-closed)")}
+          <path d="M4.4 9.6 9.6 4.4" stroke="var(--st-closed)" strokeWidth="1.5" strokeLinecap="round" />
+        </>
+      );
+    default:
+      return <circle cx={C} cy={C} r="6" fill="var(--st-done)" />;
+  }
 }

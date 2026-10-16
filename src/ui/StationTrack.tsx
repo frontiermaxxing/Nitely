@@ -19,55 +19,58 @@ function statusOf(track: Track, s: Station): Status {
 /**
  * The lifecycle track: Todo, Started, Working, Gate, Review, Needs you, Landing, Done.
  * `full` draws every station with its label and time, the "changes asked" loop above it and a
- * stuck station in red; `mini` is a 62px bar for list rows.
+ * stuck station in red; `mini` is the eight stations as dots on a line, for rows.
  */
 export function StationTrack(props: { track: Track; size?: "full" | "mini"; now?: number }) {
   return props.size === "full" ? <FullTrack track={props.track} now={props.now} /> : <MiniTrack track={props.track} />;
 }
 
-const SEG = 6;
-const GAP = 2;
+/** Distance between station centers on the mini track, and the space kept for the current dot. */
+const STEP = 11;
+const PAD = 6;
 
 function MiniTrack({ track }: { track: Track }) {
   const cur = stationIndex(track.station);
   const color = track.closed ? "var(--st-closed)" : stationColor(track.station, !!track.stuck);
-  const width = STATIONS.length * SEG + (STATIONS.length - 1) * GAP;
-  // Rounds of changes draw a small dashed arc from Review back over to Working above the bar.
+  const wash = track.closed ? "transparent" : track.stuck ? "var(--fail-wash)" : phaseOf(track.station) === "human" ? "var(--attention-wash)" : phaseOf(track.station) === "agent" ? "var(--live-wash)" : "transparent";
+  const width = (STATIONS.length - 1) * STEP + PAD * 2;
+  // Rounds of changes draw a small dashed arc from Review back over to Working above the dots.
   const looped = track.rounds > 0 && !track.closed;
   const top = looped ? 5 : 0;
-  const x = (s: Station) => stationIndex(s) * (SEG + GAP) + SEG / 2;
+  const y = top + PAD;
+  const x = (i: number) => PAD + i * STEP;
+  const w = x(stationIndex("working"));
+  const r = x(stationIndex("review"));
   return (
     <svg
-      className="ui-mini-track"
+      className={`ui-mini-track${track.closed ? " ui-mini-track-closed" : ""}`}
       width={width}
-      height={6 + top}
-      viewBox={`0 0 ${width} ${6 + top}`}
+      height={y + PAD}
+      viewBox={`0 0 ${width} ${y + PAD}`}
       role="img"
       aria-label={describeTrack(track)}
     >
       <title>{describeTrack(track)}</title>
       {looped && (
         <path
-          d={`M${x("working")} ${top} V2.6 Q${x("working")} 1 ${x("working") + 2} 1 H${x("review") - 2} Q${x("review")} 1 ${x("review")} 2.6 V${top}`}
+          d={`M${w} ${top + 2} V2.6 Q${w} 1 ${w + 2} 1 H${r - 2} Q${r} 1 ${r} 2.6 V${top + 2}`}
           fill="none"
           stroke="var(--st-changes)"
           strokeWidth="1.2"
-          strokeDasharray={track.rounds > 1 ? "2 1.4" : undefined}
+          strokeDasharray="2 1.4"
           strokeLinecap="round"
         />
       )}
-      {STATIONS.map((s, i) => (
-        <rect
-          key={s}
-          x={i * (SEG + GAP)}
-          y={1 + top}
-          width={SEG}
-          height="4"
-          rx="1.5"
-          fill={i <= cur ? color : "var(--line-strong)"}
-          opacity={i < cur ? 0.4 : i > cur ? 0.55 : 1}
-        />
-      ))}
+      <path d={`M${x(0)} ${y}H${x(STATIONS.length - 1)}`} stroke="var(--line-strong)" strokeWidth="1" />
+      {STATIONS.map((s, i) =>
+        i < cur ? (
+          <circle key={s} cx={x(i)} cy={y} r="2.5" fill="var(--st-done)" />
+        ) : i === cur ? (
+          <circle key={s} cx={x(i)} cy={y} r="4.5" fill={color} stroke={wash} strokeWidth="3" paintOrder="stroke" />
+        ) : (
+          <circle key={s} cx={x(i)} cy={y} r="2.5" fill="var(--mark-bg, var(--surface))" stroke="var(--line-strong)" strokeWidth="1" />
+        ),
+      )}
     </svg>
   );
 }

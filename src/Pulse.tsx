@@ -1,24 +1,22 @@
 import { useEffect, useRef, useState } from "react";
-import type { CSSProperties } from "react";
 import { invoke } from "./backend";
 import type { View } from "./App";
 import { KIND_LABEL as DECISION_LABEL, type Decision, type DecisionKind } from "./decisions";
 import type { Board, FlowIssue, Happening, IssueRecord, ProjectFlow, Pulse as PulseData, Session, TaskRow } from "./types";
-import { agentLabel, ago } from "./util";
+import { HOME_LABEL, agentLabel, ago } from "./util";
 import {
   AgentMark,
-  CountBadge,
   EmptyState,
   IssueToken,
   Loading,
   STATION_LABEL,
   STATIONS,
   Sparkline,
-  StateDot,
+  StationGlyph,
+  StationTrack,
   livenessLabel,
   livenessOf,
-  stationColor,
-  waitedLong,
+  phaseOf,
   trackOf,
   type Station,
 } from "./ui";
@@ -26,9 +24,8 @@ import "./styles/pulse.css";
 
 const SEEN_KEY = "nitely.pulse.seen";
 const DAY = 86400;
-/** Cards shown per station before "+N more"; keys in the quiet Todo and Done columns. */
-const CARDS = 4;
-const KEYS = 6;
+/** Issues shown per station before "+N more". */
+const CHIPS = 3;
 
 /** When the person last left Pulse; a day ago the first time. */
 function readSeen(now: number): number {
@@ -147,8 +144,9 @@ export function Pulse(props: {
   return (
     <div className="page pulse">
       <div className="page-head">
-        <h1>Pulse</h1>
+        <h1>{HOME_LABEL}</h1>
         <span className="head-note">{new Date(now * 1000).toLocaleString([], { weekday: "long", hour: "numeric", minute: "2-digit" })}</span>
+        {data && <span className="head-note pulse-since">{sinceLine(data)}</span>}
       </div>
       {error && <p className="error">{error}</p>}
       {!data && !error && <Loading />}
@@ -160,9 +158,19 @@ export function Pulse(props: {
               Add a repo and connect your agents; their work shows up here as it moves.
             </EmptyState>
           )}
-          {data.projects.map((p) => (
-            <Flow key={p.key} flow={p} ctx={ctx} onBoard={() => props.onGo({ kind: "project", key: p.key })} />
-          ))}
+          <RightNow data={data} board={props.board} ctx={ctx} />
+          {data.projects.length > 0 && (
+            <section>
+              <h2>
+                Flow <span className="head-note">open issues by station</span>
+              </h2>
+              <div className="flows">
+                {data.projects.map((p) => (
+                  <Flow key={p.key} flow={p} ctx={ctx} onBoard={() => props.onGo({ kind: "project", key: p.key })} />
+                ))}
+              </div>
+            </section>
+          )}
           <Since data={data} ctx={ctx} />
         </>
       )}
@@ -170,152 +178,158 @@ export function Pulse(props: {
   );
 }
 
+/** "Last here 10:36 · since then 1 landed, 1 question". */
+function sinceLine(data: PulseData): string {
+  const c = data.happened_counts;
+  const parts = [
+    c.landed && `${c.landed} landed`,
+    c.asked && `${c.asked} ${c.asked === 1 ? "question" : "questions"}`,
+    c.stuck && `${c.stuck} stuck`,
+  ].filter(Boolean);
+  return `Last here ${when(data.since)} · ${parts.length ? `since then ${parts.join(", ")}` : "nothing new since"}`;
+}
+
 /** The four answers, before any detail. */
 const DECISION_ORDER: DecisionKind[] = ["ask", "approve", "conflict", "input", "land"];
 
-function Glance({ data, board, decisions, ctx, onGo }: { data: PulseData; board: Board | null; decisions: Decision[] | null; ctx: Context; onGo: (view: View) => void }) {
+/** Every session that is open, with the issue it works on when there is one. */
+function openSessions(board: Board | null, now: number): { s: Session; key: string | null }[] {
   const rows = board?.repos.flatMap((r) => r.rows) ?? [];
+  return [
+    ...rows.filter((r) => r.session).map((r) => ({ s: r.session!, key: r.issue_key })),
+    ...(board?.repos.flatMap((r) => r.unmatched_sessions) ?? []).map((s) => ({ s, key: null })),
+    // Agents on other machines reach the backlog through nitely serve, not a worktree here.
+    ...(board?.remote_sessions ?? []).map((s) => ({ s, key: null })),
+  ].filter(({ s }) => livenessOf(s, now) !== "ended");
+
+}
+
+function Glance({ data, board, decisions, ctx, onGo }: { data: PulseData; board: Board | null; decisions: Decision[] | null; ctx: Context; onGo: (view: View) => void }) {
   // "Need you" is the Inbox's list (decisionsOf), so this number and the Inbox badge never differ.
   // Until the board is in, the count is unknown, which is not the same as zero.
   const known = decisions !== null;
   const needs = decisions?.length ?? 0;
   const byKind = DECISION_ORDER.map((k) => ({ k, n: decisions?.filter((d) => d.kind === k).length ?? 0 })).filter((x) => x.n > 0);
-  const sessions: { s: Session; key: string | null }[] = [
-    ...rows.filter((r) => r.session).map((r) => ({ s: r.session!, key: r.issue_key })),
-    ...(board?.repos.flatMap((r) => r.unmatched_sessions) ?? []).map((s) => ({ s, key: null })),
-    ...(board?.remote_sessions ?? []).map((s) => ({ s, key: null })),
-  ];
+  const oldest = decisions?.length ? Math.min(...decisions.map((d) => d.since)) : null;
+  const sessions = openSessions(board, ctx.now);
   const working = sessions.filter(({ s }) => livenessOf(s, ctx.now) === "working");
+  const waiting = sessions.filter(({ s }) => livenessOf(s, ctx.now) === "waiting");
   const flows = data.projects.flatMap((p) => p.issues);
   const stuck = flows.filter((f) => stuckReason(f, ctx.rows.get(f.issue.key), ctx.now));
   const done = data.projects.flatMap((p) => p.done_today);
+  const landed = data.throughput.map((h) => h.landed);
   const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
   return (
     <div className="glance">
-      <div className={`readout${!known ? " readout-calm" : needs ? " readout-attention" : " readout-calm"}`}>
-        <span className="readout-n" aria-label={known ? undefined : "not known yet"}>
-          {known ? needs : "–"}
+      <div className={`readout${known && needs ? " readout-attention" : " readout-calm"}`}>
+        <span className="readout-top">
+          <span className="readout-n" aria-label={known ? undefined : "not known yet"}>
+            {known ? needs : "–"}
+          </span>
+          <span className="readout-label">{!known ? "need you" : needs ? (needs === 1 ? "needs you" : "need you") : "Nothing needs you"}</span>
         </span>
-        <span className="readout-label">{!known ? "need you" : needs ? (needs === 1 ? "needs you" : "need you") : "Nothing needs you"}</span>
         <span className="readout-sub">
-          {!known && <span className="muted">Reading the board</span>}
-          {byKind.map(({ k, n }) => (
+          {!known && "Reading the board"}
+          {known && needs === 0 && "Agents can carry on alone"}
+          {byKind.map(({ k, n }, i) => (
             <button key={k} className="link" onClick={() => onGo({ kind: "inbox" })}>
+              {i > 0 && "· "}
               {plural(n, DECISION_LABEL[k], `${DECISION_LABEL[k]}s`)}
             </button>
           ))}
+          {oldest !== null && <span>· oldest {ago(ctx.now, oldest).replace(" ago", "")}</span>}
         </span>
       </div>
       <div className={`readout${working.length ? " readout-live" : " readout-calm"}`}>
-        <span className="readout-n">{working.length}</span>
-        <span className="readout-label">{working.length === 1 ? "agent working" : "agents working"}</span>
+        <span className="readout-top">
+          <span className="readout-n">{working.length}</span>
+          <span className="readout-label">{working.length === 1 ? "agent moving" : "agents moving"}</span>
+        </span>
         <span className="readout-sub readout-marks">
           {working.map(({ s, key }) => (
-            <AgentMark key={s.id} vendor={s.vendor} state="working" size={18} title={`${agentLabel(s.vendor)}${key ? ` on ${key}` : ""}: ${s.last_activity ?? "working"}`} />
+            <AgentMark key={s.id} vendor={s.vendor} size={18} title={`${agentLabel(s.vendor)}${key ? ` on ${key}` : ""}: ${s.last_activity ?? "working"}`} />
           ))}
-          {working.length === 0 && <span className="muted">{sessions.length ? "All quiet" : "No agent sessions today"}</span>}
+          {working.length === 0 && <span>{sessions.length ? "All quiet" : "No agent sessions open"}</span>}
+          {waiting.length > 0 && <span className="readout-aside">{waiting.length} waiting on you</span>}
         </span>
       </div>
       <div className={`readout${stuck.length ? " readout-stuck" : " readout-calm"}`}>
-        <span className="readout-n">{stuck.length}</span>
-        <span className="readout-label">stuck</span>
+        <span className="readout-top">
+          <span className="readout-n">{stuck.length}</span>
+          <span className="readout-label">stuck</span>
+        </span>
         <span className="readout-sub">
           {stuck.slice(0, 3).map((f) => (
             <IssueToken key={f.issue.key} issue={f.issue} onOpen={ctx.onOpenIssue} />
           ))}
-          {stuck.length > 3 && <span className="muted">+{stuck.length - 3}</span>}
-          {stuck.length === 0 && <span className="muted">Everything open is moving</span>}
+          {stuck.length > 3 && <span>+{stuck.length - 3}</span>}
+          {stuck.length === 0 && "Everything open is moving"}
         </span>
       </div>
       <div className={`readout${done.length ? "" : " readout-calm"}`}>
-        <span className="readout-n">{done.length}</span>
-        <span className="readout-label" title={`${data.landed_today} of them landed through Nitely; the rest were moved to Done`}>
-          done today
+        <span className="readout-top">
+          <span className="readout-n">{done.length}</span>
+          <span className="readout-label" title={`${data.landed_today} of them landed through Nitely; the rest were moved to Done`}>
+            done today
+          </span>
         </span>
         <span className="readout-sub">
-          {done.slice(0, 3).map((f) => (
-            <IssueToken key={f.issue.key} issue={f.issue} onOpen={ctx.onOpenIssue} />
-          ))}
-          {done.length > 3 && <span className="muted">+{done.length - 3}</span>}
-          {done.length === 0 && <span className="muted">Nothing yet today</span>}
+          <Sparkline kind="bars" values={landed} width={130} height={18} color="var(--fg-3)" label={`Landed per hour, last 24 hours: ${landed.reduce((a, b) => a + b, 0)}`} />
         </span>
       </div>
     </div>
   );
 }
 
-/** One project on the track: a column per station, stuck work in its own band below. */
-function Flow({ flow, ctx, onBoard }: { flow: ProjectFlow; ctx: Context; onBoard: () => void }) {
-  // Done today expands in place: the project page lists open issues by default.
-  const [allDone, setAllDone] = useState(false);
-  const at = (s: Station) =>
-    s === "done" ? flow.done_today : flow.issues.filter((f) => trackOf(f.issue).station === s && !trackOf(f.issue).closed);
-  const isStuck = (f: FlowIssue) => !!stuckReason(f, ctx.rows.get(f.issue.key), ctx.now);
-  const stuck = flow.issues.filter(isStuck);
+const LIVE_ORDER = { working: 0, waiting: 1, idle: 2, stale: 3, ended: 4 } as const;
+
+/** Every agent with a session open: who, on what, how far, and what it is doing now. */
+function RightNow({ data, board, ctx }: { data: PulseData; board: Board | null; ctx: Context }) {
+  const issues = new Map<string, IssueRecord>();
+  for (const p of data.projects) for (const f of [...p.issues, ...p.done_today]) issues.set(f.issue.key, f.issue);
+  for (const r of board?.repos.flatMap((x) => x.rows) ?? []) if (r.issue && !issues.has(r.issue.key)) issues.set(r.issue.key, r.issue);
+  const repoOf = new Map<string, string>();
+  for (const repo of board?.repos ?? []) {
+    for (const r of repo.rows) if (r.session) repoOf.set(r.session.id, repo.name);
+    for (const s of repo.unmatched_sessions) repoOf.set(s.id, repo.name);
+  }
+  const rank = (s: Session) => LIVE_ORDER[livenessOf(s, ctx.now) ?? "ended"];
+  const sessions = openSessions(board, ctx.now).sort((a, b) => rank(a.s) - rank(b.s) || b.s.last_seen_at - a.s.last_seen_at);
   return (
-    <section className="flow">
-      <div className="flow-head">
-        <h2>
-          {flow.name} <span className="muted mono small">{flow.key}</span>
-        </h2>
-        <span className="flow-sum">
-          {flow.issues.length} open
-          {stuck.length > 0 && <span className="stuck-ink"> · {stuck.length} stuck</span>}
-          {flow.done_today.length > 0 && <> · {flow.done_today.length} done today</>}
-        </span>
-        <button className="link flow-board" onClick={onBoard}>
-          All issues
-        </button>
-      </div>
-      {flow.issues.length === 0 && flow.done_today.length === 0 ? (
-        <p className="muted small flow-empty">Nothing open.</p>
+    <section>
+      <h2>
+        Right now <span className="head-note">every agent with a session open</span>
+      </h2>
+      {sessions.length === 0 ? (
+        <p className="muted small">No agent has a session open. Work they pick up shows here as it starts.</p>
       ) : (
-        <div className={`flow-grid${stuck.length ? " has-stuck" : ""}`}>
-          {stuck.length > 0 && <div className="flow-band" aria-hidden="true" />}
-          {STATIONS.map((s, i) => {
-            const here = at(s);
-            const moving = here.filter((f) => !isStuck(f));
-            const blocked = here.filter(isStuck);
-            // Placed explicitly, so the stuck band can lie under every column's last row.
-            const style = { "--c": stationColor(s), "--col": i + 1 } as CSSProperties;
+        <div className="now-list">
+          {sessions.map(({ s, key }) => {
+            const issue = key ? issues.get(key) : undefined;
+            const live = livenessOf(s, ctx.now);
+            const waiting = live === "waiting";
+            const where = repoOf.get(s.id);
             return (
-              <div key={s} className={`flow-col${here.length ? "" : " is-empty"}`} style={style}>
-                <div className="flow-st">
-                  <span className="flow-node" />
-                  <span className="flow-st-label">{s === "done" ? "Done today" : STATION_LABEL[s]}</span>
-                  <CountBadge count={here.length} tone={s === "needs" ? "attention" : "quiet"} />
-                </div>
-                {s === "todo" || s === "done" ? (
-                  // Queued and finished work stays quiet: keys only, the title on hover.
-                  <div className="flow-keys">
-                    {moving.slice(0, s === "done" && allDone ? undefined : KEYS).map((f) => (
-                      <IssueToken key={f.issue.key} issue={f.issue} onOpen={ctx.onOpenIssue} />
-                    ))}
-                    {moving.length > KEYS && !(s === "done" && allDone) && (
-                      <button className="flow-more" onClick={s === "done" ? () => setAllDone(true) : onBoard}>
-                        +{moving.length - KEYS} more
-                      </button>
-                    )}
-                  </div>
-                ) : (
-                  <div className="flow-cards">
-                    {moving.slice(0, CARDS).map((f) => (
-                      <Card key={f.issue.key} f={f} ctx={ctx} />
-                    ))}
-                    {moving.length > CARDS && (
-                      <button className="flow-more" onClick={onBoard}>
-                        +{moving.length - CARDS} more
-                      </button>
-                    )}
-                  </div>
-                )}
-                <div className="flow-cards flow-stuck">
-                  {blocked.map((f) => (
-                    <Card key={f.issue.key} f={f} ctx={ctx} />
-                  ))}
-                </div>
-              </div>
+              <button
+                key={s.id}
+                className={`now-row${waiting ? " is-waiting" : ""}${live === "idle" || live === "stale" ? " is-quiet" : ""}`}
+                onClick={() => key && ctx.onOpenIssue(key)}
+                disabled={!key}
+                title={[agentLabel(s.vendor), livenessLabel(s, ctx.now), s.last_activity].filter(Boolean).join(" · ")}
+              >
+                <span className="now-who">
+                  <AgentMark vendor={s.vendor} state={live} />
+                  <span className="now-who-name">
+                    {agentLabel(s.vendor)}
+                    {where && <span className="muted"> · {where.toLowerCase()}</span>}
+                  </span>
+                </span>
+                <span className="now-issue">{issue ? <IssueToken issue={issue} title /> : <span className="muted">{key ?? "No issue"}</span>}</span>
+                <span className="now-track">{issue && <StationTrack track={trackOf(issue)} />}</span>
+                <span className={`now-step${waiting ? " attention-ink" : ""}`}>{waiting ? livenessLabel(s, ctx.now) : (s.last_activity ?? livenessLabel(s, ctx.now))}</span>
+                <span className="now-age">{ago(ctx.now, waiting ? s.last_seen_at : s.started_at).replace(" ago", "")}</span>
+              </button>
             );
           })}
         </div>
@@ -324,19 +338,71 @@ function Flow({ flow, ctx, onBoard }: { flow: ProjectFlow; ctx: Context; onBoard
   );
 }
 
-/** An issue at its station: who has it and whether they are live, its key, title, and why it is stuck. */
-function Card({ f, ctx }: { f: FlowIssue; ctx: Context }) {
+/** One project on the track: a box per station holding its issues as chips. */
+function Flow({ flow, ctx, onBoard }: { flow: ProjectFlow; ctx: Context; onBoard: () => void }) {
+  // Done today expands in place: the project page lists open issues by default.
+  const [allDone, setAllDone] = useState(false);
+  const at = (s: Station) =>
+    s === "done" ? flow.done_today : flow.issues.filter((f) => trackOf(f.issue).station === s && !trackOf(f.issue).closed);
+  const isStuck = (f: FlowIssue) => !!stuckReason(f, ctx.rows.get(f.issue.key), ctx.now);
+  const stuck = flow.issues.filter(isStuck);
+  const moving = flow.issues.filter((f) => phaseOf(trackOf(f.issue).station) === "agent" && !isStuck(f));
+  const needs = at("needs").length;
+  return (
+    <div className="flow">
+      <div className="flow-head">
+        <button className="flow-name" onClick={onBoard} title={`Open ${flow.name}`}>
+          {flow.name}
+        </button>
+        <span className="flow-key">{flow.key}</span>
+        <span className="flow-sum">
+          {flow.issues.length} open
+          {moving.length > 0 && <> · {moving.length} moving</>}
+          {needs > 0 && <span className="attention-ink"> · {needs} waiting on you</span>}
+          {stuck.length > 0 && <span className="stuck-ink"> · {stuck.length} stuck</span>}
+          {flow.done_today.length > 0 && <> · {flow.done_today.length} done today</>}
+        </span>
+      </div>
+      <div className="flow-grid">
+        {STATIONS.map((s) => {
+          const here = at(s);
+          const max = s === "done" && allDone ? here.length : CHIPS;
+          return (
+            <div key={s} className={`flow-box${here.length ? " has-items" : ""}${s === "needs" && here.length ? " is-needs" : ""}`}>
+              <div className="flow-box-head">
+                <span>{s === "done" ? "Done today" : STATION_LABEL[s]}</span>
+                <span className="flow-box-count">{here.length}</span>
+              </div>
+              {here.slice(0, max).map((f) => (
+                <Chip key={f.issue.key} f={f} ctx={ctx} />
+              ))}
+              {here.length > max && (
+                <button className="flow-more" onClick={s === "done" ? () => setAllDone(true) : onBoard}>
+                  +{here.length - max} more
+                </button>
+              )}
+              {s === "done" && here.length === 0 && <span className="flow-more">none today</span>}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/** An issue at its station: its glyph and key, and who has it. Hover says the rest. */
+function Chip({ f, ctx }: { f: FlowIssue; ctx: Context }) {
   const row = ctx.rows.get(f.issue.key);
   const t = trackOf(f.issue);
   const reason = stuckReason(f, row, ctx.now);
   const session = row?.session ?? f.session;
   const live = livenessOf(session, ctx.now);
-  const waiting = live === "waiting";
   const vendor = session?.vendor ?? f.agent;
   const done = t.station === "done";
+  const blocked = !!reason && !(f.quiet && !t.stuck && !row?.state?.rebase_in_progress);
   const hover = [
     `${f.issue.key}: ${f.issue.title}`,
-    vendor && `${agentLabel(f.agent ?? vendor)}${live ? `, ${live}` : ""}`,
+    vendor && `${agentLabel(f.agent ?? vendor)}${live ? `, ${livenessLabel(session, ctx.now)}` : ""}`,
     t.rounds > 0 && `${t.rounds} round${t.rounds === 1 ? "" : "s"} of changes`,
     reason,
     f.last_activity && `last activity ${ago(ctx.now, f.last_activity)}`,
@@ -345,24 +411,14 @@ function Card({ f, ctx }: { f: FlowIssue; ctx: Context }) {
     .join("\n");
   return (
     <button
-      className={`fcard${reason ? (f.quiet && !t.stuck && !row?.state?.rebase_in_progress ? " is-quiet" : " is-stuck") : ""}${done ? " is-done" : ""}${waiting ? " is-waiting" : ""}`}
+      className={`fchip${reason ? (blocked ? " is-stuck" : " is-quiet") : ""}${done ? " is-done" : ""}`}
       onClick={() => ctx.onOpenIssue(f.issue.key)}
       title={hover}
     >
-      <span className="fcard-top">
-        {vendor ? <AgentMark vendor={vendor} state={done ? null : live} size={14} /> : <span className="fcard-nobody" />}
-        <span className="fcard-key">{f.issue.key}</span>
-        {t.rounds > 0 && !done && (
-          <span className="fcard-rounds" aria-label={`${t.rounds} rounds of changes`}>
-            ↺{t.rounds}
-          </span>
-        )}
-        {(t.asking || waiting) && (
-          <StateDot state="waiting" long={waitedLong(session, ctx.now)} title={waiting ? `Waiting for your input: ${livenessLabel(session, ctx.now)}` : "Asked you something"} />
-        )}
-      </span>
-      <span className="fcard-title">{f.issue.title}</span>
-      {reason && <span className="fcard-why">{reason}</span>}
+      <StationGlyph track={blocked && !t.stuck ? { ...t, stuck: reason } : t} size={12} />
+      <span className="fchip-key">{f.issue.key}</span>
+      {t.rounds > 0 && !done && <span className="fchip-rounds">↺{t.rounds}</span>}
+      {vendor && !done && <AgentMark vendor={vendor} state={live === "waiting" ? "waiting" : null} size={14} />}
     </button>
   );
 }

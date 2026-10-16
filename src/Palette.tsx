@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "./backend";
 import type { View } from "./App";
+import { HOME_LABEL } from "./util";
 import type { IssueRecord, Project } from "./types";
 import { IssueToken } from "./ui";
 import "./styles/palette.css";
@@ -14,7 +15,7 @@ interface Item {
 }
 
 const VIEWS: { label: string; view: View }[] = [
-  { label: "Pulse", view: { kind: "pulse" } },
+  { label: HOME_LABEL, view: { kind: "pulse" } },
   { label: "Inbox", view: { kind: "inbox" } },
   { label: "Now", view: { kind: "now" } },
   { label: "Activity", view: { kind: "activity" } },
@@ -121,16 +122,23 @@ export function Palette(props: { projects: Project[]; onGo: (view: View) => void
           if (e.target !== input.current) e.preventDefault();
         }}
       >
-        <input
-          ref={input}
-          autoFocus
-          className="palette-input"
-          placeholder="Go to a view, project or issue"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          aria-controls="palette-list"
-          aria-activedescendant={items[picked] ? `palette-${items[picked].id}` : undefined}
-        />
+        <div className="palette-search">
+          <input
+            ref={input}
+            autoFocus
+            className="palette-input"
+            placeholder="Go to a view, project or issue"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            aria-controls="palette-list"
+            aria-activedescendant={items[picked] ? `palette-${items[picked].id}` : undefined}
+          />
+          {query.trim() && (
+            <span className="palette-count">
+              {items.length} match{items.length === 1 ? "" : "es"}
+            </span>
+          )}
+        </div>
         <ul className="palette-list" id="palette-list" role="listbox" ref={list}>
           {items.map((it, n) => (
             <li
@@ -138,7 +146,8 @@ export function Palette(props: { projects: Project[]; onGo: (view: View) => void
               id={`palette-${it.id}`}
               role="option"
               aria-selected={n === picked}
-              className={n === picked ? "on" : undefined}
+              className={`${n === picked ? "on" : ""}${n === 0 || !it.issue !== !items[n - 1].issue ? " palette-first" : ""}`}
+              data-group={n === 0 || !it.issue !== !items[n - 1].issue ? (it.issue ? "Issues" : "Go to") : undefined}
               onMouseEnter={() => setPicked(n)}
               onClick={it.run}
             >
@@ -148,7 +157,20 @@ export function Palette(props: { projects: Project[]; onGo: (view: View) => void
           ))}
           {items.length === 0 && <li className="palette-none">Nothing matches.</li>}
         </ul>
-        <div className="palette-foot">↑↓ to pick · Enter to go · Esc to close · j and k move between items on a page</div>
+        <div className="palette-foot">
+          <span>
+            <kbd>↑↓</kbd> pick
+          </span>
+          <span>
+            <kbd>↵</kbd> go
+          </span>
+          <span>
+            <kbd>esc</kbd> close
+          </span>
+          <span>
+            <kbd>j k</kbd> move between items on a page
+          </span>
+        </div>
       </div>
     </div>
   );
@@ -157,13 +179,13 @@ export function Palette(props: { projects: Project[]; onGo: (view: View) => void
 /** Items j and k move between: whatever opens an issue or a row, in reading order. */
 const ITEMS = [
   ".content .list-row",
-  ".content .fcard",
-  ".content .flow-keys .ui-token",
+  ".content .now-row:not(:disabled)",
+  ".content .fchip",
   ".content .board-card .ui-token",
-  ".content .decision .ui-token",
+  ".content .inbox-row",
   ".content .act-row .ui-token",
   ".content .bmap-line .ui-token",
-  ".content td.cell-issue .ui-token",
+  ".content .now-card-issue",
   ".content .feed-row .ui-token",
 ].join(", ");
 

@@ -1,7 +1,7 @@
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { useEffect, useState } from "react";
 import { invoke, isPreview } from "./backend";
-import { decisionsOf, detailKeys, KIND_LABEL, type Decision, type DecisionKind } from "./decisions";
+import { decisionsOf, detailKeys, type Decision, type DecisionKind } from "./decisions";
 import { ChecksMark } from "./Pr";
 import type { Board, IssueDetail, TaskRow } from "./types";
 import { ago } from "./util";
@@ -13,7 +13,6 @@ import {
   IssueToken,
   describeFindings,
   LIVENESS_LABEL,
-  StateDot,
   StationTrack,
   VENDOR_LABEL,
   journeyOf,
@@ -24,8 +23,9 @@ import {
 import "./inbox.css";
 
 /**
- * Every decision waiting on the human, one card each: what is asked, why it needs them, where the
- * issue is, and the action in place. Most urgent first, then longest waiting.
+ * Every decision waiting on the human. The list on the left groups them by kind, most urgent
+ * first, then longest waiting; the decision picked is open on the right: what is asked, why it
+ * needs you, where the issue is on the track, and the action in place.
  */
 export function Inbox(props: {
   board: Board;
@@ -37,36 +37,89 @@ export function Inbox(props: {
 }) {
   const { board, details, now } = props;
   const decisions = decisionsOf(board, details, now);
+  const groups = GROUP_ORDER.map((k) => ({ kind: k, items: decisions.filter((d) => d.kind === k) })).filter((g) => g.items.length > 0);
+  const ordered = groups.flatMap((g) => g.items);
+  const [picked, setPicked] = useState<string | null>(null);
+  // The first decision is open until you pick one; a picked one that was settled hands over to the first.
+  const open = ordered.find((d) => d.id === picked) ?? ordered[0] ?? null;
+  const oldest = decisions.length ? Math.min(...decisions.map((d) => d.since)) : null;
+
+  if (decisions.length === 0) {
+    return (
+      <div className="page inbox">
+        <div className="page-head">
+          <h1>Inbox</h1>
+        </div>
+        <EmptyState title="Nothing needs you.">Agents show up here when they ask something, wait on your approval, or get stuck.</EmptyState>
+        <AtWork board={board} now={now} onOpenIssue={props.onOpenIssue} />
+      </div>
+    );
+  }
 
   return (
-    <div className="page inbox">
-      <div className="page-head">
-        <h1>Inbox</h1>
-        <Glance decisions={decisions} now={now} />
-      </div>
-      {decisions.length === 0 ? (
-        <>
-          <EmptyState title="Nothing needs you.">Agents show up here when they ask something, wait on your approval, or get stuck.</EmptyState>
-          <AtWork board={board} now={now} onOpenIssue={props.onOpenIssue} />
-        </>
-      ) : (
-        <div className="decisions">
-          {decisions.map((d) => (
-            <DecisionCard
-              key={d.id}
-              decision={d}
-              detail={d.issue ? details.get(d.issue.key) : undefined}
-              integration={board.repos.find((r) => r.name === d.repo)?.integration_branch ?? null}
-              now={now}
-              onOpenIssue={props.onOpenIssue}
-              onChanged={props.onChanged}
-            />
-          ))}
+    <div className="inbox-split">
+      <div className="inbox-list">
+        <div className="inbox-head">
+          <div className="page-head">
+            <h1>Inbox</h1>
+            <span className="head-note attention-ink">
+              {decisions.length} need{decisions.length === 1 ? "s" : ""} you
+            </span>
+          </div>
+          <p className="inbox-sub">Only decisions an agent cannot make.{oldest !== null && ` Oldest ${ago(now, oldest).replace(" ago", "")}.`}</p>
         </div>
+        {groups.map((g) => (
+          <div key={g.kind} className="inbox-group">
+            <div className="inbox-group-head">
+              <span>{GROUP_LABEL[g.kind]}</span>
+              <span>{g.items.length}</span>
+            </div>
+            {g.items.map((d) => (
+              <InboxRow
+                key={d.id}
+                decision={d}
+                detail={d.issue ? details.get(d.issue.key) : undefined}
+                on={open?.id === d.id}
+                now={now}
+                onPick={() => setPicked(d.id)}
+                onOpenIssue={props.onOpenIssue}
+              />
+            ))}
+          </div>
+        ))}
+        <div className="inbox-keys">
+          <span>
+            <kbd>j k</kbd> move
+          </span>
+          <span>
+            <kbd>↵</kbd> open issue
+          </span>
+        </div>
+      </div>
+      {open && (
+        <DecisionDetail
+          key={open.id}
+          decision={open}
+          detail={open.issue ? details.get(open.issue.key) : undefined}
+          integration={board.repos.find((r) => r.name === open.repo)?.integration_branch ?? null}
+          now={now}
+          onOpenIssue={props.onOpenIssue}
+          onChanged={props.onChanged}
+        />
       )}
     </div>
   );
 }
+
+/** Questions first: an agent is blocked on each one. */
+const GROUP_ORDER: DecisionKind[] = ["ask", "approve", "conflict", "land", "input"];
+const GROUP_LABEL: Record<DecisionKind, string> = {
+  ask: "Questions",
+  approve: "Approvals",
+  conflict: "Conflicts",
+  input: "Waiting agents",
+  land: "Stopped lands",
+};
 
 /**
  * Details of the issues the Inbox's decisions name (why an approval waits, whether a land
@@ -90,33 +143,83 @@ export function useDecisionDetails(board: Board | null): Map<string, IssueDetail
   return details;
 }
 
-const PLURAL: Record<DecisionKind, string> = {
-  ask: "questions",
-  approve: "approvals",
-  conflict: "conflicts",
-  input: "waiting agents",
-  land: "stopped lands",
-};
+/** What last happened, in one line under a decision in the list: good is teal, bad is red. */
+function eventOf(d: Decision, detail: IssueDetail | undefined): { text: string; tone: "good" | "bad" | null; agent: string | null } {
+  const who = (vendor: string | null) => VENDOR_LABEL[vendorOf(vendor)];
+  const agent = d.row?.session?.vendor ?? d.row?.vendor ?? null;
+  switch (d.kind) {
+    case "ask":
+      return { text: `${who(d.ask!.asked_by)} waits for your answer`, tone: null, agent: d.ask!.asked_by };
+    case "approve": {
+      if (d.issue && d.issue.origin !== "nitely") return { text: `Waits in ${originName(d.issue.origin)}`, tone: null, agent };
+      const review = detail?.reviews[0];
+      if (!review?.reviewer) return { text: detail ? "No review ran" : "Reading its review", tone: detail ? "bad" : null, agent };
+      const reviewed = journeyOf(detail?.timeline, detail?.reviews).rounds.filter((r) => r.review && r.review.verdict !== "none").length;
+      const passed = review.verdict !== "changes";
+      return {
+        text: `${who(review.reviewer)} ${passed ? "passed" : "asked for changes"}${reviewed > 1 ? ` after ${reviewed} rounds` : ""}`,
+        tone: passed ? "good" : "bad",
+        agent: review.reviewer,
+      };
+    }
+    case "conflict":
+      return { text: "Rebase stopped on a conflict", tone: "bad", agent };
+    case "input":
+      return { text: `${who(agent)} waits in its terminal`, tone: null, agent };
+    case "land":
+      return { text: "Land stopped", tone: "bad", agent };
+  }
+}
 
-/** The page in one line: how many decisions, of which kinds, and how long the oldest has waited. */
-function Glance({ decisions, now }: { decisions: Decision[]; now: number }) {
-  if (decisions.length === 0) return null;
-  const kinds = (Object.keys(KIND_LABEL) as DecisionKind[])
-    .map((k) => [k, decisions.filter((d) => d.kind === k).length] as const)
-    .filter(([, n]) => n > 0);
-  const oldest = Math.min(...decisions.map((d) => d.since));
+function InboxRow(props: {
+  decision: Decision;
+  detail?: IssueDetail;
+  on: boolean;
+  now: number;
+  onPick: () => void;
+  onOpenIssue: (key: string) => void;
+}) {
+  const { decision: d } = props;
+  const issue = props.detail?.issue ?? d.issue;
+  const ev = eventOf(d, props.detail);
   return (
-    <span className="head-glance">
-      <span className="attention-ink">
-        <StateDot state="waiting" /> {decisions.length} need{decisions.length === 1 ? "s" : ""} you
+    <button
+      className={`inbox-row${props.on ? " on" : ""}`}
+      onClick={props.onPick}
+      onFocus={props.onPick}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" && issue) {
+          e.preventDefault();
+          props.onOpenIssue(issue.key);
+        }
+      }}
+      aria-current={props.on ? "true" : undefined}
+    >
+      <span className={`inbox-kind inbox-kind-${d.kind}`} aria-label={KIND_WORD[d.kind]}>
+        {KIND_CHAR[d.kind]}
       </span>
-      <span>{kinds.map(([k, n]) => `${n} ${n === 1 ? KIND_LABEL[k] : PLURAL[k]}`).join(", ")}</span>
-      <span>oldest {ago(now, oldest).replace(" ago", "")}</span>
-    </span>
+      <span className="inbox-row-text">
+        <span className="inbox-row-top">
+          <span className="inbox-row-key">{issue?.key ?? d.row?.branch ?? d.repo}</span>
+          <span className="inbox-row-title">{issue?.title ?? (d.row ? d.row.worktree : "")}</span>
+        </span>
+        <span className="inbox-row-ev">
+          {ev.agent && <AgentMark vendor={ev.agent} size={16} />}
+          <span className={`inbox-ev-dot${ev.tone ? ` inbox-ev-${ev.tone}` : ""}`} />
+          <span className={ev.tone === "bad" ? "inbox-ev-bad-text" : undefined}>{ev.text}</span>
+        </span>
+      </span>
+      <span className="inbox-row-age" title={`Waiting since ${new Date(d.since * 1000).toLocaleString()}`}>
+        {ago(props.now, d.since).replace(" ago", "")}
+      </span>
+    </button>
   );
 }
 
-function DecisionCard(props: {
+/** The kind's mark in the list: a filled "?" asks something; a ringed mark waits on a decision. */
+const KIND_CHAR: Record<DecisionKind, string> = { ask: "?", approve: "✓", conflict: "!", input: "…", land: "!" };
+
+function DecisionDetail(props: {
   decision: Decision;
   detail?: IssueDetail;
   integration: string | null;
@@ -130,6 +233,8 @@ function DecisionCard(props: {
   const [note, setNote] = useState<string | null>(null);
   const issue = detail?.issue ?? d.issue;
   const track = issue ? trackOf(issue, detail?.timeline, detail?.reviews) : null;
+  const agent = d.kind === "ask" ? d.ask!.asked_by : (d.row?.session?.vendor ?? d.row?.vendor ?? null);
+  const live = livenessOf(d.row?.session, now);
 
   const act = async (run: () => Promise<unknown>) => {
     setBusy(true);
@@ -154,54 +259,75 @@ function DecisionCard(props: {
       setError(String(e));
     }
   };
+  const status = d.kind === "ask" ? "waiting for your answer" : live ? LIVENESS_LABEL[live] : "no session open";
 
   return (
-    <article className={`decision decision-${d.kind}`}>
-      <div className="decision-context">
-        <span className="decision-kind">{KIND_WORD[d.kind]}</span>
-        {issue ? (
-          <IssueToken issue={issue} track={track ?? undefined} title onOpen={props.onOpenIssue} />
-        ) : (
-          <span className="mono muted">{d.row?.branch ?? d.repo ?? "No issue"}</span>
-        )}
-        <span className="decision-where">
-          {track && <StationTrack track={track} />}
-          <span className="decision-age" title={`Waiting since ${new Date(d.since * 1000).toLocaleString()}`}>
-            {ago(now, d.since).replace(" ago", "")}
-          </span>
+    <article className={`inbox-detail decision-${d.kind}`}>
+      <div className="dd-context">
+        <span className="dd-kind">{KIND_WORD[d.kind]}</span>
+        {issue && <span className="mono muted">{issue.key}</span>}
+        <span className="dd-meta" title={`Waiting since ${new Date(d.since * 1000).toLocaleString()}`}>
+          {[issue?.kind, `${d.kind === "ask" ? "asked" : "waiting"} ${ago(now, d.since)}`].filter(Boolean).join(" · ")}
         </span>
       </div>
-      <Body decision={d} detail={detail} integration={props.integration} now={now} />
-      <div className="actions">
+      {issue ? (
+        <button className="dd-title" onClick={() => props.onOpenIssue(issue.key)} title="Open the issue">
+          {issue.title}
+        </button>
+      ) : (
+        <p className="dd-title mono">{d.row?.branch ?? d.repo ?? "No issue"}</p>
+      )}
+      {track && (
+        <div className="dd-track">
+          <StationTrack track={track} size="full" now={now} />
+        </div>
+      )}
+      <div className="dd-card">
+        {agent ? <AgentMark vendor={agent} state={d.kind === "ask" ? null : live} size={22} /> : <span className="dd-nobody" />}
+        <div className="dd-card-body">
+          <p className="dd-who">{[agent && VENDOR_LABEL[vendorOf(agent)], d.row?.branch, status].filter(Boolean).join(" · ")}</p>
+          <Body decision={d} detail={detail} integration={props.integration} now={now} />
+          {(d.kind === "conflict" || d.kind === "input" || d.kind === "land") && d.row && <p className="decision-path mono">{d.row.worktree}</p>}
+        </div>
+      </div>
+      <div className="dd-actions">
         {d.kind === "ask" && d.ask && <Answer askId={d.ask.id} options={d.ask.options} busy={busy} act={act} />}
         {d.kind === "approve" && issue?.origin === "nitely" && (
-          <>
+          <div className="actions">
             <button className="btn primary" disabled={busy} onClick={() => move("Approved")}>
               Approve
             </button>
-            <button className="btn quiet" disabled={busy} onClick={() => move("Todo")}>
+            <button className="btn" disabled={busy} onClick={() => move("Todo")}>
               Send back to Todo
             </button>
-          </>
+          </div>
         )}
         {d.kind === "approve" && issue && issue.origin !== "nitely" && <span className="muted small">In {originName(issue.origin)}. Act on it there.</span>}
         {(d.kind === "conflict" || d.kind === "input" || d.kind === "land") && d.row && (
-          <button className="btn primary" onClick={() => reveal(d.row!.worktree)}>
-            Open the worktree
+          <div className="actions">
+            <button className="btn primary" onClick={() => reveal(d.row!.worktree)}>
+              Open the worktree
+            </button>
+            {d.kind === "land" && issue && (
+              <button className="btn" disabled={busy} onClick={() => move("Todo")}>
+                Send back to Todo
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+      <div className="dd-links">
+        {issue && (
+          <button className="link" onClick={() => props.onOpenIssue(issue.key)}>
+            Open issue
           </button>
         )}
-        {d.kind === "land" && issue && (
-          <button className="btn quiet" disabled={busy} onClick={() => move("Todo")}>
-            Send back to Todo
-          </button>
-        )}
-        {d.kind === "approve" && d.row && (
-          <button className="btn quiet" onClick={() => reveal(d.row!.worktree)}>
+        {d.row && (d.kind === "approve" || d.kind === "ask") && (
+          <button className="link" onClick={() => reveal(d.row!.worktree)}>
             Open the worktree
           </button>
         )}
       </div>
-      {(d.kind === "conflict" || d.kind === "input" || d.kind === "land") && d.row && <p className="decision-path mono">{d.row.worktree}</p>}
       {note && <p className="muted small">{note}</p>}
       {error && <p className="error small">{error}</p>}
     </article>
@@ -229,15 +355,7 @@ function Body(props: { decision: Decision; detail?: IssueDetail; integration: st
 
   switch (d.kind) {
     case "ask": {
-      const by = d.ask!.asked_by;
-      return (
-        <>
-          <p className="decision-matter">{d.ask!.question}</p>
-          <p className="decision-why">
-            <AgentMark vendor={by} size={14} /> {who(by)} waits for your answer.
-          </p>
-        </>
-      );
+      return <p className="decision-matter">{d.ask!.question}</p>;
     }
     case "approve": {
       // A mirrored issue waits for the human in its own tracker; Nitely ran no playbook on it.
@@ -332,25 +450,26 @@ function Answer(props: { askId: number; options: string[]; busy: boolean; act: (
     if (value.trim()) props.act(() => invoke("answer_ask", { id: props.askId, answer: value.trim() }));
   };
   return (
-    <>
-      {props.options.map((o) => (
-        <button key={o} className="btn" disabled={props.busy} onClick={() => answer(o)}>
+    <div className="dd-answer">
+      {props.options.map((o, i) => (
+        <button key={o} className={`dd-option${i === 0 ? " primary" : ""}`} disabled={props.busy} onClick={() => answer(o)}>
+          <span className="dd-option-n">{i + 1}</span>
           {o}
         </button>
       ))}
       <form
-        className="answer"
+        className="dd-words"
         onSubmit={(e) => {
           e.preventDefault();
           answer(text);
         }}
       >
-        <input value={text} onChange={(e) => setText(e.target.value)} placeholder={props.options.length ? "Or answer in your words" : "Your answer"} />
+        <input value={text} onChange={(e) => setText(e.target.value)} placeholder={props.options.length ? "Or answer in your words…" : "Your answer…"} />
         <button className="btn primary" disabled={props.busy || !text.trim()}>
           Send
         </button>
       </form>
-    </>
+    </div>
   );
 }
 

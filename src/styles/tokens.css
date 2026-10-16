@@ -1,71 +1,82 @@
 /* Nitely's design tokens. docs/visualization.md says what each role is for; use roles, never raw
    colors, in views and primitives. Light is the default, dark follows the system, and
-   [data-theme] on <html> forces either one (the browser preview's theme switch sets it). */
+   [data-theme] on <html> forces either one (the browser preview's theme switch sets it).
+
+   One rule colors every issue: teal is an agent moving it, amber is waiting on you, red has
+   failed, grey is at rest. Surfaces are a warm graphite, never the stock cool gray. */
+
+@import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist-mono";
 
 :root {
-  /* Surfaces: a warm graphite neutral, never the stock cool gray. */
-  --bg: #f6f6f4;
+  /* Surfaces, from the page down to what sits on it. --sunken is the sidebar and code. */
+  --bg: #f8f7f4;
   --surface: #ffffff;
-  --sunken: #efefec;
-  --hover: #ebebe7;
-  --line: #e4e3df;
-  --line-strong: #cbcac4;
+  --sunken: #f1f0ec;
+  --hover: #ecebe6;
+  --line: #e3e1db;
+  --line-strong: #d3d1ca;
 
   /* Text, in three steps. --fg-3 is for things that should fade: done, stale, hints. */
-  --fg: #1d1d1b;
-  --fg-2: #5d5c57;
-  --fg-3: #6f6e68;
+  --fg: #1b1b19;
+  --fg-2: #55544f;
+  --fg-3: #8c8b85;
 
   /* The one attention color. Only for what needs the human: an open ask, Needs You, a stuck
      worktree waiting on them. Never for decoration, links or the primary button. */
-  --attention: #d68a00;
-  --attention-ink: #9a5b00;
-  --attention-wash: #fbf1dd;
-  --on-attention: #1d1d1b;
+  --attention: oklch(0.66 0.15 65);
+  --attention-ink: oklch(0.58 0.14 62);
+  --attention-wash: oklch(0.66 0.15 65 / 0.1);
+  --on-attention: #ffffff;
 
-  /* Live work: an agent working right now. Also the color of the agent's stations. */
-  --live: #0d8068;
+  /* An agent moving the work: working right now, and every station an agent holds. */
+  --live: oklch(0.56 0.11 170);
+  --live-wash: oklch(0.56 0.11 170 / 0.1);
 
-  /* Stations of the lifecycle track. The agent's stations step through one teal ramp, so the
-     track reads as one movement; the human's station is the attention color; done fades. */
-  --st-todo: #b4b3ad;
-  --st-started: #74b5a6;
+  /* Failed: a gate, a land, a review that did not finish. */
+  --fail: oklch(0.57 0.18 25);
+  --fail-wash: oklch(0.57 0.18 25 / 0.08);
+
+  /* Stations of the lifecycle track. Color says whose move it is: the agent's stations are all
+     teal, the human's is amber, queued and done are grey. */
+  --st-todo: var(--fg-3);
+  --st-started: var(--live);
   --st-working: var(--live);
-  --st-gate: #0c7764;
-  --st-review: #0a6656;
+  --st-gate: var(--live);
+  --st-review: var(--live);
   --st-needs: var(--attention);
-  --st-landing: #08574a;
-  --st-done: #9a9992;
-  --st-stuck: #c0453a;
-  --st-changes: #0a6656;
-  --st-closed: #b4b3ad;
+  --st-landing: var(--live);
+  --st-done: var(--fg-3);
+  --st-stuck: var(--fail);
+  --st-changes: var(--live);
+  --st-closed: var(--line-strong);
 
-  /* Agents. Muted so that a screen full of agents stays calm; each also has its own shape. */
-  --vendor-claude: #b25d43;
-  --vendor-codex: #3f566b;
-  --vendor-cursor: #6a6e32;
+  /* Agents: a rounded square with the vendor's letter. */
+  --vendor-claude: oklch(0.62 0.13 42);
+  --vendor-codex: oklch(0.5 0.06 255);
+  --vendor-cursor: oklch(0.42 0.01 260);
   --vendor-human: var(--fg);
   --vendor-other: #7d7c76;
   --on-vendor: #ffffff;
 
-  /* Review finding severity. Only P0 and P1 block, so only they are red. */
-  --sev-p0: #d1291f;
-  --sev-p1: #c0453a;
-  --sev-p2: var(--fg-2);
+  /* Review finding severity. Only P0 and P1 block, so only they are red; P2 is amber. */
+  --sev-p0: var(--fail);
+  --sev-p1: var(--fail);
+  --sev-p2: var(--attention-ink);
   --sev-p3: var(--fg-3);
 
-  /* Type. The system face (Segoe UI Variable on Windows); mono only for data: keys, branches,
-     paths, hashes. */
-  --font: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
-  --font-mono: "Cascadia Mono", "Cascadia Code", ui-monospace, Menlo, Consolas, monospace;
+  /* Type. Geist, bundled so the app needs no network; mono only for data: keys, branches,
+     paths, hashes, times. */
+  --font: "Geist Variable", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: "Geist Mono Variable", "Cascadia Mono", ui-monospace, Menlo, Consolas, monospace;
   --text-xs: 11px;
   --text-sm: 12px;
-  --text-md: 13.5px;
+  --text-md: 13px;
   --text-lg: 15px;
-  --text-xl: 20px;
-  --text-2xl: 28px;
-  --weight-medium: 550;
-  --weight-strong: 650;
+  --text-xl: 22px;
+  --text-2xl: 34px;
+  --weight-medium: 500;
+  --weight-strong: 600;
 
   /* Spacing on a 4px step. */
   --space-1: 4px;
@@ -75,8 +86,8 @@
   --space-5: 24px;
   --space-6: 32px;
 
-  --radius-sm: 4px;
-  --radius: 6px;
+  --radius-sm: 5px;
+  --radius: 7px;
   --radius-lg: 10px;
 
   /* Motion. Things move only to say something is alive or just changed. */
@@ -85,79 +96,61 @@
   --dur: 200ms;
   --breathe: 2.4s;
 
-  --shadow-panel: -1px 0 0 var(--line), -12px 0 32px -16px rgba(29, 29, 27, 0.18);
+  --shadow-panel: -1px 0 0 var(--line), -20px 0 60px -20px rgba(40, 35, 20, 0.16);
+  --shadow-float: 0 20px 60px rgba(40, 35, 20, 0.16);
+  --scrim: rgba(27, 27, 25, 0.28);
   --focus: var(--fg-2);
   color-scheme: light;
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #151514;
-    --surface: #1c1c1a;
-    --sunken: #111110;
-    --hover: #262624;
-    --line: #2b2b28;
-    --line-strong: #43423e;
+    --bg: #141413;
+    --surface: #1b1b1a;
+    --sunken: #171716;
+    --hover: #222220;
+    --line: #292927;
+    --line-strong: #363633;
     --fg: #ecebe6;
-    --fg-2: #a6a59e;
-    --fg-3: #87867f;
-    --attention: #f0a830;
-    --attention-ink: #f4b955;
-    --attention-wash: #2e2412;
-    --on-attention: #1d1d1b;
-    --live: #3cc4a3;
-    --st-todo: #5a5954;
-    --st-started: #3d7d6f;
-    --st-gate: #34ad90;
-    --st-review: #2e9a80;
-    --st-landing: #29876f;
-    --st-done: #74736d;
-    --st-stuck: #e0766a;
-    --st-changes: #2e9a80;
-    --st-closed: #5a5954;
-    --vendor-claude: #c97a5e;
-    --vendor-codex: #7f98ae;
-    --vendor-cursor: #a3a85a;
-    --vendor-other: #8f8e88;
-    --on-vendor: #151514;
-    --sev-p0: #f0675c;
-    --sev-p1: #e0766a;
-    --shadow-panel: -1px 0 0 var(--line), -12px 0 32px -12px rgba(0, 0, 0, 0.55);
+    --fg-2: #a7a69f;
+    --fg-3: #7c7b75;
+    --attention: oklch(0.8 0.14 75);
+    --attention-ink: oklch(0.8 0.14 75);
+    --attention-wash: oklch(0.8 0.14 75 / 0.12);
+    --on-attention: #141413;
+    --live: oklch(0.76 0.12 170);
+    --live-wash: oklch(0.76 0.12 170 / 0.12);
+    --fail: oklch(0.7 0.16 25);
+    --fail-wash: oklch(0.7 0.16 25 / 0.12);
+    --vendor-other: #6b6a65;
+    --shadow-panel: -1px 0 0 var(--line), -24px 0 80px -24px rgba(0, 0, 0, 0.6);
+    --shadow-float: 0 30px 90px rgba(0, 0, 0, 0.5);
+    --scrim: rgba(0, 0, 0, 0.5);
     color-scheme: dark;
   }
 }
 
 :root[data-theme="dark"] {
-  --bg: #151514;
-  --surface: #1c1c1a;
-  --sunken: #111110;
-  --hover: #262624;
-  --line: #2b2b28;
-  --line-strong: #43423e;
+  --bg: #141413;
+  --surface: #1b1b1a;
+  --sunken: #171716;
+  --hover: #222220;
+  --line: #292927;
+  --line-strong: #363633;
   --fg: #ecebe6;
-  --fg-2: #a6a59e;
-  --fg-3: #87867f;
-  --attention: #f0a830;
-  --attention-ink: #f4b955;
-  --attention-wash: #2e2412;
-  --on-attention: #1d1d1b;
-  --live: #3cc4a3;
-  --st-todo: #5a5954;
-  --st-started: #3d7d6f;
-  --st-gate: #34ad90;
-  --st-review: #2e9a80;
-  --st-landing: #29876f;
-  --st-done: #74736d;
-  --st-stuck: #e0766a;
-  --st-changes: #2e9a80;
-  --st-closed: #5a5954;
-  --vendor-claude: #c97a5e;
-  --vendor-codex: #7f98ae;
-  --vendor-cursor: #a3a85a;
-  --vendor-other: #8f8e88;
-  --on-vendor: #151514;
-  --sev-p0: #f0675c;
-  --sev-p1: #e0766a;
-  --shadow-panel: -1px 0 0 var(--line), -12px 0 32px -12px rgba(0, 0, 0, 0.55);
+  --fg-2: #a7a69f;
+  --fg-3: #7c7b75;
+  --attention: oklch(0.8 0.14 75);
+  --attention-ink: oklch(0.8 0.14 75);
+  --attention-wash: oklch(0.8 0.14 75 / 0.12);
+  --on-attention: #141413;
+  --live: oklch(0.76 0.12 170);
+  --live-wash: oklch(0.76 0.12 170 / 0.12);
+  --fail: oklch(0.7 0.16 25);
+  --fail-wash: oklch(0.7 0.16 25 / 0.12);
+  --vendor-other: #6b6a65;
+  --shadow-panel: -1px 0 0 var(--line), -24px 0 80px -24px rgba(0, 0, 0, 0.6);
+  --shadow-float: 0 30px 90px rgba(0, 0, 0, 0.5);
+  --scrim: rgba(0, 0, 0, 0.5);
   color-scheme: dark;
 }

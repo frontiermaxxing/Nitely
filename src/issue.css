@@ -74,3 +74,34 @@ button.journey-toggle:focus-visible { outline: 2px solid var(--focus); outline-o
 .panel-timeline { margin-top: 22px; }
 .panel-timeline summary { font-size: var(--text-sm); font-weight: 600; color: var(--fg-2); }
 .panel-timeline[open] summary { margin-bottom: 12px; }
+
+/* ----- who had it: a lane per owner, a cell per step, in time order ----- */
+.who { margin: 0 0 22px; }
+.who h2 { margin: 0 0 12px; }
+.who-grid {
+  position: relative; display: grid; grid-auto-rows: 48px; align-items: center; padding: 10px 16px 6px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg);
+}
+.who-lane { grid-column: 1; display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--fg-2); min-width: 0; }
+.who-lane-blank { width: 16px; flex: none; }
+.who-rule { grid-column: 2 / -1; height: 1px; background: var(--line); }
+/* A cell is as wide as its words and centered on its column; it may reach into the columns beside
+   it, which belong to other lanes' steps. */
+.who-cell {
+  position: relative; z-index: 1; justify-self: center; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px;
+  width: max-content; height: 36px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--line-strong);
+  background: var(--surface); white-space: nowrap;
+}
+.who-label { font-size: 11.5px; font-weight: var(--weight-medium); color: var(--fg); }
+
+.who-sub { font-family: var(--font-mono); font-size: 10.5px; color: var(--fg-3); }
+.who-ok { border-color: var(--live); background: var(--live-wash); }
+.who-ok .who-label { color: var(--live); }
+.who-fail { border-color: var(--fail); background: var(--fail-wash); }
+.who-fail .who-label { color: var(--fail); }
+.who-changes { border-color: var(--live); border-style: dashed; }
+.who-changes .who-label { color: var(--live); }
+.who-pass { border-color: var(--live); background: var(--live); }
+.who-pass .who-label, .who-pass .who-sub { color: var(--bg); }
+.who-needs { border-color: var(--attention); background: var(--attention-wash); }
+.who-needs .who-label { color: var(--attention-ink); }

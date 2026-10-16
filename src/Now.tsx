@@ -2,17 +2,19 @@ import { useState } from "react";
 import { invoke } from "./backend";
 import type { View } from "./App";
 import type { Board, SyncStatus, TaskRow } from "./types";
-import { PrCell } from "./Pr";
 import { ago } from "./util";
 import {
   AgentMark,
   EmptyState,
   IssueToken,
-  livenessLabel,
+  PrMark,
+  STATION_LABEL,
   StateDot,
   StationTrack,
   VENDOR_LABEL,
+  livenessLabel,
   livenessOf,
+  stationColor,
   trackOf,
   vendorOf,
 } from "./ui";
@@ -55,32 +57,20 @@ export function Now(props: {
         </EmptyState>
       )}
       {board.repos.map((repo) => {
-        const rows = sortRows(repo.rows).filter((r) => showMain || !r.is_main);
+        const rows = sortRows(repo.rows, now).filter((r) => showMain || !r.is_main);
         return (
           <section key={repo.name}>
             <h2>
-              {repo.name} <span className="muted mono small">{repo.integration_branch}</span>
+              {repo.name} <span className="head-note mono">{repo.integration_branch}</span>
             </h2>
             {repo.error && <p className="error">{repo.error}</p>}
             {rows.length === 0 ? (
               <p className="muted small">No task worktrees yet. Agents get one per issue; tick "Show main checkouts" to see the main one.</p>
             ) : (
-              <div className="table-wrap">
-                <table className="now">
-                  <thead>
-                    <tr>
-                      <th>Issue</th>
-                      <th>Agent</th>
-                      <th>Pull request</th>
-                      <th>Branch</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {rows.map((row) => (
-                      <Row key={row.worktree} row={row} integration={repo.integration_branch} now={now} onOpenIssue={props.onOpenIssue} />
-                    ))}
-                  </tbody>
-                </table>
+              <div className="now-cards">
+                {rows.map((row) => (
+                  <Card key={row.worktree} row={row} integration={repo.integration_branch} now={now} onOpenIssue={props.onOpenIssue} />
+                ))}
               </div>
             )}
             {repo.unmatched_sessions.length > 0 && (
@@ -102,98 +92,89 @@ export function Now(props: {
   );
 }
 
-function Row(props: { row: TaskRow; integration: string; now: number; onOpenIssue: (key: string) => void }) {
+/** A worktree as a card: who is in it, on what, how far it got, and its last three things. */
+function Card(props: { row: TaskRow; integration: string; now: number; onOpenIssue: (key: string) => void }) {
   const { row, now } = props;
   const s = row.session;
   const live = livenessOf(s, now);
   const st = row.state;
-  const quiet = !live || live === "stale" || live === "ended";
+  const quiet = !live || live === "stale" || live === "ended" || live === "idle";
+  const vendor = s?.vendor ?? row.vendor;
+  const track = row.issue ? trackOf(row.issue) : null;
+  const log: { t: string; text: string; tone?: "fail" | "attention" }[] = [];
+  if (st?.rebase_in_progress) log.push({ t: "now", text: `Rebase onto ${props.integration} stopped on a conflict`, tone: "fail" });
+  if (s?.last_activity) log.push({ t: live === "working" ? "now" : ago(now, s.last_seen_at).replace(" ago", ""), text: s.last_activity, tone: live === "waiting" ? "attention" : undefined });
+  if (st?.last_commit_subject && st.last_commit_at) log.push({ t: ago(now, st.last_commit_at).replace(" ago", ""), text: st.last_commit_subject });
+  if (s) log.push({ t: ago(now, s.started_at).replace(" ago", ""), text: `Session started${row.branch ? ` on ${row.branch}` : ""}` });
+  const state = st?.rebase_in_progress
+    ? { text: "Rebase stopped", color: "var(--fail)" }
+    : track
+      ? { text: track.stuck ?? STATION_LABEL[track.station], color: track.closed ? "var(--fg-3)" : stationColor(track.station, !!track.stuck) }
+      : null;
 
   return (
-    <tr className={`${row.needs_me ? "needs-me" : ""}${quiet && !row.needs_me ? " quiet" : ""}`} title={row.worktree}>
-      <td className="cell-issue">
-        {row.issue ? (
-          <>
-            <div className="cell-line">
-              <IssueToken issue={row.issue} onOpen={props.onOpenIssue} />
-              <StationTrack track={trackOf(row.issue)} />
-            </div>
-            <div className="cell-sub">{row.issue.title}</div>
-          </>
-        ) : (
-          <span className="mono">{row.issue_key ?? (row.is_main ? "main checkout" : "–")}</span>
+    <div className={`now-card${row.needs_me || live === "waiting" ? " needs-me" : ""}${quiet && !row.needs_me ? " quiet" : ""}`} title={row.worktree}>
+      <div className="now-card-top">
+        {vendor ? <AgentMark vendor={vendor} state={live} size={20} /> : <span className="now-card-nobody" />}
+        <span className="now-card-agent">{vendor ? VENDOR_NAME[vendorOf(vendor)] : "No agent"}</span>
+        <span className="now-card-branch">{row.branch ?? "detached"}</span>
+        {row.pr && <PrMark pr={row.pr} link />}
+        <span className="now-card-age">{s ? (live === "working" ? ago(now, s.started_at).replace(" ago", "") : livenessLabel(s, now)) : ""}</span>
+      </div>
+      {row.issue ? (
+        <button className="now-card-issue" onClick={() => props.onOpenIssue(row.issue!.key)}>
+          <IssueToken issue={row.issue} title />
+        </button>
+      ) : (
+        <span className="now-card-issue mono muted">{row.issue_key ?? (row.is_main ? "main checkout" : "No issue")}</span>
+      )}
+      <div className="now-card-state">
+        {track && <StationTrack track={track} />}
+        {state && (
+          <span className="now-card-station" style={{ color: state.color }}>
+            {state.text}
+          </span>
         )}
-      </td>
-      <td className="cell-agent">
-        {row.vendor || s ? (
-          <>
-            <div className="cell-line">
-              <AgentMark vendor={s?.vendor ?? row.vendor} state={live} />
-              <span>{VENDOR_LABEL[vendorOf(s?.vendor ?? row.vendor)]}</span>
-              <span className={live === "waiting" ? "attention-ink" : "muted"}>{livenessLabel(s, now)}</span>
-              {s && <span className="muted">· {ago(now, s.last_seen_at)}</span>}
-            </div>
-            <div className="cell-sub">
-              {st?.rebase_in_progress && <strong>Rebase stopped on a conflict. </strong>}
-              {s?.last_activity ?? (st?.rebase_in_progress ? "" : <span className="muted">–</span>)}
-            </div>
-          </>
-        ) : st?.rebase_in_progress ? (
-          <strong>Rebase stopped on a conflict.</strong>
-        ) : (
-          <span className="muted">–</span>
+        {st && (
+          <span className="now-card-git" title={`ahead of and behind ${props.integration}`}>
+            ↑{st.ahead} ↓{st.behind} · {st.dirty_files ? `${st.dirty_files} uncommitted` : "clean"}
+          </span>
         )}
-      </td>
-      <td className="cell-pr">{row.pr ? <PrCell pr={row.pr} /> : <span className="muted">–</span>}</td>
-      <td className="cell-branch">
-        <div className="mono branch" title={row.branch ?? undefined}>
-          {row.branch ?? "detached"}
+        {row.error && <span className="error small">{row.error}</span>}
+      </div>
+      {log.length > 0 && (
+        <div className="now-card-log">
+          {log.slice(0, 3).map((l, i) => (
+            <div key={i} className={`now-log${l.tone ? ` now-log-${l.tone}` : ""}${i === 0 ? " first" : ""}`}>
+              <span className="now-log-t">{l.t}</span>
+              <span className="now-log-text">{l.text}</span>
+            </div>
+          ))}
         </div>
-        <div className="cell-sub">
-          {st ? (
-            <>
-              <span className="mono" title={`ahead of and behind ${props.integration}`}>
-                ↑{st.ahead} ↓{st.behind}
-              </span>
-              {" · "}
-              {st.dirty_files ? `${st.dirty_files} uncommitted` : "clean"}
-              {st.last_commit_at && <span className="muted"> · {ago(now, st.last_commit_at)}</span>}
-            </>
-          ) : row.error ? (
-            <span className="error">{row.error}</span>
-          ) : (
-            "–"
-          )}
-        </div>
-      </td>
-    </tr>
+      )}
+    </div>
   );
 }
 
-/** The page in one line: how many agents work, wait on you, or went quiet. */
+const VENDOR_NAME: Record<string, string> = { ...VENDOR_LABEL, claude: "Claude Code" };
+
+/** The page in one line: how many agents move, wait on you, or sit idle. */
 function Glance({ board, needs, now, onInbox }: { board: Board; needs: number; now: number; onInbox: () => void }) {
   const rows = board.repos.flatMap((r) => r.rows);
   const count = (l: string) => rows.filter((r) => livenessOf(r.session, now) === l).length;
-  const stuck = needs;
   const working = count("working");
-  const stale = count("stale");
+  const idle = count("idle") + count("stale");
   if (rows.length === 0) return null;
   return (
-    <span className="head-glance">
-      <span>
-        <StateDot state="working" /> {working} working
-      </span>
-      {stuck > 0 && (
-        <button className="link attention-ink" onClick={onInbox}>
-          <StateDot state="waiting" /> {stuck} need{stuck === 1 ? "s" : ""} you
+    <>
+      <span className="head-note live-ink">{working} moving</span>
+      {needs > 0 && (
+        <button className="link head-note attention-ink" onClick={onInbox}>
+          {needs} waiting on you
         </button>
       )}
-      {stale > 0 && (
-        <span>
-          <StateDot state="stale" /> {stale} stale
-        </span>
-      )}
-    </span>
+      {idle > 0 && <span className="head-note">{idle} idle session{idle === 1 ? "" : "s"}</span>}
+    </>
   );
 }
 
@@ -213,10 +194,13 @@ function SyncLine({ sync, now }: { sync: SyncStatus[]; now: number }) {
   );
 }
 
-/** Needs-me first, then most recent agent activity, then most recent commit. */
-function sortRows(rows: TaskRow[]): TaskRow[] {
+const LIVE_ORDER: Record<string, number> = { working: 0, waiting: 1, idle: 2, stale: 3, ended: 4 };
+
+/** Live work first, then what waits on you, then most recent agent activity or commit. */
+function sortRows(rows: TaskRow[], now: number): TaskRow[] {
+  const rank = (r: TaskRow) => LIVE_ORDER[livenessOf(r.session, now) ?? "ended"] ?? 5;
   const key = (r: TaskRow) => Math.max(r.session?.last_seen_at ?? 0, r.state?.last_commit_at ?? 0);
-  return [...rows].sort((a, b) => Number(b.needs_me) - Number(a.needs_me) || key(b) - key(a));
+  return [...rows].sort((a, b) => rank(a) - rank(b) || Number(b.needs_me) - Number(a.needs_me) || key(b) - key(a));
 }
 
 /** Agents on other machines on the local network: they reach the backlog, not a worktree here. */
