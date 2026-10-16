@@ -874,8 +874,9 @@ pub fn nitely_on_path() -> Option<PathBuf> {
 
 /// Starts `nitely crew run --managed` for `project` in the background, apart from the caller: no
 /// window, its own process group, and nothing that ends it when the caller ends, so a crew outlives
-/// the app. Its output goes to `supervisor.log` in the project's crew folder. Returns its pid.
-pub fn start_supervisor(nitely: &Path, project: &str, repo: &Path, dir: &Path) -> Result<u32> {
+/// the app. Its output goes to `supervisor.log` in the project's crew folder. The caller should
+/// `try_wait` the child now and then, so an exited one does not linger.
+pub fn start_supervisor(nitely: &Path, project: &str, repo: &Path, dir: &Path) -> Result<std::process::Child> {
     use std::process::Stdio;
     let logs = dir.join(project.to_uppercase());
     std::fs::create_dir_all(&logs).with_context(|| format!("creating {}", logs.display()))?;
@@ -900,8 +901,7 @@ pub fn start_supervisor(nitely: &Path, project: &str, repo: &Path, dir: &Path) -
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    let child = cmd.spawn().with_context(|| format!("starting {} crew run", nitely.display()))?;
-    Ok(child.id())
+    cmd.spawn().with_context(|| format!("starting {} crew run", nitely.display()))
 }
 
 /// The crew of a project as the app shows it: the crew of the first of its repos whose playbook
@@ -987,14 +987,22 @@ impl Db {
     }
 
     /// Fails when another supervisor's heartbeat for `project` is fresh.
+    /// In one statement, so two supervisors starting at once (the app's and one handing over to a
+    /// new build) cannot both win.
     pub fn crew_claim_supervisor(&self, project: &str, pid: u32) -> Result<()> {
-        let c = self.crew_control(project)?;
-        if let (Some(other), Some(at)) = (c.supervisor_pid, c.heartbeat_at) {
-            if other != pid && now() - at < HEARTBEAT_STALE_SECS {
-                bail!("another `nitely crew run` (pid {other}) is running the {project} crew; stop it first");
-            }
+        let ts = now();
+        let claimed = self.conn.execute(
+            "INSERT INTO crew_control (project, supervisor_pid, heartbeat_at, status) VALUES (?1, ?2, ?3, 'starting')
+             ON CONFLICT (project) DO UPDATE SET supervisor_pid = ?2, heartbeat_at = ?3, status = 'starting'
+             WHERE crew_control.supervisor_pid IS NULL OR crew_control.heartbeat_at IS NULL
+                OR crew_control.heartbeat_at <= ?3 - ?4 OR crew_control.supervisor_pid = ?2",
+            rusqlite::params![project.to_uppercase(), pid, ts, HEARTBEAT_STALE_SECS],
+        )?;
+        if claimed == 0 {
+            let other = self.crew_control(project)?.supervisor_pid.unwrap_or(0);
+            bail!("another `nitely crew run` (pid {other}) is running the {project} crew; stop it first");
         }
-        self.crew_heartbeat(project, pid, "starting")
+        Ok(())
     }
 
     pub fn crew_heartbeat(&self, project: &str, pid: u32, status: &str) -> Result<()> {
