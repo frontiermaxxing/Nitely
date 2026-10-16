@@ -66,6 +66,10 @@ one land at a time under a lock, rebase, a review that must cover exactly the re
 human approval in Nitely when the change needs one, the gate, a fast-forward and a push. All of it
 shows on the issue's timeline and in the app. A repo without a playbook gets `main`, `{vendor}/{key}-{slug}`
 branches and worktrees in `../{repo}-worktrees/`. Nitely's own is in [.nitely/playbook.toml](.nitely/playbook.toml).
+Gate steps can depend on what the branch changes (`when_changed`, `unless_only`), commands can use
+`{main}`, `{worktree}` and `{base}`, and `[approval] blocked_paths` lists paths no task branch may
+touch. [docs/playbooks/aera.toml](docs/playbooks/aera.toml) is Aera's `scripts/work` workflow as a
+playbook; copy it into the Aera repo as `.nitely/playbook.toml` to run Aera through Nitely.
 
 ## GitHub
 

@@ -1,0 +1,70 @@
+# Aera's playbook: scripts/work/{start,pr,review,approval,land}.mjs as Nitely rules.
+# Install it in the Aera repo as .nitely/playbook.toml. Commands run through cmd /C on Windows and
+# sh -c on macOS, so they avoid shell-specific syntax and call Aera's own helpers through node.
+# {main} is the main checkout, {worktree} the task's worktree, {base} the integration branch.
+
+[branch]
+integration = "win-dev"
+integration_macos = "mac-dev"
+pattern = "{vendor}/{key}-{slug}"
+
+[worktree]
+# Beside the main checkout (C:/Development/AeraChromium-worktrees), as work.mjs start does.
+dir = "../{repo}-worktrees/{key}-{slug}"
+setup = [
+  # src is a submodule: link the worktree's src to the main checkout's at the recorded commit.
+  "node --input-type=module -e \"const m = await import('./scripts/work/git.mjs'); m.ensureSrcCheckout(process.cwd(), '{main}')\"",
+  # npm ci in root and aera/ when their lockfiles changed since the last install.
+  "node --input-type=module -e \"const m = await import('./scripts/work/git.mjs'); m.installDeps(process.cwd())\"",
+]
+
+[gate]
+# What aera/ reads: everything except docs/ and aera-website/ (checked 2026-10-16 in land.mjs).
+[[gate.steps]]
+run = "node --input-type=module -e \"const m = await import('./scripts/work/git.mjs'); m.installDeps(process.cwd()); console.log(m.ensureSrcCheckout(process.cwd(), '{main}'))\""
+unless_only = ["^docs/", "^aera-website/"]
+
+[[gate.steps]]
+run = "cd aera && npm run build:sidecar && npm run build:sidebar && npm run build:newtab"
+unless_only = ["^docs/", "^aera-website/"]
+
+[[gate.steps]]
+# Fails only on failures aera/test/known-failures.json does not list.
+run = "cd aera && npm run test:gate"
+unless_only = ["^docs/", "^aera-website/"]
+
+[[gate.steps]]
+# Compile-only next build, plus typecheck, lint and tests against aera-api/gate-baseline.json.
+run = "node --input-type=module -e \"const m = await import('./scripts/work/git.mjs'); if (!m.depsCurrent('aera-api')) m.npmCi('aera-api')\" && node scripts/work/app-gate.mjs {worktree}"
+when_changed = ["^aera-api/"]
+
+[[gate.steps]]
+run = "node --input-type=module -e \"const m = await import('./scripts/work/git.mjs'); if (!m.depsCurrent('aera-website')) m.npmCi('aera-website')\" && cd aera-website && npm run i18n:lint && npm run lint && npm run build"
+when_changed = ["^aera-website/"]
+
+[review]
+# Codex reviews Claude's branches; Claude reviews Codex's (founder, 2026-10-15).
+reviewer = { claude = "codex", codex = "claude", "*" = "codex" }
+
+[[review.flags]]
+name = "MONEY_OR_RELEASE"
+question = "the change alters how a customer is charged, credited, metered or refunded, or what ships to users and how (release, update, deployment or production configuration), wherever that code lives"
+reason = "money or release logic"
+
+[[review.flags]]
+name = "SWEEPING_CHANGE"
+question = "the change rewrites or restructures Aera's agent prompts or customer-facing copy broadly enough to materially change how Aera behaves or how the website or app comes across: a rewritten prompt or section, a reworded page, a new tone. A typo, one string, or a local wording fix is no"
+reason = "a sweeping prompt or copy change"
+
+[approval]
+# Founder decision, 2026-10-15: the reviewer's pass approves nearly everything. Billing and money,
+# and deploy and release, wait for Andrew (scripts/work/approval.mjs).
+human_paths = [
+  { pattern = '(?i)(^|/)[^/]*(billing|credit|entitlement|subscription|stripe|payment|paid|invoice|pricing|refund)[^/]*(/|$)', reason = "billing and money" },
+  { pattern = '^(deployment|installer|r2-download-worker)/', reason = "deploy and release" },
+  { pattern = '(?i)^scripts/[^/]*(release|deploy|production)[^/]*$', reason = "deploy and release" },
+  { pattern = '^aera-api/(deploy\.(sh|ps1)|start(-pm2)?\.sh|ecosystem\.config(\.sh)?\.js|scripts/deploy[^/]*)$', reason = "deploy and release (API server)" },
+  { pattern = '(?i)(^|/)[^/]*update_service[^/]*$|(^|/)update-?channel', reason = "deploy and release (update channel)" },
+]
+# src changes land through the C++ lane (docs/plans/agent-git-workflow.md, phase 4), not through land.
+blocked_paths = [{ pattern = '^src$', reason = "src changes land through the C++ lane" }]
