@@ -138,6 +138,20 @@ enum Cmd {
         #[command(subcommand)]
         command: RepoCmd,
     },
+    /// Move the Linear project from ~/.aera-work/credentials.json into native issues, once,
+    /// keeping its keys (AND-275 stays AND-275), states, priorities, labels, bodies and comments.
+    /// Prints what it would do; changes nothing without --yes.
+    ImportLinear {
+        /// The project the issues go into; its key must be the Linear keys' prefix.
+        #[arg(long, default_value = "AND")]
+        project: String,
+        /// The project's name, if it is created.
+        #[arg(long, default_value = "Aera")]
+        name: String,
+        /// Import, rather than only show what would happen.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Print the Now board as JSON.
     Now,
     /// Print what every agent session did over the last hours (the Activity view) as JSON.
@@ -646,6 +660,29 @@ fn run(cmd: Cmd) -> Result<()> {
             Ok(())
         }
         Cmd::Now => print_json(&nitely_core::snapshot(&Config::load()?, &Db::open_default()?)?),
+        Cmd::ImportLinear { project, name, yes } => {
+            let creds = nitely_core::credentials::load()?
+                .ok_or_else(|| anyhow::anyhow!("no credentials file at {}", nitely_core::credentials::path().display()))?;
+            eprintln!("reading every issue of the Linear project, with comments…");
+            let issues = nitely_core::linear_import::fetch(&creds)?;
+            let mut db = Db::open_default()?;
+            let plan = nitely_core::linear_import::plan(&db, &issues, &project, &name)?;
+            print_json(&plan)?;
+            if !yes {
+                eprintln!(
+                    "
+dry run: would create {} issue(s) ({} to {}) and {} comment(s) in {} {}; run again with --yes to import",
+                    plan.create,
+                    plan.first_key.as_deref().unwrap_or("-"),
+                    plan.last_key.as_deref().unwrap_or("-"),
+                    plan.comments,
+                    if plan.project_exists { "the existing project" } else { "a new project" },
+                    plan.project
+                );
+                return Ok(());
+            }
+            print_json(&nitely_core::linear_import::apply(&mut db, &issues, &plan, &me)?)
+        }
         Cmd::Activity { hours } => {
             let to = nitely_core::db::now();
             print_json(&nitely_core::activity::activity(&Config::load()?, &Db::open_default()?, to - hours * 3600, to)?)
