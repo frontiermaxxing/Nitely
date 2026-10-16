@@ -388,21 +388,31 @@ pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<String> {
 }
 
 /// A POSIX `sh` for tests' fake reviewers: `sh` on unix, and on Windows the one Git for Windows
-/// ships (found from `git --exec-path`, since its folder is often not on PATH).
+/// ships (found from `git --exec-path`, since its folder is often not on PATH). Its folder, which
+/// holds `cat`, `sleep` and the other tools the fake reviewers use, is put on this process's PATH
+/// once, so the commands they run are found too.
 #[cfg(test)]
 pub(crate) fn posix_sh() -> String {
     if !cfg!(windows) {
         return "sh".into();
     }
-    let exec = git(Path::new("."), &["--exec-path"]).unwrap_or_default();
-    // <git>/mingw64/libexec/git-core
-    let git_root = Path::new(exec.trim()).ancestors().nth(3).map(Path::to_path_buf).unwrap_or_default();
-    ["usr/bin/sh.exe", "bin/sh.exe"]
-        .iter()
-        .map(|p| git_root.join(p))
-        .find(|p| p.is_file())
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_else(|| "sh".into())
+    static SH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SH.get_or_init(|| {
+        let exec = git(Path::new("."), &["--exec-path"]).unwrap_or_default();
+        // <git>/mingw64/libexec/git-core
+        let git_root = Path::new(exec.trim()).ancestors().nth(3).map(Path::to_path_buf).unwrap_or_default();
+        let Some(sh) = ["usr/bin/sh.exe", "bin/sh.exe"].iter().map(|p| git_root.join(p)).find(|p| p.is_file()) else {
+            return "sh".into();
+        };
+        let tools = git_root.join("usr").join("bin");
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let dirs: Vec<PathBuf> = std::iter::once(tools).chain(std::env::split_paths(&path)).collect();
+        if let Ok(joined) = std::env::join_paths(dirs) {
+            std::env::set_var("PATH", joined);
+        }
+        sh.to_string_lossy().replace('\\', "/")
+    })
+    .clone()
 }
 
 pub(crate) fn shell_free_command(program: &str) -> Command {

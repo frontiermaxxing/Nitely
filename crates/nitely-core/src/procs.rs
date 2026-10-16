@@ -88,7 +88,10 @@ fn normalize(s: &str) -> String {
 #[cfg(windows)]
 fn list() -> Vec<Proc> {
     let script = "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine | ConvertTo-Json -Compress";
-    let out = crate::playbook::shell_free_command("powershell").args(["-NoProfile", "-NonInteractive", "-Command", script]).output();
+    // By its full path when it is where Windows keeps it, so a narrow PATH does not hide it.
+    let system = std::env::var_os("SystemRoot").map(|r| std::path::Path::new(&r).join("System32").join("WindowsPowerShell").join("v1.0").join("powershell.exe"));
+    let program = system.filter(|p| p.is_file()).map_or_else(|| "powershell".to_string(), |p| p.to_string_lossy().into_owned());
+    let out = crate::playbook::shell_free_command(&program).args(["-NoProfile", "-NonInteractive", "-Command", script]).output();
     let Ok(out) = out else { return Vec::new() };
     let text = String::from_utf8_lossy(&out.stdout);
     serde_json::from_str::<Vec<Proc>>(text.trim()).unwrap_or_default()
