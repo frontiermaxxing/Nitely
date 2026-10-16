@@ -106,7 +106,7 @@ export function ProjectPage(props: {
         )}
         {tab === "board" && issues && <BoardFilters issues={issues} board={props.board} filters={filters} onChange={setFilters} />}
       </div>
-      {views && issues && issues.length > 0 && <Summary issues={issues} />}
+      {views && issues && issues.length > 0 && <Summary issues={issues} projectKey={props.projectKey} version={props.version} />}
       {tab !== "brief" && error && <p className="error">{error}</p>}
       {((views && !issues) || (tab === "settings" && !issues) || (tab === "branches" && !props.board)) && !error && <Loading />}
       {tab === "settings" && issues && props.project && (

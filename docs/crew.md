@@ -18,6 +18,7 @@ Nothing runs until a person turns it on: the default is `workers = 0`.
 workers = 2                   # how many run at once; 0 (the default) is off
 agents = ["claude", "codex"]  # preference order; agents that are not installed are skipped
 max_per_day = 20              # workers started per project per local day (default 20)
+max_tokens_per_day = 5000000  # optional: no new worker once the project used this many tokens today
 quiet_hours = "01:00-07:00"   # local time; no new worker starts inside it (running ones finish)
 timeout_minutes = 180         # a worker running longer is stopped (never while it lands)
 setup_timeout_minutes = 30    # a worktree setup running longer is stopped; its issue goes to a person
@@ -33,6 +34,17 @@ number (nobody is stopped), and `workers = 0` drains it to nothing.
 
 The crew never starts when the playbook has no gate (`[gate]` empty): an unattended worker with no
 gate could land anything that builds. `nitely crew run` says why and waits.
+
+### The token budget
+
+`max_tokens_per_day` counts every agent working in the project's repo today, crew workers and
+people's own sessions alike: new input, cache writes and output (cache reads are cheap and counted
+apart). Nitely reads the counts from the agents' own session files (`crates/nitely-core/src/usage.rs`):
+Claude Code's transcripts and Codex's session logs, counts and model names only, never the text.
+Once the budget is used, running workers finish and no new one starts until the next local day;
+the project header says `token budget used: 5.2M of 5.0M today`. It is in tokens, not money: plans
+price tokens differently, and a wrong amount is worse than none. `nitely spend` shows an issue's or
+a project's spend; the project summary shows tokens per day and the issue panel one line per issue.
 
 ## The supervisor: `nitely crew run`
 
@@ -59,7 +71,8 @@ start one, the crew's status says why.
    Guardrails) and record the outcome.
 2. **Decide.** Read the playbook and the crew's pause flag. A slot is free when fewer than `workers`
    are running, the crew is not paused, it is outside quiet hours, today's count is under
-   `max_per_day`, and the gate exists.
+   `max_per_day`, the project's tokens today are under `max_tokens_per_day` (when set), and the
+   gate exists.
 3. **Claim.** For a free slot the supervisor claims the next issue itself (`next_task`'s query) and
    runs `nitely start <key> --agent <vendor>` for it in a process of its own (`start_task`: branch,
    worktree, the playbook's setup), so the worktree exists before the agent starts and the

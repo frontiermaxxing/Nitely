@@ -124,6 +124,16 @@ enum Cmd {
         #[arg(long)]
         break_lock: bool,
     },
+    /// Tokens the agents used, read from their own session files (counts only, never text): an
+    /// issue's, or a project's per day over the last days.
+    Spend {
+        /// An issue key; without it, the project's spend.
+        issue: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long, default_value_t = 14)]
+        days: usize,
+    },
     /// The project's crew: agent workers Nitely starts and keeps running itself (docs/crew.md).
     Crew {
         #[command(subcommand)]
@@ -768,6 +778,19 @@ fn run(cmd: Cmd) -> Result<()> {
                 std::process::exit(1);
             }
             Ok(())
+        }
+        Cmd::Spend { issue, project, days } => {
+            let config = Config::load()?;
+            let db = Db::open_default()?;
+            match issue {
+                Some(key) => print_json(&nitely_core::usage::spend_of_issue(&config, &db, &db.current_key(&key)?)?),
+                None => {
+                    let project = resolve_project(&config, &db, project.as_deref(), &cwd()?)?;
+                    // Days in UTC here; the app passes local midnight.
+                    let today = nitely_core::db::now().div_euclid(86_400) * 86_400;
+                    print_json(&nitely_core::usage::spend_of_project(&config, &db, &project, today, days)?)
+                }
+            }
         }
         Cmd::Crew { command } => crew::run(command, &me),
         Cmd::Agents { yes } => {

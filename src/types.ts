@@ -35,6 +35,40 @@ export interface CrewWorker {
   phase: string;
 }
 
+/** Tokens one model used (crates/nitely-core/src/usage.rs). Tokens are new input, cache writes and output. */
+export interface ModelTokens {
+  vendor: string;
+  model: string;
+  tokens: number;
+  calls: number;
+}
+
+/** What an issue's agents used, from `issue_spend`: counts only. */
+export interface IssueSpend {
+  key: string;
+  tokens: number;
+  cache_read: number;
+  calls: number;
+  sessions: number;
+  by_model: ModelTokens[];
+  first: number | null;
+  last: number | null;
+}
+
+/** A project's spend over the last days, from `project_spend`. */
+export interface ProjectSpend {
+  project: string;
+  /** Oldest first, the last one today. */
+  days: { day_start: number; tokens: number; landed: number }[];
+  tokens: number;
+  cache_read: number;
+  by_agent: ModelTokens[];
+  by_model: ModelTokens[];
+  landed: number;
+  per_landed: number | null;
+  top_issues: { key: string; tokens: number }[];
+}
+
 /** A project's crew, from `crew_status`; null when the project has none. */
 export interface CrewStatus {
   project: string;
@@ -42,6 +76,9 @@ export interface CrewStatus {
   running: CrewWorker[];
   started_today: number;
   max_per_day: number;
+  /** Tokens the project's agents used today, and the playbook's daily budget if it sets one. */
+  tokens_today?: number;
+  max_tokens_per_day?: number | null;
   paused: boolean;
   /** A `nitely crew run` heartbeat is fresh. */
   supervised: boolean;

@@ -169,6 +169,18 @@ async fn issues(project: String, include_closed: bool) -> Result<Vec<IssueRecord
     db()?.list_issues(Some(&project), include_closed).map_err(err)
 }
 
+/// Tokens an issue's agents used (crates/nitely-core/src/usage.rs): counts only.
+#[tauri::command]
+async fn issue_spend(key: String) -> Result<nitely_core::usage::IssueSpend, String> {
+    nitely_core::usage::spend_of_issue(&Config::load().map_err(err)?, &db()?, &key).map_err(err)
+}
+
+/// A project's tokens per day and by agent and model, and what landed, over `days` days.
+#[tauri::command]
+async fn project_spend(project: String, day_start: i64, days: usize) -> Result<nitely_core::usage::ProjectSpend, String> {
+    nitely_core::usage::spend_of_project(&Config::load().map_err(err)?, &db()?, &project, day_start, days).map_err(err)
+}
+
 #[tauri::command]
 async fn issue_detail(key: String) -> Result<nitely_core::issues::IssueDetail, String> {
     db()?.issue_detail(&key).map_err(err)?.ok_or_else(|| format!("no issue {key}"))
@@ -496,6 +508,8 @@ pub fn run() {
             project_brief,
             set_project_brief,
             crew_status,
+            issue_spend,
+            project_spend,
             crew_pause,
             open_crew_log,
             issues,

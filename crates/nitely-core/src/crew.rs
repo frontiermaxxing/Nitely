@@ -32,6 +32,9 @@ pub struct CrewRules {
     pub agents: Vec<String>,
     /// Workers started per local day; `DEFAULT_MAX_PER_DAY` when unset.
     pub max_per_day: Option<u32>,
+    /// Tokens the project's agents may use per local day before no new worker starts (crew
+    /// workers and everyone else, as `usage` reads them); unset, the default, is no budget.
+    pub max_tokens_per_day: Option<u64>,
     /// `HH:MM-HH:MM` local time when no new worker starts; it may wrap midnight.
     pub quiet_hours: Option<String>,
     /// A worker running longer is stopped, never while it lands.
@@ -51,6 +54,7 @@ impl Default for CrewRules {
             workers: 0,
             agents: vec!["claude".into(), "codex".into()],
             max_per_day: None,
+            max_tokens_per_day: None,
             quiet_hours: None,
             timeout_minutes: 180,
             setup_timeout_minutes: 30,
@@ -238,6 +242,9 @@ struct Running {
     process: Box<dyn Process>,
 }
 
+/// Tokens a project used since a time (`usage::project_tokens_since` over a scan).
+type TokensSince = Box<dyn Fn(&str, i64) -> u64>;
+
 pub struct Supervisor {
     pub project: String,
     pub repo_root: PathBuf,
@@ -250,6 +257,8 @@ pub struct Supervisor {
     /// True once the person asked to stop: checked before each start, since a worktree's setup
     /// can take minutes.
     interrupted: Box<dyn Fn() -> bool>,
+    /// Tokens the project used since a time, for the daily token budget.
+    tokens: TokensSince,
     running: Vec<Running>,
     preparing: Vec<Preparing>,
     /// Agents that would not start in this run, and why.
@@ -284,6 +293,10 @@ impl Supervisor {
             agents,
             clock: Box::new(Moment::now),
             interrupted: Box::new(|| false),
+            tokens: Box::new(|project, since| {
+                let config = crate::Config::load().unwrap_or_default();
+                crate::usage::project_tokens_since(&crate::usage::scan(&config, since), project, since)
+            }),
             running: Vec::new(),
             preparing: Vec::new(),
             disabled: BTreeMap::new(),
@@ -302,6 +315,18 @@ impl Supervisor {
     pub fn with_interrupt(mut self, interrupted: impl Fn() -> bool + 'static) -> Supervisor {
         self.interrupted = Box::new(interrupted);
         self
+    }
+
+    pub fn with_tokens(mut self, tokens: impl Fn(&str, i64) -> u64 + 'static) -> Supervisor {
+        self.tokens = Box::new(tokens);
+        self
+    }
+
+    /// Why the daily token budget stops new workers, or None while there is budget (or none set).
+    fn over_budget(&self, rules: &CrewRules, moment: &Moment) -> Option<String> {
+        let max = rules.max_tokens_per_day?;
+        let used = (self.tokens)(&self.project, moment.day_start);
+        (used >= max).then(|| format!("token budget used: {} of {} today", crate::usage::short(used), crate::usage::short(max)))
     }
 
     fn actor(&self) -> Actor {
@@ -401,6 +426,9 @@ impl Supervisor {
         if today >= rules.max_per_day() {
             return Ok(Some(format!("{today} of {} started today", rules.max_per_day())));
         }
+        if let Some(why) = self.over_budget(rules, moment) {
+            return Ok(Some(why));
+        }
         if self.running() >= rules.workers as usize {
             return Ok(Some("working".into()));
         }
@@ -422,6 +450,9 @@ impl Supervisor {
             }
             if db.crew_started_since(&self.project, moment.day_start)? >= rules.max_per_day() {
                 return Ok(format!("{} of {} started today", rules.max_per_day(), rules.max_per_day()));
+            }
+            if let Some(why) = self.over_budget(rules, &moment) {
+                return Ok(why);
             }
             let installed: Vec<String> = rules
                 .agents
@@ -990,6 +1021,9 @@ pub struct CrewStatus {
     pub running: Vec<CrewWorker>,
     pub started_today: u32,
     pub max_per_day: u32,
+    /// Tokens the project's agents used today, and the playbook's daily budget if it sets one.
+    pub tokens_today: u64,
+    pub max_tokens_per_day: Option<u64>,
     pub paused: bool,
     /// A supervisor's heartbeat is fresh.
     pub supervised: bool,
@@ -998,8 +1032,9 @@ pub struct CrewStatus {
     pub recent: Vec<CrewWorker>,
 }
 
-/// The crew of `project`, whose repo playbook is `playbook`.
-pub fn status(db: &Db, project: &str, playbook: &Playbook, moment: &Moment) -> Result<CrewStatus> {
+/// The crew of `project`, whose repo playbook is `playbook`; `tokens_today` is what its agents
+/// used since `moment`'s day started.
+pub fn status(db: &Db, project: &str, playbook: &Playbook, moment: &Moment, tokens_today: u64) -> Result<CrewStatus> {
     let control = db.crew_control(project)?;
     let workers = db.crew_workers(project, 20)?;
     Ok(CrewStatus {
@@ -1008,6 +1043,8 @@ pub fn status(db: &Db, project: &str, playbook: &Playbook, moment: &Moment) -> R
         running: db.crew_running(project)?,
         started_today: db.crew_started_since(project, moment.day_start)?,
         max_per_day: playbook.crew.max_per_day(),
+        tokens_today,
+        max_tokens_per_day: playbook.crew.max_tokens_per_day,
         paused: control.paused,
         supervised: control.heartbeat_at.is_some_and(|h| moment.ts - h < HEARTBEAT_STALE_SECS),
         status: control.status,
@@ -1109,7 +1146,8 @@ pub fn project_status(db: &Db, config: &crate::Config, project: &str, moment: &M
         .filter_map(|r| Playbook::load(Path::new(&r.root)).ok())
         .collect();
     let playbook = playbooks.iter().find(|p| p.crew.workers > 0).or(playbooks.first()).cloned().unwrap_or_default();
-    let status = status(db, project, &playbook, moment)?;
+    let tokens = crate::usage::project_tokens_since(&crate::usage::scan(config, moment.day_start), project, moment.day_start);
+    let status = status(db, project, &playbook, moment, tokens)?;
     Ok((status.cap > 0 || !status.running.is_empty() || status.supervised).then_some(status))
 }
 
@@ -1707,7 +1745,7 @@ mod tests {
     const NOON: Moment = Moment { ts: 1_000_000, minute_of_day: 12 * 60, day_start: 1_000_000 - 12 * 3600 };
 
     fn supervisor(f: &Fixture, fake: &Fake) -> Supervisor {
-        Supervisor::new("NIT", &f.repo, &f.base.join("crew"), "nitely", Box::new(Fake { db: Some(f.base.join("t.db")), ..fake.clone() })).with_clock(|| NOON)
+        Supervisor::new("NIT", &f.repo, &f.base.join("crew"), "nitely", Box::new(Fake { db: Some(f.base.join("t.db")), ..fake.clone() })).with_clock(|| NOON).with_tokens(|_, _| 0)
     }
 
     const GATE: &str = "[gate]\ncommands = [\"echo ok\"]\n";
@@ -1758,7 +1796,7 @@ mod tests {
         let handoff = f.db.timeline("NIT-2").unwrap().into_iter().rev().find(|t| t.kind == "handoff").unwrap();
         assert!(handoff.summary.as_deref().unwrap().contains("its last report: \"running the tests\""), "{handoff:?}");
         assert_eq!(tick.started.iter().map(|w| w.issue.as_str()).collect::<Vec<_>>(), ["NIT-2"], "a second attempt");
-        let status = status(&f.db, "NIT", &Playbook::load(&f.repo).unwrap(), &NOON).unwrap();
+        let status = status(&f.db, "NIT", &Playbook::load(&f.repo).unwrap(), &NOON, 0).unwrap();
         assert_eq!((status.running.len(), status.started_today, status.cap), (2, 4, 2));
         assert!(status.supervised);
     }
@@ -1798,6 +1836,26 @@ mod tests {
         let tick = sup.tick(&mut f.db, false).unwrap();
         assert_eq!(tick.started.len(), 2);
         assert_eq!(tick.status, "2 of 2 started today");
+    }
+
+    #[test]
+    fn the_daily_token_budget_stops_new_workers() {
+        let mut f = fixture(&format!("{GATE}[crew]
+workers = 2
+max_tokens_per_day = 1000000
+"));
+        let fake = Fake { installed: vec!["claude"], ..Default::default() };
+        let used = std::rc::Rc::new(std::cell::Cell::new(999_999u64));
+        let seen = used.clone();
+        let mut sup = supervisor(&f, &fake).with_tokens(move |project, since| {
+            assert_eq!((project, since), ("NIT", NOON.day_start), "today's tokens of this project");
+            seen.get()
+        });
+        assert_eq!(sup.tick(&mut f.db, false).unwrap().started.len(), 2, "under budget, workers start");
+        used.set(1_200_000);
+        let tick = sup.tick(&mut f.db, false).unwrap();
+        assert!(tick.started.is_empty());
+        assert_eq!(tick.status, "token budget used: 1.2M of 1.0M today");
     }
 
     #[test]

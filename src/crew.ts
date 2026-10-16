@@ -1,3 +1,4 @@
+import { shortTokens } from "./spend.ts";
 import type { CrewStatus } from "./types";
 
 /**
@@ -18,6 +19,9 @@ export function crewWords(s: CrewStatus): { text: string; attention: boolean } |
 export function crewTitle(s: CrewStatus, now: number): string {
   const lines = s.running.map((w) => `${w.issue_key} · ${w.agent} · ${w.phase === "setup" ? "setting up its worktree since" : "started"} ${minutesAgo(now, w.started_at)}`);
   lines.push(`${s.started_today} of ${s.max_per_day} started today`);
+  if (s.tokens_today !== undefined) {
+    lines.push(`${shortTokens(s.tokens_today)}${s.max_tokens_per_day ? ` of ${shortTokens(s.max_tokens_per_day)}` : ""} tokens today`);
+  }
   return lines.join("\n");
 }
 

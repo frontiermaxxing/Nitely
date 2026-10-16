@@ -27,6 +27,8 @@ import type {
   Happening,
   IssueDetail,
   IssueRecord,
+  IssueSpend,
+  ProjectSpend,
   PrRecord,
   PlaybookProposal,
   Project,
@@ -674,8 +676,78 @@ function crewStatus(project: string): CrewStatus | null {
     started_at: NOW - s.from * HOUR + 10 * MIN, ended_at: null, exit_code: null, outcome: null, reason: null, phase: "work",
   }));
   return {
-    project: "NIT", cap: 2, running, started_today: 3, max_per_day: 20, paused: crewPaused, supervised: true,
+    project: "NIT", cap: 2, running, started_today: 3, max_per_day: 20, tokens_today: 3_400_000, max_tokens_per_day: 8_000_000, paused: crewPaused, supervised: true,
     status: crewPaused ? "paused" : "working; nothing else ready", recent: [],
+  };
+}
+
+/** A steady made-up number from a string, so an issue's spend is the same every time. */
+function hashOf(s: string): number {
+  let h = 2166136261;
+  for (const c of s) h = Math.imul(h ^ c.charCodeAt(0), 16777619);
+  return h >>> 0;
+}
+
+const MODEL: Record<string, string> = { claude: "claude-opus-5-5", codex: "gpt-6", cursor: "cursor-fast" };
+
+/** Tokens an issue's agents used: none before work started, then by its agent's model and the reviewer's. */
+function issueSpend(args: Record<string, unknown>): IssueSpend {
+  const key = String(args.key);
+  const spec = ISSUES.find((s) => s.key === key);
+  const worked = spec ? spec.story.some((s) => s === "claim" || s === "work") : false;
+  const base = { key, tokens: 0, cache_read: 0, calls: 0, sessions: 0, by_model: [] as IssueSpend["by_model"], first: null, last: null };
+  if (!spec || !worked) return base;
+  const vendor = spec.vendor ?? "claude";
+  const main = 120_000 + (hashOf(key) % 900_000);
+  const by_model = [{ vendor, model: MODEL[vendor] ?? vendor, tokens: main, calls: 20 + (hashOf(key + "c") % 140) }];
+  // The other vendor reviews.
+  const reviewer = vendor === "codex" ? "claude" : "codex";
+  if (spec.story.includes("review")) by_model.push({ vendor: reviewer, model: MODEL[reviewer], tokens: 30_000 + (hashOf(key + "r") % 60_000), calls: 6 });
+  const tokens = by_model.reduce((a, m) => a + m.tokens, 0);
+  return { ...base, tokens, cache_read: tokens * 40, calls: by_model.reduce((a, m) => a + m.calls, 0), sessions: by_model.length, by_model, first: NOW - spec.from * HOUR, last: NOW - spec.to * HOUR };
+}
+
+/** A project's tokens per day: its issues' spend spread over the days they were worked. */
+function projectSpend(args: Record<string, unknown>): ProjectSpend {
+  const project = String(args.project).toUpperCase();
+  const days = Number(args.days ?? 14);
+  const dayStart = Number(args.dayStart);
+  const from = dayStart - (days - 1) * 86_400;
+  const series = Array.from({ length: days }, (_, i) => ({ day_start: from + i * 86_400, tokens: 0, landed: 0 }));
+  const dayOf = (ts: number) => Math.min(days - 1, Math.max(0, Math.floor((ts - from) / 86_400)));
+  const repo = REPOS.find((r) => r.project === project);
+  const mine = ISSUES.filter((s) => repo && repoOf(s.key) === repo);
+  const spends = mine.map((s) => ({ spec: s, spend: issueSpend({ key: s.key }) })).filter((x) => x.spend.tokens > 0 && NOW - x.spec.from * HOUR >= from - 86_400);
+  for (const { spec, spend } of spends) series[dayOf(NOW - ((spec.from + spec.to) / 2) * HOUR)].tokens += spend.tokens;
+  const landed = world.issues.filter((i) => i.project === project && i.state === "Done");
+  for (const i of landed) series[dayOf(Date.parse(i.updated_at) / 1000)].landed += 1;
+  const models = new Map<string, IssueSpend["by_model"][number]>();
+  for (const { spend } of spends) for (const m of spend.by_model) {
+    const e = models.get(m.model) ?? { ...m, tokens: 0, calls: 0 };
+    e.tokens += m.tokens;
+    e.calls += m.calls;
+    models.set(m.model, e);
+  }
+  const by_model = [...models.values()].sort((a, b) => b.tokens - a.tokens);
+  const vendors = new Map<string, IssueSpend["by_model"][number]>();
+  for (const m of by_model) {
+    const e = vendors.get(m.vendor) ?? { vendor: m.vendor, model: "", tokens: 0, calls: 0 };
+    e.tokens += m.tokens;
+    e.calls += m.calls;
+    vendors.set(m.vendor, e);
+  }
+  const tokens = series.reduce((a, d) => a + d.tokens, 0);
+  const landedSpend = spends.filter((x) => landed.some((i) => i.key === x.spec.key)).reduce((a, x) => a + x.spend.tokens, 0);
+  return {
+    project,
+    days: series,
+    tokens,
+    cache_read: tokens * 40,
+    by_agent: [...vendors.values()].sort((a, b) => b.tokens - a.tokens),
+    by_model,
+    landed: landed.length,
+    per_landed: landed.length && landedSpend ? Math.round(landedSpend / landed.length) : null,
+    top_issues: spends.map((x) => ({ key: x.spec.key, tokens: x.spend.tokens })).sort((a, b) => b.tokens - a.tokens).slice(0, 5),
   };
 }
 
@@ -1355,6 +1427,10 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return projectBrief(String(args.project));
       case "crew_status":
         return crewStatus(String(args.project));
+      case "issue_spend":
+        return issueSpend(args);
+      case "project_spend":
+        return projectSpend(args);
       case "crew_pause":
         return crewPause(args);
       case "open_crew_log":

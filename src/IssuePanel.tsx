@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "./backend";
-import type { IssueDetail, IssueRecord, LinkedIssue } from "./types";
+import { issueSpendLine } from "./spend";
+import type { IssueDetail, IssueRecord, IssueSpend, LinkedIssue } from "./types";
 import { agentLabel, ago, openExternal, PRIORITY } from "./util";
 import { IssueJourney, WhoHadIt } from "./IssueJourney";
 import { typing } from "./Palette";
@@ -44,6 +45,31 @@ function CrewLogLink({ path }: { path: string }) {
       </button>
       {error && <span className="error small"> {error}</span>}
     </div>
+  );
+}
+
+/**
+ * The issue's spend in one quiet line under its journey: time from start to land, tokens by model,
+ * model calls, review rounds. Tokens come from the agents' own session files, read on open.
+ */
+function SpendLine(props: { detail: IssueDetail; now: number }) {
+  const key = props.detail.issue.key;
+  const [spend, setSpend] = useState<IssueSpend | null>(null);
+  useEffect(() => {
+    let live = true;
+    invoke<IssueSpend>("issue_spend", { key })
+      .then((s) => live && setSpend(s))
+      .catch(() => live && setSpend(null));
+    return () => {
+      live = false;
+    };
+  }, [key, props.detail.timeline.length]);
+  const line = issueSpendLine(props.detail, spend, props.now);
+  if (!line) return null;
+  return (
+    <p className="spend-line" title="Tokens are new input, cache writes and output, read from the agents' session files. Work done from the main checkout counts toward the project, not the issue.">
+      {line}
+    </p>
   );
 }
 
@@ -175,6 +201,7 @@ export function IssuePanel(props: {
               )}
               <WhoHadIt detail={detail} now={props.now} />
               <IssueJourney key={issue.key} detail={detail} now={props.now} />
+              <SpendLine key={`spend-${issue.key}`} detail={detail} now={props.now} />
               <details className="panel-timeline">
                 <summary>
                   Timeline <span className="muted">· {detail.timeline.length} event{detail.timeline.length === 1 ? "" : "s"}</span>

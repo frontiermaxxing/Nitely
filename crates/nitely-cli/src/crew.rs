@@ -74,7 +74,9 @@ pub fn run(cmd: CrewCmd, me: &Actor) -> Result<()> {
         }
         CrewCmd::Status { project, repo } => {
             let (project, root) = crew_repo(&config, &db, project.as_deref(), repo.as_deref(), &cwd)?;
-            let status = crew::status(&db, &project, &Playbook::load(&root)?, &Moment::now())?;
+            let moment = Moment::now();
+            let tokens = nitely_core::usage::project_tokens_since(&nitely_core::usage::scan(&config, moment.day_start), &project, moment.day_start);
+            let status = crew::status(&db, &project, &Playbook::load(&root)?, &moment, tokens)?;
             println!("{}", serde_json::to_string_pretty(&status)?);
             Ok(())
         }

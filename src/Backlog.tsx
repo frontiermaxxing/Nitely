@@ -1,4 +1,7 @@
-import type { IssueRecord } from "./types";
+import { useEffect, useState } from "react";
+import { invoke } from "./backend";
+import { projectSpendWords } from "./spend";
+import type { IssueRecord, ProjectSpend } from "./types";
 import { agentLabel, nowSecs } from "./util";
 import { AgentMark, CountBadge, Labels, Meter, PriorityMark, Sparkline, StationGlyph, phaseOf, trackOf } from "./ui";
 
@@ -38,10 +41,41 @@ export function Backlog(props: { issues: IssueRecord[]; showClosed: boolean; onO
   );
 }
 
+/** Tokens per day as bars, the window's total, and on hover where they went. */
+function SpendPart({ spend }: { spend: ProjectSpend }) {
+  const words = projectSpendWords(spend);
+  return (
+    <div className="summary-part" title={words.title}>
+      <Sparkline kind="bars" values={spend.days.map((d) => d.tokens)} width={98} height={18} label={`Tokens per day, last ${spend.days.length} days: ${words.total}`} />
+      <span className="legend">
+        <span>{words.total}</span>
+        {spend.per_landed ? <span className="muted">{words.perLanded}</span> : <span className="muted">last {spend.days.length} days</span>}
+      </span>
+    </div>
+  );
+}
+
 export const isClosed = (i: IssueRecord) => i.state_type === "completed" || i.state_type === "canceled";
 
-/** The project at a glance: open issues by whose move it is, and what landed each day. */
-export function Summary({ issues }: { issues: IssueRecord[] }) {
+/** Local midnight today, unix seconds: where the spend's last day starts. */
+function localMidnight(): number {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return Math.floor(d.getTime() / 1000);
+}
+
+/** The project at a glance: open issues by whose move it is, what landed each day, and the tokens spent. */
+export function Summary({ issues, projectKey, version }: { issues: IssueRecord[]; projectKey: string; version: number }) {
+  const [spend, setSpend] = useState<ProjectSpend | null>(null);
+  useEffect(() => {
+    let live = true;
+    invoke<ProjectSpend>("project_spend", { project: projectKey, dayStart: localMidnight(), days: DAYS })
+      .then((s) => live && setSpend(s))
+      .catch(() => live && setSpend(null));
+    return () => {
+      live = false;
+    };
+  }, [projectKey, version]);
   const open = issues.filter((i) => i.state_type !== "completed" && i.state_type !== "canceled");
   const count = (phase: string) => open.filter((i) => phaseOf(trackOf(i).station) === phase).length;
   const needs = count("human");
@@ -82,6 +116,7 @@ export function Summary({ issues }: { issues: IssueRecord[] }) {
           <span className="muted">last {DAYS} days</span>
         </span>
       </div>
+      {spend && spend.tokens > 0 && <SpendPart spend={spend} />}
     </div>
   );
 }

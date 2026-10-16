@@ -1,5 +1,8 @@
 /* The issue panel's track detail and relations (src/IssueJourney.tsx, src/IssuePanel.tsx). */
 
+/* ----- spend: one quiet line under the journey ----- */
+.spend-line { margin: -8px 0 18px; font-size: var(--text-sm); color: var(--fg-3); }
+
 /* ----- journey: rounds, pull request, lands ----- */
 .journey { margin: -4px 0 18px; font-size: var(--text-sm); }
 .journey-row {
