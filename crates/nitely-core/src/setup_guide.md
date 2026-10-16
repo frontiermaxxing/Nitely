@@ -121,7 +121,9 @@ whether to file all of them or only priorities 1 to 3.
   - `approval.human_paths`: paths whose changes need a person, each with a reason (money and
     billing, release and deploy, auth, data migrations, secrets handling);
   - `review.flags`: yes/no questions for risks path rules cannot see;
-  - `approval.blocked_paths`: paths that change some other way (generated, vendored, a submodule).
+  - `approval.blocked_paths`: paths that change some other way (generated, vendored, a submodule);
+  - `approval.always_human = false`, when the playbook has `always_human = true`: Nitely starts a
+    new repo that way so nothing lands unseen until rules exist, and the approved rules replace it.
 
   For example (made-up paths):
 
@@ -142,6 +144,9 @@ whether to file all of them or only priorities 1 to 3.
   pattern = "^(deploy|\\.github/workflows)/"
   reason = "release and deploy"
 
+  [approval]
+  always_human = false
+
   [[approval.blocked_paths]]
   pattern = "^vendor/"
   reason = "vendored code is updated by the vendoring script"
@@ -154,6 +159,9 @@ whether to file all of them or only priorities 1 to 3.
   - **Questions for the owner**: 3 to 5 that only they can answer, also asked with `ask`.
 - **Mark it done.** `mark_setup_complete` with the commit you swept (`git rev-parse` of the
   integration branch).
+- **Close the setup issue.** When a repo is connected, Nitely files "Set up …: sweep the repo, seed
+  the board and draft its review rules". If you took that issue, move it to Done with what you filed
+  as evidence.
 - **Tell the user**, in chat: how many issues by priority and area, the priority-1 list, what is
   in Needs You, what was not verified, and the Phase 0 question if it is still open.
 - **Leave a handoff**: `note` with `handoff: true` on the first issue to do (or on the stale-branch issue):
