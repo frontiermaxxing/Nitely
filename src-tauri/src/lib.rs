@@ -344,15 +344,18 @@ fn run_sync() -> anyhow::Result<remote::SyncReport> {
 /// when it dies or leaves for a newer build.
 fn keep_crews() {
     let mut started: std::collections::HashMap<String, std::time::Instant> = Default::default();
+    let mut children: Vec<std::process::Child> = Vec::new();
     loop {
-        if let Err(e) = keep_crews_once(&mut started) {
+        // Reaps the supervisors that exited, so none lingers as a zombie on Unix.
+        children.retain_mut(|c| matches!(c.try_wait(), Ok(None)));
+        if let Err(e) = keep_crews_once(&mut started, &mut children) {
             eprintln!("crew: {e:#}");
         }
         std::thread::sleep(KEEP_CREWS_EVERY);
     }
 }
 
-fn keep_crews_once(started: &mut std::collections::HashMap<String, std::time::Instant>) -> anyhow::Result<()> {
+fn keep_crews_once(started: &mut std::collections::HashMap<String, std::time::Instant>, children: &mut Vec<std::process::Child>) -> anyhow::Result<()> {
     use nitely_core::crew;
     let wanted = crew::supervisors_wanted(&Config::load()?);
     if wanted.is_empty() {
@@ -369,7 +372,10 @@ fn keep_crews_once(started: &mut std::collections::HashMap<String, std::time::In
             continue;
         };
         match crew::start_supervisor(&nitely, &project, &root, &nitely_core::paths::data_dir().join("crew")) {
-            Ok(pid) => eprintln!("crew: started the {project} supervisor (pid {pid})"),
+            Ok(child) => {
+                eprintln!("crew: started the {project} supervisor (pid {})", child.id());
+                children.push(child);
+            }
             Err(e) => db.crew_set_status(&project, &format!("the app could not start the crew: {e:#}"))?,
         }
     }

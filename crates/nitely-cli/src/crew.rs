@@ -114,6 +114,7 @@ fn supervise(db: &mut Db, project: &str, root: PathBuf, once: bool, managed: boo
     // This build, as it was on disk when it started: `nitely install` replacing it ends a managed run.
     let exe = std::env::current_exe().ok().and_then(|p| nitely_core::install::stamp(&p).map(|s| (p, s)));
     let mut awake = Awake::default();
+    let mut handover: Option<PathBuf> = None;
     db.crew_claim_supervisor(project, std::process::id())?;
     // The heartbeat stays fresh through a long pass, so a second `crew run` never takes over.
     let done = Arc::new(AtomicBool::new(false));
@@ -181,8 +182,10 @@ fn supervise(db: &mut Db, project: &str, root: PathBuf, once: bool, managed: boo
                 break;
             }
             if exe.as_ref().is_some_and(|(path, at)| nitely_core::install::stamp(path).as_ref() != Some(at)) {
-                // Workers keep running; the app starts the new build, which takes them over.
-                eprintln!("a newer nitely is installed; leaving for it");
+                // Workers keep running; the new build takes them over, started here so the crew
+                // goes on with the app closed (the app's keeper would also start one).
+                eprintln!("a newer nitely is installed; handing over to it");
+                handover = exe.as_ref().map(|(path, _)| path.clone());
                 break;
             }
         }
@@ -196,6 +199,13 @@ fn supervise(db: &mut Db, project: &str, root: PathBuf, once: bool, managed: boo
     done.store(true, Ordering::SeqCst);
     beat.join().ok();
     sup.leave(db)?;
+    if let Some(new) = handover {
+        // Left first, so the new build's claim finds the crew free.
+        match crew::start_supervisor(&new, project, &root, &paths::data_dir().join("crew")) {
+            Ok(child) => eprintln!("started {} (pid {})", new.display(), child.id()),
+            Err(e) => eprintln!("could not start the new build: {e:#}"),
+        }
+    }
     if !once {
         eprintln!("crew for {project} stopped");
     }

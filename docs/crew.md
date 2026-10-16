@@ -46,8 +46,9 @@ playbook has `workers > 0` has a supervisor with a fresh heartbeat, and when one
 `nitely crew run --managed` (the `nitely` on PATH) apart from itself: no window, its own process
 group, output to `supervisor.log` in the project's crew folder. It outlives the app, so closing the
 app does not stop the crew; pause it, or set `workers = 0`, for that. A managed supervisor leaves by
-itself when the crew is off and idle, and when `nitely install` puts a newer build in place; its
-workers keep running, and the app starts the new build, which takes them over. If the app cannot
+itself when the crew is off and idle; when `nitely install` puts a newer build in place, it starts
+that build and leaves, and its workers keep running for the new one to take over, with or without
+the app open. If the app cannot
 start one, the crew's status says why.
 
 `crew run` is a loop that ticks every 10 seconds:
