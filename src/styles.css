@@ -178,3 +178,14 @@ footer .btn { margin-left: auto; }
 .review ul { margin: 0; padding-left: 18px; }
 .prio-tag { font-size: 10.5px; font-weight: 600; padding: 0 4px; border-radius: 4px; background: var(--line); }
 .prio-tag.p0, .prio-tag.p1 { color: var(--p1); }
+.fields { display: flex; gap: 12px; margin-bottom: 8px; }
+.fields label { display: grid; gap: 3px; font-size: 11.5px; color: var(--muted); }
+.fields input { width: 220px; }
+.change { display: grid; grid-template-columns: 74px 1fr; gap: 8px; padding: 7px 0; border-bottom: 1px solid var(--line); }
+.change:last-child { border-bottom: 0; }
+.change .chip { margin-left: 0; justify-self: start; height: fit-content; }
+.chip.create, .chip.run { color: var(--working); }
+.chip.update { color: var(--waiting); }
+.chip.unchanged { color: var(--idle); }
+pre.file { max-height: 280px; overflow: auto; background: var(--sidebar); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; font-size: 11.5px; }
+.nav-add { color: var(--muted); }

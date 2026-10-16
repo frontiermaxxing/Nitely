@@ -87,14 +87,16 @@ fn initialize(server: &mut Server, params: &Value) -> Value {
     .into();
     let requested = params.get("protocolVersion").and_then(Value::as_str).unwrap_or("");
     let version = if SUPPORTED_VERSIONS.contains(&requested) { requested } else { SUPPORTED_VERSIONS[0] };
+    // The repo's own instructions when Nitely watches it, else the general workflow.
+    let instructions = Config::load()
+        .ok()
+        .and_then(|c| nitely_core::instructions::for_dir(&c, &server.cwd))
+        .unwrap_or_else(|| nitely_core::instructions::WORKFLOW.to_string());
     json!({
         "protocolVersion": version,
         "capabilities": { "tools": {} },
         "serverInfo": { "name": "nitely", "version": env!("CARGO_PKG_VERSION") },
-        "instructions": "Nitely is the backlog and control room for this repo. Start work with next_task, \
-            then start_task to get the issue's branch and worktree, and submit once the work is committed (it reviews and opens the pull request), \
-            keep the human informed with report, leave a handoff note before you stop, file what you find \
-            but will not fix now with file_issue, and use ask when only the human can decide."
+        "instructions": instructions
     })
 }
 

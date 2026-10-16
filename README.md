@@ -39,17 +39,33 @@ npm run tauri dev
 `cargo test` runs the core tests. `nitely now` prints the same board as JSON, and `nitely where`
 prints where the database and config live (`%APPDATA%\Nitely`).
 
-## Track a project in Nitely
+## Add a project
+
+In the app, choose **+ Add project** and pick a folder you already work in (for example
+`C:\Development\AeraChromium`). Nitely shows what it will do before it does anything:
+
+- creates the project (key and name editable) and watches the repo and its worktrees;
+- picks a playbook: the repo's own `.nitely/playbook.toml` if it has one, Aera's when it finds
+  `scripts/work/work.mjs`, otherwise one generated from the repo (its default branch, `cargo test`,
+  npm scripts). Generated and Aera playbooks are kept in Nitely's data folder, not in the repo;
+- connects every agent it finds, at user level, so nothing is written into the repo:
+  - Claude Code: hooks in `~/.claude/settings.json` (existing hooks kept), the `nitely` skill in
+    `~/.claude/skills/nitely`, and `claude mcp add --scope user nitely -- nitely mcp`;
+  - Codex: `[mcp_servers.nitely]` and `notify` in `~/.codex/config.toml` (comments kept), and the
+    workflow between `<!-- nitely:start -->` markers in `~/.codex/AGENTS.md`;
+  - Cursor: `~/.cursor/mcp.json` and `~/.cursor/hooks.json`.
+
+Every agent session that starts in a connected repo gets that repo's instructions (project key,
+integration branch, gate, workflow) from the session-start hook and the MCP server. Running it again
+changes only what is out of date. The CLI does the same:
 
 ```powershell
-nitely project create NIT Nitely
-nitely repo add C:\Development\Nitely --integration main --project NIT
-nitely issue import docs\seed-backlog.json --project NIT
+nitely connect C:\Development\AeraChromium              # show the plan
+nitely connect C:\Development\AeraChromium --project AC --yes
 ```
 
-`.mcp.json` (Claude Code) and `.cursor/mcp.json` (Cursor) register `nitely mcp` for this repo; the
-agent picks the project from the repo it runs in. Approving and answering asks happen only in the
-app, never through the CLI or MCP.
+Manual setup still works (`nitely project create`, `nitely repo add`, `nitely issue import`).
+Approving and answering asks happen only in the app, never through the CLI or MCP.
 
 ## Playbooks
 
@@ -85,11 +101,11 @@ same from a terminal and prints what it got. Both are read-only on Bitbucket and
 requests come from each watched repo's Bitbucket `origin` plus the repo named in the credentials
 file; issues are the open ones in the Linear project the file names.
 
-## Hook up Claude Code
+## Hooks
 
-Merge [docs/claude-hooks.json](docs/claude-hooks.json) into your user settings
-(`%USERPROFILE%\.claude\settings.json`) so every repo reports, or into one repo's
-`.claude/settings.json` next to its existing hooks. The hook records tool names, commands and file
-paths, never prompt text or file contents, and always exits 0, so it can't block an agent.
+`nitely connect` installs them. The hooks (`nitely hook claude|codex|cursor`) record tool names,
+commands and file paths, never prompt text or file contents, and always exit 0, so they can't block
+an agent. [docs/claude-hooks.json](docs/claude-hooks.json) is the Claude Code part, for setting it
+up by hand.
 
 Agents can also report directly: `nitely status "running test:gate"` from inside a worktree.

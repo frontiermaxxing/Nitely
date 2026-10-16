@@ -136,3 +136,31 @@ export interface ReviewRecord {
   findings: { priority: number; text: string }[];
   ts: number;
 }
+
+export interface ConnectChange {
+  target: string;
+  action: "create" | "update" | "unchanged" | "run";
+  why: string;
+  before?: string;
+  after: string;
+}
+
+export interface ConnectPlan {
+  root: string;
+  repo_name: string;
+  project_key: string;
+  project_name: string;
+  project_exists: boolean;
+  integration_branch: string;
+  playbook: { source: string; path: string; text: string };
+  nitely: string;
+  agents: { agent: string; found: boolean; changes: ConnectChange[] }[];
+  warnings: string[];
+}
+
+export interface Applied {
+  project: string;
+  repo: string;
+  done: string[];
+  failed: string[];
+}

@@ -20,8 +20,10 @@ enum Cmd {
     /// Record an agent hook event. Reads the hook's JSON on stdin and always exits 0,
     /// so a Nitely problem never blocks the agent.
     Hook {
-        /// Which agent sent it. Only `claude` is supported so far.
+        /// Which agent sent it: claude, codex or cursor.
         vendor: String,
+        /// Codex passes its payload as an argument instead of on stdin.
+        payload: Option<String>,
     },
     /// Run the MCP server on stdio (register it as `nitely mcp` in your agent's MCP config).
     Mcp,
@@ -93,6 +95,22 @@ enum Cmd {
         /// Take over a lock left by a land that died.
         #[arg(long)]
         break_lock: bool,
+    },
+    /// Add a repo to Nitely: create its project, watch it, keep a playbook for it, and connect
+    /// Claude Code, Codex and Cursor (MCP server, hooks, instructions) at the user level.
+    /// Shows every change; makes them only with --yes.
+    Connect {
+        /// Any folder in the repo.
+        path: String,
+        /// Project key, e.g. AERA; suggested from the name when omitted.
+        #[arg(long)]
+        project: Option<String>,
+        /// Project name; the repo's folder name when omitted.
+        #[arg(long)]
+        name: Option<String>,
+        /// Make the changes.
+        #[arg(long)]
+        yes: bool,
     },
     /// Manage the repos Nitely watches.
     Repo {
@@ -207,8 +225,8 @@ enum RepoCmd {
 fn main() {
     let cli = Cli::parse();
     match &cli.command {
-        Cmd::Hook { vendor } => {
-            if let Err(e) = run_hook(vendor) {
+        Cmd::Hook { vendor, payload } => {
+            if let Err(e) = run_hook(vendor, payload.as_deref()) {
                 eprintln!("nitely hook: {e:#}");
             }
             return;
@@ -228,14 +246,30 @@ fn main() {
     }
 }
 
-fn run_hook(vendor: &str) -> Result<()> {
-    let mut input = String::new();
-    std::io::stdin().read_to_string(&mut input)?;
+fn run_hook(vendor: &str, payload: Option<&str>) -> Result<()> {
+    let mut input = payload.unwrap_or_default().to_string();
+    if input.is_empty() {
+        std::io::stdin().read_to_string(&mut input)?;
+    }
     let value: serde_json::Value = serde_json::from_str(&input)?;
     let event = match vendor {
         "claude" => hook::from_claude(&value)?,
+        "codex" => hook::from_codex(&value)?,
+        "cursor" => {
+            // Cursor waits for an answer before sending a prompt; always let it through.
+            if value.get("hook_event_name").and_then(|v| v.as_str()) == Some("beforeSubmitPrompt") {
+                println!("{{\"continue\": true}}");
+            }
+            hook::from_cursor(&value)?
+        }
         other => bail!("unsupported vendor {other}"),
     };
+    // Claude Code adds a SessionStart hook's output to the session: the repo's Nitely instructions.
+    if vendor == "claude" && event.kind == "session_start" {
+        if let Some(text) = nitely_core::instructions::for_dir(&Config::load()?, &event.cwd) {
+            println!("{text}");
+        }
+    }
     Db::open_default()?.record(&event)
 }
 
@@ -427,6 +461,39 @@ fn run(cmd: Cmd) -> Result<()> {
             print_json(&r)?;
             if let Some(e) = &r.error {
                 eprintln!("land stopped: {e}");
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+        Cmd::Connect { path, project, name, yes } => {
+            let mut config = Config::load()?;
+            let db = Db::open_default()?;
+            let plan = nitely_core::connect::plan(&db, &config, &path, project.as_deref(), name.as_deref())?;
+            let new = if plan.project_exists { "existing" } else { "new" };
+            println!("{} → project {} ({}, {new}), integration branch {}", plan.root, plan.project_key, plan.project_name, plan.integration_branch);
+            println!("playbook: {} ({})", plan.playbook.path, plan.playbook.source);
+            for agent in &plan.agents {
+                println!("\n{}{}", agent.agent, if agent.found { "" } else { " (not installed; skipped)" });
+                for c in &agent.changes {
+                    println!("  {:<9} {}\n            {}", c.action, c.target, c.why);
+                }
+            }
+            for w in &plan.warnings {
+                eprintln!("warning: {w}");
+            }
+            if !yes {
+                eprintln!("\nnothing changed; run again with --yes to apply");
+                return Ok(());
+            }
+            let applied = nitely_core::connect::apply(&db, &mut config, &plan)?;
+            println!();
+            for d in &applied.done {
+                println!("done    {d}");
+            }
+            for f in &applied.failed {
+                println!("FAILED  {f}");
+            }
+            if !applied.failed.is_empty() {
                 std::process::exit(1);
             }
             Ok(())

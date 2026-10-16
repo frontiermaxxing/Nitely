@@ -381,7 +381,7 @@ reason = "billing"
         sh(&repo, &["commit", "-q", "-m", "init"]);
         sh(&repo, &["remote", "add", "origin", &remote.to_string_lossy()]);
         sh(&repo, &["push", "-q", "-u", "origin", "main"]);
-        let mut db = Db::open(&base.join("t.db")).unwrap();
+        let db = Db::open(&base.join("t.db")).unwrap();
         db.create_project("NIT", "Nitely").unwrap();
         Fixture { base, repo, remote, db, actor: Actor::Agent("claude:test".into()) }
     }

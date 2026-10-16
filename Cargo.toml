@@ -11,7 +11,7 @@ license = "UNLICENSED"
 nitely-core = { path = "crates/nitely-core" }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 dirs = "6"
 clap = { version = "4", features = ["derive"] }
