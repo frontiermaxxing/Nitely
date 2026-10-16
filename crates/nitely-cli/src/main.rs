@@ -376,15 +376,11 @@ fn run(cmd: Cmd) -> Result<()> {
                     print_json(&db.move_issue(&key, &state, evidence.as_deref(), reason.as_deref(), &me)?)
                 }
                 IssueCmd::Block { key, by } => {
-                    for b in &by {
-                        db.add_blocker(&key, b, &me)?;
-                    }
+                    db.change_blockers(&key, &by, &[], &me)?;
                     print_json(&db.relations(&key)?)
                 }
                 IssueCmd::Unblock { key, by } => {
-                    for b in &by {
-                        db.remove_blocker(&key, b, &me)?;
-                    }
+                    db.change_blockers(&key, &[], &by, &me)?;
                     print_json(&db.relations(&key)?)
                 }
                 IssueCmd::Note { key, text, handoff } => {

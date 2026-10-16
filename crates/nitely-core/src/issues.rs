@@ -181,8 +181,9 @@ fn rank(priority: i64) -> i64 {
     if priority == 0 { 5 } else { priority }
 }
 
-/// Every blocked-by relation between stored issues, with whether each issue is open and its
-/// priority. Relations to an issue no longer stored (a dropped Linear mirror) are left out.
+/// Every blocked-by relation of a stored issue, with whether each issue is open and its priority.
+/// A blocker no longer stored (a Linear issue that left the mirror) counts as open: nothing says
+/// it finished.
 struct Deps {
     /// (blocked issue, blocker)
     edges: Vec<(String, String)>,
@@ -193,10 +194,11 @@ struct Deps {
 impl Deps {
     fn load(conn: &rusqlite::Connection) -> Result<Deps> {
         let mut stmt = conn.prepare(
-            "SELECT r.issue_key, r.blocker_key, a.state_type, a.priority, b.state_type, b.priority
+            "SELECT r.issue_key, r.blocker_key, a.state_type, a.priority,
+                    COALESCE(b.state_type, 'unstarted'), COALESCE(b.priority, 0)
              FROM issue_blocker r
              JOIN issue a ON a.key = r.issue_key
-             JOIN issue b ON b.key = r.blocker_key
+             LEFT JOIN issue b ON b.key = r.blocker_key
              ORDER BY r.issue_key, r.blocker_key",
         )?;
         let mut deps = Deps { edges: Vec::new(), open: HashMap::new(), priority: HashMap::new() };
@@ -512,48 +514,65 @@ impl Db {
         Ok(issues)
     }
 
-    /// Records that `key` cannot start before `blocker` closes. Refuses a relation that would make
-    /// two issues wait on each other.
-    pub fn add_blocker(&self, key: &str, blocker: &str, actor: &Actor) -> Result<()> {
-        let issue = self.issue(key)?.with_context(|| format!("no issue {key}"))?;
-        let blocker = self.issue(blocker)?.with_context(|| format!("no issue {blocker}"))?;
-        if issue.origin != "nitely" {
-            bail!("{} is mirrored from {}; only native issues take blockers", issue.key, issue.origin);
-        }
-        if issue.key == blocker.key {
-            bail!("{} cannot block itself", issue.key);
-        }
-        if Deps::load(&self.conn)?.waits_on(&blocker.key, &issue.key) {
-            bail!("{} already waits on {}, so {} cannot also wait on it", blocker.key, issue.key, issue.key);
-        }
-        let ts = now();
-        let added = self.conn.execute(
-            "INSERT OR IGNORE INTO issue_blocker (issue_key, blocker_key, created_at) VALUES (?1, ?2, ?3)",
-            params![issue.key, blocker.key, ts],
-        )?;
-        if added > 0 {
-            self.conn.execute(
-                "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, ?2, ?3, 'blocker_added', ?4)",
-                params![ts, actor.id(), issue.key, format!("Blocked by {}", blocker.key)],
-            )?;
-        }
-        Ok(())
+    /// Records that `key` cannot start before `blocker` closes.
+    pub fn add_blocker(&mut self, key: &str, blocker: &str, actor: &Actor) -> Result<()> {
+        self.change_blockers(key, &[blocker.to_string()], &[], actor)
     }
 
-    pub fn remove_blocker(&self, key: &str, blocker: &str, actor: &Actor) -> Result<()> {
-        let issue = self.issue(key)?.with_context(|| format!("no issue {key}"))?;
-        let blocker = blocker.trim().to_uppercase();
-        let removed = self.conn.execute(
-            "DELETE FROM issue_blocker WHERE issue_key = ?1 AND blocker_key = ?2 COLLATE NOCASE",
-            params![issue.key, blocker],
-        )?;
-        if removed == 0 {
-            bail!("{} is not blocked by {blocker}", issue.key);
+    pub fn remove_blocker(&mut self, key: &str, blocker: &str, actor: &Actor) -> Result<()> {
+        self.change_blockers(key, &[], &[blocker.to_string()], actor)
+    }
+
+    /// Adds and removes blockers of `key` together: all of them or, on any error, none. Refuses a
+    /// blocker that is missing, is `key` itself, or already waits on `key`, and removing a blocker
+    /// `key` does not have.
+    pub fn change_blockers(&mut self, key: &str, add: &[String], remove: &[String], actor: &Actor) -> Result<()> {
+        let ts = now();
+        // Immediate: the cycle check and the insert see the same relations even with agents racing.
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let find = |k: &str| -> Result<(String, String)> {
+            tx.query_row("SELECT key, origin FROM issue WHERE key = ?1 COLLATE NOCASE", [k.trim()], |r| Ok((r.get(0)?, r.get(1)?)))
+                .optional()?
+                .with_context(|| format!("no issue {k}"))
+        };
+        let (issue, origin) = find(key)?;
+        for b in remove {
+            let b = b.trim().to_uppercase();
+            let removed = tx.execute(
+                "DELETE FROM issue_blocker WHERE issue_key = ?1 AND blocker_key = ?2 COLLATE NOCASE",
+                params![issue, b],
+            )?;
+            if removed == 0 {
+                bail!("{issue} is not blocked by {b}");
+            }
+            tx.execute(
+                "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, ?2, ?3, 'blocker_removed', ?4)",
+                params![ts, actor.id(), issue, format!("No longer blocked by {b}")],
+            )?;
         }
-        self.conn.execute(
-            "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, ?2, ?3, 'blocker_removed', ?4)",
-            params![now(), actor.id(), issue.key, format!("No longer blocked by {blocker}")],
-        )?;
+        if !add.is_empty() && origin != "nitely" {
+            bail!("{issue} is mirrored from {origin}; only native issues take blockers");
+        }
+        for b in add {
+            let (blocker, _) = find(b)?;
+            if blocker == issue {
+                bail!("{issue} cannot block itself");
+            }
+            if Deps::load(&tx)?.waits_on(&blocker, &issue) {
+                bail!("{blocker} already waits on {issue}, so {issue} cannot also wait on it");
+            }
+            let added = tx.execute(
+                "INSERT OR IGNORE INTO issue_blocker (issue_key, blocker_key, created_at) VALUES (?1, ?2, ?3)",
+                params![issue, blocker, ts],
+            )?;
+            if added > 0 {
+                tx.execute(
+                    "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, ?2, ?3, 'blocker_added', ?4)",
+                    params![ts, actor.id(), issue, format!("Blocked by {blocker}")],
+                )?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -574,8 +593,9 @@ impl Db {
         };
         Ok(Relations {
             blocked_by: link(
-                "SELECT i.key, i.title, i.state, i.state_type FROM issue_blocker r JOIN issue i ON i.key = r.blocker_key
-                 WHERE r.issue_key = ?1 COLLATE NOCASE ORDER BY i.number, i.key",
+                "SELECT r.blocker_key, COALESCE(i.title, ''), COALESCE(i.state, 'Not synced'), COALESCE(i.state_type, '')
+                 FROM issue_blocker r LEFT JOIN issue i ON i.key = r.blocker_key
+                 WHERE r.issue_key = ?1 COLLATE NOCASE ORDER BY i.number, r.blocker_key",
             )?,
             blocks: link(
                 "SELECT i.key, i.title, i.state, i.state_type FROM issue_blocker r JOIN issue i ON i.key = r.issue_key
@@ -589,6 +609,26 @@ impl Db {
         self.list_issues(None, true)
     }
 
+    /// Refuses the moves `move_issue` refuses, without moving anything.
+    pub fn check_move(&self, key: &str, to: &str, evidence: Option<&str>, reason: Option<&str>, actor: &Actor) -> Result<()> {
+        let issue = self.issue(key)?.with_context(|| format!("no issue {key}"))?;
+        if issue.origin != "nitely" {
+            bail!("{} is mirrored from {}; change it there", issue.key, issue.origin);
+        }
+        let (state, _) = parse_state(to)?;
+        if state == "Approved" && *actor != Actor::Human {
+            bail!("only a human can approve; ask for approval with `ask` and move the issue to Needs You");
+        }
+        let given = |v: Option<&str>| v.is_some_and(|v| !v.trim().is_empty());
+        if state == "Done" && !given(evidence) {
+            bail!("moving to Done needs evidence: what ran and what it showed");
+        }
+        if matches!(state, "Canceled" | "Duplicate") && !given(reason) {
+            bail!("moving to {state} needs a reason");
+        }
+        Ok(())
+    }
+
     /// Moves a native issue. Done needs evidence, Canceled and Duplicate a reason, and only a human
     /// may set Approved. Leaving In Progress releases the claim.
     pub fn move_issue(
@@ -599,22 +639,11 @@ impl Db {
         reason: Option<&str>,
         actor: &Actor,
     ) -> Result<IssueRecord> {
+        self.check_move(key, to, evidence, reason, actor)?;
         let issue = self.issue(key)?.with_context(|| format!("no issue {key}"))?;
-        if issue.origin != "nitely" {
-            bail!("{} is mirrored from {}; change it there", issue.key, issue.origin);
-        }
         let (state, state_type) = parse_state(to)?;
-        if state == "Approved" && *actor != Actor::Human {
-            bail!("only a human can approve; ask for approval with `ask` and move the issue to Needs You");
-        }
         let evidence = evidence.map(str::trim).filter(|e| !e.is_empty());
         let reason = reason.map(str::trim).filter(|r| !r.is_empty());
-        if state == "Done" && evidence.is_none() {
-            bail!("moving to Done needs evidence: what ran and what it showed");
-        }
-        if matches!(state, "Canceled" | "Duplicate") && reason.is_none() {
-            bail!("moving to {state} needs a reason");
-        }
 
         let ts = now();
         let summary = match (evidence, reason) {
@@ -976,6 +1005,28 @@ mod tests {
         assert_eq!(db.issue("NIT-4").unwrap().unwrap().blocked_by, vec!["NIT-3"]);
         let rel = db.relations("NIT-1").unwrap();
         assert_eq!(rel.blocks.iter().map(|l| l.key.as_str()).collect::<Vec<_>>(), ["NIT-2", "NIT-3"]);
+
+        // All or nothing: a bad key in the batch leaves the good one unadded.
+        let batch = ["NIT-1".to_string(), "NIT-99".to_string()];
+        assert!(db.change_blockers("NIT-4", &batch, &[], &h).is_err());
+        assert_eq!(db.issue("NIT-4").unwrap().unwrap().blocked_by, vec!["NIT-3"]);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_blocker_that_left_the_mirror_still_blocks() {
+        let (mut db, dir) = db();
+        db.create_project("NIT", "Nitely").unwrap();
+        let h = Actor::Human;
+        let linear = IssueRecord { key: "AERA-5".into(), title: "Upstream fix".into(), state: "Todo".into(), state_type: "unstarted".into(), ..Default::default() };
+        db.replace_issues("linear", &[linear]).unwrap();
+        let mut waits = new("Use the upstream fix");
+        waits.blocked_by = vec!["AERA-5".into()];
+        db.create_issue(&waits, &h).unwrap();
+        db.replace_issues("linear", &[]).unwrap();
+        assert_eq!(db.issue("NIT-1").unwrap().unwrap().blocked_by, vec!["AERA-5"]);
+        assert!(db.next_task("NIT", "claude:a").unwrap().is_none());
+        assert_eq!(db.relations("NIT-1").unwrap().blocked_by[0].state, "Not synced");
         std::fs::remove_dir_all(dir).ok();
     }
 

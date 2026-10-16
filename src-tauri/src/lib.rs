@@ -72,7 +72,7 @@ async fn issue_detail(key: String) -> Result<IssueDetail, String> {
 /// Adds (`blocked` true) or removes a blocker of an issue.
 #[tauri::command]
 async fn set_blocker(key: String, blocker: String, blocked: bool) -> Result<Relations, String> {
-    let db = db()?;
+    let mut db = db()?;
     if blocked {
         db.add_blocker(&key, &blocker, &ME).map_err(err)?;
     } else {

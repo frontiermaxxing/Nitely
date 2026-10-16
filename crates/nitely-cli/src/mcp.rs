@@ -345,12 +345,11 @@ fn run_tool(server: &Server, name: &str, args: &Value) -> Result<Value> {
             if str_arg(args, "state").is_none() && add.is_empty() && remove.is_empty() {
                 bail!("give a state, blocked_by or remove_blocked_by");
             }
-            for b in &add {
-                db.add_blocker(key, b, &actor)?;
+            // Check the move first, so a refused move leaves the blockers as they were.
+            if let Some(state) = str_arg(args, "state") {
+                db.check_move(key, state, str_arg(args, "evidence"), str_arg(args, "reason"), &actor)?;
             }
-            for b in &remove {
-                db.remove_blocker(key, b, &actor)?;
-            }
+            db.change_blockers(key, &add, &remove, &actor)?;
             match str_arg(args, "state") {
                 Some(state) => json!(db.move_issue(key, state, str_arg(args, "evidence"), str_arg(args, "reason"), &actor)?),
                 None => json!(db.issue(key)?.with_context(|| format!("no issue {key}"))?),
