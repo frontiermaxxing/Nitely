@@ -7,7 +7,7 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 /// What `nitely serve` advertises over mDNS (Bonjour), and `nitely discover` browses for.
@@ -224,28 +224,58 @@ pub fn url(ip: IpAddr, port: u16, path: &str) -> String {
     }
 }
 
-/// The MCP URLs other machines would use for this one, IPv4 first (the server listens on IPv4).
+/// The addresses other machines can reach a server listening on `listen` at: every LAN address
+/// of its family when it listens on all of them (`0.0.0.0`, `[::]`), else that one address,
+/// which is none for loopback. `[::]` takes IPv4 too except on Windows, where it is IPv6 only.
+pub fn reachable_addresses(listen: IpAddr, networks: &[(IpAddr, u8)]) -> Vec<IpAddr> {
+    let all = lan_addresses(networks);
+    match listen {
+        ip if ip.is_loopback() => vec![],
+        IpAddr::V4(v4) if v4.is_unspecified() => all.into_iter().filter(IpAddr::is_ipv4).collect(),
+        IpAddr::V6(v6) if v6.is_unspecified() => {
+            let mut ips: Vec<IpAddr> = all.iter().copied().filter(IpAddr::is_ipv6).collect();
+            if !cfg!(windows) {
+                ips.extend(all.into_iter().filter(IpAddr::is_ipv4));
+            }
+            ips
+        }
+        ip => vec![ip],
+    }
+}
+
+/// The MCP URLs other machines would use for this one, for the address `nitely serve` listens on.
 pub fn lan_urls() -> Vec<String> {
-    let port = serving_port().unwrap_or(DEFAULT_PORT);
-    lan_addresses(&networks()).into_iter().filter(IpAddr::is_ipv4).map(|ip| url(ip, port, MCP_PATH)).collect()
+    let listen = serving_addr().unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], DEFAULT_PORT)));
+    reachable_addresses(listen.ip(), &networks()).into_iter().map(|ip| url(ip, listen.port(), MCP_PATH)).collect()
 }
 
 fn port_file() -> PathBuf {
     crate::paths::data_dir().join("relay-port")
 }
 
-/// Records the port `nitely serve` listens on, so the app's setup commands name it.
-pub fn record_serving_port(port: u16) -> Result<()> {
+/// Records the address `nitely serve` listens on, so the app's setup commands name it.
+pub fn record_serving_addr(addr: SocketAddr) -> Result<()> {
     let file = port_file();
     if let Some(dir) = file.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(&file, port.to_string()).with_context(|| format!("writing {}", file.display()))
+    std::fs::write(&file, addr.to_string()).with_context(|| format!("writing {}", file.display()))
+}
+
+/// The address `nitely serve` last listened on, if it ever ran. A file from before the address
+/// was recorded holds only the port, of the default IPv4 listener.
+pub fn serving_addr() -> Option<SocketAddr> {
+    parse_serving_addr(&std::fs::read_to_string(port_file()).ok()?)
+}
+
+fn parse_serving_addr(text: &str) -> Option<SocketAddr> {
+    let text = text.trim();
+    text.parse().ok().or_else(|| text.parse::<u16>().ok().map(|port| SocketAddr::from(([0, 0, 0, 0], port))))
 }
 
 /// The port `nitely serve` last listened on, if it ever ran.
 pub fn serving_port() -> Option<u16> {
-    std::fs::read_to_string(port_file()).ok()?.trim().parse().ok()
+    serving_addr().map(|a| a.port())
 }
 
 /// The command that adds this machine's backlog to Claude Code on another machine.
@@ -313,6 +343,24 @@ mod tests {
         for ip in ["8.8.8.8", "100.64.0.1", "172.32.0.1", "2001:4860::8888", "::ffff:8.8.8.8"] {
             assert!(!is_local(ip.parse().unwrap()), "{ip}");
         }
+    }
+
+    #[test]
+    fn setup_urls_follow_the_listener() {
+        let nets = [("192.168.1.68".parse().unwrap(), 24), ("2600:1700:59d:6010::2e".parse().unwrap(), 64), ("fe80::1".parse().unwrap(), 64)];
+        let at = |listen: &str| reachable_addresses(listen.parse().unwrap(), &nets).iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert_eq!(at("0.0.0.0"), ["192.168.1.68"]);
+        let six = at("::");
+        assert_eq!(six[0], "2600:1700:59d:6010::2e", "IPv6 first, never link-local: {six:?}");
+        assert_eq!(six.len(), if cfg!(windows) { 1 } else { 2 }, "Windows listens on IPv6 only: {six:?}");
+        assert_eq!(at("192.168.1.68"), ["192.168.1.68"]);
+        assert!(at("127.0.0.1").is_empty() && at("::1").is_empty());
+        assert_eq!(url("2600:1700:59d:6010::2e".parse().unwrap(), 7421, MCP_PATH), format!("http://[2600:1700:59d:6010::2e]:7421{MCP_PATH}"));
+        // What serve records, and the bare port an older serve recorded.
+        assert_eq!(parse_serving_addr("[::]:7500
+"), Some("[::]:7500".parse().unwrap()));
+        assert_eq!(parse_serving_addr("7421"), Some("0.0.0.0:7421".parse().unwrap()));
+        assert_eq!(parse_serving_addr("junk"), None);
     }
 
     #[test]

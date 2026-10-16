@@ -48,9 +48,10 @@ pub fn serve(listen: Option<&str>, advertise: bool) -> Result<()> {
     }
     let listen = listen.map(str::to_string).unwrap_or_else(|| format!("0.0.0.0:{DEFAULT_PORT}"));
     let listener = TcpListener::bind(&listen).with_context(|| format!("listening on {listen}"))?;
-    let port = listener.local_addr()?.port();
-    if let Err(e) = relay::record_serving_port(port) {
-        eprintln!("could not record the port for the app's setup commands ({e:#})");
+    let local = listener.local_addr()?;
+    let port = local.port();
+    if let Err(e) = relay::record_serving_addr(local) {
+        eprintln!("could not record the address for the app's setup commands ({e:#})");
     }
     let networks = networks();
     let _mdns = if advertise {
@@ -65,7 +66,7 @@ pub fn serve(listen: Option<&str>, advertise: bool) -> Result<()> {
         None
     };
     println!("Serving the backlog to the local network on port {port} (MCP at {MCP_PATH}).");
-    for ip in lan_addresses(&networks) {
+    for ip in relay::reachable_addresses(local.ip(), &networks) {
         println!("  {}", url(ip, port, MCP_PATH));
     }
     println!("Only this machine's networks are answered, and only with a token. Ctrl+C stops it.");
