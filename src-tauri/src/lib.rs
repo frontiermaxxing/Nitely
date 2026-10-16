@@ -6,6 +6,10 @@ use std::time::Duration;
 
 /// Bitbucket and Linear are read this often; git and agent state on every board refresh.
 const SYNC_EVERY: Duration = Duration::from_secs(60);
+/// How often the watcher checks for changes; each check is a pragma and a few file stats.
+const WATCH_EVERY: Duration = Duration::from_millis(500);
+/// Sent to the frontend when anything it shows may have changed.
+const CHANGED_EVENT: &str = "nitely://changed";
 
 /// The person at the app is the human: the only place that can approve or answer an ask.
 const ME: Actor = Actor::Human;
@@ -81,6 +85,30 @@ fn run_sync() -> anyhow::Result<remote::SyncReport> {
     Ok(remote::sync(&config, &mut db))
 }
 
+/// Pushes a change event to the frontend whenever the database or a watched repo changes.
+fn watch(app: tauri::AppHandle) {
+    use tauri::Emitter;
+    let mut watcher = loop {
+        match nitely_core::watch::Watcher::new() {
+            Ok(w) => break w,
+            Err(e) => {
+                eprintln!("watch: {e:#}");
+                std::thread::sleep(Duration::from_secs(5));
+            }
+        }
+    };
+    loop {
+        std::thread::sleep(WATCH_EVERY);
+        match watcher.changed() {
+            Ok(true) => {
+                app.emit(CHANGED_EVENT, ()).ok();
+            }
+            Ok(false) => {}
+            Err(e) => eprintln!("watch: {e:#}"),
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     std::thread::spawn(|| loop {
@@ -92,6 +120,11 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            let handle = app.handle().clone();
+            std::thread::spawn(move || watch(handle));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             snapshot,
             sync_now,

@@ -22,10 +22,8 @@ export function Backlog(props: {
         .then((i) => live && (setIssues(i), setError(null)))
         .catch((e) => live && setError(String(e)));
     load();
-    const id = setInterval(load, 4000);
     return () => {
       live = false;
-      clearInterval(id);
     };
   }, [props.projectKey, showClosed, props.version]);
 

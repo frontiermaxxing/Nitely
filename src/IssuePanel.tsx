@@ -38,10 +38,8 @@ export function IssuePanel(props: { issueKey: string; now: number; version: numb
         .then((d) => live && (setDetail(d), setError(null)))
         .catch((e) => live && setError(String(e)));
     load();
-    const id = setInterval(load, 4000);
     return () => {
       live = false;
-      clearInterval(id);
     };
   }, [props.issueKey, props.version]);
 

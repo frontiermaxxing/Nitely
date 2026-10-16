@@ -14,6 +14,7 @@ pub mod playbook;
 pub mod remote;
 pub mod review;
 pub mod snapshot;
+pub mod watch;
 pub mod submit;
 
 pub use config::{resolve_project, Config, RepoConfig};
