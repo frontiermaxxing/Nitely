@@ -1,0 +1,76 @@
+/* The issue panel's track detail and relations (src/IssueJourney.tsx, src/IssuePanel.tsx). */
+
+/* ----- journey: rounds, pull request, lands ----- */
+.journey { margin: -4px 0 18px; font-size: var(--text-sm); }
+.journey-row {
+  display: grid; grid-template-columns: 14px 84px 56px minmax(0, 1fr) auto; align-items: center; column-gap: 10px;
+  width: 100%; min-height: 30px; padding: 0 6px; margin: 0; border: 0; background: none; text-align: left;
+  border-radius: var(--radius); color: var(--fg); font: inherit;
+}
+.journey-head { min-height: 20px; color: var(--fg-3); font-size: var(--text-xs); }
+button.journey-toggle { cursor: pointer; transition: background var(--dur-fast) var(--ease); }
+button.journey-toggle:hover { background: var(--hover); }
+button.journey-toggle:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.journey-step { position: relative; }
+/* The rail: from each node down to the next one. A round that asked for changes loops into the
+   next round, so its stretch of rail is the dashed "changes asked" line. */
+.journey-step::before {
+  content: ""; position: absolute; left: 12px; top: 15px; bottom: -15px; width: 2px; border-radius: 1px; background: var(--line);
+}
+.journey-step-looped::before {
+  background: repeating-linear-gradient(180deg, var(--st-changes) 0 3px, transparent 3px 6px);
+}
+.journey-step-last::before { display: none; }
+.journey-node {
+  position: relative; z-index: 1; width: 10px; height: 10px; border-radius: 50%; justify-self: center;
+  background: var(--st-review); box-shadow: 0 0 0 3px var(--surface);
+}
+.journey-node-changes { background: var(--surface); box-shadow: inset 0 0 0 2px var(--st-changes), 0 0 0 3px var(--surface); }
+.journey-node-unreviewed { background: var(--st-todo); }
+.journey-node-reviewing, .journey-node-open { background: var(--live); }
+.journey-node-review-failed, .journey-node-stuck { background: var(--surface); box-shadow: inset 0 0 0 2px var(--st-stuck), 0 0 0 3px var(--surface); }
+.journey-node-pr { background: var(--surface); box-shadow: inset 0 0 0 2px var(--st-landing), 0 0 0 3px var(--surface); }
+.journey-node-done { background: var(--st-done); box-shadow: 0 0 0 3px var(--surface); }
+.journey-label { color: var(--fg-2); white-space: nowrap; }
+.journey-gates { display: inline-flex; align-items: center; gap: 3px; color: var(--fg-2); }
+.journey-none { width: 8px; height: 1.5px; border-radius: 1px; background: var(--line-strong); }
+.journey-review { display: flex; align-items: center; gap: 4px 8px; min-width: 0; flex-wrap: wrap; }
+.journey-verdict { color: var(--fg); white-space: nowrap; }
+.journey-verdict-changes { color: var(--st-changes); }
+.journey-verdict-review-failed, .journey-stuck { color: var(--st-stuck); }
+.journey-verdict-reviewing { color: var(--fg-2); }
+.journey-land { display: block; padding: 6px 0; line-height: 1.4; overflow-wrap: anywhere; color: var(--fg-2); }
+.journey-land.journey-stuck { color: var(--st-stuck); }
+.journey-time {
+  display: inline-flex; align-items: center; gap: 4px; justify-content: flex-end; min-width: 30px;
+  color: var(--fg-3); font-size: var(--text-xs); font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.journey-chevron { color: var(--fg-3); transition: transform var(--dur-fast) var(--ease); }
+.journey-chevron.open { transform: rotate(90deg); }
+.journey-detail { margin: 2px 6px 8px 30px; padding: 2px 0 4px; }
+.journey-by { margin: 0 0 6px; color: var(--fg-2); }
+.journey-reasons { margin: 0 0 6px; padding-left: 16px; color: var(--fg-2); }
+.journey-reasons.attention-ink { color: var(--attention-ink); }
+.journey-findings { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+.journey-findings li { display: grid; grid-template-columns: 22px 1fr; gap: 6px; line-height: 1.45; }
+
+@media (max-width: 520px) {
+  .journey-row { grid-template-columns: 14px 72px 40px minmax(0, 1fr) auto; column-gap: 8px; }
+  .journey-detail { margin-left: 28px; }
+}
+
+/* ----- relations ----- */
+.relations { display: grid; gap: 6px; margin: 0 0 16px; font-size: var(--text-sm); }
+.relation { display: grid; grid-template-columns: 84px minmax(0, 1fr); gap: 8px; align-items: start; }
+.relation-label { color: var(--fg-2); line-height: 24px; }
+.relation-items { display: grid; gap: 2px; min-width: 0; }
+.relation-item { display: flex; align-items: center; gap: 4px; min-width: 0; min-height: 24px; }
+.relation-item .ui-token { flex: 0 1 auto; }
+.relation-remove { min-height: 22px; padding: 0 6px; font-size: var(--text-xs); }
+.relation-new { justify-self: start; color: var(--fg-2); }
+.relation-add { margin-top: 0; }
+
+/* ----- the text timeline, collapsed under the track ----- */
+.panel-timeline { margin-top: 22px; }
+.panel-timeline summary { font-size: var(--text-sm); font-weight: 600; color: var(--fg-2); }
+.panel-timeline[open] summary { margin-bottom: 12px; }

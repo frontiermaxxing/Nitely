@@ -9,9 +9,11 @@ import {
   EmptyState,
   EVENT_LABEL,
   EventMark,
+  FindingDots,
   IssueToken,
   Meter,
   PriorityMark,
+  ResultMark,
   SeverityMark,
   Sparkline,
   STATION_LABEL,
@@ -40,6 +42,7 @@ const TRACKS: { label: string; track: Track }[] = [
   { label: "An agent is working on it", track: track("working") },
   { label: "Stuck: the gate failed", track: track("gate", { stuck: "Gate failed" }) },
   { label: "In review after two rounds of changes", track: track("review", { rounds: 2 }) },
+  { label: "Needs you after five review rounds (four asked for changes)", track: track("needs", { rounds: 4 }) },
   { label: "Needs you, and the agent asked something", track: track("needs", { asking: true }) },
   { label: "Landing, Needs you skipped", track: track("landing") },
   { label: "Done", track: track("done", { rounds: 1 }) },
@@ -127,6 +130,11 @@ export default function Kit() {
             <StationGlyph track={track("gate", { stuck: "Gate failed" })} />
             <StationTrack track={track("gate", { stuck: "Gate failed" })} />
             <span className="kit-caption">Stuck</span>
+          </div>
+          <div className="kit-cell">
+            <StationGlyph track={track("review", { rounds: 3 })} />
+            <StationTrack track={track("review", { rounds: 3 })} />
+            <span className="kit-caption">Changes asked</span>
           </div>
           <div className="kit-cell">
             <StationGlyph track={track("working", { asking: true })} />
@@ -224,7 +232,7 @@ export default function Kit() {
       </section>
 
       <section>
-        <h2>PriorityMark and SeverityMark</h2>
+        <h2>PriorityMark, SeverityMark, FindingDots, ResultMark</h2>
         <div className="kit-row">
           {[1, 2, 3, 4, 0].map((p) => (
             <span key={p} className="kit-pair">
@@ -236,6 +244,25 @@ export default function Kit() {
           {[0, 1, 2, 3].map((p) => (
             <SeverityMark key={p} priority={p} />
           ))}
+        </div>
+        <div className="kit-row">
+          <span className="kit-pair">
+            <FindingDots findings={[{ priority: 1, text: "" }, { priority: 1, text: "", carried: true }, { priority: 2, text: "" }, { priority: 3, text: "" }]} /> FindingDots: a P1, a P1 carried over, a P2, a P3
+          </span>
+          <span className="kit-pair">
+            <FindingDots findings={[]} /> no findings
+          </span>
+        </div>
+        <div className="kit-row">
+          <span className="kit-pair">
+            <ResultMark result="pass" /> passed
+          </span>
+          <span className="kit-pair">
+            <ResultMark result="fail" /> failed
+          </span>
+          <span className="kit-pair">
+            <ResultMark result="pending" /> running
+          </span>
         </div>
       </section>
 

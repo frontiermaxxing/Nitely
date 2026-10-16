@@ -86,16 +86,20 @@ button.ui-token:focus-visible, a.ui-token:focus-visible { outline: 2px solid var
 .ui-st-stuck .ui-st-label, .ui-st-stuck .ui-st-time { color: var(--st-stuck); }
 .ui-track-closed .ui-st { opacity: 0.6; }
 
-/* The "changes asked" loop: from Review back over to Working. */
+/* The "changes asked" loop: from Review back over to Working, one nested arc per round, so
+   many rounds read as a coil. The innermost arc is the dashed loop with the arrowhead into
+   Working; each earlier round is a thinner solid echo around it. */
+.ui-track-coil { position: absolute; top: 18px; }
 .ui-track-loop {
-  position: absolute; top: 18px; height: 16px; box-sizing: border-box;
+  position: absolute; bottom: 0; box-sizing: border-box;
   border: 1.5px dashed var(--st-changes); border-bottom: 0; border-radius: 9px 9px 0 0;
 }
-.ui-track-loop::after {
+.ui-track-loop + .ui-track-loop { border: 1px solid var(--st-changes); border-bottom: 0; border-radius: 11px 11px 0 0; }
+.ui-track-loop:first-child::after {
   content: ""; position: absolute; left: -4.75px; bottom: -3px;
   border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 5px solid var(--st-changes);
 }
-.ui-track-loop span {
+.ui-track-loop-label {
   position: absolute; left: 50%; top: -18px; transform: translateX(-50%);
   color: var(--st-changes); font-size: var(--text-xs); line-height: 14px; white-space: nowrap;
 }
@@ -127,6 +131,19 @@ button.ui-token:focus-visible, a.ui-token:focus-visible { outline: 2px solid var
 .ui-sev-p1 { color: var(--sev-p1); }
 .ui-sev-p2 { color: var(--sev-p2); }
 .ui-sev-p3 { color: var(--sev-p3); }
+.ui-findings { display: inline-flex; align-items: center; gap: 2px; flex: none; vertical-align: middle; }
+.ui-finding { width: 7px; height: 7px; border-radius: 2px; background: var(--c); --c: var(--sev-p3); }
+.ui-finding-p0 { --c: var(--sev-p0); }
+.ui-finding-p1 { --c: var(--sev-p1); }
+.ui-finding-p2 { --c: var(--sev-p2); }
+.ui-finding-carried { background: none; box-shadow: inset 0 0 0 1.5px var(--c); }
+.ui-findings-none { width: 8px; height: 1.5px; border-radius: 1px; background: var(--line-strong); }
+.ui-findings-more { margin-left: 3px; font-size: var(--text-xs); color: var(--fg-3); font-variant-numeric: tabular-nums; }
+
+/* ----- ResultMark ----- */
+.ui-result { flex: none; display: inline-block; vertical-align: middle; }
+.ui-result-fail { color: var(--sev-p0); }
+.ui-result-pending { color: var(--fg-3); }
 
 @media (prefers-reduced-motion: reduce) {
   .ui-dot-working, .ui-mark-dot-working, .ui-st-current .ui-st-node::before { animation: none !important; }

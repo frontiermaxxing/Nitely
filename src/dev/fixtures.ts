@@ -214,6 +214,17 @@ const ISSUES: IssueSpec[] = [
     from: 36, to: 2, story: ["filed", "claim", "work", "gate", "review", "pass"],
     live: { state: "idle", seen: 25, activity: "Review passed; waiting to land" }, branch: { ahead: 1, dirty_files: 0 }, checks: "success",
   },
+  {
+    // Five review rounds, four of them asking for changes: the issue track must read as a loop.
+    key: "AND-258", title: "Password autofill inside cross-origin iframes", kind: "feature", priority: 2, vendor: "codex",
+    from: 96, to: 2.2,
+    story: [
+      "filed", "claim", "work", "gate", "review", "changes", "work", "gatefail", "work", "gate", "review", "changes",
+      "work", "gate", "review", "changes", "work", "gate", "review", "changes", "work", "gate", "review", "passhuman",
+    ],
+    notes: ["Frame origin checks in the autofill agent", "Fixing review: the origin check ran after the fill", "Gate failed in components_unittests", "Fixing review: carried P1 on sandboxed frames", "Fixing review: test names", "Fixing review: last nit"],
+    live: { state: "idle", seen: 130, activity: "Submitted; waits for a human" }, branch: { ahead: 11, dirty_files: 0 }, checks: "success",
+  },
   { key: "AND-263", title: "Update the Windows installer icon", kind: "improvement", priority: 4, vendor: "codex", from: 150, to: 100, story: ["filed", "claim", "work", "gate", "review", "pass", "land"] },
   { key: "AND-262", title: "Memory saver for background tabs", kind: "feature", priority: 2, vendor: "claude", from: 300, to: 20, story: ["filed", "claim", "work", "gate", "review", "changes", "work", "gate", "review", "passhuman", "approve", "land"] },
   { key: "AND-261", title: "Spellcheck underlines in the omnibox", kind: "bug", priority: 3, vendor: "codex", from: 110, to: 60, story: ["filed", "claim", "work", "gate", "review", "pass", "land"] },
@@ -583,7 +594,8 @@ function snapshot(): Board {
         session: s,
         issue,
         pr: world.prs.get(spec.key)?.[0] ?? null,
-        needs_me: state.rebase_in_progress || s?.state === "waiting",
+        // As in nitely-core's snapshot: a conflict, an agent waiting for input, or an issue that waits on a person.
+        needs_me: state.rebase_in_progress || s?.state === "waiting" || issue.state === "Needs You",
       };
     });
     const unmatched: Session[] =
@@ -594,7 +606,8 @@ function snapshot(): Board {
   });
   return {
     repos,
-    needs_me_issues: world.issues.filter((i) => i.state === "Needs You"),
+    // Only those without a worktree row, as in nitely-core: the others are flagged on their row.
+    needs_me_issues: world.issues.filter((i) => i.state === "Needs You" && !repos.some((r) => r.rows.some((row) => row.issue_key === i.key))),
     asks: world.asks.filter((a) => a.answer === null),
     sync: [
       { source: "github", last_attempt: NOW - 95, last_ok: NOW - 95, last_error: null },
@@ -703,6 +716,25 @@ function detail(key: string): IssueDetail {
     prs: world.prs.get(issue.key) ?? [],
     reviews: world.reviews.get(issue.key) ?? [],
   };
+}
+
+/** Adds or removes a blocker, the way set_blocker does, and returns the issue's new relations. */
+function setBlocker(args: Record<string, unknown>) {
+  const key = String(args.key).toUpperCase();
+  const blocker = String(args.blocker).toUpperCase();
+  if (!world.issues.some((i) => i.key === key)) throw `no issue ${key}`;
+  if (!world.issues.some((i) => i.key === blocker)) throw `no issue ${blocker}`;
+  if (key === blocker) throw "an issue cannot wait on itself";
+  const at = BLOCKERS.findIndex(([a, b]) => a === key && b === blocker);
+  if (args.blocked && at < 0) BLOCKERS.push([key, blocker]);
+  if (!args.blocked && at >= 0) BLOCKERS.splice(at, 1);
+  for (const i of world.issues) {
+    i.blocked_by = [];
+    i.blocks = [];
+    i.urgency = i.priority;
+  }
+  link(world);
+  return detail(key).relations;
 }
 
 function moveIssue(args: Record<string, unknown>) {
@@ -914,6 +946,8 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return detail(String(args.key));
       case "move_issue":
         return moveIssue(args);
+      case "set_blocker":
+        return setBlocker(args);
       case "answer_ask":
         return answerAsk(args);
       case "sync_now":

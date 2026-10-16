@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { invoke } from "./backend";
-import type { IssueDetail, ReviewRecord } from "./types";
+import type { IssueDetail, IssueRecord, LinkedIssue } from "./types";
 import { agentLabel, ago, openExternal, PRIORITY } from "./util";
-import { PrCell } from "./Pr";
-import { AgentMark, PriorityMark, SeverityMark, StationGlyph, StationTrack, trackOf } from "./ui";
+import { IssueJourney } from "./IssueJourney";
+import { AgentMark, IssueToken, PriorityMark, StationGlyph, StationTrack, trackOf } from "./ui";
+import "./issue.css";
 
 const KIND_LABEL: Record<string, string> = {
   issue_created: "filed",
@@ -25,7 +26,14 @@ const KIND_LABEL: Record<string, string> = {
 };
 
 /** One issue and its timeline, in a panel over the right side. */
-export function IssuePanel(props: { issueKey: string; now: number; version: number; onClose: () => void; onChanged: () => void }) {
+export function IssuePanel(props: {
+  issueKey: string;
+  now: number;
+  version: number;
+  onClose: () => void;
+  onChanged: () => void;
+  onOpenIssue?: (key: string) => void;
+}) {
   const [detail, setDetail] = useState<IssueDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Done needs evidence and Canceled a reason, typed in place.
@@ -83,6 +91,14 @@ export function IssuePanel(props: { issueKey: string; now: number; version: numb
               <StationTrack track={track} size="full" now={props.now} />
             </div>
           )}
+          <IssueJourney key={issue.key} detail={detail} now={props.now} />
+          <Relations
+            issueKey={issue.key}
+            relations={detail.relations}
+            editable={issue.origin === "nitely"}
+            onOpenIssue={props.onOpenIssue}
+            onChanged={props.onChanged}
+          />
           <div className="facts">
             <span className="fact strong">{issue.state}</span>
             {issue.kind && <span className="fact">{issue.kind}</span>}
@@ -136,19 +152,10 @@ export function IssuePanel(props: { issueKey: string; now: number; version: numb
               <button type="button" className="btn ghost" onClick={() => setPending(null)}>Back</button>
             </form>
           )}
-          {detail.reviews[0] && <LatestReview review={detail.reviews[0]} now={props.now} />}
-          {detail.prs.length > 0 && (
-            <>
-              <h3>Pull requests</h3>
-              {detail.prs.map((pr) => (
-                <div key={`${pr.provider}-${pr.repo}-${pr.number}`} className="pr-row">
-                  <PrCell pr={pr} />
-                  <div className="small">{pr.title}</div>
-                </div>
-              ))}
-            </>
-          )}
-          <h3>Timeline</h3>
+          <details className="panel-timeline">
+            <summary>
+              Timeline <span className="muted">· {detail.timeline.length} event{detail.timeline.length === 1 ? "" : "s"}</span>
+            </summary>
           <ol className="timeline">
             {detail.timeline.map((t, n) => (
               <li key={n} className={`tl-${t.kind}`}>
@@ -164,44 +171,112 @@ export function IssuePanel(props: { issueKey: string; now: number; version: numb
             ))}
             {detail.timeline.length === 0 && <li className="muted small">Nothing recorded yet.</li>}
           </ol>
+          </details>
         </>
       )}
     </aside>
   );
 }
 
-function LatestReview(props: { review: ReviewRecord; now: number }) {
-  const r = props.review;
-  const verdict = r.verdict === "pass" ? "passed" : r.verdict === "changes" ? "changes requested" : "no review ran";
+/** An issue on the other end of a relation, shaped as an issue record so IssueToken can draw it. */
+function asIssue(l: LinkedIssue): IssueRecord {
+  return {
+    key: l.key,
+    origin: "nitely",
+    project: null,
+    title: l.title,
+    body: "",
+    url: "",
+    state: l.state,
+    state_type: l.open ? "" : l.state === "Done" ? "completed" : "canceled",
+    kind: null,
+    source: null,
+    priority: 0,
+    labels: [],
+    evidence: "",
+    claimed_by: null,
+    created_at: "",
+    updated_at: "",
+    blocked_by: [],
+    blocks: [],
+    urgency: 0,
+  };
+}
+
+/** "Waiting on" and "Blocks", with a way to add or remove a blocker. */
+function Relations(props: {
+  issueKey: string;
+  relations: IssueDetail["relations"];
+  editable: boolean;
+  onOpenIssue?: (key: string) => void;
+  onChanged: () => void;
+}) {
+  const { blocked_by, blocks } = props.relations;
+  const [adding, setAdding] = useState(false);
+  const [key, setKey] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const set = async (blocker: string, blocked: boolean) => {
+    try {
+      await invoke("set_blocker", { key: props.issueKey, blocker, blocked });
+      setError(null);
+      setAdding(false);
+      setKey("");
+      props.onChanged();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+  if (blocked_by.length === 0 && blocks.length === 0 && !props.editable) return null;
   return (
-    <>
-      <h3>Review</h3>
-      <div className="review">
-        <div>
-          <span className={`verdict verdict-${r.verdict}`}>{verdict}</span>
-          {r.reviewer && <span className="muted small"> by {r.reviewer}</span>}
-          <span className="muted small"> · {ago(props.now, r.ts)} · <span className="mono">{r.commit_sha}</span></span>
-        </div>
-        <div className="small">
-          {r.approver === "human" ? "Waits for your approval:" : "No approval needed from you."}
-        </div>
-        {r.reasons.length > 0 && (
-          <ul className="small reasons">
-            {r.reasons.map((x) => (
-              <li key={x}>{x}</li>
+    <div className="relations">
+      {blocked_by.length > 0 && (
+        <div className="relation">
+          <span className="relation-label">Waiting on</span>
+          <span className="relation-items">
+            {blocked_by.map((l) => (
+              <span key={l.key} className="relation-item">
+                <IssueToken issue={asIssue(l)} title onOpen={props.onOpenIssue} />
+                {props.editable && (
+                  <button className="btn ghost relation-remove" title={`Stop waiting on ${l.key}`} onClick={() => set(l.key, false)}>
+                    ✕
+                  </button>
+                )}
+              </span>
             ))}
-          </ul>
-        )}
-        {r.findings.length > 0 && (
-          <ul className="small findings">
-            {r.findings.map((f) => (
-              <li key={f.text}>
-                <SeverityMark priority={f.priority} /> {f.text}
-              </li>
+          </span>
+        </div>
+      )}
+      {blocks.length > 0 && (
+        <div className="relation">
+          <span className="relation-label">Blocks</span>
+          <span className="relation-items">
+            {blocks.map((l) => (
+              <span key={l.key} className="relation-item">
+                <IssueToken issue={asIssue(l)} title onOpen={props.onOpenIssue} />
+              </span>
             ))}
-          </ul>
-        )}
-      </div>
-    </>
+          </span>
+        </div>
+      )}
+      {props.editable &&
+        (adding ? (
+          <form
+            className="answer relation-add"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (key.trim()) set(key.trim().toUpperCase(), true);
+            }}
+          >
+            <input autoFocus value={key} onChange={(e) => setKey(e.target.value)} placeholder="Key of the issue this waits on, e.g. NIT-12" />
+            <button className="btn primary" disabled={!key.trim()}>Add</button>
+            <button type="button" className="btn ghost" onClick={() => setAdding(false)}>Back</button>
+          </form>
+        ) : (
+          <button className="link relation-new small" onClick={() => setAdding(true)}>
+            Add a blocker
+          </button>
+        ))}
+      {error && <p className="error small">{error}</p>}
+    </div>
   );
 }

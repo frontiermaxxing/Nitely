@@ -122,6 +122,7 @@ export function computeTrack(issue: IssueRecord, timeline?: TimelineEntry[], rev
   let gateFailed = false;
   let reviewFailed = false;
   let landFailed = false;
+  let pushFailed = false;
   let openAsks = 0;
   let rounds = 0;
 
@@ -151,19 +152,28 @@ export function computeTrack(issue: IssueRecord, timeline?: TimelineEntry[], rev
       case "review_started":
         reviewFailed = false;
         landFailed = false;
+        pushFailed = false;
         reach("review", e.ts);
         break;
       case "review_failed":
         reviewFailed = true;
         break;
-      case "submit":
+      case "submit": {
+        // A submit note means the submit got past the review (or skipped it), so an earlier
+        // review that did not finish no longer holds the issue.
+        reviewFailed = false;
         // Submit leaves a rejected issue In Progress without a move, so the note is the only
         // sign that the work went back from Review to Working.
-        if (e.summary?.includes("requested changes")) {
+        const changes = !!e.summary?.includes("requested changes");
+        if (changes) {
           rounds++;
           current = "working";
         }
+        // A failed push leaves the change unseen and the issue In Progress: stuck until the next
+        // submit. "No pull request" alone (the push worked, opening the PR did not) can still land.
+        pushFailed = !changes && !!e.summary?.includes("push failed");
         break;
+      }
       case "ask":
         openAsks++;
         break;
@@ -182,8 +192,11 @@ export function computeTrack(issue: IssueRecord, timeline?: TimelineEntry[], rev
       case "issue_moved": {
         const to = movedTo(e.summary);
         if (!to) break;
-        // A person moving the issue after a stopped land has taken it from there.
+        // A person moving the issue after a stopped land or review has taken it from there.
         landFailed = false;
+        reviewFailed = false;
+        // Submit itself moves the issue back to In Progress right after a failed push.
+        if (to !== "In Progress") pushFailed = false;
         const s = stationOfState(to);
         if (to === "Todo" || to === "Backlog") current = "todo";
         else if (s === "working") {
@@ -211,6 +224,7 @@ export function computeTrack(issue: IssueRecord, timeline?: TimelineEntry[], rev
   // A resubmit can fail without moving the issue, so these hold at whatever station it shows.
   else if (open && gateFailed) track.stuck = "Gate failed";
   else if (open && reviewFailed) track.stuck = "Review did not finish";
+  else if (open && pushFailed) track.stuck = "Push failed";
   return track;
 }
 

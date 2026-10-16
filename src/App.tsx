@@ -2,7 +2,8 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react"
 import { invoke, isPreview, listen } from "./backend";
 import type { AgentPlan, Board, Project } from "./types";
 import { AgentSetup, pendingChanges, setupErrors } from "./Agents";
-import { Inbox } from "./Inbox";
+import { Inbox, useDecisionDetails } from "./Inbox";
+import { decisionsOf } from "./decisions";
 import { Now } from "./Now";
 import { Pulse } from "./Pulse";
 import { Activity } from "./Activity";
@@ -135,10 +136,9 @@ export function App() {
     };
   }, [refresh, changed]);
 
-  const inboxCount =
-    (board?.asks.length ?? 0) +
-    (board?.needs_me_issues.length ?? 0) +
-    (board?.repos.flatMap((r) => r.rows).filter((r) => r.needs_me).length ?? 0);
+  // The Inbox's decisions, counted the same way the Inbox lists them.
+  const inboxDetails = useDecisionDetails(board);
+  const inboxCount = board ? decisionsOf(board, inboxDetails, now).length : 0;
   const working = board?.repos.flatMap((r) => r.rows).filter((r) => r.session?.state === "working").length ?? 0;
 
   return (
@@ -190,7 +190,7 @@ export function App() {
         )}
         {view.kind === "agents" && <AgentSetup agents={agents} onUpdated={loadAgents} onRecheck={loadAgents} />}
         {view.kind === "pulse" && <Pulse board={board} now={now} version={version} onOpenIssue={setOpenIssue} onGo={setView} />}
-        {view.kind === "inbox" && board && <Inbox board={board} now={now} onOpenIssue={setOpenIssue} onChanged={changed} />}
+        {view.kind === "inbox" && board && <Inbox board={board} details={inboxDetails} now={now} onOpenIssue={setOpenIssue} onChanged={changed} />}
         {view.kind === "now" && board && <Now board={board} now={now} onOpenIssue={setOpenIssue} onChanged={changed} />}
         {view.kind === "activity" && <Activity now={now} version={version} projects={projects} onOpenIssue={setOpenIssue} />}
         {view.kind === "add" && (
@@ -218,7 +218,7 @@ export function App() {
       </main>
 
       {openIssue && (
-        <IssuePanel issueKey={openIssue} now={now} version={version} onClose={() => setOpenIssue(null)} onChanged={changed} />
+        <IssuePanel issueKey={openIssue} now={now} version={version} onClose={() => setOpenIssue(null)} onChanged={changed} onOpenIssue={setOpenIssue} />
       )}
     </div>
   );

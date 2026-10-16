@@ -55,11 +55,15 @@ Branches off the track:
 
 - **Changes asked:** a `submit` note saying the review requested changes (or a `changes` review
   record). Drawn as a dashed loop from Review back over to Working, labelled with the number of
-  rounds.
-- **Stuck:** the last gate failed, the last land stopped, or the review did not finish, and
-  nothing has passed since. The current station turns `--st-stuck` and the line onward breaks
-  into dashes. A stuck worktree that waits on the human (a rebase conflict, an agent waiting for
-  input) is the attention color instead, because it needs him.
+  rounds. Each further round adds a thinner solid arc around it (up to five), so an issue that
+  went round four times reads as a coil before you read the label. The mini track draws a small
+  arc over the same stretch.
+- **Stuck:** the last gate failed, the last land stopped, the review did not finish, or the
+  submit could not push the branch, and nothing has passed since (a later submit or a person
+  moving the issue clears a stopped review; the next submit clears a failed push). The current
+  station turns `--st-stuck` and the line onward breaks into dashes. A stuck worktree that waits
+  on the human (a rebase conflict, an agent waiting for input) is the attention color instead,
+  because it needs him.
 - **Asked you:** an open `ask`. An attention dot on the current station (and on the glyph).
 - **Closed:** Canceled or Duplicate. The whole track fades and the station reads Canceled or
   Duplicate.
@@ -93,9 +97,13 @@ Import from `./ui` (or `../ui`). Open the browser preview at `#kit` to see each 
 | `PriorityMark` | Issue priority as three rising bars; urgent is red.                          | Issue rows. |
 | `SeverityMark` | A review finding's P0 to P3. Only P0 and P1 are red.                         | Review findings. |
 | `EventMark`    | Something that happened to an issue, as a 12px shape: ring started, dot commit, square gate, diamond review, target land, bar handoff, attention dot ask. Red only for failures. | Marks on a timeline (activity lanes), legends. |
+| `FindingDots`  | A review's findings, one small square each, most severe first; carried over is hollow. | A review round or verdict in a row. |
+| `ResultMark`   | A run's result: quiet tick, red cross, or dashed ring while it runs.         | Gate runs, lands, CI checks. |
 
 Helpers: `livenessOf(session, now)` (adds "stale" after 30 minutes quiet), `vendorOf(actor)`,
-`phaseOf(station)`, `stationColor(station, stuck)`, `describeTrack(track)` for hover text.
+`phaseOf(station)`, `stationColor(station, stuck)`, `describeTrack(track)` for hover text,
+`journeyOf(timeline, reviews)` (`src/ui/rounds.ts`) for the rounds between Working and Done
+(each round's gate runs, its review and verdict, then each land), and `describeFindings`.
 
 ### Agents
 
@@ -111,6 +119,40 @@ Vendor colors are muted on purpose, so a screen full of agents stays calm and no
 competes with the attention color. The shape carries identity as much as the color does. Live
 state is the small dot at the bottom right: breathing `--live` when working, `--attention` when
 waiting for the human, `--fg-3` when idle; stale marks fade to 45%, ended to 30%.
+
+## The issue panel
+
+![An issue after five review rounds, dark](img/issue-rounds-dark.png)
+
+Top to bottom: the key and title, the full `StationTrack`, then the issue's journey
+(`src/IssueJourney.tsx`): one row per round with its gate runs (`ResultMark`s) and its review
+(verdict and `FindingDots`), then the pull request with its checks, then each land. The rail
+down the left joins the rows; a round that asked for changes joins the next one with the dashed
+"changes asked" line, so rework reads as a loop down the rail as well as the coil on the track.
+Clicking a round opens its findings and, when it waited for a person, why. The latest reviewed
+round is open to start with. Under that: "Waiting on" and "Blocks" with a way to add or remove a
+blocker, the facts, the actions, the body, and the text timeline, collapsed.
+
+## The Inbox
+
+![The decision Inbox, light](img/inbox-light.png)
+
+Every item is a decision card (`src/Inbox.tsx`, built by `decisionsOf` in `src/decisions.ts`):
+
+| Kind         | When                                                  | Headline                  | Action in place |
+| ------------ | ----------------------------------------------------- | ------------------------- | --------------- |
+| Question     | an open `ask`                                         | the question              | its options, or an answer in words |
+| Approval     | an issue in Needs You                                 | why it needs a person (the review's reasons) | Approve, Send back to Todo, Open the worktree |
+| Conflict     | a worktree with a rebase stopped on a conflict        | the rebase and its base   | Open the worktree |
+| Waiting      | an agent session waiting for input in its terminal   | what it asks              | Open the worktree |
+| Land stopped | the track is stuck at Landing and no agent is working | why the land stopped      | Open the worktree, Send back to Todo |
+
+Each card starts with its kind in the attention ink, then the issue as an `IssueToken` with its
+mini track and how long it has waited, so a column of cards scans by kind, issue and age. Cards
+are ordered by urgency (the issue's `urgency`, so a blocker of urgent work rises), then by how
+long they have waited. The header says how many there are, of which kinds, and the oldest. The
+nav count is the same list (`useDecisionDetails` runs in the app). When nothing waits, the page
+says so and lists what the agents are doing instead.
 
 ## Tokens (`src/styles/tokens.css`)
 
