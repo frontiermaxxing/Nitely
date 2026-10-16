@@ -44,7 +44,12 @@ pub struct IssueRecord {
     pub project: Option<String>,
     pub title: String,
     pub body: String,
+    /// The link to name the issue by: `nitely://issue/KEY` for native issues, the source's address
+    /// for mirrored ones.
     pub url: String,
+    /// Where a native issue came from, e.g. its Linear address after an import; empty otherwise.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub external_url: String,
     pub state: String,
     /// backlog, unstarted, started, completed or canceled.
     pub state_type: String,
@@ -194,8 +199,9 @@ fn issue_from_row(r: &Row) -> rusqlite::Result<IssueRecord> {
     let origin: String = r.get(1)?;
     let key: String = r.get(0)?;
     let stored: String = r.get(5)?;
-    // Native issues are not stored with a URL: theirs is the app's own link.
-    let url = if origin == "nitely" && stored.is_empty() { issue_link(&key) } else { stored };
+    // A native issue's link is always the app's own. What is stored for it is where it came from
+    // (an imported Linear issue's address), shown beside it but never handed out as its link.
+    let (url, external_url) = if origin == "nitely" { (issue_link(&key), stored) } else { (stored, String::new()) };
     Ok(IssueRecord {
         key,
         origin,
@@ -203,6 +209,7 @@ fn issue_from_row(r: &Row) -> rusqlite::Result<IssueRecord> {
         title: r.get(3)?,
         body: r.get(4)?,
         url,
+        external_url,
         state: r.get(6)?,
         state_type: r.get(7)?,
         kind: r.get(8)?,
@@ -1157,6 +1164,13 @@ mod tests {
         let issue = db.create_issue(&new("Links that open the app"), &Actor::Agent("claude:x".into())).unwrap();
         assert_eq!(issue.url, issue_link(&issue.key));
         assert_eq!(db.list_issues(Some("NIT"), false).unwrap()[0].url, issue.url);
+
+        // An imported issue keeps where it came from, but its link is still the app's.
+        let linear = "https://linear.app/x/issue/NIT-1/links";
+        db.conn.execute("UPDATE issue SET url = ?2 WHERE key = ?1", rusqlite::params![issue.key, linear]).unwrap();
+        let imported = db.issue(&issue.key).unwrap().unwrap();
+        assert_eq!((imported.url.as_str(), imported.external_url.as_str()), (issue_link(&issue.key).as_str(), linear));
+        assert_eq!(db.list_issues(Some("NIT"), false).unwrap()[0].url, issue_link(&issue.key));
     }
 
     #[test]

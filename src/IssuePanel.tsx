@@ -119,6 +119,11 @@ export function IssuePanel(props: {
                 Open in {issue.origin}
               </a>
             )}
+            {issue.external_url && (
+              <a href={issue.external_url} onClick={openExternal(issue.external_url)}>
+                {externalName(issue.external_url)}
+              </a>
+            )}
           </div>
           {issue.body && <p className="body">{issue.body}</p>}
           {issue.evidence && (
@@ -177,6 +182,16 @@ export function IssuePanel(props: {
       )}
     </aside>
   );
+}
+
+/** "Imported from Linear" for a Linear address, else the host. */
+function externalName(url: string): string {
+  try {
+    const host = new URL(url).hostname.replace(/^www\./, "");
+    return host === "linear.app" ? "Imported from Linear" : `From ${host}`;
+  } catch {
+    return "Where it came from";
+  }
 }
 
 /** An issue on the other end of a relation, shaped as an issue record so IssueToken can draw it. */

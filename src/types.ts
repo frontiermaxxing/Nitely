@@ -71,6 +71,8 @@ export interface IssueRecord {
   title: string;
   body: string;
   url: string;
+  /** Where a native issue came from, e.g. its Linear address after an import. */
+  external_url?: string;
   state: string;
   state_type: string;
   kind: string | null;
