@@ -4,7 +4,7 @@ import type { Board, IssueRecord, Project } from "./types";
 import { Backlog, Summary } from "./Backlog";
 import { BoardFilters, NO_FILTER, ProjectBoard, type Filters } from "./ProjectBoard";
 import { BranchMap } from "./BranchMap";
-import { EmptyState } from "./ui";
+import { EmptyState, Loading } from "./ui";
 import "./project.css";
 
 export const PROJECT_TABS = ["list", "board", "branches"] as const;
@@ -98,6 +98,7 @@ export function ProjectPage(props: {
       </div>
       {tab !== "branches" && issues && issues.length > 0 && <Summary issues={issues} />}
       {error && <p className="error">{error}</p>}
+      {((tab !== "branches" && !issues) || (tab === "branches" && !props.board)) && !error && <Loading />}
       {tab !== "branches" && issues?.length === 0 && (
         <EmptyState title="No issues yet.">
           Agents file them with the <span className="mono">file_issue</span> tool, or run <span className="mono">nitely issue create</span>.

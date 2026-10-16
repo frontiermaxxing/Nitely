@@ -10,6 +10,7 @@ import {
   CountBadge,
   EmptyState,
   IssueToken,
+  Loading,
   STATION_LABEL,
   STATIONS,
   Sparkline,
@@ -150,6 +151,7 @@ export function Pulse(props: {
         <span className="head-note">{new Date(now * 1000).toLocaleString([], { weekday: "long", hour: "numeric", minute: "2-digit" })}</span>
       </div>
       {error && <p className="error">{error}</p>}
+      {!data && !error && <Loading />}
       {data && (
         <>
           <Glance data={data} board={props.board} decisions={props.decisions} ctx={ctx} onGo={props.onGo} />

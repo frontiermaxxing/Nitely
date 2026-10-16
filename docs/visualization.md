@@ -95,6 +95,7 @@ Import from `./ui` (or `../ui`). Open the browser preview at `#kit` to see each 
 | `Meter`        | Parts of a whole as one segmented bar.                                       | Open issues by phase, checks by result. |
 | `CountBadge`   | A count: `attention` (filled), `live`, or `quiet`.                           | Nav items and section headings. |
 | `EmptyState`   | An empty track, one sentence, what would fill it.                            | Every list or page that can be empty. |
+| `Loading`      | One quiet line, shown only after 300ms so fast reads never flash.            | Every view or panel before its first data. |
 | `PriorityMark` | Issue priority as three rising bars; urgent is red.                          | Issue rows. |
 | `PrMark`       | A pull request's number and its checks; merged and declined fade.            | Cards and rows that mention a PR (`PrCell` in src/Pr.tsx has the long form). |
 | `ChecksMark`   | CI checks: a tick, a red cross, a dashed ring while they run. `label` adds words. | Next to a PR. |
@@ -234,8 +235,13 @@ waiting on you) over the window.
    the primitive (and to `src/dev/Kit.tsx`), not to your view.
 4. **Detail on demand.** Hover `title`s for exact times and labels; clicking an issue opens the
    panel (`onOpenIssue`). Do not repeat in text what the shape already says.
-5. **Every list can be empty.** Use `EmptyState` with what would fill it.
-6. **Check it in the preview** (below) in light and dark, at 1280px and 375px, before you submit.
+5. **Every list can be empty, and every read can be slow or fail.** Use `EmptyState` with what
+   would fill it, `<Loading />` until the first data, and an `error` line when the read fails.
+6. **"Need you" means one thing.** It is the Inbox's list, `decisionsOf` (src/decisions.ts):
+   questions, approvals, conflicts, waiting agents, stopped lands. App computes it once; the nav
+   badge, Pulse and Now show that number. A view scoped to one project (the branch map) may count
+   its own rows, but never under a different name for the same thing.
+7. **Check it in the preview** (below) in light and dark, at 1280px and 375px, before you submit.
    Add fixture data in `src/dev/fixtures.ts` if your view needs some that is not there; keep it
    consistent with the stories.
 
@@ -291,5 +297,16 @@ and inside Tauri nothing changes.
   the not-recorded stretch.
 - If the preview suddenly fails with `reading 'invoke'` after a rebase or land, restart the dev
   server (with `--force`): Vite kept the files as they were mid-rebase.
-- For full-resolution screenshots without the pane, headless Edge works:
-  `msedge --headless=new --window-size=1280,900 --virtual-time-budget=4000 --screenshot=out.png "http://localhost:5173/?theme=dark#now"`.
+- **Several agents run previews at once**, so keep yours apart:
+  - Use your own port (`--port <n> --strictPort`), and your own Browser pane tab: open it with
+    `tabs_create` and pass its `tabId`, because the pane is shared and another agent may navigate
+    the active tab to its own server mid-check.
+  - Keep scratch files (screenshot scripts, shots, browser profiles) in a folder named after your
+    issue, such as `<scratchpad>/nit-29/`; the scratchpad folder is shared between sessions.
+  - Stop your dev server before `land`, or the worktree cannot be removed.
+- **Full-resolution screenshots without the pane:** headless Edge, always with a profile folder of
+  your own, or Edge hands the URL to another agent's running instance and you get its page:
+  `msedge --headless=new --user-data-dir=<your folder>/profiles/<shot> --window-size=1280,900 --virtual-time-budget=5000 --screenshot=<your folder>/out.png "http://localhost:<port>/?theme=dark#now"`.
+  With its own profile the command returns before the file is written, so wait for the file.
+  Headless Edge will not go narrower than about 500px; check 375px in the Browser pane's mobile
+  viewport (`resize_window` preset `mobile`) instead.

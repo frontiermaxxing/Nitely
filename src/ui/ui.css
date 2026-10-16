@@ -118,6 +118,9 @@ button.ui-token:focus-visible, a.ui-token:focus-visible { outline: 2px solid var
 .ui-count-live { color: var(--live); font-weight: var(--weight-medium); padding: 0; text-align: right; }
 .ui-count-attention { background: var(--attention); color: var(--on-attention); font-weight: var(--weight-strong); }
 
+/* ----- Loading ----- */
+.ui-loading { margin: 0; padding: var(--space-5) 0; color: var(--fg-3); font-size: var(--text-sm); }
+
 /* ----- EmptyState ----- */
 .ui-empty { display: grid; justify-items: start; gap: 4px; padding: var(--space-5) 0; }
 .ui-empty-glyph { margin-bottom: var(--space-2); }

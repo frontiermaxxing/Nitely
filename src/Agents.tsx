@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { invoke } from "./backend";
 import type { AgentPlan, AgentsUpdated } from "./types";
+import { VENDOR_LABEL, vendorOf } from "./ui";
 
 /** Changes still needed by the installed agents. */
 export function pendingChanges(agents: AgentPlan[]): number {
@@ -19,7 +20,7 @@ export function AgentChanges(props: { agents: AgentPlan[] }) {
       {props.agents.map((agent) => (
         <section key={agent.agent}>
           <h2>
-            {agent.agent} {!agent.found && <span className="muted small">not installed, skipped</span>}
+            {VENDOR_LABEL[vendorOf(agent.agent)] === "Agent" ? agent.agent : VENDOR_LABEL[vendorOf(agent.agent)]} {!agent.found && <span className="muted small">not installed, skipped</span>}
           </h2>
           {agent.error && <p className="error small">{agent.error}</p>}
           {agent.found &&

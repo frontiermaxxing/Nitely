@@ -11,7 +11,7 @@ import { ProjectPage, isProjectTab, type ProjectTab } from "./Project";
 import { IssuePanel } from "./IssuePanel";
 import { AddProject } from "./AddProject";
 import { nowSecs } from "./util";
-import { CountBadge } from "./ui";
+import { CountBadge, Loading } from "./ui";
 
 // The browser preview's page of every primitive in every state; never in a production build.
 const Kit = import.meta.env.DEV ? lazy(() => import("./dev/Kit")) : () => null;
@@ -195,6 +195,11 @@ export function App() {
         )}
         {view.kind === "agents" && <AgentSetup agents={agents} onUpdated={loadAgents} onRecheck={loadAgents} />}
         {view.kind === "pulse" && <Pulse board={board} decisions={decisions} now={now} version={version} onOpenIssue={setOpenIssue} onGo={setView} />}
+        {(view.kind === "inbox" || view.kind === "now") && !board && !error && (
+          <div className="page">
+            <Loading />
+          </div>
+        )}
         {view.kind === "inbox" && board && <Inbox board={board} details={inboxDetails} now={now} onOpenIssue={setOpenIssue} onChanged={changed} />}
         {view.kind === "now" && board && <Now board={board} needs={inboxCount} now={now} onOpenIssue={setOpenIssue} onChanged={changed} onGo={setView} />}
         {view.kind === "activity" && <Activity now={now} version={version} projects={projects} onOpenIssue={setOpenIssue} />}

@@ -3,7 +3,7 @@ import { invoke } from "./backend";
 import type { IssueDetail, IssueRecord, LinkedIssue } from "./types";
 import { agentLabel, ago, openExternal, PRIORITY } from "./util";
 import { IssueJourney } from "./IssueJourney";
-import { AgentMark, IssueToken, PriorityMark, StationGlyph, StationTrack, trackOf } from "./ui";
+import { AgentMark, IssueToken, Loading, PriorityMark, StationGlyph, StationTrack, trackOf } from "./ui";
 import "./issue.css";
 
 const KIND_LABEL: Record<string, string> = {
@@ -83,6 +83,7 @@ export function IssuePanel(props: {
         <button className="btn ghost" onClick={props.onClose} title="Close (Esc)">✕</button>
       </div>
       {error && <p className="error small">{error}</p>}
+      {!issue && !error && <Loading />}
       {issue && (
         <>
           <h2 className="panel-title">{issue.title}</h2>

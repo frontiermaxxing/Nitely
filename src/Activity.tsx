@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "./backend";
 import type { Activity as ActivityData, ActivityLane, ActivityMark, ActivitySegment, IssueRecord, MarkKind, Project, SegmentState } from "./types";
-import { AgentMark, EmptyState, EVENT_LABEL, EventMark, IssueToken, StateDot, VENDOR_LABEL, livenessFrom, vendorOf, type Liveness } from "./ui";
+import { AgentMark, EmptyState, Loading, EVENT_LABEL, EventMark, IssueToken, StateDot, VENDOR_LABEL, livenessFrom, vendorOf, type Liveness } from "./ui";
 
 const WINDOWS = [1, 6, 12, 24] as const;
 type Hours = (typeof WINDOWS)[number];
@@ -77,6 +77,7 @@ export function Activity(props: { now: number; version: number; projects: Projec
         </div>
       </div>
       {error && <p className="error">{error}</p>}
+      {!data && !error && <Loading />}
       {data && data.lanes.length === 0 && (
         <EmptyState title={`No agent ran in the last ${hours} hour${hours === 1 ? "" : "s"}.`}>
           Sessions show up here as soon as an agent with Nitely's hooks starts working.

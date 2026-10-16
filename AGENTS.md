@@ -33,7 +33,9 @@ Nitely tracks its own build. Its backlog is the **NIT** project in Nitely, reach
 - `npm run tauri dev` runs the app with hot reload
 - `npm run dev` in a plain browser runs the frontend on sample data (`src/dev/fixtures.ts`); the
   Browser pane opens it with the `web` configuration in `.claude/launch.json`. Check every view you
-  change there, in light and dark, wide and narrow
+  change there, in light and dark, wide and narrow. Other agents preview at the same time: use your
+  own port, your own Browser pane tab (`tabs_create`), and scratch files and browser profiles in a
+  folder named after your issue (docs/visualization.md, "The browser preview")
 - After landing a change to `crates/`, run `cargo run --release -p nitely-cli -- install` in the main
   checkout: it puts the new `nitely` where hooks and MCP run it, even while agents run the old one
   (`cargo install` fails then on Windows), and running MCP servers forward tool calls to it.
