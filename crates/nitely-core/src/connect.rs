@@ -717,7 +717,7 @@ mod tests {
 
     #[test]
     fn stale_agent_files_are_found_and_updated() {
-        let home = std::env::temp_dir().join(format!("nitely-home-{}-{}", std::process::id(), crate::db::now()));
+        let home = crate::paths::unique_temp("nitely-home", "");
         std::fs::create_dir_all(home.join(".claude")).unwrap();
         // Registered already, so nothing runs `claude mcp add`; Codex and Cursor are not installed.
         let claude_json = home.join(".claude.json");
@@ -826,7 +826,7 @@ args = [\"nitely\", \"mcp\"]
 
     #[test]
     fn suggests_free_keys() {
-        let path = std::env::temp_dir().join(format!("nitely-connect-{}-{}.db", std::process::id(), crate::db::now()));
+        let path = crate::paths::unique_temp("nitely-connect", ".db");
         let db = Db::open(&path).unwrap();
         assert_eq!(suggest_key(&db, "AcmeWeb").unwrap(), "AW");
         db.create_project("AW", "x").unwrap();
@@ -837,7 +837,7 @@ args = [\"nitely\", \"mcp\"]
 
     #[test]
     fn a_new_project_gets_one_setup_issue() {
-        let dir = std::env::temp_dir().join(format!("nitely-setup-issue-{}-{}", std::process::id(), crate::db::now()));
+        let dir = crate::paths::unique_temp("nitely-setup-issue", "");
         let mut db = Db::open(&dir.join("t.db")).unwrap();
         db.create_project("SHOP", "Shop").unwrap();
         let plan = ConnectPlan {
@@ -872,9 +872,9 @@ args = [\"nitely\", \"mcp\"]
 
     #[test]
     fn generates_a_playbook_from_the_repo() {
-        let dir = std::env::temp_dir().join(format!("nitely-gen-{}-{}", std::process::id(), crate::db::now()));
+        let dir = crate::paths::unique_temp("nitely-gen", "");
         std::fs::create_dir_all(&dir).unwrap();
-        std::process::Command::new("git").args(["init", "-q", "-b", "trunk"]).arg(&dir).output().unwrap();
+        crate::playbook::run_git(std::process::Command::new("git").args(["init", "-q", "-b", "trunk"]).arg(&dir)).unwrap();
         std::fs::write(dir.join("package.json"), r#"{"scripts":{"test":"vitest","build":"vite build"}}"#).unwrap();
         std::fs::write(dir.join("package-lock.json"), "{}").unwrap();
         let pb = Playbook::parse(&generated_playbook(&dir)).unwrap();

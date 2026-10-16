@@ -779,9 +779,9 @@ mod tests {
 
     #[test]
     fn an_open_finding_must_point_at_code_still_on_the_branch() {
-        let dir = std::env::temp_dir().join(format!("nitely-recheck-{}-{}", std::process::id(), crate::db::now()));
+        let dir = crate::paths::unique_temp("nitely-recheck", "");
         std::fs::create_dir_all(dir.join("src")).unwrap();
-        let git = |args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap().status.success());
+        let git = |args: &[&str]| assert!(crate::playbook::run_git(std::process::Command::new("git").arg("-C").arg(&dir).args(args)).unwrap().status.success());
         git(&["init", "-q"]);
         std::fs::write(dir.join("src/proposals.rs"), "fn apply() {\n    let closed = true;\n}\n").unwrap();
         git(&["add", "."]);
@@ -937,7 +937,7 @@ mod tests {
 
     #[test]
     fn finds_programs_on_path_or_by_path() {
-        let dir = std::env::temp_dir().join(format!("nitely-which-{}", std::process::id()));
+        let dir = crate::paths::unique_temp("nitely-which", "");
         std::fs::create_dir_all(dir.join("scripts")).unwrap();
         let script = dir.join("scripts").join("review");
         std::fs::write(&script, "").unwrap();

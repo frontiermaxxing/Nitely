@@ -184,4 +184,38 @@ mod tests {
         assert_eq!(made.len(), 1000);
         assert!(made.iter().all(|p| p.to_string_lossy().ends_with(".txt") && p.starts_with(std::env::temp_dir())));
     }
+
+    /// The two habits behind most flaky tests here (NIT-109, NIT-116): a scratch folder named from
+    /// the pid and a clock that can repeat, and a git run that fails when a busy machine cannot
+    /// start it. Scratch paths come from unique_temp and git runs through playbook::run_git.
+    #[test]
+    fn scratch_paths_and_git_runs_go_through_the_shared_helpers() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+        // Where a git command is built on one line and run through run_git on the next.
+        let allowed = [("build.rs", "Command::new(\"git\")"), ("git.rs", "let mut cmd = Command::new(\"git\");")];
+        let mut found = Vec::new();
+        let mut stack = vec![root.join("crates"), root.join("src-tauri").join("src")];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|e| e != "rs") || path.ends_with("paths.rs") {
+                    continue;
+                }
+                let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                let text = String::from_utf8_lossy(&std::fs::read(&path).unwrap_or_default()).into_owned();
+                for (n, line) in text.lines().enumerate() {
+                    let scratch = line.contains("temp_dir().join(format!(");
+                    let git = line.contains("Command::new(\"git\")") && !line.contains("run_git(") && !allowed.iter().any(|(f, l)| name == *f && line.contains(l));
+                    if scratch || git {
+                        found.push(format!("{}:{}: {}", path.strip_prefix(&root).unwrap_or(&path).display(), n + 1, line.trim()));
+                    }
+                }
+            }
+        }
+        assert!(found.is_empty(), "use paths::unique_temp for scratch paths and playbook::run_git for git:\n{}", found.join("\n"));
+    }
 }

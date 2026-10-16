@@ -317,11 +317,7 @@ mod tests {
     use crate::issues::{Actor, NewIssue};
 
     fn db() -> (Db, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!(
-            "nitely-pulse-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-        ));
+        let dir = crate::paths::unique_temp("nitely-pulse", "");
         let db = Db::open(&dir.join("t.db")).unwrap();
         db.create_project("NIT", "Nitely").unwrap();
         (db, dir)

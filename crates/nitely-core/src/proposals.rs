@@ -406,11 +406,7 @@ fn commit_playbook(root: &Path, branch: &str, steps: &[Step], message: &str) -> 
         }
     }
 
-    let scratch = std::env::temp_dir().join(format!(
-        "nitely-playbook-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
-    ));
+    let scratch = crate::paths::unique_temp("nitely-playbook", "");
     std::fs::create_dir_all(&scratch)?;
     let result = (|| -> Result<String> {
         let index = scratch.join("index");
@@ -670,14 +666,7 @@ mod tests {
     use super::*;
 
     fn setup() -> (Db, PathBuf) {
-        // Tests run in parallel and the clock is coarse on Windows: a counter keeps them apart.
-        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "nitely-proposals-{}-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-        ));
+        let dir = crate::paths::unique_temp("nitely-proposals", "");
         std::fs::create_dir_all(dir.join("repo")).unwrap();
         let db = Db::open(&dir.join("t.db")).unwrap();
         db.create_project("NIT", "Nitely").unwrap();

@@ -676,17 +676,17 @@ mod tests {
     }
 
     fn sh(dir: &Path, args: &[&str]) -> String {
-        let o = Command::new("git").arg("-C").arg(dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).output().unwrap();
+        let o = crate::playbook::run_git(Command::new("git").arg("-C").arg(dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args)).unwrap();
         assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
         String::from_utf8_lossy(&o.stdout).trim().to_string()
     }
 
     fn fixture(name: &str) -> Fixture {
-        let base = std::env::temp_dir().join(format!("nitely-land-{name}-{}-{}", std::process::id(), now()));
+        let base = crate::paths::unique_temp(&format!("nitely-land-{name}"), "");
         let repo = base.join("repo");
         let remote = base.join("remote.git");
         std::fs::create_dir_all(repo.join(".nitely")).unwrap();
-        Command::new("git").args(["init", "-q", "--bare", "-b", "main"]).arg(&remote).output().unwrap();
+        crate::playbook::run_git(Command::new("git").args(["init", "-q", "--bare", "-b", "main"]).arg(&remote)).unwrap();
         sh(&repo, &["init", "-q", "-b", "main"]);
         // Land rebases and commits in its own git calls, which need an identity.
         sh(&repo, &["config", "user.name", "t"]);
@@ -791,7 +791,7 @@ when_changed = ["billing"]
 
     #[test]
     fn an_approval_covers_only_the_patch_the_human_saw() {
-        let path = std::env::temp_dir().join(format!("nitely-approval-{}-{}.db", std::process::id(), now()));
+        let path = crate::paths::unique_temp("nitely-approval", ".db");
         let mut db = Db::open(&path).unwrap();
         db.create_project("NIT", "Nitely").unwrap();
         let new = NewIssue {

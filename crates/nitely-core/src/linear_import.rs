@@ -585,7 +585,7 @@ mod tests {
 
     #[test]
     fn plans_and_imports_a_linear_project_keeping_its_keys() {
-        let dir = std::env::temp_dir().join(format!("nitely-linear-{}-{}", std::process::id(), crate::db::now()));
+        let dir = crate::paths::unique_temp("nitely-linear", "");
         let mut db = Db::open(&dir.join("t.db")).unwrap();
         let (paged, next) = parse_page(&page()).unwrap();
         assert_eq!(next.as_deref(), Some("c2"));

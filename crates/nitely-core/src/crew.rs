@@ -1785,10 +1785,10 @@ mod tests {
     }
 
     fn fixture(crew: &str) -> Fixture {
-        let base = std::env::temp_dir().join(format!("nitely-crew-{}-{}-{}", std::process::id(), now(), rand_suffix()));
+        let base = crate::paths::unique_temp("nitely-crew", "");
         let repo = base.join("repo");
         std::fs::create_dir_all(repo.join(".nitely")).unwrap();
-        let git = |args: &[&str]| assert!(Command::new("git").arg("-C").arg(&repo).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).output().unwrap().status.success(), "{args:?}");
+        let git = |args: &[&str]| assert!(crate::playbook::run_git(Command::new("git").arg("-C").arg(&repo).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args)).unwrap().status.success(), "{args:?}");
         git(&["init", "-q", "-b", "main"]);
         git(&["commit", "-q", "--allow-empty", "-m", "init"]);
         std::fs::write(repo.join(playbook::PLAYBOOK_PATH), format!("[worktree]\ndir = \"../wt/{{key}}\"\n{crew}")).unwrap();
@@ -1799,12 +1799,6 @@ mod tests {
             db.create_issue(&new, &Actor::Human).unwrap();
         }
         Fixture { base, repo, db }
-    }
-
-    fn rand_suffix() -> u64 {
-        let mut b = [0u8; 8];
-        getrandom::fill(&mut b).unwrap();
-        u64::from_le_bytes(b)
     }
 
     const NOON: Moment = Moment { ts: 1_000_000, minute_of_day: 12 * 60, day_start: 1_000_000 - 12 * 3600 };
@@ -1927,7 +1921,7 @@ max_tokens_per_day = 1000000
     fn a_second_attempt_keeps_the_first_attempts_agent() {
         let mut f = fixture(&format!("{GATE}[crew]\nworkers = 1\n"));
         // NIT-1 already has a codex branch from an earlier attempt.
-        let git = |args: &[&str]| assert!(Command::new("git").arg("-C").arg(&f.repo).args(args).output().unwrap().status.success());
+        let git = |args: &[&str]| assert!(crate::playbook::run_git(Command::new("git").arg("-C").arg(&f.repo).args(args)).unwrap().status.success());
         git(&["branch", "codex/nit-1-first"]);
         let fake = Fake { installed: vec!["claude", "codex"], ..Default::default() };
         let tick = supervisor(&f, &fake).tick(&mut f.db, false).unwrap();
@@ -1938,7 +1932,7 @@ max_tokens_per_day = 1000000
     #[test]
     fn never_puts_an_agent_on_another_vendors_branch() {
         let mut f = fixture(&format!("{GATE}[crew]\nworkers = 3\n"));
-        let git = |args: &[&str]| assert!(Command::new("git").arg("-C").arg(&f.repo).args(args).output().unwrap().status.success(), "{args:?}");
+        let git = |args: &[&str]| assert!(crate::playbook::run_git(Command::new("git").arg("-C").arg(&f.repo).args(args)).unwrap().status.success(), "{args:?}");
         // NIT-1 has a claude branch, but only codex is installed.
         git(&["branch", "claude/nit-1-first"]);
         // NIT-2's worktree folder is on a branch a person started by hand.
@@ -2305,7 +2299,7 @@ workers = 1
 
     #[test]
     fn a_real_agent_gets_the_brief_on_stdin_and_writes_its_log() {
-        let dir = std::env::temp_dir().join(format!("nitely-crew-proc-{}-{}", std::process::id(), rand_suffix()));
+        let dir = crate::paths::unique_temp("nitely-crew-proc", "");
         std::fs::create_dir_all(&dir).unwrap();
         let sh = playbook::posix_sh();
         let launch = Launch {

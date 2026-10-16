@@ -7,8 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 fn temp() -> PathBuf {
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-    let dir = std::env::temp_dir().join(format!("nitely-forward-{}-{nanos}", std::process::id()));
+    let dir = nitely_core::paths::unique_temp("nitely-forward", "");
     std::fs::create_dir_all(dir.join("bin")).unwrap();
     dir
 }

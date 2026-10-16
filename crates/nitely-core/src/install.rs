@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn installs_over_the_first_path_copy_outside_cargos_folders() {
-        let dir = std::env::temp_dir().join(format!("nitely-target-{}-{}", std::process::id(), crate::db::now()));
+        let dir = crate::paths::unique_temp("nitely-target", "");
         let exe = "nitely-test.exe";
         let folders = ["repo/target/release", "repo/target/release/deps", "bin", "later"];
         for f in folders {
@@ -216,11 +216,11 @@ mod tests {
 
     #[test]
     fn a_build_older_than_landed_nitely_code_is_stale() {
-        let dir = std::env::temp_dir().join(format!("nitely-stale-{}-{}", std::process::id(), crate::db::now()));
+        let dir = crate::paths::unique_temp("nitely-stale", "");
         let repo = dir.join("repo");
         std::fs::create_dir_all(repo.join("crates").join("nitely-cli")).unwrap();
         let git = |args: &[&str]| {
-            let o = std::process::Command::new("git").arg("-C").arg(&repo).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).output().unwrap();
+            let o = crate::playbook::run_git(std::process::Command::new("git").arg("-C").arg(&repo).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args)).unwrap();
             assert!(o.status.success(), "{args:?}");
             String::from_utf8_lossy(&o.stdout).trim().to_string()
         };
@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn installs_over_a_build_that_is_running() {
-        let dir = std::env::temp_dir().join(format!("nitely-install-{}-{}", std::process::id(), crate::db::now()));
+        let dir = crate::paths::unique_temp("nitely-install", "");
         std::fs::create_dir_all(&dir).unwrap();
         let exe = if cfg!(windows) { "nitely.exe" } else { "nitely" };
         let target = dir.join(exe);

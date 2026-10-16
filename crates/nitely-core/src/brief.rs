@@ -109,11 +109,7 @@ mod tests {
     use super::*;
 
     fn db() -> Db {
-        let dir = std::env::temp_dir().join(format!(
-            "nitely-brief-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-        ));
+        let dir = crate::paths::unique_temp("nitely-brief", "");
         let db = Db::open(&dir.join("t.db")).unwrap();
         db.create_project("NIT", "Nitely").unwrap();
         db

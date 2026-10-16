@@ -305,7 +305,7 @@ mod tests {
 
     #[test]
     fn a_project_key_change_follows_into_tokens() {
-        let dir = std::env::temp_dir().join(format!("nitely-relay-retarget-{}-{}", std::process::id(), crate::db::now()));
+        let dir = crate::paths::unique_temp("nitely-relay-retarget", "");
         let token = add_token_in(&dir, "mac", Some("old")).unwrap();
         add_token_in(&dir, "box", Some("other")).unwrap();
         assert_eq!(retarget_project_in(&dir, "OLD", Some("NEW")).unwrap(), 1);
@@ -316,7 +316,7 @@ mod tests {
 
     #[test]
     fn tokens_are_shown_once_kept_hashed_and_checked() {
-        let dir = std::env::temp_dir().join(format!("nitely-relay-{}-{}", std::process::id(), crate::db::now()));
+        let dir = crate::paths::unique_temp("nitely-relay", "");
         assert!(add_token_in(&dir, "Mac", None).is_err(), "names are lowercase");
         let token = add_token_in(&dir, "mac", Some("and")).unwrap();
         assert!(token.starts_with(TOKEN_PREFIX) && token.len() == TOKEN_PREFIX.len() + 64);

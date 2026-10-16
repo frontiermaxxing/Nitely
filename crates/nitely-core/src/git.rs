@@ -52,7 +52,7 @@ fn git(dir: &str, args: &[&str]) -> Result<String> {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let out = cmd.output().with_context(|| format!("running git in {dir}"))?;
+    let out = crate::playbook::run_git(&mut cmd).with_context(|| format!("running git in {dir}"))?;
     if !out.status.success() {
         bail!(
             "git {} failed in {dir}: {}",
@@ -291,12 +291,12 @@ mod tests {
 
     #[test]
     fn worktree_state_from_the_branch_line_matches_asking_git() {
-        let dir = std::env::temp_dir().join(format!("nitely-wtstate-{}-{}", std::process::id(), crate::db::now()));
+        let dir = crate::paths::unique_temp("nitely-wtstate", "");
         let main = dir.join("main");
         let wt = dir.join("wt");
         std::fs::create_dir_all(&main).unwrap();
         let sh = |at: &std::path::Path, args: &[&str]| {
-            let o = Command::new("git").arg("-C").arg(at).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).output().unwrap();
+            let o = crate::playbook::run_git(Command::new("git").arg("-C").arg(at).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args)).unwrap();
             assert!(o.status.success(), "{args:?}: {}", String::from_utf8_lossy(&o.stderr));
         };
         sh(&main, &["init", "-q", "-b", "main"]);
@@ -375,10 +375,10 @@ mod tests {
 
     #[test]
     fn lists_branches_with_counts() {
-        let dir = std::env::temp_dir().join(format!("nitely-branches-{}-{}", std::process::id(), crate::db::now()));
+        let dir = crate::paths::unique_temp("nitely-branches", "");
         std::fs::create_dir_all(&dir).unwrap();
         let sh = |args: &[&str]| {
-            let o = Command::new("git").arg("-C").arg(&dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).output().unwrap();
+            let o = crate::playbook::run_git(Command::new("git").arg("-C").arg(&dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args)).unwrap();
             assert!(o.status.success(), "{args:?}: {}", String::from_utf8_lossy(&o.stderr));
         };
         sh(&["init", "-q", "-b", "main"]);

@@ -329,14 +329,7 @@ mod tests {
     use crate::issues::{Actor, IssueRecord, NewIssue};
 
     fn db() -> Db {
-        // A folder per test, so tests running at once never share a database.
-        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "nitely-projects-{}-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-        ));
+        let dir = crate::paths::unique_temp("nitely-projects", "");
         Db::open(&dir.join("t.db")).unwrap()
     }
 

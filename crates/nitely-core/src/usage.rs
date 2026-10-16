@@ -631,7 +631,7 @@ mod tests {
 
     #[test]
     fn scans_watched_repos_attributes_issues_and_sums_a_project() {
-        let base = std::env::temp_dir().join(format!("nitely-usage-{}-{}", std::process::id(), crate::db::now()));
+        let base = crate::paths::unique_temp("nitely-usage", "");
         let (claude, codex) = (base.join("claude"), base.join("codex"));
         let root = r"C:\dev\app";
         let folder = claude.join("projects").join(claude_folder(r"C:\dev\app-worktrees\nit-3-x"));

@@ -190,7 +190,7 @@ mod tests {
 
     #[test]
     fn one_entry_per_root_and_the_playbook_moves_with_it() {
-        let data = std::env::temp_dir().join(format!("nitely-config-{}-{}", std::process::id(), crate::db::now()));
+        let data = crate::paths::unique_temp("nitely-config", "");
         std::fs::create_dir_all(data.join("playbooks")).unwrap();
         let kept = |name: &str| Playbook::stored_path_in(&data, name);
         std::fs::write(kept("Acme"), "[branch]\nintegration = \"develop\"\n").unwrap();

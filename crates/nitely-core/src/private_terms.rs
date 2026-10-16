@@ -335,7 +335,7 @@ mod tests {
     use std::process::Command;
 
     fn sh(dir: &Path, args: &[&str]) -> String {
-        let o = Command::new("git").arg("-C").arg(dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).output().unwrap();
+        let o = crate::playbook::run_git(Command::new("git").arg("-C").arg(dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args)).unwrap();
         assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
         String::from_utf8_lossy(&o.stdout).into_owned()
     }
@@ -349,7 +349,7 @@ mod tests {
 
     #[test]
     fn finds_added_lines_paths_and_messages_and_never_echoes_the_term() {
-        let dir = std::env::temp_dir().join(format!("nitely-terms-{}-{}", std::process::id(), crate::db::now()));
+        let dir = crate::paths::unique_temp("nitely-terms", "");
         std::fs::create_dir_all(&dir).unwrap();
         sh(&dir, &["init", "-q", "-b", "main"]);
         std::fs::write(dir.join("a.txt"), "old line mentions Bluebird already\n").unwrap();
@@ -437,7 +437,7 @@ mod tests {
 
     #[test]
     fn saves_tidily_refuses_bad_patterns_and_follows_a_new_key() {
-        let data = std::env::temp_dir().join(format!("nitely-terms-data-{}-{}", std::process::id(), crate::db::now()));
+        let data = crate::paths::unique_temp("nitely-terms-data", "");
         let saved = save_in(&data, &PrivateTerms {
             all: vec![" Bluebird ".into(), "".into(), "Bluebird".into()],
             projects: BTreeMap::from([("app".to_string(), vec!["x".to_string()]), ("WEB".to_string(), vec![" ".to_string()])]),

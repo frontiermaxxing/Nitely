@@ -161,7 +161,7 @@ pub(crate) mod tests {
 
     #[test]
     fn finds_a_process_that_names_the_folder() {
-        let dir = std::env::temp_dir().join(format!("nitely-held-{}", std::process::id()));
+        let dir = crate::paths::unique_temp("nitely-held", "");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.to_string_lossy().into_owned();
         // A long-running child whose command line names the folder, like a dev server's would.

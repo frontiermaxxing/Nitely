@@ -499,7 +499,7 @@ mod tests {
 
     #[test]
     fn serves_the_backlog_to_a_token_and_only_the_backlog() {
-        let home = std::env::temp_dir().join(format!("nitely-serve-{}-{}", std::process::id(), nitely_core::db::now()));
+        let home = nitely_core::paths::unique_temp("nitely-serve", "");
         std::fs::create_dir_all(&home).unwrap();
         // This test owns NITELY_HOME for its process; no other test in this crate reads it.
         std::env::set_var("NITELY_HOME", &home);

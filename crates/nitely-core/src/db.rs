@@ -597,7 +597,7 @@ mod tests {
 
     #[test]
     fn a_v8_database_gets_issue_owners() {
-        let dir = std::env::temp_dir().join(format!("nitely-v8-{}-{}", std::process::id(), now()));
+        let dir = crate::paths::unique_temp("nitely-v8", "");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("t.db");
         {
@@ -618,8 +618,7 @@ mod tests {
         // As the app, a hook and an MCP server do right after an install (NIT-103): each opens
         // its own connection to a v10 database whose review table has no note column yet.
         for round in 0..8 {
-            let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-            let dir = std::env::temp_dir().join(format!("nitely-upgrade-{}-{nanos}-{round}", std::process::id()));
+            let dir = crate::paths::unique_temp("nitely-upgrade", "");
             std::fs::create_dir_all(&dir).unwrap();
             let path = dir.join("t.db");
             {
@@ -653,7 +652,7 @@ mod tests {
     fn record_updates_session_and_keeps_last_activity() {
         // Its own folder per run: Windows reuses process ids, and a database left by an earlier run
         // with the same id doubled the state changes counted below.
-        let dir = std::env::temp_dir().join(format!("nitely-test-{}-{}", std::process::id(), now()));
+        let dir = crate::paths::unique_temp("nitely-test", "");
         std::fs::remove_dir_all(&dir).ok();
         let mut db = Db::open(&dir.join("t.db")).unwrap();
         let mut e = NewEvent {

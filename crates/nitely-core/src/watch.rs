@@ -112,7 +112,7 @@ mod tests {
 
     #[test]
     fn data_version_moves_on_another_connections_commit() {
-        let path = std::env::temp_dir().join(format!("nitely-watch-{}-{}.db", std::process::id(), crate::db::now()));
+        let path = crate::paths::unique_temp("nitely-watch", ".db");
         let watcher_db = Db::open(&path).unwrap();
         let before = watcher_db.data_version().unwrap();
         assert_eq!(watcher_db.data_version().unwrap(), before, "no change, no move");
@@ -123,7 +123,7 @@ mod tests {
 
     #[test]
     fn opening_the_database_is_not_a_change() {
-        let path = std::env::temp_dir().join(format!("nitely-watch-open-{}-{}.db", std::process::id(), crate::db::now()));
+        let path = crate::paths::unique_temp("nitely-watch-open", ".db");
         let watcher_db = Db::open(&path).unwrap();
         let before = watcher_db.data_version().unwrap();
         for _ in 0..3 {
@@ -136,10 +136,10 @@ mod tests {
 
     #[test]
     fn ref_changes_change_the_fingerprint() {
-        let repo = std::env::temp_dir().join(format!("nitely-watch-repo-{}-{}", std::process::id(), crate::db::now()));
+        let repo = crate::paths::unique_temp("nitely-watch-repo", "");
         std::fs::create_dir_all(&repo).unwrap();
         let git = |args: &[&str]| {
-            std::process::Command::new("git").arg("-C").arg(&repo).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).output().unwrap()
+            crate::playbook::run_git(std::process::Command::new("git").arg("-C").arg(&repo).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args)).unwrap()
         };
         git(&["init", "-q", "-b", "main"]);
         git(&["commit", "-q", "--allow-empty", "-m", "one"]);

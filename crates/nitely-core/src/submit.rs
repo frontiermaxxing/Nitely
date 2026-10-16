@@ -391,7 +391,7 @@ mod tests {
 
     #[test]
     fn submits_with_a_review_and_routes_flags_to_a_human() {
-        let base = std::env::temp_dir().join(format!("nitely-submit-{}-{}", std::process::id(), now()));
+        let base = crate::paths::unique_temp("nitely-submit", "");
         let repo = base.join("repo");
         let remote = base.join("remote.git");
         std::fs::create_dir_all(repo.join(".nitely")).unwrap();

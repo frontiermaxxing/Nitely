@@ -1014,10 +1014,10 @@ mod tests {
 
     #[test]
     fn starts_a_worktree_and_runs_the_gate() {
-        let base = std::env::temp_dir().join(format!("nitely-pb-{}-{}", std::process::id(), now()));
+        let base = crate::paths::unique_temp("nitely-pb", "");
         let repo = base.join("repo");
         std::fs::create_dir_all(repo.join(".nitely")).unwrap();
-        let sh = |args: &[&str]| assert!(Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap().status.success());
+        let sh = |args: &[&str]| assert!(crate::playbook::run_git(Command::new("git").arg("-C").arg(&repo).args(args)).unwrap().status.success());
         sh(&["init", "-q", "-b", "main"]);
         sh(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"]);
         // Commands run through cmd on Windows and sh elsewhere; the quotes must reach the program.
@@ -1062,11 +1062,11 @@ mod tests {
 
     #[test]
     fn finds_the_repo_of_the_issues_project_not_the_callers() {
-        let base = std::env::temp_dir().join(format!("nitely-repos-{}-{}", std::process::id(), now()));
+        let base = crate::paths::unique_temp("nitely-repos", "");
         let init = |name: &str| {
             let dir = base.join(name);
             std::fs::create_dir_all(&dir).unwrap();
-            let sh = |args: &[&str]| assert!(Command::new("git").arg("-C").arg(&dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).output().unwrap().status.success(), "{args:?}");
+            let sh = |args: &[&str]| assert!(crate::playbook::run_git(Command::new("git").arg("-C").arg(&dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args)).unwrap().status.success(), "{args:?}");
             sh(&["init", "-q", "-b", "main"]);
             sh(&["commit", "-q", "--allow-empty", "-m", "init"]);
             dir.to_string_lossy().into_owned()
@@ -1093,7 +1093,7 @@ mod tests {
         assert!(repo_for_issue(&config, Some("APP"), &site).unwrap_err().to_string().contains("several repos"));
 
         let worktree = base.join("app-nit-3");
-        let out = Command::new("git").arg("-C").arg(&app).args(["worktree", "add", "-q", "-b", "claude/nit-3-x"]).arg(&worktree).arg("main").output().unwrap();
+        let out = crate::playbook::run_git(Command::new("git").arg("-C").arg(&app).args(["worktree", "add", "-q", "-b", "claude/nit-3-x"]).arg(&worktree).arg("main")).unwrap();
         assert!(out.status.success(), "{out:?}");
         same(issue_worktree(Path::new(&app), "NIT-3").unwrap().unwrap(), &worktree.to_string_lossy());
         assert!(issue_worktree(Path::new(&app), "NIT-4").unwrap().is_none());
@@ -1102,10 +1102,10 @@ mod tests {
 
     #[test]
     fn measures_against_the_newer_of_local_and_remote_base() {
-        let base = std::env::temp_dir().join(format!("nitely-db-{}-{}", std::process::id(), now()));
+        let base = crate::paths::unique_temp("nitely-db", "");
         let repo = base.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
-        let sh = |args: &[&str]| assert!(Command::new("git").arg("-C").arg(&repo).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).output().unwrap().status.success(), "{args:?}");
+        let sh = |args: &[&str]| assert!(crate::playbook::run_git(Command::new("git").arg("-C").arg(&repo).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args)).unwrap().status.success(), "{args:?}");
         sh(&["init", "-q", "-b", "main"]);
         sh(&["commit", "-q", "--allow-empty", "-m", "init"]);
         assert_eq!(diff_base(&repo, "main"), "main", "no remote");
