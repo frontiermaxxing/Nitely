@@ -1,7 +1,7 @@
 //! `nitely serve`: this machine's backlog for agents on others on the local network. It is the
 //! MCP server (`mcp.rs`) over Streamable HTTP at `/mcp`, so Claude Code elsewhere adds it with
 //! `claude mcp add --transport http` and needs no Nitely install. Every request must come from
-//! this machine's networks and carry a token (`nitely tokens add`); the token's name is the agent's
+//! this machine's networks and carry a token, made in the app and shown once there; the token's name is the agent's
 //! identity. The server announces itself over mDNS as `_nitely._tcp`, which `nitely discover` and
 //! macOS's `dns-sd -B _nitely._tcp` find.
 //!
@@ -11,14 +11,14 @@
 
 use crate::mcp;
 use anyhow::{Context, Result};
-use nitely_core::relay::{self, DEFAULT_PORT, MCP_PATH, SERVICE_TYPE};
+use nitely_core::relay::{self, lan_addresses, networks, url, DEFAULT_PORT, MCP_PATH, SERVICE_TYPE};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Larger bodies are refused unread; a tool call is a few kilobytes.
 const MAX_BODY: usize = 1 << 20;
@@ -26,8 +26,11 @@ const MAX_BODY: usize = 1 << 20;
 const MAX_HEAD: usize = 16 << 10;
 /// Connections handled at once; past this, new ones get 503 at once.
 const MAX_CONNECTIONS: usize = 32;
-/// How long a connection may take to send its request or read its answer.
+/// How long a connection may take to send its whole request, however it trickles in, and to read
+/// the answer.
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
+/// Connections one address may hold at once, so one machine cannot take every slot.
+const MAX_PER_ADDRESS: usize = 4;
 /// Open sessions kept; the oldest is dropped past this, and its client starts a new one.
 const MAX_SESSIONS: usize = 256;
 
@@ -41,7 +44,7 @@ type Sessions = Arc<Mutex<HashMap<String, Session>>>;
 
 pub fn serve(listen: Option<&str>, advertise: bool) -> Result<()> {
     if relay::list_tokens()?.is_empty() {
-        anyhow::bail!("no tokens yet, so nobody could connect. Make one per machine first: nitely tokens add mac --project AND");
+        anyhow::bail!("no tokens yet, so nobody could connect. Add a machine in the Nitely app (Other machines), which shows its token once, then run this again");
     }
     let listen = listen.map(str::to_string).unwrap_or_else(|| format!("0.0.0.0:{DEFAULT_PORT}"));
     let listener = TcpListener::bind(&listen).with_context(|| format!("listening on {listen}"))?;
@@ -71,6 +74,7 @@ pub fn serve(listen: Option<&str>, advertise: bool) -> Result<()> {
 fn run(listener: TcpListener, networks: Arc<Vec<(IpAddr, u8)>>) {
     let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
     let active = Arc::new(AtomicUsize::new(0));
+    let per_address: Arc<Mutex<HashMap<IpAddr, usize>>> = Arc::new(Mutex::new(HashMap::new()));
     let tick = Arc::new(AtomicU64::new(0));
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
@@ -80,16 +84,34 @@ fn run(listener: TcpListener, networks: Arc<Vec<(IpAddr, u8)>>) {
             log(peer, "-", "refused: not on the local network", 403);
             continue;
         }
-        if active.load(Ordering::SeqCst) >= MAX_CONNECTIONS {
+        let ip = peer.map(|a| a.ip()).expect("checked above");
+        let admitted = {
+            let mut held = per_address.lock().unwrap_or_else(|p| p.into_inner());
+            let mine = held.entry(ip).or_insert(0);
+            if active.load(Ordering::SeqCst) >= MAX_CONNECTIONS || *mine >= MAX_PER_ADDRESS {
+                false
+            } else {
+                *mine += 1;
+                active.fetch_add(1, Ordering::SeqCst);
+                true
+            }
+        };
+        if !admitted {
             let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
             write_response(&mut stream, 503, "text/plain", &[], b"Busy; try again shortly.");
             continue;
         }
-        active.fetch_add(1, Ordering::SeqCst);
-        let (sessions, active, tick) = (sessions.clone(), active.clone(), tick.clone());
+        let (sessions, active, per_address, tick) = (sessions.clone(), active.clone(), per_address.clone(), tick.clone());
         std::thread::spawn(move || {
             connection(stream, peer, &sessions, tick.fetch_add(1, Ordering::SeqCst) + 1);
             active.fetch_sub(1, Ordering::SeqCst);
+            let mut held = per_address.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(n) = held.get_mut(&ip) {
+                *n -= 1;
+                if *n == 0 {
+                    held.remove(&ip);
+                }
+            }
         });
     }
 }
@@ -108,7 +130,17 @@ impl Head {
     }
 }
 
-fn read_head(stream: &mut TcpStream) -> std::result::Result<Head, (u16, &'static str)> {
+/// Sets the read timeout to what is left before `deadline`; Err once nothing is left, so a client
+/// that sends a byte at a time still runs out of time.
+fn time_left(stream: &TcpStream, deadline: Instant) -> std::result::Result<(), (u16, &'static str)> {
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        return Err((408, "Request timed out."));
+    }
+    stream.set_read_timeout(Some(left)).map_err(|_| (408, "Request timed out."))
+}
+
+fn read_head(stream: &mut TcpStream, deadline: Instant) -> std::result::Result<Head, (u16, &'static str)> {
     let mut buf = Vec::with_capacity(1024);
     let mut chunk = [0u8; 2048];
     let end = loop {
@@ -118,6 +150,7 @@ fn read_head(stream: &mut TcpStream) -> std::result::Result<Head, (u16, &'static
         if buf.len() > MAX_HEAD {
             return Err((431, "Request headers too large."));
         }
+        time_left(stream, deadline)?;
         match stream.read(&mut chunk) {
             Ok(0) => return Err((400, "Incomplete request.")),
             Ok(n) => buf.extend_from_slice(&chunk[..n]),
@@ -143,7 +176,7 @@ fn read_head(stream: &mut TcpStream) -> std::result::Result<Head, (u16, &'static
 
 /// The body, by Content-Length only and within MAX_BODY; chunked or oversized bodies are refused
 /// without being read.
-fn read_body(stream: &mut TcpStream, head: &Head) -> std::result::Result<Vec<u8>, (u16, &'static str)> {
+fn read_body(stream: &mut TcpStream, head: &Head, deadline: Instant) -> std::result::Result<Vec<u8>, (u16, &'static str)> {
     if head.header("transfer-encoding").is_some() {
         return Err((411, "Send the body with a Content-Length."));
     }
@@ -156,18 +189,22 @@ fn read_body(stream: &mut TcpStream, head: &Head) -> std::result::Result<Vec<u8>
     }
     let mut body = head.rest.clone();
     body.truncate(len);
-    if body.len() < len {
-        let start = body.len();
-        body.resize(len, 0);
-        stream.read_exact(&mut body[start..]).map_err(|_| (408, "Request body timed out."))?;
+    let mut got = body.len();
+    body.resize(len, 0);
+    while got < len {
+        time_left(stream, deadline)?;
+        match stream.read(&mut body[got..]) {
+            Ok(0) | Err(_) => return Err((408, "Request body timed out.")),
+            Ok(n) => got += n,
+        }
     }
     Ok(body)
 }
 
 fn connection(mut stream: TcpStream, from: Option<SocketAddr>, sessions: &Sessions, tick: u64) {
-    let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
+    let deadline = Instant::now() + IO_TIMEOUT;
     let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
-    let head = match read_head(&mut stream) {
+    let head = match read_head(&mut stream, deadline) {
         Ok(h) => h,
         Err((status, message)) => return write_response(&mut stream, status, "text/plain", &[], message.as_bytes()),
     };
@@ -194,7 +231,7 @@ fn connection(mut stream: TcpStream, from: Option<SocketAddr>, sessions: &Sessio
             return write_response(&mut stream, 401, "text/plain", &[("WWW-Authenticate", "Bearer")], b"A Nitely token is required: Authorization: Bearer <token>.");
         }
     };
-    let body = match read_body(&mut stream, &head) {
+    let body = match read_body(&mut stream, &head, deadline) {
         Ok(b) => b,
         Err((status, message)) => {
             log(from, &token.name, message, status);
@@ -304,42 +341,6 @@ fn log(from: Option<SocketAddr>, who: &str, what: &str, status: u16) {
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let day = secs % 86_400;
     println!("{:02}:{:02}:{:02}Z {from} {who} {what} -> {status}", day / 3600, day % 3600 / 60, day % 60);
-}
-
-/// This machine's networks: each interface's address and prefix length, loopback left out.
-fn networks() -> Vec<(IpAddr, u8)> {
-    if_addrs::get_if_addrs()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|i| !i.is_loopback())
-        .map(|i| match i.addr {
-            if_addrs::IfAddr::V4(a) => (IpAddr::V4(a.ip), a.prefixlen),
-            if_addrs::IfAddr::V6(a) => (IpAddr::V6(a.ip), a.prefixlen),
-        })
-        .collect()
-}
-
-/// The addresses to connect to and announce: IPv4 first, then IPv6 that is not link-local (a
-/// link-local one needs its interface named, which a URL cannot carry reliably).
-fn lan_addresses(networks: &[(IpAddr, u8)]) -> Vec<IpAddr> {
-    let mut ips: Vec<IpAddr> = networks
-        .iter()
-        .map(|(ip, _)| *ip)
-        .filter(|ip| match ip {
-            IpAddr::V4(v4) => !v4.is_link_local(),
-            IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) != 0xfe80,
-        })
-        .collect();
-    ips.sort_by_key(|ip| (ip.is_ipv6(), *ip));
-    ips.dedup();
-    ips
-}
-
-fn url(ip: IpAddr, port: u16, path: &str) -> String {
-    match ip {
-        IpAddr::V4(v4) => format!("http://{v4}:{port}{path}"),
-        IpAddr::V6(v6) => format!("http://[{v6}]:{port}{path}"),
-    }
 }
 
 fn hostname() -> String {
@@ -499,6 +500,18 @@ mod tests {
         let auth = format!("Authorization: Bearer {token}\r\n");
         assert!(raw(&format!("POST /mcp HTTP/1.1\r\n{auth}Content-Length: 99999999\r\n\r\n")).starts_with("HTTP/1.1 413"));
         assert!(raw(&format!("POST /mcp HTTP/1.1\r\n{auth}Transfer-Encoding: chunked\r\n\r\n")).starts_with("HTTP/1.1 411"));
+
+        // One address holds at most MAX_PER_ADDRESS connections; the next is told busy at once.
+        let held: Vec<_> = (0..MAX_PER_ADDRESS)
+            .map(|_| {
+                let mut c = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+                c.write_all(b"POST /mcp HTTP/1.1\r\n").unwrap();
+                c
+            })
+            .collect();
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(raw("GET /.well-known/nitely HTTP/1.1\r\n\r\n").starts_with("HTTP/1.1 503"), "these fill the address's slots");
+        drop(held);
         drop(stalled);
         std::env::remove_var("NITELY_HOME");
     }

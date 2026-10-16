@@ -16,6 +16,6 @@ serde.workspace = true
 clap.workspace = true
 
 mdns-sd = "0.13"
-if-addrs = "0.13"
+
 ureq = { version = "3", features = ["json"] }
 

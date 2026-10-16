@@ -177,8 +177,8 @@ enum Cmd {
     /// Print where Nitely keeps its data.
     Where,
     /// Serve this machine's backlog to agents on other machines on the local network: the MCP
-    /// server over HTTP at /mcp, answered only for private addresses and with a token from
-    /// `nitely tokens add`, and announced over mDNS so `nitely discover` finds it.
+    /// server over HTTP at /mcp, answered only for this machine's networks and with a token made
+    /// in the app (Other machines), and announced over mDNS so `nitely discover` finds it.
     Serve {
         /// Address and port to listen on.
         #[arg(long, default_value = "0.0.0.0:7421")]
@@ -187,7 +187,8 @@ enum Cmd {
         #[arg(long)]
         no_advertise: bool,
     },
-    /// Tokens for `nitely serve`: one per machine or agent that reaches the backlog remotely.
+    /// Tokens for `nitely serve`, one per machine that reaches the backlog remotely. They are
+    /// made in the app (Other machines), which shows each once; here you can list and remove them.
     Tokens {
         #[command(subcommand)]
         command: TokensCmd,
@@ -202,16 +203,6 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum TokensCmd {
-    /// Make a token for a machine or agent (replacing its old one). It is written to
-    /// <data folder>/relay-tokens/<name>.token for you to copy over, never printed; Nitely keeps
-    /// only its hash.
-    Add {
-        /// Who uses it, e.g. mac; its agents act as claude@mac.
-        name: String,
-        /// The project its agents work in unless a call names another, e.g. AND.
-        #[arg(long)]
-        project: Option<String>,
-    },
     /// List the tokens (names and projects, never the tokens).
     List,
     /// Remove a token; agents using it are refused from then on.
@@ -436,19 +427,6 @@ fn run(cmd: Cmd) -> Result<()> {
         Cmd::Hook { .. } | Cmd::Mcp | Cmd::McpCall | Cmd::Ui { .. } => unreachable!(),
         Cmd::Serve { listen, no_advertise } => serve::serve(Some(&listen), !no_advertise),
         Cmd::Tokens { command } => match command {
-            TokensCmd::Add { name, project } => {
-                // The token goes to a file, never to output an agent might capture.
-                let token = nitely_core::relay::add_token(&name, project.as_deref())?;
-                let file = nitely_core::relay::write_token_file(&name, &token)?;
-                println!("{name}'s token is in {}", file.display());
-                println!(
-                    "Copy that file to {name}, then there, with Claude Code:\n  \
-                     claude mcp add --transport http nitely http://<this machine>:{port}/mcp --header \"Authorization: Bearer $(cat {name}.token)\"\n\
-                     Delete the file here once it is copied. `nitely discover` (or `dns-sd -B _nitely._tcp` on a Mac) finds this machine's address while `nitely serve` runs.",
-                    port = nitely_core::relay::DEFAULT_PORT
-                );
-                Ok(())
-            }
             TokensCmd::List => print_json(&nitely_core::relay::list_tokens()?),
             TokensCmd::Remove { name } => {
                 if !nitely_core::relay::remove_token(&name)? {

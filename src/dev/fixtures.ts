@@ -1050,6 +1050,12 @@ function activity(args: Record<string, unknown>): Activity {
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** Machines allowed through `nitely serve` in the preview; the Mac is the one on the Now board. */
+const MACHINES: { name: string; project: string | null; created_at: number }[] = [
+  { name: "mac", project: "AND", created_at: NOW - 3 * 24 * HOUR },
+  { name: "cloud-box", project: null, created_at: NOW - 9 * 24 * HOUR },
+];
+
 /** The preview's stand-in for Tauri's `invoke`: same command names and argument names. */
 export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown>): Promise<T> {
   await delay(cmd === "sync_now" ? 700 : 40);
@@ -1087,6 +1093,20 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return AGENTS;
       case "agent_setup_apply":
         return { done: [], failed: [] };
+      case "network":
+        return { tokens: MACHINES, urls: ["http://192.168.1.68:7421/mcp"], port: 7421 };
+      case "network_add": {
+        const name = String(args.name);
+        MACHINES.splice(0, MACHINES.length, ...MACHINES.filter((m) => m.name !== name), { name, project: (args.project as string | null) ?? null, created_at: NOW });
+        // A made-up token: the preview never makes real ones.
+        const token = "nly_preview0000000000000000000000000000000000000000000000000000000";
+        return { name, token, commands: [`claude mcp add --transport http nitely http://192.168.1.68:7421/mcp --header "Authorization: Bearer ${token}"`] };
+      }
+      case "network_remove": {
+        const before = MACHINES.length;
+        MACHINES.splice(0, MACHINES.length, ...MACHINES.filter((m) => m.name !== String(args.name)));
+        return MACHINES.length < before;
+      }
       default:
         throw `The preview has no fixture for "${cmd}". Add one in src/dev/fixtures.ts.`;
     }

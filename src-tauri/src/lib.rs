@@ -147,6 +147,47 @@ async fn connect_apply(path: String, key: Option<String>, name: Option<String>) 
 }
 
 /// What it takes to bring the agents' Nitely setup up to this version; empty when nothing watches a repo.
+#[derive(Serialize)]
+struct NetworkInfo {
+    tokens: Vec<nitely_core::relay::Token>,
+    urls: Vec<String>,
+    port: u16,
+}
+
+/// Machines allowed through `nitely serve`, and where they would connect.
+#[tauri::command]
+async fn network() -> Result<NetworkInfo, String> {
+    use nitely_core::relay;
+    Ok(NetworkInfo { tokens: relay::list_tokens().map_err(err)?, urls: relay::lan_urls(), port: relay::DEFAULT_PORT })
+}
+
+#[derive(Serialize)]
+struct NewMachine {
+    name: String,
+    token: String,
+    commands: Vec<String>,
+}
+
+/// Adds a machine. Its token exists only here, shown once to the person at the app: no command an
+/// agent can run prints or stores one, and Nitely keeps only its hash.
+#[tauri::command]
+async fn network_add(name: String, project: Option<String>) -> Result<NewMachine, String> {
+    use nitely_core::relay;
+    let token = relay::add_token(&name, project.as_deref()).map_err(err)?;
+    let urls = relay::lan_urls();
+    let commands = if urls.is_empty() {
+        vec![relay::claude_command(&format!("http://<this machine>:{}{}", relay::DEFAULT_PORT, relay::MCP_PATH), &token)]
+    } else {
+        urls.iter().map(|u| relay::claude_command(u, &token)).collect()
+    };
+    Ok(NewMachine { name, token, commands })
+}
+
+#[tauri::command]
+async fn network_remove(name: String) -> Result<bool, String> {
+    nitely_core::relay::remove_token(&name).map_err(err)
+}
+
 #[tauri::command]
 async fn agent_setup() -> Result<Vec<nitely_core::connect::AgentPlan>, String> {
     let config = Config::load().map_err(err)?;
@@ -255,7 +296,10 @@ pub fn run() {
             connect_plan,
             connect_apply,
             agent_setup,
-            agent_setup_apply
+            agent_setup_apply,
+            network,
+            network_add,
+            network_remove
         ])
         .run(tauri::generate_context!())
         .expect("error while running Nitely");

@@ -1,7 +1,8 @@
 //! The backlog for agents on other machines on the local network (`nitely serve`): the MCP server
-//! over HTTP, open only to private addresses and only with a token. Tokens are named (the name is
-//! the remote agent's identity, e.g. `claude@mac`), stored only as SHA-256 hashes, and shown once
-//! when made. Nothing here can approve or answer for the human: remote agents act as agents.
+//! over HTTP, open only to this machine's networks and only with a token. Tokens are named (the
+//! name is the remote agent's identity, e.g. `claude@mac`) and stored only as SHA-256 hashes. A
+//! token is made in the app and shown there once, to the human: no command an agent runs ever
+//! prints or stores one. Nothing here can approve or answer for the human.
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -94,23 +95,6 @@ fn add_token_in(dir: &Path, name: &str, project: Option<&str>) -> Result<String>
     Ok(token)
 }
 
-/// Writes a new token to `<data folder>/relay-tokens/<name>.token` for the human to copy to that
-/// machine, so it never appears in output an agent might capture. Returns the file's path.
-pub fn write_token_file(name: &str, token: &str) -> Result<PathBuf> {
-    write_token_file_in(&crate::paths::data_dir(), name, token)
-}
-
-fn write_token_file_in(dir: &Path, name: &str, token: &str) -> Result<PathBuf> {
-    if !valid_name(name) {
-        bail!("not a token name: {name}");
-    }
-    let folder = dir.join("relay-tokens");
-    std::fs::create_dir_all(&folder)?;
-    let file = folder.join(format!("{name}.token"));
-    std::fs::write(&file, format!("{token}\n")).with_context(|| format!("writing {}", file.display()))?;
-    Ok(file)
-}
-
 /// The tokens, without their hashes.
 pub fn list_tokens() -> Result<Vec<Token>> {
     list_tokens_in(&crate::paths::data_dir())
@@ -185,6 +169,52 @@ fn same_subnet(a: IpAddr, b: IpAddr, prefix: u8) -> bool {
     (x >> shift) == (y >> shift)
 }
 
+/// This machine's networks: each interface's address and prefix length, loopback left out.
+pub fn networks() -> Vec<(IpAddr, u8)> {
+    if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|i| !i.is_loopback())
+        .map(|i| match i.addr {
+            if_addrs::IfAddr::V4(a) => (IpAddr::V4(a.ip), a.prefixlen),
+            if_addrs::IfAddr::V6(a) => (IpAddr::V6(a.ip), a.prefixlen),
+        })
+        .collect()
+}
+
+/// The addresses to connect to and announce: IPv4 first, then IPv6 that is not link-local (a
+/// link-local one needs its interface named, which a URL cannot carry reliably).
+pub fn lan_addresses(networks: &[(IpAddr, u8)]) -> Vec<IpAddr> {
+    let mut ips: Vec<IpAddr> = networks
+        .iter()
+        .map(|(ip, _)| *ip)
+        .filter(|ip| match ip {
+            IpAddr::V4(v4) => !v4.is_link_local(),
+            IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) != 0xfe80,
+        })
+        .collect();
+    ips.sort_by_key(|ip| (ip.is_ipv6(), *ip));
+    ips.dedup();
+    ips
+}
+
+pub fn url(ip: IpAddr, port: u16, path: &str) -> String {
+    match ip {
+        IpAddr::V4(v4) => format!("http://{v4}:{port}{path}"),
+        IpAddr::V6(v6) => format!("http://[{v6}]:{port}{path}"),
+    }
+}
+
+/// The MCP URLs other machines would use for this one, IPv4 first (the server listens on IPv4).
+pub fn lan_urls() -> Vec<String> {
+    lan_addresses(&networks()).into_iter().filter(IpAddr::is_ipv4).map(|ip| url(ip, DEFAULT_PORT, MCP_PATH)).collect()
+}
+
+/// The command that adds this machine's backlog to Claude Code on another machine.
+pub fn claude_command(mcp_url: &str, token: &str) -> String {
+    format!("claude mcp add --transport http nitely {mcp_url} --header \"Authorization: Bearer {token}\"")
+}
+
 /// Whether a request may come from `ip` on address alone: this machine, or private ranges
 /// (RFC 1918 IPv4, link-local, IPv6 unique-local).
 pub fn is_local(ip: IpAddr) -> bool {
@@ -212,9 +242,6 @@ mod tests {
         assert!(token.starts_with(TOKEN_PREFIX) && token.len() == TOKEN_PREFIX.len() + 64);
         let stored = std::fs::read_to_string(store_path(&dir)).unwrap();
         assert!(!stored.contains(&token), "only the hash is stored");
-        let file = write_token_file_in(&dir, "mac", &token).unwrap();
-        assert_eq!(std::fs::read_to_string(&file).unwrap().trim(), token);
-        assert!(write_token_file_in(&dir, "../x", &token).is_err(), "a name never leaves the folder");
         let t = verify_in(&dir, &token).unwrap().unwrap();
         assert_eq!((t.name.as_str(), t.project.as_deref()), ("mac", Some("AND")));
         assert!(verify_in(&dir, "nly_wrong").unwrap().is_none());

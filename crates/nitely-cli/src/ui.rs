@@ -20,6 +20,7 @@ pub const READ_ONLY: &[&str] = &[
     "activity",
     "agent_setup",
     "opened_link",
+    "network",
 ];
 
 /// Why a command is refused, for the page to show.
@@ -62,6 +63,12 @@ pub fn run(command: &str, args: &Value) -> Result<Value> {
             json!(nitely_core::activity::activity(&Config::load_read_only()?, &db()?, to - hours * 3600, to)?)
         }
         "agent_setup" => agents_without_files(&nitely_core::connect::agent_setup(&Config::load_read_only()?)),
+        // Machines allowed through `nitely serve`: names and projects, never a token.
+        "network" => json!({
+            "tokens": nitely_core::relay::list_tokens()?,
+            "urls": nitely_core::relay::lan_urls(),
+            "port": nitely_core::relay::DEFAULT_PORT,
+        }),
         // Links open the app's own window, never the preview.
         "opened_link" => Value::Null,
         _ => unreachable!("every allowed command is handled"),

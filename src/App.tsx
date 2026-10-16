@@ -4,6 +4,7 @@ import type { AgentPlan, Board, Project } from "./types";
 import { AgentSetup, pendingChanges, setupErrors } from "./Agents";
 import { Inbox, useDecisionDetails } from "./Inbox";
 import { decisionsOf } from "./decisions";
+import { Network } from "./Network";
 import { Now } from "./Now";
 import { Pulse } from "./Pulse";
 import { Activity } from "./Activity";
@@ -12,7 +13,7 @@ import { IssuePanel } from "./IssuePanel";
 import { AddProject } from "./AddProject";
 import { nowSecs } from "./util";
 import { Palette, useKeys } from "./Palette";
-import { CountBadge, Loading } from "./ui";
+import { CountBadge, Loading, livenessOf } from "./ui";
 
 // The browser preview's page of every primitive in every state; never in a production build.
 const Kit = import.meta.env.DEV ? lazy(() => import("./dev/Kit")) : () => null;
@@ -32,6 +33,7 @@ export type View =
   | { kind: "project"; key: string; tab?: ProjectTab }
   | { kind: "add" }
   | { kind: "agents" }
+  | { kind: "network" }
   | { kind: "kit" };
 
 // The view and the open issue live in the URL hash (`#now`, `#project/NIT/board`, `#inbox@NIT-12`), so
@@ -45,7 +47,7 @@ function fromHash(hash: string): { view: View; issue: string | null } {
   }
   const [path, issue] = raw.split("@");
   const [kind, key, tab] = path.split("/");
-  const plain = ["pulse", "inbox", "now", "activity", "add", "agents"].concat(isPreview ? ["kit"] : []);
+  const plain = ["pulse", "inbox", "now", "activity", "add", "agents", "network"].concat(isPreview ? ["kit"] : []);
   const view: View =
     kind === "project" && key
       ? { kind: "project", key: key.toUpperCase(), ...(isProjectTab(tab) ? { tab } : {}) }
@@ -183,6 +185,13 @@ export function App() {
         <NavItem active={view.kind === "inbox"} onClick={() => setView({ kind: "inbox" })} label="Inbox" count={inboxCount} tone="attention" />
         <NavItem active={view.kind === "now"} onClick={() => setView({ kind: "now" })} label="Now" count={working} tone="live" />
         <NavItem active={view.kind === "activity"} onClick={() => setView({ kind: "activity" })} label="Activity" />
+        <NavItem
+          active={view.kind === "network"}
+          onClick={() => setView({ kind: "network" })}
+          label="Other machines"
+          count={(board?.remote_sessions ?? []).filter((s) => livenessOf(s, now) === "working").length}
+          tone="live"
+        />
         <div className="nav-heading">Projects</div>
         {projects.map((p) => (
           <NavItem
@@ -235,6 +244,7 @@ export function App() {
         {view.kind === "inbox" && board && <Inbox board={board} details={inboxDetails} now={now} onOpenIssue={setOpenIssue} onChanged={changed} />}
         {view.kind === "now" && board && <Now board={board} needs={inboxCount} now={now} onOpenIssue={setOpenIssue} onChanged={changed} onGo={setView} />}
         {view.kind === "activity" && <Activity now={now} version={version} projects={projects} onOpenIssue={setOpenIssue} />}
+        {view.kind === "network" && <Network board={board} projects={projects} now={now} />}
         {view.kind === "add" && (
           <AddProject
             onAdded={(key) => {

@@ -116,6 +116,26 @@ export interface SyncStatus {
   last_error: string | null;
 }
 
+/** A machine allowed to reach this backlog through `nitely serve` (never the token itself). */
+export interface MachineToken {
+  name: string;
+  project: string | null;
+  created_at: number;
+}
+
+export interface NetworkInfo {
+  tokens: MachineToken[];
+  urls: string[];
+  port: number;
+}
+
+/** What adding a machine returns: its token, once, inside the commands to run there. */
+export interface NewMachine {
+  name: string;
+  token: string;
+  commands: string[];
+}
+
 export interface Board {
   repos: RepoView[];
   needs_me_issues: IssueRecord[];

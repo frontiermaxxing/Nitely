@@ -128,6 +128,15 @@ a:hover { text-decoration-color: currentColor; }
 }
 .remote-row + .remote-row { border-top: 1px solid var(--line); }
 .remote-doing { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.remote-row:has(.net-confirm), .remote-row:has(> .btn) { grid-template-columns: auto minmax(120px, max-content) auto auto 1fr auto; }
+
+/* Other machines: the one-time token card, and the add form. */
+.net-made { border-color: var(--line-strong); }
+.net-command { display: flex; gap: var(--space-2); align-items: flex-start; margin: var(--space-2) 0; }
+.net-command pre { flex: 1; margin: 0; white-space: pre-wrap; word-break: break-all; }
+.net-add { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+.net-add input { width: 160px; }
+.net-urls { margin: var(--space-2) 0 0; padding-left: var(--space-4); }
 @media (max-width: 640px) {
   .remote-row { grid-template-columns: auto 1fr auto; }
   .remote-row .remote-doing, .remote-row > .small:not(.remote-doing) { grid-column: 2 / -1; }
