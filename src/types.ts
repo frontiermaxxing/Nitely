@@ -210,6 +210,8 @@ export interface ReviewRecord {
   /** carried: raised in an earlier round and not fixed since. */
   findings: { priority: number; text: string; carried?: boolean }[];
   ts: number;
+  /** How independent the review was when it was not another vendor by choice, e.g. "same vendor: codex not installed". */
+  note?: string;
 }
 
 export interface ConnectChange {

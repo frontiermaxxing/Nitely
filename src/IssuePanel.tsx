@@ -159,6 +159,7 @@ export function IssuePanel(props: {
                   <dt>Reviewer</dt>
                   <dd>
                     <AgentMark vendor={review.reviewer} size={16} /> {VENDOR_LABEL[vendorOf(review.reviewer)]}
+                    {review.note && <span className="muted"> ({review.note})</span>}
                   </dd>
                 </>
               )}

@@ -115,6 +115,8 @@ interface IssueSpec {
   branch?: Partial<BranchState>;
   checks?: PrRecord["checks"];
   body?: string;
+  /** Reviewed by the author's own vendor, because the other one is not installed. */
+  sameVendor?: boolean;
 }
 
 const WORK = ["Reading the code around the change", "Writing the change", "Adding tests", "Fixing a failing test", "Tidying the diff before the gate"];
@@ -144,7 +146,7 @@ const ISSUES: IssueSpec[] = [
   {
     key: "NIT-27", title: "Land queue shows who is landing and what waits", kind: "feature", priority: 2, vendor: "claude",
     from: 70, to: 3, story: ["filed", "claim", "work", "gate", "review", "passhuman", "approve"],
-    notes: ["Reading land.rs to see where the lock is held"], branch: { ahead: 5, dirty_files: 0 }, checks: "success",
+    notes: ["Reading land.rs to see where the lock is held"], branch: { ahead: 5, dirty_files: 0 }, checks: "success", sameVendor: true,
   },
   {
     key: "NIT-33", title: "Decide where review findings below P1 go", kind: "improvement", priority: 3, vendor: "claude",
@@ -390,7 +392,9 @@ function build(): World {
   for (const spec of ISSUES) {
     const repo = repoOf(spec.key);
     const vendor = spec.vendor ?? "claude";
-    const reviewer = vendor === "claude" ? "codex" : "claude";
+    const other = vendor === "claude" ? "codex" : "claude";
+    const reviewer = spec.sameVendor ? vendor : other;
+    const reviewNote = spec.sameVendor ? `same vendor: ${other} not installed` : "";
     const agent = `${vendor}:c:/development/${repo.name.toLowerCase()}-worktrees/${spec.key.toLowerCase()}`;
     const filer = spec.source === "human" ? "human" : `${spec.vendor ?? (rand() > 0.5 ? "claude" : "codex")}:c:/development/${repo.name.toLowerCase()}`;
     const start = NOW - spec.from * HOUR;
@@ -428,6 +432,7 @@ function build(): World {
         reasons: approver === "human" ? [spec.kind === "live-check" ? "a live check needs a person" : "touches a path the playbook keeps for a human"] : [],
         findings,
         ts,
+        note: reviewNote,
       });
     };
 
@@ -459,7 +464,7 @@ function build(): World {
           timeline.push({ ts, actor: agent, kind: "gate_failed", summary: repo.project === "AND" ? "Gate failed at `autoninja -C out/Default browser_tests`: 3 failures" : "Gate failed at `npm run build`: 2 type errors" });
           break;
         case "review":
-          timeline.push({ ts, actor: agent, kind: "review_started", summary: `Review by ${reviewer} started` });
+          timeline.push({ ts, actor: agent, kind: "review_started", summary: `Review by ${reviewer}${reviewNote ? ` (${reviewNote})` : ""} started` });
           break;
         case "reviewfail":
           timeline.push({ ts, actor: agent, kind: "review_failed", summary: `Review by ${reviewer} did not finish` });

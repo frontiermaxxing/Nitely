@@ -86,7 +86,8 @@ export function IssueJourney(props: { detail: IssueDetail; now: number }) {
             {isOpen && r.review && (
               <div className="journey-detail">
                 <p className="journey-by">
-                  {r.review.reviewer ? `${VENDOR_LABEL[vendorOf(r.review.reviewer)]} reviewed` : "No review ran"}{" "}
+                  {r.review.reviewer ? `${VENDOR_LABEL[vendorOf(r.review.reviewer)]} reviewed` : "No review ran"}
+                  {r.review.note ? ` (${r.review.note})` : ""}{" "}
                   <span className="mono">{r.review.commit_sha.slice(0, 7)}</span>
                   {r.review.approver === "human" ? "; it waits for a person." : "; no person needed."}
                 </p>

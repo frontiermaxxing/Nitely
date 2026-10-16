@@ -19,7 +19,10 @@ pub struct ReviewRules {
     /// Who reviews whose branches: the branch's vendor to the reviewer. `*` covers the rest.
     pub reviewer: BTreeMap<String, String>,
     /// How to run each reviewer. The prompt goes on stdin; an argument `{output}` is replaced with a
-    /// file the reviewer writes its reply to, otherwise the reply is read from stdout.
+    /// file the reviewer writes its reply to, otherwise the reply is read from stdout. Each runs as a
+    /// fresh read-only session with no memory of writing the change, so a same-vendor review is
+    /// still a second reading. Cursor has no default: `cursor-agent -p` can write and run anything,
+    /// and its read-only `--mode ask` has not been shown to run the `git diff` a review needs.
     pub commands: BTreeMap<String, Vec<String>>,
     /// Yes-or-no questions the reviewer answers; a yes sends the change to a human. Use them for
     /// what path rules cannot see, like money logic in a file whose name does not say so.
@@ -27,6 +30,9 @@ pub struct ReviewRules {
     /// Extra instructions for the reviewer, e.g. what matters most in this codebase.
     pub focus: String,
     pub timeout_minutes: u64,
+    /// A review by the author's own vendor (because no other reviewer is installed, or the
+    /// `reviewer` map says so) sends the change to a human instead of approving it.
+    pub require_cross_vendor: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,6 +62,7 @@ impl Default for ReviewRules {
             flags: vec![],
             focus: String::new(),
             timeout_minutes: 20,
+            require_cross_vendor: false,
         }
     }
 }
@@ -105,11 +112,68 @@ pub struct Review {
     /// ones are also in `findings`, marked carried.
     #[serde(default)]
     pub previous: Vec<Recheck>,
+    /// How independent the review was, when it was not the playbook's choice of another vendor:
+    /// e.g. `same vendor: codex not installed`. Empty otherwise.
+    #[serde(default)]
+    pub note: String,
+}
+
+/// The reviewer `choose` picked for a branch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Choice {
+    pub reviewer: String,
+    /// The reviewer is the author's own vendor.
+    pub same_vendor: bool,
+    /// As `Review::note`.
+    pub note: String,
 }
 
 impl ReviewRules {
     pub fn reviewer_for(&self, vendor: &str) -> Option<&str> {
         self.reviewer.get(vendor).or_else(|| self.reviewer.get("*")).map(String::as_str)
+    }
+
+    /// Whether the reviewer's CLI is on this machine.
+    pub fn is_installed(&self, reviewer: &str) -> bool {
+        self.commands.get(reviewer).and_then(|c| c.first()).is_some_and(|p| program_exists(&resolve_program(p)))
+    }
+
+    /// Who reviews a branch by `vendor`, among the reviewers `installed` says can run. The
+    /// `reviewer` map is the preference; when that one is missing, another vendor that is
+    /// installed reviews, and only when none is, the author's own vendor in a fresh session.
+    pub fn choose(&self, vendor: &str, installed: &dyn Fn(&str) -> bool) -> Result<Choice> {
+        let preferred = self.reviewer_for(vendor).filter(|p| self.commands.contains_key(*p));
+        let same = |r: &str| !vendor.is_empty() && r == vendor;
+        let others = || self.commands.keys().map(String::as_str).filter(move |r| Some(*r) != preferred);
+        let candidates: Vec<&str> =
+            preferred.into_iter().chain(others().filter(|r| !same(r))).chain(others().filter(|r| same(r))).collect();
+        let Some(reviewer) = candidates.iter().copied().find(|r| installed(r)) else {
+            if candidates.is_empty() {
+                bail!("the playbook has no reviewer commands (add review.commands)");
+            }
+            let wanted: Vec<String> = candidates.iter().map(|r| install_hint(r, self)).collect();
+            bail!(
+                "no reviewer can run on this machine: install {} (or point review.commands in the playbook at a reviewer you have)",
+                wanted.join(" or ")
+            );
+        };
+        let missing = self.reviewer_for(vendor).filter(|p| *p != reviewer);
+        let same_vendor = same(reviewer);
+        let note = match (same_vendor, missing) {
+            (true, Some(m)) => format!("same vendor: {m} not installed"),
+            (true, None) => "same vendor".to_string(),
+            (false, Some(m)) => format!("{m} not installed"),
+            (false, None) => String::new(),
+        };
+        Ok(Choice { reviewer: reviewer.to_string(), same_vendor, note })
+    }
+
+    /// Why a review needs a human because of who ran it: a same-vendor review when the playbook
+    /// requires another vendor's.
+    pub fn independence_reason(&self, choice: &Choice) -> Option<String> {
+        (self.require_cross_vendor && choice.same_vendor).then(|| {
+            format!("{} review ({}), and this playbook requires a review by another vendor", choice.reviewer, choice.note)
+        })
     }
 
     /// The reviewer's instructions. With a previous round, it first checks that round's findings,
@@ -227,7 +291,7 @@ using P0 for data loss or security, P1 for a definite bug in normal use, P2 for 
             .unwrap_or("")
             .to_string();
         let verdict = if findings.iter().any(|f| f.priority <= 1) { "changes" } else { "pass" };
-        Ok(Review { reviewer: reviewer.into(), verdict: verdict.into(), findings, flagged, summary, seconds, previous })
+        Ok(Review { reviewer: reviewer.into(), verdict: verdict.into(), findings, flagged, summary, seconds, previous, note: String::new() })
     }
 
     /// The human-facing reasons for the flags a review raised.
@@ -413,29 +477,66 @@ pub(crate) fn is_session_marker(name: &str) -> bool {
         || name.starts_with("CLAUDE_AGENT_SDK")
 }
 
-/// On Windows the Codex CLI ships inside the Codex Store app and is not on PATH.
+/// The program to start for a reviewer command's first word. On Windows a CLI installed with npm
+/// is a `.cmd` file, which is started by its full path, and the Codex CLI that ships inside the
+/// Codex Store app is not on PATH at all.
 pub(crate) fn resolve_program(program: &str) -> String {
     #[cfg(windows)]
-    if program == "codex" && which(program).is_none() {
-        let out = shell_free_command("powershell")
-            .args(["-NoProfile", "-Command", "(Get-AppxPackage -Name 'OpenAI.Codex*' | Select-Object -First 1).InstallLocation"])
-            .output();
-        if let Ok(out) = out {
-            let exe = Path::new(String::from_utf8_lossy(&out.stdout).trim()).join("app").join("resources").join("codex.exe");
-            if exe.exists() {
-                return exe.to_string_lossy().into_owned();
+    if Path::new(program).extension().is_none() && Path::new(program).components().count() == 1 && which(program).is_none() {
+        if let Some(script) = which_with(program, &["cmd", "bat"]) {
+            return script.to_string_lossy().into_owned();
+        }
+        if program == "codex" {
+            let out = shell_free_command("powershell")
+                .args(["-NoProfile", "-Command", "(Get-AppxPackage -Name 'OpenAI.Codex*' | Select-Object -First 1).InstallLocation"])
+                .output();
+            if let Ok(out) = out {
+                let exe = Path::new(String::from_utf8_lossy(&out.stdout).trim()).join("app").join("resources").join("codex.exe");
+                if exe.exists() {
+                    return exe.to_string_lossy().into_owned();
+                }
             }
         }
     }
     program.to_string()
 }
 
-#[cfg(windows)]
+/// Whether `program` can be started: a path that exists, or a name found on PATH.
+fn program_exists(program: &str) -> bool {
+    let path = Path::new(program);
+    if path.components().count() > 1 {
+        return path.is_file() || (cfg!(windows) && path.extension().is_none() && path.with_extension("exe").is_file());
+    }
+    which(program).is_some()
+}
+
+/// `program` on PATH, as the OS would start it.
 fn which(program: &str) -> Option<std::path::PathBuf> {
+    if cfg!(windows) && Path::new(program).extension().is_none() {
+        which_with(program, &["exe"])
+    } else {
+        which_with(program, &[""])
+    }
+}
+
+fn which_with(program: &str, extensions: &[&str]) -> Option<std::path::PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path).find_map(|dir| {
-        ["exe", "cmd", "bat"].iter().map(|ext| dir.join(format!("{program}.{ext}"))).find(|p| p.exists())
+        extensions
+            .iter()
+            .map(|ext| if ext.is_empty() { dir.join(program) } else { dir.join(format!("{program}.{ext}")) })
+            .find(|p| p.is_file())
     })
+}
+
+/// "Codex (the `codex` CLI)", for the error that says what to install.
+fn install_hint(reviewer: &str, rules: &ReviewRules) -> String {
+    let program = rules.commands.get(reviewer).and_then(|c| c.first()).map(String::as_str).unwrap_or(reviewer);
+    match cli_name(program).as_str() {
+        "claude" => "Claude Code (the `claude` CLI)".to_string(),
+        "codex" => "Codex (the `codex` CLI)".to_string(),
+        _ => format!("{reviewer} (`{program}`)"),
+    }
 }
 
 #[cfg(test)]
@@ -573,6 +674,45 @@ mod tests {
         ]"#;
         assert_eq!(nitely_servers(json), ["nitely", "board"]);
         assert!(nitely_servers("not json").is_empty());
+    }
+
+    #[test]
+    fn chooses_from_the_installed_reviewers() {
+        let r = ReviewRules::default();
+        let only = |names: &'static [&'static str]| move |n: &str| names.contains(&n);
+        let choice = |vendor, names| r.choose(vendor, &only(names)).unwrap();
+        let c = |reviewer: &str, same_vendor, note: &str| Choice { reviewer: reviewer.into(), same_vendor, note: note.into() };
+
+        assert_eq!(choice("claude", &["claude", "codex"]), c("codex", false, ""));
+        assert_eq!(choice("claude", &["claude"]), c("claude", true, "same vendor: codex not installed"));
+        assert_eq!(choice("codex", &["codex"]), c("codex", true, "same vendor: claude not installed"));
+        assert_eq!(choice("cursor", &["codex"]), c("codex", false, "claude not installed"));
+        // Another vendor beats the author's own, whatever the map's order.
+        let mut three = ReviewRules::default();
+        three.commands.insert("gemini".into(), vec!["gemini".into()]);
+        assert_eq!(three.choose("claude", &only(&["claude", "gemini"])).unwrap(), c("gemini", false, "codex not installed"));
+        // A playbook that has an agent review its own vendor says so even when nothing is missing.
+        let mut own = ReviewRules::default();
+        own.reviewer.insert("claude".into(), "claude".into());
+        assert_eq!(own.choose("claude", &only(&["claude", "codex"])).unwrap(), c("claude", true, "same vendor"));
+
+        let none = r.choose("claude", &only(&[])).unwrap_err().to_string();
+        assert!(none.contains("no reviewer can run") && none.contains("Codex (the `codex` CLI)") && none.contains("Claude Code"), "{none}");
+
+        assert_eq!(r.independence_reason(&choice("claude", &["claude"])), None);
+        let strict = ReviewRules { require_cross_vendor: true, ..ReviewRules::default() };
+        assert!(strict.independence_reason(&choice("claude", &["claude", "codex"])).is_none());
+        let reason = strict.independence_reason(&choice("claude", &["claude"])).unwrap();
+        assert!(reason.contains("same vendor: codex not installed") && reason.contains("another vendor"), "{reason}");
+    }
+
+    #[test]
+    fn finds_programs_on_path_or_by_path() {
+        assert!(program_exists(&crate::playbook::posix_sh()));
+        assert!(!program_exists("nitely-no-such-reviewer"));
+        assert!(!program_exists("/nitely/no/such/reviewer"));
+        let r = ReviewRules::default();
+        assert!(!r.is_installed("gemini"), "no command, not installed");
     }
 
     #[test]

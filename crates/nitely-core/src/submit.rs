@@ -46,6 +46,8 @@ pub struct ReviewRecord {
     pub reasons: Vec<String>,
     pub findings: Vec<crate::review::Finding>,
     pub ts: i64,
+    /// As `Review::note`: how independent the review was, e.g. `same vendor: codex not installed`.
+    pub note: String,
 }
 
 pub struct SubmitOptions<'a> {
@@ -123,16 +125,20 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     } else {
         let (vendor, _) = crate::git::parse_branch(&branch);
         let vendor = vendor.unwrap_or_default();
-        let reviewer = pb.review.reviewer_for(&vendor).context("the playbook names no reviewer for this branch")?.to_string();
+        let choice = pb.review.choose(&vendor, &|r| pb.review.is_installed(r))?;
+        let reviewer = choice.reviewer.clone();
         let previous = previous_round(db, &issue.key, &worktree)?;
-        db.log_event(actor, Some(&issue.key), Some(&wt), "review_started", &format!("Review by {reviewer} started"))?;
-        let review = match pb.review.run(&reviewer, &worktree, &since, previous.as_ref()) {
+        let started = format!("Review by {reviewer}{} started", noted(&choice.note));
+        db.log_event(actor, Some(&issue.key), Some(&wt), "review_started", &started)?;
+        let mut review = match pb.review.run(&reviewer, &worktree, &since, previous.as_ref()) {
             Ok(r) => r,
             Err(e) => {
                 db.log_event(actor, Some(&issue.key), Some(&wt), "review_failed", &format!("Review by {reviewer} did not finish"))?;
                 return Err(e);
             }
         };
+        review.note = choice.note.clone();
+        out.reasons.extend(pb.review.independence_reason(&choice));
         out.reasons.extend(pb.review.flag_reasons(&review));
         out.review = Some(review);
     }
@@ -161,9 +167,9 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         _ => "Not pushed (local only).".into(),
     };
     let outcome = match (&out.review, out.approver.as_str()) {
-        (Some(r), _) if r.verdict == "changes" => format!("Review by {} requested changes", r.reviewer),
-        (Some(r), "human") => format!("Review by {} passed; waits for a human", r.reviewer),
-        (Some(r), _) => format!("Review by {} passed; ready to land", r.reviewer),
+        (Some(r), _) if r.verdict == "changes" => format!("Review by {}{} requested changes", r.reviewer, noted(&r.note)),
+        (Some(r), "human") => format!("Review by {}{} passed; waits for a human", r.reviewer, noted(&r.note)),
+        (Some(r), _) => format!("Review by {}{} passed; ready to land", r.reviewer, noted(&r.note)),
         (None, _) => "Submitted without a review; waits for a human".to_string(),
     };
     let outcome = match out.review.as_ref().map(|r| rechecked(&r.previous)) {
@@ -201,6 +207,11 @@ fn previous_round(db: &Db, key: &str, worktree: &Path) -> Result<Option<Previous
     Ok(Some(PreviousRound { commit: last.commit_sha, findings: last.findings, in_history }))
 }
 
+/// " (same vendor: codex not installed)" after a reviewer's name, or nothing.
+fn noted(note: &str) -> String {
+    if note.is_empty() { String::new() } else { format!(" ({note})") }
+}
+
 /// "2 fixed, 1 still open" for a re-review's checks of the previous round; None when it had none.
 fn rechecked(previous: &[crate::review::Recheck]) -> Option<String> {
     if previous.is_empty() {
@@ -235,7 +246,7 @@ pub fn describe(issue: &IssueRecord, s: &Submitted) -> String {
     match &s.review {
         Some(r) => {
             let result = if r.verdict == "pass" { "no P0 or P1 findings" } else { "changes requested" };
-            lines.push(format!("**Review** by {} ({}s): {result}.", r.reviewer, r.seconds));
+            lines.push(format!("**Review** by {}{} ({}s): {result}.", r.reviewer, noted(&r.note), r.seconds));
             if !r.summary.is_empty() {
                 lines.push(format!("> {}", r.summary));
             }
@@ -299,14 +310,14 @@ fn push(worktree: &Path, branch: &str) -> Result<()> {
 
 impl Db {
     pub fn record_review(&self, s: &Submitted) -> Result<()> {
-        let (reviewer, verdict, findings, flagged) = match &s.review {
-            Some(r) => (r.reviewer.as_str(), r.verdict.as_str(), to_json(&r.findings), to_json(&r.flagged)),
-            None => ("", "none", "[]".to_string(), "[]".to_string()),
+        let (reviewer, verdict, findings, flagged, note) = match &s.review {
+            Some(r) => (r.reviewer.as_str(), r.verdict.as_str(), to_json(&r.findings), to_json(&r.flagged), r.note.as_str()),
+            None => ("", "none", "[]".to_string(), "[]".to_string(), ""),
         };
         self.conn.execute(
-            "INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, reasons, findings, flagged, ts)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            rusqlite::params![s.issue, s.patch_id, s.commit, reviewer, verdict, s.approver, to_json(&s.reasons), findings, flagged, now()],
+            "INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, reasons, findings, flagged, note, ts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            rusqlite::params![s.issue, s.patch_id, s.commit, reviewer, verdict, s.approver, to_json(&s.reasons), findings, flagged, note, now()],
         )?;
         Ok(())
     }
@@ -314,7 +325,7 @@ impl Db {
     /// Every review of an issue's branch, newest first.
     pub fn reviews(&self, issue_key: &str) -> Result<Vec<ReviewRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT issue_key, patch_id, commit_sha, reviewer, verdict, approver, reasons, findings, ts
+            "SELECT issue_key, patch_id, commit_sha, reviewer, verdict, approver, reasons, findings, ts, note
              FROM review WHERE issue_key = ?1 COLLATE NOCASE ORDER BY ts DESC, id DESC",
         )?;
         let rows = stmt.query_map([issue_key], |r| {
@@ -328,6 +339,7 @@ impl Db {
                 reasons: serde_json::from_str(&r.get::<_, String>(6)?).unwrap_or_default(),
                 findings: serde_json::from_str(&r.get::<_, String>(7)?).unwrap_or_default(),
                 ts: r.get(8)?,
+                note: r.get(9)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -358,7 +370,8 @@ mod tests {
         sh(&repo, &["init", "-q", "-b", "main"]);
         sh(&repo, &["config", "user.name", "t"]);
         sh(&repo, &["config", "user.email", "t@t"]);
-        // The fake reviewer flags money whenever the diff touches a billing file, finds an edge case
+        // Only the fake `claude` reviewer is installed, so Claude's branches get a same-vendor
+        // review. It flags money whenever the diff touches a billing file, finds an edge case
         // in a first look at an edge file, and on a re-review says that finding is still open.
         std::fs::write(
             repo.join("review.sh"),
@@ -384,8 +397,8 @@ dir = "../wt/{key}"
 [gate]
 commands = ["exit 0"]
 [review]
-reviewer = { "*" = "fake" }
-commands = { fake = ["{sh}", "review.sh"] }
+reviewer = { "*" = "codex" }
+commands = { claude = ["{sh}", "review.sh"], codex = ["nitely-test-no-such-codex"] }
 [[review.flags]]
 name = "MONEY"
 question = "the change alters billing"
@@ -433,8 +446,12 @@ reason = "money logic"
 
             let s = submit(&mut db, &config, &opts, &actor).unwrap();
             assert!(s.gate.passed && s.pushed, "{s:?}");
-            assert_eq!(s.review.as_ref().unwrap().verdict, "pass");
+            let review = s.review.as_ref().unwrap();
+            assert_eq!((review.verdict.as_str(), review.reviewer.as_str()), ("pass", "claude"));
+            assert_eq!(review.note, "same vendor: codex not installed");
             assert_eq!((s.approver.as_str(), s.state.as_str()), (approver, state), "{s:?}");
+            assert_eq!(db.reviews(&issue.key).unwrap()[0].note, "same vendor: codex not installed");
+            assert!(describe(&issue, &s).contains("**Review** by claude (same vendor: codex not installed)"));
             // A local bare remote is not a code host, so there is no PR, and it says why.
             assert!(s.pr_url.is_none() && s.pr_error.as_deref().unwrap().contains("not on GitHub"));
             assert_eq!(db.reviews(&issue.key).unwrap()[0].patch_id, s.patch_id);
@@ -461,6 +478,30 @@ reason = "money logic"
         assert_eq!((review.findings.len(), review.findings[0].carried, review.verdict.as_str()), (1, true, "pass"));
         assert!(describe(&issue, &second).contains("Previous round's findings: 1 still open."));
         assert!(db.reviews(&issue.key).unwrap()[0].findings[0].carried);
+
+        // A playbook that requires another vendor's review sends a same-vendor one to a human, and
+        // with no reviewer installed at all, submit says what to install.
+        let pb_path = repo.join(playbook::PLAYBOOK_PATH);
+        let pb = std::fs::read_to_string(&pb_path).unwrap();
+        std::fs::write(&pb_path, pb.replace("[review]
+", "[review]
+require_cross_vendor = true
+")).unwrap();
+        let issue = db.create_issue(&new("Footer tweak"), &actor).unwrap();
+        db.move_issue(&issue.key, "In Progress", None, None, &actor).unwrap();
+        let started = playbook::start_task(&db, &repo, &issue, "claude", &actor).unwrap();
+        let wt = Path::new(&started.worktree);
+        std::fs::write(wt.join("footer.txt"), "x").unwrap();
+        sh(wt, &["add", "."]);
+        sh(wt, &["commit", "-q", "-m", "footer"]);
+        let opts = SubmitOptions { dir: started.worktree.as_str(), issue_key: None, skip_review: false, local_only: true };
+        let s = submit(&mut db, &config, &opts, &actor).unwrap();
+        assert_eq!((s.approver.as_str(), s.state.as_str()), ("human", "Needs You"), "{s:?}");
+        assert!(s.reasons[0].contains("requires a review by another vendor"), "{:?}", s.reasons);
+        std::fs::write(&pb_path, pb.replace("\"{sh}\", \"review.sh\"]".replace("{sh}", &playbook::posix_sh()).as_str(), "\"nitely-test-no-such-claude\"]")).unwrap();
+        let none = submit(&mut db, &config, &opts, &actor).unwrap_err().to_string();
+        assert!(none.contains("no reviewer can run") && none.contains("nitely-test-no-such"), "{none}");
+        std::fs::write(&pb_path, pb).unwrap();
 
         // A push that fails hands nothing in, so the issue stays In Progress.
         sh(&repo, &["remote", "set-url", "origin", &base.join("missing.git").to_string_lossy()]);

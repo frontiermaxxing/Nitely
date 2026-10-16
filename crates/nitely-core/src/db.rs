@@ -97,7 +97,8 @@ CREATE TABLE IF NOT EXISTS review (       -- one per submit; land checks the one
   reasons     TEXT NOT NULL DEFAULT '[]',
   findings    TEXT NOT NULL DEFAULT '[]',
   flagged     TEXT NOT NULL DEFAULT '[]',
-  ts          INTEGER NOT NULL
+  ts          INTEGER NOT NULL,
+  note        TEXT NOT NULL DEFAULT ''   -- how independent: 'same vendor: codex not installed'
 );
 CREATE TABLE IF NOT EXISTS pull_request (
   provider       TEXT NOT NULL,
@@ -179,7 +180,7 @@ CREATE TABLE IF NOT EXISTS crew_control (  -- per project: paused, and the super
 
 /// Bumped when a table changes shape. Tables that only mirror Bitbucket or Linear are dropped
 /// and refilled by the next sync; tables Nitely owns get real migrations.
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -201,6 +202,14 @@ fn migrate(conn: &Connection) -> Result<()> {
     }
     // v6 adds issue_blocker, v7 session_state, v8 project_alias, v9 project_brief and v10 crew_worker
     // and crew_control, which SCHEMA creates; nothing to drop.
+    if version < 11 {
+        // v11 adds review.note; reviews are Nitely's own records, so the column is added, not refilled.
+        let has_review: bool = conn.query_row("SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'review')", [], |r| r.get(0))?;
+        let has_note: bool = conn.query_row("SELECT EXISTS (SELECT 1 FROM pragma_table_info('review') WHERE name = 'note')", [], |r| r.get(0))?;
+        if has_review && !has_note {
+            conn.execute_batch("ALTER TABLE review ADD COLUMN note TEXT NOT NULL DEFAULT '';")?;
+        }
+    }
     Ok(())
 }
 

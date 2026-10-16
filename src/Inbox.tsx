@@ -515,7 +515,7 @@ function Body(props: { decision: Decision; detail?: IssueDetail; integration: st
           <p className="decision-why">
             {review?.reviewer ? (
               <>
-                <AgentMark vendor={review.reviewer} size={14} /> {who(review.reviewer)}'s review{" "}
+                <AgentMark vendor={review.reviewer} size={14} /> {who(review.reviewer)}'s review{review.note ? ` (${review.note})` : ""}{" "}
                 {review.verdict === "changes" ? <span className="decision-changes">asked for changes</span> : "passed"}
                 {reviewed > 1 && ` after ${reviewed} rounds`}
                 <span className="decision-findings">
