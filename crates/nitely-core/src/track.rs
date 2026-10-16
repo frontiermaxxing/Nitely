@@ -273,20 +273,6 @@ mod tests {
     }
 
     #[test]
-    fn since_is_the_last_arrival_at_the_station() {
-        // Review started at 7; changes asked at 8 sends it back to Working from then.
-        let t = track_of(&issue("In Progress"), &with(&[("submit", "Review by codex requested changes."), ("status", "Fixing")]), 0);
-        assert_eq!((t.station, t.since), ("working", Some(8)));
-        // Moved back to Todo at 8: its age in Todo counts from the move, not from filing.
-        let t = track_of(&issue("Todo"), &with(&[("issue_moved", "In Review → Todo")]), 0);
-        assert_eq!((t.station, t.since), ("todo", Some(8)));
-        // Repeated gate results keep the first arrival at Gate.
-        let t = track_of(&issue("In Progress"), &tl(&[("issue_created", ""), ("claimed", ""), ("gate_failed", ""), ("gate_failed", "")]), 0);
-        assert_eq!((t.station, t.since), ("gate", Some(3)));
-        assert_eq!(track_of(&issue("In Review"), &[], 0).since, None);
-    }
-
-    #[test]
     fn failed_gate_is_stuck_until_it_passes() {
         let t = track_of(&issue("In Progress"), &tl(&BASE[..5].iter().copied().chain([("gate_failed", "Gate failed")]).collect::<Vec<_>>()), 0);
         assert_eq!((t.station, t.stuck.as_deref()), ("gate", Some("Gate failed")));
@@ -393,6 +379,9 @@ mod tests {
             }
             if let Some(v) = ex.get("backlog") {
                 assert_eq!(t.backlog, v.as_bool().unwrap(), "{name}: backlog");
+            }
+            if let Some(v) = ex.get("since") {
+                assert_eq!(t.since, v.as_i64(), "{name}: since");
             }
             for s in ex.get("reached").and_then(|v| v.as_array()).into_iter().flatten() {
                 assert!(t.reached.contains_key(s.as_str().unwrap()), "{name}: reached {s}");

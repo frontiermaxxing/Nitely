@@ -23,6 +23,7 @@ interface Case {
     rounds?: number;
     asking?: boolean;
     backlog?: boolean;
+    since?: number | null;
     reached?: Station[];
     skipped?: Station[];
   };
@@ -106,6 +107,7 @@ for (const c of cases) {
     if (ex.rounds !== undefined) assert.equal(t.rounds, ex.rounds, "rounds");
     if (ex.asking !== undefined) assert.equal(t.asking, ex.asking, "asking");
     if (ex.backlog !== undefined) assert.equal(t.backlog, ex.backlog, "backlog");
+    if (ex.since !== undefined) assert.equal(t.since ?? null, ex.since, "since");
     for (const s of ex.reached ?? []) assert.ok(t.reached[s] !== undefined, `reached ${s}`);
     for (const s of ex.skipped ?? []) assert.equal(t.reached[s], undefined, `skipped ${s}`);
   });

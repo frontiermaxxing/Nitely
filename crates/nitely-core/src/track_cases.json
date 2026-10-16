@@ -149,6 +149,32 @@
       "base": true,
       "events": [["issue_moved", "In Progress → In Review"], ["submit", "No pull request: push failed: x"], ["issue_moved", "In Review → In Progress"]],
       "expect": { "stuck": "Push failed" }
+    },
+    {
+      "name": "since: changes asked restarts the time at Working",
+      "state": "In Progress",
+      "base": true,
+      "events": [["submit", "Review by codex requested changes."], ["status", "Fixing"]],
+      "expect": { "station": "working", "since": 8 }
+    },
+    {
+      "name": "since: a move back to Todo counts from the move, not from filing",
+      "state": "Todo",
+      "base": true,
+      "events": [["issue_moved", "In Review → Todo"]],
+      "expect": { "station": "todo", "since": 8 }
+    },
+    {
+      "name": "since: repeated gate results keep the first arrival at Gate",
+      "state": "In Progress",
+      "events": [["issue_created", ""], ["claimed", ""], ["gate_failed", ""], ["gate_failed", ""]],
+      "expect": { "station": "gate", "since": 3 }
+    },
+    {
+      "name": "since: unknown without a timeline",
+      "state": "In Review",
+      "events": [],
+      "expect": { "station": "review", "since": null }
     }
   ]
 }
