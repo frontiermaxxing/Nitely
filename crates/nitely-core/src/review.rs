@@ -369,7 +369,8 @@ using P0 for data loss or security, P1 for a definite bug in normal use, P2 for 
             .filter(|c| !c.is_empty())
             .with_context(|| format!("the playbook has no command for the {reviewer} reviewer (add review.commands.{reviewer})"))?;
         let started = Instant::now();
-        let out_file = std::env::temp_dir().join(format!("nitely-review-{}-{}.txt", std::process::id(), crate::db::now()));
+        // Two reviews from one process in one second each get their own (NIT-116).
+        let out_file = crate::paths::unique_temp("nitely-review", ".txt");
         let uses_file = command.iter().any(|a| a.contains("{output}"));
         let program = resolve_program(&command[0]);
         let codex_servers = if cli_name(&command[0]) == "codex" { codex_nitely_servers(&program, worktree) } else { vec![] };
