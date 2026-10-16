@@ -82,12 +82,13 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         bail!("{branch} has no changes against {base}; commit your work first");
     }
 
-    let gate = playbook::run_gate(db, &root, &worktree, Some(&issue.key), actor)?;
-    let files: Vec<String> = git(&worktree, &["diff", "--name-only", &format!("{base}...HEAD")])?
+    let files: Vec<String> = git(&worktree, &["diff", "--name-only", "--no-renames", &format!("{base}...HEAD")])?
         .lines()
         .filter(|l| !l.is_empty())
         .map(str::to_string)
         .collect();
+    pb.approval.check_blocked(&files)?;
+    let gate = playbook::run_gate(db, &root, &worktree, Some(&issue.key), actor)?;
     let mut out = Submitted {
         issue: issue.key.clone(),
         branch: branch.clone(),

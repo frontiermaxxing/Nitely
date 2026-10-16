@@ -206,6 +206,7 @@ fn check_approval(db: &Db, pb: &Playbook, key: &str, worktree: &Path, base: &str
         _ => bail!("the {} review asked for changes; fix them, commit, and submit again", review.reviewer),
     }
     let files: Vec<String> = git(worktree, &["diff", "--name-only", "--no-renames", &format!("{base}...HEAD")])?.lines().map(str::to_string).collect();
+    pb.approval.check_blocked(&files)?;
     let mut reasons = pb.approval.human_reasons(&files)?;
     if review.approver == "human" {
         reasons.extend(review.reasons.iter().cloned());

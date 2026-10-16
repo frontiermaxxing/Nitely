@@ -58,9 +58,56 @@ pub struct WorktreeRules {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GateRules {
-    /// Must all pass before a change can land. Run in the task's worktree.
+    /// Must all pass before a change can land. Run in the task's worktree, in order.
     #[serde(default)]
     pub commands: Vec<String>,
+    /// Commands that run only for some changes, after `commands`.
+    #[serde(default)]
+    pub steps: Vec<GateStep>,
+}
+
+/// A gate command that depends on what the branch changes (against the integration branch).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GateStep {
+    pub run: String,
+    /// Runs only when a changed path matches one of these regular expressions.
+    pub when_changed: Vec<String>,
+    /// Skipped when every changed path matches one of these (e.g. docs-only changes).
+    pub unless_only: Vec<String>,
+}
+
+impl GateStep {
+    /// Why the step is skipped for `files`, or None when it runs.
+    pub fn skip_reason(&self, files: &[String]) -> Result<Option<String>> {
+        let any = |patterns: &[String], f: &str| -> Result<bool> {
+            for p in patterns {
+                if regex::Regex::new(p).with_context(|| format!("gate pattern {p}"))?.is_match(f) {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        };
+        if !self.when_changed.is_empty() {
+            let mut hit = false;
+            for f in files {
+                hit |= any(&self.when_changed, f)?;
+            }
+            if !hit {
+                return Ok(Some(format!("nothing matching {} changed", self.when_changed.join(" or "))));
+            }
+        }
+        if !self.unless_only.is_empty() && !files.is_empty() {
+            let mut all = true;
+            for f in files {
+                all &= any(&self.unless_only, f)?;
+            }
+            if all {
+                return Ok(Some(format!("only paths matching {} changed", self.unless_only.join(" or "))));
+            }
+        }
+        Ok(None)
+    }
 }
 
 /// Which changes wait for a human. Everything else is approved by a passing review.
@@ -71,6 +118,9 @@ pub struct ApprovalRules {
     pub always_human: bool,
     /// Changed paths that need a human, as regular expressions over `/`-separated repo paths.
     pub human_paths: Vec<PathRule>,
+    /// Changed paths no task branch may touch (submit and land refuse), e.g. a submodule pointer
+    /// that changes through another process.
+    pub blocked_paths: Vec<PathRule>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +132,17 @@ pub struct PathRule {
 }
 
 impl ApprovalRules {
+    /// Fails when the branch touches a blocked path.
+    pub fn check_blocked(&self, files: &[String]) -> Result<()> {
+        for rule in &self.blocked_paths {
+            let re = regex::Regex::new(&rule.pattern).with_context(|| format!("blocked pattern {}", rule.pattern))?;
+            if let Some(f) = files.iter().find(|f| re.is_match(&f.replace('\\', "/"))) {
+                bail!("the branch changes {f}, which task branches may not change: {}", rule.reason);
+            }
+        }
+        Ok(())
+    }
+
     /// The reasons a human must approve a change to `files`; empty when the review is enough.
     pub fn human_reasons(&self, files: &[String]) -> Result<Vec<String>> {
         let mut reasons = Vec::new();
@@ -275,8 +336,10 @@ pub struct CommandResult {
     pub command: String,
     pub ok: bool,
     pub seconds: u64,
-    /// The end of stdout and stderr.
+    /// The end of stdout and stderr, or why the step was skipped.
     pub output: String,
+    #[serde(default)]
+    pub skipped: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -309,8 +372,9 @@ pub fn start_task(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, 
 
     let mut setup = Vec::new();
     for command in &playbook.worktree.setup {
+        let command = &expand(command, repo_root, &worktree, base);
         let (ok, output, seconds) = run_shell(command, &worktree)?;
-        setup.push(CommandResult { command: command.clone(), ok, seconds, output });
+        setup.push(CommandResult { command: command.clone(), ok, seconds, output, skipped: false });
         if !ok {
             db.log_event(actor, Some(&issue.key), Some(&worktree_str), "setup_failed", &format!("{command} failed"))?;
             break;
@@ -323,15 +387,32 @@ pub fn start_task(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, 
 /// Stops at the first failure, so the agent sees the error that matters.
 pub fn run_gate(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<&str>, actor: &Actor) -> Result<GateResult> {
     let playbook = Playbook::load(repo_root)?;
-    if playbook.gate.commands.is_empty() {
+    if playbook.gate.commands.is_empty() && playbook.gate.steps.is_empty() {
         bail!("this repo's playbook has no gate commands; add them under [gate] in {PLAYBOOK_PATH}");
     }
+    let base = playbook.integration_branch();
     let commit = git(worktree, &["rev-parse", "--short", "HEAD"]).unwrap_or_default().trim().to_string();
+    // --no-renames: a moved file counts as a change at both paths.
+    let files: Vec<String> = git(worktree, &["diff", "--name-only", "--no-renames", &format!("{base}...HEAD")])
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    let mut steps: Vec<(String, Option<String>)> = playbook.gate.commands.iter().map(|c| (c.clone(), None)).collect();
+    for step in &playbook.gate.steps {
+        steps.push((step.run.clone(), step.skip_reason(&files)?));
+    }
+
     let mut results = Vec::new();
     let mut passed = true;
-    for command in &playbook.gate.commands {
-        let (ok, output, seconds) = run_shell(command, worktree)?;
-        results.push(CommandResult { command: command.clone(), ok, seconds, output });
+    for (command, skip) in steps {
+        let command = expand(&command, repo_root, worktree, base);
+        if let Some(why) = skip {
+            results.push(CommandResult { command, ok: true, seconds: 0, output: format!("skipped: {why}"), skipped: true });
+            continue;
+        }
+        let (ok, output, seconds) = run_shell(&command, worktree)?;
+        results.push(CommandResult { command, ok, seconds, output, skipped: false });
         if !ok {
             passed = false;
             break;
@@ -344,6 +425,12 @@ pub fn run_gate(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<&s
     };
     db.log_event(actor, issue_key, Some(&worktree.to_string_lossy()), if passed { "gate_passed" } else { "gate_failed" }, &summary)?;
     Ok(GateResult { passed, commit, results })
+}
+
+/// Fills `{main}` (the main checkout), `{worktree}` and `{base}` in a playbook command.
+fn expand(command: &str, main: &Path, worktree: &Path, base: &str) -> String {
+    let slash = |p: &Path| p.to_string_lossy().replace('\\', "/");
+    command.replace("{main}", &slash(main)).replace("{worktree}", &slash(worktree)).replace("{base}", base)
 }
 
 impl Db {
@@ -418,6 +505,64 @@ mod tests {
     }
 
     #[test]
+    fn gate_steps_run_by_what_changed() {
+        let step = |when: &[&str], unless: &[&str]| GateStep {
+            run: "x".into(),
+            when_changed: when.iter().map(|s| s.to_string()).collect(),
+            unless_only: unless.iter().map(|s| s.to_string()).collect(),
+        };
+        let files = |f: &[&str]| f.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let api = step(&["^aera-api/"], &[]);
+        assert!(api.skip_reason(&files(&["aera/x.ts"])).unwrap().is_some());
+        assert!(api.skip_reason(&files(&["aera/x.ts", "aera-api/y.ts"])).unwrap().is_none());
+        let aera = step(&[], &["^docs/", "^aera-website/"]);
+        assert!(aera.skip_reason(&files(&["docs/a.md", "aera-website/b.tsx"])).unwrap().is_some());
+        assert!(aera.skip_reason(&files(&["docs/a.md", "aera/c.ts"])).unwrap().is_none());
+        assert!(aera.skip_reason(&[]).unwrap().is_none(), "an empty diff runs everything");
+
+        let rules = ApprovalRules {
+            blocked_paths: vec![PathRule { pattern: "^src$".into(), reason: "src lands through the C++ lane".into() }],
+            ..Default::default()
+        };
+        assert!(rules.check_blocked(&files(&["src/x.cc", "aera/y.ts"])).is_ok());
+        assert!(rules.check_blocked(&files(&["src"])).unwrap_err().to_string().contains("C++ lane"));
+    }
+
+    /// Aera's playbook must keep parsing, and must route paths the way scripts/work/approval.mjs does.
+    #[test]
+    fn aera_playbook_matches_its_scripts() {
+        let pb = Playbook::parse(include_str!("../../../docs/playbooks/aera.toml")).unwrap();
+        let files = |f: &[&str]| f.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let human = |f: &str| !pb.approval.human_reasons(&files(&[f])).unwrap().is_empty();
+        // The cases in scripts/work/approval.test.mjs.
+        for f in [
+            "aera/core/entitlement/paidFeatures.ts", "aera-api/src/lib/credits/reverse.ts", "aera-api/src/lib/billing/legacyEvents.ts",
+            "aera/newtab/components/settings/SubscriptionCard.tsx", "aera-website/src/app/pricing/page.tsx",
+            "deployment/win64/build-release.ps1", "deployment/win64/upload-release.ps1", "scripts/deploy_release.ps1",
+            "aera-api/deploy.sh", "aera-api/ecosystem.config.js", "installer/aera.nsi", "src/chrome/browser/aera/aera_update_service.cc",
+        ] {
+            assert!(human(f), "{f} should wait for Andrew");
+        }
+        for f in [
+            "aera/core/agent/prompts/character.md", "aera/ui/i18n/locales/en.json", "aera-website/messages/en.json",
+            "aera/core/auth/authFailure.ts", "CLAUDE.md", "AGENTS.md", "aera/test/holds.test.ts", "docs/knowledge/agent-workflow.md",
+            "scripts/work/land.mjs", "aera/core/board/holds.ts", "aera-api/src/app/api/onboarding/route.ts", "tools/something-new.py",
+        ] {
+            assert!(!human(f), "{f} should not wait for Andrew");
+        }
+        assert!(!pb.approval.human_reasons(&[]).unwrap().is_empty(), "an empty branch is not approved by anyone");
+        assert!(pb.approval.check_blocked(&files(&["src"])).is_err());
+        assert_eq!(pb.review.reviewer_for("claude"), Some("codex"));
+        assert_eq!(pb.review.flags.len(), 2);
+        let docs_only = files(&["docs/a.md", "aera-website/app/page.tsx"]);
+        let skipped: Vec<bool> = pb.gate.steps.iter().map(|s| s.skip_reason(&docs_only).unwrap().is_some()).collect();
+        assert_eq!(skipped, vec![true, true, true, true, false]);
+        if !cfg!(target_os = "macos") {
+            assert_eq!(pb.integration_branch(), "win-dev");
+        }
+    }
+
+    #[test]
     fn rejects_unknown_keys() {
         assert!(Playbook::parse("[gate]\ncomand = [\"x\"]").is_err());
         assert_eq!(Playbook::parse("").unwrap().branch.integration, "main");
@@ -433,7 +578,8 @@ mod tests {
         sh(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"]);
         std::fs::write(
             repo.join(PLAYBOOK_PATH),
-            "[worktree]\ndir = \"../wt/{key}\"\nsetup = [\"echo ready > setup.txt\"]\n[gate]\ncommands = [\"test -f setup.txt\", \"false\"]\n",
+            "[worktree]\ndir = \"../wt/{key}\"\nsetup = [\"echo {base} > setup.txt\"]\n[gate]\ncommands = [\"grep -q main setup.txt\"]\n\
+             [[gate.steps]]\nrun = \"echo never\"\nwhen_changed = [\"^api/\"]\n[[gate.steps]]\nrun = \"false\"\n",
         )
         .unwrap();
         let db = Db::open(&base.join("t.db")).unwrap();
@@ -447,8 +593,8 @@ mod tests {
 
         let gate = run_gate(&db, &repo, Path::new(&started.worktree), Some("NIT-3"), &actor).unwrap();
         assert!(!gate.passed);
-        assert_eq!(gate.results.len(), 2);
-        assert!(gate.results[0].ok && !gate.results[1].ok);
+        assert_eq!(gate.results.len(), 3);
+        assert!(gate.results[0].ok && gate.results[1].skipped && !gate.results[2].ok, "{gate:?}");
         let kinds: Vec<String> = db.timeline("NIT-3").unwrap().into_iter().map(|t| t.kind).collect();
         assert_eq!(kinds, vec!["worktree", "gate_failed"]);
         std::fs::remove_dir_all(base).ok();
