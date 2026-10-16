@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 
 pub use crate::issues::IssueRecord;
@@ -246,6 +246,49 @@ fn migrate(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Puts the database in WAL mode (persistent), so the app reads while hooks write. SQLite refuses
+/// the switch as "locked" while another connection has the file open, without waiting for it as
+/// busy_timeout does for writes, so a few processes opening a new database at once each retry
+/// until one has switched it (NIT-103).
+fn use_wal(conn: &Connection) -> Result<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match conn.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get::<_, String>(0)) {
+            Ok(mode) if mode.eq_ignore_ascii_case("wal") => return Ok(()),
+            Ok(mode) => anyhow::bail!("the database stays in {mode} mode"),
+            Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == rusqlite::ErrorCode::DatabaseBusy && std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
+
+/// Brings the schema up to SCHEMA_VERSION in one write transaction. The app, a hook and an MCP
+/// server often open an old database at the same moment after an install; the first takes the
+/// write lock and upgrades, the others wait for it (busy_timeout), then find the version current
+/// and do nothing, instead of each adding the same column (NIT-103).
+fn upgrade(conn: &Connection) -> Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let done = (|| -> Result<()> {
+        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if version < SCHEMA_VERSION {
+            migrate(conn)?;
+            conn.execute_batch(SCHEMA)?;
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        }
+        Ok(())
+    })();
+    match done {
+        Ok(()) => conn.execute_batch("COMMIT")?,
+        Err(e) => {
+            conn.execute_batch("ROLLBACK").ok();
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
 /// Adds a column to a table that exists without it. SCHEMA creates new tables whole.
 fn add_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Result<()> {
     let mut stmt = conn.prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))?;
@@ -334,10 +377,8 @@ impl Db {
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if version < SCHEMA_VERSION {
             // WAL (persistent) so the app reads while hooks write; busy_timeout so parallel hooks wait.
-            conn.pragma_update(None, "journal_mode", "WAL")?;
-            migrate(&conn)?;
-            conn.execute_batch(SCHEMA)?;
-            conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            use_wal(&conn).context("switching the database to WAL")?;
+            upgrade(&conn).context("upgrading the database")?;
         }
         Ok(Db { conn })
     }
@@ -567,6 +608,42 @@ mod tests {
         assert_eq!(db.issue("NIT-1").unwrap().unwrap().owner, "agent");
         drop(db);
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn processes_opening_an_old_database_together_upgrade_it_once() {
+        // As the app, a hook and an MCP server do right after an install (NIT-103): each opens
+        // its own connection to a v10 database whose review table has no note column yet.
+        for round in 0..8 {
+            let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+            let dir = std::env::temp_dir().join(format!("nitely-upgrade-{}-{nanos}-{round}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("t.db");
+            {
+                let conn = Connection::open(&path).unwrap();
+                let old = SCHEMA.replace(",\n  note        TEXT NOT NULL DEFAULT ''", "\n  --");
+                conn.execute_batch(&old).unwrap();
+                assert!(!conn.query_row("SELECT EXISTS (SELECT 1 FROM pragma_table_info('review') WHERE name = 'note')", [], |r| r.get::<_, bool>(0)).unwrap());
+                conn.pragma_update(None, "user_version", 10).unwrap();
+            }
+            let start = std::sync::Arc::new(std::sync::Barrier::new(6));
+            let opened: Vec<_> = (0..6)
+                .map(|_| {
+                    let (path, start) = (path.clone(), start.clone());
+                    std::thread::spawn(move || {
+                        start.wait();
+                        Db::open(&path).map(|_| ()).map_err(|e| format!("{e:#}"))
+                    })
+                })
+                .collect();
+            for o in opened {
+                assert_eq!(o.join().unwrap(), Ok(()), "round {round}");
+            }
+            let db = Db::open(&path).unwrap();
+            assert_eq!(db.conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0)).unwrap(), SCHEMA_VERSION);
+            drop(db);
+            std::fs::remove_dir_all(dir).ok();
+        }
     }
 
     #[test]
