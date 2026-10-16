@@ -140,10 +140,14 @@ pub fn track_of(issue: &IssueRecord, timeline: &[TimelineEntry], change_reviews:
             }
             "issue_moved" => {
                 let Some(to) = moved_to(e.summary.as_deref()) else { continue };
-                // A person moving the issue has taken it from wherever it stopped.
+                // Someone moving the issue has taken it from wherever it stopped. A failed push
+                // is the exception unless a person moves it: submit itself moves the issue back
+                // to In Progress after one, and the branch is still unseen.
                 land_failed = false;
                 review_failed = false;
-                push_failed = false;
+                if e.actor == "human" {
+                    push_failed = false;
+                }
                 let s = station_of_state(to, "");
                 if to == "Todo" || to == "Backlog" {
                     current = "todo";
@@ -299,6 +303,9 @@ mod tests {
         assert_eq!(t.stuck.as_deref(), Some("Push failed"));
         let t = track_of(&issue("In Review"), &with(&[("submit", "No pull request: push failed: x"), ("submit", "Review by codex passed; ready to land. Pull request: y"), ("issue_moved", "In Progress → In Review")]), 0);
         assert_eq!(t.stuck, None);
+        // Submit moves a resubmitted In Review issue back to In Progress when its push fails.
+        let t = track_of(&issue("In Progress"), &with(&[("issue_moved", "In Progress → In Review"), ("submit", "No pull request: push failed: x"), ("issue_moved", "In Review → In Progress")]), 0);
+        assert_eq!(t.stuck.as_deref(), Some("Push failed"));
     }
 
     #[test]

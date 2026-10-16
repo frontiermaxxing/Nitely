@@ -351,7 +351,9 @@ function verb(h: Happening): string {
     case "asked":
       return "asked you";
     case "review":
-      return s.includes("requested changes") ? "changes asked" : s.includes("waits for a human") ? "review passed, waits for you" : "review passed";
+      if (s.includes("requested changes")) return "changes asked";
+      if (s.startsWith("Submitted without a review")) return "submitted unreviewed, waits for you";
+      return s.includes("waits for a human") ? "review passed, waits for you" : "review passed";
     case "stuck":
       return s.startsWith("Land stopped") ? "land stopped" : s.includes("did not finish") ? "review did not finish" : "gate failed";
   }
@@ -406,7 +408,15 @@ function Since({ data, ctx }: { data: PulseData; ctx: Context }) {
               <li key={`${h.ts}-${n}`} className={`feed-row feed-${h.kind}`}>
                 <span className="feed-time">{clock(h.ts)}</span>
                 <span className="feed-issue">
-                  {issue ? <IssueToken issue={issue} onOpen={ctx.onOpenIssue} /> : <span className="mono small muted">{h.issue_key}</span>}
+                  {issue ? (
+                    <IssueToken issue={issue} onOpen={ctx.onOpenIssue} />
+                  ) : (
+                    h.issue_key && (
+                      <button className="link mono small" onClick={() => ctx.onOpenIssue(h.issue_key!)}>
+                        {h.issue_key}
+                      </button>
+                    )
+                  )}
                 </span>
                 <span className="feed-verb">{verb(h)}</span>
                 <span className="feed-what" title={h.summary ?? undefined}>
