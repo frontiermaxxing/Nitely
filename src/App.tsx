@@ -147,12 +147,16 @@ export function App() {
   // A nitely://issue/KEY link opens that issue's panel: one that started the app is waiting in the
   // backend (opened_link), later ones arrive as events while the app runs.
   useEffect(() => {
-    invoke<string | null>("opened_link").then((key) => key && setOpenIssue(key), () => {});
+    let live = true;
     const unlisten = listen<string>(OPEN_ISSUE_EVENT, (e) => {
       setOpenIssue(e.payload);
       invoke("opened_link").catch(() => {});
     });
+    // Only once listening, read a link that came first: one arriving in between is then either
+    // still waiting here or heard as an event, never lost.
+    unlisten.then(() => live && invoke<string | null>("opened_link").then((key) => live && key && setOpenIssue(key), () => {}));
     return () => {
+      live = false;
       unlisten.then((stop) => stop());
     };
   }, []);
