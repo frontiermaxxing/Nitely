@@ -305,7 +305,7 @@ fn places(config: &Config) -> Vec<Place> {
         .iter()
         .filter_map(|r| {
             let project = r.project.clone()?;
-            let pb = crate::playbook::Playbook::load(Path::new(&r.root)).unwrap_or_default();
+            let pb = crate::playbook::Playbook::load_with(Path::new(&r.root), config).unwrap_or_default();
             let probe = crate::IssueRecord { key: "X-1".into(), title: "x".into(), ..Default::default() };
             let worktrees = pb.worktree_for(Path::new(&r.root), "x", &probe).parent().map(|p| normalize(&p.to_string_lossy()));
             Some(Place { project, root: normalize(&r.root), worktrees })
