@@ -109,6 +109,10 @@
   --shadow-float: 0 20px 60px rgba(40, 35, 20, 0.16);
   --scrim: rgba(27, 27, 25, 0.28);
   --focus: var(--fg-2);
+  /* Scrollbars (styles.css, "scrollbars"): a thin thumb, faint at rest, stronger under the pointer.
+     Mixed from the ink, so both themes get theirs. */
+  --scroll-thumb: color-mix(in srgb, var(--fg) 22%, transparent);
+  --scroll-thumb-hover: color-mix(in srgb, var(--fg) 40%, transparent);
   color-scheme: light;
 }
 

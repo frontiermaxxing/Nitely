@@ -15,6 +15,25 @@ body { margin: 0; background: var(--bg); }
 button, input { font: inherit; color: inherit; }
 input { accent-color: var(--fg); }
 
+/* ----- scrollbars: every scroller the same -----
+   A 6px rounded thumb on no track, with no arrows; it shows while the pointer is over the scroller
+   or it is scrolling (main.tsx marks a scroller .scrolling for a moment) and widens to 10px under
+   the pointer. The bar's space is always the same 10px, so nothing moves when the thumb shows. */
+::-webkit-scrollbar { width: 10px; height: 10px; background: transparent; }
+::-webkit-scrollbar-button { display: none; }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background-color: transparent; background-clip: padding-box; border: 2px solid transparent; border-radius: 10px;
+}
+:hover::-webkit-scrollbar-thumb, .scrolling::-webkit-scrollbar-thumb { background-color: var(--scroll-thumb); }
+::-webkit-scrollbar-thumb:hover, ::-webkit-scrollbar-thumb:active { background-color: var(--scroll-thumb-hover); border-width: 0; }
+/* Engines without these rules (Firefox) get the standard thin bar. Chromium ignores the -webkit
+   rules once these are set, so they are only for the others. */
+@supports not selector(::-webkit-scrollbar) {
+  * { scrollbar-width: thin; scrollbar-color: var(--scroll-thumb) transparent; }
+}
+.content { scrollbar-gutter: stable; }
+
 /* ----- shell ----- */
 .shell { display: grid; grid-template-columns: 232px minmax(0, 1fr); height: 100vh; }
 .sidebar {

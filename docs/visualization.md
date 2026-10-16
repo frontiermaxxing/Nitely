@@ -289,6 +289,10 @@ Use roles, never raw colors. Both themes define every role.
   coming in), `--dur-travel` 420ms (a dot along the track, a card to another column),
   `--dur-mark` 1.4s (the highlight where a change landed, fading), `--breathe` 2.4s. Respect
   `prefers-reduced-motion` (below).
+- **Scrollbars:** `--scroll-thumb` at rest and `--scroll-thumb-hover` under the pointer, mixed from
+  `--fg` so both themes have theirs. Every scroller has the same bar (styles.css, "scrollbars"): a
+  6px rounded thumb on no track and no arrows, shown while the pointer is over the scroller or it
+  is scrolling, 10px under the pointer, in a fixed 10px gutter so nothing moves when it shows.
 - **Overlays:** `--scrim` behind the palette and the issue sheet, `--shadow-float` under the
   palette, `--shadow-panel` beside the sheet.
 
