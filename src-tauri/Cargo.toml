@@ -21,7 +21,10 @@ tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-deep-link = "2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+png = "0.17"
 
 [target.'cfg(windows)'.dependencies]
 # Windows toasts for decisions that wait on the person (src/notify.rs), with the click reported back.
 tauri-winrt-notification = "0.8"
+# The agents' own icons, read from what is installed here (src/agent_icons.rs).
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }

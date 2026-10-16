@@ -1,7 +1,10 @@
+import { useId } from "react";
 import type { Liveness } from "./agents";
+import { useAgentIcon } from "./agentIcons";
 import { LIVENESS_LABEL, VENDOR_LABEL, vendorInfo, vendorOf } from "./agents";
 
-// Every agent is a rounded square in its vendor's colour with its mark from VENDORS (agents.ts):
+// Every agent is a rounded square in its vendor's colour with its own icon, read from the copy
+// installed on this machine (agentIcons.ts), or, when none is, its letters from VENDORS (agents.ts):
 // Cl Claude, Cx Codex, Cu Cursor. A person is a ring, so the human never reads as one more agent.
 
 /** An agent: vendor colour and mark, with its live state as a small notched dot. */
@@ -12,6 +15,8 @@ export function AgentMark(props: { vendor: string | null | undefined; state?: Li
   const label = props.title ?? `${VENDOR_LABEL[vendor]}${state ? ` · ${LIVENESS_LABEL[state]}` : ""}`;
   const info = vendorInfo(vendor);
   const fill = info?.color ?? "var(--vendor-human)";
+  const icon = useAgentIcon(vendor);
+  const clip = useId();
   return (
     <svg
       className={`ui-mark${state === "stale" || state === "ended" ? ` ui-mark-${state}` : ""}`}
@@ -27,7 +32,15 @@ export function AgentMark(props: { vendor: string | null | undefined; state?: Li
       ) : (
         <>
           <rect x="0.5" y="0.5" width="15" height="15" rx="3.6" fill={fill} />
-          {"path" in info.mark ? (
+          {icon ? (
+            <>
+              {/* On the vendor's colour, so an icon drawn for a dark tile (a white mark) still shows. */}
+              <clipPath id={clip}>
+                <rect x="0.5" y="0.5" width="15" height="15" rx="3.6" />
+              </clipPath>
+              <image href={icon} x="0.5" y="0.5" width="15" height="15" clipPath={`url(#${clip})`} preserveAspectRatio="xMidYMid meet" />
+            </>
+          ) : "path" in info.mark ? (
             <path d={info.mark.path} className="ui-mark-glyph" />
           ) : (
             <text x="8" y="8.4" textAnchor="middle" dominantBaseline="central" className={`ui-mark-letter${info.mark.letters.length > 1 ? " ui-mark-letters" : ""}`}>

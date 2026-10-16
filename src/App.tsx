@@ -14,7 +14,7 @@ import { AddProject } from "./AddProject";
 import { HOME_LABEL, nowSecs } from "./util";
 import { KeysSheet, Palette, useKeys } from "./Palette";
 import { reposOf } from "./BranchMap";
-import { CountBadge, Loading, livenessOf } from "./ui";
+import { CountBadge, Loading, livenessOf, setAgentIcons } from "./ui";
 import { WindowControls, ownTitleBar } from "./WindowControls";
 import { useNotifications } from "./Notifications";
 import { FakeToasts } from "./dev/FakeToasts";
@@ -130,6 +130,10 @@ export function App() {
     );
   }, []);
   useEffect(loadAgents, [loadAgents]);
+  // Each agent's own icon, from the copy installed here; the letters stay where none is.
+  useEffect(() => {
+    invoke<Record<string, number[] | null>>("agent_icons").then(setAgentIcons, () => {});
+  }, []);
   const agentChanges = pendingChanges(agents);
   const agentErrors = setupErrors(agents);
 

@@ -2429,6 +2429,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "nitely-core",
+ "png 0.17.16",
  "serde",
  "serde_json",
  "tauri",
@@ -2438,6 +2439,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
  "tauri-winrt-notification",
+ "windows",
 ]
 
 [[package]]

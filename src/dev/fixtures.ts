@@ -1432,6 +1432,9 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         MACHINES.splice(0, MACHINES.length, ...MACHINES.filter((m) => m.name !== String(args.name)));
         return MACHINES.length < before;
       }
+      case "agent_icons":
+        // Nothing is installed in the preview: every agent keeps its letters.
+        return {};
       default:
         throw `The preview has no fixture for "${cmd}". Add one in src/dev/fixtures.ts.`;
     }

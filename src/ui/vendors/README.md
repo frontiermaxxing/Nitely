@@ -1,22 +1,29 @@
 # Agent marks
 
-`AgentMark` (src/ui/AgentMark.tsx) draws each agent as a rounded square in its colour with a mark
-from `VENDORS` in src/ui/agents.ts. NIT-83 asked for each product's own icon. This file records,
-per product, what its owner allows and why Nitely does not use the official mark yet. Checked on
-2026-10-16 from each owner's own pages; nothing was downloaded from icon packs or third parties.
+`AgentMark` (src/ui/AgentMark.tsx) draws each agent as a rounded square in its colour. Nitely
+ships no vendor marks: the products' owners require permission to show them (checked 2026-10-16:
+Anthropic's trademark guidelines need its approval in advance; OpenAI publishes no Codex mark and
+asks apps to keep its logos out; Cursor's brand page states no terms). Instead, as Andrew decided
+on NIT-119, each agent is drawn with the icon of the copy installed on the person's own machine,
+which is what their own taskbar already shows.
 
-| Agent | Official mark | What the owner allows | Nitely shows |
-| ----- | ------------- | --------------------- | ------------ |
-| Claude Code (Anthropic) | The Claude spark. No public brand page; logos are in a press-kit zip linked from anthropic.com/news. | anthropic.com/legal/trademark-guidelines: the marks may be used only as Anthropic specifically allows, in materials it approves in advance; no change of colour, proportion or otherwise. Approval goes through marketing@anthropic.com. | **Cl** in Claude's colour |
-| Codex (OpenAI) | None: openai.com/brand publishes the OpenAI wordmark and Blossom, nothing for Codex, and nothing says the Blossom may stand for Codex. | openai.com/brand: use the logo exactly as provided and only with permission; its rules for developers say an app's own UI should stay free of OpenAI logos. Requests go to partnercomms@openai.com. | **Cx** in Codex's colour |
-| Cursor (Anysphere) | The cube, in the kit at cursor.com/brand (2D marks are single-colour, light and dark). | The page states no usage terms beyond spelling the name "Cursor". The cube alone is only inside the kit's zip, unread here, and the preview files carry a background, so using it means cutting it out of their artwork. | **Cu** in Cursor's colour |
+`src-tauri/src/agent_icons.rs` asks Windows for that icon (the same picture Explorer and the Start
+menu show), in this order, and keeps the first it finds as a 64px PNG in the app data dir
+(`agent-icons/<agent>.png`, read again after a week):
 
-All three products start with C, so the old single letters (C, X, U) told Codex and Cursor apart
-only to someone who had read docs/visualization.md. Two letters say which one at a glance; the
-square's colour and the hover title ("Codex · working") say the rest.
+| Agent  | Where it looks |
+| ------ | -------------- |
+| Claude | the Claude desktop app (`Claude_pzs8sxrjxfjjc!Claude`), then `claude.exe` on PATH |
+| Codex  | OpenAI's desktop app (`OpenAI.Codex_2p2nqsd0c76g0!App`), then `codex.exe` on PATH |
+| Cursor | `Cursor.exe` beside the `cursor` script on PATH, then the usual install folders |
 
-To switch an agent to its official mark once its owner allows it: add the SVG here with its source
-URL, the date and the permission, set that agent's `mark` in `VENDORS` to `{ path: "..." }` (a
-single path on the 16 by 16 grid, in the owner's monochrome variant, drawn in `--on-vendor`), and
-check it at 12 to 22px in light and dark (#kit in the browser preview). Keep the clear space the
-owner asks for; if the live dot would cover the mark, move the dot beside it.
+A program with no icon of its own is skipped rather than shown with Windows' generic one. The icon
+sits on the agent's colour, clipped to the square, so a white mark drawn for a dark tile still
+shows. Where nothing is installed (and in the browser preview, and on the Mac for now) the agent
+keeps its two letters from `VENDORS` in src/ui/agents.ts: **Cl**, **Cx**, **Cu**.
+
+To see what a machine yields: `cargo test -p nitely-app agent_icons -- --ignored --nocapture`
+prints the sources that gave an icon and writes them to the temp folder.
+
+A new agent is an entry in `VENDORS` plus, for its icon, its sources in `sources()` in
+agent_icons.rs.

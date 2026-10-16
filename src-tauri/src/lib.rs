@@ -1,3 +1,4 @@
+mod agent_icons;
 mod notify;
 
 use nitely_core::issues::{Ask, Project, Relations};
@@ -477,6 +478,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            agent_icons::agent_icons,
             notify::notify,
             notify::set_badge,
             snapshot,

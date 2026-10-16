@@ -2,6 +2,7 @@
 import "./ui.css";
 
 export { AgentMark } from "./AgentMark";
+export { setAgentIcons } from "./agentIcons";
 export { Loading } from "./Loading";
 export { AheadBehind } from "./AheadBehind";
 export { CHECKS_LABEL, ChecksMark } from "./ChecksMark";
