@@ -38,18 +38,18 @@ pub fn default_target(from: &Path) -> Option<PathBuf> {
     first_installed(&folders, from, exe).or_else(|| dirs::home_dir().map(|h| h.join(".cargo").join("bin").join(exe)))
 }
 
-/// The first `exe` in `dirs` that is not in a folder Cargo builds into: the build's own folder
-/// and its `deps`, or any `target/<profile>` and `target/<profile>/deps`.
+/// The first `exe` in `dirs` that is neither `from` itself nor in a folder Cargo builds into:
+/// `target/<profile>`, or a `deps` folder beside the build or under `target/<profile>`.
 fn first_installed(dirs: &[PathBuf], from: &Path, exe: &str) -> Option<PathBuf> {
     let real = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-    let build_dir = from.parent().map(real);
+    let (from, build_dir) = (real(from), from.parent().map(real));
+    let named = |p: Option<&Path>, name: &str| p.and_then(Path::file_name).is_some_and(|n| n.eq_ignore_ascii_case(name));
     let cargo_folder = |dir: &Path| {
         let dir = real(dir);
-        let named = |p: Option<&Path>, name: &str| p.and_then(Path::file_name).is_some_and(|n| n.eq_ignore_ascii_case(name));
-        let profile = if named(Some(&dir), "deps") { dir.parent() } else { Some(dir.as_path()) };
-        build_dir.as_deref().is_some_and(|b| profile == Some(b)) || named(profile.and_then(Path::parent), "target")
+        let deps_of = |profile: Option<&Path>| profile.is_some_and(|p| build_dir.as_deref() == Some(p) || named(p.parent(), "target"));
+        (named(Some(&dir), "deps") && deps_of(dir.parent())) || named(dir.parent(), "target")
     };
-    dirs.iter().filter(|d| !cargo_folder(d)).map(|d| d.join(exe)).find(|p| p.is_file())
+    dirs.iter().filter(|d| !cargo_folder(d)).map(|d| d.join(exe)).find(|p| p.is_file() && real(p) != from)
 }
 
 /// Code whose change makes a nitely build out of date for Nitely's own repo.
@@ -199,6 +199,10 @@ mod tests {
         let path = vec![custom.clone(), custom.join("deps"), dir.join("later")];
         assert_eq!(first_installed(&path, &custom.join(exe), exe), Some(dir.join("later").join(exe)));
         assert_eq!(first_installed(&[dir.join("nowhere")], &from, exe), None);
+        // A build handed in with --from beside the installed copy: that copy is the target.
+        let beside = dir.join("bin").join("nitely-new.exe");
+        std::fs::write(&beside, "new").unwrap();
+        assert_eq!(first_installed(&[dir.join("bin")], &beside, exe), Some(dir.join("bin").join(exe)));
         std::fs::remove_dir_all(dir).ok();
     }
 
