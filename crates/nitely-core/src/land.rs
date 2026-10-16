@@ -643,6 +643,7 @@ when_changed = ["billing"]
             allow_similar: true,
             state: None,
             blocked_by: vec![],
+            ..Default::default()
         };
         let key = db.create_issue(&new, &Actor::Agent("claude:test".into())).unwrap().key;
         db.move_issue(&key, "Approved", None, None, &Actor::Human).unwrap();
