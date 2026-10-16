@@ -309,14 +309,17 @@ fn check_approval(db: &Db, pb: &Playbook, key: &str, worktree: &Path, base: &str
 }
 
 impl Db {
-    /// When the human approved the issue, if that approval covers its latest review: given after
-    /// it, or given after an earlier review of the same patch that every review since has
-    /// re-reviewed without asking for changes or raising a reason the approved one did not have.
-    /// A changed patch or a new reason needs a new approval.
+    /// When the human approved the issue, if that approval covers its latest review: the review
+    /// the human saw, and every review since of the same patch, without asking for changes or
+    /// raising a reason the approved one did not have. A changed patch or a new reason needs a new
+    /// approval. Times are whole seconds, so the review the human saw is the newest one from before
+    /// the approval's second, and reviews from that second count as later ones; only when none is
+    /// older is it the first review of that second.
     pub fn standing_approval(&self, key: &str) -> Result<Option<i64>> {
         let Some(at) = self.human_approval_at(key)? else { return Ok(None) };
-        let reviews = self.reviews(key)?;
-        let Some(approved) = reviews.iter().position(|r| r.ts <= at) else {
+        let reviews = self.reviews(key)?; // newest first
+        let approved = reviews.iter().position(|r| r.ts < at).or_else(|| reviews.iter().rposition(|r| r.ts == at));
+        let Some(approved) = approved else {
             return Ok(reviews.is_empty().then_some(at));
         };
         let base = &reviews[approved];
@@ -621,6 +624,58 @@ when_changed = ["billing"]
         let listed = crate::paths::normalize(&sh(&f.repo, &["worktree", "list"]));
         assert!(wt.exists() && listed.contains(&crate::paths::normalize(&wt.to_string_lossy())), "kept whole and still registered");
         std::fs::remove_dir_all(&f.base).ok();
+    }
+
+    #[test]
+    fn an_approval_covers_only_the_patch_the_human_saw() {
+        let path = std::env::temp_dir().join(format!("nitely-approval-{}-{}.db", std::process::id(), now()));
+        let mut db = Db::open(&path).unwrap();
+        db.create_project("NIT", "Nitely").unwrap();
+        let new = NewIssue {
+            project: "NIT".into(),
+            title: "Billing fix".into(),
+            kind: "feature".into(),
+            body: "b".into(),
+            evidence: "none yet".into(),
+            source: "human".into(),
+            priority: 0,
+            allow_similar: true,
+            state: None,
+            blocked_by: vec![],
+        };
+        let key = db.create_issue(&new, &Actor::Agent("claude:test".into())).unwrap().key;
+        db.move_issue(&key, "Approved", None, None, &Actor::Human).unwrap();
+        let at = db.human_approval_at(&key).unwrap().unwrap();
+        let reviewed = |db: &Db, patch: &str, verdict: &str, reasons: &str, ts: i64| {
+            db.conn
+                .execute(
+                    "INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, reasons, ts)
+                     VALUES (?1, ?2, 'c', 'codex', ?3, 'human', ?4, ?5)",
+                    rusqlite::params![key, patch, verdict, reasons, ts],
+                )
+                .unwrap();
+        };
+        let stands = |db: &Db| db.standing_approval(&key).unwrap().is_some();
+
+        reviewed(&db, "p1", "pass", r#"["billing"]"#, at - 5);
+        assert!(stands(&db), "approved after the review");
+        reviewed(&db, "p1", "pass", r#"["billing"]"#, at + 5);
+        assert!(stands(&db), "the same patch again, nothing new");
+        // A review in the approval's own second is not the one the human saw.
+        reviewed(&db, "p2", "none", r#"["billing"]"#, at);
+        assert!(!stands(&db), "a changed patch in the approval's second");
+        db.conn.execute("DELETE FROM review", []).unwrap();
+        reviewed(&db, "p1", "pass", r#"["billing"]"#, at - 5);
+        reviewed(&db, "p1", "pass", r#"["billing", "money logic"]"#, at + 5);
+        assert!(!stands(&db), "a new reason");
+        db.conn.execute("DELETE FROM review", []).unwrap();
+        // With no earlier review, the first one of the approval's second is the one approved.
+        reviewed(&db, "p1", "pass", r#"["billing"]"#, at);
+        assert!(stands(&db));
+        reviewed(&db, "p3", "pass", r#"["billing"]"#, at);
+        assert!(!stands(&db), "a second, different patch in that second");
+        drop(db);
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
