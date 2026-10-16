@@ -279,8 +279,9 @@ pub fn serving_port() -> Option<u16> {
 }
 
 /// The command that adds this machine's backlog to Claude Code on another machine.
+/// The URL is quoted: an IPv6 one's brackets are a filename pattern to zsh, which then refuses it.
 pub fn claude_command(mcp_url: &str, token: &str) -> String {
-    format!("claude mcp add --transport http nitely {mcp_url} --header \"Authorization: Bearer {token}\"")
+    format!("claude mcp add --transport http nitely \"{mcp_url}\" --header \"Authorization: Bearer {token}\"")
 }
 
 /// Whether a request may come from `ip` on address alone: this machine, or private ranges
@@ -361,6 +362,8 @@ mod tests {
 "), Some("[::]:7500".parse().unwrap()));
         assert_eq!(parse_serving_addr("7421"), Some("0.0.0.0:7421".parse().unwrap()));
         assert_eq!(parse_serving_addr("junk"), None);
+        let cmd = claude_command(&url("2600:1700:59d:6010::2e".parse().unwrap(), 7421, MCP_PATH), "tok");
+        assert!(cmd.contains(&format!(" \"http://[2600:1700:59d:6010::2e]:7421{MCP_PATH}\" ")), "quoted for zsh: {cmd}");
     }
 
     #[test]

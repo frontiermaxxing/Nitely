@@ -1262,7 +1262,7 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         MACHINES.splice(0, MACHINES.length, ...MACHINES.filter((m) => m.name !== name), { name, project: (args.project as string | null) ?? null, created_at: NOW });
         // A made-up token: the preview never makes real ones.
         const token = "nly_preview0000000000000000000000000000000000000000000000000000000";
-        return { name, token, commands: [`claude mcp add --transport http nitely http://192.168.1.68:7421/mcp --header "Authorization: Bearer ${token}"`] };
+        return { name, token, commands: [`claude mcp add --transport http nitely "http://192.168.1.68:7421/mcp" --header "Authorization: Bearer ${token}"`] };
       }
       case "network_remove": {
         const before = MACHINES.length;

@@ -136,7 +136,7 @@ other machines on the same local network (a Mac beside a Windows PC, say) reach 
 3. On the other machine, run the copied command:
 
 ```bash
-claude mcp add --transport http nitely http://192.168.1.68:7421/mcp --header "Authorization: Bearer nly_..."
+claude mcp add --transport http nitely "http://192.168.1.68:7421/mcp" --header "Authorization: Bearer nly_..."
 ```
 
 `nitely discover` (or `dns-sd -B _nitely._tcp` on a Mac without Nitely) finds this machine's address.
