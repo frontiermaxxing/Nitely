@@ -44,19 +44,52 @@ export const LIVENESS_LABEL: Record<Liveness, string> = {
   ended: "ended",
 };
 
-export type Vendor = "claude" | "codex" | "cursor" | "human" | "other";
+/** How an agent is drawn and named. */
+export interface VendorInfo {
+  /** Short name, in lines like "Claude passed". */
+  label: string;
+  /** The product, where people pick which agents to connect. */
+  product: string;
+  /**
+   * Its mark inside the rounded square: two letters, or an SVG path on a 16 by 16 grid for a
+   * product mark its owner lets us show (src/ui/vendors/README.md says which, and why not yet).
+   */
+  mark: { letters: string } | { path: string };
+  /** Its colour token, defined for both themes in tokens.css. */
+  color: string;
+}
+
+/**
+ * Every agent Nitely knows. Adding one (Gemini CLI, GitHub Copilot) is an entry here and its
+ * `--vendor-*` colour in tokens.css; vendorOf, the labels and AgentMark follow.
+ */
+export const VENDORS = {
+  claude: { label: "Claude", product: "Claude Code", mark: { letters: "Cl" }, color: "var(--vendor-claude)" },
+  codex: { label: "Codex", product: "Codex", mark: { letters: "Cx" }, color: "var(--vendor-codex)" },
+  cursor: { label: "Cursor", product: "Cursor", mark: { letters: "Cu" }, color: "var(--vendor-cursor)" },
+} satisfies Record<string, VendorInfo>;
+
+export type Agent = keyof typeof VENDORS;
+/** An agent, the human (a ring, never one more agent) or something unknown. */
+export type Vendor = Agent | "human" | "other";
+
+const isAgent = (v: string): v is Agent => Object.prototype.hasOwnProperty.call(VENDORS, v);
 
 /** `claude:c:/code/nitely` or `claude` → `claude`; anything unknown → `other`. */
 export function vendorOf(actorOrVendor: string | null | undefined): Vendor {
   // "claude:c:/repo/wt" here, "claude@mac" from another machine.
   const v = (actorOrVendor ?? "").split(/[:@]/)[0].toLowerCase();
-  return v === "claude" || v === "codex" || v === "cursor" || v === "human" ? v : "other";
+  return isAgent(v) || v === "human" ? v : "other";
 }
 
 export const VENDOR_LABEL: Record<Vendor, string> = {
-  claude: "Claude",
-  codex: "Codex",
-  cursor: "Cursor",
+  ...(Object.fromEntries(Object.entries(VENDORS).map(([k, v]) => [k, v.label])) as Record<Agent, string>),
   human: "You",
   other: "Agent",
 };
+
+/** What draws a vendor: its entry, or the neutral one for an unknown agent. */
+export function vendorInfo(vendor: Vendor): VendorInfo | null {
+  if (vendor === "human") return null;
+  return vendor === "other" ? { label: "Agent", product: "Agent", mark: { letters: "?" }, color: "var(--vendor-other)" } : VENDORS[vendor];
+}

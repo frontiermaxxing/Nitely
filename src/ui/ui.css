@@ -20,6 +20,9 @@
 /* ----- AgentMark ----- */
 .ui-mark { flex: none; overflow: visible; vertical-align: middle; }
 .ui-mark-letter { font: 600 8.5px var(--font-mono); fill: var(--on-vendor); pointer-events: none; }
+/* Two letters fit the square at the sizes rows use (14 to 22px): narrower, set close. */
+.ui-mark-letters { font: 650 7.4px var(--font); letter-spacing: -0.2px; }
+.ui-mark-glyph { fill: var(--on-vendor); pointer-events: none; }
 .ui-mark-stale { opacity: 0.45; }
 .ui-mark-ended { opacity: 0.3; }
 .ui-mark-dot { stroke: var(--mark-bg, var(--surface)); transform-box: fill-box; transform-origin: center; }

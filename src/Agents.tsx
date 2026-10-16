@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { invoke } from "./backend";
 import type { AgentPlan, AgentsUpdated, ConnectChange } from "./types";
-import { AgentMark, VENDOR_LABEL, vendorOf } from "./ui";
+import { AgentMark, vendorInfo, vendorOf } from "./ui";
 
 /** Changes still needed by the installed agents. */
 export function pendingChanges(agents: AgentPlan[]): number {
@@ -28,7 +28,7 @@ export function AgentChanges(props: { agents: AgentPlan[] }) {
     <>
       {props.agents.map((agent) => {
         const vendor = vendorOf(agent.agent);
-        const name = vendor === "other" ? agent.agent : vendor === "claude" ? "Claude Code" : VENDOR_LABEL[vendor];
+        const name = vendor === "other" ? agent.agent : (vendorInfo(vendor)?.product ?? agent.agent);
         const open = agent.changes.filter((c) => c.action !== "unchanged");
         const manual = open.filter((c) => c.action === "manual").length;
         const tone = agent.error || manual ? "fail" : open.length ? "warn" : "ok";

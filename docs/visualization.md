@@ -98,7 +98,7 @@ Import from `./ui` (or `../ui`). Open the browser preview at `#kit` to see each 
 | `IssueToken`   | Station glyph + key, optionally title and kind. Opens the panel (native) or Linear. | Any mention of an issue. |
 | `StationGlyph` | Where the issue stands, as one of seven 14px forms (below).                   | Dense rows where the key sits in its own column. |
 | `StationTrack` | `size="full"`: every station, labels, times, loop, stuck. `size="mini"`: the eight stations as dots on a line, the current one large and colored. | Full: the issue sheet, a focused decision. Mini: rows that mix states. |
-| `AgentMark`    | A rounded square in the vendor's color with its letter, and a notched live dot. | Any mention of an agent or the human. |
+| `AgentMark`    | A rounded square in the vendor's color with its mark (two letters), and a notched live dot. | Any mention of an agent or the human. |
 | `StateDot`     | A session's liveness on its own: working (breathes), waiting, idle, stale, ended. | Legends, glance lines, places without a vendor. |
 | `Sparkline`    | A line or bars, oldest first.                                                 | Activity over time next to a number. |
 | `Meter`        | Parts of a whole as one segmented bar.                                       | Open issues by phase, checks by result. |
@@ -126,16 +126,22 @@ Helpers: `livenessOf(session, now)` (adds "stale" after 30 minutes quiet), `vend
 
 ### Agents
 
-| Vendor | Shape                  | Token              |
-| ------ | ---------------------- | ------------------ |
-| Claude | rounded square with C  | `--vendor-claude`  |
-| Codex  | rounded square with X  | `--vendor-codex`   |
-| Cursor | rounded square with U  | `--vendor-cursor`  |
-| Human  | ring                   | `--vendor-human`   |
-| Other  | rounded square with ?  | `--vendor-other`   |
+| Vendor | Shape                   | Token              |
+| ------ | ----------------------- | ------------------ |
+| Claude | rounded square with Cl  | `--vendor-claude`  |
+| Codex  | rounded square with Cx  | `--vendor-codex`   |
+| Cursor | rounded square with Cu  | `--vendor-cursor`  |
+| Human  | ring                    | `--vendor-human`   |
+| Other  | rounded square with ?   | `--vendor-other`   |
+
+Every agent is one entry in `VENDORS` (src/ui/agents.ts): its label, product name, mark and colour
+token. `vendorOf`, `VENDOR_LABEL`, `AgentMark` and Agent setup all read it, so adding an agent
+(Gemini CLI, GitHub Copilot) is that entry plus its `--vendor-*` colour. The products' own icons
+are not used yet: their owners' terms need permission first, and src/ui/vendors/README.md says,
+per product, what each allows and how to switch a mark over once it does.
 
 Vendor colors are muted on purpose, so a screen full of agents stays calm and none of them
-competes with the attention color. The letter carries identity as much as the color does. Live
+competes with the attention color. The letters carry identity as much as the color does. Live
 state is the small dot at the bottom right: breathing `--live` when working, `--attention` when
 waiting for the human, `--fg-3` when idle; stale marks fade to 45%, ended to 30%.
 

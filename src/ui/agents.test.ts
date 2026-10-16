@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { LONG_WAIT_SECS, STALE_SECS, livenessFrom, livenessLabel, livenessOf, waitedLong } from "./agents.ts";
+import { LONG_WAIT_SECS, STALE_SECS, VENDORS, VENDOR_LABEL, livenessFrom, livenessLabel, livenessOf, vendorInfo, vendorOf, waitedLong } from "./agents.ts";
 import type { Session } from "../types.ts";
 
 const NOW = 1_000_000;
@@ -34,4 +34,22 @@ test("ended stays ended and no session has no liveness", () => {
   assert.equal(livenessOf(session("ended", 5), NOW), "ended");
   assert.equal(livenessOf(null, NOW), null);
   assert.equal(livenessLabel(null, NOW), "no session");
+});
+
+test("vendors come from one map: detection, labels and marks follow it", () => {
+  assert.equal(vendorOf("claude:c:/code/nitely"), "claude");
+  assert.equal(vendorOf("codex@mac"), "codex");
+  assert.equal(vendorOf("Cursor"), "cursor");
+  assert.equal(vendorOf("human"), "human");
+  assert.equal(vendorOf("gemini:c:/x"), "other");
+  assert.equal(vendorOf("toString"), "other");
+  for (const [id, v] of Object.entries(VENDORS)) {
+    assert.equal(VENDOR_LABEL[id as keyof typeof VENDORS], v.label);
+    assert.match(v.color, /^var\(--vendor-[a-z]+\)$/);
+    // Every agent's mark is told apart from the others'.
+    const marks = Object.values(VENDORS).map((x) => JSON.stringify(x.mark));
+    assert.equal(marks.filter((m) => m === JSON.stringify(v.mark)).length, 1);
+  }
+  assert.equal(vendorInfo("human"), null);
+  assert.equal(vendorInfo("other")?.color, "var(--vendor-other)");
 });
