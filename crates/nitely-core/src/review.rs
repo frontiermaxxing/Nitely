@@ -122,8 +122,8 @@ pub struct Review {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Choice {
     pub reviewer: String,
-    /// The reviewer is the author's own vendor.
-    pub same_vendor: bool,
+    /// The reviewer is known to be another vendor than the author's.
+    pub independent: bool,
     /// As `Review::note`.
     pub note: String,
 }
@@ -144,7 +144,8 @@ impl ReviewRules {
     /// installed reviews, and only when none is, the author's own vendor in a fresh session.
     pub fn choose(&self, vendor: &str, installed: &dyn Fn(&str) -> bool) -> Result<Choice> {
         let preferred = self.reviewer_for(vendor).filter(|p| self.commands.contains_key(*p));
-        let same = |r: &str| !vendor.is_empty() && r == vendor;
+        let author = self.author_vendor(vendor);
+        let same = |r: &str| author.is_some_and(|a| a == r);
         let others = || self.commands.keys().map(String::as_str).filter(move |r| Some(*r) != preferred);
         let candidates: Vec<&str> =
             preferred.into_iter().chain(others().filter(|r| !same(r))).chain(others().filter(|r| same(r))).collect();
@@ -158,23 +159,43 @@ impl ReviewRules {
                 wanted.join(" or ")
             );
         };
-        let missing = self.reviewer_for(vendor).filter(|p| *p != reviewer);
-        let same_vendor = same(reviewer);
-        let note = match (same_vendor, missing) {
-            (true, Some(m)) => format!("same vendor: {m} not installed"),
-            (true, None) => "same vendor".to_string(),
-            (false, Some(m)) => format!("{m} not installed"),
-            (false, None) => String::new(),
+        let missing = self.reviewer_for(vendor).filter(|p| *p != reviewer).map(|m| format!("{m} not installed"));
+        let note = match (author, missing) {
+            (Some(a), Some(m)) if a == reviewer => format!("same vendor: {m}"),
+            (Some(a), None) if a == reviewer => "same vendor".to_string(),
+            (None, Some(m)) => format!("author's vendor unknown; {m}"),
+            (None, None) => "author's vendor unknown".to_string(),
+            (_, m) => m.unwrap_or_default(),
         };
-        Ok(Choice { reviewer: reviewer.to_string(), same_vendor, note })
+        Ok(Choice { reviewer: reviewer.to_string(), independent: self.is_independent(reviewer, vendor), note })
     }
 
-    /// Why a review needs a human because of who ran it: a same-vendor review when the playbook
-    /// requires another vendor's.
-    pub fn independence_reason(&self, choice: &Choice) -> Option<String> {
-        (self.require_cross_vendor && choice.same_vendor).then(|| {
-            format!("{} review ({}), and this playbook requires a review by another vendor", choice.reviewer, choice.note)
-        })
+    /// The branch's vendor when it names one Nitely knows (an agent vendor or a reviewer), so a
+    /// branch like `feature/x` does not pass for another vendor's.
+    fn author_vendor<'a>(&self, vendor: &'a str) -> Option<&'a str> {
+        (KNOWN_VENDORS.contains(&vendor) || self.commands.contains_key(vendor)).then_some(vendor)
+    }
+
+    /// Whether `reviewer` is known to be another vendor than the branch's `vendor`.
+    pub fn is_independent(&self, reviewer: &str, vendor: &str) -> bool {
+        self.author_vendor(vendor).is_some_and(|a| a != reviewer)
+    }
+
+    /// Why a review needs a human because of who ran it: the playbook requires another vendor's
+    /// review, and this one was by the author's own vendor or by one the branch does not rule out.
+    /// Decided from the branch, so it holds for reviews recorded before notes were kept.
+    pub fn independence_reason(&self, reviewer: &str, vendor: &str, note: &str) -> Option<String> {
+        if !self.require_cross_vendor || self.is_independent(reviewer, vendor) {
+            return None;
+        }
+        let note = if !note.is_empty() {
+            note.to_string()
+        } else if self.author_vendor(vendor).is_some() {
+            "same vendor".to_string()
+        } else {
+            "author's vendor unknown".to_string()
+        };
+        Some(format!("{reviewer} review ({note}), and this playbook requires a review by another vendor"))
     }
 
     /// The reviewer's instructions. With a previous round, it first checks that round's findings,
@@ -478,6 +499,9 @@ pub(crate) fn is_session_marker(name: &str) -> bool {
         || name.starts_with("CLAUDE_AGENT_SDK")
 }
 
+/// The vendors whose agents Nitely knows; a branch's first part names one of them.
+const KNOWN_VENDORS: [&str; 3] = ["claude", "codex", "cursor"];
+
 /// The program to start for a reviewer command's first word. On Windows a CLI installed with npm
 /// is a `.cmd` file, which is started by its full path, and the Codex CLI that ships inside the
 /// Codex Store app is not on PATH at all.
@@ -506,9 +530,20 @@ pub(crate) fn resolve_program(program: &str) -> String {
 fn program_exists(program: &str, dir: &Path) -> bool {
     let path = &dir.join(program);
     if Path::new(program).components().count() > 1 {
-        return path.is_file() || (cfg!(windows) && path.extension().is_none() && path.with_extension("exe").is_file());
+        return runnable(path) || (cfg!(windows) && path.extension().is_none() && runnable(&path.with_extension("exe")));
     }
     which(program).is_some()
+}
+
+/// A file the OS can start: on Unix it needs an execute bit.
+fn runnable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        path.metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    path.is_file()
 }
 
 /// `program` on PATH, as the OS would start it.
@@ -526,7 +561,7 @@ fn which_with(program: &str, extensions: &[&str]) -> Option<std::path::PathBuf> 
         extensions
             .iter()
             .map(|ext| if ext.is_empty() { dir.join(program) } else { dir.join(format!("{program}.{ext}")) })
-            .find(|p| p.is_file())
+            .find(|p| runnable(p))
     })
 }
 
@@ -682,29 +717,36 @@ mod tests {
         let r = ReviewRules::default();
         let only = |names: &'static [&'static str]| move |n: &str| names.contains(&n);
         let choice = |vendor, names| r.choose(vendor, &only(names)).unwrap();
-        let c = |reviewer: &str, same_vendor, note: &str| Choice { reviewer: reviewer.into(), same_vendor, note: note.into() };
+        let c = |reviewer: &str, independent, note: &str| Choice { reviewer: reviewer.into(), independent, note: note.into() };
 
-        assert_eq!(choice("claude", &["claude", "codex"]), c("codex", false, ""));
-        assert_eq!(choice("claude", &["claude"]), c("claude", true, "same vendor: codex not installed"));
-        assert_eq!(choice("codex", &["codex"]), c("codex", true, "same vendor: claude not installed"));
-        assert_eq!(choice("cursor", &["codex"]), c("codex", false, "claude not installed"));
+        assert_eq!(choice("claude", &["claude", "codex"]), c("codex", true, ""));
+        assert_eq!(choice("claude", &["claude"]), c("claude", false, "same vendor: codex not installed"));
+        assert_eq!(choice("codex", &["codex"]), c("codex", false, "same vendor: claude not installed"));
+        assert_eq!(choice("cursor", &["codex"]), c("codex", true, "claude not installed"));
+        // A branch that names no vendor Nitely knows cannot show its review was independent.
+        assert_eq!(choice("", &["claude", "codex"]), c("claude", false, "author's vendor unknown"));
+        assert_eq!(choice("feature", &["codex"]), c("codex", false, "author's vendor unknown; claude not installed"));
         // Another vendor beats the author's own, whatever the map's order.
         let mut three = ReviewRules::default();
         three.commands.insert("gemini".into(), vec!["gemini".into()]);
-        assert_eq!(three.choose("claude", &only(&["claude", "gemini"])).unwrap(), c("gemini", false, "codex not installed"));
+        assert_eq!(three.choose("claude", &only(&["claude", "gemini"])).unwrap(), c("gemini", true, "codex not installed"));
         // A playbook that has an agent review its own vendor says so even when nothing is missing.
         let mut own = ReviewRules::default();
         own.reviewer.insert("claude".into(), "claude".into());
-        assert_eq!(own.choose("claude", &only(&["claude", "codex"])).unwrap(), c("claude", true, "same vendor"));
+        assert_eq!(own.choose("claude", &only(&["claude", "codex"])).unwrap(), c("claude", false, "same vendor"));
 
         let none = r.choose("claude", &only(&[])).unwrap_err().to_string();
         assert!(none.contains("no reviewer can run") && none.contains("Codex (the `codex` CLI)") && none.contains("Claude Code"), "{none}");
 
-        assert_eq!(r.independence_reason(&choice("claude", &["claude"])), None);
+        assert_eq!(r.independence_reason("claude", "claude", "same vendor"), None);
         let strict = ReviewRules { require_cross_vendor: true, ..ReviewRules::default() };
-        assert!(strict.independence_reason(&choice("claude", &["claude", "codex"])).is_none());
-        let reason = strict.independence_reason(&choice("claude", &["claude"])).unwrap();
+        assert!(strict.independence_reason("codex", "claude", "").is_none());
+        let reason = strict.independence_reason("claude", "claude", "same vendor: codex not installed").unwrap();
         assert!(reason.contains("same vendor: codex not installed") && reason.contains("another vendor"), "{reason}");
+        // From the branch alone, as for a review recorded before notes were kept.
+        assert!(strict.independence_reason("claude", "claude", "").unwrap().contains("(same vendor)"));
+        assert!(strict.independence_reason("claude", "", "").unwrap().contains("author's vendor unknown"));
+        assert!(strict.independence_reason("codex", "feature", "").is_some());
     }
 
     #[test]

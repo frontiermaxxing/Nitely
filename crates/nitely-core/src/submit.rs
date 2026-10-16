@@ -138,7 +138,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
             }
         };
         review.note = choice.note.clone();
-        out.reasons.extend(pb.review.independence_reason(&choice));
+        out.reasons.extend(pb.review.independence_reason(&reviewer, &vendor, &choice.note));
         out.reasons.extend(pb.review.flag_reasons(&review));
         out.review = Some(review);
     }
