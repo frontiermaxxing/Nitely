@@ -254,3 +254,12 @@
   border-radius: var(--radius); background: var(--attention-wash); color: var(--attention-ink); font-size: var(--text-sm);
 }
 .brief-behind span { margin-right: auto; }
+
+/* The issue mirror's card (src/Mirror.tsx). */
+.mirror-backfill { display: grid; gap: 6px; margin: 0 0 12px; }
+.mirror-option { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 8px; row-gap: 2px; align-items: baseline; font-size: var(--text-md); }
+.mirror-option > .small { grid-column: 2; }
+.mirror-sample { margin: 0 0 12px; }
+.mirror-sample summary { font-size: var(--text-sm); }
+.mirror-title { margin: 10px 0 6px; font-weight: var(--weight-medium); }
+.mirror-body { margin: 0; padding: 10px 12px; max-height: 220px; overflow: auto; white-space: pre-wrap; font-family: var(--font-mono); font-size: 12px; line-height: 1.5; background: var(--sunken); border-radius: var(--radius); color: var(--fg-2); }

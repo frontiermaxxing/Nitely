@@ -18,6 +18,8 @@ pub const READ_ONLY: &[&str] = &[
     "crew_status",
     "issue_spend",
     "project_spend",
+    "mirror_preview",
+    "issue_mirror",
     "issues",
     "issue_detail",
     "pulse",
@@ -62,6 +64,8 @@ pub fn run(command: &str, args: &Value) -> Result<Value> {
             let days = args.get("days").and_then(Value::as_u64).unwrap_or(14) as usize;
             json!(nitely_core::usage::spend_of_project(&Config::load_read_only()?, &db()?, str_arg(args, "project")?, int_arg(args, "dayStart")?, days)?)
         }
+        "mirror_preview" => json!(nitely_core::mirror::preview(&Config::load_read_only()?, &db()?, str_arg(args, "project")?, false)?),
+        "issue_mirror" => json!(nitely_core::mirror::issue_state(&Config::load_read_only()?, &db()?, str_arg(args, "key")?)?),
         "issues" => {
             let closed = args.get("includeClosed").and_then(Value::as_bool).unwrap_or(false);
             json!(db()?.list_issues(Some(str_arg(args, "project")?), closed)?)

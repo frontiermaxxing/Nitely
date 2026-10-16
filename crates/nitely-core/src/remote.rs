@@ -289,7 +289,7 @@ pub fn open_pr(repo_root: &str, branch: &str, base: &str, title: &str, body: &st
     bail!("origin is not on GitHub or Bitbucket, so there is nowhere to open a pull request")
 }
 
-fn bitbucket_auth(creds: &Credentials) -> String {
+pub(crate) fn bitbucket_auth(creds: &Credentials) -> String {
     let bb = &creds.bitbucket;
     format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", bb.email, bb.api_token)))
 }
@@ -324,6 +324,26 @@ fn url_encode(s: &str) -> String {
             _ => format!("%{b:02X}"),
         })
         .collect()
+}
+
+/// A write to Bitbucket's API (POST, or PUT for anything else), for pull requests and the mirror.
+pub(crate) fn bitbucket_send(method: &str, url: &str, auth: &str, body: &Value) -> Result<Value> {
+    send_json(method, url, auth, body)
+}
+
+/// A delete on Bitbucket's API; one already gone counts as done.
+pub(crate) fn bitbucket_delete(url: &str, auth: &str) -> Result<()> {
+    let mut res = agent().delete(url).header("Authorization", auth).call().with_context(|| format!("calling DELETE {url}"))?;
+    if !res.status().is_success() && res.status().as_u16() != 404 {
+        let text = res.body_mut().read_to_string().unwrap_or_default();
+        bail!("Bitbucket {}: {}", res.status().as_u16(), text.chars().take(200).collect::<String>());
+    }
+    Ok(())
+}
+
+/// A read from Bitbucket's API.
+pub(crate) fn bitbucket_get(url: &str, auth: &str) -> Result<Value> {
+    get_json(url, auth)
 }
 
 fn send_json(method: &str, url: &str, auth: &str, body: &Value) -> Result<Value> {

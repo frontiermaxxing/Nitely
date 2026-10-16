@@ -158,7 +158,11 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         out.approver == "human" && verdict != "changes" && issue.state == "Approved" && db.standing_approval(&issue.key)?.is_some();
 
     let title = format!("{}: {}", issue.key, issue.title);
-    let body = describe(&issue, &out, pb.land.by);
+    let mut body = describe(&issue, &out, pb.land.by);
+    // The host links the pull request to the issue's mirror there (mirror.rs).
+    if let Some(closes) = crate::mirror::closes_line(db, &issue.key, &root) {
+        body = format!("{closes}\n\n{body}");
+    }
     if !opts.local_only {
         match push(&worktree, &branch) {
             Ok(()) => out.pushed = true,

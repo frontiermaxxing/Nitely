@@ -29,6 +29,8 @@ import type {
   IssueRecord,
   IssueSpend,
   ProjectSpend,
+  IssueMirror,
+  MirrorPreview,
   PrRecord,
   PlaybookProposal,
   Project,
@@ -751,6 +753,50 @@ function projectSpend(args: Record<string, unknown>): ProjectSpend {
   };
 }
 
+/** The mirror in the preview: Nitely's repo is on GitHub; Orbit's Bitbucket repo has no issue tracker. */
+const mirrorOn = new Map<string, string | null>([["NIT", "open"]]);
+const privateIssues = new Set<string>(["NIT-20"]);
+
+function mirrorPreview(project: string): MirrorPreview {
+  const key = project.toUpperCase();
+  const repo = REPOS.find((r) => r.project === key);
+  const issues = world.issues.filter((i) => i.project === key);
+  const sensitive = (i: IssueRecord) => privateIssues.has(i.key) || i.owner === "human" || i.labels.includes("security") || (i.priority === 1 && i.kind === "bug");
+  const count = (backfill: string, pick: (i: IssueRecord) => boolean) => {
+    const chosen = issues.filter(pick);
+    return { backfill, publish: chosen.filter((i) => !sensitive(i)).length, private: chosen.filter(sensitive).length, held: 0 };
+  };
+  const open = (i: IssueRecord) => i.state_type !== "completed" && i.state_type !== "canceled";
+  const sample = issues.filter((i) => open(i) && !sensitive(i)).slice(0, 1);
+  const backfill = mirrorOn.get(key) ?? null;
+  return {
+    project: key,
+    enabled: backfill ? { project: key, enabled_at: NOW - 2 * 24 * HOUR, backfill } : null,
+    host: repo?.provider === "github" ? "GitHub" : repo?.provider === "bitbucket" ? "Bitbucket" : null,
+    repo: repo?.slug ?? null,
+    unavailable: repo?.provider === "bitbucket" ? `${repo.slug} has no issue tracker on Bitbucket (many repos have it off); turn it on in the repo's settings to mirror` : null,
+    counts: [count("none", () => false), count("open", open), count("all", () => true)],
+    sample: sample.map((i) => ({
+      key: i.key,
+      title: i.title,
+      body: `${i.body || "What is wrong or wanted, and why."}\n\n---\nTracked in Nitely as ${i.key} (${i.state}, ${i.kind}). Nitely is where it is decided; comments here are not read.`,
+      labels: [i.kind ?? "", ...i.labels].filter(Boolean),
+    })),
+  };
+}
+
+function issueMirror(key: string): IssueMirror | null {
+  const issue = world.issues.find((i) => i.key === key);
+  if (!issue || !mirrorOn.get(issue.project ?? "")) return null;
+  const repo = REPOS.find((r) => r.project === issue.project);
+  const base = { issue: key, host: "GitHub", number: null, url: null, marked_private: privateIssues.has(key) };
+  if (privateIssues.has(key)) return { ...base, status: "private", reason: "marked private" };
+  if (issue.owner === "human") return { ...base, status: "private", reason: "the human's own work stays private" };
+  if (issue.priority === 1 && issue.kind === "bug") return { ...base, status: "private", reason: "an urgent bug may be a security problem; mark it public to publish it" };
+  const n = Number(key.split("-")[1]) + 3;
+  return { ...base, status: "mirrored", reason: null, number: n, url: `https://github.com/${repo?.slug}/issues/${n}` };
+}
+
 function crewPause(args: Record<string, unknown>): CrewStatus | null {
   crewPaused = Boolean(args.paused);
   return crewStatus(String(args.project));
@@ -1425,6 +1471,17 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return world.projects;
       case "project_brief":
         return projectBrief(String(args.project));
+      case "mirror_preview":
+        return mirrorPreview(String(args.project));
+      case "set_mirror":
+        mirrorOn.set(String(args.project).toUpperCase(), (args.backfill as string | null) ?? null);
+        return mirrorPreview(String(args.project));
+      case "issue_mirror":
+        return issueMirror(String(args.key));
+      case "set_issue_private":
+        if (args.private) privateIssues.add(String(args.key));
+        else privateIssues.delete(String(args.key));
+        return issueMirror(String(args.key));
       case "crew_status":
         return crewStatus(String(args.project));
       case "issue_spend":

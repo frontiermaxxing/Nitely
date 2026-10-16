@@ -1,5 +1,5 @@
 //! Pull requests and CI checks from GitHub's REST API, for every watched repo whose `origin` is on
-//! GitHub. Read-only. The token comes from `NITELY_GITHUB_TOKEN`, `GITHUB_TOKEN`, or the GitHub
+//! GitHub. Read-only, apart from opening pull requests and the issue mirror (mirror.rs). The token comes from `NITELY_GITHUB_TOKEN`, `GITHUB_TOKEN`, or the GitHub
 //! CLI (`gh auth token`), in that order, so a signed-in `gh` is all a user needs.
 
 use anyhow::{bail, Context, Result};
@@ -11,7 +11,7 @@ use crate::db::{Db, PrRecord};
 use crate::git;
 use crate::remote::agent;
 
-const API: &str = "https://api.github.com";
+pub(crate) const API: &str = "https://api.github.com";
 /// Recently updated PRs per repo; open ones also get reviews and checks (3 more calls each).
 const PRS_PER_REPO: usize = 50;
 
@@ -73,17 +73,17 @@ pub fn open_pr(slug: &str, branch: &str, base: &str, title: &str, body: &str) ->
     pr.get("html_url").and_then(Value::as_str).map(str::to_string).context("GitHub returned no pull request URL")
 }
 
-struct Client {
+pub(crate) struct Client {
     token: Option<String>,
     agent: ureq::Agent,
 }
 
 impl Client {
-    fn new() -> Client {
+    pub(crate) fn new() -> Client {
         Client { token: token(), agent: agent() }
     }
 
-    fn get(&self, url: &str) -> Result<Value> {
+    pub(crate) fn get(&self, url: &str) -> Result<Value> {
         let mut req = self.agent.get(url);
         for (k, v) in self.headers() {
             req = req.header(k, &v);
@@ -92,7 +92,20 @@ impl Client {
         self.read(res)
     }
 
-    fn send(&self, method: &str, url: &str, body: &Value) -> Result<Value> {
+    pub(crate) fn delete(&self, url: &str) -> Result<()> {
+        let mut req = self.agent.delete(url);
+        for (k, v) in self.headers() {
+            req = req.header(k, &v);
+        }
+        let mut res = req.call().with_context(|| format!("calling DELETE {url}"))?;
+        if !res.status().is_success() && res.status().as_u16() != 404 {
+            let text = res.body_mut().read_to_string().unwrap_or_default();
+            bail!("GitHub {}: {}", res.status().as_u16(), text.chars().take(200).collect::<String>());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn send(&self, method: &str, url: &str, body: &Value) -> Result<Value> {
         let mut req = match method {
             "POST" => self.agent.post(url),
             "PATCH" => self.agent.patch(url),

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "./backend";
 import type { Project } from "./types";
 import { PrivateTerms } from "./PrivateTerms";
+import { MirrorSettings } from "./Mirror";
 
 interface Rekeyed {
   from: string;
@@ -121,6 +122,8 @@ export function ProjectSettings(props: {
       </section>
 
       <PrivateTerms projectKey={project.key} />
+
+      <MirrorSettings projectKey={project.key} />
 
       <section className="settings-card settings-danger">
         <h2>Remove project</h2>

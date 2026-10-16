@@ -134,6 +134,33 @@ CREATE TABLE IF NOT EXISTS approval (     -- written only from the app UI, signe
   ts        INTEGER NOT NULL,
   signature TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS mirror_project ( -- projects whose issues go to their repo's tracker (mirror.rs)
+  project    TEXT PRIMARY KEY,
+  enabled_at INTEGER NOT NULL,
+  backfill   TEXT NOT NULL,             -- none, open or all: which existing issues it also publishes
+  enabled_by TEXT
+);
+CREATE TABLE IF NOT EXISTS issue_mirror (   -- an issue's place in the mirror
+  issue_key   TEXT PRIMARY KEY,
+  status      TEXT NOT NULL,            -- mirrored, private, held or withdrawn
+  reason      TEXT,
+  host        TEXT,
+  repo        TEXT,
+  number      INTEGER,
+  url         TEXT,
+  fingerprint TEXT,                     -- of what was last sent, to send only changes
+  last_event  INTEGER NOT NULL DEFAULT 0, -- the last timeline event considered for a comment
+  updated_at  INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mirror_comment ( -- comments the mirror posted, to take down if the issue goes private
+  issue_key  TEXT NOT NULL,
+  host_id    INTEGER NOT NULL,
+  PRIMARY KEY (issue_key, host_id)
+);
+CREATE TABLE IF NOT EXISTS issue_private (  -- issues the person keeps off the host
+  issue_key TEXT PRIMARY KEY,
+  at        INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS ask (
   id          INTEGER PRIMARY KEY,
   issue_key   TEXT,
@@ -207,7 +234,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS playbook_proposal_pending ON playbook_proposal
 
 /// Bumped when a table changes shape. Tables that only mirror Bitbucket or Linear are dropped
 /// and refilled by the next sync; tables Nitely owns get real migrations.
-const SCHEMA_VERSION: i64 = 17;
+const SCHEMA_VERSION: i64 = 18;
 
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -289,6 +316,7 @@ fn upgrade(conn: &Connection) -> Result<()> {
             return Err(e);
         }
     }
+    // v18 adds mirror_project, issue_mirror, mirror_comment and issue_private, which SCHEMA creates.
     Ok(())
 }
 

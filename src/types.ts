@@ -69,6 +69,30 @@ export interface ProjectSpend {
   top_issues: { key: string; tokens: number }[];
 }
 
+/** What mirroring a project's issues to its repo's tracker would publish (crates/nitely-core/src/mirror.rs). */
+export interface MirrorPreview {
+  project: string;
+  enabled: { project: string; enabled_at: number; backfill: string } | null;
+  host: string | null;
+  repo: string | null;
+  /** Why it cannot mirror, when it cannot. */
+  unavailable: string | null;
+  counts: { backfill: string; publish: number; private: number; held: number }[];
+  sample: { key: string; title: string; body: string; labels: string[] }[];
+}
+
+/** An issue's place in the mirror. */
+export interface IssueMirror {
+  issue: string;
+  /** mirrored, private, held or withdrawn. */
+  status: string;
+  reason: string | null;
+  host: string | null;
+  number: number | null;
+  url: string | null;
+  marked_private: boolean;
+}
+
 /** A project's crew, from `crew_status`; null when the project has none. */
 export interface CrewStatus {
   project: string;

@@ -368,7 +368,60 @@ async fn rule_defaults_save(defaults: rules::RuleDefaults, confirm: bool) -> Res
 fn run_sync() -> anyhow::Result<remote::SyncReport> {
     let config = Config::load()?;
     let mut db = Db::open_default()?;
-    Ok(remote::sync(&config, &mut db))
+    let report = remote::sync(&config, &mut db);
+    // The issue mirror, for projects the person turned it on for (docs/mirror.md).
+    for e in nitely_core::mirror::sync(&config, &db).errors {
+        eprintln!("mirror: {e}");
+    }
+    Ok(report)
+}
+
+/// What mirroring a project's issues to its repo's tracker would publish, and whether it can.
+#[tauri::command]
+async fn mirror_preview(project: String) -> Result<nitely_core::mirror::Preview, String> {
+    nitely_core::mirror::preview(&Config::load().map_err(err)?, &db()?, &project, true).map_err(err)
+}
+
+/// Turns the mirror on, with a backfill (`none`, `open` or `all`), or off (no backfill).
+#[tauri::command]
+async fn set_mirror(project: String, backfill: Option<String>) -> Result<nitely_core::mirror::Preview, String> {
+    let db = db()?;
+    db.set_mirror(&project, backfill.as_deref(), &ME).map_err(err)?;
+    let config = Config::load().map_err(err)?;
+    // Publish right away rather than at the next sync.
+    if backfill.is_some() {
+        let report = nitely_core::mirror::sync(&config, &db);
+        if let Some(e) = report.errors.first() {
+            return Err(e.clone());
+        }
+    }
+    nitely_core::mirror::preview(&config, &db, &project, false).map_err(err)
+}
+
+/// An issue's place in the mirror: mirrored (with its link), private, held back, or withdrawn.
+#[tauri::command]
+async fn issue_mirror(key: String) -> Result<Option<nitely_core::mirror::IssueMirror>, String> {
+    let db = db()?;
+    let key = db.current_key(&key).map_err(err)?;
+    nitely_core::mirror::issue_state(&Config::load().map_err(err)?, &db, &key).map_err(err)
+}
+
+/// Keeps an issue off the host (withdrawn if it was published), or lets it be mirrored again.
+#[tauri::command]
+async fn set_issue_private(key: String, private: bool) -> Result<Option<nitely_core::mirror::IssueMirror>, String> {
+    let db = db()?;
+    let key = db.current_key(&key).map_err(err)?;
+    db.set_issue_private(&key, private, &ME).map_err(err)?;
+    let config = Config::load().map_err(err)?;
+    // Taken down now, even when the project no longer mirrors.
+    if private {
+        nitely_core::mirror::withdraw_now(&config, &db, &key).map_err(err)?;
+    }
+    let report = nitely_core::mirror::sync(&config, &db);
+    if let Some(e) = report.errors.first() {
+        return Err(e.clone());
+    }
+    nitely_core::mirror::issue_state(&config, &db, &key).map_err(err)
 }
 
 /// Keeps a supervisor running for every project whose playbook has a crew (docs/crew.md): it starts
@@ -548,6 +601,10 @@ pub fn run() {
             issue_detail,
             set_blocker,
             move_issue,
+            mirror_preview,
+            set_mirror,
+            issue_mirror,
+            set_issue_private,
             set_owner,
             answer_ask,
             connect_plan,

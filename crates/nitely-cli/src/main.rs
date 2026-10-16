@@ -134,6 +134,14 @@ enum Cmd {
         #[arg(long, default_value_t = 14)]
         days: usize,
     },
+    /// The issue mirror (docs/mirror.md): `status` says what it would publish; `sync` brings the
+    /// host up to date now. Only the app turns it on.
+    Mirror {
+        /// status or sync
+        action: String,
+        #[arg(long)]
+        project: Option<String>,
+    },
     /// The project's crew: agent workers Nitely starts and keeps running itself (docs/crew.md).
     Crew {
         #[command(subcommand)]
@@ -790,6 +798,18 @@ fn run(cmd: Cmd) -> Result<()> {
                     let today = nitely_core::db::now().div_euclid(86_400) * 86_400;
                     print_json(&nitely_core::usage::spend_of_project(&config, &db, &project, today, days)?)
                 }
+            }
+        }
+        Cmd::Mirror { action, project } => {
+            let config = Config::load()?;
+            let db = Db::open_default()?;
+            match action.as_str() {
+                "status" => {
+                    let project = resolve_project(&config, &db, project.as_deref(), &cwd()?)?;
+                    print_json(&nitely_core::mirror::preview(&config, &db, &project, true)?)
+                }
+                "sync" => print_json(&nitely_core::mirror::sync(&config, &db)),
+                other => bail!("nitely mirror takes status or sync, not {other}"),
             }
         }
         Cmd::Crew { command } => crew::run(command, &me),

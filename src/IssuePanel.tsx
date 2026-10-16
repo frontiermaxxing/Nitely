@@ -4,6 +4,7 @@ import { issueSpendLine } from "./spend";
 import type { IssueDetail, IssueRecord, IssueSpend, LinkedIssue } from "./types";
 import { agentLabel, ago, openExternal, PRIORITY } from "./util";
 import { IssueJourney, WhoHadIt } from "./IssueJourney";
+import { MirrorFact } from "./Mirror";
 import { typing } from "./Palette";
 import { AgentMark, IssueToken, Labels, Loading, PrMark, PriorityMark, StationGlyph, StationTrack, VENDOR_LABEL, trackOf, vendorOf } from "./ui";
 import "./issue.css";
@@ -301,6 +302,7 @@ export function IssuePanel(props: {
                   </dd>
                 </>
               )}
+              {issue.origin === "nitely" && <MirrorFact issueKey={issue.key} version={props.version} />}
               {issue.source && (
                 <>
                   <dt>Filed by</dt>

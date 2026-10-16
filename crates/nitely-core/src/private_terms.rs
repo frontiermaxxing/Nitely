@@ -324,6 +324,26 @@ pub fn check_with(terms: &PrivateTerms, project: Option<&str>, worktree: &Path, 
     bail!(msg)
 }
 
+/// Which term `text` holds, as `term n of <list>`, checking the project's list and the list for
+/// every project; never the term itself. For text that leaves the machine another way than a
+/// commit (the issue mirror).
+pub fn find_in_text(terms: &PrivateTerms, project: Option<&str>, text: &str) -> Result<Option<String>> {
+    let mut lists = vec![("the list for every project".to_string(), compile("every project", &terms.all)?)];
+    if let Some(key) = project.map(|p| p.trim().to_uppercase()).filter(|k| !k.is_empty()) {
+        if let Some(list) = terms.projects.get(&key) {
+            lists.push((format!("{key}'s list"), compile(&key, list)?));
+        }
+    }
+    for line in text.lines() {
+        for (list, matchers) in &lists {
+            if let Some((n, _)) = matchers.iter().find(|(_, m)| m.matches(line)) {
+                return Ok(Some(format!("term {n} of {list}")));
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// The data folder's list file, for the app to say where it is kept.
 pub fn path() -> PathBuf {
     crate::paths::data_dir().join(FILE)
