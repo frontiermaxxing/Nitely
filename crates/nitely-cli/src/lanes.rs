@@ -75,7 +75,7 @@ pub fn lanes(cmd: Option<LanesCmd>) -> Result<()> {
 pub fn run(issue: Option<String>, command: Vec<String>, me: &Actor) -> Result<()> {
     let config = Config::load()?;
     let db = Db::open_default()?;
-    let command = command.join(" ");
+    let command = shell_join(&command);
     let stop = Arc::new(AtomicBool::new(false));
     let mut follower: Option<std::thread::JoinHandle<()>> = None;
     let result = lanes::run_in(&config, &db, &cwd()?, issue.as_deref(), &command, me, &mut |r| match r.state.as_str() {
@@ -108,6 +108,83 @@ pub fn run(issue: Option<String>, command: Vec<String>, me: &Actor) -> Result<()
             eprintln!("run {}: exit {code}", run.id);
             std::process::exit(code);
         }
+    }
+}
+
+/// The command line the lane's shell runs. One argument is a command line already, shell syntax
+/// and all (`nitely run -- "npm test && npm run build"`). Several are words, each passed on as the
+/// one word it was: quoted for the shell where it has spaces, quotes or shell characters.
+fn shell_join(args: &[String]) -> String {
+    if let [one] = args {
+        return one.clone();
+    }
+    args.iter().map(|a| quote(a)).collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(windows)]
+fn quote(word: &str) -> String {
+    // cmd passes a quoted word through, and the program's argument parser (the Windows rule:
+    // backslashes before a quote are doubled, the quote escaped) takes it back as one argument.
+    let plain = !word.is_empty() && !word.chars().any(|c| c.is_whitespace() || "\"&|<>^%()!,;=".contains(c));
+    if plain {
+        return word.to_string();
+    }
+    let mut out = String::from("\"");
+    let mut backslashes = 0;
+    for c in word.chars() {
+        match c {
+            '\\' => backslashes += 1,
+            '"' => {
+                out.push_str(&"\\".repeat(backslashes * 2 + 1));
+                out.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                out.push_str(&"\\".repeat(backslashes));
+                out.push(c);
+                backslashes = 0;
+            }
+        }
+    }
+    out.push_str(&"\\".repeat(backslashes * 2));
+    out.push('"');
+    out
+}
+
+#[cfg(not(windows))]
+fn quote(word: &str) -> String {
+    let plain = !word.is_empty() && word.chars().all(|c| c.is_ascii_alphanumeric() || "-_./=:,+@%".contains(c));
+    if plain {
+        word.to_string()
+    } else {
+        format!("'{}'", word.replace('\'', "'\\''"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn words_reach_the_command_as_they_were_typed() {
+        let words = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(shell_join(&words(&["npm test && npm run build"])), "npm test && npm run build", "one argument is a command line");
+        assert_eq!(shell_join(&words(&["cargo", "test", "-p", "nitely-core"])), "cargo test -p nitely-core");
+        // Through the same shell a lane uses, node gets each word as one argument.
+        let shell = |line: &str| -> String {
+            #[cfg(windows)]
+            let out = {
+                use std::os::windows::process::CommandExt;
+                std::process::Command::new("cmd").args(["/D", "/S", "/C"]).raw_arg(format!("\"{line}\"")).output().unwrap()
+            };
+            #[cfg(not(windows))]
+            let out = std::process::Command::new("sh").args(["-c", line]).output().unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let js = shell_join(&words(&["node", "-e", "console.log('a b')"]));
+        assert_eq!(shell(&js), "a b", "{js}");
+        let amp = shell_join(&words(&["node", "-e", "console.log(process.argv[1])", "x&y"]));
+        assert_eq!(shell(&amp), "x&y", "{amp}");
     }
 }
 

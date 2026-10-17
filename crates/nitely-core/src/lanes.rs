@@ -445,30 +445,24 @@ fn serve(repo_root: &Path, pb: &Playbook, rules: &LaneRules, lane: &Path, log: &
     if git(repo_root, &["cat-file", "-e", &format!("{}^{{commit}}", req.snapshot.commit)]).is_err() {
         bail!("snapshot {} is missing from the repo (expired or cleaned up); make a new one", &req.snapshot.commit[..req.snapshot.commit.len().min(9)]);
     }
-    let (setup_ran, files_switched) = if !lane.join(".git").exists() {
-        create_lane(repo_root, pb, lane, &req.snapshot.commit, log)?;
-        (!pb.worktree.setup.is_empty(), git(lane, &["ls-files"]).map(|o| o.lines().count() as i64).unwrap_or(0))
+    let limit = Duration::from_secs(rules.timeout_minutes.max(1) * 60);
+    let files_switched = if !lane.join(".git").exists() {
+        create_lane(repo_root, lane, &req.snapshot.commit)?;
+        git(lane, &["ls-files"]).map(|o| o.lines().count() as i64).unwrap_or(0)
     } else {
+        stop_leftovers(lane);
         let switched = git(lane, &["diff", "--name-only", "HEAD", &req.snapshot.commit]).map(|o| o.lines().count() as i64).unwrap_or(0);
         switch(lane, &req.snapshot.commit, &rules.keep)?;
-        let mut flakes = Vec::new();
-        let (results, ok) = playbook::refresh_setup(&pb.worktree, lane, repo_root, base, pb.gate.retries, &mut flakes)?;
-        if !results.is_empty() {
-            let text: String = results.iter().map(|r| format!("$ {}\n{}\n", r.command, r.output)).collect();
-            std::fs::write(log, &text).ok();
-        }
-        if !ok {
-            bail!("setup failed in the lane: {}", results.last().map(|r| r.command.as_str()).unwrap_or(""));
-        }
-        (!results.is_empty(), switched)
+        switched
     };
-    let (exit_code, timed_out) = run_logged(req.command, lane, log, Duration::from_secs(rules.timeout_minutes.max(1) * 60))?;
+    let setup_ran = ensure_setup(repo_root, pb, lane, base, log, limit)?;
+    let (exit_code, timed_out) = run_logged(req.command, lane, log, limit)?;
     let output = std::fs::read_to_string(log).map(|t| playbook::tail(&t)).unwrap_or_default();
     Ok(Outcome { exit_code, timed_out, setup_ran, files_switched, output })
 }
 
-/// Makes lane `lane` as a worktree at `commit` and runs the playbook's setup there.
-fn create_lane(repo_root: &Path, pb: &Playbook, lane: &Path, commit: &str, log: &Path) -> Result<()> {
+/// Makes lane `lane` as a worktree at `commit`; `ensure_setup` sets it up.
+fn create_lane(repo_root: &Path, lane: &Path, commit: &str) -> Result<()> {
     std::fs::create_dir_all(lane.parent().unwrap())?;
     // A folder left by a lane whose registration is gone (a crash during creation) goes first.
     git(repo_root, &["worktree", "prune"]).ok();
@@ -476,20 +470,59 @@ fn create_lane(repo_root: &Path, pb: &Playbook, lane: &Path, commit: &str, log: 
         std::fs::remove_dir_all(lane).with_context(|| format!("removing the half-made lane {}", lane.display()))?;
     }
     git(repo_root, &["worktree", "add", "--detach", &lane.to_string_lossy(), commit])?;
-    let mut text = String::new();
+    Ok(())
+}
+
+/// Runs the playbook's setup in `lane` when it has never passed there, or a dependency file differs
+/// from the last time it passed; each command bounded by `limit`. The record of a passed setup is
+/// written only after every command passed, so a setup that failed or was stopped runs again next
+/// time. Returns whether setup ran.
+fn ensure_setup(repo_root: &Path, pb: &Playbook, lane: &Path, base: &str, log: &Path, limit: Duration) -> Result<bool> {
+    if pb.worktree.setup.is_empty() {
+        return Ok(false);
+    }
+    let record = playbook::setup_record(lane).context("the lane has no git folder for its setup record")?;
+    let now = playbook::setup_fingerprint(&pb.worktree, lane);
+    if std::fs::read_to_string(&record).is_ok_and(|last| last.trim() == now) {
+        return Ok(false);
+    }
+    std::fs::remove_file(&record).ok();
     for command in &pb.worktree.setup {
-        let command = playbook::expand(command, repo_root, lane, pb.integration_branch());
-        let (ok, output, _) = playbook::run_shell(&command, lane)?;
-        text.push_str(&format!("$ {command}\n{output}\n"));
-        std::fs::write(log, &text).ok();
-        if !ok {
-            bail!("setup failed while making the lane: {command}");
+        let command = playbook::expand(command, repo_root, lane, base);
+        match run_logged(&command, lane, log, limit)? {
+            (Some(0), _) => {}
+            (_, true) => bail!("setup ran past {} minutes in the lane and was stopped: {command}", limit.as_secs() / 60),
+            (code, false) => bail!("setup failed in the lane (exit {}): {command}", code.map_or("none".to_string(), |c| c.to_string())),
         }
     }
-    if let Some(record) = playbook::setup_record(lane) {
-        std::fs::write(record, playbook::setup_fingerprint(&pb.worktree, lane)).ok();
+    std::fs::write(&record, now).with_context(|| format!("writing {}", record.display()))?;
+    Ok(true)
+}
+
+/// Where a lane keeps the pid of the command running in it: in its own git folder, gone once the
+/// command ends. Found at the start of a request, it means the last one's process died with its
+/// command still running.
+fn pid_file(lane: &Path) -> Option<PathBuf> {
+    let path = git(lane, &["rev-parse", "--git-path", "nitely-lane-pid"]).ok()?;
+    let path = PathBuf::from(path.trim());
+    Some(if path.is_absolute() { path } else { lane.join(path) })
+}
+
+/// Stops what a request that died left running in `lane`: the command it recorded, with what that
+/// started, and any process whose executable or command line is inside the lane (test binaries
+/// under its build directory). Only when the last request did not end normally.
+fn stop_leftovers(lane: &Path) {
+    let Some(file) = pid_file(lane) else { return };
+    let Ok(text) = std::fs::read_to_string(&file) else { return };
+    if let Ok(pid) = text.trim().parse::<u32>() {
+        if crate::crew::pid_alive(pid) {
+            stop_tree(pid);
+        }
     }
-    Ok(())
+    for h in crate::procs::holders(lane) {
+        stop_tree(h.pid);
+    }
+    std::fs::remove_file(&file).ok();
 }
 
 /// Puts `lane` at `commit`: a forced checkout, then everything untracked or ignored removed except
@@ -526,19 +559,28 @@ fn run_logged(command: &str, dir: &Path, log: &Path, limit: Duration) -> Result<
         cmd.process_group(0);
     }
     let mut child = cmd.spawn().with_context(|| format!("starting {command}"))?;
+    // In a lane, the pid is kept while it runs, so a request after a crash can stop it.
+    let pids = pid_file(dir);
+    if let Some(p) = &pids {
+        std::fs::write(p, child.id().to_string()).ok();
+    }
     let started = Instant::now();
-    loop {
+    let result = loop {
         if let Some(status) = child.try_wait()? {
-            return Ok((status.code(), false));
+            break (status.code(), false);
         }
         if started.elapsed() > limit {
             stop_tree(child.id());
             child.kill().ok();
             child.wait().ok();
-            return Ok((None, true));
+            break (None, true);
         }
         std::thread::sleep(Duration::from_millis(200));
+    };
+    if let Some(p) = &pids {
+        std::fs::remove_file(p).ok();
     }
+    Ok(result)
 }
 
 /// Stops `pid` and everything it started.
@@ -747,6 +789,49 @@ mod tests {
             .unwrap();
         let id = db.conn.last_insert_rowid();
         assert_eq!(db.lane_run(id).unwrap().unwrap().state, "abandoned");
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn a_setup_that_failed_runs_again_and_a_dead_requests_command_is_stopped() {
+        let base = crate::paths::unique_temp("nitely-lane-setup", "");
+        let root = repo(&base);
+        let db = Db::open(&base.join("t.db")).unwrap();
+        let actor = Actor::Agent("claude:test".into());
+        // Fails the first time it runs in a lane (it leaves a mark outside the repo), passes after.
+        let mark = base.join("setup-ran-once");
+        let mark_s = mark.to_string_lossy().replace('\\', "/");
+        let setup = if cfg!(windows) { format!("if exist \"{mark_s}\" (exit 0) else (type nul > \"{mark_s}\" & exit 1)") } else { format!("if [ -e '{mark_s}' ]; then exit 0; else touch '{mark_s}'; exit 1; fi") };
+        let pb = playbook_with(&format!("[worktree]\nsetup = [{setup:?}]\n[lanes]\n"));
+        let snap = snapshot(&root).unwrap();
+        let req = Request { project: "APP", issue: None, kind: Kind::Run, snapshot: &snap, command: "echo built" };
+        let first = run(&db, &root, &pb, &req, &actor, &mut |_| {}).unwrap();
+        assert_eq!(first.state, "lane_error", "{first:?}");
+        assert!(first.error.as_deref().unwrap_or("").contains("setup failed"), "{first:?}");
+        let second = run(&db, &root, &pb, &req, &actor, &mut |_| {}).unwrap();
+        assert!(second.passed() && second.setup_ran, "a failed setup is never taken as done: {second:?}");
+        let third = run(&db, &root, &pb, &req, &actor, &mut |_| {}).unwrap();
+        assert!(third.passed() && !third.setup_ran, "and a passed one is not run again");
+
+        // A command left running by a request whose process died is stopped before the next one.
+        let lane = lane_path(&root, &pb, 1);
+        let sleeper = if cfg!(windows) { "ping -n 60 127.0.0.1 >NUL" } else { "sleep 60" };
+        let mut left = playbook::shell_command(sleeper);
+        left.current_dir(&lane);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            left.process_group(0);
+        }
+        let mut child = left.spawn().unwrap();
+        std::fs::write(pid_file(&lane).unwrap(), child.id().to_string()).unwrap();
+        stop_leftovers(&lane);
+        let stopped = (0..50).any(|_| {
+            std::thread::sleep(Duration::from_millis(200));
+            matches!(child.try_wait(), Ok(Some(_)))
+        });
+        assert!(stopped, "the leftover command was stopped");
+        assert!(!pid_file(&lane).unwrap().exists());
         std::fs::remove_dir_all(base).ok();
     }
 
