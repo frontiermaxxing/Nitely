@@ -35,7 +35,9 @@ pub fn unique_temp(prefix: &str, suffix: &str) -> PathBuf {
 
 /// A path in one comparable form: forward slashes, no trailing slash, lowercase on Windows, and
 /// 8.3 short names (`RUNNER~1`) spelled out. Git prints `C:/Code/x`, hooks send `C:\Code\x`, an
-/// old tool or a short TEMP gives `C:\Users\RUNNER~1\...`; all must match (NIT-104).
+/// old tool or a short TEMP gives `C:\Users\RUNNER~1\...`; all must match (NIT-104). On a Mac,
+/// `/var`, `/tmp` and `/etc` are links into `/private`: the temp folder is `/var/folders/…` to the
+/// program that asks for it, while git and a process's working folder say `/private/var/folders/…`.
 pub fn normalize(path: &str) -> String {
     let long = if cfg!(windows) && path.contains('~') { long_path(path) } else { path.to_string() };
     let mut p = long.replace('\\', "/");
@@ -45,7 +47,19 @@ pub fn normalize(path: &str) -> String {
     if cfg!(windows) {
         p = p.to_lowercase();
     }
+    if cfg!(target_os = "macos") {
+        p = through_private(&p);
+    }
     p
+}
+
+/// `path` with a top folder macOS keeps as a link into `/private` (`/var`, `/tmp`, `/etc`) spelled
+/// as where it leads.
+fn through_private(path: &str) -> String {
+    match ["/var", "/tmp", "/etc"].iter().any(|d| path == *d || path.starts_with(&format!("{d}/"))) {
+        true => format!("/private{path}"),
+        false => path.to_string(),
+    }
 }
 
 /// `path` with its 8.3 short names spelled out, as far as it exists (the rest is kept as given).
@@ -139,6 +153,18 @@ pub fn is_within(child: &str, parent: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mac_links_into_private_are_spelled_out() {
+        assert_eq!(through_private("/var/folders/x/T/app"), "/private/var/folders/x/T/app");
+        assert_eq!(through_private("/tmp"), "/private/tmp");
+        assert_eq!(through_private("/private/var/x"), "/private/var/x");
+        assert_eq!(through_private("/variable/x"), "/variable/x");
+        assert_eq!(through_private("/Users/sam/app"), "/Users/sam/app");
+        if cfg!(target_os = "macos") {
+            assert_eq!(normalize("/var/folders/x/"), normalize("/private/var/folders/x"));
+        }
+    }
 
     #[test]
     fn short_names_match_long_ones() {

@@ -26,7 +26,7 @@ struct Proc {
     executable_path: Option<String>,
     #[serde(default)]
     command_line: Option<String>,
-    /// The working directory, where the platform tells it (Linux).
+    /// The working directory, where the platform tells it (Linux, and macOS through lsof).
     #[serde(skip)]
     cwd: Option<String>,
 }
@@ -155,6 +155,7 @@ fn list() -> Vec<Proc> {
 #[cfg(not(windows))]
 fn list() -> Vec<Proc> {
     let Ok(out) = std::process::Command::new("ps").args(["-axo", "pid=,ppid=,comm=,args="]).output() else { return Vec::new() };
+    let dirs = working_dirs();
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(|line| {
@@ -163,15 +164,51 @@ fn list() -> Vec<Proc> {
             let ppid: u32 = parts.next()?.parse().ok()?;
             let name = parts.next()?.to_string();
             let args = parts.collect::<Vec<_>>().join(" ");
-            let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).ok().map(|p| p.to_string_lossy().into_owned());
+            let cwd = dirs.get(&pid).cloned().or_else(|| std::fs::read_link(format!("/proc/{pid}/cwd")).ok().map(|p| p.to_string_lossy().into_owned()));
             Some(Proc { process_id: pid, parent_process_id: ppid, name: Some(name), executable_path: None, command_line: Some(args), cwd })
         })
         .collect()
 }
 
+/// Each process's working directory where there is no /proc to read it from (macOS): one `lsof`
+/// call for them all. Processes of other users are left out, as the system does.
+#[cfg(target_os = "macos")]
+fn working_dirs() -> HashMap<u32, String> {
+    let Ok(out) = std::process::Command::new("lsof").args(["-n", "-P", "-w", "-d", "cwd", "-F", "pn"]).output() else { return HashMap::new() };
+    parse_lsof(&String::from_utf8_lossy(&out.stdout))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn working_dirs() -> HashMap<u32, String> {
+    HashMap::new()
+}
+
+/// `lsof -F pn` output: a `p<pid>` line, then the `n<path>` of its files.
+#[cfg(any(unix, test))]
+fn parse_lsof(text: &str) -> HashMap<u32, String> {
+    let mut dirs = HashMap::new();
+    let mut pid = None;
+    for line in text.lines() {
+        if let Some(p) = line.strip_prefix('p') {
+            pid = p.parse().ok();
+        } else if let (Some(path), Some(p)) = (line.strip_prefix('n'), pid) {
+            dirs.insert(p, path.to_string());
+        }
+    }
+    dirs
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn reads_working_dirs_from_lsof() {
+        let dirs = parse_lsof("p12\nfcwd\nn/Users/sam/app\np40\nfcwd\nn/private/var/folders/x y\n");
+        assert_eq!(dirs.get(&12).map(String::as_str), Some("/Users/sam/app"));
+        assert_eq!(dirs.get(&40).map(String::as_str), Some("/private/var/folders/x y"));
+        assert_eq!(dirs.len(), 2);
+    }
 
     #[test]
     fn names_a_folder_in_every_spelling() {
