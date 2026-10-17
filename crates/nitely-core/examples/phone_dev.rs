@@ -113,7 +113,7 @@ fn seed(path: &std::path::Path) -> anyhow::Result<()> {
         db.move_issue(&key, "Needs You", None, None, &agent)?;
         Ok(key)
     };
-    waiting(&mut db, "Round invoice totals to the cent", 1, vec!["billing and money: src/billing/invoice.rs".into()], vec![review::Finding { priority: 3, text: "Rename `amt` to `amount`".into(), carried: false, raised_as: None }])?;
+    waiting(&mut db, "Round invoice totals to the cent", 1, vec!["billing and money: src/billing/invoice.rs".into()], vec![review::Finding { priority: 3, text: "Rename `amt` to `amount`".into(), carried: false, raised_as: None, now: None }])?;
     waiting(&mut db, "Retry webhook deliveries with backoff", 2, vec!["the change touches the release process".into()], vec![])?;
     let asked = waiting(&mut db, "Show prices in the visitor's currency", 3, vec![], vec![])?;
     db.create_ask("Which currencies should the price page offer at launch?", &["EUR and USD".into(), "EUR, USD and GBP".into(), "Every currency Stripe supports".into()], Some(&asked), None, &agent)?;

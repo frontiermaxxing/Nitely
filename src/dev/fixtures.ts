@@ -493,7 +493,7 @@ function build(): World {
             : [];
       // A second round of changes carries a finding the first round raised and was not fixed.
       const before = reviews.find((r) => r.verdict === "changes");
-      if (verdict === "changes" && before) findings.unshift({ ...before.findings[before.findings.length - 1], carried: true });
+      if (verdict === "changes" && before) findings.unshift({ ...before.findings[before.findings.length - 1], carried: true, now: "src/sync.rs:88 `retry(0)` still gives up after the first failure" });
       reviews.unshift({
         issue_key: spec.key,
         patch_id: sha(),

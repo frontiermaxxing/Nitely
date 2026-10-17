@@ -107,7 +107,8 @@ export function IssueJourney(props: { detail: IssueDetail; now: number }) {
                           <SeverityMark priority={f.priority} />
                           <span>
                             {f.text}
-                            {f.carried && <span className="muted"> Raised in an earlier round, not fixed since.</span>}
+                            {f.carried && !f.now && <span className="muted"> Raised in an earlier round, not fixed since.</span>}
+                            {f.now && <span className="muted"> Still open, the reviewer says: {f.now}</span>}
                           </span>
                         </li>
                       ))}

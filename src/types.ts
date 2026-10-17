@@ -432,8 +432,8 @@ export interface ReviewRecord {
   verdict: "pass" | "changes" | "none";
   approver: "agent" | "human";
   reasons: string[];
-  /** carried: raised in an earlier round and not fixed since. */
-  findings: { priority: number; text: string; carried?: boolean }[];
+  /** carried: raised in an earlier round and not fixed since; now: how the reviewer says it is still open. */
+  findings: { priority: number; text: string; carried?: boolean; now?: string }[];
   ts: number;
   /** How independent the review was when it was not another vendor by choice, e.g. "same vendor: codex not installed". */
   note?: string;

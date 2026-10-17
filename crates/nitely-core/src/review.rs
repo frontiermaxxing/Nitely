@@ -80,6 +80,11 @@ pub struct Finding {
     /// the branch: a later round that confirms it open restores this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raised_as: Option<u8>,
+    /// For a carried finding the last round confirmed open: what the reviewer said then, the
+    /// current code it cites and how that code still shows the problem. The text above stays as it
+    /// was raised, so findings match across rounds; this says where it stands now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub now: Option<String>,
 }
 
 /// Appended to a carried finding whose cited code was not on the branch.
@@ -108,6 +113,9 @@ pub struct Recheck {
     pub priority: u8,
     pub text: String,
     pub status: String,
+    /// An open answer's citation and reason, as the reviewer wrote it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub now: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -291,12 +299,18 @@ regressions. Skip style. Do not edit anything.\n",
             p.push_str("\nFirst, check each finding of that review against the current code:\n");
             for (i, f) in prev.findings.iter().enumerate() {
                 p.push_str(&format!("{}. [P{}] {}\n", i + 1, f.priority, f.text));
+                if let Some(now) = &f.now {
+                    p.push_str(&format!("   Last round said it was still open: {now}\n"));
+                }
             }
             p.push_str(
-                "Answer each on its own line as `PREVIOUS <n>: fixed` or `PREVIOUS <n>: open <file>:<line> `<code>``, \
-where file, line and code are from the current branch and still show the problem. The code a finding cites may have \
-moved or gone: check the problem itself, not the old line. If it no longer happens, it is fixed; an open answer that \
-cites no current code is not counted as open. Do not list an open one again as a defect: it stays on record by itself.\n",
+                "Answer each on its own line as `PREVIOUS <n>: fixed` or `PREVIOUS <n>: open <file>:<line> `<code>` <how>`, \
+where file, line and code are from the current branch, the code is at that line, and <how> says in a few words how \
+that code still causes the problem the finding describes. The code a finding cites may have moved or gone, and a fix \
+may have replaced it: check the problem itself, not the old line or its wording. If it no longer happens, it is \
+fixed, even if code nearby could be better (raise that as a new defect if it is one). An open answer that quotes no \
+code at the line it cites, or does not say how that code still causes the problem, is not counted as open. Do not \
+list an open one again as a defect: it stays on record by itself.\n",
             );
         }
         if let Some(prev) = previous.filter(|p| !p.accepted.is_empty()) {
@@ -380,15 +394,19 @@ using P0 for data loss or security, P1 for a definite bug in normal use, P2 for 
                     .enumerate()
                     .map(|(i, f)| {
                         let (status, said) = statuses.get(&(i + 1)).cloned().unwrap_or_else(|| ("unchecked".into(), String::new()));
-                        // Open needs the reviewer's own pointer at current code; unchecked, the finding's.
-                        let evidence = if status == "open" { said.as_str() } else { f.text.as_str() };
-                        let status = match &code {
-                            Some(code) if status != "fixed" && !code.confirms(evidence) => "unconfirmed".to_string(),
-                            _ => status,
+                        // Open needs the reviewer's own pointer at current code, and its reason (NIT-214);
+                        // unchecked, the finding's own citation.
+                        let confirmed = match (&code, status.as_str()) {
+                            (_, "fixed") => true,
+                            (Some(code), "open") => code.confirms_open(&said),
+                            (Some(code), _) => code.confirms(&f.text),
+                            (None, _) => true,
                         };
+                        let status = if confirmed { status } else { "unconfirmed".to_string() };
+                        let now = (status == "open").then(|| said.trim().trim_start_matches(['-', ':', ' ']).chars().take(400).collect::<String>()).filter(|s| !s.is_empty());
                         // Judged at the priority it was raised at, whatever an earlier round carried it at.
                         let text = f.text.strip_suffix(UNCONFIRMED).unwrap_or(&f.text).to_string();
-                        Recheck { priority: f.raised_as.unwrap_or(f.priority), text, status }
+                        Recheck { priority: f.raised_as.unwrap_or(f.priority), text, status, now }
                     })
                     .collect()
             })
@@ -399,9 +417,9 @@ using P0 for data loss or security, P1 for a definite bug in normal use, P2 for 
         for r in previous.iter().filter(|r| r.status != "fixed") {
             let finding = if r.status == "unconfirmed" {
                 let priority = r.priority.max(2);
-                Finding { priority, text: format!("{}{UNCONFIRMED}", r.text), carried: true, raised_as: (priority != r.priority).then_some(r.priority) }
+                Finding { priority, text: format!("{}{UNCONFIRMED}", r.text), carried: true, raised_as: (priority != r.priority).then_some(r.priority), now: None }
             } else {
-                Finding { priority: r.priority, text: r.text.clone(), carried: true, raised_as: None }
+                Finding { priority: r.priority, text: r.text.clone(), carried: true, raised_as: None, now: r.now.clone() }
             };
             findings.push(finding);
         }
@@ -528,6 +546,36 @@ impl CurrentCode {
         quotes.is_empty() || quotes.iter().any(|q| present.iter().any(|body| squash(body).contains(&squash(q))))
     }
 
+    /// Whether an open answer holds up: it cites a file and line on the branch, quotes code that is
+    /// at that line (or within three lines of it), and says in a few words how that code still
+    /// causes the problem. A citation of code that merely exists, with no reason, is how a reviewer
+    /// carried fixed findings forward by pointing at the fix (NIT-214).
+    fn confirms_open(&self, said: &str) -> bool {
+        let squash = |s: &str| s.split_whitespace().collect::<String>();
+        let lone_path = |q: &str| q.split_whitespace().count() == 1 && !citations(q).is_empty();
+        let quotes: Vec<String> = quoted(said).into_iter().filter(|q| !lone_path(q) && squash(q).len() >= 6).collect();
+        let at_line = citations(said).into_iter().filter_map(|(p, line)| Some((self.resolve(&p)?, line?))).any(|(f, line)| {
+            let Ok(body) = std::fs::read_to_string(self.root.join(&f)) else { return false };
+            let lines: Vec<&str> = body.lines().collect();
+            if line == 0 || line > lines.len() {
+                return false;
+            }
+            let near = squash(&lines[line.saturating_sub(4)..(line + 3).min(lines.len())].join("\n"));
+            quotes.iter().any(|q| near.contains(&squash(q)))
+        });
+        // The reason: what is left once the citation and the quoted code are taken out.
+        let mut rest = said.to_string();
+        for q in quoted(said) {
+            rest = rest.replacen(&format!("`{q}`"), " ", 1);
+        }
+        let words = rest
+            .split_whitespace()
+            .filter(|w| citations(w).is_empty())
+            .filter(|w| w.chars().filter(|c| c.is_alphabetic()).count() >= 2)
+            .count();
+        at_line && words >= 3
+    }
+
     /// The tracked file a cited path names: as given, or the only tracked file ending with it.
     fn resolve(&self, path: &str) -> Option<String> {
         let mut path = path.replace('\\', "/").trim_start_matches("./").to_string();
@@ -620,7 +668,7 @@ pub fn parse_findings(text: &str) -> Vec<Finding> {
         let Some(priority) = d.to_digit(10).filter(|p| *p <= 3) else { continue };
         let text = chars.as_str().trim().to_string();
         if !text.is_empty() && !out.iter().any(|f| f.text == text) {
-            out.push(Finding { priority: priority as u8, text, carried: false, raised_as: None });
+            out.push(Finding { priority: priority as u8, text, carried: false, raised_as: None, now: None });
         }
     }
     out
@@ -806,7 +854,7 @@ mod tests {
     }
 
     fn previous(in_history: bool) -> PreviousRound {
-        let f = |priority, text: &str| Finding { priority, text: text.into(), carried: false, raised_as: None };
+        let f = |priority, text: &str| Finding { priority, text: text.into(), carried: false, raised_as: None, now: None };
         PreviousRound {
             commit: "abc1234".into(),
             findings: vec![f(1, "Drops the last row: src/a.rs, f"), f(2, "Empty name: src/b.rs, g"), f(2, "Slow loop: src/c.rs, h")],
@@ -833,7 +881,7 @@ mod tests {
         // Findings the person accepted are told apart, not checked again.
         let accepted = PreviousRound {
             findings: vec![],
-            accepted: vec![(Finding { priority: 1, text: "No migration: src/k.rs, load".into(), carried: false, raised_as: None }, "no outside users yet".into())],
+            accepted: vec![(Finding { priority: 1, text: "No migration: src/k.rs, load".into(), carried: false, raised_as: None, now: None }, "no outside users yet".into())],
             ..previous(true)
         };
         let p = rules().prompt("main", Some(&accepted));
@@ -861,7 +909,7 @@ mod tests {
         let text = "PREVIOUS 1: open\nPREVIOUS 2: fixed\nPREVIOUS 3: fixed\nVERDICT: findings\nMONEY_OR_RELEASE: no";
         let r = rules().parse("codex", text, 3, Some(&prev), None).unwrap();
         assert_eq!(r.verdict, "changes");
-        assert_eq!(r.findings, vec![Finding { priority: 1, text: "Drops the last row: src/a.rs, f".into(), carried: true, raised_as: None }]);
+        assert_eq!(r.findings, vec![Finding { priority: 1, text: "Drops the last row: src/a.rs, f".into(), carried: true, raised_as: None, now: None }]);
 
         // Everything fixed and nothing new is clean; an unfinished reply is still unfinished.
         let text = "PREVIOUS 1: fixed\nPREVIOUS 2: fixed\nPREVIOUS 3: fixed\nVERDICT: clean\nMONEY_OR_RELEASE: no";
@@ -894,9 +942,9 @@ mod tests {
         std::fs::create_dir_all(dir.join("src")).unwrap();
         let git = |args: &[&str]| assert!(crate::playbook::run_git(std::process::Command::new("git").arg("-C").arg(&dir).args(args)).unwrap().status.success());
         git(&["init", "-q"]);
-        std::fs::write(dir.join("src/proposals.rs"), "fn apply() {\n    let closed = true;\n}\n").unwrap();
+        std::fs::write(dir.join("src/proposals.rs"), "fn apply() {\n    let closed = true;\n}\n".to_string() + &"// more\n".repeat(9)).unwrap();
         git(&["add", "."]);
-        let f = |priority, text: &str| Finding { priority, text: text.into(), carried: false, raised_as: None };
+        let f = |priority, text: &str| Finding { priority, text: text.into(), carried: false, raised_as: None, now: None };
         let prev = PreviousRound {
             commit: "abc1234".into(),
             findings: vec![
@@ -922,6 +970,19 @@ mod tests {
         let r = review("PREVIOUS 1: fixed\nPREVIOUS 2: fixed\nPREVIOUS 3: open proposals.rs:2 `let closed = true;` is set before the write");
         assert_eq!(statuses(&r), ["fixed", "fixed", "open"]);
         assert_eq!(r.verdict, "changes");
+        // The reviewer's reason travels with the carried finding; its text stays as it was raised.
+        let carried = r.findings.iter().find(|f| f.carried).unwrap();
+        assert_eq!(carried.text, "Apply is not atomic: src/proposals.rs, apply");
+        assert_eq!(carried.now.as_deref(), Some("proposals.rs:2 `let closed = true;` is set before the write"));
+        let again = PreviousRound { commit: "abc9999".into(), findings: r.findings.clone(), in_history: true, accepted: vec![] };
+        assert!(rules().prompt("main", Some(&again)).contains("Last round said it was still open: proposals.rs:2"));
+
+        // Code that is in the file but not at the cited line, or a citation with no reason, is not
+        // an open answer.
+        let r = review("PREVIOUS 1: fixed\nPREVIOUS 2: fixed\nPREVIOUS 3: open proposals.rs:12 `let closed = true;` is set before the write");
+        assert_eq!(statuses(&r), ["fixed", "fixed", "unconfirmed"], "the quote is on line 2, not near 12");
+        let r = review("PREVIOUS 1: fixed\nPREVIOUS 2: fixed\nPREVIOUS 3: open proposals.rs:2 `let closed = true;`");
+        assert_eq!(statuses(&r), ["fixed", "fixed", "unconfirmed"], "no reason given");
 
         // Not mentioned: carried as it was while the file it names exists, unconfirmed once it is gone.
         let r = review("`PREVIOUS 1: fixed`\nPREVIOUS 2: fixed");
@@ -934,7 +995,7 @@ mod tests {
         assert_eq!((first.findings[0].priority, first.findings[0].raised_as), (2, Some(1)));
         let next = PreviousRound { commit: "def5678".into(), findings: first.findings.clone(), in_history: true, accepted: vec![] };
         let absolute = dir.join("src").join("proposals.rs");
-        let text = format!("PREVIOUS 1: open {}:2 `let closed = true;`\nVERDICT: clean\nMONEY_OR_RELEASE: no", absolute.display());
+        let text = format!("PREVIOUS 1: open {}:2 `let closed = true;` still closes before the write\nVERDICT: clean\nMONEY_OR_RELEASE: no", absolute.display());
         let r = rules().parse("codex", &text, 1, Some(&next), Some(&dir)).unwrap();
         assert_eq!(statuses(&r), ["open"]);
         assert_eq!((r.findings[0].priority, r.verdict.as_str()), (1, "changes"));
@@ -944,6 +1005,43 @@ mod tests {
         std::fs::write(dir.join("Dockerfile"), "FROM scratch\n").unwrap();
         git(&["add", "."]);
         assert!(CurrentCode::new(&dir).confirms("Dockerfile:1 `FROM scratch`"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// NIT-197, rounds 2 and 3 (2026-10-17): the reviewer called two fixed findings open by citing
+    /// the code that fixed them, with no reason, and both were carried at their priority, which sent
+    /// the issue to a person as "not converging".
+    #[test]
+    fn a_citation_of_the_fix_without_a_reason_does_not_keep_a_finding_open() {
+        let dir = crate::paths::unique_temp("nitely-recheck-197", "");
+        std::fs::create_dir_all(dir.join("crates/nitely-cli/src")).unwrap();
+        std::fs::create_dir_all(dir.join("crates/nitely-core/src")).unwrap();
+        let git = |args: &[&str]| assert!(crate::playbook::run_git(std::process::Command::new("git").arg("-C").arg(&dir).args(args)).unwrap().status.success());
+        git(&["init", "-q"]);
+        // The fixed code, at the lines the reviewer cited (139 and 529).
+        let cli: String = (1..=138).map(|i| format!("// line {i}\n")).collect::<String>() + "                out.push_str(&\"\\\\\".repeat(backslashes * 2 + 1));\n";
+        std::fs::write(dir.join("crates/nitely-cli/src/lanes.rs"), cli).unwrap();
+        let core: String = (1..=528).map(|i| format!("// line {i}\n")).collect::<String>()
+            + "    let same = !command.trim().is_empty() && crate::procs::command_line(pid).is_some_and(|line| line.contains(command.trim()));\n";
+        std::fs::write(dir.join("crates/nitely-core/src/lanes.rs"), core).unwrap();
+        git(&["add", "."]);
+        let f = |priority, text: &str| Finding { priority, text: text.into(), carried: true, raised_as: None, now: None };
+        let prev = PreviousRound {
+            commit: "4567a11".into(),
+            findings: vec![
+                f(2, "Stale PID recovery can kill unrelated processes: crates/nitely-core/src/lanes.rs:518, `stop_leftovers`: after a requester crashes and its child exits, Windows can reuse the recorded PID. Checking only `pid_alive` then calling `stop_tree` forcibly terminates the unrelated process and its descendants without verifying their identity."),
+                f(1, "CLI drops argument quoting: crates/nitely-cli/src/lanes.rs:78, `run`: joining arguments with spaces and reparsing them through a shell breaks quoted arguments such as `nitely run -- node -e \"console.log('ok')\"` and interprets literal shell metacharacters as commands."),
+            ],
+            in_history: true,
+            accepted: vec![],
+        };
+        // The reviewer's reply on 2463af7, word for word.
+        let reply = "PREVIOUS 1: open crates/nitely-core/src/lanes.rs:529 `let same = !command.trim().is_empty() && crate::procs::command_line(pid).is_some_and(|line| line.contains(command.trim()));`\n\
+PREVIOUS 2: open crates/nitely-cli/src/lanes.rs:139 `out.push_str(&\"\\\\\".repeat(backslashes * 2 + 1));`\nVERDICT: clean\nMONEY_OR_RELEASE: no";
+        let r = rules().parse("codex", reply, 1, Some(&prev), Some(&dir)).unwrap();
+        assert_eq!(r.previous.iter().map(|p| p.status.as_str()).collect::<Vec<_>>(), ["unconfirmed", "unconfirmed"]);
+        assert_eq!(r.verdict, "pass", "no P1 is carried on an answer that only points at the fix: {:?}", r.findings);
+        assert!(r.findings.iter().all(|f| f.priority >= 2 && f.now.is_none()));
         std::fs::remove_dir_all(&dir).ok();
     }
 

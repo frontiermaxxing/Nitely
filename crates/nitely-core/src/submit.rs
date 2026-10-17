@@ -304,7 +304,15 @@ pub fn not_converging(earlier: &[ReviewRecord], review: &Review) -> Option<Strin
     if twice.is_empty() && round < MAX_ROUNDS {
         return None;
     }
-    let open: Vec<String> = review.findings.iter().filter(|f| f.priority <= 1).map(|f| format!("[P{}] {}", f.priority, f.text)).collect();
+    let open: Vec<String> = review
+        .findings
+        .iter()
+        .filter(|f| f.priority <= 1)
+        .map(|f| match &f.now {
+            Some(now) => format!("[P{}] {} (the reviewer says it is still open: {now})", f.priority, f.text),
+            None => format!("[P{}] {}", f.priority, f.text),
+        })
+        .collect();
     let why = if twice.is_empty() {
         format!("{round} review rounds in a row asked for changes")
     } else {
@@ -332,7 +340,7 @@ fn previous_round(db: &Db, key: &str, worktree: &Path) -> Result<Option<Previous
     let mut told: Vec<(Finding, String)> = vec![];
     for a in &accepted {
         if !told.iter().any(|(f, _)| f.text == a.finding) {
-            told.push((Finding { priority: a.priority, text: a.finding.clone(), carried: false, raised_as: None }, a.reason.clone()));
+            told.push((Finding { priority: a.priority, text: a.finding.clone(), carried: false, raised_as: None, now: None }, a.reason.clone()));
         }
     }
     let findings = last.findings.into_iter().filter(|f| !told.iter().any(|(t, _)| t.text == f.text)).collect();
@@ -389,7 +397,11 @@ pub fn describe(issue: &IssueRecord, s: &Submitted, land_by: crate::playbook::La
                 lines.push(format!("Previous round's findings: {counts}."));
             }
             lines.extend(r.findings.iter().map(|f| {
-                let carried = if f.carried { " (open since an earlier round)" } else { "" };
+                let carried = match (&f.now, f.carried) {
+                    (Some(now), _) => format!(" (open since an earlier round; now: {now})"),
+                    (None, true) => " (open since an earlier round)".to_string(),
+                    _ => String::new(),
+                };
                 format!("- [P{}] {}{carried}", f.priority, f.text)
             }));
         }
@@ -503,7 +515,7 @@ mod tests {
     #[test]
     fn rounds_that_do_not_converge_go_to_a_person() {
         use crate::review::Finding;
-        let f = |priority, text: &str, carried| Finding { priority, text: text.into(), carried, raised_as: None };
+        let f = |priority, text: &str, carried| Finding { priority, text: text.into(), carried, raised_as: None, now: None };
         let record = |findings: Vec<Finding>| ReviewRecord {
             issue_key: "NIT-1".into(),
             patch_id: "p".into(),
@@ -573,8 +585,8 @@ files=$(git diff main...HEAD --name-only)
 money=no; case "$files" in *billing*) money=yes;; esac
 case "$prompt" in
   *"PREVIOUS <n>"*) case "$files" in
-       *stuck*) echo "PREVIOUS 1: open stuck.txt:1 \`x\`"; echo "VERDICT: clean";;
-       *) echo "PREVIOUS 1: open edge.txt:1 still empty"; echo "VERDICT: clean";;
+       *stuck*) echo "PREVIOUS 1: open stuck.txt:1 \`let stuck = 1;\` is still never read"; echo "VERDICT: clean";;
+       *) echo "PREVIOUS 1: open edge.txt:1 \`let edge = 2;\` still skips the empty line"; echo "VERDICT: clean";;
      esac;;
   *) case "$files" in
        *edge*) echo "- [P2] Edge case: edge.txt, the empty line"; echo "VERDICT: findings";;
@@ -668,7 +680,7 @@ reason = "money logic"
         let first = submit(&mut db, &config, &opts, &actor).unwrap();
         let review = first.review.as_ref().unwrap();
         assert!(review.previous.is_empty() && !review.findings[0].carried, "{review:?}");
-        std::fs::write(wt.join("edge.txt"), "y").unwrap();
+        std::fs::write(wt.join("edge.txt"), "let edge = 2;").unwrap();
         sh(wt, &["commit", "-q", "-am", "edge again"]);
         let second = submit(&mut db, &config, &opts, &actor).unwrap();
         let review = second.review.as_ref().unwrap();
@@ -684,7 +696,7 @@ reason = "money logic"
         let started = playbook::start_task(&db, &repo, &issue, "claude", &actor).unwrap();
         let wt = Path::new(&started.worktree);
         let opts = SubmitOptions { dir: started.worktree.as_str(), issue_key: None, skip_review: false, local_only: true };
-        std::fs::write(wt.join("stuck.txt"), "x").unwrap();
+        std::fs::write(wt.join("stuck.txt"), "let stuck = 1;").unwrap();
         sh(wt, &["add", "."]);
         sh(wt, &["commit", "-q", "-m", "stuck"]);
         let states: Vec<String> = (0..3).map(|_| submit(&mut db, &config, &opts, &actor).unwrap().state).collect();
