@@ -423,9 +423,12 @@ wash of `--fg`, and the platform's red (`--caption-close`) on close. The issue s
 and their veils start below the bar, and the drag strip stays above the veils, so the window can be
 moved with one open. Narrow, the sidebar's strip is the bar: it stops short of the buttons, which
 take its colour and height. Windows 11's Snap Layouts flyout does not appear on hover (no reliable
-way to get it with drawn buttons; Win+Z and Win+arrows still snap). The Mac keeps its native title
-bar for now (NIT-111), and the browser preview has none; `?chrome=win` in the preview draws it,
-inert, to check how it looks.
+way to get it with drawn buttons; Win+Z and Win+arrows still snap). On the Mac the native title bar
+is hidden behind its traffic lights (`titleBarStyle: Overlay` in `src-tauri/tauri.macos.conf.json`),
+which stay the system's own: the same bar and drag strips, no drawn buttons, and the brand row
+starts below the lights (in full screen, where they hide, it moves back up). Narrow, the sidebar's
+strip starts right of them. The browser preview has none; `?chrome=win` or `?chrome=mac` draws
+either, inert, to check how it looks.
 
 Now is a card per worktree, two columns, grouped by repo: the agent and branch, the issue, its mini
 track with the station in its color and the branch's git state, then its last three things (what

@@ -444,17 +444,25 @@ details summary { cursor: pointer; color: var(--fg-2); }
 .kit-color { display: flex; align-items: center; gap: 10px; font-size: var(--text-sm); }
 .kit-swatch { width: 18px; height: 18px; border-radius: var(--radius-sm); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--fg) 12%, transparent); flex: none; }
 
-/* ----- the title bar the app draws on Windows (src/WindowControls.tsx) -----
+/* ----- the title bar the app draws on Windows, and the Mac's (src/WindowControls.tsx) -----
    A bar --titlebar-h high across the top of the main pane, empty but for the caption buttons at its
-   right: the main pane scrolls below it, so nothing clickable ever sits under the buttons or the
-   drag strip. The sidebar runs to the top of the window; its brand row drags too. Overlays start
-   below the bar, and the strip stays above their veils, so the window can be moved with one open. */
-.own-titlebar .sidebar { padding-top: 0; }
+   right on Windows: the main pane scrolls below it, so nothing clickable ever sits under the buttons
+   or the drag strip. The sidebar runs to the top of the window; its brand row drags too. Overlays
+   start below the bar, and the strip stays above their veils, so the window can be moved with one
+   open. On the Mac the system's traffic lights sit at the sidebar's top left, so the brand row
+   starts below them, except in full screen, where they are hidden. */
+.drag-titlebar .sidebar { padding-top: 0; }
 .own-titlebar .brand { padding-top: 18px; }
-.own-titlebar .brand > * { pointer-events: none; }
+.mac-titlebar .brand { padding-top: 40px; }
+.mac-titlebar.mac-fullscreen .brand { padding-top: 18px; }
+.drag-titlebar .brand > * { pointer-events: none; }
 .titlebar-drag { position: fixed; top: 0; left: 232px; right: 138px; height: var(--titlebar-h); z-index: 25; }
-.own-titlebar .content { margin-top: var(--titlebar-h); }
-.own-titlebar .panel-veil, .own-titlebar .palette-veil { top: var(--titlebar-h); }
+.mac-titlebar .titlebar-drag { right: 0; }
+.drag-titlebar .content { margin-top: var(--titlebar-h); }
+.drag-titlebar .panel-veil, .drag-titlebar .palette-veil { top: var(--titlebar-h); }
+/* The lights' place, drawn only in the browser preview (?chrome=mac). */
+.mac-lights { position: fixed; top: 10px; left: 20px; z-index: 30; display: flex; gap: 8px; pointer-events: none; }
+.mac-lights span { width: 12px; height: 12px; border-radius: 50%; background: var(--line-strong); }
 .caption { position: fixed; top: 0; right: 0; z-index: 30; display: flex; }
 .caption-btn {
   display: grid; place-items: center; width: 46px; height: var(--titlebar-h); padding: 0; border: 0; border-radius: 0;
@@ -467,8 +475,8 @@ details summary { cursor: pointer; color: var(--fg-2); }
 .caption-btn:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 .caption-blurred .caption-btn:not(:hover) { color: var(--fg-3); }
 /* The bar takes the top of the pages' padding. */
-.own-titlebar .page { padding-top: 12px; }
-.own-titlebar .panel { top: var(--titlebar-h); }
+.drag-titlebar .page { padding-top: 12px; }
+.drag-titlebar .panel { top: var(--titlebar-h); }
 
 /* ----- narrow windows: the sidebar becomes a strip across the top ----- */
 @media (max-width: 760px) {
@@ -506,6 +514,13 @@ details summary { cursor: pointer; color: var(--fg-2); }
   .own-titlebar .content { margin-top: 0; }
   .own-titlebar .page { padding-top: 20px; }
   .titlebar-drag { display: none; }
+  /* On the Mac the strip starts right of the traffic lights, at their height. */
+  .mac-titlebar .sidebar { padding: 8px 10px 8px 84px; }
+  .mac-titlebar .brand, .mac-titlebar.mac-fullscreen .brand { padding-top: 0; }
+  .mac-titlebar.mac-fullscreen .sidebar { padding-left: 10px; }
+  .mac-titlebar .content { margin-top: 0; }
+  .mac-titlebar .page { padding-top: 20px; }
+  .mac-titlebar .mac-lights { top: 17px; }
 }
 @media (max-width: 1000px) and (min-width: 761px) {
   .panel { grid-template-columns: minmax(0, 1fr); overflow-y: auto; width: calc(100vw - 60px); }

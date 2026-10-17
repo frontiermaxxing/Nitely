@@ -1,7 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
-import { ownTitleBar } from "./WindowControls";
+import { dragTitleBar, macTitleBar, ownTitleBar } from "./WindowControls";
 import "./styles/tokens.css";
 import "./styles.css";
 
@@ -26,8 +26,11 @@ document.addEventListener(
   { capture: true, passive: true },
 );
 
-// The app draws its own title bar on Windows; the layout leaves room for it (styles.css).
+// The app draws its own title bar on Windows, and the Mac's lights sit over its top left; the layout
+// leaves room for them (styles.css).
+if (dragTitleBar) document.documentElement.classList.add("drag-titlebar");
 if (ownTitleBar) document.documentElement.classList.add("own-titlebar");
+if (macTitleBar) document.documentElement.classList.add("mac-titlebar");
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

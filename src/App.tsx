@@ -18,7 +18,7 @@ import { HOME_LABEL, nowSecs } from "./util";
 import { KeysSheet, Palette, useKeys } from "./Palette";
 import { reposOf } from "./BranchMap";
 import { CountBadge, Loading, livenessOf, setAgentIcons } from "./ui";
-import { WindowControls, ownTitleBar } from "./WindowControls";
+import { WindowControls, dragTitleBar } from "./WindowControls";
 import { useNotifications } from "./Notifications";
 import { FakeToasts } from "./dev/FakeToasts";
 
@@ -212,8 +212,8 @@ export function App() {
       <WindowControls />
       {isPreview && <FakeToasts />}
       <nav className="sidebar">
-        {/* On Windows the brand row is where the window is dragged from, as a title bar would be. */}
-        <div className="brand" data-tauri-drag-region={ownTitleBar || undefined}>
+        {/* On Windows and the Mac the brand row is where the window is dragged from, as a title bar would be. */}
+        <div className="brand" data-tauri-drag-region={dragTitleBar || undefined}>
           <BrandMark />
           Nitely
         </div>
