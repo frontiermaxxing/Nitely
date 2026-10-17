@@ -642,6 +642,7 @@ fn run(cmd: Cmd) -> Result<()> {
                     let batch: Vec<BatchItem> = items
                         .iter()
                         .map(|item| BatchItem {
+                            not_duplicates: vec![],
                             local_ref: field(item, "ref"),
                             issue: NewIssue {
                                 project: project.clone(),

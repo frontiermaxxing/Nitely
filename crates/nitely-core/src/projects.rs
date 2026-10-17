@@ -24,6 +24,7 @@ const KEY_COLUMNS: &[(&str, &str)] = &[
     ("ask", "issue_key"),
     ("crew_worker", "issue_key"),
     ("playbook_proposal", "issue_key"),
+    ("goal_plan", "issue_key"),
     ("issue_mirror", "issue_key"),
     ("issue_private", "issue_key"),
     ("mirror_comment", "issue_key"),
@@ -248,6 +249,7 @@ impl Db {
         tx.execute("UPDATE project_alias SET project = ?2 WHERE project = ?1", params![from, to])?;
         tx.execute("UPDATE project_brief SET project = ?2 WHERE project = ?1", params![from, to])?;
         tx.execute("UPDATE goal SET project = ?2 WHERE project = ?1", params![from, to])?;
+        tx.execute("UPDATE goal_plan SET project = ?2 WHERE project = ?1", params![from, to])?;
         tx.execute("UPDATE crew_worker SET project = ?2 WHERE project = ?1", params![from, to])?;
         tx.execute("UPDATE mirror_project SET project = ?2 WHERE project = ?1", params![from, to])?;
         tx.execute("DELETE FROM crew_control WHERE project = ?1", [&to])?;

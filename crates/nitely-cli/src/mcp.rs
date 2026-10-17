@@ -692,6 +692,7 @@ fn run_tool(server: &Server, name: &str, args: &Value, session: &str) -> Result<
                 target_date: str_arg(args, "target_date").map(str::to_string),
                 issues: serde_json::from_value(args.get("issues").cloned().unwrap_or(json!([]))).context("issues: each needs ref, title, kind, body and evidence")?,
                 existing: keys_arg(args, "existing"),
+                planning_issue: None,
             };
             json!(db.propose_goal(&project(&db)?, &plan, str_arg(args, "planning_issue"), &actor)?)
         }
@@ -748,7 +749,7 @@ fn run_tool(server: &Server, name: &str, args: &Value, session: &str) -> Result<
                 .enumerate()
                 .map(|(n, item)| {
                     let issue = new_issue(item, &project, &server.vendor).with_context(|| format!("item {}", n + 1))?;
-                    Ok(BatchItem { local_ref: str_arg(item, "ref").unwrap_or_default().to_string(), issue })
+                    Ok(BatchItem { local_ref: str_arg(item, "ref").unwrap_or_default().to_string(), issue, not_duplicates: vec![] })
                 })
                 .collect::<Result<Vec<_>>>()?;
             let before = db.project_labels(&project)?;

@@ -46,6 +46,9 @@ pub struct GoalPlan {
     pub issues: Vec<PlanItem>,
     #[serde(default)]
     pub existing: Vec<String>,
+    /// The "Plan a goal" issue it answers, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planning_issue: Option<String>,
 }
 
 /// What the person changes before approving.
@@ -103,11 +106,14 @@ fn source_of(actor: &Actor) -> String {
     }
 }
 
-/// The plan's issues as a batch for `project`, filed into `goal` (None while only checking).
-fn batch(plan: &GoalPlan, project: &str, goal: Option<i64>, source: &str) -> Vec<BatchItem> {
+/// The plan's issues as a batch for `project`, filed into `goal` (None while only checking). The
+/// plan's own issues (`own`: the one that carries it and the one that asked for it) describe the
+/// same work, so the duplicate check passes over them.
+fn batch(plan: &GoalPlan, project: &str, goal: Option<i64>, source: &str, own: &[String]) -> Vec<BatchItem> {
     plan.issues
         .iter()
         .map(|i| BatchItem {
+            not_duplicates: own.to_vec(),
             local_ref: i.local_ref.clone(),
             issue: NewIssue {
                 project: project.to_string(),
@@ -221,7 +227,7 @@ impl Db {
             bail!("a plan needs issues: new ones, existing ones, or both");
         }
         if !plan.issues.is_empty() {
-            self.check_batch(&batch(plan, &p.key, None, &source_of(actor)))?;
+            self.check_batch(&batch(plan, &p.key, None, &source_of(actor), &[]))?;
         }
         for key in &plan.existing {
             let i = self.issue(key)?.with_context(|| format!("no issue {key}"))?;
@@ -252,9 +258,11 @@ impl Db {
             },
             actor,
         )?;
+        let mut stored = plan.clone();
+        stored.planning_issue = planning.as_ref().map(|i| i.key.clone());
         self.conn.execute(
             "INSERT INTO goal_plan (issue_key, project, plan, status, created_by, created_at) VALUES (?1, ?2, ?3, 'pending', ?4, ?5)",
-            params![issue.key, p.key, serde_json::to_string(plan)?, actor.id(), now()],
+            params![issue.key, p.key, serde_json::to_string(&stored)?, actor.id(), now()],
         )?;
         if let Some(planning) = planning.filter(|i| i.is_open()) {
             self.move_issue(&planning.key, "Done", Some(&format!("Drafted the plan as {}; the person decides it in the Inbox.", issue.key)), None, actor)?;
@@ -274,17 +282,30 @@ impl Db {
             bail!("only the person approves a goal plan");
         }
         let v = self.goal_plan_for_issue(key)?.filter(|v| v.status == "pending").with_context(|| format!("{key} carries no pending goal plan"))?;
+        // Claim the decision first, so two approvals at once cannot both create a goal.
+        if self.conn.execute("UPDATE goal_plan SET status = 'approving' WHERE id = ?1 AND status = 'pending'", [v.id])? == 0 {
+            bail!("{key}'s goal plan was decided just now");
+        }
+        let result = self.approve_claimed(key, &v, edit, actor);
+        if result.is_err() {
+            self.conn.execute("UPDATE goal_plan SET status = 'pending' WHERE id = ?1 AND status = 'approving'", [v.id]).ok();
+        }
+        result
+    }
+
+    fn approve_claimed(&mut self, key: &str, v: &GoalPlanView, edit: &PlanEdit, actor: &Actor) -> Result<PlanApproved> {
         let plan = v.plan.edited(edit);
         let author = Actor::Agent(v.created_by.clone());
+        let own: Vec<String> = std::iter::once(v.issue_key.clone()).chain(plan.planning_issue.clone()).collect();
         if !plan.issues.is_empty() {
-            self.check_batch(&batch(&plan, &v.project, None, &source_of(&author)))?;
+            self.check_batch(&batch(&plan, &v.project, None, &source_of(&author), &own))?;
         }
         let change = GoalChange { title: Some(plan.title.clone()), outcome: Some(plan.outcome.clone()), target_date: plan.target_date.clone(), state: None };
         let goal = self.save_goal(&v.project, None, &change, actor)?;
         let filed = if plan.issues.is_empty() {
             BatchFiled::default()
         } else {
-            match self.create_issues(&batch(&plan, &v.project, Some(goal.id), &source_of(&author)), &author) {
+            match self.create_issues(&batch(&plan, &v.project, Some(goal.id), &source_of(&author), &own), &author) {
                 Ok(f) => f,
                 Err(e) => {
                     // Nothing was filed (create_issues is one transaction): the goal goes too.
@@ -416,6 +437,7 @@ mod tests {
             target_date: Some("2026-12-01".into()),
             issues: vec![item("ci", "Build installers in CI", &[]), item("sign", "Sign the Windows installer", &["ci"]), item("docs", "Install guide in the README", &["ci"])],
             existing: vec![],
+            planning_issue: None,
         }
     }
 
@@ -443,6 +465,36 @@ mod tests {
         let v = db.goal_plan_for_issue(&p.issue.key).unwrap().unwrap();
         assert_eq!((v.status.as_str(), v.goal_id), ("approved", Some(a.goal.id)));
         assert!(db.approve_goal_plan(&p.issue.key, &PlanEdit::default(), &Actor::Human).is_err(), "decided once");
+    }
+
+    #[test]
+    fn a_plans_own_issues_never_count_as_duplicates_of_its_work() {
+        let mut db = db();
+        let ask = db.start_goal("NIT", "sign the Windows installer", &Actor::Human).unwrap();
+        let mut p = plan();
+        p.title = "Sign the Windows installer".into();
+        p.issues = vec![item("sign", "Sign the Windows installer", &[])];
+        let proposed = db.propose_goal("NIT", &p, Some(&ask.key), &agent()).unwrap();
+        let a = db.approve_goal_plan(&proposed.issue.key, &PlanEdit::default(), &Actor::Human).unwrap();
+        assert_eq!((a.filed.filed.len(), a.filed.skipped.len()), (1, 0), "{:?}", a.filed.skipped);
+        assert_eq!(a.goal.progress.total, 1);
+    }
+
+    #[test]
+    fn plans_follow_a_new_key_and_go_with_a_removed_project() {
+        let mut db = db();
+        let p = db.propose_goal("NIT", &plan(), None, &agent()).unwrap();
+        db.rekey_project("NIT", "NX").unwrap();
+        let key = p.issue.key.replace("NIT-", "NX-");
+        assert_eq!(db.goal_plan_for_issue(&key).unwrap().unwrap().project, "NX");
+        let a = db.approve_goal_plan(&key, &PlanEdit::default(), &Actor::Human).unwrap();
+        assert_eq!(a.goal.project, "NX");
+        db.remove_project("NX", true).unwrap();
+        db.create_project("NX", "Again").unwrap();
+        let fresh = db
+            .create_issue(&NewIssue { project: "NX".into(), title: "New".into(), body: "b".into(), kind: "bug".into(), source: "human".into(), evidence: "e".into(), ..Default::default() }, &Actor::Human)
+            .unwrap();
+        assert!(db.goal_plan_for_issue(&fresh.key).unwrap().is_none(), "an old plan never attaches to a new issue");
     }
 
     #[test]

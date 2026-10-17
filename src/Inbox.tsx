@@ -480,7 +480,8 @@ function DecisionDetail(props: {
   props.keys.current = resolved
     ? {}
     : {
-        approve: d.kind === "approve" && native ? () => move("Approved") : undefined,
+        // A goal plan is approved with its edits, from its own button.
+        approve: d.kind === "approve" && native && !plan ? () => move("Approved") : undefined,
         todo: (d.kind === "approve" || d.kind === "land") && native && issue && !proposal && !plan ? () => move("Todo") : undefined,
         option: d.kind === "ask" && d.ask ? (i) => d.ask!.options[i] !== undefined && answer(d.ask!.options[i]) : undefined,
         reply: d.kind === "ask" ? () => card.current?.querySelector<HTMLInputElement>(".dd-words input")?.focus() : undefined,

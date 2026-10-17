@@ -204,6 +204,9 @@ struct PreparedBatch<'a> {
 pub struct BatchItem {
     pub local_ref: String,
     pub issue: NewIssue,
+    /// Issues the duplicate check passes over for this item: a goal plan's own issues, which
+    /// describe the very work it files.
+    pub not_duplicates: Vec<String>,
 }
 
 /// What a batch filed: each ref's key (the new issue, or the one it duplicates), the issues filed in
@@ -712,7 +715,11 @@ impl Db {
         // Duplicates of open issues are found before the transaction; of earlier items, as it goes.
         let mut duplicates: Vec<Vec<Duplicate>> = Vec::with_capacity(items.len());
         for (item, c) in items.iter().zip(&checked) {
-            duplicates.push(if item.issue.allow_similar { Vec::new() } else { self.likely_duplicates(&c.project, &item.issue)? });
+            duplicates.push(if item.issue.allow_similar {
+                Vec::new()
+            } else {
+                self.likely_duplicates(&c.project, &item.issue)?.into_iter().filter(|d| !item.not_duplicates.contains(&d.issue.key)).collect()
+            });
         }
 
         let ts = now();
@@ -1636,6 +1643,7 @@ mod tests {
         let agent = Actor::Agent("claude:a".into());
         let existing = db.create_issue(&new("Wire the settings page"), &agent).unwrap();
         let item = |r: &str, title: &str, blocked_by: &[&str]| BatchItem {
+            not_duplicates: vec![],
             local_ref: r.into(),
             issue: NewIssue { blocked_by: blocked_by.iter().map(|b| b.to_string()).collect(), ..new(title) },
         };
