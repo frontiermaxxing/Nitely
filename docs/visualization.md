@@ -457,6 +457,8 @@ List and Board start with the project's goal rows (see Goal rows).
   in a worktree or mirrored from another tracker; and removing it, which deletes its issues only
   when the key is typed to confirm. Repos and machine tokens that name the project follow the new
   key, or name none after a removal. The CLI has the same: `nitely project rename|rekey|remove`.
+  Its Crew section turns the project's crew on and sets its limits (docs/crew.md); the header's
+  crew control, or "Crew off", opens it.
 
 - **Board.** One column per station, in track order; each head is the station's dot, its name and
   its count over a rule. Empty columns fold to a dashed strip with the name running down it. Cards hold the

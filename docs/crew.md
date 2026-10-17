@@ -9,7 +9,9 @@ on a project's backlog, one issue each, and starts the next when one finishes. E
 does goes through the same tools a person's agent uses (`start_task`, `report`, `submit`, `land`),
 so the board, the review and the gate treat it like any other agent.
 
-Nothing runs until a person turns it on: the default is `workers = 0`.
+Nothing runs until a person turns it on: the default is `workers = 0`. Turn it on in the app, in
+the Crew section of the project's Settings (or "Crew off" in the project header), or by editing
+`[crew]` in the playbook.
 
 ## The playbook's `[crew]` section
 
@@ -272,7 +274,16 @@ When a worker exits, the supervisor reads its issue:
 - **Project header:** when the playbook has a crew, a control: "Crew 2/3" (running / cap), a pause
   or resume button, and the state in words when it is not working: "paused", "quiet hours", "20 of
   20 today", "no gate", "claude can't start: <reason>", or "not running: start `nitely crew run`"
-  when no supervisor heartbeat is fresh. A playbook with `workers = 0` shows nothing.
+  when no supervisor heartbeat is fresh. A playbook with `workers = 0` shows "Crew off". Either
+  opens the Crew section of the project's Settings.
+- **Project Settings, Crew** (`src/CrewSettings.tsx`, `crates/nitely-core/src/crew_settings.rs`):
+  workers, agents in preference order (and which are installed), starts a day, the token budget in
+  millions and quiet hours, one card per repo of the project. Only the app saves it, as you, and
+  turning a crew on asks first. The playbook Nitely keeps is written in place, keeping its comments;
+  a repo that commits its own `.nitely/playbook.toml` gets a commit on its integration branch, built
+  in a scratch index the way an approved playbook proposal is, so nothing else in a checkout
+  changes, and the next land pushes it. It warns when the playbook has no gate (the crew would not
+  start) and when an agent's playbook proposal for the repo is still waiting for you.
 - **Now and Pulse:** crew workers are ordinary sessions there (their hooks and reports already put
   them on the board), with "· crew" after the agent's name. A session is a crew session when it runs
   in a crew worker's worktree from the time that worker started, so the hooks need nothing new.

@@ -247,8 +247,8 @@ function CrewCard(props: { view: CrewView; first: boolean; titled: boolean; onSa
       {confirming && (
         <div className="rules-loosen" role="alert">
           <p>
-            Turn the crew on? Up to {draft.workers} worker{draft.workers === 1 ? "" : "s"} start on {v.repo}'s Todo issues as soon as the app sees the
-            change, and land what passes review without asking you. Each agent's CLI must be signed in on this machine.
+            Turn the crew on? {draft.workers === 1 ? "A worker starts" : `Up to ${draft.workers} workers start`} on {v.repo}'s Todo issues as soon as the
+            app sees the change, and work that passes review lands without asking you. Each agent's CLI must be signed in on this machine.
           </p>
           <div className="settings-row">
             <button className="btn primary" disabled={busy} onClick={save}>

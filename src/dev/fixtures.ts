@@ -702,17 +702,17 @@ let crewPaused = false;
 const CREW_CHOICES = [{ name: "claude", installed: true }, { name: "codex", installed: true }];
 const crewViews: CrewView[] = [
   {
-    repo: "Nitely", root: "C:\Code\Nitely", source: "repo", path: "C:\Code\Nitely\.nitely\playbook.toml", integration: "main", workers: 2,
+    repo: "Nitely", root: "C:\\Code\\Nitely", source: "repo", path: "C:\\Code\\Nitely\\.nitely\\playbook.toml", integration: "main", workers: 2,
     agents: ["claude", "codex"], max_per_day: null, default_max_per_day: 20, max_tokens_per_day: 8_000_000, quiet_hours: "01:00-07:00",
     choices: CREW_CHOICES, has_gate: true, pending_proposal: null,
   },
   {
-    repo: "Orbit", root: "C:\Code\Orbit", source: "stored", path: "C:\Users\you\AppData\Roaming\Nitely\playbooks\Orbit.toml", integration: "develop", workers: 0,
+    repo: "Orbit", root: "C:\\Code\\Orbit", source: "stored", path: "C:\\Users\\you\\AppData\\Roaming\\Nitely\\playbooks\\Orbit.toml", integration: "develop", workers: 0,
     agents: ["claude", "codex"], max_per_day: null, default_max_per_day: 20, max_tokens_per_day: null, quiet_hours: null,
     choices: [{ name: "claude", installed: true }, { name: "codex", installed: false }], has_gate: true, pending_proposal: "ORB-12",
   },
   {
-    repo: "Harbor", root: "C:\Code\Harbor", source: "none", path: "C:\Users\you\AppData\Roaming\Nitely\playbooks\Harbor.toml", integration: "main", workers: 0,
+    repo: "Harbor", root: "C:\\Code\\Harbor", source: "none", path: "C:\\Users\\you\\AppData\\Roaming\\Nitely\\playbooks\\Harbor.toml", integration: "main", workers: 0,
     agents: ["claude", "codex"], max_per_day: null, default_max_per_day: 20, max_tokens_per_day: null, quiet_hours: null,
     choices: CREW_CHOICES, has_gate: false, pending_proposal: null,
   },

@@ -32,7 +32,7 @@ test("the hover lists running workers and today's count", () => {
 });
 
 const view: CrewView = {
-  repo: "shop", root: "C:\Code\shop", source: "stored", path: "C:\data\playbooks\shop.toml", integration: "main",
+  repo: "shop", root: "C:\\Code\\shop", source: "stored", path: "C:\\data\\playbooks\\shop.toml", integration: "main",
   workers: 0, agents: ["claude", "codex"], max_per_day: null, default_max_per_day: 20, max_tokens_per_day: null, quiet_hours: null,
   choices: [{ name: "claude", installed: false }, { name: "codex", installed: true }], has_gate: true, pending_proposal: null,
 };
