@@ -151,7 +151,8 @@ The gate and land go together: gating a stack that is not then landed as gated p
 A submitted change waits in the review queue when its project batches reviews. A batch closes when
 it reaches `max` changes, when its oldest change has waited `window`, or, with `window = "busy"`,
 when a reviewer slot frees up (the machine's reviewer slots, as for lanes' build slots, NIT-199).
-A batch holds changes from one project only, so the reviewer works in one repository.
+A batch holds changes from one repository only (a project can span several), so the reviewer works
+in one checkout that has every change's commits.
 
 **Small** means at most `small_lines` lines and `small_files` files changed against the base
 (default 100 and 5: 15% of this repo's reviews). With `batch = "all"`, any size can join, up to a
@@ -204,8 +205,9 @@ whose diff introduces it, and that a problem that only appears when two changes 
 - A finding that names no change, or a change the batch does not hold, makes the batch's verdicts
   unreliable: every change it could belong to is reviewed again alone. So is every change whose
   VERDICT line is missing.
-- An `INTERACTION` line is not a finding against either change. The land queue keeps those two
-  changes in separate runs, and the note goes on both issues.
+- An `INTERACTION` line is not a finding against either change on its own, but it blocks the pair:
+  the first of the two may land, and the second is reviewed again alone, on top of the first, before
+  it can land. The note goes on both issues.
 - A batch whose reviewer fails to run or finish goes back to the queue as single reviews, so no
   batch ever leaves a change without a review.
 
