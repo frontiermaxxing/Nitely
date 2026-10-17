@@ -58,6 +58,10 @@ authenticated end to end:
     authority (a public one, or a local authority the person installed on the phone). Nitely makes
     no certificate authority and runs no server.
 
+  A server left running picks up a renewed certificate by itself: it asks Tailscale again every 12
+  hours (Tailscale renews a month before expiry), and checks the person's files every 10 minutes,
+  reading them again when they change. A fetch that fails keeps the certificate being served.
+
 Plain HTTP on an ordinary LAN address is refused, and the app says why. Loopback is offered for
 trying it on the PC itself.
 
