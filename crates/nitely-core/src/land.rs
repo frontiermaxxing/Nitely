@@ -368,7 +368,9 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
     let project = db.issue(key)?.and_then(|i| i.project);
     crate::private_terms::check(project.as_deref(), &worktree, &base)?;
 
-    let gate = playbook::run_gate(db, root, &worktree, Some(key), actor)?;
+    // In a repo with build lanes, a land request: first in line, and answered from the record when
+    // this same tree passed its gate already (a rebase that changed nothing).
+    let gate = playbook::run_gate_as(db, root, &worktree, Some(key), actor, crate::lanes::Kind::Land)?;
     let passed = gate.passed;
     report.gate = Some(gate);
     if !passed {

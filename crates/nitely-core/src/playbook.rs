@@ -998,6 +998,12 @@ pub fn diff_base(worktree: &Path, base: &str) -> String {
 /// Stops at the first failure, so the agent sees the error that matters. A failing command runs
 /// again first (`[gate] retries`); one that then passes is recorded as a flake.
 pub fn run_gate(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<&str>, actor: &Actor) -> Result<GateResult> {
+    run_gate_as(db, repo_root, worktree, issue_key, actor, crate::lanes::Kind::Gate)
+}
+
+/// `run_gate`, saying what the gate is for: in a repo with build lanes (`[lanes]`), the gate runs
+/// there as a request of that kind, land's first, and never builds in the worktree.
+pub fn run_gate_as(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<&str>, actor: &Actor, kind: crate::lanes::Kind) -> Result<GateResult> {
     let playbook = Playbook::load(repo_root)?;
     if playbook.gate.commands.is_empty() && playbook.gate.steps.is_empty() {
         bail!("this repo's playbook has no gate commands; add them under [gate] in {PLAYBOOK_PATH}");
@@ -1017,8 +1023,15 @@ pub fn run_gate(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<&s
         steps.push((step.run.clone(), step.skip_reason(&files)?));
     }
 
-    // A sparse worktree lacks files the gate builds (a workspace's other members): until gates run
-    // in build lanes, it becomes whole first, so the gate sees what land will.
+    if playbook.lanes.is_some() {
+        // In a lane: a full checkout of the worktree's snapshot, set up there. The worktree itself
+        // is not built, made whole or set up.
+        let lane = crate::lanes::gate(db, repo_root, &playbook, worktree, issue_key, kind, &steps, actor)?;
+        return record_gate(db, issue_key, worktree, actor, &lane.commit, lane.results, lane.passed, lane.flaked, playbook.unknown_warnings());
+    }
+
+    // A sparse worktree lacks files the gate builds (a workspace's other members): without build
+    // lanes, it becomes whole first, so the gate sees what land will.
     let whole = crate::light::make_whole(worktree)?;
     // A stale setup fails the gate for reasons that are not the change's; set up again first.
     let retries = playbook.gate.retries;
@@ -1042,6 +1055,12 @@ pub fn run_gate(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<&s
             break;
         }
     }
+    record_gate(db, issue_key, worktree, actor, &commit, results, passed, flaked, playbook.unknown_warnings())
+}
+
+/// Puts a gate's outcome on the issue's timeline (its flakes, then passed or failed) and returns it.
+#[allow(clippy::too_many_arguments)]
+fn record_gate(db: &Db, issue_key: Option<&str>, worktree: &Path, actor: &Actor, commit: &str, results: Vec<CommandResult>, passed: bool, flaked: Vec<Flake>, warnings: Vec<String>) -> Result<GateResult> {
     let at = Some(worktree.to_string_lossy().into_owned());
     for f in &flaked {
         let tests = if f.tests.is_empty() { String::new() } else { format!(": {}", f.tests.join(", ")) };
@@ -1053,7 +1072,7 @@ pub fn run_gate(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<&s
         format!("Gate failed at {commit}: {}", results.last().map(|r| r.command.as_str()).unwrap_or(""))
     };
     db.log_event(actor, issue_key, at.as_deref(), if passed { "gate_passed" } else { "gate_failed" }, &summary)?;
-    Ok(GateResult { passed, commit, results, warnings: playbook.unknown_warnings(), flaked })
+    Ok(GateResult { passed, commit: commit.to_string(), results, warnings, flaked })
 }
 
 /// Fills `{main}` (the main checkout), `{worktree}` and `{base}` in a playbook command.

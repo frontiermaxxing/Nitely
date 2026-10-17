@@ -332,14 +332,29 @@ pub fn run_in(config: &crate::Config, db: &Db, dir: &str, issue: Option<&str>, c
 /// is written as the request moves (queued, running, done), so another process can follow it with
 /// `Db::lane_run`. `on_event` is called with the run when it is queued and when it starts.
 pub fn run(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Actor, on_event: &mut dyn FnMut(&Run)) -> Result<Run> {
+    run_with(db, repo_root, pb, req, actor, on_event, &mut |lane, log, limit| run_logged(req.command, lane, log, limit))
+}
+
+/// What runs in a lane once it holds the request's snapshot: given the lane, the log and the time
+/// limit, it returns the exit code (None when stopped) and whether it ran past the limit.
+type Exec<'a> = dyn FnMut(&Path, &Path, Duration) -> Result<(Option<i32>, bool)> + 'a;
+
+/// `run`, with what happens in the lane given by `exec` (one command, or a gate's commands).
+fn run_with(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Actor, on_event: &mut dyn FnMut(&Run), exec: &mut Exec) -> Result<Run> {
     let Some(rules) = pb.lanes.clone() else {
         bail!("{} has no [lanes] in its playbook, so it has no build lanes; run the command in your worktree, or add [lanes] (docs/build-lanes.md)", repo_root.display());
     };
     let root = repo_root.to_string_lossy().into_owned();
+    // Land first, then submit's gate, then everything else (the scheduler, NIT-199, orders by it).
+    let priority = match req.kind {
+        Kind::Land => 1,
+        Kind::Gate => 2,
+        Kind::Run => 3,
+    };
     db.conn.execute(
-        "INSERT INTO lane_run (project, repo, issue_key, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'queued', 'local', ?10, ?11)",
-        params![req.project.to_uppercase(), root, req.issue, actor.id(), req.kind.as_str(), req.snapshot.commit, req.snapshot.tree, req.snapshot.base, req.command, now(), std::process::id()],
+        "INSERT INTO lane_run (project, repo, issue_key, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, priority)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'queued', 'local', ?10, ?11, ?12)",
+        params![req.project.to_uppercase(), root, req.issue, actor.id(), req.kind.as_str(), req.snapshot.commit, req.snapshot.tree, req.snapshot.base, req.command, now(), std::process::id(), priority],
     )?;
     let id = db.conn.last_insert_rowid();
     // A made snapshot exists only as an object: a ref keeps git's gc from taking it while it waits.
@@ -364,7 +379,7 @@ pub fn run(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Acto
         on_event(&r);
     }
 
-    let outcome = serve(repo_root, pb, &rules, &lane, &log, req);
+    let outcome = serve(repo_root, pb, &rules, &lane, &log, req, exec);
     let ended = now();
     match outcome {
         Ok(o) => {
@@ -393,6 +408,119 @@ pub fn run(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Acto
         db.log_event(actor, Some(key), Some(&lane.to_string_lossy()), "lane_run", &format!("{said} (run {id})")).ok();
     }
     Ok(done)
+}
+
+/// A gate that ran in a lane (or was answered from one), for `playbook::run_gate` to record the way
+/// it records a gate in a worktree.
+pub struct GateRun {
+    /// The snapshot's short commit.
+    pub commit: String,
+    pub results: Vec<playbook::CommandResult>,
+    pub passed: bool,
+    pub flaked: Vec<playbook::Flake>,
+    /// The lane run it was, or the earlier one it was answered from.
+    pub run: Option<i64>,
+}
+
+/// The gate's `steps` (command, why it is skipped) for `worktree`, as one lane request: one switch
+/// to the worktree's snapshot, then each command that is not skipped, in order, each run again up to
+/// `[gate] retries` times when it fails (a pass after a failure is a flake), stopping at the first
+/// that keeps failing. A tree whose same commands already passed in a lane is answered from that
+/// run's record without running anything.
+#[allow(clippy::too_many_arguments)]
+pub fn gate(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Option<&str>, kind: Kind, steps: &[(String, Option<String>)], actor: &Actor) -> Result<GateRun> {
+    let snap = snapshot(worktree)?;
+    let short = snap.commit[..snap.commit.len().min(7)].to_string();
+    let project = issue.and_then(|k| db.issue(k).ok().flatten()).and_then(|i| i.project).unwrap_or_default();
+    let base = pb.integration_branch().to_string();
+    let skipped = |why: &str, command: &str| playbook::CommandResult { command: command.to_string(), ok: true, seconds: 0, output: format!("skipped: {why}"), skipped: true };
+    // The commands as the playbook writes them: the record's command, and what an earlier pass of
+    // the same tree must have run.
+    let to_run: Vec<&str> = steps.iter().filter(|(_, skip)| skip.is_none()).map(|(c, _)| c.as_str()).collect();
+    let key = to_run.join("\n");
+    let root = repo_root.to_string_lossy().into_owned();
+    let passed_before: Option<i64> = db
+        .conn
+        .query_row(
+            "SELECT id FROM lane_run WHERE repo = ?1 AND tree = ?2 AND command = ?3 AND kind IN ('gate', 'land') AND state = 'done' AND exit_code = 0 ORDER BY id DESC LIMIT 1",
+            params![root, snap.tree, key],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(id) = passed_before {
+        let results = steps
+            .iter()
+            .map(|(command, skip)| match skip {
+                Some(why) => skipped(why, command),
+                None => skipped(&format!("this tree passed it in lane run {id}; not run again"), command),
+            })
+            .collect();
+        if let Some(key) = issue {
+            db.log_event(actor, Some(key), None, "lane_run", &format!("The gate for {short} passed in lane run {id} already; not run again")).ok();
+        }
+        return Ok(GateRun { commit: short, results, passed: true, flaked: vec![], run: Some(id) });
+    }
+
+    let mut results: Vec<playbook::CommandResult> = Vec::new();
+    let mut flaked: Vec<playbook::Flake> = Vec::new();
+    let retries = pb.gate.retries;
+    let req = Request { project: &project, issue, kind, snapshot: &snap, command: &key };
+    let run = run_with(db, repo_root, pb, &req, actor, &mut |_| {}, &mut |lane: &Path, log: &Path, limit: Duration| {
+        for (command, skip) in steps {
+            if let Some(why) = skip {
+                results.push(skipped(why, command));
+                continue;
+            }
+            let command = playbook::expand(command, repo_root, lane, &base);
+            let started = Instant::now();
+            let mut failures: Vec<String> = Vec::new();
+            loop {
+                let from = std::fs::metadata(log).map(|m| m.len()).unwrap_or(0);
+                let (code, timed_out) = run_logged(&command, lane, log, limit)?;
+                let output = log_since(log, from);
+                let seconds = started.elapsed().as_secs();
+                if timed_out {
+                    results.push(playbook::CommandResult { command: command.clone(), ok: false, seconds, output, skipped: false });
+                    return Ok((None, true));
+                }
+                if code == Some(0) {
+                    if !failures.is_empty() {
+                        let tests = failures.iter().flat_map(|o| playbook::failed_tests(o)).fold(Vec::<String>::new(), |mut all, t| {
+                            if !all.contains(&t) {
+                                all.push(t);
+                            }
+                            all
+                        });
+                        flaked.push(playbook::Flake { command: command.clone(), tests, output: failures.swap_remove(0) });
+                    }
+                    results.push(playbook::CommandResult { command: command.clone(), ok: true, seconds, output, skipped: false });
+                    break;
+                }
+                if failures.len() as u32 >= retries {
+                    results.push(playbook::CommandResult { command: command.clone(), ok: false, seconds, output, skipped: false });
+                    return Ok((code, false));
+                }
+                failures.push(output);
+            }
+        }
+        Ok((Some(0), false))
+    })?;
+    if let Some(why) = &run.error {
+        results.push(playbook::CommandResult { command: format!("lane {}", run.lane.unwrap_or(0)), ok: false, seconds: 0, output: why.clone(), skipped: false });
+    }
+    Ok(GateRun { commit: short, passed: run.passed(), results, flaked, run: Some(run.id) })
+}
+
+/// What `log` gained after byte `from`, its end kept as a command's output is.
+fn log_since(log: &Path, from: u64) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut text = Vec::new();
+    if let Ok(mut f) = std::fs::File::open(log) {
+        if f.seek(SeekFrom::Start(from)).is_ok() {
+            f.read_to_end(&mut text).ok();
+        }
+    }
+    playbook::tail(&String::from_utf8_lossy(&text))
 }
 
 /// Deletes snapshot refs and logs older than `KEEP_SECS`. Best effort.
@@ -448,7 +576,7 @@ struct Outcome {
 }
 
 /// The four steps, in a lane this process holds.
-fn serve(repo_root: &Path, pb: &Playbook, rules: &LaneRules, lane: &Path, log: &Path, req: &Request) -> Result<Outcome> {
+fn serve(repo_root: &Path, pb: &Playbook, rules: &LaneRules, lane: &Path, log: &Path, req: &Request, exec: &mut Exec) -> Result<Outcome> {
     let base = pb.integration_branch();
     if git(repo_root, &["cat-file", "-e", &format!("{}^{{commit}}", req.snapshot.commit)]).is_err() {
         bail!("snapshot {} is missing from the repo (expired or cleaned up); make a new one", &req.snapshot.commit[..req.snapshot.commit.len().min(9)]);
@@ -464,7 +592,7 @@ fn serve(repo_root: &Path, pb: &Playbook, rules: &LaneRules, lane: &Path, log: &
         switched
     };
     let setup_ran = ensure_setup(repo_root, pb, lane, base, log, limit)?;
-    let (exit_code, timed_out) = run_logged(req.command, lane, log, limit)?;
+    let (exit_code, timed_out) = exec(lane, log, limit)?;
     let output = std::fs::read_to_string(log).map(|t| playbook::tail(&t)).unwrap_or_default();
     Ok(Outcome { exit_code, timed_out, setup_ran, files_switched, output })
 }
@@ -919,6 +1047,57 @@ mod tests {
         });
         assert!(stopped, "the leftover command was stopped");
         assert!(!pid_file(&lane).unwrap().exists());
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn the_gate_runs_in_a_lane_once_per_tree_and_land_goes_first() {
+        let base = crate::paths::unique_temp("nitely-lane-gate", "");
+        let root = repo(&base);
+        let db = Db::open(&base.join("t.db")).unwrap();
+        let actor = Actor::Agent("claude:test".into());
+        // Proves where it ran: the lane gets the file, the worktree does not. The second command
+        // fails the first time it ever runs (a mark outside the repo), then passes: a flake.
+        let mark = base.join("flaked-once").to_string_lossy().replace('\\', "/");
+        let (wrote, flaky) = if cfg!(windows) {
+            ("echo ran > gate-ran.txt".to_string(), format!("if exist \"{mark}\" (exit 0) else (type nul > \"{mark}\" & exit 1)"))
+        } else {
+            ("echo ran > gate-ran.txt".to_string(), format!("if [ -e '{mark}' ]; then exit 0; else touch '{mark}'; exit 1; fi"))
+        };
+        let text = format!("[gate]\ncommands = [{wrote:?}, {flaky:?}]\n[lanes]\n");
+        std::fs::create_dir_all(root.join(".nitely")).unwrap();
+        std::fs::write(root.join(playbook::PLAYBOOK_PATH), &text).unwrap();
+        let g = |args: &[&str]| assert!(playbook::run_git(Command::new("git").arg("-C").arg(&root).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args)).unwrap().status.success(), "{args:?}");
+        g(&["add", "."]);
+        g(&["commit", "-q", "-m", "playbook"]);
+        let pb = Playbook::load(&root).unwrap();
+        let rows = |db: &Db| db.lane_runs("", 50).unwrap();
+
+        let gate = playbook::run_gate(&db, &root, &root, Some("APP-1"), &actor).unwrap();
+        assert!(gate.passed, "{gate:?}");
+        assert_eq!(gate.flaked.len(), 1, "the second command passed on its second run");
+        assert!(!root.join("gate-ran.txt").exists(), "nothing ran in the worktree");
+        assert!(lane_path(&root, &pb, 1).join("gate-ran.txt").exists(), "it ran in the lane");
+        let first = rows(&db);
+        assert_eq!(first.len(), 1);
+        assert_eq!((first[0].kind.as_str(), first[0].command.lines().count()), ("gate", 2));
+        let kinds: Vec<String> = db.timeline("APP-1").unwrap().into_iter().map(|t| t.kind).collect();
+        assert!(kinds.ends_with(&["lane_run".to_string(), "gate_flaked".to_string(), "gate_passed".to_string()]), "{kinds:?}");
+
+        // The same tree again: answered from that run, nothing runs.
+        let again = playbook::run_gate(&db, &root, &root, Some("APP-1"), &actor).unwrap();
+        assert!(again.passed && again.results.iter().all(|r| r.skipped && r.output.contains("not run again")), "{again:?}");
+        assert_eq!(rows(&db).len(), 1, "no new run");
+
+        // Another tree, as land asks: a land request, first in line.
+        std::fs::write(root.join("src/a.txt"), "changed\n").unwrap();
+        let landing = playbook::run_gate_as(&db, &root, &root, Some("APP-1"), &actor, Kind::Land).unwrap();
+        assert!(landing.passed, "{landing:?}");
+        let now = rows(&db);
+        assert_eq!(now.len(), 2);
+        assert_eq!(now[0].kind, "land");
+        let priority: i64 = db.conn.query_row("SELECT priority FROM lane_run WHERE id = ?1", [now[0].id], |r| r.get(0)).unwrap();
+        assert_eq!(priority, 1);
         std::fs::remove_dir_all(base).ok();
     }
 

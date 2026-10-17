@@ -167,6 +167,13 @@ rebase still happens in the agent's worktree (git only), then the rebased head's
 lane, all while land holds its lock. `land` asks for the highest priority, so the land lock is held
 for one lane run, not a cold build. `[gate] retries` (NIT-160) applies in lanes as before.
 
+The whole gate is one request: one switch to the snapshot, then each command that is not skipped,
+in order, each run again on failure up to `[gate] retries` (a pass after a failure is recorded as a
+flake), stopping at the first that keeps failing. The record's `command` is the gate's commands, one
+per line, as the playbook writes them; a later gate of the same tree with the same commands is
+answered from it. The worktree is never set up, made whole (a sparse one) or built for its gate. A
+repo without `[lanes]` gates in the worktree as before (`playbook::run_gate_as`).
+
 ### When a request cannot run
 
 - The snapshot is gone (expired, or the repo was cleaned): the requester gets "snapshot missing",
