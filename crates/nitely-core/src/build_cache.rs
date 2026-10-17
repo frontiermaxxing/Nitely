@@ -32,12 +32,14 @@ pub fn worktrees_folder(pb: &Playbook, repo_root: &Path) -> Option<PathBuf> {
     if fixed.len() == template.split('/').count() {
         return None;
     }
-    let mut folder = repo_root.to_path_buf();
-    for part in fixed {
+    // An absolute template (`D:/worktrees/{key}`, `/srv/wt/{key}`) starts at its own root.
+    let prefix = Path::new(&fixed.join("/")).to_path_buf();
+    let mut folder = if prefix.has_root() { PathBuf::new() } else { repo_root.to_path_buf() };
+    for part in prefix.components() {
         match part {
-            "" | "." => {}
-            ".." => folder = folder.parent()?.to_path_buf(),
-            p => folder.push(p),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => folder = folder.parent()?.to_path_buf(),
+            p => folder.push(p.as_os_str()),
         }
     }
     let same = |a: &Path, b: &Path| crate::paths::normalize(&a.to_string_lossy()) == crate::paths::normalize(&b.to_string_lossy());
@@ -336,6 +338,10 @@ mod tests {
         // Up to the first per-task part, whatever comes after it.
         let by_vendor = playbook("[worktree]\ndir = \"../worktrees/{vendor}/{key}-{slug}\"\n");
         assert_eq!(worktrees_folder(&by_vendor, &repo), Some(base.join("worktrees")));
+        // An absolute one, as on a Dev Drive, keeps its root.
+        let elsewhere = base.join("drive").join("app-worktrees");
+        let absolute = playbook(&format!("[worktree]\ndir = \"{}/{{key}}-{{slug}}\"\n", elsewhere.to_string_lossy().replace('\\', "/")));
+        assert_eq!(worktrees_folder(&absolute, &repo).map(|f| crate::paths::normalize(&f.to_string_lossy())), Some(crate::paths::normalize(&elsewhere.to_string_lossy())));
         std::fs::remove_dir_all(base).ok();
     }
 
