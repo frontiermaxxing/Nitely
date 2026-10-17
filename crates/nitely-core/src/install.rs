@@ -40,6 +40,15 @@ pub fn default_target(from: &Path) -> Option<PathBuf> {
     first_installed(&folders, from, exe).or_else(|| fallback_dir(&folders, cargo, windows_apps).map(|d| d.join(exe)))
 }
 
+/// The `nitely` agents and hooks run: the first on PATH outside Cargo's build folders. Under
+/// `cargo run` (the app's `npm run tauri dev`) Cargo puts its target folders first on PATH, and the
+/// copy there is whatever the last debug build left, often older than the installed one (NIT-193).
+pub fn installed_on_path() -> Option<PathBuf> {
+    let exe = if cfg!(windows) { "nitely.exe" } else { "nitely" };
+    let folders: Vec<PathBuf> = std::env::var_os("PATH").map(|path| std::env::split_paths(&path).collect()).unwrap_or_default();
+    first_installed(&folders, Path::new(""), exe)
+}
+
 /// Where a first install goes: Cargo's install folder when it is on PATH (a machine that builds
 /// Nitely), else the user's WindowsApps folder when it is (Windows puts it on every account's
 /// PATH, so the release installer's copy is found without changing PATH), else Cargo's folder.
@@ -237,6 +246,10 @@ mod tests {
         std::fs::create_dir_all(&tools).unwrap();
         std::fs::write(tools.join(exe), "old").unwrap();
         assert_eq!(first_installed(&[tools.clone(), dir.join("later")], &from, exe), Some(tools.join(exe)));
+        // With no build of its own (the app's keeper looking for the installed copy): Cargo's
+        // profile folder and its deps are still passed over.
+        let keeper = [dir.join("repo/target/release"), dir.join("repo/target/release/deps"), dir.join("bin")];
+        assert_eq!(first_installed(&keeper, Path::new(""), exe), Some(dir.join("bin").join(exe)));
         std::fs::remove_dir_all(dir).ok();
     }
 

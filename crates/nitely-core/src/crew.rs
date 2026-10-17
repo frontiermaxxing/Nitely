@@ -1322,9 +1322,10 @@ pub fn unsupervised(db: &Db, project: &str) -> Result<bool> {
 }
 
 /// The `nitely` the app starts supervisors with: the one on PATH, where `nitely install` puts new
-/// builds, so a supervisor that leaves for a new build is replaced by that build.
+/// builds, so a supervisor that leaves for a new build is replaced by that build. Never one in
+/// Cargo's build folders, which `cargo run` puts first on PATH (NIT-193).
 pub fn nitely_on_path() -> Option<PathBuf> {
-    on_path("nitely")
+    crate::install::installed_on_path()
 }
 
 /// Starts `nitely crew run --managed` for `project` in the background, apart from the caller: no
