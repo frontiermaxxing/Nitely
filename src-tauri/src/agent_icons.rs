@@ -4,7 +4,7 @@
 //! in the app data dir. An agent with nothing installed keeps its lettered mark.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 /// Icons are read again after this long, so an updated app's new icon shows up.
@@ -13,7 +13,14 @@ const REFRESH: Duration = Duration::from_secs(7 * 24 * 3600);
 const SIZE: u32 = 64;
 
 /// Where an agent's icon may come from, most specific first: shell parsing names, either a
-/// program's path or `shell:AppsFolder\<app id>` for an app installed from the Store.
+/// program's path or `shell:AppsFolder\<app id>` for an app installed from the Store. Windows
+/// only: elsewhere `read` reads nothing yet, so there is nowhere to look.
+#[cfg(not(windows))]
+fn sources(_vendor: &str) -> Vec<String> {
+    Vec::new()
+}
+
+#[cfg(windows)]
 fn sources(vendor: &str) -> Vec<String> {
     let mut out = Vec::new();
     match vendor {
@@ -36,7 +43,7 @@ fn sources(vendor: &str) -> Vec<String> {
             for base in ["LOCALAPPDATA", "ProgramFiles"] {
                 if let Some(b) = std::env::var_os(base) {
                     let sub = if base == "LOCALAPPDATA" { "Programs\\cursor" } else { "cursor" };
-                    out.push(PathBuf::from(b).join(sub).join("Cursor.exe").to_string_lossy().into_owned());
+                    out.push(std::path::PathBuf::from(b).join(sub).join("Cursor.exe").to_string_lossy().into_owned());
                 }
             }
         }
@@ -48,6 +55,7 @@ fn sources(vendor: &str) -> Vec<String> {
 }
 
 /// The full paths of `file` in each folder on PATH.
+#[cfg(windows)]
 fn on_path(file: &str) -> Vec<String> {
     std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).map(|d| d.join(file)).filter(|f| f.is_file()).map(|f| f.to_string_lossy().into_owned()).collect())
@@ -185,6 +193,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn every_agent_has_somewhere_to_look_and_unknown_ones_none() {
         for v in ["claude", "codex", "cursor"] {
             assert!(!sources(v).is_empty(), "{v}");
