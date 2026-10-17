@@ -5,7 +5,7 @@
 //! the land with the rebase left in progress for the branch's owner.
 
 use anyhow::{bail, Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -18,7 +18,8 @@ use crate::submit::patch_id;
 const LOCK_STALE_SECS: u64 = 60 * 60;
 pub const LOCK_FILE: &str = "nitely-land.lock";
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Landed {
     pub issue: String,
     pub branch: String,
@@ -44,9 +45,12 @@ pub struct Landed {
     pub error: Option<String>,
     /// The integration branch's head before this land, to tell what landed.
     #[serde(skip)]
-    landed_from: Option<String>,
+    pub(crate) landed_from: Option<String>,
     /// Issues that waited on this one and have no open blocker left.
     pub unblocked: Vec<String>,
+    /// Landed (or sent back) through the land queue: the run and what it went with.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batch: Option<crate::land_queue::BatchNote>,
 }
 
 pub struct LandOptions<'a> {
@@ -66,11 +70,14 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
     let issue = db.issue(opts.issue_key)?.with_context(|| format!("no issue {}", opts.issue_key))?;
     let root = playbook::repo_for_issue(config, issue.project.as_deref(), opts.dir)?;
     let pb = Playbook::load(&root)?;
+    // With `[land] batch`, a change that may land with others waits in the queue (land_queue.rs).
+    if crate::land_queue::lands_alone(db, &pb, &issue.key)?.is_none() {
+        return crate::land_queue::land(db, &root, &issue.key, opts, actor);
+    }
     let base = pb.integration_branch().to_string();
     let mut report = Landed { issue: issue.key.clone(), base: base.clone(), ..Default::default() };
 
-    let common = PathBuf::from(git(&root, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?.trim());
-    let lock = Lock::take(&common.join(LOCK_FILE), &issue.key, opts.break_lock)?;
+    let lock = Lock::take(&lock_path(&root)?, &issue.key, opts.break_lock)?;
     let result = run(db, &root, &pb, &issue.key, opts, actor, &mut report);
     // Still under the lock, so the next land cannot change the main checkout mid-build; and, in
     // large-repo mode, with the checkout held from build requests.
@@ -83,33 +90,49 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
     drop(lock);
 
     match result {
-        Ok(()) => {
-            let evidence = format!(
-                "Landed on {base} at {}; gate passed ({}).",
-                report.head.as_deref().unwrap_or("?"),
-                report.gate.as_ref().map(|g| g.results.iter().map(|r| r.command.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default()
-            );
-            db.log_event(actor, Some(&issue.key), None, "landed", &format!("Landed {} on {base} at {}", report.branch, report.head.as_deref().unwrap_or("?")))?;
-            if issue.origin == "nitely" && issue.state != "Done" {
-                db.move_issue(&issue.key, "Done", Some(&evidence), None, actor)?;
-            }
-            for waiting in &issue.blocks {
-                if db.issue(waiting)?.is_some_and(|i| i.blocked_by.is_empty()) {
-                    report.unblocked.push(waiting.clone());
-                }
-            }
-        }
-        Err(e) => {
-            let msg = format!("{e:#}");
-            db.log_event(actor, Some(&issue.key), None, "land_failed", &format!("Land stopped: {}", msg.lines().next().unwrap_or("")))?;
-            // An approval the app did not sign goes back to the person, so they can approve it again.
-            if msg.contains(crate::approval::UNSIGNED) && db.issue(&issue.key)?.is_some_and(|i| i.state == "Approved") {
-                db.move_issue(&issue.key, "Needs You", None, None, actor)?;
-            }
-            report.error = Some(msg);
-        }
+        Ok(()) => record_landed(db, &issue, &mut report, actor)?,
+        Err(e) => record_stopped(db, &issue.key, &format!("{e:#}"), &mut report, actor)?,
     }
     Ok(report)
+}
+
+/// What a land that went through does to its issue: the landed event, Done with the gate as
+/// evidence, and the issues it unblocked.
+pub(crate) fn record_landed(db: &mut Db, issue: &IssueRecord, report: &mut Landed, actor: &Actor) -> Result<()> {
+    let base = report.base.clone();
+    let evidence = format!(
+        "Landed on {base} at {}; gate passed ({}).",
+        report.head.as_deref().unwrap_or("?"),
+        report.gate.as_ref().map(|g| g.results.iter().map(|r| r.command.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default()
+    );
+    db.log_event(actor, Some(&issue.key), None, "landed", &format!("Landed {} on {base} at {}", report.branch, report.head.as_deref().unwrap_or("?")))?;
+    if issue.origin == "nitely" && issue.state != "Done" {
+        db.move_issue(&issue.key, "Done", Some(&evidence), None, actor)?;
+    }
+    for waiting in &issue.blocks {
+        if db.issue(waiting)?.is_some_and(|i| i.blocked_by.is_empty()) {
+            report.unblocked.push(waiting.clone());
+        }
+    }
+    Ok(())
+}
+
+/// What a land that stopped does to its issue: the event, and an unsigned approval back to the
+/// person.
+pub(crate) fn record_stopped(db: &mut Db, key: &str, msg: &str, report: &mut Landed, actor: &Actor) -> Result<()> {
+    db.log_event(actor, Some(key), None, "land_failed", &format!("Land stopped: {}", msg.lines().next().unwrap_or("")))?;
+    // An approval the app did not sign goes back to the person, so they can approve it again.
+    if msg.contains(crate::approval::UNSIGNED) && db.issue(key)?.is_some_and(|i| i.state == "Approved") {
+        db.move_issue(key, "Needs You", None, None, actor)?;
+    }
+    report.error = Some(msg.to_string());
+    Ok(())
+}
+
+/// The repo's land lock file, in its common git dir.
+pub(crate) fn lock_path(root: &Path) -> Result<PathBuf> {
+    let common = PathBuf::from(git(root, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?.trim());
+    Ok(common.join(LOCK_FILE))
 }
 
 /// Who Nitely lands as when it lands a change itself, not the agent that wrote it.
@@ -257,7 +280,7 @@ fn lock_age(root: &Path) -> Option<u64> {
 /// The playbook's `[land] after` steps that match what landed. A failure is a warning. Then, when
 /// a dependency file landed that no after step took care of, a warning that the main checkout's
 /// setup is stale: land fast-forwards it but never runs setup there (NIT-81).
-fn after_land(root: &Path, pb: &Playbook, report: &mut Landed) {
+pub(crate) fn after_land(root: &Path, pb: &Playbook, report: &mut Landed) {
     // What landed, from the head before the fast-forward. When that cannot be told, every step
     // runs: skipping a needed one silently is worse than running one more.
     let files: Option<Vec<String>> = report
@@ -318,26 +341,11 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
         bail!("the main checkout {} is on {current}, not {base}; land only writes {base}", root.display());
     }
 
-    // The branch: the one the issue's worktree has, else the only local branch that names the issue.
-    let worktrees = list_worktrees(root)?;
-    let named = |b: &str| crate::git::parse_branch(b).1.is_some_and(|k| k.eq_ignore_ascii_case(key));
-    let branch = match worktrees.iter().filter(|(_, b)| b.as_deref().is_some_and(named)).count() {
-        1 => worktrees.iter().find_map(|(_, b)| b.clone().filter(|b| named(b))).unwrap(),
-        0 => {
-            let branches: Vec<String> = git(root, &["branch", "--format=%(refname:short)"])?.lines().filter(|b| named(b)).map(str::to_string).collect();
-            match branches.as_slice() {
-                [one] => one.clone(),
-                [] => bail!("no local branch names {key}"),
-                many => bail!("several branches name {key}: {}", many.join(", ")),
-            }
-        }
-        _ => bail!("several worktrees have a branch that names {key}"),
-    };
+    let (branch, found) = branch_of(root, key)?;
     report.branch = branch.clone();
 
-    let (worktree, temporary) = match worktrees.iter().find(|(_, b)| b.as_deref() == Some(branch.as_str())) {
-        Some((path, _)) if same_path(path, root) => bail!("{branch} is checked out in the main checkout"),
-        Some((path, _)) => (path.clone(), false),
+    let (worktree, temporary) = match found {
+        Some(path) => (path, false),
         None => {
             let path = root.parent().unwrap_or(root).join(format!("{}-land-{}", file_name(root), key.to_lowercase()));
             git(root, &["worktree", "add", &path.to_string_lossy(), &branch])?;
@@ -345,13 +353,7 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
         }
     };
     let wt = worktree.to_string_lossy().into_owned();
-    if rebase_in_progress(&worktree) {
-        bail!("a rebase is in progress in {wt}; finish it (git rebase --continue) or abort it, then land again");
-    }
-    let dirty = git(&worktree, &["status", "--porcelain", "--untracked-files=no", "--ignore-submodules=all"])?;
-    if !dirty.trim().is_empty() {
-        bail!("{wt} has uncommitted changes to tracked files; commit them on {branch} first:\n{}", dirty.trim_end());
-    }
+    check_worktree(&worktree, &branch)?;
 
     let before = rev(root, &base)?;
     if git(root, &["merge-base", "--is-ancestor", &base, &branch]).is_err() {
@@ -371,7 +373,7 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
     }
 
     let head = rev(root, &branch)?;
-    report.approval = Some(check_approval(db, pb, key, &worktree, &base)?);
+    report.approval = Some(check_approval(db, pb, key, &worktree, &base, &branch)?);
     let project = db.issue(key)?.and_then(|i| i.project);
     crate::private_terms::check(project.as_deref(), &worktree, &base)?;
 
@@ -447,9 +449,47 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
     Ok(())
 }
 
+/// The issue's branch, and the worktree it is checked out in: the one the issue's worktree has,
+/// else the only local branch that names the issue.
+pub(crate) fn branch_of(root: &Path, key: &str) -> Result<(String, Option<PathBuf>)> {
+    let worktrees = list_worktrees(root)?;
+    let named = |b: &str| crate::git::parse_branch(b).1.is_some_and(|k| k.eq_ignore_ascii_case(key));
+    let branch = match worktrees.iter().filter(|(_, b)| b.as_deref().is_some_and(named)).count() {
+        1 => worktrees.iter().find_map(|(_, b)| b.clone().filter(|b| named(b))).unwrap(),
+        0 => {
+            let branches: Vec<String> = git(root, &["branch", "--format=%(refname:short)"])?.lines().filter(|b| named(b)).map(str::to_string).collect();
+            match branches.as_slice() {
+                [one] => one.clone(),
+                [] => bail!("no local branch names {key}"),
+                many => bail!("several branches name {key}: {}", many.join(", ")),
+            }
+        }
+        _ => bail!("several worktrees have a branch that names {key}"),
+    };
+    match worktrees.into_iter().find(|(_, b)| b.as_deref() == Some(branch.as_str())) {
+        Some((path, _)) if same_path(&path, root) => bail!("{branch} is checked out in the main checkout"),
+        Some((path, _)) => Ok((branch, Some(path))),
+        None => Ok((branch, None)),
+    }
+}
+
+/// A worktree's state that stops a land: a rebase in progress, or uncommitted changes to tracked files.
+pub(crate) fn check_worktree(worktree: &Path, branch: &str) -> Result<()> {
+    let wt = worktree.to_string_lossy();
+    if rebase_in_progress(worktree) {
+        bail!("a rebase is in progress in {wt}; finish it (git rebase --continue) or abort it, then land again");
+    }
+    let dirty = git(worktree, &["status", "--porcelain", "--untracked-files=no", "--ignore-submodules=all"])?;
+    if !dirty.trim().is_empty() {
+        bail!("{wt} has uncommitted changes to tracked files; commit them on {branch} first:\n{}", dirty.trim_end());
+    }
+    Ok(())
+}
+
 /// A branch lands with a passing review of exactly what it changes, and, when a human must
-/// approve, with that approval given in Nitely after the review.
-fn check_approval(db: &Db, pb: &Playbook, key: &str, worktree: &Path, base: &str) -> Result<String> {
+/// approve, with that approval given in Nitely after the review. `worktree` holds the change at
+/// HEAD on top of `base`; `branch` is the issue's branch, whose name says its vendor.
+pub(crate) fn check_approval(db: &Db, pb: &Playbook, key: &str, worktree: &Path, base: &str, branch: &str) -> Result<String> {
     let patch = patch_id(worktree, base)?;
     let review = db.reviews(key)?.into_iter().next().with_context(|| format!("{key} has no review; submit it first"))?;
     if review.patch_id != patch {
@@ -479,7 +519,6 @@ fn check_approval(db: &Db, pb: &Playbook, key: &str, worktree: &Path, base: &str
     }
     // A cross-vendor requirement added after the review still applies, judged from the branch.
     if !review.reviewer.is_empty() {
-        let branch = git(worktree, &["rev-parse", "--abbrev-ref", "HEAD"])?;
         let vendor = crate::git::parse_branch(branch.trim()).0.unwrap_or_default();
         if let Some(reason) = pb.review.independence_reason(&review.reviewer, &vendor, &review.note).filter(|r| !reasons.contains(r)) {
             reasons.push(reason);
@@ -623,9 +662,22 @@ The merged branch was kept; delete it with `git branch -d` once the folder is go
     ))
 }
 
-struct Lock(PathBuf);
+pub(crate) struct Lock(PathBuf);
 
 impl Lock {
+    /// The lock, or None when another land holds it (a stale one is broken with `break_lock`).
+    pub(crate) fn try_take(path: &Path, holder: &str, break_lock: bool) -> Result<Option<Lock>> {
+        if path.exists() && !break_lock {
+            return Ok(None);
+        }
+        match Lock::take(path, holder, break_lock) {
+            Ok(lock) => Ok(Some(lock)),
+            // Taken by another between the look and the take.
+            Err(_) if path.exists() => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     fn take(path: &Path, holder: &str, break_lock: bool) -> Result<Lock> {
         if path.exists() {
             let held = std::fs::read_to_string(path).unwrap_or_default();
@@ -675,7 +727,7 @@ fn rebase_in_progress(worktree: &Path) -> bool {
         .is_ok_and(|paths| paths.lines().any(|p| !p.trim().is_empty() && Path::new(p.trim()).exists()))
 }
 
-fn rev(dir: &Path, name: &str) -> Result<String> {
+pub(crate) fn rev(dir: &Path, name: &str) -> Result<String> {
     Ok(git(dir, &["rev-parse", "--verify", &format!("{name}^{{commit}}")])?.trim().to_string())
 }
 
@@ -691,7 +743,7 @@ fn short(s: &str) -> &str {
     &s[..s.len().min(12)]
 }
 
-fn first_line(e: &anyhow::Error) -> String {
+pub(crate) fn first_line(e: &anyhow::Error) -> String {
     format!("{e:#}").lines().next().unwrap_or("").to_string()
 }
 

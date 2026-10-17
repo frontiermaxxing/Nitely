@@ -8,7 +8,7 @@ use std::path::Path;
 
 /// A process using a folder, by name and pid only: its command line is matched but never kept,
 /// since it can carry a token or password.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Holder {
     pub pid: u32,
     pub name: String,

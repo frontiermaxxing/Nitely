@@ -245,6 +245,38 @@ at once. The queue runs under the land lock, one run at a time:
 The person's approvals stay per change: a batch never lands a change that was not approved on its
 own, and the app signs each approved patch, as today.
 
+### As built (NIT-215)
+
+`crates/nitely-core/src/land_queue.rs`, with `[land] batch = "waiting"` or `"all"`:
+
+- **Who queues.** `land` puts the change in the repo's queue (`land_queue`, one row per change) when
+  the playbook batches, the repo has `[lanes]`, it is not in large-repo mode, and the change needs no
+  person's approval (its review's approver is not "human" and it names no approval reasons). Those
+  land alone, as before, so approvals are given and signed per change.
+- **Who runs it.** No resident process. Whichever `land` call finds the land lock free runs the
+  queue until nothing waits, landing other agents' changes too. The others wait on their own row and
+  return once it landed or was sent back, or after 20 minutes saying it is still waiting. Landing
+  again then finds the same row, not a second one. A run that died leaves its rows `running`; the
+  next run, under the lock, queues them again.
+- **Stacking.** The stack is built in its own worktree, `<lanes dir>/stack`, by rebasing each branch
+  head onto the tip before it there. An agent's branch is moved only when its change lands, so a
+  change sent back keeps the branch it handed in. A conflict says "conflicts with main or with
+  NIT-x, landing just before it". A change whose patch no longer matches its review ("changed since
+  its review") goes back for a new submit.
+- **The gate** runs once at the tip, as a land request in a build lane, with the playbook's retries.
+- **Bisecting.** On a failure, the guess comes first. If exactly one change touches a file the
+  failing output names (the echoed `$ command` lines do not count), the others are stacked again
+  without it and gated; if that passes, they land and it goes back. Otherwise the run halves, gating
+  prefixes: the shortest failing prefix ends with the bad change. The prefix before it lands, the bad
+  change goes back with the failing gate's output, and the changes after it wait for the next run.
+- **Landing.** The rebased heads are pushed to their PR branches first. Then main is fast-forwarded
+  to the tip and pushed once, the `[[land.after]]` steps run once, and each change is landed as land
+  lands one: issue Done, branch moved to what landed, worktree cleaned up. If main moved during the
+  gate, nothing lands from that stack and its changes wait for the next run.
+- **Records.** `land_run` holds one row per run: changes in stack order, landed, sent back, gates,
+  head. Each change's land result (with `batch`: run, the changes it went with, gates) is on its
+  `land_queue` row, and its events are on its issue's timeline.
+
 ## Asynchronous submit, weighed against batching
 
 [NIT-212](nitely://issue/NIT-212) turns `submit` into a handover: it records the submission and

@@ -428,7 +428,12 @@ pub fn describe(issue: &IssueRecord, s: &Submitted, land_by: crate::playbook::La
 
 /// The diff's stable id: the same change rebased onto a newer base keeps its id.
 pub fn patch_id(worktree: &Path, base: &str) -> Result<String> {
-    let diff = git(worktree, &["diff", "-U0", &format!("{base}...HEAD")])?;
+    patch_id_range(worktree, base, "HEAD")
+}
+
+/// The patch-id of what `head` changes since it left `base` (`base...head`), as `patch_id`.
+pub fn patch_id_range(worktree: &Path, base: &str, head: &str) -> Result<String> {
+    let diff = git(worktree, &["diff", "-U0", &format!("{base}...{head}")])?;
     if diff.is_empty() {
         return Ok("empty".into());
     }

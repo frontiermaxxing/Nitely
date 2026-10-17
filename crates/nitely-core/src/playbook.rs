@@ -53,6 +53,58 @@ pub struct LandRules {
     /// rebuild and install a tool the agents use). A failure is a warning: the land stands.
     #[serde(default)]
     pub after: Vec<GateStep>,
+    /// Landing changes together (docs/batching.md, "The land queue"): `off` lands each alone;
+    /// `waiting` queues a change while a land runs and lands what waited together, gated once;
+    /// `all` also waits `batch_window` for more.
+    #[serde(default)]
+    pub batch: LandBatch,
+    /// With `batch = "all"`: how long a queue run waits for more changes, e.g. "5m" ("0": none).
+    #[serde(default)]
+    pub batch_window: Option<String>,
+    /// Changes per queue run (default 5).
+    #[serde(default)]
+    pub batch_max: Option<u32>,
+}
+
+/// How a project lands reviewed changes: one at a time, or together in a queue.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LandBatch {
+    /// Each change lands on its own, as it always has.
+    #[default]
+    Off,
+    /// A change that arrives while a land runs waits, and what waited lands together.
+    Waiting,
+    /// As `Waiting`, and a queue run also waits `batch_window` for more.
+    All,
+}
+
+impl LandRules {
+    /// Changes per queue run.
+    pub fn batch_max(&self) -> usize {
+        self.batch_max.filter(|n| *n > 0).unwrap_or(5) as usize
+    }
+
+    /// How long a queue run waits for more changes: only with `batch = "all"`.
+    pub fn batch_window(&self) -> std::time::Duration {
+        let secs = match (self.batch, self.batch_window.as_deref()) {
+            (LandBatch::All, Some(w)) => duration_secs(w).unwrap_or(0),
+            _ => 0,
+        };
+        std::time::Duration::from_secs(secs)
+    }
+}
+
+/// "90s", "5m", "2h" or a plain number of seconds, as seconds.
+fn duration_secs(text: &str) -> Option<u64> {
+    let t = text.trim();
+    let (n, unit) = match t.char_indices().last()? {
+        (i, 's') => (&t[..i], 1),
+        (i, 'm') => (&t[..i], 60),
+        (i, 'h') => (&t[..i], 3600),
+        _ => (t, 1),
+    };
+    n.trim().parse::<u64>().ok().map(|n| n * unit)
 }
 
 /// Who lands a change once its review passes.
@@ -256,7 +308,7 @@ fn one() -> u32 {
 }
 
 /// A gate command that failed and then passed at the same commit.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Flake {
     pub command: String,
     /// The tests the failed runs named (cargo's `test x ... FAILED` and closing `failures:` list,
@@ -948,7 +1000,7 @@ pub struct Started {
     pub reference: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandResult {
     pub command: String,
     pub ok: bool,
@@ -959,20 +1011,20 @@ pub struct CommandResult {
     pub skipped: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GateResult {
     pub passed: bool,
     pub commit: String,
     pub results: Vec<CommandResult>,
     /// Playbook keys this nitely ignored.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
     /// Commands that failed and then passed on a later run (`[gate] retries`): the gate passed,
     /// but these tests are flaky.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub flaked: Vec<Flake>,
     /// The build lane run it was (or the earlier run that answered it), when it ran in a lane.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lane_run: Option<i64>,
 }
 

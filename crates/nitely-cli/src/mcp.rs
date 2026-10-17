@@ -284,7 +284,7 @@ fn tools() -> Value {
         },
         {
             "name": "land",
-            "description": "Land a submitted issue on the integration branch: one land at a time, rebase onto the integration branch, check that the review covers exactly this change (and that the human approved it when the playbook says so), run the gate, fast-forward, push, clean up the worktree, and move the issue to Done. A rebase conflict is left in progress for you to resolve.",
+            "description": "Land a submitted issue on the integration branch: one land at a time, rebase onto the integration branch, check that the review covers exactly this change (and that the human approved it when the playbook says so), run the gate, fast-forward, push, clean up the worktree, and move the issue to Done. A rebase conflict is left in progress for you to resolve. With `[land] batch` in the playbook, a change that arrives while another land runs waits in the repo's land queue and lands together with what else waited (stacked, gated once in a build lane, pushed once); land returns once it landed or was sent back with why.",
             "inputSchema": { "type": "object", "required": ["key"], "properties": {
                 "key": { "type": "string" }
             } }
