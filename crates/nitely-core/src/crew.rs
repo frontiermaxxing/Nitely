@@ -184,14 +184,54 @@ pub struct CleanUp {
     pub worktree: PathBuf,
     pub branch: String,
     pub log: PathBuf,
+    /// The issue and the crew's actor the outcome is recorded under, and the worker's agent.
+    pub issue: String,
+    pub actor: String,
+    pub agent: String,
+    pub timeout_minutes: u64,
 }
 
 /// Land's cleanup of a worktree it kept for a crew worker: the playbook's teardown, `git worktree
 /// remove` without force (a dirty worktree stays), `git branch -d` (an unmerged branch stays).
-/// Returns what it did, in words. `nitely crew clean-up` runs it for the supervisor.
+/// Only a worktree git lists for `repo`, on `branch`, is touched: anything else is refused, since
+/// land's last resort deletes what git would not. Returns what it did, in words.
 pub fn clean_up_worktree(repo: &Path, worktree: &Path, branch: &str) -> Result<String> {
+    let listed = playbook::git(repo, &["worktree", "list", "--porcelain"])?;
+    let wanted = crate::paths::normalize(&worktree.to_string_lossy());
+    let mut on: Option<String> = None;
+    let mut path_matches = false;
+    for line in listed.lines().chain(std::iter::once("")) {
+        if let Some(p) = line.strip_prefix("worktree ") {
+            path_matches = crate::paths::normalize(p) == wanted;
+        } else if let Some(b) = line.strip_prefix("branch refs/heads/") {
+            if path_matches {
+                on = Some(b.trim().to_string());
+            }
+        } else if line.is_empty() {
+            path_matches = false;
+        }
+    }
+    if on.as_deref() != Some(branch) {
+        bail!("{} is not a worktree of {} on {branch}, so it is left alone", worktree.display(), repo.display());
+    }
     let pb = Playbook::load(repo)?;
     Ok(crate::land::cleanup(repo, &pb, worktree, branch, false, false).0)
+}
+
+/// Runs `clean_up_worktree` for the crew, stopping waiting after `timeout_minutes` (a teardown that
+/// hangs), and records how it went on the issue itself, so the outcome is kept whether or not a
+/// supervisor is still there to see it. Returns the words recorded.
+pub fn clean_up_and_report(db: &Db, job: &CleanUp) -> Result<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (repo, worktree, branch) = (job.repo.clone(), job.worktree.clone(), job.branch.clone());
+    std::thread::spawn(move || tx.send(clean_up_worktree(&repo, &worktree, &branch).map_err(|e| format!("{e:#}"))).ok());
+    let said = match rx.recv_timeout(std::time::Duration::from_secs(job.timeout_minutes.max(1) * 60)) {
+        Ok(Ok(said)) => said,
+        Ok(Err(why)) => why,
+        Err(_) => format!("its removal ran past {} minutes (crew.setup_timeout_minutes); {} is left as it is", job.timeout_minutes.max(1), job.worktree.display()),
+    };
+    db.log_event(&Actor::Agent(job.actor.clone()), Some(&job.issue), None, "crew_cleaned", &format!("After the {} worker left: {said}", job.agent))?;
+    Ok(said)
 }
 
 /// What `Agents::prepare` needs: `nitely start <key> --agent <vendor>` in the repo, output to `log`.
@@ -252,7 +292,6 @@ struct Cleaning {
     agent: String,
     worktree: PathBuf,
     since: i64,
-    log: PathBuf,
     process: Box<dyn Process>,
 }
 
@@ -938,9 +977,20 @@ impl Supervisor {
         let Ok(branch) = playbook::git(&w.worktree, &["rev-parse", "--abbrev-ref", "HEAD"]) else { return Ok(()) };
         let ts = (self.clock)().ts;
         let log = self.dir.join(&self.project).join(format!("{ts}-{}-cleanup.log", w.issue.to_lowercase()));
-        let job = CleanUp { nitely: self.nitely.clone(), repo: self.repo_root.clone(), worktree: w.worktree.clone(), branch: branch.trim().to_string(), log: log.clone() };
+        let timeout_minutes = Playbook::load(&self.repo_root).map(|p| p.crew.setup_timeout_minutes).unwrap_or(30);
+        let job = CleanUp {
+            nitely: self.nitely.clone(),
+            repo: self.repo_root.clone(),
+            worktree: w.worktree.clone(),
+            branch: branch.trim().to_string(),
+            log: log.clone(),
+            issue: w.issue.clone(),
+            actor: self.actor().id().to_string(),
+            agent: w.agent.clone(),
+            timeout_minutes,
+        };
         match self.agents.clean_up(&job) {
-            Ok(process) => self.cleaning.push(Cleaning { issue: w.issue.clone(), agent: w.agent.clone(), worktree: w.worktree.clone(), since: ts, log, process }),
+            Ok(process) => self.cleaning.push(Cleaning { issue: w.issue.clone(), agent: w.agent.clone(), worktree: w.worktree.clone(), since: ts, process }),
             Err(e) => db.log_event(&self.actor(), Some(&w.issue), None, "crew_cleaned", &format!("Could not start removing {}: {e:#}", w.worktree.display()))?,
         }
         Ok(())
@@ -948,31 +998,33 @@ impl Supervisor {
 
     /// Records the worktree removals that finished, and stops one past `setup_timeout_minutes`
     /// (a teardown that hangs), leaving its worktree for a person.
+    /// Forgets the removals that ended (each records its own outcome on the issue), and stops one
+    /// a minute past `setup_timeout_minutes`, after its own limit should have ended it, with
+    /// everything it started.
     fn finish_cleanups(&mut self, db: &mut Db, rules: &CrewRules) -> Result<()> {
-        let deadline = rules.setup_timeout_minutes.max(1) as i64 * 60;
+        let deadline = (rules.setup_timeout_minutes.max(1) as i64 + 1) * 60;
         let now = (self.clock)().ts;
         let mut i = 0;
         while i < self.cleaning.len() {
-            let done = match self.cleaning[i].process.exited() {
-                Ok(Some(_)) | Err(_) => None,
+            match self.cleaning[i].process.exited() {
+                Ok(Some(_)) | Err(_) => {
+                    self.cleaning.remove(i);
+                }
                 Ok(None) if now - self.cleaning[i].since > deadline => {
-                    self.cleaning[i].process.stop();
-                    Some(format!("its removal ran past {} minutes (crew.setup_timeout_minutes) and was stopped", deadline / 60))
+                    let mut c = self.cleaning.remove(i);
+                    c.process.stop();
+                    let why = format!("its removal ran past {} minutes and was stopped; {} is left as it is", deadline / 60, c.worktree.display());
+                    db.log_event(&self.actor(), Some(&c.issue), None, "crew_cleaned", &format!("After the {} worker left: {why}", c.agent))?;
                 }
-                Ok(None) => {
-                    i += 1;
-                    continue;
-                }
-            };
-            let c = self.cleaning.remove(i);
-            let said = std::fs::read_to_string(&c.log).unwrap_or_default();
-            let message = match done {
-                Some(why) => format!("{why}; {} is left as it is", c.worktree.display()),
-                None => said.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("removal ended without a word").trim().to_string(),
-            };
-            db.log_event(&self.actor(), Some(&c.issue), None, "crew_cleaned", &format!("After the {} worker left: {message}", c.agent))?;
+                Ok(None) => i += 1,
+            }
         }
         Ok(())
+    }
+
+    /// Worktree removals still running: a stopping supervisor waits for them.
+    pub fn cleaning(&self) -> usize {
+        self.cleaning.len()
     }
 
     /// Failures count from the last time a person moved the issue or answered the crew about it.
@@ -1662,6 +1714,7 @@ impl Agents for SystemAgents {
         let program = self.resolve(&job.nitely).unwrap_or_else(|| job.nitely.clone());
         let mut cmd = std::process::Command::new(program);
         cmd.args(["crew", "clean-up", "--repo"]).arg(&job.repo).arg("--worktree").arg(&job.worktree).args(["--branch", &job.branch]);
+        cmd.args(["--issue", &job.issue, "--actor", &job.actor, "--agent", &job.agent, "--timeout-minutes", &job.timeout_minutes.to_string()]);
         cmd.current_dir(&job.repo).stdin(Stdio::null()).stdout(Stdio::from(log.try_clone()?)).stderr(Stdio::from(log));
         #[cfg(windows)]
         {
@@ -1895,9 +1948,8 @@ mod tests {
             let pid = 7000 + self.cleanups.borrow().len() as u32;
             self.cleanups.borrow_mut().push(job.worktree.clone());
             if !self.hang_cleanup {
-                let said = clean_up_worktree(&job.repo, &job.worktree, &job.branch)?;
-                std::fs::create_dir_all(job.log.parent().unwrap()).ok();
-                std::fs::write(&job.log, format!("{said}\n")).unwrap();
+                let db = Db::open(self.db.as_ref().expect("the fixture sets the database")).unwrap();
+                clean_up_and_report(&db, job)?;
                 self.exits.borrow_mut().insert(pid, 0);
             }
             Ok(Box::new(FakeProcess { pid, exits: self.exits.clone(), stopped: self.stopped.clone() }))
@@ -2446,11 +2498,11 @@ workers = 1
         let tick = sup.tick(&mut f.db, false).unwrap();
         assert_eq!(*fake.cleanups.borrow(), [worktree.clone()]);
         assert_eq!(tick.started.iter().map(|w| w.issue.as_str()).collect::<Vec<_>>(), ["NIT-2"], "the crew goes on meanwhile");
-        clock.set(Moment { ts: NOON.ts + 6 * 60, ..NOON });
+        clock.set(Moment { ts: NOON.ts + 7 * 60, ..NOON });
         sup.tick(&mut f.db, false).unwrap();
         assert!(fake.stopped.borrow().contains(&7000));
         let note = f.db.timeline("NIT-1").unwrap().into_iter().rev().find(|t| t.kind == "crew_cleaned").unwrap();
-        assert!(note.summary.unwrap().contains("ran past 5 minutes"));
+        assert!(note.summary.unwrap().contains("ran past 6 minutes"), "its own limit plus a minute");
         assert!(worktree.exists(), "left for a person");
 
         // Landed with --keep: nothing is removed.
@@ -2463,6 +2515,22 @@ workers = 1
         land_and_exit(&mut f, "NIT-1", 1001, &fake);
         sup.tick(&mut f.db, false).unwrap();
         assert!(fake.cleanups.borrow().is_empty() && worktree.exists());
+    }
+
+    #[test]
+    fn clean_up_touches_only_a_listed_worktree_on_its_branch() {
+        let f = fixture(GATE);
+        let git = |args: &[&str]| assert!(crate::playbook::run_git(Command::new("git").arg("-C").arg(&f.repo).args(args)).unwrap().status.success(), "{args:?}");
+        let wt = f.base.join("wt").join("nit-1");
+        git(&["worktree", "add", "-q", "-b", "claude/nit-1-first", &wt.to_string_lossy()]);
+        let stray = f.base.join("wt").join("not-a-worktree");
+        std::fs::create_dir_all(&stray).unwrap();
+        std::fs::write(stray.join("keep.txt"), "mine").unwrap();
+        assert!(clean_up_worktree(&f.repo, &stray, "claude/nit-1-first").is_err());
+        assert!(stray.join("keep.txt").exists(), "an ordinary folder is never deleted");
+        assert!(clean_up_worktree(&f.repo, &wt, "main").is_err(), "nor a worktree on another branch");
+        assert_eq!(clean_up_worktree(&f.repo, &wt, "claude/nit-1-first").unwrap(), "removed the worktree and the merged branch");
+        assert!(!wt.exists());
     }
 
     #[test]

@@ -64,6 +64,15 @@ pub enum CrewCmd {
         worktree: PathBuf,
         #[arg(long)]
         branch: String,
+        /// The issue to record the outcome on, and the crew's actor it is recorded under.
+        #[arg(long)]
+        issue: String,
+        #[arg(long)]
+        actor: String,
+        #[arg(long)]
+        agent: String,
+        #[arg(long, default_value_t = 30)]
+        timeout_minutes: u64,
     },
 }
 
@@ -78,9 +87,12 @@ pub fn run(cmd: CrewCmd, me: &Actor) -> Result<()> {
             println!("paused the {project} crew: running workers finish, no new ones start");
             Ok(())
         }
-        CrewCmd::CleanUp { repo, worktree, branch } => {
-            println!("{}", crew::clean_up_worktree(&repo, &worktree, &branch)?);
-            Ok(())
+        CrewCmd::CleanUp { repo, worktree, branch, issue, actor, agent, timeout_minutes } => {
+            let log = PathBuf::new();
+            let job = crew::CleanUp { nitely: String::new(), repo, worktree, branch, log, issue, actor, agent, timeout_minutes };
+            println!("{}", crew::clean_up_and_report(&db, &job)?);
+            // Past the limit a teardown may still run in its thread: leave without waiting for it.
+            std::process::exit(0);
         }
         CrewCmd::Resume { project } => {
             let project = resolve_project(&config, &db, project.as_deref(), &cwd)?;
@@ -217,7 +229,7 @@ fn supervise(db: &mut Db, project: &str, root: PathBuf, once: bool, managed: boo
             }
             break;
         }
-        if pressed >= 1 && sup.running() == 0 {
+        if pressed >= 1 && sup.running() == 0 && sup.cleaning() == 0 {
             break;
         }
         if managed {
