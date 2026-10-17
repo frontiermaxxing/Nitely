@@ -92,8 +92,15 @@ pub fn sanitize_with_home(text: &str, roots: &[String], home: Option<&str>) -> S
     // Windows (C:\x, C:/x) and Unix home and temp paths. Folders may have spaces in their names;
     // the last part, the file, ends at a space.
     // A folder's name may hold spaces but not end with one, so prose between two paths is not taken
-    // for a folder.
-    let path = regex::Regex::new(r#"(?i)\b[A-Z]:[\\/](?:[^\\/\n"'`<>|:]*[^\s\\/"'`<>|:][\\/])*[^\s\\/"'`<>|,;)\]]*|(?:^|[\s"'`(\[])(/[^\s/"'`<>|,;)\]]+/(?:[^/\n"'`<>|]*[^\s/"'`<>|]/)*[^\s/"'`<>|,;)\]]*)"#).unwrap();
+    // for a folder; a file's name may hold spaces when it ends with an extension (`report v2.pdf`).
+    // Network paths (`\\server\share\…`) never go out.
+    let file = r#"[^\s\\/"'`<>|,;)\]]*(?: [^\s\\/"'`<>|,;)\]]*\.[A-Za-z0-9]{1,8}\b)?"#;
+    let unc = regex::Regex::new(&format!(r#"\\\\[^\s\\/"'`<>|]+\\(?:[^\\/\n"'`<>|:]*[^\s\\/"'`<>|:]\\)*{file}"#)).unwrap();
+    let text = unc.replace_all(&text, "<local path>").into_owned();
+    let path = regex::Regex::new(&format!(
+        r#"(?i)\b[A-Z]:[\\/](?:[^\\/\n"'`<>|:]*[^\s\\/"'`<>|:][\\/])*{file}|(?:^|[\s"'`(\[])(/[^\s/"'`<>|,;)\]]+/(?:[^/\n"'`<>|]*[^\s/"'`<>|]/)*{file})"#
+    ))
+    .unwrap();
     let roots: Vec<String> = roots.iter().map(|r| match r.strip_prefix(WORKTREES) { Some(d) => format!("{WORKTREES}{}", normalize(d)), None => normalize(r) }).collect();
     let text = regex::Regex::new(r#"<home>(?:[\\/](?:[^\\/\n"'`<>|:]*[^\s\\/"'`<>|:][\\/])*[^\s\\/"'`<>|,;)\]]*)?"#).unwrap()
         .replace_all(&text, |c: &regex::Captures| {
@@ -113,12 +120,16 @@ pub fn sanitize_with_home(text: &str, roots: &[String], home: Option<&str>) -> S
         let dots = ".".repeat(p.len() - trimmed.len());
         let p = trimmed;
         let n = normalize(p);
-        let relative = roots.iter().find_map(|r| match r.strip_prefix(WORKTREES) {
-            // A worktree folder: what is inside a task's worktree, after the task's own folder.
-            Some(dir) => n.strip_prefix(&format!("{dir}/"))?.split_once('/').map(|(_, inner)| inner.to_string()),
-            // The repo's main checkout.
-            None => n.strip_prefix(&format!("{r}/")).map(str::to_string),
-        });
+        let relative = roots
+            .iter()
+            .find_map(|r| match r.strip_prefix(WORKTREES) {
+                // A worktree folder: what is inside a task's worktree, after the task's own folder.
+                Some(dir) => n.strip_prefix(&format!("{dir}/"))?.split_once('/').map(|(_, inner)| inner.to_string()),
+                // The repo's main checkout.
+                None => n.strip_prefix(&format!("{r}/")).map(str::to_string),
+            })
+            // A `..` could climb out of the repo: such a path is not inside it.
+            .filter(|rel| !rel.split('/').any(|part| part == ".."));
         // Keep the original case for the relative part.
         let shown = match relative {
             Some(rel) if !rel.is_empty() => p.replace('\\', "/")[p.len() - rel.len()..].to_string(),
@@ -655,6 +666,17 @@ fn sync_issue(db: &Db, host: &dyn Host, issue: &IssueRecord, setting: &MirrorSet
     // issue is published anew there, and nothing is written to the old repo's issue.
     let here = db.conn.query_row("SELECT host = ?2 AND repo = ?3 FROM issue_mirror WHERE issue_key = ?1", params![issue.key, host.name(), host.repo()], |r| r.get::<_, Option<bool>>(0)).optional()?.flatten().unwrap_or(false);
     let published = known.as_ref().filter(|_| here).and_then(|m| m.number.map(|n| (n, m.status.clone())));
+    // Still public on a repo the project's origin no longer points at.
+    let elsewhere: Option<(i64, String)> = match known.as_ref().filter(|m| !here && m.status == "mirrored") {
+        Some(m) => match m.number {
+            Some(n) => {
+                let repo: Option<String> = db.conn.query_row("SELECT repo FROM issue_mirror WHERE issue_key = ?1", [&issue.key], |r| r.get(0))?;
+                Some((n, format!("{} {}", m.host.clone().unwrap_or_default(), repo.unwrap_or_default())))
+            }
+            None => None,
+        },
+        None => None,
+    };
     let eligible = published.is_some()
         || created >= setting.enabled_at
         || setting.backfill == "all"
@@ -704,6 +726,13 @@ fn sync_issue(db: &Db, host: &dyn Host, issue: &IssueRecord, setting: &MirrorSet
         }
         // Still public on the host (it could not be deleted): that stays said until it is.
         Decision::Private(_) | Decision::Held(_) if published.as_ref().is_some_and(|(_, s)| s == "exposed") => {}
+        // Published on a repo that is no longer the project's: Nitely cannot reach it to take it
+        // down, so it says where it still is rather than calling it private.
+        Decision::Private(why) | Decision::Held(why) if elsewhere.is_some() => {
+            let (number, on) = elsewhere.unwrap();
+            let left = format!("{why}, but it is still published as #{number} on {on}, which is no longer this project's repo: take it down there");
+            db.save_mirror(&issue.key, "exposed", Some(&left), None, None)?;
+        }
         Decision::Private(why) => db.save_mirror(&issue.key, if published.is_some() { "withdrawn" } else { "private" }, Some(&why), None, None)?,
         Decision::Held(why) => db.save_mirror(&issue.key, if published.is_some() { "withdrawn" } else { "held" }, Some(&why), None, None)?,
     }

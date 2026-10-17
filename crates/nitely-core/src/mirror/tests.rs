@@ -84,6 +84,10 @@ fn local_paths_and_agent_ids_go_out_neutral() {
     assert_eq!(sanitize_with_home(r"See C:\code\app-secrets\archive\notes.txt", &roots, None), "See <local path>");
     assert_eq!(sanitize_with_home("In /srv/customer/notes.txt and /Volumes/Private/x.md", &roots, None), "In <local path> and <local path>");
     assert_eq!(sanitize_with_home("By claude:c:/Users/Sam Lee/app-worktrees/x today", &roots, None), "By claude today");
+    // Network shares, a `..` out of the repo, and a file name with a space.
+    assert_eq!(sanitize_with_home(r"On \\server\secret share\notes.txt now", &roots, None), "On <local path> now");
+    assert_eq!(sanitize_with_home(r"C:\code\app\..\app-secrets\x\notes.txt", &roots, None), "<local path>");
+    assert_eq!(sanitize_with_home(r"Read C:\Docs\report v2.pdf and more", &roots, None), "Read <local path> and more");
 }
 
 #[test]
@@ -269,6 +273,23 @@ fn turning_the_mirror_off_stops_a_sync_on_its_way() {
     sync_project(&db, &host, "APP", &PrivateTerms::default(), &roots, &mut 30, &mut report).unwrap();
     assert_eq!(report.created, 1, "nothing more once it is off");
     drop(host);
+    drop(db);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn a_publication_left_on_an_old_repo_is_reported_not_hidden() {
+    let (mut db, dir) = db();
+    let agent = Actor::Agent("claude:x".into());
+    db.set_mirror("APP", Some("all"), &Actor::Human).unwrap();
+    let a = db.create_issue(&new("Add export", "Export the list."), &agent).unwrap();
+    db.save_mirror(&a.key, "mirrored", None, Some(("GitHub", "someone/old-app", 7, "https://github.com/someone/old-app/issues/7")), Some("x")).unwrap();
+    db.set_issue_private(&a.key, true, &Actor::Human).unwrap();
+    let fake = Fake::default();
+    sync_project(&db, &fake, "APP", &PrivateTerms::default(), &roots(), &mut 30, &mut MirrorReport::default()).unwrap();
+    let m = db.issue_mirror(&a.key).unwrap().unwrap();
+    assert_eq!(m.status, "exposed");
+    assert!(m.reason.unwrap().contains("#7 on GitHub someone/old-app"));
     drop(db);
     std::fs::remove_dir_all(dir).ok();
 }
