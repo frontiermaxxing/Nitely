@@ -63,6 +63,11 @@ enum Cmd {
         #[arg(long)]
         session: Option<String>,
     },
+    /// Build lanes and the disk task worktrees use (docs/build-lanes.md).
+    Lanes {
+        #[command(subcommand)]
+        command: LanesCmd,
+    },
     /// Goals: the outcomes a project works toward, and the issues that get it there.
     Goal {
         #[command(subcommand)]
@@ -278,6 +283,21 @@ enum TokensCmd {
     List,
     /// Remove a token; agents using it are refused from then on.
     Remove { name: String },
+}
+
+#[derive(Subcommand)]
+enum LanesCmd {
+    /// Delete the build directories (the playbook's [lanes] keep, else target and node_modules) of
+    /// task worktrees whose work is finished: nothing uncommitted, the branch pushed or landed, and
+    /// nothing using the folder. Lists them and asks first.
+    Slim {
+        /// Only this project's repos.
+        #[arg(long)]
+        project: Option<String>,
+        /// Do not ask.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -614,6 +634,51 @@ fn run(cmd: Cmd) -> Result<()> {
                 summary: Some(text),
                 state: "working".into(),
             })
+        }
+        Cmd::Lanes { command: LanesCmd::Slim { project, yes } } => {
+            use nitely_core::slim::{human, plan, reclaim};
+            let config = Config::load()?;
+            let db = Db::open_default().ok();
+            let plan = plan(&config, db.as_ref(), project.as_deref())?;
+            if plan.is_empty() {
+                println!("No task worktree holds build output.");
+                return Ok(());
+            }
+            println!("Build output in task worktrees (an agent's recent session, unfinished work or a running process keeps it):");
+            for c in &plan {
+                let name = c.worktree.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let dirs: Vec<&str> = c.dirs.iter().map(|(d, _)| d.as_str()).collect();
+                match &c.skip {
+                    None => println!("  {:>8}  {name}  ({})", human(c.bytes), dirs.join(", ")),
+                    Some(why) => println!("  {:>8}  {name}  kept: {why}", human(c.bytes)),
+                }
+            }
+            let go: Vec<_> = plan.iter().filter(|c| c.skip.is_none()).collect();
+            if go.is_empty() {
+                println!("Nothing to reclaim: every worktree with build output still holds work or is in use.");
+                return Ok(());
+            }
+            let total: u64 = go.iter().map(|c| c.bytes).sum();
+            if !yes {
+                use std::io::{IsTerminal, Write};
+                if !std::io::stdin().is_terminal() {
+                    anyhow::bail!("pass --yes to delete {} of build output in {} worktrees without asking", human(total), go.len());
+                }
+                print!("Delete {} of build output in {} worktrees? Their source and branches stay. [y/N] ", human(total), go.len());
+                std::io::stdout().flush().ok();
+                let mut answer = String::new();
+                std::io::stdin().read_line(&mut answer)?;
+                if !matches!(answer.trim().to_lowercase().as_str(), "y" | "yes") {
+                    println!("Nothing deleted.");
+                    return Ok(());
+                }
+            }
+            let r = reclaim(&plan);
+            println!("Reclaimed {} from {} worktrees.", human(r.bytes), r.worktrees);
+            for f in &r.failed {
+                eprintln!("could not remove {f}");
+            }
+            Ok(())
         }
         Cmd::Goal { command } => {
             let db = Db::open_default()?;

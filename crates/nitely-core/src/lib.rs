@@ -37,6 +37,7 @@ pub mod relay;
 pub mod release_notes;
 pub mod remote;
 pub mod similar;
+pub mod slim;
 pub mod review;
 pub mod rules;
 pub mod snapshot;
