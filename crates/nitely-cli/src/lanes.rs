@@ -161,6 +161,28 @@ fn quote(word: &str) -> String {
     }
 }
 
+/// Prints what `log` gains until `stop` is set, then the rest.
+fn follow(log: &str, stop: &AtomicBool) {
+    let mut at = 0u64;
+    loop {
+        let done = stop.load(Ordering::SeqCst);
+        if let Ok(mut f) = std::fs::File::open(log) {
+            if f.seek(SeekFrom::Start(at)).is_ok() {
+                let mut buf = Vec::new();
+                if f.read_to_end(&mut buf).is_ok() && !buf.is_empty() {
+                    at += buf.len() as u64;
+                    std::io::stdout().write_all(&buf).ok();
+                    std::io::stdout().flush().ok();
+                }
+            }
+        }
+        if done {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,27 +207,5 @@ mod tests {
         assert_eq!(shell(&js), "a b", "{js}");
         let amp = shell_join(&words(&["node", "-e", "console.log(process.argv[1])", "x&y"]));
         assert_eq!(shell(&amp), "x&y", "{amp}");
-    }
-}
-
-/// Prints what `log` gains until `stop` is set, then the rest.
-fn follow(log: &str, stop: &AtomicBool) {
-    let mut at = 0u64;
-    loop {
-        let done = stop.load(Ordering::SeqCst);
-        if let Ok(mut f) = std::fs::File::open(log) {
-            if f.seek(SeekFrom::Start(at)).is_ok() {
-                let mut buf = Vec::new();
-                if f.read_to_end(&mut buf).is_ok() && !buf.is_empty() {
-                    at += buf.len() as u64;
-                    std::io::stdout().write_all(&buf).ok();
-                    std::io::stdout().flush().ok();
-                }
-            }
-        }
-        if done {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(300));
     }
 }

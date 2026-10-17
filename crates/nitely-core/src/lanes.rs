@@ -691,8 +691,8 @@ mod tests {
 
     #[test]
     fn changed_paths_reads_porcelain_v2() {
-        let status = "1 .M N... 100644 100644 100644 abc abc src/a.txt\0? src/new file.txt\02 R. N... 100644 100644 100644 abc abc R100 src/c.txt\0src/b.txt\0";
-        assert_eq!(changed_paths(status), ["src/a.txt", "src/b.txt", "src/c.txt", "src/new file.txt"]);
+        let status = ["1 .M N... 100644 100644 100644 abc abc src/a.txt", "? src/new file.txt", "2 R. N... 100644 100644 100644 abc abc R100 src/c.txt", "src/b.txt", ""].join("\0");
+        assert_eq!(changed_paths(&status), ["src/a.txt", "src/b.txt", "src/c.txt", "src/new file.txt"]);
     }
 
     #[test]
