@@ -1137,7 +1137,9 @@ impl Supervisor {
                     db.move_issue(&issue.key, "Todo", None, Some("its submit came back; a new crew worker takes it"), &self.actor())?;
                 }
                 // Whoever lands: the author's land is this worker's, gone; Nitely's own land in the
-                // submit may have found the lock held, and the app retries only approvals.
+                // submit may have found the lock held, and the app retries only approvals. Where
+                // only the app can verify an approval (macOS), an approved one is the app's to land.
+                "Approved" if !crate::approval::agents_can_verify() => {}
                 "In Review" | "Approved" if self.land_after.get(&issue.key).is_none_or(|t| now >= *t) => {
                     self.start_land(db, &issue.key)?;
                 }
@@ -1187,8 +1189,11 @@ impl Supervisor {
                 continue;
             }
             let stopped = db.timeline(&l.issue)?.into_iter().rev().find(|t| t.kind == "land_failed" && t.ts >= l.since).and_then(|t| t.summary);
+            // Not the change's fault: the lock was held, or the approval is for the app or the person
+            // to see to. Only a land that stopped on the change itself goes to a new worker.
+            let not_the_change = |why: &str| why.contains("another land holds") || why.contains(crate::approval::UNSIGNED) || why.contains("waits for a human");
             match stopped {
-                Some(why) if !why.contains("another land holds") => {
+                Some(why) if !not_the_change(&why) => {
                     let note = format!("The land stopped: {}. A new crew worker takes it from here (its land log: {}).", why.trim_start_matches("Land stopped: "), l.log.display());
                     db.add_note(&l.issue, &note, "handoff", &self.actor())?;
                     db.move_issue(&l.issue, "Todo", None, Some("its land stopped; a new crew worker takes it"), &self.actor())?;
@@ -2223,6 +2228,7 @@ mod tests {
                     db.move_issue(&job.issue, "Done", Some("landed"), None, &cli)?;
                 }
                 "conflict" => db.log_event(&cli, Some(&job.issue), None, "land_failed", "Land stopped: the rebase stopped on conflicts in a.txt")?,
+                "unsigned" => db.log_event(&cli, Some(&job.issue), None, "land_failed", &format!("Land stopped: the approval {}", crate::approval::UNSIGNED))?,
                 _ => db.log_event(&cli, Some(&job.issue), None, "land_failed", "Land stopped: another land holds the lock")?,
             }
             self.exits.borrow_mut().insert(pid, 0);
@@ -2423,7 +2429,9 @@ mod tests {
         assert!(fake.lands.borrow().is_empty(), "nothing to land while it waits for the person");
         h.db.move_issue("NIT-1", "Approved", None, None, &Actor::Human).unwrap();
         sup.tick(&mut h.db, false).unwrap();
-        assert_eq!(*fake.lands.borrow(), ["NIT-1"]);
+        // Where only the app can verify an approval (macOS), landing it is the app's.
+        let want: &[&str] = if crate::approval::agents_can_verify() { &["NIT-1"] } else { &[] };
+        assert_eq!(*fake.lands.borrow(), want);
     }
 
     #[test]
@@ -2446,7 +2454,7 @@ mod tests {
 
     #[test]
     fn a_land_that_stops_on_the_change_goes_to_a_new_worker_and_a_held_lock_waits() {
-        for (does, state) in [("conflict", "Todo"), ("busy", "In Review")] {
+        for (does, state) in [("conflict", "Todo"), ("busy", "In Review"), ("unsigned", "In Review")] {
             let mut f = fixture(&format!("{GATE}[crew]\nworkers = 1\n"));
             let fake = Fake { installed: vec!["claude"], land_does: Some(does), ..Default::default() };
             let mut sup = supervisor(&f, &fake);
@@ -2458,7 +2466,7 @@ mod tests {
             sup.tick(&mut f.db, false).unwrap();
             sup.tick(&mut f.db, false).unwrap();
             assert_eq!(f.db.issue("NIT-1").unwrap().unwrap().state, state, "{does}");
-            assert_eq!(fake.lands.borrow().len(), 1, "{does}: a held lock is tried again a minute later, not every tick");
+            assert_eq!(fake.lands.borrow().len(), 1, "{does}: tried again a minute later, not every tick");
             if does == "conflict" {
                 let note = f.db.timeline("NIT-1").unwrap().into_iter().rev().find(|t| t.kind == "handoff").unwrap().summary.unwrap_or_default();
                 assert!(note.contains("The land stopped: the rebase stopped on conflicts in a.txt"), "{note}");

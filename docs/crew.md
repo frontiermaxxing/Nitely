@@ -263,7 +263,8 @@ When a worker exits, the supervisor reads its issue:
   on it in the same worktree, with the same agent (a worktree a land left mid-rebase counts as on its
   branch). The review's rounds count as before, and a stalled one still goes to the person. One that
   passed and still waits to land (In Review, or Approved once a person approves it, also when the
-  worker ended `asked` because its submit reached Needs You first) is landed by the supervisor:
+  worker ended `asked` because its submit reached Needs You first; on macOS, where only the app can
+  verify an approval, approved ones are left to the app) is landed by the supervisor:
   `nitely land <key>` in a process of its own, since a land runs the gate and may wait in the land
   queue. A worker started only to call land would spend a session on one mechanical call. With
   `[land] by = "auto"`, an issue still In Review is one whose own land found the lock held, so it is
