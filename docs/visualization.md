@@ -371,8 +371,9 @@ waiting on you) over the window.
   gap with no segment means the session was not running. Waiting on an ask lasts only while the ask
   is open: from its answer on, or from the start when the ask is gone (its project was removed),
   the lane reads idle. A session whose agent stopped without saying so (an exited `codex exec`, a
-  closed terminal) ends at its last event once the sweep finds nothing running in its folder
-  (`crates/nitely-core/src/sessions.rs`), so amber never outlives the agent.
+  closed terminal) ends at its last event once it has been quiet 30 minutes and is certainly gone:
+  its folder no longer exists, or, on macOS and Linux, no process works in it
+  (`crates/nitely-core/src/sessions.rs`). Crew workers' sessions end when the worker does.
 - **Before recording started** (session states are kept from the version that added them), the
   window is hatched and lanes show only "seen" stretches: the session was active, its state is
   unknown. The axis says when recording started. Never guess states for that stretch.

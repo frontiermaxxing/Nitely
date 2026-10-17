@@ -122,7 +122,7 @@ pub fn remove(db: &mut Db, key: &str, with_issues: bool) -> Result<Removed> {
     if !busy.is_empty() {
         bail!("{}", checked_out_message(&key, &busy));
     }
-    let folders = folders_of(&config, &key);
+    let folders = folders_of(&config, db, &key);
     let mut done = db.remove_project(&key, with_issues)?;
     // Nothing of it stays live: its agents' sessions end and the questions they asked go, so no
     // view keeps showing it as working or waiting on you (NIT-189).
@@ -139,18 +139,37 @@ pub fn remove(db: &mut Db, key: &str, with_issues: bool) -> Result<Removed> {
     Ok(done)
 }
 
-/// The folders a project's agents work in: each of its repos' main checkout and worktree folder.
-fn folders_of(config: &crate::Config, project: &str) -> Vec<String> {
-    config
-        .repos
-        .iter()
-        .filter(|r| r.project.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(project)))
-        .flat_map(|r| {
-            let root = Path::new(&r.root);
-            let worktrees = crate::playbook::Playbook::load_with(root, config).ok().and_then(|pb| pb.worktrees_folder(root));
-            std::iter::once(r.root.clone()).chain(worktrees.map(|w| w.to_string_lossy().into_owned()))
-        })
-        .collect()
+/// The folders only this project's agents work in: each of its repos' main checkout and the
+/// worktrees git lists for it, and in the playbook's worktree folder the task folders named for one
+/// of its issues (`app-3-fix-login` for APP-3) that a session or question still names, gone or
+/// not. The worktree folder itself is not one: it may be shared with other repos (`../{key}-{slug}`
+/// puts every task beside the repos).
+fn folders_of(config: &crate::Config, db: &Db, project: &str) -> Vec<String> {
+    let aliases = db.project_aliases().unwrap_or_default();
+    let mine = |name: &str| crate::git::parse_branch(name).1.map(|k| current_key(&aliases, &k)).is_some_and(|k| k.split_once('-').is_some_and(|(p, _)| p.eq_ignore_ascii_case(project)));
+    let named: Vec<String> = {
+        let rows = db.conn.prepare("SELECT cwd FROM session WHERE state != 'ended' UNION SELECT cwd FROM ask WHERE answered_at IS NULL AND cwd IS NOT NULL").and_then(|mut stmt| {
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<Vec<String>>>()
+        });
+        rows.unwrap_or_default().iter().map(|c| crate::paths::normalize(c)).collect()
+    };
+    let mut out = Vec::new();
+    for r in config.repos.iter().filter(|r| r.project.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(project))) {
+        out.push(r.root.clone());
+        out.extend(crate::git::list_worktrees(&r.root).unwrap_or_default().into_iter().filter(|w| !w.is_main).map(|w| w.path));
+        let root = Path::new(&r.root);
+        let Some(folder) = crate::playbook::Playbook::load_with(root, config).ok().and_then(|pb| pb.worktrees_folder(root)) else { continue };
+        let folder = crate::paths::normalize(&folder.to_string_lossy());
+        for cwd in &named {
+            let Some(task) = cwd.strip_prefix(&format!("{folder}/")).and_then(|rest| rest.split('/').next()) else { continue };
+            let dir = format!("{folder}/{task}");
+            if mine(task) && !out.iter().any(|d| crate::paths::normalize(d) == dir) {
+                out.push(dir);
+            }
+        }
+    }
+    out
 }
 
 /// Points the config's repos and the machine tokens that name `from` at `to` (or at none).
@@ -468,10 +487,19 @@ mod tests {
             repos: vec![repo("app", &root.to_string_lossy(), Some("APP")), repo("other", "C:/code/other", Some("OTH")), repo("loose", "C:/code/loose", None)],
             ..Default::default()
         };
-        let folders: Vec<String> = folders_of(&config, "app").iter().map(|f| crate::paths::normalize(f)).collect();
-        let worktrees = crate::paths::normalize(&root.parent().unwrap().join("app-worktrees").to_string_lossy());
-        assert_eq!(folders, [crate::paths::normalize(&root.to_string_lossy()), worktrees], "the default playbook's worktree folder");
-        assert!(folders_of(&config, "NONE").is_empty());
+        let mut db = db();
+        db.create_project("APP", "App").unwrap();
+        db.create_project("OTH", "Other").unwrap();
+        let worktrees = root.parent().unwrap().join("app-worktrees");
+        // Sessions in task folders of the worktree folder: one for APP, one for another project.
+        for (id, task) in [("codex:a", "app-3-fix-login"), ("codex:o", "oth-4-docs")] {
+            let cwd = worktrees.join(task).join("src").to_string_lossy().into_owned();
+            db.record(&crate::db::NewEvent { session_id: id.into(), vendor: "codex".into(), cwd, kind: "tool".into(), summary: None, state: "working".into() }).unwrap();
+        }
+        let folders: Vec<String> = folders_of(&config, &db, "app").iter().map(|f| crate::paths::normalize(f)).collect();
+        let task = crate::paths::normalize(&worktrees.join("app-3-fix-login").to_string_lossy());
+        assert_eq!(folders, [crate::paths::normalize(&root.to_string_lossy()), task], "its checkout and its own task folder, never the shared worktree folder");
+        assert!(folders_of(&config, &db, "NONE").is_empty());
     }
 
     #[test]

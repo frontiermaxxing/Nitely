@@ -345,39 +345,41 @@ pub fn activity(config: &Config, db: &Db, from: i64, to: i64) -> Result<Activity
 
 /// When each wait in `rows` that an ask began stops being a wait: the ask's answer, or the wait's
 /// own start when the ask no longer exists. An ask records its wait at the moment it is asked, as
-/// an `ask` event of one of `ids` with the question; a wait still open, or one a Notification
-/// hook began (a permission prompt), stays.
+/// an `ask` event of one of `ids` with the question, from the folder the ask was asked in. A wait
+/// still open, one a Notification hook began (a permission prompt), and one the session moved on
+/// from before the answer came (it worked, asked again or ended) stay as they are.
 fn ask_waits_end(db: &Db, ids: &[String], rows: &[(i64, u8, String)]) -> Result<Vec<i64>> {
     let mut out = Vec::new();
     for &(ts, _, ref state) in rows {
         if state != "waiting" {
             continue;
         }
-        let mut asked = None;
+        let mut asked: Option<(String, Option<String>)> = None;
         for id in ids {
-            let summary: Option<String> = db
+            asked = db
                 .conn
-                .query_row("SELECT summary FROM event WHERE actor = ?1 AND type = 'ask' AND ts = ?2 LIMIT 1", params![id, ts], |r| r.get::<_, Option<String>>(0))
-                .optional()?
-                .flatten();
-            if summary.is_some() {
-                asked = summary;
+                .query_row("SELECT summary, cwd FROM event WHERE actor = ?1 AND type = 'ask' AND ts = ?2 LIMIT 1", params![id, ts], |r| {
+                    Ok((r.get::<_, Option<String>>(0)?.unwrap_or_default(), r.get::<_, Option<String>>(1)?))
+                })
+                .optional()?;
+            if asked.is_some() {
                 break;
             }
         }
-        let Some(summary) = asked else { continue };
+        let Some((summary, cwd)) = asked else { continue };
         let question = summary.strip_prefix("Asked: ").unwrap_or(&summary);
-        let ask: Option<Option<i64>> = db
-            .conn
-            .query_row(
-                "SELECT answered_at FROM ask WHERE question = ?1 AND asked_at BETWEEN ?2 - 5 AND ?2 + 5 ORDER BY ABS(asked_at - ?2) LIMIT 1",
-                params![question, ts],
-                |r| r.get(0),
-            )
-            .optional()?;
+        let place = cwd.as_deref().map(normalize);
+        let candidates: Vec<(Option<String>, Option<i64>)> = {
+            let mut stmt = db.conn.prepare("SELECT cwd, answered_at FROM ask WHERE question = ?1 AND asked_at BETWEEN ?2 - 5 AND ?2 + 5 ORDER BY ABS(asked_at - ?2)")?;
+            let found = stmt.query_map(params![question, ts], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            found.collect::<rusqlite::Result<_>>()?
+        };
+        // The same question from the same folder: another agent asking it elsewhere is not this one.
+        let ask = candidates.into_iter().find(|(asked_in, _)| asked_in.as_deref().map(normalize) == place).map(|(_, answered)| answered);
+        let next = rows.iter().map(|(t, _, _)| *t).filter(|t| *t > ts).min();
         match ask {
-            Some(Some(answered)) => out.push(answered.max(ts)),
-            Some(None) => {}
+            Some(Some(answered)) if next.is_none_or(|n| answered < n) => out.push(answered.max(ts)),
+            Some(_) => {}
             None => out.push(ts),
         }
     }
@@ -632,6 +634,7 @@ mod tests {
             state(&db, id, t0, "working");
             state(&db, id, t0 + 60, "waiting");
             event(&db, t0 + 60, id, "ask", &format!("Asked: {question}"), None);
+            db.conn.execute("UPDATE event SET cwd = ?2 WHERE actor = ?1 AND type = 'ask'", params![id, "C:/code/app"]).unwrap();
             let ask = db.create_ask(question, &[], None, Some("C:\\code\\app"), &agent).unwrap();
             db.conn.execute("UPDATE ask SET asked_at = ?2 WHERE id = ?1", params![ask.id, t0 + 61]).unwrap();
             match id {
@@ -650,9 +653,25 @@ mod tests {
         state(&db, "claude:prompt", t0 + 60, "waiting");
         event(&db, t0 + 60, "claude:prompt", "waiting", "Waiting for input", None);
 
+        // One moved on before its answer came: the late answer changes nothing.
+        session(&db, "codex:moved", "C:\\code\\app", t0, t0 + 300, "working");
+        state(&db, "codex:moved", t0 + 60, "waiting");
+        state(&db, "codex:moved", t0 + 300, "working");
+        event(&db, t0 + 60, "codex:moved", "ask", "Asked: Rebase now?", None);
+        db.conn.execute("UPDATE event SET cwd = 'C:/code/app' WHERE actor = 'codex:moved' AND type = 'ask'", []).unwrap();
+        let late = db.create_ask("Rebase now?", &[], None, Some("C:\\code\\app"), &agent).unwrap();
+        db.answer_ask(late.id, "yes", &crate::Actor::Human).unwrap();
+        db.conn.execute("UPDATE ask SET asked_at = ?2, answered_at = ?3 WHERE id = ?1", params![late.id, t0 + 61, t0 + 900]).unwrap();
+        // The same question asked from another folder at the same moment, and answered there.
+        let elsewhere = db.create_ask("Ship it?", &[], None, Some("C:\\code\\other"), &agent).unwrap();
+        db.answer_ask(elsewhere.id, "no", &crate::Actor::Human).unwrap();
+        db.conn.execute("UPDATE ask SET asked_at = ?2, answered_at = ?3 WHERE id = ?1", params![elsewhere.id, t0 + 60, t0 + 120]).unwrap();
+
         let a = activity(&config, &db, t0 - 600, now()).unwrap();
         let lane = |id: &str| a.lanes.iter().find(|l| l.session_id == id).unwrap_or_else(|| panic!("{id}"));
         let waits = |id: &str| lane(id).segments.iter().filter(|s| s.state == "waiting").map(|s| (s.from - t0, s.to - t0)).collect::<Vec<_>>();
+        assert_eq!(waits("codex:moved"), [(60, 300)], "until it moved on, not until the late answer");
+        assert_eq!(lane("codex:moved").segments.iter().find(|s| s.from - t0 == 300).map(|s| s.state.as_str()), Some("working"));
         assert_eq!(waits("codex:answered"), [(60, 600)], "until the answer");
         assert!(waits("codex:gone").is_empty(), "an ask that is gone waits on no one");
         assert_eq!(lane("codex:open").segments.last().unwrap().state, "waiting");

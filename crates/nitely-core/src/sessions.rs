@@ -2,8 +2,10 @@
 //! (Claude Code's SessionEnd), but a `codex exec` that exits, a terminal closed under an agent, or a
 //! crash sends nothing, and the session would stay working or waiting on the person forever. So:
 //! the crew supervisor ends a worker's sessions when the worker ends, removing a project ends the
-//! sessions in its repos, and a sweep ends sessions that have been quiet a while and whose folder
-//! no process uses any more (NIT-189).
+//! sessions in its repos, and a sweep ends sessions that have been quiet a while and are certainly
+//! gone: their folder no longer exists, or, where the system says which folder each process works
+//! in (macOS, Linux), none does (NIT-189). Windows does not say, so there a session whose folder
+//! is still there is never taken for gone; a session on another machine (`remote:…`) never is.
 
 use anyhow::Result;
 use rusqlite::{params, OptionalExtension};
@@ -86,34 +88,35 @@ impl Db {
     }
 }
 
-/// Ends the sessions quiet for `GONE_AFTER_SECS` whose folder nothing runs in any more, as of
-/// their last event; `runs_in` says whether a process uses a folder. Returns how many it ended.
-pub fn end_gone(db: &Db, now: i64, runs_in: &dyn Fn(&str) -> bool) -> Result<usize> {
+/// Ends the sessions quiet for `GONE_AFTER_SECS` that `gone` says are certainly gone, by their
+/// folder, as of their last event. Returns how many it ended.
+pub fn end_gone(db: &Db, now: i64, gone: &dyn Fn(&str) -> bool) -> Result<usize> {
     let mut ended = 0;
     for (id, cwd, last_seen) in db.quiet_sessions(now - GONE_AFTER_SECS)? {
-        if !runs_in(&cwd) {
-            ended += usize::from(db.end_session(&id, last_seen, "Ended: no process runs in its folder any more")?);
+        if gone(&cwd) {
+            ended += usize::from(db.end_session(&id, last_seen, "Ended: nothing runs in its folder any more")?);
         }
     }
     Ok(ended)
 }
 
-/// `end_gone` with this machine's processes: a folder that is gone, or that no process uses
-/// (procs.rs), has nothing running in it. The processes are listed once, and only when a session
-/// is quiet long enough to ask about; when they cannot be listed, nothing is ended.
+/// `end_gone` with this machine: a session is gone when its folder (a local path) no longer
+/// exists, or, where processes' working folders are known (not Windows), when no process uses it.
+/// The processes are listed once, only when a quiet session's folder is still there; when they
+/// cannot be listed, only the folders that are gone count.
 pub fn end_gone_now(db: &Db) -> Result<usize> {
     let now = crate::db::now();
-    let quiet: Vec<String> = db.quiet_sessions(now - GONE_AFTER_SECS)?.into_iter().map(|(_, cwd, _)| cwd).filter(|cwd| Path::new(cwd).is_dir()).collect();
-    let mut in_use: HashMap<String, bool> = HashMap::new();
-    if !quiet.is_empty() {
-        let dirs: Vec<&Path> = quiet.iter().map(Path::new).collect();
+    let local = |cwd: &str| Path::new(cwd).is_absolute();
+    let still_there: Vec<String> = db.quiet_sessions(now - GONE_AFTER_SECS)?.into_iter().map(|(_, cwd, _)| cwd).filter(|cwd| local(cwd) && Path::new(cwd).is_dir()).collect();
+    let mut unused: HashMap<String, bool> = HashMap::new();
+    if cfg!(not(windows)) && !still_there.is_empty() {
+        let dirs: Vec<&Path> = still_there.iter().map(Path::new).collect();
         let (holders, whole) = crate::procs::holders_of(&dirs);
-        if !whole {
-            return Ok(0);
+        if whole {
+            unused = still_there.into_iter().zip(holders).map(|(cwd, h)| (cwd, h.is_empty())).collect();
         }
-        in_use = quiet.into_iter().zip(holders).map(|(cwd, h)| (cwd, !h.is_empty())).collect();
     }
-    end_gone(db, now, &|cwd| in_use.get(cwd).copied().unwrap_or(false))
+    end_gone(db, now, &|cwd| local(cwd) && (!Path::new(cwd).is_dir() || unused.get(cwd).copied().unwrap_or(false)))
 }
 
 #[cfg(test)]
@@ -169,6 +172,26 @@ mod tests {
     }
 
     #[test]
+    fn on_this_machine_a_folder_that_is_gone_ends_its_session_and_a_remote_one_never_does() {
+        let (mut db, dir) = db();
+        let there = dir.join("still-here");
+        std::fs::create_dir_all(&there).unwrap();
+        let missing = dir.join("removed-worktree").to_string_lossy().into_owned();
+        seen(&mut db, "codex:missing", &missing, "ask", "waiting");
+        seen(&mut db, "codex:remote", "remote:laptop", "status", "working");
+        seen(&mut db, "codex:there", &there.to_string_lossy(), "ask", "waiting");
+        db.conn.execute("UPDATE session SET last_seen_at = last_seen_at - ?1", [GONE_AFTER_SECS + 60]).unwrap();
+        end_gone_now(&db).unwrap();
+        assert_eq!(state(&db, "codex:missing").0, "ended");
+        assert_eq!(state(&db, "codex:remote").0, "working", "another machine's session is not judged from here");
+        // Nothing runs in the folder that is still there; only a system that says where each
+        // process works can tell, and Windows does not.
+        assert_eq!(state(&db, "codex:there").0, if cfg!(windows) { "waiting" } else { "ended" });
+        drop(db);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn removes_only_the_open_questions_asked_from_a_folder() {
         let (db, dir) = db();
         let agent = crate::Actor::Agent("codex:x".into());
@@ -191,9 +214,9 @@ mod tests {
         seen(&mut db, "codex:alive", r"C:\code\app", "tool", "working");
         seen(&mut db, "claude:idle", r"C:\gone\wt", "turn_end", "idle");
         let (_, t) = state(&db, "codex:dead");
-        let runs_in = |cwd: &str| cwd.contains("app");
-        assert_eq!(end_gone(&db, t + 60, &runs_in).unwrap(), 0, "not quiet long enough yet");
-        assert_eq!(end_gone(&db, t + GONE_AFTER_SECS + 1, &runs_in).unwrap(), 1);
+        let gone = |cwd: &str| !cwd.contains("app");
+        assert_eq!(end_gone(&db, t + 60, &gone).unwrap(), 0, "not quiet long enough yet");
+        assert_eq!(end_gone(&db, t + GONE_AFTER_SECS + 1, &gone).unwrap(), 1);
         assert_eq!(state(&db, "codex:dead"), ("ended".to_string(), t), "ended as of its last event");
         assert_eq!(state(&db, "codex:alive").0, "working");
         assert_eq!(state(&db, "claude:idle").0, "idle", "idle is not left on anyone");
