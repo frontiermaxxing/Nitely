@@ -923,6 +923,9 @@ pub struct GateResult {
     /// but these tests are flaky.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub flaked: Vec<Flake>,
+    /// The build lane run it was (or the earlier run that answered it), when it ran in a lane.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lane_run: Option<i64>,
 }
 
 /// Creates the issue's branch and worktree from the integration branch and runs the setup
@@ -1062,7 +1065,11 @@ pub fn run_gate_as(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option
         // In a lane: a full checkout of the worktree's snapshot, set up there. The worktree itself
         // is not built, made whole or set up.
         let lane = crate::lanes::gate(db, repo_root, &playbook, worktree, issue_key, kind, &steps, actor)?;
-        return record_gate(db, issue_key, worktree, actor, &lane.commit, lane.results, lane.passed, lane.flaked, playbook.unknown_warnings());
+        let mut warnings = playbook.unknown_warnings();
+        warnings.extend(lane.warnings);
+        let mut gate = record_gate(db, issue_key, worktree, actor, &lane.commit, lane.results, lane.passed, lane.flaked, warnings)?;
+        gate.lane_run = lane.run;
+        return Ok(gate);
     }
 
     // A sparse worktree lacks files the gate builds (a workspace's other members): without build
@@ -1107,7 +1114,7 @@ fn record_gate(db: &Db, issue_key: Option<&str>, worktree: &Path, actor: &Actor,
         format!("Gate failed at {commit}: {}", results.last().map(|r| r.command.as_str()).unwrap_or(""))
     };
     db.log_event(actor, issue_key, at.as_deref(), if passed { "gate_passed" } else { "gate_failed" }, &summary)?;
-    Ok(GateResult { passed, commit: commit.to_string(), results, warnings, flaked })
+    Ok(GateResult { passed, commit: commit.to_string(), results, warnings, flaked, lane_run: None })
 }
 
 /// Fills `{main}` (the main checkout), `{worktree}` and `{base}` in a playbook command.

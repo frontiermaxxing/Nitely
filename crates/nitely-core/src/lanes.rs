@@ -433,6 +433,8 @@ pub struct GateRun {
     pub flaked: Vec<playbook::Flake>,
     /// The lane run it was, or the earlier one it was answered from.
     pub run: Option<i64>,
+    /// What the caller should know: uncommitted work left out of the gate.
+    pub warnings: Vec<String>,
 }
 
 /// The gate's `steps` (command, why it is skipped) for `worktree`, as one lane request: one switch
@@ -442,7 +444,15 @@ pub struct GateRun {
 /// run's record without running anything.
 #[allow(clippy::too_many_arguments)]
 pub fn gate(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Option<&str>, kind: Kind, steps: &[(String, Option<String>)], actor: &Actor) -> Result<GateRun> {
-    let snap = snapshot(worktree)?;
+    // What is committed, as land will build it: the branch head, never a commit made for the
+    // request, so the gate reports the commit the review sees.
+    let top = PathBuf::from(git(worktree, &["rev-parse", "--show-toplevel"])?.trim());
+    let head = git(&top, &["rev-parse", "HEAD"])?.trim().to_string();
+    let snap = Snapshot { tree: git(&top, &["rev-parse", "HEAD^{tree}"])?.trim().to_string(), commit: head.clone(), base: head, made: false };
+    let mut warnings = Vec::new();
+    if snapshot(worktree)?.made {
+        warnings.push("the worktree has uncommitted work, which this gate leaves out: it builds what is committed, as land will; `run` builds the worktree as it is".to_string());
+    }
     let short = snap.commit[..snap.commit.len().min(7)].to_string();
     let project = issue.and_then(|k| db.issue(k).ok().flatten()).and_then(|i| i.project).unwrap_or_default();
     let base = pb.integration_branch().to_string();
@@ -452,14 +462,20 @@ pub fn gate(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Op
     let to_run: Vec<&str> = steps.iter().filter(|(_, skip)| skip.is_none()).map(|(c, _)| c.as_str()).collect();
     let key = to_run.join("\n");
     let root = repo_root.to_string_lossy().into_owned();
-    let passed_before: Option<i64> = db
-        .conn
-        .query_row(
-            "SELECT id FROM lane_run WHERE repo = ?1 AND tree = ?2 AND command = ?3 AND kind IN ('gate', 'land') AND state = 'done' AND exit_code = 0 ORDER BY id DESC LIMIT 1",
-            params![root, snap.tree, key],
-            |r| r.get(0),
-        )
-        .optional()?;
+    // One command per line is the key, so a command that holds a line break of its own could
+    // stand for two: such a gate is never answered from a record.
+    let keyed = !to_run.iter().any(|c| c.contains('\n'));
+    let passed_before: Option<i64> = if !keyed {
+        None
+    } else {
+        db.conn
+            .query_row(
+                "SELECT id FROM lane_run WHERE repo = ?1 AND tree = ?2 AND command = ?3 AND kind IN ('gate', 'land') AND state = 'done' AND exit_code = 0 ORDER BY id DESC LIMIT 1",
+                params![root, snap.tree, key],
+                |r| r.get(0),
+            )
+            .optional()?
+    };
     if let Some(id) = passed_before {
         let results = steps
             .iter()
@@ -471,7 +487,7 @@ pub fn gate(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Op
         if let Some(key) = issue {
             db.log_event(actor, Some(key), None, "lane_run", &format!("The gate for {short} passed in lane run {id} already; not run again")).ok();
         }
-        return Ok(GateRun { commit: short, results, passed: true, flaked: vec![], run: Some(id) });
+        return Ok(GateRun { commit: short, results, passed: true, flaked: vec![], run: Some(id), warnings });
     }
 
     let mut results: Vec<playbook::CommandResult> = Vec::new();
@@ -520,9 +536,11 @@ pub fn gate(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Op
         Ok((Some(0), false))
     })?;
     if let Some(why) = &run.error {
-        results.push(playbook::CommandResult { command: format!("lane {}", run.lane.unwrap_or(0)), ok: false, seconds: 0, output: why.clone(), skipped: false });
+        // The setup's own output too, so the caller sees why it failed.
+        let output = if run.output.trim().is_empty() { why.clone() } else { format!("{why}\n{}", run.output) };
+        results.push(playbook::CommandResult { command: format!("lane {}", run.lane.unwrap_or(0)), ok: false, seconds: 0, output, skipped: false });
     }
-    Ok(GateRun { commit: short, passed: run.passed(), results, flaked, run: Some(run.id) })
+    Ok(GateRun { commit: short, passed: run.passed(), results, flaked, run: Some(run.id), warnings })
 }
 
 /// What `log` gained after byte `from`, its end kept as a command's output is.
@@ -1415,9 +1433,17 @@ commands = []
         assert!(again.passed && again.results.iter().all(|r| r.skipped && r.output.contains("not run again")), "{again:?}");
         assert_eq!(rows(&db).len(), 1, "no new run");
 
-        // Another tree, as land asks: a land request, first in line.
+        // Uncommitted work is not what a gate builds: it says so, and the record answers it.
         std::fs::write(root.join("src/a.txt"), "changed\n").unwrap();
+        let dirty = playbook::run_gate(&db, &root, &root, Some("APP-1"), &actor).unwrap();
+        assert!(dirty.passed && dirty.warnings.iter().any(|w| w.contains("uncommitted work")), "{dirty:?}");
+        assert_eq!(dirty.commit, gate.commit, "it reports the branch head, the commit the review sees");
+        assert_eq!(rows(&db).len(), 1);
+
+        // Another tree, as land asks: a land request, first in line.
+        g(&["commit", "-q", "-am", "change"]);
         let landing = playbook::run_gate_as(&db, &root, &root, Some("APP-1"), &actor, Kind::Land).unwrap();
+        assert_eq!(landing.lane_run, Some(rows(&db)[0].id));
         assert!(landing.passed, "{landing:?}");
         let now = rows(&db);
         assert_eq!(now.len(), 2);

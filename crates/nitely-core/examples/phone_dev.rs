@@ -103,7 +103,7 @@ fn seed(path: &std::path::Path) -> anyhow::Result<()> {
         let key = db.create_issue(&new, &agent)?.key;
         db.move_issue(&key, "In Progress", None, None, &agent)?;
         let review = review::Review { reviewer: "codex".into(), verdict: "pass".into(), findings, flagged: vec![], summary: String::new(), seconds: 80, previous: vec![], note: String::new() };
-        let gate = playbook::GateResult { passed: true, commit: "abc1234".into(), results: vec![], warnings: vec![], flaked: vec![] };
+        let gate = playbook::GateResult { passed: true, commit: "abc1234".into(), results: vec![], warnings: vec![], flaked: vec![], lane_run: None };
         let s = submit::Submitted {
             issue: key.clone(), branch: format!("claude/{}", key.to_lowercase()), base: "main".into(), patch_id: format!("patch-{}", key.to_lowercase()),
             commit: "abc1234".into(), files: 3, gate, review: Some(review), approver: "human".into(), reasons, approval_stands: false,
