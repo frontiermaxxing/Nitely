@@ -127,7 +127,11 @@ enum Cmd {
         /// The issue; defaults to the one the branch names.
         #[arg(long)]
         issue: Option<String>,
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        /// A whole command line for the lane's shell, e.g. "npm test && npm run build"; without
+        /// it, the words after -- are passed on as words.
+        #[arg(long, conflicts_with = "command")]
+        shell: Option<String>,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
     /// The repo's build lanes: `status` (the default), `reset`, or `show <run>`.
@@ -1021,7 +1025,7 @@ fn run(cmd: Cmd) -> Result<()> {
             }
         }
         Cmd::Crew { command } => crew::run(command, &me),
-        Cmd::Run { issue, command } => lanes::run(issue, command, &me),
+        Cmd::Run { issue, shell, command } => lanes::run(issue, shell, command, &me),
         Cmd::Lanes { command } => lanes::lanes(command),
         Cmd::Agents { yes } => {
             let config = Config::load()?;

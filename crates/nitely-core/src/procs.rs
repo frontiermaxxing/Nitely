@@ -75,6 +75,12 @@ pub fn holders_of(dirs: &[&Path]) -> (Vec<Vec<Holder>>, bool) {
     (each, whole)
 }
 
+/// The command line process `pid` runs, when it is running and the platform lists it. For telling
+/// a recorded pid from another process that got the same number since.
+pub fn command_line(pid: u32) -> Option<String> {
+    list().into_iter().find(|p| p.process_id == pid).and_then(|p| p.command_line)
+}
+
 /// Whether `text` names `dir` or a path inside it, in any spelling a process might use:
 /// `C:\x\y`, `C:/x/y`, Git Bash's `/c/x/y`, WSL's `/mnt/c/x/y`; case-insensitive on Windows.
 pub fn names_path(text: &str, dir: &str) -> bool {

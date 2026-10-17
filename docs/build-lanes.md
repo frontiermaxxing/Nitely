@@ -148,8 +148,9 @@ changed nothing is one of them.
   forwarded to a newer build in a process of its own, so the wait happens in the call, not in a
   thread that could die with it. `run_status { id?, wait_seconds? }` reads a run (and waits up to
   600 s for an open one); without an id, the caller's last runs.
-- CLI `nitely run [--issue] -- <command>` from a worktree, printing the log as it grows and exiting
-  with the command's exit code. `nitely lanes [status]` shows the lanes, the queue and the last
+- CLI `nitely run [--issue] -- <words>` from a worktree (each word passed on as one word), or
+  `nitely run --shell "<line>"` for a line meant for the lane's shell, printing the log as it grows
+  and exiting with the command's exit code. `nitely lanes [status]` shows the lanes, the queue and the last
   runs; `nitely lanes reset` puts every free lane back to a clean checkout of what it holds (its
   build output stays); `nitely lanes show <id>` prints a run and its log.
 - `step` names a playbook gate command, so an agent can ask for "the gate's tests" without spelling

@@ -72,10 +72,14 @@ pub fn lanes(cmd: Option<LanesCmd>) -> Result<()> {
 
 /// `nitely run -- <command>`: the current worktree as a snapshot, in a lane, its output followed as
 /// it comes. Exits with the command's own exit code.
-pub fn run(issue: Option<String>, command: Vec<String>, me: &Actor) -> Result<()> {
+pub fn run(issue: Option<String>, shell: Option<String>, command: Vec<String>, me: &Actor) -> Result<()> {
     let config = Config::load()?;
     let db = Db::open_default()?;
-    let command = shell_join(&command);
+    let command = match shell {
+        Some(line) => line,
+        None if command.is_empty() => anyhow::bail!("say what to run: `nitely run -- cargo test`, or `nitely run --shell \"npm test && npm run build\"`"),
+        None => shell_join(&command),
+    };
     let stop = Arc::new(AtomicBool::new(false));
     let mut follower: Option<std::thread::JoinHandle<()>> = None;
     let result = lanes::run_in(&config, &db, &cwd()?, issue.as_deref(), &command, me, &mut |r| match r.state.as_str() {
@@ -111,13 +115,10 @@ pub fn run(issue: Option<String>, command: Vec<String>, me: &Actor) -> Result<()
     }
 }
 
-/// The command line the lane's shell runs. One argument is a command line already, shell syntax
-/// and all (`nitely run -- "npm test && npm run build"`). Several are words, each passed on as the
-/// one word it was: quoted for the shell where it has spaces, quotes or shell characters.
+/// The command line the lane's shell runs for `nitely run -- <words>`: each word passed on as the
+/// one word it was, quoted where it has spaces, quotes or shell characters, so nothing in it is
+/// taken as shell syntax. (`--shell "<line>"` is for a line that means to use the shell.)
 fn shell_join(args: &[String]) -> String {
-    if let [one] = args {
-        return one.clone();
-    }
     args.iter().map(|a| quote(a)).collect::<Vec<_>>().join(" ")
 }
 
@@ -190,8 +191,8 @@ mod tests {
     #[test]
     fn words_reach_the_command_as_they_were_typed() {
         let words = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(shell_join(&words(&["npm test && npm run build"])), "npm test && npm run build", "one argument is a command line");
         assert_eq!(shell_join(&words(&["cargo", "test", "-p", "nitely-core"])), "cargo test -p nitely-core");
+        assert_ne!(shell_join(&words(&["echo", "a&b"])), "echo a&b", "a shell character in a word stays in the word");
         // Through the same shell a lane uses, node gets each word as one argument.
         let shell = |line: &str| -> String {
             #[cfg(windows)]

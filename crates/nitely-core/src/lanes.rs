@@ -489,10 +489,18 @@ fn ensure_setup(repo_root: &Path, pb: &Playbook, lane: &Path, base: &str, log: &
     std::fs::remove_file(&record).ok();
     for command in &pb.worktree.setup {
         let command = playbook::expand(command, repo_root, lane, base);
-        match run_logged(&command, lane, log, limit)? {
-            (Some(0), _) => {}
-            (_, true) => bail!("setup ran past {} minutes in the lane and was stopped: {command}", limit.as_secs() / 60),
-            (code, false) => bail!("setup failed in the lane (exit {}): {command}", code.map_or("none".to_string(), |c| c.to_string())),
+        // Run again on failure as the gate's commands are (`[gate] retries`): a setup that fails
+        // once, on a busy machine, then passes is not the change's fault.
+        let mut tries = 0;
+        loop {
+            match run_logged(&command, lane, log, limit)? {
+                (Some(0), _) => break,
+                (_, true) => bail!("setup ran past {} minutes in the lane and was stopped: {command}", limit.as_secs() / 60),
+                (code, false) if tries >= pb.gate.retries => {
+                    bail!("setup failed in the lane (exit {}): {command}", code.map_or("none".to_string(), |c| c.to_string()))
+                }
+                _ => tries += 1,
+            }
         }
     }
     std::fs::write(&record, now).with_context(|| format!("writing {}", record.display()))?;
@@ -514,8 +522,12 @@ fn pid_file(lane: &Path) -> Option<PathBuf> {
 fn stop_leftovers(lane: &Path) {
     let Some(file) = pid_file(lane) else { return };
     let Ok(text) = std::fs::read_to_string(&file) else { return };
-    if let Ok(pid) = text.trim().parse::<u32>() {
-        if crate::crew::pid_alive(pid) {
+    // "<pid>\n<command>": the pid is stopped only while it still runs that command, since the
+    // system may have given the number to another process once the command ended.
+    let (pid, command) = text.split_once('\n').unwrap_or((text.as_str(), ""));
+    if let Ok(pid) = pid.trim().parse::<u32>() {
+        let same = !command.trim().is_empty() && crate::procs::command_line(pid).is_some_and(|line| line.contains(command.trim()));
+        if same {
             stop_tree(pid);
         }
     }
@@ -562,7 +574,7 @@ fn run_logged(command: &str, dir: &Path, log: &Path, limit: Duration) -> Result<
     // In a lane, the pid is kept while it runs, so a request after a crash can stop it.
     let pids = pid_file(dir);
     if let Some(p) = &pids {
-        std::fs::write(p, child.id().to_string()).ok();
+        std::fs::write(p, format!("{}\n{command}", child.id())).ok();
     }
     let started = Instant::now();
     let result = loop {
@@ -802,7 +814,8 @@ mod tests {
         let mark = base.join("setup-ran-once");
         let mark_s = mark.to_string_lossy().replace('\\', "/");
         let setup = if cfg!(windows) { format!("if exist \"{mark_s}\" (exit 0) else (type nul > \"{mark_s}\" & exit 1)") } else { format!("if [ -e '{mark_s}' ]; then exit 0; else touch '{mark_s}'; exit 1; fi") };
-        let pb = playbook_with(&format!("[worktree]\nsetup = [{setup:?}]\n[lanes]\n"));
+        // No retries, so the first request sees the failure (with the default one retry it passes).
+        let pb = playbook_with(&format!("[worktree]\nsetup = [{setup:?}]\n[gate]\nretries = 0\n[lanes]\n"));
         let snap = snapshot(&root).unwrap();
         let req = Request { project: "APP", issue: None, kind: Kind::Run, snapshot: &snap, command: "echo built" };
         let first = run(&db, &root, &pb, &req, &actor, &mut |_| {}).unwrap();
@@ -823,8 +836,12 @@ mod tests {
             use std::os::unix::process::CommandExt;
             left.process_group(0);
         }
+        // A recorded pid now running something else (the number was reused) is left alone.
+        std::fs::write(pid_file(&lane).unwrap(), format!("{}\nsome other command", std::process::id())).unwrap();
+        stop_leftovers(&lane);
+        assert!(!pid_file(&lane).unwrap().exists(), "this test process is still here to check");
         let mut child = left.spawn().unwrap();
-        std::fs::write(pid_file(&lane).unwrap(), child.id().to_string()).unwrap();
+        std::fs::write(pid_file(&lane).unwrap(), format!("{}\n{sleeper}", child.id())).unwrap();
         stop_leftovers(&lane);
         let stopped = (0..50).any(|_| {
             std::thread::sleep(Duration::from_millis(200));
