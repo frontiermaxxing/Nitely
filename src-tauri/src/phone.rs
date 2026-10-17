@@ -96,13 +96,16 @@ pub async fn phone_pair(app: tauri::State<'_, PhoneApp>) -> Result<OfferView, St
 /// The person's answer to a pairing request; a yes adds the phone to the list the app signs.
 #[tauri::command]
 pub async fn phone_decide(app: tauri::State<'_, PhoneApp>, id: String, accept: bool) -> Result<PhoneStatus, String> {
-    if let Some(device) = app.phone.decide(&id, accept).map_err(err)? {
+    if accept {
+        // Saved first: if the keychain refuses, the request stays waiting and the person can retry.
+        let device = app.phone.pending_device(&id).map_err(err)?;
         let secret = approval_key(&db()?)?;
         let mut devices = phone::load_devices().unwrap_or_default();
         devices.retain(|d| d.id != device.id);
         devices.push(device);
         phone::save_devices(&secret, devices).map_err(err)?;
     }
+    app.phone.decide(&id, accept).map_err(err)?;
     Ok(status(&app))
 }
 

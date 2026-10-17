@@ -37,9 +37,10 @@ the key away or signs approvals the person never made. Request signatures cannot
 signing code itself is replaced. So the phone server serves only over a path that is encrypted and
 authenticated end to end:
 
-- **A tunnel address**, such as Tailscale's (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`). WireGuard
+- **This machine's Tailscale address**: one the Tailscale client itself reports (`tailscale ip`),
+  not merely an address in its ranges (`100.64.0.0/10` is also used by carriers' NAT). WireGuard
   encrypts and authenticates every packet between the person's own devices, so plain HTTP inside it
-  is safe from the network in between. This is the first version's way, and it works on the same
+  is safe from the network in between. Other tunnels can follow once Nitely can tell they are one. This is the first version's way, and it works on the same
   Wi-Fi as well as away from home: both devices only need to be on the person's tailnet.
 - **HTTPS** with a certificate the phone already trusts (a Tailscale HTTPS certificate, or a local
   certificate authority the person installs on the phone). This is how a plain LAN without a tunnel

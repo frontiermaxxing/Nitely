@@ -32,8 +32,8 @@ type View =
 function initial(): View {
   const device = loadDevice();
   const secret = pairSecret();
-  if (secret && !device?.paired) return { kind: "pair", secret };
-  if (secret) forgetSecret();
+  // A new pairing link wins: the phone may have been removed on the PC and is pairing again.
+  if (secret) return { kind: "pair", secret };
   if (device?.paired) return { kind: "paired", device };
   if (device) return { kind: "confirm", device };
   return { kind: "start" };

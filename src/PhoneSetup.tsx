@@ -29,12 +29,13 @@ export function PhoneSetup(props: { now: number }) {
     );
   }, []);
   useEffect(load, [load]);
-  // While a pairing offer is open, the phone's request can arrive any moment.
+  // While the server is on, a phone's pairing request can arrive any moment, code shown or hidden.
+  const serving = (status?.listening.length ?? 0) > 0;
   useEffect(() => {
-    if (!offer) return;
+    if (!serving) return;
     const t = setInterval(load, 2000);
     return () => clearInterval(t);
-  }, [offer, load]);
+  }, [serving, load]);
 
   const run = async (work: () => Promise<PhoneStatus | void>) => {
     setBusy(true);
@@ -92,7 +93,7 @@ export function PhoneSetup(props: { now: number }) {
         ) : (
           <>
             <p className="small muted">
-              Only addresses whose path to the phone is encrypted end to end: a tunnel such as Tailscale, on this PC and the phone. Plain Wi-Fi is not offered,
+              Only addresses whose path to the phone is encrypted end to end: this PC's Tailscale address, with Tailscale on the phone too. Plain Wi-Fi is not offered,
               because anyone who can intercept it could change the page that holds the phone's key.
             </p>
             <div className="phone-addresses">

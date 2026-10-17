@@ -41,21 +41,45 @@ pub enum PathKind {
     Tunnel,
 }
 
-/// Whether `ip` can serve the phone page, and as what. None for an ordinary LAN address: plain
-/// HTTP there could be changed by anyone who can intercept traffic (docs/phone.md).
-pub fn path_kind(ip: IpAddr) -> Option<PathKind> {
+/// Whether `ip` can serve the phone page, and as what, given the addresses the Tailscale client
+/// says are this machine's. None for anything else: plain HTTP on an ordinary network could be
+/// changed by anyone who can intercept traffic (docs/phone.md). An address in Tailscale's range
+/// that Tailscale does not claim is not enough: a carrier's NAT uses 100.64.0.0/10 too.
+pub fn path_kind(ip: IpAddr, tailscale: &[IpAddr]) -> Option<PathKind> {
+    if ip.is_loopback() {
+        Some(PathKind::Loopback)
+    } else if tailscale.contains(&ip) && in_tailscale_range(ip) {
+        Some(PathKind::Tunnel)
+    } else {
+        None
+    }
+}
+
+/// Tailscale's address ranges: 100.64.0.0/10 and fd7a:115c:a1e0::/48.
+pub fn in_tailscale_range(ip: IpAddr) -> bool {
     match ip {
-        ip if ip.is_loopback() => Some(PathKind::Loopback),
-        // Tailscale's addresses: 100.64.0.0/10 and fd7a:115c:a1e0::/48.
         IpAddr::V4(v4) => {
             let o = v4.octets();
-            (o[0] == 100 && (o[1] & 0xc0) == 64).then_some(PathKind::Tunnel)
+            o[0] == 100 && (o[1] & 0xc0) == 64
         }
         IpAddr::V6(v6) => {
             let s = v6.segments();
-            (s[0] == 0xfd7a && s[1] == 0x115c && s[2] == 0xa1e0).then_some(PathKind::Tunnel)
+            s[0] == 0xfd7a && s[1] == 0x115c && s[2] == 0xa1e0
         }
     }
+}
+
+/// This machine's addresses on its tailnet, as the Tailscale client reports them (`tailscale ip`);
+/// empty when Tailscale is not installed or not signed in.
+pub fn tailscale_ips() -> Vec<IpAddr> {
+    let candidates = ["tailscale", r"C:\Program Files\Tailscale\tailscale.exe", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"];
+    for program in candidates {
+        let Ok(out) = crate::playbook::shell_free_command(program).arg("ip").stdin(std::process::Stdio::null()).output() else { continue };
+        if out.status.success() {
+            return String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| l.trim().parse().ok()).filter(|ip| in_tailscale_range(*ip)).collect();
+        }
+    }
+    vec![]
 }
 
 /// One of this machine's addresses, as the app's Phone screen offers it.
@@ -68,6 +92,7 @@ pub struct Address {
 
 /// This machine's addresses: loopback, then the tunnel ones, then the rest (which cannot serve).
 pub fn addresses() -> Vec<Address> {
+    let tailscale = tailscale_ips();
     let mut out: Vec<Address> = vec![Address { ip: "127.0.0.1".into(), interface: "this machine".into(), kind: Some(PathKind::Loopback) }];
     for i in if_addrs::get_if_addrs().unwrap_or_default() {
         let ip = i.ip();
@@ -79,7 +104,7 @@ pub fn addresses() -> Vec<Address> {
                 continue;
             }
         }
-        out.push(Address { ip: ip.to_string(), interface: i.name.clone(), kind: path_kind(ip) });
+        out.push(Address { ip: ip.to_string(), interface: i.name.clone(), kind: path_kind(ip, &tailscale) });
     }
     out.sort_by_key(|a| (a.kind.is_none(), a.kind != Some(PathKind::Loopback), a.ip.contains(':')));
     out
@@ -251,8 +276,9 @@ impl Phone {
         if ips.is_empty() {
             bail!("pick at least one address to listen on");
         }
-        if let Some(ip) = ips.iter().find(|ip| path_kind(**ip).is_none()) {
-            bail!("{ip} is an ordinary network address, and plain HTTP there could be changed by anyone who can intercept traffic; pick a tunnel address such as Tailscale's (docs/phone.md)");
+        let tailscale = if ips.iter().all(|ip| ip.is_loopback()) { vec![] } else { tailscale_ips() };
+        if let Some(ip) = ips.iter().find(|ip| path_kind(**ip, &tailscale).is_none()) {
+            bail!("{ip} is not this machine's Tailscale address, and plain HTTP on any other network could be changed by anyone who can intercept traffic; pick the Tailscale address (docs/phone.md)");
         }
         let mut running = Running { addrs: vec![], stoppers: vec![] };
         for ip in ips {
@@ -269,7 +295,7 @@ impl Phone {
             let handler: http::Handler = Arc::new(move |stream: &mut TcpStream, _peer: SocketAddr| me.connection(stream));
             // Loopback answers only this machine; a tunnel address only the tunnel's peers.
             let own = *ip;
-            let allow = Arc::new(move |peer: IpAddr| if own.is_loopback() { peer.is_loopback() } else { path_kind(peer) == Some(PathKind::Tunnel) });
+            let allow = Arc::new(move |peer: IpAddr| if own.is_loopback() { peer.is_loopback() } else { in_tailscale_range(peer) });
             let stop = flag.clone();
             std::thread::spawn(move || http::accept_until(listener, allow, Arc::new(Slots::default()), handler, stop));
             running.addrs.push(addr);
@@ -302,8 +328,16 @@ impl Phone {
         self.state().requests.iter().filter(|r| r.status == "waiting" && r.at >= cutoff).cloned().collect()
     }
 
-    /// The person's answer to a pairing request, in the app. Returns the device to add on yes;
-    /// the app adds it to the signed list.
+    /// The device a waiting pairing request would add, without answering it: the app saves it to
+    /// the signed list first, then calls `decide`, so a failed save leaves the request waiting.
+    pub fn pending_device(&self, id: &str) -> Result<Device> {
+        let cutoff = now() - OFFER_SECONDS;
+        let state = self.state();
+        let r = state.requests.iter().find(|r| r.id == id && r.status == "waiting" && r.at >= cutoff).context("that pairing request is gone; pair the phone again")?;
+        Ok(Device { id: r.id.clone(), name: r.name.clone(), public_key: r.public_key.clone(), paired_at: now() })
+    }
+
+    /// The person's answer to a pairing request, in the app. Returns the device to add on yes.
     pub fn decide(&self, id: &str, accept: bool) -> Result<Option<Device>> {
         let mut state = self.state();
         let cutoff = now() - OFFER_SECONDS;
@@ -408,8 +442,10 @@ impl Phone {
         if let Err((status, why)) = self.check_signature(head, body, &key) {
             return (status, error(why));
         }
+        let expired = |r: &PairRequest| r.at < now() - OFFER_SECONDS;
         let status = match (paired, request) {
             (Some(_), _) => "paired".to_string(),
+            (None, Some(r)) if r.status == "waiting" && expired(&r) => "declined".to_string(),
             (None, Some(r)) if r.status == "paired" => "waiting".to_string(),
             (None, Some(r)) => r.status,
             (None, None) => "declined".to_string(),
@@ -487,14 +523,16 @@ mod tests {
     #[test]
     fn only_loopback_and_tunnel_addresses_serve() {
         let ip = |s: &str| s.parse::<IpAddr>().unwrap();
-        assert_eq!(path_kind(ip("127.0.0.1")), Some(PathKind::Loopback));
-        assert_eq!(path_kind(ip("100.101.102.103")), Some(PathKind::Tunnel));
-        assert_eq!(path_kind(ip("100.128.0.1")), None, "outside 100.64.0.0/10");
-        assert_eq!(path_kind(ip("fd7a:115c:a1e0::1")), Some(PathKind::Tunnel));
-        assert_eq!(path_kind(ip("192.168.1.20")), None);
+        let ts = [ip("100.101.102.103"), ip("fd7a:115c:a1e0::1")];
+        assert_eq!(path_kind(ip("127.0.0.1"), &[]), Some(PathKind::Loopback));
+        assert_eq!(path_kind(ip("100.101.102.103"), &ts), Some(PathKind::Tunnel));
+        assert_eq!(path_kind(ip("100.101.102.104"), &ts), None, "in the range, but not Tailscale's: a carrier's NAT");
+        assert_eq!(path_kind(ip("100.128.0.1"), &[ip("100.128.0.1")]), None, "outside 100.64.0.0/10");
+        assert_eq!(path_kind(ip("fd7a:115c:a1e0::1"), &ts), Some(PathKind::Tunnel));
+        assert_eq!(path_kind(ip("192.168.1.20"), &ts), None);
         let phone = Phone::new(Arc::new(|| Ok(vec![])), Arc::new(|_: &str| None));
         let err = phone.start(&[ip("192.168.1.20")], 0).err().unwrap().to_string();
-        assert!(err.contains("ordinary network address"), "{err}");
+        assert!(err.contains("not this machine's Tailscale address"), "{err}");
     }
 
     #[test]

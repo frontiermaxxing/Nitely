@@ -35,7 +35,7 @@ export function phoneStatus(): PhoneStatus {
 export function phoneStart(args: Record<string, unknown>): PhoneStatus {
   const ips = args.ips as string[];
   const bad = ips.find((ip) => !ADDRESSES.find((a) => a.ip === ip)?.kind);
-  if (bad) throw `${bad} is an ordinary network address, and plain HTTP there could be changed by anyone who can intercept traffic; pick a tunnel address such as Tailscale's (docs/phone.md)`;
+  if (bad) throw `${bad} is not this machine's Tailscale address, and plain HTTP on any other network could be changed by anyone who can intercept traffic; pick the Tailscale address (docs/phone.md)`;
   listening = ips.map((ip) => `http://${ip}:7422/phone/`);
   return status();
 }
