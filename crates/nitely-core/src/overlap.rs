@@ -326,9 +326,9 @@ mod tests {
         let touching = [issue("NIT-56", 3, "Add a field to src/types.ts", &[])];
         assert_eq!(clash_of(&touching, &bare, &shared)["NIT-56"].0, SHARED_WEIGHT);
         // A held folder holding a shared file still holds the rest at full weight.
-        let folder = vec![Held { key: "NIT-43".into(), branch: None, files: vec!["src".into()] }];
-        let button = [issue("NIT-57", 3, "Fix src/Button.tsx", &[])];
-        assert_eq!(clash_of(&button, &folder, &shared)["NIT-57"].0, 1.0);
+        let folder = vec![Held { key: "NIT-43".into(), branch: None, files: vec!["src/ui".into()] }];
+        let button = [issue("NIT-57", 3, "Fix src/ui/Button.tsx", &[])];
+        assert_eq!(clash_of(&button, &folder, &["src/ui/types.ts".to_string()])["NIT-57"].0, 1.0);
 
         // A held folder or bare file name catches a candidate's full path.
         let wide = vec![Held { key: "NIT-41".into(), branch: None, files: vec!["src/ui".into(), "Backlog.tsx".into()] }];
