@@ -49,7 +49,7 @@ impl Agreement {
     }
 }
 
-/// Where a finding points: the files it cites (by name) and the symbol after the file, from the
+/// Where a finding points: the files it cites and the symbol after the file, from the
 /// `title: file, symbol: what` form the prompt asks for.
 #[derive(Debug, PartialEq)]
 struct Place {
@@ -58,8 +58,8 @@ struct Place {
 }
 
 fn place(f: &Finding) -> Place {
-    let name = |p: &str| p.replace('\\', "/").rsplit('/').next().unwrap_or(p).to_lowercase();
-    let mut files: Vec<String> = citations(&f.text).into_iter().map(|(p, _)| name(&p)).collect();
+    let path = |p: &str| p.replace('\\', "/").trim_start_matches("./").to_lowercase();
+    let mut files: Vec<String> = citations(&f.text).into_iter().map(|(p, _)| path(&p)).collect();
     files.dedup();
     let symbol = f.text.split_once(": ").and_then(|(_, rest)| rest.split_once(": ")).and_then(|(at, _)| at.split_once(',')).map(|(_, s)| s.trim().trim_matches('`').trim().to_lowercase()).filter(|s| {
         !s.is_empty() && !s.contains(' ') && citations(s).is_empty()
@@ -75,7 +75,10 @@ fn same_place(a: &Place, b: &Place) -> bool {
     if a.files.is_empty() || b.files.is_empty() {
         return a.symbol.is_some() && a.symbol == b.symbol;
     }
-    a.files.iter().any(|f| b.files.contains(f)) && symbols_agree
+    // One path may be written shorter than the other (`land.rs`, `crates/x/src/land.rs`), but two
+    // files of one name in different folders are different files.
+    let same_file = |x: &String, y: &String| x == y || x.ends_with(&format!("/{y}")) || y.ends_with(&format!("/{x}"));
+    a.files.iter().any(|f| b.files.iter().any(|g| same_file(f, g))) && symbols_agree
 }
 
 /// Compares two reviews of one change, pairing their findings one to one by place.
@@ -250,9 +253,11 @@ mod tests {
         assert!(!a.same_verdict);
         assert_eq!((a.blocking, a.blocking_matched, a.matched), ((1, 0), 0, 1));
         assert_eq!((a.severity.clone(), a.crossed()), (vec![(1, 2)], 1));
-        // Same file, another symbol: a different defect.
+        // Same file, another symbol: a different defect. Same name and symbol in another folder: too.
         let other = side("changes", vec![f(1, "Leak: crates/nitely-core/src/land.rs, push_token: logged")], 1.0, None);
         assert_eq!(agree(&alone, &other).matched, 0);
+        let elsewhere = side("changes", vec![f(1, "Approval race: crates/other/src/land.rs, approved_at: the same second")], 1.0, None);
+        assert_eq!(agree(&alone, &elsewhere).matched, 0);
 
         let report = Report::of(&[Pair { issue: "NIT-1".into(), batch: 1, batch_size: 2, single: alone.clone(), batched: batched.clone() }]);
         assert_eq!((report.changes, report.same_verdict, report.crossed, report.tokens_batched), (1, 0, 1, Some(18_000.0)));

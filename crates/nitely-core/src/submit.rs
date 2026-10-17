@@ -440,10 +440,17 @@ fn plural(n: usize, what: &str) -> String {
 /// The latest review that ran on the issue, for the next one to start from. Its commit counts as
 /// in the branch's history only when it is an ancestor of HEAD; after a rebase it is not.
 pub(crate) fn previous_round(db: &Db, key: &str, worktree: &Path) -> Result<Option<PreviousRound>> {
-    let Some(last) = db.reviews(key)?.into_iter().find(|r| !r.reviewer.is_empty()) else {
+    previous_round_at(db, key, worktree, "HEAD", None)
+}
+
+/// `previous_round` for the commit `head` (read in `dir`), from the reviews recorded before the
+/// review `before`: for a shadow batch, the round before the single review that decided the change,
+/// so the batch reviews it as that single review did, not knowing its answers (NIT-217).
+pub(crate) fn previous_round_at(db: &Db, key: &str, dir: &Path, head: &str, before: Option<i64>) -> Result<Option<PreviousRound>> {
+    let Some(last) = db.reviews_before(key, before)?.into_iter().find(|r| !r.reviewer.is_empty()) else {
         return Ok(None);
     };
-    let in_history = git(worktree, &["merge-base", "--is-ancestor", &last.commit_sha, "HEAD"]).is_ok();
+    let in_history = git(dir, &["merge-base", "--is-ancestor", &last.commit_sha, head]).is_ok();
     // Only acceptances that verify count: a row an agent wrote itself must not silence a finding.
     let accepted: Vec<crate::accept::Accepted> = match crate::approval::trusted_key() {
         Ok(public) => db.signed_acceptances(key, &public)?,
@@ -600,11 +607,16 @@ impl Db {
 
     /// Every review of an issue's branch, newest first.
     pub fn reviews(&self, issue_key: &str) -> Result<Vec<ReviewRecord>> {
+        self.reviews_before(issue_key, None)
+    }
+
+    /// `reviews`, only those recorded before the review `before` when given.
+    pub fn reviews_before(&self, issue_key: &str, before: Option<i64>) -> Result<Vec<ReviewRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT issue_key, patch_id, commit_sha, reviewer, verdict, approver, reasons, findings, ts, note, batch_id
-             FROM review WHERE issue_key = ?1 COLLATE NOCASE ORDER BY ts DESC, id DESC",
+             FROM review WHERE issue_key = ?1 COLLATE NOCASE AND (?2 IS NULL OR id < ?2) ORDER BY ts DESC, id DESC",
         )?;
-        let rows = stmt.query_map([issue_key], |r| {
+        let rows = stmt.query_map(rusqlite::params![issue_key, before], |r| {
             Ok(ReviewRecord {
                 issue_key: r.get(0)?,
                 patch_id: r.get(1)?,
@@ -1068,5 +1080,23 @@ reason = "money logic"
         }
         let report = crate::review_compare::Report::of(&pairs);
         assert_eq!((report.changes, report.batches, report.same_verdict, report.blocking_batched), (2, 1, 1, 1));
+    }
+
+    #[test]
+    fn a_shadow_batch_starts_from_the_round_before_the_review_that_decided() {
+        let mut f = fixture();
+        let (issue, wt) = f.committed("Edge again", "edge.txt");
+        let first = f.submit(&wt, true).unwrap();
+        std::fs::write(wt.join("edge.txt"), "let edge = 2;").unwrap();
+        sh(&wt, &["commit", "-q", "-am", "edge again"]);
+        f.submit(&wt, true).unwrap();
+        let deciding: i64 = f.db.conn.query_row("SELECT MAX(id) FROM review WHERE issue_key = ?1", [&issue.key], |r| r.get(0)).unwrap();
+        // The next round would start from the deciding review; its shadow batch starts where that
+        // review started, from the first round, so it does not see the answers it is measured against.
+        let next = previous_round(&f.db, &issue.key, &wt).unwrap().unwrap();
+        let shadow = previous_round_at(&f.db, &issue.key, &wt, "HEAD", Some(deciding)).unwrap().unwrap();
+        assert_ne!(next.commit, shadow.commit);
+        assert_eq!(shadow.commit, first.commit);
+        assert!(shadow.in_history && shadow.findings.len() == 1 && !shadow.findings[0].carried, "{shadow:?}");
     }
 }

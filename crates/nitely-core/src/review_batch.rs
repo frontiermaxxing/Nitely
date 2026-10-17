@@ -236,9 +236,13 @@ struct Queued {
     queued_at: i64,
     result: Option<String>,
     why: Option<String>,
+    /// A shadow change's single review, which decided it.
+    review_id: Option<i64>,
+    repo: String,
 }
 
-const COLUMNS: &str = "id, issue_key, reviewer, note, title, branch, worktree, base, head, lines, files, pid, actor, state, batch_id, queued_at, result, why";
+const COLUMNS: &str =
+    "id, issue_key, reviewer, note, title, branch, worktree, base, head, lines, files, pid, actor, state, batch_id, queued_at, result, why, review_id, repo";
 
 fn row(r: &rusqlite::Row) -> rusqlite::Result<Queued> {
     Ok(Queued {
@@ -260,6 +264,8 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<Queued> {
         queued_at: r.get(15)?,
         result: r.get(16)?,
         why: r.get(17)?,
+        review_id: r.get(18)?,
+        repo: r.get(19)?,
     })
 }
 
@@ -418,8 +424,10 @@ fn run_batch(db: &Db, rules: &ReviewRules, batch: i64, rows: &[Queued], shadow: 
     let changes: Vec<BatchChange> = rows
         .iter()
         .map(|r| {
-            let worktree = PathBuf::from(&r.worktree);
-            let previous = crate::submit::previous_round(db, &r.issue, &worktree).ok().flatten();
+            // A worktree already cleaned up (a shadow change Nitely landed meanwhile): the repo has
+            // every branch's commits.
+            let worktree = Some(PathBuf::from(&r.worktree)).filter(|w| w.is_dir()).unwrap_or_else(|| PathBuf::from(&r.repo));
+            let previous = crate::submit::previous_round_at(db, &r.issue, &worktree, &r.head, r.review_id).ok().flatten();
             BatchChange {
                 key: r.issue.clone(),
                 title: r.title.clone(),
@@ -435,7 +443,7 @@ fn run_batch(db: &Db, rules: &ReviewRules, batch: i64, rows: &[Queued], shadow: 
     let reviewer = rows[0].reviewer.as_str();
     let fail = |why: String| fail_batch(db, batch, &why);
     let Some(run_in) = changes.iter().map(|c| c.worktree.as_path()).find(|w| w.is_dir()) else {
-        return fail("none of its changes' worktrees is there to run the reviewer in".into());
+        return fail("none of its changes' worktrees, nor the repository, is there to run the reviewer in".into());
     };
     let reply = match rules.run_prompt(reviewer, run_in, &rules.batch_prompt(&changes)) {
         Ok(reply) if reply.only_a_login_message => Err(reply.signed_out(rules)),
