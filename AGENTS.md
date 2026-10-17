@@ -46,9 +46,12 @@ Nitely tracks its own build. Its backlog is the **NIT** project in Nitely, reach
   `node scripts/app-icon.mjs` makes the sizes. Windows embeds the icon in the exe when it is built,
   so a new icon shows only after a rebuild (restart `npm run tauri dev`), and a pinned taskbar
   shortcut can keep the old one until Windows refreshes its icon cache.
-- After landing a change to `crates/`, run `cargo run --release -p nitely-cli -- install` in the main
-  checkout: it puts the new `nitely` where hooks and MCP run it, even while agents run the old one
-  (`cargo install` fails then on Windows), and running MCP servers forward tool calls to it.
+- Land installs the new `nitely` itself after a change to `crates/`, `Cargo.toml` or `Cargo.lock`
+  (a `[[land.after]]` step in `.nitely/playbook.toml`, run in the main checkout while land still
+  holds its lock), so you do not. It puts the new build where hooks and MCP run it, even while
+  agents run the old one, and running MCP servers forward tool calls to it. Only when submit or land
+  refuses because the installed `nitely` is older than main (the land's install step failed: see
+  its warning) run `cargo run --release -p nitely-cli -- install` in the main checkout yourself.
 
 ## Driving the real app
 
