@@ -1339,6 +1339,13 @@ impl Db {
         Ok(())
     }
 
+    /// Keeps a claim held by `agent` fresh, as a note from it does. An agent whose calls now act as
+    /// its session (NIT-194) still holds the claims it took under its folder's id before.
+    pub fn renew_claim(&self, key: &str, agent: &str) -> Result<()> {
+        self.conn.execute("UPDATE issue SET claimed_at = ?3 WHERE key = ?1 COLLATE NOCASE AND claimed_by = ?2", params![key, agent, now()])?;
+        Ok(())
+    }
+
     /// Fills each issue's track: open issues from their timelines, read in one query; closed ones
     /// from their state, which is all a list shows of them.
     fn fill_tracks(&self, issues: &mut [IssueRecord]) -> Result<()> {

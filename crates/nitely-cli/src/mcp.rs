@@ -61,7 +61,7 @@ impl Server {
     /// a move names the agent that made it, not every session in its folder (NIT-194). A crew
     /// worker keeps its folder's id: the supervisor knows it by that id, and its worktree is its own.
     fn actor_for(&self, session: &str) -> Actor {
-        if std::env::var_os("NITELY_CREW").is_some() {
+        if crew_worker() {
             return Actor::Agent(self.agent());
         }
         Actor::Agent(session.to_string())
@@ -72,7 +72,8 @@ impl Server {
     /// session Claude Code named when it started this server (`named`, its
     /// `CLAUDE_CODE_SESSION_ID`), while that session is still open: a `/clear` starts another.
     fn claude_session(&self, params: &Value, db: &Db, named: Option<&str>) -> Option<String> {
-        if self.vendor != "claude" || self.remote.is_some() {
+        // A crew worker's reports go under its folder's id too, where the supervisor reads them.
+        if self.vendor != "claude" || self.remote.is_some() || crew_worker() {
             return None;
         }
         let call = params.pointer("/_meta/claudecode~1toolUseId").and_then(Value::as_str).filter(|c| !c.is_empty());
@@ -98,6 +99,12 @@ impl Server {
             _ => self.agent(),
         }
     }
+}
+
+/// Whether this server serves a crew worker: the supervisor sets `NITELY_CREW` in its worker's MCP
+/// configuration (crew.rs), and knows the worker by its folder's id.
+fn crew_worker() -> bool {
+    std::env::var_os("NITELY_CREW").is_some()
 }
 
 pub fn serve() -> Result<()> {
@@ -633,7 +640,7 @@ fn run_tool(server: &Server, name: &str, args: &Value, params: &Value) -> Result
     Ok(match name {
         "next_task" => {
             let project = project(&db)?;
-            match nitely_core::overlap::next_task(&config, &mut db, &project, &server.agent(), &[])? {
+            match nitely_core::overlap::next_task(&config, &mut db, &project, actor.id(), &[])? {
                 Some(nitely_core::overlap::Picked { issue, why }) => {
                     let root = if server.remote.is_some() { None } else { playbook::repo_for_issue(&config, issue.project.as_deref(), &server.cwd).ok() };
                     let branch = match root {
@@ -851,12 +858,15 @@ fn run_tool(server: &Server, name: &str, args: &Value, params: &Value) -> Result
                 // Written by the session the report counts toward, so Activity puts the issue on
                 // that Codex thread's lane rather than guessing between threads in one folder.
                 db.add_note_from(key, text, "status", &actor, session)?;
+                db.renew_claim(key, &server.agent())?;
             }
             json!({ "ok": true })
         }
         "note" => {
             let handoff = args.get("handoff").and_then(Value::as_bool).unwrap_or(false);
             db.add_note(req(args, "key")?, req(args, "text")?, if handoff { "handoff" } else { "note" }, &actor)?;
+            // A claim it took under its folder's id, before its calls named its session.
+            db.renew_claim(req(args, "key")?, &server.agent())?;
             json!({ "ok": true })
         }
         "ask" => {
