@@ -46,9 +46,10 @@ export function crewDraftOf(v: CrewView): CrewDraft {
   const [from, to] = (v.quiet_hours ?? "").split("-").map((s) => s.trim());
   return {
     workers: v.workers,
-    agents: v.workers > 0 || v.agents.length ? [...v.agents] : v.choices.filter((c) => c.installed).map((c) => c.name),
+    agents: v.agents.length ? [...v.agents] : v.choices.filter((c) => c.installed).map((c) => c.name),
     maxPerDay: v.max_per_day == null ? "" : String(v.max_per_day),
-    budgetMillions: v.max_tokens_per_day == null ? "" : String(Math.round(v.max_tokens_per_day / 100_000) / 10),
+    // Exact, so a save that changes something else keeps the budget as it is.
+    budgetMillions: v.max_tokens_per_day == null ? "" : String(v.max_tokens_per_day / 1_000_000),
     quiet: !!v.quiet_hours,
     quietFrom: from || "01:00",
     quietTo: to || "07:00",
@@ -82,10 +83,11 @@ export function crewChanged(v: CrewView, d: CrewDraft): boolean {
   const e = crewEditOf(d);
   if (typeof e === "string") return true;
   const same = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
-  const agentsMatter = e.workers > 0 || v.workers > 0;
+  // A playbook that names no agents drafts the installed ones; that alone is no change.
+  const agentsChanged = v.agents.length ? !same(e.agents, v.agents) : e.workers > 0 || !same(e.agents, crewDraftOf(v).agents);
   return (
     e.workers !== v.workers ||
-    (agentsMatter && !same(e.agents, v.agents)) ||
+    agentsChanged ||
     e.max_per_day !== v.max_per_day ||
     e.max_tokens_per_day !== v.max_tokens_per_day ||
     e.quiet_hours !== v.quiet_hours

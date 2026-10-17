@@ -43,6 +43,15 @@ test("a crew that is off drafts the installed agents, and saves nothing until so
   assert.deepEqual(crewDraftOf({ ...view, agents: [] }).agents, ["codex"], "with none named, the installed ones");
   assert.equal(crewChanged(view, d), false);
   assert.equal(crewChanged(view, { ...d, workers: 2 }), true);
+  assert.equal(crewChanged(view, { ...d, agents: ["codex", "claude"] }), true, "the order of agents saves with the crew off too");
+});
+
+test("a budget the draft did not touch saves as it was", () => {
+  for (const tokens of [1_250_000, 30_000, 1_234_567]) {
+    const v = { ...view, workers: 1, max_tokens_per_day: tokens };
+    const e = crewEditOf({ ...crewDraftOf(v), maxPerDay: "5" });
+    assert.equal(typeof e === "string" ? e : e.max_tokens_per_day, tokens);
+  }
 });
 
 test("the draft saves the playbook's units and refuses what the crew could not run", () => {
