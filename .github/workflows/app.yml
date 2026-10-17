@@ -55,5 +55,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: app-screens
-          path: target/harness/screens
+          path: |
+            target/harness/screens
+            target/harness/app.log
           if-no-files-found: ignore

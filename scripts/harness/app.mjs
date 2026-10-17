@@ -148,13 +148,14 @@ async function start({ seed, env, keepHome, unlock }) {
   // harness identifier's own, never the app's.
   if (process.platform === "win32" && process.env.LOCALAPPDATA) {
     const web = join(process.env.LOCALAPPDATA, IDENTIFIER);
-    if (web.endsWith(".harness")) rmSync(web, { recursive: true, force: true });
+    if (web.endsWith(".harness")) rmSync(web, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
   }
   seed(home);
   const port = await freePort();
   mkdirSync(join(home, "screens"), { recursive: true });
   const child = spawn(exe("nitely-app"), [], {
-    cwd: home,
+    // Not in its data folder, which close() removes.
+    cwd: ROOT,
     env: { ...process.env, ...env, NITELY_HOME: home, NITELY_HARNESS: "1", WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}` },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -162,26 +163,50 @@ async function start({ seed, env, keepHome, unlock }) {
   child.stdout.on("data", (d) => (log += d));
   child.stderr.on("data", (d) => (log += d));
   const exited = new Promise((r) => child.once("exit", r));
-  let page;
-  try {
-    page = await Promise.race([Page.connect(port, 90000), exited.then((code) => Promise.reject(new Error(`the app exited (${code}) before its page came up:\n${log}`)))]);
-    await page.waitFor(`return document.querySelector(".sidebar") !== null;`, { timeoutMs: 30000, what: "the app's sidebar" });
-  } catch (e) {
-    child.kill();
-    rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-    throw e;
-  }
-  const close = async () => {
-    page?.close();
+  // The app and its WebView2 processes, all of them: a process left behind holds the folders.
+  const stop = async () => {
     if (child.exitCode === null) {
       if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore" });
       else child.kill();
       await Promise.race([exited, new Promise((r) => setTimeout(r, 5000))]);
     }
-    if (!keepHome) rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  };
+  // Cleaning up never hides why a run failed: what cannot be removed is left and said.
+  const remove = () => {
+    try {
+      rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
+    } catch (e) {
+      console.error(`harness: could not remove ${home}: ${e.message}`);
+    }
+  };
+  let page;
+  try {
+    page = await Promise.race([Page.connect(port, 90000), exited.then((code) => Promise.reject(new Error(`the app exited (${code}) before its page came up`)))]);
+    await page.waitFor(`return document.querySelector(".sidebar") !== null;`, { timeoutMs: 30000, what: "the app's sidebar" });
+  } catch (e) {
+    await stop();
+    keepLog(log);
+    remove();
+    throw new Error(`${e.message}\n--- the app's output ---\n${log}`);
+  }
+  const close = async () => {
+    page?.close();
+    await stop();
+    keepLog(log);
+    if (!keepHome) remove();
     unlock();
   };
   return { page, home, port, pid: child.pid, log: () => log, exited, close };
+}
+
+/** The app's output of the last run, kept in target/harness/app.log (CI uploads it). */
+function keepLog(log) {
+  try {
+    mkdirSync(TARGET, { recursive: true });
+    writeFileSync(join(TARGET, "app.log"), log);
+  } catch {
+    // Only for looking at later.
+  }
 }
 
 /** The taskbar count the app last set, and whether it drew the overlay: `{ count, drawn }` or null. */
