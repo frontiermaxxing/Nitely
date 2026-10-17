@@ -122,8 +122,9 @@ export function Network(props: { board: Board | null; projects: Project[]; now: 
                   <span className="remote-who">
                     {t.name} {t.project && <span className="muted mono">{t.project}</span>}
                   </span>
-                  <StateDot state={live} />
-                  <span className="small">{latest ? livenessLabel(latest, now) : "not seen yet"}</span>
+                  <span className="remote-state small">
+                    <StateDot state={live} /> {latest ? livenessLabel(latest, now) : "not seen yet"}
+                  </span>
                   <span className="remote-doing small">{latest?.last_activity ?? <span className="muted">added {ago(now, t.created_at)}</span>}</span>
                   {removing === t.name ? (
                     <span className="net-confirm small">

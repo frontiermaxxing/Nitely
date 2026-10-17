@@ -89,7 +89,7 @@ input { accent-color: var(--fg); }
 .head-note { color: var(--fg-3); font-size: var(--text-md); }
 h1 { font-size: var(--text-xl); font-weight: var(--weight-strong); margin: 0; letter-spacing: -0.015em; line-height: 1.25; }
 h1 .mono { font-size: var(--text-sm); font-weight: 400; margin-left: 6px; color: var(--fg-3); letter-spacing: 0; }
-h2 { display: flex; align-items: baseline; gap: 10px; font-size: 14px; font-weight: var(--weight-strong); margin: 24px 0 10px; }
+h2 { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; font-size: 14px; font-weight: var(--weight-strong); margin: 24px 0 10px; }
 h2 .muted, h2 .head-note { font-size: var(--text-sm); font-weight: 400; color: var(--fg-3); }
 section:first-of-type h2 { margin-top: 8px; }
 h3 { font-size: var(--text-sm); font-weight: 600; margin: 22px 0 8px; color: var(--fg-2); }
@@ -173,12 +173,21 @@ a:hover { text-decoration-color: currentColor; }
 /* Agents on other machines (nitely serve): one quiet row each. */
 .remote-list { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); }
 .remote-row {
-  display: grid; grid-template-columns: auto minmax(120px, max-content) auto auto 1fr auto;
+  display: grid; grid-template-columns: auto minmax(120px, max-content) auto 1fr auto;
   align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-3);
+}
+.remote-state { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+/* Narrow, a machine is two lines: who and Remove, then its state and what it last did. */
+@media (max-width: 640px) {
+  .remote-row { grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "mark who end" ". state state" ". doing doing"; row-gap: 2px; }
+  .remote-row > .ui-mark { grid-area: mark; }
+  .remote-who { grid-area: who; }
+  .remote-state { grid-area: state; }
+  .remote-doing { grid-area: doing; }
+  .remote-row > .btn, .remote-row > .net-confirm { grid-area: end; }
 }
 .remote-row + .remote-row { border-top: 1px solid var(--line); }
 .remote-doing { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-.remote-row:has(.net-confirm), .remote-row:has(> .btn) { grid-template-columns: auto minmax(120px, max-content) auto auto 1fr auto; }
 /* In its settings card the list is the card's rows, not a box in a box. */
 .settings-card .remote-list { background: none; border: 0; border-radius: 0; }
 .settings-card .remote-row { padding-left: 0; padding-right: 0; }
@@ -191,10 +200,6 @@ a:hover { text-decoration-color: currentColor; }
 .net-add input { width: 160px; }
 .net-urls { margin: var(--space-2) 0 0; padding-left: var(--space-4); }
 .net-add-why { margin: 10px 0 0; }
-@media (max-width: 640px) {
-  .remote-row { grid-template-columns: auto 1fr auto; }
-  .remote-row .remote-doing, .remote-row > .small:not(.remote-doing) { grid-column: 2 / -1; }
-}
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
 tbody tr:last-child td { border-bottom: 0; }
@@ -523,9 +528,9 @@ details summary { cursor: pointer; color: var(--fg-2); }
 }
 .vendor-missing { opacity: 0.6; }
 .vendor-head { display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 0 16px; }
-.vendor-name { font-size: 14px; font-weight: var(--weight-strong); }
-.vendor-meta { font-size: var(--text-sm); color: var(--fg-3); }
-.vendor-pill { margin-left: auto; font-size: 11.5px; font-weight: var(--weight-medium); padding: 3px 8px; border-radius: 5px; }
+.vendor-name { font-size: 14px; font-weight: var(--weight-strong); white-space: nowrap; }
+.vendor-meta { min-width: 0; font-size: var(--text-sm); color: var(--fg-3); }
+.vendor-pill { margin-left: auto; font-size: 11.5px; font-weight: var(--weight-medium); padding: 3px 8px; border-radius: 5px; white-space: nowrap; }
 .vendor-pill-ok { color: var(--live); background: var(--live-wash); }
 .vendor-pill-warn { color: var(--attention-ink); background: var(--attention-wash); }
 .vendor-pill-fail { color: var(--fail); background: var(--fail-wash); }

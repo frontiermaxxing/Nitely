@@ -263,7 +263,7 @@ export function WhoHadIt(props: { detail: IssueDetail; now: number }) {
   const name = (lane: string) => (lane === "gate" ? "Gate" : lane === "human" ? "You" : VENDOR_LABEL[vendorOf(lane.replace(/-review$/, ""))]);
   const reviewerNote = lanes.find((l) => l !== authorLane && l !== "gate" && l !== "human");
   return (
-    <section className="who">
+    <section className="who-had">
       <h2>
         Who had it{" "}
         <span className="head-note">
@@ -273,7 +273,7 @@ export function WhoHadIt(props: { detail: IssueDetail; now: number }) {
           . Read left to right.
         </span>
       </h2>
-      <div className="who-grid" style={{ gridTemplateColumns: `84px repeat(${shown.length}, minmax(0, 1fr))` }}>
+      <div className="who-grid" style={{ gridTemplateColumns: `84px repeat(${shown.length}, minmax(76px, 1fr))` }}>
         {lanes.map((lane, row) => (
           <div key={lane} className="who-lane" style={{ gridRow: row + 1 }}>
             {lane !== "gate" && lane !== "human" ? <AgentMark vendor={lane.replace(/-review$/, "")} size={16} /> : <span className="who-lane-blank" />}

@@ -83,15 +83,20 @@ button.ui-token:focus-visible, a.ui-token:focus-visible { outline: 2px solid var
   position: absolute; right: -4px; top: -4px; width: 8px; height: 8px; border-radius: 50%;
   background: var(--attention); box-shadow: 0 0 0 2px var(--track-bg, var(--surface));
 }
-.ui-st-label {
-  font-size: var(--text-xs); line-height: 1.25; color: var(--fg-3); text-align: center; overflow-wrap: anywhere;
-}
+.ui-st-label { font-size: var(--text-xs); line-height: 1.25; color: var(--fg-3); text-align: center; }
 .ui-st-current .ui-st-label { color: var(--c); font-weight: var(--weight-strong); }
 .ui-st-current.ui-phase-done .ui-st-label, .ui-st-current.ui-phase-queued .ui-st-label { color: var(--fg); }
 .ui-st-skipped .ui-st-label { opacity: 0.6; }
 .ui-st-time { font-family: var(--font-mono); font-size: 10.5px; line-height: 1.2; min-height: 13px; color: var(--fg-3); font-variant-numeric: tabular-nums; text-align: center; }
 .ui-st-stuck .ui-st-label, .ui-st-stuck .ui-st-time { color: var(--st-stuck); }
 .ui-track-closed .ui-st { opacity: 0.6; }
+/* Too narrow for eight labels (a phone-width sheet): only where it stands is named, on one line;
+   the other stations say theirs on hover. Never a label broken mid-word. */
+.ui-track { container-type: inline-size; }
+@container (max-width: 440px) {
+  .ui-st:not(.ui-st-current) .ui-st-label, .ui-st:not(.ui-st-current) .ui-st-time { visibility: hidden; }
+  .ui-st-current .ui-st-label, .ui-st-current .ui-st-time { white-space: nowrap; }
+}
 
 /* The "changes asked" loop: from Review back over to Working, one nested arc per round, so
    many rounds read as a coil. The innermost arc is the dashed loop with the arrowhead into
