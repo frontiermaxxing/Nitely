@@ -71,8 +71,12 @@ mod tests {
 
     #[test]
     fn holds_and_lets_go() {
-        let first = KeepAwake::new().unwrap();
-        let second = KeepAwake::new().unwrap();
+        // Windows always can; elsewhere it needs caffeinate or systemd-inhibit, which a test
+        // machine may lack.
+        let (Ok(first), Ok(second)) = (KeepAwake::new(), KeepAwake::new()) else {
+            assert!(!cfg!(windows), "Windows always keeps the machine awake on request");
+            return;
+        };
         #[cfg(windows)]
         {
             // While one is held, Windows reports the system as required. (Other programs may hold it
