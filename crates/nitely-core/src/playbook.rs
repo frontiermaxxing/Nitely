@@ -240,40 +240,58 @@ fn one() -> u32 {
 #[derive(Debug, Clone, Serialize)]
 pub struct Flake {
     pub command: String,
-    /// The tests the failed run named (cargo's `test x ... FAILED`, node:test's `not ok`).
+    /// The tests the failed runs named (cargo's `test x ... FAILED` and closing `failures:` list,
+    /// node:test's `not ok`), across every failed run.
     pub tests: Vec<String>,
-    /// The end of the failed run's output.
+    /// The end of the first failed run's output.
     pub output: String,
 }
 
 /// Runs `command`, and again up to `retries` times while it fails. Returns the last run, with
-/// its time counting every run, and the failure it got past when a later run passed.
+/// its time counting every run, and the failures it got past when a later run passed.
 fn run_retrying(command: &str, dir: &Path, retries: u32) -> Result<(bool, String, u64, Option<Flake>)> {
     let (mut ok, mut output, mut seconds) = run_shell(command, dir)?;
-    let mut failed = None;
+    let mut failed: Vec<String> = Vec::new();
     for _ in 0..retries {
         if ok {
             break;
         }
-        failed = Some(output);
+        failed.push(output);
         let again = run_shell(command, dir)?;
         (ok, output, seconds) = (again.0, again.1, seconds + again.2);
     }
-    let flake = failed.filter(|_| ok).map(|out| Flake { command: command.to_string(), tests: failed_tests(&out), output: out });
+    let flake = (ok && !failed.is_empty()).then(|| {
+        let mut tests: Vec<String> = Vec::new();
+        for name in failed.iter().flat_map(|out| failed_tests(out)) {
+            if !tests.contains(&name) {
+                tests.push(name);
+            }
+        }
+        Flake { command: command.to_string(), tests, output: failed.swap_remove(0) }
+    });
     Ok((ok, output, seconds, flake))
 }
 
-/// The tests a run's output says failed: cargo's `test x ... FAILED` lines and node:test's
-/// `not ok N - name`, each once, in order.
+/// The tests a run's output says failed, each once, in order: cargo's `test x ... FAILED` lines
+/// and the `failures:` list it closes with (the end of a long run, which is what is kept of it),
+/// and node:test's `not ok N - name`.
 pub fn failed_tests(output: &str) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
+    let mut in_list = false;
     for line in output.lines() {
         let line = line.trim_end();
         let name = if let Some(rest) = line.strip_prefix("test ").and_then(|r| r.strip_suffix(" ... FAILED")) {
             rest.trim()
         } else if let Some(rest) = line.strip_prefix("not ok ") {
             rest.split_once(" - ").map(|(_, n)| n.trim()).unwrap_or("")
+        } else if line == "failures:" {
+            in_list = true;
+            ""
+        } else if in_list && line.starts_with("    ") && !line.trim().contains(' ') {
+            line.trim()
         } else {
+            // The list is names only; the first `failures:` block, of each test's output, is not.
+            in_list = in_list && (line.is_empty() || line.starts_with("    ")) && !line.starts_with("----");
             ""
         };
         if !name.is_empty() && !names.iter().any(|n| n == name) {
@@ -1184,6 +1202,9 @@ mod tests {
     fn names_the_failed_tests_of_cargo_and_node() {
         let cargo = "test a::ok ... ok\ntest a::bad ... FAILED\n\nfailures:\n    a::bad\n\ntest result: FAILED.";
         assert_eq!(failed_tests(cargo), ["a::bad"]);
+        // A long run's kept tail may start after the `... FAILED` lines; its closing list names them.
+        let tail = "…oo\n\nfailures:\n\n---- b::slow stdout ----\nthread panicked at x.rs:3\n    left: 1\n\nfailures:\n    b::slow\n    c::late\n\ntest result: FAILED. 1 passed; 2 failed";
+        assert_eq!(failed_tests(tail), ["b::slow", "c::late"]);
         let node = "ok 1 - fine\nnot ok 2 - since: counts from the move\n  ---\nnot ok 2 - since: counts from the move\n";
         assert_eq!(failed_tests(node), ["since: counts from the move"]);
         assert!(failed_tests("error[E0425]: cannot find value").is_empty());
