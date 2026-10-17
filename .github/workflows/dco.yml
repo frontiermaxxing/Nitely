@@ -1,11 +1,15 @@
 # Every commit in a pull request from a fork must be signed off by its author (Developer
 # Certificate of Origin, CONTRIBUTING.md). Branches pushed to this repo by its own agents are not
 # checked. scripts/dco.mjs does the check; its test runs with npm test.
+#
+# pull_request_target runs this workflow and the checker as they are on main, never as the fork
+# has them, so a pull request cannot change what checks it. The pull request's commits are only
+# fetched and read by git; nothing from them runs.
 
 name: DCO
 
 on:
-  pull_request:
+  pull_request_target:
     branches: [main]
 
 permissions:
@@ -20,8 +24,14 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch the pull request's commits
+        env:
+          PR: ${{ github.event.pull_request.number }}
+        run: git fetch --no-tags "https://github.com/${GITHUB_REPOSITORY}.git" "+refs/pull/${PR}/head:refs/remotes/pr/head"
 
       - uses: actions/setup-node@v5
         with:
