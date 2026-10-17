@@ -232,6 +232,8 @@ The same text for every agent, with the blanks filled in:
 - Workers start in their own process group (`process_group(0)`), so the terminal's SIGINT reaches
   only the supervisor. Stopping a worker sends SIGTERM to its group, then SIGKILL after 10 seconds.
 - Sleep: `crew run` holds a `caffeinate -i -w <pid>` while workers run.
+- Processes holding a worktree are found by their command line (`ps`) and their working folder
+  (`lsof -d cwd`), with `/var/…` and `/private/var/…` taken as the same folder.
 - Running without the app open at all (a login item through launchd, a scheduled task on Windows) is
   a follow-up; the supervisor itself needs nothing platform-specific for it.
 

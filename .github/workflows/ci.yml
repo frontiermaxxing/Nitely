@@ -74,8 +74,12 @@ jobs:
           mkdir -p src-tauri/binaries
           cp target/release/nitely "src-tauri/binaries/nitely-$triple"
           npx tauri build --config src-tauri/tauri.release.json --bundles app,dmg
-          ls -l target/release/bundle/macos target/release/bundle/dmg
+          ls -l target/release/bundle/dmg target/release/bundle/macos/Nitely.app/Contents/MacOS
+          # The app and the CLI side by side: Mac file names ignore case, so the app's own binary
+          # must not be called Nitely, or it and the CLI would be one file.
+          test -x target/release/bundle/macos/Nitely.app/Contents/MacOS/nitely-app
           test -x target/release/bundle/macos/Nitely.app/Contents/MacOS/nitely
+          target/release/bundle/macos/Nitely.app/Contents/MacOS/nitely --version
 
       - name: Mac bundle files
         if: runner.os == 'macOS' && always()

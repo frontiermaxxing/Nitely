@@ -29,6 +29,13 @@ node scripts/version.mjs set 0.3.0  # writes it everywhere
 A release build stamps its own version (`0.2.0-beta.1`, a nightly's date and commit) without
 committing it. After a stable `0.2.0` ships, land a change that sets main to `0.3.0`.
 
+## The Mac
+
+CI builds the Mac app and disk image on every pull request (the "Mac bundle" step of
+[ci.yml](../.github/workflows/ci.yml), the `mac-bundle` artifact): `Nitely.app` with the `nitely`
+CLI beside the app's own `nitely-app`, unsigned. Releases do not carry it yet: a Mac build people
+download must be signed with an Apple Developer ID and notarized, or macOS refuses to open it.
+
 ## What one build does
 
 1. Runs the gate (the same four commands as CI).
