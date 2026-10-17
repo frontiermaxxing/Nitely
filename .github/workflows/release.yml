@@ -19,16 +19,12 @@ on:
     tags: ["v*"]
   schedule:
     - cron: "0 5 * * *"
+  # promote.yml dispatches a stable tag's build this way, on the tag itself (so it is attested).
   workflow_dispatch:
     inputs:
       ref:
-        description: "nightly, or a tag to build again"
+        description: "nightly, or a tag to build again (choose the same tag under \"Use workflow from\")"
         default: nightly
-  workflow_call:
-    inputs:
-      ref:
-        type: string
-        required: true
 
 # One build per tag (or for the nightly) at a time. Builds for different tags run side by side:
 # GitHub keeps only one pending run per group, so a shared group could drop a queued tag. Their
@@ -45,7 +41,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 90
     # id-token and attestations: the provenance attestations (keyless: GitHub's OIDC token, signed
-    # through Sigstore). promote.yml, which calls this workflow, grants the same.
+    # through Sigstore).
     permissions:
       contents: write
       id-token: write
@@ -211,8 +207,21 @@ jobs:
       # Provenance for what a tag publishes: which workflow, commit and run built each file, signed
       # keylessly through Sigstore and kept by GitHub. Anyone checks a download with
       # `gh attestation verify <file> -R <this repo>`. Not for the nightly, which is replaced daily.
-      - name: Attest the release files
+      # The attestation names the run's own ref and commit (its OIDC token's), so only a run on the
+      # tag it builds attests: a pushed tag, or a dispatch from the tag (promote.yml's). A rebuild
+      # dispatched from a branch would claim the branch's commit, so it is published unattested.
+      - name: Check the run is on the tag it builds
         if: steps.changed.outputs.build == 'true' && steps.meta.outputs.tag != 'nightly'
+        id: attest
+        run: |
+          if [ "$GITHUB_REF" = "refs/tags/${{ steps.meta.outputs.tag }}" ] && [ "$GITHUB_SHA" = "$(git rev-parse HEAD)" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Not attested: this run is on $GITHUB_REF, not the tag ${{ steps.meta.outputs.tag }} it builds. To attest a rebuild, run it from the tag: gh workflow run release.yml --ref ${{ steps.meta.outputs.tag }} -f ref=${{ steps.meta.outputs.tag }}"
+          fi
+
+      - name: Attest the release files
+        if: steps.attest.outputs.ok == 'true'
         uses: actions/attest-build-provenance@v4
         with:
           subject-path: |

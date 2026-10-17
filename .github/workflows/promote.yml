@@ -1,5 +1,5 @@
-# Promotes a beta to stable in one run: tags the beta's commit v1.2.3 and builds that tag as a
-# stable release (release.yml), so the stable installer is built by CI from exactly the code the
+# Promotes a beta to stable in one run: tags the beta's commit v1.2.3 and starts that tag's build as
+# a stable release (release.yml), so the stable installer is built by CI from exactly the code the
 # beta shipped, stamped with the stable version. Run it from the Actions tab: "Promote a beta",
 # with the beta's tag (docs/releasing.md).
 
@@ -12,12 +12,10 @@ on:
         description: "The beta tag to promote, e.g. v0.2.0-beta.3"
         required: true
 
-# id-token and attestations: release.yml attests what it publishes, and a called workflow gets no
-# more than its caller grants.
+# actions: to start release.yml's run.
 permissions:
   contents: write
-  id-token: write
-  attestations: write
+  actions: write
 
 jobs:
   tag:
@@ -44,10 +42,17 @@ jobs:
           git push origin "refs/tags/$stable"
           echo "tagged $stable at $sha"
 
-  # A tag pushed with the workflow token starts no workflow, so the build is called here.
+  # A tag pushed with the workflow token starts no workflow, so the build is started here: dispatched
+  # on the tag itself, so its run's ref and commit are the tag's and its attestations name them
+  # (a called workflow would carry this run's ref, main).
   release:
     needs: tag
-    uses: ./.github/workflows/release.yml
-    with:
-      ref: ${{ needs.tag.outputs.stable }}
-    secrets: inherit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Start the stable build
+        env:
+          STABLE: ${{ needs.tag.outputs.stable }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run release.yml -R "$GITHUB_REPOSITORY" --ref "$STABLE" -f ref="$STABLE"
+          echo "started the $STABLE build: Actions, Release"

@@ -119,12 +119,12 @@ file to GitHub's secret store:
    key is never pasted, typed, or shown:
 
    ```powershell
-   cmd /c "gh secret set TAURI_SIGNING_PRIVATE_KEY -R frontiermaxxing/Nitely < %USERPROFILE%\.tauri\nitely-updater.key"
+   Start-Process gh -ArgumentList "secret set TAURI_SIGNING_PRIVATE_KEY -R frontiermaxxing/Nitely" -RedirectStandardInput "$HOME\.tauri\nitely-updater.key" -NoNewWindow -Wait
    gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD -R frontiermaxxing/Nitely
    ```
 
-   The first reads the file exactly as written (through `cmd`, since PowerShell's pipe would add a
-   newline). The second prompts for the password without echoing it. Don't pass either with
+   The first hands `gh` the file exactly as written (PowerShell's pipe would add a newline). The
+   second prompts for the password without echoing it. Don't pass either with
    `--body`: the value would land in your shell history. (The web page works too: **Settings →
    Secrets and variables → Actions → New repository secret**, pasting the file's contents.)
 3. Give an agent the **public** key (the contents of `nitely-updater.key.pub`; it is safe to share)
@@ -180,14 +180,22 @@ version to install (`nitely.db.upgraded-by` beside the database records it).
    installer, the CLI, checksums and notes. Install it on a clean user account or another PC, and
    connect a repo.
 4. **Promote it.** **Actions → Promote a beta → Run workflow**, beta tag `v0.1.0-beta.1`. It tags
-   that commit `v0.1.0` and builds it as the stable release. Found a problem in the beta? Fix it
+   that commit `v0.1.0` and starts its build as the stable release (a second run under **Actions →
+   Release**, on the tag, so it is attested like a pushed tag). Found a problem in the beta? Fix it
    on main and tag `v0.1.0-beta.2` instead.
 5. **Move main on.** Have an agent land `node scripts/version.mjs set 0.2.0`, so nightlies
    carry the next version.
 
-To build a tag again (say the build failed for a reason outside the code): **Actions → Release →
-Run workflow**, with that tag as `ref`. A release already published under the tag has to be
-deleted first.
+To build a tag again (say the build failed for a reason outside the code), run the workflow from
+that tag, with the tag as `ref` too:
+
+```powershell
+gh workflow run release.yml -R frontiermaxxing/Nitely --ref v0.1.0 -f ref=v0.1.0
+```
+
+(In **Actions → Release → Run workflow**, choose the tag under "Use workflow from".) A run from a
+branch builds the tag too but publishes it unattested, since its attestation would name the
+branch's commit. A release already published under the tag has to be deleted first.
 
 ## Trying the workflow
 
