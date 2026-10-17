@@ -673,7 +673,16 @@ fn run(cmd: Cmd) -> Result<()> {
                     return Ok(());
                 }
             }
-            let r = reclaim(&plan);
+            // Looked at again: an agent may have started work, or a build, while you decided.
+            let asked: Vec<&std::path::Path> = go.iter().map(|c| c.worktree.as_path()).collect();
+            let now: Vec<_> = nitely_core::slim::plan(&config, db.as_ref(), project.as_deref())?
+                .into_iter()
+                .filter(|c| asked.contains(&c.worktree.as_path()))
+                .collect();
+            for c in now.iter().filter(|c| c.skip.is_some()) {
+                println!("  kept after all: {} ({})", c.worktree.display(), c.skip.as_deref().unwrap_or(""));
+            }
+            let r = reclaim(&now);
             println!("Reclaimed {} from {} worktrees.", human(r.bytes), r.worktrees);
             for f in &r.failed {
                 eprintln!("could not remove {f}");

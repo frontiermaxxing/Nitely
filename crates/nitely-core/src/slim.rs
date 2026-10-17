@@ -53,11 +53,24 @@ pub fn keep_dirs(repo_root: &Path) -> Vec<String> {
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|text| text.parse::<toml::Table>().ok())
         .and_then(|t| t.get("lanes")?.get("keep")?.as_array().cloned())
-        .map(|a| a.iter().filter_map(|v| v.as_str()).map(|s| s.trim().trim_matches('/').to_string()).filter(|s| !s.is_empty() && !s.contains("..")).collect::<Vec<_>>());
+        .map(|a| a.iter().filter_map(|v| v.as_str()).map(|s| s.trim().trim_end_matches('/').to_string()).filter(|s| plain(s)).collect::<Vec<_>>());
     match set {
         Some(dirs) if !dirs.is_empty() => dirs,
         _ => DEFAULT_KEEP.iter().map(|s| s.to_string()).collect(),
     }
+}
+
+/// A directory name inside a worktree and nothing else: relative, of plain names only, so no
+/// `.`, `..`, root, drive or absolute path can make slim delete the worktree or a folder outside it.
+fn plain(dir: &str) -> bool {
+    let p = Path::new(dir);
+    !dir.is_empty() && p.components().all(|c| matches!(c, std::path::Component::Normal(_)))
+}
+
+/// Whether git ignores `dir` in `worktree`: build output is ignored, and slim never deletes a
+/// directory that holds anything git tracks or would show as new.
+fn ignored(worktree: &Path, dir: &str) -> bool {
+    plain(dir) && git(worktree, &["check-ignore", "-q", &format!("{dir}/")]).is_ok() && git(worktree, &["ls-files", "--", dir]).is_ok_and(|t| t.trim().is_empty())
 }
 
 /// The repo's task worktrees with build output, each with whether slim may reclaim it.
@@ -72,7 +85,7 @@ pub fn plan_repo(name: &str, repo_root: &Path, recent: &Recent) -> Result<Vec<Ca
             continue;
         }
         let path = PathBuf::from(&wt.path);
-        let dirs: Vec<(String, u64)> = keep.iter().filter(|d| path.join(d).is_dir()).map(|d| (d.clone(), size(&path.join(d)))).collect();
+        let dirs: Vec<(String, u64)> = keep.iter().filter(|d| path.join(d).is_dir() && ignored(&path, d)).map(|d| (d.clone(), size(&path.join(d)))).collect();
         if dirs.is_empty() {
             continue;
         }
@@ -141,7 +154,8 @@ fn why_kept(worktree: &Path, branch: Option<&str>, head: &str, base: &str) -> Op
     None
 }
 
-/// Removes the build directories of the candidates slim may reclaim.
+/// Removes the build directories of the candidates slim may reclaim. Pass a plan made just now
+/// (`plan` again after asking), so what changed while the person decided counts.
 pub fn reclaim(candidates: &[Candidate]) -> Reclaimed {
     let mut out = Reclaimed::default();
     for c in candidates.iter().filter(|c| c.skip.is_none()) {
@@ -271,6 +285,16 @@ mod tests {
         built(&landed, "build");
         let plan = plan_repo("repo", &repo, &Recent::default()).unwrap();
         assert_eq!(plan.iter().map(|c| c.dirs[0].0.as_str()).collect::<Vec<_>>(), ["build"], "target is not a build directory now");
+        // Only plain names inside the worktree, and only what git ignores, are ever build output.
+        std::fs::write(repo.join(crate::playbook::PLAYBOOK_PATH), "[lanes]\nkeep = [\".\", \"..\", \"/tmp\", \"C:/Code\", \"src\", \"build\"]\n").unwrap();
+        assert_eq!(keep_dirs(&repo), ["src", "build"]);
+        std::fs::create_dir_all(landed.join("src")).unwrap();
+        std::fs::write(landed.join("src/kept.rs"), "work").unwrap();
+        sh(&landed, &["add", "-A"]);
+        sh(&landed, &["commit", "-q", "-m", "src"]);
+        sh(&repo, &["merge", "-q", "--ff-only", "claude/nit-1-landed"]);
+        let plan = plan_repo("repo", &repo, &Recent::default()).unwrap();
+        assert!(plan.iter().all(|c| c.dirs.iter().all(|(d, _)| d == "build")), "src is tracked, so never build output: {plan:#?}");
         assert_eq!(human(3 * 4096), "12 KB");
         assert_eq!(human(7_000_000_000), "6.5 GB");
         std::fs::remove_dir_all(base).ok();
