@@ -815,7 +815,9 @@ when_changed = ["billing"]
         crate::approval::trust_in_tests(Some(crate::approval::public_of(&SECRET)));
         assert_eq!(land(&mut f.db, &crate::Config::default(), &opts, &f.actor).unwrap().error.unwrap_or_default(), refused, "an unsigned row is no acceptance");
 
-        // The person accepts it in the app: signed, the issue goes on as a passing review would.
+        // The person accepts it in the app: signed, the issue goes on as a passing review would,
+        // also when the rounds had handed it to them as their own work.
+        f.db.set_owner(&a, "human", &f.actor).unwrap();
         let decided = f.db.accept_finding(ask.id, "no outside users yet", &SECRET).unwrap();
         assert_eq!((decided.state.as_str(), decided.ask.answer.as_deref()), ("In Review", Some("Accepted: no outside users yet")));
         assert!(f.db.accept_finding(ask.id, "again", &SECRET).is_err(), "decided once");
@@ -840,6 +842,9 @@ when_changed = ["billing"]
         std::fs::write(&pb_path, pb).unwrap();
         sh(&f.repo, &["commit", "-q", "-am", "a reviewer with a P1"]);
         let (a, _) = f.submitted("Rows", "rows.txt", "x");
+        // A person's own issue (handed over after rounds that did not converge) goes back to the
+        // agents when they decide, and a request a later review made moot can still be sent back.
+        f.db.set_owner(&a, "human", &f.actor).ok();
         let wrong = f.db.request_acceptance(&a, "Nothing like it", "why", None, &f.actor).unwrap_err().to_string();
         assert!(wrong.contains("1. [P1] Drops a row"), "lists what can be accepted: {wrong}");
         let ask = f.db.request_acceptance(&a, "Drops a row: rows.txt, f: the last row", "It is how the export always worked.", None, &f.actor).unwrap();
@@ -848,6 +853,21 @@ when_changed = ["billing"]
         assert_eq!(decided.state, "Todo");
         assert!(decided.ask.answer.unwrap().starts_with("Not accepted: it is a real bug"));
         assert!(f.db.unaccepted_blockers(&a, &f.db.reviews(&a).unwrap()[0]).unwrap().len() == 1);
+
+        // A later round without the finding closes a request still open, and one already in the
+        // person's hands can still be sent back.
+        let open = f.db.request_acceptance(&a, "1", "Still how it always worked.", None, &f.actor).unwrap();
+        let moot = f.db.request_acceptance(&a, "1", "Asked twice.", None, &f.actor).unwrap();
+        f.db.conn
+            .execute(
+                "INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, findings, ts) VALUES (?1, 'p9', 'c', 'fake', 'pass', 'agent', '[]', ?2)",
+                rusqlite::params![a, crate::db::now() + 5],
+            )
+            .unwrap();
+        assert!(f.db.accept_finding(moot.id, "fine", &SECRET).is_err(), "nothing to accept any more");
+        assert!(f.db.decline_finding(moot.id, "moot now", "").is_ok());
+        assert_eq!(f.db.close_superseded_requests(&a, &[]).unwrap(), 1);
+        assert!(f.db.ask(open.id).unwrap().unwrap().closed.is_some());
         std::fs::remove_dir_all(&f.base).ok();
     }
 

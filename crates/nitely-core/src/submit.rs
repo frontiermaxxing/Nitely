@@ -190,6 +190,10 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         _ => None,
     };
     db.record_review(&out)?;
+    // A request to accept a finding this round no longer raised has nothing left to decide.
+    if let Some(r) = &out.review {
+        db.close_superseded_requests(&issue.key, &r.findings)?;
+    }
     out.approval_stands =
         out.approver == "human" && verdict != "changes" && issue.state == "Approved" && db.standing_approval(&issue.key)?.is_some();
 

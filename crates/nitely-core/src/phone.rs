@@ -1530,7 +1530,8 @@ mod tests {
             )
             .unwrap();
         let req = db.request_acceptance(&c, "1", "You ruled out a migration.", None, &agent).unwrap();
-        let d = p.get_with(&base, "/phone/api/decisions", now(), "bbbbbbbbbbbbbbbb").1;
+        let (status, d) = p.get_with(&base, "/phone/api/decisions", now(), "acce97ed0f191191");
+        assert_eq!(status, 200, "{d}");
         let shown = d["decisions"].as_array().unwrap().iter().find(|x| x["ask"]["id"] == req.id).cloned().unwrap();
         assert_eq!((shown["patch_id"].as_str(), shown["ask"]["finding"]["text"].as_str()), (Some("p3"), Some("No migration: k.rs, load")));
         let t = now();

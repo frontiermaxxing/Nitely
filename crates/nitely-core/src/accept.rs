@@ -106,7 +106,7 @@ impl Db {
 
     /// The person sends the request back: the finding stays a defect to fix, for the reason given.
     pub fn decline_finding(&mut self, ask_id: i64, why: &str, from: &str) -> Result<Decided> {
-        let (_, key, finding, _) = self.acceptance_ask(ask_id)?;
+        let (_, key, finding, _) = self.acceptance_ask_as_asked(ask_id)?;
         let why = one_line(why)?;
         let ask = self.answer_ask(ask_id, &format!("Not accepted: {why}. Fix it."), &Actor::Human)?;
         let issue = self.issue(&key)?.with_context(|| format!("no issue {key}"))?;
@@ -183,6 +183,17 @@ impl Db {
     /// The open ask `ask_id` asking to accept a finding, its issue key, the finding, and the
     /// issue's latest review, which must still hold that finding.
     fn acceptance_ask(&self, ask_id: i64) -> Result<(Ask, String, AskedFinding, ReviewRecord)> {
+        let (ask, key, finding, review) = self.acceptance_ask_as_asked(ask_id)?;
+        let review = review.with_context(|| format!("{key} has no review"))?;
+        if !review.findings.iter().any(|f| f.text == finding.text) {
+            bail!("{key} was reviewed again and that finding is not in the latest review; the request no longer applies");
+        }
+        Ok((ask, key, finding, review))
+    }
+
+    /// As `acceptance_ask`, whether or not the latest review still holds the finding: sending a
+    /// request back works even when a later review made it moot.
+    fn acceptance_ask_as_asked(&self, ask_id: i64) -> Result<(Ask, String, AskedFinding, Option<ReviewRecord>)> {
         let ask = self.ask(ask_id)?.with_context(|| format!("no ask {ask_id}"))?;
         let finding = ask.finding.clone().with_context(|| format!("ask {ask_id} does not ask to accept a finding"))?;
         if ask.answer.is_some() || ask.closed.is_some() {
@@ -190,11 +201,26 @@ impl Db {
         }
         let key = ask.issue_key.clone().context("the request names no issue")?;
         let key = self.issue(&key)?.with_context(|| format!("no issue {key}"))?.key;
-        let review = self.reviews(&key)?.into_iter().find(|r| !r.reviewer.is_empty()).with_context(|| format!("{key} has no review"))?;
-        if !review.findings.iter().any(|f| f.text == finding.text) {
-            bail!("{key} was reviewed again and that finding is not in the latest review; the request no longer applies");
-        }
+        let review = self.reviews(&key)?.into_iter().find(|r| !r.reviewer.is_empty());
         Ok((ask, key, finding, review))
+    }
+
+    /// Closes `key`'s open requests to accept a finding that its latest review (`findings`) no
+    /// longer holds: a new round fixed it or worded it otherwise, so there is nothing to decide.
+    pub fn close_superseded_requests(&self, key: &str, findings: &[Finding]) -> Result<usize> {
+        let open: Vec<Ask> = self.open_asks()?.into_iter().filter(|a| a.issue_key.as_deref().is_some_and(|k| k.eq_ignore_ascii_case(key)) && a.finding.is_some()).collect();
+        let mut closed = 0;
+        for a in open {
+            let f = a.finding.as_ref().expect("filtered");
+            if !findings.iter().any(|x| x.text == f.text) {
+                self.conn.execute(
+                    "UPDATE ask SET closed = ?2 WHERE id = ?1",
+                    params![a.id, "closed: the latest review no longer has that finding"],
+                )?;
+                closed += 1;
+            }
+        }
+        Ok(closed)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -214,14 +240,19 @@ impl Db {
         let answered = self.answer_ask(_ask.id, &format!("Accepted: {reason}"), &Actor::Human)?;
         let review = self.reviews(key)?.into_iter().find(|r| !r.reviewer.is_empty()).context("no review")?;
         let blocking = self.unaccepted_blockers(key, &review)?;
-        let issue = self.issue(key)?.with_context(|| format!("no issue {key}"))?;
-        if issue.owner == "human" {
+        // Handing a person's own issue back to the agents moves it, so its state is read after.
+        if self.issue(key)?.with_context(|| format!("no issue {key}"))?.owner == "human" {
             self.set_owner(key, "agent", &Actor::Human)?;
         }
+        let issue = self.issue(key)?.with_context(|| format!("no issue {key}"))?;
         let (to, then) = if !blocking.is_empty() {
             ("In Progress", format!("{} other P0/P1 finding(s) still to fix", blocking.len()))
         } else if review.approver == "human" {
             ("Needs You", "the review now passes, and the change waits for your approval".to_string())
+        } else if !crate::approval::agents_can_verify() {
+            // Only the app reads the keys acceptances are checked with (macOS): an agent's land
+            // could not see this one, so the change waits for an approval, and the app lands it.
+            ("Needs You", "the review now passes; approve the change in the app, which lands it".to_string())
         } else {
             ("In Review", "the review now passes: land it".to_string())
         };
