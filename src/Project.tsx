@@ -6,7 +6,7 @@ import { BoardFilters, NO_FILTER, ProjectBoard, type Filters } from "./ProjectBo
 import { BranchMap } from "./BranchMap";
 import { CrewControl } from "./CrewControl";
 import { ProjectBrief } from "./ProjectBrief";
-import { GoalRows } from "./GoalRows";
+import { GoalRows, type GoalFocus } from "./GoalRows";
 import { ProjectSettings } from "./ProjectSettings";
 import { ProjectRules } from "./Rules";
 import { EmptyState, Loading } from "./ui";
@@ -49,7 +49,7 @@ export function ProjectPage(props: {
   projectKey: string;
   tab: ProjectTab | undefined;
   /** A goal to bring into view (from the issue panel): its row shows on the list or the board. */
-  goal?: number;
+  goal?: GoalFocus;
   onTab: (tab: ProjectTab) => void;
   board: Board | null;
   now: number;

@@ -11,6 +11,7 @@ import { Now } from "./Now";
 import { Pulse } from "./Pulse";
 import { Activity } from "./Activity";
 import { ProjectPage, isProjectTab, type ProjectTab } from "./Project";
+import type { GoalFocus } from "./GoalRows";
 import { IssuePanel } from "./IssuePanel";
 import { AddProject } from "./AddProject";
 import { HOME_LABEL, nowSecs } from "./util";
@@ -38,7 +39,7 @@ export type View =
   | { kind: "inbox" }
   | { kind: "now" }
   | { kind: "activity" }
-  | { kind: "project"; key: string; tab?: ProjectTab; goal?: number }
+  | { kind: "project"; key: string; tab?: ProjectTab; goal?: GoalFocus }
   | { kind: "add" }
   | { kind: "agents" }
   | { kind: "network" }
@@ -355,7 +356,8 @@ export function App() {
           onOpenIssue={setOpenIssue}
           onOpenGoal={(key, goal) => {
             setOpenIssue(null);
-            setView({ kind: "project", key, goal });
+            // Stamped, so opening the same goal again scrolls to it again.
+            setView({ kind: "project", key, goal: { id: goal, at: Date.now() } });
           }}
         />
       )}

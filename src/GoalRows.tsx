@@ -9,7 +9,10 @@ import "./goal-rows.css";
  * The active goals of one project (or of every project, on the Overview), one row each. Renders
  * nothing while there are none, so a project without goals looks as it did.
  */
-export function GoalRows(props: { project?: string; version: number; onOpenIssue: (key: string) => void; heading?: boolean; focus?: number }) {
+/** A goal row to bring into view; `at` tells one request from the next for the same goal. */
+export type GoalFocus = { id: number; at: number };
+
+export function GoalRows(props: { project?: string; version: number; onOpenIssue: (key: string) => void; heading?: boolean; focus?: GoalFocus }) {
   const [goals, setGoals] = useState<GoalDetail[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -28,7 +31,14 @@ export function GoalRows(props: { project?: string; version: number; onOpenIssue
   const rows = (
     <div className="goal-rows">
       {goals.map((g) => (
-        <GoalRow key={g.goal.id} detail={g} showProject={!props.project} focused={g.goal.id === props.focus} onOpenIssue={props.onOpenIssue} />
+        <GoalRow
+          // A new request for the same goal remounts its row, so the scroll and the outline run again.
+          key={g.goal.id === props.focus?.id ? `${g.goal.id}@${props.focus.at}` : g.goal.id}
+          detail={g}
+          showProject={!props.project}
+          focused={g.goal.id === props.focus?.id}
+          onOpenIssue={props.onOpenIssue}
+        />
       ))}
     </div>
   );
@@ -49,7 +59,7 @@ export function GoalRow(props: { detail: GoalDetail; showProject?: boolean; focu
   // Opened from an issue's goal: scrolled to and marked for a moment.
   const row = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    if (props.focused) row.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+    if (props.focused) row.current?.scrollIntoView({ block: "center" });
   }, [props.focused]);
   const placed = goalOrder(props.detail.issues);
   const c = goalCounts(placed);
