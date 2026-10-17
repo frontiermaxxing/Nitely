@@ -238,9 +238,11 @@ pub fn session_note(pb: &Playbook, repo_root: &Path, worktree: &Path) -> Option<
 /// How a light worktree builds and tests, for its session and the crew's brief.
 pub const RUN_LINE: &str = "Build and test through `run` (MCP; `nitely run -- <command>` from a shell): it builds a snapshot of this worktree, committed or not, in a warm build lane that keeps its build output, and returns the exit code and the end of the output (`run_status` waits on a long one). Do not build or test here: it would install and compile everything again, for this worktree alone.";
 
-/// The commands of a shell line, each trimmed: split at `&&`, `||`, `;`, `|` and new lines.
+/// The commands of a shell line's first line, each trimmed: split at `&&`, `||`, `;` and `|`. Only
+/// the first line: what follows can be a heredoc's text (a prompt, a file), which is not a command
+/// and is never read or kept.
 fn commands_of(line: &str) -> Vec<String> {
-    line.split(['\n', ';', '|', '&']).map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).collect()
+    line.lines().next().unwrap_or("").split([';', '|', '&']).map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).collect()
 }
 
 /// The folder a shell line works in: the folder of a leading `cd <dir>`, else `cwd`.
@@ -404,6 +406,7 @@ mod tests {
         assert!(n.message.contains("use `run`"), "{}", n.message);
         assert!(nudge(&config, &at, "cargo fmt && git diff").is_none(), "not a build");
         assert!(nudge(&config, &at, "npm testing-library").is_none(), "a word, not the command");
+        assert!(nudge(&config, &at, "cat > notes.md <<'EOF'\ncargo test is what we run\nEOF").is_none(), "a heredoc's text is not a command");
         // From the main checkout, a line that goes into the worktree first.
         let main = repo.to_string_lossy().into_owned();
         assert!(nudge(&config, &main, &format!("cd {} && npm run build", wt.display())).is_some());

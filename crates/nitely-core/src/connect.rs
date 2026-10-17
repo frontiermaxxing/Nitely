@@ -452,7 +452,15 @@ fn claude_plan(nitely: &str, repoint: bool) -> Result<AgentPlan> {
             }
             let old = entry.get("matcher").and_then(Value::as_str).is_some_and(|m| OLD_MATCHERS.contains(&(event, m)));
             if let (true, true, Some(m)) = (ours, old, matcher) {
-                entry["matcher"] = json!(m);
+                let hooks = entry.get_mut("hooks").and_then(Value::as_array_mut);
+                if hooks.as_ref().is_some_and(|h| h.len() == 1) {
+                    entry["matcher"] = json!(m);
+                } else if let Some(hooks) = hooks {
+                    // Other hooks share the entry: they keep its matcher, and Nitely's moves to an
+                    // entry of its own (added below), so widening it widens nothing of theirs.
+                    hooks.retain(|h| !h.get("command").and_then(Value::as_str).is_some_and(|c| is_ours(c, "claude")));
+                    ours = false;
+                }
             }
             present |= ours;
         }
@@ -819,6 +827,18 @@ mod tests {
         assert!(apply_agents(&behind).1.is_empty());
         let now: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
         assert_eq!((now["hooks"]["PreToolUse"].as_array().unwrap().len(), &now["hooks"]["PreToolUse"][0]["matcher"]), (1, &json!("mcp__.*|Bash|PowerShell")));
+        assert_eq!(pending_changes(&agent_plans("nitely", true)), 0);
+        // Another hook in the same old entry keeps its matcher; Nitely's moves out on its own.
+        let mut shared: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        shared["hooks"]["PreToolUse"] = json!([{ "matcher": "mcp__.*", "hooks": [
+            { "type": "command", "command": "audit-mcp" }, { "type": "command", "command": "nitely hook claude", "timeout": 5 }
+        ] }]);
+        std::fs::write(&settings, serde_json::to_string_pretty(&shared).unwrap()).unwrap();
+        assert!(apply_agents(&agent_plans("nitely", true)).1.is_empty());
+        let now: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        let pre = now["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!((pre.len(), &pre[0]["matcher"], &pre[0]["hooks"][0]["command"], pre[0]["hooks"].as_array().unwrap().len()), (2, &json!("mcp__.*"), &json!("audit-mcp"), 1));
+        assert_eq!((&pre[1]["matcher"], &pre[1]["hooks"][0]["command"]), (&json!("mcp__.*|Bash|PowerShell"), &json!("nitely hook claude")));
         assert_eq!(pending_changes(&agent_plans("nitely", true)), 0);
         let mut chained = json!({ "command": "nitely hook claude && notify-user" });
         assert!(point_at(&mut chained, "claude", "nitely hook claude", true), "still counts as Nitely's");
