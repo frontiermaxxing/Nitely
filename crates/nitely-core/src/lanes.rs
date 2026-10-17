@@ -696,16 +696,16 @@ struct Waiting {
 
 /// The order requests start in: priority first (land, then submit's gate, then the rest), then
 /// each project's first waiting request before any project's second, then the oldest.
-/// A project's requests running now count as its turns already taken (`running`, by upper-case
-/// project), so a project whose first request just started waits behind the others' first.
-fn in_order(mut waiting: Vec<Waiting>, running: &std::collections::HashMap<String, usize>) -> Vec<Waiting> {
+/// Turns a project has already had (`served`, by upper-case project) count before its waiting
+/// requests, so a project whose request just ran waits behind the others' next.
+fn in_order(mut waiting: Vec<Waiting>, served: &std::collections::HashMap<String, usize>) -> Vec<Waiting> {
     waiting.sort_by_key(|w| (w.priority, w.id));
     let mut seen: std::collections::HashMap<(i64, String), usize> = std::collections::HashMap::new();
     let mut ranked: Vec<(i64, usize, i64, Waiting)> = waiting
         .into_iter()
         .map(|w| {
             let project = w.project.to_uppercase();
-            let n = seen.entry((w.priority, project.clone())).or_insert_with(|| running.get(&project).copied().unwrap_or(0));
+            let n = seen.entry((w.priority, project.clone())).or_insert_with(|| served.get(&project).copied().unwrap_or(0));
             *n += 1;
             (w.priority, *n, w.id, w)
         })
@@ -718,16 +718,16 @@ fn in_order(mut waiting: Vec<Waiting>, running: &std::collections::HashMap<Strin
 /// it, and fewer requests ahead of it, of repos with a free lane, than there are free slots. A
 /// repo whose lanes are all busy does not hold up the others.
 fn my_turn(db: &Db, id: i64, slots: u32, alive: &mut dyn FnMut(i64) -> bool) -> Result<bool> {
-    let mut stmt = db.conn.prepare("SELECT id, project, repo, priority, state, pid, lane_count FROM lane_run WHERE state IN ('queued', 'running')")?;
-    let rows: Vec<(Waiting, String, Option<i64>, i64)> = stmt
-        .query_map([], |r| Ok((Waiting { id: r.get(0)?, project: r.get(1)?, repo: r.get(2)?, priority: r.get(3)? }, r.get(4)?, r.get(5)?, r.get(6)?)))?
+    let mut stmt = db.conn.prepare("SELECT id, project, repo, priority, state, pid, lane_count, queued_at FROM lane_run WHERE state IN ('queued', 'running')")?;
+    let rows: Vec<(Waiting, String, Option<i64>, i64, i64)> = stmt
+        .query_map([], |r| Ok((Waiting { id: r.get(0)?, project: r.get(1)?, repo: r.get(2)?, priority: r.get(3)? }, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)))?
         .collect::<rusqlite::Result<_>>()?;
     let mut running_by_repo: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
     let mut lanes_by_repo: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
-    let mut running_by_project: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut running = 0i64;
     let mut waiting = Vec::new();
-    for (w, state, pid, lane_count) in rows {
+    let mut oldest_waiting: Option<i64> = None;
+    for (w, state, pid, lane_count, queued_at) in rows {
         let repo = crate::paths::normalize(&w.repo);
         lanes_by_repo.insert(repo.clone(), lane_count.max(1));
         // A request whose process is gone holds nothing and waits for nothing.
@@ -737,15 +737,26 @@ fn my_turn(db: &Db, id: i64, slots: u32, alive: &mut dyn FnMut(i64) -> bool) -> 
         if state == "running" {
             running += 1;
             *running_by_repo.entry(repo).or_default() += 1;
-            *running_by_project.entry(w.project.to_uppercase()).or_default() += 1;
         } else {
+            oldest_waiting = Some(oldest_waiting.map_or(queued_at, |o: i64| o.min(queued_at)));
             waiting.push(w);
+        }
+    }
+    // The turns each project has had since the oldest request still waiting was queued, running or
+    // finished: a project whose request just ran waits behind the others' next, so one project's
+    // backlog never holds the rest up.
+    let mut served: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    if let Some(since) = oldest_waiting {
+        let mut stmt = db.conn.prepare("SELECT project, COUNT(*) FROM lane_run WHERE started_at IS NOT NULL AND started_at >= ?1 GROUP BY project")?;
+        for row in stmt.query_map([since], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))? {
+            let (project, n) = row?;
+            *served.entry(project.to_uppercase()).or_default() += n as usize;
         }
     }
     let free_slots = (slots as i64 - running).max(0);
     let mine = crate::paths::normalize(&waiting.iter().find(|w| w.id == id).map(|w| w.repo.clone()).unwrap_or_default());
     let mut ahead_that_can_start = 0;
-    for w in in_order(waiting, &running_by_project) {
+    for w in in_order(waiting, &served) {
         if w.id == id {
             return Ok(ahead_that_can_start < free_slots);
         }
@@ -1516,8 +1527,8 @@ commands = []
         let row = |project: &str, state: &str, priority: i64, lanes: i64, pid: i64| -> i64 {
             db.conn
                 .execute(
-                    "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, priority, lane_count)
-                     VALUES (?1, ?2, 'x', 'run', 's', 't', 'b', 'c', ?3, 'local', 1, ?4, ?5, ?6)",
+                    "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, priority, lane_count, started_at)
+                     VALUES (?1, ?2, 'x', 'run', 's', 't', 'b', 'c', ?3, 'local', 1, ?4, ?5, ?6, CASE WHEN ?3 = 'queued' THEN NULL ELSE 2 END)",
                     params![project, format!("C:/Code/{project}"), state, pid, priority, lanes],
                 )
                 .unwrap();
@@ -1543,6 +1554,28 @@ commands = []
         assert!(my_turn(&db, a, 3, &mut alive).unwrap(), "a dead requester's running row holds no slot");
         let mut all_alive = |_: i64| true;
         assert!(!my_turn(&db, a, 3, &mut all_alive).unwrap(), "while it lives, it does");
+        std::fs::remove_dir_all(base).ok();
+
+        // A1 has run and finished; A2 and B1 wait for one slot: B1 goes first.
+        let base = crate::paths::unique_temp("nitely-lane-turn2", "");
+        std::fs::create_dir_all(&base).unwrap();
+        let db = Db::open(&base.join("t.db")).unwrap();
+        let add = |project: &str, state: &str, queued: i64, started: Option<i64>| -> i64 {
+            db.conn
+                .execute(
+                    "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, started_at, pid, priority, lane_count)
+                     VALUES (?1, ?2, 'x', 'run', 's', 't', 'b', 'c', ?3, 'local', ?4, ?5, ?6, 3, 1)",
+                    params![project, format!("C:/Code/{project}"), state, queued, started, me],
+                )
+                .unwrap();
+            db.conn.last_insert_rowid()
+        };
+        add("A", "done", 10, Some(13));
+        let a2 = add("A", "queued", 11, None);
+        let b1 = add("B", "queued", 12, None);
+        let mut alive = |pid: i64| pid == me;
+        assert!(my_turn(&db, b1, 1, &mut alive).unwrap(), "B has had no turn since A2 queued; A has had one");
+        assert!(!my_turn(&db, a2, 1, &mut alive).unwrap());
         std::fs::remove_dir_all(base).ok();
     }
 
