@@ -145,7 +145,7 @@ async function start({ seed, env, keepHome, unlock }) {
     cwd: ROOT,
     // The harness build asks WebView2 for DevTools on a port of its own choosing (its config's
     // additionalBrowserArgs); WebView2 writes it to DevToolsActivePort in its folder.
-    env: { ...process.env, ...env, NITELY_HOME: home, NITELY_HARNESS: "1" },
+    env: appEnv({ ...process.env, ...env, NITELY_HOME: home, NITELY_HARNESS: "1" }),
     stdio: ["ignore", "pipe", "pipe"],
   });
   let log = "";
@@ -191,6 +191,15 @@ async function start({ seed, env, keepHome, unlock }) {
     unlock();
   };
   return { page, home, port, pid: child.pid, log: () => log, exited, close };
+}
+
+/**
+ * The app's environment: WebView2 adds its own variable's arguments to the config's, so one left
+ * set (a debugging port of someone's) would override the port the harness lets WebView2 choose.
+ */
+function appEnv(env) {
+  for (const name of Object.keys(env)) if (name.toUpperCase() === "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS") delete env[name];
+  return env;
 }
 
 /** WebView2's folder for the harness identifier, where it keeps storage and DevToolsActivePort. */
