@@ -18,6 +18,7 @@ const KIND_LABEL: Record<string, string> = {
   handoff: "handoff",
   ask: "asked",
   answer: "answered",
+  ask_closed: "ask closed",
   worktree: "started",
   gate_passed: "gate passed",
   gate_failed: "gate failed",

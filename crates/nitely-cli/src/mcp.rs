@@ -847,7 +847,11 @@ fn run_tool(server: &Server, name: &str, args: &Value, session: &str) -> Result<
         "get_answer" => {
             let id = args.get("id").and_then(Value::as_i64).ok_or_else(|| anyhow!("missing id"))?;
             let ask = db.ask(id)?.with_context(|| format!("no ask {id}"))?;
-            json!({ "id": ask.id, "question": ask.question, "answer": ask.answer })
+            match &ask.closed {
+                // Its issue closed first: nothing to wait for.
+                Some(why) => json!({ "id": ask.id, "question": ask.question, "answer": null, "closed": why }),
+                None => json!({ "id": ask.id, "question": ask.question, "answer": ask.answer }),
+            }
         }
         other => bail!("unknown tool {other}"),
     })

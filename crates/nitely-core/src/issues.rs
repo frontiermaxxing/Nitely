@@ -147,6 +147,9 @@ pub struct Ask {
     pub answer: Option<String>,
     pub asked_at: i64,
     pub answered_at: Option<i64>,
+    /// Why it closed unanswered: its issue closed first ("closed with NIT-3 (Done)").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub closed: Option<String>,
 }
 
 /// Who is acting. Only a human may approve or answer.
@@ -1065,6 +1068,23 @@ impl Db {
             "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, ?2, ?3, 'issue_moved', ?4)",
             params![ts, actor.id(), issue.key, summary],
         )?;
+        // An open question about work that just closed has nothing left to decide: it closes too,
+        // so the Inbox and the phone never ask about finished work.
+        if issue.is_open() && matches!(state_type, "completed" | "canceled") {
+            let why = format!("closed with {} ({state})", issue.key);
+            let open: Vec<(i64, String)> = {
+                let mut stmt = tx.prepare("SELECT id, question FROM ask WHERE issue_key = ?1 COLLATE NOCASE AND answer IS NULL AND closed IS NULL")?;
+                let rows = stmt.query_map([&issue.key], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                rows.collect::<rusqlite::Result<_>>()?
+            };
+            for (id, question) in open {
+                tx.execute("UPDATE ask SET closed = ?2 WHERE id = ?1", params![id, why])?;
+                tx.execute(
+                    "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, ?2, ?3, 'ask_closed', ?4)",
+                    params![ts, actor.id(), issue.key, format!("Closed with the issue, unanswered: {question}")],
+                )?;
+            }
+        }
         // Closing a blocker readies the issues that waited only on it.
         if issue.is_open() && matches!(state_type, "completed" | "canceled") {
             let deps = Deps::load(&tx)?;
@@ -1411,17 +1431,22 @@ impl Db {
         Ok(self
             .conn
             .query_row(
-                "SELECT id, issue_key, asked_by, question, options, answer, asked_at, answered_at FROM ask WHERE id = ?1",
+                "SELECT id, issue_key, asked_by, question, options, answer, asked_at, answered_at, closed FROM ask WHERE id = ?1",
                 [id],
                 ask_from_row,
             )
             .optional()?)
     }
 
+    /// The questions waiting on the person. One whose issue has closed is not: its issue's close
+    /// closed it (and one asked before that rule, on an issue closed since, is passed over too).
     pub fn open_asks(&self) -> Result<Vec<Ask>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, issue_key, asked_by, question, options, answer, asked_at, answered_at
-             FROM ask WHERE answer IS NULL ORDER BY asked_at",
+            "SELECT a.id, a.issue_key, a.asked_by, a.question, a.options, a.answer, a.asked_at, a.answered_at, a.closed
+             FROM ask a LEFT JOIN issue i ON i.key = a.issue_key COLLATE NOCASE
+             WHERE a.answer IS NULL AND a.closed IS NULL
+               AND (i.key IS NULL OR i.state_type NOT IN ('completed', 'canceled'))
+             ORDER BY a.asked_at",
         )?;
         let rows = stmt.query_map([], ask_from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -1434,6 +1459,9 @@ impl Db {
         let ask = self.ask(id)?.with_context(|| format!("no ask {id}"))?;
         if ask.answer.is_some() {
             bail!("ask {id} is already answered");
+        }
+        if let Some(why) = &ask.closed {
+            bail!("ask {id} needs no answer any more: it {why}");
         }
         let ts = now();
         self.conn.execute(
@@ -1460,6 +1488,7 @@ fn ask_from_row(r: &Row) -> rusqlite::Result<Ask> {
         answer: r.get(5)?,
         asked_at: r.get(6)?,
         answered_at: r.get(7)?,
+        closed: r.get(8)?,
     })
 }
 
@@ -1824,6 +1853,41 @@ mod tests {
         let ask = db.create_ask("Ship it?", &["yes".into(), "no".into()], None, None, &agent).unwrap();
         assert!(db.answer_ask(ask.id, "yes", &agent).is_err());
         assert_eq!(db.answer_ask(ask.id, "yes", &Actor::Human).unwrap().answer.as_deref(), Some("yes"));
+        assert!(db.open_asks().unwrap().is_empty());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn an_issue_closing_closes_its_open_asks() {
+        let (mut db, dir) = db();
+        db.create_project("NIT", "Nitely").unwrap();
+        let agent = Actor::Agent("codex:x".into());
+        let done = db.create_issue(&new("Set the origin remote"), &Actor::Human).unwrap();
+        let answered = db.create_ask("Which remote?", &[], Some(&done.key), None, &agent).unwrap();
+        db.answer_ask(answered.id, "origin", &Actor::Human).unwrap();
+        let open = db.create_ask("Push to the fork too?", &[], Some(&done.key), None, &agent).unwrap();
+        let other = db.create_issue(&new("Something else"), &Actor::Human).unwrap();
+        let elsewhere = db.create_ask("Keep the old flag?", &[], Some(&other.key), None, &agent).unwrap();
+        assert!(db.issue(&done.key).unwrap().unwrap().track.asking);
+
+        db.move_issue(&done.key, "Done", Some("landed"), None, &agent).unwrap();
+        let closed = db.ask(open.id).unwrap().unwrap();
+        assert_eq!((closed.answer, closed.closed.as_deref()), (None, Some("closed with NIT-1 (Done)")));
+        assert_eq!(db.ask(answered.id).unwrap().unwrap().closed, None, "an answered ask keeps its answer");
+        assert_eq!(db.open_asks().unwrap().iter().map(|a| a.id).collect::<Vec<_>>(), [elsewhere.id], "other issues' asks stay");
+        assert!(db.answer_ask(open.id, "yes", &Actor::Human).unwrap_err().to_string().contains("needs no answer"));
+        let issue = db.issue(&done.key).unwrap().unwrap();
+        assert!(!issue.track.asking);
+        let last = db.timeline(&done.key).unwrap().into_iter().find(|t| t.kind == "ask_closed").unwrap();
+        assert_eq!(last.summary.as_deref(), Some("Closed with the issue, unanswered: Push to the fork too?"));
+
+        // Canceled closes them too; and an ask left open on an issue closed before this rule is
+        // not listed either.
+        db.move_issue(&other.key, "Canceled", None, Some("not needed"), &Actor::Human).unwrap();
+        assert!(db.ask(elsewhere.id).unwrap().unwrap().closed.is_some());
+        let stale = db.create_issue(&new("Old work"), &Actor::Human).unwrap();
+        db.create_ask("Still there?", &[], Some(&stale.key), None, &agent).unwrap();
+        db.conn.execute("UPDATE issue SET state = 'Done', state_type = 'completed' WHERE key = ?1", [&stale.key]).unwrap();
         assert!(db.open_asks().unwrap().is_empty());
         std::fs::remove_dir_all(dir).ok();
     }

@@ -298,6 +298,8 @@ export interface Ask {
   answer: string | null;
   asked_at: number;
   answered_at: number | null;
+  /** Why it closed unanswered: its issue closed first. */
+  closed?: string | null;
 }
 
 export interface Project {

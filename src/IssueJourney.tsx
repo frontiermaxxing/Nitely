@@ -240,6 +240,10 @@ export function WhoHadIt(props: { detail: IssueDetail; now: number }) {
       case "answer":
         cells.push({ lane: "human", label: "Answered", sub: at, tone: "step" });
         break;
+      case "ask_closed":
+        // The issue closed before the question was answered: nothing is left to decide.
+        cells.push({ lane: "human", label: "No answer needed", sub: at, tone: "step" });
+        break;
       case "issue_moved":
         if (e.actor === "human" && /→ Approved/.test(e.summary ?? "")) cells.push({ lane: "human", label: "Approved", sub: at, tone: "pass" });
         break;

@@ -156,7 +156,7 @@ pub fn track_of(issue: &IssueRecord, timeline: &[TimelineEntry], change_reviews:
                 }
             }
             "ask" => open_asks += 1,
-            "answer" => open_asks = (open_asks - 1).max(0),
+            "answer" | "ask_closed" => open_asks = (open_asks - 1).max(0),
             "land_failed" => {
                 land_failed = true;
                 reach(&mut t, &mut w, "landing", e.ts);
