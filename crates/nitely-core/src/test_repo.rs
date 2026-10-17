@@ -25,11 +25,12 @@ pub(crate) fn copy(name: &str, build: fn(&Path)) -> PathBuf {
     base
 }
 
-/// Removes the templates of runs that ended an hour or more ago: a test run leaves its own behind.
+/// Removes templates made a day or more ago: a test run leaves its own behind, and none runs for
+/// a day, so a run still using one is never left without it.
 fn forget_old_templates() {
-    let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    let day_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(24 * 3600);
     for entry in std::fs::read_dir(std::env::temp_dir()).into_iter().flatten().flatten() {
-        let old = entry.metadata().and_then(|m| m.modified()).is_ok_and(|t| t < hour_ago);
+        let old = entry.metadata().and_then(|m| m.modified()).is_ok_and(|t| t < day_ago);
         if old && entry.file_name().to_string_lossy().starts_with("nitely-template-") {
             std::fs::remove_dir_all(entry.path()).ok();
         }
