@@ -147,6 +147,7 @@ fn merge(base: &str, change: &str) -> Result<String> {
     let after = last_position(doc.as_table()) + 1;
     shift_positions(patch.as_table_mut(), after);
     merge_table(doc.as_table_mut(), patch.as_table());
+    drop_stale_approval_note(&mut doc);
     Ok(doc.to_string())
 }
 
@@ -201,6 +202,26 @@ fn merge_table(into: &mut dyn toml_edit::TableLike, from: &dyn toml_edit::TableL
         }
         into.insert(key, item.clone());
     }
+}
+
+/// The note `connect` writes above `always_human = true`, which stops being true once a change
+/// turns it off.
+const ALWAYS_HUMAN_NOTE: &str = "Every change waits for you until";
+
+/// Drops `connect`'s note above `approval.always_human` once it is false, and with it the comment
+/// lines that continue it.
+fn drop_stale_approval_note(doc: &mut toml_edit::DocumentMut) {
+    let Some(approval) = doc.get_mut("approval").and_then(|i| i.as_table_like_mut()) else { return };
+    if approval.get("always_human").and_then(|v| v.as_bool()) != Some(false) {
+        return;
+    }
+    let Some((mut key, _)) = approval.get_key_value_mut("always_human") else { return };
+    let prefix = key.leaf_decor().prefix().and_then(|p| p.as_str()).unwrap_or("").to_string();
+    let lines: Vec<&str> = prefix.split_inclusive('\n').collect();
+    let Some(start) = lines.iter().position(|l| l.contains(ALWAYS_HUMAN_NOTE)) else { return };
+    let end = lines[start + 1..].iter().position(|l| !l.trim_start().starts_with('#')).map_or(lines.len(), |n| start + 1 + n);
+    let kept: String = lines[..start].iter().chain(&lines[end..]).copied().collect();
+    key.leaf_decor_mut().set_prefix(kept);
 }
 
 /// The playbook after `steps`, starting from `base`.
@@ -529,9 +550,9 @@ impl Db {
         }
         let id = self.conn.last_insert_rowid();
 
-        // Titled after the first change's reason, with a count when later ones joined it.
-        let first = why_all.lines().next().unwrap_or(why);
-        let mut summary: String = first.chars().take(70).collect();
+        // Titled after the first sentence of the first change's reason (agents are told to open
+        // `why` with a summary), with a count when later ones joined it.
+        let mut summary = crate::issues::headline(&why_all, 70);
         if steps.len() > 1 {
             summary.push_str(&format!(" (and {} more)", steps.len() - 1));
         }
@@ -543,7 +564,7 @@ impl Db {
         let joins = earlier.as_ref().map(|e| format!("\n\nIt includes the change proposed in {}, which it replaces.", e.issue_key)).unwrap_or_default();
         let body = format!(
             "{who} proposes a change to {where_}.{joins}\n\nWhy: {why_all}\n\n{applies} Canceling it with a reason rejects it and records why.\n\n```diff\n{diff}\n```",
-            who = actor.id(),
+            who = crate::issues::agent_name(actor.id()),
             where_ = target.describe(),
             diff = diff_text(&lines),
         );
@@ -686,6 +707,32 @@ mod tests {
     const BASE: &str = "# kept by Nitely\n[branch]\nintegration = \"master\"\n\n[gate]\n# must pass\ncommands = [\"npm test\"]\n";
     fn agent() -> Actor {
         Actor::Agent("claude:/w".into())
+    }
+
+    #[test]
+    fn titles_read_as_a_sentence_and_the_body_names_the_agent() {
+        use crate::issues::{agent_name, headline};
+        assert_eq!(
+            headline("Setup sweep of main ee30a597f3c89767432861e8015fdbb570664304. main is the integration branch.", 70),
+            "Setup sweep of main ee30a597f3c89767432861e8015fdbb570664304"
+        );
+        assert_eq!(headline("Review rules for the billing code, so money changes wait for a person and the rest lands alone", 70), "Review rules for the billing code, so money changes wait for a…");
+        assert_eq!(headline("\nGate on npm test, e.g. the unit tests. More later.", 70), "Gate on npm test, e.g. the unit tests");
+        assert_eq!(agent_name("codex:c:/users/someone/appdata/local/demo"), "Codex");
+        assert_eq!(agent_name("claude:x"), "Claude");
+    }
+
+    #[test]
+    fn approving_review_rules_drops_the_note_that_every_change_waits() {
+        let empty = crate::paths::unique_temp("nitely-note", "");
+        std::fs::create_dir_all(&empty).unwrap();
+        let base = crate::connect::generated_playbook(&empty);
+        assert!(base.contains("Every change waits for you"), "{base}");
+        let out = merge(&base, "[approval]\nalways_human = false\n").unwrap();
+        assert!(!out.contains("Every change waits") && !out.contains("sweep drafts them"), "{out}");
+        assert!(out.contains("[approval]\nalways_human = false"), "{out}");
+        // Left true, the note still holds.
+        assert!(merge(&base, "[review]\nfocus = \"money\"\n").unwrap().contains("Every change waits for you"));
     }
 
     #[test]

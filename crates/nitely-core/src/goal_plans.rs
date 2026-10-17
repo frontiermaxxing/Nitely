@@ -136,6 +136,7 @@ fn batch(plan: &GoalPlan, project: &str, goal: Option<i64>, source: &str, own: &
 
 /// The issue body the person reads: the sentence, the goal, and each issue with its blockers.
 fn describe(plan: &GoalPlan, who: &str) -> String {
+    let who = crate::issues::agent_name(who);
     let mut out = format!(
         "{who} drafted this goal from what you asked for: \"{}\"\n\n**{}**: {}",
         plan.sentence.trim(),

@@ -320,7 +320,7 @@ fn tools() -> Value {
             "description": "Propose a change to the repo's playbook (.nitely/playbook.toml or the one Nitely keeps): the integration branch, gate commands, review focus and flags, approval paths. You never change the rules yourself: this files an issue in Needs You with the diff and your reasons, and only the human's approval puts it in effect. Refused when the result would not parse. A proposal while another is pending for the repo replaces it with a new issue that carries both changes.",
             "inputSchema": { "type": "object", "required": ["change", "why"], "properties": {
                 "change": { "type": "string", "description": "TOML. With mode merge (the default), a fragment merged into the playbook, e.g. a [branch] table with integration = \"main\": tables merge key by key, other values (arrays too) are replaced. With mode replace, the whole new playbook (also how to remove a key)." },
-                "why": { "type": "string", "description": "What is wrong now and the evidence, for the human deciding." },
+                "why": { "type": "string", "description": "Open with one short sentence that sums up the change: it becomes the title of the person's decision. Then what is wrong now and the evidence, for the person deciding." },
                 "mode": { "type": "string", "enum": ["merge", "replace"] },
                 "project": { "type": "string" }
             } }

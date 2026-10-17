@@ -340,7 +340,7 @@ fn playbook_plan(root: &Path, repo_name: &str) -> Result<PlaybookPlan> {
 
 /// A starting playbook from what the repo has: its default branch and the usual test and build
 /// commands for Rust and npm projects.
-fn generated_playbook(root: &Path) -> String {
+pub(crate) fn generated_playbook(root: &Path) -> String {
     let branch = git(root, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
         .ok()
         .and_then(|b| b.trim().strip_prefix("origin/").map(str::to_string))

@@ -118,7 +118,9 @@ whether to file all of them or only priorities 1 to 3.
 ## Phase 6: rules, brief, and wrap-up
 
 - **Review and approval rules.** Draft the playbook's judgment for this project and propose it
-  with `propose_playbook_change`, explaining each rule in `why`:
+  with `propose_playbook_change`. Open `why` with one short sentence that sums the change up ("Review
+  rules for the billing and release code"): it becomes the title of the person's decision. Then
+  explain each rule:
   - `review.focus`: what matters most in this codebase, in a few sentences;
   - `approval.human_paths`: paths whose changes need a person, each with a reason (money and
     billing, release and deploy, auth, data migrations, secrets handling);

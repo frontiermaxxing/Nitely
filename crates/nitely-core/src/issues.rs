@@ -152,6 +152,42 @@ pub struct Ask {
     pub closed: Option<String>,
 }
 
+/// An agent as a person reads it: its vendor ("Codex"), not its id ("codex:c:/users/.../demo").
+pub(crate) fn agent_name(id: &str) -> String {
+    match id.split(':').next().unwrap_or(id) {
+        "claude" => "Claude".into(),
+        "codex" => "Codex".into(),
+        "cursor" => "Cursor".into(),
+        "human" => "You".into(),
+        other if !other.is_empty() => {
+            let mut c = other.chars();
+            c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
+        }
+        _ => "An agent".into(),
+    }
+}
+
+/// The first sentence of `text`, at most `max` characters, cut at a word with an ellipsis: what a
+/// title shows of a longer reason.
+pub(crate) fn headline(text: &str, max: usize) -> String {
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    // A sentence ends at ". ", "? " or "! " (not inside "e.g." or a version like 1.2).
+    let end = line.char_indices().find(|&(i, c)| matches!(c, '.' | '?' | '!') && line[i + 1..].starts_with(' ') && !line[..i].ends_with("e.g") && !line[..i].ends_with("i.e")).map(|(i, _)| i);
+    let sentence = match end {
+        Some(i) => &line[..i],
+        None => line.trim_end_matches(['.', '!', '?']),
+    };
+    if sentence.chars().count() <= max {
+        return sentence.to_string();
+    }
+    let cut: String = sentence.chars().take(max - 1).collect();
+    let at_word = match cut.rfind(' ') {
+        Some(i) if i > max / 3 => cut[..i].trim_end_matches([',', ';', ':', ' ']).to_string(),
+        _ => cut,
+    };
+    format!("{at_word}…")
+}
+
 /// Who is acting. Only a human may approve or answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Actor {
