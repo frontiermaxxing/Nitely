@@ -122,7 +122,7 @@ export function PhoneSetup(props: { now: number }) {
                 </span>
               </label>
               <label className="phone-mode">
-                <input type="radio" name="phone-mode" checked={mode === "tailscale"} onChange={() => setMode("tailscale")} />
+                <input type="radio" name="phone-mode" checked={mode === "tailscale"} onChange={() => { setTsName(null); setMode("tailscale"); }} />
                 <span>
                   <strong>HTTPS with Tailscale's certificate</strong>
                   <span className="small muted"> A real certificate for this PC's tailnet name, which phones trust. Turn on MagicDNS and HTTPS Certificates in the Tailscale admin console first.</span>

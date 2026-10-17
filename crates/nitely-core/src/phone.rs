@@ -104,22 +104,29 @@ pub struct Tls {
     pub host: String,
 }
 
-/// A certificate and key in PEM files, for `host` (a name on the certificate).
+/// A certificate and key in PEM files, for `host` (a name on the certificate). The files are only
+/// read.
 pub fn tls_from_files(cert: &std::path::Path, key: &std::path::Path, host: &str) -> Result<Tls> {
+    let cert_pem = std::fs::read(cert).with_context(|| format!("reading {}", cert.display()))?;
+    let key_pem = std::fs::read(key).with_context(|| format!("reading {}", key.display()))?;
+    tls_from_pem(&cert_pem, &key_pem, host, &cert.display().to_string(), &key.display().to_string())
+}
+
+/// A certificate chain and key in PEM, named in errors as `cert_name` and `key_name`.
+fn tls_from_pem(cert_pem: &[u8], key_pem: &[u8], host: &str, cert_name: &str, key_name: &str) -> Result<Tls> {
     use rustls_pki_types::pem::PemObject;
     use rustls_pki_types::{CertificateDer, PrivateKeyDer};
     let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
     if host.is_empty() || !host.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.') {
         bail!("give the name on the certificate, e.g. pc.example.ts.net");
     }
-    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert)
-        .with_context(|| format!("reading {}", cert.display()))?
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(cert_pem)
         .collect::<std::result::Result<_, _>>()
-        .with_context(|| format!("{} is not a PEM certificate", cert.display()))?;
+        .with_context(|| format!("{cert_name} is not a PEM certificate"))?;
     if certs.is_empty() {
-        bail!("{} holds no certificate", cert.display());
+        bail!("{cert_name} holds no certificate");
     }
-    let key = PrivateKeyDer::from_pem_file(key).with_context(|| format!("{} is not a PEM private key", key.display()))?;
+    let key = PrivateKeyDer::from_pem_slice(key_pem).with_context(|| format!("{key_name} is not a PEM private key"))?;
     let config = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
         .with_safe_default_protocol_versions()
         .context("TLS")?
@@ -141,46 +148,73 @@ pub fn tailscale_cert_name() -> Result<String> {
         .context("Tailscale gives this machine no certificate yet: in the Tailscale admin console, turn on MagicDNS and HTTPS Certificates (DNS page), then try again")
 }
 
-/// A Tailscale HTTPS certificate for this machine (a real one, which phones trust), kept in `dir`
-/// and renewed by `tailscale cert` when it nears expiry.
-pub fn tailscale_tls(dir: &std::path::Path) -> Result<Tls> {
+/// A Tailscale HTTPS certificate for this machine (a real one, which phones trust). `tailscale
+/// cert` prints it and its key; Nitely keeps them only in memory and writes no key file. Tailscale
+/// keeps and renews its own copy.
+pub fn tailscale_tls() -> Result<Tls> {
     let name = tailscale_cert_name()?;
-    std::fs::create_dir_all(dir)?;
-    let (cert, key) = (dir.join(format!("{name}.crt")), dir.join(format!("{name}.key")));
-    tailscale(&["cert", "--cert-file", &cert.to_string_lossy(), "--key-file", &key.to_string_lossy(), &name])?;
-    tls_from_files(&cert, &key, &name)
+    let pem = tailscale(&["cert", "--cert-file", "-", "--key-file", "-", &name])?;
+    tls_from_pem(pem.as_bytes(), pem.as_bytes(), &name, "Tailscale's certificate", "Tailscale's key")
+}
+
+/// One connection's TCP stream, which refuses to read past the request's deadline: rustls reads the
+/// socket as often as a handshake or record needs, so the deadline is kept here rather than by each
+/// HTTP-level read, or a client trickling TLS bytes could hold the connection indefinitely.
+struct Sock<'a> {
+    tcp: &'a mut TcpStream,
+    deadline: Instant,
+}
+
+impl std::io::Read for Sock<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let left = self.deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "the request took too long"));
+        }
+        self.tcp.set_read_timeout(Some(left))?;
+        self.tcp.read(buf)
+    }
+}
+
+impl std::io::Write for Sock<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.tcp.write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.tcp.flush()
+    }
 }
 
 /// TLS over one connection's TCP stream.
 struct TlsConn<'a> {
     conn: rustls::ServerConnection,
-    sock: &'a mut TcpStream,
+    sock: Sock<'a>,
 }
 
 impl std::io::Read for TlsConn<'_> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        rustls::Stream::new(&mut self.conn, self.sock).read(buf)
+        rustls::Stream::new(&mut self.conn, &mut self.sock).read(buf)
     }
 }
 
 impl std::io::Write for TlsConn<'_> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        rustls::Stream::new(&mut self.conn, self.sock).write(buf)
+        rustls::Stream::new(&mut self.conn, &mut self.sock).write(buf)
     }
     fn flush(&mut self) -> std::io::Result<()> {
-        rustls::Stream::new(&mut self.conn, self.sock).flush()
+        rustls::Stream::new(&mut self.conn, &mut self.sock).flush()
     }
 }
 
 impl http::Conn for TlsConn<'_> {
     fn tcp(&self) -> &TcpStream {
-        self.sock
+        self.sock.tcp
     }
     fn close_write(&mut self) {
         use std::io::Write;
         self.conn.send_close_notify();
         let _ = self.flush();
-        let _ = self.sock.shutdown(std::net::Shutdown::Write);
+        let _ = self.sock.tcp.shutdown(std::net::Shutdown::Write);
     }
 }
 
@@ -472,7 +506,8 @@ impl Phone {
             let handler: http::Handler = Arc::new(move |stream: &mut TcpStream, _peer: SocketAddr| match &config {
                 Some(config) => {
                     let Ok(conn) = rustls::ServerConnection::new(config.clone()) else { return };
-                    me.connection(&mut TlsConn { conn, sock: stream });
+                    let deadline = Instant::now() + http::IO_TIMEOUT;
+                    me.connection(&mut TlsConn { conn, sock: Sock { tcp: stream, deadline } });
                 }
                 None => me.connection(stream),
             });
@@ -1189,6 +1224,48 @@ mod tests {
         assert!(!String::from_utf8_lossy(&got).contains("<html>phone</html>"));
         running.stop();
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_client_trickling_tls_bytes_is_cut_off_at_the_deadline() {
+        use std::io::{Read, Write};
+        let made = rcgen::generate_simple_self_signed(vec!["nitely.test".to_string()]).unwrap();
+        let tls = tls_from_pem(made.cert.pem().as_bytes(), made.key_pair.serialize_pem().as_bytes(), "nitely.test", "cert", "key").unwrap();
+        let assets: Assets = Arc::new(|_: &str| None);
+        let phone = Phone::new(Arc::new(|| Ok(vec![])), assets, Arc::new(|| anyhow::bail!("no database in this test")), Arc::new(|_: &crate::Db| vec![]));
+        let running = phone.start(&["127.0.0.1".parse().unwrap()], 0, Some(tls)).unwrap();
+        let mut sock = TcpStream::connect(running.addrs[0]).unwrap();
+        sock.set_read_timeout(Some(std::time::Duration::from_millis(50))).unwrap();
+        // The start of a ClientHello record that announces far more than ever comes, a byte at a time.
+        let hello = [0x16u8, 0x03, 0x01, 0x3f, 0xff, 0x01, 0x00, 0x3f, 0xfb, 0x03, 0x03];
+        let started = Instant::now();
+        let mut closed = false;
+        for byte in hello.iter().cycle().take(200) {
+            if sock.write_all(&[*byte]).is_err() {
+                closed = true;
+                break;
+            }
+            let mut buf = [0u8; 64];
+            match sock.read(&mut buf) {
+                Ok(0) => {
+                    closed = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {}
+                Err(_) => {
+                    closed = true;
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            if started.elapsed() > http::IO_TIMEOUT + std::time::Duration::from_secs(5) {
+                break;
+            }
+        }
+        assert!(closed, "the server still held the connection after {:?}", started.elapsed());
+        assert!(started.elapsed() < http::IO_TIMEOUT + std::time::Duration::from_secs(3), "{:?}", started.elapsed());
+        running.stop();
     }
 
     #[test]

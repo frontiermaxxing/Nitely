@@ -48,7 +48,8 @@ authenticated end to end:
   The Phone screen offers two certificates:
   - **Tailscale's certificate for this machine.** The app runs `tailscale cert` for the machine's
     tailnet name (`pc.tail1234.ts.net`, from `tailscale status --json`), a real Let's Encrypt
-    certificate every phone trusts, and keeps it in the data directory (`phone-tls/`). The person
+    certificate every phone trusts. Nitely reads it and its key from the command's output and keeps
+    them only in memory; Tailscale keeps and renews its own copy. The person
     must first turn on **MagicDNS** and **HTTPS Certificates** in the Tailscale admin console (DNS
     page); until then the Phone screen shows Tailscale's own reason. The name resolves only inside
     the tailnet, so the phone needs Tailscale too.
@@ -155,8 +156,8 @@ the app's approval key to add a device of its own.
   an encrypted, authenticated tunnel or over HTTPS with a certificate the phone trusts, so they can
   neither read the decisions nor replace the page that holds the key ("Choosing where it listens").
 - **A stolen certificate key:** whoever holds it and can reach the phone on that name could serve a
-  page of their own. Tailscale's key lives in the data directory like the database; the person's
-  own key is wherever they keep it. Revoke and reissue it as for any HTTPS site.
+  page of their own. Nitely writes no key file: Tailscale's key stays in Tailscale's own state, and
+  the person's own key wherever they keep it. Revoke and reissue it as for any HTTPS site.
 - **Another device on the person's tailnet:** it is the person's own device, or one they shared the
   tailnet with. It still cannot act without a paired device key; it could read the page's code, which
   holds nothing secret.

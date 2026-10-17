@@ -87,7 +87,7 @@ fn tls_for(choice: Option<TlsChoice>) -> Result<Option<phone::Tls>, String> {
     let Some(c) = choice else { return Ok(None) };
     match c.kind.as_str() {
         "none" => Ok(None),
-        "tailscale" => phone::tailscale_tls(&nitely_core::paths::data_dir().join("phone-tls")).map(Some).map_err(err),
+        "tailscale" => phone::tailscale_tls().map(Some).map_err(err),
         "files" => phone::tls_from_files(std::path::Path::new(c.cert.trim()), std::path::Path::new(c.key.trim()), &c.host).map(Some).map_err(err),
         other => Err(format!("{other} is not a way to serve the phone page")),
     }
