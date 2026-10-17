@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { signedGet, signedPost } from "./api";
+import { shownIndex, type Shown } from "./select";
 import { answerMessage, approvalMessage, sendBackMessage, sign, type Device } from "./keys";
 import { StationTrack } from "../ui/StationTrack";
 import { SeverityMark } from "../ui/SeverityMark";
@@ -45,7 +46,7 @@ export function Inbox(props: { device: Device; onGone: (why: string) => void }) 
   const [data, setData] = useState<Decisions | null>(null);
   // The decision on screen, by id: a refresh that adds or removes others never swaps it out (and
   // with it a half-written answer). Its position is kept for when it goes.
-  const [shown, setShown] = useState<{ id: string | null; index: number }>({ id: null, index: 0 });
+  const [shown, setShown] = useState<Shown>({ id: null, index: 0 });
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
 
@@ -74,13 +75,13 @@ export function Inbox(props: { device: Device; onGone: (why: string) => void }) 
   }, [load]);
 
   const list = data?.decisions ?? [];
-  const byId = list.findIndex((d) => d.id === shown.id);
-  const index = byId >= 0 ? byId : Math.min(shown.index, Math.max(0, list.length - 1));
+  const index = shownIndex(list.map((d) => d.id), shown);
   const current = list[index];
-  // Whatever is on screen is pinned by id from then on, the first one included.
+  // Whatever is on screen is pinned by id, the first one included, and its position follows it on
+  // every refresh: when it goes, the one after it takes its place.
   useEffect(() => {
-    if (current && current.id !== shown.id) setShown({ id: current.id, index });
-  }, [current, shown.id, index]);
+    if (current && (current.id !== shown.id || index !== shown.index)) setShown({ id: current.id, index });
+  }, [current, shown.id, shown.index, index]);
   const move = (by: number) => {
     const next = Math.max(0, Math.min(list.length - 1, index + by));
     setShown({ id: list[next]?.id ?? null, index: next });
@@ -102,10 +103,11 @@ export function Inbox(props: { device: Device; onGone: (why: string) => void }) 
     },
   };
 
-  // The decided one leaves the list; the next one moves into its place.
+  // The decided one leaves the list at the next load and the one after it moves into its place.
+  // The selection is not touched here: by the time a slow reply arrives the person may be on
+  // another decision, writing in it.
   const decided = async (what: string) => {
     setDone(what);
-    setShown({ id: null, index });
     await load();
   };
 
