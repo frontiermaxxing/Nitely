@@ -1,7 +1,7 @@
 // Runs with `npm test` (scripts/test.mjs).
 import test from "node:test";
 import assert from "node:assert/strict";
-import { decide, promoted } from "./release-meta.mjs";
+import { compareVersions, decide, promoted } from "./release-meta.mjs";
 
 test("tags decide the channel, the version and how the release is published", () => {
   assert.deepEqual(
@@ -16,38 +16,22 @@ test("tags decide the channel, the version and how the release is published", ()
 });
 
 test("a nightly carries main's next version, the day and the commit", () => {
-  const r = decide("nightly", { base: "0.3.0", date: new Date("2026-10-16T05:00:00Z"), sha: "0123456789abcdef" });
-  assert.equal(r.version, "0.3.0-nightly.20261016.g0123456");
+  const r = decide("nightly", { base: "0.3.0", date: new Date("2026-10-16T05:00:00Z"), sha: "0123456789abcdef", count: 1234 });
+  assert.equal(r.version, "0.3.0-nightly.20261016.1234.g0123456");
   assert.equal(r.tag, "nightly");
   assert.deepEqual(r.manifests, ["nightly"]);
   assert.throws(() => decide("nightly", {}), /version main carries/);
+  assert.throws(() => decide("nightly", { base: "0.3.0" }), /commit count/);
+  // Two builds on one day: the later one has more commits, whatever its hash.
+  const day = { base: "0.3.0", date: new Date("2026-10-16T05:00:00Z") };
+  const [early, late] = [decide("nightly", { ...day, sha: "ffff", count: 100 }), decide("nightly", { ...day, sha: "0000", count: 101 })];
+  assert.equal(compareVersions(early.version, late.version), -1);
 });
 
 test("versions sort the way the updater compares them", () => {
   // Semver pre-releases: beta < nightly (later letters), both below the release itself.
-  const order = ["0.2.0-beta.1", "0.2.0-beta.2", "0.2.0-nightly.20261016.g1a2b3c4", "0.2.0-nightly.20261017.g0aa", "0.2.0", "0.3.0-beta.1"];
-  // The comparison semver.org section 11 defines, as the updater's semver crate does.
-  const ids = (s) => s.split(".").map((p) => (/^\d+$/.test(p) ? Number(p) : p));
-  const cmpIds = (a, b) => {
-    for (let i = 0; i < Math.max(a.length, b.length); i++) {
-      if (a[i] === undefined) return -1;
-      if (b[i] === undefined) return 1;
-      if (a[i] === b[i]) continue;
-      const [na, nb] = [typeof a[i] === "number", typeof b[i] === "number"];
-      if (na !== nb) return na ? -1 : 1;
-      return a[i] < b[i] ? -1 : 1;
-    }
-    return 0;
-  };
-  const cmp = (x, y) => {
-    const [cx, px] = x.split(/-(.*)/s);
-    const [cy, py] = y.split(/-(.*)/s);
-    const core = cmpIds(ids(cx), ids(cy));
-    if (core !== 0) return core;
-    if (px === undefined || py === undefined) return px === py ? 0 : px === undefined ? 1 : -1;
-    return cmpIds(ids(px), ids(py));
-  };
-  assert.deepEqual([...order].reverse().sort(cmp), order);
+  const order = ["0.2.0-beta.1", "0.2.0-beta.2", "0.2.0-nightly.20261016.99.g1a2b3c4", "0.2.0-nightly.20261016.100.g0aa", "0.2.0", "0.3.0-beta.1"];
+  assert.deepEqual([...order].reverse().sort(compareVersions), order);
 });
 
 test("promoting a beta names its stable tag", () => {

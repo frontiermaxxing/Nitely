@@ -28,8 +28,9 @@ on:
         type: string
         required: true
 
+# One release build at a time, so two never update the same channel's manifest at once.
 concurrency:
-  group: release-${{ inputs.ref || github.ref }}
+  group: release
   cancel-in-progress: false
 
 permissions:
@@ -56,20 +57,28 @@ jobs:
 
       - uses: actions/checkout@v5
         with:
-          # A tag given as input (a rebuild, or promote.yml) is checked out by name; otherwise the
-          # pushed tag, or main for a scheduled or dispatched nightly.
-          ref: ${{ inputs.ref && inputs.ref != 'nightly' && format('refs/tags/{0}', inputs.ref) || github.ref }}
+          # A tag given as input (a rebuild, or promote.yml) is checked out by name, a pushed tag as
+          # pushed, and a nightly always from main, whichever branch dispatched it.
+          ref: ${{ (inputs.ref && inputs.ref != 'nightly' && format('refs/tags/{0}', inputs.ref)) || (github.event_name == 'push' && github.ref) || 'refs/heads/main' }}
           fetch-depth: 0
 
+      # Skipped only when the nightly of this very commit is fully out: its release exists, and
+      # with the updater key set, nightly.json names it. A run that failed halfway builds again.
       - name: Skip a nightly when main has not changed
         id: changed
+        env:
+          SIGNING: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
         run: |
-          if [ "$REF" = nightly ] && [ "$(git rev-parse -q --verify 'refs/tags/nightly^{commit}' || true)" = "$(git rev-parse HEAD)" ]; then
-            echo "main has not changed since the last nightly"
-            echo "build=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "build=true" >> "$GITHUB_OUTPUT"
+          build=true
+          head=$(git rev-parse HEAD)
+          if [ "$REF" = nightly ] && [ "$(git rev-parse -q --verify 'refs/tags/nightly^{commit}' || true)" = "$head" ] \
+             && gh release view nightly --json assets -q '.assets[].name' 2>/dev/null | grep -q -- '-setup.exe$'; then
+            if [ "$SIGNING" != true ] || gh release download updates -p nightly.json -O - 2>/dev/null | grep -q "g${head:0:7}"; then
+              echo "main has not changed since the last nightly"
+              build=false
+            fi
           fi
+          echo "build=$build" >> "$GITHUB_OUTPUT"
 
       - name: Rust toolchain
         if: steps.changed.outputs.build == 'true'
@@ -96,10 +105,10 @@ jobs:
         if: steps.changed.outputs.build == 'true'
         id: meta
         run: |
-          node scripts/release-meta.mjs "$REF" "$(git rev-parse HEAD)" | tee -a "$GITHUB_OUTPUT"
+          node scripts/release-meta.mjs "$REF" "$(git rev-parse HEAD)" "$(git rev-list --count HEAD)" | tee -a "$GITHUB_OUTPUT"
           # The previous release, for the notes: for a stable one the previous stable (so its notes
           # cover everything its betas had), else the previous beta or stable. None: the first.
-          if grep -q '^channel=stable$' <(node scripts/release-meta.mjs "$REF" x); then exclude='*-*'; else exclude='*-test.*'; fi
+          if grep -q '^channel=stable$' <(node scripts/release-meta.mjs "$REF" x 1); then exclude='*-*'; else exclude='*-test.*'; fi
           prev=$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude "$exclude" --exclude "$REF" HEAD 2>/dev/null || true)
           echo "previous=$prev" | tee -a "$GITHUB_OUTPUT"
 
@@ -137,10 +146,13 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+          # Updater artifacts need both halves of the key: the secret to sign, and the public key in
+          # tauri.conf.json (plugins.updater.pubkey) for installed copies to check.
+          pubkey=$(node -e "console.log(require('./src-tauri/tauri.conf.json').plugins?.updater?.pubkey ?? '')")
+          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ] && [ -n "$pubkey" ]; then
             npx tauri build --config src-tauri/tauri.release.json --config '{"bundle":{"createUpdaterArtifacts":true}}'
           else
-            echo "::warning::No TAURI_SIGNING_PRIVATE_KEY secret: building without updater signatures, and no update manifest is published (docs/releasing.md)."
+            echo "::warning::No updater key (the TAURI_SIGNING_PRIVATE_KEY secret and plugins.updater.pubkey in tauri.conf.json): building without updater signatures, and no update manifest is published (docs/releasing.md)."
             npx tauri build --config src-tauri/tauri.release.json
           fi
           ls -l target/release/bundle/nsis
@@ -200,11 +212,14 @@ jobs:
           [ "${{ steps.meta.outputs.prerelease }}" = true ] && flags+=(--prerelease)
           [ "${{ steps.meta.outputs.draft }}" = true ] && flags+=(--draft)
           if [ "$tag" = nightly ]; then
-            # The rolling nightly: the previous one goes, with its tag, and this commit takes it.
+            # The rolling nightly: the previous one goes, with its tag, and the new release makes
+            # the tag on this commit as it is created, so a failed create leaves no tag behind.
             gh release delete nightly --yes --cleanup-tag 2>/dev/null || true
-            git push -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/tags/nightly"
+            flags+=(--target "$(git rev-parse HEAD)")
+          else
+            flags+=(--verify-tag)
           fi
-          gh release create "$tag" out/* --verify-tag --title "${{ steps.meta.outputs.title }}" --notes-file notes.md "${flags[@]}"
+          gh release create "$tag" out/* --title "${{ steps.meta.outputs.title }}" --notes-file notes.md "${flags[@]}"
 
       - name: Update the channel manifests
         if: steps.changed.outputs.build == 'true' && steps.meta.outputs.manifests != ''
@@ -219,6 +234,10 @@ jobs:
           gh release view updates >/dev/null 2>&1 || gh release create updates --prerelease --title "Update manifests" \
             --notes "What installed copies of Nitely read to find their channel's newest version. Not a release to download."
           for channel in ${{ steps.meta.outputs.manifests }}; do
-            node scripts/update-manifest.mjs --version "$v" --url "$url" --sig "$sig" --notes notes.md --out "$channel.json"
+            rm -f "current-$channel.json"
+            gh release download updates -p "$channel.json" -O "current-$channel.json" 2>/dev/null || true
+            status=0
+            node scripts/update-manifest.mjs --version "$v" --url "$url" --sig "$sig" --notes notes.md --out "$channel.json" --current "current-$channel.json" || status=$?
+            if [ "$status" = 3 ]; then continue; elif [ "$status" != 0 ]; then exit "$status"; fi
             gh release upload updates "$channel.json" --clobber
           done

@@ -7,7 +7,7 @@ published on GitHub Releases. Nobody builds an installer by hand. There are thre
 | --- | --- | --- | --- | --- |
 | **stable** | a tag `v0.2.0`, or promoting a beta | `0.2.0` | a release | everyone, by default |
 | **beta** | a tag `v0.2.0-beta.1` | `0.2.0-beta.1` | a pre-release | people who choose beta |
-| **nightly** | main, every day at 05:00 UTC when it changed (or on demand) | `0.2.0-nightly.20261016.g1a2b3c4` | the rolling pre-release `nightly` | people who choose nightly |
+| **nightly** | main, every day at 05:00 UTC when it changed (or on demand) | `0.2.0-nightly.20261016.1234.g1a2b3c4` (day, main's commit count, commit) | the rolling pre-release `nightly` | people who choose nightly |
 
 A tag `v0.2.0-test.1` builds everything and publishes a **draft** that only the repo's
 collaborators see, with no update manifest: use it to try the workflow, then delete the draft
@@ -80,8 +80,9 @@ make it yourself:
 3. Give an agent the **public** key (`nitely-updater.key.pub`; it is safe to share). It goes into
    `src-tauri/tauri.conf.json` under `plugins.updater.pubkey` with the auto-update work (NIT-93).
 
-Until the secret exists, releases still publish installers; they just carry no updater signature,
-and no manifest changes.
+Until both halves are in place (the secret, and the public key in `tauri.conf.json`), releases
+still publish installers; they just carry no updater signature, and no manifest changes. A
+manifest only ever moves forward: a build that finishes after a newer one leaves it alone.
 
 ## Cutting the first stable release (Andrew)
 
