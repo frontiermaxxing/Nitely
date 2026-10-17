@@ -47,11 +47,7 @@ pub fn for_dir(config: &Config, dir: &str) -> Option<String> {
     let repo = config.repo_for_dir(dir)?;
     let pb = Playbook::load(std::path::Path::new(&repo.root)).unwrap_or_default();
     let project = repo.project.as_deref().map(|p| format!(" Its issues are in project {p} ({p}-n keys).")).unwrap_or_default();
-    let gate = pb.gate.commands.len() + pb.gate.steps.len();
-    let gate = match gate {
-        0 => "The playbook has no gate commands yet.".to_string(),
-        n => format!("`submit` and `land` run its gate ({n} commands)."),
-    };
+    let gate = gate_line(&pb);
     // Read-only, and skipped when the database cannot be read: this runs at every session start.
     let offer = repo
         .project
@@ -64,6 +60,27 @@ pub fn for_dir(config: &Config, dir: &str) -> Option<String> {
         repo.name,
         pb.integration_branch()
     ))
+}
+
+/// The gate an agent is told about at session start: its commands by name, so it can check them
+/// (the setup sweep's pre-flight does) without reading the playbook file; a count when they are
+/// too long to list.
+fn gate_line(pb: &Playbook) -> String {
+    let named: Vec<String> = pb
+        .gate
+        .commands
+        .iter()
+        .map(|c| format!("`{c}`"))
+        .chain(pb.gate.steps.iter().map(|s| {
+            let some = !s.when_changed.is_empty() || !s.unless_only.is_empty();
+            format!("`{}`{}", s.run, if some { " (for some changes)" } else { "" })
+        }))
+        .collect();
+    match named.len() {
+        0 => "The playbook has no gate commands yet.".to_string(),
+        n if named.iter().map(String::len).sum::<usize>() > 300 => format!("`submit` and `land` run its gate ({n} commands)."),
+        _ => format!("`submit` and `land` run its gate: {}.", named.join(", ")),
+    }
 }
 
 /// What a session in a project nobody has set up is told: offer the sweep, and without a yes run
@@ -88,6 +105,16 @@ mod tests {
         assert!(offer.starts_with("SHOP has not been set up") && offer.contains("seed the SHOP board"), "{offer}");
         assert!(offer.contains("only on a yes") && offer.contains("Phase 0 pre-flight"), "{offer}");
         assert!(!offer.contains('\n'), "one paragraph");
+    }
+
+    #[test]
+    fn the_gate_is_named_so_an_agent_can_check_it() {
+        let none = Playbook::parse("").unwrap();
+        assert_eq!(gate_line(&none), "The playbook has no gate commands yet.");
+        let pb = Playbook::parse("[gate]\ncommands = [\"npm test\"]\n[[gate.steps]]\nrun = \"cargo test\"\nwhen_changed = [\"^crates/\"]\n").unwrap();
+        assert_eq!(gate_line(&pb), "`submit` and `land` run its gate: `npm test`, `cargo test` (for some changes).");
+        let long = Playbook::parse(&format!("[gate]\ncommands = [\"{}\", \"x\"]\n", "y".repeat(400))).unwrap();
+        assert_eq!(gate_line(&long), "`submit` and `land` run its gate (2 commands).");
     }
 
     #[test]
