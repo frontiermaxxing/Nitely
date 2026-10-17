@@ -71,7 +71,8 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
     let root = playbook::repo_for_issue(config, issue.project.as_deref(), opts.dir)?;
     let pb = Playbook::load(&root)?;
     // With `[land] batch`, a change that may land with others waits in the queue (land_queue.rs).
-    if crate::land_queue::lands_alone(db, &pb, &issue.key)?.is_none() {
+    // One that is not to be pushed lands alone: a stack is pushed as one.
+    if opts.push && crate::land_queue::lands_alone(db, &pb, &issue.key)?.is_none() {
         return crate::land_queue::land(db, &root, &issue.key, opts, actor);
     }
     let base = pb.integration_branch().to_string();
@@ -85,6 +86,13 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
         match crate::lanes::hold_checkout(&root, &pb) {
             Ok(_held) => after_land(&root, &pb, &mut report),
             Err(e) => report.warnings.push(format!("the after-land steps did not run: {e:#}")),
+        }
+    }
+    // Changes that queued while this land held the lock land now, under it: their own lands may
+    // have stopped waiting.
+    if crate::land_queue::has_waiting(db, &root).unwrap_or(false) {
+        if let Err(e) = crate::land_queue::run_queue(db, &root) {
+            report.warnings.push(format!("the land queue that waited behind this land stopped: {e:#}"));
         }
     }
     drop(lock);

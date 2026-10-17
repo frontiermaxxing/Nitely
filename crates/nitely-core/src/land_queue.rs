@@ -268,6 +268,11 @@ fn result_of(db: &Db, entry: &Entry) -> Result<Landed> {
     Ok(landed)
 }
 
+/// Whether changes wait in the repo's queue.
+pub fn has_waiting(db: &Db, root: &Path) -> Result<bool> {
+    Ok(!db.land_queue(root)?.is_empty())
+}
+
 /// Runs the repo's queue until nothing waits: the caller holds the land lock.
 pub fn run_queue(db: &mut Db, root: &Path) -> Result<()> {
     // A run that died (its process ended) left its changes running; with the lock held, no run is
@@ -307,6 +312,8 @@ struct Stacked {
     entry: Entry,
     branch: String,
     worktree: Option<PathBuf>,
+    /// The branch's head when it was stacked: what its review covers.
+    head: String,
     /// The commit it was stacked onto, and its own tip.
     from: String,
     tip: String,
@@ -514,7 +521,7 @@ fn stack_one(db: &Db, root: &Path, pb: &Playbook, stack: &Path, entry: &Entry, o
         let project = db.issue(key)?.and_then(|i| i.project);
         crate::private_terms::check(project.as_deref(), stack, onto)?;
         let files = git(stack, &["diff", "--name-only", "--no-renames", onto, &tip])?.lines().map(str::to_string).collect();
-        Ok(Stacked { entry: entry.clone(), branch, worktree, from: onto.to_string(), tip, approval, files })
+        Ok(Stacked { entry: entry.clone(), branch, worktree, head, from: onto.to_string(), tip, approval, files })
     };
     inner().map_err(|e| format!("{e:#}"))
 }
@@ -532,7 +539,23 @@ fn land_prefix(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stacked: Vec<S
         }
         bail!("{base} moved during the gate");
     }
-    let push = playbook::has_origin(root) && stacked.iter().any(|s| s.entry.push);
+    // A branch that gained commits during the gate: what it holds now was not reviewed or gated,
+    // so it goes back; the others wait for the next run, stacked again without it.
+    let gained: Vec<usize> = stacked.iter().enumerate().filter(|(_, s)| land::rev(root, &s.branch).ok().as_deref() != Some(s.head.as_str())).map(|(i, _)| i).collect();
+    if !gained.is_empty() {
+        for (i, s) in stacked.iter().enumerate() {
+            if gained.contains(&i) {
+                let why = format!("{} gained commits during the gate, after its review was checked; submit again", s.branch);
+                send_back(db, run, &s.entry, &why, None, pb)?;
+            } else {
+                db.conn.execute("UPDATE land_queue SET state = 'queued', run_id = NULL WHERE id = ?1", [s.entry.id])?;
+            }
+        }
+        return Ok(());
+    }
+    // Every change in a queue pushes (one that does not lands alone), so the stack pushes when
+    // the repo has a remote.
+    let push = playbook::has_origin(root) && stacked.iter().all(|s| s.entry.push);
     let mut warnings = Vec::new();
     if push {
         // Each pull request shows the commits that land, not the ones from before the stacking.
@@ -586,17 +609,31 @@ fn land_prefix(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stacked: Vec<S
             }
             None => {}
         }
-        // The branch moves to what landed, so it reads as merged and its worktree as clean.
-        let moved = match &s.worktree {
-            Some(wt) => git(wt, &["reset", "--quiet", "--keep", &s.tip]),
-            None => git(root, &["branch", "--force", &s.branch, &s.tip]),
+        // The branch moves to what landed, so it reads as merged and its worktree as clean; but a
+        // commit made on it since the check above is never thrown away.
+        let still = land::rev(root, &s.branch).ok().as_deref() == Some(s.head.as_str());
+        let moved = match (&s.worktree, still) {
+            (_, false) => Err(anyhow::anyhow!("it gained commits after the gate, so it was left as it is")),
+            (Some(wt), true) => git(wt, &["reset", "--quiet", "--keep", &s.tip]),
+            (None, true) => git(root, &["branch", "--force", &s.branch, &s.tip]),
         };
-        if let Err(e) = moved {
-            report.warnings.push(format!("{} was not moved to what landed ({})", s.branch, land::first_line(&e)));
-        }
+        let moved = match moved {
+            Ok(_) => true,
+            Err(e) => {
+                report.warnings.push(format!("{} was not moved to what landed ({})", s.branch, land::first_line(&e)));
+                false
+            }
+        };
         let (cleanup, held_by) = match &s.worktree {
+            Some(wt) if !moved => (format!("kept {} and {} as they are", wt.display(), s.branch), vec![]),
+            Some(wt) if db.crew_worker_in(wt)? && s.entry.keep => {
+                // Said on the issue, so the supervisor does not remove it once the worker exits.
+                db.log_event(&actor, Some(&s.entry.issue), Some(&wt.to_string_lossy()), "land_kept", "Kept the worktree and branch (--keep)")?;
+                (format!("kept {} (--keep)", wt.display()), vec![])
+            }
             Some(wt) if db.crew_worker_in(wt)? => (format!("kept {} whole: the crew worker running in it removes it once it exits", wt.display()), vec![]),
             Some(wt) => land::cleanup(root, pb, wt, &s.branch, false, s.entry.keep),
+            None if !moved => (format!("kept {}", s.branch), vec![]),
             None => match git(root, &["branch", "-d", &s.branch]) {
                 Ok(_) => ("removed the merged branch".to_string(), vec![]),
                 Err(e) => (format!("kept the branch ({})", land::first_line(&e)), vec![]),
@@ -856,6 +893,47 @@ batch = "waiting"
         assert_eq!(f.entry(&a).state, "sent_back");
         assert!(f.error(&a).contains("changed since its review"), "{}", f.error(&a));
         assert_eq!(f.entry(&b).state, "landed");
+        std::fs::remove_dir_all(&f.base).ok();
+    }
+
+    #[test]
+    fn a_branch_that_gains_commits_during_the_gate_keeps_them_and_goes_back() {
+        let mut f = fixture();
+        let (a, wa) = f.submitted("A", &[("a.txt", "a")]);
+        let (b, _) = f.submitted("B", &[("b.txt", "b")]);
+        // The gate commits on A's branch while it runs, as its agent might.
+        let wt = wa.to_string_lossy().replace('\\', "/");
+        let commits = if cfg!(windows) {
+            format!("if not exist \"{wt}/late.txt\" (echo late> \"{wt}/late.txt\" & git -C \"{wt}\" add late.txt & git -C \"{wt}\" commit -q -m late)")
+        } else {
+            format!("if [ ! -e '{wt}/late.txt' ]; then echo late > '{wt}/late.txt'; git -C '{wt}' add late.txt; git -C '{wt}' commit -q -m late; fi")
+        };
+        let text = PLAYBOOK.replace("{sh}", &playbook::posix_sh()).replace("{gate}", &format!("{commits:?}"));
+        std::fs::write(f.repo.join(playbook::PLAYBOOK_PATH), text).unwrap();
+        sh(&f.repo, &["commit", "-q", "-am", "a gate that commits on A"]);
+        f.queue_and_run(&[&a, &b]);
+        assert_eq!(f.entry(&a).state, "sent_back");
+        assert!(f.error(&a).contains("gained commits during the gate"), "{}", f.error(&a));
+        assert_eq!(f.entry(&b).state, "landed", "B waited for the next run and landed there");
+        assert!(sh(&wa, &["log", "--oneline", "-1"]).contains("late"), "A's new commit is still on its branch");
+        assert!(!f.on_main("late.txt") && !f.on_main("a.txt"));
+        std::fs::remove_dir_all(&f.base).ok();
+    }
+
+    #[test]
+    fn a_land_alone_lands_what_queued_behind_it_and_a_local_land_never_goes_in_a_stack() {
+        let mut f = fixture();
+        let (a, _) = f.submitted("A", &[("a.txt", "a")]);
+        let (b, _) = f.submitted("B", &[("b.txt", "b")]);
+        // B queued while another land held the lock, and its own land stopped waiting.
+        enqueue(&f.db, &f.repo, &b, &f.opts(), &f.actor).unwrap();
+        // A lands alone (not to be pushed: a stack is pushed as one), and then lands B under its lock.
+        let dir = f.repo.to_string_lossy().into_owned();
+        let opts = LandOptions { dir: &dir, issue_key: &a, push: false, keep: false, break_lock: false };
+        let r = land::land(&mut f.db, &crate::Config::default(), &opts, &f.actor).unwrap();
+        assert!(r.landed && r.batch.is_none(), "{r:?}");
+        assert_eq!(f.entry(&b).state, "landed", "{}", f.error(&b));
+        assert!(f.db.latest_land_queue_entry(&a).unwrap().is_none(), "A never went in the queue");
         std::fs::remove_dir_all(&f.base).ok();
     }
 

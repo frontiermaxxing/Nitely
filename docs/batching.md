@@ -252,7 +252,9 @@ own, and the app signs each approved patch, as today.
 - **Who queues.** `land` puts the change in the repo's queue (`land_queue`, one row per change) when
   the playbook batches, the repo has `[lanes]`, it is not in large-repo mode, and the change needs no
   person's approval (its review's approver is not "human" and it names no approval reasons). Those
-  land alone, as before, so approvals are given and signed per change.
+  land alone, as before, so approvals are given and signed per change. So does a land that is not
+  to be pushed (`--no-push`), since a stack is pushed as one. A land of one change alone that finds
+  changes queued behind it when it finishes lands them too, still under its lock.
 - **Who runs it.** No resident process. Whichever `land` call finds the land lock free runs the
   queue until nothing waits, landing other agents' changes too. The others wait on their own row and
   return once it landed or was sent back, or after 20 minutes saying it is still waiting. Landing
@@ -272,7 +274,9 @@ own, and the app signs each approved patch, as today.
 - **Landing.** The rebased heads are pushed to their PR branches first. Then main is fast-forwarded
   to the tip and pushed once, the `[[land.after]]` steps run once, and each change is landed as land
   lands one: issue Done, branch moved to what landed, worktree cleaned up. If main moved during the
-  gate, nothing lands from that stack and its changes wait for the next run.
+  gate, nothing lands from that stack and its changes wait for the next run. A branch that gained
+  commits during the gate goes back (what it holds now was neither reviewed nor gated) and keeps
+  them; the others wait for the next run. `--keep` keeps a crew worker's worktree too.
 - **Records.** `land_run` holds one row per run: changes in stack order, landed, sent back, gates,
   head. Each change's land result (with `batch`: run, the changes it went with, gates) is on its
   `land_queue` row, and its events are on its issue's timeline.
