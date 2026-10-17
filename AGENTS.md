@@ -89,8 +89,8 @@ once came just before a hard freeze (NIT-188), so:
   person's), no updates, and notifications written to `harness-notifications.jsonl` instead of shown
   (`NITELY_HARNESS_TOASTS=1` shows them). Anything new that reaches outside the app's folders (a
   scheduled task, a login item, the registry) fails `everything_the_app_reaches_outside_its_folders_is_listed`
-  in src-tauri/src/harness.rs until it is listed there with how the harness stays clear of it. The window opens without taking the focus, but it is on the person's screen while
-  a test runs (window.e2e.mjs maximizes it for a moment).
+  in src-tauri/src/harness.rs until it is listed there with how the harness stays clear of it.
+  The window opens without taking the focus, but it is on the screen while a test runs.
 - One real toast, confirmed from Windows' notification history: `node scripts/harness/toast.check.mjs`
   (it shows a toast on the desktop, so it is not part of `app:test`).
 - What a driven window cannot do: OS input outside the page (Alt+Space, Win+arrows, dragging the

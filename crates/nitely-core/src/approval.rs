@@ -184,7 +184,9 @@ pub fn trust_in_tests(public: Option<[u8; 32]>) {
     TEST_KEY.with(|k| k.set(public));
 }
 
-/// The public key approvals are checked with: the keychain's.
+/// The public key approvals are checked with: the keychain's. Under the test harness, the throwaway
+/// key's, which signed them: the harness app (its background lander too) never reads the keychain.
+/// The CLI never has a throwaway key, so `nitely land` trusts only the keychain's.
 pub fn trusted_key() -> Result<[u8; 32]> {
     #[cfg(test)]
     {
@@ -192,6 +194,9 @@ pub fn trusted_key() -> Result<[u8; 32]> {
     }
     #[allow(unreachable_code)]
     {
+        if let Some(secret) = EPHEMERAL.get() {
+            return Ok(public_of(secret));
+        }
         if !SILENT_KEYCHAIN.load(std::sync::atomic::Ordering::Relaxed) {
             bail!("on macOS only the Nitely app reads its approval key, so the app lands a change that waits for approval once the person approves it there");
         }
