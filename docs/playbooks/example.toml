@@ -51,7 +51,7 @@ when_changed = ["^site/"]
 reviewer = { claude = "codex", codex = "claude", "*" = "codex" }
 # Small changes handed in close together can share one reviewer call, each with its own verdict
 # (docs/batching.md). Off unless you turn it on.
-# batch = "small"          # "off", "small" (at most small_lines and small_files) or "all"
+# batch = "small"          # "off", "small" (at most small_lines and small_files), "all", or "shadow" to measure first
 # batch_window = "5m"      # how long the oldest change waits for others; "busy": until the reviewer is free
 # batch_max = 3
 

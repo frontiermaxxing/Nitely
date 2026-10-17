@@ -102,12 +102,12 @@ fn seed(path: &std::path::Path) -> anyhow::Result<()> {
         let new = NewIssue { project: "DEMO".into(), title: title.into(), kind: "feature".into(), body: "b".into(), evidence: "e".into(), source: "claude".into(), priority, allow_similar: true, ..Default::default() };
         let key = db.create_issue(&new, &agent)?.key;
         db.move_issue(&key, "In Progress", None, None, &agent)?;
-        let review = review::Review { reviewer: "codex".into(), verdict: "pass".into(), findings, flagged: vec![], summary: String::new(), seconds: 80, previous: vec![], note: String::new(), batch: None };
+        let review = review::Review { reviewer: "codex".into(), verdict: "pass".into(), findings, flagged: vec![], summary: String::new(), seconds: 80, previous: vec![], note: String::new(), batch: None, tokens: None };
         let gate = playbook::GateResult { passed: true, commit: "abc1234".into(), results: vec![], warnings: vec![], flaked: vec![], lane_run: None };
         let s = submit::Submitted {
             issue: key.clone(), branch: format!("claude/{}", key.to_lowercase()), base: "main".into(), patch_id: format!("patch-{}", key.to_lowercase()),
             commit: "abc1234".into(), files: 3, gate, review: Some(review), approver: "human".into(), reasons, approval_stands: false,
-            pushed: true, pr_url: None, pr_error: None, land: None, state: "Needs You".into(), next: String::new(),
+            pushed: true, pr_url: None, pr_error: None, land: None, shadow: None, state: "Needs You".into(), next: String::new(),
         };
         db.record_review(&s)?;
         db.move_issue(&key, "Needs You", None, None, &agent)?;

@@ -35,7 +35,9 @@ pub struct ReviewRules {
     pub require_cross_vendor: bool,
     /// Review several changes in one reviewer call (docs/batching.md): `off` (each alone, the
     /// default), `small` (changes of at most `small_lines` and `small_files`), or `all`. Only a
-    /// submit that runs in the background waits for a batch.
+    /// submit that runs in the background waits for a batch. `shadow` measures batching without
+    /// using it: each change is reviewed alone, which decides, and small ones are also reviewed in
+    /// a batch that is only recorded (`nitely batches compare`).
     pub batch: BatchMode,
     /// How long the oldest change in the queue waits for others ("5m", "30s", "0"), or `busy`:
     /// until no batch of the repository is being reviewed.
@@ -55,6 +57,7 @@ pub enum BatchMode {
     Off,
     Small,
     All,
+    Shadow,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -167,6 +170,10 @@ pub struct Review {
     /// The batch this change was reviewed in, with others in one reviewer call (NIT-216).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch: Option<BatchInfo>,
+    /// What the reviewer said the call used, when it says (Codex does); for a batched review, the
+    /// batch's tokens shared evenly between its changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -510,7 +517,7 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
             .unwrap_or("")
             .to_string();
         let verdict = if findings.iter().any(|f| f.priority <= 1) { "changes" } else { "pass" };
-        Ok(Review { reviewer: reviewer.into(), verdict: verdict.into(), findings, flagged, summary, seconds, previous, note: String::new(), batch: None })
+        Ok(Review { reviewer: reviewer.into(), verdict: verdict.into(), findings, flagged, summary, seconds, previous, note: String::new(), batch: None, tokens: None })
     }
 
     /// The instructions for several changes reviewed in one call (docs/batching.md): one section
@@ -670,7 +677,10 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
     /// Runs `reviewer` in `worktree` and parses its reply.
     pub fn run(&self, reviewer: &str, worktree: &Path, base: &str, previous: Option<&PreviousRound>) -> Result<Review> {
         let reply = self.run_prompt(reviewer, worktree, &self.prompt(base, previous))?;
-        self.parse(reviewer, &reply.text, reply.seconds, previous, Some(worktree)).map_err(|e| if reply.only_a_login_message { reply.signed_out(self) } else { e })
+        let mut review =
+            self.parse(reviewer, &reply.text, reply.seconds, previous, Some(worktree)).map_err(|e| if reply.only_a_login_message { reply.signed_out(self) } else { e })?;
+        review.tokens = reply.tokens;
+        Ok(review)
     }
 
     /// Runs `reviewer` in `worktree` with `prompt` on its stdin, and returns what it wrote. A
@@ -733,6 +743,7 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
             // short reply with no findings in it. A long or partial review that mentions logins is
             // unfinished.
             only_a_login_message: printed.len() < 1000 && !text.contains("- [P") && says_signed_out(&printed),
+            tokens: tokens_used(&printed),
             text,
             printed,
             seconds: started.elapsed().as_secs(),
@@ -751,9 +762,25 @@ pub struct Reply {
     /// The reply and everything the reviewer printed, for its error.
     printed: String,
     pub seconds: u64,
+    /// The tokens the reviewer said it used, when it says.
+    pub tokens: Option<u64>,
     /// Short, with no findings, and about signing in: the reviewer could not run, whatever its
     /// exit code said.
     pub only_a_login_message: bool,
+}
+
+/// What a reviewer printed about its tokens: Codex ends with `tokens used` and the count, on that
+/// line or the next (`4,755`).
+fn tokens_used(printed: &str) -> Option<u64> {
+    let lines: Vec<&str> = printed.lines().collect();
+    let at = lines.iter().rposition(|l| l.to_lowercase().contains("tokens used"))?;
+    let count = |l: &str| -> Option<u64> {
+        let digits: String = l.chars().skip_while(|c| !c.is_ascii_digit()).take_while(|c| c.is_ascii_digit() || *c == ',').filter(|c| *c != ',').collect();
+        digits.parse().ok()
+    };
+    let after = lines[at].to_lowercase();
+    let after = &after[after.find("tokens used").unwrap_or(0) + "tokens used".len()..];
+    count(after).or_else(|| lines.get(at + 1).and_then(|l| count(l)))
 }
 
 impl Reply {
@@ -866,7 +893,7 @@ impl CurrentCode {
 }
 
 /// `path/to/file.rs:120` and `file.rs` mentions in a text, with their line when given.
-fn citations(text: &str) -> Vec<(String, Option<usize>)> {
+pub(crate) fn citations(text: &str) -> Vec<(String, Option<usize>)> {
     let mut out = Vec::new();
     for word in text.split(|c: char| c.is_whitespace() || "`,;()[]\"'".contains(c)) {
         let word = word.trim_end_matches(['.', ':']);
@@ -1534,5 +1561,12 @@ VERDICT 1: findings\nMONEY_OR_RELEASE 1: no\nVERDICT 2: findings\nMONEY_OR_RELEA
         let unanswered = rules.parse_batch("codex", "VERDICT 1: clean\nVERDICT 2: clean\nMONEY_OR_RELEASE 2: no\n", 1, &changes);
         assert!(unanswered.reviews[0].as_ref().unwrap_err().contains("unfinished") && unanswered.reviews[1].is_ok(), "{unanswered:?}");
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_reviewers_token_count_is_read_from_what_it_printed() {
+        assert_eq!(tokens_used("codex\nok\ntokens used\n4,755\nok\n"), Some(4755));
+        assert_eq!(tokens_used("[2026-10-17T21:42:00] tokens used: 12345\n"), Some(12345));
+        assert_eq!(tokens_used("Fine.\nVERDICT: clean\n"), None);
     }
 }

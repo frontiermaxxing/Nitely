@@ -70,6 +70,12 @@ enum Cmd {
         #[command(subcommand)]
         command: Option<LanesCmd>,
     },
+    /// Review batches (docs/batching.md): `compare` sets the shadow batches of `[review] batch =
+    /// "shadow"` against the single reviews that decided the same changes.
+    Batches {
+        #[command(subcommand)]
+        command: BatchesCmd,
+    },
     /// Goals: the outcomes a project works toward, and the issues that get it there.
     Goal {
         #[command(subcommand)]
@@ -315,6 +321,17 @@ enum TokensCmd {
     List,
     /// Remove a token; agents using it are refused from then on.
     Remove { name: String },
+}
+
+#[derive(Subcommand)]
+enum BatchesCmd {
+    /// Per change, whether the shadow batch agreed with the single review: verdict, P0/P1 findings
+    /// by file and symbol, severities, and seconds and tokens per change.
+    Compare {
+        /// Every pair as JSON, not the summary.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -691,6 +708,17 @@ fn run(cmd: Cmd) -> Result<()> {
                 state: "working".into(),
             })
         }
+        Cmd::Batches { command: BatchesCmd::Compare { json } } => {
+            let db = Db::open_default()?;
+            let pairs = nitely_core::review_compare::shadow_pairs(&db)?;
+            if json {
+                return print_json(&pairs);
+            }
+            for line in nitely_core::review_compare::Report::of(&pairs).lines() {
+                println!("{line}");
+            }
+            Ok(())
+        }
         Cmd::Lanes { command: None } => lanes::status(None),
         Cmd::Lanes { command: Some(LanesCmd::Status { project }) } => lanes::status(project),
         Cmd::Lanes { command: Some(LanesCmd::Reset { project }) } => lanes::reset(project),
@@ -1037,7 +1065,7 @@ fn run(cmd: Cmd) -> Result<()> {
         Cmd::SubmitJob { id } => {
             let config = Config::load()?;
             let mut db = Db::open_default()?;
-            let job = nitely_core::submit_job::run(&mut db, &config, id)?;
+            let job = nitely_core::submit_job::run_in_background(&mut db, &config, id)?;
             print_json(&job)?;
             Ok(())
         }

@@ -246,6 +246,26 @@ word, and a later slice measures the drift: the same small change reviewed alone
 over a day of real submissions, comparing verdicts. Batching stays opt-in until that comparison
 says it does not let defects through.
 
+### Measuring it: shadow batches (NIT-217)
+
+`[review] batch = "shadow"` measures batching without using it. Every change is reviewed alone,
+and that review decides, as with `"off"`. A small change that could have joined a batch (the same
+rules as `"small"`) is then reviewed again in a shadow batch: once its submit job has handed the
+result back and released the issue, the job's process joins the shadow queue, and the batch is
+reviewed and recorded like a real one, but nothing reads it. No note, event or state comes from it.
+
+`nitely batches compare` sets each shadow batch's review of a change against the single review
+that decided it: the same verdict, the same P0/P1 findings (paired by the file and symbol they
+cite), findings both raised at a different priority (and how many of those crossed between P1
+and P2, which is what changes a verdict), and reviewer seconds and tokens per change (Codex
+reports its tokens; a batch's are shared evenly). `--json` gives every pair.
+
+For numbers before a day of traffic, `cargo run -p nitely-core --example review_replay` replays a
+project's recent small first-round changes through the reviewer, alone and in batches. It opens
+the database read-only and reviews in scratch clones of the repo. It also compares each fresh single
+review with the change's original one: how much two reviews of one change disagree anyway, the
+baseline batching is judged against.
+
 ## The land queue
 
 When a project batches landing, `land` puts the change in the project's queue instead of landing it
@@ -351,7 +371,7 @@ identical patch. Reusing a pass for the same patch and reviewing only the differ
 
 ```toml
 [review]
-batch = "off"          # "off": each change alone. "small": small changes together. "all": any size.
+batch = "off"          # "off": each change alone. "small": small changes together. "all": any size. "shadow": alone, and measured in batches.
 batch_window = "5m"    # how long the oldest change waits for others; "busy": until a reviewer frees up
 batch_max = 3          # changes per review call
 small_lines = 100      # what counts as small

@@ -359,9 +359,26 @@ pub fn submit_async(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, a
 /// Runs a job: the job's own process calls this. One job of an issue runs at a time (a file lock
 /// per issue); a job superseded while it waited does nothing.
 pub fn run(db: &mut Db, config: &crate::Config, id: i64) -> Result<Job> {
+    run_job(db, config, id).map(|(job, _)| job)
+}
+
+/// `run`, then, once the job has handed its result back and released the issue, its change's
+/// shadow batch (`[review] batch = "shadow"`, NIT-217). Only the job's own process does this: it
+/// waits for the batch's window, and nobody waits on that process.
+pub fn run_in_background(db: &mut Db, config: &crate::Config, id: i64) -> Result<Job> {
+    let (job, shadow) = run_job(db, config, id)?;
+    if let Some(shadow) = shadow {
+        if let Err(e) = crate::review_batch::shadow(db, &shadow) {
+            eprintln!("the shadow batch of {} did not finish: {e:#}", job.issue);
+        }
+    }
+    Ok(job)
+}
+
+fn run_job(db: &mut Db, config: &crate::Config, id: i64) -> Result<(Job, Option<crate::review_batch::Shadow>)> {
     let job = db.submit_job(id)?.with_context(|| format!("no submit job {id}"))?;
     if job.state != "queued" {
-        return Ok(job);
+        return Ok((job, None));
     }
     let locks = crate::paths::data_dir().join("jobs");
     std::fs::create_dir_all(&locks)?;
@@ -373,7 +390,7 @@ pub fn run(db: &mut Db, config: &crate::Config, id: i64) -> Result<Job> {
     )?;
     if started == 0 {
         // Superseded while it waited for the lock.
-        return db.submit_job(id)?.context("the job's record went missing");
+        return Ok((db.submit_job(id)?.context("the job's record went missing")?, None));
     }
     let actor = if job.requested_by == "human" { Actor::Human } else { Actor::Agent(job.requested_by.clone()) };
     // Only a submit in the background may wait for a review batch: nobody waits on it (NIT-216).
@@ -396,7 +413,8 @@ pub fn run(db: &mut Db, config: &crate::Config, id: i64) -> Result<Job> {
         }
     }
     drop(lock);
-    db.submit_job(id)?.context("the job's record went missing")
+    let shadow = outcome.ok().and_then(|s| s.shadow);
+    Ok((db.submit_job(id)?.context("the job's record went missing")?, shadow))
 }
 
 /// Waits up to `limit` for a job to finish, and returns it as it stands then.
