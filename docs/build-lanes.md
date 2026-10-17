@@ -72,9 +72,9 @@ reading code outside its sparse set, an agent has the **reference tree**: one fu
 checkout of the project's base commit, read-only by convention, moved with the base.
 
 **Build lanes.** A lane is a full checkout that keeps its build output: one or two per project,
-`<repo>-lanes/lane-<n>` beside the repo (`[lanes] dir`, like `[worktree] dir`), with NIT-196's
-reference tree at `<repo>-lanes/ref`. Only one request runs in a lane at a time, under an OS file
-lock (`lane-<n>.lock`) that a crashed process lets go of.
+`.nitely-lanes/<repo>/lane-<n>` beside the repo's worktree folder, with the reference tree at
+`.nitely-lanes/<repo>/ref`; no listing of agents' worktrees shows them. Only one request runs in a
+lane at a time, under an OS file lock (`lane-<n>.lock`) that a crashed process lets go of.
 
 **Requests.** A request is (snapshot, command). The snapshot is a commit in the repo's own object
 store: for committed work the branch head; for uncommitted work, a commit Nitely builds from the
@@ -248,7 +248,6 @@ sparse = ["crates/nitely-core"]      # optional: cone-mode directories every wor
 [lanes]                              # no [lanes]: no lanes, everything works as before
 count = 2                            # lanes for this project on this machine
 keep = ["target", "node_modules"]    # build directories a lane keeps between requests
-dir = "../{repo}-lanes"              # where lanes go, relative to the repo root
 timeout_minutes = 30                 # a command running longer is stopped with what it started
 heavy = ["^cargo (build|test|clippy)", "^npm (ci|install|test|run build)"]
 executor = "local"                   # "local", "machine:<name>" or "ci" (the gate only)

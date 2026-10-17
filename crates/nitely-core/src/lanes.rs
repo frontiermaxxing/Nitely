@@ -25,25 +25,20 @@ pub struct LaneRules {
     pub count: u32,
     /// Build directories (repo-relative) a lane keeps between requests, e.g. `target`.
     pub keep: Vec<String>,
-    /// Where the lanes go, relative to the repo root like `[worktree] dir`; `{repo}` is the repo's
-    /// folder name. Lanes are `<dir>/lane-<n>`.
-    pub dir: String,
     /// A command running longer is stopped, with everything it started.
     pub timeout_minutes: u64,
 }
 
 impl Default for LaneRules {
     fn default() -> Self {
-        LaneRules { count: 1, keep: vec![], dir: "../{repo}-lanes".into(), timeout_minutes: 30 }
+        LaneRules { count: 1, keep: vec![], timeout_minutes: 30 }
     }
 }
 
-/// The folder a repo's lanes (and NIT-196's reference tree) live in. With no `[lanes]`, where they
-/// would go by default.
+/// The folder a repo's lanes live in, beside its reference tree: `.nitely-lanes/<repo>` next to its
+/// worktrees (light.rs), which no listing of agents' worktrees shows.
 pub fn dir(repo_root: &Path, pb: &Playbook) -> PathBuf {
-    let rules = pb.lanes.clone().unwrap_or_default();
-    let repo = repo_root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    playbook::normalize_lexically(&repo_root.join(rules.dir.replace("{repo}", &repo)))
+    crate::light::lanes_dir(pb, repo_root)
 }
 
 fn lane_path(repo_root: &Path, pb: &Playbook, n: u32) -> PathBuf {
