@@ -6,17 +6,23 @@ import assert from "node:assert/strict";
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { launch, seedSample } from "./app.mjs";
+import { spawnSync } from "node:child_process";
+import { launch, nitely, seedSample } from "./app.mjs";
 
 const SCREENS = join("target", "harness", "screens");
 mkdirSync(SCREENS, { recursive: true });
 const norm = (p) => resolve(p).replace(/\\/g, "/").toLowerCase();
 
 test("Agent setup works on the run's own agents' home, never the person's", { timeout: 180000 }, async () => {
-  // Claude Code "installed" in the throwaway home, so Agent setup has something to plan for.
+  // A watched repo (Agent setup plans nothing without one) and Claude Code "installed" in the
+  // throwaway agents' home, so Agent setup has something to plan for.
   const app = await launch({
     seed: (home) => {
       seedSample(home);
+      const repo = join(home, "repo");
+      mkdirSync(repo, { recursive: true });
+      spawnSync("git", ["init", "-q", "-b", "main", repo], { stdio: "ignore" });
+      nitely(home, "repo", "add", repo, "--integration", "main", "--project", "APP");
       mkdirSync(join(home, "agents", ".claude"), { recursive: true });
     },
   });
