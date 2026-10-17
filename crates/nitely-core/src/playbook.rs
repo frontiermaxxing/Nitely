@@ -648,7 +648,7 @@ fn checked(out: std::process::Output, args: &[&str]) -> Result<String> {
 /// Windows' `git.exe` launcher can fail to start the real git and exit with -1 having said and done
 /// nothing (NIT-116). Nothing ran either way, so running it again is safe; any other failure is
 /// git's own answer and is returned as it is.
-pub(crate) fn run_git(cmd: &mut Command) -> std::io::Result<std::process::Output> {
+pub fn run_git(cmd: &mut Command) -> std::io::Result<std::process::Output> {
     let mut attempt = 0;
     loop {
         attempt += 1;
