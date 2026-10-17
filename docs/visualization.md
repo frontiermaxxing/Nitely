@@ -481,7 +481,7 @@ List and Board start with the project's goal rows (see Goal rows).
   `get_project` before they explore the repo and write with `set_project_brief`. A line on top
   says whether the setup sweep has run (by whom, at which commit) and who edited the brief last;
   under it the Markdown, rendered by `src/markdown.ts` (headings, lists with task boxes, tables,
-  code, links; `nitely://issue/` links open the issue). Edit opens it as text; a save passes the
+  code, links; issue links in either form open the issue). Edit opens it as text; a save passes the
   revision it started from, and when an agent wrote meanwhile the editor says so and offers
   "Take theirs" or "Keep mine" instead of overwriting either.
 
@@ -546,11 +546,18 @@ never on one in the background, and never while you type in a field: approving s
 act. The keys live in `src/Palette.tsx` (`useKeys`, `KeysSheet`, the palette's `actionsOf`), the
 Inbox (`onKeyDown` over the decisions) and `src/IssuePanel.tsx`.
 
-**Links.** A native issue's `url` is `nitely://issue/NIT-14` (crates/nitely-core/src/issues.rs,
-`issue_link`). The app registers the `nitely` scheme (Tauri's deep-link plugin; the installer at
-install time, and every run of the app for the current user on Windows and Linux), and a link opens
-that issue's panel, in the running window if there is one. Inside the app, issues open the panel
-directly; the link is for everywhere else: agents' replies, commits, pull requests and notes.
+**Links.** A native issue's `url` is `http://127.0.0.1:7423/i/NIT-14` (crates/nitely-core/src/links.rs,
+`issue_url`), the link agents write in their replies, commits, pull requests and notes. The running
+app answers it on loopback only, at a fixed port so links stay stable (7423, beside the relay's 7421
+and the phone's 7422; when it is taken, the next free one up to 7432, written to `link-port` in the
+data folder for the tools to use). It opens that issue's panel and focuses the window, and the
+browser tab says "Opened NIT-14 in Nitely". It only ever opens a view: GET and HEAD for `/i/<KEY>`
+and nothing else, no token, no state changed, and a Host other than 127.0.0.1 or localhost gets no
+answer. Chats, GitHub and most apps open web links where they drop custom schemes. The app also
+registers the older `nitely://issue/NIT-14` form (Tauri's deep-link plugin; the installer at
+install time, and every run of the app for the current user on Windows and Linux): the OS opens that
+one even when the app is closed, which the web form cannot, and the web form's page offers it.
+Inside the app, either form in an agent's text opens the panel (`issueKeyOf` in `src/markdown.ts`).
 
 A new view joins j/k by adding its item selector to `ITEMS` in `src/Palette.tsx`; the items must be
 focusable (a button or link) so Enter works and the focus ring shows.

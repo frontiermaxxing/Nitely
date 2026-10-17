@@ -2,7 +2,15 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseInline, parseMarkdown } from "./markdown.ts";
+import { issueKeyOf, parseInline, parseMarkdown } from "./markdown.ts";
+
+test("NIT-228: an issue link in either form names its issue", () => {
+  assert.equal(issueKeyOf("nitely://issue/nit-12"), "NIT-12");
+  assert.equal(issueKeyOf("http://127.0.0.1:7423/i/NIT-12"), "NIT-12");
+  assert.equal(issueKeyOf("http://localhost:7425/i/app-3/"), "APP-3");
+  assert.equal(issueKeyOf("http://example.com:7423/i/NIT-12"), null);
+  assert.equal(issueKeyOf("https://github.com/o/r/pull/12"), null);
+});
 
 test("inline code, bold, italics and links", () => {
   assert.deepEqual(parseInline("run `npm ci`, **then** *gate* _now_ [NIT-1](nitely://issue/NIT-1)."), [

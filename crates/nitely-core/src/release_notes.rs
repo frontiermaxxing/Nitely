@@ -20,11 +20,11 @@ pub struct Entry {
     pub commits: usize,
 }
 
-/// The issue a commit names: the last `(KEY-123)` in its subject, else the first
-/// `nitely://issue/KEY-123` link in its body.
+/// The issue a commit names: the last `(KEY-123)` in its subject, else the first issue link in its
+/// body (`nitely://issue/KEY-123` or `http://127.0.0.1:7423/i/KEY-123`).
 pub fn key_of(subject: &str, body: &str) -> Option<String> {
     let in_subject = regex::Regex::new(r"\(([A-Z][A-Z0-9]{1,9}-\d+)\)").expect("valid");
-    let linked = regex::Regex::new(r"nitely://issue/([A-Z][A-Z0-9]{1,9}-\d+)").expect("valid");
+    let linked = regex::Regex::new(r"(?:nitely://issue/|http://(?:127\.0\.0\.1|localhost):\d+/i/)([A-Z][A-Z0-9]{1,9}-\d+)").expect("valid");
     in_subject
         .captures_iter(subject)
         .last()
@@ -106,6 +106,7 @@ mod tests {
         assert_eq!(key_of("Fix the thing (APP-12)", "").as_deref(), Some("APP-12"));
         assert_eq!(key_of("Follow (APP-3) up (APP-12)", "").as_deref(), Some("APP-12"));
         assert_eq!(key_of("Add goals", "APP-40 (nitely://issue/APP-40), slice of APP-36").as_deref(), Some("APP-40"));
+        assert_eq!(key_of("Add goals", "[APP-41](http://127.0.0.1:7423/i/APP-41)").as_deref(), Some("APP-41"));
         assert_eq!(key_of("Use UTF-8 everywhere", "No link"), None);
 
         let dir = crate::paths::unique_temp("nitely-notes", "");
