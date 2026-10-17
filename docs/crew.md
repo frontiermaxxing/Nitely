@@ -269,7 +269,9 @@ When a worker exits, the supervisor reads its issue:
   queue. A worker started only to call land would spend a session on one mechanical call. With
   `[land] by = "auto"`, an issue still In Review is one whose own land found the lock held, so it is
   landed the same way. A land that stopped on the change (a conflict, a failed gate, a change since
-  its review) goes to a new worker with why. One that found the land lock held, or is still waiting
+  its review) goes to a new worker with why. So does an issue whose land stopped elsewhere (the app's land of an
+  approved change) and came back to In Progress with nobody's claim. A land that now needs a
+  person's approval moves the issue to Needs You. One that found the land lock held, or is still waiting
   in the land queue, is tried again a minute later.
 - **Retry cap.** When an issue reaches `attempts` (3) `failed` workers, it moves to Needs You with an
   ask instead of back to Todo: "The crew tried {key} three times without submitting. Last: {reason}.

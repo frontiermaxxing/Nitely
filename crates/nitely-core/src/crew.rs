@@ -1122,15 +1122,22 @@ impl Supervisor {
                 continue;
             }
             let Some(job) = self.handed_in(db, &issue.key, &worker.agent_id, worker.started_at)? else { continue };
+            // Nobody else has taken it: still the worker's claim, or none (an approval clears it).
+            let unclaimed = issue.claimed_by.as_deref().is_none_or(|c| c == worker.agent_id);
+            // A land after the submit that stopped and sent it back to In Progress (the app's land of
+            // an approved change, say).
+            let land_stopped = job.ended_at.is_some_and(|end| {
+                db.timeline(&issue.key).map(|t| t.iter().any(|e| e.kind == "land_failed" && e.ts >= end)).unwrap_or(false)
+            });
             match issue.state.as_str() {
-                "In Progress" if job.finished() && job.needs_the_submitter() && issue.claimed_by.as_deref() == Some(worker.agent_id.as_str()) => {
+                "In Progress" if job.finished() && (job.needs_the_submitter() || land_stopped) && unclaimed => {
                     db.mark_submit_jobs_delivered(&[job.id])?;
+                    let what = if job.needs_the_submitter() { job.outcome() } else { "it passed, and then its land stopped (the land's reason is on this issue).".to_string() };
                     let note = format!(
-                        "Its submit (job {}) came back after the {} worker had left: {} The review's findings and the gate's output are on this issue. \
+                        "Its submit (job {}) came back after the {} worker had left: {what} The review's findings and the gate's output are on this issue. \
                          A new crew worker takes it, in {}.",
                         job.id,
                         worker.agent,
-                        job.outcome(),
                         worker.worktree
                     );
                     db.add_note(&issue.key, &note, "handoff", &self.actor())?;
@@ -1189,10 +1196,15 @@ impl Supervisor {
                 continue;
             }
             let stopped = db.timeline(&l.issue)?.into_iter().rev().find(|t| t.kind == "land_failed" && t.ts >= l.since).and_then(|t| t.summary);
-            // Not the change's fault: the lock was held, or the approval is for the app or the person
-            // to see to. Only a land that stopped on the change itself goes to a new worker.
-            let not_the_change = |why: &str| why.contains("another land holds") || why.contains(crate::approval::UNSIGNED) || why.contains("waits for a human");
+            // Not the change's fault: the lock was held, or the approval is for the app to sign
+            // (land itself sends that one back to the person). Only a land that stopped on the change
+            // itself goes to a new worker; one that now needs a person's approval goes to them.
+            let not_the_change = |why: &str| why.contains("another land holds") || why.contains(crate::approval::UNSIGNED);
             match stopped {
+                Some(why) if why.contains("waits for a human") => {
+                    db.move_issue(&l.issue, "Needs You", None, Some("its land waits for a person's approval"), &self.actor())?;
+                    self.land_after.remove(&l.issue);
+                }
                 Some(why) if !not_the_change(&why) => {
                     let note = format!("The land stopped: {}. A new crew worker takes it from here (its land log: {}).", why.trim_start_matches("Land stopped: "), l.log.display());
                     db.add_note(&l.issue, &note, "handoff", &self.actor())?;
@@ -2229,6 +2241,7 @@ mod tests {
                 }
                 "conflict" => db.log_event(&cli, Some(&job.issue), None, "land_failed", "Land stopped: the rebase stopped on conflicts in a.txt")?,
                 "unsigned" => db.log_event(&cli, Some(&job.issue), None, "land_failed", &format!("Land stopped: the approval {}", crate::approval::UNSIGNED))?,
+                "human" => db.log_event(&cli, Some(&job.issue), None, "land_failed", "Land stopped: this change waits for a human (billing); it lands once they approve it in Nitely, after the review")?,
                 _ => db.log_event(&cli, Some(&job.issue), None, "land_failed", "Land stopped: another land holds the lock")?,
             }
             self.exits.borrow_mut().insert(pid, 0);
@@ -2435,6 +2448,30 @@ mod tests {
     }
 
     #[test]
+    fn an_approved_change_whose_land_stopped_elsewhere_goes_to_a_new_worker() {
+        let mut f = fixture(&format!("{GATE}[crew]\nworkers = 1\n"));
+        let fake = Fake { installed: vec!["claude"], ..Default::default() };
+        let mut sup = supervisor(&f, &fake);
+        sup.tick(&mut f.db, false).unwrap();
+        let claimed = f.db.issue("NIT-1").unwrap().unwrap().claimed_by.unwrap();
+        let job = handed_in(&f, "NIT-1", "done", Some(r#"{"state":"Needs You","next":"x"}"#));
+        f.db.conn.execute("UPDATE submit_job SET ended_at = ?2 WHERE id = ?1", rusqlite::params![job, NOON.ts + 2]).unwrap();
+        f.db.move_issue("NIT-1", "Needs You", None, None, &Actor::Agent(claimed)).unwrap();
+        fake.exits.borrow_mut().insert(1001, 0);
+        sup.tick(&mut f.db, false).unwrap();
+        // The app lands it once approved (its own lander, not the supervisor's), and that land stops
+        // on a conflict: the issue is back In Progress with nobody's claim.
+        let app = Actor::Agent(crate::land::AUTO_LANDER.into());
+        f.db.log_event(&app, Some("NIT-1"), None, "land_failed", "Land stopped: the rebase stopped on conflicts in a.txt").unwrap();
+        f.db.move_issue("NIT-1", "In Progress", None, None, &app).unwrap();
+        f.db.conn.execute("UPDATE issue SET claimed_by = NULL WHERE key = 'NIT-1'", []).unwrap();
+        sup.tick(&mut f.db, false).unwrap();
+        let note = f.db.timeline("NIT-1").unwrap().into_iter().rev().find(|t| t.kind == "handoff").unwrap().summary.unwrap_or_default();
+        assert!(note.contains("its land stopped"), "{note}");
+        assert_eq!(f.db.issue("NIT-1").unwrap().unwrap().state, "Todo", "for the next free slot");
+    }
+
+    #[test]
     fn a_worktree_left_mid_rebase_is_still_its_branchs() {
         let f = fixture("");
         let wt = f.base.join("wt").join("nit-1");
@@ -2454,7 +2491,7 @@ mod tests {
 
     #[test]
     fn a_land_that_stops_on_the_change_goes_to_a_new_worker_and_a_held_lock_waits() {
-        for (does, state) in [("conflict", "Todo"), ("busy", "In Review"), ("unsigned", "In Review")] {
+        for (does, state) in [("conflict", "Todo"), ("busy", "In Review"), ("unsigned", "In Review"), ("human", "Needs You")] {
             let mut f = fixture(&format!("{GATE}[crew]\nworkers = 1\n"));
             let fake = Fake { installed: vec!["claude"], land_does: Some(does), ..Default::default() };
             let mut sup = supervisor(&f, &fake);
