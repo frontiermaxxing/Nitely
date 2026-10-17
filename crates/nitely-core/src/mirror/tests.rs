@@ -59,9 +59,7 @@ fn roots() -> Vec<String> {
 }
 
 fn db() -> (Db, std::path::PathBuf) {
-    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("nitely-mirror-{}-{n}-{}", std::process::id(), crate::db::now()));
+    let dir = crate::paths::unique_temp("nitely-mirror", "");
     let db = Db::open(&dir.join("t.db")).unwrap();
     db.create_project("APP", "App").unwrap();
     (db, dir)
