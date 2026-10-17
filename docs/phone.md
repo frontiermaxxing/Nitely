@@ -270,8 +270,11 @@ What Nitely does for it:
 
 What the person does: install Tailscale on the PC and the phone and sign both in with the same
 account; turn the phone server on with the Tailscale address; pair; keep Tailscale on on the phone.
-The PC must be awake: Nitely keeps it from sleeping only while crew workers run (docs/crew.md),
-not for the phone.
+The PC must be awake: tick **Keep this PC awake while the phone server is on** when turning it on
+(off by default, since it costs battery on a laptop). While the server runs, Nitely then asks the
+OS not to sleep (`awake.rs`: `SetThreadExecutionState` on Windows, `caffeinate` on macOS,
+`systemd-inhibit` on Linux); the display can still turn off, and turning the server off or
+quitting the app lets go.
 
 ### A relay Nitely runs: not wanted
 
@@ -297,11 +300,6 @@ order of the pairing links, and reading `tailscale status`. Not tested here: a r
 Tailscale on the machine this was built on), so binding a real Tailscale address, a phone reaching
 it over a cellular network, `tailscale cert`, and the Phone screen's live Tailscale state against a
 real `tailscale status`.
-
-## Later
-
-- Keeping the PC awake while the phone server is on, so a phone away from home finds it
-  ([NIT-183](nitely://issue/NIT-183)).
 
 ## Build order
 

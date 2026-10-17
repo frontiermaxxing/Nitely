@@ -715,6 +715,8 @@ export interface TailscaleState {
 export interface PhoneStatus {
   /** The phone page's address on each address the server listens on; empty when it is off. */
   listening: string[];
+  /** The phone server keeps this PC from sleeping. */
+  awake: boolean;
   /** The addresses the server is bound to. */
   bound: string[];
   addresses: PhoneAddress[];

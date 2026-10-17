@@ -23,6 +23,7 @@ export function PhoneSetup(props: { now: number }) {
   const [mode, setMode] = useState<"none" | "tailscale" | "files">("none");
   const [tsName, setTsName] = useState<{ name: string | null; why: string | null } | null>(null);
   const [files, setFiles] = useState({ cert: "", key: "", host: "" });
+  const [keepAwake, setKeepAwake] = useState(false);
   useEffect(() => {
     if (mode !== "tailscale" || tsName) return;
     invoke<string>("phone_tailscale_name").then(
@@ -85,6 +86,7 @@ export function PhoneSetup(props: { now: number }) {
                 <li key={u}>{u}</li>
               ))}
             </ul>
+            {status.awake && <p className="small muted">This PC stays awake while the phone server is on.</p>}
             <div className="actions">
               <button
                 className="btn"
@@ -157,11 +159,18 @@ export function PhoneSetup(props: { now: number }) {
               ))}
             </div>
             {tunnels.length === 0 && mode !== "files" && <p className="small">No Tailscale address yet. Install Tailscale on this PC and on the phone, sign both in, and it shows up here.</p>}
+            <label className="phone-awake">
+              <input type="checkbox" checked={keepAwake} onChange={(e) => setKeepAwake(e.target.checked)} />
+              <span>
+                Keep this PC awake while the phone server is on
+                <span className="small muted"> So your phone finds it away from home. The screen can still turn off; on a laptop it costs battery.</span>
+              </span>
+            </label>
             <div className="actions">
               <button
                 className="btn primary"
                 disabled={busy || !ready || !status.addresses.some((a) => usable(a) && picked.includes(a.ip))}
-                onClick={() => run(() => invoke<PhoneStatus>("phone_start", { ips: picked.filter((ip) => status.addresses.some((a) => a.ip === ip && usable(a))), tls }))}
+                onClick={() => run(() => invoke<PhoneStatus>("phone_start", { ips: picked.filter((ip) => status.addresses.some((a) => a.ip === ip && usable(a))), tls, keepAwake }))}
               >
                 Turn on
               </button>
@@ -304,7 +313,7 @@ function AwayFromHome(props: { bound: string[] }) {
         <li>Install Tailscale on this PC and on the phone, and sign both in with the same account.</li>
         <li>Turn the phone server on with this PC's Tailscale address, or with HTTPS and Tailscale's certificate.</li>
         <li>Pair the phone: the code it scans carries that address.</li>
-        <li>Away from home, keep Tailscale on on the phone. This PC must be awake, with Nitely open.</li>
+        <li>Away from home, keep Tailscale on on the phone. This PC must be awake, with Nitely open: tick "Keep this PC awake" when you turn the phone server on.</li>
       </ol>
       <div className="actions">
         <button className="btn quiet" disabled={checking} onClick={check}>

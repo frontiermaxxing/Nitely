@@ -12,6 +12,8 @@ use crate::{approval_key, db, err};
 pub struct PhoneApp {
     phone: Arc<Phone>,
     running: Mutex<Option<Running>>,
+    /// Held while the server runs, when the person asked to keep the PC awake for it.
+    awake: Mutex<Option<nitely_core::awake::KeepAwake>>,
 }
 
 impl PhoneApp {
@@ -35,11 +37,15 @@ impl PhoneApp {
                 Arc::new(|db: &nitely_core::Db| {
                     nitely_core::Config::load().ok().and_then(|c| nitely_core::snapshot(&c, db).ok()).map(|b| phone::waiting_in_worktrees(&b)).unwrap_or_default()
                 }),
-            ), running: Mutex::new(None) }
+            ), running: Mutex::new(None), awake: Mutex::new(None) }
     }
 
     fn running(&self) -> std::sync::MutexGuard<'_, Option<Running>> {
         self.running.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn awake(&self) -> std::sync::MutexGuard<'_, Option<nitely_core::awake::KeepAwake>> {
+        self.awake.lock().unwrap_or_else(|p| p.into_inner())
     }
 }
 
@@ -48,6 +54,8 @@ impl PhoneApp {
 #[derive(Serialize)]
 pub struct PhoneStatus {
     listening: Vec<String>,
+    /// The server keeps this PC from sleeping.
+    awake: bool,
     /// The addresses the server is bound to (an HTTPS link names the certificate, not these).
     bound: Vec<String>,
     addresses: Vec<Address>,
@@ -66,7 +74,7 @@ fn status(app: &PhoneApp) -> PhoneStatus {
         Err(e) => (vec![], Some(format!("{e:#}"))),
     };
     let notified = app.phone.push().map(|p| p.subscriptions().into_iter().map(|s| s.device).collect()).unwrap_or_default();
-    PhoneStatus { listening, bound, addresses: phone::addresses(), devices, requests: app.phone.waiting(), devices_error, notified }
+    PhoneStatus { listening, awake: app.awake().is_some(), bound, addresses: phone::addresses(), devices, requests: app.phone.waiting(), devices_error, notified }
 }
 
 #[tauri::command]
@@ -113,7 +121,7 @@ pub async fn phone_tailscale_name() -> Result<String, String> {
 /// Starts the phone server on `ips`, replacing a running one: over plain HTTP only on loopback or
 /// the Tailscale address, over HTTPS (`tls`) on any of this machine's addresses.
 #[tauri::command]
-pub async fn phone_start(app: tauri::State<'_, PhoneApp>, ips: Vec<String>, tls: Option<TlsChoice>) -> Result<PhoneStatus, String> {
+pub async fn phone_start(app: tauri::State<'_, PhoneApp>, ips: Vec<String>, tls: Option<TlsChoice>, keep_awake: Option<bool>) -> Result<PhoneStatus, String> {
     let ips: Vec<IpAddr> = ips.iter().map(|ip| ip.parse::<IpAddr>().map_err(|_| format!("{ip} is not an address"))).collect::<Result<_, _>>()?;
     let tls = tls_for(tls)?;
     // Notifications need the VAPID key from the keychain; without it the phone server still runs.
@@ -126,8 +134,11 @@ pub async fn phone_start(app: tauri::State<'_, PhoneApp>, ips: Vec<String>, tls:
     if let Some(old) = app.running().take() {
         old.stop();
     }
+    *app.awake() = None;
     let running = app.phone.start(&ips, phone::PORT, tls).map_err(err)?;
     *app.running() = Some(running);
+    // So a phone away from home finds the PC; the display may still turn off.
+    *app.awake() = keep_awake.unwrap_or(false).then(nitely_core::awake::KeepAwake::new);
     Ok(status(&app))
 }
 
@@ -136,6 +147,7 @@ pub async fn phone_stop(app: tauri::State<'_, PhoneApp>) -> Result<PhoneStatus, 
     if let Some(r) = app.running().take() {
         r.stop();
     }
+    *app.awake() = None;
     app.phone.cancel_offer();
     Ok(status(&app))
 }

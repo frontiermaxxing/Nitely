@@ -9,6 +9,7 @@ const ADDRESSES: PhoneStatus["addresses"] = [
   { ip: "192.168.1.68", interface: "Wi-Fi", kind: null },
 ];
 let listening: string[] = [];
+let awake = false;
 let bound: string[] = [];
 let devices: PhoneStatus["devices"] = [{ id: "9f2c41aa07d3e5b1", name: "Pixel 9", public_key: "ab".repeat(32), paired_at: NOW() - 3 * 86400 }];
 let offeredAt = 0;
@@ -26,7 +27,7 @@ function status(): PhoneStatus {
     offeredAt && !decided && NOW() - offeredAt > 3
       ? [{ id: "c0ffee0011223344", name: "Andrew's iPhone", public_key: "cd".repeat(32), code: "4821-0937", at: offeredAt + 3, status: "waiting" as const }]
       : [];
-  return { listening, bound, addresses: ADDRESSES, devices, requests, devices_error: null, notified: ["9f2c41aa07d3e5b1"] };
+  return { listening, awake, bound, addresses: ADDRESSES, devices, requests, devices_error: null, notified: ["9f2c41aa07d3e5b1"] };
 }
 
 export function phoneStatus(): PhoneStatus {
@@ -43,6 +44,7 @@ export function phoneTailscaleName(): string {
 
 export function phoneStart(args: Record<string, unknown>): PhoneStatus {
   const ips = args.ips as string[];
+  awake = args.keepAwake === true;
   const tls = args.tls as { kind: string; host: string } | null;
   if (tls && tls.kind !== "none") {
     const host = tls.kind === "tailscale" ? phoneTailscaleName() : tls.host.trim();
@@ -59,6 +61,7 @@ export function phoneStart(args: Record<string, unknown>): PhoneStatus {
 
 export function phoneStop(): PhoneStatus {
   listening = [];
+  awake = false;
   bound = [];
   offeredAt = 0;
   return status();

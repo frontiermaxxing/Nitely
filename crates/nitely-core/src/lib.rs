@@ -4,6 +4,7 @@
 pub mod accept;
 pub mod activity;
 pub mod approval;
+pub mod awake;
 pub mod brief;
 pub mod config;
 pub mod connect;
