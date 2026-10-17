@@ -1020,14 +1020,20 @@ fn decisions(db: &crate::Db) -> std::result::Result<(Value, std::collections::Ha
     Ok((json!({ "decisions": out }), at_pc, on_phone))
 }
 
-/// Whether the issue has stayed in Needs You since `since` (its latest review): only then is that
-/// review's change what it waits on. One sent back and in Needs You again for a question has no
-/// change to approve until it is submitted again.
+/// Whether the issue has stayed in Needs You since its latest submit (or, with none recorded, since
+/// `since`, its latest review): only then is that review's change what it waits on. One sent back
+/// and in Needs You again for a question has no change to approve until it is submitted again. By
+/// the timeline's order, not its whole-second times, so a send-back and a resubmit in one second
+/// still read in the order they happened.
 fn waited_since(db: &crate::Db, key: &str, since: i64) -> Result<bool> {
-    let left = db.timeline(key)?.into_iter().any(|t| {
-        t.ts >= since && t.kind == "issue_moved" && t.summary.as_deref().is_some_and(|s| s.starts_with("Needs You → ") && !s.starts_with("Needs You → Needs You"))
-    });
-    Ok(!left)
+    let timeline = db.timeline(key)?;
+    let left = |t: &crate::issues::TimelineEntry| {
+        t.kind == "issue_moved" && t.summary.as_deref().is_some_and(|s| s.starts_with("Needs You → ") && !s.starts_with("Needs You → Needs You"))
+    };
+    Ok(match timeline.iter().rposition(|t| t.kind == "submit") {
+        Some(submit) => !timeline[submit..].iter().any(left),
+        None => !timeline.iter().any(|t| t.ts >= since && left(t)),
+    })
 }
 
 /// Approves a change for the person, signed by the phone over the same message the app signs
@@ -1428,6 +1434,17 @@ mod tests {
         let d = p.get_with(&base, "/phone/api/decisions", now(), "bbbbbbbbbbbbbbbb").1;
         let of_a: Vec<&str> = d["decisions"].as_array().unwrap().iter().filter(|x| x["issue"]["key"] == json!(a)).map(|x| x["kind"].as_str().unwrap()).collect();
         assert_eq!(of_a, ["ask"], "{d}");
+        // Submitted again, in the same second it was sent back: its new change waits for approval.
+        db.conn
+            .execute(
+                "INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, reasons, ts) VALUES (?1, 'p4', 'c', 'codex', 'pass', 'human', '[]', ?2)",
+                rusqlite::params![a, now() - 30],
+            )
+            .unwrap();
+        db.add_note(&a, "Submitted again", "submit", &agent).unwrap();
+        let d = p.get_with(&base, "/phone/api/decisions", now(), "cccccccccccccccc").1;
+        let of_a: Vec<&str> = d["decisions"].as_array().unwrap().iter().filter(|x| x["issue"]["key"] == json!(a)).map(|x| x["kind"].as_str().unwrap()).collect();
+        assert_eq!(of_a, ["ask", "approve"], "{d}");
 
         // Another key under this device's id can do none of it.
         p.key = ed25519_dalek::SigningKey::from_bytes(&new_secret().unwrap());
