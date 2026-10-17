@@ -119,10 +119,11 @@ impl Db {
         }
     }
 
-    /// Finished jobs this requester has not been told about, oldest first.
+    /// Finished jobs this requester has not been told about, oldest first. Queued and running ones
+    /// are read too, so one whose process is gone is failed and told here.
     pub fn undelivered_submit_jobs(&self, requested_by: &str) -> Result<Vec<Job>> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT {COLUMNS} FROM submit_job WHERE requested_by = ?1 AND delivered_at IS NULL AND state IN ('done', 'failed', 'running') ORDER BY id"
+            "SELECT {COLUMNS} FROM submit_job WHERE requested_by = ?1 AND delivered_at IS NULL AND state IN ('done', 'failed', 'running', 'queued') ORDER BY id"
         ))?;
         let jobs: Vec<Job> = stmt.query_map([requested_by], row)?.collect::<rusqlite::Result<_>>()?;
         let mut out = Vec::new();
@@ -521,6 +522,11 @@ mod tests {
         }
         let waiting = submit_async(&mut db, &config, &opts, &actor, &Started).unwrap();
         assert_eq!((waiting.state.as_str(), waiting.pid), ("failed", Some(999999)), "{waiting:?}");
+        // And the submitter hears of one without asking for it.
+        let unasked = enqueue(&db, &opts, &actor).unwrap();
+        db.conn.execute("UPDATE submit_job SET pid = 999999 WHERE id = ?1", [unasked.id]).unwrap();
+        let told = db.undelivered_submit_jobs(actor.id()).unwrap();
+        assert!(told.iter().any(|j| j.id == unasked.id && j.state == "failed"), "{told:?}");
 
         // A runner that cannot start a process: the job runs in this one, and finishes.
         struct Broken;
