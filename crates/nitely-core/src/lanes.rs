@@ -913,17 +913,12 @@ fn hygiene(lane: &Path, rules: &LaneRules, record: &Path, log: &Path) {
     let mut said = None;
     if cap > 0 && size > cap.saturating_mul(2) {
         for d in rules.keep.iter().filter_map(|k| keep_dir(lane, k)) {
-            if !is_link(&d) {
-                std::fs::remove_dir_all(&d).ok();
-            }
+            std::fs::remove_dir_all(&d).ok();
         }
         size = keep_size(lane, &rules.keep);
         said = Some(format!("over twice its size cap ({} of {}): removed its build directories; the next request builds cold", human(measured), human(cap)));
     } else if cap > 0 && size > cap {
         for d in rules.keep.iter().filter_map(|k| keep_dir(lane, k)) {
-            if is_link(&d) {
-                continue;
-            }
             let Ok(entries) = std::fs::read_dir(&d) else { continue };
             for e in entries.flatten() {
                 let incremental = e.path().join("incremental");
@@ -955,15 +950,25 @@ fn keep_size(lane: &Path, keep: &[String]) -> u64 {
             })
             .sum()
     }
-    keep.iter().filter_map(|k| keep_dir(lane, k)).filter(|d| !is_link(d)).map(|d| walk(&d)).sum()
+    keep.iter().filter_map(|k| keep_dir(lane, k)).map(|d| walk(&d)).sum()
 }
 
 /// A `keep` entry as a folder inside `lane`, or None when it is not a plain relative path (`..`,
-/// an absolute or drive path): hygiene never touches anything outside the lane.
+/// an absolute or drive path) or any folder on the way to it is a link: hygiene never touches
+/// anything outside the lane.
 fn keep_dir(lane: &Path, keep: &str) -> Option<PathBuf> {
     let rel = Path::new(keep.trim_matches('/'));
-    let plain = rel.components().count() > 0 && rel.components().all(|c| matches!(c, std::path::Component::Normal(_)));
-    plain.then(|| lane.join(rel))
+    if rel.components().count() == 0 || !rel.components().all(|c| matches!(c, std::path::Component::Normal(_))) {
+        return None;
+    }
+    let mut dir = lane.to_path_buf();
+    for c in rel.components() {
+        dir.push(c);
+        if is_link(&dir) {
+            return None;
+        }
+    }
+    Some(dir)
 }
 
 /// Whether `path` is a link to somewhere else: a symlink, or on Windows any reparse point (a
@@ -1526,11 +1531,13 @@ commands = []
         #[cfg(unix)]
         let linked = std::os::unix::fs::symlink(outside.join("dep"), &link).is_ok();
         assert!(linked, "made the link");
-        let climbing = LaneRules { keep: vec!["target".into(), "../outside".into(), "/abs".into()], ..rules.clone() };
+        let climbing = LaneRules { keep: vec!["target".into(), "../outside".into(), "/abs".into(), "target/linked".into()], ..rules.clone() };
         hygiene(&lane, &climbing, &record, &log);
         assert!(outside.join("dep").join("incremental").join("keep.me").exists() && outside.join("big").exists(), "outside the lane: untouched");
         assert_eq!(keep_dir(&lane, "../outside"), None);
+        #[cfg(windows)]
         assert_eq!(keep_dir(&lane, "C:/x"), None);
+        assert_eq!(keep_dir(&lane, "target/linked/incremental"), None, "through a link");
         assert_eq!(keep_dir(&lane, "target/"), Some(lane.join("target")));
 
         // The playbook's cap wins over twice the first build.
