@@ -30,15 +30,16 @@ const DAY = 86400;
 /** Issues shown per station before "+N more". */
 const CHIPS = 3;
 
-/** When the person last left Pulse; a day ago the first time. */
-function readSeen(now: number): number {
+/** When the person last left Pulse. The first time there is no such visit: `first`, and the
+ * last day is covered instead. */
+function readSeen(now: number): { since: number; first: boolean } {
   try {
     const v = Number(localStorage.getItem(SEEN_KEY));
-    if (v > 0 && v <= now) return v;
+    if (v > 0 && v <= now) return { since: v, first: false };
   } catch {
     // Storage can be refused; then every visit covers the last day.
   }
-  return now - DAY;
+  return { since: now - DAY, first: true };
 }
 
 /** Saves the time of the data last shown, so nothing that was never on screen is skipped next time. */
@@ -99,7 +100,7 @@ export function Pulse(props: {
   onOpenIssue: (key: string) => void;
   onGo: (view: View) => void;
 }) {
-  const [since] = useState(() => readSeen(Math.floor(Date.now() / 1000)));
+  const [{ since, first }] = useState(() => readSeen(Math.floor(Date.now() / 1000)));
   const [data, setData] = useState<PulseData | null>(null);
   const [error, setError] = useState<string | null>(null);
   // When the data last seen on screen was read; "last seen" never moves past it. A refresh while
@@ -152,7 +153,7 @@ export function Pulse(props: {
       <div className="page-head">
         <h1>{HOME_LABEL}</h1>
         <span className="head-note">{new Date(now * 1000).toLocaleString([], { weekday: "long", hour: "numeric", minute: "2-digit" })}</span>
-        {data && <span className="head-note pulse-since">{sinceLine(data)}</span>}
+        {data && <span className="head-note pulse-since">{sinceLine(data, first)}</span>}
       </div>
       {error && <p className="error">{error}</p>}
       {!data && !error && <Loading />}
@@ -178,21 +179,22 @@ export function Pulse(props: {
               </div>
             </section>
           )}
-          <Since data={data} ctx={ctx} />
+          <Since data={data} ctx={ctx} first={first} />
         </>
       )}
     </div>
   );
 }
 
-/** "Last here 10:36 · since then 1 landed, 1 question". */
-function sinceLine(data: PulseData): string {
+/** "Last here 10:36 · since then 1 landed, 1 question"; on a first visit, "In the last day: 1 landed". */
+function sinceLine(data: PulseData, first: boolean): string {
   const c = data.happened_counts;
   const parts = [
     c.landed && `${c.landed} landed`,
     c.asked && `${c.asked} ${c.asked === 1 ? "question" : "questions"}`,
     c.stuck && `${c.stuck} stuck`,
   ].filter(Boolean);
+  if (first) return parts.length ? `In the last day: ${parts.join(", ")}` : "Nothing in the last day";
   return `Last here ${when(data.since)} · ${parts.length ? `since then ${parts.join(", ")}` : "nothing new since"}`;
 }
 
@@ -466,7 +468,7 @@ function verb(h: Happening): string {
 }
 
 /** What happened while you were away, with landed and submitted per hour. */
-function Since({ data, ctx }: { data: PulseData; ctx: Context }) {
+function Since({ data, ctx, first }: { data: PulseData; ctx: Context; first: boolean }) {
   const [filter, setFilter] = useState<Happening["kind"] | null>(null);
   const [all, setAll] = useState(false);
   const issues = new Map<string, IssueRecord>();
@@ -482,7 +484,7 @@ function Since({ data, ctx }: { data: PulseData; ctx: Context }) {
   return (
     <section className="since">
       <div className="since-head">
-        <h2>Since you were last here</h2>
+        <h2>{first ? "The last day" : "Since you were last here"}</h2>
         <span className="muted small">
           {when(data.since)}, {ago(ctx.now, data.since)}
         </span>
