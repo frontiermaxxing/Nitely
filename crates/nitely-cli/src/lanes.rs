@@ -66,7 +66,7 @@ pub fn run(issue: Option<String>, shell: Option<String>, command: Vec<String>, m
     let command = match shell {
         Some(line) => line,
         None if command.is_empty() => anyhow::bail!("say what to run: `nitely run -- cargo test`, or `nitely run --shell \"npm test && npm run build\"`"),
-        None => shell_join(&command),
+        None => shell_join(&command)?,
     };
     let stop = Arc::new(AtomicBool::new(false));
     let mut follower: Option<std::thread::JoinHandle<()>> = None;
@@ -106,48 +106,35 @@ pub fn run(issue: Option<String>, shell: Option<String>, command: Vec<String>, m
 /// The command line the lane's shell runs for `nitely run -- <words>`: each word passed on as the
 /// one word it was, quoted where it has spaces, quotes or shell characters, so nothing in it is
 /// taken as shell syntax. (`--shell "<line>"` is for a line that means to use the shell.)
-fn shell_join(args: &[String]) -> String {
-    args.iter().map(|a| quote(a)).collect::<Vec<_>>().join(" ")
+fn shell_join(args: &[String]) -> Result<String> {
+    Ok(args.iter().map(|a| quote(a)).collect::<Result<Vec<_>>>()?.join(" "))
 }
 
+/// A word for cmd. Inside double quotes cmd takes every character but `"` (which ends the quoted
+/// part, whatever precedes it) and `%` (which it expands even there) as it is, and the program's
+/// argument parser takes the quoted word back as one argument. A word with either cannot be
+/// passed through cmd as one word, so it is refused rather than guessed at.
 #[cfg(windows)]
-fn quote(word: &str) -> String {
-    // cmd passes a quoted word through, and the program's argument parser (the Windows rule:
-    // backslashes before a quote are doubled, the quote escaped) takes it back as one argument.
-    let plain = !word.is_empty() && !word.chars().any(|c| c.is_whitespace() || "\"&|<>^%()!,;=".contains(c));
+fn quote(word: &str) -> Result<String> {
+    if word.contains('"') || word.contains('%') {
+        anyhow::bail!(
+            "the word {word:?} has a \" or % that the lane's shell (cmd) would read as its own; pass the whole line with --shell, quoted for cmd"
+        );
+    }
+    let plain = !word.is_empty() && !word.chars().any(|c| c.is_whitespace() || "&|<>^()!,;=".contains(c));
     if plain {
-        return word.to_string();
+        return Ok(word.to_string());
     }
-    let mut out = String::from("\"");
-    let mut backslashes = 0;
-    for c in word.chars() {
-        match c {
-            '\\' => backslashes += 1,
-            '"' => {
-                out.push_str(&"\\".repeat(backslashes * 2 + 1));
-                out.push('"');
-                backslashes = 0;
-            }
-            _ => {
-                out.push_str(&"\\".repeat(backslashes));
-                out.push(c);
-                backslashes = 0;
-            }
-        }
-    }
-    out.push_str(&"\\".repeat(backslashes * 2));
-    out.push('"');
-    out
+    // Backslashes right before the closing quote are doubled, so the parser does not read the
+    // last one as escaping it; elsewhere they stay as they are.
+    let trailing = word.len() - word.trim_end_matches('\\').len();
+    Ok(format!("\"{word}{}\"", "\\".repeat(trailing)))
 }
 
 #[cfg(not(windows))]
-fn quote(word: &str) -> String {
+fn quote(word: &str) -> Result<String> {
     let plain = !word.is_empty() && word.chars().all(|c| c.is_ascii_alphanumeric() || "-_./=:,+@%".contains(c));
-    if plain {
-        word.to_string()
-    } else {
-        format!("'{}'", word.replace('\'', "'\\''"))
-    }
+    Ok(if plain { word.to_string() } else { format!("'{}'", word.replace('\'', "'\\''")) })
 }
 
 /// Prints what `log` gains until `stop` is set, then the rest.
@@ -179,8 +166,9 @@ mod tests {
     #[test]
     fn words_reach_the_command_as_they_were_typed() {
         let words = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(shell_join(&words(&["cargo", "test", "-p", "nitely-core"])), "cargo test -p nitely-core");
-        assert_ne!(shell_join(&words(&["echo", "a&b"])), "echo a&b", "a shell character in a word stays in the word");
+        let join = |w: &[&str]| shell_join(&words(w)).unwrap();
+        assert_eq!(join(&["cargo", "test", "-p", "nitely-core"]), "cargo test -p nitely-core");
+        assert_ne!(join(&["echo", "a&b"]), "echo a&b", "a shell character in a word stays in the word");
         // Through the same shell a lane uses, node gets each word as one argument.
         let shell = |line: &str| -> String {
             #[cfg(windows)]
@@ -192,9 +180,19 @@ mod tests {
             let out = std::process::Command::new("sh").args(["-c", line]).output().unwrap();
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         };
-        let js = shell_join(&words(&["node", "-e", "console.log('a b')"]));
+        let js = join(&["node", "-e", "console.log('a b')"]);
         assert_eq!(shell(&js), "a b", "{js}");
-        let amp = shell_join(&words(&["node", "-e", "console.log(process.argv[1])", "x&y"]));
-        assert_eq!(shell(&amp), "x&y", "{amp}");
+        let echo = |word: &str| join(&["node", "-e", "console.log(process.argv[1])", word]);
+        for word in ["x&y", "a | b > c", "C:\\some dir\\", "(1,2);=^!"] {
+            assert_eq!(shell(&echo(word)), word, "{}", echo(word));
+        }
+        // A word cmd cannot carry is refused, never run as something else; sh carries it.
+        let tricky = "\"&echo INJECTED&rem \"";
+        if cfg!(windows) {
+            assert!(shell_join(&words(&["node", "-e", "1", tricky])).unwrap_err().to_string().contains("--shell"));
+            assert!(shell_join(&words(&["echo", "%PATH%"])).is_err());
+        } else {
+            assert_eq!(shell(&echo(tricky)), tricky);
+        }
     }
 }

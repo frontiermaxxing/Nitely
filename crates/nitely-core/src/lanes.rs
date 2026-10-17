@@ -513,7 +513,9 @@ fn ensure_setup(repo_root: &Path, pb: &Playbook, lane: &Path, base: &str, log: &
     let mut made: Vec<String> = status
         .split('\0')
         .filter_map(|e| e.strip_prefix("!! ").or_else(|| e.strip_prefix("?? ")))
-        .filter_map(|p| p.trim_end_matches('/').split('/').next().map(str::to_string))
+        // The whole path git names (`packages/app/node_modules`), not its first part, which tracked
+        // files would keep present after a clean took what setup made.
+        .map(|p| p.trim_end_matches('/').to_string())
         .filter(|p| !p.is_empty())
         .collect();
     made.sort();
@@ -590,9 +592,22 @@ fn run_logged(command: &str, dir: &Path, log: &Path, limit: Duration) -> Result<
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    let mut child = cmd.spawn().with_context(|| format!("starting {command}"))?;
-    // In a lane, the pid is kept while it runs, so a request after a crash can stop it.
+    // In a lane, the pid is kept while it runs, so a request after a crash can stop it. The file is
+    // written before the start too, without a pid, so a crash in between still leaves the mark that
+    // makes the next request look for what runs in the lane.
     let pids = pid_file(dir);
+    if let Some(p) = &pids {
+        std::fs::write(p, format!("starting\n{command}")).ok();
+    }
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            if let Some(p) = &pids {
+                std::fs::remove_file(p).ok();
+            }
+            return Err(e).with_context(|| format!("starting {command}"));
+        }
+    };
     if let Some(p) = &pids {
         std::fs::write(p, format!("{}\n{command}", child.id())).ok();
     }
@@ -854,13 +869,14 @@ mod tests {
         assert!(third.passed() && !third.setup_ran, "and a passed one is not run again");
 
         // What setup makes and `keep` does not list goes with the clean, so setup runs again; what
-        // `keep` lists stays, and setup does not.
-        let makes = if cfg!(windows) { "if not exist deps mkdir deps && echo x > deps\\ok.txt" } else { "mkdir -p deps && echo x > deps/ok.txt" };
-        let needs = if cfg!(windows) { "if not exist deps\\ok.txt exit 9" } else { "test -e deps/ok.txt || exit 9" };
+        // `keep` lists stays, and setup does not. Inside a tracked folder (`src/deps`), which the
+        // clean leaves in place.
+        let makes = if cfg!(windows) { "if not exist src\\deps mkdir src\\deps && echo x > src\\deps\\ok.txt" } else { "mkdir -p src/deps && echo x > src/deps/ok.txt" };
+        let needs = if cfg!(windows) { "if not exist src\\deps\\ok.txt exit 9" } else { "test -e src/deps/ok.txt || exit 9" };
         let other = crate::paths::unique_temp("nitely-lane-keep", "");
         let root2 = repo(&other);
         let snap2 = snapshot(&root2).unwrap();
-        for (keep, again) in [("", true), ("keep = [\"deps\"]\n", false)] {
+        for (keep, again) in [("", true), ("keep = [\"src/deps\"]\n", false)] {
             let pb2 = playbook_with(&format!("[worktree]\nsetup = [{makes:?}]\n[lanes]\n{keep}"));
             let req2 = Request { project: "APP", issue: None, kind: Kind::Run, snapshot: &snap2, command: needs };
             assert!(run(&db, &root2, &pb2, &req2, &actor, &mut |_| {}).unwrap().passed());
