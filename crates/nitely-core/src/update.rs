@@ -3,7 +3,7 @@
 //! running, so an update never lands in the middle of one. The download and the install are the
 //! Tauri updater's (src-tauri/src/update.rs).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// The channel this build was released on: the release workflow sets `NITELY_CHANNEL` when it
 /// builds. Anything else (`cargo build`, `npm run tauri dev`) is "dev", and a dev build never
@@ -56,15 +56,64 @@ pub fn older_channel_warning(from: &str, to: &str) -> Option<String> {
     }
 }
 
+/// Who holds a repo's land lock while the app installs an update.
+pub const UPDATE_HOLDER: &str = "an app update";
+
 /// The watched repos with a land running now: an update waits for them.
 pub fn lands_running(config: &crate::Config) -> Vec<String> {
-    config.repos.iter().filter(|r| land_running_in(Path::new(&r.root))).map(|r| r.name.clone()).collect()
+    config.repos.iter().filter(|r| lock_path(Path::new(&r.root)).is_some_and(|p| p.exists())).map(|r| r.name.clone()).collect()
 }
 
-fn land_running_in(root: &Path) -> bool {
+fn lock_path(root: &Path) -> Option<PathBuf> {
     crate::playbook::git(root, &["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .map(|dir| Path::new(dir.trim()).join(crate::land::LOCK_FILE).exists())
-        .unwrap_or(false)
+        .ok()
+        .map(|dir| Path::new(dir.trim()).join(crate::land::LOCK_FILE))
+}
+
+/// Every watched repo's land lock, held for an update: no land can start while the app installs,
+/// so the installer never ends a land halfway. Dropping it releases them.
+pub struct Reservation(Vec<PathBuf>);
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        for p in &self.0 {
+            std::fs::remove_file(p).ok();
+        }
+    }
+}
+
+/// Takes every watched repo's land lock, or none: `Err` names the repos whose land is running.
+pub fn reserve_lands(config: &crate::Config) -> Result<Reservation, Vec<String>> {
+    use std::io::Write;
+    let mut taken = Reservation(Vec::new());
+    let mut busy = Vec::new();
+    for repo in &config.repos {
+        let Some(path) = lock_path(Path::new(&repo.root)) else { continue };
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut f) => {
+                writeln!(f, "{UPDATE_HOLDER} pid {} since {}", std::process::id(), crate::issues::iso(crate::db::now())).ok();
+                taken.0.push(path);
+            }
+            Err(_) => busy.push(repo.name.clone()),
+        }
+    }
+    if busy.is_empty() {
+        Ok(taken)
+    } else {
+        Err(busy)
+    }
+}
+
+/// Releases land locks an update took and could not release: the installer ends the app while it
+/// holds them. The updated app calls this when it starts. Returns how many it released.
+pub fn release_update_reservations(config: &crate::Config) -> usize {
+    config
+        .repos
+        .iter()
+        .filter_map(|r| lock_path(Path::new(&r.root)))
+        .filter(|p| std::fs::read_to_string(p).is_ok_and(|held| held.starts_with(UPDATE_HOLDER)))
+        .filter(|p| std::fs::remove_file(p).is_ok())
+        .count()
 }
 
 #[cfg(test)]
@@ -91,8 +140,21 @@ mod tests {
         crate::playbook::run_git(std::process::Command::new("git").args(["init", "-q", "-b", "main"]).arg(&repo)).unwrap();
         let config = crate::Config { repos: vec![crate::RepoConfig { name: "app".into(), root: repo.to_string_lossy().into_owned(), integration_branch: "main".into(), project: None }], ..Default::default() };
         assert!(lands_running(&config).is_empty());
-        std::fs::write(repo.join(".git").join(crate::land::LOCK_FILE), "APP-1").unwrap();
+
+        // An update holds the lock while it installs, and the next start frees one it left.
+        let held = reserve_lands(&config).ok().unwrap();
+        assert_eq!(lands_running(&config), ["app"], "a land would wait");
+        drop(held);
+        assert!(lands_running(&config).is_empty(), "dropping the reservation releases it");
+        std::mem::forget(reserve_lands(&config).ok().unwrap());
+        assert_eq!(release_update_reservations(&config), 1);
+        assert!(lands_running(&config).is_empty());
+
+        // A land holds it: the update takes none and says which repo.
+        std::fs::write(repo.join(".git").join(crate::land::LOCK_FILE), "APP-1 pid 1 since now").unwrap();
         assert_eq!(lands_running(&config), ["app"]);
+        assert_eq!(reserve_lands(&config).err().unwrap(), ["app"]);
+        assert_eq!(release_update_reservations(&config), 0, "a land's lock is never released by the app");
         std::fs::remove_dir_all(&repo).ok();
     }
 }

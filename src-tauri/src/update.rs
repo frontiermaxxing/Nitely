@@ -7,6 +7,7 @@
 use nitely_core::update::{self as up, BUILD_CHANNEL, VERSION};
 use nitely_core::Config;
 use serde::Serialize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
@@ -58,6 +59,9 @@ pub struct UpdateState {
     status: Mutex<UpdateStatus>,
     /// The downloaded update, verified against the updater key, waiting to be installed.
     ready: Mutex<Option<(Update, Vec<u8>)>>,
+    /// Moves on when the person picks another channel: a check or download started before then
+    /// belongs to the old channel, and its result is dropped.
+    generation: AtomicU64,
 }
 
 fn pubkey(app: &AppHandle) -> String {
@@ -99,10 +103,27 @@ fn change(app: &AppHandle, f: impl FnOnce(&mut UpdateStatus)) -> UpdateStatus {
 
 /// Starts the checks: one now, then every few hours.
 pub fn start(app: &AppHandle) {
+    // Land locks an update held when the installer ended the previous app.
+    if let Ok(config) = Config::load() {
+        let freed = up::release_update_reservations(&config);
+        if freed > 0 {
+            eprintln!("update: released {freed} land lock(s) the last update held");
+        }
+    }
     let first = base_status(app);
     *app.state::<UpdateState>().status.lock().unwrap() = first.clone();
     if first.disabled.is_some() {
         return;
+    }
+    // Keep the channel this copy started on: a beta build that the beta channel updates to a
+    // stable release stays on beta, rather than following the new build's own channel.
+    if let Ok(mut config) = Config::load() {
+        if config.update_channel.is_none() {
+            config.update_channel = Some(first.channel.clone());
+            if let Err(e) = config.save() {
+                eprintln!("update: keeping the channel: {e:#}");
+            }
+        }
     }
     let app = app.clone();
     std::thread::spawn(move || loop {
@@ -122,6 +143,8 @@ pub async fn check(app: &AppHandle) -> UpdateStatus {
         }
     }
     let channel = chosen_channel();
+    let generation = app.state::<UpdateState>().generation.load(Ordering::SeqCst);
+    let current = |app: &AppHandle| app.state::<UpdateState>().generation.load(Ordering::SeqCst) == generation;
     change(app, |s| {
         s.checking = true;
         s.channel = channel.clone();
@@ -132,11 +155,17 @@ pub async fn check(app: &AppHandle) -> UpdateStatus {
         let updater = app.updater_builder().pubkey(pubkey(app)).endpoints(vec![url]).map_err(|e| e.to_string())?.build().map_err(|e| e.to_string())?;
         let Some(update) = updater.check().await.map_err(|e| e.to_string())? else { return Ok(None) };
         let version = update.version.clone();
-        change(app, |s| s.available = Some(Available { version: version.clone(), notes_url: up::release_url(&channel, &version), ready: false }));
+        if current(app) {
+            change(app, |s| s.available = Some(Available { version: version.clone(), notes_url: up::release_url(&channel, &version), ready: false }));
+        }
         let bytes = update.download(|_, _| {}, || {}).await.map_err(|e| e.to_string())?;
         Ok::<_, String>(Some((update, bytes)))
     }
     .await;
+    // The person picked another channel meanwhile: this result is the old channel's.
+    if !current(app) {
+        return app.state::<UpdateState>().status.lock().unwrap().clone();
+    }
     let now = nitely_core::db::now();
     match result {
         Ok(Some(pair)) => {
@@ -164,7 +193,8 @@ pub async fn check(app: &AppHandle) -> UpdateStatus {
 }
 
 /// Installs the downloaded update once no land is running; the app closes for the installer,
-/// which starts it again. Waits (and says what for) while lands run.
+/// which starts it again. Waits (and says what for) while lands run. It holds every land lock
+/// while it installs, so no land starts in the moment the app closes.
 pub fn install_when_free(app: &AppHandle) -> UpdateStatus {
     if app.state::<UpdateState>().ready.lock().unwrap().is_none() {
         return change(app, |s| s.error = Some("no update is ready to install".into()));
@@ -172,13 +202,19 @@ pub fn install_when_free(app: &AppHandle) -> UpdateStatus {
     let app = app.clone();
     let status = change(&app, |s| s.waiting_for_lands = Config::load().map(|c| up::lands_running(&c)).unwrap_or_default());
     std::thread::spawn(move || loop {
-        let running = Config::load().map(|c| up::lands_running(&c)).unwrap_or_default();
-        if running.is_empty() {
-            install_now(&app);
-            return;
+        let config = Config::load().unwrap_or_default();
+        match up::reserve_lands(&config) {
+            Ok(held) => {
+                install_now(&app);
+                // Still here: the install did not start, so lands may run again.
+                drop(held);
+                return;
+            }
+            Err(running) => {
+                change(&app, |s| s.waiting_for_lands = running);
+                std::thread::sleep(LAND_POLL);
+            }
         }
-        change(&app, |s| s.waiting_for_lands = running);
-        std::thread::sleep(LAND_POLL);
     });
     status
 }
@@ -186,9 +222,13 @@ pub fn install_when_free(app: &AppHandle) -> UpdateStatus {
 /// Installs a downloaded update if there is one and no land runs; for quitting. Returns whether it
 /// started the installer (which ends this process).
 pub fn install_on_quit(app: &AppHandle) -> bool {
-    let has_update = app.state::<UpdateState>().ready.lock().unwrap().is_some();
-    let lands_idle = Config::load().map(|c| up::lands_running(&c).is_empty()).unwrap_or(false);
-    has_update && lands_idle && install_now(app)
+    if app.state::<UpdateState>().ready.lock().unwrap().is_none() {
+        return false;
+    }
+    let Ok(held) = up::reserve_lands(&Config::load().unwrap_or_default()) else { return false };
+    let started = install_now(app);
+    drop(held);
+    started
 }
 
 fn install_now(app: &AppHandle) -> bool {
@@ -226,11 +266,16 @@ pub async fn set_update_channel(app: AppHandle, channel: String) -> Result<Updat
     let mut config = Config::load().map_err(|e| format!("{e:#}"))?;
     config.update_channel = Some(channel.clone());
     config.save().map_err(|e| format!("{e:#}"))?;
-    app.state::<UpdateState>().ready.lock().unwrap().take();
+    let state = app.state::<UpdateState>();
+    state.generation.fetch_add(1, Ordering::SeqCst);
+    state.ready.lock().unwrap().take();
     change(&app, |s| {
         s.channel = channel;
         s.available = None;
         s.error = None;
+        // A check of the old channel may still run; it drops its result (generation), and the
+        // new channel's check starts now.
+        s.checking = false;
     });
     Ok(check(&app).await)
 }
