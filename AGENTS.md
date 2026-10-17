@@ -80,12 +80,16 @@ once came just before a hard freeze (NIT-188), so:
   `close()` cleans up; `restart(whileClosed)` closes it from its window and starts it again on the
   same data and storage; `notifications(home)` and `badge(home)` read the toasts the app asked to
   show and its taskbar count.
-- It never touches the person's Nitely: its own identifier (so its own window, lock, storage and
-  app data), a new temp data folder each run (the app refuses `NITELY_HARNESS=1` without one, and the
-  real one always), no `nitely://` registration, no OS keychain at all (a throwaway approval key and
-  paired-phone list in the process; its CLI calls, on the temp data folder, get keychain entries of
-  their own, never the person's), and notifications written to `harness-notifications.jsonl` instead of shown (`NITELY_HARNESS_TOASTS=1`
-  shows them). The window opens without taking the focus, but it is on the person's screen while
+- It never touches the person's Nitely or their agents: its own identifier (so its own window, lock,
+  storage and app data), a new temp data folder each run and an agents' home inside it
+  (`NITELY_AGENT_HOME`, so Agent setup and the token counts never see the real `~/.claude`, `~/.codex`
+  or `~/.cursor`; the app refuses `NITELY_HARNESS=1` without either, and the real ones always), no
+  `nitely://` registration, no OS keychain at all (a throwaway approval key and paired-phone list in
+  the process; its CLI calls, on the temp data folder, get keychain entries of their own, never the
+  person's), no updates, and notifications written to `harness-notifications.jsonl` instead of shown
+  (`NITELY_HARNESS_TOASTS=1` shows them). Anything new that reaches outside the app's folders (a
+  scheduled task, a login item, the registry) fails `everything_the_app_reaches_outside_its_folders_is_listed`
+  in src-tauri/src/harness.rs until it is listed there with how the harness stays clear of it. The window opens without taking the focus, but it is on the person's screen while
   a test runs (window.e2e.mjs maximizes it for a moment).
 - One real toast, confirmed from Windows' notification history: `node scripts/harness/toast.check.mjs`
   (it shows a toast on the desktop, so it is not part of `app:test`).

@@ -259,13 +259,14 @@ fn read_file(path: &Path, codex: bool, wanted: &dyn Fn(&str) -> bool, files: &mu
     state.records.clone()
 }
 
-/// Where Claude Code and Codex keep their sessions.
+/// Where Claude Code and Codex keep their sessions: as they do, their own variable first, then
+/// the agents' home (connect::agent_home, the person's home unless NITELY_AGENT_HOME says else).
 fn claude_home() -> Option<PathBuf> {
-    std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).or_else(|| dirs::home_dir().map(|h| h.join(".claude")))
+    Some(std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).unwrap_or_else(|| crate::connect::agent_home().join(".claude")))
 }
 
 fn codex_home() -> Option<PathBuf> {
-    std::env::var_os("CODEX_HOME").map(PathBuf::from).or_else(|| dirs::home_dir().map(|h| h.join(".codex")))
+    Some(std::env::var_os("CODEX_HOME").map(PathBuf::from).unwrap_or_else(|| crate::connect::agent_home().join(".codex")))
 }
 
 /// Claude Code's folder name for a working directory: every character that is not a letter or a

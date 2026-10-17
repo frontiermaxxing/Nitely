@@ -97,8 +97,10 @@ impl Change {
     }
 }
 
-/// The folder agents keep their user-level config in. `NITELY_AGENT_HOME` overrides it for tests.
-fn home() -> PathBuf {
+/// The folder agents keep their user-level config (and Claude Code and Codex their sessions) in:
+/// the person's home. `NITELY_AGENT_HOME` overrides it, for tests and the test harness, which must
+/// never read or write the person's own agents.
+pub fn agent_home() -> PathBuf {
     std::env::var_os("NITELY_AGENT_HOME").map(PathBuf::from).or_else(dirs::home_dir).unwrap_or_else(|| PathBuf::from("."))
 }
 
@@ -425,8 +427,8 @@ pub(crate) fn is_nitely_mcp(command: Option<&str>, args: Option<Vec<&str>>) -> b
 }
 
 fn claude_plan(nitely: &str, repoint: bool) -> Result<AgentPlan> {
-    let dir = home().join(".claude");
-    let found = dir.is_dir() || home().join(".claude.json").exists();
+    let dir = agent_home().join(".claude");
+    let found = dir.is_dir() || agent_home().join(".claude.json").exists();
     let mut changes = Vec::new();
 
     let settings_path = dir.join("settings.json");
@@ -467,7 +469,7 @@ fn claude_plan(nitely: &str, repoint: bool) -> Result<AgentPlan> {
         format!("---\nname: nitely-setup\ndescription: {}\n---\n\n{SETUP_GUIDE}", Value::String(SETUP_DESCRIPTION.into())),
     ));
 
-    let claude_json = read_json(&home().join(".claude.json"))?;
+    let claude_json = read_json(&agent_home().join(".claude.json"))?;
     let registered = claude_json.pointer("/mcpServers/nitely");
     let current = registered.is_some_and(|s| s.get("command") == Some(&json!(nitely)) && s.get("args") == Some(&json!(["mcp"])));
     // Another install path is worth fixing; the user's own launcher is not ours to judge.
@@ -480,7 +482,7 @@ fn claude_plan(nitely: &str, repoint: bool) -> Result<AgentPlan> {
         // Registering again would drop the entry's other settings (env, tokens), and Claude Code
         // rewrites ~/.claude.json itself, so the human makes this one edit.
         (Some(_), false) => Change {
-            target: home().join(".claude.json").to_string_lossy().into_owned(),
+            target: agent_home().join(".claude.json").to_string_lossy().into_owned(),
             action: "manual".into(),
             why: "the nitely MCP server is registered with another command".into(),
             before: None,
@@ -491,7 +493,7 @@ fn claude_plan(nitely: &str, repoint: bool) -> Result<AgentPlan> {
 }
 
 fn codex_plan(nitely: &str, repoint: bool) -> Result<AgentPlan> {
-    let dir = home().join(".codex");
+    let dir = agent_home().join(".codex");
     let found = dir.is_dir();
     let mut changes = Vec::new();
 
@@ -558,7 +560,7 @@ fn codex_plan(nitely: &str, repoint: bool) -> Result<AgentPlan> {
 }
 
 fn cursor_plan(nitely: &str, repoint: bool) -> Result<AgentPlan> {
-    let dir = home().join(".cursor");
+    let dir = agent_home().join(".cursor");
     let found = dir.is_dir();
     let mut changes = Vec::new();
 

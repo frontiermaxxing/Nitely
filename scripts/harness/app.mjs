@@ -50,8 +50,11 @@ const norm = (p) => resolve(p).replace(/\\/g, "/").replace(/\/$/, "").toLowerCas
 
 /** Runs the harness's nitely CLI on the run's data folder, e.g. to seed it or read it back. */
 export function nitely(home, ...args) {
-  return run(exe("nitely"), args, { capture: true, env: { ...process.env, NITELY_HOME: home } });
+  return run(exe("nitely"), args, { capture: true, env: { ...personsEnv(), NITELY_HOME: home, NITELY_AGENT_HOME: agentsOf(home) } });
 }
+
+/** The run's own agents' home, inside its data folder: never the person's ~/.claude, ~/.codex or ~/.cursor. */
+const agentsOf = (home) => join(home, "agents");
 
 /**
  * The default seed: a project with an issue waiting for approval and a question waiting for an
@@ -155,6 +158,10 @@ async function start({ seed, env, keepHome, unlock }) {
     const web = join(process.env.LOCALAPPDATA, IDENTIFIER);
     if (web.endsWith(".harness")) rmSync(web, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
   }
+  // Agent setup and the token counts read the agents' home; the app refuses to start without one
+  // of its own (src-tauri/src/harness.rs).
+  const agents = env.NITELY_AGENT_HOME ?? agentsOf(home);
+  mkdirSync(agents, { recursive: true });
   seed(home);
   mkdirSync(join(home, "screens"), { recursive: true });
   let log = "";
@@ -197,7 +204,7 @@ async function start({ seed, env, keepHome, unlock }) {
       cwd: ROOT,
       // The harness build asks WebView2 for DevTools on a port of its own choosing (its config's
       // additionalBrowserArgs); WebView2 writes it to DevToolsActivePort in its folder.
-      env: appEnv({ ...process.env, ...env, NITELY_HOME: home, NITELY_HARNESS: "1" }),
+      env: { ...personsEnv(), ...env, NITELY_HOME: home, NITELY_AGENT_HOME: agents, NITELY_HARNESS: "1" },
       stdio: ["ignore", "pipe", "pipe"],
     });
     child.stdout.on("data", (d) => (log += d));
@@ -232,11 +239,15 @@ async function start({ seed, env, keepHome, unlock }) {
 }
 
 /**
- * The app's environment: WebView2 adds its own variable's arguments to the config's, so one left
- * set (a debugging port of someone's) would override the port the harness lets WebView2 choose.
+ * This process's environment, less what would point the app at the person's own things: their
+ * agents' session folders (CLAUDE_CONFIG_DIR, CODEX_HOME; the app reads NITELY_AGENT_HOME's
+ * instead, and refuses them outside it) and WebView2's extra arguments, which WebView2 adds to the
+ * config's, so a debugging port of someone's would override the one the harness lets it choose.
  */
-function appEnv(env) {
-  for (const name of Object.keys(env)) if (name.toUpperCase() === "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS") delete env[name];
+function personsEnv() {
+  const env = { ...process.env };
+  const drop = ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "NITELY_AGENT_HOME"];
+  for (const name of Object.keys(env)) if (drop.includes(name.toUpperCase())) delete env[name];
   return env;
 }
 

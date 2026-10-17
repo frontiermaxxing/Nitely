@@ -14,6 +14,12 @@ pub fn real_data_dir() -> PathBuf {
     dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("Nitely")
 }
 
+/// The person's own home folder, where their agents keep their config: what the test harness
+/// refuses as its agents' home (connect::agent_home).
+pub fn real_home() -> Option<PathBuf> {
+    dirs::home_dir()
+}
+
 pub fn db_path() -> PathBuf {
     data_dir().join("nitely.db")
 }

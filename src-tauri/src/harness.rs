@@ -1,8 +1,10 @@
-//! The app driven by a test (scripts/app-harness.mjs): started with `NITELY_HARNESS=1` and a
-//! throwaway `NITELY_HOME`. Then it touches nothing of the person's: it refuses their real data
-//! folder, registers no `nitely://` links, signs approvals with a key that lives only in this
-//! process (never the OS keychain), and writes its notifications to a file in its data folder
-//! instead of showing them, unless `NITELY_HARNESS_TOASTS=1` asks for real ones.
+//! The app driven by a test (scripts/harness/app.mjs): started with `NITELY_HARNESS=1`, a throwaway
+//! `NITELY_HOME` and a throwaway `NITELY_AGENT_HOME`. Then it touches nothing of the person's: it
+//! refuses their real data folder and their real agents' home (~/.claude, ~/.codex, ~/.cursor and
+//! the sessions there), registers no `nitely://` links, keeps the OS keychain shut (a key and
+//! entries that live only in this process), never updates itself, and writes its notifications to
+//! a file in its data folder instead of showing them, unless `NITELY_HARNESS_TOASTS=1` asks for real
+//! ones. `everything_the_app_reaches_outside_its_folders_is_listed` below keeps that list whole.
 
 use std::path::{Path, PathBuf};
 
@@ -13,7 +15,29 @@ pub fn mode() -> Result<bool, String> {
         return Ok(false);
     }
     check(std::env::var_os("NITELY_HOME").map(PathBuf::from).as_deref(), &nitely_core::paths::real_data_dir())?;
+    let var = |name: &str| std::env::var_os(name).map(PathBuf::from);
+    check_agents(var("NITELY_AGENT_HOME").as_deref(), nitely_core::paths::real_home().as_deref(), &[("CLAUDE_CONFIG_DIR", var("CLAUDE_CONFIG_DIR")), ("CODEX_HOME", var("CODEX_HOME"))])?;
     Ok(true)
+}
+
+/// The harness's agents' home must be given, exist and not be the person's home; an agent's own
+/// variable (CLAUDE_CONFIG_DIR, CODEX_HOME) may only point inside it, or the app would read the
+/// person's sessions from there.
+fn check_agents(agents: Option<&Path>, real: Option<&Path>, vars: &[(&str, Option<PathBuf>)]) -> Result<(), String> {
+    let agents = agents.ok_or("NITELY_HARNESS is set without NITELY_AGENT_HOME: the harness needs an agents' home of its own, or Agent setup would read and rewrite the person's ~/.claude, ~/.codex and ~/.cursor")?;
+    if real.is_some_and(|r| same(agents, r)) {
+        return Err("NITELY_AGENT_HOME is the person's home; the harness only runs on a throwaway one".into());
+    }
+    if !agents.is_dir() {
+        return Err(format!("NITELY_AGENT_HOME {} does not exist; the harness makes it first", agents.display()));
+    }
+    let inside = |p: &Path| nitely_core::paths::normalize(&p.to_string_lossy()).starts_with(&format!("{}/", nitely_core::paths::normalize(&agents.to_string_lossy())));
+    for (name, value) in vars {
+        if let Some(v) = value.as_deref().filter(|v| !inside(v)) {
+            return Err(format!("{name} is {} under the harness, outside NITELY_AGENT_HOME; the harness clears it", v.display()));
+        }
+    }
+    Ok(())
 }
 
 /// The harness's data folder must be given, exist, and be neither the person's real one nor in it.
@@ -84,5 +108,104 @@ mod tests {
         assert!(check(Some(&mine), &real).is_ok());
         std::fs::remove_dir_all(&real).ok();
         std::fs::remove_dir_all(&mine).ok();
+    }
+
+    #[test]
+    fn refuses_the_real_agents_home_and_their_own_variables_outside_its_own() {
+        let real = nitely_core::paths::unique_temp("nitely-real-home", "");
+        let mine = nitely_core::paths::unique_temp("nitely-agents", "");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::create_dir_all(&mine).unwrap();
+        assert!(check_agents(None, Some(&real), &[]).unwrap_err().contains("NITELY_AGENT_HOME"));
+        assert!(check_agents(Some(&real), Some(&real), &[]).unwrap_err().contains("person's home"));
+        assert!(check_agents(Some(&mine.join("missing")), Some(&real), &[]).unwrap_err().contains("does not exist"));
+        assert!(check_agents(Some(&mine), Some(&real), &[("CLAUDE_CONFIG_DIR", Some(real.join(".claude")))]).unwrap_err().contains("CLAUDE_CONFIG_DIR"));
+        assert!(check_agents(Some(&mine), Some(&real), &[("CODEX_HOME", Some(mine.join(".codex"))), ("CLAUDE_CONFIG_DIR", None)]).is_ok());
+        std::fs::remove_dir_all(&real).ok();
+        std::fs::remove_dir_all(&mine).ok();
+    }
+
+    /// Everything in the app and the core that reaches outside the app's own folders: the OS
+    /// keychain, the person's home and agents, registered links, the OS's notifications, scheduled
+    /// tasks and login items, the registry, the updater. Each is listed with how the harness keeps
+    /// off the person's (this file, scripts/harness/app.mjs). Code that adds one fails here until it
+    /// is listed, and so until someone has said how the harness stays clear of it.
+    #[test]
+    fn everything_the_app_reaches_outside_its_folders_is_listed() {
+        const REACHES: &[&str] = &[
+            "keyring::",
+            "dirs::",
+            "register_all",
+            "Toast::new",
+            "notify_rust::",
+            "UNUserNotificationCenter",
+            "updater_builder",
+            "schtasks",
+            "ScheduledTask",
+            "LaunchAgents",
+            "autostart",
+            "winreg",
+            "HKEY_",
+            "CurrentVersion\\Run",
+            "CLAUDE_CONFIG_DIR",
+            "CODEX_HOME",
+        ];
+        // (file, what it reaches, how many lines, or 0 for any): why the harness is clear of it.
+        const LISTED: &[(&str, &str, usize, &str)] = &[
+            ("crates/nitely-core/src/approval.rs", "keyring::", 0, "under the harness the key and every entry live in the process (use_ephemeral_key)"),
+            ("crates/nitely-core/src/paths.rs", "dirs::", 0, "the real data folder and home, which harness::check and check_agents refuse"),
+            ("crates/nitely-core/src/connect.rs", "dirs::", 1, "agent_home: NITELY_AGENT_HOME, which the harness must set (check_agents)"),
+            ("crates/nitely-core/src/usage.rs", "CLAUDE_CONFIG_DIR", 1, "only inside NITELY_AGENT_HOME under the harness (check_agents); app.mjs clears it"),
+            ("crates/nitely-core/src/usage.rs", "CODEX_HOME", 1, "only inside NITELY_AGENT_HOME under the harness (check_agents); app.mjs clears it"),
+            ("crates/nitely-core/src/install.rs", "dirs::", 0, "`nitely install`, the CLI's; the app never runs it"),
+            ("crates/nitely-core/src/mirror.rs", "dirs::", 1, "the home's path as text, kept out of mirrored issues; nothing is read"),
+            ("src-tauri/src/lib.rs", "register_all", 0, "skipped under the harness"),
+            ("src-tauri/src/notify.rs", "Toast::new", 0, "notify() records instead under the harness, unless NITELY_HARNESS_TOASTS=1"),
+            ("src-tauri/src/notify.rs", "notify_rust::", 0, "as Toast::new"),
+            ("src-tauri/src/notify.rs", "UNUserNotificationCenter", 0, "as Toast::new; init() skips the Mac's center under the harness"),
+            ("src-tauri/src/update.rs", "updater_builder", 0, "base_status disables updates under the harness"),
+        ];
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+        let mut files = Vec::new();
+        let mut dirs = vec![root.join("src-tauri").join("src")];
+        for c in std::fs::read_dir(root.join("crates")).unwrap().flatten() {
+            dirs.push(c.path().join("src"));
+        }
+        while let Some(dir) = dirs.pop() {
+            for e in std::fs::read_dir(&dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    dirs.push(p);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    files.push(p);
+                }
+            }
+        }
+        let mut found = Vec::new();
+        for file in &files {
+            let rel = file.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
+            if rel == "src-tauri/src/harness.rs" {
+                continue;
+            }
+            let text = std::fs::read_to_string(file).unwrap();
+            // Tests may reach anything in a scratch folder; only the code that ships counts.
+            let code = text.split("#[cfg(test)]").next().unwrap_or("");
+            for reach in REACHES {
+                let n = code.lines().filter(|l| !l.trim_start().starts_with("//") && l.contains(reach)).count();
+                if n > 0 {
+                    found.push((rel.clone(), reach.to_string(), n));
+                }
+            }
+        }
+        assert!(found.iter().any(|(f, r, _)| f.ends_with("approval.rs") && r == "keyring::"), "the scan found nothing, so it reads no source: {found:?}");
+        let unlisted: Vec<String> = found
+            .iter()
+            .filter(|(f, r, n)| !LISTED.iter().any(|(lf, lr, ln, _)| lf == f && lr == r && (*ln == 0 || ln == n)))
+            .map(|(f, r, n)| format!("{f}: {r} ({n} lines)"))
+            .collect();
+        assert!(
+            unlisted.is_empty(),
+            "these reach outside the app's own folders and are not listed with how the test harness stays clear of them; add each to LISTED with its harness guard: {unlisted:#?}"
+        );
     }
 }

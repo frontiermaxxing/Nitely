@@ -88,7 +88,9 @@ fn chosen_channel() -> String {
 }
 
 fn base_status(app: &AppHandle) -> UpdateStatus {
-    let disabled = if !up::CHANNELS.contains(&BUILD_CHANNEL) {
+    let disabled = if crate::harness::on() {
+        Some("the test harness never updates".to_string())
+    } else if !up::CHANNELS.contains(&BUILD_CHANNEL) {
         Some("a build from source: it never updates itself".to_string())
     } else if pubkey(app).is_empty() {
         Some("this build has no updater key, so it can't check updates; install a newer release by hand".to_string())
