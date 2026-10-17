@@ -39,7 +39,8 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   } else {
     console.error(`${missing.length} of ${commits.length} commit(s) have no Signed-off-by line with their author's email:`);
     for (const c of missing) console.error(`  ${c.sha.slice(0, 7)} ${c.subject} (author ${c.email})`);
-    console.error("\nSign them off with `git rebase --signoff " + base.slice(0, 7) + "` (or `git commit --amend -s` for the last one),");
+    const onto = /^[0-9a-f]{40}$/.test(base) ? base.slice(0, 12) : base;
+    console.error(`\nSign them off with \`git rebase --signoff ${onto}\` (or \`git commit --amend -s\` for the last one),`);
     console.error("then push again. CONTRIBUTING.md explains the sign-off.");
     process.exit(1);
   }
