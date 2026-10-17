@@ -656,9 +656,9 @@ fn list_worktrees(root: &Path) -> Result<Vec<(PathBuf, Option<String>)>> {
 }
 
 fn rebase_in_progress(worktree: &Path) -> bool {
-    ["rebase-merge", "rebase-apply"]
-        .iter()
-        .any(|d| git(worktree, &["rev-parse", "--path-format=absolute", "--git-path", d]).is_ok_and(|p| Path::new(p.trim()).exists()))
+    // Both paths from one git call, a line each.
+    git(worktree, &["rev-parse", "--path-format=absolute", "--git-path", "rebase-merge", "--git-path", "rebase-apply"])
+        .is_ok_and(|paths| paths.lines().any(|p| !p.trim().is_empty() && Path::new(p.trim()).exists()))
 }
 
 fn rev(dir: &Path, name: &str) -> Result<String> {
@@ -686,7 +686,6 @@ mod tests {
     use super::*;
     use crate::issues::NewIssue;
     use crate::submit::{submit, SubmitOptions};
-    use std::process::Command;
 
     struct Fixture {
         base: PathBuf,
@@ -696,26 +695,39 @@ mod tests {
         actor: Actor,
     }
 
-    fn sh(dir: &Path, args: &[&str]) -> String {
-        let o = crate::playbook::run_git(Command::new("git").arg("-C").arg(dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args)).unwrap();
-        assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
-        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    use crate::test_repo::git as sh;
+
+    /// A repo whose playbook gates with `exit 0` and has a fake reviewer. It has no remote, so land
+    /// pushes nothing: three pushes a land, of several git processes each, in tests about something
+    /// else. `pushed_fixture` has one.
+    fn fixture() -> Fixture {
+        fixture_from(crate::test_repo::copy("land", |base| land_repo(&base.join("repo"))))
     }
 
-    fn fixture(name: &str) -> Fixture {
-        let base = crate::paths::unique_temp(&format!("nitely-land-{name}"), "");
+    /// As `fixture`, with a bare remote that land pushes to.
+    fn pushed_fixture() -> Fixture {
+        fixture_from(crate::test_repo::copy("land-pushed", |base| {
+            land_repo(&base.join("repo"));
+            crate::test_repo::add_remote(&base.join("repo"), &base.join("remote.git"));
+        }))
+    }
+
+    fn land_repo(repo: &Path) {
+        // Land rebases and commits in its own git calls, which need an identity: init sets one.
+        let playbook = PLAYBOOK.replace("{sh}", &playbook::posix_sh());
+        crate::test_repo::init(repo, &[(playbook::PLAYBOOK_PATH, &playbook), ("shared.txt", "one\n")]);
+    }
+
+    fn fixture_from(base: PathBuf) -> Fixture {
         let repo = base.join("repo");
         let remote = base.join("remote.git");
-        std::fs::create_dir_all(repo.join(".nitely")).unwrap();
-        crate::playbook::run_git(Command::new("git").args(["init", "-q", "--bare", "-b", "main"]).arg(&remote)).unwrap();
-        sh(&repo, &["init", "-q", "-b", "main"]);
-        // Land rebases and commits in its own git calls, which need an identity.
-        sh(&repo, &["config", "user.name", "t"]);
-        sh(&repo, &["config", "user.email", "t@t"]);
-        // `exit 0` and the fake reviewer run the same under cmd (Windows) and sh.
-        std::fs::write(
-            repo.join(playbook::PLAYBOOK_PATH),
-            r#"
+        let db = Db::open(&base.join("t.db")).unwrap();
+        db.create_project("NIT", "Nitely").unwrap();
+        Fixture { base, repo, remote, db, actor: Actor::Agent("claude:test".into()) }
+    }
+
+    // `exit 0` and the fake reviewer run the same under cmd (Windows) and sh.
+    const PLAYBOOK: &str = r#"
 [worktree]
 dir = "../wt/{key}"
 teardown = ["echo torn >> {main}/../teardown.txt"]
@@ -733,19 +745,7 @@ when_changed = ["sidebar"]
 [[land.after]]
 run = "exit 3"
 when_changed = ["billing"]
-"#
-            .replace("{sh}", &playbook::posix_sh()),
-        )
-        .unwrap();
-        std::fs::write(repo.join("shared.txt"), "one\n").unwrap();
-        sh(&repo, &["add", "."]);
-        sh(&repo, &["commit", "-q", "-m", "init"]);
-        sh(&repo, &["remote", "add", "origin", &remote.to_string_lossy()]);
-        sh(&repo, &["push", "-q", "-u", "origin", "main"]);
-        let db = Db::open(&base.join("t.db")).unwrap();
-        db.create_project("NIT", "Nitely").unwrap();
-        Fixture { base, repo, remote, db, actor: Actor::Agent("claude:test".into()) }
-    }
+"#;
 
     impl Fixture {
         /// Files an issue, starts its worktree, commits `file`, and submits it.
@@ -793,7 +793,7 @@ when_changed = ["billing"]
 
     #[test]
     fn a_finding_the_person_accepted_does_not_block_the_land() {
-        let mut f = fixture("accept");
+        let mut f = fixture();
         // A reviewer that keeps one P1 a person decided to live with.
         let pb_path = f.repo.join(playbook::PLAYBOOK_PATH);
         let pb = std::fs::read_to_string(&pb_path).unwrap().replace(
@@ -871,7 +871,7 @@ when_changed = ["billing"]
 
     #[test]
     fn a_finding_sent_back_stays_a_defect_to_fix() {
-        let mut f = fixture("decline");
+        let mut f = fixture();
         let pb_path = f.repo.join(playbook::PLAYBOOK_PATH);
         let pb = std::fs::read_to_string(&pb_path)
             .unwrap()
@@ -911,7 +911,7 @@ when_changed = ["billing"]
 
     #[test]
     fn keeps_a_worktree_a_process_still_uses() {
-        let mut f = fixture("held");
+        let mut f = fixture();
         let (a, wt) = f.submitted("Pulse view", "pulse.txt", "x");
         // A dev server started in the worktree, as the browser preview asks agents to do.
         let mut server = std::process::Command::new(playbook::posix_sh()).arg("-c").arg(format!("sleep 30; : {}", wt.display())).spawn().unwrap();
@@ -981,20 +981,27 @@ when_changed = ["billing"]
         std::fs::remove_file(&path).ok();
     }
 
+    /// Commits a playbook that lands by `mode`.
+    fn set_mode(f: &Fixture, mode: &str) {
+        let path = f.repo.join(playbook::PLAYBOOK_PATH);
+        let pb = std::fs::read_to_string(&path).unwrap().replacen("[[land.after]]", &format!("[land]\nby = \"{mode}\"\n[[land.after]]"), 1);
+        std::fs::write(&path, pb).unwrap();
+        sh(&f.repo, &["commit", "-q", "-am", mode]);
+    }
+
+    fn state(f: &Fixture, key: &str) -> String {
+        f.db.issue(key).unwrap().unwrap().state
+    }
+
+    /// `root` as one of the NIT project's repos in the config.
+    fn linked(root: &Path, name: &str) -> crate::RepoConfig {
+        crate::RepoConfig { name: name.into(), root: root.to_string_lossy().into_owned(), integration_branch: "main".into(), project: Some("NIT".into()) }
+    }
+
     #[test]
     fn lands_by_nitely_when_the_playbook_says_so() {
-        let mut f = fixture("auto");
-        let set_mode = |f: &Fixture, mode: &str| {
-            let path = f.repo.join(playbook::PLAYBOOK_PATH);
-            let pb = std::fs::read_to_string(&path).unwrap();
-            // Drop the mode a previous call set, then set this one.
-            let kept: Vec<&str> = pb.lines().filter(|l| *l != "[land]" && !l.starts_with("by = ")).collect();
-            let pb = kept.join("\n").replacen("[[land.after]]", &format!("[land]\nby = \"{mode}\"\n[[land.after]]"), 1);
-            std::fs::write(&path, pb).unwrap();
-            sh(&f.repo, &["commit", "-q", "-am", mode]);
-        };
+        let mut f = fixture();
         set_mode(&f, "auto");
-        let state = |f: &Fixture, key: &str| f.db.issue(key).unwrap().unwrap().state;
 
         // A passing review that needs no human lands in the same submit.
         let (a, wt_a) = f.submitted("Sidebar polish", "sidebar.txt", "x");
@@ -1003,8 +1010,7 @@ when_changed = ["billing"]
 
         // One that needs a human waits, and lands as soon as they approve it.
         let (b, _) = f.submitted("Billing fix", "billing.txt", "x");
-        let (c, _) = f.submitted("Billing again", "billing.txt", "y");
-        assert_eq!((state(&f, &b), state(&f, &c)), ("Needs You".to_string(), "Needs You".to_string()));
+        assert_eq!(state(&f, &b), "Needs You");
         let dir = f.repo.to_string_lossy().into_owned();
         let config = crate::Config::default();
         assert!(land_on_approval(&mut f.db, &config, &b, &dir).unwrap().is_none(), "not approved yet");
@@ -1014,12 +1020,6 @@ when_changed = ["billing"]
         let other = f.base.join("other");
         std::fs::create_dir_all(&other).unwrap();
         sh(&other, &["init", "-q", "-b", "main"]);
-        let linked = |root: &Path, name: &str| crate::RepoConfig {
-            name: name.into(),
-            root: root.to_string_lossy().into_owned(),
-            integration_branch: "main".into(),
-            project: Some("NIT".into()),
-        };
         let two = crate::Config { repos: vec![linked(&other, "other"), linked(&f.repo, "repo")], ..Default::default() };
         let mut reported = HashMap::new();
         let r = land_approved(&mut f.db, &two, &mut reported).unwrap();
@@ -1027,13 +1027,32 @@ when_changed = ["billing"]
         let notes = f.db.timeline(&b).unwrap();
         assert!(notes.iter().any(|e| e.summary.as_deref().is_some_and(|s| s.contains("with warnings") && s.contains("exit 3"))), "{notes:?}");
         assert_eq!(state(&f, &b), "Done");
+        std::fs::remove_dir_all(&f.base).ok();
+    }
 
+    #[test]
+    fn an_automatic_land_that_stops_on_a_conflict_sends_the_issue_back() {
+        let mut f = fixture();
+        set_mode(&f, "auto");
+        let (c, _) = f.submitted("Billing again", "billing.txt", "y");
+        assert_eq!(state(&f, &c), "Needs You");
+        // Another change to the same file lands first.
+        std::fs::write(f.repo.join("billing.txt"), "x").unwrap();
+        sh(&f.repo, &["add", "."]);
+        sh(&f.repo, &["commit", "-q", "-m", "Billing fix"]);
         // An automatic land that stops on a conflict sends the issue back with the reason.
         approve(&mut f.db, &c);
-        let r = land_on_approval(&mut f.db, &config, &c, &dir).unwrap().unwrap();
+        let dir = f.repo.to_string_lossy().into_owned();
+        let r = land_on_approval(&mut f.db, &crate::Config::default(), &c, &dir).unwrap().unwrap();
         assert!(!r.landed && r.conflicts == ["billing.txt"], "{r:?}");
         assert_eq!(state(&f, &c), "In Progress");
+        std::fs::remove_dir_all(&f.base).ok();
+    }
 
+    #[test]
+    fn lands_only_what_a_human_approved_when_the_playbook_says_human() {
+        let mut f = fixture();
+        let mut reported = HashMap::new();
         // "human" sends every change to a human, then lands it on approval.
         set_mode(&f, "human");
         let (d, _) = f.submitted("Header tweak", "header.txt", "x");
@@ -1051,7 +1070,12 @@ when_changed = ["billing"]
         let r = land_approved(&mut f.db, &linked, &mut reported).unwrap();
         assert!(r.len() == 1 && r[0].landed, "{r:?}");
         assert_eq!(state(&f, &d), "Done");
+        std::fs::remove_dir_all(&f.base).ok();
+    }
 
+    #[test]
+    fn leaves_the_land_to_the_agent_when_the_playbook_says_author() {
+        let mut f = fixture();
         // "author" (the default) leaves the land to the agent.
         set_mode(&f, "author");
         let (e, _) = f.submitted("Footer tweak", "footer.txt", "x");
@@ -1071,9 +1095,9 @@ when_changed = ["billing"]
 
     #[test]
     fn lands_reviewed_work_and_waits_for_human_approval() {
-        let mut f = fixture("approve");
+        let mut f = pushed_fixture();
         let (a, wt_a) = f.submitted("Sidebar polish", "sidebar.txt", "x");
-        let (b, wt_b) = f.submitted("Billing fix", "billing.txt", "x");
+        let (b, _) = f.submitted("Billing fix", "billing.txt", "x");
 
         let r = f.land(&a);
         assert!(r.landed && r.pushed == Some(true), "{r:?}");
@@ -1086,6 +1110,15 @@ when_changed = ["billing"]
         assert_eq!(f.db.issue(&a).unwrap().unwrap().state, "Done");
 
         // b needs a human; it was reviewed before a landed, so it also rebases.
+        let r = f.land(&b);
+        assert!(!r.landed && r.error.as_deref().unwrap().contains("waits for a human"), "{r:?}");
+        std::fs::remove_dir_all(&f.base).ok();
+    }
+
+    #[test]
+    fn lands_only_with_the_apps_signed_approval() {
+        let mut f = fixture();
+        let (b, wt_b) = f.submitted("Billing fix", "billing.txt", "x");
         let r = f.land(&b);
         assert!(!r.landed && r.error.as_deref().unwrap().contains("waits for a human"), "{r:?}");
         // An agent cannot approve; only a human move counts.
@@ -1130,9 +1163,13 @@ when_changed = ["billing"]
         // A failing after-land step is a warning; the land stands.
         assert!(r.warnings.iter().any(|w| w.contains("exit 3")), "{r:?}");
         assert!(r.approval.unwrap().contains("approved by a human"));
-        assert!(Path::new(&f.repo.join("billing.txt")).exists() && Path::new(&f.repo.join("sidebar.txt")).exists());
+        assert!(f.repo.join("billing.txt").exists());
+        std::fs::remove_dir_all(&f.base).ok();
+    }
 
-        // A changed patch needs a new approval.
+    #[test]
+    fn a_changed_patch_needs_a_new_approval() {
+        let mut f = fixture();
         let (c, wt_c) = f.submitted("Billing rounding", "billing-rounding.txt", "x");
         approve(&mut f.db, &c);
         std::thread::sleep(std::time::Duration::from_millis(1100));
@@ -1146,7 +1183,7 @@ when_changed = ["billing"]
 
     #[test]
     fn warns_when_a_dependency_landed_that_no_after_step_set_up() {
-        let mut f = fixture("deps");
+        let mut f = fixture();
         // Setup in worktrees, and an after step that takes care of Cargo.lock but not package-lock.json.
         let pb = std::fs::read_to_string(f.repo.join(playbook::PLAYBOOK_PATH))
             .unwrap()
@@ -1169,7 +1206,7 @@ when_changed = ["billing"]
 
     #[test]
     fn refuses_changes_after_review_conflicts_and_a_held_lock() {
-        let mut f = fixture("refuse");
+        let mut f = fixture();
         let (a, wt) = f.submitted("Edit shared", "shared.txt", "two\n");
 
         // A commit after the review is not what was reviewed.

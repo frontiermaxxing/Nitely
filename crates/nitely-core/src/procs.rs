@@ -164,8 +164,15 @@ fn normalize(s: &str) -> String {
     if cfg!(windows) { out.to_lowercase() } else { out }
 }
 
+/// From the Windows API, or from PowerShell when that fails: starting PowerShell for the same list
+/// takes a second or two, more on a busy machine, and land asks before every cleanup (NIT-208).
 #[cfg(windows)]
 fn list() -> Vec<Proc> {
+    win::list().unwrap_or_else(list_by_powershell)
+}
+
+#[cfg(windows)]
+fn list_by_powershell() -> Vec<Proc> {
     let script = "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine | ConvertTo-Json -Compress";
     // By its full path when it is where Windows keeps it, so a narrow PATH does not hide it.
     let system = std::env::var_os("SystemRoot").map(|r| std::path::Path::new(&r).join("System32").join("WindowsPowerShell").join("v1.0").join("powershell.exe"));
@@ -174,6 +181,145 @@ fn list() -> Vec<Proc> {
     let Ok(out) = out else { return Vec::new() };
     let text = String::from_utf8_lossy(&out.stdout);
     serde_json::from_str::<Vec<Proc>>(text.trim()).unwrap_or_default()
+}
+
+/// What `Win32_Process` gives, read the way it reads it: a snapshot of the processes, then each
+/// one's executable and command line, where this user may query it.
+#[cfg(windows)]
+mod win {
+    use super::Proc;
+    use std::ffi::c_void;
+
+    type Handle = *mut c_void;
+    const INVALID_HANDLE_VALUE: Handle = -1isize as Handle;
+    const TH32CS_SNAPPROCESS: u32 = 0x2;
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const PROCESS_COMMAND_LINE_INFORMATION: u32 = 60;
+    /// Longest path Windows takes, in UTF-16 units.
+    const MAX_PATH_UNITS: usize = 32_768;
+
+    #[repr(C)]
+    struct ProcessEntry32W {
+        size: u32,
+        usage: u32,
+        process_id: u32,
+        default_heap_id: usize,
+        module_id: u32,
+        threads: u32,
+        parent_process_id: u32,
+        priority: i32,
+        flags: u32,
+        exe_file: [u16; 260],
+    }
+
+    #[repr(C)]
+    struct UnicodeString {
+        length: u16,
+        maximum_length: u16,
+        buffer: *const u16,
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateToolhelp32Snapshot(flags: u32, process_id: u32) -> Handle;
+        fn Process32FirstW(snapshot: Handle, entry: *mut ProcessEntry32W) -> i32;
+        fn Process32NextW(snapshot: Handle, entry: *mut ProcessEntry32W) -> i32;
+        fn OpenProcess(access: u32, inherit: i32, process_id: u32) -> Handle;
+        fn QueryFullProcessImageNameW(process: Handle, flags: u32, name: *mut u16, size: *mut u32) -> i32;
+        fn CloseHandle(handle: Handle) -> i32;
+    }
+
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn NtQueryInformationProcess(process: Handle, class: u32, info: *mut c_void, length: u32, returned: *mut u32) -> i32;
+    }
+
+    /// Every process, or None when the snapshot fails.
+    pub fn list() -> Option<Vec<Proc>> {
+        // SAFETY: a plain call; the handle is closed below.
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+        if snapshot == INVALID_HANDLE_VALUE || snapshot.is_null() {
+            return None;
+        }
+        // SAFETY: all zeros is a valid ProcessEntry32W, and `size` says which layout this is.
+        let mut entry: ProcessEntry32W = unsafe { std::mem::zeroed() };
+        entry.size = std::mem::size_of::<ProcessEntry32W>() as u32;
+        let mut path = vec![0u16; MAX_PATH_UNITS];
+        let mut procs = Vec::new();
+        // SAFETY: `entry` is a ProcessEntry32W with its size set, as both calls need.
+        let mut more = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
+        while more {
+            let len = entry.exe_file.iter().position(|&c| c == 0).unwrap_or(entry.exe_file.len());
+            let (executable_path, command_line) = details(entry.process_id, &mut path);
+            procs.push(Proc {
+                process_id: entry.process_id,
+                parent_process_id: entry.parent_process_id,
+                name: Some(String::from_utf16_lossy(&entry.exe_file[..len])),
+                executable_path,
+                command_line,
+                cwd: None,
+            });
+            // SAFETY: as above.
+            more = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
+        }
+        // SAFETY: the snapshot handle from above, closed once.
+        unsafe { CloseHandle(snapshot) };
+        (!procs.is_empty()).then_some(procs)
+    }
+
+    /// The executable and command line of `pid`, each None where it cannot be read (the idle and
+    /// system processes, and another user's or an elevated one).
+    fn details(pid: u32, path: &mut [u16]) -> (Option<String>, Option<String>) {
+        if pid == 0 {
+            return (None, None);
+        }
+        // SAFETY: a plain call; the handle is closed below.
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if process.is_null() {
+            return (None, None);
+        }
+        let mut size = path.len() as u32;
+        // SAFETY: `path` holds `size` u16s; on success `size` is the length written.
+        let exe = (unsafe { QueryFullProcessImageNameW(process, 0, path.as_mut_ptr(), &mut size) } != 0)
+            .then(|| String::from_utf16_lossy(&path[..(size as usize).min(path.len())]));
+        let command_line = command_line(process);
+        // SAFETY: the handle from OpenProcess, closed once.
+        unsafe { CloseHandle(process) };
+        (exe, command_line)
+    }
+
+    /// The command line as the process was started with, which Windows copies into `buf` after a
+    /// UNICODE_STRING that points at it.
+    fn command_line(process: Handle) -> Option<String> {
+        // u64s, so the UNICODE_STRING at its start is aligned.
+        let mut buf = vec![0u64; 512];
+        for _ in 0..3 {
+            let bytes = buf.len() * 8;
+            let mut needed = 0u32;
+            // SAFETY: `buf` holds `bytes` writable bytes, as the call is told.
+            let status = unsafe { NtQueryInformationProcess(process, PROCESS_COMMAND_LINE_INFORMATION, buf.as_mut_ptr().cast(), bytes as u32, &mut needed) };
+            if status < 0 {
+                // Too small (it says how much it needs), or not allowed.
+                if needed as usize > bytes {
+                    buf = vec![0u64; (needed as usize).div_ceil(8)];
+                    continue;
+                }
+                return None;
+            }
+            // SAFETY: on success `buf` starts with a UNICODE_STRING.
+            let s = unsafe { &*buf.as_ptr().cast::<UnicodeString>() };
+            let (start, end) = (buf.as_ptr() as usize, buf.as_ptr() as usize + bytes);
+            let text = s.buffer as usize;
+            // Read only what lies inside `buf`.
+            if s.buffer.is_null() || text < start || text + s.length as usize > end {
+                return None;
+            }
+            // SAFETY: checked above to lie inside `buf`, which outlives the slice.
+            let units = unsafe { std::slice::from_raw_parts(s.buffer, s.length as usize / 2) };
+            return Some(String::from_utf16_lossy(units));
+        }
+        None
+    }
 }
 
 #[cfg(not(windows))]
@@ -282,6 +428,23 @@ pub(crate) mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
+    }
+
+    /// The Windows API list reads what PowerShell's Win32_Process does, for this process and the
+    /// ones that started it.
+    #[cfg(windows)]
+    #[test]
+    fn the_api_list_matches_win32_process() {
+        let native = win::list().expect("a process snapshot");
+        let by_powershell = list_by_powershell();
+        let me = std::process::id();
+        let mine = native.iter().find(|p| p.process_id == me).expect("lists this process");
+        let theirs = by_powershell.iter().find(|p| p.process_id == me).expect("PowerShell lists this process");
+        assert_eq!(mine.parent_process_id, theirs.parent_process_id);
+        assert_eq!(mine.name.as_deref().map(str::to_lowercase), theirs.name.as_deref().map(str::to_lowercase));
+        assert_eq!(mine.executable_path, theirs.executable_path);
+        assert_eq!(mine.command_line, theirs.command_line);
+        assert!(mine.command_line.as_deref().is_some_and(|c| c.contains("nitely_core")), "{mine:?}");
     }
 
     #[test]

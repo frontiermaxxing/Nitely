@@ -2048,12 +2048,9 @@ mod tests {
     }
 
     fn fixture(crew: &str) -> Fixture {
-        let base = crate::paths::unique_temp("nitely-crew", "");
+        let base = crate::test_repo::copy("crew", |base| crate::test_repo::init(&base.join("repo"), &[]));
         let repo = base.join("repo");
         std::fs::create_dir_all(repo.join(".nitely")).unwrap();
-        let git = |args: &[&str]| assert!(crate::playbook::run_git(Command::new("git").arg("-C").arg(&repo).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args)).unwrap().status.success(), "{args:?}");
-        git(&["init", "-q", "-b", "main"]);
-        git(&["commit", "-q", "--allow-empty", "-m", "init"]);
         std::fs::write(repo.join(playbook::PLAYBOOK_PATH), format!("[worktree]\ndir = \"../wt/{{key}}\"\n{crew}")).unwrap();
         let mut db = Db::open(&base.join("t.db")).unwrap();
         db.create_project("NIT", "Nitely").unwrap();

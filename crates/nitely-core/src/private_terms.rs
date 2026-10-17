@@ -367,11 +367,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn finds_added_lines_paths_and_messages_and_never_echoes_the_term() {
-        let dir = crate::paths::unique_temp("nitely-terms", "");
-        std::fs::create_dir_all(&dir).unwrap();
-        sh(&dir, &["init", "-q", "-b", "main"]);
+    /// A copy of a repo whose branch `claude/app-1-x` adds terms in every way a branch can.
+    fn branch_with_terms() -> PathBuf {
+        crate::test_repo::copy("terms", |base| history(&base.join("repo"))).join("repo")
+    }
+
+    fn history(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        sh(dir, &["init", "-q", "-b", "main"]);
         std::fs::write(dir.join("a.txt"), "old line mentions Bluebird already\n").unwrap();
         sh(&dir, &["add", "."]);
         sh(&dir, &["commit", "-q", "-m", "init"]);
@@ -417,11 +420,19 @@ mod tests {
         sh(&dir, &["commit", "-q", "-m", "odd name"]);
         // The user's diff settings change nothing.
         sh(&dir, &["config", "diff.noprefix", "true"]);
+    }
 
+    fn app_terms() -> PrivateTerms {
+        terms(&["bluebird"], &["c:/work/secret-client", "re:ticket-\\d+"])
+    }
+
+    #[test]
+    fn finds_added_lines_paths_and_messages() {
+        let dir = branch_with_terms();
         let none = scan(&PrivateTerms::default(), Some("APP"), &dir, "main").unwrap();
         assert!(none.is_empty(), "no list, nothing to find");
 
-        let t = terms(&["bluebird"], &["c:/work/secret-client", "re:ticket-\\d+"]);
+        let t = app_terms();
         let hits = scan(&t, Some("app"), &dir, "main").unwrap();
         let at: Vec<&str> = hits.iter().map(|h| h.at.as_str()).collect();
         let first = sh(&dir, &["rev-parse", "--short=7", ":/Port the change"]).trim().to_string();
@@ -439,13 +450,26 @@ mod tests {
         assert!(at.iter().any(|a| a.starts_with("commit ") && a.ends_with("message line 3")), "{at:?}");
         assert!(!at.iter().any(|a| a.starts_with("a.txt:1 ")), "a line the branch did not add: {at:?}");
         assert_eq!(hits.iter().find(|h| h.at.starts_with("a.txt:3 ")).map(|h| (h.list.as_str(), h.term)), Some(("APP", 1)));
-        assert!(scan(&t, Some("OTHER"), &dir, "main").unwrap().iter().all(|h| h.list == "every project"), "another project's list does not apply");
+        std::fs::remove_dir_all(dir.parent().unwrap()).ok();
+    }
 
-        let err = check_with(&t, Some("APP"), &dir, "main").unwrap_err().to_string();
+    #[test]
+    fn another_projects_list_does_not_apply() {
+        let dir = branch_with_terms();
+        let hits = scan(&app_terms(), Some("OTHER"), &dir, "main").unwrap();
+        assert!(!hits.is_empty() && hits.iter().all(|h| h.list == "every project"), "{:?}", hits.iter().map(|h| &h.at).collect::<Vec<_>>());
+        std::fs::remove_dir_all(dir.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn refuses_a_branch_with_a_term_and_never_echoes_it() {
+        let dir = branch_with_terms();
+        let first = sh(&dir, &["rev-parse", "--short=7", ":/Port the change"]).trim().to_string();
+        let err = check_with(&app_terms(), Some("APP"), &dir, "main").unwrap_err().to_string();
         assert!(err.contains(&format!("a.txt:3 (commit {first}): term 1 of APP's list")), "{err}");
         assert!(!err.to_lowercase().contains("bluebird") || err.contains("path bluebird/"), "the term shows only as part of a path it is in: {err}");
         assert!(!err.to_lowercase().contains("secret-client"), "{err}");
-        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(dir.parent().unwrap()).ok();
     }
 
     #[test]

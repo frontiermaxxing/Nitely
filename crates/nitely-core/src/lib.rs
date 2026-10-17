@@ -49,6 +49,8 @@ pub mod pulse;
 pub mod push;
 pub mod watch;
 pub mod submit;
+#[cfg(test)]
+pub(crate) mod test_repo;
 
 pub use config::{resolve_project, Config, RepoConfig};
 pub use db::Db;

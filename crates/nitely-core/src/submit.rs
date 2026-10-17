@@ -68,11 +68,14 @@ pub struct SubmitOptions<'a> {
 }
 
 pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: &Actor) -> Result<Submitted> {
-    let (worktree, branch_key) = playbook::current_worktree(opts.dir)?;
+    let (worktree, branch) = playbook::worktree_and_branch(opts.dir)?;
+    let (_, branch_key) = crate::git::parse_branch(&branch);
     let root = playbook::repo_root(config, opts.dir).with_context(|| format!("{} is not inside a git repo", opts.dir))?;
     let pb = Playbook::load(&root)?;
     let base = pb.integration_branch().to_string();
-    let branch = git(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"])?.trim().to_string();
+    if branch.is_empty() {
+        bail!("{} has no commit on its branch yet; submit from the worktree start_task made", worktree.display());
+    }
     if branch == base || branch == "HEAD" {
         bail!("{branch} is not a task branch; submit from the worktree start_task made");
     }
@@ -445,9 +448,9 @@ pub fn patch_id(worktree: &Path, base: &str) -> Result<String> {
 }
 
 fn rebase_in_progress(worktree: &Path) -> bool {
-    ["rebase-merge", "rebase-apply"].iter().any(|d| {
-        git(worktree, &["rev-parse", "--git-path", d]).is_ok_and(|p| worktree.join(p.trim()).exists())
-    })
+    // Both paths from one git call, a line each.
+    git(worktree, &["rev-parse", "--git-path", "rebase-merge", "--git-path", "rebase-apply"])
+        .is_ok_and(|paths| paths.lines().any(|p| !p.trim().is_empty() && worktree.join(p.trim()).exists()))
 }
 
 /// Pushes the branch. `--force-with-lease` lets a rebased branch replace its own old head but
@@ -511,7 +514,8 @@ fn to_json<T: Serialize + ?Sized>(v: &T) -> String {
 mod tests {
     use super::*;
     use crate::issues::NewIssue;
-    use std::process::Command;
+    use crate::test_repo::git as sh;
+    use std::path::PathBuf;
 
     #[test]
     fn rounds_that_do_not_converge_go_to_a_person() {
@@ -562,26 +566,19 @@ mod tests {
         assert_eq!(not_converging(&after_a_pass, &new()), None, "three in a row since the pass");
     }
 
-    #[test]
-    fn submits_with_a_review_and_routes_flags_to_a_human() {
-        let base = crate::paths::unique_temp("nitely-submit", "");
-        let repo = base.join("repo");
-        let remote = base.join("remote.git");
-        std::fs::create_dir_all(repo.join(".nitely")).unwrap();
-        let sh = |dir: &Path, args: &[&str]| {
-            let o = playbook::run_git(Command::new("git").arg("-C").arg(dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args)).unwrap();
-            assert!(o.status.success(), "git {args:?}: {} {}", o.status, String::from_utf8_lossy(&o.stderr));
-        };
-        playbook::run_git(Command::new("git").args(["init", "-q", "--bare"]).arg(&remote)).unwrap();
-        sh(&repo, &["init", "-q", "-b", "main"]);
-        sh(&repo, &["config", "user.name", "t"]);
-        sh(&repo, &["config", "user.email", "t@t"]);
-        // Only the fake `claude` reviewer is installed, so Claude's branches get a same-vendor
-        // review. It flags money whenever the diff touches a billing file, finds an edge case
-        // in a first look at an edge file, and on a re-review says that finding is still open.
-        std::fs::write(
-            repo.join("review.sh"),
-            r#"prompt=$(cat)
+    /// A repo whose playbook gates with `exit 0`, pushed to a bare remote. Only the fake `claude`
+    /// reviewer is installed, so Claude's branches get a same-vendor review. It flags money
+    /// whenever the diff touches a billing file, finds an edge case in a first look at an edge
+    /// file, and on a re-review says that finding is still open.
+    struct Fixture {
+        base: PathBuf,
+        repo: PathBuf,
+        db: Db,
+        actor: Actor,
+        config: crate::Config,
+    }
+
+    const REVIEW_SH: &str = r#"prompt=$(cat)
 files=$(git diff main...HEAD --name-only)
 money=no; case "$files" in *billing*) money=yes;; esac
 case "$prompt" in
@@ -596,12 +593,9 @@ case "$prompt" in
      esac;;
 esac
 echo "MONEY: $money"
-"#,
-        )
-        .unwrap();
-        std::fs::write(
-            repo.join(playbook::PLAYBOOK_PATH),
-            r#"
+"#;
+
+    const PLAYBOOK: &str = r#"
 [worktree]
 dir = "../wt/{key}"
 [gate]
@@ -613,19 +607,22 @@ commands = { claude = ["{sh}", "review.sh"], codex = ["nitely-test-no-such-codex
 name = "MONEY"
 question = "the change alters billing"
 reason = "money logic"
-"#
-            .replace("{sh}", &playbook::posix_sh()),
-        )
-        .unwrap();
-        sh(&repo, &["add", "."]);
-        sh(&repo, &["commit", "-q", "-m", "init"]);
-        sh(&repo, &["remote", "add", "origin", &remote.to_string_lossy()]);
-        sh(&repo, &["push", "-q", "origin", "main"]);
+"#;
 
-        let mut db = Db::open(&base.join("t.db")).unwrap();
+    fn fixture() -> Fixture {
+        let base = crate::test_repo::copy("submit", |base| {
+            let repo = base.join("repo");
+            let playbook = PLAYBOOK.replace("{sh}", &playbook::posix_sh());
+            crate::test_repo::init(&repo, &[("review.sh", REVIEW_SH), (playbook::PLAYBOOK_PATH, &playbook)]);
+            crate::test_repo::add_remote(&repo, &base.join("remote.git"));
+        });
+        let db = Db::open(&base.join("t.db")).unwrap();
         db.create_project("NIT", "Nitely").unwrap();
-        let actor = Actor::Agent("claude:test".into());
-        let new = |title: &str| NewIssue {
+        Fixture { repo: base.join("repo"), base, db, actor: Actor::Agent("claude:test".into()), config: crate::Config::default() }
+    }
+
+    fn new(title: &str) -> NewIssue {
+        NewIssue {
             project: "NIT".into(),
             title: title.into(),
             kind: "feature".into(),
@@ -637,173 +634,179 @@ reason = "money logic"
             state: None,
             blocked_by: vec![],
             ..Default::default()
-        };
-        let config = crate::Config::default();
+        }
+    }
 
+    impl Fixture {
+        /// An issue In Progress with its worktree started; nothing committed there yet.
+        fn started(&mut self, title: &str) -> (IssueRecord, PathBuf) {
+            let issue = self.db.create_issue(&new(title), &self.actor).unwrap();
+            self.db.move_issue(&issue.key, "In Progress", None, None, &self.actor).unwrap();
+            let started = playbook::start_task(&self.db, &self.repo, &issue, "claude", &self.actor).unwrap();
+            (issue, PathBuf::from(started.worktree))
+        }
+
+        /// An issue whose worktree has `file` committed.
+        fn committed(&mut self, title: &str, file: &str) -> (IssueRecord, PathBuf) {
+            let (issue, wt) = self.started(title);
+            std::fs::write(wt.join(file), "x").unwrap();
+            sh(&wt, &["add", "."]);
+            sh(&wt, &["commit", "-q", "-m", title]);
+            (issue, wt)
+        }
+
+        fn submit(&mut self, wt: &Path, local_only: bool) -> Result<Submitted> {
+            let dir = wt.to_string_lossy().into_owned();
+            let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only };
+            submit(&mut self.db, &self.config, &opts, &self.actor)
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.base).ok();
+        }
+    }
+
+    #[test]
+    fn submits_with_a_review_and_routes_flags_to_a_human() {
+        let mut f = fixture();
         for (title, file, approver, state) in
             [("Sidebar polish", "sidebar.txt", "agent", "In Review"), ("Billing fix", "billing.txt", "human", "Needs You")]
         {
-            let issue = db.create_issue(&new(title), &actor).unwrap();
-            db.move_issue(&issue.key, "In Progress", None, None, &actor).unwrap();
-            let started = playbook::start_task(&db, &repo, &issue, "claude", &actor).unwrap();
-            let wt = Path::new(&started.worktree);
+            let (issue, wt) = f.started(title);
             std::fs::write(wt.join(file), "x").unwrap();
-            let dir = started.worktree.as_str();
-            let opts = SubmitOptions { dir, issue_key: None, skip_review: false, local_only: false };
-            let empty = submit(&mut db, &config, &opts, &actor).unwrap_err().to_string();
+            let empty = f.submit(&wt, false).unwrap_err().to_string();
             assert!(empty.contains("no changes"), "{empty}");
-            sh(wt, &["add", "."]);
-            sh(wt, &["commit", "-q", "-m", title]);
+            sh(&wt, &["add", "."]);
+            sh(&wt, &["commit", "-q", "-m", title]);
 
-            let s = submit(&mut db, &config, &opts, &actor).unwrap();
+            let s = f.submit(&wt, false).unwrap();
             assert!(s.gate.passed && s.pushed, "{s:?}");
             let review = s.review.as_ref().unwrap();
             assert_eq!((review.verdict.as_str(), review.reviewer.as_str()), ("pass", "claude"));
             assert_eq!(review.note, "same vendor: codex not installed");
             assert_eq!((s.approver.as_str(), s.state.as_str()), (approver, state), "{s:?}");
-            assert_eq!(db.reviews(&issue.key).unwrap()[0].note, "same vendor: codex not installed");
+            assert_eq!(f.db.reviews(&issue.key).unwrap()[0].note, "same vendor: codex not installed");
             assert!(describe(&issue, &s, Default::default()).contains("**Review** by claude (same vendor: codex not installed)"));
             // A local bare remote is not a code host, so there is no PR, and it says why.
             assert!(s.pr_url.is_none() && s.pr_error.as_deref().unwrap().contains("not on GitHub"));
-            assert_eq!(db.reviews(&issue.key).unwrap()[0].patch_id, s.patch_id);
+            assert_eq!(f.db.reviews(&issue.key).unwrap()[0].patch_id, s.patch_id);
             assert!(describe(&issue, &s, Default::default()).contains(&format!("patch={}", s.patch_id)));
         }
+    }
 
+    #[test]
+    fn a_second_round_checks_the_first_rounds_finding() {
+        let mut f = fixture();
         // A second round checks the first round's finding and carries it while it is open.
-        let issue = db.create_issue(&new("Edge handling"), &actor).unwrap();
-        db.move_issue(&issue.key, "In Progress", None, None, &actor).unwrap();
-        let started = playbook::start_task(&db, &repo, &issue, "claude", &actor).unwrap();
-        let wt = Path::new(&started.worktree);
-        let opts = SubmitOptions { dir: started.worktree.as_str(), issue_key: None, skip_review: false, local_only: true };
-        std::fs::write(wt.join("edge.txt"), "x").unwrap();
-        sh(wt, &["add", "."]);
-        sh(wt, &["commit", "-q", "-m", "edge"]);
-        let first = submit(&mut db, &config, &opts, &actor).unwrap();
+        let (issue, wt) = f.committed("Edge handling", "edge.txt");
+        let first = f.submit(&wt, true).unwrap();
         let review = first.review.as_ref().unwrap();
         assert!(review.previous.is_empty() && !review.findings[0].carried, "{review:?}");
         std::fs::write(wt.join("edge.txt"), "let edge = 2;").unwrap();
-        sh(wt, &["commit", "-q", "-am", "edge again"]);
-        let second = submit(&mut db, &config, &opts, &actor).unwrap();
+        sh(&wt, &["commit", "-q", "-am", "edge again"]);
+        let second = f.submit(&wt, true).unwrap();
         let review = second.review.as_ref().unwrap();
         assert_eq!(review.previous.iter().map(|r| r.status.as_str()).collect::<Vec<_>>(), ["open"], "{review:?}");
         assert_eq!((review.findings.len(), review.findings[0].carried, review.verdict.as_str()), (1, true, "pass"));
         assert!(describe(&issue, &second, Default::default()).contains("Previous round's findings: 1 still open."));
-        assert!(db.reviews(&issue.key).unwrap()[0].findings[0].carried);
+        assert!(f.db.reviews(&issue.key).unwrap()[0].findings[0].carried);
+    }
 
+    #[test]
+    fn a_p1_that_two_rounds_leave_open_goes_to_a_person() {
+        let mut f = fixture();
         // A P1 that two rounds of fixes leave open sends the issue to a person instead of a
         // fourth round.
-        let issue = db.create_issue(&new("Stuck fix"), &actor).unwrap();
-        db.move_issue(&issue.key, "In Progress", None, None, &actor).unwrap();
-        let started = playbook::start_task(&db, &repo, &issue, "claude", &actor).unwrap();
-        let wt = Path::new(&started.worktree);
-        let opts = SubmitOptions { dir: started.worktree.as_str(), issue_key: None, skip_review: false, local_only: true };
+        let (issue, wt) = f.started("Stuck fix");
         std::fs::write(wt.join("stuck.txt"), "let stuck = 1;").unwrap();
-        sh(wt, &["add", "."]);
-        sh(wt, &["commit", "-q", "-m", "stuck"]);
-        let states: Vec<String> = (0..3).map(|_| submit(&mut db, &config, &opts, &actor).unwrap().state).collect();
+        sh(&wt, &["add", "."]);
+        sh(&wt, &["commit", "-q", "-m", "stuck"]);
+        let states: Vec<String> = (0..3).map(|_| f.submit(&wt, true).unwrap().state).collect();
         assert_eq!(states, ["In Progress", "In Progress", "Needs You"]);
-        let last: String = db
+        let last: String = f
+            .db
             .conn
             .query_row("SELECT summary FROM event WHERE issue_key = ?1 AND type = 'submit' ORDER BY id DESC LIMIT 1", [&issue.key], |r| r.get(0))
             .unwrap();
         assert!(last.contains("not converging") && last.contains("[P1] Stuck: stuck.txt"), "{last}");
         // A decision about the change, not the person's own work (NIT-220): the owner stays the agent,
         // and the open finding waits in the Inbox as a request to accept it, or send it back.
-        let stuck = db.issue(&issue.key).unwrap().unwrap();
+        let stuck = f.db.issue(&issue.key).unwrap().unwrap();
         assert_eq!((stuck.owner.as_str(), stuck.state.as_str()), ("agent", "Needs You"));
-        let requests: Vec<crate::issues::Ask> = db.open_asks().unwrap().into_iter().filter(|a| a.issue_key.as_deref() == Some(issue.key.as_str())).collect();
+        let requests: Vec<crate::issues::Ask> = f.db.open_asks().unwrap().into_iter().filter(|a| a.issue_key.as_deref() == Some(issue.key.as_str())).collect();
         assert_eq!(requests.len(), 1, "{requests:?}");
         assert!(requests[0].finding.as_ref().is_some_and(|f| f.priority == 1 && f.text.starts_with("Stuck: stuck.txt")), "{requests:?}");
         assert!(requests[0].question.contains("not converging"), "{}", requests[0].question);
         // Done is refused while the change is not landed: it is not on the integration branch.
-        let done = db.move_issue(&issue.key, "Done", Some("Done by the human, outside Nitely."), None, &Actor::Human).unwrap_err().to_string();
+        let done = f.db.move_issue(&issue.key, "Done", Some("Done by the human, outside Nitely."), None, &Actor::Human).unwrap_err().to_string();
         assert!(done.contains("never landed"), "{done}");
         // Sent back, the count starts over: the next round that carries it is not escalated.
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        db.decline_finding(requests[0].id, "fix it properly", "").unwrap();
+        f.db.decline_finding(requests[0].id, "fix it properly", "").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        assert_eq!(submit(&mut db, &config, &opts, &actor).unwrap().state, "In Progress");
+        assert_eq!(f.submit(&wt, true).unwrap().state, "In Progress");
+    }
 
+    #[test]
+    fn a_signed_out_reviewer_is_passed_over() {
+        let mut f = fixture();
         // A preferred reviewer that is installed but signed out is passed over: the next one
         // reviews, and the note says why.
-        let pb_path = repo.join(playbook::PLAYBOOK_PATH);
+        let pb_path = f.repo.join(playbook::PLAYBOOK_PATH);
         let pb = std::fs::read_to_string(&pb_path).unwrap();
         std::fs::write(&pb_path, pb.replace("codex = [\"nitely-test-no-such-codex\"]", &format!("codex = [\"{}\", \"-c\", \"echo 'Error: not logged in' >&2; exit 1\"]", playbook::posix_sh()))).unwrap();
-        let issue = db.create_issue(&new("Signed out"), &actor).unwrap();
-        db.move_issue(&issue.key, "In Progress", None, None, &actor).unwrap();
-        let started = playbook::start_task(&db, &repo, &issue, "claude", &actor).unwrap();
-        let wt = Path::new(&started.worktree);
-        std::fs::write(wt.join("signed.txt"), "x").unwrap();
-        sh(wt, &["add", "."]);
-        sh(wt, &["commit", "-q", "-m", "signed"]);
-        let opts = SubmitOptions { dir: started.worktree.as_str(), issue_key: None, skip_review: false, local_only: true };
-        let s = submit(&mut db, &config, &opts, &actor).unwrap();
+        let (issue, wt) = f.committed("Signed out", "signed.txt");
+        let s = f.submit(&wt, true).unwrap();
         let review = s.review.as_ref().unwrap();
         assert_eq!((review.reviewer.as_str(), review.note.as_str()), ("claude", "same vendor: codex could not run: not signed in"), "{s:?}");
-        let failed: String = db
+        let failed: String = f
+            .db
             .conn
             .query_row("SELECT summary FROM event WHERE issue_key = ?1 AND type = 'review_failed'", [&issue.key], |r| r.get(0))
             .unwrap();
         assert!(failed.contains("codex could not run (not signed in)"), "{failed}");
-        std::fs::write(&pb_path, &pb).unwrap();
+    }
 
+    #[test]
+    fn a_cross_vendor_rule_sends_a_same_vendor_review_to_a_human() {
+        let mut f = fixture();
         // A playbook that requires another vendor's review sends a same-vendor one to a human, and
         // with no reviewer installed at all, submit says what to install.
-        let pb_path = repo.join(playbook::PLAYBOOK_PATH);
+        let pb_path = f.repo.join(playbook::PLAYBOOK_PATH);
         let pb = std::fs::read_to_string(&pb_path).unwrap();
-        std::fs::write(&pb_path, pb.replace("[review]
-", "[review]
-require_cross_vendor = true
-")).unwrap();
-        let issue = db.create_issue(&new("Footer tweak"), &actor).unwrap();
-        db.move_issue(&issue.key, "In Progress", None, None, &actor).unwrap();
-        let started = playbook::start_task(&db, &repo, &issue, "claude", &actor).unwrap();
-        let wt = Path::new(&started.worktree);
-        std::fs::write(wt.join("footer.txt"), "x").unwrap();
-        sh(wt, &["add", "."]);
-        sh(wt, &["commit", "-q", "-m", "footer"]);
-        let opts = SubmitOptions { dir: started.worktree.as_str(), issue_key: None, skip_review: false, local_only: true };
-        let s = submit(&mut db, &config, &opts, &actor).unwrap();
+        std::fs::write(&pb_path, pb.replace("[review]\n", "[review]\nrequire_cross_vendor = true\n")).unwrap();
+        let (_, wt) = f.committed("Footer tweak", "footer.txt");
+        let s = f.submit(&wt, true).unwrap();
         assert_eq!((s.approver.as_str(), s.state.as_str()), ("human", "Needs You"), "{s:?}");
         assert!(s.reasons[0].contains("requires a review by another vendor"), "{:?}", s.reasons);
         std::fs::write(&pb_path, pb.replace("\"{sh}\", \"review.sh\"]".replace("{sh}", &playbook::posix_sh()).as_str(), "\"nitely-test-no-such-claude\"]")).unwrap();
-        let none = submit(&mut db, &config, &opts, &actor).unwrap_err().to_string();
+        let none = f.submit(&wt, true).unwrap_err().to_string();
         assert!(none.contains("no reviewer can run") && none.contains("nitely-test-no-such"), "{none}");
-        std::fs::write(&pb_path, pb).unwrap();
+    }
 
+    #[test]
+    fn a_failed_push_hands_nothing_in_and_a_repo_without_origin_is_local() {
+        let mut f = fixture();
         // A push that fails hands nothing in, so the issue stays In Progress.
-        sh(&repo, &["remote", "set-url", "origin", &base.join("missing.git").to_string_lossy()]);
-        let issue = db.create_issue(&new("Header tweak"), &actor).unwrap();
-        db.move_issue(&issue.key, "In Progress", None, None, &actor).unwrap();
-        let started = playbook::start_task(&db, &repo, &issue, "claude", &actor).unwrap();
-        let wt = Path::new(&started.worktree);
-        std::fs::write(wt.join("header.txt"), "x").unwrap();
-        sh(wt, &["add", "."]);
-        sh(wt, &["commit", "-q", "-m", "header"]);
-        let opts = SubmitOptions { dir: started.worktree.as_str(), issue_key: None, skip_review: false, local_only: false };
-        let s = submit(&mut db, &config, &opts, &actor).unwrap();
+        sh(&f.repo, &["remote", "set-url", "origin", &f.base.join("missing.git").to_string_lossy()]);
+        let (_, wt) = f.committed("Header tweak", "header.txt");
+        let s = f.submit(&wt, false).unwrap();
         assert!(!s.pushed && s.pr_error.as_deref().unwrap().contains("push failed"), "{s:?}");
         assert_eq!(s.state, "In Progress");
         assert!(s.next.contains("push failed"), "{}", s.next);
 
         // A repo with no origin at all is local: submit hands the change in without a push, and
         // land lands it without one.
-        sh(&repo, &["remote", "remove", "origin"]);
-        let issue = db.create_issue(&new("Local tweak"), &actor).unwrap();
-        db.move_issue(&issue.key, "In Progress", None, None, &actor).unwrap();
-        let started = playbook::start_task(&db, &repo, &issue, "claude", &actor).unwrap();
-        let wt = Path::new(&started.worktree);
-        std::fs::write(wt.join("local.txt"), "x").unwrap();
-        sh(wt, &["add", "."]);
-        sh(wt, &["commit", "-q", "-m", "local"]);
-        let opts = SubmitOptions { dir: started.worktree.as_str(), issue_key: None, skip_review: false, local_only: false };
-        let s = submit(&mut db, &config, &opts, &actor).unwrap();
+        sh(&f.repo, &["remote", "remove", "origin"]);
+        let (issue, wt) = f.committed("Local tweak", "local.txt");
+        let s = f.submit(&wt, false).unwrap();
         assert!(!s.pushed && s.pr_error.is_none(), "{s:?}");
         assert_eq!(s.state, "In Review", "{s:?}");
-        let dir = repo.to_string_lossy().into_owned();
+        let dir = f.repo.to_string_lossy().into_owned();
         let land = crate::land::LandOptions { dir: &dir, issue_key: &issue.key, push: true, keep: false, break_lock: false };
-        let landed = crate::land::land(&mut db, &config, &land, &actor).unwrap();
+        let landed = crate::land::land(&mut f.db, &f.config, &land, &f.actor).unwrap();
         assert!(landed.landed && landed.pushed.is_none(), "{landed:?}");
-        std::fs::remove_dir_all(base).ok();
     }
 }

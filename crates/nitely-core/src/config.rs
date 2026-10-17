@@ -100,10 +100,12 @@ impl Config {
     /// The repo that `dir` is in: its main checkout or any of its linked worktrees, wherever
     /// they live on disk.
     pub fn repo_for_dir(&self, dir: &str) -> Option<&RepoConfig> {
-        let main = crate::git::main_root(dir)?;
-        self.repos
-            .iter()
-            .find(|r| paths::normalize(&r.root) == paths::normalize(&main))
+        self.repo_for_main(&crate::git::main_root(dir)?)
+    }
+
+    /// The repo whose main checkout is `main`.
+    pub fn repo_for_main(&self, main: &str) -> Option<&RepoConfig> {
+        self.repos.iter().find(|r| paths::normalize(&r.root) == paths::normalize(main))
     }
 
     /// Points repos that name project `from` at `to`, or at no project when `to` is None.

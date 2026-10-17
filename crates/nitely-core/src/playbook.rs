@@ -764,10 +764,8 @@ pub(crate) fn tail(s: &str) -> String {
 /// The main checkout of the repo `dir` is in: the watched repo's root when Nitely knows it,
 /// otherwise git's answer.
 pub fn repo_root(config: &crate::Config, dir: &str) -> Option<PathBuf> {
-    config
-        .repo_for_dir(dir)
-        .map(|r| PathBuf::from(&r.root))
-        .or_else(|| crate::git::main_root(dir).map(PathBuf::from))
+    let main = crate::git::main_root(dir)?;
+    Some(config.repo_for_main(&main).map_or_else(|| PathBuf::from(&main), |r| PathBuf::from(&r.root)))
 }
 
 /// The main checkout an issue's work happens in: the repo linked to the issue's project, so an
@@ -775,9 +773,12 @@ pub fn repo_root(config: &crate::Config, dir: &str) -> Option<PathBuf> {
 /// the project, the one `dir` is in; when none does, the repo `dir` is in, unless that repo holds
 /// another project's work.
 pub fn repo_for_issue(config: &crate::Config, project: Option<&str>, dir: &str) -> Result<PathBuf> {
-    let here = config.repo_for_dir(dir);
+    // Asked of git once: the main checkout `dir` is in, and the repo it is.
+    let main = crate::git::main_root(dir);
+    let here = main.as_deref().and_then(|m| config.repo_for_main(m));
+    let root_here = || main.as_deref().map(|m| here.map_or_else(|| PathBuf::from(m), |r| PathBuf::from(&r.root)));
     let Some(project) = project else {
-        return repo_root(config, dir).with_context(|| format!("{dir} is not inside a git repo"));
+        return root_here().with_context(|| format!("{dir} is not inside a git repo"));
     };
     let is_project = |r: &crate::config::RepoConfig| r.project.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(project));
     let linked: Vec<&crate::config::RepoConfig> = config.repos.iter().filter(|r| is_project(r)).collect();
@@ -800,7 +801,7 @@ pub fn repo_for_issue(config: &crate::Config, project: Option<&str>, dir: &str) 
             );
         }
     }
-    repo_root(config, dir).with_context(|| format!("{dir} is not inside a git repo, and no repo is linked to {project}"))
+    root_here().with_context(|| format!("{dir} is not inside a git repo, and no repo is linked to {project}"))
 }
 
 /// The worktree of `root` whose branch names the issue; None when there is none.
@@ -819,11 +820,25 @@ pub fn issue_worktree(root: &Path, key: &str) -> Result<Option<PathBuf>> {
 
 /// The worktree `dir` is in, and the issue its branch names (`claude/nit-3-...` is NIT-3).
 pub fn current_worktree(dir: &str) -> Result<(PathBuf, Option<String>)> {
+    let (top, branch) = worktree_and_branch(dir)?;
+    let (_, key) = crate::git::parse_branch(&branch);
+    Ok((top, key))
+}
+
+/// The worktree `dir` is in, and the branch checked out there: `HEAD` when detached, empty when
+/// git cannot say (a branch with no commits yet).
+pub fn worktree_and_branch(dir: &str) -> Result<(PathBuf, String)> {
     let dir = Path::new(dir);
+    // Both from one git call; it fails on a branch with no commits, which the two calls below
+    // tell apart from a folder outside any worktree.
+    if let Ok(out) = git(dir, &["rev-parse", "--show-toplevel", "--abbrev-ref", "HEAD"]) {
+        if let [top, branch] = out.lines().map(str::trim).collect::<Vec<_>>()[..] {
+            return Ok((PathBuf::from(top), branch.to_string()));
+        }
+    }
     let top = git(dir, &["rev-parse", "--show-toplevel"]).context("not inside a git worktree")?;
     let branch = git(dir, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
-    let (_, key) = crate::git::parse_branch(branch.trim());
-    Ok((PathBuf::from(top.trim()), key))
+    Ok((PathBuf::from(top.trim()), branch.trim().to_string()))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -985,14 +1000,15 @@ pub fn run_gate(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<&s
         bail!("this repo's playbook has no gate commands; add them under [gate] in {PLAYBOOK_PATH}");
     }
     let base = playbook.integration_branch();
-    let since = diff_base(worktree, base);
     let commit = git(worktree, &["rev-parse", "--short", "HEAD"]).unwrap_or_default().trim().to_string();
+    // What changed, for the steps that skip by it; four git calls, so only when there are some.
     // --no-renames: a moved file counts as a change at both paths.
-    let files: Vec<String> = git(worktree, &["diff", "--name-only", "--no-renames", &format!("{since}...HEAD")])
-        .unwrap_or_default()
-        .lines()
-        .map(str::to_string)
-        .collect();
+    let files: Vec<String> = if playbook.gate.steps.is_empty() {
+        vec![]
+    } else {
+        let since = diff_base(worktree, base);
+        git(worktree, &["diff", "--name-only", "--no-renames", &format!("{since}...HEAD")]).unwrap_or_default().lines().map(str::to_string).collect()
+    };
     let mut steps: Vec<(String, Option<String>)> = playbook.gate.commands.iter().map(|c| (c.clone(), None)).collect();
     for step in &playbook.gate.steps {
         steps.push((step.run.clone(), step.skip_reason(&files)?));

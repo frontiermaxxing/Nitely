@@ -6,7 +6,18 @@ pub fn data_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("NITELY_HOME") {
         return PathBuf::from(dir);
     }
+    // This crate's tests never read or write the person's own data (their config, their private
+    // terms): a folder of the test run's own instead, which only a test that writes there makes.
+    #[cfg(test)]
+    return test_data_dir();
+    #[cfg(not(test))]
     real_data_dir()
+}
+
+#[cfg(test)]
+fn test_data_dir() -> PathBuf {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| unique_temp("nitely-test-home", "")).clone()
 }
 
 /// The person's own data directory, whatever `NITELY_HOME` says: what the test harness refuses.
