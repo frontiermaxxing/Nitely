@@ -19,7 +19,10 @@ shows on the issue's timeline and in the app. A repo without a playbook gets `ma
 branches and worktrees in `../{repo}-worktrees/`. Nitely's own is in [.nitely/playbook.toml](../.nitely/playbook.toml).
 Gate steps can depend on what the branch changes (`when_changed`, `unless_only`), commands can use
 `{main}`, `{worktree}` and `{base}`, and `[approval] blocked_paths` lists paths no task branch may
-touch. [docs/playbooks/example.toml](playbooks/example.toml) is a worked example of a full
+touch. A gate command that fails runs once more at the same commit before the gate fails
+(`[gate] retries`, 1 by default, 0 to turn it off). One that then passes is a flake: the gate
+passes, its result lists the command and the tests that failed under `flaked`, and a `gate_flaked`
+event goes on the issue's timeline, so flakes are counted rather than hidden. [docs/playbooks/example.toml](playbooks/example.toml) is a worked example of a full
 playbook for a made-up monorepo: per-OS branches, worktree setup and teardown, gate steps that skip
 what a change cannot affect, review flags, and paths that wait for you.
 

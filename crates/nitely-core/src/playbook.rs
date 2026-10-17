@@ -181,8 +181,8 @@ fn setup_fingerprint(rules: &WorktreeRules, worktree: &Path) -> String {
 /// Runs setup again when the dependency files changed since it last ran (a rebase brought a new
 /// dependency, or the agent added one), so the gate does not fail on a stale node_modules or
 /// target. A worktree from before this was recorded is taken as set up. Returns the setup results,
-/// and false when one failed.
-fn refresh_setup(rules: &WorktreeRules, worktree: &Path, main: &Path, base: &str) -> Result<(Vec<CommandResult>, bool)> {
+/// and false when one failed; a command that failed and then passed goes in `flakes`.
+fn refresh_setup(rules: &WorktreeRules, worktree: &Path, main: &Path, base: &str, retries: u32, flakes: &mut Vec<Flake>) -> Result<(Vec<CommandResult>, bool)> {
     if rules.setup.is_empty() {
         return Ok((vec![], true));
     }
@@ -199,8 +199,10 @@ fn refresh_setup(rules: &WorktreeRules, worktree: &Path, main: &Path, base: &str
     let mut results = Vec::new();
     for command in &rules.setup {
         let command = expand(command, main, worktree, base);
-        let (ok, output, seconds) = run_shell(&command, worktree)?;
-        results.push(CommandResult { command: format!("{command} (setup again: a dependency file changed)"), ok, seconds, output, skipped: false });
+        let (ok, output, seconds, flake) = run_retrying(&command, worktree, retries)?;
+        let command = format!("{command} (setup again: a dependency file changed)");
+        flakes.extend(flake.map(|f| Flake { command: command.clone(), ..f }));
+        results.push(CommandResult { command, ok, seconds, output, skipped: false });
         if !ok {
             return Ok((results, false));
         }
@@ -209,7 +211,7 @@ fn refresh_setup(rules: &WorktreeRules, worktree: &Path, main: &Path, base: &str
     Ok((results, true))
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GateRules {
     /// Must all pass before a change can land. Run in the task's worktree, in order.
     #[serde(default)]
@@ -217,6 +219,68 @@ pub struct GateRules {
     /// Commands that run only for some changes, after `commands`.
     #[serde(default)]
     pub steps: Vec<GateStep>,
+    /// How many times a failing command (or a setup run again before the gate) runs again at the
+    /// same commit before the gate fails. One that then passes is a flake: the gate passes and
+    /// says so, with the tests that failed (a `gate_flaked` event). 0 turns this off.
+    #[serde(default = "one")]
+    pub retries: u32,
+}
+
+impl Default for GateRules {
+    fn default() -> Self {
+        GateRules { commands: vec![], steps: vec![], retries: 1 }
+    }
+}
+
+fn one() -> u32 {
+    1
+}
+
+/// A gate command that failed and then passed at the same commit.
+#[derive(Debug, Clone, Serialize)]
+pub struct Flake {
+    pub command: String,
+    /// The tests the failed run named (cargo's `test x ... FAILED`, node:test's `not ok`).
+    pub tests: Vec<String>,
+    /// The end of the failed run's output.
+    pub output: String,
+}
+
+/// Runs `command`, and again up to `retries` times while it fails. Returns the last run, with
+/// its time counting every run, and the failure it got past when a later run passed.
+fn run_retrying(command: &str, dir: &Path, retries: u32) -> Result<(bool, String, u64, Option<Flake>)> {
+    let (mut ok, mut output, mut seconds) = run_shell(command, dir)?;
+    let mut failed = None;
+    for _ in 0..retries {
+        if ok {
+            break;
+        }
+        failed = Some(output);
+        let again = run_shell(command, dir)?;
+        (ok, output, seconds) = (again.0, again.1, seconds + again.2);
+    }
+    let flake = failed.filter(|_| ok).map(|out| Flake { command: command.to_string(), tests: failed_tests(&out), output: out });
+    Ok((ok, output, seconds, flake))
+}
+
+/// The tests a run's output says failed: cargo's `test x ... FAILED` lines and node:test's
+/// `not ok N - name`, each once, in order.
+pub fn failed_tests(output: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for line in output.lines() {
+        let line = line.trim_end();
+        let name = if let Some(rest) = line.strip_prefix("test ").and_then(|r| r.strip_suffix(" ... FAILED")) {
+            rest.trim()
+        } else if let Some(rest) = line.strip_prefix("not ok ") {
+            rest.split_once(" - ").map(|(_, n)| n.trim()).unwrap_or("")
+        } else {
+            ""
+        };
+        if !name.is_empty() && !names.iter().any(|n| n == name) {
+            names.push(name.to_string());
+        }
+    }
+    names
 }
 
 /// A gate command that depends on what the branch changes (against the integration branch).
@@ -739,6 +803,10 @@ pub struct GateResult {
     /// Playbook keys this nitely ignored.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// Commands that failed and then passed on a later run (`[gate] retries`): the gate passed,
+    /// but these tests are flaky.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub flaked: Vec<Flake>,
 }
 
 /// Creates the issue's branch and worktree from the integration branch and runs the setup
@@ -799,7 +867,8 @@ pub fn diff_base(worktree: &Path, base: &str) -> String {
 }
 
 /// Runs the gate commands in `worktree` and records the outcome on the issue's timeline.
-/// Stops at the first failure, so the agent sees the error that matters.
+/// Stops at the first failure, so the agent sees the error that matters. A failing command runs
+/// again first (`[gate] retries`); one that then passes is recorded as a flake.
 pub fn run_gate(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<&str>, actor: &Actor) -> Result<GateResult> {
     let playbook = Playbook::load(repo_root)?;
     if playbook.gate.commands.is_empty() && playbook.gate.steps.is_empty() {
@@ -820,7 +889,9 @@ pub fn run_gate(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<&s
     }
 
     // A stale setup fails the gate for reasons that are not the change's; set up again first.
-    let (mut results, mut passed) = refresh_setup(&playbook.worktree, worktree, repo_root, base)?;
+    let retries = playbook.gate.retries;
+    let mut flaked = Vec::new();
+    let (mut results, mut passed) = refresh_setup(&playbook.worktree, worktree, repo_root, base, retries, &mut flaked)?;
     if !passed {
         steps.clear();
     }
@@ -830,20 +901,26 @@ pub fn run_gate(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<&s
             results.push(CommandResult { command, ok: true, seconds: 0, output: format!("skipped: {why}"), skipped: true });
             continue;
         }
-        let (ok, output, seconds) = run_shell(&command, worktree)?;
+        let (ok, output, seconds, flake) = run_retrying(&command, worktree, retries)?;
+        flaked.extend(flake);
         results.push(CommandResult { command, ok, seconds, output, skipped: false });
         if !ok {
             passed = false;
             break;
         }
     }
+    let at = Some(worktree.to_string_lossy().into_owned());
+    for f in &flaked {
+        let tests = if f.tests.is_empty() { String::new() } else { format!(": {}", f.tests.join(", ")) };
+        db.log_event(actor, issue_key, at.as_deref(), "gate_flaked", &format!("{} failed at {commit}, then passed when run again{tests}", f.command))?;
+    }
     let summary = if passed {
         format!("Gate passed at {commit}")
     } else {
         format!("Gate failed at {commit}: {}", results.last().map(|r| r.command.as_str()).unwrap_or(""))
     };
-    db.log_event(actor, issue_key, Some(&worktree.to_string_lossy()), if passed { "gate_passed" } else { "gate_failed" }, &summary)?;
-    Ok(GateResult { passed, commit, results, warnings: playbook.unknown_warnings() })
+    db.log_event(actor, issue_key, at.as_deref(), if passed { "gate_passed" } else { "gate_failed" }, &summary)?;
+    Ok(GateResult { passed, commit, results, warnings: playbook.unknown_warnings(), flaked })
 }
 
 /// Fills `{main}` (the main checkout), `{worktree}` and `{base}` in a playbook command.
@@ -1058,6 +1135,58 @@ mod tests {
         let gate = run_gate(&db, &repo, wt, Some("NIT-3"), &actor).unwrap();
         assert_eq!(gate.results.len(), 3, "nothing changed since: {gate:?}");
         std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn a_command_that_fails_then_passes_is_a_flake_and_one_that_keeps_failing_fails() {
+        let base = crate::paths::unique_temp("nitely-flake", "");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(repo.join(".nitely")).unwrap();
+        let sh = |args: &[&str]| assert!(crate::playbook::run_git(Command::new("git").arg("-C").arg(&repo).args(args)).unwrap().status.success());
+        sh(&["init", "-q", "-b", "main"]);
+        sh(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"]);
+        // Fails the first time it runs in a folder, naming a test, and passes after.
+        let flaky = if cfg!(windows) {
+            "if exist ran.txt (exit 0) else (echo test crew::tests::slow ... FAILED& type nul > ran.txt& exit 1)"
+        } else {
+            "if [ -f ran.txt ]; then exit 0; else echo 'test crew::tests::slow ... FAILED'; touch ran.txt; exit 1; fi"
+        };
+        let playbook = |extra: &str| std::fs::write(repo.join(PLAYBOOK_PATH), format!("[gate]\ncommands = [{flaky:?}]\n{extra}")).unwrap();
+        let db = Db::open(&base.join("t.db")).unwrap();
+        let actor = Actor::Agent("claude:test".into());
+
+        playbook("");
+        let gate = run_gate(&db, &repo, &repo, Some("NIT-3"), &actor).unwrap();
+        assert!(gate.passed, "{gate:?}");
+        assert_eq!(gate.flaked.len(), 1);
+        assert_eq!(gate.flaked[0].tests, ["crew::tests::slow"]);
+        let timeline = db.timeline("NIT-3").unwrap();
+        let kinds: Vec<&str> = timeline.iter().map(|t| t.kind.as_str()).collect();
+        assert_eq!(kinds, ["gate_flaked", "gate_passed"]);
+        assert!(timeline[0].summary.as_deref().unwrap_or("").ends_with("then passed when run again: crew::tests::slow"), "{:?}", timeline[0].summary);
+
+        // With retries off the same first failure fails the gate.
+        std::fs::remove_file(repo.join("ran.txt")).unwrap();
+        playbook("retries = 0\n");
+        let gate = run_gate(&db, &repo, &repo, Some("NIT-4"), &actor).unwrap();
+        assert!(!gate.passed && gate.flaked.is_empty(), "{gate:?}");
+
+        // A command that fails every time fails the gate, and is no flake.
+        std::fs::write(repo.join(PLAYBOOK_PATH), "[gate]\ncommands = [\"exit 1\"]\n").unwrap();
+        let gate = run_gate(&db, &repo, &repo, Some("NIT-5"), &actor).unwrap();
+        assert!(!gate.passed && gate.flaked.is_empty(), "{gate:?}");
+        let kinds: Vec<String> = db.timeline("NIT-5").unwrap().into_iter().map(|t| t.kind).collect();
+        assert_eq!(kinds, ["gate_failed"]);
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn names_the_failed_tests_of_cargo_and_node() {
+        let cargo = "test a::ok ... ok\ntest a::bad ... FAILED\n\nfailures:\n    a::bad\n\ntest result: FAILED.";
+        assert_eq!(failed_tests(cargo), ["a::bad"]);
+        let node = "ok 1 - fine\nnot ok 2 - since: counts from the move\n  ---\nnot ok 2 - since: counts from the move\n";
+        assert_eq!(failed_tests(node), ["since: counts from the move"]);
+        assert!(failed_tests("error[E0425]: cannot find value").is_empty());
     }
 
     #[test]

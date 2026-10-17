@@ -22,6 +22,9 @@ setup = [
 teardown = ["node scripts/unlink-sdk.mjs {worktree}"]
 
 [gate]
+# A failing command runs once more before the gate fails; one that then passes is recorded as a
+# flake (gate_flaked). 0 turns this off.
+retries = 1
 # The app reads everything except docs/ and site/, so a change only there skips its steps.
 [[gate.steps]]
 run = "npm run build --workspace app"
