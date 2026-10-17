@@ -239,7 +239,7 @@ impl Push {
         for sub in self.subscriptions() {
             if !paired.contains(&sub.device) {
                 gone.insert((sub.device.clone(), sub.endpoint.clone()));
-                delivery.results.push((sub.endpoint.clone(), Sent::Gone));
+                delivery.results.push((sub.device.clone(), Sent::Gone));
                 continue;
             }
             let Some(message) = message_for(&sub) else { continue };
@@ -249,8 +249,10 @@ impl Push {
                     Sent::Delivered
                 }
                 Ok(404 | 410) => {
+                    // The subscription is gone, not the phone: it may have handed over a new one,
+                    // which is owed what this one missed.
                     gone.insert((sub.device.clone(), sub.endpoint.clone()));
-                    Sent::Gone
+                    Sent::Failed
                 }
                 Ok(status) => {
                     delivery.failed.push(format!("{}: the push service answered {status}", sub.device));
@@ -261,7 +263,7 @@ impl Push {
                     Sent::Failed
                 }
             };
-            delivery.results.push((sub.endpoint.clone(), sent));
+            delivery.results.push((sub.device.clone(), sent));
         }
         if !gone.is_empty() {
             let _g = self.guard();
@@ -293,7 +295,7 @@ impl Push {
 pub struct Delivery {
     pub delivered: usize,
     pub failed: Vec<String>,
-    /// Each subscription's outcome, by endpoint.
+    /// Each phone's outcome, by device id.
     pub results: Vec<(String, Sent)>,
 }
 
@@ -303,7 +305,7 @@ pub enum Sent {
     Delivered,
     /// Not taken this time (the push service was down, say): told again with the next message.
     Failed,
-    /// The subscription is gone, or its phone was removed: forgotten.
+    /// The phone was removed: what it was owed is forgotten.
     Gone,
 }
 
@@ -323,7 +325,7 @@ pub struct Notifier {
     seen: Option<HashSet<String>>,
     pending: Vec<(String, String)>,
     last: Option<Instant>,
-    /// What each phone (by subscription endpoint) was not told yet.
+    /// What each phone (by device id, so it follows a new subscription) was not told yet.
     owed: std::collections::HashMap<String, Vec<(String, String)>>,
 }
 
@@ -347,16 +349,16 @@ impl Notifier {
     }
 
     /// What one phone is told with `batch`: what it is owed, then the new decisions.
-    fn items_for(&self, endpoint: &str, batch: &Batch) -> Vec<(String, String)> {
-        let mut items = self.owed.get(endpoint).cloned().unwrap_or_default();
+    fn items_for(&self, device: &str, batch: &Batch) -> Vec<(String, String)> {
+        let mut items = self.owed.get(device).cloned().unwrap_or_default();
         let fresh: Vec<(String, String)> = batch.new.iter().filter(|(id, _)| !items.iter().any(|(o, _)| o == id)).cloned().collect();
         items.extend(fresh);
         items
     }
 
     /// The message for one phone, or None when it has nothing to be told.
-    pub fn message_for(&self, endpoint: &str, batch: &Batch) -> Option<Value> {
-        let items = self.items_for(endpoint, batch);
+    pub fn message_for(&self, device: &str, batch: &Batch) -> Option<Value> {
+        let items = self.items_for(device, batch);
         if items.is_empty() {
             return None;
         }
@@ -366,14 +368,14 @@ impl Notifier {
     }
 
     /// Records what became of a phone's message: one that did not go out is owed again.
-    pub fn settle(&mut self, endpoint: &str, batch: &Batch, sent: Sent) {
+    pub fn settle(&mut self, device: &str, batch: &Batch, sent: Sent) {
         match sent {
             Sent::Failed => {
-                let items = self.items_for(endpoint, batch);
-                self.owed.insert(endpoint.to_string(), items);
+                let items = self.items_for(device, batch);
+                self.owed.insert(device.to_string(), items);
             }
             Sent::Delivered | Sent::Gone => {
-                self.owed.remove(endpoint);
+                self.owed.remove(device);
             }
         }
     }
