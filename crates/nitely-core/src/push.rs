@@ -225,35 +225,35 @@ impl Push {
     }
 
     /// Sends `message` to every subscribed phone among `paired`. A subscription the push service
-    /// says is gone (404, 410), or whose phone is no longer paired, is forgotten. Returns what
-    /// failed, one line per phone.
-    pub fn notify(&self, paired: &[String], message: &Value, now: i64) -> Vec<String> {
+    /// says is gone (404, 410), or whose phone is no longer paired, is forgotten; one the phone
+    /// replaced meanwhile is kept.
+    pub fn notify(&self, paired: &[String], message: &Value, now: i64) -> Delivery {
         let body = message.to_string();
-        let mut failed = Vec::new();
+        let mut delivery = Delivery::default();
         let mut gone = HashSet::new();
         for sub in self.subscriptions() {
             if !paired.contains(&sub.device) {
-                gone.insert(sub.device.clone());
+                gone.insert((sub.device.clone(), sub.endpoint.clone()));
                 continue;
             }
             match self.send_one(&sub, body.as_bytes(), now) {
-                Ok(200..=299) => {}
+                Ok(200..=299) => delivery.delivered += 1,
                 Ok(404 | 410) => {
-                    gone.insert(sub.device.clone());
+                    gone.insert((sub.device.clone(), sub.endpoint.clone()));
                 }
-                Ok(status) => failed.push(format!("{}: the push service answered {status}", sub.device)),
-                Err(e) => failed.push(format!("{}: {e:#}", sub.device)),
+                Ok(status) => delivery.failed.push(format!("{}: the push service answered {status}", sub.device)),
+                Err(e) => delivery.failed.push(format!("{}: {e:#}", sub.device)),
             }
         }
         if !gone.is_empty() {
             let _g = self.guard();
             let mut subs = self.subscriptions();
-            subs.retain(|s| !gone.contains(&s.device));
+            subs.retain(|s| !gone.contains(&(s.device.clone(), s.endpoint.clone())));
             if let Err(e) = self.save(&subs) {
-                failed.push(format!("{e:#}"));
+                delivery.failed.push(format!("{e:#}"));
             }
         }
-        failed
+        delivery
     }
 
     fn send_one(&self, sub: &Subscription, plaintext: &[u8], now: i64) -> Result<u16> {
@@ -269,6 +269,14 @@ impl Push {
     }
 }
 
+/// What one message did: how many phones' push services took it, and what failed, one line per
+/// phone.
+#[derive(Debug, Default)]
+pub struct Delivery {
+    pub delivered: usize,
+    pub failed: Vec<String>,
+}
+
 /// Decides when to notify: a decision is new the first time it is seen waiting, and new decisions
 /// are told at most once per `THROTTLE`, together. What already waited when watching began is not
 /// told; a decision settled before its turn came is dropped.
@@ -277,6 +285,8 @@ pub struct Notifier {
     seen: Option<HashSet<String>>,
     pending: Vec<(String, String)>,
     last: Option<Instant>,
+    /// What the last message told, until it is known to have gone out.
+    told: Vec<(String, String)>,
 }
 
 impl Notifier {
@@ -291,9 +301,19 @@ impl Notifier {
         }
         self.last = Some(now);
         let new = std::mem::take(&mut self.pending);
+        self.told = new.clone();
         let title = if new.len() == 1 { "A decision waits for you".to_string() } else { format!("{} decisions wait for you", new.len()) };
         let lines: Vec<String> = new.iter().take(3).map(|(_, line)| line.chars().take(140).collect()).collect();
         Some(json!({ "title": title, "body": lines.join("\n"), "waiting": waiting.len() }))
+    }
+
+    /// The last message reached no phone (the push service was down, say): its decisions are told
+    /// again with the next message, while they still wait.
+    pub fn undelivered(&mut self) {
+        let told = std::mem::take(&mut self.told);
+        let mut again: Vec<(String, String)> = told.into_iter().filter(|(id, _)| !self.pending.iter().any(|(p, _)| p == id)).collect();
+        again.append(&mut self.pending);
+        self.pending = again;
     }
 }
 
@@ -397,8 +417,9 @@ mod tests {
         assert!(push.subscribe(Subscription { auth: B64.encode([1u8; 8]), ..sub("e", "x") }).is_err());
         assert_eq!(push.subscriptions().len(), 4, "one per phone");
 
-        let failed = push.notify(&["a".into(), "b".into(), "c".into()], &json!({ "title": "t" }), 1_000);
-        assert_eq!(failed.len(), 1, "{failed:?}");
+        let delivery = push.notify(&["a".into(), "b".into(), "c".into()], &json!({ "title": "t" }), 1_000);
+        let failed = delivery.failed;
+        assert_eq!((delivery.delivered, failed.len()), (1, 1), "{failed:?}");
         assert!(failed[0].starts_with("c: ") && failed[0].contains("503"));
         let sent = sent.lock().unwrap();
         assert_eq!(sent.len(), 3, "d is no longer paired");
@@ -432,5 +453,38 @@ mod tests {
         assert_eq!(later["title"], "2 decisions wait for you", "c was settled meanwhile");
         assert_eq!(later["body"], "line d\nline e");
         assert_eq!(n.tick(t0 + Duration::from_secs(400), &w(&["a", "d", "e"])), None);
+
+        // A message that reached no phone is told again with the next one, while it still waits.
+        let t1 = t0 + Duration::from_secs(1000);
+        assert!(n.tick(t1, &w(&["a", "f", "g"])).is_some());
+        n.undelivered();
+        assert_eq!(n.tick(t1 + Duration::from_secs(30), &w(&["a", "f", "g", "h"])), None, "still the throttle");
+        let again = n.tick(t1 + THROTTLE, &w(&["a", "g", "h"])).unwrap();
+        assert_eq!(again["body"], "line g\nline h", "f was settled meanwhile");
+    }
+
+    #[test]
+    fn a_subscription_replaced_while_the_old_one_is_refused_is_kept() {
+        let store = crate::paths::unique_temp("nitely-push", ".json");
+        let me: Arc<Mutex<Option<Arc<Push>>>> = Arc::new(Mutex::new(None));
+        let rng = SystemRandom::new();
+        let phone_key = B64.encode(agreement::EphemeralPrivateKey::generate(&agreement::ECDH_P256, &rng).unwrap().compute_public_key().unwrap().as_ref());
+        let fresh = Subscription { device: "a".into(), endpoint: "https://fcm.googleapis.com/fcm/send/new".into(), p256dh: phone_key.clone(), auth: B64.encode([1u8; 16]) };
+        let (later, replacement) = (me.clone(), fresh.clone());
+        let send: Sender = Arc::new(move |endpoint: &str, _: &[(&'static str, String)], _: &[u8]| {
+            // The phone hands over a new subscription while the old one is being refused.
+            if endpoint.ends_with("/old") {
+                later.lock().unwrap().clone().unwrap().subscribe(replacement.clone()).unwrap();
+                return Ok(410);
+            }
+            Ok(201)
+        });
+        let push = Arc::new(Push::new(&key(), store.clone(), send).unwrap());
+        *me.lock().unwrap() = Some(push.clone());
+        push.subscribe(Subscription { endpoint: "https://fcm.googleapis.com/fcm/send/old".into(), ..fresh.clone() }).unwrap();
+        let delivery = push.notify(&["a".into()], &json!({ "title": "t" }), 1_000);
+        assert_eq!(delivery.delivered, 0);
+        assert_eq!(push.subscriptions(), [fresh]);
+        std::fs::remove_file(store).ok();
     }
 }

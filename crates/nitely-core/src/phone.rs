@@ -492,11 +492,20 @@ impl Phone {
     /// what failed.
     pub fn notify_tick(&self, notifier: &mut crate::push::Notifier) -> Vec<String> {
         let Some(push) = self.push.get() else { return vec![] };
+        // Without the phone list nothing is sent, and nothing forgotten: a phone missing from an
+        // unreadable list is not a removed one.
+        let paired: Vec<String> = match self.devices() {
+            Ok(d) => d.into_iter().map(|d| d.id).collect(),
+            Err(e) => return vec![format!("the paired phones could not be read: {e:#}")],
+        };
         let Ok(db) = (self.db)() else { return vec![] };
         let Ok((v, _, _)) = decisions(&db) else { return vec![] };
         let Some(message) = notifier.tick(Instant::now(), &waiting_lines(&v)) else { return vec![] };
-        let paired: Vec<String> = self.devices().map(|d| d.into_iter().map(|d| d.id).collect()).unwrap_or_default();
-        push.notify(&paired, &message, now())
+        let delivery = push.notify(&paired, &message, now());
+        if delivery.delivered == 0 && !delivery.failed.is_empty() {
+            notifier.undelivered();
+        }
+        delivery.failed
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
