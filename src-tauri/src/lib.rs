@@ -262,6 +262,7 @@ async fn move_issue(key: String, state: String, evidence: Option<String>, reason
     let approving = nitely_core::issues::parse_state(&state).map_err(err)?.0 == "Approved";
     // The key first: an approval the app cannot sign would not let anything land.
     let secret = if approving { Some(approval_key(&db)?) } else { None };
+    db.check_open_asks(&key, &state).map_err(err)?;
     let moved = db.move_issue(&key, &state, evidence.as_deref(), reason.as_deref(), &ME).map_err(err)?;
     // Approving a playbook proposal applies it and closes its issue at once: nothing to land.
     if let Some(secret) = secret.filter(|_| moved.state == "Approved") {

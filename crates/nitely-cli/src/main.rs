@@ -800,6 +800,7 @@ fn run(cmd: Cmd) -> Result<()> {
                 // A key from before its project changed key names the same issue.
                 IssueCmd::Move { key, state, evidence, reason } => {
                     let key = db.current_key(&key)?;
+                    db.check_open_asks(&key, &state)?;
                     print_json(&db.move_issue(&key, &state, evidence.as_deref(), reason.as_deref(), &me)?)
                 }
                 IssueCmd::Block { key, by } => {

@@ -1080,24 +1080,30 @@ impl Db {
                     issue.key
                 );
             }
-            // Landing closes what was asked about the change; otherwise an open question is answered first.
-            let open: i64 = self.conn.query_row(
-                "SELECT COUNT(*) FROM ask WHERE issue_key = ?1 COLLATE NOCASE AND answer IS NULL AND closed IS NULL",
-                [&issue.key],
-                |r| r.get(0),
-            )?;
-            if open > 0 && landed.is_none() {
-                bail!(
-                    "{} has {open} open question{}: answer {} first (Cancel the issue with a reason to drop {} with it)",
-                    issue.key,
-                    if open == 1 { "" } else { "s" },
-                    if open == 1 { "it" } else { "them" },
-                    if open == 1 { "it" } else { "them" }
-                );
-            }
         }
         if matches!(state, "Canceled" | "Duplicate") && !given(reason) {
             bail!("moving to {state} needs a reason");
+        }
+        Ok(())
+    }
+
+    /// Refuses Done, asked for directly (the app, MCP, the CLI), while a question on the issue is
+    /// open: it is answered first, or the issue canceled to drop it, never dropped silently by a
+    /// Done (NIT-220). Nitely's own closing moves decide their asks themselves: a land closes what
+    /// was asked about the change, an approved playbook change or goal plan answers its issue.
+    pub fn check_open_asks(&self, key: &str, to: &str) -> Result<()> {
+        if !to.eq_ignore_ascii_case("done") {
+            return Ok(());
+        }
+        let issue = self.issue(key)?.with_context(|| format!("no issue {key}"))?;
+        let open: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM ask WHERE issue_key = ?1 COLLATE NOCASE AND answer IS NULL AND closed IS NULL",
+            [&issue.key],
+            |r| r.get(0),
+        )?;
+        if open > 0 {
+            let (s, it) = if open == 1 { ("", "it") } else { ("s", "them") };
+            bail!("{} has {open} open question{s}: answer {it} first (Cancel the issue with a reason to drop {it} with it)", issue.key);
         }
         Ok(())
     }
@@ -1976,11 +1982,11 @@ mod tests {
         let elsewhere = db.create_ask("Keep the old flag?", &[], Some(&other.key), None, &agent).unwrap();
         assert!(db.issue(&done.key).unwrap().unwrap().track.asking);
 
-        // Done with a question still open is refused (NIT-220): it is answered first, or the issue
-        // canceled. Landing the change closes what was asked about it.
-        let refused = db.move_issue(&done.key, "Done", Some("fixed"), None, &agent).unwrap_err().to_string();
+        // Done asked for directly with a question still open is refused (NIT-220): it is answered
+        // first, or the issue canceled. Nitely's own closing moves (a land) close it with the issue.
+        let refused = db.check_open_asks(&done.key, "Done").unwrap_err().to_string();
         assert!(refused.contains("1 open question: answer it first"), "{refused}");
-        db.log_event(&agent, Some(&done.key), None, "landed", "Landed the branch").unwrap();
+        assert!(db.check_open_asks(&done.key, "Canceled").is_ok());
         db.move_issue(&done.key, "Done", Some("landed"), None, &agent).unwrap();
         let closed = db.ask(open.id).unwrap().unwrap();
         assert_eq!((closed.answer, closed.closed.as_deref()), (None, Some("closed with NIT-1 (Done)")));

@@ -131,8 +131,10 @@ back per finding. Accepting one keeps the issue with the person while others wai
 accepted it goes on as a passing review. Their decision starts the count of rounds again.
 
 **Done** is refused on an issue whose change was submitted and never landed (it isn't on the
-integration branch): land it, or Cancel it with a reason. Done is also refused while a question on
-the issue is open, unless the change landed: answer it first, or Cancel the issue to drop it.
+integration branch): land it, or Cancel it with a reason. Done asked for directly (the app, MCP, the
+CLI) is also refused while a question on the issue is open: answer it first, or Cancel the issue to
+drop it. Nitely's own closing moves decide their questions themselves: a land closes what was asked
+about the change, and an approved playbook change or goal plan answers its issue.
 `nitely submit --no-review` still exists for emergencies, but nothing suggests it for this.
 
 ## Code
