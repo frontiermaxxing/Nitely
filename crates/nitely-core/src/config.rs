@@ -24,6 +24,10 @@ pub struct Config {
     /// None follows the build's own channel (`update::default_channel`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_channel: Option<String>,
+    /// Build lane requests this machine runs at once, across every project (lanes.rs, NIT-199).
+    /// None works it out from the machine's cores and memory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_slots: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

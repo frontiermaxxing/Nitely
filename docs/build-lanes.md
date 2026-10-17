@@ -98,10 +98,15 @@ agent's worktree share the objects, and a forced checkout cannot conflict. Base 
 (`git diff --binary`) is only how a request travels to another machine or to CI.
 
 **Machine scheduler.** One budget for the whole machine across all projects: build slots from cores
-and memory (default: one slot per 8 logical cores and 8 GB, at least 1; settable in the app), and
-each request gets the slot's share of cores (`{jobs}` in a command, `CARGO_BUILD_JOBS`,
-`MAKEFLAGS`). Order: the person's own requests, then land, then submit's gate, then agents' `run`,
-first come first served within each, round-robin across projects.
+and memory (one slot per 8 logical cores and 8 GB, at least 1), or `build_slots` in Nitely's config
+(the app's Settings, NIT-205), or `NITELY_BUILD_SLOTS` for one shell. Each request gets the slot's
+share of cores: `{jobs}` in a command, and `NITELY_JOBS`, `CARGO_BUILD_JOBS` and `MAKEFLAGS=-j` in its
+environment. A slot is an OS file lock beside the database, so a crashed requester frees its slot as
+it frees its lane. Order: land, then submit's gate, then `run`; within each, every project's first
+waiting request before any project's second, then the oldest. A request starts when no request of
+its own repo is ahead of it and there is a free slot after the requests ahead of it that could start;
+a repo whose lanes are all busy holds up no other repo. (The person's own requests do not yet go
+first.)
 
 **Executors.** Where a request runs, per project in the playbook: a local lane (the default),
 another of the person's machines over the existing relay (`nitely serve`), or CI, for the gate only,
