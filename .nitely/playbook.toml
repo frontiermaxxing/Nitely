@@ -34,3 +34,10 @@ shared_files = ["src/App.tsx", "src/types.ts", "src/dev/fixtures.ts", "src-tauri
 [[land.after]]
 run = "npm install --no-save --no-audit --no-fund"
 when_changed = ['^package(-lock)?\.json$']
+
+# A change to Nitely's own code makes the installed nitely out of date, and the next submit or land
+# refuses to run until it is installed again (install.rs, stale_build). Install it here, under the
+# land lock, so no agent has to (NIT-163). The paths are the ones stale_build counts.
+[[land.after]]
+run = "cargo run --release -p nitely-cli -- install"
+when_changed = ['^crates/', '^Cargo\.(toml|lock)$']
