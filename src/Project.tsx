@@ -65,6 +65,8 @@ export function ProjectPage(props: {
   const [showClosed, setShowClosed] = useState(false);
   const [filters, setFilters] = useState<Filters>(NO_FILTER);
   const [error, setError] = useState<string | null>(null);
+  // Bumped when the header's crew control asks for the Crew section, which scrolls to itself.
+  const [crewFocus, setCrewFocus] = useState(0);
 
   // Closed issues are always loaded: the header counts what landed lately and the board shows
   // recent Done ones, even while the list hides them.
@@ -94,7 +96,15 @@ export function ProjectPage(props: {
         <h1>
           {props.project?.name ?? props.projectKey} <span className="muted mono">{props.projectKey}</span>
         </h1>
-        <CrewControl projectKey={props.projectKey} version={props.version} now={props.now} />
+        <CrewControl
+          projectKey={props.projectKey}
+          version={props.version}
+          now={props.now}
+          onSettings={() => {
+            setCrewFocus((n) => n + 1);
+            pick("settings");
+          }}
+        />
         <div className="seg" role="tablist" aria-label="Project view">
           {PROJECT_TABS.map((t) => (
             <button key={t} role="tab" aria-selected={tab === t} className={tab === t ? "on" : undefined} onClick={() => pick(t)}>
@@ -115,7 +125,7 @@ export function ProjectPage(props: {
       {tab !== "brief" && error && <p className="error">{error}</p>}
       {((views && !issues) || (tab === "settings" && !issues) || (tab === "branches" && !props.board)) && !error && <Loading />}
       {tab === "settings" && issues && props.project && (
-        <ProjectSettings project={props.project} issueCount={issues.length} onChanged={props.onChanged} onMoved={props.onMoved} />
+        <ProjectSettings project={props.project} issueCount={issues.length} crewFocus={crewFocus} onChanged={props.onChanged} onMoved={props.onMoved} />
       )}
       {views && issues?.length === 0 && (
         <EmptyState title="No issues yet.">

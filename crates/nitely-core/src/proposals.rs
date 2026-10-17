@@ -376,11 +376,16 @@ fn committed_branch(checkout: &str, steps: &[Step]) -> Result<String> {
 /// When the main checkout has the branch checked out, its playbook file follows the commit, and
 /// a local edit of that file stops it. Returns the new commit.
 fn commit_playbook(root: &Path, branch: &str, steps: &[Step], message: &str) -> Result<String> {
+    commit_playbook_edit(root, branch, &|at_tip| replay(at_tip, steps), message)
+}
+
+/// `commit_playbook` with the change as a function of the playbook committed at the branch's tip.
+pub(crate) fn commit_playbook_edit(root: &Path, branch: &str, edit: &dyn Fn(&str) -> Result<String>, message: &str) -> Result<String> {
     let git = |args: &[&str]| crate::playbook::git(root, args).map(|s| s.trim().to_string());
     let tip = git(&["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")])
         .map_err(|_| anyhow::anyhow!("{branch}, the integration branch the changed playbook names, is not a branch in {}", root.display()))?;
     let at_tip = crate::playbook::git(root, &["show", &format!("{tip}:{PLAYBOOK_PATH}")]).unwrap_or_default();
-    let text = replay(&at_tip, steps)?;
+    let text = edit(&at_tip)?;
 
     // Where the branch is checked out, if anywhere.
     let listing = git(&["worktree", "list", "--porcelain"])?;

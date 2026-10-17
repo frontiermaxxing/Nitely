@@ -207,6 +207,18 @@ async fn crew_pause(project: String, paused: bool) -> Result<Option<nitely_core:
     nitely_core::crew::project_status(&db, &Config::load().map_err(err)?, &project, &nitely_core::crew::Moment::now()).map_err(err)
 }
 
+/// The crew settings of each repo in a project (the Crew section): workers, agents, limits.
+#[tauri::command]
+async fn crew_settings(project: String) -> Result<Vec<nitely_core::crew_settings::CrewView>, String> {
+    nitely_core::crew_settings::crew_for_project(&Config::load().map_err(err)?, &db()?, &project).map_err(err)
+}
+
+/// Saves a repo's crew settings. Only the app saves them: a person, never an agent.
+#[tauri::command]
+async fn crew_save(repo: String, edit: nitely_core::crew_settings::CrewEdit) -> Result<nitely_core::crew_settings::CrewSaved, String> {
+    nitely_core::crew_settings::save_crew(&Config::load().map_err(err)?, &db()?, &repo, &edit).map_err(err)
+}
+
 #[tauri::command]
 async fn issues(project: String, include_closed: bool) -> Result<Vec<IssueRecord>, String> {
     db()?.list_issues(Some(&project), include_closed).map_err(err)
@@ -674,6 +686,8 @@ pub fn run() {
             issue_spend,
             project_spend,
             crew_pause,
+            crew_settings,
+            crew_save,
             open_crew_log,
             issues,
             issue_detail,

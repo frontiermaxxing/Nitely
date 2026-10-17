@@ -3,6 +3,7 @@ import { invoke } from "./backend";
 import type { Project } from "./types";
 import { PrivateTerms } from "./PrivateTerms";
 import { MirrorSettings } from "./Mirror";
+import { CrewSettings } from "./CrewSettings";
 
 interface Rekeyed {
   from: string;
@@ -23,7 +24,7 @@ interface Removed {
 const KEY = /^[A-Z][A-Z0-9]{1,9}$/;
 
 /**
- * A project's name and key, and removing it. A new key re-keys every issue (NIT-12 becomes
+ * A project's name and key, its crew, and removing it. A new key re-keys every issue (NIT-12 becomes
  * NX-12) and old links keep working; removing a project with issues deletes them, so it asks for
  * the key to be typed first. The backend (crates/nitely-core/src/projects.rs) enforces both.
  */
@@ -31,6 +32,8 @@ export function ProjectSettings(props: {
   project: Project;
   /** Issues in the project, open and closed. */
   issueCount: number;
+  /** Bumped to bring the Crew section into view. */
+  crewFocus?: number;
   onChanged: () => void;
   /** The project now goes by another key, or is gone (null). */
   onMoved: (key: string | null) => void;
@@ -120,6 +123,8 @@ export function ProjectSettings(props: {
         </form>
         {!keyOk && key.trim() !== "" && <p className="settings-hint">2 to 10 letters or digits, starting with a letter.</p>}
       </section>
+
+      <CrewSettings projectKey={project.key} focus={props.crewFocus} onSaved={props.onChanged} />
 
       <PrivateTerms projectKey={project.key} />
 

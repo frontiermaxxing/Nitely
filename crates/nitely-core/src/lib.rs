@@ -7,6 +7,7 @@ pub mod brief;
 pub mod config;
 pub mod connect;
 pub mod crew;
+pub mod crew_settings;
 pub mod instructions;
 pub mod credentials;
 pub mod db;

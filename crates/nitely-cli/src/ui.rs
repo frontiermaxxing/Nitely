@@ -18,6 +18,7 @@ pub const READ_ONLY: &[&str] = &[
     "goals",
     "goal_choices",
     "crew_status",
+    "crew_settings",
     "held_files",
     "issue_spend",
     "project_spend",
@@ -65,6 +66,7 @@ pub fn run(command: &str, args: &Value) -> Result<Value> {
             let moment = nitely_core::crew::Moment::now();
             json!(nitely_core::crew::project_status(&db()?, &Config::load_read_only()?, str_arg(args, "project")?, &moment)?)
         }
+        "crew_settings" => json!(nitely_core::crew_settings::crew_for_project(&Config::load_read_only()?, &db()?, str_arg(args, "project")?)?),
         "issue_spend" => json!(nitely_core::usage::spend_of_issue(&Config::load_read_only()?, &db()?, str_arg(args, "key")?)?),
         "project_spend" => {
             let days = args.get("days").and_then(Value::as_u64).unwrap_or(14) as usize;

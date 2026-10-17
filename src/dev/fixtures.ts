@@ -11,7 +11,10 @@ import * as phoneFixture from "./phone";
 import * as rulesFixture from "./rules";
 import type {
   Held,
+  CrewEdit,
+  CrewSaved,
   CrewStatus,
+  CrewView,
   CrewWorker,
   Activity,
   ActivityLane,
@@ -693,15 +696,62 @@ function heldFiles(project: string): Held[] {
 
 let crewPaused = false;
 
+// Each repo's [crew] as the Crew section edits it (crates/nitely-core/src/crew_settings.rs): Nitely
+// commits its own playbook and runs a crew, Orbit's playbook is kept by Nitely with the crew off,
+// and Harbor has no playbook (so no gate) yet.
+const CREW_CHOICES = [{ name: "claude", installed: true }, { name: "codex", installed: true }];
+const crewViews: CrewView[] = [
+  {
+    repo: "Nitely", root: "C:\Code\Nitely", source: "repo", path: "C:\Code\Nitely\.nitely\playbook.toml", integration: "main", workers: 2,
+    agents: ["claude", "codex"], max_per_day: null, default_max_per_day: 20, max_tokens_per_day: 8_000_000, quiet_hours: "01:00-07:00",
+    choices: CREW_CHOICES, has_gate: true, pending_proposal: null,
+  },
+  {
+    repo: "Orbit", root: "C:\Code\Orbit", source: "stored", path: "C:\Users\you\AppData\Roaming\Nitely\playbooks\Orbit.toml", integration: "develop", workers: 0,
+    agents: ["claude", "codex"], max_per_day: null, default_max_per_day: 20, max_tokens_per_day: null, quiet_hours: null,
+    choices: [{ name: "claude", installed: true }, { name: "codex", installed: false }], has_gate: true, pending_proposal: "ORB-12",
+  },
+  {
+    repo: "Harbor", root: "C:\Code\Harbor", source: "none", path: "C:\Users\you\AppData\Roaming\Nitely\playbooks\Harbor.toml", integration: "main", workers: 0,
+    agents: ["claude", "codex"], max_per_day: null, default_max_per_day: 20, max_tokens_per_day: null, quiet_hours: null,
+    choices: CREW_CHOICES, has_gate: false, pending_proposal: null,
+  },
+];
+
+function crewSettings(project: string): CrewView[] {
+  const names = REPOS.filter((r) => r.project === project.toUpperCase()).map((r) => r.name);
+  return crewViews.filter((v) => names.includes(v.repo));
+}
+
+function crewSave(args: Record<string, unknown>): CrewSaved {
+  const v = crewViews.find((x) => x.repo === args.repo);
+  if (!v) throw `no repo ${String(args.repo)} in Nitely's config`;
+  const edit = args.edit as CrewEdit;
+  if (edit.workers > 0 && edit.agents.length === 0) throw "pick at least one agent for the crew to start";
+  Object.assign(v, { workers: edit.workers, agents: edit.agents, max_per_day: edit.max_per_day, max_tokens_per_day: edit.max_tokens_per_day, quiet_hours: edit.quiet_hours });
+  if (v.source === "none") v.source = "stored";
+  const done = v.source === "repo" ? "Committed 4f2a9c1e0 to .nitely/playbook.toml on main; it is pushed with the next land" : `Saved to ${v.path}`;
+  return { view: { ...v }, done };
+}
+
 function crewStatus(project: string): CrewStatus | null {
-  if (project.toUpperCase() !== "NIT") return null;
+  const views = crewSettings(project);
+  const on = views.find((v) => v.workers > 0);
+  if (!on) return null;
+  if (project.toUpperCase() !== "NIT") {
+    return {
+      project: project.toUpperCase(), cap: on.workers, running: [], started_today: 0, max_per_day: on.max_per_day ?? on.default_max_per_day,
+      tokens_today: 0, max_tokens_per_day: on.max_tokens_per_day, paused: crewPaused, supervised: on.has_gate,
+      status: on.has_gate ? "working; nothing else ready" : "no gate: the playbook has no gate commands", recent: [],
+    };
+  }
   const running: CrewWorker[] = ISSUES.filter((s) => s.crew && s.live).map((s, i) => ({
     id: 40 + i, project: "NIT", issue_key: s.key, agent: s.vendor ?? "claude", pid: 7100 + i, worktree: worktreeOf(s),
     log: `C:\Users\you\AppData\Roaming\Nitely\crew\NIT\${s.key.toLowerCase()}-${s.vendor}.log`,
     started_at: NOW - s.from * HOUR + 10 * MIN, ended_at: null, exit_code: null, outcome: null, reason: null, phase: "work",
   }));
   return {
-    project: "NIT", cap: 2, running, started_today: 3, max_per_day: 20, tokens_today: 3_400_000, max_tokens_per_day: 8_000_000, paused: crewPaused, supervised: true,
+    project: "NIT", cap: on.workers, running, started_today: 3, max_per_day: on.max_per_day ?? 20, tokens_today: 3_400_000, max_tokens_per_day: on.max_tokens_per_day, paused: crewPaused, supervised: true,
     status: crewPaused ? "paused" : "working; nothing else ready", recent: [],
   };
 }
@@ -1695,6 +1745,10 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return heldFiles(String(args.project));
       case "crew_status":
         return crewStatus(String(args.project));
+      case "crew_settings":
+        return crewSettings(String(args.project));
+      case "crew_save":
+        return crewSave(args);
       case "issue_spend":
         return issueSpend(args);
       case "project_spend":

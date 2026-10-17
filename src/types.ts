@@ -113,6 +113,38 @@ export interface CrewStatus {
   recent: CrewWorker[];
 }
 
+/** One repo's crew as the Crew section edits it (crates/nitely-core/src/crew_settings.rs). */
+export interface CrewView {
+  repo: string;
+  root: string;
+  /** `repo`: saving commits to its .nitely/playbook.toml; `stored`: the copy Nitely keeps; `none`: no playbook yet. */
+  source: "repo" | "stored" | "none";
+  path: string;
+  integration: string;
+  workers: number;
+  agents: string[];
+  max_per_day: number | null;
+  default_max_per_day: number;
+  max_tokens_per_day: number | null;
+  quiet_hours: string | null;
+  choices: { name: string; installed: boolean }[];
+  has_gate: boolean;
+  pending_proposal: string | null;
+}
+
+export interface CrewEdit {
+  workers: number;
+  agents: string[];
+  max_per_day: number | null;
+  max_tokens_per_day: number | null;
+  quiet_hours: string | null;
+}
+
+export interface CrewSaved {
+  view: CrewView;
+  done: string;
+}
+
 export interface BranchState {
   ahead: number;
   behind: number;

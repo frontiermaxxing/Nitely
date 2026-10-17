@@ -1,5 +1,5 @@
 import { shortTokens } from "./spend.ts";
-import type { CrewStatus } from "./types";
+import type { CrewEdit, CrewStatus, CrewView } from "./types";
 
 /**
  * What the crew control says next to "Crew n/cap" (docs/crew.md): nothing while it works, else
@@ -29,4 +29,65 @@ export function crewTitle(s: CrewStatus, now: number): string {
 function minutesAgo(now: number, ts: number): string {
   const m = Math.max(0, Math.round((now - ts) / 60));
   return m < 60 ? `${m}m ago` : `${Math.round(m / 60)}h ago`;
+}
+
+/** The Crew section's form: quiet hours as two times and an on switch, the budget in millions. */
+export interface CrewDraft {
+  workers: number;
+  agents: string[];
+  maxPerDay: string;
+  budgetMillions: string;
+  quiet: boolean;
+  quietFrom: string;
+  quietTo: string;
+}
+
+export function crewDraftOf(v: CrewView): CrewDraft {
+  const [from, to] = (v.quiet_hours ?? "").split("-").map((s) => s.trim());
+  return {
+    workers: v.workers,
+    agents: v.workers > 0 || v.agents.length ? [...v.agents] : v.choices.filter((c) => c.installed).map((c) => c.name),
+    maxPerDay: v.max_per_day == null ? "" : String(v.max_per_day),
+    budgetMillions: v.max_tokens_per_day == null ? "" : String(Math.round(v.max_tokens_per_day / 100_000) / 10),
+    quiet: !!v.quiet_hours,
+    quietFrom: from || "01:00",
+    quietTo: to || "07:00",
+  };
+}
+
+/** What the draft saves, or why it cannot be saved yet. */
+export function crewEditOf(d: CrewDraft): CrewEdit | string {
+  if (!Number.isInteger(d.workers) || d.workers < 0) return "Workers is a whole number, 0 for off.";
+  if (d.workers > 0 && d.agents.length === 0) return "Pick at least one agent.";
+  let max_per_day: number | null = null;
+  if (d.maxPerDay.trim()) {
+    const n = Number(d.maxPerDay);
+    if (!Number.isInteger(n) || n < 1) return "Starts a day is a whole number, at least 1.";
+    max_per_day = n;
+  }
+  let max_tokens_per_day: number | null = null;
+  if (d.budgetMillions.trim()) {
+    const m = Number(d.budgetMillions);
+    if (!Number.isFinite(m) || m <= 0) return "The token budget is a number of millions, more than 0.";
+    max_tokens_per_day = Math.round(m * 1_000_000);
+  }
+  const time = /^([01]\d|2[0-3]):[0-5]\d$/;
+  if (d.quiet && (!time.test(d.quietFrom) || !time.test(d.quietTo))) return "Quiet hours need a start and an end.";
+  if (d.quiet && d.quietFrom === d.quietTo) return "Quiet hours start and end at the same time.";
+  return { workers: d.workers, agents: d.agents, max_per_day, max_tokens_per_day, quiet_hours: d.quiet ? `${d.quietFrom}-${d.quietTo}` : null };
+}
+
+/** The saved settings as the draft would save them, to tell whether anything changed. */
+export function crewChanged(v: CrewView, d: CrewDraft): boolean {
+  const e = crewEditOf(d);
+  if (typeof e === "string") return true;
+  const same = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
+  const agentsMatter = e.workers > 0 || v.workers > 0;
+  return (
+    e.workers !== v.workers ||
+    (agentsMatter && !same(e.agents, v.agents)) ||
+    e.max_per_day !== v.max_per_day ||
+    e.max_tokens_per_day !== v.max_tokens_per_day ||
+    e.quiet_hours !== v.quiet_hours
+  );
 }

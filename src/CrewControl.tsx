@@ -5,10 +5,13 @@ import type { CrewStatus } from "./types";
 
 /**
  * The project's crew in its header (docs/crew.md): how many workers run of the cap, why it is not
- * working when it is not, and pause or resume. Nothing when the project has no crew.
+ * working when it is not, and pause or resume. With no crew, "Crew off", which opens the Crew
+ * section of the project's settings, as the count does.
  */
-export function CrewControl(props: { projectKey: string; version: number; now: number }) {
+export function CrewControl(props: { projectKey: string; version: number; now: number; onSettings: () => void }) {
   const [crew, setCrew] = useState<CrewStatus | null>(null);
+  // The project whose answer came back: before that, nothing shows.
+  const [answered, setAnswered] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // The project on screen now: a pause answered after a switch must not land on another project.
@@ -22,19 +25,29 @@ export function CrewControl(props: { projectKey: string; version: number; now: n
     loaded.current = props.projectKey;
     setCrew(null);
     setError(null);
+    setAnswered(null);
   }
 
   useEffect(() => {
     let live = true;
-    invoke<CrewStatus | null>("crew_status", { project: props.projectKey })
-      .then((c) => live && (setCrew(c), setError(null)))
+    const project = props.projectKey;
+    invoke<CrewStatus | null>("crew_status", { project })
+      .then((c) => live && (setCrew(c), setError(null), setAnswered(project)))
       .catch((e) => live && setError(String(e)));
     return () => {
       live = false;
     };
   }, [props.projectKey, props.version]);
 
-  if (!crew) return error ? <span className="crew error small" title={error}>Crew unavailable</span> : null;
+  if (!crew) {
+    if (error) return <span className="crew error small" title={error}>Crew unavailable</span>;
+    if (answered !== props.projectKey) return null;
+    return (
+      <button className="btn btn-quiet crew-off" onClick={props.onSettings} title="Agent workers Nitely runs on this project's Todo issues">
+        Crew off
+      </button>
+    );
+  }
   const words = crewWords(crew);
   const toggle = () => {
     const project = props.projectKey;
@@ -48,9 +61,9 @@ export function CrewControl(props: { projectKey: string; version: number; now: n
 
   return (
     <div className="crew" title={crewTitle(crew, props.now)}>
-      <span className="crew-count">
+      <button className="crew-count" onClick={props.onSettings} title="Crew settings">
         Crew <span className="mono">{crew.running.length}/{crew.cap}</span>
-      </span>
+      </button>
       {words && <span className={`crew-state${words.attention ? " attention-ink" : " muted"}`}>{words.text}</span>}
       {error && <span className="error small">{error}</span>}
       <button className="btn quiet" onClick={toggle} disabled={busy}>
