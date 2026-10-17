@@ -265,18 +265,21 @@ pub type Devices = Arc<dyn Fn() -> Result<Vec<Device>> + Send + Sync>;
 /// Opens Nitely's database for a request that reads or decides.
 pub type OpenDb = Arc<dyn Fn() -> Result<crate::Db> + Send + Sync>;
 /// Counts what only the app sees waiting on the person: agents waiting at their own prompt and
-/// worktrees stopped in a rebase (`waiting_in_worktrees`, from the board).
-pub type InWorktrees = Arc<dyn Fn(&crate::Db) -> usize + Send + Sync>;
+/// worktrees stopped in a rebase (`waiting_in_worktrees`, from the board), each named by its
+/// issue's key, or its folder when it has none.
+pub type InWorktrees = Arc<dyn Fn(&crate::Db) -> Vec<String> + Send + Sync>;
 
 /// The board's worktrees that wait on the person: a rebase stopped there, or the agent in it is
-/// waiting for input. The desktop Inbox shows each as a decision.
-pub fn waiting_in_worktrees(board: &crate::Board) -> usize {
+/// waiting for input. The desktop Inbox shows each as a decision. Named by issue key, so one
+/// issue the server already counts (a stopped land with an agent waiting in it) counts once.
+pub fn waiting_in_worktrees(board: &crate::Board) -> Vec<String> {
     board
         .repos
         .iter()
         .flat_map(|r| r.rows.iter())
         .filter(|row| row.needs_me && (row.state.as_ref().is_some_and(|s| s.rebase_in_progress) || row.session.as_ref().is_some_and(|s| s.state == "waiting")))
-        .count()
+        .map(|row| row.issue_key.as_ref().map(|k| k.to_uppercase()).unwrap_or_else(|| format!("worktree:{}", row.worktree)))
+        .collect()
 }
 
 #[derive(Default)]
@@ -447,8 +450,11 @@ impl Phone {
                     Err(_) => return (503, error("The PC could not open Nitely's database; try again.")),
                 };
                 let result = match path {
-                    "/phone/api/decisions" => decisions(&db).map(|mut v| {
-                        v["at_pc"] = json!(v["at_pc"].as_u64().unwrap_or(0) + (self.in_worktrees)(&db) as u64);
+                    "/phone/api/decisions" => decisions(&db).map(|(mut v, at_pc, on_phone)| {
+                        let mut waiting: std::collections::HashSet<String> = at_pc;
+                        waiting.extend((self.in_worktrees)(&db));
+                        waiting.retain(|k| !on_phone.contains(k));
+                        v["at_pc"] = json!(waiting.len());
                         v
                     }),
                     "/phone/api/approve" => approve(&mut db, &device, body),
@@ -613,11 +619,16 @@ fn issue_json(i: &crate::IssueRecord) -> Value {
 /// `at_pc`: an issue in Needs You for another reason (a playbook change, no review), the person's
 /// own open work, and a land that stopped; the server adds the worktrees that wait on the person
 /// (`waiting_in_worktrees`).
-fn decisions(db: &crate::Db) -> std::result::Result<Value, Refused> {
+/// Also returns the issues counted as waiting at the PC, and those the phone decides, by key.
+fn decisions(db: &crate::Db) -> std::result::Result<(Value, std::collections::HashSet<String>, std::collections::HashSet<String>), Refused> {
     let mut out = Vec::new();
+    let mut on_phone = std::collections::HashSet::new();
     let asks = db.open_asks()?;
     for a in &asks {
         let issue = a.issue_key.as_deref().map(|k| db.issue(k)).transpose()?.flatten();
+        if let Some(i) = &issue {
+            on_phone.insert(i.key.to_uppercase());
+        }
         out.push(json!({
             "kind": "ask",
             "id": format!("ask-{}", a.id),
@@ -626,7 +637,7 @@ fn decisions(db: &crate::Db) -> std::result::Result<Value, Refused> {
             "ask": { "id": a.id, "question": a.question, "options": a.options, "asked_by": a.asked_by },
         }));
     }
-    let mut at_pc = 0;
+    let mut at_pc = std::collections::HashSet::new();
     for i in db.list_issues(None, false)? {
         if asks.iter().any(|a| a.issue_key.as_deref().is_some_and(|k| k.eq_ignore_ascii_case(&i.key))) {
             continue;
@@ -634,15 +645,18 @@ fn decisions(db: &crate::Db) -> std::result::Result<Value, Refused> {
         if i.state != "Needs You" {
             let own_work = i.owner == "human" && !matches!(i.state_type.as_str(), "completed" | "canceled") && i.state != "Backlog";
             let stopped_land = i.track.station == "landing" && i.track.stuck.is_some();
-            at_pc += usize::from(own_work || stopped_land);
+            if own_work || stopped_land {
+                at_pc.insert(i.key.to_uppercase());
+            }
             continue;
         }
         let review = db.reviews(&i.key)?.into_iter().next();
         let approvable = i.origin == "nitely" && db.proposal_for_issue(&i.key)?.is_none() && review.as_ref().is_some_and(|r| r.approver == "human");
         let Some(r) = review.filter(|_| approvable) else {
-            at_pc += 1;
+            at_pc.insert(i.key.to_uppercase());
             continue;
         };
+        on_phone.insert(i.key.to_uppercase());
         out.push(json!({
             "kind": "approve",
             "id": format!("approve-{}", i.key),
@@ -653,7 +667,7 @@ fn decisions(db: &crate::Db) -> std::result::Result<Value, Refused> {
             "review": { "reviewer": r.reviewer, "verdict": r.verdict, "note": r.note, "findings": r.findings },
         }));
     }
-    Ok(json!({ "decisions": out, "at_pc": at_pc }))
+    Ok((json!({ "decisions": out }), at_pc, on_phone))
 }
 
 /// Approves a change for the person, signed by the phone over the same message the app signs
@@ -769,7 +783,7 @@ mod tests {
         assert_eq!(path_kind(ip("100.128.0.1"), &[ip("100.128.0.1")]), None, "outside 100.64.0.0/10");
         assert_eq!(path_kind(ip("fd7a:115c:a1e0::1"), &ts), Some(PathKind::Tunnel));
         assert_eq!(path_kind(ip("192.168.1.20"), &ts), None);
-        let phone = Phone::new(Arc::new(|| Ok(vec![])), Arc::new(|_: &str| None), Arc::new(|| anyhow::bail!("no database in this test")), Arc::new(|_: &crate::Db| 0));
+        let phone = Phone::new(Arc::new(|| Ok(vec![])), Arc::new(|_: &str| None), Arc::new(|| anyhow::bail!("no database in this test")), Arc::new(|_: &crate::Db| vec![]));
         let err = phone.start(&[ip("192.168.1.20")], 0).err().unwrap().to_string();
         assert!(err.contains("not this machine's Tailscale address"), "{err}");
     }
@@ -849,7 +863,7 @@ mod tests {
         let public = public_of(&app);
         let devices: Devices = Arc::new(move || Ok(read.lock().unwrap().as_ref().and_then(|l| verified(&public, l)).unwrap_or_default()));
         let assets: Assets = Arc::new(|p: &str| (p == "phone.html").then(|| (b"<html>phone</html>".to_vec(), content_type(p))));
-        let phone = Phone::new(devices, assets, Arc::new(|| anyhow::bail!("no database in this test")), Arc::new(|_: &crate::Db| 0));
+        let phone = Phone::new(devices, assets, Arc::new(|| anyhow::bail!("no database in this test")), Arc::new(|_: &crate::Db| vec![]));
         let running = phone.start(&["127.0.0.1".parse().unwrap()], 0).unwrap();
         let base = format!("http://{}", running.addrs[0]);
 
@@ -912,7 +926,7 @@ mod tests {
         let path = crate::paths::unique_temp("nitely-phone", ".db");
         let db_path = path.clone();
         // Two worktrees the app sees waiting: an agent at its prompt, a stopped rebase.
-        let phone = Phone::new(devices, Arc::new(|_: &str| None), Arc::new(move || crate::Db::open(&db_path)), Arc::new(|_: &crate::Db| 2));
+        let phone = Phone::new(devices, Arc::new(|_: &str| None), Arc::new(move || crate::Db::open(&db_path)), Arc::new(|_: &crate::Db| vec!["worktree:C:/wt/x".to_string(), "worktree:C:/wt/y".to_string()]));
         let running = phone.start(&["127.0.0.1".parse().unwrap()], 0).unwrap();
         let base = format!("http://{}", running.addrs[0]);
 

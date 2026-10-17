@@ -204,4 +204,6 @@ page, with randomness from `crypto.getRandomValues`, which browsers offer on any
 - Phone decisions (`/phone/api/decisions`, `approve`, `answer`, `sendback`) are in `phone.rs`;
   `approval.rs` checks phone-signed approvals in `land` against the signed device list (the
   `approval` table's `device` and `signed_at`). The harness seeds a scratch database with decisions.
-- Still to come: the phone page's Inbox ([NIT-145](nitely://issue/NIT-145)).
+- `src/phone/Inbox.tsx`: the one-hand Inbox (one decision per screen, the compact track with its
+  words, the ask's options or the approval's reasons and review, Approve and Send back). Preview it
+  at `/phone.html?fixtures` in the browser preview, or end to end with the harness.

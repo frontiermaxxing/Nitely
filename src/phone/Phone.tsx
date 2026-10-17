@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { post, signedGet } from "./api";
+import { Inbox } from "./Inbox";
 import { loadDevice, newKey, pairingCode, pairMessage, saveDevice, sign, type Device } from "./keys";
 
 /** The pairing secret from the QR code's link, if the page was opened from one. */
@@ -39,7 +40,7 @@ function initial(): View {
   return { kind: "start" };
 }
 
-/** The phone page: pairing first, then (NIT-145) the decisions waiting on the person. */
+/** The phone page: pairing first, then the decisions waiting on the person, one per screen. */
 export function Phone() {
   const [view, setView] = useState<View>(initial);
   return (
@@ -56,7 +57,15 @@ export function Phone() {
       {view.kind === "confirm" && (
         <Confirm device={view.device} onPaired={(device) => setView({ kind: "paired", device })} onGone={(why) => setView({ kind: "gone", why })} />
       )}
-      {view.kind === "paired" && <Paired device={view.device} onGone={(why) => setView({ kind: "gone", why })} />}
+      {view.kind === "paired" && (
+        <Inbox
+          device={view.device}
+          onGone={(why) => {
+            saveDevice(null);
+            setView({ kind: "gone", why });
+          }}
+        />
+      )}
       {view.kind === "gone" && <Gone why={view.why} />}
     </main>
   );
@@ -181,31 +190,6 @@ function Confirm(props: { device: Device; onPaired: (d: Device) => void; onGone:
           Cancel
         </button>
       </div>
-    </section>
-  );
-}
-
-function Paired(props: { device: Device; onGone: (why: string) => void }) {
-  const [ok, setOk] = useState<boolean | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
-    signedGet<{ name: string }>(props.device, "/phone/api/hello")
-      .then((r) => {
-        if (r.status === 200) return setOk(true);
-        if (r.status === 401 && /not paired/.test(r.body.error ?? "")) {
-          saveDevice(null);
-          return props.onGone("This phone was removed in the Nitely app.");
-        }
-        setError(r.body.error ?? `The PC answered ${r.status}.`);
-      })
-      .catch((e) => setError(`Could not reach the PC: ${String(e)}`));
-  }, [props.device]);
-
-  return (
-    <section className="ph-body">
-      <h1>{ok ? "Paired" : "Connecting…"}</h1>
-      {ok && <p>This phone is paired with Nitely. The questions and approvals waiting for you will show here.</p>}
-      {error && <p className="ph-error">{error}</p>}
     </section>
   );
 }

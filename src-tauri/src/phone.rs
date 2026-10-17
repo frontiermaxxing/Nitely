@@ -33,7 +33,7 @@ impl PhoneApp {
                 assets,
                 Arc::new(nitely_core::Db::open_default),
                 Arc::new(|db: &nitely_core::Db| {
-                    nitely_core::Config::load().ok().and_then(|c| nitely_core::snapshot(&c, db).ok()).map(|b| phone::waiting_in_worktrees(&b)).unwrap_or(0)
+                    nitely_core::Config::load().ok().and_then(|c| nitely_core::snapshot(&c, db).ok()).map(|b| phone::waiting_in_worktrees(&b)).unwrap_or_default()
                 }),
             ), running: Mutex::new(None) }
     }
