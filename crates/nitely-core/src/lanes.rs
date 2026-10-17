@@ -870,12 +870,18 @@ impl Db {
     pub fn last_finished_lane_run(&self, project: &str, repo: &str, lane: u32) -> Result<Option<Run>> {
         let mine = crate::paths::normalize(repo);
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT {COLUMNS} FROM lane_run WHERE project = ?1 COLLATE NOCASE AND lane = ?2 AND state NOT IN ('queued', 'running') ORDER BY id DESC"
+            "SELECT {COLUMNS} FROM lane_run WHERE project = ?1 COLLATE NOCASE AND lane = ?2 ORDER BY id DESC"
         ))?;
         let mut rows = stmt.query(params![project, lane as i64])?;
         while let Some(r) = rows.next()? {
-            let (run, _) = row(r)?;
-            if crate::paths::normalize(&run.repo) == mine {
+            let (run, pid) = row(r)?;
+            if crate::paths::normalize(&run.repo) != mine {
+                continue;
+            }
+            // A run whose process died counts as finished (abandoned), even where that cannot be
+            // written back (the read-only preview); one still going is not the lane's last.
+            let run = settle(self, run, pid);
+            if run.state != "queued" && run.state != "running" {
                 return Ok(Some(run));
             }
         }
