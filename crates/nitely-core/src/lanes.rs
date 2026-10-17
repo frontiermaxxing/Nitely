@@ -1457,6 +1457,10 @@ fn pid_file(lane: &Path) -> Option<PathBuf> {
 /// under its build directory). Only when the last request did not end normally.
 fn stop_leftovers(lane: &Path) {
     let Some(file) = pid_file(lane) else { return };
+    // No record: the last request ended normally, and nothing it started is left.
+    if !file.exists() {
+        return;
+    }
     stop_recorded_command(&file);
     for h in crate::procs::holders(lane) {
         stop_tree(h.pid);

@@ -490,10 +490,14 @@ impl Playbook {
         };
         // Read until the checkout's state is the same before and after the read (each lend and
         // each return moves the count), so what was read is what that state allows: the file on
-        // disk, unless a request's commit with a playbook of its own may be there.
+        // disk, unless a request's commit with a playbook of its own may be there. A lend lasts a
+        // whole build, so a read settles at once in practice; one that never does is an error,
+        // never a guess at the rules.
         let mut settled = None;
-        let mut last = None;
-        for _ in 0..5 {
+        for attempt in 0..300 {
+            if attempt > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
             let before = crate::lanes::lends(repo_root);
             if let Some(pb) = before.lent.as_deref().and_then(from_branch) {
                 return pb;
@@ -509,19 +513,9 @@ impl Playbook {
                 settled = Some((path, text));
                 break;
             }
-            last = after.lent.or(after.last);
         }
-        // Lent and given back over and over while it was read: the branch's, else the stored one.
-        let (path, text) = match settled {
-            Some(read_once) => read_once,
-            None => {
-                if let Some(pb) = last.as_deref().and_then(from_branch) {
-                    return pb;
-                }
-                let path = Playbook::stored_path_for(repo_root, config);
-                let text = read(&path)?;
-                (path, text)
-            }
+        let Some((path, text)) = settled else {
+            bail!("{}: build requests kept taking and giving back the main checkout while its playbook was read; try again", repo_root.display());
         };
         let (Some(path), Some(text)) = (path, text) else {
             let mut pb = Playbook::default();
