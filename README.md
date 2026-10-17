@@ -38,12 +38,31 @@ you what each agent is doing right now. An inbox holds the decisions only you sh
 
 ## Install
 
-Nitely runs on Windows today; macOS is next. There is no release to download yet: until the first
-one, build it from source (below). Releases will be published on
+Nitely runs on Windows today; macOS is next. Builds are published on
 [GitHub Releases](https://github.com/frontiermaxxing/Nitely/releases): stable releases, plus beta and
-nightly pre-releases ([docs/releasing.md](docs/releasing.md)). Their `Nitely_*_x64-setup.exe` needs
-no administrator rights and puts the `nitely` command where your agents find it. It isn't
-code-signed yet, so SmartScreen warns the first time (**More info → Run anyway**).
+nightly pre-releases ([docs/releasing.md](docs/releasing.md)); until the first stable release, the
+nightly is the one to try. Its `Nitely_*_x64-setup.exe` needs no administrator rights and puts the
+`nitely` command where your agents find it.
+
+The installer is not code-signed, so Windows SmartScreen warns the first time you run it: choose
+**More info**, then **Run anyway**. To check a download first instead of trusting the warning
+away:
+
+- **Tagged releases** (stable and beta) carry a GitHub build attestation: proof, signed through
+  Sigstore, that this repository's release workflow built the file from that tag. With the
+  [GitHub CLI](https://cli.github.com):
+
+  ```powershell
+  gh attestation verify .\Nitely_0.1.0_x64-setup.exe -R frontiermaxxing/Nitely
+  ```
+
+- **Every release**, the nightly too, has `SHA256SUMS.txt`. Compare your file's hash with its line:
+
+  ```powershell
+  (Get-FileHash .\Nitely_0.1.0_x64-setup.exe).Hash.ToLower()
+  ```
+
+Or build it from source, which needs no trust in a download at all.
 
 To build it from source:
 

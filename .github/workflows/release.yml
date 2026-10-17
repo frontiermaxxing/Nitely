@@ -6,9 +6,11 @@
 #   test     a pushed tag v1.2.3-test.N: a draft only collaborators see, to try this workflow
 # Each build runs the gate, stamps the version (scripts/release-meta.mjs decides it), builds the
 # nitely CLI and the NSIS installer that carries it, installs that installer on the runner to check
-# it, writes the notes with `nitely release-notes`, and publishes. With the updater signing key set
-# (the TAURI_SIGNING_PRIVATE_KEY secret), it also signs the installer for the updater and updates
-# the channel's manifest under the "updates" release.
+# it, writes the notes with `nitely release-notes`, and publishes with SHA256SUMS.txt. A tag's build
+# also gets a GitHub build-provenance attestation for each file (keyless, through Sigstore), which
+# anyone can check with `gh attestation verify`. With the updater signing key set (the
+# TAURI_SIGNING_PRIVATE_KEY secret), it also signs the installer for the updater and updates the
+# channel's manifest under the "updates" release.
 
 name: Release
 
@@ -42,6 +44,12 @@ jobs:
   release:
     runs-on: windows-latest
     timeout-minutes: 90
+    # id-token and attestations: the provenance attestations (keyless: GitHub's OIDC token, signed
+    # through Sigstore). promote.yml, which calls this workflow, grants the same.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: 0
@@ -158,7 +166,10 @@ jobs:
           if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ] && [ -n "$pubkey" ]; then
             npx tauri build --config src-tauri/tauri.release.json --config '{"bundle":{"createUpdaterArtifacts":true}}'
           else
-            echo "::warning::No updater key (the TAURI_SIGNING_PRIVATE_KEY secret and plugins.updater.pubkey in tauri.conf.json): building without updater signatures, and no update manifest is published (docs/releasing.md)."
+            missing=()
+            [ -z "$TAURI_SIGNING_PRIVATE_KEY" ] && missing+=("the TAURI_SIGNING_PRIVATE_KEY repository secret")
+            [ -z "$pubkey" ] && missing+=("plugins.updater.pubkey in src-tauri/tauri.conf.json")
+            echo "::warning::Updates are off for this build: no updater key ($(IFS=,; echo "${missing[*]}" | sed 's/,/ and /') missing). The installer is published without an updater signature, no update manifest changes, and the app it installs doesn't check for updates. docs/releasing.md, \"The updater signing key\", sets it up."
             npx tauri build --config src-tauri/tauri.release.json
           fi
           ls -l target/release/bundle/nsis
@@ -197,6 +208,18 @@ jobs:
           Write-Output "installed $app; CLI at ${cli}: $out"
           if ("$out" -notmatch [regex]::Escape($v)) { throw "the installed CLI says '$out', not $v" }
 
+      # Provenance for what a tag publishes: which workflow, commit and run built each file, signed
+      # keylessly through Sigstore and kept by GitHub. Anyone checks a download with
+      # `gh attestation verify <file> -R <this repo>`. Not for the nightly, which is replaced daily.
+      - name: Attest the release files
+        if: steps.changed.outputs.build == 'true' && steps.meta.outputs.tag != 'nightly'
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            out/*-setup.exe
+            out/nitely_*.exe
+            out/SHA256SUMS.txt
+
       - name: Write the notes
         if: steps.changed.outputs.build == 'true'
         run: |
@@ -206,8 +229,14 @@ jobs:
           cat >> notes.md <<'EOF'
 
           ---
-          **Installing:** download `Nitely_*_x64-setup.exe` and run it; no administrator rights are needed. The installer is not code-signed yet, so Windows SmartScreen warns the first time: choose **More info**, then **Run anyway**. `SHA256SUMS.txt` lists each file's checksum. The `nitely_*` file is the command-line tool on its own.
+          **Installing:** download `Nitely_*_x64-setup.exe` and run it; no administrator rights are needed. The installer is not code-signed, so Windows SmartScreen warns the first time: choose **More info**, then **Run anyway**. The `nitely_*` file is the command-line tool on its own.
           EOF
+          echo >> notes.md
+          if [ "${{ steps.meta.outputs.tag }}" = nightly ]; then
+            echo '**Checking a download:** `SHA256SUMS.txt` lists each file'"'"'s SHA-256; compare it with `Get-FileHash <file>` in PowerShell. Tagged releases also carry a GitHub build attestation.' >> notes.md
+          else
+            echo '**Checking a download:** `gh attestation verify <file> -R '"$GITHUB_REPOSITORY"'` shows that this repository'"'"'s release workflow built the file from this tag. `SHA256SUMS.txt` lists each file'"'"'s SHA-256 (`Get-FileHash <file>` in PowerShell).' >> notes.md
+          fi
           cat notes.md
 
       - name: Publish the release

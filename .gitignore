@@ -4,3 +4,5 @@
 /src-tauri/gen
 /.test-build
 /src-tauri/binaries
+# Signing keys (the updater key lives outside the repo: docs/releasing.md)
+*.key

@@ -12,8 +12,12 @@ on:
         description: "The beta tag to promote, e.g. v0.2.0-beta.3"
         required: true
 
+# id-token and attestations: release.yml attests what it publishes, and a called workflow gets no
+# more than its caller grants.
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   tag:
