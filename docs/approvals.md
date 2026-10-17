@@ -40,7 +40,10 @@ the agent's transcript.
   service `Nitely (<hash of the folder's path>)` for every entry (the key, its public half, the
   paired phones, the push key), so it can neither read the person's key nor sign with it, and its
   approvals never verify against the person's. The test harness opens no keychain entry at all.
-  Only `entry` in `approval.rs` opens one, and a test keeps it that way.
+  Only `entry` in `approval.rs` opens one, and a test keeps it that way. There is no migration: a
+  second profile that used the `Nitely` entries before this starts with a key of its own, so what
+  waited for approval there is approved again and its phones pair again (copying the person's key
+  into another folder's entries is what must never be possible).
 - **macOS:** only the app that made a keychain entry reads it without the OS asking the person. So
   on macOS an agent's `land` refuses a change that waits for approval, and the app lands it itself
   once the person approves, whatever the playbook says about who lands. Windows and Linux read the

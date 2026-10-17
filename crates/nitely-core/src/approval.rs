@@ -57,14 +57,32 @@ pub fn keychain_is_silent() {
 
 /// The keychain service for the data folder `data`: `Nitely` for the person's own (`real`), and for
 /// any other `Nitely (<hash of its path>)`, which nothing on the person's own folder reads.
+///
+/// Deliberately no migration: a folder that used the `Nitely` entries before (a second profile on
+/// `NITELY_HOME`) starts with a key of its own, so changes approved there before are approved
+/// again and its phones pair again. Copying the person's key into another folder's entries is
+/// exactly what a sandbox must never be able to do.
 pub(crate) fn service_for(data: &std::path::Path, real: &std::path::Path) -> String {
-    let folder = crate::paths::normalize(&data.to_string_lossy());
-    if folder == crate::paths::normalize(&real.to_string_lossy()) {
+    let folder = folder_key(data);
+    if folder == folder_key(real) {
         return SERVICE.to_string();
     }
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(folder.as_bytes());
     format!("{SERVICE} ({})", hex(&digest[..8]))
+}
+
+/// One spelling per folder: links, `.` and `..` and a relative path resolved where the folder
+/// exists (the app and an agent's CLI must pick the same entries for one database), then
+/// `paths::normalize`.
+fn folder_key(path: &std::path::Path) -> String {
+    let resolved = std::fs::canonicalize(path).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| path.to_string_lossy().into_owned());
+    // Windows hands back the verbatim form, `\\?\C:\...` or `\\?\UNC\server\...`.
+    let plain = match resolved.strip_prefix(r"\\?\") {
+        Some(rest) => rest.strip_prefix(r"UNC\").map_or_else(|| rest.to_string(), |unc| format!(r"\\{unc}")),
+        None => resolved,
+    };
+    crate::paths::normalize(&plain)
 }
 
 /// The one place Nitely opens a keychain entry: in this data folder's service, and never under the
@@ -353,6 +371,15 @@ mod tests {
         assert!(sandbox.starts_with("Nitely (") && profile.starts_with("Nitely ("), "{sandbox} {profile}");
         assert_ne!(sandbox, profile);
         assert_eq!(sandbox, service_for(std::path::Path::new(r"C:\Users\you\AppData\Local\Temp\nitely-harness-x"), real), "stable");
+
+        // The app and an agent's CLI spell one existing folder differently and still agree.
+        let dir = crate::paths::unique_temp("nitely-keychain", "");
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let one = service_for(&dir, real);
+        assert_eq!(service_for(&dir.join("."), real), one);
+        assert_eq!(service_for(&dir.join("sub").join(".."), real), one);
+        assert_eq!(service_for(&dir.join("sub"), &dir.join("sub").join(".")), "Nitely", "the person's own folder, spelled two ways");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Every keychain entry is opened by `entry`, which picks the data folder's service: nothing
