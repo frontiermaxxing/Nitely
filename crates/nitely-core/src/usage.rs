@@ -385,11 +385,19 @@ impl Db {
     /// note), else the one issue a tool call names (`start_task: NIT-3`, a path in its worktree).
     /// A call that names several, or only reads about or triages one, says nothing.
     pub fn session_touches(&self, since: i64) -> Result<Touches> {
-        let keys: std::collections::HashSet<String> = {
+        let mut keys: std::collections::HashSet<String> = {
             let mut stmt = self.conn.prepare("SELECT key FROM issue")?;
             let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
             rows.collect::<rusqlite::Result<_>>()?
         };
+        // A summary written before a re-key names the issue by its old key.
+        let aliases = self.project_aliases().unwrap_or_default();
+        let old: Vec<String> = keys
+            .iter()
+            .filter_map(|k| k.split_once('-'))
+            .flat_map(|(p, n)| aliases.iter().filter(move |(_, now)| now.eq_ignore_ascii_case(p)).map(move |(was, _)| format!("{}-{n}", was.to_uppercase())))
+            .collect();
+        keys.extend(old);
         let prefixes: std::collections::HashSet<String> = keys.iter().filter_map(|k| k.split_once('-')).map(|(p, _)| p.to_lowercase()).collect();
         let mut stmt = self.conn.prepare(
             "SELECT actor, ts, issue_key, COALESCE(summary, '') FROM event
@@ -405,7 +413,7 @@ impl Db {
                 Some(k) => Some(k),
                 None if NOT_WORK_TOOLS.iter().any(|t| tool.ends_with(t)) => None,
                 None => match crate::activity::issue_keys(&summary, &prefixes, &keys)[..] {
-                    [ref k] => Some(k.clone()),
+                    [ref k] => Some(crate::projects::current_key(&aliases, k)),
                     _ => None,
                 },
             };
@@ -420,14 +428,50 @@ impl Db {
 /// Gives each usage no branch or folder placed (a session in the main checkout) to the issue its
 /// session named last before it, when that issue is in the usage's project.
 pub fn by_session(records: &mut [Attributed], touches: &Touches) {
+    let shared = codex_shared(records, touches);
     for r in records.iter_mut().filter(|r| r.issue.is_none()) {
-        let Some(named) = touches.get(&format!("{}:{}", r.usage.vendor, r.usage.session)) else { continue };
+        let id = format!("{}:{}", r.usage.vendor, r.usage.session);
+        let Some(named) = shared.get(&id).or_else(|| touches.get(&id)) else { continue };
         let last = named.partition_point(|(ts, _)| *ts <= r.usage.ts);
         r.issue = last
             .checked_sub(1)
             .map(|i| named[i].1.clone())
             .filter(|k| r.project.as_deref().is_some_and(|p| k.split('-').next().is_some_and(|kp| kp.eq_ignore_ascii_case(p))));
     }
+}
+
+/// How far outside a Codex session's usage an event under its folder's id may still be its own.
+const CODEX_SLACK_SECS: i64 = 10 * 60;
+
+/// Codex writes its MCP events (`start_task`, notes) under one id per folder (`codex:c:/code/app`),
+/// which every Codex session there shares, and its hooks name no tools. Such an event goes to the
+/// one Codex session in that folder whose usage runs around then; with two at once, to neither.
+/// Returns each such session's touches, its own and these, in time order.
+fn codex_shared(records: &[Attributed], touches: &Touches) -> Touches {
+    let mut spans: HashMap<(String, String), (i64, i64)> = HashMap::new();
+    for r in records.iter().filter(|r| r.usage.vendor == "codex") {
+        let span = spans.entry((format!("codex:{}", normalize(&r.usage.cwd)), format!("codex:{}", r.usage.session))).or_insert((r.usage.ts, r.usage.ts));
+        span.0 = span.0.min(r.usage.ts);
+        span.1 = span.1.max(r.usage.ts);
+    }
+    let mut out = Touches::new();
+    for (agent, named) in touches.iter().filter(|(a, _)| a.starts_with("codex:")) {
+        for (t, k) in named {
+            let near: Vec<&String> = spans
+                .iter()
+                .filter(|((a, _), (from, to))| a == agent && *t >= from - CODEX_SLACK_SECS && *t <= to + CODEX_SLACK_SECS)
+                .map(|((_, s), _)| s)
+                .collect();
+            if let [session] = near[..] {
+                out.entry(session.clone()).or_default().push((*t, k.clone()));
+            }
+        }
+    }
+    for (session, list) in out.iter_mut() {
+        list.extend(touches.get(session).into_iter().flatten().cloned());
+        list.sort();
+    }
+    out
 }
 
 /// The project of the watched repo `cwd` is in: its main checkout or a worktree in the folder its
@@ -774,6 +818,10 @@ mod tests {
         db.conn.execute("INSERT INTO event (ts, actor, type, summary, issue_key) VALUES (400, 'codex:c1', 'status', 'Fixing it', ?1)", [&a]).unwrap();
         let touches = db.session_touches(0).unwrap();
         assert_eq!(touches["claude:s1"], [(100, a.clone()), (300, b.clone())], "reading, triaging and naming two say nothing");
+        // A summary from before a re-key names the old key.
+        db.conn.execute("INSERT INTO project_alias (old_key, project, created_at) VALUES ('OLD', 'NIT', 0)", []).unwrap();
+        tool(350, "claude:s2", "mcp__nitely__start_task: OLD-2");
+        assert_eq!(db.session_touches(0).unwrap()["claude:s2"], [(350, b.clone())]);
 
         let usage = |vendor: &'static str, session: &str, ts: i64| Attributed {
             usage: Usage { vendor, session: session.into(), ts, model: "m".into(), input: 1, output: 1, cache_read: 0, cache_write: 0, cwd: r"C:\dev\app".into(), branch: "main".into() },
@@ -784,6 +832,16 @@ mod tests {
         by_session(&mut records, &touches);
         let got: Vec<Option<&str>> = records.iter().map(|r| r.issue.as_deref()).collect();
         assert_eq!(got, [None, Some(a.as_str()), Some(a.as_str()), Some(b.as_str()), Some(a.as_str()), None]);
+
+        // Codex's MCP events are under its folder's id: they go to the one Codex session there then.
+        let codex_touches = Touches::from([("codex:c:/dev/app".to_string(), vec![(600, b.clone()), (5000, a.clone())])]);
+        let codex = |session: &str, ts: i64| Attributed { usage: Usage { cwd: "C:/dev/app".into(), ..usage("codex", session, ts).usage }, ..usage("codex", session, ts) };
+        let mut alone = vec![codex("c1", 590), codex("c1", 700), codex("c2", 9000)];
+        by_session(&mut alone, &codex_touches);
+        assert_eq!(alone.iter().map(|r| r.issue.as_deref()).collect::<Vec<_>>(), [None, Some(b.as_str()), None], "c2 ran long after");
+        let mut two = vec![codex("c1", 700), codex("c2", 650)];
+        by_session(&mut two, &codex_touches);
+        assert_eq!(two.iter().map(|r| r.issue.as_deref()).collect::<Vec<_>>(), [None, None], "two at once: neither");
 
         // A branch's issue stands, and an issue of another project is not taken.
         let mut placed = vec![Attributed { issue: Some("NIT-9".into()), ..usage("claude", "s1", 250) }, Attributed { project: Some("APP".into()), ..usage("claude", "s1", 250) }];
