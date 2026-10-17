@@ -1118,7 +1118,7 @@ impl Db {
             rows.collect::<rusqlite::Result<_>>()?
         };
         let deps = Deps::load(&tx)?;
-        let mut ready: Vec<((i64, i64, Option<String>, i64), String)> = candidates
+        let mut ready: Vec<_> = candidates
             .into_iter()
             .filter(|(k, ..)| deps.blocked_by(k).is_empty() && !except.iter().any(|e| e.eq_ignore_ascii_case(k)))
             .map(|(k, priority, number, goal, target)| ((rank(deps.urgency(&k, priority)), goal, target, number), k))
