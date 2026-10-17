@@ -146,29 +146,34 @@ impl Db {
     fn settle_abandoned(&self, mut j: Job) -> Result<Job> {
         // A queued job carries the pid of the process started for it, which may die waiting for the
         // issue's lock; a running one, the pid of the process running it.
-        let ended = matches!(j.state.as_str(), "queued" | "running") && j.pid.is_some_and(|p| p as u32 != std::process::id() && !process_runs(p as u32));
-        // A process id the OS gave to something else after the job's ended would keep it running
-        // forever: no submit takes this long (the review stops at its timeout).
-        let stale = j.state == "running" && j.started_at.is_some_and(|t| now() - t > MAX_RUNNING_SECS);
-        if ended || stale {
-            let why = if ended {
-                "its process ended before it finished (the machine restarted, or it was stopped); submit again"
-            } else {
-                "it ran for more than two hours without finishing; submit again"
-            };
-            self.conn.execute(
-                "UPDATE submit_job SET state = 'failed', ended_at = COALESCE(ended_at, ?2), error = ?3 WHERE id = ?1 AND state IN ('queued', 'running')",
-                params![j.id, now(), why],
-            )?;
-            j.state = "failed".into();
-            j.error = Some(why.into());
-            j.ended_at.get_or_insert(now());
+        let Some(pid) = j.pid.map(|p| p as u32).filter(|p| *p != std::process::id()) else { return Ok(j) };
+        if !matches!(j.state.as_str(), "queued" | "running") {
+            return Ok(j);
         }
+        // Long after the job started, its process id may be one the OS has given to another program
+        // since: past that, the process must still be a nitely (when its command line can be read).
+        let since = j.started_at.unwrap_or(j.queued_at);
+        let reused = || now() - since > PID_CHECK_AFTER_SECS && crate::procs::command_line(pid).is_some_and(|c| !c.to_lowercase().contains("nitely"));
+        if process_runs(pid) && !reused() {
+            return Ok(j);
+        }
+        let why = "its process ended before it finished (the machine restarted, or it was stopped); submit again";
+        let failed = self.conn.execute(
+            "UPDATE submit_job SET state = 'failed', ended_at = ?2, error = ?3 WHERE id = ?1 AND state IN ('queued', 'running')",
+            params![j.id, now(), why],
+        )?;
+        if failed == 0 {
+            // It finished between the read and now: its own record says how.
+            return self.conn.query_row(&format!("SELECT {COLUMNS} FROM submit_job WHERE id = ?1"), [j.id], row).map_err(Into::into);
+        }
+        j.state = "failed".into();
+        j.error = Some(why.into());
+        j.ended_at = Some(now());
         Ok(j)
     }
 }
 
-const MAX_RUNNING_SECS: i64 = 2 * 3600;
+const PID_CHECK_AFTER_SECS: i64 = 30 * 60;
 
 /// Whether a process runs: asked of the OS directly, since a job's status is read often and a
 /// wrong "gone" fails a job that is about to finish.

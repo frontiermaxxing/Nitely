@@ -678,7 +678,15 @@ fn run_tool(server: &Server, name: &str, args: &Value, params: &Value) -> Result
         // Only one of the project asked for: an agent working across projects gets this one's work.
         let project = project(&db)?;
         let of_project = |key: &str| key.split_once('-').is_some_and(|(p, _)| p.eq_ignore_ascii_case(&project));
-        db.undelivered_submit_jobs(actor.id())?.into_iter().find(|j| j.needs_the_submitter() && of_project(&j.issue))
+        // Only the issue's latest submit: an older one that failed is moot once a newer one passed.
+        let mut found = None;
+        for j in db.undelivered_submit_jobs(actor.id())? {
+            if j.needs_the_submitter() && of_project(&j.issue) && db.latest_submit_job(&j.issue)?.is_some_and(|l| l.id == j.id) {
+                found = Some(j);
+                break;
+            }
+        }
+        found
     } else {
         None
     };
