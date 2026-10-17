@@ -111,8 +111,9 @@ async function takeLock(waitMs = 10 * 60 * 1000) {
       let holder;
       try {
         holder = Number(readFileSync(LOCK, "utf8").trim());
-      } catch {
-        continue; // Released between the two looks: try again.
+      } catch (err) {
+        if (err.code === "ENOENT") continue; // Released between the two looks: try again.
+        throw err;
       }
       if (!holder || !alive(holder)) {
         rmSync(LOCK, { force: true });
