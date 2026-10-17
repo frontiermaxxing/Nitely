@@ -288,6 +288,11 @@ fn approval_notice() -> Result<Option<ApprovalNotice>, String> {
     Ok(at.map(|at| ApprovalNotice { text: nitely_core::approval::NEW_FOLDER_KEY_NOTICE, at }))
 }
 
+#[tauri::command]
+fn dismiss_approval_notice() -> Result<(), String> {
+    db()?.dismiss_new_folder_key().map_err(err)
+}
+
 fn approval_key(db: &Db) -> Result<[u8; 32], String> {
     let secret = nitely_core::approval::keychain_secret().map_err(err)?;
     // Made just now for a profile that is not the person's own folder: said once, and kept.
@@ -744,6 +749,7 @@ pub fn run() {
             network_remove,
             update::update_status,
             approval_notice,
+            dismiss_approval_notice,
             update::check_for_update,
             update::set_update_channel,
             update::restart_to_update

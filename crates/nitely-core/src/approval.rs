@@ -53,6 +53,8 @@ pub fn new_folder_key_notice() -> Option<&'static str> {
     NEW_FOLDER_KEY.load(std::sync::atomic::Ordering::Relaxed).then_some(NEW_FOLDER_KEY_NOTICE)
 }
 
+const NEW_FOLDER_KEY_READ: &str = "The person read that this profile has its own approval key";
+
 pub const NEW_FOLDER_KEY_NOTICE: &str =
     "This profile has its own approval key now: approve waiting changes and pair phones again.";
 
@@ -262,14 +264,25 @@ impl Db {
         Ok(())
     }
 
-    /// When the app last made this data folder its own approval key (`log_new_folder_key`), so the
-    /// app keeps saying so after a restart until the person has read it.
+    /// When the app last made this data folder its own approval key (`log_new_folder_key`), while the
+    /// person has not dismissed that notice: the app keeps saying so after a restart until then.
+    /// Kept in this folder's own database, so one profile's dismissal never hides another's notice.
     pub fn new_folder_key_at(&self) -> Result<Option<i64>> {
-        Ok(self.conn.query_row(
-            "SELECT MAX(ts) FROM event WHERE type = 'approval_key' AND summary = ?1",
-            params![NEW_FOLDER_KEY_NOTICE],
-            |r| r.get(0),
-        )?)
+        let made: Option<i64> =
+            self.conn.query_row("SELECT MAX(id) FROM event WHERE type = 'approval_key' AND summary = ?1", params![NEW_FOLDER_KEY_NOTICE], |r| r.get(0))?;
+        let read: Option<i64> =
+            self.conn.query_row("SELECT MAX(id) FROM event WHERE type = 'approval_key' AND summary = ?1", params![NEW_FOLDER_KEY_READ], |r| r.get(0))?;
+        let Some(made) = made.filter(|m| read.is_none_or(|r| r < *m)) else { return Ok(None) };
+        Ok(Some(self.conn.query_row("SELECT ts FROM event WHERE id = ?1", params![made], |r| r.get(0))?))
+    }
+
+    /// The person dismissed the new-key notice (`new_folder_key_at`).
+    pub fn dismiss_new_folder_key(&self) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, 'human', NULL, 'approval_key', ?2)",
+            params![now(), NEW_FOLDER_KEY_READ],
+        )?;
+        Ok(())
     }
 
     pub fn log_approval_key_restored(&self) -> Result<()> {
@@ -427,6 +440,10 @@ mod tests {
         assert_eq!(db.new_folder_key_at().unwrap(), None, "another approval_key event is not this one");
         db.log_new_folder_key().unwrap();
         assert!(db.new_folder_key_at().unwrap().is_some());
+        db.dismiss_new_folder_key().unwrap();
+        assert_eq!(db.new_folder_key_at().unwrap(), None, "dismissed, in this folder's own database");
+        db.log_new_folder_key().unwrap();
+        assert!(db.new_folder_key_at().unwrap().is_some(), "a later new key is said again");
         drop(db);
         std::fs::remove_dir_all(&dir).ok();
     }

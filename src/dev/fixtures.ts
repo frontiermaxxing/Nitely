@@ -1798,6 +1798,8 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return connectApply(args);
       case "update_status":
         return UPDATE;
+      case "dismiss_approval_notice":
+        return null;
       case "approval_notice":
         // `?approval-notice` shows the line a profile on its own data folder gets once.
         return new URLSearchParams(location.search).has("approval-notice")
