@@ -12,8 +12,7 @@
 // and writes its notifications to harness-notifications.jsonl instead of showing them.
 
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createServer } from "node:net";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -48,17 +47,6 @@ function realDataDir() {
 }
 
 const norm = (p) => resolve(p).replace(/\\/g, "/").replace(/\/$/, "").toLowerCase();
-
-function freePort() {
-  return new Promise((ok, fail) => {
-    const s = createServer();
-    s.once("error", fail);
-    s.listen(0, "127.0.0.1", () => {
-      const { port } = s.address();
-      s.close(() => ok(port));
-    });
-  });
-}
 
 /** Runs the harness's nitely CLI on the run's data folder, e.g. to seed it or read it back. */
 export function nitely(home, ...args) {
@@ -151,12 +139,13 @@ async function start({ seed, env, keepHome, unlock }) {
     if (web.endsWith(".harness")) rmSync(web, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
   }
   seed(home);
-  const port = await freePort();
   mkdirSync(join(home, "screens"), { recursive: true });
   const child = spawn(exe("nitely-app"), [], {
     // Not in its data folder, which close() removes.
     cwd: ROOT,
-    env: { ...process.env, ...env, NITELY_HOME: home, NITELY_HARNESS: "1", WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}` },
+    // The harness build asks WebView2 for DevTools on a port of its own choosing (its config's
+    // additionalBrowserArgs); WebView2 writes it to DevToolsActivePort in its folder.
+    env: { ...process.env, ...env, NITELY_HOME: home, NITELY_HARNESS: "1" },
     stdio: ["ignore", "pipe", "pipe"],
   });
   let log = "";
@@ -180,14 +169,19 @@ async function start({ seed, env, keepHome, unlock }) {
     }
   };
   let page;
+  let port;
   try {
-    page = await Promise.race([Page.connect(port, 90000), exited.then((code) => Promise.reject(new Error(`the app exited (${code}) before its page came up`)))]);
+    const up = (async () => {
+      port = await devtoolsPort(90000);
+      return Page.connect(port, 30000);
+    })();
+    page = await Promise.race([up, exited.then((code) => Promise.reject(new Error(`the app exited (${code}) before its page came up`)))]);
     await page.waitFor(`return document.querySelector(".sidebar") !== null;`, { timeoutMs: 30000, what: "the app's sidebar" });
   } catch (e) {
     await stop();
-    keepLog(log);
+    keepLog(log + diagnose());
     remove();
-    throw new Error(`${e.message}\n--- the app's output ---\n${log}`);
+    throw new Error(`${e.message}\n--- the app's output ---\n${log}${diagnose()}`);
   }
   const close = async () => {
     page?.close();
@@ -197,6 +191,43 @@ async function start({ seed, env, keepHome, unlock }) {
     unlock();
   };
   return { page, home, port, pid: child.pid, log: () => log, exited, close };
+}
+
+/** WebView2's folder for the harness identifier, where it keeps storage and DevToolsActivePort. */
+function webviewDir() {
+  return process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, IDENTIFIER, "EBWebView") : null;
+}
+
+/** The DevTools port WebView2 chose, once it has written it. */
+async function devtoolsPort(timeoutMs) {
+  const dir = webviewDir();
+  if (!dir) throw new Error("no LOCALAPPDATA: the harness runs on Windows for now");
+  const file = join(dir, "DevToolsActivePort");
+  const until = Date.now() + timeoutMs;
+  while (Date.now() < until) {
+    try {
+      const port = Number(readFileSync(file, "utf8").split(/\r?\n/)[0]);
+      if (port > 0) return port;
+    } catch {
+      // Not written yet.
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  throw new Error(`WebView2 never wrote ${file}`);
+}
+
+/** What was running and what WebView2 left, for a launch that failed (CI shows it). */
+function diagnose() {
+  if (process.platform !== "win32") return "";
+  const ps = spawnSync("powershell.exe", ["-NoProfile", "-Command", "Get-Process nitely-app,msedgewebview2 -ErrorAction SilentlyContinue | Format-Table Id,ProcessName,MainWindowTitle -AutoSize | Out-String -Width 200"], { encoding: "utf8" });
+  const dir = webviewDir();
+  let files = "";
+  try {
+    files = dir && existsSync(dir) ? readdirSync(dir).join(", ") : `${dir} does not exist`;
+  } catch (e) {
+    files = String(e);
+  }
+  return `\n--- processes ---\n${ps.stdout ?? ""}\n--- WebView2 folder ---\n${files}\n`;
 }
 
 /** The app's output of the last run, kept in target/harness/app.log (CI uploads it). */
