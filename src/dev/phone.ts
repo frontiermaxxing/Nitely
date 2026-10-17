@@ -25,7 +25,7 @@ function status(): PhoneStatus {
     offeredAt && !decided && NOW() - offeredAt > 3
       ? [{ id: "c0ffee0011223344", name: "Andrew's iPhone", public_key: "cd".repeat(32), code: "4821-0937", at: offeredAt + 3, status: "waiting" as const }]
       : [];
-  return { listening, addresses: ADDRESSES, devices, requests, devices_error: null };
+  return { listening, addresses: ADDRESSES, devices, requests, devices_error: null, notified: ["9f2c41aa07d3e5b1"] };
 }
 
 export function phoneStatus(): PhoneStatus {

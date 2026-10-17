@@ -433,7 +433,12 @@ pub struct Phone {
     assets: Assets,
     db: OpenDb,
     in_worktrees: InWorktrees,
+    /// Web push to the paired phones that ask for it (push.rs); off until the app sets it.
+    push: std::sync::OnceLock<Arc<crate::push::Push>>,
 }
+
+/// How often the phone server looks for new decisions to notify the phones of.
+const NOTIFY_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// A running phone server; dropping it does not stop it, `stop` does.
 pub struct Running {
@@ -441,6 +446,8 @@ pub struct Running {
     /// The certificate's name when it serves HTTPS.
     pub host: Option<String>,
     stoppers: Vec<Stopper>,
+    /// Stops the thread that notifies the phones.
+    notifier: Option<Arc<AtomicBool>>,
 }
 
 impl Running {
@@ -460,12 +467,36 @@ impl Running {
         for s in &self.stoppers {
             s.stop();
         }
+        if let Some(flag) = &self.notifier {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 }
 
 impl Phone {
     pub fn new(devices: Devices, assets: Assets, db: OpenDb, in_worktrees: InWorktrees) -> Arc<Phone> {
-        Arc::new(Phone { state: Mutex::new(State::default()), devices, assets, db, in_worktrees })
+        Arc::new(Phone { state: Mutex::new(State::default()), devices, assets, db, in_worktrees, push: std::sync::OnceLock::new() })
+    }
+
+    /// Turns on web push: phones may subscribe, and while the server runs it notifies them of new
+    /// decisions.
+    pub fn set_push(&self, push: Arc<crate::push::Push>) {
+        let _ = self.push.set(push);
+    }
+
+    pub fn push(&self) -> Option<&Arc<crate::push::Push>> {
+        self.push.get()
+    }
+
+    /// One look for new decisions: tells the subscribed phones when `notifier` says so. Returns
+    /// what failed.
+    pub fn notify_tick(&self, notifier: &mut crate::push::Notifier) -> Vec<String> {
+        let Some(push) = self.push.get() else { return vec![] };
+        let Ok(db) = (self.db)() else { return vec![] };
+        let Ok((v, _, _)) = decisions(&db) else { return vec![] };
+        let Some(message) = notifier.tick(Instant::now(), &waiting_lines(&v)) else { return vec![] };
+        let paired: Vec<String> = self.devices().map(|d| d.into_iter().map(|d| d.id).collect()).unwrap_or_default();
+        push.notify(&paired, &message, now())
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
@@ -490,7 +521,7 @@ impl Phone {
         }
         let networks = Arc::new(if tls.is_some() { crate::relay::networks() } else { vec![] });
         let config = tls.as_ref().map(|t| t.config.clone());
-        let mut running = Running { addrs: vec![], host: tls.map(|t| t.host), stoppers: vec![] };
+        let mut running = Running { addrs: vec![], host: tls.map(|t| t.host), stoppers: vec![], notifier: None };
         for ip in ips {
             let listener = match TcpListener::bind(SocketAddr::new(*ip, port)) {
                 Ok(l) => l,
@@ -526,6 +557,23 @@ impl Phone {
             std::thread::spawn(move || http::accept_until(listener, allow, Arc::new(Slots::default()), handler, stop));
             running.addrs.push(addr);
             running.stoppers.push(Stopper { addr, flag });
+        }
+        if self.push.get().is_some() {
+            let flag = Arc::new(AtomicBool::new(false));
+            let (me, stop) = (self.clone(), flag.clone());
+            std::thread::spawn(move || {
+                let mut notifier = crate::push::Notifier::default();
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    for failed in me.notify_tick(&mut notifier) {
+                        eprintln!("nitely: phone notification: {failed}");
+                    }
+                    let until = Instant::now() + NOTIFY_EVERY;
+                    while Instant::now() < until && !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                    }
+                }
+            });
+            running.notifier = Some(flag);
         }
         Ok(running)
     }
@@ -610,6 +658,10 @@ impl Phone {
         match (head.method.as_str(), path) {
             ("GET", "/phone") | ("GET", "/phone/") | ("GET", "/phone/index.html") => self.file("phone.html"),
             ("GET", p) if p.starts_with("/assets/") && !p.contains("..") => self.file(&p[1..]),
+            // The service worker that shows notifications, and what installs the page on the home
+            // screen (iPhones show web push only to a page added there).
+            ("GET", "/phone/sw.js") | ("GET", "/phone/manifest.webmanifest") | ("GET", "/phone/icon-192.png") | ("GET", "/phone/icon-512.png") => self.file(&path[1..]),
+            ("GET", "/phone/api/push") | ("POST", "/phone/api/push") => self.push_route(head, body),
             ("POST", "/phone/api/pair") => self.pair(body),
             ("GET", "/phone/api/pair/status") => self.pair_status(head, body),
             ("GET", "/phone/api/hello") => match self.authorize(head, body) {
@@ -644,6 +696,38 @@ impl Phone {
             }
             _ => (404, error("Not found.")),
         }
+    }
+
+    /// The phone's notifications: GET says whether it is subscribed and the key to subscribe under;
+    /// POST saves its subscription (`PushSubscription.toJSON()`), or forgets it with no endpoint.
+    fn push_route(&self, head: &Head, body: &[u8]) -> (u16, Reply) {
+        let device = match self.authorize(head, body) {
+            Ok(d) => d,
+            Err((status, why)) => return (status, error(why)),
+        };
+        let Some(push) = self.push.get() else { return (404, error("This Nitely app does not send notifications.")) };
+        if head.method == "POST" {
+            #[derive(Deserialize)]
+            struct Keys {
+                p256dh: String,
+                auth: String,
+            }
+            #[derive(Deserialize)]
+            struct Subscribe {
+                endpoint: Option<String>,
+                keys: Option<Keys>,
+            }
+            let Ok(req) = serde_json::from_slice::<Subscribe>(body) else { return (400, error("Send the push subscription.")) };
+            let saved = match (req.endpoint, req.keys) {
+                (Some(endpoint), Some(keys)) => push.subscribe(crate::push::Subscription { device: device.id.clone(), endpoint, p256dh: keys.p256dh, auth: keys.auth }),
+                (None, _) => push.unsubscribe(&device.id),
+                _ => return (400, error("Send the push subscription.")),
+            };
+            if let Err(e) = saved {
+                return (400, Reply::Json(json!({ "error": format!("{e:#}") })));
+            }
+        }
+        (200, Reply::Json(json!({ "subscribed": push.subscribed(&device.id), "key": push.public_key() })))
     }
 
     fn file(&self, path: &str) -> (u16, Reply) {
@@ -786,6 +870,26 @@ fn check_decision(device: &Device, message: &str, time: i64, signature: &str) ->
 }
 
 /// An issue as the phone shows it.
+/// Each waiting decision as (id, one line) for a notification.
+fn waiting_lines(v: &Value) -> Vec<(String, String)> {
+    let text = |v: &Value| v.as_str().unwrap_or("").to_string();
+    v["decisions"]
+        .as_array()
+        .map(|ds| {
+            ds.iter()
+                .map(|d| {
+                    let key = d["issue"]["key"].as_str();
+                    let line = match d["kind"].as_str() {
+                        Some("ask") => format!("{} asks: {}", key.unwrap_or("An agent"), text(&d["ask"]["question"])),
+                        _ => format!("{} waits for your approval: {}", key.unwrap_or("A change"), text(&d["issue"]["title"])),
+                    };
+                    (text(&d["id"]), line)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn issue_json(i: &crate::IssueRecord) -> Value {
     json!({ "key": i.key, "title": i.title, "kind": i.kind, "priority": i.priority, "state": i.state, "track": i.track })
 }
@@ -938,7 +1042,8 @@ pub fn content_type(path: &str) -> String {
         "svg" => "image/svg+xml",
         "png" => "image/png",
         "woff2" => "font/woff2",
-        "json" | "webmanifest" => "application/json",
+        "json" => "application/json",
+        "webmanifest" => "application/manifest+json",
         _ => "application/octet-stream",
     }
     .to_string()
@@ -1087,6 +1192,72 @@ mod tests {
         *store.lock().unwrap() = Some(sign_list(&app, vec![]));
         assert_eq!(p.get(&base, "/phone/api/hello", t + 5).0, 401);
         running.stop();
+    }
+
+    #[test]
+    fn a_subscribed_phone_is_notified_of_a_new_decision_end_to_end() {
+        use crate::issues::{Actor, NewIssue};
+        use base64::Engine;
+        use ring::agreement;
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let app = new_secret().unwrap();
+        let public = public_of(&app);
+        let p = FakePhone { key: ed25519_dalek::SigningKey::from_bytes(&new_secret().unwrap()), id: "d1".into() };
+        let list = sign_list(&app, vec![Device { id: p.id.clone(), name: "Pixel".into(), public_key: p.public(), paired_at: now() }]);
+        let devices: Devices = Arc::new(move || Ok(verified(&public, &list).unwrap_or_default()));
+        let path = crate::paths::unique_temp("nitely-phone-push", ".db");
+        let db_path = path.clone();
+        let phone = Phone::new(devices, Arc::new(|_: &str| None), Arc::new(move || crate::Db::open(&db_path)), Arc::new(|_: &crate::Db| vec![]));
+        let store = crate::paths::unique_temp("nitely-phone-push", ".json");
+        let sent: Arc<Mutex<Vec<(String, Vec<u8>)>>> = Arc::new(Mutex::new(vec![]));
+        let log = sent.clone();
+        let pkcs8 = ring::signature::EcdsaKeyPair::generate_pkcs8(&ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING, &ring::rand::SystemRandom::new()).unwrap();
+        let push = crate::push::Push::new(
+            pkcs8.as_ref(),
+            store.clone(),
+            Arc::new(move |endpoint: &str, _: &[(&'static str, String)], body: &[u8]| {
+                log.lock().unwrap().push((endpoint.to_string(), body.to_vec()));
+                Ok(201)
+            }),
+        )
+        .unwrap();
+        phone.set_push(Arc::new(push));
+        let running = phone.start(&["127.0.0.1".parse().unwrap()], 0, None).unwrap();
+        let base = format!("http://{}", running.addrs[0]);
+
+        let (status, state) = p.get(&base, "/phone/api/push", now());
+        assert_eq!((status, &state["subscribed"]), (200, &json!(false)), "{state}");
+        assert_eq!(b64.decode(state["key"].as_str().unwrap()).unwrap().len(), 65);
+        let mine = agreement::EphemeralPrivateKey::generate(&agreement::ECDH_P256, &ring::rand::SystemRandom::new()).unwrap();
+        let ua_public = mine.compute_public_key().unwrap().as_ref().to_vec();
+        let auth = [7u8; 16];
+        let keys = json!({ "p256dh": b64.encode(&ua_public), "auth": b64.encode(auth) });
+        let (status, r) = p.post(&base, "/phone/api/push", json!({ "endpoint": "https://example.com/push/1", "keys": keys }));
+        assert_eq!(status, 400, "only a push service: {r}");
+        let (status, r) = p.post(&base, "/phone/api/push", json!({ "endpoint": "https://fcm.googleapis.com/fcm/send/xyz", "keys": keys }));
+        assert_eq!((status, &r["subscribed"]), (200, &json!(true)), "{r}");
+        let stranger = FakePhone { key: ed25519_dalek::SigningKey::from_bytes(&new_secret().unwrap()), id: "d1".into() };
+        assert_eq!(stranger.post(&base, "/phone/api/push", json!({ "endpoint": null })).0, 401);
+
+        let mut db = crate::Db::open(&path).unwrap();
+        db.create_project("NIT", "Nitely").unwrap();
+        let agent = Actor::Agent("claude:test".into());
+        let key = db.create_issue(&NewIssue { project: "NIT".into(), title: "Billing".into(), kind: "feature".into(), body: "b".into(), evidence: "e".into(), source: "claude".into(), allow_similar: true, ..Default::default() }, &agent).unwrap().key;
+        let mut notifier = crate::push::Notifier::default();
+        assert!(phone.notify_tick(&mut notifier).is_empty());
+        db.create_ask("Which currency?", &["EUR".into(), "USD".into()], Some(&key), None, &agent).unwrap();
+        assert!(phone.notify_tick(&mut notifier).is_empty());
+        let sent = sent.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, "https://fcm.googleapis.com/fcm/send/xyz");
+        let message: Value = serde_json::from_slice(&crate::push::decrypt_for_tests(mine, &ua_public, &auth, &sent[0].1)).unwrap();
+        assert_eq!(message["title"], "A decision waits for you");
+        assert_eq!(message["body"], format!("{key} asks: Which currency?"));
+
+        let (status, r) = p.post(&base, "/phone/api/push", json!({ "endpoint": null }));
+        assert_eq!((status, &r["subscribed"]), (200, &json!(false)), "{r}");
+        running.stop();
+        std::fs::remove_file(store).ok();
     }
 
     #[test]

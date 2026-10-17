@@ -673,6 +673,8 @@ export interface PhoneStatus {
   devices: PhoneDevice[];
   requests: PairRequest[];
   devices_error: string | null;
+  /** The paired phones that asked for notifications, by id. */
+  notified: string[];
 }
 
 export interface PhoneOffer {

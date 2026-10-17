@@ -223,6 +223,11 @@ export function PhoneSetup(props: { now: number }) {
               </button>
             </div>
           )}
+          <p className="small muted phone-notify-note">
+            {status.listening.some((u) => u.startsWith("https://"))
+              ? "For notifications, tap Notify me on the phone once it is paired. On iPhone they come only to the page added to the Home Screen: add it there first and pair from there."
+              : "Notifications need HTTPS: turn the phone server off and on with HTTPS chosen, then pair the phone from the new link."}
+          </p>
         </section>
       )}
 
@@ -234,7 +239,10 @@ export function PhoneSetup(props: { now: number }) {
           {status.devices.map((d) => (
             <div className="phone-device" key={d.id}>
               <span>{d.name}</span>
-              <span className="small muted">paired {ago(props.now, d.paired_at)}</span>
+              <span className="small muted">
+                paired {ago(props.now, d.paired_at)}
+                {status.notified.includes(d.id) && " · notifications on"}
+              </span>
               {removing === d.id ? (
                 <span className="phone-confirm small">
                   Its approvals not landed yet stop counting.

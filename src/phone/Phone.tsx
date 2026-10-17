@@ -2,11 +2,17 @@ import { useEffect, useState } from "react";
 import { post, signedGet } from "./api";
 import { Inbox } from "./Inbox";
 import { loadDevice, newKey, pairingCode, pairMessage, saveDevice, sign, type Device } from "./keys";
+import { Notify } from "./Notify";
+import { readEnv } from "./push";
 
-/** The pairing secret from the QR code's link, if the page was opened from one. */
-function pairSecret(): string | null {
-  const m = /[#&]pair=([0-9a-f]{64})/i.exec(location.hash);
+/** The pairing secret in a pairing link (or the page's own address, opened from the QR code). */
+function secretIn(link: string): string | null {
+  const m = /[#&]pair=([0-9a-f]{64})/i.exec(link);
   return m ? m[1].toLowerCase() : null;
+}
+
+function pairSecret(): string | null {
+  return secretIn(location.hash);
 }
 
 /** Takes the secret out of the address bar, so it is not left in the phone's history. */
@@ -51,8 +57,9 @@ export function Phone() {
         </span>
         <span className="ph-brand">Nitely</span>
         {view.kind === "paired" && <span className="ph-who">{view.device.name}</span>}
+        {view.kind === "paired" && <Notify device={view.device} />}
       </header>
-      {view.kind === "start" && <Start />}
+      {view.kind === "start" && <Start onSecret={(secret) => setView({ kind: "pair", secret })} />}
       {view.kind === "pair" && <Pair secret={view.secret} onAsked={(device) => setView({ kind: "confirm", device })} />}
       {view.kind === "confirm" && (
         <Confirm device={view.device} onPaired={(device) => setView({ kind: "paired", device })} onGone={(why) => setView({ kind: "gone", why })} />
@@ -71,14 +78,56 @@ export function Phone() {
   );
 }
 
-function Start() {
+function Start(props: { onSecret: (secret: string) => void }) {
+  const [link, setLink] = useState("");
+  const secret = secretIn(link);
   return (
     <section className="ph-body">
       <h1>Pair this phone</h1>
       <p>
         On the PC, open Nitely, go to <strong>Phone</strong> and press <strong>Pair a phone</strong>. Then scan the code it shows with this phone's camera.
       </p>
+      <label className="ph-field">
+        <span>Or paste the pairing link</span>
+        <input value={link} inputMode="url" autoComplete="off" autoCapitalize="off" spellCheck={false} onChange={(e) => setLink(e.target.value)} />
+      </label>
+      {link.trim() && !secret && <p className="ph-error">That is not a pairing link: it ends in #pair= and 64 letters and digits.</p>}
+      <div className="ph-actions">
+        <button className="ph-btn ph-primary" disabled={!secret} onClick={() => secret && props.onSecret(secret)}>
+          Continue
+        </button>
+      </div>
     </section>
+  );
+}
+
+/**
+ * On an iPhone's browser, before pairing: notifications come only to the page on the Home Screen,
+ * which keeps its own storage, so the key must be made there. Copying the link lets the person
+ * pair from there instead.
+ */
+function HomeScreenHint() {
+  const env = readEnv();
+  const [copied, setCopied] = useState(false);
+  if (!env.ios || env.standalone || !env.secure) return null;
+  return (
+    <div className="ph-hint">
+      <p>
+        <strong>Want notifications?</strong> On iPhone they come only to Nitely on the Home Screen, which pairs on its own. Copy this pairing link, tap Share, then Add to
+        Home Screen, open Nitely from there and paste the link.
+      </p>
+      <button
+        className="ph-btn"
+        onClick={() =>
+          navigator.clipboard.writeText(location.href).then(
+            () => setCopied(true),
+            () => setCopied(false),
+          )
+        }
+      >
+        {copied ? "Copied" : "Copy pairing link"}
+      </button>
+    </div>
   );
 }
 
@@ -124,6 +173,7 @@ function Pair(props: { secret: string; onAsked: (d: Device) => void }) {
     <section className="ph-body">
       <h1>Pair this phone</h1>
       <p>This phone will be able to answer the agents' questions and approve their changes. Nothing else.</p>
+      <HomeScreenHint />
       <label className="ph-field">
         <span>Name it</span>
         <input value={name} maxLength={40} autoComplete="off" onChange={(e) => setName(e.target.value)} />

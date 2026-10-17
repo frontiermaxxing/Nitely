@@ -13,6 +13,9 @@ let fake: Fake | null = null;
 export function setFake(f: Fake) {
   fake = f;
 }
+export function isFake(): boolean {
+  return fake !== null;
+}
 
 async function call<T>(method: string, path: string, body: string, headers: Record<string, string>): Promise<Answer<T>> {
   if (fake) return fake(method, path, body) as Answer<T>;

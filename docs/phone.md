@@ -195,14 +195,50 @@ until plain HTTP inside the tunnel goes away.
   wait at the PC.
 - Light and dark follow the phone. No pinch-zoom traps: text is at least 16 px so inputs do not zoom.
 
+## Notifications
+
+When a new question or approval waits, the app tells each paired phone that asked for it, through
+that phone's own browser push service (Google's for Chrome on Android, Apple's for Safari,
+Mozilla's, Microsoft's). Nitely runs no server for it.
+
+- **On the phone:** **Notify me** in the page's header asks the phone for permission, subscribes
+  its browser under the app's VAPID public key (`PushManager.subscribe`), and posts the
+  subscription to the app as a signed request (`POST /phone/api/push`; an empty endpoint turns it
+  off). A service worker (`/phone/sw.js`) shows each message and opens the page when it is tapped.
+  Each time the page opens with permission given, it hands the app its current subscription again,
+  since push services replace them now and then.
+- **On the PC:** while the phone server runs, it looks for new decisions every 15 seconds. A
+  decision is new the first time it is seen waiting; what already waited when the server started is
+  not told. New decisions go out together, at most one message every two minutes, and one settled
+  before its turn is dropped. The message ("NIT-12 asks: Which currency?") is encrypted to the
+  phone's key (RFC 8291, `aes128gcm`), so the push service carries it without reading it, and the
+  app signs a VAPID token (RFC 8292, ES256) with a P-256 key it makes once and keeps in the OS
+  keychain (`phone-vapid`). A subscription the push service calls gone (404, 410), or one whose
+  phone was removed, is forgotten. Subscriptions are kept in `phone-push.json` in the data
+  directory.
+- **Only push services:** the app posts only to HTTPS endpoints of the known push services
+  (`fcm.googleapis.com`, `*.push.apple.com`, `*.push.services.mozilla.com`, `*.notify.windows.com`),
+  so a paired phone cannot make the PC post elsewhere.
+
+What the person must do:
+
+- Serve the phone page over **HTTPS** ("Choosing where it listens"): browsers offer push only to
+  secure origins, and plain HTTP inside Tailscale is not one. Pair the phone from the HTTPS link.
+- **iPhone:** iOS shows web push only to a page added to the Home Screen (iOS 16.4 or later), and
+  that page keeps its own storage, apart from Safari's. So pair from there: scan the QR code, tap
+  **Copy pairing link** on the pairing screen, then Share, Add to Home Screen, open Nitely from the
+  Home Screen and paste the link. Then **Notify me**.
+- **Android:** Chrome needs nothing more than **Notify me**; adding the page to the home screen is
+  optional.
+- Allow notifications when the phone asks. The PC must be on, with the Nitely app open and the
+  phone server on, for messages to go out; the push service keeps a message for a day for a phone
+  that is off.
+
 ## Later
 
 - **Away from home:** a tunnel already reaches anywhere the phone has a connection; checking it end
   to end and the setup words on the Phone screen are [NIT-148](nitely://issue/NIT-148). A relay
   Nitely would run is out of scope.
-- **Notifications on the phone:** web push needs a secure origin, which HTTPS now gives, and the
-  browser's own push service; it is [NIT-159](nitely://issue/NIT-159). Until then, the desktop
-  notifications (NIT-124) and a home-screen shortcut to the phone page.
 
 ## Build order
 
@@ -226,6 +262,11 @@ until plain HTTP inside the tunnel goes away.
 - Phone decisions (`/phone/api/decisions`, `approve`, `answer`, `sendback`) are in `phone.rs`;
   `approval.rs` checks phone-signed approvals in `land` against the signed device list (the
   `approval` table's `device` and `signed_at`). The harness seeds a scratch database with decisions.
+- Notifications: `crates/nitely-core/src/push.rs` (the VAPID key, RFC 8291 encryption, sending,
+  `Notifier`'s throttle), `Phone::notify_tick` and `/phone/api/push` in `phone.rs`;
+  `src/phone/push.ts`, `Notify.tsx` and `public/phone/` (service worker, manifest, icons) on the
+  phone. Preview the switch at `/phone.html?fixtures`, and what an iPhone or a plain-HTTP page
+  shows with `&env=ios` or `&env=http`.
 - `src/phone/Inbox.tsx`: the one-hand Inbox (one decision per screen, the compact track with its
   words, the ask's options or the approval's reasons and review, Approve and Send back). Preview it
   at `/phone.html?fixtures` in the browser preview, or end to end with the harness.

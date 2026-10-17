@@ -38,6 +38,7 @@ let decisions: PhoneDecision[] = [
 
 export function installFake() {
   let askedAt = 0;
+  let notifying = false;
   setFake((method, path, body) => {
     if (method === "POST" && path === "/phone/api/pair") {
       askedAt = Date.now();
@@ -46,6 +47,10 @@ export function installFake() {
     }
     if (path === "/phone/api/pair/status") return { status: 200, body: { status: Date.now() - askedAt > 4000 ? "paired" : "waiting" } };
     if (path === "/phone/api/hello") return { status: 200, body: { name: "Preview phone", id: "preview0001" } };
+    if (path === "/phone/api/push") {
+      if (method === "POST") notifying = (JSON.parse(body) as { endpoint: string | null }).endpoint !== null;
+      return { status: 200, body: { subscribed: notifying, key: "BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8" } };
+    }
     if (path === "/phone/api/decisions") return { status: 200, body: { decisions, at_pc: 2 } };
     if (method === "POST" && ["/phone/api/approve", "/phone/api/sendback"].includes(path)) {
       const key = (JSON.parse(body) as { key: string }).key;

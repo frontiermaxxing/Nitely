@@ -40,6 +40,7 @@ pub mod track;
 pub mod update;
 pub mod usage;
 pub mod pulse;
+pub mod push;
 pub mod watch;
 pub mod submit;
 

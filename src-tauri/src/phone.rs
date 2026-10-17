@@ -53,6 +53,8 @@ pub struct PhoneStatus {
     requests: Vec<PairRequest>,
     /// Why the paired phones could not be read, when they could not.
     devices_error: Option<String>,
+    /// The paired phones that asked for notifications.
+    notified: Vec<String>,
 }
 
 fn status(app: &PhoneApp) -> PhoneStatus {
@@ -61,7 +63,8 @@ fn status(app: &PhoneApp) -> PhoneStatus {
         Ok(d) => (d, None),
         Err(e) => (vec![], Some(format!("{e:#}"))),
     };
-    PhoneStatus { listening, addresses: phone::addresses(), devices, requests: app.phone.waiting(), devices_error }
+    let notified = app.phone.push().map(|p| p.subscriptions().into_iter().map(|s| s.device).collect()).unwrap_or_default();
+    PhoneStatus { listening, addresses: phone::addresses(), devices, requests: app.phone.waiting(), devices_error, notified }
 }
 
 #[tauri::command]
@@ -105,6 +108,13 @@ pub async fn phone_tailscale_name() -> Result<String, String> {
 pub async fn phone_start(app: tauri::State<'_, PhoneApp>, ips: Vec<String>, tls: Option<TlsChoice>) -> Result<PhoneStatus, String> {
     let ips: Vec<IpAddr> = ips.iter().map(|ip| ip.parse::<IpAddr>().map_err(|_| format!("{ip} is not an address"))).collect::<Result<_, _>>()?;
     let tls = tls_for(tls)?;
+    // Notifications need the VAPID key from the keychain; without it the phone server still runs.
+    if app.phone.push().is_none() {
+        match nitely_core::push::Push::open_default() {
+            Ok(push) => app.phone.set_push(Arc::new(push)),
+            Err(e) => eprintln!("nitely: phone notifications are off: {e:#}"),
+        }
+    }
     if let Some(old) = app.running().take() {
         old.stop();
     }

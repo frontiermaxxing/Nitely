@@ -27,6 +27,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 # The phone server over HTTPS (phone.rs, docs/phone.md); the same rustls and ring ureq uses.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
 rustls-pki-types = { version = "1", features = ["std"] }
+# Web push to paired phones (push.rs): VAPID signing, RFC 8291 encryption.
+ring = "0.17"
 
 [dev-dependencies]
 rcgen = "0.13"

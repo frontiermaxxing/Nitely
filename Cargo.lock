@@ -2639,6 +2639,7 @@ dependencies = [
  "qrcode",
  "rcgen",
  "regex",
+ "ring",
  "rusqlite",
  "rustls",
  "rustls-pki-types",
