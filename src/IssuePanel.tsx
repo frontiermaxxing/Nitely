@@ -186,6 +186,7 @@ export function IssuePanel(props: {
   const own = decision === "own";
   const waiting = decision === "approve";
   // A decision's buttons act through the backend; the sheet then reloads to show what came of it.
+  // Each decision is keyed by its issue, so one opened after another starts with none of its edits.
   const [acting, setActing] = useState(false);
   const act = (_move: Move, run: () => Promise<unknown>) => {
     setActing(true);
@@ -300,13 +301,13 @@ export function IssuePanel(props: {
             {decision === "playbook" && detail.proposal && (
               <div className="panel-waiting panel-decision">
                 <p className="panel-waiting-head">Playbook change{waitedSince && ` · ${ago(props.now, waitedSince.ts).replace(" ago", "")}`}</p>
-                <PlaybookChangeDecision proposal={detail.proposal} issueKey={issue.key} resolved={false} busy={acting} onAct={act} />
+                <PlaybookChangeDecision key={`pb-${issue.key}-${detail.proposal.id}`} proposal={detail.proposal} issueKey={issue.key} resolved={false} busy={acting} onAct={act} />
               </div>
             )}
             {decision === "goal-plan" && detail.goal_plan && (
               <div className="panel-waiting panel-decision">
                 <p className="panel-waiting-head">Goal plan</p>
-                <GoalPlanDecision plan={detail.goal_plan} issueKey={issue.key} resolved={acting} onAct={act} />
+                <GoalPlanDecision key={`plan-${issue.key}`} plan={detail.goal_plan} issueKey={issue.key} resolved={acting} onAct={act} />
               </div>
             )}
             {own && (
