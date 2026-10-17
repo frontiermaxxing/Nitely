@@ -38,13 +38,14 @@ you what each agent is doing right now. An inbox holds the decisions only you sh
 
 ## Install
 
-Nitely runs on Windows today; macOS is next. Installers are published on
+Nitely runs on Windows today; macOS is next. There is no release to download yet: until the first
+one, build it from source (below). Releases will be published on
 [GitHub Releases](https://github.com/frontiermaxxing/Nitely/releases): stable releases, plus beta and
-nightly pre-releases ([docs/releasing.md](docs/releasing.md)). Download `Nitely_*_x64-setup.exe` and
-run it; it needs no administrator rights and puts the `nitely` command where your agents find it.
-The installer isn't code-signed yet, so SmartScreen warns the first time (**More info → Run anyway**).
+nightly pre-releases ([docs/releasing.md](docs/releasing.md)). Their `Nitely_*_x64-setup.exe` needs
+no administrator rights and puts the `nitely` command where your agents find it. It isn't
+code-signed yet, so SmartScreen warns the first time (**More info → Run anyway**).
 
-To build it from source instead:
+To build it from source:
 
 1. Install [Rust](https://rustup.rs) (MSVC toolchain), [Node.js](https://nodejs.org) 20 or newer,
    and Visual Studio Build Tools with "Desktop development with C++". WebView2 ships with Windows 11.
@@ -72,10 +73,24 @@ To build it from source instead:
    This creates the project, watches the repo and its worktrees, keeps a playbook for it, and
    connects every agent it finds at user level (MCP server, hooks, instructions). Nothing is written
    into the repo. Details: [docs/setup.md](docs/setup.md).
-2. **Seed the board.** In the repo, ask an agent to set it up (`/nitely-setup` in Claude Code).
-   It sweeps the repo read-only, files what it finds and writes the project's brief.
-3. **Let agents work.** Tell an agent to take the next task, or turn on the project's crew. Watch
-   Overview, answer the Inbox, and approve what waits for you.
+2. **Seed the board.** In the repo, ask an agent to set it up: `/nitely-setup` in Claude Code; in
+   Codex or any other agent, "call the nitely `setup_guide` tool and follow it". It sweeps the repo
+   read-only, files what it finds, writes the project's brief and proposes review rules, which you
+   approve in the Inbox. (Codex from the Microsoft Store isn't on PATH; Nitely finds it anyway.)
+3. **Let agents work.** Tell an agent to take the next task, or let Nitely run them: add a crew to
+   the project's playbook (the Rules tab shows where it is), and it keeps that many agents working
+   through the backlog ([docs/crew.md](docs/crew.md)):
+
+   ```toml
+   [crew]
+   workers = 1
+   agents = ["claude", "codex"]   # preference order; ones not installed are skipped
+   ```
+
+   Watch Overview, answer the Inbox, and approve what waits for you.
+4. **Answer from your phone.** **Phone** in the sidebar pairs a phone over Tailscale; a paired phone
+   answers the agents' questions and approves their changes, and nothing else
+   ([docs/phone.md](docs/phone.md)).
 
 ## What agents get
 
@@ -102,8 +117,8 @@ Every command has a CLI twin (`nitely submit`, `nitely land APP-4`, ...); `nitel
 - [GitHub, Bitbucket and Linear](docs/integrations.md): pull requests, checks and the one-time move
   off Linear.
 - [Agents on other machines](docs/other-machines.md): share this machine's backlog on your network.
-- [Signed approvals](docs/approvals.md), [the crew](docs/crew.md), and where Nitely is going
-  ([docs/vision.md](docs/vision.md)).
+- [Signed approvals](docs/approvals.md), [the crew](docs/crew.md), [the phone](docs/phone.md), and
+  where Nitely is going ([docs/vision.md](docs/vision.md)).
 
 Nitely keeps its data in `%APPDATA%\Nitely` (`nitely where` prints it): a SQLite database, its
 config, and the playbooks it keeps for repos that have none.
