@@ -141,9 +141,9 @@ fn compile(list: &str, terms: &[String]) -> Result<Vec<(usize, Matcher)>> {
 const DIFF: &[&str] = &["--text", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--src-prefix=a/", "--dst-prefix=b/"];
 const PLAIN: &[&str] = &["-c", "core.quotepath=false", "-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false"];
 
-fn git_plain(worktree: &Path, args: &[&str]) -> Result<String> {
+fn git_plain_with_input(worktree: &Path, args: &[&str], input: &str) -> Result<String> {
     let all: Vec<&str> = PLAIN.iter().chain(args).copied().collect();
-    git(worktree, &all)
+    crate::playbook::git_with_input(worktree, &all, input)
 }
 
 /// What the branch's commits add since `base` (a commit or branch), one commit at a time, since
@@ -151,40 +151,93 @@ fn git_plain(worktree: &Path, args: &[&str]) -> Result<String> {
 /// still published. `(where, text)` for every line a commit adds (for a merge, the lines in none
 /// of its parents, as a conflict resolution adds), the path of every file it adds (binary and empty
 /// ones too), and every line of its message.
+///
+/// Three git calls for the whole branch, however many commits it has (NIT-221): the commits with
+/// their parents and messages, then every commit's added files and every commit's patch, each
+/// from one `diff-tree --stdin`.
 fn added(worktree: &Path, base: &str) -> Result<Vec<(String, String)>> {
-    let mut out = Vec::new();
-    let commits = git(worktree, &["rev-list", "--reverse", &format!("{base}..HEAD")])?;
-    for sha in commits.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        let short = &sha[..sha.len().min(7)];
-        let message = git(worktree, &["log", "-1", "--format=%B", sha])?;
-        for (n, text) in message.lines().enumerate() {
-            out.push((format!("commit {short} message line {}", n + 1), text.to_string()));
-        }
-        let parents: Vec<String> = git(worktree, &["rev-list", "--parents", "-n", "1", sha])?.split_whitespace().skip(1).map(str::to_string).collect();
-        let merge = parents.len() > 1;
-        // The files it adds, NUL-separated so no path is quoted or split. A merge adds a file only
-        // when none of its parents has it.
-        let added_against = |from: Option<&str>| -> Result<Vec<String>> {
-            let mut args = vec!["diff-tree", "-r", "-z", "--no-commit-id", "--name-only", "--no-renames", "--diff-filter=A"];
-            match from {
-                Some(parent) => args.extend([parent, sha]),
-                None => args.extend(["--root", sha]),
+    // `<sha> <parents>` and the message, NUL between commits (a message holds no NUL).
+    let log = git(worktree, &["log", "--reverse", "-z", "--no-show-signature", "--format=%H %P%n%B", &format!("{base}..HEAD")])?;
+    let commits: Vec<(&str, Vec<&str>, &str)> = log
+        .split('\0')
+        .filter(|c| !c.trim().is_empty())
+        .map(|c| {
+            let (head, message) = c.split_once('\n').unwrap_or((c, ""));
+            let mut ids = head.split_whitespace();
+            (ids.next().unwrap_or(""), ids.collect(), message)
+        })
+        .collect();
+    if commits.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // The files each commit adds: a line per parent (a root commit alone, against nothing), and a
+    // merge adds a file only when none of its parents has it. NUL-separated, so no path is quoted
+    // or split.
+    let pairs: Vec<(&str, Option<&str>)> =
+        commits.iter().flat_map(|(sha, parents, _)| if parents.is_empty() { vec![(*sha, None)] } else { parents.iter().map(|p| (*sha, Some(*p))).collect() }).collect();
+    let input: String = pairs.iter().map(|(sha, parent)| parent.map_or(format!("{sha}\n"), |p| format!("{sha} {p}\n"))).collect();
+    let names = git_plain_with_input(worktree, &["diff-tree", "--stdin", "-r", "-z", "--name-only", "--no-renames", "--diff-filter=A", "--root"], &input)?;
+    let pair_shas: Vec<&str> = pairs.iter().map(|(sha, _)| *sha).collect();
+    let mut against: Vec<Option<Vec<String>>> = vec![None; pairs.len()];
+    let mut at = None;
+    for token in names.split('\0').filter(|t| !t.is_empty()) {
+        match next_header(token, &pair_shas, at) {
+            Some(i) => {
+                against[i] = Some(vec![]);
+                at = Some(i);
             }
-            Ok(git_plain(worktree, &args)?.split('\0').filter(|p| !p.is_empty()).map(str::to_string).collect())
-        };
-        let mut paths = added_against(parents.first().map(String::as_str))?;
-        for parent in parents.iter().skip(1) {
-            let also = added_against(Some(parent))?;
+            None => {
+                if let Some(paths) = at.and_then(|i| against[i].as_mut()) {
+                    paths.push(token.to_string());
+                }
+            }
+        }
+    }
+
+    // Every commit's patch, each after a line with its id. A merge's is the combined one.
+    let mut args = vec!["diff-tree", "--stdin", "-p", "--unified=0", "--cc", "--root"];
+    args.extend_from_slice(DIFF);
+    let shas: Vec<&str> = commits.iter().map(|(sha, _, _)| *sha).collect();
+    let input: String = shas.iter().map(|sha| format!("{sha}\n")).collect();
+    let mut patches: Vec<String> = vec![String::new(); shas.len()];
+    let mut at = None;
+    for line in git_plain_with_input(worktree, &args, &input)?.lines() {
+        match next_header(line, &shas, at) {
+            Some(i) => at = Some(i),
+            None => {
+                if let Some(i) = at {
+                    patches[i].push_str(line);
+                    patches[i].push('\n');
+                }
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    for (n, (sha, _, message)) in commits.iter().enumerate() {
+        let short = &sha[..sha.len().min(7)];
+        for (k, text) in message.lines().enumerate() {
+            out.push((format!("commit {short} message line {}", k + 1), text.to_string()));
+        }
+        // A parent with no block added nothing against it, so the commit adds nothing new.
+        let mut lists = pair_shas.iter().zip(&against).filter(|(s, _)| *s == sha).map(|(_, paths)| paths.clone().unwrap_or_default());
+        let mut paths = lists.next().unwrap_or_default();
+        for also in lists {
             paths.retain(|p| also.contains(p));
         }
         out.extend(paths.into_iter().map(|f| (format!("path {f} (commit {short})"), f)));
-        let mut args = vec!["diff-tree", "-p", "--unified=0", "--no-commit-id"];
-        args.extend_from_slice(DIFF);
-        args.push(if merge { "--cc" } else { "--root" });
-        args.push(sha);
-        out.extend(patch_lines(&git_plain(worktree, &args)?, short));
+        out.extend(patch_lines(&patches[n], short));
     }
     Ok(out)
+}
+
+/// The index of the input line whose block starts at `token`, `diff-tree --stdin`'s line with a
+/// commit's id: the first line after `at` with that id. Only later lines are looked at, and no
+/// path or patch line can name a later commit (its id depends on everything before it).
+fn next_header(token: &str, shas: &[&str], at: Option<usize>) -> Option<usize> {
+    let from = at.map_or(0, |i| i + 1);
+    (from..shas.len()).find(|&i| shas[i] == token)
 }
 
 /// Added lines in one commit's patch (`--unified=0`, `a/` and `b/` prefixes). A merge's combined
@@ -410,6 +463,8 @@ mod tests {
         sh(&dir, &["checkout", "-q", "claude/app-1-x"]);
         sh(&dir, &["merge", "-q", "--no-ff", "--no-commit", "side"]);
         std::fs::write(dir.join("e.txt"), "side\nresolved with ticket-9\n").unwrap();
+        // And a file in neither parent, empty, so only its path says anything.
+        std::fs::write(dir.join("bluebird-merge.keep"), "").unwrap();
         sh(&dir, &["add", "."]);
         sh(&dir, &["commit", "-q", "-m", "merge side"]);
         // A name git has to quote, written straight to the index: Windows allows no `"` in a file name.
@@ -447,6 +502,12 @@ mod tests {
         assert!(at.iter().any(|a| a.starts_with("notes.dat:1 ")), "{at:?}");
         assert!(at.iter().any(|a| a.starts_with("we\"ird.txt:1 ")), "{at:?}");
         assert!(!at.iter().any(|a| a.starts_with("path bluebird.keep") && a.contains(&merge)), "the merge adds no file its parents have: {at:?}");
+        assert!(at.contains(&format!("path bluebird-merge.keep (commit {merge})").as_str()), "a file only the merge adds: {at:?}");
+        // Each place once, though a merge is read against each of its parents.
+        let mut unique: Vec<(&str, &str, usize)> = hits.iter().map(|h| (h.at.as_str(), h.list.as_str(), h.term)).collect();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), hits.len(), "{at:?}");
         assert!(at.iter().any(|a| a.starts_with("commit ") && a.ends_with("message line 3")), "{at:?}");
         assert!(!at.iter().any(|a| a.starts_with("a.txt:1 ")), "a line the branch did not add: {at:?}");
         assert_eq!(hits.iter().find(|h| h.at.starts_with("a.txt:3 ")).map(|h| (h.list.as_str(), h.term)), Some(("APP", 1)));
@@ -470,6 +531,29 @@ mod tests {
         assert!(!err.to_lowercase().contains("bluebird") || err.contains("path bluebird/"), "the term shows only as part of a path it is in: {err}");
         assert!(!err.to_lowercase().contains("secret-client"), "{err}");
         std::fs::remove_dir_all(dir.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn scans_a_branch_that_shares_no_history_with_its_base() {
+        // An orphan branch: its first commit has no parent, so it adds everything in it.
+        let dir = crate::paths::unique_temp("nitely-terms-orphan", "");
+        crate::test_repo::init(&dir, &[("a.txt", "clean\n")]);
+        sh(&dir, &["checkout", "-q", "--orphan", "claude/app-2-y"]);
+        sh(&dir, &["rm", "-q", "-r", "--cached", "."]);
+        std::fs::remove_file(dir.join("a.txt")).unwrap();
+        std::fs::write(dir.join("bluebird.txt"), "first\nticket-5\n").unwrap();
+        sh(&dir, &["add", "."]);
+        sh(&dir, &["commit", "-q", "-m", "start over"]);
+        sh(&dir, &["commit", "-q", "--allow-empty", "-m", "nothing but ticket-6"]);
+        let root = sh(&dir, &["rev-parse", "--short=7", "HEAD~1"]).trim().to_string();
+        let tip = sh(&dir, &["rev-parse", "--short=7", "HEAD"]).trim().to_string();
+        let at: Vec<String> = scan(&app_terms(), Some("APP"), &dir, "main").unwrap().into_iter().map(|h| h.at).collect();
+        assert_eq!(
+            at,
+            [format!("path bluebird.txt (commit {root})"), format!("bluebird.txt:2 (commit {root})"), format!("commit {tip} message line 1")],
+            "the root commit's file and line, and the empty commit's message"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

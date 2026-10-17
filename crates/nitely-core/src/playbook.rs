@@ -6,7 +6,7 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use crate::db::{now, Db};
@@ -600,6 +600,41 @@ pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<String> {
 
 fn finish(cmd: &mut Command, args: &[&str]) -> Result<String> {
     let out = run_git(cmd).with_context(|| format!("starting git {}", args.join(" ")))?;
+    checked(out, args)
+}
+
+/// `git` in `dir` with `input` on its stdin, for the commands that read their list of commits
+/// there (`diff-tree --stdin`); started again like run_git when git never ran.
+pub(crate) fn git_with_input(dir: &Path, args: &[&str], input: &str) -> Result<String> {
+    use std::io::Write;
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let last = attempt == 3;
+        let mut cmd = shell_free_command("git");
+        cmd.arg("-C").arg(dir).args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        match cmd.spawn() {
+            Err(e) if !last && e.kind() == std::io::ErrorKind::PermissionDenied => {}
+            Err(e) => return Err(e).with_context(|| format!("starting git {}", args.join(" "))),
+            Ok(mut child) => {
+                let mut stdin = child.stdin.take().context("git's stdin")?;
+                let input = input.to_string();
+                // Written while git runs, so a large output cannot stall it; git's exit status says
+                // whether it read what it needed.
+                let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
+                let out = child.wait_with_output().with_context(|| format!("running git {}", args.join(" ")))?;
+                writer.join().ok();
+                if last || !never_ran(&out) {
+                    return checked(out, args);
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100 * attempt));
+    }
+}
+
+/// git's output, or an error with what it said (or its exit code when it said nothing).
+fn checked(out: std::process::Output, args: &[&str]) -> Result<String> {
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         let why = if stderr.trim().is_empty() { format!("exited with {} and said nothing", exit_code(&out.status)) } else { stderr.trim().to_string() };
