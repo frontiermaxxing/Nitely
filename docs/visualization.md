@@ -405,8 +405,9 @@ prose, and motion that loops (other than the breathing dot), flashes, bounces or
 
 ## The sidebar and Now
 
-The sidebar holds the mark and name, "Go to…" (the palette), the four views with their counts
-(Inbox in a filled amber badge, Now in teal figures), the projects with a dot per agent session in
+The sidebar holds the mark and name, "Go to…" (the palette), the views with their counts
+(Overview; Inbox in a filled amber badge; Now in teal figures; Activity; Other machines, with the
+agents working there in teal figures; Phone), the projects with a dot per agent session in
 their repos (amber waiting on you first, then teal working, at most five), "+ Add project", and at
 the foot Agent setup with a dot per installed agent (teal up to date, amber an update is ready, red
 needs a look) and the line "Local · live".
@@ -473,6 +474,27 @@ List and Board start with the project's goal rows (see Goal rows).
   code, links; `nitely://issue/` links open the issue). Edit opens it as text; a save passes the
   revision it started from, and when an agent wrote meanwhile the editor says so and offers
   "Take theirs" or "Keep mine" instead of overwriting either.
+
+## Settings
+
+Every setting is a card (`.settings-card`, src/styles.css): its name as the heading, a line of why
+in `--fg-2` (`.settings-why`), then the controls, the button that saves them last. Stacked cards sit
+14px apart. A project's Settings and Rules, the review defaults and Updates on Agent setup, Phone,
+Other machines and the Inbox's notification settings all use it, so a setting looks the same wherever
+it lives.
+
+- **A page that is mostly settings** (Add project, Agent setup, Phone, Other machines) is a form
+  page (`page page-form`): the same frame as every view, so the title does not move from one page to
+  the next, but narrower, with a lead paragraph under the title (`page-lead`). A project's Settings
+  and Rules tabs stack their cards in `.settings` (720px).
+- **A list inside a card** (machines, paired phones) is the card's own rows, never a box in a box.
+- **No amber.** A rule or a setting waits on nobody, so it stays ink however much it is about the
+  person ("What waits for you" leads the Rules tab by its place, first). The one amber thing on a
+  settings page is a request that does wait on them now: a phone asking to pair.
+- **Destructive** cards (removing a project) get a fail-tinged edge (`.settings-danger`) and a
+  `btn danger`; what they remove is typed to confirm.
+- **Empty** settings tabs say what is missing with `EmptyState`, in the same words wherever the same
+  thing is missing (a project with no repo says so the same way on Branches and Rules).
 
 ## Keys
 

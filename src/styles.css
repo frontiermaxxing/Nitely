@@ -179,6 +179,9 @@ a:hover { text-decoration-color: currentColor; }
 .remote-row + .remote-row { border-top: 1px solid var(--line); }
 .remote-doing { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .remote-row:has(.net-confirm), .remote-row:has(> .btn) { grid-template-columns: auto minmax(120px, max-content) auto auto 1fr auto; }
+/* In its settings card the list is the card's rows, not a box in a box. */
+.settings-card .remote-list { background: none; border: 0; border-radius: 0; }
+.settings-card .remote-row { padding-left: 0; padding-right: 0; }
 
 /* Other machines: the one-time token card, and the add form. */
 .net-made { border-color: var(--line-strong); }
@@ -187,6 +190,7 @@ a:hover { text-decoration-color: currentColor; }
 .net-add { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
 .net-add input { width: 160px; }
 .net-urls { margin: var(--space-2) 0 0; padding-left: var(--space-4); }
+.net-add-why { margin: 10px 0 0; }
 @media (max-width: 640px) {
   .remote-row { grid-template-columns: auto 1fr auto; }
   .remote-row .remote-doing, .remote-row > .small:not(.remote-doing) { grid-column: 2 / -1; }
@@ -504,8 +508,9 @@ details summary { cursor: pointer; color: var(--fg-2); }
   .panel-rail { border-left: 0; border-top: 1px solid var(--line); }
 }
 
-/* ----- forms: add a project, agent setup ----- */
-.page.page-form { max-width: 980px; padding: 40px 56px 48px; }
+/* ----- forms: add a project, agent setup, phone, other machines ----- */
+/* Narrower than a view, but in the same frame, so the title stays put from one page to the next. */
+.page.page-form { max-width: 980px; }
 .page-form .page-head { margin-bottom: 8px; }
 .head-action { margin-left: auto; }
 .page-lead { margin: 0 0 22px; max-width: 720px; font-size: 13.5px; line-height: 1.55; color: var(--fg-2); }
@@ -532,9 +537,29 @@ details summary { cursor: pointer; color: var(--fg-2); }
 .chip { font-size: 11.5px; }
 .chip.manual { color: var(--fail); }
 @media (max-width: 760px) {
-  .page.page-form { padding: 20px 16px 40px; }
   .vendor-card .change { grid-template-columns: minmax(0, 1fr); gap: 4px; }
 }
+
+/* ----- Settings: every setting is a card (docs/visualization.md, "Settings"): its name, why, the controls.
+   A project's Settings and Rules, Agent setup's defaults and updates, Phone, Other machines, notifications. ----- */
+.settings { display: flex; flex-direction: column; gap: 14px; max-width: 720px; }
+.settings-card { padding: 16px 18px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); }
+.settings-card h2 { margin: 0 0 8px; }
+.settings-card + .settings-card { margin-top: 14px; }
+.settings > .settings-card + .settings-card { margin-top: 0; }
+.settings-why { margin: 0 0 12px; font-size: var(--text-md); line-height: 1.55; color: var(--fg-2); text-wrap: pretty; }
+.settings-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.settings-row input {
+  min-height: 32px; min-width: 0; flex: 0 1 320px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: 6px;
+  background: var(--bg); font-size: var(--text-md);
+}
+.settings-row input.mono { flex-basis: 140px; font-size: 12.5px; letter-spacing: 0.02em; }
+.settings-row input:focus { outline: 2px solid var(--focus); outline-offset: -1px; }
+.settings-hint { margin: 8px 0 0; font-size: var(--text-sm); color: var(--fail); }
+.settings-why code { font-family: var(--font-mono); font-size: 0.88em; background: var(--sunken); border-radius: var(--radius-sm); padding: 1px 4px; }
+.settings-danger { border-color: color-mix(in srgb, var(--fail) 40%, var(--line)); }
+.btn.danger { border-color: var(--fail); color: var(--fail); }
+.btn.danger:hover:not(:disabled) { background: var(--fail-wash); }
 
 /* Other machines: the add form's fields match the rest of the app's inputs. */
 .net-add input, .net-add select {

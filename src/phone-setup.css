@@ -1,5 +1,4 @@
 /* ----- Phone: where the phone server listens, pairing, paired phones (docs/phone.md) ----- */
-.phone-setup .card { margin-bottom: 12px; }
 .phone-urls { margin: 4px 0 0; padding-left: 18px; overflow-wrap: anywhere; }
 .phone-addresses { display: grid; gap: 6px; margin: 8px 0 4px; }
 .phone-address { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; font-size: var(--text-md); cursor: pointer; }

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "./backend";
 import type { DefaultsView, DryRun, LandBy, PathRule, ReviewerInfo, ReviewFlag, RuleDefaults, RuleField, RulesEdit, RulesView } from "./types";
-import { Loading, VENDOR_LABEL, vendorOf } from "./ui";
+import { EmptyState, Loading, VENDOR_LABEL, vendorOf } from "./ui";
 import "./rules.css";
 
 /** Who lands a reviewed change, in the words the playbook docs use. */
@@ -202,7 +202,7 @@ function RepoRules(props: { view: RulesView; onSaved: (v: RulesView) => void }) 
       </p>
       {v.read_only && <p className="rules-readonly">{v.read_only}</p>}
 
-      <section className="settings-card rules-human">
+      <section className="settings-card">
         <h2>What waits for you</h2>
         <p className="rules-summary">{waitsSummary(draft, landBy, crossVendor)}</p>
         <label className="rules-check">
@@ -424,7 +424,12 @@ export function ProjectRules(props: { projectKey: string }) {
 
   if (error) return <p className="error">{error}</p>;
   if (!views) return <Loading />;
-  if (views.length === 0) return <p className="muted">No repo is linked to {props.projectKey}, so it has no rules yet. Add one with Add project.</p>;
+  if (views.length === 0)
+    return (
+      <EmptyState title="No repo is watched for this project.">
+        Add its repo from the sidebar, or run <span className="mono">nitely repo add &lt;path&gt;</span>. Its review and landing rules show up here.
+      </EmptyState>
+    );
   return (
     <>
       {views.map((v) => (

@@ -123,14 +123,14 @@ function badgePixels(count: number, size: number): number[] | null {
 export function NotifySettingsPanel(props: { onClose: () => void }) {
   const [settings, save] = useNotifySettings();
   return (
-    <section className="notify-settings" aria-label="Notifications">
+    <section className="settings-card notify-settings" aria-label="Notifications">
       <div className="notify-settings-head">
         <h2>Notifications</h2>
         <button className="link" onClick={props.onClose}>
           Done
         </button>
       </div>
-      <p className="muted small">When a decision starts waiting on you, Nitely tells you once, outside the window. Several at once come as one.</p>
+      <p className="settings-why">When a decision starts waiting on you, Nitely tells you once, outside the window. Several at once come as one.</p>
       {NOTIFY_KINDS.map(({ kind, label }) => (
         <label key={kind} className="notify-kind">
           <input type="checkbox" checked={settings.kinds[kind]} onChange={(e) => save({ ...settings, kinds: { ...settings.kinds, [kind]: e.target.checked } })} />

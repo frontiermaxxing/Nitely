@@ -82,8 +82,8 @@ export function PhoneSetup(props: { now: number }) {
       </p>
       {error && <p className="error">{error}</p>}
 
-      <section className="card">
-        <div className="card-title">Where it listens</div>
+      <section className="settings-card">
+        <h2>Where it listens</h2>
         {on ? (
           <>
             <p className="small">The phone page is on:</p>
@@ -109,7 +109,7 @@ export function PhoneSetup(props: { now: number }) {
           </>
         ) : (
           <>
-            <p className="small muted">
+            <p className="settings-why">
               The phone page holds the phone's key, so nobody between the PC and the phone may be able to change it: the page goes only inside Tailscale, or over
               HTTPS with a certificate the phone trusts.
             </p>
@@ -178,8 +178,8 @@ export function PhoneSetup(props: { now: number }) {
       </section>
 
       {on && (
-        <section className="card">
-          <div className="card-title">Pair a phone</div>
+        <section className="settings-card">
+          <h2>Pair a phone</h2>
           {status.requests.map((r) => (
             <div className="phone-request" key={r.id} role="alert">
               <p>
@@ -226,8 +226,8 @@ export function PhoneSetup(props: { now: number }) {
         </section>
       )}
 
-      <section className="card">
-        <div className="card-title">Paired phones</div>
+      <section className="settings-card">
+        <h2>Paired phones</h2>
         {status.devices_error && <p className="error small">{status.devices_error}</p>}
         {status.devices.length === 0 && !status.devices_error && <p className="small muted">None yet.</p>}
         <div className="phone-devices">

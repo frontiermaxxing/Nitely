@@ -7,11 +7,10 @@
   background: var(--hover); color: var(--fg-2);
 }
 
-/* What sends a change to a person leads, in the attention color: it is what the person tunes. */
-.rules-human { border-color: color-mix(in srgb, var(--attention) 45%, var(--line)); }
-.rules-human h2 { color: var(--attention-ink); }
+/* What sends a change to a person leads by its place, first; it stays ink, because amber is only for
+   what waits on the person now, and a rule waits on nobody. */
 .rules-summary {
-  margin: 0 0 12px; padding: 10px 12px; border-radius: var(--radius); background: var(--attention-wash);
+  margin: 0 0 12px; padding: 10px 12px; border-radius: var(--radius); background: var(--sunken);
   font-size: var(--text-md); line-height: 1.5; color: var(--fg); text-wrap: pretty;
 }
 .rules-check { display: inline-flex; align-items: center; gap: 8px; font-size: var(--text-md); cursor: pointer; }

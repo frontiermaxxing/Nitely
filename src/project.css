@@ -176,20 +176,7 @@
   .bmap-group-label { grid-area: label; padding: 2px 0; }
 }
 
-/* ----- Settings: a project's name, key, and removing it ----- */
-.settings { display: flex; flex-direction: column; gap: 14px; max-width: 720px; }
-.settings-card { padding: 16px 18px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); }
-.settings-card h2 { margin: 0 0 8px; }
-.settings-why { margin: 0 0 12px; font-size: var(--text-md); line-height: 1.55; color: var(--fg-2); text-wrap: pretty; }
-.settings-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.settings-row input {
-  min-height: 32px; min-width: 0; flex: 0 1 320px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: 6px;
-  background: var(--bg); font-size: var(--text-md);
-}
-.settings-row input.mono { flex-basis: 140px; font-size: 12.5px; letter-spacing: 0.02em; }
-.settings-row input:focus { outline: 2px solid var(--focus); outline-offset: -1px; }
-.settings-hint { margin: 8px 0 0; font-size: var(--text-sm); color: var(--fail); }
-.settings-why code { font-family: var(--font-mono); font-size: 0.88em; background: var(--sunken); border-radius: var(--radius-sm); padding: 1px 4px; }
+/* ----- Settings: the project's private terms (the settings card itself is in styles.css) ----- */
 .terms { display: grid; gap: 12px; }
 .terms-list { display: grid; gap: 6px; font-size: var(--text-sm); color: var(--fg-2); }
 .terms-list textarea {
@@ -199,9 +186,6 @@
 }
 .terms-list textarea:focus { outline: 2px solid var(--focus); outline-offset: -1px; }
 .terms-list textarea::placeholder { color: var(--fg-3); }
-.settings-danger { border-color: color-mix(in srgb, var(--fail) 40%, var(--line)); }
-.btn.danger { border-color: var(--fail); color: var(--fail); }
-.btn.danger:hover:not(:disabled) { background: var(--fail-wash); }
 
 /* ----- Brief: what agents learned about the project, and whether setup has run ----- */
 .brief { max-width: 760px; }
