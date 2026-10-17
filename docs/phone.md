@@ -211,7 +211,8 @@ Mozilla's, Microsoft's). Nitely runs no server for it.
 - **On the PC:** while the phone server runs, it looks for new decisions every 15 seconds. A
   decision is new the first time it is seen waiting; what already waited when the server started is
   not told. New decisions go out together, at most one message every two minutes, and one settled
-  before its turn is dropped. The message ("NIT-12 asks: Which currency?") is encrypted to the
+  before its turn is dropped. A phone whose message did not go out (its push service was down)
+  is told those decisions again with its next message, while they still wait. The message ("NIT-12 asks: Which currency?") is encrypted to the
   phone's key (RFC 8291, `aes128gcm`), so the push service carries it without reading it, and the
   app signs a VAPID token (RFC 8292, ES256) with a P-256 key it makes once and keeps in the OS
   keychain (`phone-vapid`). A subscription the push service calls gone (404, 410), or one whose

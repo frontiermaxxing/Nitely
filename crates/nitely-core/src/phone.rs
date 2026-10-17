@@ -559,10 +559,10 @@ impl Phone {
         };
         let Ok(db) = (self.db)() else { return vec![] };
         let Ok((v, _, _)) = decisions(&db) else { return vec![] };
-        let Some(message) = notifier.tick(Instant::now(), &waiting_lines(&v)) else { return vec![] };
-        let delivery = push.notify(&paired, &message, now());
-        if delivery.delivered == 0 && !delivery.failed.is_empty() {
-            notifier.undelivered();
+        let Some(batch) = notifier.tick(Instant::now(), &waiting_lines(&v)) else { return vec![] };
+        let delivery = push.notify_each(&paired, &|sub| notifier.message_for(&sub.endpoint, &batch), now());
+        for (endpoint, sent) in &delivery.results {
+            notifier.settle(endpoint, &batch, *sent);
         }
         delivery.failed
     }

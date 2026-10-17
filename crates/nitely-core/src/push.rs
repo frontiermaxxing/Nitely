@@ -228,22 +228,40 @@ impl Push {
     /// says is gone (404, 410), or whose phone is no longer paired, is forgotten; one the phone
     /// replaced meanwhile is kept.
     pub fn notify(&self, paired: &[String], message: &Value, now: i64) -> Delivery {
-        let body = message.to_string();
+        self.notify_each(paired, &|_| Some(message.clone()), now)
+    }
+
+    /// `notify` with each phone's own message (`message_for`; None sends it nothing), so a phone
+    /// that missed one can be told it again with its next. Each outcome is in `results`.
+    pub fn notify_each(&self, paired: &[String], message_for: &dyn Fn(&Subscription) -> Option<Value>, now: i64) -> Delivery {
         let mut delivery = Delivery::default();
         let mut gone = HashSet::new();
         for sub in self.subscriptions() {
             if !paired.contains(&sub.device) {
                 gone.insert((sub.device.clone(), sub.endpoint.clone()));
+                delivery.results.push((sub.endpoint.clone(), Sent::Gone));
                 continue;
             }
-            match self.send_one(&sub, body.as_bytes(), now) {
-                Ok(200..=299) => delivery.delivered += 1,
+            let Some(message) = message_for(&sub) else { continue };
+            let sent = match self.send_one(&sub, message.to_string().as_bytes(), now) {
+                Ok(200..=299) => {
+                    delivery.delivered += 1;
+                    Sent::Delivered
+                }
                 Ok(404 | 410) => {
                     gone.insert((sub.device.clone(), sub.endpoint.clone()));
+                    Sent::Gone
                 }
-                Ok(status) => delivery.failed.push(format!("{}: the push service answered {status}", sub.device)),
-                Err(e) => delivery.failed.push(format!("{}: {e:#}", sub.device)),
-            }
+                Ok(status) => {
+                    delivery.failed.push(format!("{}: the push service answered {status}", sub.device));
+                    Sent::Failed
+                }
+                Err(e) => {
+                    delivery.failed.push(format!("{}: {e:#}", sub.device));
+                    Sent::Failed
+                }
+            };
+            delivery.results.push((sub.endpoint.clone(), sent));
         }
         if !gone.is_empty() {
             let _g = self.guard();
@@ -275,45 +293,89 @@ impl Push {
 pub struct Delivery {
     pub delivered: usize,
     pub failed: Vec<String>,
+    /// Each subscription's outcome, by endpoint.
+    pub results: Vec<(String, Sent)>,
+}
+
+/// What became of one phone's message.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Sent {
+    Delivered,
+    /// Not taken this time (the push service was down, say): told again with the next message.
+    Failed,
+    /// The subscription is gone, or its phone was removed: forgotten.
+    Gone,
+}
+
+/// The decisions one tick tells: those new since the last message, and how many wait in all.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Batch {
+    pub new: Vec<(String, String)>,
+    pub waiting: usize,
 }
 
 /// Decides when to notify: a decision is new the first time it is seen waiting, and new decisions
 /// are told at most once per `THROTTLE`, together. What already waited when watching began is not
-/// told; a decision settled before its turn came is dropped.
+/// told; a decision settled before its turn came is dropped. A phone whose message did not go out
+/// is owed its decisions, and gets them with its next message while they still wait.
 #[derive(Default)]
 pub struct Notifier {
     seen: Option<HashSet<String>>,
     pending: Vec<(String, String)>,
     last: Option<Instant>,
-    /// What the last message told, until it is known to have gone out.
-    told: Vec<(String, String)>,
+    /// What each phone (by subscription endpoint) was not told yet.
+    owed: std::collections::HashMap<String, Vec<(String, String)>>,
 }
 
 impl Notifier {
-    /// `waiting` is every decision waiting now, as (id, one line). Returns the message to send now.
-    pub fn tick(&mut self, now: Instant, waiting: &[(String, String)]) -> Option<Value> {
+    /// `waiting` is every decision waiting now, as (id, one line). Returns what to tell now: the
+    /// new decisions, when there are any or a phone is owed some, and the throttle allows.
+    pub fn tick(&mut self, now: Instant, waiting: &[(String, String)]) -> Option<Batch> {
         let ids: HashSet<String> = waiting.iter().map(|(id, _)| id.clone()).collect();
         let seen = self.seen.replace(ids.clone())?;
         self.pending.extend(waiting.iter().filter(|(id, _)| !seen.contains(id)).cloned());
         self.pending.retain(|(id, _)| ids.contains(id));
-        if self.pending.is_empty() || self.last.is_some_and(|l| now.duration_since(l) < THROTTLE) {
+        for owed in self.owed.values_mut() {
+            owed.retain(|(id, _)| ids.contains(id));
+        }
+        self.owed.retain(|_, owed| !owed.is_empty());
+        if (self.pending.is_empty() && self.owed.is_empty()) || self.last.is_some_and(|l| now.duration_since(l) < THROTTLE) {
             return None;
         }
         self.last = Some(now);
-        let new = std::mem::take(&mut self.pending);
-        self.told = new.clone();
-        let title = if new.len() == 1 { "A decision waits for you".to_string() } else { format!("{} decisions wait for you", new.len()) };
-        let lines: Vec<String> = new.iter().take(3).map(|(_, line)| line.chars().take(140).collect()).collect();
-        Some(json!({ "title": title, "body": lines.join("\n"), "waiting": waiting.len() }))
+        Some(Batch { new: std::mem::take(&mut self.pending), waiting: waiting.len() })
     }
 
-    /// The last message reached no phone (the push service was down, say): its decisions are told
-    /// again with the next message, while they still wait.
-    pub fn undelivered(&mut self) {
-        let told = std::mem::take(&mut self.told);
-        let mut again: Vec<(String, String)> = told.into_iter().filter(|(id, _)| !self.pending.iter().any(|(p, _)| p == id)).collect();
-        again.append(&mut self.pending);
-        self.pending = again;
+    /// What one phone is told with `batch`: what it is owed, then the new decisions.
+    fn items_for(&self, endpoint: &str, batch: &Batch) -> Vec<(String, String)> {
+        let mut items = self.owed.get(endpoint).cloned().unwrap_or_default();
+        let fresh: Vec<(String, String)> = batch.new.iter().filter(|(id, _)| !items.iter().any(|(o, _)| o == id)).cloned().collect();
+        items.extend(fresh);
+        items
+    }
+
+    /// The message for one phone, or None when it has nothing to be told.
+    pub fn message_for(&self, endpoint: &str, batch: &Batch) -> Option<Value> {
+        let items = self.items_for(endpoint, batch);
+        if items.is_empty() {
+            return None;
+        }
+        let title = if items.len() == 1 { "A decision waits for you".to_string() } else { format!("{} decisions wait for you", items.len()) };
+        let lines: Vec<String> = items.iter().take(3).map(|(_, line)| line.chars().take(140).collect()).collect();
+        Some(json!({ "title": title, "body": lines.join("\n"), "waiting": batch.waiting }))
+    }
+
+    /// Records what became of a phone's message: one that did not go out is owed again.
+    pub fn settle(&mut self, endpoint: &str, batch: &Batch, sent: Sent) {
+        match sent {
+            Sent::Failed => {
+                let items = self.items_for(endpoint, batch);
+                self.owed.insert(endpoint.to_string(), items);
+            }
+            Sent::Delivered | Sent::Gone => {
+                self.owed.remove(endpoint);
+            }
+        }
     }
 }
 
@@ -442,25 +504,41 @@ mod tests {
         let t0 = Instant::now();
         let w = |ids: &[&str]| ids.iter().map(|i| (i.to_string(), format!("line {i}"))).collect::<Vec<_>>();
         assert_eq!(n.tick(t0, &w(&["a"])), None, "what waited when watching began");
-        let first = n.tick(t0 + Duration::from_secs(10), &w(&["a", "b"])).unwrap();
+        let batch = n.tick(t0 + Duration::from_secs(10), &w(&["a", "b"])).unwrap();
+        let first = n.message_for("phone", &batch).unwrap();
         assert_eq!(first["title"], "A decision waits for you");
         assert_eq!(first["body"], "line b");
         assert_eq!(first["waiting"], 2);
         assert_eq!(n.tick(t0 + Duration::from_secs(20), &w(&["a", "b"])), None, "nothing new");
         assert_eq!(n.tick(t0 + Duration::from_secs(30), &w(&["a", "b", "c", "d"])), None, "too soon after the last");
         assert_eq!(n.tick(t0 + Duration::from_secs(40), &w(&["a", "b", "d", "e"])), None);
-        let later = n.tick(t0 + Duration::from_secs(10) + THROTTLE, &w(&["a", "d", "e"])).unwrap();
+        let batch = n.tick(t0 + Duration::from_secs(10) + THROTTLE, &w(&["a", "d", "e"])).unwrap();
+        let later = n.message_for("phone", &batch).unwrap();
         assert_eq!(later["title"], "2 decisions wait for you", "c was settled meanwhile");
         assert_eq!(later["body"], "line d\nline e");
         assert_eq!(n.tick(t0 + Duration::from_secs(400), &w(&["a", "d", "e"])), None);
 
-        // A message that reached no phone is told again with the next one, while it still waits.
+        // Two phones: the one whose message did not go out is told those decisions again with its
+        // next message, while they still wait; the other gets only what is new.
         let t1 = t0 + Duration::from_secs(1000);
-        assert!(n.tick(t1, &w(&["a", "f", "g"])).is_some());
-        n.undelivered();
+        let batch = n.tick(t1, &w(&["a", "f", "g"])).unwrap();
+        n.settle("down", &batch, Sent::Failed);
+        n.settle("up", &batch, Sent::Delivered);
         assert_eq!(n.tick(t1 + Duration::from_secs(30), &w(&["a", "f", "g", "h"])), None, "still the throttle");
-        let again = n.tick(t1 + THROTTLE, &w(&["a", "g", "h"])).unwrap();
-        assert_eq!(again["body"], "line g\nline h", "f was settled meanwhile");
+        let batch = n.tick(t1 + THROTTLE, &w(&["a", "g", "h"])).unwrap();
+        assert_eq!(n.message_for("down", &batch).unwrap()["body"], "line g\nline h", "f was settled meanwhile");
+        assert_eq!(n.message_for("up", &batch).unwrap()["body"], "line h");
+        n.settle("down", &batch, Sent::Delivered);
+        n.settle("up", &batch, Sent::Delivered);
+        // Owed decisions alone are worth a message once the throttle allows; nothing owed, none.
+        let batch = n.tick(t1 + THROTTLE * 2, &w(&["a", "g", "h"]));
+        assert_eq!(batch, None);
+        let batch = n.tick(t1 + THROTTLE * 3, &w(&["a", "g", "h", "i"])).unwrap();
+        n.settle("down", &batch, Sent::Failed);
+        let batch = n.tick(t1 + THROTTLE * 4, &w(&["a", "g", "h", "i"])).unwrap();
+        assert_eq!(batch.new, vec![], "nothing new");
+        assert_eq!(n.message_for("down", &batch).unwrap()["body"], "line i");
+        assert_eq!(n.message_for("up", &batch), None);
     }
 
     #[test]
