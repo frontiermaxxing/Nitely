@@ -666,6 +666,16 @@ export interface PairRequest {
   status: "waiting" | "paired" | "declined";
 }
 
+/** Tailscale on this machine (crates/nitely-core/src/phone.rs `TailscaleState`). */
+export interface TailscaleState {
+  installed: boolean;
+  running: boolean;
+  backend: string;
+  name: string | null;
+  ips: string[];
+  phones: { name: string; online: boolean }[];
+}
+
 export interface PhoneStatus {
   /** The phone page's address on each address the server listens on; empty when it is off. */
   listening: string[];

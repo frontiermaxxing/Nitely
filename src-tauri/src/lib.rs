@@ -680,6 +680,7 @@ pub fn run() {
             phone::phone_status,
             phone::phone_start,
             phone::phone_tailscale_name,
+            phone::phone_tailscale,
             phone::phone_stop,
             phone::phone_pair,
             phone::phone_decide,

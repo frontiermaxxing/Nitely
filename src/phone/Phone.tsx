@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { post, signedGet } from "./api";
+import { post, signedGet, unreachable } from "./api";
 import { Inbox } from "./Inbox";
 import { loadDevice, newKey, pairingCode, pairMessage, saveDevice, sign, type Device } from "./keys";
 import { Notify } from "./Notify";
@@ -164,7 +164,7 @@ function Pair(props: { secret: string; onAsked: (d: Device) => void }) {
       saveDevice(device);
       props.onAsked(device);
     } catch (e) {
-      setError(`Could not reach the PC: ${String(e)}`);
+      setError(unreachable(e));
       setBusy(false);
     }
   };

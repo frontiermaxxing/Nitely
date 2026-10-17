@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { signedGet, signedPost } from "./api";
+import { signedGet, signedPost, unreachable } from "./api";
 import { shownIndex, type Shown } from "./select";
 import { answerMessage, approvalMessage, sendBackMessage, sign, type Device } from "./keys";
 import { StationTrack } from "../ui/StationTrack";
@@ -58,7 +58,7 @@ export function Inbox(props: { device: Device; onGone: (why: string) => void }) 
       setError(null);
       setData(r.body);
     } catch (e) {
-      setError(`Could not reach the PC: ${String(e)}`);
+      setError(unreachable(e));
     }
   }, [device]);
 
@@ -180,7 +180,7 @@ function Decision(props: { decision: PhoneDecision; device: Device; onDecided: (
       if (r.status === 200) props.onDecided(what);
       else props.onError(r.body.error ?? `The PC answered ${r.status}.`);
     } catch (e) {
-      props.onError(`Could not reach the PC: ${String(e)}`);
+      props.onError(unreachable(e));
     }
     setBusy(false);
   };

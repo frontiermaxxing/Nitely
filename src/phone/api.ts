@@ -29,6 +29,11 @@ async function call<T>(method: string, path: string, body: string, headers: Reco
   return { status: res.status, body: json as T & { error?: string } };
 }
 
+/** What the page says when the PC does not answer at all. */
+export function unreachable(e: unknown): string {
+  return `Could not reach the PC (${String(e)}). Away from home? Turn on Tailscale on this phone. The PC must be awake, with Nitely open and its phone server on.`;
+}
+
 export function post<T>(path: string, data: unknown): Promise<Answer<T>> {
   return call<T>("POST", path, JSON.stringify(data), {});
 }

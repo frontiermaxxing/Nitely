@@ -78,6 +78,60 @@ pub fn tailscale_ips() -> Vec<IpAddr> {
     }
 }
 
+/// Tailscale on this machine, for the Phone screen's "Away from home": whether it is installed and
+/// signed in, this machine's tailnet name and addresses, and the phones on the tailnet.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct TailscaleState {
+    pub installed: bool,
+    /// Signed in and connected (`BackendState` "Running").
+    pub running: bool,
+    /// What Tailscale says when it is not running ("NeedsLogin", "Stopped").
+    pub backend: String,
+    /// This machine's MagicDNS name, without the trailing dot.
+    pub name: Option<String>,
+    pub ips: Vec<String>,
+    /// The phones and tablets on the tailnet: their name and whether Tailscale sees them online.
+    pub phones: Vec<TailnetPhone>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TailnetPhone {
+    pub name: String,
+    pub online: bool,
+}
+
+/// Reads `tailscale status --json`.
+pub fn parse_tailscale_status(json: &str) -> Result<TailscaleState> {
+    let v: Value = serde_json::from_str(json).context("tailscale status said something unexpected")?;
+    let backend = v["BackendState"].as_str().unwrap_or("").to_string();
+    let me = &v["Self"];
+    let name = me["DNSName"].as_str().map(|n| n.trim_end_matches('.').to_string()).filter(|n| !n.is_empty());
+    let ips = me["TailscaleIPs"].as_array().map(|a| a.iter().filter_map(|ip| ip.as_str().map(String::from)).collect()).unwrap_or_default();
+    let mut phones: Vec<TailnetPhone> = v["Peer"]
+        .as_object()
+        .map(|peers| {
+            peers
+                .values()
+                .filter(|p| matches!(p["OS"].as_str().map(str::to_ascii_lowercase).as_deref(), Some("ios" | "android")))
+                .map(|p| TailnetPhone { name: p["HostName"].as_str().unwrap_or("phone").to_string(), online: p["Online"].as_bool().unwrap_or(false) })
+                .collect()
+        })
+        .unwrap_or_default();
+    phones.sort_by(|a, b| b.online.cmp(&a.online).then_with(|| a.name.cmp(&b.name)));
+    Ok(TailscaleState { installed: true, running: backend == "Running", backend, name, ips, phones })
+}
+
+/// Tailscale on this machine; not installed when its CLI cannot be found.
+pub fn tailscale_state() -> TailscaleState {
+    match tailscale(&["status", "--json"]) {
+        Ok(out) => parse_tailscale_status(&out).unwrap_or(TailscaleState { installed: true, ..Default::default() }),
+        // Installed but stopped or signed out, `tailscale status` still answers (with an exit code
+        // other than 0); only a missing CLI says nothing.
+        Err(e) if e.to_string().contains("not installed") => TailscaleState::default(),
+        Err(_) => TailscaleState { installed: true, backend: "Stopped".into(), ..Default::default() },
+    }
+}
+
 /// Runs the Tailscale CLI, wherever it is installed, and returns what it printed.
 fn tailscale(args: &[&str]) -> Result<String> {
     let candidates = ["tailscale", r"C:\Program Files\Tailscale\tailscale.exe", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"];
@@ -452,14 +506,19 @@ pub struct Running {
 
 impl Running {
     /// The phone page's address on each address it listens on: by the certificate's name over
-    /// HTTPS (one link), else by address.
+    /// HTTPS (one link), else by address, the ones a phone can reach first (the pairing QR code
+    /// carries the first): the Tailscale address before this machine's loopback, IPv4 before IPv6.
     pub fn pages(&self) -> Vec<String> {
         match &self.host {
             Some(host) => {
                 let port = self.addrs.first().map_or(PORT, |a| a.port());
                 vec![if port == 443 { format!("https://{host}/phone/") } else { format!("https://{host}:{port}/phone/") }]
             }
-            None => self.addrs.iter().map(|a| url(a.ip(), a.port())).collect(),
+            None => {
+                let mut addrs = self.addrs.clone();
+                addrs.sort_by_key(|a| (a.ip().is_loopback(), a.is_ipv6()));
+                addrs.iter().map(|a| url(a.ip(), a.port())).collect()
+            }
         }
     }
 
@@ -1446,6 +1505,36 @@ mod tests {
         assert!(closed, "the server still held the connection after {:?}", started.elapsed());
         assert!(started.elapsed() < http::IO_TIMEOUT + std::time::Duration::from_secs(3), "{:?}", started.elapsed());
         running.stop();
+    }
+
+    #[test]
+    fn the_pairing_link_is_one_the_phone_can_reach() {
+        let running = |addrs: &[&str]| Running { addrs: addrs.iter().map(|a| a.parse().unwrap()).collect(), host: None, stoppers: vec![], notifier: None };
+        let r = running(&["127.0.0.1:7422", "[fd7a:115c:a1e0::1]:7422", "100.101.7.42:7422"]);
+        assert_eq!(r.pages(), ["http://100.101.7.42:7422/phone/", "http://[fd7a:115c:a1e0::1]:7422/phone/", "http://127.0.0.1:7422/phone/"]);
+        let r = Running { host: Some("pc.tail1234.ts.net".into()), ..running(&["127.0.0.1:7422", "192.168.1.68:7422"]) };
+        assert_eq!(r.pages(), ["https://pc.tail1234.ts.net:7422/phone/"]);
+    }
+
+    #[test]
+    fn reads_tailscale_status_for_the_away_from_home_card() {
+        let json = r#"{
+            "BackendState": "Running",
+            "Self": { "HostName": "pc", "DNSName": "pc.tail1234.ts.net.", "OS": "windows", "TailscaleIPs": ["100.101.7.42", "fd7a:115c:a1e0::1"] },
+            "Peer": {
+                "nodekey:a": { "HostName": "Pixel-9", "OS": "android", "Online": false },
+                "nodekey:b": { "HostName": "laptop", "OS": "macOS", "Online": true },
+                "nodekey:c": { "HostName": "iPhone", "OS": "iOS", "Online": true }
+            }
+        }"#;
+        let s = parse_tailscale_status(json).unwrap();
+        assert!(s.installed && s.running);
+        assert_eq!(s.name.as_deref(), Some("pc.tail1234.ts.net"));
+        assert_eq!(s.ips, ["100.101.7.42", "fd7a:115c:a1e0::1"]);
+        assert_eq!(s.phones, [TailnetPhone { name: "iPhone".into(), online: true }, TailnetPhone { name: "Pixel-9".into(), online: false }]);
+        let out = parse_tailscale_status(r#"{ "BackendState": "NeedsLogin", "Self": { "DNSName": "" } }"#).unwrap();
+        assert!(out.installed && !out.running && out.name.is_none());
+        assert_eq!(out.backend, "NeedsLogin");
     }
 
     #[test]

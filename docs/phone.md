@@ -234,11 +234,61 @@ What the person must do:
   phone server on, for messages to go out; the push service keeps a message for a day for a phone
   that is off.
 
+## Away from home
+
+The phone reaches the PC from anywhere through Tailscale, which the person runs on both: the phone
+server listens on this PC's Tailscale address (or serves HTTPS under its tailnet name), and a
+phone on the same tailnet reaches that address over any network it is on, at home or not. Nitely
+adds nothing between them.
+
+What Nitely does for it:
+
+- **Listens on the tailnet interface:** the Tailscale address is offered (and picked by default)
+  where the phone server listens; it is checked against what `tailscale ip` reports
+  ("Choosing where it listens").
+- **Puts a reachable address in the pairing QR code:** the code carries the first of the page's
+  links, and those list the Tailscale address (or the HTTPS name) before this PC's loopback, which
+  a phone cannot reach (`Running::pages`).
+- **Says where Tailscale stands** on the Phone screen ("Away from home"): not installed, installed
+  but not connected, or connected with this PC's tailnet name and address; the phones on the
+  tailnet and whether Tailscale sees them online; and whether the phone server listens there
+  (`tailscale status --json`, `tailscale_state`).
+- **Says what to check on the phone** when the PC does not answer: Tailscale on, the PC awake with
+  Nitely open and the phone server on.
+
+What the person does: install Tailscale on the PC and the phone and sign both in with the same
+account; turn the phone server on with the Tailscale address; pair; keep Tailscale on on the phone.
+The PC must be awake: Nitely keeps it from sleeping only while crew workers run (docs/crew.md),
+not for the phone.
+
+### A relay Nitely runs: not wanted
+
+A relay would let a phone without Tailscale reach the PC through a server Nitely operates. It
+would hold no keys (the phone signs every action, the app checks every signature), but it is not
+wanted:
+
+- It would serve the page that holds the phone's key, so whoever runs it could replace that page
+  ("Choosing where it listens"): the trust the tunnel or HTTPS gives would move to Nitely's server.
+- It is a service to run, pay for and keep up, for a product that runs on the person's machine.
+- Tailscale's free plan, or any tunnel the person already runs, gives the same reach with
+  encryption end to end, and the PC stays the only server.
+
+Tailscale's own ways to publish a local server fit this without Nitely changing: `tailscale serve`
+puts the loopback server under the tailnet name with HTTPS inside the tailnet. Tailscale Funnel
+would put the pairing endpoint on the public internet, which the phone server is not built for;
+it is not supported.
+
+### What is tested, and what not
+
+Tested here, on loopback: pairing, signed requests, decisions, HTTPS with a given certificate, the
+order of the pairing links, and reading `tailscale status`. Not tested here: a real tailnet (no
+Tailscale on the machine this was built on), so binding a real Tailscale address, a phone reaching
+it over a cellular network, `tailscale cert`, and the Phone screen's live Tailscale state against a
+real `tailscale status`.
+
 ## Later
 
-- **Away from home:** a tunnel already reaches anywhere the phone has a connection; checking it end
-  to end and the setup words on the Phone screen are [NIT-148](nitely://issue/NIT-148). A relay
-  Nitely would run is out of scope.
+- Keeping the PC awake while the phone server is on, so a phone away from home finds it.
 
 ## Build order
 
@@ -250,6 +300,8 @@ What the person must do:
 
 - `crates/nitely-core/src/phone.rs`: which addresses may serve, pairing offers and requests, the
   signed device list in the keychain, signed requests, the phone server's routes.
+- Away from home: `tailscale_state` and `Running::pages` in `phone.rs`; `AwayFromHome` in
+  `src/PhoneSetup.tsx`; `unreachable` in `src/phone/api.ts`.
 - `crates/nitely-core/src/http.rs`: the strict HTTP layer it shares with `nitely serve`, over any
   `Conn` (a TCP stream, or `phone.rs`'s TLS over one).
 - HTTPS (`phone.rs`): `Tls` from PEM files (`tls_from_files`) or from `tailscale cert`

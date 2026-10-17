@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "./backend";
-import type { PhoneOffer, PhoneStatus } from "./types";
+import type { PhoneOffer, PhoneStatus, TailscaleState } from "./types";
 import { Loading } from "./ui";
 import { ago } from "./util";
 import "./phone-setup.css";
@@ -262,6 +262,61 @@ export function PhoneSetup(props: { now: number }) {
           ))}
         </div>
       </section>
+
+      <AwayFromHome listening={status.listening} />
     </div>
+  );
+}
+
+/**
+ * Reaching the phone server from anywhere: through Tailscale, which the person runs on this PC and
+ * the phone. Nitely runs no relay (docs/phone.md, "Away from home"); this says where Tailscale
+ * stands and what is left to do.
+ */
+function AwayFromHome(props: { listening: string[] }) {
+  const [ts, setTs] = useState<TailscaleState | null>(null);
+  const [checking, setChecking] = useState(false);
+  const check = useCallback(() => {
+    setChecking(true);
+    invoke<TailscaleState>("phone_tailscale").then(
+      (s) => (setTs(s), setChecking(false)),
+      () => (setTs(null), setChecking(false)),
+    );
+  }, []);
+  useEffect(check, [check]);
+  const viaTailscale = props.listening.some((u) => /^http:\/\/(\[fd7a:115c:a1e0:|100\.)/.test(u) || u.startsWith("https://"));
+
+  return (
+    <section className="settings-card phone-away">
+      <h2>Away from home</h2>
+      <p className="small muted">
+        A paired phone reaches this PC from anywhere it has internet through Tailscale, a private network you run on your own devices. Nitely runs no server in between.
+      </p>
+      {ts && (
+        <p className="small phone-away-state" role="status">
+          {!ts.installed
+            ? "Tailscale is not on this PC yet."
+            : !ts.running
+              ? `Tailscale is on this PC but not connected (${ts.backend || "stopped"}): open Tailscale and sign in.`
+              : `Tailscale is connected: this PC is ${ts.name ?? ts.ips[0] ?? "on your tailnet"}${ts.ips[0] ? ` (${ts.ips[0]})` : ""}.`}
+          {ts.running &&
+            (ts.phones.length
+              ? ` Phones on your tailnet: ${ts.phones.map((p) => `${p.name} (${p.online ? "online" : "offline"})`).join(", ")}.`
+              : " No phone on your tailnet yet.")}
+          {ts.running && props.listening.length > 0 && (viaTailscale ? " The phone server listens there." : " The phone server listens only on this PC: turn it off and on with the Tailscale address picked.")}
+        </p>
+      )}
+      <ol className="small phone-away-steps">
+        <li>Install Tailscale on this PC and on the phone, and sign both in with the same account.</li>
+        <li>Turn the phone server on with this PC's Tailscale address, or with HTTPS and Tailscale's certificate.</li>
+        <li>Pair the phone: the code it scans carries that address.</li>
+        <li>Away from home, keep Tailscale on on the phone. This PC must be awake, with Nitely open.</li>
+      </ol>
+      <div className="actions">
+        <button className="btn quiet" disabled={checking} onClick={check}>
+          {checking ? "Checking…" : "Check again"}
+        </button>
+      </div>
+    </section>
   );
 }

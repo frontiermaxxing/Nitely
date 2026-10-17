@@ -96,6 +96,12 @@ fn tls_for(choice: Option<TlsChoice>) -> Result<Option<phone::Tls>, String> {
     }
 }
 
+/// Tailscale on this machine, for the Phone screen's "Away from home".
+#[tauri::command]
+pub async fn phone_tailscale() -> Result<phone::TailscaleState, String> {
+    Ok(phone::tailscale_state())
+}
+
 /// The name Tailscale can give this machine a certificate for, or why it cannot yet.
 #[tauri::command]
 pub async fn phone_tailscale_name() -> Result<String, String> {

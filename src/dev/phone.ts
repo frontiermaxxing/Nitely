@@ -1,6 +1,6 @@
 // The browser preview's phone server (src/PhoneSetup.tsx): a tunnel address and an ordinary one,
 // a paired phone, and a pairing request that arrives a few seconds after a code is shown.
-import type { PhoneOffer, PhoneStatus } from "../types";
+import type { PhoneOffer, PhoneStatus, TailscaleState } from "../types";
 
 const NOW = () => Math.floor(Date.now() / 1000);
 const ADDRESSES: PhoneStatus["addresses"] = [
@@ -30,6 +30,10 @@ function status(): PhoneStatus {
 
 export function phoneStatus(): PhoneStatus {
   return status();
+}
+
+export function phoneTailscale(): TailscaleState {
+  return { installed: true, running: true, backend: "Running", name: "pc.tail1234.ts.net", ips: ["100.101.7.42", "fd7a:115c:a1e0::1"], phones: [{ name: "Pixel-9", online: true }] };
 }
 
 export function phoneTailscaleName(): string {
