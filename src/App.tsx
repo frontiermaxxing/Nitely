@@ -38,7 +38,7 @@ export type View =
   | { kind: "inbox" }
   | { kind: "now" }
   | { kind: "activity" }
-  | { kind: "project"; key: string; tab?: ProjectTab }
+  | { kind: "project"; key: string; tab?: ProjectTab; goal?: number }
   | { kind: "add" }
   | { kind: "agents" }
   | { kind: "network" }
@@ -331,6 +331,7 @@ export function App() {
             project={projects.find((p) => p.key === view.key)}
             projectKey={view.key}
             tab={view.tab}
+            goal={view.goal}
             onTab={(tab) => setView({ kind: "project", key: view.key, tab })}
             board={board}
             now={now}
@@ -345,7 +346,18 @@ export function App() {
       {palette && <Palette projects={projects} onGo={setView} onOpenIssue={setOpenIssue} onChanged={changed} onClose={() => setPalette(false)} />}
       {keys && <KeysSheet onClose={closeKeys} />}
       {openIssue && (
-        <IssuePanel issueKey={openIssue} now={now} version={version} onClose={() => setOpenIssue(null)} onChanged={changed} onOpenIssue={setOpenIssue} />
+        <IssuePanel
+          issueKey={openIssue}
+          now={now}
+          version={version}
+          onClose={() => setOpenIssue(null)}
+          onChanged={changed}
+          onOpenIssue={setOpenIssue}
+          onOpenGoal={(key, goal) => {
+            setOpenIssue(null);
+            setView({ kind: "project", key, goal });
+          }}
+        />
       )}
     </div>
   );

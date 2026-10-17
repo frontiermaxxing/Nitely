@@ -48,6 +48,8 @@ export function ProjectPage(props: {
   project: Project | undefined;
   projectKey: string;
   tab: ProjectTab | undefined;
+  /** A goal to bring into view (from the issue panel): its row shows on the list or the board. */
+  goal?: number;
   onTab: (tab: ProjectTab) => void;
   board: Board | null;
   now: number;
@@ -57,7 +59,8 @@ export function ProjectPage(props: {
   /** The project goes by another key now, or was removed (null). */
   onMoved: (key: string | null) => void;
 }) {
-  const tab = props.tab ?? rememberedTab();
+  const remembered = rememberedTab();
+  const tab = props.tab ?? (props.goal != null && remembered !== "list" && remembered !== "board" ? "list" : remembered);
   const [issues, setIssues] = useState<IssueRecord[] | null>(null);
   const [showClosed, setShowClosed] = useState(false);
   const [filters, setFilters] = useState<Filters>(NO_FILTER);
@@ -108,7 +111,7 @@ export function ProjectPage(props: {
         {tab === "board" && issues && <BoardFilters issues={issues} board={props.board} filters={filters} onChange={setFilters} />}
       </div>
       {views && issues && issues.length > 0 && <Summary issues={issues} projectKey={props.projectKey} version={props.version} />}
-      {views && <GoalRows project={props.projectKey} version={props.version} onOpenIssue={props.onOpenIssue} />}
+      {views && <GoalRows project={props.projectKey} version={props.version} focus={props.goal} onOpenIssue={props.onOpenIssue} />}
       {tab !== "brief" && error && <p className="error">{error}</p>}
       {((views && !issues) || (tab === "settings" && !issues) || (tab === "branches" && !props.board)) && !error && <Loading />}
       {tab === "settings" && issues && props.project && (

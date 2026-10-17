@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "./backend";
 import type { GoalDetail } from "./types";
 import { goalCounts, goalOrder, targetLine } from "./goals";
@@ -9,7 +9,7 @@ import "./goal-rows.css";
  * The active goals of one project (or of every project, on the Overview), one row each. Renders
  * nothing while there are none, so a project without goals looks as it did.
  */
-export function GoalRows(props: { project?: string; version: number; onOpenIssue: (key: string) => void; heading?: boolean }) {
+export function GoalRows(props: { project?: string; version: number; onOpenIssue: (key: string) => void; heading?: boolean; focus?: number }) {
   const [goals, setGoals] = useState<GoalDetail[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -28,7 +28,7 @@ export function GoalRows(props: { project?: string; version: number; onOpenIssue
   const rows = (
     <div className="goal-rows">
       {goals.map((g) => (
-        <GoalRow key={g.goal.id} detail={g} showProject={!props.project} onOpenIssue={props.onOpenIssue} />
+        <GoalRow key={g.goal.id} detail={g} showProject={!props.project} focused={g.goal.id === props.focus} onOpenIssue={props.onOpenIssue} />
       ))}
     </div>
   );
@@ -44,15 +44,20 @@ export function GoalRows(props: { project?: string; version: number; onOpenIssue
 }
 
 /** One goal: its title and date, a meter of whose move its issues are, then the issues in station order. */
-export function GoalRow(props: { detail: GoalDetail; showProject?: boolean; onOpenIssue: (key: string) => void }) {
+export function GoalRow(props: { detail: GoalDetail; showProject?: boolean; focused?: boolean; onOpenIssue: (key: string) => void }) {
   const { goal } = props.detail;
+  // Opened from an issue's goal: scrolled to and marked for a moment.
+  const row = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (props.focused) row.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, [props.focused]);
   const placed = goalOrder(props.detail.issues);
   const c = goalCounts(placed);
   const total = placed.length;
   // Late only while something is left to do.
   const when = targetLine(goal.target_date, new Date(), c.done === total);
   return (
-    <div className="goal-row">
+    <div className={`goal-row${props.focused ? " goal-focus" : ""}`} ref={row} id={`goal-${goal.id}`}>
       <div className="goal-head">
         <span className="goal-title" title={goal.outcome}>
           {goal.title}

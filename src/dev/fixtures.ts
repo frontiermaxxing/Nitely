@@ -36,6 +36,7 @@ import type {
   PrRecord,
   PlaybookProposal,
   Project,
+  Goal,
   GoalDetail,
   GoalPlanView,
   ProjectBrief,
@@ -1031,6 +1032,7 @@ function issues(args: Record<string, unknown>): IssueRecord[] {
 }
 
 function detail(key: string): IssueDetail {
+  placeGoals();
   const issue = world.issues.find((i) => i.key.toLowerCase() === key.toLowerCase());
   if (!issue) throw `no issue ${key}`;
   const relations = {
@@ -1541,12 +1543,12 @@ const dateIn = (days: number) => {
   const d = new Date(Date.now() + days * 86400000);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 };
-const GOALS: { id: number; project: string; title: string; outcome: string; target_date: string | null; keys: string[] }[] = [
+const GOALS: { id: number; project: string; title: string; outcome: string; target_date: string | null; state?: Goal["state"]; keys: string[] }[] = [
   {
     id: 1,
     project: "NIT",
     title: "One glance says what needs you",
-    outcome: "Andrew opens Nitely and knows in a few seconds what waits on him, what moves and what is stuck, on any view.",
+    outcome: "You open Nitely and know in a few seconds what waits on you, what moves and what is stuck, on any view.",
     target_date: dateIn(12),
     keys: ["NIT-24", "NIT-25", "NIT-31", "NIT-30", "NIT-29", "NIT-44", "NIT-26", "NIT-28"],
   },
@@ -1566,6 +1568,16 @@ const GOALS: { id: number; project: string; title: string; outcome: string; targ
     target_date: null,
     keys: ["HAR-14", "HAR-13", "HAR-12", "HAR-16", "HAR-9", "HAR-8"],
   },
+  {
+    // Reached: it has no row any more, but an issue still in it names it in the issue panel.
+    id: 4,
+    project: "NIT",
+    title: "Every agent's session is on the record",
+    outcome: "Each session of every agent shows from its start to its end, whichever vendor ran it.",
+    target_date: null,
+    state: "done",
+    keys: ["NIT-22"],
+  },
 ];
 
 /** Puts the fixture issues in their goals; the world is built before GOALS is defined. */
@@ -1576,29 +1588,54 @@ function placeGoals() {
   }
 }
 
+function goalRecord(g: (typeof GOALS)[number]): Goal {
+  const issues = world.issues.filter((i) => i.goal === g.id);
+  const done = issues.filter((i) => i.state_type === "completed").length;
+  const dropped = issues.filter((i) => i.state_type === "canceled").length;
+  return {
+    id: g.id,
+    project: g.project,
+    title: g.title,
+    outcome: g.outcome,
+    target_date: g.target_date,
+    state: g.state ?? "active",
+    created_by: "human",
+    created_at: NOW - 5 * 24 * HOUR,
+    updated_at: NOW - 5 * 24 * HOUR,
+    progress: { total: issues.length, done, dropped, open: issues.length - done - dropped },
+  };
+}
+
+/** As the goals command: the active goals, with their issues. */
 function goals(args: Record<string, unknown>): GoalDetail[] {
   placeGoals();
   const project = args.project ? String(args.project).toUpperCase() : null;
-  return GOALS.filter((g) => !project || g.project === project).map((g) => {
-    const issues = world.issues.filter((i) => i.goal === g.id);
-    const done = issues.filter((i) => i.state_type === "completed").length;
-    const dropped = issues.filter((i) => i.state_type === "canceled").length;
-    return {
-      goal: {
-        id: g.id,
-        project: g.project,
-        title: g.title,
-        outcome: g.outcome,
-        target_date: g.target_date,
-        state: "active" as const,
-        created_by: "human",
-        created_at: NOW - 5 * 24 * HOUR,
-        updated_at: NOW - 5 * 24 * HOUR,
-        progress: { total: issues.length, done, dropped, open: issues.length - done - dropped },
-      },
-      issues,
-    };
-  });
+  return GOALS.filter((g) => (!project || g.project === project) && (g.state ?? "active") === "active").map((g) => ({
+    goal: goalRecord(g),
+    issues: world.issues.filter((i) => i.goal === g.id),
+  }));
+}
+
+/** As goal_choices: every goal of a project, closed ones too. */
+function goalChoices(args: Record<string, unknown>): Goal[] {
+  placeGoals();
+  const project = String(args.project ?? "").toUpperCase();
+  return GOALS.filter((g) => g.project === project).map(goalRecord);
+}
+
+/** As nitely-core's set_issue_goal: an active goal of the issue's own project, or none. */
+function setIssueGoal(args: Record<string, unknown>): IssueRecord {
+  placeGoals();
+  const issue = world.issues.find((i) => i.key === String(args.key).toUpperCase());
+  if (!issue) throw `no issue ${String(args.key)}`;
+  const id = args.goal == null ? null : Number(args.goal);
+  if (id != null) {
+    const g = GOALS.find((x) => x.id === id);
+    if (!g || g.project !== issue.project) throw `no goal ${id} in ${issue.project}`;
+    if ((g.state ?? "active") !== "active") throw `goal ${id} is ${g.state}; reopen it first`;
+  }
+  issue.goal = id;
+  return issue;
 }
 
 function projectBrief(key: string): ProjectBrief {
@@ -1637,6 +1674,10 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return startGoal(args);
       case "goals":
         return goals(args);
+      case "goal_choices":
+        return goalChoices(args);
+      case "set_issue_goal":
+        return setIssueGoal(args);
       case "project_brief":
         return projectBrief(String(args.project));
       case "mirror_preview":

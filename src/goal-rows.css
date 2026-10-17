@@ -8,6 +8,9 @@
 .goal-late { color: var(--fail); }
 .goal-count { margin-left: auto; color: var(--fg-2); font-size: var(--text-sm); white-space: nowrap; }
 .goal-issues { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.goal-focus { animation: goal-focus 2.4s ease-out; }
+@keyframes goal-focus { from { border-color: var(--focus); box-shadow: 0 0 0 2px var(--focus); } }
+@media (prefers-reduced-motion: reduce) { .goal-focus { animation: none; border-color: var(--focus); } }
 
 /* ----- A goal plan in the Inbox (src/GoalPlanDecision.tsx) ----- */
 .gp { display: grid; gap: 10px; }

@@ -1,7 +1,8 @@
 // The browser preview's page of every shared primitive in every state (`#kit`). Look here first
 // when building a view, and add a row here when a primitive gains a state.
 
-import type { IssueRecord, MarkKind, PrRecord } from "../types";
+import { GoalRow } from "../GoalRows";
+import type { GoalDetail, IssueRecord, MarkKind, PrRecord } from "../types";
 import { nowSecs } from "../util";
 import {
   AgentMark,
@@ -73,6 +74,33 @@ const ISSUE: IssueRecord = {
   blocks: [],
   urgency: 1,
 };
+
+/** A day `n` days from today, as YYYY-MM-DD in local time. */
+function dayIn(n: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() + n);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+/** A goal of the made-up project APP whose issues stand in the given states. */
+function goalSample(id: number, title: string, target: string | null, states: [string, string][]): GoalDetail {
+  const issues = states.map(([state, state_type], n): IssueRecord => ({ ...ISSUE, key: `APP-${id * 10 + n}`, project: "APP", state, state_type, claimed_by: state_type === "started" ? ISSUE.claimed_by : null }));
+  const done = issues.filter((i) => i.state_type === "completed").length;
+  return {
+    goal: {
+      id, project: "APP", title, outcome: "What is true once it is reached, in one paragraph.", target_date: target, state: "active",
+      created_by: "human", created_at: 0, updated_at: 0, progress: { total: issues.length, done, dropped: 0, open: issues.length - done },
+    },
+    issues,
+  };
+}
+
+const GOAL_SAMPLES: GoalDetail[] = [
+  goalSample(1, "On track, a target date ahead", dayIn(9), [["Done", "completed"], ["Done", "completed"], ["In Progress", "started"], ["Needs You", "started"], ["Todo", "unstarted"]]),
+  goalSample(2, "Late: past its date with work left", dayIn(-4), [["Done", "completed"], ["In Review", "started"], ["Todo", "unstarted"], ["Todo", "unstarted"]]),
+  goalSample(3, "Reached: every issue done, no date", null, [["Done", "completed"], ["Done", "completed"]]),
+  goalSample(4, "Nothing in it yet", null, []),
+];
 
 const PR: PrRecord = {
   provider: "github",
@@ -177,6 +205,15 @@ export default function Kit() {
         </div>
         <div className="kit-row kit-wide">
           <IssueToken issue={ISSUE} title onOpen={() => {}} />
+        </div>
+      </section>
+
+      <section>
+        <h2>GoalRow</h2>
+        <div className="goal-rows">
+          {GOAL_SAMPLES.map((g) => (
+            <GoalRow key={g.goal.id} detail={g} onOpenIssue={() => {}} />
+          ))}
         </div>
       </section>
 

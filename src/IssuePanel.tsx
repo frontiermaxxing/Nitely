@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "./backend";
 import { issueSpendLine } from "./spend";
-import type { IssueDetail, IssueRecord, IssueSpend, LinkedIssue } from "./types";
+import type { Goal, IssueDetail, IssueRecord, IssueSpend, LinkedIssue } from "./types";
 import { agentLabel, ago, openExternal, PRIORITY } from "./util";
 import { IssueJourney, WhoHadIt } from "./IssueJourney";
 import { MirrorFact } from "./Mirror";
@@ -82,8 +82,26 @@ export function IssuePanel(props: {
   onClose: () => void;
   onChanged: () => void;
   onOpenIssue?: (key: string) => void;
+  /** Shows a goal's row on its project's page. */
+  onOpenGoal?: (project: string, goal: number) => void;
 }) {
   const [detail, setDetail] = useState<IssueDetail | null>(null);
+  // The goals of the issue's project, closed ones too: its goal, and where it can move.
+  const [goals, setGoals] = useState<Goal[] | null>(null);
+  const project = detail?.issue.project ?? null;
+  useEffect(() => {
+    if (!project) return;
+    let live = true;
+    // Another project's goals never show for this issue, even for a moment.
+    setGoals((g) => (g && g.every((x) => x.project === project) ? g : null));
+    invoke<Goal[]>("goal_choices", { project }).then(
+      (g) => live && setGoals(g),
+      () => live && setGoals([]),
+    );
+    return () => {
+      live = false;
+    };
+  }, [project, props.version]);
   const [error, setError] = useState<string | null>(null);
   // Done needs evidence and Canceled a reason, typed in place.
   const [pending, setPending] = useState<"Done" | "Canceled" | null>(null);
@@ -151,6 +169,7 @@ export function IssuePanel(props: {
   const pr = detail?.prs[0];
   const lastGate = detail ? [...detail.timeline].reverse().find((e) => e.kind === "gate_passed" || e.kind === "gate_failed") : undefined;
   const native = issue?.origin === "nitely";
+  const goal = issue?.goal != null ? goals?.find((g) => g.id === issue.goal) : undefined;
   // Keys act only while the focus is in this sheet: a approve, t back to Todo, m then t, d or c.
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (!issue || !native || e.repeat || e.ctrlKey || e.metaKey || e.altKey || typing(e.target)) return;
@@ -183,6 +202,24 @@ export function IssuePanel(props: {
             <span className="panel-crumb">
               {issue?.project && <span>{issue.project}</span>}
               {issue?.project && <span>/</span>}
+              {goal && (
+                <>
+                  {goal.state === "active" && props.onOpenGoal ? (
+                    <button
+                      className="link panel-goal-link"
+                      title={`Goal: ${goal.outcome}`}
+                      aria-label={`Show the goal ${goal.title}`}
+                      onClick={() => props.onOpenGoal!(goal.project, goal.id)}>
+                      {goal.title}
+                    </button>
+                  ) : (
+                    <span className="panel-goal-link" title={`Goal (${goal.state}): ${goal.outcome}`}>
+                      {goal.title}
+                    </span>
+                  )}
+                  <span>/</span>
+                </>
+              )}
               <span className="mono">{props.issueKey}</span>
             </span>
             <button className="btn ghost" onClick={props.onClose} title="Close (Esc)">✕</button>
@@ -302,6 +339,7 @@ export function IssuePanel(props: {
                   </dd>
                 </>
               )}
+              {goals && <GoalFact issue={issue} goals={goals} onChanged={props.onChanged} />}
               {issue.origin === "nitely" && <MirrorFact issueKey={issue.key} version={props.version} />}
               {issue.source && (
                 <>
@@ -385,6 +423,49 @@ export function IssuePanel(props: {
 }
 
 const capital = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
+/**
+ * The goal the issue serves. For a native issue a picker: another active goal of its project, or
+ * none. Nothing shows while the project has no goals.
+ */
+function GoalFact(props: { issue: IssueRecord; goals: Goal[]; onChanged: () => void }) {
+  const [error, setError] = useState<string | null>(null);
+  const { issue } = props;
+  const current = props.goals.find((g) => g.id === issue.goal);
+  // A closed goal stays listed while the issue is in it, so the picker shows where it is.
+  const choices = props.goals.filter((g) => g.state === "active" || g.id === issue.goal);
+  if (issue.origin !== "nitely") {
+    return current ? (
+      <>
+        <dt>Goal</dt>
+        <dd>{current.title}</dd>
+      </>
+    ) : null;
+  }
+  if (choices.length === 0) return null;
+  const set = (value: string) =>
+    invoke("set_issue_goal", { key: issue.key, goal: value ? Number(value) : null }).then(
+      () => (setError(null), props.onChanged()),
+      (e) => setError(String(e)),
+    );
+  return (
+    <>
+      <dt>Goal</dt>
+      <dd>
+        <select className="panel-goal" value={issue.goal ?? ""} onChange={(e) => set(e.target.value)} aria-label="The goal this issue serves">
+          <option value="">None</option>
+          {choices.map((g) => (
+            <option key={g.id} value={g.id}>
+              {g.title}
+              {g.state === "active" ? "" : ` (${g.state})`}
+            </option>
+          ))}
+        </select>
+        {error && <span className="error small">{error}</span>}
+      </dd>
+    </>
+  );
+}
 
 /** "Imported from Linear" for a Linear address, else the host. */
 function externalName(url: string): string {

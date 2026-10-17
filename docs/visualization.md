@@ -154,7 +154,13 @@ waiting for the human, `--fg-3` when idle; stale marks fade to 45%, ended to 30%
 An issue opens as a sheet over the view (`src/IssuePanel.tsx`), its story on the left and the
 decision and facts on a rail on the right. The rail starts with "Waiting on you" (why, Approve,
 Back to Todo) when the issue is in Needs You, then the facts (state, agent, reviewer, branch, pull
-request, kind, last gate), "Waiting on" and "Blocks", the body and the moves.
+request, kind, goal, last gate), "Waiting on" and "Blocks", the body and the moves.
+
+An issue in a goal names it in the sheet's crumb (`NIT / goal title / NIT-12`); clicking it opens
+the project page on that goal's row, scrolled to and outlined for a moment. The Goal fact is a
+picker of the project's active goals and None, so you move an issue between goals in place. It
+shows only once the project has a goal; a closed goal stays listed, marked done or dropped, while
+the issue is still in it.
 
 On the left, top to bottom: the key and title, the full `StationTrack` on a card, **Who had it**,
 then the issue's journey. Who had it (`WhoHadIt` in `src/IssueJourney.tsx`) is a lane per owner
@@ -348,7 +354,8 @@ human-owned "Plan: …" issue; the Inbox shows it as a Goal plan decision (`Goal
 approving creates the goal and files its issues in one batch.
 
 Rows come active goals first, nearer target dates first. A project page shows its own goals above
-the List and the Board, under the summary; a project without goals shows none.
+the List and the Board, under the summary; a project without goals shows none. The Kit (`#kit`)
+draws a row on track, a late one, a reached one and an empty one.
 
 ## Activity lanes
 

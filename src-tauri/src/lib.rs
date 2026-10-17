@@ -160,6 +160,20 @@ async fn start_goal(project: String, sentence: String) -> Result<IssueRecord, St
     db()?.start_goal(&project, &sentence, &ME).map_err(err)
 }
 
+/// Every goal of a project, closed ones too: what the issue panel's goal picker offers.
+#[tauri::command]
+async fn goal_choices(project: String) -> Result<Vec<nitely_core::goals::Goal>, String> {
+    db()?.goals(&project, true).map_err(err)
+}
+
+/// Puts an issue in a goal of its project, or takes it out of its goal (`goal` None).
+#[tauri::command]
+async fn set_issue_goal(key: String, goal: Option<i64>) -> Result<IssueRecord, String> {
+    let db = db()?;
+    let key = db.current_key(&key).map_err(err)?;
+    db.set_issue_goal(&key, goal, &ME).map_err(err)
+}
+
 /// The goal rows: every active goal with its issues, of one project or all of them.
 #[tauri::command]
 async fn goals(project: Option<String>) -> Result<Vec<nitely_core::goals::GoalDetail>, String> {
@@ -648,6 +662,8 @@ pub fn run() {
             set_private_terms,
             project_brief,
             goals,
+            goal_choices,
+            set_issue_goal,
             approve_goal_plan,
             start_goal,
             set_project_brief,
