@@ -333,7 +333,7 @@ export function App() {
             onNotifySettings={() => setView({ kind: "settings", section: "notifications" })}
           />
         )}
-        {view.kind === "now" && board && <Now board={board} needs={inboxCount} now={now} onOpenIssue={setOpenIssue} onChanged={changed} onGo={setView} />}
+        {view.kind === "now" && board && <Now board={board} version={version} needs={inboxCount} now={now} onOpenIssue={setOpenIssue} onChanged={changed} onGo={setView} />}
         {view.kind === "activity" && <Activity now={now} version={version} projects={projects} onOpenIssue={setOpenIssue} />}
         {view.kind === "settings" && (
           <Settings
@@ -343,6 +343,7 @@ export function App() {
             board={board}
             projects={projects}
             now={now}
+            version={version}
             update={update}
             onUpdate={setUpdate}
             onGo={setView}

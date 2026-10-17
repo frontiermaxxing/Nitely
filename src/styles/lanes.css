@@ -1,0 +1,28 @@
+/* Build lanes (docs/build-lanes.md): the strip on Now and Overview, and Settings' section. */
+.lanes-strip h2 { display: flex; align-items: baseline; gap: 8px; }
+.lanes-chips { display: flex; flex-direction: column; gap: 8px; }
+.lanes-project { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.lane-chip {
+  display: inline-flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; min-height: 32px; padding: 4px 12px 4px 10px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 999px; font-size: var(--text-sm); --mark-bg: var(--surface);
+}
+.lane-name { color: var(--fg-2); font-size: var(--text-xs); flex: none; }
+.lane-words { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
+.lane-words.link { font: inherit; text-align: left; }
+.lane-idle .lane-words, .lane-unmade .lane-words { color: var(--fg-3); }
+.lane-running { border-color: color-mix(in oklch, var(--live) 40%, var(--line)); }
+.lane-unhealthy { border-color: color-mix(in oklch, var(--fail) 45%, var(--line)); }
+.lane-unhealthy .lane-words { color: var(--fail); }
+.lane-problem-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fail); flex: none; }
+.lanes-queue { color: var(--fg-3); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
+
+.lanes-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 16px; margin: 8px 0 0; font-size: var(--text-md); }
+.lanes-facts dt { color: var(--fg-3); }
+.lanes-facts dd { margin: 0; min-width: 0; }
+.lanes-path { overflow-wrap: anywhere; font-size: var(--text-sm); }
+
+@media (max-width: 560px) {
+  .lane-chip { width: 100%; }
+  .lanes-facts { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .lanes-facts dd { margin-bottom: 8px; }
+}

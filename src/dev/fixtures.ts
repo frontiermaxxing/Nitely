@@ -10,6 +10,9 @@
 import * as phoneFixture from "./phone";
 import * as rulesFixture from "./rules";
 import type {
+  LaneRun,
+  LanesOverview,
+  ProjectLanes,
   Held,
   CrewEdit,
   CrewSaved,
@@ -698,6 +701,53 @@ function recount(world: World) {
 }
 
 const world = build();
+
+// ----- Build lanes (docs/build-lanes.md): running, idle, queued, not made yet, and unhealthy -----
+
+function laneRun(id: number, project: string, state: string, lane: number | null, more: Partial<LaneRun> = {}): LaneRun {
+  return {
+    id, project, repo: `C:/Code/${project.toLowerCase()}`, issue: null, by: "claude", kind: "run", snapshot: "c0ffee1", tree: "t", base: "b",
+    command: "cargo test -p nitely-core", state, lane, executor: "local", queued_at: NOW - 5 * MIN, started_at: lane ? NOW - 4 * MIN : null,
+    ended_at: null, exit_code: null, timed_out: false, setup_ran: false, files_switched: null, log: null, output: "", error: null, ...more,
+  };
+}
+
+function lanesOf(project: string, repo: string, count: number, lanes: ProjectLanes["lanes"], queue: LaneRun[], recent: LaneRun[]): ProjectLanes {
+  return {
+    project, repo: `C:\\Code\\${repo}`, dir: `C:\\Code\\worktrees\\.nitely-lanes\\${repo}`,
+    rules: { count, keep: ["target", "node_modules"], timeout_minutes: 30 }, lanes, queue, recent,
+  };
+}
+
+const BUILD_LANES: ProjectLanes[] = [
+  lanesOf("NIT", "nitely", 2,
+    [{ lane: 1, path: "l1", made: true, busy: true, at: "9f3c2a1" }, { lane: 2, path: "l2", made: true, busy: false, at: "9f3c2a1" }],
+    [
+      laneRun(41, "NIT", "running", 1, { issue: "NIT-31", kind: "gate", started_at: NOW - 2 * MIN - 10 }),
+      laneRun(42, "NIT", "queued", null, { issue: "NIT-44", command: "npm test" }),
+      laneRun(43, "NIT", "queued", null, { issue: "NIT-45", command: "cargo clippy --workspace -- -D warnings" }),
+    ],
+    [laneRun(40, "NIT", "done", 2, { issue: "NIT-31", exit_code: 0, ended_at: NOW - 6 * MIN })]),
+  lanesOf("HAR", "harbor", 1,
+    [{ lane: 1, path: "l1", made: true, busy: false, at: "4e5d6c7" }],
+    [],
+    [laneRun(12, "HAR", "lane_error", 1, { issue: "HAR-14", command: "npm run build", error: "switching the lane failed twice: a file is still held open (node.exe)" })]),
+  lanesOf("ORB", "orbit", 2,
+    [{ lane: 1, path: "l1", made: true, busy: false, at: "a1b2c3d" }, { lane: 2, path: "l2", made: false, busy: false, at: null }],
+    [],
+    []),
+];
+
+function lanesOverview(): LanesOverview {
+  // `?slots` shows the machine's build budget, which the scheduler adds.
+  const slots = new URLSearchParams(location.search).has("slots") ? { used: 1, total: 4 } : null;
+  return { projects: new URLSearchParams(location.search).has("nolanes") ? [] : BUILD_LANES, slots };
+}
+
+// Its gate ran in a lane before: the timeline names the run, and Open log asks the app for it.
+world.timelines.get("NIT-31")?.push(
+  { ts: NOW - 7 * MIN, actor: "claude", kind: "lane_run", summary: "Ran `cargo test -p nitely-core` in lane 2: exit 0 after 63 s (run 40)" },
+);
 
 // ----- Commands -----
 
@@ -1804,6 +1854,10 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
       case "crew_pause":
         return crewPause(args);
       case "open_crew_log":
+        throw "The preview has no logs to open; the app opens them.";
+      case "lanes_overview":
+        return lanesOverview();
+      case "open_lane_log":
         throw "The preview has no logs to open; the app opens them.";
       case "set_project_brief":
         return setProjectBrief(args);

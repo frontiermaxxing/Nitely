@@ -735,3 +735,50 @@ export interface PhoneOffer {
   qr_svg: string;
   expires: number;
 }
+
+/** A build lane request and what came of it: a `lane_run` row (crates/nitely-core/src/lanes.rs `Run`). */
+export interface LaneRun {
+  id: number;
+  project: string;
+  repo: string;
+  issue: string | null;
+  by: string;
+  kind: "run" | "gate" | "land" | string;
+  snapshot: string;
+  tree: string;
+  base: string;
+  command: string;
+  /** queued | running | done | lane_error | abandoned */
+  state: string;
+  lane: number | null;
+  executor: string;
+  queued_at: number;
+  started_at: number | null;
+  ended_at: number | null;
+  exit_code: number | null;
+  timed_out: boolean;
+  setup_ran: boolean;
+  files_switched: number | null;
+  log: string | null;
+  output: string;
+  error: string | null;
+}
+
+/** One repo's build lanes, as `nitely lanes status` shows them (lanes.rs `Lanes`). */
+export interface ProjectLanes {
+  project: string;
+  repo: string;
+  dir: string;
+  rules: { count: number; keep: string[]; timeout_minutes: number };
+  lanes: { lane: number; path: string; made: boolean; busy: boolean; at: string | null }[];
+  /** Waiting and running requests, oldest first. */
+  queue: LaneRun[];
+  /** The last finished runs, newest first. */
+  recent: LaneRun[];
+}
+
+/** Every repo's lanes (src-tauri `lanes_overview`); `slots` once the machine keeps a build budget. */
+export interface LanesOverview {
+  projects: ProjectLanes[];
+  slots: { used: number; total: number } | null;
+}

@@ -229,6 +229,14 @@ The same design everywhere; only lane creation differs.
   base policy). Large-repo mode says, in the project header, when the person's own checkout is
   building.
 
+As built (NIT-205): `lanes_overview` (src-tauri) reads `lanes::status` for every connected repo with
+`[lanes]`; `src/lanes.ts` turns it into chips. A lane is unhealthy when its last finished request
+there ended in a lane problem (`lane_error`), until a request runs in it again. The strip's "builds N
+of M" shows once `lanes_overview` returns `slots` (the scheduler). The timeline's "Open log" opens the
+log by run id (`open_lane_log`), which reads the path from the run's record and opens only `.log`
+files in the lanes folder. Settings shows what the playbook sets today (count, keep, timeout) and
+where the lanes live.
+
 ### Moving over
 
 Nothing changes until a project's playbook asks for it (`[lanes]`). Per project:

@@ -578,6 +578,54 @@ async fn open_crew_log(app: tauri::AppHandle, path: String) -> Result<(), String
     app.opener().open_path(log.to_string_lossy(), None::<&str>).map_err(|e| e.to_string())
 }
 
+/// The build lanes of every connected repo whose playbook has `[lanes]` (docs/build-lanes.md): each
+/// lane, the queue and the last runs, as `nitely lanes status` shows them. `slots` is the machine's
+/// build budget ("builds 3 of 4") once the scheduler keeps one; until then it is absent.
+#[derive(Serialize)]
+struct LanesOverview {
+    projects: Vec<nitely_core::lanes::Lanes>,
+    slots: Option<Slots>,
+}
+
+#[derive(Serialize)]
+struct Slots {
+    used: u32,
+    total: u32,
+}
+
+#[tauri::command]
+async fn lanes_overview() -> Result<LanesOverview, String> {
+    let config = Config::load().map_err(err)?;
+    let db = db()?;
+    let mut projects = Vec::new();
+    for repo in &config.repos {
+        let Some(project) = repo.project.as_deref() else { continue };
+        let root = std::path::Path::new(&repo.root);
+        // A repo whose playbook does not read shows no lanes here; its own views say why.
+        let Ok(pb) = nitely_core::playbook::Playbook::load(root) else { continue };
+        if let Some(lanes) = nitely_core::lanes::status(&db, root, &pb, project).map_err(err)? {
+            projects.push(lanes);
+        }
+    }
+    Ok(LanesOverview { projects, slots: None })
+}
+
+/// Opens a build lane run's log, named by the run's id in its issue's timeline. The path comes
+/// from the run's record, and only a `.log` file in Nitely's lanes folder opens.
+#[tauri::command]
+async fn open_lane_log(app: tauri::AppHandle, id: i64) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let db = db()?;
+    let run = db.lane_run(id).map_err(err)?.ok_or_else(|| format!("no run {id}"))?;
+    let path = run.log.ok_or_else(|| format!("run {id} has no log (logs are kept 7 days)"))?;
+    let dir = nitely_core::lanes::state_dir(&db).canonicalize().map_err(|e| format!("no lane logs yet: {e}"))?;
+    let log = std::path::Path::new(&path).canonicalize().map_err(|e| format!("{path}: {e}"))?;
+    if !log.starts_with(&dir) || log.extension().is_none_or(|e| e != "log") {
+        return Err(format!("{path} is not a lane log"));
+    }
+    app.opener().open_path(log.to_string_lossy(), None::<&str>).map_err(|e| e.to_string())
+}
+
 /// Pushes a change event to the frontend whenever the database or a watched repo changes.
 fn watch(app: tauri::AppHandle) {
     use tauri::Emitter;
@@ -734,6 +782,8 @@ pub fn run() {
             crew_settings,
             crew_save,
             open_crew_log,
+            lanes_overview,
+            open_lane_log,
             issues,
             issue_detail,
             set_blocker,

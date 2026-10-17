@@ -5,6 +5,7 @@ import { KIND_LABEL as DECISION_LABEL, type Decision, type DecisionKind } from "
 import type { Board, FlowIssue, Happening, IssueRecord, ProjectFlow, Pulse as PulseData, Session, TaskRow } from "./types";
 import { HOME_LABEL, agentLabel, agentTitle, ago } from "./util";
 import { GoalRows } from "./GoalRows";
+import { LanesStrip } from "./LanesStrip";
 import {
   AgentMark,
   EmptyState,
@@ -178,6 +179,7 @@ export function Pulse(props: {
             </EmptyState>
           )}
           <RightNow data={data} board={props.board} ctx={ctx} />
+          <LanesStrip version={props.version} now={now} onOpenIssue={props.onOpenIssue} />
           <GoalRows heading version={props.version} onOpenIssue={props.onOpenIssue} />
           {data.projects.length > 0 && (
             <section>

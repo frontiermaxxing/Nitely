@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "./backend";
 import { issueSpendLine } from "./spend";
+import { laneRunId } from "./lanes";
 import type { Goal, IssueDetail, IssueRecord, IssueSpend, LinkedIssue } from "./types";
 import { agentLabel, agentTitle, ago, openExternal, PRIORITY } from "./util";
 import { IssueJourney, WhoHadIt } from "./IssueJourney";
@@ -29,6 +30,7 @@ const KIND_LABEL: Record<string, string> = {
   land_failed: "land stopped",
   crew_started: "crew started",
   crew_ended: "crew ended",
+  lane_run: "build lane",
 };
 
 /** The worker log a crew entry names (docs/crew.md), e.g. `... log: C:\\...\\crew\\NIT\\1-nit-3-codex.log`. */
@@ -43,6 +45,19 @@ function CrewLogLink({ path }: { path: string }) {
   return (
     <div className="tl-text">
       <button className="link" title={path} onClick={() => invoke("open_crew_log", { path }).then(() => setError(null), (e) => setError(String(e)))}>
+        Open log
+      </button>
+      {error && <span className="error small"> {error}</span>}
+    </div>
+  );
+}
+
+/** Opens a build lane run's log, by the run's id; the app finds the log in the run's record. */
+function LaneLogLink({ id }: { id: number }) {
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <div className="tl-text">
+      <button className="link" title={`Run ${id}`} onClick={() => invoke("open_lane_log", { id }).then(() => setError(null), (e) => setError(String(e)))}>
         Open log
       </button>
       {error && <span className="error small"> {error}</span>}
@@ -256,6 +271,7 @@ export function IssuePanel(props: {
                       </div>
                       {t.summary && <div className="tl-text">{t.summary}</div>}
                       {crewLog(t) && <CrewLogLink path={crewLog(t)!} />}
+                      {laneRunId(t) !== null && <LaneLogLink id={laneRunId(t)!} />}
                     </li>
                   ))}
                   {detail.timeline.length === 0 && <li className="muted small">Nothing recorded yet.</li>}

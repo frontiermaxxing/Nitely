@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import type { View } from "./App";
 import { CrewSettings } from "./CrewSettings";
+import { LanesSettings } from "./LanesStrip";
 import { Network } from "./Network";
 import { NotifySettingsPanel } from "./Notifications";
 import { PhoneSetup } from "./PhoneSetup";
@@ -15,6 +16,7 @@ export const SETTINGS_SECTIONS = [
   { id: "updates", label: "Updates" },
   { id: "reviews", label: "Review defaults" },
   { id: "crew", label: "Crew" },
+  { id: "lanes", label: "Build lanes" },
   { id: "phone", label: "Phone" },
   { id: "machines", label: "Other machines" },
 ] as const;
@@ -37,6 +39,8 @@ export function Settings(props: {
   board: Board | null;
   projects: Project[];
   now: number;
+  /** Moves on whenever the data changes. */
+  version: number;
   update: UpdateStatus | null;
   onUpdate: (s: UpdateStatus) => void;
   onGo: (view: View) => void;
@@ -95,6 +99,10 @@ export function Settings(props: {
             <CrewSettings projectKey={p.key} onSaved={props.onChanged} />
           </div>
         ))}
+      </Section>
+
+      <Section id="lanes" label="Build lanes" why="Where builds and tests run: a few warm checkouts per project that keep their build output, so agents' worktrees hold source only.">
+        <LanesSettings version={props.version} />
       </Section>
 
       <Section id="phone" label="Phone" why="Answer the agents' questions and approve their changes from your phone. A paired phone can do that and nothing else, and every approval it gives is signed with a key that never leaves it.">

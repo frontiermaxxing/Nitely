@@ -4,6 +4,7 @@ import type { View } from "./App";
 import type { Board, SyncStatus, TaskRow } from "./types";
 import { ago } from "./util";
 import { exampleRepoPath } from "./AddProject";
+import { LanesStrip } from "./LanesStrip";
 import {
   AgentMark,
   EmptyState,
@@ -24,6 +25,8 @@ import {
 /** Every worktree of every watched repo, with the agent in it and its git and PR state. */
 export function Now(props: {
   board: Board;
+  /** Moves on whenever the data changes, so what Now reads besides the board (lanes) reads again. */
+  version: number;
   /** How many decisions wait on the human (the Inbox's count). */
   needs: number;
   now: number;
@@ -52,6 +55,7 @@ export function Now(props: {
           Show main checkouts
         </label>
       </div>
+      <LanesStrip version={props.version} now={now} onOpenIssue={props.onOpenIssue} />
       {board.repos.length === 0 && (
         <EmptyState title="No repos yet.">
           <p>Add one from the sidebar, or from a terminal:</p>
