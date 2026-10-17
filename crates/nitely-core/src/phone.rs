@@ -943,7 +943,8 @@ fn check_decision(device: &Device, message: &str, time: i64, signature: &str) ->
 fn plain(s: &str) -> String {
     static LINK: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let link = LINK.get_or_init(|| regex::Regex::new(r"\[([^\]]*)\]\([^)\s]*\)").unwrap());
-    link.replace_all(s, "$1").replace("**", "").replace('`', "")
+    // Between backticks is code, kept as written; outside, links become their text and bold marks go.
+    s.split('`').enumerate().map(|(i, part)| if i % 2 == 1 { part.to_string() } else { link.replace_all(part, "$1").replace("**", "") }).collect()
 }
 
 /// Each waiting decision as (id, one line) for a notification.
@@ -1586,6 +1587,7 @@ mod tests {
     #[test]
     fn notifications_read_an_agents_markdown_as_text() {
         assert_eq!(plain("Which currency for [DEM-5](nitely://issue/DEM-5)? See `rates.rs` and **[docs](https://example.com)**."), "Which currency for DEM-5? See rates.rs and docs.");
+        assert_eq!(plain("Tests under `src/**/*.test.ts` run **first**"), "Tests under src/**/*.test.ts run first");
         let v = json!({ "decisions": [{ "id": "ask-1", "kind": "ask", "issue": { "key": "DEM-3" }, "ask": { "question": "Round [DEM-5](nitely://issue/DEM-5) too?" } }] });
         assert_eq!(waiting_lines(&v), [("ask-1".to_string(), "DEM-3 asks: Round DEM-5 too?".to_string())]);
     }

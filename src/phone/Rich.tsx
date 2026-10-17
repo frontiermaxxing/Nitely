@@ -6,8 +6,9 @@ import { parseInline } from "../markdown";
  * a web link as its words, so nothing on the phone leads away from the decision.
  */
 export function Rich(props: { text: string }) {
+  // One element, so a flex row that holds it (a finding beside its severity mark) keeps it one sentence.
   return (
-    <>
+    <span className="ph-rich">
       {parseInline(props.text).map((p, i) => {
         switch (p.t) {
           case "code":
@@ -28,6 +29,6 @@ export function Rich(props: { text: string }) {
             return <span key={i}>{p.s}</span>;
         }
       })}
-    </>
+    </span>
   );
 }
