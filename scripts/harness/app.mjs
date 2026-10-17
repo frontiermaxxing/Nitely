@@ -108,7 +108,12 @@ async function takeLock(waitMs = 10 * 60 * 1000) {
       };
     } catch (e) {
       if (e.code !== "EEXIST") throw e;
-      const holder = Number(readFileSync(LOCK, "utf8").trim());
+      let holder;
+      try {
+        holder = Number(readFileSync(LOCK, "utf8").trim());
+      } catch {
+        continue; // Released between the two looks: try again.
+      }
       if (!holder || !alive(holder)) {
         rmSync(LOCK, { force: true });
         continue;
