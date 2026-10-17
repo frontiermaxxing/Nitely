@@ -73,6 +73,16 @@ input { accent-color: var(--fg); }
 .nav-dot-fail { background: var(--fail); }
 .nav-foot { margin-top: auto; padding-top: 16px; display: flex; flex-direction: column; gap: 2px; }
 .nav-status { display: flex; align-items: center; gap: 7px; padding: 8px 10px 0; font-size: var(--text-xs); color: var(--fg-3); }
+/* The version line under it; it speaks up only when an update is ready (src/Update.tsx). */
+.nav-update { padding: 4px 10px 0 24px; font-size: var(--text-xs); color: var(--fg-3); line-height: 1.5; }
+.nav-update.ready { color: var(--fg-2); }
+.nav-update .link { font: inherit; color: var(--fg); text-decoration: underline; text-underline-offset: 2px; }
+.nav-update a { color: inherit; }
+.updates .channel-choice { display: grid; gap: 6px; margin: 0 0 12px; }
+.updates .channel-choice label { display: flex; align-items: baseline; gap: 8px; cursor: pointer; }
+.updates .channel-name { min-width: 64px; font-weight: var(--weight-medium); }
+.updates .channel-warning { margin: 0 0 12px; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--sunken); }
+.updates .channel-warning p { margin: 0 0 8px; }
 .content { overflow-y: auto; min-width: 0; }
 .page { padding: 28px 40px 48px; max-width: 1360px; }
 .page-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 12px; margin-bottom: 18px; }
@@ -458,7 +468,7 @@ details summary { cursor: pointer; color: var(--fg-2); }
   .nav-item { width: auto; flex: none; }
   .nav-goto { margin: 0 4px 0 0; flex: none; }
   .nav-foot { margin: 0 0 0 auto; padding: 0; flex-direction: row; align-items: center; }
-  .nav-status, .nav-dots { display: none; }
+  .nav-status, .nav-dots, .nav-update { display: none; }
   .preview-foot { margin: 0; padding: 0; display: flex; align-items: center; }
   .preview-theme { padding: 0 0 0 6px; }
   .page { padding: 20px 16px 40px; }

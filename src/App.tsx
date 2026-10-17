@@ -1,4 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { UpdateLine, useUpdateStatus } from "./Update";
 import { invoke, isLive, isPreview, listen } from "./backend";
 import type { AgentPlan, Board, Project } from "./types";
 import { AgentSetup, pendingChanges, setupErrors } from "./Agents";
@@ -121,6 +122,7 @@ export function App() {
   // What Nitely writes for agents changes only with Nitely itself, so this is checked at start and
   // after the app changes it, not on every refresh.
   const [agents, setAgents] = useState<AgentPlan[]>([]);
+  const [update, setUpdate] = useUpdateStatus();
   const [agentsError, setAgentsError] = useState<string | null>(null);
   const loadAgents = useCallback(() => {
     invoke<AgentPlan[]>("agent_setup").then(
@@ -268,6 +270,7 @@ export function App() {
             <span className={`nav-dot nav-dot-${error ? "fail" : "ok"}`} />
             {error ? "Local · not reading" : isLive ? "Local · live data" : isPreview ? "Local · sample data" : "Local · live"}
           </div>
+          <UpdateLine status={update} onStatus={setUpdate} />
           {isPreview && <PreviewFoot active={view.kind === "kit"} onKit={() => setView({ kind: "kit" })} />}
         </div>
       </nav>
@@ -297,7 +300,7 @@ export function App() {
             </button>
           </p>
         )}
-        {view.kind === "agents" && <AgentSetup agents={agents} onUpdated={loadAgents} onRecheck={loadAgents} />}
+        {view.kind === "agents" && <AgentSetup agents={agents} onUpdated={loadAgents} onRecheck={loadAgents} update={update} onUpdate={setUpdate} />}
         {view.kind === "pulse" && <Pulse board={board} decisions={decisions} now={now} version={version} onOpenIssue={setOpenIssue} onGo={setView} />}
         {(view.kind === "inbox" || view.kind === "now") && !board && !error && (
           <div className="page">

@@ -20,6 +20,10 @@ pub struct Config {
     /// person changes them, in the app (`rules::save_defaults`).
     #[serde(default, skip_serializing_if = "crate::rules::RuleDefaults::is_empty")]
     pub rule_defaults: crate::rules::RuleDefaults,
+    /// The release channel the app updates from (stable, beta or nightly); chosen in the app.
+    /// None follows the build's own channel (`update::default_channel`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_channel: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

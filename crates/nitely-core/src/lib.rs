@@ -37,6 +37,7 @@ pub mod review;
 pub mod rules;
 pub mod snapshot;
 pub mod track;
+pub mod update;
 pub mod usage;
 pub mod pulse;
 pub mod watch;

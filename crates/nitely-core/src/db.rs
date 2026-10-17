@@ -433,6 +433,24 @@ pub struct NewEvent {
     pub state: String,
 }
 
+/// Beside the database: the version of Nitely that last upgraded its schema.
+fn upgraded_by_path(db: &Path) -> std::path::PathBuf {
+    let mut name = db.file_name().unwrap_or_default().to_os_string();
+    name.push(".upgraded-by");
+    db.with_file_name(name)
+}
+
+/// What an older build says when it meets a database a newer one upgraded (an update from a newer
+/// channel to an older one): it does not open it, so it can never write in a form the newer build
+/// misreads.
+fn newer_database(path: &Path, version: i64) -> String {
+    let by = std::fs::read_to_string(upgraded_by_path(path)).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    match by {
+        Some(v) => format!("this database was upgraded by Nitely {v}; this is Nitely {}. Install {v} or newer", crate::update::VERSION),
+        None => format!("this database was upgraded by a newer Nitely (schema {version}; this build knows {SCHEMA_VERSION}); install the newer version"),
+    }
+}
+
 impl Db {
     pub fn open(path: &Path) -> Result<Db> {
         if let Some(dir) = path.parent() {
@@ -444,10 +462,15 @@ impl Db {
         // a write on open moves `data_version`, which the app's watcher reads as a change: it would
         // refresh, open the database again, and loop.
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if version > SCHEMA_VERSION {
+            anyhow::bail!("{}", newer_database(path, version));
+        }
         if version < SCHEMA_VERSION {
             // WAL (persistent) so the app reads while hooks write; busy_timeout so parallel hooks wait.
             use_wal(&conn).context("switching the database to WAL")?;
             upgrade(&conn).context("upgrading the database")?;
+            // Who upgraded it, so an older build can say which version to install (`newer_database`).
+            std::fs::write(upgraded_by_path(path), crate::update::VERSION).ok();
         }
         Ok(Db { conn })
     }
@@ -660,6 +683,23 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_older_build_refuses_a_database_a_newer_one_upgraded() {
+        let dir = crate::paths::unique_temp("nitely-newer", "");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        drop(Db::open(&path).unwrap());
+        assert_eq!(std::fs::read_to_string(upgraded_by_path(&path)).unwrap(), crate::update::VERSION, "the upgrade names its version");
+        Connection::open(&path).unwrap().pragma_update(None, "user_version", SCHEMA_VERSION + 1).unwrap();
+        std::fs::write(upgraded_by_path(&path), "9.9.0-nightly.20261016.g1a2b3c4").unwrap();
+        let err = Db::open(&path).err().unwrap().to_string();
+        assert!(err.contains("upgraded by Nitely 9.9.0-nightly.20261016.g1a2b3c4") && err.contains("Install 9.9.0-nightly"), "{err}");
+        std::fs::remove_file(upgraded_by_path(&path)).unwrap();
+        let err = Db::open(&path).err().unwrap().to_string();
+        assert!(err.contains(&format!("schema {}", SCHEMA_VERSION + 1)), "{err}");
+        std::fs::remove_dir_all(dir).ok();
+    }
 
     #[test]
     fn a_v8_database_gets_issue_owners() {

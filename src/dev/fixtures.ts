@@ -1180,6 +1180,24 @@ function setPrivateTerms(args: Record<string, unknown>) {
   return PRIVATE_TERMS;
 }
 
+// A beta build with the next beta downloaded and ready (src-tauri/src/update.rs).
+let UPDATE = {
+  version: "0.2.0-beta.1",
+  build_channel: "beta",
+  channel: "beta",
+  channels: [
+    { name: "stable", warning: "You run a beta build. The stable channel's newest version can be older than this one; Nitely updates to it only once it is newer." },
+    { name: "beta", warning: null },
+    { name: "nightly", warning: null },
+  ],
+  disabled: null as string | null,
+  checking: false,
+  checked_at: NOW - 2 * HOUR as number | null,
+  available: { version: "0.2.0-beta.2", notes_url: "https://github.com/frontiermaxxing/Nitely/releases/tag/v0.2.0-beta.2", ready: true } as { version: string; notes_url: string; ready: boolean } | null,
+  waiting_for_lands: [] as string[],
+  error: null as string | null,
+};
+
 function renameProject(args: Record<string, unknown>) {
   const p = projectOf(args.key);
   const name = String(args.name ?? "").trim();
@@ -1683,6 +1701,17 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return connectPlan(args);
       case "connect_apply":
         return connectApply(args);
+      case "update_status":
+        return UPDATE;
+      case "check_for_update":
+        UPDATE = { ...UPDATE, checked_at: NOW };
+        return UPDATE;
+      case "set_update_channel":
+        UPDATE = { ...UPDATE, channel: String(args.channel), available: null, checked_at: NOW };
+        return UPDATE;
+      case "restart_to_update":
+        UPDATE = { ...UPDATE, waiting_for_lands: ["Nitely"] };
+        return UPDATE;
       case "agent_setup":
         return AGENTS;
       case "rules":

@@ -16,7 +16,7 @@ use crate::submit::patch_id;
 
 /// A lock older than this probably belongs to a land that died.
 const LOCK_STALE_SECS: u64 = 60 * 60;
-pub(crate) const LOCK_FILE: &str = "nitely-land.lock";
+pub const LOCK_FILE: &str = "nitely-land.lock";
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct Landed {

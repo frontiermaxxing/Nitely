@@ -22,6 +22,7 @@ tauri-plugin-dialog = "2"
 tauri-plugin-deep-link = "2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 png = "0.17"
+tauri-plugin-updater = "2"
 
 [target.'cfg(windows)'.dependencies]
 # Windows toasts for decisions that wait on the person (src/notify.rs), with the click reported back.

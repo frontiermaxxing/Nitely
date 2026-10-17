@@ -15,7 +15,7 @@ use std::io::Read;
 
 /// Nitely: what your coding agents are doing.
 #[derive(Parser)]
-#[command(name = "nitely", version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("NITELY_COMMIT"), ")"))]
+#[command(name = "nitely", version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("NITELY_COMMIT"), ", ", env!("NITELY_BUILD_CHANNEL"), ")"))]
 struct Cli {
     #[command(subcommand)]
     command: Cmd,

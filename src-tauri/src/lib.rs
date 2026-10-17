@@ -1,6 +1,7 @@
 mod agent_icons;
 mod harness;
 mod notify;
+mod update;
 
 mod phone;
 use nitely_core::issues::{Ask, Project, Relations};
@@ -583,7 +584,9 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(PendingLink::default())
+        .manage(update::UpdateState::default())
         .setup(|app| {
             use tauri_plugin_deep_link::DeepLinkExt;
             // Installers register nitely:// at install; this registers it for the current user each
@@ -610,6 +613,7 @@ pub fn run() {
             std::thread::spawn(move || watch(handle));
             // The phone server stays off until the person turns it on (docs/phone.md).
             tauri::Manager::manage(app, phone::PhoneApp::new(app.handle().clone()));
+            update::start(app.handle());
             // A playbook that lands by Nitely lands an approved change without an agent coming back
             // for it. Each round lands what is approved and ready; a land that holds the lock, or an
             // app that was closed, only delays it to a later round. Started here, in the one
@@ -683,8 +687,18 @@ pub fn run() {
             rule_defaults_save,
             network,
             network_add,
-            network_remove
+            network_remove,
+            update::update_status,
+            update::check_for_update,
+            update::set_update_channel,
+            update::restart_to_update
         ])
-        .run(context)
-        .expect("error while running Nitely");
+        .build(context)
+        .expect("error while building Nitely")
+        .run(|app, event| {
+            // A downloaded update installs on quit, unless a land is running (then the next quit).
+            if let tauri::RunEvent::Exit = event {
+                update::install_on_quit(app);
+            }
+        });
 }
