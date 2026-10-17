@@ -189,7 +189,7 @@ fn tools() -> Value {
     json!([
         {
             "name": "next_task",
-            "description": "Claim the most urgent Todo issue in this repo's project and get it with a suggested branch name. Two agents never get the same issue. Issues with an open blocker are skipped, and a blocker is as urgent as what it blocks. Returns null when nothing is ready.",
+            "description": "Claim the most urgent Todo issue in this repo's project and get it with a suggested branch name. Two agents never get the same issue. Issues with an open blocker are skipped, and a blocker is as urgent as what it blocks. Among equally urgent issues, those of an active goal come first, the nearest target date first. Returns null when nothing is ready.",
             "inputSchema": { "type": "object", "properties": {
                 "project": { "type": "string", "description": "Project key; defaults to this repo's project." }
             } }

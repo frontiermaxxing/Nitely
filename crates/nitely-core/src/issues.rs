@@ -1081,7 +1081,8 @@ impl Db {
 
     /// Claims the most urgent Todo issue of a project for `agent`, atomically: two agents asking at
     /// once get different issues. A claim untouched for `CLAIM_TTL_SECS` counts as abandoned. An
-    /// issue with an open blocker is skipped, and a blocker is as urgent as what it blocks.
+    /// issue with an open blocker is skipped, and a blocker is as urgent as what it blocks. Among
+    /// issues equally urgent, those of an active goal go first, the nearest target date first.
     pub fn next_task(&mut self, project: &str, agent: &str) -> Result<Option<IssueRecord>> {
         self.next_task_except(project, agent, &[])
     }
@@ -1092,7 +1093,8 @@ impl Db {
     }
 
     /// `next_task_except`, letting `choose` pick among the ready candidates, given as (key, urgency
-    /// rank, number), most urgent first (overlap::next_task prefers one clear of work in flight).
+    /// rank, number), in the order `next_task` takes them (overlap::next_task prefers one clear of
+    /// work in flight).
     pub fn next_task_choosing(
         &mut self,
         project: &str,
@@ -1102,25 +1104,27 @@ impl Db {
     ) -> Result<Option<IssueRecord>> {
         let ts = now();
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let candidates: Vec<(String, i64, i64)> = {
+        // Each candidate with its goal's place: 0 for an active goal with a target date, 1 for one
+        // without, 2 for no active goal; then the target date.
+        let candidates: Vec<(String, i64, i64, i64, Option<String>)> = {
             let mut stmt = tx.prepare(
-                "SELECT key, priority, number FROM issue
-                 WHERE project = ?1 COLLATE NOCASE AND origin = 'nitely' AND owner != 'human'
-                   AND (state = 'Todo' OR (state = 'In Progress' AND claimed_at < ?2))",
+                "SELECT i.key, i.priority, i.number,
+                        CASE WHEN g.id IS NULL THEN 2 WHEN g.target_date IS NULL THEN 1 ELSE 0 END, g.target_date
+                 FROM issue i LEFT JOIN goal g ON g.id = i.goal AND g.state = 'active'
+                 WHERE i.project = ?1 COLLATE NOCASE AND i.origin = 'nitely' AND i.owner != 'human'
+                   AND (i.state = 'Todo' OR (i.state = 'In Progress' AND i.claimed_at < ?2))",
             )?;
-            let rows = stmt.query_map(params![project, ts - CLAIM_TTL_SECS], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            let rows = stmt.query_map(params![project, ts - CLAIM_TTL_SECS], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?;
             rows.collect::<rusqlite::Result<_>>()?
         };
         let deps = Deps::load(&tx)?;
-        let mut ready: Vec<(String, i64, i64)> = candidates
+        let mut ready: Vec<((i64, i64, Option<String>, i64), String)> = candidates
             .into_iter()
-            .filter(|(k, _, _)| deps.blocked_by(k).is_empty() && !except.iter().any(|e| e.eq_ignore_ascii_case(k)))
-            .map(|(k, priority, number)| {
-                let r = rank(deps.urgency(&k, priority));
-                (k, r, number)
-            })
+            .filter(|(k, ..)| deps.blocked_by(k).is_empty() && !except.iter().any(|e| e.eq_ignore_ascii_case(k)))
+            .map(|(k, priority, number, goal, target)| ((rank(deps.urgency(&k, priority)), goal, target, number), k))
             .collect();
-        ready.sort_by_key(|(_, r, number)| (*r, *number));
+        ready.sort();
+        let ready: Vec<(String, i64, i64)> = ready.into_iter().map(|((r, _, _, number), k)| (k, r, number)).collect();
         let key = choose(&ready).filter(|k| ready.iter().any(|(r, _, _)| r == k));
         let Some(key) = key else {
             return Ok(None);
@@ -1528,6 +1532,34 @@ mod tests {
         assert_eq!(first.claimed_by.as_deref(), Some("claude:a"));
         assert_eq!(db.next_task("NIT", "codex:b").unwrap().unwrap().key, "NIT-1");
         assert!(db.next_task("NIT", "cursor:c").unwrap().is_none());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn next_task_prefers_active_goals_with_nearer_targets_after_urgency() {
+        let (mut db, dir) = db();
+        db.create_project("NIT", "Nitely").unwrap();
+        let h = Actor::Human;
+        let goal = |db: &Db, title: &str, target: Option<&str>| {
+            let change = crate::goals::GoalChange { title: Some(title.into()), outcome: Some("o".into()), target_date: target.map(str::to_string), state: None };
+            db.save_goal("NIT", None, &change, &h).unwrap().id
+        };
+        let (later, sooner, open, shelved) = (goal(&db, "Later", Some("2027-03-01")), goal(&db, "Sooner", Some("2026-11-01")), goal(&db, "Open", None), goal(&db, "Shelved", Some("2026-10-20")));
+        let file = |db: &mut Db, title: &str, priority: i64, goal: Option<i64>| {
+            let mut i = new(title);
+            i.priority = priority;
+            i.goal = goal;
+            db.create_issue(&i, &h).unwrap().key
+        };
+        let plain = file(&mut db, "No goal", 3, None);
+        let undated = file(&mut db, "Undated goal", 3, Some(open));
+        let late = file(&mut db, "Later goal", 3, Some(later));
+        let dropped = file(&mut db, "Dropped goal", 3, Some(shelved));
+        let soon = file(&mut db, "Sooner goal", 3, Some(sooner));
+        let urgent = file(&mut db, "Urgent, no goal", 2, None);
+        db.save_goal("NIT", Some(shelved), &crate::goals::GoalChange { state: Some("dropped".into()), ..Default::default() }, &h).unwrap();
+        let order: Vec<String> = std::iter::from_fn(|| db.next_task("NIT", "claude:a").unwrap().map(|i| i.key)).collect();
+        assert_eq!(order, [urgent, soon, late, undated, plain, dropped], "priority first, then active goals by target, then the rest by number");
         std::fs::remove_dir_all(dir).ok();
     }
 
