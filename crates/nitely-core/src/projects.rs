@@ -151,7 +151,13 @@ fn folders_of(config: &crate::Config, db: &Db, project: &str) -> Vec<String> {
     keys.extend(db.project_aliases().unwrap_or_default().into_iter().filter(|(_, now)| now.eq_ignore_ascii_case(project)).map(|(was, _)| was.to_lowercase()));
     let mine = |name: &str| {
         let name = name.to_lowercase();
-        keys.iter().any(|k| name.strip_prefix(&format!("{k}-")).is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit())))
+        // The issue's number, then the slug's dash or the end: `app-2fa` is another repo, not APP-2.
+        keys.iter().any(|k| {
+            name.strip_prefix(&format!("{k}-")).is_some_and(|rest| {
+                let digits = rest.chars().take_while(char::is_ascii_digit).count();
+                digits > 0 && matches!(rest[digits..].chars().next(), None | Some('-'))
+            })
+        })
     };
     let named: Vec<String> = {
         let rows = db.conn.prepare("SELECT cwd FROM session WHERE state != 'ended' UNION SELECT cwd FROM ask WHERE answered_at IS NULL AND cwd IS NOT NULL").and_then(|mut stmt| {
@@ -498,7 +504,7 @@ mod tests {
         db.create_project("OTH", "Other").unwrap();
         let worktrees = root.parent().unwrap().join("app-worktrees");
         // Sessions in task folders of the worktree folder: one for APP, one for another project.
-        for (id, task) in [("codex:a", "app-3-fix-login"), ("codex:o", "oth-4-docs"), ("codex:p", "app2-5-other")] {
+        for (id, task) in [("codex:a", "app-3-fix-login"), ("codex:o", "oth-4-docs"), ("codex:p", "app2-5-other"), ("codex:f", "app-2fa")] {
             let cwd = worktrees.join(task).join("src").to_string_lossy().into_owned();
             db.record(&crate::db::NewEvent { session_id: id.into(), vendor: "codex".into(), cwd, kind: "tool".into(), summary: None, state: "working".into() }).unwrap();
         }

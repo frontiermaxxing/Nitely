@@ -366,7 +366,7 @@ fn ask_waits_end(db: &Db, ids: &[String], rows: &[(i64, u8, String)]) -> Result<
                 )
                 .optional()?;
             if let Some((summary, cwd)) = found {
-                asked.push((ts, summary.trim_start_matches("Asked: ").to_string(), cwd));
+                asked.push((ts, summary.strip_prefix("Asked: ").unwrap_or(&summary).to_string(), cwd));
                 break;
             }
         }
@@ -640,7 +640,7 @@ mod tests {
         let agent = crate::Actor::Agent("codex:x".into());
         // Three Codex threads ask and go quiet: one is answered, one's ask is gone (its project
         // was removed), one is still waiting on the person.
-        for (id, question) in [("codex:answered", "Which branch?"), ("codex:gone", "May I write here?"), ("codex:open", "Ship it?")] {
+        for (id, question) in [("codex:answered", "Which branch?"), ("codex:gone", "May I write here?"), ("codex:open", "Asked: ship it?")] {
             session(&db, id, "C:\\code\\app", t0, t0 + 60, "waiting");
             state(&db, id, t0, "working");
             state(&db, id, t0 + 60, "waiting");
@@ -686,7 +686,7 @@ mod tests {
         db.answer_ask(late.id, "yes", &crate::Actor::Human).unwrap();
         db.conn.execute("UPDATE ask SET asked_at = ?2, answered_at = ?3 WHERE id = ?1", params![late.id, t0 + 61, t0 + 900]).unwrap();
         // The same question asked from another folder at the same moment, and answered there.
-        let elsewhere = db.create_ask("Ship it?", &[], None, Some("C:\\code\\other"), &agent).unwrap();
+        let elsewhere = db.create_ask("Asked: ship it?", &[], None, Some("C:\\code\\other"), &agent).unwrap();
         db.answer_ask(elsewhere.id, "no", &crate::Actor::Human).unwrap();
         db.conn.execute("UPDATE ask SET asked_at = ?2, answered_at = ?3 WHERE id = ?1", params![elsewhere.id, t0 + 60, t0 + 120]).unwrap();
 
