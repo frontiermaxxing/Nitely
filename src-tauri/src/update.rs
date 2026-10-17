@@ -62,6 +62,21 @@ pub struct UpdateState {
     /// Moves on when the person picks another channel: a check or download started before then
     /// belongs to the old channel, and its result is dropped.
     generation: AtomicU64,
+    /// The generation a check is running for, if one is: a second check for the same channel
+    /// waits for it, a check for a newly picked channel does not.
+    running: Mutex<Option<u64>>,
+}
+
+/// Marks a check as running for its generation, and clears the mark however the check ends.
+struct Running<'a>(&'a UpdateState, u64);
+
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
+        let mut running = self.0.running.lock().unwrap();
+        if *running == Some(self.1) {
+            *running = None;
+        }
+    }
 }
 
 fn pubkey(app: &AppHandle) -> String {
@@ -135,15 +150,24 @@ pub fn start(app: &AppHandle) {
 /// Asks the channel for a newer version and downloads it. Does nothing while a check runs or an
 /// update already waits to be installed.
 pub async fn check(app: &AppHandle) -> UpdateStatus {
-    {
-        let state = app.state::<UpdateState>();
+    let state = app.state::<UpdateState>();
+    let generation = {
         let s = state.status.lock().unwrap();
-        if s.disabled.is_some() || s.checking || s.available.as_ref().is_some_and(|a| a.ready) {
+        if s.disabled.is_some() || s.available.as_ref().is_some_and(|a| a.ready) {
             return s.clone();
         }
-    }
+        let mut running = state.running.lock().unwrap();
+        let generation = state.generation.load(Ordering::SeqCst);
+        if *running == Some(generation) {
+            return s.clone();
+        }
+        *running = Some(generation);
+        generation
+    };
+    let _running = Running(state.inner(), generation);
+    // The channel is read after the generation: a channel picked in between moves the generation
+    // too, so this check's result is then dropped rather than taken for the new channel's.
     let channel = chosen_channel();
-    let generation = app.state::<UpdateState>().generation.load(Ordering::SeqCst);
     let current = |app: &AppHandle| app.state::<UpdateState>().generation.load(Ordering::SeqCst) == generation;
     change(app, |s| {
         s.checking = true;
