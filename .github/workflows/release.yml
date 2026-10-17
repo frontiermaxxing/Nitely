@@ -245,7 +245,7 @@ jobs:
           # was published puts it right on a later read-back, as does the newer build itself.
           publish() { # channel: derive the manifest from the releases now, and upload it when the published one is older
             local channel="$1"
-            gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > releases.json
+            gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > releases.json
             local status=0
             node scripts/update-manifest.mjs --pick "$channel" --releases releases.json --notes-out "notes-$channel.md" > "pick-$channel.env" || status=$?
             if [ "$status" = 5 ]; then echo "::notice::No published release for $channel yet."; return 0; elif [ "$status" != 0 ]; then return "$status"; fi

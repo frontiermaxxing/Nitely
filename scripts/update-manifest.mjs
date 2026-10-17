@@ -87,7 +87,8 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
       process.exit(same(read(args.same), read(args.as)) ? 0 : 6);
     }
     if (args.pick !== undefined) {
-      const picked = newest(JSON.parse(readFileSync(args.releases, "utf8")), args.pick);
+      // `gh api --paginate --slurp` gives one array per page.
+      const picked = newest(JSON.parse(readFileSync(args.releases, "utf8")).flat(), args.pick);
       if (!picked) process.exit(5);
       if (args["notes-out"]) writeFileSync(args["notes-out"], picked.notes);
       console.log(`tag=${picked.tag}\nversion=${picked.version}\nurl=${picked.url}\nsig=${picked.sig}`);
