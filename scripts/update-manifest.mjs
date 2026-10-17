@@ -9,10 +9,53 @@
 // `node scripts/update-manifest.mjs --version V --holds FILE` exits 0 when FILE (a manifest read
 // back after uploading) names V or a newer version, and 4 when it is missing or older: another
 // build that read the same old manifest uploaded after this one.
+//
+// `node scripts/update-manifest.mjs --pick CHANNEL --releases FILE --notes-out FILE` picks, from the
+// repo's releases (`gh api repos/OWNER/REPO/releases`), the newest published one the channel's
+// manifest should name, and prints it as KEY=value lines (tag, version, url, sig) for the shell,
+// writing its notes to the notes file; it exits 5 when the channel has none yet. `--same A --as B`
+// exits 0 when two manifest files name the same version, installer and signature, 6 otherwise. Every build writes
+// the manifest from this, not from its own version, so builds finishing side by side all write the
+// same thing, and a read-back that finds an older one can always derive the right one again.
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { compareVersions } from "./release-meta.mjs";
+import { compareVersions, decide } from "./release-meta.mjs";
+
+/** Whether two manifests (parsed, or null) name the same version, installer and signature. */
+export function same(a, b) {
+  return !!a && !!b && a.version === b.version && JSON.stringify(a.platforms) === JSON.stringify(b.platforms);
+}
+
+/** The installer of a release, by the name the workflow gives it: `Nitely_<version>_x64-setup.exe`. */
+const INSTALLER = /^Nitely_(.+)_x64-setup\.exe$/;
+
+/**
+ * The newest published release whose manifests include `channel`, from GitHub's releases list
+ * (`tag_name`, `draft`, `body`, `assets[{ name, browser_download_url }]`): one that has its
+ * installer and that installer's updater signature. Its version is the installer's, so the rolling
+ * `nightly` tag counts too. Null when there is none.
+ */
+export function newest(releases, channel) {
+  const manifestsOf = (tag) => {
+    if (tag === "nightly") return ["nightly"];
+    try {
+      return decide(tag).manifests;
+    } catch {
+      return [];
+    }
+  };
+  const candidates = [];
+  for (const r of releases) {
+    if (r.draft || !manifestsOf(r.tag_name).includes(channel)) continue;
+    const installer = (r.assets ?? []).find((a) => INSTALLER.test(a.name));
+    if (!installer || !(r.assets ?? []).some((a) => a.name === `${installer.name}.sig`)) continue;
+    const version = INSTALLER.exec(installer.name)[1];
+    candidates.push({ tag: r.tag_name, version, url: installer.browser_download_url, sig: `${installer.name}.sig`, notes: r.body ?? "" });
+  }
+  candidates.sort((a, b) => compareVersions(b.version, a.version));
+  return candidates[0] ?? null;
+}
 
 /** Whether a manifest for `version` should replace `current` (a parsed manifest, or null). */
 export function replaces(version, current) {
@@ -39,6 +82,17 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
     process.argv.slice(2).reduce((acc, a, i, all) => (a.startsWith("--") ? [...acc, [a.slice(2), all[i + 1]]] : acc), []),
   );
   try {
+    if (args.same !== undefined) {
+      const read = (f) => (f && existsSync(f) ? JSON.parse(readFileSync(f, "utf8")) : null);
+      process.exit(same(read(args.same), read(args.as)) ? 0 : 6);
+    }
+    if (args.pick !== undefined) {
+      const picked = newest(JSON.parse(readFileSync(args.releases, "utf8")), args.pick);
+      if (!picked) process.exit(5);
+      if (args["notes-out"]) writeFileSync(args["notes-out"], picked.notes);
+      console.log(`tag=${picked.tag}\nversion=${picked.version}\nurl=${picked.url}\nsig=${picked.sig}`);
+      process.exit(0);
+    }
     if (args.holds !== undefined) {
       const published = existsSync(args.holds) ? JSON.parse(readFileSync(args.holds, "utf8")) : null;
       process.exit(holds(args.version, published) ? 0 : 4);

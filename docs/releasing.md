@@ -91,9 +91,11 @@ Until both halves are in place (the secret, and the public key in `tauri.conf.js
 still publish installers; they just carry no updater signature, no manifest changes, and the app
 they install doesn't check for updates (Agent setup → Updates says so). Copies installed before
 the key existed don't update themselves: install a later release over them once, by hand. A
-manifest only ever moves forward: a build that finishes after a newer one leaves it alone, and
-when two finish within seconds of each other, the newer one reads its upload back for a minute
-and puts it back if the older one overwrote it.
+manifest only ever moves forward: no build writes its own version; each writes the newest
+published release of the channel (with its installer's signature), from the releases as they
+are then, and checks again three times over the next minute. Builds finishing side by side write
+the same thing, and one that saw the list before a newer release was published is put right by a
+later check.
 
 ## How installed copies update
 

@@ -236,31 +236,33 @@ jobs:
             echo "::warning::No updater signature, so the ${{ steps.meta.outputs.manifests }} manifest stays as it was."
             exit 0
           fi
-          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${{ steps.meta.outputs.tag }}/Nitely_${v}_x64-setup.exe"
           gh release view updates >/dev/null 2>&1 || gh release create updates --prerelease --title "Update manifests" \
             --notes "What installed copies of Nitely read to find their channel's newest version. Not a release to download."
-          uploaded=""
-          for channel in ${{ steps.meta.outputs.manifests }}; do
+          # Builds for different tags run side by side, and reading, comparing and uploading a
+          # manifest isn't atomic. So no build writes its own version: each writes the newest
+          # published release of the channel, from the releases as they are now. Builds finishing
+          # together then write the same thing, and one that read the list before a newer release
+          # was published puts it right on a later read-back, as does the newer build itself.
+          publish() { # channel: derive the manifest from the releases now, and upload it when the published one is older
+            local channel="$1"
+            gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" > releases.json
+            local status=0
+            node scripts/update-manifest.mjs --pick "$channel" --releases releases.json --notes-out "notes-$channel.md" > "pick-$channel.env" || status=$?
+            if [ "$status" = 5 ]; then echo "::notice::No published release for $channel yet."; return 0; elif [ "$status" != 0 ]; then return "$status"; fi
+            . "./pick-$channel.env"
             rm -f "current-$channel.json"
             gh release download updates -p "$channel.json" -O "current-$channel.json" 2>/dev/null || true
+            gh release download "$tag" -p "$sig" -O "sig-$channel" --clobber
             status=0
-            node scripts/update-manifest.mjs --version "$v" --url "$url" --sig "$sig" --notes notes.md --out "$channel.json" --current "current-$channel.json" || status=$?
-            if [ "$status" = 3 ]; then continue; elif [ "$status" != 0 ]; then exit "$status"; fi
+            node scripts/update-manifest.mjs --version "$version" --url "$url" --sig "sig-$channel" --notes "notes-$channel.md" --out "$channel.json" --current "current-$channel.json" || status=$?
+            if [ "$status" = 3 ]; then return 0; elif [ "$status" != 0 ]; then return "$status"; fi
+            # Already published as it should be (same version, installer and signature): leave it.
+            node scripts/update-manifest.mjs --same "$channel.json" --as "current-$channel.json" && return 0
             gh release upload updates "$channel.json" --clobber
-            uploaded="$uploaded $channel"
-          done
-          # Builds for different tags run side by side, and the read, compare and upload above
-          # aren't atomic: an older build that read the same old manifest can upload after this
-          # one. So read each upload back a few times, some seconds apart, and put it back when an
-          # older version has replaced it. The newest build always does, so the newest wins.
+            echo "$channel.json names $version ($tag)"
+          }
+          for channel in ${{ steps.meta.outputs.manifests }}; do publish "$channel"; done
           for check in 1 2 3; do
-            [ -n "$uploaded" ] || break
             sleep 20
-            for channel in $uploaded; do
-              rm -f "published-$channel.json"
-              gh release download updates -p "$channel.json" -O "published-$channel.json" 2>/dev/null || continue
-              node scripts/update-manifest.mjs --version "$v" --holds "published-$channel.json" && continue
-              echo "::notice::$channel.json went back to an older version; publishing $v again."
-              gh release upload updates "$channel.json" --clobber
-            done
+            for channel in ${{ steps.meta.outputs.manifests }}; do publish "$channel"; done
           done
