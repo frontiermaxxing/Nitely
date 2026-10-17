@@ -155,6 +155,11 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     }
     out.approver = if out.reasons.is_empty() { "agent" } else { "human" }.into();
     let verdict = out.review.as_ref().map_or("none", |r| r.verdict.as_str()).to_string();
+    // Read before this round is recorded: the rounds before it.
+    let stalled = match &out.review {
+        Some(r) if verdict == "changes" => not_converging(&db.reviews(&issue.key)?, r),
+        _ => None,
+    };
     db.record_review(&out)?;
     out.approval_stands =
         out.approver == "human" && verdict != "changes" && issue.state == "Approved" && db.standing_approval(&issue.key)?.is_some();
@@ -196,12 +201,19 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         _ => outcome,
     };
     let outcome = if pb.land.by.by_nitely() && verdict != "changes" { format!("{outcome}; it {}", pb.land.by.describe()) } else { outcome };
+    let outcome = match &stalled {
+        Some(why) => format!("{outcome}. The review rounds are not converging, so it waits for you: {why}"),
+        None => outcome,
+    };
     // The full description is on the pull request and in the app's review section.
     db.add_note(&issue.key, &format!("{outcome}. {pr_line}"), "submit", actor)?;
 
     let push_failed = !local_only && !out.pushed;
     let by_nitely = pb.land.by.by_nitely();
-    let (state, next) = if verdict == "changes" {
+    let (state, next) = if stalled.is_some() {
+        // Another round would cost as much again and likely end the same: a person decides.
+        ("Needs You", "The review rounds are not converging, so the issue waits for the human: stop working on it and pick up other work. They decide whether to go on (moving it back to In Progress), narrow it, or close it.")
+    } else if verdict == "changes" {
         ("In Progress", "The review found P0 or P1 problems. Fix them, commit, and submit again.")
     } else if push_failed {
         // Not handed in: nobody can see or merge the branch, so it must not look ready to land.
@@ -232,6 +244,40 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         out.land = landed.ok();
     }
     Ok(out)
+}
+
+/// How many review rounds in a row may ask for changes before the issue goes to a person.
+pub const MAX_ROUNDS: usize = 5;
+
+/// Why an issue's review rounds have stopped converging, given the reviews before this one
+/// (newest first) and this one, which asks for changes: a P0 or P1 finding still open after two
+/// rounds that tried to fix it (carried a second time), or the `MAX_ROUNDS`th round in a row that
+/// asks for changes. A passing review ends a run: rounds after it (a rebase, a land that stopped)
+/// are not a loop. The text is the short summary the person reads.
+pub fn not_converging(earlier: &[ReviewRecord], review: &Review) -> Option<String> {
+    let earlier: Vec<&ReviewRecord> = earlier.iter().filter(|r| !r.reviewer.is_empty()).collect();
+    let round = 1 + earlier.iter().take_while(|r| r.verdict == "changes").count();
+    // Carried now and already carried by the round before: two fixes did not close it.
+    let twice: Vec<&crate::review::Finding> = review
+        .findings
+        .iter()
+        .filter(|f| f.carried && f.priority <= 1)
+        .filter(|f| earlier.first().is_some_and(|last| last.findings.iter().any(|p| p.carried && p.priority <= 1 && p.text == f.text)))
+        .collect();
+    if twice.is_empty() && round < MAX_ROUNDS {
+        return None;
+    }
+    let open: Vec<String> = review.findings.iter().filter(|f| f.priority <= 1).map(|f| format!("[P{}] {}", f.priority, f.text)).collect();
+    let why = if twice.is_empty() {
+        format!("{round} review rounds in a row asked for changes")
+    } else {
+        format!("{} still open after two rounds that tried to fix {}", plural(twice.len(), "P0/P1 finding"), if twice.len() == 1 { "it" } else { "them" })
+    };
+    Some(format!("{why}. Open: {}", open.join("; ")))
+}
+
+fn plural(n: usize, what: &str) -> String {
+    if n == 1 { format!("1 {what}") } else { format!("{n} {what}s") }
 }
 
 /// The latest review that ran on the issue, for the next one to start from. Its commit counts as
@@ -397,6 +443,55 @@ mod tests {
     use std::process::Command;
 
     #[test]
+    fn rounds_that_do_not_converge_go_to_a_person() {
+        use crate::review::Finding;
+        let f = |priority, text: &str, carried| Finding { priority, text: text.into(), carried, raised_as: None };
+        let record = |findings: Vec<Finding>| ReviewRecord {
+            issue_key: "NIT-1".into(),
+            patch_id: "p".into(),
+            commit_sha: "c".into(),
+            reviewer: "codex".into(),
+            verdict: "changes".into(),
+            approver: "agent".into(),
+            reasons: vec![],
+            findings,
+            ts: 0,
+            note: String::new(),
+        };
+        let review = |findings: Vec<Finding>| Review {
+            reviewer: "codex".into(),
+            verdict: "changes".into(),
+            findings,
+            flagged: vec![],
+            summary: String::new(),
+            seconds: 1,
+            previous: vec![],
+            note: String::new(),
+        };
+        // Round 2 carrying a P1 once is still a round that may converge.
+        let first = record(vec![f(1, "Drops the last row: a.rs", false)]);
+        assert_eq!(not_converging(&[first.clone()], &review(vec![f(1, "Drops the last row: a.rs", true)])), None);
+        // Round 3 carrying it a second time goes to a person, and says what is open.
+        let second = record(vec![f(1, "Drops the last row: a.rs", true)]);
+        let why = not_converging(&[second.clone(), first.clone()], &review(vec![f(1, "Drops the last row: a.rs", true), f(0, "Leaks the token: b.rs", false)])).unwrap();
+        assert!(why.starts_with("1 P0/P1 finding still open after two rounds that tried to fix it. Open:"), "{why}");
+        assert!(why.contains("[P1] Drops the last row: a.rs; [P0] Leaks the token: b.rs"), "{why}");
+        // A finding carried at P2 (its code gone) or a new one does not count as carried twice.
+        assert_eq!(not_converging(&[second.clone(), first.clone()], &review(vec![f(2, "Drops the last row: a.rs", true), f(1, "New: c.rs", false)])), None);
+        // The fifth round in a row asking for changes goes to a person whatever was carried; a
+        // review that did not run (no reviewer) is not a round, and a passing one ends the run.
+        let none = ReviewRecord { reviewer: String::new(), ..first.clone() };
+        let four = vec![record(vec![]), record(vec![]), none.clone(), record(vec![]), record(vec![])];
+        let new = || review(vec![f(1, "Off by one: d.rs", false)]);
+        let why = not_converging(&four, &new()).unwrap();
+        assert!(why.starts_with("5 review rounds in a row asked for changes. Open: [P1] Off by one: d.rs"), "{why}");
+        assert_eq!(not_converging(&four[1..], &new()), None, "the fourth");
+        let passed = ReviewRecord { verdict: "pass".into(), ..record(vec![]) };
+        let after_a_pass = vec![record(vec![]), record(vec![]), passed, record(vec![]), record(vec![]), record(vec![])];
+        assert_eq!(not_converging(&after_a_pass, &new()), None, "three in a row since the pass");
+    }
+
+    #[test]
     fn submits_with_a_review_and_routes_flags_to_a_human() {
         let base = crate::paths::unique_temp("nitely-submit", "");
         let repo = base.join("repo");
@@ -419,9 +514,13 @@ mod tests {
 files=$(git diff main...HEAD --name-only)
 money=no; case "$files" in *billing*) money=yes;; esac
 case "$prompt" in
-  *"PREVIOUS <n>"*) echo "PREVIOUS 1: open edge.txt:1 still empty"; echo "VERDICT: clean";;
+  *"PREVIOUS <n>"*) case "$files" in
+       *stuck*) echo "PREVIOUS 1: open stuck.txt:1 \`x\`"; echo "VERDICT: clean";;
+       *) echo "PREVIOUS 1: open edge.txt:1 still empty"; echo "VERDICT: clean";;
+     esac;;
   *) case "$files" in
        *edge*) echo "- [P2] Edge case: edge.txt, the empty line"; echo "VERDICT: findings";;
+       *stuck*) echo "- [P1] Stuck: stuck.txt, the x is never read"; echo "VERDICT: findings";;
        *) echo "Fine."; echo "VERDICT: clean";;
      esac;;
 esac
@@ -519,6 +618,24 @@ reason = "money logic"
         assert_eq!((review.findings.len(), review.findings[0].carried, review.verdict.as_str()), (1, true, "pass"));
         assert!(describe(&issue, &second, Default::default()).contains("Previous round's findings: 1 still open."));
         assert!(db.reviews(&issue.key).unwrap()[0].findings[0].carried);
+
+        // A P1 that two rounds of fixes leave open sends the issue to a person instead of a
+        // fourth round.
+        let issue = db.create_issue(&new("Stuck fix"), &actor).unwrap();
+        db.move_issue(&issue.key, "In Progress", None, None, &actor).unwrap();
+        let started = playbook::start_task(&db, &repo, &issue, "claude", &actor).unwrap();
+        let wt = Path::new(&started.worktree);
+        let opts = SubmitOptions { dir: started.worktree.as_str(), issue_key: None, skip_review: false, local_only: true };
+        std::fs::write(wt.join("stuck.txt"), "x").unwrap();
+        sh(wt, &["add", "."]);
+        sh(wt, &["commit", "-q", "-m", "stuck"]);
+        let states: Vec<String> = (0..3).map(|_| submit(&mut db, &config, &opts, &actor).unwrap().state).collect();
+        assert_eq!(states, ["In Progress", "In Progress", "Needs You"]);
+        let last: String = db
+            .conn
+            .query_row("SELECT summary FROM event WHERE issue_key = ?1 AND type = 'submit' ORDER BY id DESC LIMIT 1", [&issue.key], |r| r.get(0))
+            .unwrap();
+        assert!(last.contains("not converging") && last.contains("[P1] Stuck: stuck.txt"), "{last}");
 
         // A playbook that requires another vendor's review sends a same-vendor one to a human, and
         // with no reviewer installed at all, submit says what to install.

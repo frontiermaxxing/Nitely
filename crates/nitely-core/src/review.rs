@@ -244,7 +244,8 @@ cites no current code is not counted as open. Do not list an open one again as a
         if let Some(prev) = previous.filter(|p| p.in_history) {
             p.push_str(&format!(
                 "\nThen review what changed since {c} and report any defect in it. The rest of the branch was already \
-reviewed: raise something new there only if it is P0 or P1.\n",
+reviewed: raise something new there only if it is P0 or P1, and then say in the finding why that review missed it \
+(for example, a change since made it reachable).\n",
                 c = prev.commit
             ));
         }
