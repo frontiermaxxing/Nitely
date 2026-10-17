@@ -500,9 +500,13 @@ it lives.
 
 - **Ctrl+K** (Cmd+K on a Mac), or "Go to…" at the top of the sidebar: the palette. Type part of a view,
   project or issue; arrows pick, Enter goes, Esc closes. An exact key ("nit-12") opens that issue.
-  Results come in groups ("Go to", "Issues", "Actions") with a count of matches. Actions are what
-  you can do to an issue you named: "Approve NIT-12" when it waits on you, "Move NIT-12 to Todo"
-  or "to Backlog", through the same `move_issue` the Inbox uses. They show only once you type;
+  Results come in groups ("Go to", "Issues", "Actions") with a count of matches. "Go to" has every
+  view in the sidebar, each project's tabs (List, Board, Branches, Brief, Rules, Settings) and
+  "Notification settings", which opens the Inbox with them open. Actions are what you can do to
+  an issue you named: "Approve NIT-12" when it waits on you, "Move NIT-12 to Todo" or "to
+  Backlog", through the same `move_issue` the Inbox uses; and what the app's controls do
+  elsewhere: "Start a goal", "Pause the crew in Nitely" (or Resume), "Check for updates". A view
+  that adds a control people reach for adds its action here too. Actions show only once you type;
   the palette says what happened ("Approved NIT-12. Landing next.") and closes. Done and Canceled
   need words of why, so they stay on the issue sheet.
 - **j / k** move focus to the next or previous item on the page (list rows, the Overview's rows and

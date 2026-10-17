@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "./backend";
 import type { View } from "./App";
+import { askNotifySettings } from "./Notifications";
+import type { UpdateStatus } from "./Update";
 import { HOME_LABEL } from "./util";
-import type { IssueRecord, Project } from "./types";
+import type { CrewStatus, IssueRecord, Project } from "./types";
 import { IssueToken, ResultMark } from "./ui";
 import "./styles/palette.css";
 
@@ -28,6 +30,8 @@ const VIEWS: { label: string; view: View }[] = [
   { label: "Inbox", view: { kind: "inbox" } },
   { label: "Now", view: { kind: "now" } },
   { label: "Activity", view: { kind: "activity" } },
+  { label: "Other machines", view: { kind: "network" } },
+  { label: "Phone", view: { kind: "phone" } },
   { label: "Agent setup", view: { kind: "agents" } },
   { label: "Add project", view: { kind: "add" } },
 ];
@@ -51,6 +55,34 @@ function goalItems(query: string, projects: Project[], begin: () => void): Item[
   }));
 }
 
+/** Pausing or resuming each project's crew (docs/crew.md), for the projects that have one. */
+function crewItems(crews: { project: Project; crew: CrewStatus }[]): Item[] {
+  return crews.map(({ project: p, crew }) => ({
+    id: `crew-${p.key}`,
+    label: `${crew.paused ? "Resume" : "Pause"} the crew in ${p.name}`,
+    hint: p.key,
+    group: "Actions" as Group,
+    act: async () => {
+      await invoke<CrewStatus | null>("crew_pause", { project: p.key, paused: !crew.paused });
+      return crew.paused ? `Resumed the crew in ${p.name}.` : `Paused the crew in ${p.name}: running workers finish, no new ones start.`;
+    },
+  }));
+}
+
+/** Checking for a newer Nitely now, as Agent setup's "Check now" does. */
+const UPDATE_ITEM: Item = {
+  id: "update-check",
+  label: "Check for updates",
+  group: "Actions",
+  act: async () => {
+    const s = await invoke<UpdateStatus>("check_for_update");
+    if (s.disabled) return `Not checking: ${s.disabled}.`;
+    if (s.error) throw s.error;
+    if (s.available) return s.available.ready ? `${s.available.version} is ready; restart to update.` : `Downloading ${s.available.version}.`;
+    return s.checking ? "Checking now; Agent setup says what it finds." : `Nitely ${s.version} is up to date.`;
+  },
+};
+
 /** An issue key: a project key (letters, then letters or digits), a dash, a number. */
 const KEY = /^[A-Za-z][A-Za-z0-9]*-\d+$/;
 
@@ -72,6 +104,7 @@ export function Palette(props: {
   const [said, setSaid] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [issues, setIssues] = useState<IssueRecord[]>([]);
+  const [crews, setCrews] = useState<{ project: Project; crew: CrewStatus }[]>([]);
   const list = useRef<HTMLUListElement>(null);
   const input = useRef<HTMLInputElement>(null);
 
@@ -79,6 +112,8 @@ export function Palette(props: {
     let live = true;
     Promise.all(props.projects.map((p) => invoke<IssueRecord[]>("issues", { project: p.key, includeClosed: false }).catch(() => [])))
       .then((all) => live && setIssues(all.flat()));
+    Promise.all(props.projects.map((p) => invoke<CrewStatus | null>("crew_status", { project: p.key }).then((crew) => (crew ? [{ project: p, crew }] : []), () => [])))
+      .then((all) => live && setCrews(all.flat()));
     return () => {
       live = false;
     };
@@ -96,8 +131,18 @@ export function Palette(props: {
     };
     const all: Item[] = [
       ...VIEWS.map((v): Item => ({ id: `view-${v.label}`, label: v.label, hint: "view", group: "Go to", run: go(v.view) })),
+      {
+        id: "notify-settings",
+        label: "Notification settings",
+        hint: "Inbox",
+        group: "Go to",
+        run: () => {
+          askNotifySettings();
+          go({ kind: "inbox" })();
+        },
+      },
       ...props.projects.flatMap((p) =>
-        (["list", "board", "branches", "rules", "settings"] as const).map(
+        (["list", "board", "branches", "brief", "rules", "settings"] as const).map(
           (tab): Item => ({
             id: `project-${p.key}-${tab}`,
             label: `${p.name} ${tab}`,
@@ -109,6 +154,8 @@ export function Palette(props: {
       ),
       ...issues.map((i): Item => ({ id: `issue-${i.key}`, label: `${i.key} ${i.title}`, issue: i, group: "Issues", run: open(i.key) })),
       ...goalItems(query, props.projects, () => setQuery("goal ")),
+      ...crewItems(crews),
+      UPDATE_ITEM,
       ...issues.flatMap(actionsOf),
     ];
     // With nothing typed, only where to go; issues and actions need a word of what you mean. A
@@ -135,7 +182,7 @@ export function Palette(props: {
     }
     const order: Group[] = exact ? ["Issues", "Actions", "Go to"] : ["Go to", "Issues", "Actions"];
     return order.flatMap((g) => found.filter((it) => it.group === g)).slice(0, 12);
-  }, [query, issues, props]);
+  }, [query, issues, crews, props]);
 
   useEffect(() => setPicked(0), [query]);
 

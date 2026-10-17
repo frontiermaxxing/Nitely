@@ -27,7 +27,7 @@ import {
   useFlip,
   vendorOf,
 } from "./ui";
-import { NotifySettingsPanel } from "./Notifications";
+import { NotifySettingsPanel, useNotifySettingsOpen } from "./Notifications";
 import "./inbox.css";
 
 /**
@@ -46,7 +46,7 @@ export function Inbox(props: {
   onChanged: () => void;
 }) {
   const { board, details, now } = props;
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useNotifySettingsOpen();
   const live = decisionsOf(board, details, now);
   // A decision the human acts on resolves at once and says what happened, in place, before the
   // next one takes its place; the board can take a moment longer to drop it, so those the Inbox

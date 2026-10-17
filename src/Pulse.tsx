@@ -22,6 +22,7 @@ import {
   trackOf,
   useFlip,
   type Station,
+  type Track,
 } from "./ui";
 import "./styles/pulse.css";
 
@@ -78,6 +79,17 @@ function stuckReason(f: FlowIssue, row: TaskRow | undefined, now: number): strin
   if (t.stuck) return t.stuck;
   if (f.quiet) return `Quiet ${ago(now, f.last_activity).replace(" ago", "")}`;
   return null;
+}
+
+/**
+ * The track an issue's glyph draws: work that cannot move on (a rebase conflict, which its track
+ * does not know) draws as stuck, wherever it is shown; work that is only quiet keeps its own.
+ */
+function glyphTrack(f: FlowIssue, row: TaskRow | undefined, now: number): Track {
+  const t = trackOf(f.issue);
+  const reason = stuckReason(f, row, now);
+  const blocked = !!reason && !(f.quiet && !t.stuck && !row?.state?.rebase_in_progress);
+  return blocked && !t.stuck ? { ...t, stuck: reason } : t;
 }
 
 interface Context {
@@ -273,7 +285,7 @@ function Glance({ data, board, decisions, ctx, onGo }: { data: PulseData; board:
         </span>
         <span className="readout-sub">
           {stuck.slice(0, 3).map((f) => (
-            <IssueToken key={f.issue.key} issue={f.issue} onOpen={ctx.onOpenIssue} />
+            <IssueToken key={f.issue.key} issue={f.issue} track={glyphTrack(f, ctx.rows.get(f.issue.key), ctx.now)} onOpen={ctx.onOpenIssue} />
           ))}
           {stuck.length > 3 && <span>+{stuck.length - 3}</span>}
           {stuck.length === 0 && "Everything open is moving"}
@@ -432,7 +444,7 @@ function Chip({ f, ctx }: { f: FlowIssue; ctx: Context }) {
       title={hover}
       data-flip={f.issue.key}
     >
-      <StationGlyph track={blocked && !t.stuck ? { ...t, stuck: reason } : t} size={12} />
+      <StationGlyph track={glyphTrack(f, row, ctx.now)} size={12} />
       <span className="fchip-key">{f.issue.key}</span>
       {t.rounds > 0 && !done && <span className="fchip-rounds">↺{t.rounds}</span>}
       {vendor && !done && <AgentMark vendor={vendor} state={live === "waiting" ? "waiting" : null} size={14} />}
