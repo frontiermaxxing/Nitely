@@ -336,6 +336,7 @@ export function App() {
         {view.kind === "activity" && <Activity now={now} version={version} projects={projects} onOpenIssue={setOpenIssue} />}
         {view.kind === "settings" && (
           <Settings
+            asked={view}
             section={view.section}
             project={view.project}
             board={board}

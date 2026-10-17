@@ -30,6 +30,8 @@ export const isSettingsSection = (s: string | undefined): s is SettingsSection =
  * on a section (`#settings/crew/NIT` for one project's crew), it scrolls there.
  */
 export function Settings(props: {
+  /** The view as it was asked for: a new one each time, so asking for the same section again scrolls again. */
+  asked: View;
   section?: SettingsSection;
   project?: string;
   board: Board | null;
@@ -54,7 +56,8 @@ export function Settings(props: {
       stop();
       events.forEach((e) => window.removeEventListener(e, stop));
     };
-  }, [props.section, props.project]);
+    // Again when the projects come in, for a project's crew asked for before they had loaded.
+  }, [props.asked, props.section, props.project, props.projects.length]);
 
   return (
     <div className="page page-form settings-page">

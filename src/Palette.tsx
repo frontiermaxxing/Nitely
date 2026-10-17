@@ -131,7 +131,7 @@ export function Palette(props: {
       props.onClose();
     };
     const all: Item[] = [
-      ...VIEWS.map((v): Item => ({ id: `view-${v.label}`, label: v.label, hint: "view", group: "Go to", run: go(v.view) })),
+      ...VIEWS.map((v): Item => ({ id: `view-${v.label}`, label: v.label, hint: "view", group: "Go to", run: go({ ...v.view }) })),
       ...props.projects.flatMap((p) =>
         (["list", "board", "branches", "brief", "rules", "settings"] as const).map(
           (tab): Item => ({
