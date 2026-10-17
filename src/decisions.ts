@@ -87,10 +87,15 @@ export function decisionsOf(board: Board, details: Map<string, IssueDetail>, now
   }
   // The board lists an issue that waits on a person under its worktree row when it has one
   // (that row's needs_me is set), and in needs_me_issues only when it has none.
+  // An issue whose review findings wait on the person (a request to accept one, and every one when
+  // the review rounds stopped converging) is decided there, finding by finding: it is no approval
+  // and no work of theirs to mark done, since its change failed review (NIT-220).
+  const deciding = new Set(board.asks.filter((a) => a.finding && a.issue_key).map((a) => a.issue_key!.toUpperCase()));
   const approvals = new Map<string, IssueRecord>();
   for (const { row } of rows) if (row.issue && (needsHuman(row.issue) || isOwnWork(row.issue))) approvals.set(row.issue.key, row.issue);
   for (const i of board.needs_me_issues) if (!approvals.has(i.key)) approvals.set(i.key, i);
   for (const listed of approvals.values()) {
+    if (deciding.has(listed.key.toUpperCase())) continue;
     // The board can be older than the issue's detail (a snapshot started before the human moved
     // it): an issue the detail shows approved, or moved anywhere else, is no longer a decision.
     const i = details.get(listed.key)?.issue ?? listed;

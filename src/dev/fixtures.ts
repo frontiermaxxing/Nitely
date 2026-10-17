@@ -1339,6 +1339,18 @@ function moveIssue(args: Record<string, unknown>) {
   const to = String(args.state);
   if (to === "Done" && !args.evidence) throw "Done needs evidence: what ran and what it showed";
   if ((to === "Canceled" || to === "Duplicate") && !args.reason) throw `${to} needs a reason`;
+  if (to === "Done") {
+    // As nitely-core's check_move (NIT-220): a change submitted and not landed since is not on the
+    // integration branch, and an open question is answered first.
+    const events = world.timelines.get(issue.key) ?? [];
+    const lastOf = (kind: string) => events.map((e) => e.kind).lastIndexOf(kind);
+    const landed = lastOf("landed");
+    if (lastOf("submit") > landed) {
+      throw `${issue.key}'s change was submitted and never landed, so it is not on the integration branch: land it, or Cancel the issue with a reason to close it without landing`;
+    }
+    const open = world.asks.filter((a) => a.issue_key === issue.key && a.answer === null && !a.closed).length;
+    if (open > 0 && landed < 0) throw `${issue.key} has ${open} open question${open === 1 ? "" : "s"}: answer ${open === 1 ? "it" : "them"} first (Cancel the issue with a reason to drop ${open === 1 ? "it" : "them"} with it)`;
+  }
   const ts = Math.floor(Date.now() / 1000);
   const why = (args.evidence ?? args.reason) as string | null;
   world.timelines.get(issue.key)!.push({ ts, actor: "human", kind: "issue_moved", summary: `${issue.state} → ${to}${why ? `: ${why}` : ""}` });

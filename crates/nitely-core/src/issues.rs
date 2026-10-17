@@ -1064,6 +1064,38 @@ impl Db {
         if state == "Done" && !given(evidence) {
             bail!("moving to Done needs evidence: what ran and what it showed");
         }
+        if state == "Done" {
+            // A change handed in (submitted) and not landed since is not on the integration branch:
+            // Done would close the issue with the work left on its branch.
+            let (submitted, landed): (Option<i64>, Option<i64>) = self.conn.query_row(
+                "SELECT (SELECT MAX(id) FROM event WHERE issue_key = ?1 COLLATE NOCASE AND type = 'submit'),
+                        (SELECT MAX(id) FROM event WHERE issue_key = ?1 COLLATE NOCASE AND type = 'landed')",
+                [&issue.key],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            let unlanded = submitted.is_some_and(|s| landed.is_none_or(|l| l < s));
+            if unlanded {
+                bail!(
+                    "{}'s change was submitted and never landed, so it is not on the integration branch: land it, or Cancel the issue with a reason to close it without landing",
+                    issue.key
+                );
+            }
+            // Landing closes what was asked about the change; otherwise an open question is answered first.
+            let open: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM ask WHERE issue_key = ?1 COLLATE NOCASE AND answer IS NULL AND closed IS NULL",
+                [&issue.key],
+                |r| r.get(0),
+            )?;
+            if open > 0 && landed.is_none() {
+                bail!(
+                    "{} has {open} open question{}: answer {} first (Cancel the issue with a reason to drop {} with it)",
+                    issue.key,
+                    if open == 1 { "" } else { "s" },
+                    if open == 1 { "it" } else { "them" },
+                    if open == 1 { "it" } else { "them" }
+                );
+            }
+        }
         if matches!(state, "Canceled" | "Duplicate") && !given(reason) {
             bail!("moving to {state} needs a reason");
         }
@@ -1944,6 +1976,11 @@ mod tests {
         let elsewhere = db.create_ask("Keep the old flag?", &[], Some(&other.key), None, &agent).unwrap();
         assert!(db.issue(&done.key).unwrap().unwrap().track.asking);
 
+        // Done with a question still open is refused (NIT-220): it is answered first, or the issue
+        // canceled. Landing the change closes what was asked about it.
+        let refused = db.move_issue(&done.key, "Done", Some("fixed"), None, &agent).unwrap_err().to_string();
+        assert!(refused.contains("1 open question: answer it first"), "{refused}");
+        db.log_event(&agent, Some(&done.key), None, "landed", "Landed the branch").unwrap();
         db.move_issue(&done.key, "Done", Some("landed"), None, &agent).unwrap();
         let closed = db.ask(open.id).unwrap().unwrap();
         assert_eq!((closed.answer, closed.closed.as_deref()), (None, Some("closed with NIT-1 (Done)")));

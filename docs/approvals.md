@@ -116,9 +116,23 @@ and stores it (`accepted_finding` table). Then:
   so they are never carried. Only acceptances that verify are told.
 - `submit` of a patch whose only P0/P1 findings are accepted goes on as a passing review.
 - The issue goes on at once: to In Review when nothing else blocks it, to Needs You when the change
-  still waits for the person's approval, back to In Progress when other P0/P1 findings remain.
+  still waits for the person's approval, staying in Needs You while requests about its other P0/P1
+  findings wait, and back to In Progress when other findings remain that nobody asked about.
 
-**Send back** answers "Not accepted: <reason>. Fix it." and the issue goes back to Todo.
+**Send back** answers "Not accepted: <reason>. Fix it." and the issue goes back to Todo; its other
+requests close with it.
+
+**When review rounds stop converging** (a P0/P1 finding still open after two rounds that tried to
+fix it, or five rounds in a row asking for changes; `not_converging` in submit.rs), `submit` asks
+the person about every open P0/P1 finding of the latest review the same way, one request each, and
+moves the issue to Needs You. The issue stays the agents' work: a change that failed review is never
+the person's own task, so the Inbox offers no Approve and no Mark done for it, only Accept or Send
+back per finding. Accepting one keeps the issue with the person while others wait; once all are
+accepted it goes on as a passing review. Their decision starts the count of rounds again.
+
+**Done** is refused on an issue whose change was submitted and never landed (it isn't on the
+integration branch): land it, or Cancel it with a reason. Done is also refused while a question on
+the issue is open, unless the change landed: answer it first, or Cancel the issue to drop it.
 `nitely submit --no-review` still exists for emergencies, but nothing suggests it for this.
 
 ## Code

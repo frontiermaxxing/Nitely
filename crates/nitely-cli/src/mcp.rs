@@ -404,7 +404,7 @@ fn tools() -> Value {
         },
         {
             "name": "update_issue",
-            "description": "Move an issue, change what blocks it, or make it the human's own work (owner human: next_task skips it, and an open issue goes to Needs You; only the human hands it back). Done needs evidence (what ran and what it showed); Canceled and Duplicate need a reason. Approved is set only by the human; move to Needs You and ask instead. An issue with an open blocker waits: next_task skips it until every blocker is Done or Canceled.",
+            "description": "Move an issue, change what blocks it, or make it the human's own work (owner human: next_task skips it, and an open issue goes to Needs You; only the human hands it back). Done needs evidence (what ran and what it showed), and is refused while a submitted change is not landed or a question on the issue is open; Canceled and Duplicate need a reason. Approved is set only by the human; move to Needs You and ask instead. An issue with an open blocker waits: next_task skips it until every blocker is Done or Canceled.",
             "inputSchema": { "type": "object", "required": ["key"], "properties": {
                 "key": { "type": "string" },
                 "state": { "type": "string", "enum": states },

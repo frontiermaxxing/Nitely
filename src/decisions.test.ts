@@ -128,6 +128,24 @@ test("the track moves to where the move takes it", () => {
   assert.equal(trackAfter(t, "answer", NOW).station, "needs");
 });
 
+test("NIT-220: review findings waiting on the person are the issue's only decisions: no approval, no work to mark done", () => {
+  const stalled = issue("X-5", "Needs You");
+  const request = (id: number, text: string): Ask => ({ ...ask(id, "X-5", NOW - 60), question: "The review rounds are not converging.", options: [], finding: { priority: 1, text } });
+  const ds = decisionsOf(board([stalled], [request(7, "Drops a row: a.rs"), request(8, "Leaks a key: b.rs")]), new Map(), NOW);
+  assert.deepEqual(
+    ds.map((d) => [d.id, d.kind]),
+    [
+      ["ask-7", "ask"],
+      ["ask-8", "ask"],
+    ],
+  );
+  // Also for an issue an older submit made the person's own: its findings are what they decide.
+  const own = { ...stalled, owner: "human" };
+  assert.deepEqual(decisionsOf(board([own], [request(7, "Drops a row: a.rs")]), new Map(), NOW).map((d) => d.kind), ["ask"]);
+  // A plain question on an issue that waits for approval leaves the approval in place.
+  assert.deepEqual(decisionsOf(board([stalled], [ask(9, "X-5", NOW - 30)]), new Map(), NOW).map((d) => d.kind).sort(), ["approve", "ask"]);
+});
+
 test("the human's own work is its own kind of decision, in any open state outside Backlog", () => {
   const own = (state: string) => ({ ...issue("X-9", state), owner: "human" });
   assert.deepEqual(

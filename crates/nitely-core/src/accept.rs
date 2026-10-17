@@ -82,6 +82,39 @@ impl Db {
         self.ask(ask.id)?.context("ask vanished")
     }
 
+    /// Review rounds on `key` stopped converging (`why`): the person decides each P0/P1 finding of
+    /// its latest review not yet accepted, accept it as it is or send it back, as a request to
+    /// accept it (the Inbox's Review finding). The issue goes to Needs You and stays the agents'
+    /// work. Returns its state.
+    pub fn ask_to_decide_findings(&mut self, key: &str, why: &str, actor: &Actor) -> Result<String> {
+        let issue = self.issue(key)?.with_context(|| format!("no issue {key}"))?;
+        let review = self.reviews(&issue.key)?.into_iter().find(|r| !r.reviewer.is_empty()).with_context(|| format!("{} has no review", issue.key))?;
+        let open: Vec<Ask> = self.open_asks()?.into_iter().filter(|a| a.issue_key.as_deref().is_some_and(|k| k.eq_ignore_ascii_case(&issue.key))).collect();
+        let question = format!("The review rounds are not converging ({why}). Accept this finding as it is if it is a trade-off you decided; send it back and it stays a defect to fix.");
+        for f in self.unaccepted_blockers(&issue.key, &review)? {
+            // One request per finding; one already open for it stands.
+            if open.iter().any(|a| a.finding.as_ref().is_some_and(|x| x.text == f.text)) {
+                continue;
+            }
+            self.request_acceptance(&issue.key, &f.text, &question, None, actor)?;
+        }
+        let issue = self.issue(&issue.key)?.with_context(|| format!("no issue {key}"))?;
+        if issue.state != "Needs You" {
+            return Ok(self.move_issue(&issue.key, "Needs You", None, None, actor)?.state);
+        }
+        Ok(issue.state)
+    }
+
+    /// When the person last decided a request to accept a finding of `key` (0 when never): their
+    /// decision to go on starts a new count of review rounds.
+    pub fn findings_decided_at(&self, key: &str) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COALESCE(MAX(answered_at), 0) FROM ask WHERE issue_key = ?1 COLLATE NOCASE AND finding IS NOT NULL AND answer IS NOT NULL",
+            [key],
+            |r| r.get(0),
+        )?)
+    }
+
     /// The person accepts the finding of open ask `ask_id`, signed with the app's key `secret`.
     pub fn accept_finding(&mut self, ask_id: i64, reason: &str, secret: &[u8; 32]) -> Result<Decided> {
         let (ask, key, finding, review) = self.acceptance_ask(ask_id)?;
@@ -109,6 +142,11 @@ impl Db {
         let (_, key, finding, _) = self.acceptance_ask_as_asked(ask_id)?;
         let why = one_line(why)?;
         let ask = self.answer_ask(ask_id, &format!("Not accepted: {why}. Fix it."), &Actor::Human)?;
+        // The change goes back to be fixed, so the issue's other requests have nothing left to decide.
+        self.conn.execute(
+            "UPDATE ask SET closed = ?2 WHERE issue_key = ?1 COLLATE NOCASE AND finding IS NOT NULL AND answer IS NULL AND closed IS NULL",
+            params![key, "closed: the change was sent back over another finding"],
+        )?;
         let issue = self.issue(&key)?.with_context(|| format!("no issue {key}"))?;
         if issue.owner == "human" {
             self.set_owner(&key, "agent", &Actor::Human)?;
@@ -245,7 +283,11 @@ impl Db {
             self.set_owner(key, "agent", &Actor::Human)?;
         }
         let issue = self.issue(key)?.with_context(|| format!("no issue {key}"))?;
-        let (to, then) = if !blocking.is_empty() {
+        // Findings the person is still deciding keep it with them; one nobody asked about goes back.
+        let asked: Vec<String> = self.open_asks()?.into_iter().filter(|a| a.issue_key.as_deref().is_some_and(|k| k.eq_ignore_ascii_case(key))).filter_map(|a| a.finding.map(|f| f.text)).collect();
+        let (to, then) = if !blocking.is_empty() && blocking.iter().all(|f| asked.contains(&f.text)) {
+            ("Needs You", format!("{} other P0/P1 finding(s) wait for your decision", blocking.len()))
+        } else if !blocking.is_empty() {
             ("In Progress", format!("{} other P0/P1 finding(s) still to fix", blocking.len()))
         } else if review.approver == "human" {
             ("Needs You", "the review now passes, and the change waits for your approval".to_string())

@@ -841,6 +841,35 @@ when_changed = ["billing"]
     }
 
     #[test]
+    fn a_stalled_review_asks_about_each_finding_and_waits_for_all_of_them() {
+        // Rounds that do not converge (NIT-220): the person decides each open finding; the issue
+        // stays the agents' and waits in Needs You until every one is decided.
+        let mut f = fixture("stalled");
+        let pb_path = f.repo.join(playbook::PLAYBOOK_PATH);
+        let pb = std::fs::read_to_string(&pb_path).unwrap().replace(
+            "echo 'Fine.'; echo 'VERDICT: clean'",
+            "echo 'x'; echo '- [P1] Drops a row: rows.txt, f: the last row'; echo '- [P0] Leaks a key: keys.txt, g: logs it'; echo 'VERDICT: findings'",
+        );
+        std::fs::write(&pb_path, pb).unwrap();
+        sh(&f.repo, &["commit", "-q", "-am", "a reviewer with two findings"]);
+        let (a, _) = f.submitted("Rows", "rows.txt", "x");
+        assert_eq!(f.db.ask_to_decide_findings(&a, "1 P0/P1 finding still open after two rounds", &f.actor).unwrap(), "Needs You");
+        // Asked again (another stalled round), the requests already open stand.
+        f.db.ask_to_decide_findings(&a, "again", &f.actor).unwrap();
+        let requests: Vec<crate::issues::Ask> = f.db.open_asks().unwrap().into_iter().filter(|x| x.issue_key.as_deref() == Some(a.as_str())).collect();
+        assert_eq!(requests.len(), 2, "{requests:?}");
+        assert_eq!(f.db.issue(&a).unwrap().unwrap().owner, "agent");
+        crate::approval::trust_in_tests(Some(crate::approval::public_of(&SECRET)));
+        let first = f.db.accept_finding(requests[0].id, "no outside users yet", &SECRET).unwrap();
+        assert_eq!(first.state, "Needs You", "the other finding still waits for the person");
+        let second = f.db.accept_finding(requests[1].id, "the key is a test key", &SECRET).unwrap();
+        let goes_on = if crate::approval::agents_can_verify() { "In Review" } else { "Needs You" };
+        assert_eq!(second.state, goes_on);
+        assert!(f.db.findings_decided_at(&a).unwrap() > 0);
+        std::fs::remove_dir_all(&f.base).ok();
+    }
+
+    #[test]
     fn a_finding_sent_back_stays_a_defect_to_fix() {
         let mut f = fixture("decline");
         let pb_path = f.repo.join(playbook::PLAYBOOK_PATH);
@@ -874,8 +903,9 @@ when_changed = ["billing"]
             .unwrap();
         assert!(f.db.accept_finding(moot.id, "fine", &SECRET).is_err(), "nothing to accept any more");
         assert!(f.db.decline_finding(moot.id, "moot now", "").is_ok());
-        assert_eq!(f.db.close_superseded_requests(&a, &[]).unwrap(), 1);
-        assert!(f.db.ask(open.id).unwrap().unwrap().closed.is_some());
+        // Sending one back closes the issue's other requests: the change goes back to be fixed.
+        assert!(f.db.ask(open.id).unwrap().unwrap().closed.as_deref().is_some_and(|c| c.contains("sent back")));
+        assert_eq!(f.db.close_superseded_requests(&a, &[]).unwrap(), 0);
         std::fs::remove_dir_all(&f.base).ok();
     }
 

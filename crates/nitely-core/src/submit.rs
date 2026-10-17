@@ -179,11 +179,11 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     if accepted_only {
         verdict = "pass".into();
     }
-    // Read before this round is recorded: the rounds before it, since the human last handed the
-    // issue back (their decision to go on starts a new count).
+    // Read before this round is recorded: the rounds before it, since the human last decided on the
+    // issue's findings or handed it back (their decision to go on starts a new count).
     let stalled = match &out.review {
         Some(r) if verdict == "changes" && issue.origin == "nitely" => {
-            let since = db.handed_back_at(&issue.key)?;
+            let since = db.handed_back_at(&issue.key)?.max(db.findings_decided_at(&issue.key)?);
             let earlier: Vec<ReviewRecord> = db.reviews(&issue.key)?.into_iter().filter(|r| r.ts > since).collect();
             not_converging(&earlier, r)
         }
@@ -245,9 +245,10 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     let push_failed = !local_only && !out.pushed;
     let by_nitely = pb.land.by.by_nitely();
     let (state, next) = if stalled.is_some() {
-        // Another round would cost as much again and likely end the same: a person decides. It is
-        // handed to them as their own work, so nothing offers to approve a change that failed review.
-        ("Needs You", "The review rounds are not converging, so the issue is handed to the human: stop working on it and pick up other work. They decide whether to hand it back, narrow it, or close it. If what keeps coming back is a trade-off for them to decide, call request_acceptance with that finding and your reasoning first.")
+        // Another round would cost as much again and likely end the same: a person decides each open
+        // finding (accept it as it is, signed, or send it back). The issue stays the agents' work: a
+        // change that failed review is never the person's own task to mark done.
+        ("Needs You", "The review rounds are not converging, so Nitely asked the human to decide each open P0/P1 finding in the Inbox: accept it as it is, or send it back to be fixed. Stop working on it and pick up other work. If you have reasoning for a finding (a trade-off they decided, say), add it in a `note` on the issue: they read it beside the finding.")
     } else if verdict == "changes" {
         ("In Progress", "The review found P0 or P1 problems. Fix them, commit, and submit again. If one is a trade-off the human decided or should decide, not a defect (they ruled out what it asks for), call request_acceptance with it and your reasoning instead of looping on it.")
     } else if push_failed {
@@ -262,8 +263,8 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     } else {
         ("In Review", "The review passed and no human approval is needed. Call land to put it on the integration branch.")
     };
-    if stalled.is_some() {
-        out.state = db.set_owner(&issue.key, "human", actor)?.state;
+    if let Some(why) = &stalled {
+        out.state = db.ask_to_decide_findings(&issue.key, why, actor)?;
     } else if issue.state != state && issue.origin == "nitely" {
         out.state = db.move_issue(&issue.key, state, None, None, actor)?.state;
     }
@@ -706,11 +707,20 @@ reason = "money logic"
             .query_row("SELECT summary FROM event WHERE issue_key = ?1 AND type = 'submit' ORDER BY id DESC LIMIT 1", [&issue.key], |r| r.get(0))
             .unwrap();
         assert!(last.contains("not converging") && last.contains("[P1] Stuck: stuck.txt"), "{last}");
-        // Handed to the human as their own work: nothing offers to approve a change that failed.
-        assert_eq!(db.issue(&issue.key).unwrap().unwrap().owner, "human");
-        // Handed back, the count starts over: the next round that carries it is not escalated.
+        // A decision about the change, not the person's own work (NIT-220): the owner stays the agent,
+        // and the open finding waits in the Inbox as a request to accept it, or send it back.
+        let stuck = db.issue(&issue.key).unwrap().unwrap();
+        assert_eq!((stuck.owner.as_str(), stuck.state.as_str()), ("agent", "Needs You"));
+        let requests: Vec<crate::issues::Ask> = db.open_asks().unwrap().into_iter().filter(|a| a.issue_key.as_deref() == Some(issue.key.as_str())).collect();
+        assert_eq!(requests.len(), 1, "{requests:?}");
+        assert!(requests[0].finding.as_ref().is_some_and(|f| f.priority == 1 && f.text.starts_with("Stuck: stuck.txt")), "{requests:?}");
+        assert!(requests[0].question.contains("not converging"), "{}", requests[0].question);
+        // Done is refused while the change is not landed: it is not on the integration branch.
+        let done = db.move_issue(&issue.key, "Done", Some("Done by the human, outside Nitely."), None, &Actor::Human).unwrap_err().to_string();
+        assert!(done.contains("never landed"), "{done}");
+        // Sent back, the count starts over: the next round that carries it is not escalated.
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        db.set_owner(&issue.key, "agent", &Actor::Human).unwrap();
+        db.decline_finding(requests[0].id, "fix it properly", "").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(1100));
         assert_eq!(submit(&mut db, &config, &opts, &actor).unwrap().state, "In Progress");
 
