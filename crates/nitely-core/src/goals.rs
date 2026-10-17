@@ -84,14 +84,17 @@ fn check_date(date: &str) -> Result<Option<String>> {
         return Ok(None);
     }
     let parts: Vec<&str> = date.split('-').collect();
-    let ok = parts.len() == 3
-        && parts[0].len() == 4
-        && parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
-        && (1..=12).contains(&parts[1].parse::<u32>().unwrap_or(0))
-        && (1..=31).contains(&parts[2].parse::<u32>().unwrap_or(0))
-        && parts[1].len() == 2
-        && parts[2].len() == 2;
-    if !ok {
+    let digits = parts.len() == 3 && [4, 2, 2].iter().zip(&parts).all(|(n, p)| p.len() == *n && p.chars().all(|c| c.is_ascii_digit()));
+    let (year, month, day): (u32, u32, u32) = if digits { (parts[0].parse()?, parts[1].parse()?, parts[2].parse()?) } else { (0, 0, 0) };
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => 0,
+    };
+    if !digits || !(1..=days).contains(&day) {
         bail!("a target date is YYYY-MM-DD, e.g. 2026-12-01");
     }
     Ok(Some(date.to_string()))
@@ -149,34 +152,39 @@ impl Db {
                 self.conn.last_insert_rowid()
             }
             Some(id) => {
-                let goal = self.goal(id)?.with_context(|| format!("no goal {id}"))?;
-                self.conn.execute(
-                    "UPDATE goal SET title = ?2, outcome = ?3, target_date = ?4, state = ?5, updated_at = ?6 WHERE id = ?1",
-                    params![
-                        id,
-                        title.unwrap_or(goal.title),
-                        outcome.unwrap_or(goal.outcome),
-                        match target {
-                            Some(t) => t,
-                            None => goal.target_date,
-                        },
-                        change.state.clone().unwrap_or(goal.state),
-                        ts
-                    ],
+                // Only the fields given change, in one statement: two agents editing different
+                // fields at once both keep their edit.
+                let changed = self.conn.execute(
+                    "UPDATE goal SET title = COALESCE(?2, title), outcome = COALESCE(?3, outcome),
+                       target_date = CASE WHEN ?4 THEN ?5 ELSE target_date END, state = COALESCE(?6, state), updated_at = ?7
+                     WHERE id = ?1",
+                    params![id, title, outcome, target.is_some(), target.flatten(), change.state, ts],
                 )?;
+                if changed == 0 {
+                    bail!("no goal {id}");
+                }
                 id
             }
         };
         self.goal(id)?.context("goal vanished")
     }
 
-    /// Puts an issue in a goal of its project, or (`None`) takes it out of the one it is in. Only
-    /// active goals take new issues. Logged on the issue's timeline.
-    pub fn set_issue_goal(&self, key: &str, goal: Option<i64>, actor: &Actor) -> Result<IssueRecord> {
+    /// Refuses what `set_issue_goal` would refuse, without changing anything.
+    pub fn check_issue_goal(&self, key: &str, goal: Option<i64>) -> Result<IssueRecord> {
         let issue = self.issue(key)?.with_context(|| format!("no issue {key}"))?;
         if issue.origin != "nitely" {
             bail!("{} is mirrored from {}; only native issues have goals", issue.key, issue.origin);
         }
+        if let Some(id) = goal.filter(|g| issue.goal != Some(*g)) {
+            self.goal_for(issue.project.as_deref(), id)?;
+        }
+        Ok(issue)
+    }
+
+    /// Puts an issue in a goal of its project, or (`None`) takes it out of the one it is in. Only
+    /// active goals take new issues. Logged on the issue's timeline.
+    pub fn set_issue_goal(&self, key: &str, goal: Option<i64>, actor: &Actor) -> Result<IssueRecord> {
+        let issue = self.check_issue_goal(key, goal)?;
         if issue.goal == goal {
             return Ok(issue);
         }
@@ -306,7 +314,15 @@ mod tests {
         let titles = |all: bool| db.goals("NIT", all).unwrap().into_iter().map(|g| g.title).collect::<Vec<_>>();
         assert_eq!(titles(false), ["Sooner", "Undated"]);
         assert_eq!(titles(true), ["Sooner", "Undated", "Later"]);
-        assert!(db.save_goal("NIT", None, &new("Bad date", Some("2026-13-01")), &agent).is_err());
+        for bad in ["2026-13-01", "2026-02-29", "2026-04-31", "2026-1-01", "next week"] {
+            assert!(db.save_goal("NIT", None, &new("Bad date", Some(bad)), &agent).is_err(), "{bad}");
+        }
+        assert!(db.save_goal("NIT", None, &new("Leap day", Some("2028-02-29")), &agent).is_ok());
+        // A change touches only what it names.
+        let a = db.save_goal("NIT", Some(later.id), &GoalChange { title: Some("Renamed".into()), ..Default::default() }, &agent).unwrap();
+        let b = db.save_goal("NIT", Some(later.id), &GoalChange { outcome: Some("New outcome".into()), ..Default::default() }, &agent).unwrap();
+        assert_eq!((a.title.as_str(), b.title.as_str(), b.outcome.as_str(), b.state.as_str()), ("Renamed", "Renamed", "New outcome", "dropped"));
+        assert!(db.save_goal("NIT", Some(999), &GoalChange { title: Some("x".into()), ..Default::default() }, &agent).is_err());
         assert!(db.save_goal("NIT", None, &GoalChange { title: Some("No outcome".into()), ..Default::default() }, &agent).is_err());
         assert!(db.save_goal("NIT", Some(later.id), &GoalChange { state: Some("paused".into()), ..Default::default() }, &agent).is_err());
         // Clearing the date.

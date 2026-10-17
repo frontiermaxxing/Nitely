@@ -727,7 +727,10 @@ fn run_tool(server: &Server, name: &str, args: &Value, session: &str) -> Result<
             if str_arg(args, "state").is_none() && add.is_empty() && remove.is_empty() && owner.is_none() && add_labels.is_empty() && remove_labels.is_empty() && goal.is_none() {
                 bail!("give a state, blocked_by, remove_blocked_by, labels, remove_labels, owner or goal");
             }
-            // Refuse bad labels before anything changes.
+            // Refuse bad labels and a goal the issue cannot join before anything changes.
+            if let Some(goal) = goal {
+                db.check_issue_goal(key, Some(goal).filter(|g| *g > 0))?;
+            }
             nitely_core::issues::normalize_labels(&add_labels)?;
             nitely_core::issues::normalize_labels(&remove_labels)?;
             if owner.is_some_and(|o| o != "human") {
