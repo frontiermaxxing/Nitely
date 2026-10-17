@@ -31,7 +31,10 @@ fn check_agents(agents: Option<&Path>, real: Option<&Path>, vars: &[(&str, Optio
     if !agents.is_dir() {
         return Err(format!("NITELY_AGENT_HOME {} does not exist; the harness makes it first", agents.display()));
     }
-    let inside = |p: &Path| nitely_core::paths::normalize(&p.to_string_lossy()).starts_with(&format!("{}/", nitely_core::paths::normalize(&agents.to_string_lossy())));
+    // Resolved first (links, junctions), and never through `..`, so a path that only looks nested
+    // cannot reach the person's sessions.
+    let canon = |p: &Path| nitely_core::paths::normalize(&resolved(p).to_string_lossy());
+    let inside = |p: &Path| !p.components().any(|c| c == std::path::Component::ParentDir) && canon(p).starts_with(&format!("{}/", canon(agents)));
     for (name, value) in vars {
         if let Some(v) = value.as_deref().filter(|v| !inside(v)) {
             return Err(format!("{name} is {} under the harness, outside NITELY_AGENT_HOME; the harness clears it", v.display()));
@@ -86,6 +89,25 @@ pub fn record_badge(count: u32, drawn: bool) {
     let _ = std::fs::write(Path::new(&home).join("harness-badge.json"), serde_json::json!({ "count": count, "drawn": drawn }).to_string());
 }
 
+/// `p` with its links and junctions resolved, as far as it exists: the nearest folder that does,
+/// resolved, and the rest of the path after it.
+fn resolved(p: &Path) -> PathBuf {
+    let mut rest = Vec::new();
+    let mut at = p;
+    loop {
+        if let Ok(real) = std::fs::canonicalize(at) {
+            return rest.iter().rev().fold(real, |acc: PathBuf, part| acc.join(part));
+        }
+        match (at.parent(), at.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_os_string());
+                at = parent;
+            }
+            _ => return p.to_path_buf(),
+        }
+    }
+}
+
 fn same(a: &Path, b: &Path) -> bool {
     let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     nitely_core::paths::normalize(&canon(a).to_string_lossy()) == nitely_core::paths::normalize(&canon(b).to_string_lossy())
@@ -121,6 +143,8 @@ mod tests {
         assert!(check_agents(Some(&mine.join("missing")), Some(&real), &[]).unwrap_err().contains("does not exist"));
         assert!(check_agents(Some(&mine), Some(&real), &[("CLAUDE_CONFIG_DIR", Some(real.join(".claude")))]).unwrap_err().contains("CLAUDE_CONFIG_DIR"));
         assert!(check_agents(Some(&mine), Some(&real), &[("CODEX_HOME", Some(mine.join(".codex"))), ("CLAUDE_CONFIG_DIR", None)]).is_ok());
+        let escape = mine.join(".codex").join("..").join("..").join(real.file_name().unwrap());
+        assert!(check_agents(Some(&mine), Some(&real), &[("CODEX_HOME", Some(escape))]).unwrap_err().contains("CODEX_HOME"), "no way out through ..");
         std::fs::remove_dir_all(&real).ok();
         std::fs::remove_dir_all(&mine).ok();
     }
@@ -157,6 +181,8 @@ mod tests {
             ("crates/nitely-core/src/connect.rs", "dirs::", 1, "agent_home: NITELY_AGENT_HOME, which the harness must set (check_agents)"),
             ("crates/nitely-core/src/usage.rs", "CLAUDE_CONFIG_DIR", 1, "only inside NITELY_AGENT_HOME under the harness (check_agents); app.mjs clears it"),
             ("crates/nitely-core/src/usage.rs", "CODEX_HOME", 1, "only inside NITELY_AGENT_HOME under the harness (check_agents); app.mjs clears it"),
+            ("crates/nitely-core/src/connect.rs", "CLAUDE_CONFIG_DIR", 1, "removed from an agent's own command (run_in), which gets the agents' home as its home"),
+            ("crates/nitely-core/src/connect.rs", "CODEX_HOME", 1, "as CLAUDE_CONFIG_DIR"),
             ("crates/nitely-core/src/install.rs", "dirs::", 0, "`nitely install`, the CLI's; the app never runs it"),
             ("crates/nitely-core/src/mirror.rs", "dirs::", 1, "the home's path as text, kept out of mirrored issues; nothing is read"),
             ("src-tauri/src/lib.rs", "register_all", 0, "skipped under the harness"),

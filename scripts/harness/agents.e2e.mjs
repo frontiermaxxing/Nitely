@@ -30,7 +30,7 @@ test("Agent setup works on the run's own agents' home, never the person's", { ti
   try {
     const agents = norm(join(home, "agents"));
     const plans = await page.invoke("agent_setup");
-    const claude = plans.find((p) => p.agent === "claude");
+    const claude = plans.find((p) => p.agent === "Claude Code");
     assert.ok(claude?.found, `Claude Code is found in the run's agents' home: ${JSON.stringify(plans.map((p) => [p.agent, p.found]))}`);
     const paths = plans.flatMap((p) => p.changes ?? []).filter((c) => c.action !== "run").map((c) => c.target);
     assert.ok(paths.length > 0, "Agent setup plans files to write");

@@ -654,7 +654,18 @@ fn write(path: &Path, text: &str) -> Result<()> {
 }
 
 fn run(command: &str) -> Result<()> {
-    let out = crate::playbook::shell_command(command).output().with_context(|| format!("running {command}"))?;
+    run_in(command, std::env::var_os("NITELY_AGENT_HOME").as_deref())
+}
+
+/// Runs an agent's own command. With an agents' home other than the person's (tests, the test
+/// harness), the agent's CLI (`claude mcp add --scope user`) finds its config from the home folder,
+/// so it gets that one as its home, and none of its own variables pointing back at the person's.
+fn run_in(command: &str, agents: Option<&std::ffi::OsStr>) -> Result<()> {
+    let mut cmd = crate::playbook::shell_command(command);
+    if let Some(home) = agents {
+        cmd.env("HOME", home).env("USERPROFILE", home).env_remove("CLAUDE_CONFIG_DIR").env_remove("CODEX_HOME");
+    }
+    let out = cmd.output().with_context(|| format!("running {command}"))?;
     if !out.status.success() {
         bail!("{}", String::from_utf8_lossy(&out.stderr).trim().lines().last().unwrap_or("failed"));
     }
@@ -715,6 +726,18 @@ mod tests {
         let old = once.replace("v2", "v1");
         assert_eq!(with_block(&old, &block), once);
         assert_eq!(with_block("", &block), format!("{block}\n"));
+    }
+
+    #[test]
+    fn an_agents_command_runs_in_the_agents_home_it_was_given() {
+        let agents = crate::paths::unique_temp("nitely-agents", "");
+        std::fs::create_dir_all(&agents).unwrap();
+        let out = agents.join("home.txt");
+        let home = if cfg!(windows) { "%USERPROFILE%" } else { "$HOME" };
+        run_in(&format!("echo {home}> \"{}\"", out.display()), Some(agents.as_os_str())).unwrap();
+        let seen = std::fs::read_to_string(&out).unwrap();
+        assert_eq!(seen.trim(), agents.to_string_lossy(), "the command's home is the agents' home, not the person's");
+        std::fs::remove_dir_all(&agents).ok();
     }
 
     #[test]
