@@ -769,8 +769,10 @@ export interface ProjectLanes {
   project: string;
   repo: string;
   dir: string;
-  rules: { count: number; keep: string[]; timeout_minutes: number };
-  lanes: { lane: number; path: string; made: boolean; busy: boolean; at: string | null }[];
+  rules: { count: number; keep: string[]; timeout_minutes: number; size_cap_gb?: number | null };
+  /** `size_bytes` and `cap_bytes`: its build directories after its last request, and the cap
+   * hygiene keeps them under; absent until it has run one. */
+  lanes: { lane: number; path: string; made: boolean; busy: boolean; at: string | null; size_bytes?: number | null; cap_bytes?: number | null }[];
   /** Waiting and running requests, oldest first. */
   queue: LaneRun[];
   /** The last finished runs, newest first. */

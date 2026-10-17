@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "./backend";
-import { chipWords, laneChips, waiting, type LaneChip } from "./lanes";
+import { capWords, chipWords, laneChips, sizeWords, waiting, type LaneChip } from "./lanes";
 import type { LanesOverview } from "./types";
 import { StateDot } from "./ui";
 import "./styles/lanes.css";
@@ -118,6 +118,12 @@ export function LanesSettings(props: { version: number }) {
             <dd className="mono">{p.rules.keep.join(", ") || "nothing"}</dd>
             <dt>Stops a run after</dt>
             <dd>{p.rules.timeout_minutes} minutes</dd>
+            <dt>Size cap</dt>
+            <dd>
+              {capWords(p)}
+              <span className="muted">: over it, the incremental caches are emptied; over twice it, the lane builds cold once</span>
+              {sizeWords(p).length > 0 && <div className="muted small">{sizeWords(p).join(" · ")}</div>}
+            </dd>
             <dt>Runs on</dt>
             <dd>this machine</dd>
             <dt>Lives in</dt>

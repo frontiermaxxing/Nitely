@@ -81,6 +81,65 @@ pub fn command_line(pid: u32) -> Option<String> {
     list().into_iter().find(|p| p.process_id == pid).and_then(|p| p.command_line)
 }
 
+/// Whether any process's command line contains `text` (for tests that start one by a marker).
+#[cfg(test)]
+pub fn running_with(text: &str) -> bool {
+    list().iter().any(|p| p.command_line.as_deref().is_some_and(|c| c.contains(text)))
+}
+
+/// When process `pid` started, as a string only to compare: the same pid with another start time is
+/// another process that got the number since. None when it is not running or cannot be read.
+pub fn started(pid: u32) -> Option<String> {
+    #[cfg(windows)]
+    {
+        win::started(pid)
+    }
+    #[cfg(not(windows))]
+    {
+        let out = std::process::Command::new("ps").args(["-o", "lstart=", "-p", &pid.to_string()]).output().ok()?;
+        let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (out.status.success() && !text.is_empty()).then_some(text)
+    }
+}
+
+/// Everything a command starts, held so it can all be ended together, and ended with this process:
+/// on Windows a job object that kills its processes when its last handle closes, which is when this
+/// guard drops or this process dies; elsewhere nothing (the command runs in its own process group
+/// there, and a process's folder can be read to find what it left). A build lane runs each command
+/// in one, so nothing a request started outlives it, even when the requester crashes (NIT-223).
+pub struct TreeGuard {
+    #[cfg(windows)]
+    job: win::Job,
+}
+
+impl TreeGuard {
+    /// A new, empty guard; None when the system will not make one (the command then runs unguarded).
+    pub fn new() -> Option<TreeGuard> {
+        #[cfg(windows)]
+        {
+            win::Job::new().map(|job| TreeGuard { job })
+        }
+        #[cfg(not(windows))]
+        {
+            Some(TreeGuard {})
+        }
+    }
+
+    /// Puts `child`, and so everything it starts from now on, in the guard. False when it could not.
+    pub fn add(&self, child: &std::process::Child) -> bool {
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            self.job.assign(child.as_raw_handle())
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = child;
+            true
+        }
+    }
+}
+
 /// Whether `text` names `dir` or a path inside it, in any spelling a process might use:
 /// `C:\x\y`, `C:/x/y`, Git Bash's `/c/x/y`, WSL's `/mnt/c/x/y`; case-insensitive on Windows.
 pub fn names_path(text: &str, dir: &str) -> bool {
@@ -233,6 +292,91 @@ mod win {
         fn OpenProcess(access: u32, inherit: i32, process_id: u32) -> Handle;
         fn QueryFullProcessImageNameW(process: Handle, flags: u32, name: *mut u16, size: *mut u32) -> i32;
         fn CloseHandle(handle: Handle) -> i32;
+        fn GetProcessTimes(process: Handle, creation: *mut u64, exit: *mut u64, kernel: *mut u64, user: *mut u64) -> i32;
+        fn CreateJobObjectW(attributes: *mut c_void, name: *const u16) -> Handle;
+        fn SetInformationJobObject(job: Handle, class: u32, info: *mut c_void, length: u32) -> i32;
+        fn AssignProcessToJobObject(job: Handle, process: Handle) -> i32;
+    }
+
+    const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: u32 = 9;
+    const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x2000;
+
+    #[repr(C)]
+    struct BasicLimits {
+        per_process_user_time: i64,
+        per_job_user_time: i64,
+        limit_flags: u32,
+        minimum_working_set: usize,
+        maximum_working_set: usize,
+        active_process_limit: u32,
+        affinity: usize,
+        priority_class: u32,
+        scheduling_class: u32,
+    }
+
+    #[repr(C)]
+    struct ExtendedLimits {
+        basic: BasicLimits,
+        io: [u64; 6],
+        process_memory_limit: usize,
+        job_memory_limit: usize,
+        peak_process_memory: usize,
+        peak_job_memory: usize,
+    }
+
+    /// When `pid` started (its creation FILETIME), or None.
+    pub fn started(pid: u32) -> Option<String> {
+        // SAFETY: a plain call; the handle is closed below.
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if process.is_null() {
+            return None;
+        }
+        let (mut creation, mut exit, mut kernel, mut user) = (0u64, 0u64, 0u64, 0u64);
+        // SAFETY: four u64s, each the size of a FILETIME, as the call writes.
+        let ok = unsafe { GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user) } != 0;
+        // SAFETY: the handle from OpenProcess, closed once.
+        unsafe { CloseHandle(process) };
+        ok.then(|| creation.to_string())
+    }
+
+    /// A job object whose processes end when it is closed.
+    pub struct Job(Handle);
+
+    // The handle is only used to assign processes and is closed once, from whichever thread drops it.
+    unsafe impl Send for Job {}
+
+    impl Job {
+        pub fn new() -> Option<Job> {
+            // SAFETY: an unnamed job with default security; the handle is closed in drop.
+            let job = unsafe { CreateJobObjectW(std::ptr::null_mut(), std::ptr::null()) };
+            if job.is_null() {
+                return None;
+            }
+            // SAFETY: all zeros is a valid ExtendedLimits.
+            let mut limits: ExtendedLimits = unsafe { std::mem::zeroed() };
+            limits.basic.limit_flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let size = std::mem::size_of::<ExtendedLimits>() as u32;
+            // SAFETY: `limits` is the struct the class names, of `size` bytes.
+            let ok = unsafe { SetInformationJobObject(job, JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, (&mut limits as *mut ExtendedLimits).cast(), size) } != 0;
+            if !ok {
+                // SAFETY: the job's handle, closed once.
+                unsafe { CloseHandle(job) };
+                return None;
+            }
+            Some(Job(job))
+        }
+
+        pub fn assign(&self, process: std::os::windows::io::RawHandle) -> bool {
+            // SAFETY: both handles are open: the job's own, and a child's process handle.
+            unsafe { AssignProcessToJobObject(self.0, process.cast()) != 0 }
+        }
+    }
+
+    impl Drop for Job {
+        fn drop(&mut self) {
+            // SAFETY: the job's handle, closed once; its processes end with it.
+            unsafe { CloseHandle(self.0) };
+        }
     }
 
     #[link(name = "ntdll")]

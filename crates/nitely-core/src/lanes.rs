@@ -31,6 +31,9 @@ pub struct LaneRules {
     /// Commands (regexes, matched against each command of a shell line) that build or test: run in
     /// a light worktree, the hook reminds the agent to use `run` instead (it never blocks them).
     pub heavy: Vec<String>,
+    /// How big a lane's build directories may grow, in GB, before `hygiene` trims them; unset, twice
+    /// the size of its first build.
+    pub size_cap_gb: Option<f64>,
 }
 
 /// The commands that build or test when the playbook names none.
@@ -43,6 +46,7 @@ impl Default for LaneRules {
             keep: crate::slim::DEFAULT_KEEP.iter().map(|s| s.to_string()).collect(),
             timeout_minutes: 30,
             heavy: DEFAULT_HEAVY.iter().map(|s| s.to_string()).collect(),
+            size_cap_gb: None,
         }
     }
 }
@@ -833,7 +837,88 @@ fn serve(repo_root: &Path, pb: &Playbook, rules: &LaneRules, lane: &Path, log: &
     let setup_ran = ensure_setup(repo_root, pb, lane, base, log, limit)?;
     let (exit_code, timed_out) = exec(lane, log, limit)?;
     let output = std::fs::read_to_string(log).map(|t| playbook::tail(&t)).unwrap_or_default();
+    // Between requests, still holding the lane: best effort, it never fails the request.
+    if let Some(record) = git_path(lane, SIZE_RECORD) {
+        hygiene(lane, rules, &record, log);
+    }
     Ok(Outcome { exit_code, timed_out, setup_ran, files_switched, output })
+}
+
+/// The file in a lane's git folder that keeps the size of its build directories after its last
+/// request and after its first one: "<bytes> <first bytes>".
+const SIZE_RECORD: &str = "nitely-lane-size";
+
+const GB: f64 = 1024.0 * 1024.0 * 1024.0;
+
+/// A lane's size cap in bytes: the playbook's, else twice its first build.
+fn cap_bytes(rules: &LaneRules, first: u64) -> u64 {
+    match rules.size_cap_gb {
+        Some(gb) if gb > 0.0 => (gb * GB) as u64,
+        _ => first.saturating_mul(2),
+    }
+}
+
+/// What a lane's size record says: (size after the last request, size after the first), if any.
+fn read_size(record: &Path) -> Option<(u64, u64)> {
+    let text = std::fs::read_to_string(record).ok()?;
+    let mut parts = text.split_whitespace().map(|p| p.parse::<u64>().ok());
+    Some((parts.next()??, parts.next()??))
+}
+
+/// Keeps a lane within its size cap (docs/build-lanes.md, "Lane hygiene"): over the cap, the
+/// incremental caches in its build directories (`*/incremental`, cargo's) are emptied; over twice
+/// the cap, its build directories go and the next request builds cold. Records the size after, and
+/// the first build's size the first time. Nothing it removes is anyone's work. Says what it did in
+/// the log.
+fn hygiene(lane: &Path, rules: &LaneRules, record: &Path, log: &Path) {
+    use std::io::Write;
+    let measured = keep_size(lane, &rules.keep);
+    let first = read_size(record).map(|(_, f)| f).filter(|f| *f > 0).unwrap_or(measured);
+    let cap = cap_bytes(rules, first);
+    let mut size = measured;
+    let mut said = None;
+    if cap > 0 && size > cap.saturating_mul(2) {
+        for k in &rules.keep {
+            std::fs::remove_dir_all(lane.join(k.trim_matches('/'))).ok();
+        }
+        size = keep_size(lane, &rules.keep);
+        said = Some(format!("over twice its size cap ({} of {}): removed its build directories; the next request builds cold", human(measured), human(cap)));
+    } else if cap > 0 && size > cap {
+        for k in &rules.keep {
+            let Ok(entries) = std::fs::read_dir(lane.join(k.trim_matches('/'))) else { continue };
+            for e in entries.flatten() {
+                std::fs::remove_dir_all(e.path().join("incremental")).ok();
+            }
+        }
+        size = keep_size(lane, &rules.keep);
+        said = Some(format!("over its size cap ({} of {}): emptied the incremental caches, now {}", human(measured), human(cap), human(size)));
+    }
+    std::fs::write(record, format!("{size} {first}")).ok();
+    if let (Some(said), Ok(mut f)) = (said, std::fs::OpenOptions::new().append(true).open(log)) {
+        writeln!(f, "nitely: lane {said}").ok();
+    }
+}
+
+/// The bytes in a lane's build directories, symlinks not followed.
+fn keep_size(lane: &Path, keep: &[String]) -> u64 {
+    fn walk(dir: &Path) -> u64 {
+        let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+        entries
+            .flatten()
+            .map(|e| match e.file_type() {
+                Ok(t) if t.is_dir() => walk(&e.path()),
+                Ok(t) if t.is_file() => e.metadata().map(|m| m.len()).unwrap_or(0),
+                _ => 0,
+            })
+            .sum()
+    }
+    keep.iter().map(|k| walk(&lane.join(k.trim_matches('/')))).sum()
+}
+
+/// "8.3 GB", "640 MB".
+fn human(bytes: u64) -> String {
+    let gb = bytes as f64 / GB;
+    if gb >= 1.0 { format!("{gb:.1} GB") } else { format!("{:.0} MB", bytes as f64 / (1024.0 * 1024.0)) }
 }
 
 /// Makes lane `lane` as a worktree at `commit`; `ensure_setup` sets it up.
@@ -922,10 +1007,16 @@ fn stop_leftovers(lane: &Path) {
     let Ok(text) = std::fs::read_to_string(&file) else { return };
     // "<pid>\n<command>": the pid is stopped only while it still runs that command, since the
     // system may have given the number to another process once the command ended.
-    let (pid, command) = text.split_once('\n').unwrap_or((text.as_str(), ""));
-    if let Ok(pid) = pid.trim().parse::<u32>() {
-        let same = !command.trim().is_empty() && crate::procs::command_line(pid).is_some_and(|line| line.contains(command.trim()));
-        if same {
+    // "<pid> <start time>\n<command>": the same command at the same number with the same start is
+    // the process the request left; one that got the number since (running the same command in
+    // another lane, say) has another start time.
+    let (head, command) = text.split_once('\n').unwrap_or((text.as_str(), ""));
+    let mut head = head.split_whitespace();
+    if let Some(Ok(pid)) = head.next().map(str::parse::<u32>) {
+        let recorded = head.next();
+        let same_command = !command.trim().is_empty() && crate::procs::command_line(pid).is_some_and(|line| line.contains(command.trim()));
+        let same_start = recorded.is_some_and(|t| crate::procs::started(pid).as_deref() == Some(t));
+        if same_command && same_start {
             stop_tree(pid);
         }
     }
@@ -977,6 +1068,10 @@ fn run_logged(command: &str, dir: &Path, log: &Path, limit: Duration, jobs: u32)
     if let Some(p) = &pids {
         std::fs::write(p, format!("starting\n{command}")).ok();
     }
+    // On Windows the command and all it starts go in a job that ends with this process: a crash of
+    // the requester (even before the pid is written) leaves nothing running in the lane, and what
+    // the command left running ends when it does (NIT-223).
+    let guard = crate::procs::TreeGuard::new();
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -986,8 +1081,12 @@ fn run_logged(command: &str, dir: &Path, log: &Path, limit: Duration, jobs: u32)
             return Err(e).with_context(|| format!("starting {command}"));
         }
     };
+    if let Some(g) = &guard {
+        g.add(&child);
+    }
     if let Some(p) = &pids {
-        std::fs::write(p, format!("{}\n{command}", child.id())).ok();
+        let started = crate::procs::started(child.id()).unwrap_or_default();
+        std::fs::write(p, format!("{} {started}\n{command}", child.id())).ok();
     }
     let started = Instant::now();
     let result = loop {
@@ -1005,6 +1104,7 @@ fn run_logged(command: &str, dir: &Path, log: &Path, limit: Duration, jobs: u32)
     if let Some(p) = &pids {
         std::fs::remove_file(p).ok();
     }
+    drop(guard);
     Ok(result)
 }
 
@@ -1033,6 +1133,10 @@ pub struct LaneState {
     pub busy: bool,
     /// The commit it holds.
     pub at: Option<String>,
+    /// The size of its build directories after its last request, and the cap `hygiene` keeps it
+    /// under, once it has run one.
+    pub size_bytes: Option<u64>,
+    pub cap_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1143,7 +1247,12 @@ fn status_with(db: &Db, repo_root: &Path, pb: &Playbook, project: &str, probe_lo
         let made = path.join(".git").exists();
         let busy = if probe_locks { try_lock(repo_root, pb, n)?.is_none() } else { queue.iter().any(|r| r.state == "running" && r.lane == Some(n)) };
         let at = made.then(|| git(&path, &["rev-parse", "--short", "HEAD"]).ok().map(|s| s.trim().to_string())).flatten();
-        lanes.push(LaneState { lane: n, path: path.to_string_lossy().into_owned(), made, busy, at });
+        let size = made.then(|| git_path(&path, SIZE_RECORD).and_then(|r| read_size(&r))).flatten();
+        let (size_bytes, cap_bytes) = match size {
+            Some((size, first)) => (Some(size), Some(cap_bytes(&rules, first))),
+            None => (None, None),
+        };
+        lanes.push(LaneState { lane: n, path: path.to_string_lossy().into_owned(), made, busy, at, size_bytes, cap_bytes });
     }
     let recent = runs.iter().filter(mine).filter(|r| r.state != "queued" && r.state != "running").take(10).cloned().collect();
     // Every project's running requests, each read through `lane_run` so one whose process is gone
@@ -1254,6 +1363,66 @@ commands = []
 ").unwrap();
         assert!(overview(&config, &db).unwrap().projects.is_empty());
         drop(db);
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// What a lane command leaves running ends with it on Windows (the job object), so a requester
+    /// that crashes, or a command that starts a background process, leaves nothing in the lane.
+    #[cfg(windows)]
+    #[test]
+    fn a_lane_command_takes_what_it_started_with_it() {
+        let base = crate::paths::unique_temp("nitely-tree", "");
+        std::fs::create_dir_all(&base).unwrap();
+        let log = base.join("run.log");
+        // A marker no other process carries: an address only this test pings.
+        let marker = "ping -n 40 127.0.0.97";
+        let (code, timed_out) = run_logged(&format!("start \"\" /B {marker} >NUL & exit /b 0"), &base, &log, Duration::from_secs(30)).unwrap();
+        assert_eq!((code, timed_out), (Some(0), false));
+        let left = (0..25).all(|_| {
+            std::thread::sleep(Duration::from_millis(200));
+            crate::procs::holders(&base).is_empty() && !crate::procs::running_with(marker)
+        });
+        assert!(left, "the background ping ended with the command");
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn hygiene_trims_a_lane_over_its_cap_and_builds_cold_over_twice_it() {
+        let base = crate::paths::unique_temp("nitely-hygiene", "");
+        let lane = base.join("lane");
+        let record = base.join("size");
+        let log = base.join("run.log");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(&log, "").unwrap();
+        let fill = |rel: &str, bytes: usize| {
+            let p = lane.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, vec![0u8; bytes]).unwrap();
+        };
+        let rules = LaneRules { keep: vec!["target".into()], ..Default::default() };
+        // The first build sets the cap at twice its size: 2 000 bytes.
+        fill("target/debug/app", 600);
+        fill("target/debug/incremental/a", 400);
+        fill("src/main.rs", 5_000);
+        hygiene(&lane, &rules, &record, &log);
+        assert_eq!(read_size(&record), Some((1_000, 1_000)), "only build directories count");
+
+        // Over the cap: the incremental caches go, the rest stays.
+        fill("target/debug/incremental/b", 1_500);
+        hygiene(&lane, &rules, &record, &log);
+        assert!(!lane.join("target/debug/incremental").exists() && lane.join("target/debug/app").exists());
+        assert_eq!(read_size(&record), Some((600, 1_000)));
+
+        // Over twice the cap: the build directories go; sources never.
+        fill("target/release/big", 5_000);
+        hygiene(&lane, &rules, &record, &log);
+        assert!(!lane.join("target").exists() && lane.join("src/main.rs").exists());
+        assert_eq!(read_size(&record), Some((0, 1_000)), "the first build's size is kept");
+        let said = std::fs::read_to_string(&log).unwrap();
+        assert!(said.contains("emptied the incremental caches") && said.contains("builds cold"), "{said}");
+
+        // The playbook's cap wins over twice the first build.
+        assert_eq!(cap_bytes(&LaneRules { size_cap_gb: Some(1.0), ..Default::default() }, 10), 1 << 30);
         std::fs::remove_dir_all(base).ok();
     }
 
@@ -1423,7 +1592,14 @@ commands = []
         stop_leftovers(&lane);
         assert!(!pid_file(&lane).unwrap().exists(), "this test process is still here to check");
         let mut child = left.spawn().unwrap();
-        std::fs::write(pid_file(&lane).unwrap(), format!("{}\n{sleeper}", child.id())).unwrap();
+        let started = crate::procs::started(child.id()).expect("the start time of a running child");
+        // The same command at the same number but another start time is another process (a reused
+        // pid in another lane): left alone.
+        std::fs::write(pid_file(&lane).unwrap(), format!("{} 1\n{sleeper}", child.id())).unwrap();
+        stop_leftovers(&lane);
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(matches!(child.try_wait(), Ok(None)), "another start time: not the one the request left");
+        std::fs::write(pid_file(&lane).unwrap(), format!("{} {started}\n{sleeper}", child.id())).unwrap();
         stop_leftovers(&lane);
         let stopped = (0..50).any(|_| {
             std::thread::sleep(Duration::from_millis(200));

@@ -721,7 +721,10 @@ function lanesOf(project: string, repo: string, count: number, lanes: ProjectLan
 
 const BUILD_LANES: ProjectLanes[] = [
   lanesOf("NIT", "nitely", 2,
-    [{ lane: 1, path: "l1", made: true, busy: true, at: "9f3c2a1" }, { lane: 2, path: "l2", made: true, busy: false, at: "9f3c2a1" }],
+    [
+      { lane: 1, path: "l1", made: true, busy: true, at: "9f3c2a1", size_bytes: 8.3 * 1024 ** 3, cap_bytes: 12.8 * 1024 ** 3 },
+      { lane: 2, path: "l2", made: true, busy: false, at: "9f3c2a1", size_bytes: 6.4 * 1024 ** 3, cap_bytes: 12.8 * 1024 ** 3 },
+    ],
     [
       laneRun(41, "NIT", "running", 1, { issue: "NIT-31", kind: "gate", started_at: NOW - 2 * MIN - 10 }),
       laneRun(42, "NIT", "queued", null, { issue: "NIT-44", command: "npm test" }),

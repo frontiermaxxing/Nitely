@@ -35,6 +35,25 @@ export function waiting(p: ProjectLanes): number {
   return p.queue.filter((r) => r.state === "queued").length;
 }
 
+/** "8.3 GB", "640 MB". */
+export function bytesWords(bytes: number): string {
+  const gb = bytes / 1024 ** 3;
+  return gb >= 1 ? `${gb.toFixed(1)} GB` : `${Math.round(bytes / 1024 ** 2)} MB`;
+}
+
+/** What a project's lanes may grow to: the playbook's cap, or twice each lane's first build. */
+export function capWords(p: ProjectLanes): string {
+  const gb = p.rules.size_cap_gb;
+  return gb && gb > 0 ? `${gb} GB per lane` : "twice each lane's first build";
+}
+
+/** "lane 1: 8.3 GB of 12.8 GB", for each lane that has run a request. */
+export function sizeWords(p: ProjectLanes): string[] {
+  return p.lanes
+    .filter((l) => l.size_bytes != null)
+    .map((l) => `lane ${l.lane}: ${bytesWords(l.size_bytes!)}${l.cap_bytes ? ` of ${bytesWords(l.cap_bytes)}` : ""}`);
+}
+
 /** "42s", "3m", "1h 5m": how long something has run. */
 export function forHowLong(seconds: number): string {
   const s = Math.max(0, Math.round(seconds));

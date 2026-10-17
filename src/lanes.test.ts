@@ -2,7 +2,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chipWords, forHowLong, laneChips, laneRunId, waiting } from "./lanes.ts";
+import { bytesWords, capWords, chipWords, forHowLong, laneChips, laneRunId, sizeWords, waiting } from "./lanes.ts";
 import type { LaneRun, ProjectLanes } from "./types.ts";
 
 const run = (id: number, state: string, lane: number | null, more: Partial<LaneRun> = {}): LaneRun =>
@@ -49,6 +49,17 @@ test("a lane's last problem stays shown however many runs other lanes finish sin
   const others = Array.from({ length: 10 }, (_, i) => run(20 + i, "done", 1, { exit_code: 0 }));
   const p = { ...project([], others), last: [others[0], run(8, "lane_error", 2, { error: "held open" })] };
   assert.equal(laneChips(p)[1].state, "unhealthy");
+});
+
+test("a lane's size against its cap", () => {
+  const p = project([], []);
+  p.lanes[0].size_bytes = 8.3 * 1024 ** 3;
+  p.lanes[0].cap_bytes = 12.8 * 1024 ** 3;
+  p.lanes[1].size_bytes = 640 * 1024 ** 2;
+  assert.deepEqual(sizeWords(p), ["lane 1: 8.3 GB of 12.8 GB", "lane 2: 640 MB"]);
+  assert.equal(capWords(p), "twice each lane's first build");
+  assert.equal(capWords({ ...p, rules: { ...p.rules, size_cap_gb: 20 } }), "20 GB per lane");
+  assert.equal(bytesWords(1024 ** 3), "1.0 GB");
 });
 
 test("durations and the run a timeline entry names", () => {

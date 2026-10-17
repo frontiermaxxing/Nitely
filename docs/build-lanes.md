@@ -256,10 +256,19 @@ Nothing changes until a project's playbook asks for it (`[lanes]`). Per project:
 
 ### Lane hygiene
 
-A lane over its size cap (default 2 × its first build) has its incremental caches
-(`target/*/incremental`) emptied between requests. Over twice the cap, its build directories are
-removed and it builds cold once. Nothing a lane holds is anyone's work: a lane can be deleted at any
-moment and rebuilt.
+A lane over its size cap (default 2 × its first build; `[lanes] size_cap_gb` sets it) has its
+incremental caches (`target/*/incremental`) emptied between requests. Over twice the cap, its build
+directories are removed and it builds cold once. Nothing a lane holds is anyone's work: a lane can be
+deleted at any moment and rebuilt. As built (NIT-223): the check runs after each request while the
+lane is still held, measures only the `keep` directories, keeps the sizes in the lane's git folder
+(`nitely-lane-size`: after the last request, after the first), and says what it trimmed in the run's
+log. Settings shows each lane's size against its cap.
+
+What a lane command starts ends with it: on Windows it runs in a job object that kills its whole tree
+when the command ends or the requesting process dies, so a crash leaves nothing running in the lane
+and a background process (a build daemon, say) does not outlive the request. Elsewhere it runs in its
+own process group. A leftover found at the next request is stopped only when both its command and
+its start time match what the lane recorded, so a reused pid is never stopped.
 
 ## The playbook
 
