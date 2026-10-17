@@ -46,8 +46,10 @@ Approving and answering asks happen only in the app, never through the CLI or MC
 `nitely connect` installs them. The hooks (`nitely hook claude|codex|cursor`) record tool names,
 commands and file paths, never prompt text or file contents, and always exit 0, so they can't block
 an agent. [docs/claude-hooks.json](claude-hooks.json) is the Claude Code part, for setting it
-up by hand; its PreToolUse hook runs before MCP calls only and notes which session makes each one,
-so the board can say which agent holds an issue (NIT-194). When a Nitely version adds a hook, Agent
+up by hand. Its PreToolUse hook runs before MCP calls and shell commands: it notes which session
+makes each MCP call, so the board can say which agent holds an issue (NIT-194), and it reminds an
+agent about to build or test in a light worktree to use `run` instead (the playbook's `[lanes]
+heavy`; NIT-202). The command still runs. When a Nitely version adds a hook, Agent
 setup in the app (or `nitely agents`) shows the agent's settings as a change to make; applying it
 covers every repo, since the hooks are set up once per user.
 

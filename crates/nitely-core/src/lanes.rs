@@ -28,11 +28,22 @@ pub struct LaneRules {
     pub keep: Vec<String>,
     /// A command running longer is stopped, with everything it started.
     pub timeout_minutes: u64,
+    /// Commands (regexes, matched against each command of a shell line) that build or test: run in
+    /// a light worktree, the hook reminds the agent to use `run` instead (it never blocks them).
+    pub heavy: Vec<String>,
 }
+
+/// The commands that build or test when the playbook names none.
+pub const DEFAULT_HEAVY: &[&str] = &["^cargo (build|test|clippy|check|run)\\b", "^npm (ci|install|test|run build)\\b"];
 
 impl Default for LaneRules {
     fn default() -> Self {
-        LaneRules { count: 1, keep: crate::slim::DEFAULT_KEEP.iter().map(|s| s.to_string()).collect(), timeout_minutes: 30 }
+        LaneRules {
+            count: 1,
+            keep: crate::slim::DEFAULT_KEEP.iter().map(|s| s.to_string()).collect(),
+            timeout_minutes: 30,
+            heavy: DEFAULT_HEAVY.iter().map(|s| s.to_string()).collect(),
+        }
     }
 }
 

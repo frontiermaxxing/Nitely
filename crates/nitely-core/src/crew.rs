@@ -1117,6 +1117,9 @@ impl Supervisor {
 
 /// The brief every worker gets on stdin.
 pub fn brief(issue: &IssueRecord, project: &str, worktree: &Path, branch: &str, repo: &Path) -> String {
+    // A light worktree with lanes builds through `run` (docs/build-lanes.md).
+    let lanes = Playbook::load(repo).ok().is_some_and(|pb| pb.lanes.is_some());
+    let light = if lanes && crate::light::is_light(worktree) { format!("\n{}\n", crate::light::RUN_LINE) } else { String::new() };
     let (key, title, wt, repo) = (&issue.key, &issue.title, worktree.display(), repo.display());
     format!(
         "You are a Nitely crew worker: Nitely started you to work on one issue, {key}, \"{title}\", in project {project}. \
@@ -1134,7 +1137,7 @@ Work only there; never edit or commit in {repo}.
 7. Before you stop, for any reason, leave a note on {key} with handoff: true: what is done, what is left, what you were unsure about.
 
 Then end. Do not take another issue: Nitely starts a new worker for it.
-"
+{light}"
     )
 }
 

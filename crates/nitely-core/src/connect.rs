@@ -20,14 +20,19 @@ const BLOCK_END: &str = "<!-- nitely:end -->";
 const CLAUDE_EVENTS: &[(&str, Option<&str>)] = &[
     ("SessionStart", None),
     ("UserPromptSubmit", None),
-    // Before MCP calls only: which session makes each one, so the nitely server acts as it (NIT-194).
-    ("PreToolUse", Some("mcp__.*")),
+    // Before MCP calls: which session makes each one, so the nitely server acts as it (NIT-194).
+    // Before shell commands: a build in a light worktree is reminded to use `run` (NIT-202).
+    ("PreToolUse", Some("mcp__.*|Bash|PowerShell")),
     ("PostToolUse", Some("*")),
     ("Notification", None),
     ("Stop", None),
     ("SessionEnd", None),
 ];
 const CURSOR_EVENTS: &[&str] = &["beforeSubmitPrompt", "afterFileEdit", "stop"];
+
+/// Matchers an earlier nitely wrote for its own hooks, by event: settings that still have one are
+/// brought to the current matcher, as one change.
+const OLD_MATCHERS: &[(&str, &str)] = &[("PreToolUse", "mcp__.*")];
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ConnectPlan {
@@ -441,9 +446,15 @@ fn claude_plan(nitely: &str, repoint: bool) -> Result<AgentPlan> {
         let list = hooks.entry(event.to_string()).or_insert_with(|| json!([]));
         let mut present = false;
         for entry in list.as_array_mut().into_iter().flatten() {
+            let mut ours = false;
             for h in entry.get_mut("hooks").and_then(Value::as_array_mut).into_iter().flatten() {
-                present |= point_at(h, "claude", &command, repoint);
+                ours |= point_at(h, "claude", &command, repoint);
             }
+            let old = entry.get("matcher").and_then(Value::as_str).is_some_and(|m| OLD_MATCHERS.contains(&(event, m)));
+            if let (true, true, Some(m)) = (ours, old, matcher) {
+                entry["matcher"] = json!(m);
+            }
+            present |= ours;
         }
         if !present {
             let mut entry = json!({ "hooks": [{ "type": "command", "command": command, "timeout": 5 }] });
@@ -457,7 +468,7 @@ fn claude_plan(nitely: &str, repoint: bool) -> Result<AgentPlan> {
     }
     changes.push(Change::json(
         &settings_path,
-        "hooks that show each session's status, give it the repo's instructions at start, and tell Nitely which session makes each MCP call",
+        "hooks that show each session's status, give it the repo's instructions at start, tell Nitely which session makes each MCP call, and remind a build in a light worktree to use `run`",
         &settings,
     ));
 
@@ -796,7 +807,18 @@ mod tests {
         assert_eq!(pending_changes(&behind), 1, "one change to make");
         assert!(apply_agents(&behind).1.is_empty());
         let now: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
-        assert_eq!(now["hooks"]["PreToolUse"][0]["matcher"], "mcp__.*");
+        assert_eq!(now["hooks"]["PreToolUse"][0]["matcher"], "mcp__.*|Bash|PowerShell");
+        assert_eq!(pending_changes(&agent_plans("nitely", true)), 0);
+        // Settings with the MCP-only matcher an earlier nitely wrote are brought up to date, as one
+        // change, and no second entry is added.
+        let mut narrow: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        narrow["hooks"]["PreToolUse"][0]["matcher"] = json!("mcp__.*");
+        std::fs::write(&settings, serde_json::to_string_pretty(&narrow).unwrap()).unwrap();
+        let behind = agent_plans("nitely", true);
+        assert_eq!(pending_changes(&behind), 1);
+        assert!(apply_agents(&behind).1.is_empty());
+        let now: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!((now["hooks"]["PreToolUse"].as_array().unwrap().len(), &now["hooks"]["PreToolUse"][0]["matcher"]), (1, &json!("mcp__.*|Bash|PowerShell")));
         assert_eq!(pending_changes(&agent_plans("nitely", true)), 0);
         let mut chained = json!({ "command": "nitely hook claude && notify-user" });
         assert!(point_at(&mut chained, "claude", "nitely hook claude", true), "still counts as Nitely's");

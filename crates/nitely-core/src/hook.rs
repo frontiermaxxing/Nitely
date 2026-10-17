@@ -53,6 +53,23 @@ pub fn claude_mcp_call(input: &Value) -> Option<String> {
     Some(str_field("tool_use_id").to_string()).filter(|id| mcp && !id.is_empty())
 }
 
+/// The shell line and folder of a Claude Code PreToolUse hook for Bash or PowerShell: what the
+/// agent is about to run, and where. None for any other hook.
+pub fn claude_shell(input: &Value) -> Option<(String, String)> {
+    let str_field = |k: &str| input.get(k).and_then(Value::as_str).unwrap_or("");
+    if str_field("hook_event_name") != "PreToolUse" || !matches!(str_field("tool_name"), "Bash" | "PowerShell") {
+        return None;
+    }
+    let command = input.pointer("/tool_input/command").and_then(Value::as_str)?;
+    Some((command.to_string(), str_field("cwd").to_string())).filter(|(c, d)| !c.is_empty() && !d.is_empty())
+}
+
+/// What a PreToolUse hook prints to add `text` to Claude's context, leaving the call to run as it
+/// would have (no permission decision).
+pub fn claude_context(text: &str) -> Value {
+    serde_json::json!({ "hookSpecificOutput": { "hookEventName": "PreToolUse", "additionalContext": text } })
+}
+
 /// Codex's `notify` program gets one JSON argument after each turn: `type`
 /// (`agent-turn-complete`), `thread-id` and `cwd`, plus the turn's messages, which are not kept.
 pub fn from_codex(input: &Value) -> Result<NewEvent> {
@@ -164,6 +181,13 @@ mod tests {
         let call = |event: &str, tool: &str| claude_mcp_call(&json!({ "session_id": "s1", "cwd": "/w", "hook_event_name": event, "tool_name": tool, "tool_use_id": "toolu_01" }));
         assert_eq!(call("PreToolUse", "mcp__nitely__start_task").as_deref(), Some("toolu_01"));
         assert_eq!(call("PreToolUse", "Bash"), None, "only MCP calls reach a server");
+        let shell = |event: &str, tool: &str| claude_shell(&json!({ "hook_event_name": event, "tool_name": tool, "cwd": "C:/w", "tool_input": { "command": "cargo test" } }));
+        assert_eq!(shell("PreToolUse", "Bash"), Some(("cargo test".into(), "C:/w".into())));
+        assert_eq!(shell("PreToolUse", "PowerShell").map(|s| s.0).as_deref(), Some("cargo test"));
+        assert_eq!(shell("PostToolUse", "Bash"), None);
+        assert_eq!(shell("PreToolUse", "Edit"), None);
+        assert_eq!(claude_context("x")["hookSpecificOutput"]["additionalContext"], "x");
+        assert!(claude_context("x")["hookSpecificOutput"].get("permissionDecision").is_none(), "never blocks");
         assert_eq!(call("PostToolUse", "mcp__nitely__start_task"), None, "after the call is too late");
     }
 

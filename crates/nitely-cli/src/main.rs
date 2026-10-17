@@ -573,8 +573,20 @@ fn run_hook(vendor: &str, payload: Option<&str>) -> Result<()> {
     // Before an MCP call: only which session makes it, for the server it reaches (NIT-194). The
     // PostToolUse hook records the call itself.
     if vendor == "claude" {
-        if let (Some(call), Some(session)) = (hook::claude_mcp_call(&value), value.get("session_id").and_then(|v| v.as_str())) {
+        let session = value.get("session_id").and_then(|v| v.as_str()).unwrap_or_default();
+        if let Some(call) = hook::claude_mcp_call(&value).filter(|_| !session.is_empty()) {
             return Db::open_default()?.note_tool_call(&call, &format!("claude:{session}"));
+        }
+        // Before a shell command: a build or test in a light worktree is reminded to use `run`. It
+        // still runs; PostToolUse records it as any other.
+        if let Some((line, cwd)) = hook::claude_shell(&value) {
+            if let Some(n) = nitely_core::light::nudge(&Config::load()?, &cwd, &line) {
+                println!("{}", hook::claude_context(&n.message));
+                let actor = Actor::Agent(format!("claude:{session}"));
+                let at = n.worktree.to_string_lossy();
+                Db::open_default()?.log_event(&actor, n.issue.as_deref(), Some(&at), "heavy_local", &format!("Built in its light worktree: {}", n.command))?;
+            }
+            return Ok(());
         }
     }
     let event = match vendor {

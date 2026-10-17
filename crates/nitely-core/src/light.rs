@@ -229,9 +229,66 @@ pub fn session_note(pb: &Playbook, repo_root: &Path, worktree: &Path) -> Option<
         Some(dirs) => format!(" It is sparse: it holds {} and the files at the root. Add more with `widen` (paths or directories) before you edit them.", dirs.join(", ")),
         None => String::new(),
     };
+    let build = if pb.lanes.is_some() { format!(" {RUN_LINE}") } else { String::new() };
     Some(format!(
-        "This is a light worktree: source only, with no dependencies installed and no build output, on purpose, so many agents fit on one machine.{sparse}{read}"
+        "This is a light worktree: source only, with no dependencies installed and no build output, on purpose, so many agents fit on one machine.{build}{sparse}{read}"
     ))
+}
+
+/// How a light worktree builds and tests, for its session and the crew's brief.
+pub const RUN_LINE: &str = "Build and test through `run` (MCP; `nitely run -- <command>` from a shell): it builds a snapshot of this worktree, committed or not, in a warm build lane that keeps its build output, and returns the exit code and the end of the output (`run_status` waits on a long one). Do not build or test here: it would install and compile everything again, for this worktree alone.";
+
+/// The commands of a shell line, each trimmed: split at `&&`, `||`, `;`, `|` and new lines.
+fn commands_of(line: &str) -> Vec<String> {
+    line.split(['\n', ';', '|', '&']).map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).collect()
+}
+
+/// The folder a shell line works in: the folder of a leading `cd <dir>`, else `cwd`.
+fn folder_of(line: &str, cwd: &Path) -> PathBuf {
+    let first = commands_of(line).into_iter().next().unwrap_or_default();
+    let Some(dir) = first.strip_prefix("cd ").map(|d| d.trim().trim_matches(['"', '\'']).to_string()) else { return cwd.to_path_buf() };
+    // Git Bash spells C:\x as /c/x.
+    let dir = match dir.as_bytes() {
+        [b'/', drive, b'/', ..] if cfg!(windows) && drive.is_ascii_alphabetic() => format!("{}:{}", *drive as char, &dir[2..]),
+        _ => dir,
+    };
+    let p = PathBuf::from(&dir);
+    if p.is_absolute() { p } else { cwd.join(p) }
+}
+
+/// The first command of `line` that the playbook's `[lanes] heavy` names, when there are lanes.
+pub fn heavy_in(pb: &Playbook, line: &str) -> Option<String> {
+    let rules = pb.lanes.as_ref()?;
+    let patterns: Vec<regex::Regex> = rules.heavy.iter().filter_map(|h| regex::Regex::new(h).ok()).collect();
+    commands_of(line).into_iter().find(|c| patterns.iter().any(|p| p.is_match(c)))
+}
+
+/// A reminder for an agent about to build or test in a light worktree: the heavy command, the
+/// worktree, its issue and the words to say. None anywhere else.
+#[derive(Debug, Clone)]
+pub struct Nudge {
+    pub command: String,
+    pub worktree: PathBuf,
+    pub issue: Option<String>,
+    pub message: String,
+}
+
+/// Whether the shell line an agent is about to run in `cwd` builds or tests in a light worktree.
+pub fn nudge(config: &crate::Config, cwd: &str, line: &str) -> Option<Nudge> {
+    let folder = folder_of(line, Path::new(cwd));
+    let folder = folder.to_string_lossy();
+    let repo = config.repo_for_dir(&folder)?;
+    let (worktree, issue) = crate::playbook::current_worktree(&folder).ok()?;
+    if !is_light(&worktree) {
+        return None;
+    }
+    let pb = Playbook::load(Path::new(&repo.root)).ok()?;
+    let command = heavy_in(&pb, line)?;
+    let message = format!(
+        "Nitely: `{command}` is about to build in a light worktree ({}), which has no build output on purpose. It still runs, but this time and next, use `run` with this command instead: it builds a snapshot of this worktree in a warm build lane and returns the result, in a fraction of the time and none of the disk.",
+        worktree.display()
+    );
+    Some(Nudge { command, worktree, issue, message })
 }
 
 /// Whether the playbook asks for light worktrees.
@@ -331,6 +388,36 @@ mod tests {
         assert!(wt.join("docs/a.md").exists() && wt.join("crates/cli/src/main.rs").exists() && sparse_set(&wt).is_none());
         // A whole worktree has nothing to widen.
         assert!(widen(&repo, &["docs".into()]).unwrap().note.contains("not sparse"));
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn heavy_commands_in_a_light_worktree_with_lanes_get_a_reminder() {
+        let (base, repo) = repo("nitely-nudge", "[worktree]\nmode = \"light\"\ndir = \"../wt/{key}\"\n[lanes]\ncount = 1\n");
+        let db = Db::open(&base.join("t.db")).unwrap();
+        let started = start_task(&db, &repo, &issue(""), "claude", &Actor::Agent("claude:test".into())).unwrap();
+        let wt = PathBuf::from(&started.worktree);
+        let config = crate::Config { repos: vec![crate::RepoConfig { name: "repo".into(), root: repo.to_string_lossy().into_owned(), integration_branch: "main".into(), project: Some("NIT".into()) }], ..Default::default() };
+        let at = wt.to_string_lossy().into_owned();
+        let n = nudge(&config, &at, "git status && cargo test -p core").unwrap();
+        assert_eq!((n.command.as_str(), n.issue.as_deref()), ("cargo test -p core", Some("NIT-7")));
+        assert!(n.message.contains("use `run`"), "{}", n.message);
+        assert!(nudge(&config, &at, "cargo fmt && git diff").is_none(), "not a build");
+        assert!(nudge(&config, &at, "npm testing-library").is_none(), "a word, not the command");
+        // From the main checkout, a line that goes into the worktree first.
+        let main = repo.to_string_lossy().into_owned();
+        assert!(nudge(&config, &main, &format!("cd {} && npm run build", wt.display())).is_some());
+        assert!(nudge(&config, &main, "cargo test").is_none(), "the main checkout is not light");
+        assert!(session_note(&Playbook::load(&repo).unwrap(), &repo, &wt).unwrap().contains("through `run`"));
+
+        // Without [lanes] there is no `run` to send anyone to.
+        std::fs::write(repo.join(PLAYBOOK_PATH), "[worktree]\nmode = \"light\"\ndir = \"../wt/{key}\"\n").unwrap();
+        assert!(nudge(&config, &at, "cargo test").is_none());
+        assert!(!session_note(&Playbook::load(&repo).unwrap(), &repo, &wt).unwrap().contains("`run`"));
+        // A playbook's own list replaces the defaults.
+        let pb = Playbook::parse("[lanes]\nheavy = [\"^make\\\\b\"]\n").unwrap();
+        assert_eq!(heavy_in(&pb, "cd x; make all").as_deref(), Some("make all"));
+        assert!(heavy_in(&pb, "cargo test").is_none());
         std::fs::remove_dir_all(base).ok();
     }
 
