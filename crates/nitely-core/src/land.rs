@@ -89,8 +89,9 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
         }
     }
     // Changes that queued while this land held the lock land now, under it: their own lands may
-    // have stopped waiting.
-    if crate::land_queue::has_waiting(db, &root).unwrap_or(false) {
+    // have stopped waiting. Not after a land kept local (--no-push): their push would publish it.
+    let kept_local = !opts.push && playbook::has_origin(&root);
+    if !kept_local && crate::land_queue::has_waiting(db, &root).unwrap_or(false) {
         if let Err(e) = crate::land_queue::run_queue(db, &root) {
             report.warnings.push(format!("the land queue that waited behind this land stopped: {e:#}"));
         }

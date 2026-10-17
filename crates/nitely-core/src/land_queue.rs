@@ -625,11 +625,13 @@ fn land_prefix(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stacked: Vec<S
             }
         };
         let (cleanup, held_by) = match &s.worktree {
-            Some(wt) if !moved => (format!("kept {} and {} as they are", wt.display(), s.branch), vec![]),
-            Some(wt) if db.crew_worker_in(wt)? && s.entry.keep => {
-                // Said on the issue, so the supervisor does not remove it once the worker exits.
-                db.log_event(&actor, Some(&s.entry.issue), Some(&wt.to_string_lossy()), "land_kept", "Kept the worktree and branch (--keep)")?;
-                (format!("kept {} (--keep)", wt.display()), vec![])
+            Some(wt) if s.entry.keep || !moved => {
+                let why = if moved { "--keep" } else { "it gained commits after the gate" };
+                // Said on the issue, so a crew supervisor does not remove it once its worker exits.
+                if db.crew_worker_in(wt)? {
+                    db.log_event(&actor, Some(&s.entry.issue), Some(&wt.to_string_lossy()), "land_kept", &format!("Kept the worktree and branch ({why})"))?;
+                }
+                (format!("kept {} and {} ({why})", wt.display(), s.branch), vec![])
             }
             Some(wt) if db.crew_worker_in(wt)? => (format!("kept {} whole: the crew worker running in it removes it once it exits", wt.display()), vec![]),
             Some(wt) => land::cleanup(root, pb, wt, &s.branch, false, s.entry.keep),
@@ -934,6 +936,16 @@ batch = "waiting"
         assert!(r.landed && r.batch.is_none(), "{r:?}");
         assert_eq!(f.entry(&b).state, "landed", "{}", f.error(&b));
         assert!(f.db.latest_land_queue_entry(&a).unwrap().is_none(), "A never went in the queue");
+
+        // With a remote, a land kept local leaves the queue alone: landing it would push it.
+        crate::test_repo::add_remote(&f.repo, &f.base.join("remote.git"));
+        let (c, _) = f.submitted("C", &[("c.txt", "c")]);
+        let (d, _) = f.submitted("D", &[("d.txt", "d")]);
+        enqueue(&f.db, &f.repo, &d, &f.opts(), &f.actor).unwrap();
+        let opts = LandOptions { dir: &dir, issue_key: &c, push: false, keep: false, break_lock: false };
+        assert!(land::land(&mut f.db, &crate::Config::default(), &opts, &f.actor).unwrap().landed);
+        assert_eq!(f.entry(&d).state, "queued");
+        assert!(!sh(&f.repo, &["ls-remote", "origin", "main"]).contains(&sh(&f.repo, &["rev-parse", "HEAD"])), "C stayed local");
         std::fs::remove_dir_all(&f.base).ok();
     }
 

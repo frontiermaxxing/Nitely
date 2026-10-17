@@ -254,7 +254,8 @@ own, and the app signs each approved patch, as today.
   person's approval (its review's approver is not "human" and it names no approval reasons). Those
   land alone, as before, so approvals are given and signed per change. So does a land that is not
   to be pushed (`--no-push`), since a stack is pushed as one. A land of one change alone that finds
-  changes queued behind it when it finishes lands them too, still under its lock.
+  changes queued behind it when it finishes lands them too, still under its lock, unless it was kept
+  local (their push would publish it).
 - **Who runs it.** No resident process. Whichever `land` call finds the land lock free runs the
   queue until nothing waits, landing other agents' changes too. The others wait on their own row and
   return once it landed or was sent back, or after 20 minutes saying it is still waiting. Landing
