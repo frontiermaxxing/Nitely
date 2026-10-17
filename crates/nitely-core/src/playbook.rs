@@ -542,6 +542,12 @@ impl Playbook {
         fill(&self.branch.pattern, vendor, issue, "")
     }
 
+    /// The folder this playbook puts a repo's task worktrees in (the parent of each one).
+    pub fn worktrees_folder(&self, repo_root: &Path) -> Option<PathBuf> {
+        let probe = IssueRecord { key: "X-1".into(), title: "x".into(), ..Default::default() };
+        self.worktree_for(repo_root, "x", &probe).parent().map(Path::to_path_buf)
+    }
+
     pub fn worktree_for(&self, repo_root: &Path, vendor: &str, issue: &IssueRecord) -> PathBuf {
         let repo = repo_root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let rel = fill(&self.worktree.dir, vendor, issue, &repo);

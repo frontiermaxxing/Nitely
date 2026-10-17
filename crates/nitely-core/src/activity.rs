@@ -10,7 +10,7 @@
 //! when a turn ends, so its MCP id is the lane and its hook sessions in that folder are folded in.
 
 use anyhow::Result;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
@@ -241,6 +241,14 @@ pub fn activity(config: &Config, db: &Db, from: i64, to: i64) -> Result<Activity
         }
     }
 
+    // Waiting on an ask lasts only while the ask is open: from its answer on, or from the start
+    // when it is gone (its project was removed), the lane reads idle until it says otherwise.
+    for lane in &mut lanes {
+        let ids: Vec<String> = lane.members.iter().map(|m| m.id.clone()).collect();
+        let ends = ask_waits_end(db, &ids, &lane.rows)?;
+        lane.rows.extend(ends.into_iter().map(|ts| (ts, 2, "idle".to_string())));
+    }
+
     // Marks: a lane's own commits, and issue events wherever they belong.
     for e in &events {
         let Some(kind) = mark_kind(e) else { continue };
@@ -301,7 +309,11 @@ pub fn activity(config: &Config, db: &Db, from: i64, to: i64) -> Result<Activity
                 issues: issues.into_iter().map(|(_, k)| k).collect(),
                 started_at,
                 last_seen_at: latest.last_seen_at,
-                state: latest.state,
+                // Waiting no longer, when the ask it waited on closed and nothing came after.
+                state: match segments.last() {
+                    Some(s) if latest.state == "waiting" && s.state != "waiting" => "idle".to_string(),
+                    _ => latest.state,
+                },
                 segments,
                 marks: l.marks,
             })
@@ -329,6 +341,47 @@ pub fn activity(config: &Config, db: &Db, from: i64, to: i64) -> Result<Activity
     }
     let issues = named.iter().filter_map(|k| db.issue(k).transpose()).collect::<Result<Vec<_>>>()?;
     Ok(Activity { from, to, recorded_since, lanes: out, issues })
+}
+
+/// When each wait in `rows` that an ask began stops being a wait: the ask's answer, or the wait's
+/// own start when the ask no longer exists. An ask records its wait at the moment it is asked, as
+/// an `ask` event of one of `ids` with the question; a wait still open, or one a Notification
+/// hook began (a permission prompt), stays.
+fn ask_waits_end(db: &Db, ids: &[String], rows: &[(i64, u8, String)]) -> Result<Vec<i64>> {
+    let mut out = Vec::new();
+    for &(ts, _, ref state) in rows {
+        if state != "waiting" {
+            continue;
+        }
+        let mut asked = None;
+        for id in ids {
+            let summary: Option<String> = db
+                .conn
+                .query_row("SELECT summary FROM event WHERE actor = ?1 AND type = 'ask' AND ts = ?2 LIMIT 1", params![id, ts], |r| r.get::<_, Option<String>>(0))
+                .optional()?
+                .flatten();
+            if summary.is_some() {
+                asked = summary;
+                break;
+            }
+        }
+        let Some(summary) = asked else { continue };
+        let question = summary.strip_prefix("Asked: ").unwrap_or(&summary);
+        let ask: Option<Option<i64>> = db
+            .conn
+            .query_row(
+                "SELECT answered_at FROM ask WHERE question = ?1 AND asked_at BETWEEN ?2 - 5 AND ?2 + 5 ORDER BY ABS(asked_at - ?2) LIMIT 1",
+                params![question, ts],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match ask {
+            Some(Some(answered)) => out.push(answered.max(ts)),
+            Some(None) => {}
+            None => out.push(ts),
+        }
+    }
+    Ok(out)
 }
 
 /// `rows` plus the state in force at each of `events`: every event of a session says its state
@@ -564,6 +617,49 @@ mod tests {
         // Before recording: activity close together is one stretch, a long pause splits it.
         let got: Vec<(i64, i64)> = seen(&[100, 300, 500, 2000, 9500], 0, 9000).iter().map(|s| (s.from, s.to)).collect();
         assert_eq!(got, [(100, 560), (2000, 2060)]);
+    }
+
+    #[test]
+    fn waiting_on_an_ask_lasts_while_the_ask_is_open() {
+        let (db, dir) = db();
+        let config = Config::default();
+        let t0 = now() - 7200;
+        let agent = crate::Actor::Agent("codex:x".into());
+        // Three Codex threads ask and go quiet: one is answered, one's ask is gone (its project
+        // was removed), one is still waiting on the person.
+        for (id, question) in [("codex:answered", "Which branch?"), ("codex:gone", "May I write here?"), ("codex:open", "Ship it?")] {
+            session(&db, id, "C:\\code\\app", t0, t0 + 60, "waiting");
+            state(&db, id, t0, "working");
+            state(&db, id, t0 + 60, "waiting");
+            event(&db, t0 + 60, id, "ask", &format!("Asked: {question}"), None);
+            let ask = db.create_ask(question, &[], None, Some("C:\\code\\app"), &agent).unwrap();
+            db.conn.execute("UPDATE ask SET asked_at = ?2 WHERE id = ?1", params![ask.id, t0 + 61]).unwrap();
+            match id {
+                "codex:answered" => {
+                    db.answer_ask(ask.id, "main", &crate::Actor::Human).unwrap();
+                    db.conn.execute("UPDATE ask SET answered_at = ?2 WHERE id = ?1", params![ask.id, t0 + 600]).unwrap();
+                }
+                "codex:gone" => {
+                    db.conn.execute("DELETE FROM ask WHERE id = ?1", [ask.id]).unwrap();
+                }
+                _ => {}
+            }
+        }
+        // A permission prompt (Notification hook) is waiting with no ask, and stays so.
+        session(&db, "claude:prompt", "C:\\code\\app", t0, t0 + 60, "waiting");
+        state(&db, "claude:prompt", t0 + 60, "waiting");
+        event(&db, t0 + 60, "claude:prompt", "waiting", "Waiting for input", None);
+
+        let a = activity(&config, &db, t0 - 600, now()).unwrap();
+        let lane = |id: &str| a.lanes.iter().find(|l| l.session_id == id).unwrap_or_else(|| panic!("{id}"));
+        let waits = |id: &str| lane(id).segments.iter().filter(|s| s.state == "waiting").map(|s| (s.from - t0, s.to - t0)).collect::<Vec<_>>();
+        assert_eq!(waits("codex:answered"), [(60, 600)], "until the answer");
+        assert!(waits("codex:gone").is_empty(), "an ask that is gone waits on no one");
+        assert_eq!(lane("codex:open").segments.last().unwrap().state, "waiting");
+        assert_eq!(lane("claude:prompt").segments.last().unwrap().state, "waiting");
+        assert_eq!((lane("codex:answered").state.as_str(), lane("codex:gone").state.as_str(), lane("codex:open").state.as_str()), ("idle", "idle", "waiting"));
+        drop(db);
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

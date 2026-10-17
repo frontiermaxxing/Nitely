@@ -226,6 +226,9 @@ The same text for every agent, with the blanks filled in:
 - No job object with kill-on-close: a supervisor that dies must not take its workers with it.
 - Stopping a worker kills its tree (`taskkill /T /F /PID`), since `claude` and `codex` start shells,
   builds and MCP servers under them.
+- When a worker ends, however it ends, the supervisor ends its sessions (the ones in its worktree
+  since it started, and the one named after its agent id): a `codex exec` that exits sends no
+  session end of its own, and would otherwise stay working or waiting on you.
 - `crew run` asks Windows not to sleep while a worker runs (`SetThreadExecutionState` with
   `ES_SYSTEM_REQUIRED`), and lets go when the crew is idle. The display may still turn off.
 

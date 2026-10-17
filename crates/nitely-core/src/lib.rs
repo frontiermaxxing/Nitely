@@ -40,6 +40,7 @@ pub mod similar;
 pub mod slim;
 pub mod review;
 pub mod rules;
+pub mod sessions;
 pub mod snapshot;
 pub mod track;
 pub mod update;

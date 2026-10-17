@@ -228,7 +228,7 @@ enum Cmd {
         #[arg(long, default_value_t = 12)]
         hours: i64,
     },
-    /// Pull PRs from Bitbucket and issues from Linear, using credentials.json in Nitely's data folder.
+    /// Pull PRs from Bitbucket and issues from Linear, using credentials.json in Nitely's data folder, and end the sessions whose agent stopped without saying so.
     Sync,
     /// Print where Nitely keeps its data.
     Where,
@@ -1124,7 +1124,12 @@ dry run: would create {} issue(s) ({} to {}) and {} comment(s) in {} {}; run aga
             print_json(&nitely_core::activity::activity(&Config::load()?, &Db::open_default()?, to - hours * 3600, to)?)
         }
         Cmd::Sync => {
-            let report = nitely_core::remote::sync(&Config::load()?, &mut Db::open_default()?);
+            let mut db = Db::open_default()?;
+            let report = nitely_core::remote::sync(&Config::load()?, &mut db);
+            // As the app's sync does: sessions whose agent stopped without saying so end (NIT-189).
+            if let Err(e) = nitely_core::sessions::end_gone_now(&db) {
+                eprintln!("ending gone sessions: {e:#}");
+            }
             print_json(&report)?;
             if !report.credentials_found {
                 eprintln!("no credentials file at {}", nitely_core::credentials::path().display());

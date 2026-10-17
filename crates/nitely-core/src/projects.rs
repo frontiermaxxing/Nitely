@@ -8,6 +8,7 @@ use anyhow::{bail, Context, Result};
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
 use std::collections::HashMap;
+use std::path::Path;
 
 use crate::db::now;
 use crate::Db;
@@ -121,10 +122,35 @@ pub fn remove(db: &mut Db, key: &str, with_issues: bool) -> Result<Removed> {
     if !busy.is_empty() {
         bail!("{}", checked_out_message(&key, &busy));
     }
+    let folders = folders_of(&config, &key);
     let mut done = db.remove_project(&key, with_issues)?;
-    let (repos, machines, warnings) = follow(config, &done.key, None);
+    // Nothing of it stays live: its agents' sessions end and the questions they asked go, so no
+    // view keeps showing it as working or waiting on you (NIT-189).
+    let mut warnings = Vec::new();
+    for folder in &folders {
+        let why = format!("Ended: project {key} was removed");
+        if let Err(e) = db.end_sessions_in(folder, 0, None, now(), &why).and_then(|_| db.remove_open_asks_in(folder)) {
+            warnings.push(format!("sessions or questions in {folder} were left as they were: {e:#}"));
+        }
+    }
+    let (repos, machines, more) = follow(config, &done.key, None);
+    warnings.extend(more);
     (done.repos, done.machines, done.warnings) = (repos, machines, warnings);
     Ok(done)
+}
+
+/// The folders a project's agents work in: each of its repos' main checkout and worktree folder.
+fn folders_of(config: &crate::Config, project: &str) -> Vec<String> {
+    config
+        .repos
+        .iter()
+        .filter(|r| r.project.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(project)))
+        .flat_map(|r| {
+            let root = Path::new(&r.root);
+            let worktrees = crate::playbook::Playbook::load_with(root, config).ok().and_then(|pb| pb.worktrees_folder(root));
+            std::iter::once(r.root.clone()).chain(worktrees.map(|w| w.to_string_lossy().into_owned()))
+        })
+        .collect()
 }
 
 /// Points the config's repos and the machine tokens that name `from` at `to` (or at none).
@@ -427,6 +453,25 @@ mod tests {
             .unwrap();
         let err = db.rekey_project("AAA", "CCC").unwrap_err().to_string();
         assert!(err.contains("AAA-1"), "{err}");
+    }
+
+    #[test]
+    fn a_projects_folders_are_its_repos_and_their_worktree_folders() {
+        let repo = |name: &str, root: &str, project: Option<&str>| crate::RepoConfig {
+            name: name.into(),
+            root: root.into(),
+            integration_branch: "main".into(),
+            project: project.map(str::to_string),
+        };
+        let root = crate::paths::unique_temp("nitely-folders", "").join("app");
+        let config = crate::Config {
+            repos: vec![repo("app", &root.to_string_lossy(), Some("APP")), repo("other", "C:/code/other", Some("OTH")), repo("loose", "C:/code/loose", None)],
+            ..Default::default()
+        };
+        let folders: Vec<String> = folders_of(&config, "app").iter().map(|f| crate::paths::normalize(f)).collect();
+        let worktrees = crate::paths::normalize(&root.parent().unwrap().join("app-worktrees").to_string_lossy());
+        assert_eq!(folders, [crate::paths::normalize(&root.to_string_lossy()), worktrees], "the default playbook's worktree folder");
+        assert!(folders_of(&config, "NONE").is_empty());
     }
 
     #[test]

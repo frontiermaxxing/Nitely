@@ -1648,10 +1648,17 @@ impl Db {
     }
 
     fn crew_worker_ended(&self, id: i64, code: Option<i32>, outcome: &str, reason: &str) -> Result<()> {
+        let at = now();
         self.conn.execute(
             "UPDATE crew_worker SET ended_at = ?2, exit_code = ?3, outcome = ?4, reason = ?5 WHERE id = ?1",
-            rusqlite::params![id, now(), code, outcome, reason],
+            rusqlite::params![id, at, code, outcome, reason],
         )?;
+        // Its agent sends no session end when it exits (a `codex exec` never does), so its sessions
+        // end here: the ones in its worktree since it started, and the one named after its agent id.
+        let (worktree, started, agent_id): (String, i64, String) =
+            self.conn.query_row("SELECT worktree, started_at, agent_id FROM crew_worker WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        let named = Some(agent_id.as_str()).filter(|a| !a.is_empty());
+        self.end_sessions_in(&worktree, started - 60, named, at, &format!("Ended: its crew worker exited ({outcome})"))?;
         Ok(())
     }
 
@@ -2382,6 +2389,14 @@ workers = 2
         assert!(f.db.session(&agent_id).unwrap().unwrap().crew);
         let json = serde_json::to_value(f.db.session("claude:person").unwrap().unwrap()).unwrap();
         assert!(json.get("crew").is_none(), "only crew sessions carry the field");
+
+        // The worker exits without a session end of its own (as `codex exec` does): its sessions
+        // end with it, the person's does not (NIT-189).
+        f.db.record(&crate::db::NewEvent { session_id: "claude:worker".into(), vendor: "claude".into(), cwd: format!("{wt}\\src"), kind: "ask".into(), summary: None, state: "waiting".into() }).unwrap();
+        fake.exits.borrow_mut().insert(1001, 0);
+        supervisor(&f, &fake).tick(&mut f.db, false).unwrap();
+        let state = |id: &str| f.db.session(id).unwrap().unwrap().state;
+        assert_eq!((state("claude:worker"), state(&agent_id), state("claude:person")), ("ended".into(), "ended".into(), "working".into()));
     }
 
     #[test]

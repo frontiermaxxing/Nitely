@@ -34,6 +34,12 @@ struct Proc {
 /// Processes whose executable, command line or working directory is inside `dir`, other than this
 /// process and the ones that started it. Empty when processes cannot be listed.
 pub fn holders(dir: &Path) -> Vec<Holder> {
+    holders_of(&[dir]).0.into_iter().next().unwrap_or_default()
+}
+
+/// `holders` of each of `dirs`, from one list of the processes, and whether that list is whole: a
+/// list that never held this process failed, and says nothing about what runs where.
+pub fn holders_of(dirs: &[&Path]) -> (Vec<Vec<Holder>>, bool) {
     // A list without this process failed (a busy machine can time out the query), and taking it
     // for "nothing holds the folder" would let land remove a worktree in use; so ask again.
     let me = std::process::id();
@@ -53,13 +59,20 @@ pub fn holders(dir: &Path) -> Vec<Holder> {
         }
         mine.push(parent);
     }
-    let dir = dir.to_string_lossy();
-    procs
-        .into_iter()
-        .filter(|p| !mine.contains(&p.process_id))
-        .filter(|p| [&p.executable_path, &p.command_line, &p.cwd].into_iter().flatten().any(|text| names_path(text, &dir)))
-        .map(|p| Holder { pid: p.process_id, name: p.name.unwrap_or_default() })
-        .collect()
+    let whole = procs.iter().any(|p| p.process_id == me);
+    let others: Vec<&Proc> = procs.iter().filter(|p| !mine.contains(&p.process_id)).collect();
+    let each = dirs
+        .iter()
+        .map(|dir| {
+            let dir = dir.to_string_lossy();
+            others
+                .iter()
+                .filter(|p| [&p.executable_path, &p.command_line, &p.cwd].into_iter().flatten().any(|text| names_path(text, &dir)))
+                .map(|p| Holder { pid: p.process_id, name: p.name.clone().unwrap_or_default() })
+                .collect()
+        })
+        .collect();
+    (each, whole)
 }
 
 /// Whether `text` names `dir` or a path inside it, in any spelling a process might use:

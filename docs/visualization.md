@@ -368,7 +368,11 @@ waiting on you) over the window.
 
 - **Segments** are the session's state: working (`--live`, thick), waiting for you (`--attention`,
   thick), idle (thin), and stale, a dashed hairline once nothing was recorded for 30 minutes. A
-  gap with no segment means the session was not running.
+  gap with no segment means the session was not running. Waiting on an ask lasts only while the ask
+  is open: from its answer on, or from the start when the ask is gone (its project was removed),
+  the lane reads idle. A session whose agent stopped without saying so (an exited `codex exec`, a
+  closed terminal) ends at its last event once the sweep finds nothing running in its folder
+  (`crates/nitely-core/src/sessions.rs`), so amber never outlives the agent.
 - **Before recording started** (session states are kept from the version that added them), the
   window is hatched and lanes show only "seen" stretches: the session was active, its state is
   unknown. The axis says when recording started. Never guess states for that stretch.

@@ -463,6 +463,11 @@ fn run_sync() -> anyhow::Result<remote::SyncReport> {
     let config = Config::load()?;
     let mut db = Db::open_default()?;
     let report = remote::sync(&config, &mut db);
+    // Sessions whose agent stopped without a session end (a crashed terminal, an exited `codex
+    // exec`) end, so nothing shows working or waiting on you for an agent that is gone (NIT-189).
+    if let Err(e) = nitely_core::sessions::end_gone_now(&db) {
+        eprintln!("sessions: {e:#}");
+    }
     // The issue mirror, for projects the person turned it on for (docs/mirror.md).
     for e in nitely_core::mirror::sync(&config, &db).errors {
         eprintln!("mirror: {e}");
