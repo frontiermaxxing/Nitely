@@ -179,14 +179,15 @@ fn tls_from_files_every(cert: &std::path::Path, key: &std::path::Path, host: &st
 fn certified_key(cert_pem: &[u8], key_pem: &[u8], cert_name: &str, key_name: &str) -> Result<Arc<rustls::sign::CertifiedKey>> {
     use rustls_pki_types::pem::PemObject;
     use rustls_pki_types::{CertificateDer, PrivateKeyDer};
-    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(cert_pem)
-        .collect::<std::result::Result<_, _>>()
-        .with_context(|| format!("{cert_name} is not a PEM certificate"))?;
+    // The parser's own errors can quote the line they stopped at, which may be key material: they
+    // are replaced, never shown or logged.
+    let certs: Vec<CertificateDer<'static>> =
+        CertificateDer::pem_slice_iter(cert_pem).collect::<std::result::Result<_, _>>().map_err(|_| anyhow::anyhow!("{cert_name} is not a PEM certificate"))?;
     if certs.is_empty() {
         bail!("{cert_name} holds no certificate");
     }
-    let key = PrivateKeyDer::from_pem_slice(key_pem).with_context(|| format!("{key_name} is not a PEM private key"))?;
-    let signing = rustls::crypto::ring::sign::any_supported_type(&key).map_err(|e| anyhow::anyhow!("{key_name}: {e}"))?;
+    let key = PrivateKeyDer::from_pem_slice(key_pem).map_err(|_| anyhow::anyhow!("{key_name} is not a PEM private key"))?;
+    let signing = rustls::crypto::ring::sign::any_supported_type(&key).map_err(|_| anyhow::anyhow!("{key_name} is not a key this server can use"))?;
     let loaded = rustls::sign::CertifiedKey::new(certs, signing);
     loaded.keys_match().map_err(|_| anyhow::anyhow!("the certificate and key do not go together"))?;
     Ok(Arc::new(loaded))
@@ -227,17 +228,35 @@ impl CertSource {
     }
 }
 
-/// Serves the current certificate, and every `every` fetches it again in the background, so a
-/// server left running picks up a renewed certificate before the old one expires. A fetch that
-/// fails keeps the certificate it has.
+/// Serves the current certificate, which a background thread fetches again every `every`, so a
+/// server left running, busy or idle, has a renewed certificate before the old one expires. A
+/// fetch that fails keeps the certificate it has. The thread ends once the server's TLS settings
+/// are dropped.
 #[derive(Debug)]
 struct Reloading {
     source: CertSource,
-    every: std::time::Duration,
     current: std::sync::RwLock<Arc<rustls::sign::CertifiedKey>>,
     stamp: Mutex<Stamp>,
-    next: Mutex<Instant>,
-    busy: AtomicBool,
+}
+
+impl Reloading {
+    fn refresh(&self) {
+        let stamp = *self.stamp.lock().unwrap_or_else(|p| p.into_inner());
+        if let CertSource::Files { cert, key } = &self.source {
+            let now = std::fs::metadata(cert).and_then(|c| c.modified()).ok().zip(std::fs::metadata(key).and_then(|k| k.modified()).ok());
+            if now.is_some() && now == stamp {
+                return;
+            }
+        }
+        match self.source.load() {
+            Ok((loaded, stamp)) => {
+                *self.current.write().unwrap_or_else(|p| p.into_inner()) = loaded;
+                *self.stamp.lock().unwrap_or_else(|p| p.into_inner()) = stamp;
+            }
+            // The error names the file and what was wrong, never what it holds.
+            Err(e) => eprintln!("nitely: the phone server keeps its certificate: {e:#}"),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -245,41 +264,7 @@ struct Resolver(Arc<Reloading>);
 
 impl rustls::server::ResolvesServerCert for Resolver {
     fn resolve(&self, _hello: rustls::server::ClientHello<'_>) -> Option<Arc<rustls::sign::CertifiedKey>> {
-        use std::sync::atomic::Ordering;
-        let r = &self.0;
-        let due = {
-            let mut next = r.next.lock().unwrap_or_else(|p| p.into_inner());
-            let due = Instant::now() >= *next && !matches!(r.source, CertSource::Fixed);
-            if due {
-                *next = Instant::now() + r.every;
-            }
-            due
-        };
-        // Fetched off the handshake: `tailscale cert` may take a while when it renews.
-        if due && !r.busy.swap(true, Ordering::AcqRel) {
-            let r = r.clone();
-            std::thread::spawn(move || {
-                let stamp = *r.stamp.lock().unwrap_or_else(|p| p.into_inner());
-                let unchanged = match &r.source {
-                    CertSource::Files { cert, key } => {
-                        let now = std::fs::metadata(cert).and_then(|c| c.modified()).ok().zip(std::fs::metadata(key).and_then(|k| k.modified()).ok());
-                        now.is_some() && now == stamp
-                    }
-                    _ => false,
-                };
-                if !unchanged {
-                    match r.source.load() {
-                        Ok((loaded, stamp)) => {
-                            *r.current.write().unwrap_or_else(|p| p.into_inner()) = loaded;
-                            *r.stamp.lock().unwrap_or_else(|p| p.into_inner()) = stamp;
-                        }
-                        Err(e) => eprintln!("nitely: the phone server keeps its certificate: {e:#}"),
-                    }
-                }
-                r.busy.store(false, Ordering::Release);
-            });
-        }
-        Some(r.current.read().unwrap_or_else(|p| p.into_inner()).clone())
+        Some(self.0.current.read().unwrap_or_else(|p| p.into_inner()).clone())
     }
 }
 
@@ -294,26 +279,31 @@ fn tls_with(
     if host.is_empty() || !host.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.') {
         bail!("give the name on the certificate, e.g. pc.example.ts.net");
     }
-    let reloading = Reloading {
-        source,
-        every,
-        current: std::sync::RwLock::new(loaded),
-        stamp: Mutex::new(stamp),
-        next: Mutex::new(Instant::now() + every),
-        busy: AtomicBool::new(false),
-    };
+    let fixed = matches!(source, CertSource::Fixed);
+    let reloading = Arc::new(Reloading { source, current: std::sync::RwLock::new(loaded), stamp: Mutex::new(stamp) });
+    if !fixed {
+        let weak = Arc::downgrade(&reloading);
+        let pause = every.max(std::time::Duration::from_millis(50));
+        std::thread::spawn(move || loop {
+            std::thread::sleep(pause);
+            match weak.upgrade() {
+                Some(r) => r.refresh(),
+                None => break,
+            }
+        });
+    }
     let config = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
         .with_safe_default_protocol_versions()
         .context("TLS")?
         .with_no_client_auth()
-        .with_cert_resolver(Arc::new(Resolver(Arc::new(reloading))));
+        .with_cert_resolver(Arc::new(Resolver(reloading)));
     Ok(Tls { config: Arc::new(config), host })
 }
 
 /// A certificate chain and key in PEM, served as given.
 #[cfg(test)]
 fn tls_from_pem(cert_pem: &[u8], key_pem: &[u8], host: &str, cert_name: &str, key_name: &str) -> Result<Tls> {
-    tls_with(host, certified_key(cert_pem, key_pem, cert_name, key_name)?, CertSource::Fixed, None, std::time::Duration::MAX / 4)
+    tls_with(host, certified_key(cert_pem, key_pem, cert_name, key_name)?, CertSource::Fixed, None, std::time::Duration::ZERO)
 }
 
 /// The name Tailscale can issue this machine a certificate for, from `tailscale status`.
@@ -1748,7 +1738,7 @@ mod tests {
         let new = rcgen::generate_simple_self_signed(vec!["nitely.test".to_string()]).unwrap();
         std::fs::write(&cert, old.cert.pem()).unwrap();
         std::fs::write(&key, old.key_pair.serialize_pem()).unwrap();
-        let tls = tls_from_files_every(&cert, &key, "nitely.test", std::time::Duration::ZERO).unwrap();
+        let tls = tls_from_files_every(&cert, &key, "nitely.test", std::time::Duration::from_millis(100)).unwrap();
         let assets: Assets = Arc::new(|p: &str| (p == "phone.html").then(|| (b"<html>phone</html>".to_vec(), content_type(p))));
         let phone = Phone::new(Arc::new(|| Ok(vec![])), assets, Arc::new(|| anyhow::bail!("no database in this test")), Arc::new(|_: &crate::Db| vec![]));
         let running = phone.start(&["127.0.0.1".parse().unwrap()], 0, Some(tls)).unwrap();
@@ -1785,8 +1775,13 @@ mod tests {
             assert!(started.elapsed() < std::time::Duration::from_secs(10), "still the old certificate");
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        // A file that is no longer a certificate keeps the one being served.
+        // A file that is no longer a certificate keeps the one being served, and the error quotes
+        // nothing from a broken key.
         std::fs::write(&cert, "not a certificate").unwrap();
+        let broken = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49secretKEYmaterial$$\n-----END PRIVATE KEY-----\n";
+        let err = certified_key(new.cert.pem().as_bytes(), broken.as_bytes(), "pc.crt", "pc.key").unwrap_err();
+        let said = format!("{err:#}");
+        assert!(said.contains("pc.key") && !said.contains("secretKEY"), "{said}");
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert_eq!(&served(), new.cert.der());
         assert_eq!(&served(), new.cert.der());
