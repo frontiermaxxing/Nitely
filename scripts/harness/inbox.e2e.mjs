@@ -6,7 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { launch, nitely } from "./app.mjs";
+import { badge, launch, nitely } from "./app.mjs";
 
 const SCREENS = join("target", "harness", "screens");
 mkdirSync(SCREENS, { recursive: true });
@@ -39,6 +39,10 @@ test("the Inbox approves an issue and answers a question, and the database shows
     // Both decisions leave the Inbox once their moment has passed.
     await page.waitFor(`return document.querySelectorAll(".inbox-row").length === 0 || !!document.querySelector(".empty-state, .ui-empty");`, { timeoutMs: 20000, what: "the Inbox to empty" });
     await page.screenshot(join(SCREENS, "inbox-empty.png"));
+
+    // The taskbar count clears with it: no number, no overlay drawn.
+    for (let i = 0; i < 40 && badge(home)?.count !== 0; i++) await new Promise((r) => setTimeout(r, 250));
+    assert.deepEqual(badge(home), { count: 0, drawn: false }, "the taskbar count clears at zero");
   } catch (e) {
     console.error(app.log());
     throw e;

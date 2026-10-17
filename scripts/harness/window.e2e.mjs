@@ -51,6 +51,15 @@ test("the in-app title bar: buttons, double-click, the strip's reach, focus dimm
     await doubleClick();
     await until((s) => !s.maximized, "restored by a double-click");
 
+    // The sidebar's brand row is the other strip: the same double-click there.
+    const brand = await page.eval(`const el = document.querySelector(".brand[data-tauri-drag-region]"); if (!el) return null; const r = el.getBoundingClientRect(); return { x: r.left + 8, y: r.top + r.height / 2 };`);
+    assert.ok(brand, "the brand row is a drag strip");
+    Object.assign(strip, brand);
+    await doubleClick();
+    await until((s) => s.maximized, "maximized by a double-click on the brand row");
+    await doubleClick();
+    await until((s) => !s.maximized, "restored by a double-click on the brand row");
+
     // Nothing that takes clicks sits under the strip or the buttons: the board's tabs and filters.
     await page.open("#project/APP/board");
     await page.waitFor(`return document.querySelector(".board, .ui-empty, [role=tablist], .tabs") !== null;`, { what: "the project page" });

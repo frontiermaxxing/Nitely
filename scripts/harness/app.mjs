@@ -115,7 +115,9 @@ async function takeLock(waitMs = 10 * 60 * 1000) {
 
 /**
  * Starts the harness app on a new data folder, seeded by `seed(home)`, with DevTools on a free
- * port. Returns the page, the folder and `close()`, which ends the app and removes the folder.
+ * port. Returns the page, the folder, `restart()`, which closes the app as the person would and
+ * starts it again on the same data and storage, and `close()`, which ends the app and removes the
+ * folder.
  */
 export async function launch({ seed = seedSample, env = {}, keepHome = false } = {}) {
   if (!existsSync(exe("nitely-app"))) throw new Error(`no harness build at ${exe("nitely-app")}: run \`node scripts/harness/app.mjs build\` first`);
@@ -140,26 +142,7 @@ async function start({ seed, env, keepHome, unlock }) {
   }
   seed(home);
   mkdirSync(join(home, "screens"), { recursive: true });
-  const child = spawn(exe("nitely-app"), [], {
-    // Not in its data folder, which close() removes.
-    cwd: ROOT,
-    // The harness build asks WebView2 for DevTools on a port of its own choosing (its config's
-    // additionalBrowserArgs); WebView2 writes it to DevToolsActivePort in its folder.
-    env: appEnv({ ...process.env, ...env, NITELY_HOME: home, NITELY_HARNESS: "1" }),
-    stdio: ["ignore", "pipe", "pipe"],
-  });
   let log = "";
-  child.stdout.on("data", (d) => (log += d));
-  child.stderr.on("data", (d) => (log += d));
-  const exited = new Promise((r) => child.once("exit", r));
-  // The app and its WebView2 processes, all of them: a process left behind holds the folders.
-  const stop = async () => {
-    if (child.exitCode === null) {
-      if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore" });
-      else child.kill();
-      await Promise.race([exited, new Promise((r) => setTimeout(r, 5000))]);
-    }
-  };
   // Cleaning up never hides why a run failed: what cannot be removed is left and said.
   const remove = () => {
     try {
@@ -168,29 +151,69 @@ async function start({ seed, env, keepHome, unlock }) {
       console.error(`harness: could not remove ${home}: ${e.message}`);
     }
   };
-  let page;
-  let port;
-  try {
-    const up = (async () => {
-      port = await devtoolsPort(90000);
-      return Page.connect(port, 30000);
-    })();
-    page = await Promise.race([up, exited.then((code) => Promise.reject(new Error(`the app exited (${code}) before its page came up`)))]);
-    await page.waitFor(`return document.querySelector(".sidebar") !== null;`, { timeoutMs: 30000, what: "the app's sidebar" });
-  } catch (e) {
-    await stop();
-    keepLog(log + diagnose());
-    remove();
-    throw new Error(`${e.message}\n--- the app's output ---\n${log}${diagnose()}`);
-  }
-  const close = async () => {
-    page?.close();
-    await stop();
-    keepLog(log);
-    if (!keepHome) remove();
-    unlock();
+  const app = {
+    home,
+    log: () => log,
+    /** `whileClosed()` runs between the two, e.g. an agent asking something while the app is not up. */
+    async restart(whileClosed = () => {}) {
+      // Closed by its own window, as the person would, so it saves what it keeps (what it told).
+      await app.page.invoke("plugin:window|close", { label: "main" }).catch(() => {});
+      const code = await Promise.race([app.exited, new Promise((r) => setTimeout(() => r("running"), 15000))]);
+      app.page.close();
+      if (code === "running") throw new Error("the app did not end when its window closed");
+      await whileClosed();
+      await boot();
+      return app.page;
+    },
+    async close() {
+      app.page?.close();
+      await app.stop?.();
+      keepLog(log);
+      if (!keepHome) remove();
+      unlock();
+    },
   };
-  return { page, home, port, pid: child.pid, log: () => log, exited, close };
+  const boot = async () => {
+    // A port file left by the last run would name a port nobody listens on now.
+    const portFile = webviewDir() && join(webviewDir(), "DevToolsActivePort");
+    if (portFile) rmSync(portFile, { force: true });
+    const child = spawn(exe("nitely-app"), [], {
+      // Not in its data folder, which close() removes.
+      cwd: ROOT,
+      // The harness build asks WebView2 for DevTools on a port of its own choosing (its config's
+      // additionalBrowserArgs); WebView2 writes it to DevToolsActivePort in its folder.
+      env: appEnv({ ...process.env, ...env, NITELY_HOME: home, NITELY_HARNESS: "1" }),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    child.stdout.on("data", (d) => (log += d));
+    child.stderr.on("data", (d) => (log += d));
+    const exited = new Promise((r) => child.once("exit", r));
+    // The app and its WebView2 processes, all of them: a process left behind holds the folders.
+    const stop = async () => {
+      if (child.exitCode === null) {
+        if (process.platform === "win32") spawnSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore" });
+        else child.kill();
+        await Promise.race([exited, new Promise((r) => setTimeout(r, 5000))]);
+      }
+    };
+    Object.assign(app, { pid: child.pid, exited, stop, page: null });
+    try {
+      const up = (async () => {
+        app.port = await devtoolsPort(90000);
+        return Page.connect(app.port, 30000);
+      })();
+      app.page = await Promise.race([up, exited.then((code) => Promise.reject(new Error(`the app exited (${code}) before its page came up`)))]);
+      await app.page.waitFor(`return document.querySelector(".sidebar") !== null;`, { timeoutMs: 30000, what: "the app's sidebar" });
+    } catch (e) {
+      app.page?.close();
+      await stop();
+      keepLog(log + diagnose());
+      remove();
+      throw new Error(`${e.message}\n--- the app's output ---\n${log}${diagnose()}`);
+    }
+  };
+  await boot();
+  return app;
 }
 
 /**

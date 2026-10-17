@@ -64,7 +64,9 @@ show) is yours to run, in the real app on throwaway data, before it becomes a li
   folder; drive it from a script with `scripts/harness/cdp.mjs` (`Page.connect(port)`: `open("#inbox")`,
   `click({ css, text })`, `waitFor(js)`, `screenshot(path)`, `invoke(command)`, `windowState()`).
   In a test, `launch()` from `scripts/harness/app.mjs` does the same with your own seed and
-  `close()` cleans up; `notifications(home)` reads the toasts the app asked to show.
+  `close()` cleans up; `restart(whileClosed)` closes it from its window and starts it again on the
+  same data and storage; `notifications(home)` and `badge(home)` read the toasts the app asked to
+  show and its taskbar count.
 - It never touches the person's Nitely: its own identifier (so its own window, lock, storage and
   app data), a new temp data folder each run (the app refuses `NITELY_HARNESS=1` without one, and the
   real one always), no `nitely://` registration, a throwaway approval key instead of the keychain,
