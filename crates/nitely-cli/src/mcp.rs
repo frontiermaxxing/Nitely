@@ -33,7 +33,7 @@ pub(crate) struct Remote {
 }
 
 /// Tools that work in a repo on this machine, so not for an agent elsewhere.
-const LOCAL_ONLY: &[&str] = &["start_task", "run_gate", "submit", "land", "widen"];
+const LOCAL_ONLY: &[&str] = &["start_task", "run_gate", "run", "submit", "land", "widen"];
 
 impl Server {
     pub(crate) fn remote(name: &str, project: Option<String>) -> Server {
@@ -245,6 +245,23 @@ fn tools() -> Value {
             "inputSchema": { "type": "object", "properties": {
                 "key": { "type": "string", "description": "The issue; defaults to the one your branch names." },
                 "worktree": { "type": "string", "description": "Defaults to the worktree you are in." }
+            } }
+        },
+        {
+            "name": "run",
+            "description": "Run a build or test command in one of the repo's build lanes (docs/build-lanes.md) instead of your worktree: Nitely snapshots your worktree as it is now, committed or not (your files, index and branch are left as they are), runs the command in a warm checkout that keeps its build output, and returns the exit code, the end of the output and the log's path. Waits for a free lane and for the command to end. Only for a repo whose playbook has [lanes].",
+            "inputSchema": { "type": "object", "required": ["command"], "properties": {
+                "command": { "type": "string", "description": "As you would type it in the worktree, e.g. `cargo test -p nitely-core`." },
+                "key": { "type": "string", "description": "The issue; defaults to the one your branch names." },
+                "worktree": { "type": "string", "description": "Defaults to the worktree you are in." }
+            } }
+        },
+        {
+            "name": "run_status",
+            "description": "A build lane run's record (state queued, running, done, lane_error or abandoned; exit code; output; log), by the id `run` returned. Without an id, your last runs. With wait_seconds, waits up to that long (at most 600) for a queued or running one to end.",
+            "inputSchema": { "type": "object", "properties": {
+                "id": { "type": "integer" },
+                "wait_seconds": { "type": "integer", "minimum": 0, "maximum": 600 }
             } }
         },
         {
@@ -701,6 +718,25 @@ fn run_tool(server: &Server, name: &str, args: &Value, params: &Value) -> Result
             let root = playbook::repo_root(&config, &dir).with_context(|| format!("{dir} is not inside a git repo"))?;
             json!(playbook::run_gate(&db, &root, &worktree, key.as_deref(), &actor)?)
         }
+        "run" => {
+            let dir = task_dir(&config, &db, args, &server.cwd)?;
+            json!(nitely_core::lanes::run_in(&config, &db, &dir, str_arg(args, "key"), req(args, "command")?, &actor, &mut |_| {})?)
+        }
+        "run_status" => match args.get("id").and_then(Value::as_i64) {
+            Some(id) => {
+                let wait = args.get("wait_seconds").and_then(Value::as_u64).unwrap_or(0).min(600);
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait);
+                loop {
+                    let run = db.lane_run(id)?.with_context(|| format!("no run {id}"))?;
+                    let open = run.state == "queued" || run.state == "running";
+                    if !open || std::time::Instant::now() >= deadline {
+                        break json!(run);
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
+            }
+            None => json!(db.lane_runs_by(actor.id(), 5)?),
+        },
         "submit" => {
             let dir = task_dir(&config, &db, args, &server.cwd)?;
             nitely_core::install::check_current(&config, &dir, env!("NITELY_COMMIT"))?;

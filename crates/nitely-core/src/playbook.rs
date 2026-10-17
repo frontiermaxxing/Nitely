@@ -34,6 +34,9 @@ pub struct Playbook {
     /// Agent workers Nitely starts itself (docs/crew.md); off unless `workers` is set.
     #[serde(default)]
     pub crew: crate::crew::CrewRules,
+    /// Build lanes (docs/build-lanes.md); none unless the playbook has a `[lanes]` table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lanes: Option<crate::lanes::LaneRules>,
     /// Keys this nitely does not know, which it ignored: a typo, or a key a newer nitely reads.
     /// Refusing them would break every older nitely still running the day a playbook starts
     /// using a new key (NIT-50), so they are reported instead (see `unknown_warnings`).
@@ -163,7 +166,7 @@ pub fn setup_files_in(rules: &WorktreeRules, files: &[String]) -> Vec<String> {
 
 /// Where a worktree keeps the fingerprint of the dependency files its setup last ran against:
 /// in its own git folder, so it is never committed and goes away with the worktree.
-fn setup_record(worktree: &Path) -> Option<PathBuf> {
+pub(crate) fn setup_record(worktree: &Path) -> Option<PathBuf> {
     let path = git(worktree, &["rev-parse", "--git-path", "nitely-setup"]).ok()?;
     let path = PathBuf::from(path.trim());
     Some(if path.is_absolute() { path } else { worktree.join(path) })
@@ -176,7 +179,7 @@ pub fn setup_passed(worktree: &Path) -> bool {
 }
 
 /// FNV-1a over the names and contents of the dependency files present, stable across builds.
-fn setup_fingerprint(rules: &WorktreeRules, worktree: &Path) -> String {
+pub(crate) fn setup_fingerprint(rules: &WorktreeRules, worktree: &Path) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     let mut eat = |bytes: &[u8]| {
         for b in bytes {
@@ -198,7 +201,7 @@ fn setup_fingerprint(rules: &WorktreeRules, worktree: &Path) -> String {
 /// dependency, or the agent added one), so the gate does not fail on a stale node_modules or
 /// target. A worktree from before this was recorded is taken as set up. Returns the setup results,
 /// and false when one failed; a command that failed and then passed goes in `flakes`.
-fn refresh_setup(rules: &WorktreeRules, worktree: &Path, main: &Path, base: &str, retries: u32, flakes: &mut Vec<Flake>) -> Result<(Vec<CommandResult>, bool)> {
+pub(crate) fn refresh_setup(rules: &WorktreeRules, worktree: &Path, main: &Path, base: &str, retries: u32, flakes: &mut Vec<Flake>) -> Result<(Vec<CommandResult>, bool)> {
     if rules.setup.is_empty() {
         return Ok((vec![], true));
     }

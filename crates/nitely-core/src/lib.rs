@@ -21,6 +21,7 @@ pub mod github;
 pub mod hook;
 pub mod install;
 pub mod land;
+pub mod lanes;
 pub mod light;
 pub mod linear_import;
 pub mod mirror;

@@ -1841,7 +1841,7 @@ impl Process for Adopted {
     }
 }
 
-fn pid_alive(pid: u32) -> bool {
+pub(crate) fn pid_alive(pid: u32) -> bool {
     #[cfg(windows)]
     {
         let out = playbook::shell_free_command("tasklist").args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"]).output();

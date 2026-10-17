@@ -72,8 +72,9 @@ reading code outside its sparse set, an agent has the **reference tree**: one fu
 checkout of the project's base commit, read-only by convention, moved with the base.
 
 **Build lanes.** A lane is a full checkout that keeps its build output: one or two per project,
-`.nitely-lanes/<project>/lane-<n>` beside the repo's worktrees. Only one request runs in a lane at a
-time.
+`<repo>-lanes/lane-<n>` beside the repo (`[lanes] dir`, like `[worktree] dir`), with NIT-196's
+reference tree at `<repo>-lanes/ref`. Only one request runs in a lane at a time, under an OS file
+lock (`lane-<n>.lock`) that a crashed process lets go of.
 
 **Requests.** A request is (snapshot, command). The snapshot is a commit in the repo's own object
 store: for committed work the branch head; for uncommitted work, a commit Nitely builds from the
@@ -122,15 +123,19 @@ every number above is without them.
 ### The request and its record
 
 ```json
-{ "id": "r-1792217000-3", "project": "NIT", "issue": "NIT-12", "by": "codex:c:/.../nit-12",
+{ "id": 42, "project": "NIT", "repo": "C:/Code/nitely", "issue": "NIT-12", "by": "codex:c:/.../nit-12",
   "kind": "run | gate | land", "snapshot": "<sha>", "tree": "<tree sha>", "base": "<sha>",
-  "command": "cargo test -p nitely-core", "step": null, "priority": 3, "timeout_s": 1800 }
+  "command": "cargo test -p nitely-core", "state": "queued | running | done | lane_error | abandoned",
+  "lane": 1, "executor": "local", "queued_at": 0, "started_at": 0, "ended_at": 0,
+  "exit_code": 0, "timed_out": false, "setup_ran": false, "files_switched": 2,
+  "log": "<data>/lanes/NIT/42.log", "output": "<the end of it>", "error": null }
 ```
 
-The record adds `lane`, `executor`, `queued_at`, `started_at`, `ended_at`, `exit_code`,
-`timed_out`, `setup_ran`, `files_switched`, the log's path, and the end of its output. Records live
-in the database (`lane_run`), logs in the data folder (`lanes/<project>/<id>.log`, kept 7 days), and
-each run also goes on the issue's timeline.
+This is `lanes::Run`, the `lane_run` row. `exit_code` is the command's (none when it was stopped
+at the timeout); `lane_error` means the lane could not run it at all (`error` says why), which is
+never a verdict on the code. A queued or running row whose process is gone reads as `abandoned`.
+Logs live in the data folder (`lanes/<project>/<id>.log`; logs and snapshot refs are kept 7 days),
+and each run with an issue goes on its timeline as `lane_run`.
 
 A gate request whose tree and gate commands already passed is answered from its record. The retro
 found 31 of 418 gate passes repeated a commit that had passed already, and a land whose rebase
@@ -138,13 +143,15 @@ changed nothing is one of them.
 
 ### `run`
 
-- MCP `run { command | step, issue?, wait? }`. It snapshots the caller's worktree, queues the
-  request and waits up to 10 minutes. It returns the record: exit code, seconds, the end of the
-  output, and the log. A request still queued or running after that returns its id, and
-  `run_status { id }` waits again.
-- CLI `nitely run [--step <name>] -- <command>` from a worktree, the same way, printing the output
-  live. `nitely lanes` shows lanes, queue and slots. `nitely lanes reset <project>` puts every lane
-  of a project back to a clean checkout; its build output stays.
+- MCP `run { command, key?, worktree? }`. It snapshots the caller's worktree, waits for a free lane
+  and for the command (bounded by `[lanes] timeout_minutes`), and returns the record. A call can be
+  forwarded to a newer build in a process of its own, so the wait happens in the call, not in a
+  thread that could die with it. `run_status { id?, wait_seconds? }` reads a run (and waits up to
+  600 s for an open one); without an id, the caller's last runs.
+- CLI `nitely run [--issue] -- <command>` from a worktree, printing the log as it grows and exiting
+  with the command's exit code. `nitely lanes [status]` shows the lanes, the queue and the last
+  runs; `nitely lanes reset` puts every free lane back to a clean checkout of what it holds (its
+  build output stays); `nitely lanes show <id>` prints a run and its log.
 - `step` names a playbook gate command, so an agent can ask for "the gate's tests" without spelling
   the command out.
 - Commands run with the agent's own trust: an agent that could run them in its worktree can run them
@@ -237,9 +244,11 @@ moment and rebuilt.
 mode = "light"                       # "full" (today) or "light"
 sparse = ["crates/nitely-core"]      # optional: cone-mode directories every worktree starts with
 
-[lanes]
+[lanes]                              # no [lanes]: no lanes, everything works as before
 count = 2                            # lanes for this project on this machine
 keep = ["target", "node_modules"]    # build directories a lane keeps between requests
+dir = "../{repo}-lanes"              # where lanes go, relative to the repo root
+timeout_minutes = 30                 # a command running longer is stopped with what it started
 heavy = ["^cargo (build|test|clippy)", "^npm (ci|install|test|run build)"]
 executor = "local"                   # "local", "machine:<name>" or "ci" (the gate only)
 base = "tip"                         # or "every 4h"

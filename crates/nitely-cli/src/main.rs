@@ -2,6 +2,7 @@
 #![recursion_limit = "256"]
 
 mod crew;
+mod lanes;
 mod mcp;
 mod serve;
 mod ui;
@@ -118,6 +119,21 @@ enum Cmd {
         /// The issue; defaults to the one the branch names.
         #[arg(long)]
         issue: Option<String>,
+    },
+    /// Run a build or test command in one of the repo's build lanes (docs/build-lanes.md), on a
+    /// snapshot of the current worktree, committed or not, e.g. `nitely run -- cargo test`. Prints
+    /// the output as it comes and exits with the command's exit code.
+    Run {
+        /// The issue; defaults to the one the branch names.
+        #[arg(long)]
+        issue: Option<String>,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        command: Vec<String>,
+    },
+    /// The repo's build lanes: `status` (the default), `reset`, or `show <run>`.
+    Lanes {
+        #[command(subcommand)]
+        command: Option<lanes::LanesCmd>,
     },
     /// Hand in the current worktree's branch: gate, cross-vendor review, push, pull request.
     Submit {
@@ -1005,6 +1021,8 @@ fn run(cmd: Cmd) -> Result<()> {
             }
         }
         Cmd::Crew { command } => crew::run(command, &me),
+        Cmd::Run { issue, command } => lanes::run(issue, command, &me),
+        Cmd::Lanes { command } => lanes::lanes(command),
         Cmd::Agents { yes } => {
             let config = Config::load()?;
             if config.repos.is_empty() {

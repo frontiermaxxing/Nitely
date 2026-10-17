@@ -22,7 +22,10 @@ Gate steps can depend on what the branch changes (`when_changed`, `unless_only`)
 touch. A gate command that fails runs once more at the same commit before the gate fails
 (`[gate] retries`, 1 by default, 0 to turn it off). One that then passes is a flake: the gate
 passes, its result lists the command and the tests that failed under `flaked`, and a `gate_flaked`
-event goes on the issue's timeline, so flakes are counted rather than hidden. [docs/playbooks/example.toml](playbooks/example.toml) is a worked example of a full
+event goes on the issue's timeline, so flakes are counted rather than hidden. A `[lanes]` table gives
+the repo build lanes: warm checkouts where `nitely run` (MCP: `run`) builds and tests a snapshot of a
+worktree instead of the worktree itself ([build-lanes.md](build-lanes.md)). Without it nothing
+changes. [docs/playbooks/example.toml](playbooks/example.toml) is a worked example of a full
 playbook for a made-up monorepo: per-OS branches, worktree setup and teardown, gate steps that skip
 what a change cannot affect, review flags, and paths that wait for you.
 
