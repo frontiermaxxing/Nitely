@@ -33,7 +33,7 @@ pub(crate) struct Remote {
 }
 
 /// Tools that work in a repo on this machine, so not for an agent elsewhere.
-const LOCAL_ONLY: &[&str] = &["start_task", "run_gate", "run", "submit", "land", "widen"];
+const LOCAL_ONLY: &[&str] = &["start_task", "run_gate", "run", "submit", "submit_status", "land", "widen"];
 
 impl Server {
     pub(crate) fn remote(name: &str, project: Option<String>) -> Server {
@@ -266,10 +266,20 @@ fn tools() -> Value {
         },
         {
             "name": "submit",
-            "description": "Hand in a finished branch: runs the gate, has another vendor review it (this takes minutes), decides whether the human must approve, pushes, opens or updates the pull request, and moves the issue (In Review, Needs You, or back to In Progress when the review finds P0/P1 problems). Commit everything first. Read `next` in the result for what to do after.",
+            "description": "Hand in a finished branch and move on. It returns at once with a job id; in the background Nitely runs the gate, has another vendor review it, decides whether the human must approve, pushes, opens or updates the pull request, and moves the issue (In Review, Needs You, or back to In Progress when the review finds P0/P1 problems). The result comes back through next_task, submit_status, or a notice on your next nitely call. Commit everything first. With wait: true it blocks until the result instead (minutes), as before.",
             "inputSchema": { "type": "object", "properties": {
                 "key": { "type": "string", "description": "The issue; defaults to the one your branch names." },
-                "worktree": { "type": "string", "description": "Defaults to the worktree you are in." }
+                "worktree": { "type": "string", "description": "Defaults to the worktree you are in." },
+                "wait": { "type": "boolean", "description": "Block until the gate and review finish and return the full result, as submit did before." }
+            } }
+        },
+        {
+            "name": "submit_status",
+            "description": "The result of a submit: the job's state, and once it finished, what submit returned (the issue's new state and `next`). Pass the job id from submit, or the issue key for its latest submit. wait_seconds (up to 600) waits for it to finish.",
+            "inputSchema": { "type": "object", "properties": {
+                "job": { "type": "integer" },
+                "key": { "type": "string" },
+                "wait_seconds": { "type": "integer" }
             } }
         },
         {
@@ -663,7 +673,24 @@ fn run_tool(server: &Server, name: &str, args: &Value, params: &Value) -> Result
         None => resolve_project(&config, db, str_arg(args, "project"), &server.cwd),
     };
 
-    Ok(match name {
+    // A submit that came back to this agent is told before anything else (NIT-212).
+    let returned = if name == "next_task" && server.remote.is_none() {
+        db.undelivered_submit_jobs(actor.id())?.into_iter().find(|j| j.needs_the_submitter())
+    } else {
+        None
+    };
+    let mut out = match name {
+        "next_task" if returned.is_some() => {
+            let job = returned.as_ref().unwrap();
+            db.mark_submit_jobs_delivered(&[job.id])?;
+            json!({
+                "issue": db.issue(&job.issue)?,
+                "returned": job.outcome(),
+                "job": job.id,
+                "worktree": job.worktree,
+                "next": "Your submit came back: fix what it says in the same worktree (start_task with this key if the worktree is gone), commit, and submit again."
+            })
+        }
         "next_task" => {
             let project = project(&db)?;
             match nitely_core::overlap::next_task(&config, &mut db, &project, actor.id(), &[])? {
@@ -741,7 +768,23 @@ fn run_tool(server: &Server, name: &str, args: &Value, params: &Value) -> Result
             let dir = task_dir(&config, &db, args, &server.cwd)?;
             nitely_core::install::check_current(&config, &dir, env!("NITELY_COMMIT"))?;
             let opts = nitely_core::submit::SubmitOptions { dir: &dir, issue_key: str_arg(args, "key"), skip_review: false, local_only: false };
-            json!(nitely_core::submit::submit(&mut db, &config, &opts, &actor)?)
+            if args.get("wait").and_then(Value::as_bool).unwrap_or(false) {
+                json!(nitely_core::submit::submit(&mut db, &config, &opts, &actor)?)
+            } else {
+                let runner = nitely_core::submit_job::DetachedProcess { nitely: std::env::current_exe()? };
+                let job = nitely_core::submit_job::submit_async(&mut db, &config, &opts, &actor, &runner)?;
+                job_json(&db, &job, &actor)?
+            }
+        }
+        "submit_status" => {
+            let job = match (args.get("job").and_then(Value::as_i64), str_arg(args, "key")) {
+                (Some(id), _) => db.submit_job(id)?.with_context(|| format!("no submit job {id}"))?,
+                (None, Some(key)) => db.latest_submit_job(key)?.with_context(|| format!("{key} has no submit yet"))?,
+                (None, None) => bail!("pass the job id submit returned, or the issue key"),
+            };
+            let seconds = args.get("wait_seconds").and_then(Value::as_u64).unwrap_or(0).min(600);
+            let job = nitely_core::submit_job::wait(&db, job.id, std::time::Duration::from_secs(seconds))?;
+            job_json(&db, &job, &actor)?
         }
         "land" => {
             let key = req(args, "key")?;
@@ -960,7 +1003,33 @@ fn run_tool(server: &Server, name: &str, args: &Value, params: &Value) -> Result
             }
         }
         other => bail!("unknown tool {other}"),
-    })
+    };
+    // Submits of this agent's that finished since its last call: one line each (NIT-212).
+    if server.remote.is_none() && out.is_object() {
+        let done = db.undelivered_submit_jobs(actor.id())?;
+        if !done.is_empty() {
+            db.mark_submit_jobs_delivered(&done.iter().map(|j| j.id).collect::<Vec<_>>())?;
+            out["notices"] = json!(done.iter().map(|j| j.outcome()).collect::<Vec<_>>());
+        }
+    }
+    Ok(out)
+}
+
+/// A submit job as submit and submit_status return it. A finished one is told to its submitter
+/// here, so it is not repeated as a notice.
+fn job_json(db: &Db, job: &nitely_core::submit_job::Job, actor: &nitely_core::issues::Actor) -> Result<Value> {
+    if job.finished() && job.requested_by == actor.id() {
+        db.mark_submit_jobs_delivered(&[job.id])?;
+    }
+    let mut v = json!(job);
+    v["outcome"] = json!(job.outcome());
+    v["next"] = match (&job.result, job.state.as_str()) {
+        (Some(r), _) => r["next"].clone(),
+        (None, "queued" | "running") => json!(nitely_core::submit_job::QUEUED_NEXT),
+        (None, _) => json!("Fix what stopped it, commit, and submit again."),
+    };
+    v["log"] = json!(nitely_core::submit_job::log_path(job.id).to_string_lossy());
+    Ok(v)
 }
 
 #[cfg(test)]

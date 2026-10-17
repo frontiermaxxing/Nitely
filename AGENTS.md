@@ -15,11 +15,14 @@ Nitely tracks its own build. Its backlog is the **NIT** project in Nitely, reach
    does not depend on the answer. Never set Approved; only Andrew can.
 5. Before you stop, leave a `note` with `handoff: true`: what is done, what is left, what you were
    unsure about.
-6. When the work is committed, call `submit` (or `nitely submit`). It runs the gate, has the other
-   vendor review the branch (Codex reviews Claude, Claude reviews the rest), pushes, opens or
-   updates the pull request into `main`, and moves the issue: back to In Progress when the review
-   finds P0 or P1 problems (fix them and submit again), to Needs You when Andrew must approve, and
-   to In Review otherwise. `run_gate` alone runs just the gate.
+6. When the work is committed, call `submit` (or `nitely submit`). It hands the branch in and
+   returns at once; in the background it runs the gate, has the other vendor review the branch
+   (Codex reviews Claude, Claude reviews the rest), pushes, opens or updates the pull request into
+   `main`, and moves the issue: back to In Progress when the review finds P0 or P1 problems (fix
+   them and submit again), to Needs You when Andrew must approve, and to In Review otherwise. The
+   result comes back through `next_task`, `submit_status` (`nitely submit-status`), or a notice on
+   your next nitely call. `submit` with `wait: true` (`nitely submit --wait`) blocks for the result
+   as before. `run_gate` alone runs just the gate.
 7. Once the review passed (and Andrew approved, when it waits for him), call `land` (or
    `nitely land NIT-n`). It lands one branch at a time: rebase onto `main`, check the review still
    covers exactly this change, gate, fast-forward, push, clean up, and move the issue to Done. On a

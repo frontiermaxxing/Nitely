@@ -190,7 +190,7 @@ The same text for every agent, with the blanks filled in:
 > 3. File anything you find but will not fix with file_issue.
 > 4. If only the human can decide something, ask it, move {key} to Needs You, leave a handoff note
 >    and stop: do not wait for the answer.
-> 5. Commit, then call submit. If the review sends it back (P0 or P1 findings), fix them, commit and
+> 5. Commit, then call submit with wait: true, so you get its result here. If the review sends it back (P0 or P1 findings), fix them, commit and
 >    submit again, up to three rounds; then file what is left and stop.
 > 6. When submit says it passed and no human approval is needed, call land. On a rebase conflict,
 >    resolve it in the worktree, then submit and land again. If land says it could not remove the

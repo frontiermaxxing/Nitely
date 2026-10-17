@@ -50,6 +50,7 @@ pub mod pulse;
 pub mod push;
 pub mod watch;
 pub mod submit;
+pub mod submit_job;
 #[cfg(test)]
 pub(crate) mod test_repo;
 

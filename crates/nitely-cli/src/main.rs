@@ -135,7 +135,8 @@ enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
-    /// Hand in the current worktree's branch: gate, cross-vendor review, push, pull request.
+    /// Hand in the current worktree's branch: gate, cross-vendor review, push, pull request. It runs
+    /// in the background and returns a job id (`nitely submit-status`); --wait runs it here.
     Submit {
         /// The issue; defaults to the one the branch names.
         #[arg(long)]
@@ -146,7 +147,22 @@ enum Cmd {
         /// Do not push or open a pull request.
         #[arg(long)]
         local: bool,
+        /// Run the gate and review here and print the result, as submit did before (for scripts).
+        #[arg(long)]
+        wait: bool,
     },
+    /// The result of a submit: by job id, by --issue (its latest), or the current worktree's issue.
+    SubmitStatus {
+        job: Option<i64>,
+        #[arg(long)]
+        issue: Option<String>,
+        /// Wait up to this many seconds for it to finish.
+        #[arg(long)]
+        wait: Option<u64>,
+    },
+    /// Runs a queued submit; `nitely submit` starts it in the background.
+    #[command(hide = true)]
+    SubmitJob { id: i64 },
     /// Land a submitted issue: rebase, check its review and approval, gate, fast-forward, push.
     Land {
         key: String,
@@ -992,19 +1008,53 @@ fn run(cmd: Cmd) -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Submit { issue, no_review, local } => {
+        Cmd::Submit { issue, no_review, local, wait } => {
             let config = Config::load()?;
             let mut db = Db::open_default()?;
             let cwd = cwd()?;
             nitely_core::install::check_current(&config, &cwd, env!("NITELY_COMMIT"))?;
-            eprintln!("running the gate, then the review (this takes minutes)…");
             let opts = nitely_core::submit::SubmitOptions { dir: &cwd, issue_key: issue.as_deref(), skip_review: no_review, local_only: local };
+            if !wait {
+                let runner = nitely_core::submit_job::DetachedProcess { nitely: std::env::current_exe()? };
+                let job = nitely_core::submit_job::submit_async(&mut db, &config, &opts, &me, &runner)?;
+                print_json(&job)?;
+                if job.finished() {
+                    eprintln!("{}", job.outcome());
+                } else {
+                    eprintln!("handed in as job {}: the gate and review run in the background. `nitely submit-status {}` shows the result (--wait to wait for it).", job.id, job.id);
+                }
+                return Ok(());
+            }
+            eprintln!("running the gate, then the review (this takes minutes)…");
             let s = nitely_core::submit::submit(&mut db, &config, &opts, &me)?;
             print_json(&s)?;
             eprintln!("{}", s.next);
             if !s.gate.passed || s.review.as_ref().is_some_and(|r| r.verdict != "pass") {
                 std::process::exit(1);
             }
+            Ok(())
+        }
+        Cmd::SubmitJob { id } => {
+            let config = Config::load()?;
+            let mut db = Db::open_default()?;
+            let job = nitely_core::submit_job::run(&mut db, &config, id)?;
+            print_json(&job)?;
+            Ok(())
+        }
+        Cmd::SubmitStatus { job, issue, wait } => {
+            let db = Db::open_default()?;
+            let found = match (job, issue.as_deref()) {
+                (Some(id), _) => db.submit_job(id)?.ok_or_else(|| anyhow::anyhow!("no submit job {id}"))?,
+                (None, Some(key)) => db.latest_submit_job(key)?.ok_or_else(|| anyhow::anyhow!("{key} has no submit yet"))?,
+                (None, None) => {
+                    let (_, branch_key) = playbook::current_worktree(&cwd()?)?;
+                    let key = branch_key.ok_or_else(|| anyhow::anyhow!("pass a job id or --issue"))?;
+                    db.latest_submit_job(&key)?.ok_or_else(|| anyhow::anyhow!("{key} has no submit yet"))?
+                }
+            };
+            let found = nitely_core::submit_job::wait(&db, found.id, std::time::Duration::from_secs(wait.unwrap_or(0)))?;
+            print_json(&found)?;
+            eprintln!("{}", found.outcome());
             Ok(())
         }
         Cmd::Land { key, no_push, keep, break_lock } => {

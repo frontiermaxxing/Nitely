@@ -21,8 +21,10 @@ files many at once, their blockers naming each other by ref. When the playbook i
 4. When only the human can decide, `ask`, move the issue to Needs You, and keep working on what does \
 not depend on the answer. Never set Approved: only the human approves. When a change needs their \
 approval, `submit` already puts it in their inbox, so never `ask` for an approval.
-5. Commit, then `submit`: it runs the gate, has another vendor review the branch, opens the pull \
-request, and moves the issue. Read its `next`.
+5. Commit, then `submit`: it hands the branch in and returns at once. In the background it runs the \
+gate, has another vendor review the branch, opens the pull request, and moves the issue. The result \
+comes back through `next_task`, `submit_status`, or a notice on your next nitely call; meanwhile pick \
+up other work or stop. `submit` with wait: true blocks until the result instead.
 6. Once it is In Review (or the human approved it), `land` puts it on the integration branch.
 7. Before you stop, `note` with handoff: true: what is done, what is left, what you were unsure about.
 8. Link every issue you name, in replies, commit messages, pull requests and notes: \
