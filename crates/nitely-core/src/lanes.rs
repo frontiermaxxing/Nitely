@@ -696,22 +696,25 @@ struct Waiting {
 
 /// The order requests start in: priority first (land, then submit's gate, then the rest), then
 /// each project's first waiting request before any project's second, then the oldest.
-/// Turns a project has already had (`served`, by upper-case project) count before its waiting
-/// requests, so a project whose request just ran waits behind the others' next.
-fn in_order(mut waiting: Vec<Waiting>, served: &std::collections::HashMap<String, usize>) -> Vec<Waiting> {
+/// Among requests at the same place in their projects' queues, the project served longest ago
+/// goes first (`last_started`, by upper-case project; never served counts as longest ago), so a
+/// project whose request just started or ran waits behind the others' next, whenever its own was
+/// queued.
+fn in_order(mut waiting: Vec<Waiting>, last_started: &std::collections::HashMap<String, i64>) -> Vec<Waiting> {
     waiting.sort_by_key(|w| (w.priority, w.id));
     let mut seen: std::collections::HashMap<(i64, String), usize> = std::collections::HashMap::new();
-    let mut ranked: Vec<(i64, usize, i64, Waiting)> = waiting
+    let mut ranked: Vec<(i64, usize, i64, i64, Waiting)> = waiting
         .into_iter()
         .map(|w| {
             let project = w.project.to_uppercase();
-            let n = seen.entry((w.priority, project.clone())).or_insert_with(|| served.get(&project).copied().unwrap_or(0));
+            let n = seen.entry((w.priority, project.clone())).or_default();
             *n += 1;
-            (w.priority, *n, w.id, w)
+            let last = last_started.get(&project).copied().unwrap_or(i64::MIN);
+            (w.priority, *n, last, w.id, w)
         })
         .collect();
-    ranked.sort_by_key(|(p, n, id, _)| (*p, *n, *id));
-    ranked.into_iter().map(|(_, _, _, w)| w).collect()
+    ranked.sort_by_key(|(p, n, last, id, _)| (*p, *n, *last, *id));
+    ranked.into_iter().map(|(_, _, _, _, w)| w).collect()
 }
 
 /// Whether request `id` may try for a slot and a lane now: no request of its own repo is ahead of
@@ -726,8 +729,7 @@ fn my_turn(db: &Db, id: i64, slots: u32, alive: &mut dyn FnMut(i64) -> bool) -> 
     let mut lanes_by_repo: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
     let mut running = 0i64;
     let mut waiting = Vec::new();
-    let mut oldest_waiting: Option<i64> = None;
-    for (w, state, pid, lane_count, queued_at) in rows {
+    for (w, state, pid, lane_count, _queued_at) in rows {
         let repo = crate::paths::normalize(&w.repo);
         lanes_by_repo.insert(repo.clone(), lane_count.max(1));
         // A request whose process is gone holds nothing and waits for nothing.
@@ -738,20 +740,17 @@ fn my_turn(db: &Db, id: i64, slots: u32, alive: &mut dyn FnMut(i64) -> bool) -> 
             running += 1;
             *running_by_repo.entry(repo).or_default() += 1;
         } else {
-            oldest_waiting = Some(oldest_waiting.map_or(queued_at, |o: i64| o.min(queued_at)));
             waiting.push(w);
         }
     }
-    // The turns each project has had since the oldest request still waiting was queued, running or
-    // finished: a project whose request just ran waits behind the others' next, so one project's
-    // backlog never holds the rest up.
-    let mut served: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    if let Some(since) = oldest_waiting {
-        let mut stmt = db.conn.prepare("SELECT project, COUNT(*) FROM lane_run WHERE started_at IS NOT NULL AND started_at >= ?1 GROUP BY project")?;
-        for row in stmt.query_map([since], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))? {
-            let (project, n) = row?;
-            *served.entry(project.to_uppercase()).or_default() += n as usize;
-        }
+    // When each project last had a turn (a request of it started), so the one served longest ago
+    // goes first and one project's backlog never holds up the rest.
+    let mut served: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    let mut stmt = db.conn.prepare("SELECT project, MAX(started_at) FROM lane_run WHERE started_at IS NOT NULL GROUP BY project")?;
+    for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))? {
+        let (project, at) = row?;
+        let slot = served.entry(project.to_uppercase()).or_insert(at);
+        *slot = (*slot).max(at);
     }
     let free_slots = (slots as i64 - running).max(0);
     let mine = crate::paths::normalize(&waiting.iter().find(|w| w.id == id).map(|w| w.repo.clone()).unwrap_or_default());
@@ -1513,9 +1512,14 @@ commands = []
         let order: Vec<i64> = in_order(vec![w(1, "A", 3), w(2, "A", 3), w(3, "B", 3), w(4, "A", 2), w(5, "C", 1), w(6, "B", 3)], &none).into_iter().map(|w| w.id).collect();
         assert_eq!(order, [5, 4, 1, 3, 2, 6]);
         // A1 started: A2 waits behind B1, though it is older.
-        let a_running = std::collections::HashMap::from([("A".to_string(), 1)]);
-        let order: Vec<i64> = in_order(vec![w(2, "A", 3), w(3, "B", 3)], &a_running).into_iter().map(|w| w.id).collect();
+        // A was served last (A1 started): A2 waits behind B1, though it is older.
+        let a_served = std::collections::HashMap::from([("A".to_string(), 10)]);
+        let order: Vec<i64> = in_order(vec![w(2, "A", 3), w(3, "B", 3)], &a_served).into_iter().map(|w| w.id).collect();
         assert_eq!(order, [3, 2]);
+        // Both served, B more recently: A's goes first.
+        let both = std::collections::HashMap::from([("A".to_string(), 10), ("B".to_string(), 20)]);
+        let order: Vec<i64> = in_order(vec![w(2, "A", 3), w(3, "B", 3)], &both).into_iter().map(|w| w.id).collect();
+        assert_eq!(order, [2, 3]);
     }
 
     #[test]
@@ -1570,11 +1574,12 @@ commands = []
                 .unwrap();
             db.conn.last_insert_rowid()
         };
-        add("A", "done", 10, Some(13));
+        // A1 started (10) before A2 (11) and B1 (12) were even queued, and has finished.
+        add("A", "done", 9, Some(10));
         let a2 = add("A", "queued", 11, None);
         let b1 = add("B", "queued", 12, None);
         let mut alive = |pid: i64| pid == me;
-        assert!(my_turn(&db, b1, 1, &mut alive).unwrap(), "B has had no turn since A2 queued; A has had one");
+        assert!(my_turn(&db, b1, 1, &mut alive).unwrap(), "B was never served; A was, last");
         assert!(!my_turn(&db, a2, 1, &mut alive).unwrap());
         std::fs::remove_dir_all(base).ok();
     }

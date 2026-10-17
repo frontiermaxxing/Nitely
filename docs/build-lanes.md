@@ -103,8 +103,9 @@ and memory (one slot per 8 logical cores and 8 GB, at least 1), or `build_slots`
 share of cores: `{jobs}` in a command, and `NITELY_JOBS`, `CARGO_BUILD_JOBS` and `MAKEFLAGS=-j` in its
 environment. A slot is an OS file lock beside the database, so a crashed requester frees its slot as
 it frees its lane. Order: land, then submit's gate, then `run`; within each, round-robin across
-projects (the turns a project has had since the oldest waiting request was queued count against it,
-so one project's backlog never holds up the rest), then the oldest. A request starts when no request of
+projects (each project's first waiting request before any project's second, and among those the
+project served longest ago first, so one project's backlog never holds up the rest), then the
+oldest. A request starts when no request of
 its own repo is ahead of it and there is a free slot after the requests ahead of it that could start;
 a repo whose lanes are all busy holds up no other repo. (The person's own requests do not yet go
 first.)
