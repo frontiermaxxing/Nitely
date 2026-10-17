@@ -9,6 +9,7 @@ const ADDRESSES: PhoneStatus["addresses"] = [
   { ip: "192.168.1.68", interface: "Wi-Fi", kind: null },
 ];
 let listening: string[] = [];
+let bound: string[] = [];
 let devices: PhoneStatus["devices"] = [{ id: "9f2c41aa07d3e5b1", name: "Pixel 9", public_key: "ab".repeat(32), paired_at: NOW() - 3 * 86400 }];
 let offeredAt = 0;
 let decided = false;
@@ -25,7 +26,7 @@ function status(): PhoneStatus {
     offeredAt && !decided && NOW() - offeredAt > 3
       ? [{ id: "c0ffee0011223344", name: "Andrew's iPhone", public_key: "cd".repeat(32), code: "4821-0937", at: offeredAt + 3, status: "waiting" as const }]
       : [];
-  return { listening, addresses: ADDRESSES, devices, requests, devices_error: null, notified: ["9f2c41aa07d3e5b1"] };
+  return { listening, bound, addresses: ADDRESSES, devices, requests, devices_error: null, notified: ["9f2c41aa07d3e5b1"] };
 }
 
 export function phoneStatus(): PhoneStatus {
@@ -46,16 +47,19 @@ export function phoneStart(args: Record<string, unknown>): PhoneStatus {
   if (tls && tls.kind !== "none") {
     const host = tls.kind === "tailscale" ? phoneTailscaleName() : tls.host.trim();
     listening = [`https://${host}:7422/phone/`];
+    bound = ips;
     return status();
   }
   const bad = ips.find((ip) => !ADDRESSES.find((a) => a.ip === ip)?.kind);
   if (bad) throw `${bad} is not this machine's Tailscale address, and plain HTTP on any other network could be changed by anyone who can intercept traffic; pick the Tailscale address (docs/phone.md)`;
   listening = ips.map((ip) => `http://${ip}:7422/phone/`);
+  bound = ips;
   return status();
 }
 
 export function phoneStop(): PhoneStatus {
   listening = [];
+  bound = [];
   offeredAt = 0;
   return status();
 }

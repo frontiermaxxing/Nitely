@@ -263,7 +263,7 @@ export function PhoneSetup(props: { now: number }) {
         </div>
       </section>
 
-      <AwayFromHome listening={status.listening} />
+      <AwayFromHome bound={status.bound} />
     </div>
   );
 }
@@ -273,7 +273,7 @@ export function PhoneSetup(props: { now: number }) {
  * the phone. Nitely runs no relay (docs/phone.md, "Away from home"); this says where Tailscale
  * stands and what is left to do.
  */
-function AwayFromHome(props: { listening: string[] }) {
+function AwayFromHome(props: { bound: string[] }) {
   const [ts, setTs] = useState<TailscaleState | null>(null);
   const [checking, setChecking] = useState(false);
   const check = useCallback(() => {
@@ -284,7 +284,8 @@ function AwayFromHome(props: { listening: string[] }) {
     );
   }, []);
   useEffect(check, [check]);
-  const viaTailscale = props.listening.some((u) => /^http:\/\/(\[fd7a:115c:a1e0:|100\.)/.test(u) || u.startsWith("https://"));
+  // Whether the server is bound to one of Tailscale's addresses for this PC, over HTTP or HTTPS.
+  const viaTailscale = !!ts && props.bound.some((ip) => ts.ips.includes(ip));
 
   return (
     <section className="settings-card phone-away">
@@ -303,7 +304,7 @@ function AwayFromHome(props: { listening: string[] }) {
             (ts.phones.length
               ? ` Phones on your tailnet: ${ts.phones.map((p) => `${p.name} (${p.online ? "online" : "offline"})`).join(", ")}.`
               : " No phone on your tailnet yet.")}
-          {ts.running && props.listening.length > 0 && (viaTailscale ? " The phone server listens there." : " The phone server listens only on this PC: turn it off and on with the Tailscale address picked.")}
+          {ts.running && props.bound.length > 0 && (viaTailscale ? " The phone server listens there." : " The phone server does not listen on the Tailscale address: turn it off and on with that address picked.")}
         </p>
       )}
       <ol className="small phone-away-steps">

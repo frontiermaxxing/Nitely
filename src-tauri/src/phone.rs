@@ -48,6 +48,8 @@ impl PhoneApp {
 #[derive(Serialize)]
 pub struct PhoneStatus {
     listening: Vec<String>,
+    /// The addresses the server is bound to (an HTTPS link names the certificate, not these).
+    bound: Vec<String>,
     addresses: Vec<Address>,
     devices: Vec<Device>,
     requests: Vec<PairRequest>,
@@ -58,13 +60,13 @@ pub struct PhoneStatus {
 }
 
 fn status(app: &PhoneApp) -> PhoneStatus {
-    let listening = app.running().as_ref().map(|r| r.pages()).unwrap_or_default();
+    let (listening, bound) = app.running().as_ref().map(|r| (r.pages(), r.addrs.iter().map(|a| a.ip().to_string()).collect())).unwrap_or_default();
     let (devices, devices_error) = match phone::load_devices() {
         Ok(d) => (d, None),
         Err(e) => (vec![], Some(format!("{e:#}"))),
     };
     let notified = app.phone.push().map(|p| p.subscriptions().into_iter().map(|s| s.device).collect()).unwrap_or_default();
-    PhoneStatus { listening, addresses: phone::addresses(), devices, requests: app.phone.waiting(), devices_error, notified }
+    PhoneStatus { listening, bound, addresses: phone::addresses(), devices, requests: app.phone.waiting(), devices_error, notified }
 }
 
 #[tauri::command]
