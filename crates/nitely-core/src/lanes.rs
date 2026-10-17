@@ -280,6 +280,40 @@ impl Db {
     }
 
     /// The runs one actor asked for, newest first.
+    /// A repo's queued and running runs in a project, oldest first, however many finished since:
+    /// what its queue shows. Read by repo, so another repo of the project cannot crowd it out.
+    pub fn open_lane_runs(&self, project: &str, repo: &str) -> Result<Vec<Run>> {
+        let mine = crate::paths::normalize(repo);
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {COLUMNS} FROM lane_run WHERE project = ?1 COLLATE NOCASE AND state IN ('queued', 'running') ORDER BY id"
+        ))?;
+        let rows = stmt.query_map(params![project], row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows
+            .into_iter()
+            .filter(|(r, _)| crate::paths::normalize(&r.repo) == mine)
+            .map(|(run, pid)| settle(self, run, pid))
+            .filter(|r| r.state == "queued" || r.state == "running")
+            .collect())
+    }
+
+    /// A repo's last `limit` finished runs in a project, newest first.
+    pub fn finished_lane_runs(&self, project: &str, repo: &str, limit: usize) -> Result<Vec<Run>> {
+        let mine = crate::paths::normalize(repo);
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {COLUMNS} FROM lane_run WHERE project = ?1 COLLATE NOCASE AND state NOT IN ('queued', 'running') ORDER BY id DESC"
+        ))?;
+        let mut rows = stmt.query(params![project])?;
+        let mut out = Vec::new();
+        while out.len() < limit {
+            let Some(r) = rows.next()? else { break };
+            let (run, _) = row(r)?;
+            if crate::paths::normalize(&run.repo) == mine {
+                out.push(run);
+            }
+        }
+        Ok(out)
+    }
+
     pub fn lane_runs_by(&self, by: &str, limit: usize) -> Result<Vec<Run>> {
         let mut stmt = self.conn.prepare(&format!("SELECT {COLUMNS} FROM lane_run WHERE requested_by = ?1 ORDER BY id DESC LIMIT ?2"))?;
         let rows = stmt.query_map(params![by, limit as i64], row)?.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1200,7 +1234,9 @@ pub fn overview(config: &crate::Config, db: &Db) -> Result<Overview> {
         }
         projects.push(ShownLanes { lanes, last });
     }
-    Ok(Overview { projects, slots: None })
+    // The machine's budget and what runs in it, the same for every repo ("builds 1 of 4").
+    let slots = projects.first().map(|p| Slots { used: p.lanes.running_on_machine.max(0) as u32, total: p.lanes.budget.slots });
+    Ok(Overview { projects, slots })
 }
 
 impl Db {
@@ -1236,11 +1272,9 @@ pub fn status(db: &Db, repo_root: &Path, pb: &Playbook, project: &str) -> Result
 /// otherwise when a running request names it.
 fn status_with(db: &Db, repo_root: &Path, pb: &Playbook, project: &str, probe_locks: bool) -> Result<Option<Lanes>> {
     let Some(rules) = pb.lanes.clone() else { return Ok(None) };
-    let runs = db.lane_runs(project, 50)?;
     let root = repo_root.to_string_lossy();
-    let mine = |r: &&Run| crate::paths::normalize(&r.repo) == crate::paths::normalize(&root);
-    let mut queue: Vec<Run> = runs.iter().filter(mine).filter(|r| r.state == "queued" || r.state == "running").cloned().collect();
-    queue.reverse();
+    // The queue by this repo directly: a long build stays in it whatever finished since (NIT-223).
+    let queue = db.open_lane_runs(project, &root)?;
     let mut lanes = Vec::new();
     for n in 1..=rules.count.max(1) {
         let path = lane_path(repo_root, pb, n);
@@ -1254,7 +1288,7 @@ fn status_with(db: &Db, repo_root: &Path, pb: &Playbook, project: &str, probe_lo
         };
         lanes.push(LaneState { lane: n, path: path.to_string_lossy().into_owned(), made, busy, at, size_bytes, cap_bytes });
     }
-    let recent = runs.iter().filter(mine).filter(|r| r.state != "queued" && r.state != "running").take(10).cloned().collect();
+    let recent = db.finished_lane_runs(project, &root, 10)?;
     // Every project's running requests, each read through `lane_run` so one whose process is gone
     // reads as abandoned and is not counted.
     let running_ids: Vec<i64> = db.conn.prepare("SELECT id FROM lane_run WHERE state = 'running'")?.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
@@ -1343,6 +1377,24 @@ count = 2
                 .unwrap();
         };
         insert(2, "lane_error", 1, Some("the switch failed twice"));
+        // A long build that started before everything below: still in the queue after 600 more.
+        db.conn
+            .execute(
+                "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, lane, queued_at, pid)
+                 VALUES ('APP', ?1, 'claude', 'gate', 's', 't', 'b', 'cargo test', 'running', 1, 2, ?2)",
+                params![root_s, std::process::id()],
+            )
+            .unwrap();
+        // Another repo of the same project, busier than this one, crowds nothing out.
+        for i in 0..80 {
+            db.conn
+                .execute(
+                    "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, lane, queued_at)
+                     VALUES ('APP', 'C:/Code/other', 'claude', 'run', 's', 't', 'b', 'npm test', 'done', 1, ?1)",
+                    params![700 + i],
+                )
+                .unwrap();
+        }
         for i in 0..600 {
             insert(1, "done", 10 + i, None);
         }
@@ -1353,9 +1405,13 @@ count = 2
         let o = overview(&config, &db).unwrap();
         assert_eq!(o.projects.len(), 1);
         let shown = &o.projects[0];
-        assert!(shown.lanes.recent.iter().all(|r| r.lane == Some(1)), "the last few runs are all lane 1's");
+        assert!(shown.lanes.recent.iter().all(|r| r.lane == Some(1) && r.state == "done"), "the last few runs are all lane 1's");
         assert_eq!(shown.last.iter().map(|r| (r.lane, r.state.as_str())).collect::<Vec<_>>(), [(Some(1), "done"), (Some(2), "lane_error")]);
-        assert!(o.slots.is_none(), "no machine budget until the scheduler keeps one");
+        assert_eq!(shown.lanes.queue.iter().map(|r| r.command.as_str()).collect::<Vec<_>>(), ["cargo test"], "the long build stays in the queue");
+        assert_eq!(shown.lanes.recent.len(), 10);
+        assert!(shown.lanes.recent.iter().all(|r| r.repo == root_s), "only this repo's runs");
+        let slots = o.slots.as_ref().expect("the machine's budget");
+        assert!(slots.total >= 1);
         assert!(!dir(&root, &playbook_with("[lanes]\n")).exists(), "reading the lanes writes nothing: no lane folder, no lock file");
         // A repo without [lanes] is left out.
         std::fs::write(root.join(playbook::PLAYBOOK_PATH), "[gate]
@@ -1376,7 +1432,7 @@ commands = []
         let log = base.join("run.log");
         // A marker no other process carries: an address only this test pings.
         let marker = "ping -n 40 127.0.0.97";
-        let (code, timed_out) = run_logged(&format!("start \"\" /B {marker} >NUL & exit /b 0"), &base, &log, Duration::from_secs(30)).unwrap();
+        let (code, timed_out) = run_logged(&format!("start \"\" /B {marker} >NUL & exit /b 0"), &base, &log, Duration::from_secs(30), 1).unwrap();
         assert_eq!((code, timed_out), (Some(0), false));
         let left = (0..25).all(|_| {
             std::thread::sleep(Duration::from_millis(200));
