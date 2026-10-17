@@ -775,6 +775,8 @@ export interface ProjectLanes {
   queue: LaneRun[];
   /** The last finished runs, newest first. */
   recent: LaneRun[];
+  /** The last finished run of each lane that has one, however long ago (`lanes::overview`). */
+  last?: LaneRun[];
 }
 
 /** Every repo's lanes (src-tauri `lanes_overview`); `slots` once the machine keeps a build budget. */

@@ -22,7 +22,7 @@ export interface LaneChip {
 export function laneChips(p: ProjectLanes): LaneChip[] {
   return p.lanes.map((l) => {
     const run = p.queue.find((r) => r.state === "running" && r.lane === l.lane) ?? null;
-    const last = p.recent.find((r) => r.lane === l.lane) ?? null;
+    const last = (p.last ?? p.recent).find((r) => r.lane === l.lane) ?? null;
     const base = { project: p.project, lane: l.lane, run, at: l.at, problem: null };
     if (run) return { ...base, state: "running" };
     if (last?.state === "lane_error") return { ...base, state: "unhealthy", problem: firstLine(last.error) ?? "the lane could not run its last request" };
@@ -60,10 +60,11 @@ export function chipWords(c: LaneChip, now: number): string {
   }
 }
 
-/** The run id a lane entry on an issue's timeline names: `Ran \`cargo test\` in lane 1: exit 0 after 42 s (run 17)`. */
+/** The run id a lane entry on an issue's timeline names: `Ran \`cargo test\` in lane 1: exit 0 after
+ * 42 s (run 17)`, or, for a gate answered from an earlier pass, `passed in lane run 17 already`. */
 export function laneRunId(t: { kind: string; summary: string | null }): number | null {
   if (t.kind !== "lane_run") return null;
-  const m = t.summary?.match(/\(run (\d+)\)\s*$/);
+  const m = t.summary?.match(/\(run (\d+)\)\s*$/) ?? t.summary?.match(/\blane run (\d+)\b/);
   return m ? Number(m[1]) : null;
 }
 

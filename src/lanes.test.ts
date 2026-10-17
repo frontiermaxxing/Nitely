@@ -45,9 +45,16 @@ test("a lane runs again after a problem, and an idle lane names the commit it ho
   assert.equal(chipWords(chips[0], 0), "idle at 1a2b3c4");
 });
 
+test("a lane's last problem stays shown however many runs other lanes finish since", () => {
+  const others = Array.from({ length: 10 }, (_, i) => run(20 + i, "done", 1, { exit_code: 0 }));
+  const p = { ...project([], others), last: [others[0], run(8, "lane_error", 2, { error: "held open" })] };
+  assert.equal(laneChips(p)[1].state, "unhealthy");
+});
+
 test("durations and the run a timeline entry names", () => {
   assert.deepEqual([forHowLong(42), forHowLong(180), forHowLong(3900), forHowLong(7200)], ["42s", "3m", "1h 5m", "2h"]);
   assert.equal(laneRunId({ kind: "lane_run", summary: "Ran `cargo test` in lane 1: exit 0 after 42 s (run 17)" }), 17);
   assert.equal(laneRunId({ kind: "lane_run", summary: "Lane 1 could not run `x`: busy" }), null);
+  assert.equal(laneRunId({ kind: "lane_run", summary: "The gate for 1a2b3c4 passed in lane run 12 already; not run again" }), 12);
   assert.equal(laneRunId({ kind: "crew_started", summary: "(run 3)" }), null);
 });

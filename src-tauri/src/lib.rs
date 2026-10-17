@@ -578,36 +578,10 @@ async fn open_crew_log(app: tauri::AppHandle, path: String) -> Result<(), String
     app.opener().open_path(log.to_string_lossy(), None::<&str>).map_err(|e| e.to_string())
 }
 
-/// The build lanes of every connected repo whose playbook has `[lanes]` (docs/build-lanes.md): each
-/// lane, the queue and the last runs, as `nitely lanes status` shows them. `slots` is the machine's
-/// build budget ("builds 3 of 4") once the scheduler keeps one; until then it is absent.
-#[derive(Serialize)]
-struct LanesOverview {
-    projects: Vec<nitely_core::lanes::Lanes>,
-    slots: Option<Slots>,
-}
-
-#[derive(Serialize)]
-struct Slots {
-    used: u32,
-    total: u32,
-}
-
+/// The build lanes of every connected repo whose playbook has `[lanes]` (docs/build-lanes.md).
 #[tauri::command]
-async fn lanes_overview() -> Result<LanesOverview, String> {
-    let config = Config::load().map_err(err)?;
-    let db = db()?;
-    let mut projects = Vec::new();
-    for repo in &config.repos {
-        let Some(project) = repo.project.as_deref() else { continue };
-        let root = std::path::Path::new(&repo.root);
-        // A repo whose playbook does not read shows no lanes here; its own views say why.
-        let Ok(pb) = nitely_core::playbook::Playbook::load(root) else { continue };
-        if let Some(lanes) = nitely_core::lanes::status(&db, root, &pb, project).map_err(err)? {
-            projects.push(lanes);
-        }
-    }
-    Ok(LanesOverview { projects, slots: None })
+async fn lanes_overview() -> Result<nitely_core::lanes::Overview, String> {
+    nitely_core::lanes::overview(&Config::load().map_err(err)?, &db()?).map_err(err)
 }
 
 /// Opens a build lane run's log, named by the run's id in its issue's timeline. The path comes

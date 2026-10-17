@@ -818,6 +818,53 @@ pub struct Lanes {
     pub recent: Vec<Run>,
 }
 
+/// One repo's lanes for the app (NIT-205): `status`, plus the last finished run in each lane,
+/// however long ago, so a lane whose last request ended in a lane problem shows it until it runs
+/// again (`recent` is only the last few runs of the repo).
+#[derive(Debug, Clone, Serialize)]
+pub struct ShownLanes {
+    #[serde(flatten)]
+    pub lanes: Lanes,
+    /// The last finished run of each lane that has one, in lane order.
+    pub last: Vec<Run>,
+}
+
+/// The machine's build budget once the scheduler keeps one: "builds 3 of 4".
+#[derive(Debug, Clone, Serialize)]
+pub struct Slots {
+    pub used: u32,
+    pub total: u32,
+}
+
+/// Every connected repo's lanes, for the app's lanes strip and Settings.
+#[derive(Debug, Clone, Serialize)]
+pub struct Overview {
+    pub projects: Vec<ShownLanes>,
+    /// Absent until the scheduler keeps a machine budget.
+    pub slots: Option<Slots>,
+}
+
+/// The lanes of every connected repo whose playbook has `[lanes]`. A repo whose playbook does not
+/// read is left out; its own views say why.
+pub fn overview(config: &crate::Config, db: &Db) -> Result<Overview> {
+    let mut projects = Vec::new();
+    for repo in &config.repos {
+        let Some(project) = repo.project.as_deref() else { continue };
+        let root = Path::new(&repo.root);
+        let Ok(pb) = Playbook::load(root) else { continue };
+        let Some(lanes) = status(db, root, &pb, project)? else { continue };
+        let mine = crate::paths::normalize(&repo.root);
+        let finished: Vec<Run> = db
+            .lane_runs(project, 500)?
+            .into_iter()
+            .filter(|r| crate::paths::normalize(&r.repo) == mine && r.state != "queued" && r.state != "running")
+            .collect();
+        let last = lanes.lanes.iter().filter_map(|l| finished.iter().find(|r| r.lane == Some(l.lane)).cloned()).collect();
+        projects.push(ShownLanes { lanes, last });
+    }
+    Ok(Overview { projects, slots: None })
+}
+
 /// The repo's lanes, its queue and its last runs. None when its playbook has no `[lanes]`.
 pub fn status(db: &Db, repo_root: &Path, pb: &Playbook, project: &str) -> Result<Option<Lanes>> {
     let Some(rules) = pb.lanes.clone() else { return Ok(None) };
@@ -882,6 +929,48 @@ mod tests {
 
     fn playbook_with(text: &str) -> Playbook {
         Playbook::parse(text).unwrap()
+    }
+
+    #[test]
+    fn the_overview_keeps_each_lanes_last_problem_however_many_runs_since() {
+        let base = crate::paths::unique_temp("nitely-overview", "");
+        let root = repo(&base);
+        std::fs::create_dir_all(root.join(".nitely")).unwrap();
+        std::fs::write(root.join(playbook::PLAYBOOK_PATH), "[lanes]
+count = 2
+").unwrap();
+        let db = Db::open(&base.join("t.db")).unwrap();
+        let root_s = root.to_string_lossy().into_owned();
+        let insert = |lane: i64, state: &str, at: i64, error: Option<&str>| {
+            db.conn
+                .execute(
+                    "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, lane, queued_at, error)
+                     VALUES ('APP', ?1, 'claude', 'run', 's', 't', 'b', 'npm test', ?2, ?3, ?4, ?5)",
+                    params![root_s, state, lane, at, error],
+                )
+                .unwrap();
+        };
+        insert(2, "lane_error", 1, Some("the switch failed twice"));
+        for i in 0..12 {
+            insert(1, "done", 10 + i, None);
+        }
+        let config = crate::Config {
+            repos: vec![crate::config::RepoConfig { name: "app".into(), root: root_s.clone(), integration_branch: "main".into(), project: Some("APP".into()) }],
+            ..Default::default()
+        };
+        let o = overview(&config, &db).unwrap();
+        assert_eq!(o.projects.len(), 1);
+        let shown = &o.projects[0];
+        assert!(shown.lanes.recent.iter().all(|r| r.lane == Some(1)), "the last few runs are all lane 1's");
+        assert_eq!(shown.last.iter().map(|r| (r.lane, r.state.as_str())).collect::<Vec<_>>(), [(Some(1), "done"), (Some(2), "lane_error")]);
+        assert!(o.slots.is_none(), "no machine budget until the scheduler keeps one");
+        // A repo without [lanes] is left out.
+        std::fs::write(root.join(playbook::PLAYBOOK_PATH), "[gate]
+commands = []
+").unwrap();
+        assert!(overview(&config, &db).unwrap().projects.is_empty());
+        drop(db);
+        std::fs::remove_dir_all(base).ok();
     }
 
     #[test]
