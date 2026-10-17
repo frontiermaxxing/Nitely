@@ -28,7 +28,14 @@ impl PhoneApp {
             }
             None
         });
-        PhoneApp { phone: Phone::new(Arc::new(phone::load_devices), assets, Arc::new(nitely_core::Db::open_default)), running: Mutex::new(None) }
+        PhoneApp { phone: Phone::new(
+                Arc::new(phone::load_devices),
+                assets,
+                Arc::new(nitely_core::Db::open_default),
+                Arc::new(|db: &nitely_core::Db| {
+                    nitely_core::Config::load().ok().and_then(|c| nitely_core::snapshot(&c, db).ok()).map(|b| phone::waiting_in_worktrees(&b)).unwrap_or(0)
+                }),
+            ), running: Mutex::new(None) }
     }
 
     fn running(&self) -> std::sync::MutexGuard<'_, Option<Running>> {

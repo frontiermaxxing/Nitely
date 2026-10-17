@@ -31,7 +31,7 @@ fn main() -> anyhow::Result<()> {
     seed(&db_path)?;
     println!("scratch database: {}", db_path.display());
     let open: OpenDb = Arc::new(move || Db::open(&db_path));
-    let phone = Phone::new(devices, assets, open);
+    let phone = Phone::new(devices, assets, open, Arc::new(|_: &Db| 0));
     let running = phone.start(&["127.0.0.1".parse()?], phone::PORT)?;
     println!("phone server: {}", phone::url(running.addrs[0].ip(), running.addrs[0].port()));
 

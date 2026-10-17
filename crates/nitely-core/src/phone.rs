@@ -264,6 +264,20 @@ pub type Assets = Arc<dyn Fn(&str) -> Option<(Vec<u8>, String)> + Send + Sync>;
 pub type Devices = Arc<dyn Fn() -> Result<Vec<Device>> + Send + Sync>;
 /// Opens Nitely's database for a request that reads or decides.
 pub type OpenDb = Arc<dyn Fn() -> Result<crate::Db> + Send + Sync>;
+/// Counts what only the app sees waiting on the person: agents waiting at their own prompt and
+/// worktrees stopped in a rebase (`waiting_in_worktrees`, from the board).
+pub type InWorktrees = Arc<dyn Fn(&crate::Db) -> usize + Send + Sync>;
+
+/// The board's worktrees that wait on the person: a rebase stopped there, or the agent in it is
+/// waiting for input. The desktop Inbox shows each as a decision.
+pub fn waiting_in_worktrees(board: &crate::Board) -> usize {
+    board
+        .repos
+        .iter()
+        .flat_map(|r| r.rows.iter())
+        .filter(|row| row.needs_me && (row.state.as_ref().is_some_and(|s| s.rebase_in_progress) || row.session.as_ref().is_some_and(|s| s.state == "waiting")))
+        .count()
+}
 
 #[derive(Default)]
 struct State {
@@ -279,6 +293,7 @@ pub struct Phone {
     devices: Devices,
     assets: Assets,
     db: OpenDb,
+    in_worktrees: InWorktrees,
 }
 
 /// A running phone server; dropping it does not stop it, `stop` does.
@@ -296,8 +311,8 @@ impl Running {
 }
 
 impl Phone {
-    pub fn new(devices: Devices, assets: Assets, db: OpenDb) -> Arc<Phone> {
-        Arc::new(Phone { state: Mutex::new(State::default()), devices, assets, db })
+    pub fn new(devices: Devices, assets: Assets, db: OpenDb, in_worktrees: InWorktrees) -> Arc<Phone> {
+        Arc::new(Phone { state: Mutex::new(State::default()), devices, assets, db, in_worktrees })
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
@@ -432,7 +447,10 @@ impl Phone {
                     Err(_) => return (503, error("The PC could not open Nitely's database; try again.")),
                 };
                 let result = match path {
-                    "/phone/api/decisions" => decisions(&db),
+                    "/phone/api/decisions" => decisions(&db).map(|mut v| {
+                        v["at_pc"] = json!(v["at_pc"].as_u64().unwrap_or(0) + (self.in_worktrees)(&db) as u64);
+                        v
+                    }),
                     "/phone/api/approve" => approve(&mut db, &device, body),
                     "/phone/api/answer" => answer(&db, &device, body),
                     _ => send_back(&mut db, &device, body),
@@ -593,8 +611,8 @@ fn issue_json(i: &crate::IssueRecord) -> Value {
 /// What waits on the person that the phone can decide: open asks, and changes in Needs You whose
 /// latest review waits for a person's approval. What only the PC can settle is counted in
 /// `at_pc`: an issue in Needs You for another reason (a playbook change, no review), the person's
-/// own open work, and a land that stopped. Agents waiting at their own prompt and worktree
-/// conflicts are seen only by the app, so the phone never says nothing else waits.
+/// own open work, and a land that stopped; the server adds the worktrees that wait on the person
+/// (`waiting_in_worktrees`).
 fn decisions(db: &crate::Db) -> std::result::Result<Value, Refused> {
     let mut out = Vec::new();
     let asks = db.open_asks()?;
@@ -751,7 +769,7 @@ mod tests {
         assert_eq!(path_kind(ip("100.128.0.1"), &[ip("100.128.0.1")]), None, "outside 100.64.0.0/10");
         assert_eq!(path_kind(ip("fd7a:115c:a1e0::1"), &ts), Some(PathKind::Tunnel));
         assert_eq!(path_kind(ip("192.168.1.20"), &ts), None);
-        let phone = Phone::new(Arc::new(|| Ok(vec![])), Arc::new(|_: &str| None), Arc::new(|| anyhow::bail!("no database in this test")));
+        let phone = Phone::new(Arc::new(|| Ok(vec![])), Arc::new(|_: &str| None), Arc::new(|| anyhow::bail!("no database in this test")), Arc::new(|_: &crate::Db| 0));
         let err = phone.start(&[ip("192.168.1.20")], 0).err().unwrap().to_string();
         assert!(err.contains("not this machine's Tailscale address"), "{err}");
     }
@@ -831,7 +849,7 @@ mod tests {
         let public = public_of(&app);
         let devices: Devices = Arc::new(move || Ok(read.lock().unwrap().as_ref().and_then(|l| verified(&public, l)).unwrap_or_default()));
         let assets: Assets = Arc::new(|p: &str| (p == "phone.html").then(|| (b"<html>phone</html>".to_vec(), content_type(p))));
-        let phone = Phone::new(devices, assets, Arc::new(|| anyhow::bail!("no database in this test")));
+        let phone = Phone::new(devices, assets, Arc::new(|| anyhow::bail!("no database in this test")), Arc::new(|_: &crate::Db| 0));
         let running = phone.start(&["127.0.0.1".parse().unwrap()], 0).unwrap();
         let base = format!("http://{}", running.addrs[0]);
 
@@ -893,7 +911,8 @@ mod tests {
         let devices: Devices = Arc::new(move || Ok(verified(&public, &served).unwrap_or_default()));
         let path = crate::paths::unique_temp("nitely-phone", ".db");
         let db_path = path.clone();
-        let phone = Phone::new(devices, Arc::new(|_: &str| None), Arc::new(move || crate::Db::open(&db_path)));
+        // Two worktrees the app sees waiting: an agent at its prompt, a stopped rebase.
+        let phone = Phone::new(devices, Arc::new(|_: &str| None), Arc::new(move || crate::Db::open(&db_path)), Arc::new(|_: &crate::Db| 2));
         let running = phone.start(&["127.0.0.1".parse().unwrap()], 0).unwrap();
         let base = format!("http://{}", running.addrs[0]);
 
@@ -921,9 +940,9 @@ mod tests {
         assert_eq!(status, 200, "{d}");
         let kinds: Vec<&str> = d["decisions"].as_array().unwrap().iter().map(|x| x["kind"].as_str().unwrap()).collect();
         assert_eq!(kinds, ["ask", "approve"], "a's open ask stands for it; b waits for approval: {d}");
-        assert_eq!(d["at_pc"], 0);
+        assert_eq!(d["at_pc"], 2, "the worktrees the app sees waiting");
         let own = db.create_issue(&NewIssue { owner: Some("human".into()), ..new("Call the bank") }, &agent).unwrap().key;
-        assert_eq!(p.get_with(&base, "/phone/api/decisions", now(), "aaaaaaaaaaaaaaaa").1["at_pc"], 1, "the person's own work waits at the PC");
+        assert_eq!(p.get_with(&base, "/phone/api/decisions", now(), "aaaaaaaaaaaaaaaa").1["at_pc"], 3, "and the person's own work");
         db.move_issue(&own, "Canceled", None, Some("done elsewhere"), &Actor::Human).unwrap();
         assert_eq!(d["decisions"][1]["patch_id"], "p2");
 
