@@ -79,6 +79,11 @@ pub fn names_path(text: &str, dir: &str) -> bool {
         }
         spellings.push(dir);
     }
+    // On a Mac, `/var/…` as a process was given it, for the `/private/var/…` git names.
+    if cfg!(target_os = "macos") {
+        let linked: Vec<String> = spellings.iter().filter_map(|s| through_link(s)).collect();
+        spellings.extend(linked);
+    }
     // As written, or with its short names spelled out.
     texts.iter().any(|text| {
         spellings.iter().any(|s| {
@@ -89,6 +94,12 @@ pub fn names_path(text: &str, dir: &str) -> bool {
             })
         })
     })
+}
+
+/// `/private/var/x` as `/var/x`: the macOS link most programs are handed (also `/tmp`, `/etc`).
+fn through_link(dir: &str) -> Option<String> {
+    let rest = dir.strip_prefix("/private")?;
+    ["/var/", "/tmp/", "/etc/"].iter().any(|d| rest.starts_with(d)).then(|| rest.to_string())
 }
 
 /// `text` with the 8.3 short names in its paths spelled out, so a path written in any mix of
@@ -208,6 +219,9 @@ pub(crate) mod tests {
         assert_eq!(dirs.get(&12).map(String::as_str), Some("/Users/sam/app"));
         assert_eq!(dirs.get(&40).map(String::as_str), Some("/private/var/folders/x y"));
         assert_eq!(dirs.len(), 2);
+        assert_eq!(through_link("/private/var/folders/x/wt").as_deref(), Some("/var/folders/x/wt"));
+        assert_eq!(through_link("/private/stuff/x"), None);
+        assert_eq!(through_link("/Users/sam/app"), None);
     }
 
     #[test]
