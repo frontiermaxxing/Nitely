@@ -239,9 +239,9 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     } else if out.approval_stands {
         ("Approved", "The human approved this exact patch before and the review raised nothing new, so the approval stands. Call land.")
     } else if out.approver == "human" && by_nitely {
-        ("Needs You", "It waits for the human's approval in the Nitely inbox, and Nitely lands it as soon as they approve it; you do not call land. Pick up other work meanwhile.")
+        ("Needs You", "It waits for the human's approval in the Nitely inbox, and Nitely lands it as soon as they approve it; you do not call land. Nitely already asked them, so do not `ask` for this approval yourself. Pick up other work meanwhile.")
     } else if out.approver == "human" {
-        ("Needs You", "It waits for the human's approval in the Nitely inbox. Pick up other work meanwhile; once it is Approved, call land.")
+        ("Needs You", "It waits for the human's approval in the Nitely inbox. Nitely already asked them, so do not `ask` for this approval yourself. Pick up other work meanwhile; once it is Approved, call land.")
     } else {
         ("In Review", "The review passed and no human approval is needed. Call land to put it on the integration branch.")
     };

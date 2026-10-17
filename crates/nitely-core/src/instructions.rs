@@ -19,7 +19,8 @@ branch and worktree from the integration branch and runs setup. Work only in tha
 files many at once, their blockers naming each other by ref. When the playbook itself is wrong \
 (integration branch, gate, review rules), `propose_playbook_change`: never change the rules yourself.
 4. When only the human can decide, `ask`, move the issue to Needs You, and keep working on what does \
-not depend on the answer. Never set Approved: only the human approves.
+not depend on the answer. Never set Approved: only the human approves. When a change needs their \
+approval, `submit` already puts it in their inbox, so never `ask` for an approval.
 5. Commit, then `submit`: it runs the gate, has another vendor review the branch, opens the pull \
 request, and moves the issue. Read its `next`.
 6. Once it is In Review (or the human approved it), `land` puts it on the integration branch.

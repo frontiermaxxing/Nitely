@@ -399,7 +399,7 @@ fn tools() -> Value {
         },
         {
             "name": "ask",
-            "description": "Ask the human something only they can decide. It goes to their inbox. Returns an id; check it with get_answer. Keep working on whatever does not depend on the answer.",
+            "description": "Ask the human something only they can decide. It goes to their inbox. Returns an id; check it with get_answer. Keep working on whatever does not depend on the answer. Never ask for an approval: when a change needs one, submit already puts it in their inbox.",
             "inputSchema": { "type": "object", "required": ["question"], "properties": {
                 "question": { "type": "string" },
                 "options": { "type": "array", "items": { "type": "string" } },

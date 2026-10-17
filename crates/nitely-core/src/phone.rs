@@ -986,10 +986,9 @@ fn decisions(db: &crate::Db) -> std::result::Result<(Value, std::collections::Ha
         }));
     }
     let mut at_pc = std::collections::HashSet::new();
+    // An issue's approval shows beside its open asks, never behind them: an agent asking "approve
+    // this?" must not stand in for the approval itself (NIT-180).
     for i in db.list_issues(None, false)? {
-        if asks.iter().any(|a| a.issue_key.as_deref().is_some_and(|k| k.eq_ignore_ascii_case(&i.key))) {
-            continue;
-        }
         if i.state != "Needs You" {
             let own_work = i.owner == "human" && !matches!(i.state_type.as_str(), "completed" | "canceled") && i.state != "Backlog";
             let stopped_land = i.track.station == "landing" && i.track.stuck.is_some();
@@ -999,7 +998,10 @@ fn decisions(db: &crate::Db) -> std::result::Result<(Value, std::collections::Ha
             continue;
         }
         let review = db.reviews(&i.key)?.into_iter().next();
-        let approvable = i.origin == "nitely" && db.proposal_for_issue(&i.key)?.is_none() && review.as_ref().is_some_and(|r| r.approver == "human");
+        let approvable = i.origin == "nitely"
+            && db.proposal_for_issue(&i.key)?.is_none()
+            && review.as_ref().is_some_and(|r| r.approver == "human")
+            && waited_since(db, &i.key, review.as_ref().map_or(0, |r| r.ts))?;
         let Some(r) = review.filter(|_| approvable) else {
             at_pc.insert(i.key.to_uppercase());
             continue;
@@ -1016,6 +1018,16 @@ fn decisions(db: &crate::Db) -> std::result::Result<(Value, std::collections::Ha
         }));
     }
     Ok((json!({ "decisions": out }), at_pc, on_phone))
+}
+
+/// Whether the issue has stayed in Needs You since `since` (its latest review): only then is that
+/// review's change what it waits on. One sent back and in Needs You again for a question has no
+/// change to approve until it is submitted again.
+fn waited_since(db: &crate::Db, key: &str, since: i64) -> Result<bool> {
+    let left = db.timeline(key)?.into_iter().any(|t| {
+        t.ts >= since && t.kind == "issue_moved" && t.summary.as_deref().is_some_and(|s| s.starts_with("Needs You → ") && !s.starts_with("Needs You → Needs You"))
+    });
+    Ok(!left)
 }
 
 /// Approves a change for the person, signed by the phone over the same message the app signs
@@ -1368,12 +1380,12 @@ mod tests {
         let (status, d) = p.get(&base, "/phone/api/decisions", now());
         assert_eq!(status, 200, "{d}");
         let kinds: Vec<&str> = d["decisions"].as_array().unwrap().iter().map(|x| x["kind"].as_str().unwrap()).collect();
-        assert_eq!(kinds, ["ask", "approve"], "a's open ask stands for it; b waits for approval: {d}");
+        assert_eq!(kinds, ["ask", "approve", "approve"], "a's open ask shows beside its approval, not instead of it: {d}");
         assert_eq!(d["at_pc"], 2, "the worktrees the app sees waiting");
         let own = db.create_issue(&NewIssue { owner: Some("human".into()), ..new("Call the bank") }, &agent).unwrap().key;
         assert_eq!(p.get_with(&base, "/phone/api/decisions", now(), "aaaaaaaaaaaaaaaa").1["at_pc"], 3, "and the person's own work");
         db.move_issue(&own, "Canceled", None, Some("done elsewhere"), &Actor::Human).unwrap();
-        assert_eq!(d["decisions"][1]["patch_id"], "p2");
+        assert_eq!((&d["decisions"][1]["patch_id"], &d["decisions"][2]["patch_id"]), (&json!("p1"), &json!("p2")));
 
         // An answer, signed over what it says.
         let t = now();
@@ -1407,6 +1419,15 @@ mod tests {
         let (status, _) = p.post(&base, "/phone/api/sendback", json!({ "key": a, "reason": "Use EUR only", "time": t, "signature": p.sign(&sendback_message(&a, "Use EUR only", t)) }));
         assert_eq!(status, 200);
         assert_eq!(db.issue(&a).unwrap().unwrap().state, "Todo");
+        // Back in Needs You for a question, before any new submit: the old review's change is not
+        // offered for approval again.
+        db.move_issue(&a, "In Progress", None, None, &agent).unwrap();
+        db.move_issue(&a, "Needs You", None, None, &agent).unwrap();
+        db.create_ask("Round prices up?", &[], Some(&a), None, &agent).unwrap();
+        // A request of its own (the phone's requests are never replayed).
+        let d = p.get_with(&base, "/phone/api/decisions", now(), "bbbbbbbbbbbbbbbb").1;
+        let of_a: Vec<&str> = d["decisions"].as_array().unwrap().iter().filter(|x| x["issue"]["key"] == json!(a)).map(|x| x["kind"].as_str().unwrap()).collect();
+        assert_eq!(of_a, ["ask"], "{d}");
 
         // Another key under this device's id can do none of it.
         p.key = ed25519_dalek::SigningKey::from_bytes(&new_secret().unwrap());
