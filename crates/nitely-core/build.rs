@@ -1,0 +1,31 @@
+//! Lists the schema migrations in `migrations/` (one `.sql` file each) for `db.rs`, in file-name
+//! order, so adding one is adding a file: two branches never edit the same lines for it.
+
+use std::path::Path;
+
+fn main() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    println!("cargo:rerun-if-changed={}", dir.display());
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter_map(|e| e.file_name().to_str().map(str::to_string))
+                .filter(|n| n.ends_with(".sql"))
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    let mut out = String::from("&[\n");
+    for name in &names {
+        let stem = name.trim_end_matches(".sql");
+        let valid = !stem.is_empty() && stem.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+        assert!(valid, "migration file names are lower-case letters, digits and dashes: {name}");
+        let path = dir.join(name);
+        println!("cargo:rerun-if-changed={}", path.display());
+        out.push_str(&format!("    ({stem:?}, include_str!({:?})),\n", path.display().to_string()));
+    }
+    out.push(']');
+    let target = Path::new(&std::env::var("OUT_DIR").unwrap()).join("migrations.rs");
+    std::fs::write(target, out).unwrap();
+}

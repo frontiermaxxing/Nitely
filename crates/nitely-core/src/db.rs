@@ -6,7 +6,9 @@ use serde::Serialize;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Schema from docs/design.md. `task` and `approval` are not written yet.
+/// The schema as the numbered scheme left it (`LEGACY_VERSION`), from docs/design.md. Frozen: a new
+/// table, column or index goes in a file in `migrations/` (see `MIGRATIONS`), never here, because
+/// every database, new or old, gets this and then every migration.
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS project (
   key         TEXT PRIMARY KEY,            -- issue prefix, e.g. NIT
@@ -262,10 +264,32 @@ CREATE INDEX IF NOT EXISTS playbook_proposal_issue ON playbook_proposal (issue_k
 CREATE UNIQUE INDEX IF NOT EXISTS playbook_proposal_pending ON playbook_proposal (scope) WHERE status = 'pending';
 "#;
 
-/// Bumped when a table changes shape. Tables that only mirror Bitbucket or Linear are dropped
-/// and refilled by the next sync; tables Nitely owns get real migrations.
-const SCHEMA_VERSION: i64 = 22;
+/// The last `user_version` of the numbered scheme, which `migrate` brings any older database up to.
+/// It never moves again: schema changes are named migrations now (`MIGRATIONS`).
+const LEGACY_VERSION: i64 = 22;
 
+/// `user_version` of a database on named migrations. A build from before them knows versions up to
+/// LEGACY_VERSION only, so it refuses such a database as one a newer Nitely upgraded.
+const FORMAT: i64 = LEGACY_VERSION + 1;
+
+/// Every schema change since LEGACY_VERSION, by name, in file-name order (build.rs lists
+/// `migrations/`). To change the schema, add `migrations/<yyyymmdd>-<what>.sql`: plain SQL such as
+/// `ALTER TABLE issue ADD COLUMN size INTEGER;` or a `CREATE TABLE`. Two branches each adding one
+/// never touch the same lines. Never edit, rename or remove one that has landed: each runs once per
+/// database and is recorded by name in `schema_migration`, and a database holding a name this build
+/// does not list was upgraded by a newer Nitely, so this build refuses it.
+const MIGRATIONS: &[(&str, &str)] = include!(concat!(env!("OUT_DIR"), "/migrations.rs"));
+
+/// The record of which named migrations a database has run.
+const MIGRATION_TABLE: &str = "CREATE TABLE IF NOT EXISTS schema_migration (
+  name       TEXT PRIMARY KEY,
+  applied_at INTEGER NOT NULL,
+  applied_by TEXT NOT NULL                 -- the Nitely version that ran it
+);";
+
+/// Brings a database of the numbered scheme (user_version 0 to LEGACY_VERSION) up to
+/// LEGACY_VERSION. Tables that only mirror Bitbucket or Linear were dropped and refilled by the
+/// next sync; tables Nitely owns got real migrations.
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
     if version < 2 {
@@ -333,18 +357,72 @@ fn use_wal(conn: &Connection) -> Result<()> {
     }
 }
 
-/// Brings the schema up to SCHEMA_VERSION in one write transaction. The app, a hook and an MCP
-/// server often open an old database at the same moment after an install; the first takes the
-/// write lock and upgrades, the others wait for it (busy_timeout), then find the version current
-/// and do nothing, instead of each adding the same column (NIT-103).
-fn upgrade(conn: &Connection) -> Result<()> {
+/// Where a database stands against this build's `migrations`.
+enum Standing {
+    Current,
+    /// On the numbered scheme still, or missing named migrations: `upgrade` brings it up.
+    Behind,
+    /// A newer Nitely changed it in a way this build does not know: what, in a few words.
+    Newer(String),
+}
+
+/// The named migrations a database has run; none while it is on the numbered scheme.
+fn applied_migrations(conn: &Connection) -> Result<Vec<String>> {
+    let has_table: bool = conn.query_row("SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migration')", [], |r| r.get(0))?;
+    if !has_table {
+        return Ok(vec![]);
+    }
+    let mut stmt = conn.prepare("SELECT name FROM schema_migration ORDER BY name")?;
+    let names = stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    Ok(names)
+}
+
+fn standing(conn: &Connection, migrations: &[(&str, &str)]) -> Result<Standing> {
+    let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if version > FORMAT {
+        return Ok(Standing::Newer(format!("schema {version}; this build knows {FORMAT}")));
+    }
+    if version < FORMAT {
+        return Ok(Standing::Behind);
+    }
+    let applied = applied_migrations(conn)?;
+    if let Some(unknown) = applied.iter().find(|a| !migrations.iter().any(|(m, _)| m == a)) {
+        return Ok(Standing::Newer(format!("migration {unknown}, which this build does not have")));
+    }
+    Ok(if migrations.iter().all(|(m, _)| applied.iter().any(|a| a == m)) { Standing::Current } else { Standing::Behind })
+}
+
+/// Brings the schema up to date in one write transaction: a database on the numbered scheme to
+/// LEGACY_VERSION and then to FORMAT, and then every named migration it has not run, oldest first.
+/// The app, a hook and an MCP server often open an old database at the same moment after an
+/// install; the first takes the write lock and upgrades, the others wait for it (busy_timeout),
+/// then find it current and do nothing, instead of each adding the same column (NIT-103).
+fn upgrade(conn: &Connection, migrations: &[(&str, &str)]) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE")?;
     let done = (|| -> Result<()> {
+        // Looked at again under the lock: another process may have upgraded it meanwhile.
+        match standing(conn, migrations)? {
+            Standing::Current => return Ok(()),
+            Standing::Newer(what) => anyhow::bail!("a newer Nitely upgraded this database meanwhile ({what})"),
+            Standing::Behind => {}
+        }
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version < SCHEMA_VERSION {
+        if version < FORMAT {
             migrate(conn)?;
             conn.execute_batch(SCHEMA)?;
-            conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            conn.execute_batch(MIGRATION_TABLE)?;
+            conn.pragma_update(None, "user_version", FORMAT)?;
+        }
+        let applied = applied_migrations(conn)?;
+        for (name, sql) in migrations {
+            if applied.iter().any(|a| a == name) {
+                continue;
+            }
+            conn.execute_batch(sql).with_context(|| format!("migration {name}"))?;
+            conn.execute(
+                "INSERT INTO schema_migration (name, applied_at, applied_by) VALUES (?1, ?2, ?3)",
+                params![name, now(), crate::update::VERSION],
+            )?;
         }
         Ok(())
     })();
@@ -442,17 +520,26 @@ fn upgraded_by_path(db: &Path) -> std::path::PathBuf {
 
 /// What an older build says when it meets a database a newer one upgraded (an update from a newer
 /// channel to an older one): it does not open it, so it can never write in a form the newer build
-/// misreads.
-fn newer_database(path: &Path, version: i64) -> String {
-    let by = std::fs::read_to_string(upgraded_by_path(path)).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+/// misreads. `what` says what it does not know.
+fn newer_database(path: &Path, what: &str) -> String {
+    // Two builds of one version (development builds) tell apart only by what the database holds.
+    let by = std::fs::read_to_string(upgraded_by_path(path))
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty() && v != crate::update::VERSION);
     match by {
         Some(v) => format!("this database was upgraded by Nitely {v}; this is Nitely {}. Install {v} or newer", crate::update::VERSION),
-        None => format!("this database was upgraded by a newer Nitely (schema {version}; this build knows {SCHEMA_VERSION}); install the newer version"),
+        None => format!("this database was upgraded by a newer Nitely ({what}); install the newer version"),
     }
 }
 
 impl Db {
     pub fn open(path: &Path) -> Result<Db> {
+        Db::open_with(path, MIGRATIONS)
+    }
+
+    /// `open`, with the named migrations given (tests stand in for a build with others).
+    fn open_with(path: &Path, migrations: &[(&str, &str)]) -> Result<Db> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
@@ -461,16 +548,16 @@ impl Db {
         // Only an outdated database is written to here. Every app command opens the database, and
         // a write on open moves `data_version`, which the app's watcher reads as a change: it would
         // refresh, open the database again, and loop.
-        let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > SCHEMA_VERSION {
-            anyhow::bail!("{}", newer_database(path, version));
-        }
-        if version < SCHEMA_VERSION {
-            // WAL (persistent) so the app reads while hooks write; busy_timeout so parallel hooks wait.
-            use_wal(&conn).context("switching the database to WAL")?;
-            upgrade(&conn).context("upgrading the database")?;
-            // Who upgraded it, so an older build can say which version to install (`newer_database`).
-            std::fs::write(upgraded_by_path(path), crate::update::VERSION).ok();
+        match standing(&conn, migrations)? {
+            Standing::Current => {}
+            Standing::Newer(what) => anyhow::bail!("{}", newer_database(path, &what)),
+            Standing::Behind => {
+                // WAL (persistent) so the app reads while hooks write; busy_timeout so parallel hooks wait.
+                use_wal(&conn).context("switching the database to WAL")?;
+                upgrade(&conn, migrations).context("upgrading the database")?;
+                // Who upgraded it, so an older build can say which version to install (`newer_database`).
+                std::fs::write(upgraded_by_path(path), crate::update::VERSION).ok();
+            }
         }
         Ok(Db { conn })
     }
@@ -691,13 +778,83 @@ mod tests {
         let path = dir.join("t.db");
         drop(Db::open(&path).unwrap());
         assert_eq!(std::fs::read_to_string(upgraded_by_path(&path)).unwrap(), crate::update::VERSION, "the upgrade names its version");
-        Connection::open(&path).unwrap().pragma_update(None, "user_version", SCHEMA_VERSION + 1).unwrap();
+        Connection::open(&path).unwrap().pragma_update(None, "user_version", FORMAT + 1).unwrap();
         std::fs::write(upgraded_by_path(&path), "9.9.0-nightly.20261016.g1a2b3c4").unwrap();
         let err = Db::open(&path).err().unwrap().to_string();
         assert!(err.contains("upgraded by Nitely 9.9.0-nightly.20261016.g1a2b3c4") && err.contains("Install 9.9.0-nightly"), "{err}");
         std::fs::remove_file(upgraded_by_path(&path)).unwrap();
         let err = Db::open(&path).err().unwrap().to_string();
-        assert!(err.contains(&format!("schema {}", SCHEMA_VERSION + 1)), "{err}");
+        assert!(err.contains(&format!("schema {}", FORMAT + 1)), "{err}");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    // Two migrations as two branches might each add one: a table, then a column on an old table.
+    const PLANS: (&str, &str) = ("20261017-trip", "CREATE TABLE trip (id INTEGER PRIMARY KEY, name TEXT NOT NULL);");
+    const SIZE: (&str, &str) = ("20261018-issue-size", "ALTER TABLE issue ADD COLUMN size INTEGER NOT NULL DEFAULT 0;");
+
+    fn columns(db: &Db, table: &str) -> Vec<String> {
+        let mut stmt = db.conn.prepare(&format!("SELECT name FROM pragma_table_info('{table}')")).unwrap();
+        stmt.query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+    }
+
+    fn user_version(db: &Db) -> i64 {
+        db.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn a_fresh_database_gets_the_schema_and_every_migration() {
+        let dir = crate::paths::unique_temp("nitely-fresh", "");
+        let path = dir.join("t.db");
+        let db = Db::open_with(&path, &[PLANS, SIZE]).unwrap();
+        assert_eq!(user_version(&db), FORMAT);
+        assert_eq!(applied_migrations(&db.conn).unwrap(), ["20261017-trip", "20261018-issue-size"]);
+        assert!(columns(&db, "issue").contains(&"size".to_string()) && columns(&db, "trip").contains(&"name".to_string()));
+        assert!(columns(&db, "goal_plan").contains(&"goal_id".to_string()), "the numbered scheme's last tables too");
+        drop(db);
+        // This build's own migrations, whatever they are, apply to a new database too.
+        let real = dir.join("real.db");
+        let db = Db::open(&real).unwrap();
+        assert_eq!(applied_migrations(&db.conn).unwrap().len(), MIGRATIONS.len());
+        drop(db);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_v22_database_keeps_its_data_and_takes_each_migration_once() {
+        let dir = crate::paths::unique_temp("nitely-v22", "");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        {
+            // As a build of the numbered scheme left it.
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            conn.execute_batch("INSERT INTO issue (key, origin, project, number, title, state, goal) VALUES ('NIT-1', 'nitely', 'NIT', 1, 'Old', 'Todo', 3);").unwrap();
+            conn.pragma_update(None, "user_version", LEGACY_VERSION).unwrap();
+        }
+        let db = Db::open_with(&path, &[PLANS]).unwrap();
+        assert_eq!(user_version(&db), FORMAT, "a build from before named migrations now refuses it");
+        assert_eq!((db.issue("NIT-1").unwrap().unwrap().title.as_str(), db.issue("NIT-1").unwrap().unwrap().goal), ("Old", Some(3)));
+        drop(db);
+        // A later build brings one more: only that one runs (the first would fail run twice).
+        let db = Db::open_with(&path, &[PLANS, SIZE]).unwrap();
+        assert_eq!(applied_migrations(&db.conn).unwrap(), ["20261017-trip", "20261018-issue-size"]);
+        assert!(columns(&db, "issue").contains(&"size".to_string()));
+        drop(db);
+        // Opening a current database writes nothing (the app's watcher would read a write as a change).
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        drop(Db::open_with(&path, &[PLANS, SIZE]).unwrap());
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), before);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_build_without_a_migration_the_database_ran_refuses_it() {
+        let dir = crate::paths::unique_temp("nitely-unknown", "");
+        let path = dir.join("t.db");
+        drop(Db::open_with(&path, &[PLANS, SIZE]).unwrap());
+        std::fs::remove_file(upgraded_by_path(&path)).unwrap();
+        let err = Db::open_with(&path, &[PLANS]).err().unwrap().to_string();
+        assert!(err.contains("upgraded by a newer Nitely (migration 20261018-issue-size"), "{err}");
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -748,7 +905,7 @@ mod tests {
                 assert_eq!(o.join().unwrap(), Ok(()), "round {round}");
             }
             let db = Db::open(&path).unwrap();
-            assert_eq!(db.conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0)).unwrap(), SCHEMA_VERSION);
+            assert_eq!(user_version(&db), FORMAT);
             drop(db);
             std::fs::remove_dir_all(dir).ok();
         }

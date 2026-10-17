@@ -82,7 +82,9 @@ show) is yours to run, in the real app on throwaway data, before it becomes a li
 ## Layout
 
 - `crates/nitely-core`: database, issues and their rules, git reader, playbooks (`playbook.rs`),
-  GitHub/Bitbucket/Linear sync, snapshot, `connect.rs` (adding a repo and wiring up its agents)
+  GitHub/Bitbucket/Linear sync, snapshot, `connect.rs` (adding a repo and wiring up its agents).
+  A schema change is a new file in `crates/nitely-core/migrations/` (its README), never an edit of
+  `SCHEMA` in `db.rs`
 - `crates/nitely-cli`: the `nitely` binary, including `nitely mcp` (`src/mcp.rs`)
 - `src-tauri`: the desktop shell and its commands; `src`: the React frontend, with the shared visual
   primitives in `src/ui` and design tokens in `src/styles/tokens.css`
