@@ -64,7 +64,9 @@ pub fn keep_dirs(repo_root: &Path) -> Vec<String> {
 /// `.`, `..`, root, drive or absolute path can make slim delete the worktree or a folder outside it.
 fn plain(dir: &str) -> bool {
     let p = Path::new(dir);
-    !dir.is_empty() && p.components().all(|c| matches!(c, std::path::Component::Normal(_)))
+    // A drive or a backslash path is never a build directory, on any OS: the same playbook must
+    // mean the same thing on Windows, macOS and Linux.
+    !dir.is_empty() && !dir.contains([':', '\\']) && p.components().all(|c| matches!(c, std::path::Component::Normal(_)))
 }
 
 /// Whether git ignores `dir` in `worktree`: build output is ignored, and slim never deletes a
@@ -286,7 +288,7 @@ mod tests {
         let plan = plan_repo("repo", &repo, &Recent::default()).unwrap();
         assert_eq!(plan.iter().map(|c| c.dirs[0].0.as_str()).collect::<Vec<_>>(), ["build"], "target is not a build directory now");
         // Only plain names inside the worktree, and only what git ignores, are ever build output.
-        std::fs::write(repo.join(crate::playbook::PLAYBOOK_PATH), "[lanes]\nkeep = [\".\", \"..\", \"/tmp\", \"C:/Code\", \"src\", \"build\"]\n").unwrap();
+        std::fs::write(repo.join(crate::playbook::PLAYBOOK_PATH), "[lanes]\nkeep = [\".\", \"..\", \"/tmp\", \"C:/Code\", \"a\\\\b\", \"src\", \"build\"]\n").unwrap();
         assert_eq!(keep_dirs(&repo), ["src", "build"]);
         std::fs::create_dir_all(landed.join("src")).unwrap();
         std::fs::write(landed.join("src/kept.rs"), "work").unwrap();
