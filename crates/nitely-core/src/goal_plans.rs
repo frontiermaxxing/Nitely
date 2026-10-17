@@ -320,24 +320,40 @@ impl Db {
         plan.existing = plan.existing.iter().map(|k| self.current_key(k)).collect::<Result<_>>()?;
         let author = Actor::Agent(v.created_by.clone());
         let own: Vec<String> = std::iter::once(v.issue_key.clone()).chain(plan.planning_issue.clone()).collect();
-        // An interrupted approval left its goal, and maybe its filed issues: carry on with them.
+        // An interrupted approval left its goal, and maybe the issues it filed (create_issues files
+        // all or none): carry on with them. Its issues are the ones in the goal that the plan's
+        // author filed under the plan's titles; one attached to the goal since does not count.
         let resumed = match v.goal_id {
             Some(id) => self.goal(id)?,
             None => None,
         };
+        let titles: Vec<&str> = v.plan.issues.iter().map(|i| i.title.trim()).collect();
         let already_filed = match &resumed {
-            Some(g) => self.list_issues(Some(&v.project), true)?.into_iter().filter(|i| i.goal == Some(g.id) && !plan.existing.contains(&i.key)).count(),
+            Some(g) => self
+                .list_issues(Some(&v.project), true)?
+                .into_iter()
+                .filter(|i| i.goal == Some(g.id) && i.source.as_deref() == Some(source_of(&author).as_str()) && titles.contains(&i.title.trim()))
+                .count(),
             None => 0,
         };
         if !plan.issues.is_empty() && already_filed == 0 {
             self.check_batch(&batch(&plan, &v.project, None, &source_of(&author), &own))?;
         }
+        // The person's edits stand on a resumed approval too (a cleared date clears it).
+        let change = GoalChange {
+            title: Some(plan.title.clone()),
+            outcome: Some(plan.outcome.clone()),
+            target_date: Some(plan.target_date.clone().unwrap_or_default()),
+            state: None,
+        };
         let goal = match resumed {
-            Some(g) => g,
+            Some(g) => self.save_goal(&v.project, Some(g.id), &change, actor)?,
             None => {
-                let change = GoalChange { title: Some(plan.title.clone()), outcome: Some(plan.outcome.clone()), target_date: plan.target_date.clone(), state: None };
+                // The goal and the plan's note of it commit together, so a retry always finds it.
+                let tx = self.conn.unchecked_transaction()?;
                 let goal = self.save_goal(&v.project, None, &change, actor)?;
                 self.conn.execute("UPDATE goal_plan SET goal_id = ?2 WHERE id = ?1", params![v.id, goal.id])?;
+                tx.commit()?;
                 goal
             }
         };
@@ -545,10 +561,31 @@ mod tests {
         assert!(db.approve_goal_plan(&key, &PlanEdit::default(), &Actor::Human).is_err(), "a running approval holds the plan");
         db.conn.execute("UPDATE goal_plan SET decided_at = ?1", [now() - APPROVAL_LEASE_SECS - 1]).unwrap();
         assert_eq!(db.goal_plan_for_issue(&key).unwrap().unwrap().status, "pending", "an interrupted one lets go");
-        let a = db.approve_goal_plan(&key, &PlanEdit::default(), &Actor::Human).unwrap();
+        let edit = PlanEdit { title: Some("Strangers install Nitely".into()), target_date: Some(String::new()), ..Default::default() };
+        let a = db.approve_goal_plan(&key, &edit, &Actor::Human).unwrap();
         assert_eq!(a.goal.id, goal, "the goal it created is the one it finishes");
+        assert_eq!((a.goal.title.as_str(), a.goal.target_date.as_deref()), ("Strangers install Nitely", None), "the edits made this time stand");
         assert_eq!((filed(&db), a.filed.filed.len(), db.goals("NIT", true).unwrap().len()), (n, 0, 1), "nothing filed twice");
         assert_eq!(a.issue.state, "Done");
+        assert!(a.goal.progress.total >= 3);
+    }
+
+    #[test]
+    fn an_approval_stopped_before_filing_files_its_issues_when_taken_up() {
+        let mut db = db();
+        let p = db.propose_goal("NIT", &plan(), None, &agent()).unwrap();
+        let key = p.issue.key.clone();
+        // The app quit after creating the goal, before filing; meanwhile an agent put another issue in it.
+        let change = GoalChange { title: Some("Strangers can install Nitely".into()), outcome: Some("o".into()), ..Default::default() };
+        let goal = db.save_goal("NIT", None, &change, &Actor::Human).unwrap().id;
+        db.conn.execute("UPDATE goal_plan SET status = 'approving', decided_at = ?1, goal_id = ?2", params![now() - APPROVAL_LEASE_SECS - 1, goal]).unwrap();
+        let other = db
+            .create_issue(&NewIssue { project: "NIT".into(), title: "Pick a code-signing vendor".into(), body: "b".into(), kind: "idea".into(), source: "claude".into(), evidence: "e".into(), goal: Some(goal), ..Default::default() }, &agent())
+            .unwrap();
+        let a = db.approve_goal_plan(&key, &PlanEdit::default(), &Actor::Human).unwrap();
+        assert_eq!((a.goal.id, a.filed.filed.len()), (goal, 3), "an unrelated issue in the goal is not the plan's filing");
+        assert_eq!(db.issue(&other.key).unwrap().unwrap().goal, Some(goal));
+        assert_eq!(db.goals("NIT", true).unwrap().len(), 1);
     }
 
     #[test]
