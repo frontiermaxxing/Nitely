@@ -77,6 +77,10 @@ export function Inbox(props: { device: Device; onGone: (why: string) => void }) 
   const byId = list.findIndex((d) => d.id === shown.id);
   const index = byId >= 0 ? byId : Math.min(shown.index, Math.max(0, list.length - 1));
   const current = list[index];
+  // Whatever is on screen is pinned by id from then on, the first one included.
+  useEffect(() => {
+    if (current && current.id !== shown.id) setShown({ id: current.id, index });
+  }, [current, shown.id, index]);
   const move = (by: number) => {
     const next = Math.max(0, Math.min(list.length - 1, index + by));
     setShown({ id: list[next]?.id ?? null, index: next });
