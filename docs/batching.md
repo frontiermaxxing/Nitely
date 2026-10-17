@@ -211,6 +211,30 @@ whose diff introduces it, and that a problem that only appears when two changes 
 - A batch whose reviewer fails to run or finish goes back to the queue as single reviews, so no
   batch ever leaves a change without a review.
 
+### How it runs (NIT-216)
+
+- **Only a submit in the background waits for a batch.** `submit` hands the change to a job of its
+  own (NIT-212), and that job waits in the queue after its gate passes; nobody is held by the
+  wait. `submit` with `wait: true` (`nitely submit --wait`) always reviews alone, at once.
+- **No resident process.** Each waiting job polls its row in `review_queue`. The first one to find
+  its queue's batch due takes it under the queue's file lock, runs the reviewer once, and writes each
+  change's review into its row; each job then goes on with its own change exactly as after a single
+  review (recording the review row, the pull request, the issue's move, the land by Nitely).
+- **A queue is a repository and a reviewer.** Codex's changes and Claude's are reviewed by
+  different reviewers, so they queue apart. `busy` closes a batch as soon as no batch of that queue
+  is under review: changes collect only while one is.
+- **The reviewer runs in the first change's worktree** and reads the others with `git diff` and
+  `git show <head>:<path>`; every worktree of a repository sees every branch's commits. Its tokens
+  count toward that first change's issue.
+- **An interaction** becomes a P1 finding on the second change ("Interacts with NIT-x, reviewed in
+  the same batch: ... Once NIT-x has landed, rebase onto it and submit again"), and a note on both.
+  Its next submit has an open P1, so it is reviewed alone, on top of the first.
+- **What waits stops being waited for:** a job that dies while waiting leaves the queue
+  (`abandoned`), a batch whose reviewing process dies sends its changes back alone, and a newer
+  submit of the issue replaces its waiting change (`superseded`; its job ends as superseded).
+- Each review row carries `batch_id`; `review_batch` holds the batch (its issues in prompt order,
+  reviewer, seconds, and the error when it failed).
+
 ### Severity
 
 Batching does not change how severities are judged, but the experiment shows they drift between runs
@@ -358,12 +382,12 @@ branch protection and CI-run gates, and Nitely's gate runs on the person's machi
 
 ## Build order
 
-1. **Async submit** ([NIT-212](nitely://issue/NIT-212), in progress): the background runner,
-   `submit_status`, results through `next_task`.
+1. **Async submit** ([NIT-212](nitely://issue/NIT-212), landed): submit jobs in processes of their
+   own, `submit_status`, results through `next_task` and notices.
 2. **The land queue** (`[land] batch = "waiting"`): queue table, stacking, one gate per run in a lane,
    bisection, per-change land records. Needs lanes for the stacked tip's gate (NIT-198).
-3. **Batched review** (`[review] batch`): the queue, the batched prompt, the per-change parser, review
-   rows with a batch id, fallbacks to single reviews. Needs async submit.
+3. **Batched review** (`[review] batch`, [NIT-216](nitely://issue/NIT-216)): the queue, the batched
+   prompt, the per-change parser, review rows with a batch id, fallbacks to single reviews.
 4. **The board, timeline and Inbox** for batches and the queue.
 5. **Measuring it**: severity drift between single and batched reviews over a day; queue waits,
    batch sizes and bisections in the retro's terms.

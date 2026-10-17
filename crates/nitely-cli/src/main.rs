@@ -1013,7 +1013,7 @@ fn run(cmd: Cmd) -> Result<()> {
             let mut db = Db::open_default()?;
             let cwd = cwd()?;
             nitely_core::install::check_current(&config, &cwd, env!("NITELY_COMMIT"))?;
-            let opts = nitely_core::submit::SubmitOptions { dir: &cwd, issue_key: issue.as_deref(), skip_review: no_review, local_only: local };
+            let opts = nitely_core::submit::SubmitOptions { dir: &cwd, issue_key: issue.as_deref(), skip_review: no_review, local_only: local, batch: false };
             if !wait {
                 let runner = nitely_core::submit_job::DetachedProcess { nitely: std::env::current_exe()? };
                 let job = nitely_core::submit_job::submit_async(&mut db, &config, &opts, &me, &runner)?;

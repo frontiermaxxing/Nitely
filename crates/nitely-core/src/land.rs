@@ -855,7 +855,7 @@ when_changed = ["billing"]
 
         fn submit(&mut self, wt: &Path) {
             let dir = wt.to_string_lossy().into_owned();
-            let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true };
+            let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: false };
             submit(&mut self.db, &crate::Config::default(), &opts, &self.actor).unwrap();
         }
 

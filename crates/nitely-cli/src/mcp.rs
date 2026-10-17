@@ -778,7 +778,7 @@ fn run_tool(server: &Server, name: &str, args: &Value, params: &Value) -> Result
         "submit" => {
             let dir = task_dir(&config, &db, args, &server.cwd)?;
             nitely_core::install::check_current(&config, &dir, env!("NITELY_COMMIT"))?;
-            let opts = nitely_core::submit::SubmitOptions { dir: &dir, issue_key: str_arg(args, "key"), skip_review: false, local_only: false };
+            let opts = nitely_core::submit::SubmitOptions { dir: &dir, issue_key: str_arg(args, "key"), skip_review: false, local_only: false, batch: false };
             if args.get("wait").and_then(Value::as_bool).unwrap_or(false) {
                 json!(nitely_core::submit::submit(&mut db, &config, &opts, &actor)?)
             } else {

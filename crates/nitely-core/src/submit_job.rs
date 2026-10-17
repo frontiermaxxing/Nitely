@@ -177,7 +177,7 @@ const PID_CHECK_AFTER_SECS: i64 = 30 * 60;
 
 /// Whether a process runs: asked of the OS directly, since a job's status is read often and a
 /// wrong "gone" fails a job that is about to finish.
-fn process_runs(pid: u32) -> bool {
+pub(crate) fn process_runs(pid: u32) -> bool {
     #[cfg(windows)]
     {
         #[link(name = "kernel32")]
@@ -322,6 +322,8 @@ pub fn enqueue(db: &Db, opts: &SubmitOptions, actor: &Actor) -> Result<Job> {
         "UPDATE submit_job SET state = 'superseded', ended_at = ?2 WHERE issue_key = ?1 COLLATE NOCASE AND state = 'queued'",
         params![issue.key, now()],
     )?;
+    // One that already waits for a review batch is replaced too: its job then ends as superseded.
+    crate::review_batch::supersede_waiting(db, &issue.key)?;
     db.conn.execute(
         "INSERT INTO submit_job (issue_key, worktree, branch, head, requested_by, skip_review, local_only, state, queued_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', ?8)",
@@ -374,7 +376,8 @@ pub fn run(db: &mut Db, config: &crate::Config, id: i64) -> Result<Job> {
         return db.submit_job(id)?.context("the job's record went missing");
     }
     let actor = if job.requested_by == "human" { Actor::Human } else { Actor::Agent(job.requested_by.clone()) };
-    let opts = SubmitOptions { dir: &job.worktree, issue_key: Some(&job.issue), skip_review: job.skip_review, local_only: job.local_only };
+    // Only a submit in the background may wait for a review batch: nobody waits on it (NIT-216).
+    let opts = SubmitOptions { dir: &job.worktree, issue_key: Some(&job.issue), skip_review: job.skip_review, local_only: job.local_only, batch: true };
     let outcome = crate::submit::submit(db, config, &opts, &actor);
     match &outcome {
         Ok(s) => {
@@ -382,6 +385,9 @@ pub fn run(db: &mut Db, config: &crate::Config, id: i64) -> Result<Job> {
                 "UPDATE submit_job SET state = 'done', ended_at = ?2, result = ?3 WHERE id = ?1",
                 params![id, now(), serde_json::to_string(s)?],
             )?;
+        }
+        Err(e) if e.downcast_ref::<crate::review_batch::Superseded>().is_some() => {
+            db.conn.execute("UPDATE submit_job SET state = 'superseded', ended_at = ?2, error = ?3 WHERE id = ?1", params![id, now(), e.to_string()])?;
         }
         Err(e) => {
             let why = format!("{e:#}");
@@ -463,7 +469,7 @@ mod tests {
         let mut db = Db::open(&db_path).unwrap();
         let actor = Actor::Agent("codex:session-1".into());
         let dir = wt.to_string_lossy().into_owned();
-        let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true };
+        let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: false };
 
         // Handed in: queued, nothing ran, the issue still In Progress.
         let runner = Recorded(Default::default());
@@ -506,7 +512,7 @@ mod tests {
         let mut db = Db::open(&db_path).unwrap();
         let actor = Actor::Agent("codex:session-1".into());
         let dir = wt.to_string_lossy().into_owned();
-        let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true };
+        let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: false };
         let job = enqueue(&db, &opts, &actor).unwrap();
         // Running under a process that no longer exists: abandoned, and the submitter is told.
         db.conn.execute("UPDATE submit_job SET state = 'running', pid = 999999, started_at = ?2 WHERE id = ?1", rusqlite::params![job.id, now()]).unwrap();

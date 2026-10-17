@@ -437,6 +437,8 @@ export interface ReviewRecord {
   ts: number;
   /** How independent the review was when it was not another vendor by choice, e.g. "same vendor: codex not installed". */
   note?: string;
+  /** The review batch it was reviewed in, with other changes in one reviewer call (NIT-216). */
+  batch_id?: number | null;
 }
 
 export interface ConnectChange {

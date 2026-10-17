@@ -52,6 +52,7 @@ pub mod push;
 pub mod watch;
 pub mod submit;
 pub mod submit_job;
+pub mod review_batch;
 #[cfg(test)]
 pub(crate) mod test_repo;
 

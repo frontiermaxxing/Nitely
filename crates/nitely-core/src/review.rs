@@ -33,6 +33,28 @@ pub struct ReviewRules {
     /// A review by the author's own vendor (because no other reviewer is installed, or the
     /// `reviewer` map says so) sends the change to a human instead of approving it.
     pub require_cross_vendor: bool,
+    /// Review several changes in one reviewer call (docs/batching.md): `off` (each alone, the
+    /// default), `small` (changes of at most `small_lines` and `small_files`), or `all`. Only a
+    /// submit that runs in the background waits for a batch.
+    pub batch: BatchMode,
+    /// How long the oldest change in the queue waits for others ("5m", "30s", "0"), or `busy`:
+    /// until no batch of the repository is being reviewed.
+    pub batch_window: String,
+    /// Changes per review call.
+    pub batch_max: usize,
+    pub small_lines: usize,
+    pub small_files: usize,
+    /// With `all`: changed lines per batch.
+    pub max_lines: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BatchMode {
+    #[default]
+    Off,
+    Small,
+    All,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +86,12 @@ impl Default for ReviewRules {
             focus: String::new(),
             timeout_minutes: 20,
             require_cross_vendor: false,
+            batch: BatchMode::Off,
+            batch_window: "5m".into(),
+            batch_max: 3,
+            small_lines: 100,
+            small_files: 5,
+            max_lines: 1500,
         }
     }
 }
@@ -136,6 +164,65 @@ pub struct Review {
     /// e.g. `same vendor: codex not installed`. Empty otherwise.
     #[serde(default)]
     pub note: String,
+    /// The batch this change was reviewed in, with others in one reviewer call (NIT-216).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch: Option<BatchInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BatchInfo {
+    pub id: i64,
+    /// The other changes' issues, in the batch's order.
+    pub with: Vec<String>,
+}
+
+impl Review {
+    /// "NIT-2, NIT-3": the changes a batched review reviewed this one with.
+    pub fn batched_with(&self) -> Option<String> {
+        self.batch.as_ref().filter(|b| !b.with.is_empty()).map(|b| b.with.join(", "))
+    }
+}
+
+/// How severities are judged, word for word in a single and a batched review, so batching does not
+/// change what a P1 is.
+const SEVERITIES: &str = "using P0 for data loss or security, P1 for a definite bug in normal use, P2 for an edge case, P3 for a minor issue.";
+
+/// What an answer about a previous finding must hold, after its format (NIT-214).
+const PREVIOUS_RULES: &str = "where file, line and code are from the current branch, the code is at that line, and <how> says in a few words how \
+that code still causes the problem the finding describes. The code a finding cites may have moved or gone, and a fix \
+may have replaced it: check the problem itself, not the old line or its wording. If it no longer happens, it is \
+fixed, even if code nearby could be better (raise that as a new defect if it is one). An open answer that quotes no \
+code at the line it cites, or does not say how that code still causes the problem, is not counted as open. Do not \
+list an open one again as a defect: it stays on record by itself.\n";
+
+/// What the person accepted, before the list (NIT-191).
+const ACCEPTED_INTRO: &str = "The person who owns this change accepted these findings as they are: a trade-off they decided, not a \
+defect left to fix. Do not raise them again, or anything that only restates them, unless the code they cite has changed \
+since in a way that makes them worse:\n";
+
+/// One change in a batched review.
+#[derive(Debug, Clone)]
+pub struct BatchChange {
+    pub key: String,
+    pub title: String,
+    pub branch: String,
+    /// The commits its diff runs between.
+    pub base: String,
+    pub head: String,
+    /// Its own worktree, to check what its previous findings cite.
+    pub worktree: std::path::PathBuf,
+    /// The files its diff touches, to place a finding that names no change.
+    pub files: Vec<String>,
+    pub previous: Option<PreviousRound>,
+}
+
+/// A batched reply, split by change.
+#[derive(Debug)]
+pub struct BatchReply {
+    /// In the batch's order: the change's review, or why it must be reviewed alone.
+    pub reviews: Vec<std::result::Result<Review, String>>,
+    /// `INTERACTION j,k` lines: the two changes (0-based, the first one first) and what goes wrong.
+    pub interactions: Vec<(usize, usize, String)>,
 }
 
 /// A reviewer that could not run at all: it did not start, it stopped with an error, or it is not
@@ -303,22 +390,12 @@ regressions. Skip style. Do not edit anything.\n",
                     p.push_str(&format!("   Last round said it was still open: {now}\n"));
                 }
             }
-            p.push_str(
-                "Answer each on its own line as `PREVIOUS <n>: fixed` or `PREVIOUS <n>: open <file>:<line> `<code>` <how>`, \
-where file, line and code are from the current branch, the code is at that line, and <how> says in a few words how \
-that code still causes the problem the finding describes. The code a finding cites may have moved or gone, and a fix \
-may have replaced it: check the problem itself, not the old line or its wording. If it no longer happens, it is \
-fixed, even if code nearby could be better (raise that as a new defect if it is one). An open answer that quotes no \
-code at the line it cites, or does not say how that code still causes the problem, is not counted as open. Do not \
-list an open one again as a defect: it stays on record by itself.\n",
-            );
+            p.push_str("Answer each on its own line as `PREVIOUS <n>: fixed` or `PREVIOUS <n>: open <file>:<line> `<code>` <how>`, ");
+            p.push_str(PREVIOUS_RULES);
         }
         if let Some(prev) = previous.filter(|p| !p.accepted.is_empty()) {
-            p.push_str(
-                "\nThe person who owns this change accepted these findings as they are: a trade-off they decided, not a \
-defect left to fix. Do not raise them again, or anything that only restates them, unless the code they cite has changed \
-since in a way that makes them worse:\n",
-            );
+            p.push('\n');
+            p.push_str(ACCEPTED_INTRO);
             for (f, reason) in &prev.accepted {
                 p.push_str(&format!("- [P{}] {} (accepted: {reason})\n", f.priority, f.text));
             }
@@ -334,10 +411,7 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
         if !self.focus.trim().is_empty() {
             p.push_str(&format!("\n{}\n", self.focus.trim()));
         }
-        p.push_str(
-            "\nReport each defect on its own line as:\n- [P0] title: file, symbol: what goes wrong and when\n\
-using P0 for data loss or security, P1 for a definite bug in normal use, P2 for an edge case, P3 for a minor issue.\n\n",
-        );
+        p.push_str(&format!("\nReport each defect on its own line as:\n- [P0] title: file, symbol: what goes wrong and when\n{SEVERITIES}\n\n"));
         p.push_str(&format!("Then end your reply with exactly these {} lines:\nVERDICT: <findings or clean>\n", 1 + self.flags.len()));
         for f in &self.flags {
             p.push_str(&format!("{}: <yes or no>\n", f.name));
@@ -436,7 +510,146 @@ using P0 for data loss or security, P1 for a definite bug in normal use, P2 for 
             .unwrap_or("")
             .to_string();
         let verdict = if findings.iter().any(|f| f.priority <= 1) { "changes" } else { "pass" };
-        Ok(Review { reviewer: reviewer.into(), verdict: verdict.into(), findings, flagged, summary, seconds, previous, note: String::new() })
+        Ok(Review { reviewer: reviewer.into(), verdict: verdict.into(), findings, flagged, summary, seconds, previous, note: String::new(), batch: None })
+    }
+
+    /// The instructions for several changes reviewed in one call (docs/batching.md): one section
+    /// per change, judged as if alone, with the single prompt's severities word for word.
+    pub fn batch_prompt(&self, changes: &[BatchChange]) -> String {
+        let mut p = format!(
+            "Review these {n} changes to this repository. They are separate: each will land on its own, so judge each one \
+as if it were reviewed alone. A defect belongs to the change whose diff introduces it. A problem that only appears when \
+two of these changes meet goes on a line `INTERACTION <j>,<k>: <what goes wrong>`, not on either change. Your working \
+directory has none of these changes checked out: read a file as change <k> has it with `git show <head>:<path>`. For each \
+change, run its diff, read the changed code and its callers, and look for correctness bugs and regressions. Skip style. \
+Do not edit anything.\n",
+            n = changes.len()
+        );
+        for (i, c) in changes.iter().enumerate() {
+            let k = i + 1;
+            p.push_str(&format!("\n## CHANGE {k}: {} \"{}\"\nbranch {}, base {}, head {}\n", c.key, c.title, c.branch, c.base, c.head));
+            p.push_str(&format!("Run `git diff {}...{}` for the change.\n", c.base, c.head));
+            match &c.previous {
+                Some(prev) if prev.in_history => p.push_str(&format!(
+                    "It was reviewed before, at commit {c0}: `git diff {c0} {h}` is what changed since. The rest was already \
+reviewed: raise something new there only if it is P0 or P1, and then say in the finding why that review missed it.\n",
+                    c0 = prev.commit,
+                    h = c.head
+                )),
+                Some(prev) => p.push_str(&format!("It was reviewed before, at commit {}, and rebased since: review the whole change again.\n", prev.commit)),
+                None => {}
+            }
+            if let Some(prev) = c.previous.as_ref().filter(|p| !p.findings.is_empty()) {
+                p.push_str("First, check each finding of its previous review against its current code:\n");
+                for (j, f) in prev.findings.iter().enumerate() {
+                    p.push_str(&format!("{k}.{}. [P{}] {}\n", j + 1, f.priority, f.text));
+                    if let Some(now) = &f.now {
+                        p.push_str(&format!("   Last round said it was still open: {now}\n"));
+                    }
+                }
+            }
+            if let Some(prev) = c.previous.as_ref().filter(|p| !p.accepted.is_empty()) {
+                p.push_str(ACCEPTED_INTRO);
+                for (f, reason) in &prev.accepted {
+                    p.push_str(&format!("- [P{}] {} (accepted: {reason})\n", f.priority, f.text));
+                }
+            }
+        }
+        if changes.iter().any(|c| c.previous.as_ref().is_some_and(|p| !p.findings.is_empty())) {
+            p.push_str("\nAnswer each previous finding on its own line as `PREVIOUS <k>.<n>: fixed` or `PREVIOUS <k>.<n>: open <file>:<line> `<code>` <how>`, ");
+            p.push_str(PREVIOUS_RULES);
+        }
+        if !self.focus.trim().is_empty() {
+            p.push_str(&format!("\n{}\n", self.focus.trim()));
+        }
+        p.push_str(&format!("\nReport each defect on its own line as:\n- [P0] CHANGE <k>: title: file, symbol: what goes wrong and when\n{SEVERITIES}\n\n"));
+        p.push_str("Then end your reply with these lines for each change, change 1's first:\nVERDICT <k>: <findings or clean>\n");
+        for f in &self.flags {
+            p.push_str(&format!("{} <k>: <yes or no>\n", f.name));
+        }
+        p.push_str("VERDICT <k> is findings if you listed any new defect for change <k>, otherwise clean.");
+        for f in &self.flags {
+            p.push_str(&format!(" {} <k> is yes if, for change <k>, {}.", f.name, f.question.trim_end_matches('.')));
+        }
+        if !self.flags.is_empty() {
+            p.push_str(" Answer yes when unsure.");
+        }
+        p
+    }
+
+    /// Splits a batched reply into one review per change, each parsed as a single review would be
+    /// (carried and accepted findings, NIT-214's checks against that change's worktree). A change
+    /// whose part of the reply cannot stand alone gets the reason it must be reviewed alone: no
+    /// VERDICT for it, an unfinished part, or a finding that names no change and could be its.
+    pub fn parse_batch(&self, reviewer: &str, text: &str, seconds: u64, changes: &[BatchChange]) -> BatchReply {
+        let n = changes.len();
+        let mut parts: Vec<Vec<String>> = vec![vec![]; n];
+        let mut stray: Vec<String> = vec![];
+        let mut interactions = vec![];
+        let index = |k: &str| k.trim().trim_start_matches('#').parse::<usize>().ok().filter(|k| (1..=n).contains(k)).map(|k| k - 1);
+        for line in text.lines() {
+            let l = line.replace("**", "");
+            let t = l.trim().trim_start_matches('`');
+            if let Some(rest) = t.strip_prefix("- [P").or_else(|| t.strip_prefix("* [P")) {
+                let Some((priority, body)) = rest.split_once(']') else { continue };
+                let body = body.trim();
+                match body.get(..7).filter(|w| w.eq_ignore_ascii_case("change ")).and_then(|_| body[7..].split_once(|c: char| !c.is_ascii_digit() && c != '#')) {
+                    Some((k, said)) if index(k).is_some() => {
+                        let said = said.trim_start_matches([':', ' ', '-', '\u{2013}', '\u{2014}']);
+                        parts[index(k).unwrap()].push(format!("- [P{priority}] {said}"));
+                    }
+                    _ => stray.push(body.to_string()),
+                }
+                continue;
+            }
+            let t = t.trim_start_matches(['-', '*', ' ']);
+            let Some((head, value)) = t.split_once(':') else { continue };
+            let mut words = head.split_whitespace();
+            let (Some(name), Some(at), None) = (words.next(), words.next(), words.next()) else { continue };
+            let name = name.to_uppercase();
+            if name == "PREVIOUS" {
+                if let Some((k, finding)) = at.split_once('.') {
+                    if let Some(k) = index(k) {
+                        parts[k].push(format!("PREVIOUS {finding}:{value}"));
+                    }
+                }
+            } else if name == "INTERACTION" {
+                let pair: Vec<Option<usize>> = at.split(',').map(index).collect();
+                if let [Some(a), Some(b)] = pair[..] {
+                    if a != b {
+                        interactions.push((a.min(b), a.max(b), value.trim().to_string()));
+                    }
+                }
+            } else if name == "VERDICT" || self.flags.iter().any(|f| f.name.eq_ignore_ascii_case(&name)) {
+                if let Some(k) = index(at) {
+                    parts[k].push(format!("{name}: {}", value.trim()));
+                }
+            }
+        }
+        // A finding that names no change could be any change whose diff touches what it cites.
+        let mut unattributed = vec![false; n];
+        for s in &stray {
+            let cited: Vec<String> = citations(s).into_iter().map(|(p, _)| p.replace('\\', "/")).collect();
+            let touches = |c: &BatchChange| c.files.iter().any(|f| cited.iter().any(|p| f == p || f.ends_with(&format!("/{p}"))));
+            let some: Vec<usize> = (0..n).filter(|&k| touches(&changes[k])).collect();
+            for k in if some.is_empty() { (0..n).collect() } else { some } {
+                unattributed[k] = true;
+            }
+        }
+        let reviews = changes
+            .iter()
+            .enumerate()
+            .map(|(k, c)| {
+                if unattributed[k] {
+                    return Err("the batched review listed a finding without saying which change it belongs to, and it could be this one's".to_string());
+                }
+                if !parts[k].iter().any(|l| l.starts_with("VERDICT:")) {
+                    return Err(format!("the batched review gave no VERDICT for it (change {} of {n})", k + 1));
+                }
+                self.parse(reviewer, &parts[k].join("\n"), seconds, c.previous.as_ref(), Some(&c.worktree)).map_err(|e| format!("its part of the batched review was unfinished: {e:#}"))
+            })
+            .collect();
+        BatchReply { reviews, interactions }
     }
 
     /// The human-facing reasons for the flags a review raised.
@@ -450,6 +663,13 @@ using P0 for data loss or security, P1 for a definite bug in normal use, P2 for 
 
     /// Runs `reviewer` in `worktree` and parses its reply.
     pub fn run(&self, reviewer: &str, worktree: &Path, base: &str, previous: Option<&PreviousRound>) -> Result<Review> {
+        let reply = self.run_prompt(reviewer, worktree, &self.prompt(base, previous))?;
+        self.parse(reviewer, &reply.text, reply.seconds, previous, Some(worktree)).map_err(|e| if reply.only_a_login_message { reply.signed_out(self) } else { e })
+    }
+
+    /// Runs `reviewer` in `worktree` with `prompt` on its stdin, and returns what it wrote. A
+    /// reviewer that cannot run is a `CouldNotRun`; one that ran past its timeout, an error.
+    pub fn run_prompt(&self, reviewer: &str, worktree: &Path, prompt: &str) -> Result<Reply> {
         let command = self
             .commands
             .get(reviewer)
@@ -470,7 +690,7 @@ using P0 for data loss or security, P1 for a definite bug in normal use, P2 for 
         let could_not = |why: &str, detail: String| anyhow::Error::new(CouldNotRun { reviewer: reviewer.to_string(), why: why.to_string(), detail });
         let mut child = cmd.spawn().map_err(|e| could_not("did not start", format!("{}: {e}", command[0])))?;
         let mut stdin = child.stdin.take().unwrap();
-        let prompt = self.prompt(base, previous);
+        let prompt = prompt.to_string();
         let writer = std::thread::spawn(move || stdin.write_all(prompt.as_bytes()));
         let mut stdout = child.stdout.take().unwrap();
         let mut stderr = child.stderr.take().unwrap();
@@ -501,14 +721,42 @@ using P0 for data loss or security, P1 for a definite bug in normal use, P2 for 
         let text = if uses_file { std::fs::read_to_string(&out_file).unwrap_or_default() } else { stdout.clone() };
         std::fs::remove_file(&out_file).ok();
         let printed = format!("{text}\n{stdout}{stderr}");
-        let signed_out = || could_not("not signed in", format!("{}.\n{}", login_hint(reviewer, self), tail(&printed)));
+        let reply = Reply {
+            reviewer: reviewer.to_string(),
+            // A reviewer that is signed out may still exit 0, printing why instead of a review: a
+            // short reply with no findings in it. A long or partial review that mentions logins is
+            // unfinished.
+            only_a_login_message: printed.len() < 1000 && !text.contains("- [P") && says_signed_out(&printed),
+            text,
+            printed,
+            seconds: started.elapsed().as_secs(),
+        };
         if !status.success() {
-            return Err(if says_signed_out(&printed) { signed_out() } else { could_not(&format!("exited with {status}"), tail(&printed)) });
+            return Err(if says_signed_out(&reply.printed) { reply.signed_out(self) } else { could_not(&format!("exited with {status}"), tail(&reply.printed)) });
         }
-        // A reviewer that is signed out may still exit 0, printing why instead of a review: a short
-        // reply with no findings in it. A long or partial review that mentions logins is unfinished.
-        let only_a_login_message = printed.len() < 1000 && !text.contains("- [P") && says_signed_out(&printed);
-        self.parse(reviewer, &text, started.elapsed().as_secs(), previous, Some(worktree)).map_err(|e| if only_a_login_message { signed_out() } else { e })
+        Ok(reply)
+    }
+}
+
+/// What a reviewer wrote.
+pub struct Reply {
+    reviewer: String,
+    pub text: String,
+    /// The reply and everything the reviewer printed, for its error.
+    printed: String,
+    pub seconds: u64,
+    /// Short, with no findings, and about signing in: the reviewer could not run, whatever its
+    /// exit code said.
+    pub only_a_login_message: bool,
+}
+
+impl Reply {
+    pub fn signed_out(&self, rules: &ReviewRules) -> anyhow::Error {
+        anyhow::Error::new(CouldNotRun {
+            reviewer: self.reviewer.clone(),
+            why: "not signed in".into(),
+            detail: format!("{}.\n{}", login_hint(&self.reviewer, rules), tail(&self.printed)),
+        })
     }
 }
 
@@ -1213,5 +1461,72 @@ PREVIOUS 2: open crates/nitely-cli/src/lanes.rs:139 `out.push_str(&\"\\\\\".repe
         let mut r = rules();
         r.commands.insert("gone".into(), vec!["nitely-test-no-such-reviewer".into()]);
         assert_eq!(r.run("gone", &std::env::temp_dir(), "main", None).unwrap_err().downcast::<CouldNotRun>().unwrap().why, "did not start");
+    }
+
+    /// Two changes in one reviewer call: each finding, previous answer, verdict and flag goes to the
+    /// change it names, even when both touch one file (NIT-216).
+    #[test]
+    fn a_batched_reply_is_split_by_change() {
+        let dir = crate::paths::unique_temp("nitely-batch-parse", "");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("shared.rs"), "let total = rows.len();\nlet edge = 2;\n".to_string() + &"// more\n".repeat(9)).unwrap();
+        let f = |priority, text: &str| Finding { priority, text: text.into(), carried: false, raised_as: None, now: None };
+        let change = |k: &str, files: &[&str], previous: Option<PreviousRound>| BatchChange {
+            key: k.into(),
+            title: format!("{k} title"),
+            branch: format!("claude/{}-x", k.to_lowercase()),
+            base: "b0".into(),
+            head: format!("h{k}"),
+            worktree: dir.clone(),
+            files: files.iter().map(|f| f.to_string()).collect(),
+            previous,
+        };
+        let earlier = PreviousRound {
+            commit: "c0".into(),
+            findings: vec![f(2, "Edge: shared.rs:2, the empty line")],
+            in_history: true,
+            accepted: vec![(f(2, "Slow: shared.rs"), "fine for now".into())],
+        };
+        let changes = vec![change("NIT-1", &["shared.rs"], Some(earlier)), change("NIT-2", &["shared.rs", "other.rs"], None)];
+        let rules = rules();
+
+        // The prompt: a section per change, its previous findings numbered by change, what was
+        // accepted, the single prompt's severities word for word, and the closing lines per change.
+        let p = rules.batch_prompt(&changes);
+        assert!(p.contains("## CHANGE 1: NIT-1 \"NIT-1 title\"\nbranch claude/nit-1-x, base b0, head hNIT-1\nRun `git diff b0...hNIT-1`"), "{p}");
+        assert!(p.contains("`git diff c0 hNIT-1`") && p.contains("1.1. [P2] Edge: shared.rs:2, the empty line"), "{p}");
+        assert!(p.contains("- [P2] Slow: shared.rs (accepted: fine for now)") && p.contains("## CHANGE 2: NIT-2"), "{p}");
+        assert!(p.contains(SEVERITIES) && rules.prompt("main", None).contains(SEVERITIES));
+        assert!(p.contains("`PREVIOUS <k>.<n>: fixed`") && p.contains("VERDICT <k>: <findings or clean>\nMONEY_OR_RELEASE <k>: <yes or no>"), "{p}");
+
+        let reply = "Two small changes.\n\
+- [P1] **CHANGE 2**: Off by one: shared.rs:1, total: skips the last row\n\
+- [P2] CHANGE 1: Naming: shared.rs:1, total\n\
+PREVIOUS 1.1: fixed\n\
+INTERACTION 2,1: both change `total`\n\
+VERDICT 1: findings\nMONEY_OR_RELEASE 1: no\nVERDICT 2: findings\nMONEY_OR_RELEASE 2: yes\n";
+        let split = rules.parse_batch("codex", reply, 70, &changes);
+        let one = split.reviews[0].as_ref().unwrap();
+        assert_eq!((one.verdict.as_str(), one.findings.len(), one.findings[0].text.as_str()), ("pass", 1, "Naming: shared.rs:1, total"));
+        assert_eq!((one.previous[0].status.as_str(), one.seconds, one.flagged.is_empty()), ("fixed", 70, true));
+        let two = split.reviews[1].as_ref().unwrap();
+        assert_eq!((two.verdict.as_str(), two.findings[0].priority, two.flagged.clone()), ("changes", 1, vec!["MONEY_OR_RELEASE".to_string()]));
+        assert_eq!(split.interactions, [(0, 1, "both change `total`".to_string())]);
+
+        // A finding that names no change goes to every change whose diff touches what it cites, or
+        // to all of them when it cites nothing they touch; a change without its VERDICT goes alone.
+        let stray = |line: &str| {
+            rules.parse_batch("codex", &format!("{line}\nVERDICT 1: clean\nMONEY_OR_RELEASE 1: no\nVERDICT 2: findings\nMONEY_OR_RELEASE 2: no\n"), 1, &changes)
+        };
+        let only_two = stray("- [P1] Leak: other.rs:4, keeps the token");
+        assert!(only_two.reviews[0].is_ok() && only_two.reviews[1].as_ref().unwrap_err().contains("without saying which change"), "{only_two:?}");
+        let both = stray("- [P1] CHANGE 7: Leak: nowhere");
+        assert!(both.reviews.iter().all(|r| r.is_err()), "{both:?}");
+        let no_verdict = rules.parse_batch("codex", "VERDICT 1: clean\nMONEY_OR_RELEASE 1: no\n", 1, &changes);
+        assert!(no_verdict.reviews[0].is_ok() && no_verdict.reviews[1].as_ref().unwrap_err().contains("no VERDICT"), "{no_verdict:?}");
+        // Its part unfinished (a flag unanswered) is the same.
+        let unanswered = rules.parse_batch("codex", "VERDICT 1: clean\nVERDICT 2: clean\nMONEY_OR_RELEASE 2: no\n", 1, &changes);
+        assert!(unanswered.reviews[0].as_ref().unwrap_err().contains("unfinished") && unanswered.reviews[1].is_ok(), "{unanswered:?}");
+        std::fs::remove_dir_all(dir).ok();
     }
 }
