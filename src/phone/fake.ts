@@ -14,7 +14,7 @@ let decisions: PhoneDecision[] = [
     id: "ask-12",
     since: NOW() - 900,
     issue: { key: "DEMO-3", title: "Show prices in the visitor's currency", kind: "feature", priority: 3, state: "In Progress", track: track("working", { todo: NOW() - 9000, started: NOW() - 8000, working: NOW() - 7000 }) as never },
-    ask: { id: 12, question: "Which currencies should the price page offer at launch?", options: ["EUR and USD", "EUR, USD and GBP", "Every currency Stripe supports"], asked_by: "claude:c:/code/demo-worktrees/demo-3" },
+    ask: { id: 12, question: "Which currencies should the price page offer at launch? It decides the rounding in [DEMO-1](nitely://issue/DEMO-1) and the `currency` setting.", options: ["EUR and USD", "EUR, USD and GBP", "Every currency Stripe supports"], asked_by: "claude:c:/code/demo-worktrees/demo-3" },
   },
   {
     kind: "approve",

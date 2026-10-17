@@ -938,9 +938,17 @@ fn check_decision(device: &Device, message: &str, time: i64, signature: &str) ->
 }
 
 /// An issue as the phone shows it.
+/// An agent's markdown as a reader sees it, for a notification: links as their text (an issue
+/// link as its key), backticks and bold marks dropped.
+fn plain(s: &str) -> String {
+    static LINK: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let link = LINK.get_or_init(|| regex::Regex::new(r"\[([^\]]*)\]\([^)\s]*\)").unwrap());
+    link.replace_all(s, "$1").replace("**", "").replace('`', "")
+}
+
 /// Each waiting decision as (id, one line) for a notification.
 fn waiting_lines(v: &Value) -> Vec<(String, String)> {
-    let text = |v: &Value| v.as_str().unwrap_or("").to_string();
+    let text = |v: &Value| plain(v.as_str().unwrap_or(""));
     v["decisions"]
         .as_array()
         .map(|ds| {
@@ -1573,6 +1581,13 @@ mod tests {
         let out = parse_tailscale_status(r#"{ "BackendState": "NeedsLogin", "Self": { "DNSName": "" } }"#).unwrap();
         assert!(out.installed && !out.running && out.name.is_none());
         assert_eq!(out.backend, "NeedsLogin");
+    }
+
+    #[test]
+    fn notifications_read_an_agents_markdown_as_text() {
+        assert_eq!(plain("Which currency for [DEM-5](nitely://issue/DEM-5)? See `rates.rs` and **[docs](https://example.com)**."), "Which currency for DEM-5? See rates.rs and docs.");
+        let v = json!({ "decisions": [{ "id": "ask-1", "kind": "ask", "issue": { "key": "DEM-3" }, "ask": { "question": "Round [DEM-5](nitely://issue/DEM-5) too?" } }] });
+        assert_eq!(waiting_lines(&v), [("ask-1".to_string(), "DEM-3 asks: Round DEM-5 too?".to_string())]);
     }
 
     #[test]

@@ -94,3 +94,8 @@ body { font-family: var(--font); font-size: 16px; line-height: 1.5; -webkit-text
   background: var(--surface); border: 1px solid var(--line-strong); border-radius: 10px;
 }
 .ph-field textarea:focus { outline: 2px solid var(--focus); outline-offset: -1px; }
+
+/* An agent's markdown, shown (Rich.tsx). */
+.ph-decision code, .ph-key { font-family: var(--font-mono); font-size: 0.92em; }
+.ph-decision code { padding: 0 4px; border-radius: 4px; background: var(--surface); }
+.ph-key { font-weight: var(--weight-medium); color: var(--fg); }

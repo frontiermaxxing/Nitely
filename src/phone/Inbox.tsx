@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { signedGet, signedPost, unreachable } from "./api";
 import { shownIndex, type Shown } from "./select";
+import { plain } from "./plain";
+import { Rich } from "./Rich";
 import { answerMessage, approvalMessage, sendBackMessage, sign, type Device } from "./keys";
 import { StationTrack } from "../ui/StationTrack";
 import { SeverityMark } from "../ui/SeverityMark";
@@ -207,7 +209,11 @@ function Decision(props: { decision: PhoneDecision; device: Device; onDecided: (
       <div className={`ph-kind ph-kind-${d.kind}`}>{d.kind === "ask" ? `${who(d.ask!.asked_by)} asks` : "Approve this change?"}</div>
       {d.issue && <IssueHead issue={d.issue} />}
 
-      {d.kind === "ask" && <p className="ph-question">{d.ask!.question}</p>}
+      {d.kind === "ask" && (
+        <p className="ph-question">
+          <Rich text={d.ask!.question} />
+        </p>
+      )}
       {d.kind === "approve" && (
         <div className="ph-why">
           {(d.reasons ?? []).length > 0 && (
@@ -215,7 +221,9 @@ function Decision(props: { decision: PhoneDecision; device: Device; onDecided: (
               <h2>Why it waits for you</h2>
               <ul>
                 {d.reasons!.map((r) => (
-                  <li key={r}>{r}</li>
+                  <li key={r}>
+                    <Rich text={r} />
+                  </li>
                 ))}
               </ul>
             </>
@@ -232,7 +240,7 @@ function Decision(props: { decision: PhoneDecision; device: Device; onDecided: (
                 <ul className="ph-findings">
                   {d.review.findings.map((f) => (
                     <li key={f.text}>
-                      <SeverityMark priority={f.priority} /> {f.text}
+                      <SeverityMark priority={f.priority} /> <Rich text={f.text} />
                     </li>
                   ))}
                 </ul>
@@ -260,7 +268,7 @@ function Decision(props: { decision: PhoneDecision; device: Device; onDecided: (
           <>
             {d.ask!.options.map((o) => (
               <button key={o} className="ph-btn ph-option" disabled={busy} onClick={() => answer(o)}>
-                {o}
+                {plain(o)}
               </button>
             ))}
             <button className="ph-btn" disabled={busy} onClick={() => setWriting("answer")}>
