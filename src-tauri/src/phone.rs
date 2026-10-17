@@ -138,7 +138,15 @@ pub async fn phone_start(app: tauri::State<'_, PhoneApp>, ips: Vec<String>, tls:
     let running = app.phone.start(&ips, phone::PORT, tls).map_err(err)?;
     *app.running() = Some(running);
     // So a phone away from home finds the PC; the display may still turn off.
-    *app.awake() = keep_awake.unwrap_or(false).then(nitely_core::awake::KeepAwake::new);
+    // Shown as awake only when the OS holds it.
+    *app.awake() = match keep_awake.unwrap_or(false).then(nitely_core::awake::KeepAwake::new) {
+        Some(Ok(held)) => Some(held),
+        Some(Err(e)) => {
+            eprintln!("nitely: the phone server cannot keep this PC awake: {e:#}");
+            None
+        }
+        None => None,
+    };
     Ok(status(&app))
 }
 

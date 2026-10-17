@@ -10,7 +10,7 @@ pub struct KeepAwake {
     /// macOS `caffeinate`, Linux `systemd-inhibit`: each waits on this process, so it lets go by
     /// itself if Nitely dies.
     #[cfg(not(windows))]
-    child: Option<std::process::Child>,
+    child: std::process::Child,
 }
 
 #[cfg(windows)]
@@ -20,7 +20,8 @@ extern "system" {
 }
 
 impl KeepAwake {
-    pub fn new() -> KeepAwake {
+    /// Fails when the OS gives no way to hold it (no `caffeinate` or `systemd-inhibit`).
+    pub fn new() -> anyhow::Result<KeepAwake> {
         #[cfg(windows)]
         {
             const ES_CONTINUOUS: u32 = 0x8000_0000;
@@ -34,40 +35,33 @@ impl KeepAwake {
                 let _ = held.recv();
                 unsafe { SetThreadExecutionState(ES_CONTINUOUS) };
             });
-            KeepAwake { _release: release }
+            Ok(KeepAwake { _release: release })
         }
         #[cfg(not(windows))]
         {
             let pid = std::process::id().to_string();
+            use anyhow::Context;
             let child = if cfg!(target_os = "macos") {
                 // -i: no idle sleep; -w: until this process exits.
-                std::process::Command::new("caffeinate").args(["-i", "-w", &pid]).spawn().ok()
+                std::process::Command::new("caffeinate").args(["-i", "-w", &pid]).spawn().context("caffeinate is not available")?
             } else {
                 std::process::Command::new("systemd-inhibit")
                     .args(["--what=idle:sleep", "--who=Nitely", "--why=The phone server is on", "--mode=block", "tail", "-f", "--pid", &pid, "/dev/null"])
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .spawn()
-                    .ok()
+                    .context("systemd-inhibit is not available, so this PC cannot be kept awake")?
             };
-            KeepAwake { child }
+            Ok(KeepAwake { child })
         }
-    }
-}
-
-impl Default for KeepAwake {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
 #[cfg(not(windows))]
 impl Drop for KeepAwake {
     fn drop(&mut self) {
-        if let Some(mut c) = self.child.take() {
-            c.kill().ok();
-            c.wait().ok();
-        }
+        self.child.kill().ok();
+        self.child.wait().ok();
     }
 }
 
@@ -77,8 +71,8 @@ mod tests {
 
     #[test]
     fn holds_and_lets_go() {
-        let first = KeepAwake::new();
-        let second = KeepAwake::new();
+        let first = KeepAwake::new().unwrap();
+        let second = KeepAwake::new().unwrap();
         #[cfg(windows)]
         {
             // While one is held, Windows reports the system as required. (Other programs may hold it
