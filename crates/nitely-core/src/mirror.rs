@@ -71,7 +71,8 @@ pub fn sanitize(text: &str, roots: &[String]) -> String {
 /// As `sanitize`, with the home folder given: it is taken out whole first, so a user name with a
 /// space in it (`C:\Users\Sam Lee`) never goes out in part.
 pub fn sanitize_with_home(text: &str, roots: &[String], home: Option<&str>) -> String {
-    let agent = regex::Regex::new(r#"\b(claude|codex|cursor|agent|crew|cli)(@[\w.-]+|:[A-Za-z]:[\\/](?:[^\\/\n"'`<>|:]*[^\s\\/"'`<>|:][\\/])*[^\s\\/"'`<>|,;)\]]*|:/(?:[^/\n"'`<>|]*[^\s/"'`<>|]/)*[^\s/"'`<>|,;)\]]*)"#).unwrap();
+    // A session's id (`claude:<session id>`, NIT-194) goes the same way as an agent's folder.
+    let agent = regex::Regex::new(r#"\b(claude|codex|cursor|agent|crew|cli)(@[\w.-]+|:[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}\b|:[A-Za-z]:[\\/](?:[^\\/\n"'`<>|:]*[^\s\\/"'`<>|:][\\/])*[^\s\\/"'`<>|,;)\]]*|:/(?:[^/\n"'`<>|]*[^\s/"'`<>|]/)*[^\s/"'`<>|,;)\]]*)"#).unwrap();
     let mut text = agent.replace_all(text, "$1").into_owned();
     if let Some(home) = home.map(|h| h.trim_end_matches(['/', '\\'])).filter(|h| h.len() > 3) {
         // Both slash styles, any case: what is inside a repo root keeps its relative part below.

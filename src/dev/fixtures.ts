@@ -445,6 +445,16 @@ function sha() {
 let askId = 1;
 let prNumber = 40;
 
+/** A session id for a fixture agent, made from its issue's key so it is the same on every load. */
+function fakeSession(seed: string): string {
+  let h = 2166136261;
+  const hex = Array.from({ length: 32 }, (_, i) => {
+    h = Math.imul(h ^ (seed.charCodeAt(i % seed.length) + i), 16777619);
+    return ((h >>> 0) % 16).toString(16);
+  }).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 function build(): World {
   const world: World = { issues: [], timelines: new Map(), reviews: new Map(), prs: new Map(), asks: [], projects: [], repos: REPOS };
   for (const spec of ISSUES) {
@@ -453,7 +463,11 @@ function build(): World {
     const other = vendor === "claude" ? "codex" : "claude";
     const reviewer = spec.sameVendor ? vendor : other;
     const reviewNote = spec.sameVendor ? `same vendor: ${other} not installed` : "";
-    const agent = `${vendor}:c:/code/${repo.name.toLowerCase()}-worktrees/${spec.key.toLowerCase()}`;
+    // Agents act as their session (NIT-194); every third issue's events are from before that, under
+    // the agent's folder.
+    const folder = `C:\\Code\\${repo.name}-worktrees\\${spec.key.toLowerCase()}`;
+    const oldStyle = Number(spec.key.split("-")[1]) % 3 === 0;
+    const agent = oldStyle ? `${vendor}:c:/code/${repo.name.toLowerCase()}-worktrees/${spec.key.toLowerCase()}` : `${vendor}:${fakeSession(spec.key)}`;
     const filer = spec.source === "human" ? "human" : `${spec.vendor ?? (rand() > 0.5 ? "claude" : "codex")}:c:/code/${repo.name.toLowerCase()}`;
     const start = NOW - spec.from * HOUR;
     const end = NOW - spec.to * HOUR;
@@ -611,7 +625,7 @@ function build(): World {
       blocks: [],
       urgency: spec.priority,
     });
-    world.timelines.set(spec.key, timeline);
+    world.timelines.set(spec.key, oldStyle ? timeline : timeline.map((t) => (t.actor === agent ? { ...t, place: folder } : t)));
     world.reviews.set(spec.key, reviews);
     if (number) {
       const done = state === "Done";

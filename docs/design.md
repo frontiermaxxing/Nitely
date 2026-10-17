@@ -84,6 +84,16 @@ state, decides it, so a missed event cannot leave a row wrong forever.
 maps cwd → worktree → branch → issue key (branches are `claude/app-123-slug`), so an agent never has to
 say which task it is on.
 
+**Every call names its session.** Several agents often work from one folder, so an MCP call acts as
+the session that made it, not as the folder (NIT-194): a Codex call names its thread
+(`_meta.threadId`, `codex:<thread id>`), and a Claude Code call carries its tool use id, which the
+session's PreToolUse hook noted with the session id (`claude:<session id>`, the id its other hooks
+report). Without that hook, the session Claude Code names in `CLAUDE_CODE_SESSION_ID` stands in while
+it is open, and else the folder (`claude:c:/code/app`), as every event before this did. Claims and
+timeline entries carry that id; the folder stays the session's own (`place` on a timeline entry).
+The app shows a session as its vendor and the end of its id, `Claude · 3317`, and the full id on
+hover. A crew worker keeps its folder's id, which is its own worktree.
+
 **Approvals are a guardrail, not a security boundary.** The CLI and MCP server refuse to set `Approved`
 or write an Approval. An agent with shell access could
 still write the SQLite file directly. If that matters later, the app can sign approvals with a key held
@@ -97,7 +107,8 @@ Three layers, each useful on its own.
 that call `nitely hook <vendor>` with the hook's JSON on stdin.
 
 - Claude Code: `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `Stop`, `SubagentStop` in
-  `.claude/settings.json`, next to any PreToolUse hooks the repo already has. The hook records a
+  `.claude/settings.json`, next to any PreToolUse hooks the repo already has, and `PreToolUse` for MCP
+  tools only (`mcp__.*`), which notes the session behind each call and nothing else. The hook records a
   heartbeat and a one-line summary (tool name, command or file), never full prompts or file contents.
 - Cursor: its `hooks.json` (shell execution, file edit, stop events) maps the same way.
 - Codex: the `notify` program in `config.toml` gives turn-complete events.

@@ -44,6 +44,15 @@ pub fn from_claude(input: &Value) -> Result<NewEvent> {
     })
 }
 
+/// The tool use id of a Claude Code PreToolUse hook for an MCP tool: the id the call carries to
+/// the MCP server (`_meta["claudecode/toolUseId"]`), so the nitely server can tell which session
+/// made it. None for any other hook.
+pub fn claude_mcp_call(input: &Value) -> Option<String> {
+    let str_field = |k: &str| input.get(k).and_then(Value::as_str).unwrap_or("");
+    let mcp = str_field("hook_event_name") == "PreToolUse" && str_field("tool_name").starts_with("mcp__");
+    Some(str_field("tool_use_id").to_string()).filter(|id| mcp && !id.is_empty())
+}
+
 /// Codex's `notify` program gets one JSON argument after each turn: `type`
 /// (`agent-turn-complete`), `thread-id` and `cwd`, plus the turn's messages, which are not kept.
 pub fn from_codex(input: &Value) -> Result<NewEvent> {
@@ -148,6 +157,14 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(e.summary.as_deref(), Some("mcp__nitely__note: NIT-27"));
+    }
+
+    #[test]
+    fn a_call_to_an_mcp_tool_names_its_tool_use() {
+        let call = |event: &str, tool: &str| claude_mcp_call(&json!({ "session_id": "s1", "cwd": "/w", "hook_event_name": event, "tool_name": tool, "tool_use_id": "toolu_01" }));
+        assert_eq!(call("PreToolUse", "mcp__nitely__start_task").as_deref(), Some("toolu_01"));
+        assert_eq!(call("PreToolUse", "Bash"), None, "only MCP calls reach a server");
+        assert_eq!(call("PostToolUse", "mcp__nitely__start_task"), None, "after the call is too late");
     }
 
     #[test]

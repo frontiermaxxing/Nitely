@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "./backend";
 import { issueSpendLine } from "./spend";
 import type { Goal, IssueDetail, IssueRecord, IssueSpend, LinkedIssue } from "./types";
-import { agentLabel, ago, openExternal, PRIORITY } from "./util";
+import { agentLabel, agentTitle, ago, openExternal, PRIORITY } from "./util";
 import { IssueJourney, WhoHadIt } from "./IssueJourney";
 import { MirrorFact } from "./Mirror";
 import { typing } from "./Palette";
@@ -249,10 +249,10 @@ export function IssuePanel(props: {
                   {detail.timeline.map((t, n) => (
                     <li key={n} className={`tl-${t.kind}`}>
                       <span className="tl-mark">
-                        <AgentMark vendor={t.actor} size={14} title={agentLabel(t.actor)} />
+                        <AgentMark vendor={t.actor} size={14} title={agentTitle(t.actor, t.place)} />
                       </span>
                       <div className="tl-meta">
-                        <span className="tl-kind">{KIND_LABEL[t.kind] ?? t.kind}</span> {agentLabel(t.actor)} · {ago(props.now, t.ts)}
+                        <span className="tl-kind">{KIND_LABEL[t.kind] ?? t.kind}</span> <span title={agentTitle(t.actor, t.place)}>{agentLabel(t.actor)}</span> · {ago(props.now, t.ts)}
                       </div>
                       {t.summary && <div className="tl-text">{t.summary}</div>}
                       {crewLog(t) && <CrewLogLink path={crewLog(t)!} />}
@@ -300,7 +300,9 @@ export function IssuePanel(props: {
                 <>
                   <dt>Agent</dt>
                   <dd>
-                    <AgentMark vendor={issue.claimed_by} size={16} /> {VENDOR_LABEL[vendorOf(issue.claimed_by)]}
+                    <span title={agentTitle(issue.claimed_by)}>
+                      <AgentMark vendor={issue.claimed_by} size={16} /> {agentLabel(issue.claimed_by)}
+                    </span>
                   </dd>
                 </>
               )}

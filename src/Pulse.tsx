@@ -3,7 +3,7 @@ import { invoke } from "./backend";
 import type { View } from "./App";
 import { KIND_LABEL as DECISION_LABEL, type Decision, type DecisionKind } from "./decisions";
 import type { Board, FlowIssue, Happening, IssueRecord, ProjectFlow, Pulse as PulseData, Session, TaskRow } from "./types";
-import { HOME_LABEL, agentLabel, ago } from "./util";
+import { HOME_LABEL, agentLabel, agentTitle, ago } from "./util";
 import { GoalRows } from "./GoalRows";
 import {
   AgentMark,
@@ -548,7 +548,7 @@ function Since({ data, ctx, first }: { data: PulseData; ctx: Context; first: boo
                 <span className="feed-what" title={h.summary ?? undefined}>
                   {issue?.title ?? h.summary}
                 </span>
-                <AgentMark vendor={h.actor} size={14} title={agentLabel(h.actor)} />
+                <AgentMark vendor={h.actor} size={14} title={agentTitle(h.actor)} />
               </li>
             );
           })}

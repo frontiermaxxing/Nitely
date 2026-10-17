@@ -347,9 +347,12 @@ export interface ProjectBrief {
 
 export interface TimelineEntry {
   ts: number;
+  /** The session that wrote it (`claude:<session id>`), or for an older event its agent and folder. */
   actor: string;
   kind: string;
   summary: string | null;
+  /** The folder its session works in, where known. */
+  place?: string;
 }
 
 /** An issue on the other end of a blocked-by relation, open or closed. */

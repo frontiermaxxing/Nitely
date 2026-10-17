@@ -1175,13 +1175,16 @@ fn toml_string(s: &str) -> String {
     toml::Value::String(s.to_string()).to_string()
 }
 
-/// The variables that pick Nitely's data and agent folders, as this supervisor has them: a
-/// worker's nitely MCP server must use the same ones, and agents don't pass them on by themselves.
+/// The variables a worker's nitely MCP server gets, since agents don't pass theirs on by
+/// themselves: the ones that pick Nitely's data and agent folders, as this supervisor has them,
+/// and `NITELY_CREW`, so its calls act as the worker's id, the one its claim is under (mcp.rs).
 fn nitely_env() -> Vec<(String, String)> {
-    ["NITELY_HOME", "NITELY_AGENT_HOME"]
+    let mut env: Vec<(String, String)> = ["NITELY_HOME", "NITELY_AGENT_HOME"]
         .iter()
         .filter_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()).map(|v| (k.to_string(), v)))
-        .collect()
+        .collect();
+    env.push(("NITELY_CREW".into(), "1".into()));
+    env
 }
 
 /// `{KEY = "value", ...}`, a TOML inline table for a `-c` override.
@@ -1906,6 +1909,7 @@ mod tests {
         assert_eq!(table, r#"{NITELY_HOME = 'C:\Temp\n h', NITELY_AGENT_HOME = '/tmp/a"b'}"#);
         let parsed: toml::Table = format!("env = {table}").parse().unwrap();
         assert_eq!(parsed["env"]["NITELY_HOME"].as_str(), Some(r"C:\Temp\n h"), "the value survives TOML quoting");
+        assert!(nitely_env().contains(&("NITELY_CREW".into(), "1".into())), "a worker's MCP server acts as the worker's id");
     }
 
     #[test]

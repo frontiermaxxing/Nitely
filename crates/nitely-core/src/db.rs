@@ -576,6 +576,21 @@ impl Db {
         Ok(Db { conn })
     }
 
+    /// Notes that `session_id` made the tool call `tool_use_id` (Claude Code's PreToolUse hook), so
+    /// the nitely MCP server that call reaches can act as that session (NIT-194). Calls older than
+    /// a day go as new ones come.
+    pub fn note_tool_call(&self, tool_use_id: &str, session_id: &str) -> Result<()> {
+        let ts = now();
+        self.conn.execute("INSERT OR REPLACE INTO tool_call (tool_use_id, session_id, ts) VALUES (?1, ?2, ?3)", params![tool_use_id, session_id, ts])?;
+        self.conn.execute("DELETE FROM tool_call WHERE ts < ?1", [ts - 86_400])?;
+        Ok(())
+    }
+
+    /// The session that made the tool call `tool_use_id`, if its hook noted it.
+    pub fn session_of_tool_call(&self, tool_use_id: &str) -> Result<Option<String>> {
+        Ok(self.conn.query_row("SELECT session_id FROM tool_call WHERE tool_use_id = ?1", [tool_use_id], |r| r.get(0)).optional()?)
+    }
+
     /// Stores the event and moves the session's heartbeat, in one transaction. A change of state
     /// (or the first state seen for a session) is also kept in `session_state`, so the Activity
     /// view can show what each session did over time.

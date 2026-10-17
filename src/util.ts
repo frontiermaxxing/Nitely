@@ -21,14 +21,7 @@ export function openExternal(url: string) {
 
 export const PRIORITY = ["", "Urgent", "High", "Medium", "Low"];
 
-/** `claude:c:/code/nitely` → `claude · nitely` */
-export function agentLabel(id: string): string {
-  const [vendor, ...rest] = id.split(":");
-  const path = rest.join(":");
-  const last = path.split("/").filter(Boolean).pop();
-  const name = vendor ? vendor[0].toUpperCase() + vendor.slice(1) : vendor;
-  return last ? `${name} · ${last}` : name;
-}
+export { agentLabel, agentTitle } from "./ui/agents";
 
 export function nowSecs() {
   return Date.now() / 1000;

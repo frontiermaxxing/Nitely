@@ -516,6 +516,13 @@ fn run_hook(vendor: &str, payload: Option<&str>) -> Result<()> {
         std::io::stdin().read_to_string(&mut input)?;
     }
     let value: serde_json::Value = serde_json::from_str(&input)?;
+    // Before an MCP call: only which session makes it, for the server it reaches (NIT-194). The
+    // PostToolUse hook records the call itself.
+    if vendor == "claude" {
+        if let (Some(call), Some(session)) = (hook::claude_mcp_call(&value), value.get("session_id").and_then(|v| v.as_str())) {
+            return Db::open_default()?.note_tool_call(&call, &format!("claude:{session}"));
+        }
+    }
     let event = match vendor {
         "claude" => hook::from_claude(&value)?,
         "codex" => hook::from_codex(&value)?,

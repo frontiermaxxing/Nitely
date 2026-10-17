@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "./backend";
 import { projectSpendWords } from "./spend";
 import type { IssueRecord, ProjectSpend } from "./types";
-import { agentLabel, nowSecs } from "./util";
+import { agentTitle, nowSecs } from "./util";
 import { AgentMark, CountBadge, Labels, Meter, PriorityMark, Sparkline, StationGlyph, phaseOf, trackOf } from "./ui";
 
 const GROUPS = ["Needs You", "In Progress", "In Review", "Approved", "Todo", "Backlog", "Done", "Canceled", "Duplicate"];
@@ -30,7 +30,7 @@ export function Backlog(props: { issues: IssueRecord[]; showClosed: boolean; onO
                   <span className="title">{i.title}</span>
                   <Labels labels={i.labels} max={3} />
                   {i.kind && <span className="kind">{i.kind}</span>}
-                  <span className="who">{i.claimed_by && <AgentMark vendor={i.claimed_by} title={agentLabel(i.claimed_by)} />}</span>
+                  <span className="who">{i.claimed_by && <AgentMark vendor={i.claimed_by} title={agentTitle(i.claimed_by)} />}</span>
                 </button>
               ))}
             </div>

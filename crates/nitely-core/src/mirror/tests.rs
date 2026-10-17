@@ -84,6 +84,7 @@ fn local_paths_and_agent_ids_go_out_neutral() {
     assert_eq!(sanitize_with_home(r"See C:\code\app-secrets\archive\notes.txt", &roots, None), "See <local path>");
     assert_eq!(sanitize_with_home("In /srv/customer/notes.txt and /Volumes/Private/x.md", &roots, None), "In <local path> and <local path>");
     assert_eq!(sanitize_with_home("By claude:c:/Users/Sam Lee/app-worktrees/x today", &roots, None), "By claude today");
+    assert_eq!(sanitize_with_home("Started by claude:60f2a6c3-5858-4141-b8bb-a52c02f13317, then codex:01a146fa-40c8-7393-8fc6-f768a3dfb9a2.", &roots, None), "Started by claude, then codex.");
     // Network shares, a `..` out of the repo, and a file name with a space.
     assert_eq!(sanitize_with_home(r"On \\server\secret share\notes.txt now", &roots, None), "On <local path> now");
     assert_eq!(sanitize_with_home(r"C:\code\app\..\app-secrets\x\notes.txt", &roots, None), "<local path>");

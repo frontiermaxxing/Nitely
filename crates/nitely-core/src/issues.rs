@@ -132,9 +132,14 @@ pub struct Project {
 #[derive(Debug, Clone, Serialize)]
 pub struct TimelineEntry {
     pub ts: i64,
+    /// The session that wrote it (`claude:<session id>`, `codex:<thread id>`), or for an older
+    /// event or an agent without hooks its agent and folder (`claude:c:/code/app`), or `human`.
     pub actor: String,
     pub kind: String,
     pub summary: Option<String>,
+    /// The folder its session works in, where known: what a session id does not say (NIT-194).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub place: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1346,7 +1351,7 @@ impl Db {
             "SELECT issue_key, ts, actor, type, summary FROM event WHERE issue_key IS NOT NULL ORDER BY ts, id",
         )?;
         let rows = stmt.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, TimelineEntry { ts: r.get(1)?, actor: r.get(2)?, kind: r.get(3)?, summary: r.get(4)? }))
+            Ok((r.get::<_, String>(0)?, TimelineEntry { ts: r.get(1)?, actor: r.get(2)?, kind: r.get(3)?, summary: r.get(4)?, place: None }))
         })?;
         for row in rows {
             let (key, entry) = row?;
@@ -1392,10 +1397,11 @@ impl Db {
 
     pub fn timeline(&self, key: &str) -> Result<Vec<TimelineEntry>> {
         let mut stmt = self.conn.prepare(
-            "SELECT ts, actor, type, summary FROM event WHERE issue_key = ?1 COLLATE NOCASE ORDER BY ts, id",
+            "SELECT e.ts, e.actor, e.type, e.summary, COALESCE(s.cwd, e.cwd) FROM event e LEFT JOIN session s ON s.id = e.actor
+             WHERE e.issue_key = ?1 COLLATE NOCASE ORDER BY e.ts, e.id",
         )?;
         let rows = stmt.query_map([key], |r| {
-            Ok(TimelineEntry { ts: r.get(0)?, actor: r.get(1)?, kind: r.get(2)?, summary: r.get(3)? })
+            Ok(TimelineEntry { ts: r.get(0)?, actor: r.get(1)?, kind: r.get(2)?, summary: r.get(3)?, place: r.get(4)? })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -1573,6 +1579,20 @@ mod tests {
         let mut forced = new("Add an MCP server");
         forced.allow_similar = true;
         assert_eq!(db.create_issue(&forced, &agent).unwrap().key, "NIT-3");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_timeline_entry_says_which_session_wrote_it_and_where_it_works() {
+        let (mut db, dir) = db();
+        db.create_project("NIT", "Nitely").unwrap();
+        let session = Actor::Agent("claude:60f2a6c3-5858-4141-b8bb-a52c02f13317".into());
+        db.record(&crate::db::NewEvent { session_id: session.id().into(), vendor: "claude".into(), cwd: r"C:\Code\my-app".into(), kind: "session_start".into(), summary: None, state: "working".into() }).unwrap();
+        db.create_issue(&new("One"), &session).unwrap();
+        db.add_note("NIT-1", "picked it up", "note", &Actor::Agent("claude:c:/code/my-app".into())).unwrap();
+        let timeline = db.timeline("NIT-1").unwrap();
+        assert_eq!((timeline[0].actor.as_str(), timeline[0].place.as_deref()), (session.id(), Some(r"C:\Code\my-app")));
+        assert_eq!((timeline[1].actor.as_str(), timeline[1].place.as_deref()), ("claude:c:/code/my-app", None), "an older folder id says its folder itself");
         std::fs::remove_dir_all(dir).ok();
     }
 

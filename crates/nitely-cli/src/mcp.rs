@@ -57,8 +57,30 @@ impl Server {
         }
     }
 
-    fn actor(&self) -> Actor {
-        Actor::Agent(self.agent())
+    /// Who a call acts as: its session (see `session` and `claude_session`), so a claim, a note or
+    /// a move names the agent that made it, not every session in its folder (NIT-194). A crew
+    /// worker keeps its folder's id: the supervisor knows it by that id, and its worktree is its own.
+    fn actor_for(&self, session: &str) -> Actor {
+        if std::env::var_os("NITELY_CREW").is_some() {
+            return Actor::Agent(self.agent());
+        }
+        Actor::Agent(session.to_string())
+    }
+
+    /// The Claude Code session making a call: the one whose PreToolUse hook noted the call's tool
+    /// use id (`_meta["claudecode/toolUseId"]`); without that (hooks not set up for it yet), the
+    /// session Claude Code named when it started this server (`named`, its
+    /// `CLAUDE_CODE_SESSION_ID`), while that session is still open: a `/clear` starts another.
+    fn claude_session(&self, params: &Value, db: &Db, named: Option<&str>) -> Option<String> {
+        if self.vendor != "claude" || self.remote.is_some() {
+            return None;
+        }
+        let call = params.pointer("/_meta/claudecode~1toolUseId").and_then(Value::as_str).filter(|c| !c.is_empty());
+        if let Some(session) = call.and_then(|c| db.session_of_tool_call(c).ok().flatten()) {
+            return Some(session);
+        }
+        let named = format!("claude:{}", named.filter(|s| !s.is_empty())?);
+        db.session(&named).ok().flatten().filter(|s| s.state != "ended").map(|s| s.id)
     }
 
     /// The session a tool call's report or ask counts toward. Codex names its thread on every
@@ -428,7 +450,7 @@ fn tools() -> Value {
 fn call_tool(server: &Server, params: &Value) -> Value {
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
-    match run_tool(server, name, &args, &server.session(params)) {
+    match run_tool(server, name, &args, params) {
         Ok(v) => json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&v).unwrap_or_default() }] }),
         Err(e) => json!({ "content": [{ "type": "text", "text": format!("{e:#}") }], "isError": true }),
     }
@@ -586,12 +608,14 @@ fn label_note(before: &[(String, usize)], given: &[String]) -> Option<String> {
     Some(note)
 }
 
-/// `session` is the session a report or ask counts toward (see `Server::session`).
-fn run_tool(server: &Server, name: &str, args: &Value, session: &str) -> Result<Value> {
+/// `params` are the call's, whose `_meta` says which session made it (see `Server::session`).
+fn run_tool(server: &Server, name: &str, args: &Value, params: &Value) -> Result<Value> {
     let config = Config::load()?;
     let mut db = Db::open_default()?;
     let args = &current_args(&db, args)?;
-    let actor = server.actor();
+    let named = std::env::var("CLAUDE_CODE_SESSION_ID").ok();
+    let session = &server.claude_session(params, &db, named.as_deref()).unwrap_or_else(|| server.session(params));
+    let actor = server.actor_for(session);
     if server.remote.is_some() && LOCAL_ONLY.contains(&name) {
         bail!("{name} runs on the machine that holds the repo, so it is not available over the local network; do the work in your own checkout");
     }
@@ -932,5 +956,30 @@ mod tests {
         assert_eq!(s.session(&json!({ "name": "report" })), format!("codex:{folder}"), "no thread: the agent id");
         let claude = Server { vendor: "claude".into(), ..s };
         assert_eq!(claude.session(&call), format!("claude:{folder}"), "only Codex threads");
+    }
+
+    #[test]
+    fn claude_calls_act_as_the_session_that_made_them() {
+        let dir = nitely_core::paths::unique_temp("nitely-mcp-session", "");
+        let mut db = Db::open(&dir.join("t.db")).unwrap();
+        let open = |db: &mut Db, id: &str, state: &str| {
+            db.record(&NewEvent { session_id: id.into(), vendor: "claude".into(), cwd: r"C:\Code\App".into(), kind: "tool".into(), summary: None, state: state.into() }).unwrap();
+        };
+        open(&mut db, "claude:s-one", "working");
+        open(&mut db, "claude:s-old", "ended");
+        // The PreToolUse hook noted which session made the call; the call carries its tool use id.
+        db.note_tool_call("toolu_01", "claude:s-one").unwrap();
+        let s = Server { vendor: "claude".into(), cwd: r"C:\Code\App".into(), exe: None, remote: None };
+        let call = |id: &str| json!({ "name": "report", "_meta": { "claudecode/toolUseId": id } });
+        assert_eq!(s.claude_session(&call("toolu_01"), &db, None).as_deref(), Some("claude:s-one"));
+        // Not noted (hooks older than this): the session Claude Code named, while it is open.
+        assert_eq!(s.claude_session(&call("toolu_02"), &db, Some("s-one")).as_deref(), Some("claude:s-one"));
+        assert_eq!(s.claude_session(&call("toolu_02"), &db, Some("s-old")), None, "a session /clear ended");
+        assert_eq!(s.claude_session(&call("toolu_02"), &db, None), None, "then the folder's id, as before");
+        let codex = Server { vendor: "codex".into(), cwd: r"C:\Code\App".into(), exe: None, remote: None };
+        assert_eq!(codex.claude_session(&call("toolu_01"), &db, None), None);
+        assert_eq!(s.actor_for("claude:s-one").id(), "claude:s-one");
+        drop(db);
+        std::fs::remove_dir_all(dir).ok();
     }
 }

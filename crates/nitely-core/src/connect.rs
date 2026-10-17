@@ -20,6 +20,8 @@ const BLOCK_END: &str = "<!-- nitely:end -->";
 const CLAUDE_EVENTS: &[(&str, Option<&str>)] = &[
     ("SessionStart", None),
     ("UserPromptSubmit", None),
+    // Before MCP calls only: which session makes each one, so the nitely server acts as it (NIT-194).
+    ("PreToolUse", Some("mcp__.*")),
     ("PostToolUse", Some("*")),
     ("Notification", None),
     ("Stop", None),

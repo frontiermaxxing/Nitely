@@ -93,3 +93,30 @@ export function vendorInfo(vendor: Vendor): VendorInfo | null {
   if (vendor === "human") return null;
   return vendor === "other" ? { label: "Agent", product: "Agent", mark: { letters: "?" }, color: "var(--vendor-other)" } : VENDORS[vendor];
 }
+
+/**
+ * An agent's short, stable name. A session (`claude:<session id>`, `codex:<thread id>`) is its vendor
+ * and the last four characters of its id, `Claude · 3317`, the same wherever it shows; an agent
+ * known only by its folder (`claude:c:/code/nitely`, older events) is its vendor and the folder's
+ * name, `Claude · nitely`.
+ */
+export function agentLabel(id: string): string {
+  const [vendor, ...rest] = id.split(":");
+  const tail = rest.join(":");
+  const name = vendor ? vendor[0].toUpperCase() + vendor.slice(1) : vendor;
+  if (isSessionId(tail)) return `${name} · ${tail.replace(/[^0-9a-z]/gi, "").slice(-4).toLowerCase()}`;
+  const last = tail.split("/").filter(Boolean).pop();
+  return last ? `${name} · ${last}` : name;
+}
+
+/** The hover text for an agent: its full id, and the folder its session works in when known. */
+export function agentTitle(id: string, place?: string | null): string {
+  const label = agentLabel(id);
+  const full = label === id ? id : `${label}: ${id}`;
+  return place ? `${full}, in ${place}` : full;
+}
+
+/** A session or thread id (a UUID, or another opaque id), not a folder. */
+function isSessionId(tail: string): boolean {
+  return tail.length >= 8 && !/[\\/]/.test(tail) && /^[0-9a-z-]+$/i.test(tail);
+}

@@ -247,6 +247,7 @@ mod tests {
                 actor: "claude:x".into(),
                 kind: (*kind).into(),
                 summary: (!summary.is_empty()).then(|| (*summary).into()),
+                place: None,
             })
             .collect()
     }
@@ -374,7 +375,7 @@ mod tests {
             let timeline: Vec<TimelineEntry> = events
                 .into_iter()
                 .enumerate()
-                .map(|(n, (kind, summary, actor))| TimelineEntry { ts: n as i64 + 1, actor, kind, summary: (!summary.is_empty()).then_some(summary) })
+                .map(|(n, (kind, summary, actor))| TimelineEntry { ts: n as i64 + 1, actor, kind, summary: (!summary.is_empty()).then_some(summary), place: None })
                 .collect();
             let t = track_of(&issue(case["state"].as_str().unwrap()), &timeline, case["change_reviews"].as_i64().unwrap_or(0));
             let ex = &case["expect"];
