@@ -97,7 +97,8 @@ pub fn started(pid: u32) -> Option<String> {
     #[cfg(not(windows))]
     {
         let out = std::process::Command::new("ps").args(["-o", "lstart=", "-p", &pid.to_string()]).output().ok()?;
-        let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        // One word ("Fri_Oct_17_09:12:01_2026"), as the pid file keeps it beside the pid.
+        let text = String::from_utf8_lossy(&out.stdout).split_whitespace().collect::<Vec<_>>().join("_");
         (out.status.success() && !text.is_empty()).then_some(text)
     }
 }
@@ -125,12 +126,27 @@ impl TreeGuard {
         }
     }
 
-    /// Puts `child`, and so everything it starts from now on, in the guard. False when it could not.
-    pub fn add(&self, child: &std::process::Child) -> bool {
+    /// Makes `cmd` start suspended (Windows), so `adopt` puts it in the guard before it can start
+    /// anything. The command must then be adopted, or it never runs.
+    pub fn prepare(&self, cmd: &mut std::process::Command) {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000 | 0x0000_0004); // CREATE_NO_WINDOW | CREATE_SUSPENDED
+        }
+        #[cfg(not(windows))]
+        let _ = cmd;
+    }
+
+    /// Puts `child`, started by a `prepare`d command, in the guard, then lets it run: everything it
+    /// starts is in the guard too. False when it could not be put in (it runs anyway).
+    pub fn adopt(&self, child: &std::process::Child) -> bool {
         #[cfg(windows)]
         {
             use std::os::windows::io::AsRawHandle;
-            self.job.assign(child.as_raw_handle())
+            let added = self.job.assign(child.as_raw_handle());
+            win::resume(child.as_raw_handle());
+            added
         }
         #[cfg(not(windows))]
         {
@@ -382,6 +398,13 @@ mod win {
     #[link(name = "ntdll")]
     extern "system" {
         fn NtQueryInformationProcess(process: Handle, class: u32, info: *mut c_void, length: u32, returned: *mut u32) -> i32;
+        fn NtResumeProcess(process: Handle) -> i32;
+    }
+
+    /// Lets a process started suspended run (all its threads).
+    pub fn resume(process: std::os::windows::io::RawHandle) {
+        // SAFETY: a child's open process handle.
+        unsafe { NtResumeProcess(process.cast()) };
     }
 
     /// Every process, or None when the snapshot fails.

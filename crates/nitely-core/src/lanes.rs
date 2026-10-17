@@ -912,16 +912,24 @@ fn hygiene(lane: &Path, rules: &LaneRules, record: &Path, log: &Path) {
     let mut size = measured;
     let mut said = None;
     if cap > 0 && size > cap.saturating_mul(2) {
-        for k in &rules.keep {
-            std::fs::remove_dir_all(lane.join(k.trim_matches('/'))).ok();
+        for d in rules.keep.iter().filter_map(|k| keep_dir(lane, k)) {
+            if !is_link(&d) {
+                std::fs::remove_dir_all(&d).ok();
+            }
         }
         size = keep_size(lane, &rules.keep);
         said = Some(format!("over twice its size cap ({} of {}): removed its build directories; the next request builds cold", human(measured), human(cap)));
     } else if cap > 0 && size > cap {
-        for k in &rules.keep {
-            let Ok(entries) = std::fs::read_dir(lane.join(k.trim_matches('/'))) else { continue };
+        for d in rules.keep.iter().filter_map(|k| keep_dir(lane, k)) {
+            if is_link(&d) {
+                continue;
+            }
+            let Ok(entries) = std::fs::read_dir(&d) else { continue };
             for e in entries.flatten() {
-                std::fs::remove_dir_all(e.path().join("incremental")).ok();
+                let incremental = e.path().join("incremental");
+                if !is_link(&e.path()) && incremental.is_dir() && !is_link(&incremental) {
+                    std::fs::remove_dir_all(incremental).ok();
+                }
             }
         }
         size = keep_size(lane, &rules.keep);
@@ -933,20 +941,45 @@ fn hygiene(lane: &Path, rules: &LaneRules, record: &Path, log: &Path) {
     }
 }
 
-/// The bytes in a lane's build directories, symlinks not followed.
+/// The bytes in a lane's build directories, links (symlinks, junctions) not followed.
 fn keep_size(lane: &Path, keep: &[String]) -> u64 {
     fn walk(dir: &Path) -> u64 {
         let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
         entries
             .flatten()
             .map(|e| match e.file_type() {
+                _ if is_link(&e.path()) => 0,
                 Ok(t) if t.is_dir() => walk(&e.path()),
                 Ok(t) if t.is_file() => e.metadata().map(|m| m.len()).unwrap_or(0),
                 _ => 0,
             })
             .sum()
     }
-    keep.iter().map(|k| walk(&lane.join(k.trim_matches('/')))).sum()
+    keep.iter().filter_map(|k| keep_dir(lane, k)).filter(|d| !is_link(d)).map(|d| walk(&d)).sum()
+}
+
+/// A `keep` entry as a folder inside `lane`, or None when it is not a plain relative path (`..`,
+/// an absolute or drive path): hygiene never touches anything outside the lane.
+fn keep_dir(lane: &Path, keep: &str) -> Option<PathBuf> {
+    let rel = Path::new(keep.trim_matches('/'));
+    let plain = rel.components().count() > 0 && rel.components().all(|c| matches!(c, std::path::Component::Normal(_)));
+    plain.then(|| lane.join(rel))
+}
+
+/// Whether `path` is a link to somewhere else: a symlink, or on Windows any reparse point (a
+/// junction). Hygiene never deletes through one.
+fn is_link(path: &Path) -> bool {
+    let Ok(meta) = std::fs::symlink_metadata(path) else { return false };
+    if meta.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        meta.file_attributes() & 0x400 != 0 // FILE_ATTRIBUTE_REPARSE_POINT
+    }
+    #[cfg(not(windows))]
+    false
 }
 
 /// "8.3 GB", "640 MB".
@@ -1106,6 +1139,9 @@ fn run_logged(command: &str, dir: &Path, log: &Path, limit: Duration, jobs: u32)
     // the requester (even before the pid is written) leaves nothing running in the lane, and what
     // the command left running ends when it does (NIT-223).
     let guard = crate::procs::TreeGuard::new();
+    if let Some(g) = &guard {
+        g.prepare(&mut cmd);
+    }
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -1116,7 +1152,7 @@ fn run_logged(command: &str, dir: &Path, log: &Path, limit: Duration, jobs: u32)
         }
     };
     if let Some(g) = &guard {
-        g.add(&child);
+        g.adopt(&child);
     }
     if let Some(p) = &pids {
         let started = crate::procs::started(child.id()).unwrap_or_default();
@@ -1476,6 +1512,26 @@ commands = []
         assert_eq!(read_size(&record), Some((0, 1_000)), "the first build's size is kept");
         let said = std::fs::read_to_string(&log).unwrap();
         assert!(said.contains("emptied the incremental caches") && said.contains("builds cold"), "{said}");
+
+        // Nothing outside the lane is ever touched: not a `keep` that climbs out, not what a link
+        // inside a build directory points at.
+        let outside = base.join("outside");
+        std::fs::create_dir_all(outside.join("dep").join("incremental")).unwrap();
+        std::fs::write(outside.join("dep").join("incremental").join("keep.me"), vec![0u8; 3_000]).unwrap();
+        std::fs::write(outside.join("big"), vec![0u8; 9_000]).unwrap();
+        fill("target/debug/app", 2_500);
+        let link = lane.join("target").join("linked");
+        #[cfg(windows)]
+        let linked = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(&link).arg(outside.join("dep")).output().unwrap().status.success();
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(outside.join("dep"), &link).is_ok();
+        assert!(linked, "made the link");
+        let climbing = LaneRules { keep: vec!["target".into(), "../outside".into(), "/abs".into()], ..rules.clone() };
+        hygiene(&lane, &climbing, &record, &log);
+        assert!(outside.join("dep").join("incremental").join("keep.me").exists() && outside.join("big").exists(), "outside the lane: untouched");
+        assert_eq!(keep_dir(&lane, "../outside"), None);
+        assert_eq!(keep_dir(&lane, "C:/x"), None);
+        assert_eq!(keep_dir(&lane, "target/"), Some(lane.join("target")));
 
         // The playbook's cap wins over twice the first build.
         assert_eq!(cap_bytes(&LaneRules { size_cap_gb: Some(1.0), ..Default::default() }, 10), 1 << 30);
