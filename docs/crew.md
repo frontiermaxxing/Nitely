@@ -237,7 +237,7 @@ When a worker exits, the supervisor reads its issue:
 
 | Issue after the worker | Outcome | What the supervisor does |
 | --- | --- | --- |
-| Done | `landed` | removes the worktree land kept whole while the worker ran in it, the way land would: teardown, `git worktree remove` without force, `git branch -d` |
+| Done | `landed` | removes the worktree land kept whole while the worker ran in it, the way land would (teardown, `git worktree remove` without force, `git branch -d`), as `nitely crew clean-up` in a process of its own, stopped past `setup_timeout_minutes`; not when it was landed with `--keep` |
 | In Review, or Needs You after submit | `submitted` | nothing; a person approves, then land |
 | Needs You with an open ask from the worker | `asked` | nothing |
 | In Progress (or Todo), still claimed by the worker | `failed` | writes the handoff note if the worker left none since it started, from its last report, exit code and log path; clears the claim; moves the issue back to Todo |

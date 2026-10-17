@@ -53,6 +53,18 @@ pub enum CrewCmd {
         #[arg(long)]
         project: Option<String>,
     },
+    /// Remove a landed crew worker's worktree and branch the way land would (teardown, then git
+    /// worktree remove and git branch -d, never forced). The supervisor runs this in a process of
+    /// its own.
+    #[command(hide = true)]
+    CleanUp {
+        #[arg(long)]
+        repo: PathBuf,
+        #[arg(long)]
+        worktree: PathBuf,
+        #[arg(long)]
+        branch: String,
+    },
 }
 
 pub fn run(cmd: CrewCmd, me: &Actor) -> Result<()> {
@@ -64,6 +76,10 @@ pub fn run(cmd: CrewCmd, me: &Actor) -> Result<()> {
             let project = resolve_project(&config, &db, project.as_deref(), &cwd)?;
             db.crew_pause(&project, true, me)?;
             println!("paused the {project} crew: running workers finish, no new ones start");
+            Ok(())
+        }
+        CrewCmd::CleanUp { repo, worktree, branch } => {
+            println!("{}", crew::clean_up_worktree(&repo, &worktree, &branch)?);
             Ok(())
         }
         CrewCmd::Resume { project } => {
@@ -213,9 +229,17 @@ fn supervise(db: &mut Db, project: &str, root: PathBuf, once: bool, managed: boo
                 // The new build is started here, so the crew goes on with the app closed, and takes
                 // the crew and its running workers over; this one leaves only once it has.
                 eprintln!("a newer nitely is installed; handing over to it");
-                if hand_over(db, &path, project, &root) {
-                    handed_over = true;
-                    break;
+                match hand_over(db, &path, project, &root) {
+                    HandOver::Done => {
+                        handed_over = true;
+                        break;
+                    }
+                    HandOver::TakenBack => {
+                        // It held the crew for a moment and may have started workers: look again.
+                        db.crew_take_over(project, std::process::id(), None).ok();
+                        sup.rescan();
+                    }
+                    HandOver::Failed => {}
                 }
                 eprintln!("the new build did not take over; this one carries on");
                 // Not again for this build, only for the next install; while the file is missing (an
@@ -245,29 +269,39 @@ fn supervise(db: &mut Db, project: &str, root: PathBuf, once: bool, managed: boo
 
 /// Starts `nitely` (a newer build) to take this crew over, and waits up to half a minute for it to
 /// hold the crew. True when it does.
-fn hand_over(db: &Db, nitely: &std::path::Path, project: &str, root: &std::path::Path) -> bool {
+enum HandOver {
+    /// The new build holds the crew.
+    Done,
+    /// It did not start or take over.
+    Failed,
+    /// It took the crew just as it was stopped for being slow; this one takes it back.
+    TakenBack,
+}
+
+fn hand_over(db: &Db, nitely: &std::path::Path, project: &str, root: &std::path::Path) -> HandOver {
     let mut child = match crew::start_supervisor(nitely, project, root, &paths::data_dir().join("crew"), Some(std::process::id())) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("could not start the new build: {e:#}");
-            return false;
+            return HandOver::Failed;
         }
     };
     let pid = child.id();
+    let holds = || db.crew_control(project).ok().and_then(|c| c.supervisor_pid) == Some(pid);
     for _ in 0..120 {
-        if db.crew_control(project).ok().and_then(|c| c.supervisor_pid) == Some(pid) {
+        if holds() {
             eprintln!("{} (pid {pid}) took the crew over", nitely.display());
-            return true;
+            return HandOver::Done;
         }
         if matches!(child.try_wait(), Ok(Some(_))) {
-            return false;
+            return HandOver::Failed;
         }
         std::thread::sleep(Duration::from_millis(250));
     }
     // Too slow: it must not take over later while this one carries on.
     child.kill().ok();
     child.wait().ok();
-    false
+    if holds() { HandOver::TakenBack } else { HandOver::Failed }
 }
 
 /// Keeps the machine from sleeping while workers run, so a crew left overnight keeps working. The

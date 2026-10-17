@@ -171,6 +171,27 @@ pub trait Agents {
     /// Makes an issue's branch and worktree and runs the playbook's setup, in a process of its own,
     /// so a slow or hung setup never holds the supervisor up. It exits 0 when setup passed.
     fn prepare(&self, prep: &Prepare) -> Result<Box<dyn Process>>;
+    /// Removes a landed worker's worktree and branch the way land would (`clean_up_worktree`), in a
+    /// process of its own, so a playbook teardown that hangs never holds the supervisor up.
+    fn clean_up(&self, job: &CleanUp) -> Result<Box<dyn Process>>;
+}
+
+/// What `Agents::clean_up` needs: `nitely crew clean-up` with these, output to `log`.
+#[derive(Debug, Clone)]
+pub struct CleanUp {
+    pub nitely: String,
+    pub repo: PathBuf,
+    pub worktree: PathBuf,
+    pub branch: String,
+    pub log: PathBuf,
+}
+
+/// Land's cleanup of a worktree it kept for a crew worker: the playbook's teardown, `git worktree
+/// remove` without force (a dirty worktree stays), `git branch -d` (an unmerged branch stays).
+/// Returns what it did, in words. `nitely crew clean-up` runs it for the supervisor.
+pub fn clean_up_worktree(repo: &Path, worktree: &Path, branch: &str) -> Result<String> {
+    let pb = Playbook::load(repo)?;
+    Ok(crate::land::cleanup(repo, &pb, worktree, branch, false, false).0)
 }
 
 /// What `Agents::prepare` needs: `nitely start <key> --agent <vendor>` in the repo, output to `log`.
@@ -225,6 +246,16 @@ enum Start {
     LaunchFailed(String),
 }
 
+/// A landed worker's worktree being removed, in a process of its own.
+struct Cleaning {
+    issue: String,
+    agent: String,
+    worktree: PathBuf,
+    since: i64,
+    log: PathBuf,
+    process: Box<dyn Process>,
+}
+
 /// An issue whose worktree setup runs, before its worker starts.
 struct Preparing {
     id: i64,
@@ -266,6 +297,7 @@ pub struct Supervisor {
     tokens: TokensSince,
     running: Vec<Running>,
     preparing: Vec<Preparing>,
+    cleaning: Vec<Cleaning>,
     /// Agents that would not start in this run, and why.
     disabled: BTreeMap<String, String>,
     /// Pick issues clear of the files work in flight holds (overlap.rs); reads the config.
@@ -307,6 +339,7 @@ impl Supervisor {
             }),
             running: Vec::new(),
             preparing: Vec::new(),
+            cleaning: Vec::new(),
             disabled: BTreeMap::new(),
             avoid_overlap: false,
             adopted: false,
@@ -319,6 +352,12 @@ impl Supervisor {
     pub fn with_clock(mut self, clock: impl Fn() -> Moment + 'static) -> Supervisor {
         self.clock = Box::new(clock);
         self
+    }
+
+    /// Looks for workers again on the next pass, as a new supervisor does: after a newer build held
+    /// the crew for a moment, it may have started some.
+    pub fn rescan(&mut self) {
+        self.adopted = false;
     }
 
     /// Picks issues clear of the files work in flight holds, reading the repos from the config.
@@ -387,6 +426,7 @@ impl Supervisor {
             self.adopted = true;
         }
         self.reap(db, &rules, &mut tick)?;
+        self.finish_cleanups(db, &rules)?;
         self.retry_answered(db)?;
         if self.self_paused && !db.crew_control(&self.project)?.paused {
             // A person resumed the crew: give every agent another chance.
@@ -717,6 +757,10 @@ impl Supervisor {
     /// settled now.
     fn adopt(&mut self, db: &mut Db, rules: &CrewRules, tick: &mut Tick) -> Result<()> {
         for w in db.crew_running(&self.project)? {
+            // Ones this supervisor already watches (a rescan).
+            if self.running.iter().any(|r| r.id == w.id) || self.preparing.iter().any(|p| p.id == w.id) {
+                continue;
+            }
             if w.phase == "setup" {
                 // A setup an earlier supervisor started: watch it if it still runs. If it is gone,
                 // its worktree says how it went (`nitely start` would not set up an existing worktree
@@ -876,7 +920,7 @@ impl Supervisor {
     /// Removes the worktree land kept whole while the worker ran in it, as land itself would have:
     /// the playbook's teardown, `git worktree remove` without force (a dirty worktree stays), and
     /// `git branch -d` (an unmerged branch stays). Only a worktree git still tracks is touched.
-    fn clean_up_landed(&self, db: &Db, w: &Running) -> Result<()> {
+    fn clean_up_landed(&mut self, db: &Db, w: &Running) -> Result<()> {
         let listed = playbook::git(&self.repo_root, &["worktree", "list", "--porcelain"]);
         let tracked = listed.as_deref().is_ok_and(|l| {
             l.lines()
@@ -886,10 +930,48 @@ impl Supervisor {
         if !tracked {
             return Ok(());
         }
+        // A person who landed it with --keep wants the worktree and branch kept.
+        let since = db.crew_worker_logged_at(w.id)?;
+        if db.timeline(&w.issue)?.iter().any(|t| t.kind == "land_kept" && t.ts >= since) {
+            return Ok(());
+        }
         let Ok(branch) = playbook::git(&w.worktree, &["rev-parse", "--abbrev-ref", "HEAD"]) else { return Ok(()) };
-        let pb = Playbook::load(&self.repo_root)?;
-        let (message, _) = crate::land::cleanup(&self.repo_root, &pb, &w.worktree, branch.trim(), false, false);
-        db.log_event(&self.actor(), Some(&w.issue), None, "crew_cleaned", &format!("After the {} worker left: {message}", w.agent))?;
+        let ts = (self.clock)().ts;
+        let log = self.dir.join(&self.project).join(format!("{ts}-{}-cleanup.log", w.issue.to_lowercase()));
+        let job = CleanUp { nitely: self.nitely.clone(), repo: self.repo_root.clone(), worktree: w.worktree.clone(), branch: branch.trim().to_string(), log: log.clone() };
+        match self.agents.clean_up(&job) {
+            Ok(process) => self.cleaning.push(Cleaning { issue: w.issue.clone(), agent: w.agent.clone(), worktree: w.worktree.clone(), since: ts, log, process }),
+            Err(e) => db.log_event(&self.actor(), Some(&w.issue), None, "crew_cleaned", &format!("Could not start removing {}: {e:#}", w.worktree.display()))?,
+        }
+        Ok(())
+    }
+
+    /// Records the worktree removals that finished, and stops one past `setup_timeout_minutes`
+    /// (a teardown that hangs), leaving its worktree for a person.
+    fn finish_cleanups(&mut self, db: &mut Db, rules: &CrewRules) -> Result<()> {
+        let deadline = rules.setup_timeout_minutes.max(1) as i64 * 60;
+        let now = (self.clock)().ts;
+        let mut i = 0;
+        while i < self.cleaning.len() {
+            let done = match self.cleaning[i].process.exited() {
+                Ok(Some(_)) | Err(_) => None,
+                Ok(None) if now - self.cleaning[i].since > deadline => {
+                    self.cleaning[i].process.stop();
+                    Some(format!("its removal ran past {} minutes (crew.setup_timeout_minutes) and was stopped", deadline / 60))
+                }
+                Ok(None) => {
+                    i += 1;
+                    continue;
+                }
+            };
+            let c = self.cleaning.remove(i);
+            let said = std::fs::read_to_string(&c.log).unwrap_or_default();
+            let message = match done {
+                Some(why) => format!("{why}; {} is left as it is", c.worktree.display()),
+                None => said.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("removal ended without a word").trim().to_string(),
+            };
+            db.log_event(&self.actor(), Some(&c.issue), None, "crew_cleaned", &format!("After the {} worker left: {message}", c.agent))?;
+        }
         Ok(())
     }
 
@@ -1570,6 +1652,29 @@ impl Agents for SystemAgents {
         }
         Ok(Box::new(SystemProcess(cmd.spawn().with_context(|| format!("starting {} start", prep.nitely))?)))
     }
+
+    fn clean_up(&self, job: &CleanUp) -> Result<Box<dyn Process>> {
+        use std::process::Stdio;
+        if let Some(dir) = job.log.parent() {
+            std::fs::create_dir_all(dir).ok();
+        }
+        let log = std::fs::File::create(&job.log).with_context(|| format!("creating {}", job.log.display()))?;
+        let program = self.resolve(&job.nitely).unwrap_or_else(|| job.nitely.clone());
+        let mut cmd = std::process::Command::new(program);
+        cmd.args(["crew", "clean-up", "--repo"]).arg(&job.repo).arg("--worktree").arg(&job.worktree).args(["--branch", &job.branch]);
+        cmd.current_dir(&job.repo).stdin(Stdio::null()).stdout(Stdio::from(log.try_clone()?)).stderr(Stdio::from(log));
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000 | 0x0000_0200); // CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        Ok(Box::new(SystemProcess(cmd.spawn().with_context(|| format!("starting {} crew clean-up", job.nitely))?)))
+    }
 }
 
 /// A setup known to have ended, with this exit code.
@@ -1745,6 +1850,10 @@ mod tests {
         prepares: Rc<RefCell<Vec<String>>>,
         /// Setups never finish.
         hang_setup: bool,
+        /// Worktrees whose removal was started.
+        cleanups: Rc<RefCell<Vec<PathBuf>>>,
+        /// Removals never finish.
+        hang_cleanup: bool,
     }
 
     struct FakeProcess {
@@ -1780,6 +1889,18 @@ mod tests {
         fn adopt(&self, pid: u32) -> Option<Box<dyn Process>> {
             let alive = (1001..=1000 + self.launches.borrow().len() as u32).contains(&pid) && !self.exits.borrow().contains_key(&pid);
             alive.then(|| Box::new(FakeProcess { pid, exits: self.exits.clone(), stopped: self.stopped.clone() }) as Box<dyn Process>)
+        }
+        /// Removes the worktree here and now, as `nitely crew clean-up` would, unless removals hang.
+        fn clean_up(&self, job: &CleanUp) -> Result<Box<dyn Process>> {
+            let pid = 7000 + self.cleanups.borrow().len() as u32;
+            self.cleanups.borrow_mut().push(job.worktree.clone());
+            if !self.hang_cleanup {
+                let said = clean_up_worktree(&job.repo, &job.worktree, &job.branch)?;
+                std::fs::create_dir_all(job.log.parent().unwrap()).ok();
+                std::fs::write(&job.log, format!("{said}\n")).unwrap();
+                self.exits.borrow_mut().insert(pid, 0);
+            }
+            Ok(Box::new(FakeProcess { pid, exits: self.exits.clone(), stopped: self.stopped.clone() }))
         }
         /// Runs start_task here and now, as `nitely start` would, unless setups hang.
         fn prepare(&self, prep: &Prepare) -> Result<Box<dyn Process>> {
@@ -2304,6 +2425,56 @@ workers = 1
         sup.tick(&mut f.db, false).unwrap();
         assert!(dirty.join("notes.txt").exists(), "uncommitted work is kept");
         assert!(loose.exists(), "an untracked folder is left alone");
+    }
+
+    #[test]
+    fn a_hung_removal_is_stopped_and_land_keep_is_respected() {
+        let land_and_exit = |f: &mut Fixture, key: &str, pid: u32, fake: &Fake| {
+            let agent = f.db.issue(key).unwrap().unwrap().claimed_by.unwrap();
+            f.db.move_issue(key, "Done", Some("landed"), None, &Actor::Agent(agent)).unwrap();
+            fake.exits.borrow_mut().insert(pid, 0);
+        };
+        // A removal that hangs holds nothing up and is stopped at the setup timeout.
+        let mut f = fixture(&format!("{GATE}[crew]\nworkers = 1\nsetup_timeout_minutes = 5\n"));
+        let fake = Fake { installed: vec!["claude"], hang_cleanup: true, db: Some(f.base.join("t.db")), ..Default::default() };
+        let clock = Rc::new(std::cell::Cell::new(NOON));
+        let c = clock.clone();
+        let mut sup = Supervisor::new("NIT", &f.repo, &f.base.join("crew"), "nitely", Box::new(fake.clone())).with_clock(move || c.get());
+        sup.tick(&mut f.db, false).unwrap();
+        let worktree = fake.launches.borrow()[0].cwd.clone();
+        land_and_exit(&mut f, "NIT-1", 1001, &fake);
+        let tick = sup.tick(&mut f.db, false).unwrap();
+        assert_eq!(*fake.cleanups.borrow(), [worktree.clone()]);
+        assert_eq!(tick.started.iter().map(|w| w.issue.as_str()).collect::<Vec<_>>(), ["NIT-2"], "the crew goes on meanwhile");
+        clock.set(Moment { ts: NOON.ts + 6 * 60, ..NOON });
+        sup.tick(&mut f.db, false).unwrap();
+        assert!(fake.stopped.borrow().contains(&7000));
+        let note = f.db.timeline("NIT-1").unwrap().into_iter().rev().find(|t| t.kind == "crew_cleaned").unwrap();
+        assert!(note.summary.unwrap().contains("ran past 5 minutes"));
+        assert!(worktree.exists(), "left for a person");
+
+        // Landed with --keep: nothing is removed.
+        let mut f = fixture(&format!("{GATE}[crew]\nworkers = 1\n"));
+        let fake = Fake { installed: vec!["claude"], ..Default::default() };
+        let mut sup = supervisor(&f, &fake);
+        sup.tick(&mut f.db, false).unwrap();
+        let worktree = fake.launches.borrow()[0].cwd.clone();
+        f.db.log_event(&Actor::Human, Some("NIT-1"), None, "land_kept", "Kept the worktree and branch (--keep)").unwrap();
+        land_and_exit(&mut f, "NIT-1", 1001, &fake);
+        sup.tick(&mut f.db, false).unwrap();
+        assert!(fake.cleanups.borrow().is_empty() && worktree.exists());
+    }
+
+    #[test]
+    fn a_rescan_adopts_only_workers_it_does_not_watch() {
+        let mut f = fixture(&format!("{GATE}[crew]\nworkers = 2\n"));
+        let fake = Fake { installed: vec!["claude"], ..Default::default() };
+        let mut sup = supervisor(&f, &fake);
+        sup.tick(&mut f.db, false).unwrap();
+        assert_eq!(sup.running(), 2);
+        sup.rescan();
+        sup.tick(&mut f.db, false).unwrap();
+        assert_eq!(sup.running(), 2, "the two it watches are not taken twice");
     }
 
     #[test]

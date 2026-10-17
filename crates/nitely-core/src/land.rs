@@ -411,7 +411,11 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
     // A crew worker runs in the worktree until land returns to it; the supervisor removes the
     // worktree once the worker has exited (crew::Supervisor::clean_up_landed).
     let crew_in_it = !temporary && db.crew_worker_in(&worktree)?;
-    let (cleanup, held_by) = if crew_in_it {
+    let (cleanup, held_by) = if crew_in_it && opts.keep {
+        // Said on the issue, so the supervisor does not remove it once the worker exits.
+        db.log_event(actor, Some(key), Some(&worktree.to_string_lossy()), "land_kept", "Kept the worktree and branch (--keep)")?;
+        (format!("kept {} (--keep)", worktree.display()), vec![])
+    } else if crew_in_it {
         (format!("kept {} whole: the crew worker running in it removes it once it exits", worktree.display()), vec![])
     } else {
         cleanup(root, pb, &worktree, &branch, temporary, opts.keep)
