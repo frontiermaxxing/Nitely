@@ -2,9 +2,12 @@
 //! the count of waiting ones on the taskbar button. What to say and when is decided by the
 //! frontend from the Inbox's own list (src/notify.ts); this only shows it.
 
-use tauri::{AppHandle, Emitter, Manager};
+#[cfg(windows)]
+use tauri::Emitter;
+use tauri::{AppHandle, Manager};
 
 /// Sent with a decision's id when the person clicks its toast; the Inbox opens on it.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub const OPEN_DECISION_EVENT: &str = "nitely://open-decision";
 
 /// Shows one toast. `decision` is the decision a click opens, or none for a batch (the Inbox).

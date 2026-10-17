@@ -169,6 +169,7 @@ fn read(_source: &str) -> Option<Vec<u8>> {
 }
 
 /// The shell's premultiplied BGRA as straight RGBA, which PNG wants.
+#[cfg(windows)]
 fn straight_rgba(mut px: Vec<u8>) -> Vec<u8> {
     for p in px.chunks_exact_mut(4) {
         let (b, g, r, a) = (p[0] as u32, p[1] as u32, p[2] as u32, p[3] as u32);
@@ -185,6 +186,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(windows)]
     fn premultiplied_bgra_becomes_straight_rgba() {
         // Half-transparent pure red, premultiplied: B 0, G 0, R 128, A 128.
         assert_eq!(straight_rgba(vec![0, 0, 128, 128]), vec![255, 0, 0, 128]);
