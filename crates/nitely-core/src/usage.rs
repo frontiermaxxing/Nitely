@@ -834,7 +834,7 @@ mod tests {
         assert_eq!(got, [None, Some(a.as_str()), Some(a.as_str()), Some(b.as_str()), Some(a.as_str()), None]);
 
         // Codex's MCP events are under its folder's id: they go to the one Codex session there then.
-        let codex_touches = Touches::from([("codex:c:/dev/app".to_string(), vec![(600, b.clone()), (5000, a.clone())])]);
+        let codex_touches = Touches::from([(format!("codex:{}", normalize("C:/dev/app")), vec![(600, b.clone()), (5000, a.clone())])]);
         let codex = |session: &str, ts: i64| Attributed { usage: Usage { cwd: "C:/dev/app".into(), ..usage("codex", session, ts).usage }, ..usage("codex", session, ts) };
         let mut alone = vec![codex("c1", 590), codex("c1", 700), codex("c2", 9000)];
         by_session(&mut alone, &codex_touches);

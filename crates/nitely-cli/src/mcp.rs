@@ -902,8 +902,10 @@ mod tests {
         assert_eq!(s.session(&call), "codex:01a1-t1", "the id the turn-end hook reports");
         let older = json!({ "name": "report", "_meta": { "x-codex-turn-metadata": { "thread_id": "t2" } } });
         assert_eq!(s.session(&older), "codex:t2");
-        assert_eq!(s.session(&json!({ "name": "report" })), "codex:c:/code/app", "no thread: the agent id");
+        // The agent id is the folder as paths::normalize spells it: lowercase only on Windows.
+        let folder = nitely_core::paths::normalize(r"C:\Code\App");
+        assert_eq!(s.session(&json!({ "name": "report" })), format!("codex:{folder}"), "no thread: the agent id");
         let claude = Server { vendor: "claude".into(), ..s };
-        assert_eq!(claude.session(&call), "claude:c:/code/app", "only Codex threads");
+        assert_eq!(claude.session(&call), format!("claude:{folder}"), "only Codex threads");
     }
 }

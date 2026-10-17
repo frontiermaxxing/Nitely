@@ -281,7 +281,19 @@ mod tests {
         let system = if cfg!(windows) { PathBuf::from(r"C:\Windows\System32\PING.EXE") } else { PathBuf::from("/bin/sleep") };
         std::fs::copy(&system, &target).unwrap();
         let args: &[&str] = if cfg!(windows) { &["-n", "30", "127.0.0.1"] } else { &["30"] };
-        let mut running = std::process::Command::new(&target).args(args).stdout(std::process::Stdio::null()).spawn().unwrap();
+        // Linux refuses to run a file another thread of this test process still holds open for
+        // writing (a test forking while the copy was open hands its child the handle): "text file
+        // busy" passes once that child has gone on to run its own program.
+        let spawn = || std::process::Command::new(&target).args(args).stdout(std::process::Stdio::null()).spawn();
+        let mut running = (0..50)
+            .find_map(|_| match spawn() {
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    None
+                }
+                other => Some(other.unwrap()),
+            })
+            .expect("the copy stayed busy");
         let before = stamp(&target).unwrap();
 
         let build = dir.join("new-build");
