@@ -1,0 +1,117 @@
+//! The app's side of deciding from a phone (docs/phone.md): the phone server it runs on the
+//! addresses the person picks, pairing offers, the person's answers to pairing requests, and the
+//! device list it signs with its approval key. Only the person reaches these, through the app.
+
+use nitely_core::phone::{self, Address, Device, OfferView, PairRequest, Phone, Running};
+use serde::Serialize;
+use std::net::IpAddr;
+use std::sync::{Arc, Mutex};
+
+use crate::{approval_key, db, err};
+
+pub struct PhoneApp {
+    phone: Arc<Phone>,
+    running: Mutex<Option<Running>>,
+}
+
+impl PhoneApp {
+    pub fn new(app: tauri::AppHandle) -> PhoneApp {
+        let assets: phone::Assets = Arc::new(move |path: &str| {
+            if let Some(asset) = app.asset_resolver().get(path.to_string()) {
+                return Some((asset.bytes, asset.mime_type));
+            }
+            // `tauri dev` serves the desktop page from Vite and embeds nothing; the phone page
+            // then comes from the last `npm run build`.
+            if cfg!(debug_assertions) {
+                let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("dist").join(path);
+                return std::fs::read(&file).ok().map(|bytes| (bytes, phone::content_type(path)));
+            }
+            None
+        });
+        PhoneApp { phone: Phone::new(Arc::new(phone::load_devices), assets), running: Mutex::new(None) }
+    }
+
+    fn running(&self) -> std::sync::MutexGuard<'_, Option<Running>> {
+        self.running.lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
+/// The Phone screen: whether the server runs and where, the addresses it could use, the paired
+/// phones, and pairing requests waiting for the person.
+#[derive(Serialize)]
+pub struct PhoneStatus {
+    listening: Vec<String>,
+    addresses: Vec<Address>,
+    devices: Vec<Device>,
+    requests: Vec<PairRequest>,
+    /// Why the paired phones could not be read, when they could not.
+    devices_error: Option<String>,
+}
+
+fn status(app: &PhoneApp) -> PhoneStatus {
+    let listening = app.running().as_ref().map(|r| r.addrs.iter().map(|a| phone::url(a.ip(), a.port())).collect()).unwrap_or_default();
+    let (devices, devices_error) = match phone::load_devices() {
+        Ok(d) => (d, None),
+        Err(e) => (vec![], Some(format!("{e:#}"))),
+    };
+    PhoneStatus { listening, addresses: phone::addresses(), devices, requests: app.phone.waiting(), devices_error }
+}
+
+#[tauri::command]
+pub async fn phone_status(app: tauri::State<'_, PhoneApp>) -> Result<PhoneStatus, String> {
+    Ok(status(&app))
+}
+
+/// Starts the phone server on `ips` (loopback or tunnel addresses only), replacing a running one.
+#[tauri::command]
+pub async fn phone_start(app: tauri::State<'_, PhoneApp>, ips: Vec<String>) -> Result<PhoneStatus, String> {
+    let ips: Vec<IpAddr> = ips.iter().map(|ip| ip.parse::<IpAddr>().map_err(|_| format!("{ip} is not an address"))).collect::<Result<_, _>>()?;
+    if let Some(old) = app.running().take() {
+        old.stop();
+    }
+    let running = app.phone.start(&ips, phone::PORT).map_err(err)?;
+    *app.running() = Some(running);
+    Ok(status(&app))
+}
+
+#[tauri::command]
+pub async fn phone_stop(app: tauri::State<'_, PhoneApp>) -> Result<PhoneStatus, String> {
+    if let Some(r) = app.running().take() {
+        r.stop();
+    }
+    app.phone.cancel_offer();
+    Ok(status(&app))
+}
+
+/// A new pairing offer: the QR code and links, valid for ten minutes and one phone.
+#[tauri::command]
+pub async fn phone_pair(app: tauri::State<'_, PhoneApp>) -> Result<OfferView, String> {
+    let addrs = app.running().as_ref().map(|r| r.addrs.clone()).unwrap_or_default();
+    if addrs.is_empty() {
+        return Err("Turn the phone server on first.".into());
+    }
+    app.phone.offer(&addrs).map_err(err)
+}
+
+/// The person's answer to a pairing request; a yes adds the phone to the list the app signs.
+#[tauri::command]
+pub async fn phone_decide(app: tauri::State<'_, PhoneApp>, id: String, accept: bool) -> Result<PhoneStatus, String> {
+    if let Some(device) = app.phone.decide(&id, accept).map_err(err)? {
+        let secret = approval_key(&db()?)?;
+        let mut devices = phone::load_devices().unwrap_or_default();
+        devices.retain(|d| d.id != device.id);
+        devices.push(device);
+        phone::save_devices(&secret, devices).map_err(err)?;
+    }
+    Ok(status(&app))
+}
+
+/// Removes a paired phone: its requests are refused from now on.
+#[tauri::command]
+pub async fn phone_revoke(app: tauri::State<'_, PhoneApp>, id: String) -> Result<PhoneStatus, String> {
+    let secret = approval_key(&db()?)?;
+    let mut devices = phone::load_devices().unwrap_or_default();
+    devices.retain(|d| d.id != id);
+    phone::save_devices(&secret, devices).map_err(err)?;
+    Ok(status(&app))
+}

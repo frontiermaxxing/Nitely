@@ -35,6 +35,24 @@ fn entry(account: &str) -> Result<keyring::Entry> {
     keyring::Entry::new(SERVICE, account).map_err(|e| anyhow::anyhow!("the OS keychain: {e}"))
 }
 
+/// A Nitely keychain entry's text; None when it does not exist. On macOS only the app reads
+/// without the OS asking the person.
+pub(crate) fn keychain_get(account: &str) -> Result<Option<String>> {
+    if !SILENT_KEYCHAIN.load(std::sync::atomic::Ordering::Relaxed) {
+        bail!("on macOS only the Nitely app reads its keychain entries");
+    }
+    match entry(account)?.get_password() {
+        Ok(text) => Ok(Some(text)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => bail!("reading {account} from the OS keychain: {e}"),
+    }
+}
+
+/// Writes a Nitely keychain entry. Only the app calls it.
+pub(crate) fn keychain_set(account: &str, text: &str) -> Result<()> {
+    entry(account)?.set_password(text).map_err(|e| anyhow::anyhow!("saving {account} in the OS keychain: {e}"))
+}
+
 /// The app's signing secret, made and saved in the keychain the first time. Only the app calls it.
 pub fn keychain_secret() -> Result<[u8; 32]> {
     let e = entry(SECRET_ACCOUNT)?;

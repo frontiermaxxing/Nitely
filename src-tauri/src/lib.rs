@@ -1,6 +1,7 @@
 mod agent_icons;
 mod notify;
 
+mod phone;
 use nitely_core::issues::{Ask, Project, Relations};
 use nitely_core::{remote, rules, Actor, Board, Config, Db, IssueRecord};
 use serde::Serialize;
@@ -570,6 +571,8 @@ pub fn run() {
             }
             let handle = app.handle().clone();
             std::thread::spawn(move || watch(handle));
+            // The phone server stays off until the person turns it on (docs/phone.md).
+            tauri::Manager::manage(app, phone::PhoneApp::new(app.handle().clone()));
             // A playbook that lands by Nitely lands an approved change without an agent coming back
             // for it. Each round lands what is approved and ready; a land that holds the lock, or an
             // app that was closed, only delays it to a later round. Started here, in the one
@@ -615,6 +618,12 @@ pub fn run() {
             issue_detail,
             set_blocker,
             move_issue,
+            phone::phone_status,
+            phone::phone_start,
+            phone::phone_stop,
+            phone::phone_pair,
+            phone::phone_decide,
+            phone::phone_revoke,
             mirror_preview,
             set_mirror,
             issue_mirror,

@@ -71,5 +71,7 @@ function liveData(): Plugin {
 export default defineConfig({
   plugins: [react(), liveData()],
   clearScreen: false,
+  // Two pages: the desktop app, and the phone page the app's phone server serves (docs/phone.md).
+  build: { rollupOptions: { input: { main: resolve("index.html"), phone: resolve("phone.html") } } },
   server: { port: 1420, strictPort: true, watch: { ignored: ["**/src-tauri/**", "**/crates/**", "**/target/**"] } },
 });

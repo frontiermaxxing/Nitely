@@ -5,6 +5,7 @@ import { AgentSetup, pendingChanges, setupErrors } from "./Agents";
 import { Inbox, useDecisionDetails } from "./Inbox";
 import { decisionsOf } from "./decisions";
 import { Network } from "./Network";
+import { PhoneSetup } from "./PhoneSetup";
 import { Now } from "./Now";
 import { Pulse } from "./Pulse";
 import { Activity } from "./Activity";
@@ -40,6 +41,7 @@ export type View =
   | { kind: "add" }
   | { kind: "agents" }
   | { kind: "network" }
+  | { kind: "phone" }
   | { kind: "kit" };
 
 // The view and the open issue live in the URL hash (`#now`, `#project/NIT/board`, `#inbox@NIT-12`), so
@@ -53,7 +55,7 @@ function fromHash(hash: string): { view: View; issue: string | null } {
   }
   const [path, issue] = raw.split("@");
   const [kind, key, tab] = path.split("/");
-  const plain = ["pulse", "inbox", "now", "activity", "add", "agents", "network"].concat(isPreview ? ["kit"] : []);
+  const plain = ["pulse", "inbox", "now", "activity", "add", "agents", "network", "phone"].concat(isPreview ? ["kit"] : []);
   // The home view was called Pulse; old links still land on it.
   const named = kind === "overview" ? "pulse" : kind;
   const view: View =
@@ -226,6 +228,7 @@ export function App() {
           count={(board?.remote_sessions ?? []).filter((s) => livenessOf(s, now) === "working").length}
           tone="live"
         />
+        <NavItem active={view.kind === "phone"} onClick={() => setView({ kind: "phone" })} label="Phone" />
         <div className="nav-heading">Projects</div>
         {projects.map((p) => (
           <button
@@ -305,6 +308,7 @@ export function App() {
         {view.kind === "now" && board && <Now board={board} needs={inboxCount} now={now} onOpenIssue={setOpenIssue} onChanged={changed} onGo={setView} />}
         {view.kind === "activity" && <Activity now={now} version={version} projects={projects} onOpenIssue={setOpenIssue} />}
         {view.kind === "network" && <Network board={board} projects={projects} now={now} />}
+        {view.kind === "phone" && <PhoneSetup now={now} />}
         {view.kind === "add" && (
           <AddProject
             onAdded={(key) => {

@@ -192,8 +192,13 @@ page, with randomness from `crypto.getRandomValues`, which browsers offer on any
 
 ## Code (as built)
 
-- `crates/nitely-core/src/phone.rs`: pairing offers, the signed device list, request and decision
-  checks, the phone's decisions payload.
-- `crates/nitely-core/src/approval.rs`: phone approvals in `land`'s check.
-- `src-tauri/src/lib.rs`: turning the server on and off, pairing and revoking from the app.
-- `phone.html`, `src/phone/`: the phone page.
+- `crates/nitely-core/src/phone.rs`: which addresses may serve, pairing offers and requests, the
+  signed device list in the keychain, signed requests, the phone server's routes.
+- `crates/nitely-core/src/http.rs`: the strict HTTP layer it shares with `nitely serve`.
+- `src-tauri/src/phone.rs`: turning the server on and off, pairing and revoking from the app.
+- `src/PhoneSetup.tsx`: the app's Phone screen. `phone.html`, `src/phone/`: the phone page.
+- `crates/nitely-core/examples/phone_dev.rs`: the real phone server on loopback with a stand-in for
+  the app's Phone screen, to pair a browser tab as the phone end to end (`npm run build`, then
+  `cargo run -p nitely-core --example phone_dev`).
+- Still to come: the decisions ([NIT-145](nitely://issue/NIT-145)), and phone approvals checked
+  at land ([NIT-146](nitely://issue/NIT-146)).

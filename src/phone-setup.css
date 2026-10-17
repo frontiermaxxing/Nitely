@@ -1,0 +1,29 @@
+/* ----- Phone: where the phone server listens, pairing, paired phones (docs/phone.md) ----- */
+.phone-setup .card { margin-bottom: 12px; }
+.phone-urls { margin: 4px 0 0; padding-left: 18px; overflow-wrap: anywhere; }
+.phone-addresses { display: grid; gap: 6px; margin: 8px 0 4px; }
+.phone-address { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; font-size: var(--text-md); cursor: pointer; }
+.phone-address input { margin: 0; align-self: center; }
+.phone-address-no { cursor: default; color: var(--fg-3); }
+
+.phone-request {
+  margin: 0 0 12px; padding: 12px 14px; border-radius: var(--radius); background: var(--attention-wash);
+  border: 1px solid color-mix(in srgb, var(--attention) 45%, var(--line));
+}
+.phone-request p { margin: 0; font-size: var(--text-md); }
+.phone-request .actions { margin-top: 8px; }
+.phone-code { font-family: var(--font-mono); font-size: 18px; letter-spacing: 0.04em; white-space: nowrap; color: var(--fg); }
+
+.phone-offer { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
+/* The QR code stays dark on white in both themes, as scanners expect. */
+.phone-qr { flex: none; width: 220px; height: 220px; padding: 8px; background: #fff; border-radius: var(--radius); border: 1px solid var(--line); }
+.phone-qr svg { display: block; width: 100%; height: 100%; }
+.phone-offer-text { flex: 1 1 220px; min-width: 0; }
+.phone-offer-text p { margin: 0 0 8px; }
+.phone-link { overflow-wrap: anywhere; color: var(--fg-3); }
+
+.phone-devices { display: grid; }
+.phone-device { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; padding: 6px 0; border-top: 1px solid var(--line); }
+.phone-device:first-child { border-top: 0; }
+.phone-device > .btn, .phone-confirm { margin-left: auto; }
+.phone-confirm { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }

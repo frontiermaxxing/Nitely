@@ -7,6 +7,7 @@
 // data stays consistent: an issue In Review has passed a gate and a review, a stuck one has a
 // failed gate as its last gate event, and so on.
 
+import * as phoneFixture from "./phone";
 import * as rulesFixture from "./rules";
 import type {
   Held,
@@ -1635,6 +1636,18 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return rulesFixture.ruleDefaultsCheck(args);
       case "rule_defaults_save":
         return rulesFixture.ruleDefaultsSave(args);
+      case "phone_status":
+        return phoneFixture.phoneStatus();
+      case "phone_start":
+        return phoneFixture.phoneStart(args);
+      case "phone_stop":
+        return phoneFixture.phoneStop();
+      case "phone_pair":
+        return phoneFixture.phonePair();
+      case "phone_decide":
+        return phoneFixture.phoneDecide(args);
+      case "phone_revoke":
+        return phoneFixture.phoneRevoke(args);
       case "agent_setup_apply":
         return { done: [], failed: [] };
       case "network":

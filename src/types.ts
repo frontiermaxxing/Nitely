@@ -612,3 +612,42 @@ export interface DryRun {
   blocked: string | null;
   outcome: string;
 }
+
+/** One of this machine's addresses, as the Phone screen offers it (crates/nitely-core/src/phone.rs). */
+export interface PhoneAddress {
+  ip: string;
+  interface: string;
+  /** null: an ordinary network address, which cannot serve the phone page. */
+  kind: "loopback" | "tunnel" | null;
+}
+
+export interface PhoneDevice {
+  id: string;
+  name: string;
+  public_key: string;
+  paired_at: number;
+}
+
+export interface PairRequest {
+  id: string;
+  name: string;
+  public_key: string;
+  code: string;
+  at: number;
+  status: "waiting" | "paired" | "declined";
+}
+
+export interface PhoneStatus {
+  /** The phone page's address on each address the server listens on; empty when it is off. */
+  listening: string[];
+  addresses: PhoneAddress[];
+  devices: PhoneDevice[];
+  requests: PairRequest[];
+  devices_error: string | null;
+}
+
+export interface PhoneOffer {
+  urls: string[];
+  qr_svg: string;
+  expires: number;
+}
