@@ -155,9 +155,14 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     }
     out.approver = if out.reasons.is_empty() { "agent" } else { "human" }.into();
     let verdict = out.review.as_ref().map_or("none", |r| r.verdict.as_str()).to_string();
-    // Read before this round is recorded: the rounds before it.
+    // Read before this round is recorded: the rounds before it, since the human last handed the
+    // issue back (their decision to go on starts a new count).
     let stalled = match &out.review {
-        Some(r) if verdict == "changes" => not_converging(&db.reviews(&issue.key)?, r),
+        Some(r) if verdict == "changes" && issue.origin == "nitely" => {
+            let since = db.handed_back_at(&issue.key)?;
+            let earlier: Vec<ReviewRecord> = db.reviews(&issue.key)?.into_iter().filter(|r| r.ts > since).collect();
+            not_converging(&earlier, r)
+        }
         _ => None,
     };
     db.record_review(&out)?;
@@ -202,7 +207,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     };
     let outcome = if pb.land.by.by_nitely() && verdict != "changes" { format!("{outcome}; it {}", pb.land.by.describe()) } else { outcome };
     let outcome = match &stalled {
-        Some(why) => format!("{outcome}. The review rounds are not converging, so it waits for you: {why}"),
+        Some(why) => format!("{outcome}. The review rounds are not converging, so it is handed to you: {why}"),
         None => outcome,
     };
     // The full description is on the pull request and in the app's review section.
@@ -211,8 +216,9 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     let push_failed = !local_only && !out.pushed;
     let by_nitely = pb.land.by.by_nitely();
     let (state, next) = if stalled.is_some() {
-        // Another round would cost as much again and likely end the same: a person decides.
-        ("Needs You", "The review rounds are not converging, so the issue waits for the human: stop working on it and pick up other work. They decide whether to go on (moving it back to In Progress), narrow it, or close it.")
+        // Another round would cost as much again and likely end the same: a person decides. It is
+        // handed to them as their own work, so nothing offers to approve a change that failed review.
+        ("Needs You", "The review rounds are not converging, so the issue is handed to the human: stop working on it and pick up other work. They decide whether to hand it back, narrow it, or close it.")
     } else if verdict == "changes" {
         ("In Progress", "The review found P0 or P1 problems. Fix them, commit, and submit again.")
     } else if push_failed {
@@ -227,7 +233,9 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     } else {
         ("In Review", "The review passed and no human approval is needed. Call land to put it on the integration branch.")
     };
-    if issue.state != state && issue.origin == "nitely" {
+    if stalled.is_some() {
+        out.state = db.set_owner(&issue.key, "human", actor)?.state;
+    } else if issue.state != state && issue.origin == "nitely" {
         out.state = db.move_issue(&issue.key, state, None, None, actor)?.state;
     }
     out.next = next.into();
@@ -395,6 +403,15 @@ fn push(worktree: &Path, branch: &str) -> Result<()> {
 }
 
 impl Db {
+    /// When the human last handed the issue back to agents (0 when never).
+    pub fn handed_back_at(&self, issue_key: &str) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COALESCE(MAX(ts), 0) FROM event WHERE issue_key = ?1 COLLATE NOCASE AND type = 'owner_changed' AND summary = 'Handed back to agents'",
+            [issue_key],
+            |r| r.get(0),
+        )?)
+    }
+
     pub fn record_review(&self, s: &Submitted) -> Result<()> {
         let (reviewer, verdict, findings, flagged, note) = match &s.review {
             Some(r) => (r.reviewer.as_str(), r.verdict.as_str(), to_json(&r.findings), to_json(&r.flagged), r.note.as_str()),
@@ -636,6 +653,13 @@ reason = "money logic"
             .query_row("SELECT summary FROM event WHERE issue_key = ?1 AND type = 'submit' ORDER BY id DESC LIMIT 1", [&issue.key], |r| r.get(0))
             .unwrap();
         assert!(last.contains("not converging") && last.contains("[P1] Stuck: stuck.txt"), "{last}");
+        // Handed to the human as their own work: nothing offers to approve a change that failed.
+        assert_eq!(db.issue(&issue.key).unwrap().unwrap().owner, "human");
+        // Handed back, the count starts over: the next round that carries it is not escalated.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        db.set_owner(&issue.key, "agent", &Actor::Human).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        assert_eq!(submit(&mut db, &config, &opts, &actor).unwrap().state, "In Progress");
 
         // A playbook that requires another vendor's review sends a same-vendor one to a human, and
         // with no reviewer installed at all, submit says what to install.
