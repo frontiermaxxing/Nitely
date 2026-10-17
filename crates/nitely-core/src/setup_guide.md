@@ -100,8 +100,10 @@ behavior, or work that blocks other work; **3** worth doing (cleanup, missing te
 
 ## Phase 5: file
 
-File everything with one `file_issues` call (in batches if very large). Give each item a `ref`, and
-turn `depends_on_titles` into `blocked_by` refs. Give each the area (and platform, if the repo has
+File everything with `file_issues` in batches of up to 10 (it refuses more, so the board fills as
+you go). Give each item a `ref`, and turn `depends_on_titles` into `blocked_by` refs. Refs are local
+to one call: put blockers in an earlier batch, and in later batches name them by the keys
+`file_issues` returned (`"blocked_by": ["APP-3"]`), so file in dependency order. Give each the area (and platform, if the repo has
 several) as `labels`, e.g. `["api"]` or `["mobile", "ios"]`: one short lowercase word per area, the
 same across the batch, reusing labels the project already has. Human-only items get `owner: "human"`
 (they go to the owner's Needs You, and `next_task` never hands them out). Ideas and speculative

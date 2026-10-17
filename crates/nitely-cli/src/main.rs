@@ -456,7 +456,7 @@ enum IssueCmd {
         #[arg(long)]
         goal: Option<i64>,
     },
-    /// File many issues at once from a JSON list (a file, or - for stdin). Each item has a `ref`
+    /// File up to 10 issues at once from a JSON list (a file, or - for stdin). Each item has a `ref`
     /// and file_issue's fields; its blocked_by may name refs of the same list. Prints each ref's key.
     CreateMany {
         file: String,
@@ -860,6 +860,7 @@ fn run(cmd: Cmd) -> Result<()> {
                             },
                         })
                         .collect();
+                    nitely_core::issues::check_batch_size(batch.len())?;
                     print_json(&db.create_issues(&batch, &me)?)
                 }
                 IssueCmd::Label { key, add, remove } => {

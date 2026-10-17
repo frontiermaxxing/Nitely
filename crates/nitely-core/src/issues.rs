@@ -247,6 +247,22 @@ struct PreparedBatch<'a> {
     order: Vec<usize>,
 }
 
+/// The most issues one `file_issues` call (or `nitely issue create-many`) files (NIT-235). An agent
+/// writing a hundred items in one call works for a long time with nothing on the board; batches of
+/// ten show up as it goes. A goal plan is not held to it: the person approves it as one decision.
+pub const FILE_ISSUES_MAX: usize = 10;
+
+/// Refuses a batch of more than `FILE_ISSUES_MAX` items, before anything is filed.
+pub fn check_batch_size(items: usize) -> Result<()> {
+    if items > FILE_ISSUES_MAX {
+        bail!(
+            "{items} items, but file_issues takes at most {FILE_ISSUES_MAX} per call: file the first {FILE_ISSUES_MAX} now and the rest in further calls. \
+Refs are local to one call, so file blockers first; a later batch names them in blocked_by by the keys the earlier call returned"
+        );
+    }
+    Ok(())
+}
+
 /// One issue of a `file_issues` batch: a new issue, and the ref the batch's other items name it by
 /// in their `blocked_by`.
 #[derive(Debug, Clone, Default)]
@@ -1811,6 +1827,26 @@ mod tests {
         assert!(refused.contains("both name count_needs, src-tauri/src/tray.rs"), "{refused}");
         assert!(!refused.contains(&process.key), "{refused}");
         assert!(db.create_issue(&NewIssue { allow_similar: true, ..again }, &agent).is_ok(), "allow_similar still files it");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn file_issues_takes_ten_at_a_time() {
+        assert_eq!(FILE_ISSUES_MAX, 10);
+        assert!(check_batch_size(10).is_ok());
+        let err = check_batch_size(11).unwrap_err().to_string();
+        assert!(err.contains("at most 10 per call") && err.contains("file the first 10 now"), "{err}");
+        assert!(err.contains("blocked_by") && err.contains("keys"), "says how to name blockers across batches: {err}");
+
+        // The batch itself is not held to it: an approved goal plan files all its issues at once.
+        let (mut db, dir) = db();
+        db.create_project("NIT", "Nitely").unwrap();
+        let topics = ["billing", "search", "export", "import", "login", "audit", "themes", "alerts", "uploads", "reports", "webhooks"];
+        let items: Vec<BatchItem> = topics
+            .iter()
+            .map(|t| BatchItem { local_ref: t.to_string(), not_duplicates: vec![], issue: NewIssue { allow_similar: true, ..new(&format!("Build the {t} page")) } })
+            .collect();
+        assert_eq!(db.create_issues(&items, &Actor::Agent("claude:a".into())).unwrap().filed.len(), 11);
         std::fs::remove_dir_all(dir).ok();
     }
 

@@ -321,7 +321,7 @@ fn tools() -> Value {
         },
         {
             "name": "propose_goal",
-            "description": "Draft a goal and the issues that reach it from what the person asked for, for them to decide in the Inbox: approving creates the goal and files every issue into it in one batch (they may edit or leave items out first); rejecting files nothing. Checked as file_issues checks a batch (refs, blockers, cycles) before anything is filed. Pass planning_issue when you were handed a \"Plan a goal\" issue; it closes once the plan is filed. Do not file the issues yourself.",
+            "description": "Draft a goal and the issues that reach it from what the person asked for, for them to decide in the Inbox: approving creates the goal and files every issue into it in one batch (they may edit or leave items out first); rejecting files nothing. Checked as file_issues checks a batch (refs, blockers, cycles) before anything is filed, but not held to its 10 items: the person decides the plan as one. Keep it to what one goal needs; a plan of more than about 30 issues is likely two goals. Pass planning_issue when you were handed a \"Plan a goal\" issue; it closes once the plan is filed. Do not file the issues yourself.",
             "inputSchema": { "type": "object", "required": ["sentence", "title", "outcome"], "properties": {
                 "sentence": { "type": "string", "description": "What the person asked for, in their words." },
                 "title": { "type": "string" },
@@ -410,7 +410,7 @@ fn tools() -> Value {
         },
         {
             "name": "file_issues",
-            "description": "File many issues in one call, e.g. to seed a board. Give each a ref; its blocked_by may name refs of the same batch as well as existing issues. Nitely files the batch in one transaction, blockers first; an unknown ref, a cycle or an invalid item files nothing. An item that looks like an existing issue, open or closed (or an earlier item), is skipped, unless it sets allow_similar, and items that named it are blocked by that issue instead. Returns each ref's key, what was filed and what was skipped.",
+            "description": "File up to 10 issues in one call, e.g. to seed a board in batches of 10: more is refused and files nothing. Give each a ref; its blocked_by may name refs of the same batch as well as existing issues. Refs are local to one call, so file blockers in an earlier batch and name them by key in later ones. Nitely files the batch in one transaction, blockers first; an unknown ref, a cycle or an invalid item files nothing. An item that looks like an existing issue, open or closed (or an earlier item), is skipped, unless it sets allow_similar, and items that named it are blocked by that issue instead. Returns each ref's key, what was filed and what was skipped.",
             "inputSchema": { "type": "object", "required": ["issues"], "properties": {
                 "project": { "type": "string", "description": "Project key for every item; defaults to this repo's project." },
                 "issues": { "type": "array", "items": { "type": "object", "required": ["ref", "title", "kind", "body", "evidence"], "properties": {
@@ -888,6 +888,7 @@ fn run_tool(server: &Server, name: &str, args: &Value, params: &Value) -> Result
         "file_issues" => {
             let project = project(&db)?;
             let list = args.get("issues").and_then(Value::as_array).context("issues must be a list")?;
+            nitely_core::issues::check_batch_size(list.len())?;
             let items = list
                 .iter()
                 .enumerate()
