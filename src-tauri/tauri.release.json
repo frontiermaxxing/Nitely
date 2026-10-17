@@ -1,6 +1,5 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "mainBinaryName": "Nitely",
   "bundle": {
     "targets": [
       "nsis"

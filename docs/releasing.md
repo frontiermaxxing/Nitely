@@ -36,7 +36,8 @@ committing it. After a stable `0.2.0` ships, land a change that sets main to `0.
    carries the CLI beside the app. After installing, the installer runs `nitely install`. That
    puts the CLI where agents' hooks and MCP servers run `nitely`: over the copy already on PATH, or
    on a machine without Rust into the user's WindowsApps folder, which Windows keeps on PATH.
-   Uninstalling removes that copy.
+   Uninstalling removes that copy. The app's own executable stays `nitely-app.exe` (shortcuts say
+   "Nitely"): Windows file names ignore case, so an app named `Nitely.exe` would be the CLI.
 3. Installs the new installer silently on the runner and checks that the app and the CLI are in
    place and report the right version.
 4. Writes the notes with `nitely release-notes`: every issue whose commits landed since the
