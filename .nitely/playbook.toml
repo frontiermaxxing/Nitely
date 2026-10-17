@@ -9,6 +9,7 @@ pattern = "{vendor}/{key}-{slug}"
 # Beside the repo, so searches in the main checkout never walk task worktrees.
 dir = "../{repo}-worktrees/{key}-{slug}"
 setup = ["npm ci"]
+mode = "light"
 
 [gate]
 commands = ["cargo test --workspace", "cargo clippy --workspace -- -D warnings", "npm test", "npm run build"]
@@ -41,3 +42,12 @@ when_changed = ['^package(-lock)?\.json$']
 [[land.after]]
 run = "cargo run --release -p nitely-cli -- install"
 when_changed = ['^crates/', '^Cargo\.(toml|lock)$']
+
+# Two warm checkouts of this repo that keep target/ and node_modules/ between requests; `run`,
+# submit's gate and land's gate run there, one request per lane at a time.
+[lanes]
+count = 2
+keep = ["target", "node_modules"]
+# Reminded to use `run` instead when run in a light worktree (never blocked). npm ci stays local:
+# the browser preview needs node_modules in the worktree, and it costs 2 s and ~100 MB.
+heavy = ["^cargo (build|test|clippy|check)\\b", "^npm (test|run build)\\b"]
