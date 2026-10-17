@@ -819,7 +819,9 @@ when_changed = ["billing"]
         // also when the rounds had handed it to them as their own work.
         f.db.set_owner(&a, "human", &f.actor).unwrap();
         let decided = f.db.accept_finding(ask.id, "no outside users yet", &SECRET).unwrap();
-        assert_eq!((decided.state.as_str(), decided.ask.answer.as_deref()), ("In Review", Some("Accepted: no outside users yet")));
+        // Where only the app can check acceptances (macOS), the change waits for its approval there.
+        let goes_on = if crate::approval::agents_can_verify() { "In Review" } else { "Needs You" };
+        assert_eq!((decided.state.as_str(), decided.ask.answer.as_deref()), (goes_on, Some("Accepted: no outside users yet")));
         assert!(f.db.accept_finding(ask.id, "again", &SECRET).is_err(), "decided once");
         // Submitted again unchanged: the reviewer still says it, and it passes on the acceptance.
         f.submit(&wt);
