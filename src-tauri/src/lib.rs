@@ -714,10 +714,7 @@ pub fn run() {
             // harness, whose app must not answer the person's links.
             if !harness::on() {
                 let links = app.handle().clone();
-                std::thread::spawn(move || match nitely_core::links::bind() {
-                    Ok((listener, _port)) => nitely_core::links::serve(listener, move |key| open_issue(&links, key)),
-                    Err(e) => eprintln!("issue links: {e:#}"),
-                });
+                std::thread::spawn(move || nitely_core::links::listen(move |key| open_issue(&links, key), |e| eprintln!("issue links: {e:#}")));
             }
             let handle = app.handle().clone();
             std::thread::spawn(move || watch(handle));

@@ -3,46 +3,23 @@
 //! so the app also answers `http://127.0.0.1:7423/i/NIT-12` on loopback: the same thing, focusing
 //! the app on that issue. It only opens a view, never changes anything, so it needs no token.
 //!
-//! The port is fixed so links stay stable. When it is taken, the app takes the next free one of a
-//! few and writes the one it took to the data folder, where `issue_url` reads it.
+//! The port is fixed, so a link pasted into a chat or a pull request today still opens the issue
+//! next month: links never name another port. When something else holds it, the app says so and
+//! takes it as soon as it is free (`listen`).
 
-use anyhow::{bail, Result};
+use anyhow::{Context, Result};
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
-use std::path::PathBuf;
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// The loopback port issue links use: beside the relay's 7421 and the phone's 7422.
 pub const PORT: u16 = 7423;
-/// Ports tried after `PORT`, in order, when it is taken.
-const FALLBACKS: u16 = 9;
 /// The path an issue's key follows.
 pub const PATH: &str = "/i/";
 
-/// Where the app writes the port it listens on.
-pub fn port_file() -> PathBuf {
-    crate::paths::data_dir().join("link-port")
-}
-
-/// The port links name: the one the app last listened on, else `PORT`. Read at most once a minute
-/// per process, so a long list of issues reads the file once.
-pub fn current_port() -> u16 {
-    static CACHE: Mutex<Option<(Instant, u16)>> = Mutex::new(None);
-    let mut cache = CACHE.lock().unwrap_or_else(|p| p.into_inner());
-    if let Some((at, port)) = *cache {
-        if at.elapsed() < Duration::from_secs(60) {
-            return port;
-        }
-    }
-    let port = std::fs::read_to_string(port_file()).ok().and_then(|s| s.trim().parse().ok()).filter(|p| (PORT..=PORT + FALLBACKS).contains(p)).unwrap_or(PORT);
-    *cache = Some((Instant::now(), port));
-    port
-}
-
 /// The web link to an issue: `http://127.0.0.1:7423/i/NIT-12`.
 pub fn issue_url(key: &str) -> String {
-    format!("http://127.0.0.1:{}{PATH}{}", current_port(), key.trim().to_uppercase())
+    format!("http://127.0.0.1:{PORT}{PATH}{}", key.trim().to_uppercase())
 }
 
 /// The issue key a link names, in either form: `nitely://issue/NIT-12` or a loopback
@@ -76,17 +53,27 @@ fn valid_key(s: &str) -> Option<String> {
     ok.then(|| s.to_uppercase())
 }
 
-/// Listens on loopback at `PORT`, or the next free port of a few, and writes the one it took to
-/// `port_file`.
-pub fn bind() -> Result<(TcpListener, u16)> {
-    for port in PORT..=PORT + FALLBACKS {
-        if let Ok(l) = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, port))) {
-            std::fs::create_dir_all(crate::paths::data_dir()).ok();
-            std::fs::write(port_file(), port.to_string()).ok();
-            return Ok((l, port));
+/// Listens on loopback at `PORT`.
+pub fn bind() -> Result<TcpListener> {
+    TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, PORT))).with_context(|| format!("127.0.0.1:{PORT} is taken, so issue links cannot open the app until it is free"))
+}
+
+/// Answers issue links for the life of the process: takes `PORT`, and while something else holds
+/// it, says so once through `taken` and tries again every 30 seconds.
+pub fn listen(open: impl Fn(String) + Send + Sync + 'static, taken: impl Fn(&anyhow::Error)) {
+    let mut told = false;
+    loop {
+        match bind() {
+            Ok(listener) => return serve(listener, open),
+            Err(e) => {
+                if !told {
+                    taken(&e);
+                    told = true;
+                }
+                std::thread::sleep(Duration::from_secs(30));
+            }
         }
     }
-    bail!("ports {PORT} to {} on 127.0.0.1 are all taken, so issue links cannot open the app", PORT + FALLBACKS)
 }
 
 /// Answers issue links on `listener` until the process ends, calling `open` with each key a link

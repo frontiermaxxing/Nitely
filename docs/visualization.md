@@ -548,9 +548,10 @@ Inbox (`onKeyDown` over the decisions) and `src/IssuePanel.tsx`.
 
 **Links.** A native issue's `url` is `http://127.0.0.1:7423/i/NIT-14` (crates/nitely-core/src/links.rs,
 `issue_url`), the link agents write in their replies, commits, pull requests and notes. The running
-app answers it on loopback only, at a fixed port so links stay stable (7423, beside the relay's 7421
-and the phone's 7422; when it is taken, the next free one up to 7432, written to `link-port` in the
-data folder for the tools to use). It opens that issue's panel and focuses the window, and the
+app answers it on loopback only, at a fixed port so a link pasted anywhere keeps working (7423,
+beside the relay's 7421 and the phone's 7422; links never name another port, so while something
+else holds it the app logs that and takes it once it is free). It opens that issue's panel and
+focuses the window, and the
 browser tab says "Opened NIT-14 in Nitely". It only ever opens a view: GET and HEAD for `/i/<KEY>`
 and nothing else, no token, no state changed, and a Host other than 127.0.0.1 or localhost gets no
 answer. Chats, GitHub and most apps open web links where they drop custom schemes. The app also
