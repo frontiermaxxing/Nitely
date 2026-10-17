@@ -192,6 +192,9 @@ fn certified_key(cert_pem: &[u8], key_pem: &[u8], cert_name: &str, key_name: &st
     Ok(Arc::new(loaded))
 }
 
+/// The certificate and key files' modification times, which change when they may have.
+type Stamp = Option<(std::time::SystemTime, std::time::SystemTime)>;
+
 /// Where the phone server's certificate comes from, so it can be fetched again while it runs.
 #[derive(Debug, Clone)]
 enum CertSource {
@@ -207,7 +210,7 @@ enum CertSource {
 impl CertSource {
     /// The certificate now, and a stamp that changes when it may have: the files' modification
     /// times (Tailscale's and a fixed one have none).
-    fn load(&self) -> Result<(Arc<rustls::sign::CertifiedKey>, Option<(std::time::SystemTime, std::time::SystemTime)>)> {
+    fn load(&self) -> Result<(Arc<rustls::sign::CertifiedKey>, Stamp)> {
         match self {
             CertSource::Files { cert, key } => {
                 let stamp = (std::fs::metadata(cert)?.modified()?, std::fs::metadata(key)?.modified()?);
@@ -232,7 +235,7 @@ struct Reloading {
     source: CertSource,
     every: std::time::Duration,
     current: std::sync::RwLock<Arc<rustls::sign::CertifiedKey>>,
-    stamp: Mutex<Option<(std::time::SystemTime, std::time::SystemTime)>>,
+    stamp: Mutex<Stamp>,
     next: Mutex<Instant>,
     busy: AtomicBool,
 }
@@ -284,7 +287,7 @@ fn tls_with(
     host: &str,
     loaded: Arc<rustls::sign::CertifiedKey>,
     source: CertSource,
-    stamp: Option<(std::time::SystemTime, std::time::SystemTime)>,
+    stamp: Stamp,
     every: std::time::Duration,
 ) -> Result<Tls> {
     let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
