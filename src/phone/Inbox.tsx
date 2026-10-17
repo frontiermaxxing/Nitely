@@ -43,7 +43,9 @@ const who = (actorOrVendor: string) => {
 export function Inbox(props: { device: Device; onGone: (why: string) => void }) {
   const { device } = props;
   const [data, setData] = useState<Decisions | null>(null);
-  const [at, setAt] = useState(0);
+  // The decision on screen, by id: a refresh that adds or removes others never swaps it out (and
+  // with it a half-written answer). Its position is kept for when it goes.
+  const [shown, setShown] = useState<{ id: string | null; index: number }>({ id: null, index: 0 });
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
 
@@ -72,24 +74,34 @@ export function Inbox(props: { device: Device; onGone: (why: string) => void }) 
   }, [load]);
 
   const list = data?.decisions ?? [];
-  const index = Math.min(at, Math.max(0, list.length - 1));
+  const byId = list.findIndex((d) => d.id === shown.id);
+  const index = byId >= 0 ? byId : Math.min(shown.index, Math.max(0, list.length - 1));
   const current = list[index];
-  const move = (by: number) => setAt((i) => Math.max(0, Math.min(list.length - 1, i + by)));
+  const move = (by: number) => {
+    const next = Math.max(0, Math.min(list.length - 1, index + by));
+    setShown({ id: list[next]?.id ?? null, index: next });
+  };
 
-  // A swipe left or right moves between decisions.
-  const touch = useRef<number | null>(null);
+  // A clearly sideways swipe moves between decisions; a scroll, or a gesture in a text field, does not.
+  const touch = useRef<{ x: number; y: number } | null>(null);
   const swipe = {
-    onTouchStart: (e: React.TouchEvent) => (touch.current = e.touches[0].clientX),
+    onTouchStart: (e: React.TouchEvent) => {
+      const inField = (e.target as HTMLElement).closest("textarea, input");
+      touch.current = inField ? null : { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    },
     onTouchEnd: (e: React.TouchEvent) => {
-      if (touch.current === null) return;
-      const dx = e.changedTouches[0].clientX - touch.current;
+      if (!touch.current) return;
+      const dx = e.changedTouches[0].clientX - touch.current.x;
+      const dy = e.changedTouches[0].clientY - touch.current.y;
       touch.current = null;
-      if (Math.abs(dx) > 60) move(dx < 0 ? 1 : -1);
+      if (Math.abs(dx) > 60 && Math.abs(dx) > 2 * Math.abs(dy)) move(dx < 0 ? 1 : -1);
     },
   };
 
+  // The decided one leaves the list; the next one moves into its place.
   const decided = async (what: string) => {
     setDone(what);
+    setShown({ id: null, index });
     await load();
   };
 
