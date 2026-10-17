@@ -156,6 +156,7 @@ p{{max-width:30em;margin:0 16px}}.m{{display:block;margin-top:8px;color:#6b6862;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     #[test]
     fn reads_either_form_of_link() {
