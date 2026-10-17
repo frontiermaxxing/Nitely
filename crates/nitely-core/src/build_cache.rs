@@ -22,11 +22,24 @@ const MARKER: &str = "# Written by Nitely";
 /// The shared build directory, in the folder that holds the worktrees.
 const BUILD_DIR: &str = ".cargo-build";
 
-/// The folder a repo's task worktrees are made in, when it holds nothing else of the repo's: not
-/// the main checkout, inside it, or above it.
+/// The folder all of a repo's task worktrees are made in: the `[worktree] dir` template up to its
+/// first per-task part (`{key}`, `{slug}`, `{vendor}`), when that folder holds nothing else of the
+/// repo's: not the main checkout, inside it, or above it.
 pub fn worktrees_folder(pb: &Playbook, repo_root: &Path) -> Option<PathBuf> {
-    let issue = crate::IssueRecord { key: "x".into(), title: "x".into(), ..Default::default() };
-    let folder = pb.worktree_for(repo_root, "x", &issue).parent()?.to_path_buf();
+    let repo = repo_root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let template = pb.worktree.dir.replace("{repo}", &repo).replace('\\', "/");
+    let fixed: Vec<&str> = template.split('/').take_while(|part| !part.contains('{')).collect();
+    if fixed.len() == template.split('/').count() {
+        return None;
+    }
+    let mut folder = repo_root.to_path_buf();
+    for part in fixed {
+        match part {
+            "" | "." => {}
+            ".." => folder = folder.parent()?.to_path_buf(),
+            p => folder.push(p),
+        }
+    }
     let same = |a: &Path, b: &Path| crate::paths::normalize(&a.to_string_lossy()) == crate::paths::normalize(&b.to_string_lossy());
     let ancestor = |a: &Path, of: &Path| of.ancestors().any(|p| same(p, a));
     (!ancestor(&folder, repo_root) && !ancestor(repo_root, &folder)).then_some(folder)
@@ -95,38 +108,67 @@ fn gb(bytes: u64) -> String {
 
 /// After land removes a worktree: when the shared build directory has grown past the cap (every
 /// worktree adds its own crates, about a gigabyte for Nitely), clears it; the next build fills it
-/// again. Only when no build is using it: it is renamed first, which Windows refuses while a
-/// file in it is open, and deleted under the new name.
+/// again. Only when no build is using it, told the way cargo tells: cargo holds each profile's
+/// `.cargo-lock` for as long as it builds or runs tests, so every one of them is taken first,
+/// without waiting, and held while the rest is deleted.
 pub fn trim(pb: &Playbook, repo_root: &Path) -> Option<String> {
     let folder = worktrees_folder(pb, repo_root)?;
-    trim_dir(&folder, pb.worktree.shared_build_max_gb.saturating_mul(1_000_000_000))
+    trim_dir(&folder.join(BUILD_DIR), pb.worktree.shared_build_max_gb.saturating_mul(1_000_000_000))
 }
 
-fn trim_dir(folder: &Path, max_bytes: u64) -> Option<String> {
-    // Leftovers of an earlier clear that could not finish.
-    for entry in std::fs::read_dir(folder).into_iter().flatten().flatten() {
-        if entry.file_name().to_string_lossy().starts_with(&format!("{BUILD_DIR}-old-")) {
-            std::fs::remove_dir_all(entry.path()).ok();
-        }
-    }
-    let dir = folder.join(BUILD_DIR);
-    let bytes = size(&dir);
+fn trim_dir(dir: &Path, max_bytes: u64) -> Option<String> {
+    let bytes = size(dir);
     if bytes <= max_bytes {
         return None;
     }
-    let aside = folder.join(format!("{BUILD_DIR}-old-{}", crate::db::now()));
-    if std::fs::rename(&dir, &aside).is_err() {
-        return Some(format!("the shared build directory is {} (over {}) but a build is using it; it is cleared after a later land", gb(bytes), gb(max_bytes)));
+    let busy = || Some(format!("the shared build directory is {} (over {}) but a build is using it; a later land clears it", gb(bytes), gb(max_bytes)));
+    // The profiles' locks (`debug/.cargo-lock`, a target triple's `x/debug/.cargo-lock`).
+    let mut locks = Vec::new();
+    let mut stack = vec![(dir.to_path_buf(), 0)];
+    while let Some((d, depth)) = stack.pop() {
+        for entry in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() && depth < 2 {
+                stack.push((path, depth + 1));
+            } else if entry.file_name() == ".cargo-lock" {
+                let Ok(file) = std::fs::OpenOptions::new().read(true).write(true).open(&path) else { return busy() };
+                if file.try_lock().is_err() {
+                    return busy();
+                }
+                locks.push((path, file));
+            }
+        }
     }
-    std::fs::remove_dir_all(&aside).ok();
+    // Everything but the held lock files, which a build waiting on them still needs.
+    let held: Vec<PathBuf> = locks.iter().map(|(p, _)| p.clone()).collect();
+    clear(dir, &held);
+    drop(locks);
     Some(format!("cleared the shared build directory ({}; the next build fills it again)", gb(bytes)))
 }
 
+/// Deletes what is in `dir` except the `keep` files and the folders on their way.
+fn clear(dir: &Path, keep: &[PathBuf]) {
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if keep.iter().any(|k| k.starts_with(&path)) {
+            if path.is_dir() {
+                clear(&path, keep);
+            }
+        } else if path.is_dir() {
+            std::fs::remove_dir_all(&path).ok();
+        } else {
+            std::fs::remove_file(&path).ok();
+        }
+    }
+}
+
 /// For a worktree land had to keep because a process uses it: deletes its `target/`, the bulk of
-/// it, when no process uses that. Returns what it did.
+/// it, when that is cargo's build output (a Rust repo, cargo's `CACHEDIR.TAG` in it, ignored by
+/// git) and no process uses it. Returns what it did.
 pub fn free_target(worktree: &Path) -> Option<String> {
     let target = worktree.join("target");
-    if !target.is_dir() || !crate::procs::holders(&target).is_empty() {
+    let cargos = worktree.join("Cargo.toml").is_file() && target.join("CACHEDIR.TAG").is_file();
+    if !cargos || crate::playbook::git(worktree, &["check-ignore", "-q", "target"]).is_err() || !crate::procs::holders(&target).is_empty() {
         return None;
     }
     let bytes = size(&target);
@@ -291,27 +333,51 @@ mod tests {
         assert_eq!(worktrees_folder(&beside, &repo), None);
         let inside = playbook("[worktree]\ndir = \"wt/{key}\"\n");
         assert_eq!(worktrees_folder(&inside, &repo), None);
+        // Up to the first per-task part, whatever comes after it.
+        let by_vendor = playbook("[worktree]\ndir = \"../worktrees/{vendor}/{key}-{slug}\"\n");
+        assert_eq!(worktrees_folder(&by_vendor, &repo), Some(base.join("worktrees")));
         std::fs::remove_dir_all(base).ok();
     }
 
     #[test]
-    fn clears_the_shared_build_dir_past_its_cap_and_frees_a_kept_worktrees_target() {
+    fn clears_the_shared_build_dir_past_its_cap_only_when_no_build_holds_it() {
         let folder = crate::paths::unique_temp("nitely-build-trim", "");
-        let dir = folder.join(BUILD_DIR).join("debug").join("deps");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("libdep-1234.rlib"), vec![0u8; 4096]).unwrap();
-        assert_eq!(trim_dir(&folder, 1 << 20), None, "under the cap");
-        assert!(dir.exists());
-        assert!(trim_dir(&folder, 1024).unwrap().starts_with("cleared"));
-        assert!(!folder.join(BUILD_DIR).exists());
-        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 0, "nothing left aside");
+        let dir = folder.join(BUILD_DIR);
+        let deps = dir.join("debug").join("deps");
+        std::fs::create_dir_all(&deps).unwrap();
+        std::fs::write(deps.join("libdep-1234.rlib"), vec![0u8; 4096]).unwrap();
+        let lock = dir.join("debug").join(".cargo-lock");
+        std::fs::write(&lock, b"").unwrap();
+        assert_eq!(trim_dir(&dir, 1 << 20), None, "under the cap");
 
-        let wt = folder.join("app-1-x");
+        // A build holds the profile's lock, as cargo does while it builds or runs tests.
+        let building = std::fs::OpenOptions::new().read(true).write(true).open(&lock).unwrap();
+        building.lock().unwrap();
+        assert!(trim_dir(&dir, 1024).unwrap().contains("a build is using it"));
+        assert!(deps.join("libdep-1234.rlib").exists());
+        drop(building);
+
+        assert!(trim_dir(&dir, 1024).unwrap().starts_with("cleared"));
+        assert!(!deps.exists() && lock.exists(), "everything but the lock file goes");
+        std::fs::remove_dir_all(folder).ok();
+    }
+
+    #[test]
+    fn frees_only_cargos_target_of_a_kept_worktree() {
+        let wt = crate::paths::unique_temp("nitely-build-free", "");
         std::fs::create_dir_all(wt.join("target").join("debug")).unwrap();
+        let git = |args: &[&str]| assert!(crate::playbook::run_git(std::process::Command::new("git").arg("-C").arg(&wt).args(args)).unwrap().status.success());
+        git(&["init", "-q"]);
         std::fs::write(wt.join("target").join("debug").join("app.exe"), b"x").unwrap();
+        assert_eq!(free_target(&wt), None, "not a Rust repo");
+        std::fs::write(wt.join("Cargo.toml"), "[workspace]\n").unwrap();
+        assert_eq!(free_target(&wt), None, "no CACHEDIR.TAG: not cargo's");
+        std::fs::write(wt.join("target").join("CACHEDIR.TAG"), "Signature: 8a477f597d28d172789f06886806bc55\n").unwrap();
+        assert_eq!(free_target(&wt), None, "not ignored by git");
+        std::fs::write(wt.join(".gitignore"), "/target\n").unwrap();
         assert!(free_target(&wt).unwrap().starts_with("deleted its target/"));
         assert!(!wt.join("target").exists() && wt.exists());
-        std::fs::remove_dir_all(folder).ok();
+        std::fs::remove_dir_all(wt).ok();
     }
 
     #[test]
