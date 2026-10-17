@@ -175,7 +175,15 @@ fn supervise(db: &mut Db, project: &str, root: PathBuf, once: bool, managed: boo
     let mut sup = Supervisor::new(project, &root, &paths::data_dir().join("crew"), &nitely_command(), Box::new(SystemAgents))
         .with_interrupt(move || interrupted.load(Ordering::SeqCst) > 0)
         .avoiding_overlap();
-    eprintln!("crew for {project}, following {}", root.join(playbook::PLAYBOOK_PATH).display());
+    // The playbook that is actually read: the repo's own, or the one Nitely keeps for it. Rebuilt
+    // from its parts so it prints with one kind of slash.
+    match Playbook::path_for(&root) {
+        Some(path) => eprintln!("crew for {project}, following {}", path.components().collect::<PathBuf>().display()),
+        None => eprintln!(
+            "crew for {project}: the repo has no playbook yet, so no crew runs (commit {} or connect the repo)",
+            playbook::PLAYBOOK_PATH
+        ),
+    }
     eprintln!("Ctrl+C once: start no more workers and wait for the running ones. Twice: stop every worker that is not landing.");
 
     let mut last_status = String::new();
