@@ -241,10 +241,11 @@ jobs:
           **Installing:** download `Nitely_*_x64-setup.exe` and run it; no administrator rights are needed. The installer is not code-signed, so Windows SmartScreen warns the first time: choose **More info**, then **Run anyway**. The `nitely_*` file is the command-line tool on its own.
           EOF
           echo >> notes.md
-          if [ "${{ steps.meta.outputs.tag }}" = nightly ]; then
-            echo '**Checking a download:** `SHA256SUMS.txt` lists each file'"'"'s SHA-256; compare it with `Get-FileHash <file>` in PowerShell. Tagged releases also carry a GitHub build attestation.' >> notes.md
-          else
+          # The attestation is promised only when this build made one ("Attest the release files").
+          if [ "${{ steps.attest.outputs.ok }}" = true ]; then
             echo '**Checking a download:** `gh attestation verify <file> -R '"$GITHUB_REPOSITORY"'` shows that this repository'"'"'s release workflow built the file from this tag. `SHA256SUMS.txt` lists each file'"'"'s SHA-256 (`Get-FileHash <file>` in PowerShell).' >> notes.md
+          else
+            echo '**Checking a download:** `SHA256SUMS.txt` lists each file'"'"'s SHA-256; compare it with `Get-FileHash <file>` in PowerShell.' >> notes.md
           fi
           cat notes.md
 
