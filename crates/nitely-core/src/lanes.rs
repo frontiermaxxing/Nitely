@@ -379,15 +379,32 @@ fn run_with(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Act
         on_event(&r);
     }
 
-    let (n, _lock, _slot) = take_turn(db, id, repo_root, pb, &rules, machine_budget().slots)?;
+    // Until it runs, a failure here (a lock that cannot be opened, a log folder that cannot be made)
+    // closes the request's row: a queued row left behind would hold up the requests after it.
+    let started = (|| -> Result<_> {
+        let (n, lock, slot) = take_turn(db, id, repo_root, pb, &rules, machine_budget().slots)?;
+        let logs = logs_dir(db, req.project);
+        std::fs::create_dir_all(&logs)?;
+        let log = logs.join(format!("{id}.log"));
+        db.conn.execute(
+            "UPDATE lane_run SET state = 'running', lane = ?2, started_at = ?3, log_path = ?4 WHERE id = ?1",
+            params![id, n, now(), log.to_string_lossy()],
+        )?;
+        Ok((n, lock, slot, log))
+    })();
+    let (n, _lock, _slot, log) = match started {
+        Ok(s) => s,
+        Err(e) => {
+            db.conn
+                .execute(
+                    "UPDATE lane_run SET state = 'lane_error', ended_at = ?2, error = ?3 WHERE id = ?1 AND state IN ('queued', 'running')",
+                    params![id, now(), format!("{e:#}")],
+                )
+                .ok();
+            return Err(e);
+        }
+    };
     let lane = lane_path(repo_root, pb, n);
-    let logs = logs_dir(db, req.project);
-    std::fs::create_dir_all(&logs)?;
-    let log = logs.join(format!("{id}.log"));
-    db.conn.execute(
-        "UPDATE lane_run SET state = 'running', lane = ?2, started_at = ?3, log_path = ?4 WHERE id = ?1",
-        params![id, n, now(), log.to_string_lossy()],
-    )?;
     if let Some(r) = db.lane_run(id)? {
         on_event(&r);
     }
@@ -679,13 +696,16 @@ struct Waiting {
 
 /// The order requests start in: priority first (land, then submit's gate, then the rest), then
 /// each project's first waiting request before any project's second, then the oldest.
-fn in_order(mut waiting: Vec<Waiting>) -> Vec<Waiting> {
+/// A project's requests running now count as its turns already taken (`running`, by upper-case
+/// project), so a project whose first request just started waits behind the others' first.
+fn in_order(mut waiting: Vec<Waiting>, running: &std::collections::HashMap<String, usize>) -> Vec<Waiting> {
     waiting.sort_by_key(|w| (w.priority, w.id));
     let mut seen: std::collections::HashMap<(i64, String), usize> = std::collections::HashMap::new();
     let mut ranked: Vec<(i64, usize, i64, Waiting)> = waiting
         .into_iter()
         .map(|w| {
-            let n = seen.entry((w.priority, w.project.to_uppercase())).or_default();
+            let project = w.project.to_uppercase();
+            let n = seen.entry((w.priority, project.clone())).or_insert_with(|| running.get(&project).copied().unwrap_or(0));
             *n += 1;
             (w.priority, *n, w.id, w)
         })
@@ -704,6 +724,7 @@ fn my_turn(db: &Db, id: i64, slots: u32, alive: &mut dyn FnMut(i64) -> bool) -> 
         .collect::<rusqlite::Result<_>>()?;
     let mut running_by_repo: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
     let mut lanes_by_repo: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    let mut running_by_project: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut running = 0i64;
     let mut waiting = Vec::new();
     for (w, state, pid, lane_count) in rows {
@@ -716,6 +737,7 @@ fn my_turn(db: &Db, id: i64, slots: u32, alive: &mut dyn FnMut(i64) -> bool) -> 
         if state == "running" {
             running += 1;
             *running_by_repo.entry(repo).or_default() += 1;
+            *running_by_project.entry(w.project.to_uppercase()).or_default() += 1;
         } else {
             waiting.push(w);
         }
@@ -723,7 +745,7 @@ fn my_turn(db: &Db, id: i64, slots: u32, alive: &mut dyn FnMut(i64) -> bool) -> 
     let free_slots = (slots as i64 - running).max(0);
     let mine = crate::paths::normalize(&waiting.iter().find(|w| w.id == id).map(|w| w.repo.clone()).unwrap_or_default());
     let mut ahead_that_can_start = 0;
-    for w in in_order(waiting) {
+    for w in in_order(waiting, &running_by_project) {
         if w.id == id {
             return Ok(ahead_that_can_start < free_slots);
         }
@@ -837,7 +859,7 @@ fn ensure_setup(repo_root: &Path, pb: &Playbook, lane: &Path, base: &str, log: &
     }
     std::fs::remove_file(&record).ok();
     for command in &pb.worktree.setup {
-        let command = playbook::expand(command, repo_root, lane, base);
+        let command = playbook::expand(command, repo_root, lane, base).replace("{jobs}", &machine_budget().jobs.to_string());
         // Run again on failure as the gate's commands are (`[gate] retries`): a setup that fails
         // once, on a busy machine, then passes is not the change's fault.
         let mut tries = 0;
@@ -1114,7 +1136,15 @@ fn status_with(db: &Db, repo_root: &Path, pb: &Playbook, project: &str, probe_lo
         lanes.push(LaneState { lane: n, path: path.to_string_lossy().into_owned(), made, busy, at });
     }
     let recent = runs.iter().filter(mine).filter(|r| r.state != "queued" && r.state != "running").take(10).cloned().collect();
-    let running_on_machine = db.conn.query_row("SELECT COUNT(*) FROM lane_run WHERE state = 'running'", [], |r| r.get(0))?;
+    // Every project's running requests, each read through `lane_run` so one whose process is gone
+    // reads as abandoned and is not counted.
+    let running_ids: Vec<i64> = db.conn.prepare("SELECT id FROM lane_run WHERE state = 'running'")?.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    let mut running_on_machine = 0i64;
+    for id in running_ids {
+        if db.lane_run(id)?.is_some_and(|r| r.state == "running") {
+            running_on_machine += 1;
+        }
+    }
     Ok(Some(Lanes {
         project: project.to_uppercase(),
         repo: root.into_owned(),
@@ -1468,8 +1498,13 @@ commands = []
     #[test]
     fn the_queue_goes_by_priority_then_one_per_project_then_age() {
         let w = |id, project: &str, priority| Waiting { id, project: project.into(), repo: format!("C:/Code/{project}"), priority };
-        let order: Vec<i64> = in_order(vec![w(1, "A", 3), w(2, "A", 3), w(3, "B", 3), w(4, "A", 2), w(5, "C", 1), w(6, "B", 3)]).into_iter().map(|w| w.id).collect();
+        let none = std::collections::HashMap::new();
+        let order: Vec<i64> = in_order(vec![w(1, "A", 3), w(2, "A", 3), w(3, "B", 3), w(4, "A", 2), w(5, "C", 1), w(6, "B", 3)], &none).into_iter().map(|w| w.id).collect();
         assert_eq!(order, [5, 4, 1, 3, 2, 6]);
+        // A1 started: A2 waits behind B1, though it is older.
+        let a_running = std::collections::HashMap::from([("A".to_string(), 1)]);
+        let order: Vec<i64> = in_order(vec![w(2, "A", 3), w(3, "B", 3)], &a_running).into_iter().map(|w| w.id).collect();
+        assert_eq!(order, [3, 2]);
     }
 
     #[test]
@@ -1493,7 +1528,8 @@ commands = []
         row("B", "running", 3, 1, me);
         let b_waits = row("B", "queued", 3, 1, me);
         let a = row("A", "queued", 3, 1, me);
-        assert!(my_turn(&db, b_waits, 2, &mut alive).unwrap(), "B's first waiting request may try; its lane's lock decides");
+        assert!(!my_turn(&db, b_waits, 2, &mut alive).unwrap(), "B has one running: A's first goes before B's second");
+        assert!(my_turn(&db, b_waits, 3, &mut alive).unwrap(), "with a slot for each, B may try; its lane's lock decides");
         assert!(my_turn(&db, a, 2, &mut alive).unwrap(), "a busy repo does not hold A up");
         assert!(!my_turn(&db, a, 1, &mut alive).unwrap(), "no free slot: the one is B's running request");
         // A second request of A waits behind the first.
