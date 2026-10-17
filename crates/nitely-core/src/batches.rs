@@ -165,6 +165,12 @@ fn name_of(config: &crate::Config, repo: &str) -> Option<String> {
     config.repos.iter().find(|r| crate::paths::normalize(&r.root) == want).map(|r| r.name.clone())
 }
 
+/// Whether the process `pid` runs (this one does).
+fn runs(pid: i64) -> bool {
+    let pid = pid as u32;
+    pid == std::process::id() || crate::submit_job::process_runs(pid)
+}
+
 /// Whether a land queue run of `repo` can be going: a land holds the repo's lock, and the process
 /// that took it still runs. A run whose process died stays unended in its row until the next run
 /// puts its changes back in the queue, so its row alone does not say.
@@ -173,7 +179,7 @@ fn land_running(repo: &str) -> bool {
     let Ok(held) = std::fs::read_to_string(lock) else { return false };
     // "<holder> pid <n> since <time>", as land.rs writes it.
     let pid = held.split_whitespace().skip_while(|w| *w != "pid").nth(1).and_then(|p| p.parse::<u32>().ok());
-    pid.is_some_and(|p| p == std::process::id() || crate::submit_job::process_runs(p))
+    pid.is_some_and(|p| runs(p as i64))
 }
 
 /// The batches going now: review batches under review, changes waiting for one, and every land
@@ -186,20 +192,24 @@ pub fn overview(config: &crate::Config, db: &Db) -> Result<Overview> {
         .collect::<rusqlite::Result<_>>()?;
     let mut reviewing: Vec<ReviewBatch> = reviewing
         .into_iter()
-        .filter(|(_, pid)| *pid as u32 == std::process::id() || crate::submit_job::process_runs(*pid as u32))
+        .filter(|(_, pid)| runs(*pid))
         .map(|(b, _)| b)
         .collect();
     for b in &mut reviewing {
         b.repo_name = name_of(config, &b.repo);
     }
-    let review_waiting = db
+    // A change whose submit stopped while it waited is no longer waiting (the next batch to form
+    // marks it abandoned).
+    let review_waiting: Vec<(ReviewWait, i64)> = db
         .conn
-        .prepare("SELECT issue_key, repo, reviewer, shadow, queued_at, lines FROM review_queue WHERE state = 'waiting' ORDER BY id")?
+        .prepare("SELECT issue_key, repo, reviewer, shadow, queued_at, lines, pid FROM review_queue WHERE state = 'waiting' ORDER BY id")?
         .query_map([], |r| {
             let repo: String = r.get(1)?;
-            Ok(ReviewWait { issue: r.get(0)?, repo_name: name_of(config, &repo), reviewer: r.get(2)?, shadow: r.get(3)?, queued_at: r.get(4)?, lines: r.get(5)? })
+            let wait = ReviewWait { issue: r.get(0)?, repo_name: name_of(config, &repo), reviewer: r.get(2)?, shadow: r.get(3)?, queued_at: r.get(4)?, lines: r.get(5)? };
+            Ok((wait, r.get(6)?))
         })?
         .collect::<rusqlite::Result<_>>()?;
+    let review_waiting = review_waiting.into_iter().filter(|(_, pid)| runs(*pid)).map(|(w, _)| w).collect();
     let rows: Vec<(String, LandWait)> = db
         .conn
         .prepare("SELECT repo, id, issue_key, state, queued_at, run_id FROM land_queue WHERE state IN ('queued', 'running') ORDER BY id")?
@@ -311,7 +321,12 @@ impl Db {
             .prepare("SELECT id, repo, state, queued_at, ended_at, run_id, result FROM land_queue WHERE issue_key = ?1 COLLATE NOCASE ORDER BY id DESC LIMIT 20")?
             .query_map([key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))?
             .collect::<rusqlite::Result<_>>()?;
-        for (id, repo, state, queued_at, ended_at, run, result) in rows {
+        for (id, repo, mut state, queued_at, ended_at, mut run, result) in rows {
+            // A change its dead run held waits again, as the board shows it.
+            if state == "running" && !land_running(&repo) {
+                state = "queued".into();
+                run = None;
+            }
             let landed: Option<Landed> = result.as_deref().and_then(|t| serde_json::from_str(t).ok());
             let place = if state == "queued" {
                 let ahead: i64 = self.conn.query_row(
@@ -415,7 +430,8 @@ mod tests {
                INSERT INTO review_queue (issue_key, repo, reviewer, note, title, branch, worktree, base, head, lines, files, pid, actor, state, batch_id, queued_at, result, shadow) VALUES
                  ('APP-1', '{repo}', 'codex', '', 'One', 'b1', 'w1', 'x', 'y', 10, '[]', 1, 'claude:s', 'reviewing', 1, 90, NULL, 0),
                  ('APP-1', '{repo}', 'codex', '', 'One', 'b1', 'w1', 'x', 'y', 10, '[]', 1, '', 'done', 2, 40, '{shadow_review}', 1),
-                 ('APP-4', '{repo}', 'codex', '', 'Four', 'b4', 'w4', 'x', 'y', 5, '[]', 1, 'claude:s', 'waiting', NULL, 95, NULL, 0);"#
+                 ('APP-4', '{repo}', 'codex', '', 'Four', 'b4', 'w4', 'x', 'y', 5, '[]', {pid}, 'claude:s', 'waiting', NULL, 95, NULL, 0),
+                 ('APP-11', '{repo}', 'codex', '', 'Eleven', 'b11', 'w11', 'x', 'y', 5, '[]', 4000000000, 'claude:s', 'waiting', NULL, 96, NULL, 0);"#
         ));
         // A queue run landing two changes, with a third behind it, and one sent back earlier.
         exec(&format!(
@@ -429,7 +445,7 @@ mod tests {
         let o = overview(&config, &db).unwrap();
         assert_eq!(o.reviewing.len(), 1, "only what is under review now, by a process that still runs");
         assert_eq!((o.reviewing[0].issues.clone(), o.reviewing[0].repo_name.as_deref()), (vec!["APP-1".to_string(), "APP-2".to_string()], Some("my-app")));
-        assert_eq!(o.review_waiting.iter().map(|w| w.issue.as_str()).collect::<Vec<_>>(), ["APP-4"]);
+        assert_eq!(o.review_waiting.iter().map(|w| w.issue.as_str()).collect::<Vec<_>>(), ["APP-4"], "not APP-11, whose submit stopped");
         assert_eq!(o.land.len(), 1);
         assert_eq!(o.land[0].entries.iter().map(|e| e.issue.as_str()).collect::<Vec<_>>(), ["APP-5", "APP-6", "APP-7"]);
         assert_eq!(o.land[0].runs.iter().map(|r| r.step.as_deref()).collect::<Vec<_>>(), [Some("bisecting: gating 1 of 2")]);
@@ -450,6 +466,8 @@ mod tests {
         let o = overview(&config, &db).unwrap();
         assert!(o.land[0].runs.is_empty());
         assert!(o.land[0].entries.iter().all(|e| e.state == "queued" && e.run.is_none()));
+        let five = db.issue_batches("APP-5").unwrap();
+        assert_eq!((five.lands[0].state.as_str(), five.lands[0].place, five.lands[0].run.is_none()), ("queued", Some(1), true), "and so does its panel");
         std::fs::remove_file(&lock).unwrap();
         assert!(overview(&config, &db).unwrap().land[0].runs.is_empty(), "nor without a lock");
         std::fs::remove_dir_all(&dir).ok();

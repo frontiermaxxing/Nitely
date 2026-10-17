@@ -177,10 +177,11 @@ export function batchEvents(key: string, d: IssueBatches | undefined): BatchEven
         out.push({ ...base, tone: null, text: `In the land queue${l.place ? `, ${ordinal(l.place)} in line` : ""}.` });
         break;
       case "running":
-        out.push({ ...base, tone: null, text: `Landing in queue run ${run?.id ?? "?"}${withWords(run?.issues ?? [])}${run?.step ? `: ${run.step}` : ""}.` });
+        out.push({ ...base, tone: null, text: `Landing in queue run ${run?.id ?? "?"}${withWords((run?.issues ?? []).filter((k) => !run!.sent_back.includes(k)))}${run?.step ? `: ${run.step}` : ""}.` });
         break;
       case "landed":
-        out.push({ ...base, tone: "good", text: `Landed in queue run ${run?.id ?? "?"}${withWords(run?.issues ?? [])}${l.head ? ` at ${l.head}` : ""}${gates}.` });
+        // With what landed, not what the run started with: bisection or a conflict sends some back.
+        out.push({ ...base, tone: "good", text: `Landed in queue run ${run?.id ?? "?"}${withWords(run?.landed.length ? run.landed : [])}${l.head ? ` at ${l.head}` : ""}${gates}.` });
         break;
       default:
         out.push({ ...base, tone: "bad", text: `Sent back from queue run ${run?.id ?? "?"}: ${sentBackWords(l.sent_back ?? { why: "other", with: [] })}${gates}.` });

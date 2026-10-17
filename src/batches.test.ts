@@ -79,7 +79,8 @@ test("the timeline has the batch's verdict for this change, the queue run, and a
       { batch: batch(12, ["APP-1", "APP-2"], { state: "done", ended_at: 1200 }), state: "done", verdict: "changes", blocking: 1, minor: 2, why: null, sent_back: { why: "own", with: [] } },
     ],
     lands: [
-      { id: 3, state: "landed", queued_at: 2500, ended_at: 2600, place: null, run: run(8, ["APP-1", "APP-2"], { gates: 1, ended_at: 2600 }), lane_run: 41, head: "abc1234", error: null, sent_back: null },
+      // APP-3 went back from run 8: the line names only what landed with it.
+      { id: 3, state: "landed", queued_at: 2500, ended_at: 2600, place: null, run: run(8, ["APP-1", "APP-3", "APP-2"], { gates: 1, ended_at: 2600, landed: ["APP-1", "APP-2"], sent_back: ["APP-3"] }), lane_run: 41, head: "abc1234", error: null, sent_back: null },
       { id: 2, state: "sent_back", queued_at: 1900, ended_at: 2100, place: null, run: run(7, ["APP-1", "APP-5"], { gates: 3 }), lane_run: 40, head: null, error: "the gate failed", sent_back: { why: "bisected", with: [] } },
     ],
   };
