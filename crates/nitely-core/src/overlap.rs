@@ -159,7 +159,9 @@ fn collisions(issue: &IssueRecord, held: &[Held], shared: &[String]) -> (f64, Ve
                     continue;
                 }
                 // Shared entries are full paths; a held bare `types.ts` is the same file.
-                weight += if shared.iter().any(|s| names(s, f) || names(f, s)) { SHARED_WEIGHT } else { 1.0 };
+                // (Only a bare name: a held folder is not one shared file.)
+                let shared_file = shared.iter().any(|s| names(s, f) || (!f.contains('/') && names(f, s)));
+                weight += if shared_file { SHARED_WEIGHT } else { 1.0 };
                 hits.push((h.key.clone(), f.clone()));
             }
         }
@@ -323,6 +325,10 @@ mod tests {
         let bare = vec![Held { key: "NIT-42".into(), branch: None, files: vec!["types.ts".into()] }];
         let touching = [issue("NIT-56", 3, "Add a field to src/types.ts", &[])];
         assert_eq!(clash_of(&touching, &bare, &shared)["NIT-56"].0, SHARED_WEIGHT);
+        // A held folder holding a shared file still holds the rest at full weight.
+        let folder = vec![Held { key: "NIT-43".into(), branch: None, files: vec!["src".into()] }];
+        let button = [issue("NIT-57", 3, "Fix src/Button.tsx", &[])];
+        assert_eq!(clash_of(&button, &folder, &shared)["NIT-57"].0, 1.0);
 
         // A held folder or bare file name catches a candidate's full path.
         let wide = vec![Held { key: "NIT-41".into(), branch: None, files: vec!["src/ui".into(), "Backlog.tsx".into()] }];
