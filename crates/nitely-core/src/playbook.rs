@@ -611,9 +611,10 @@ fn exit_code(status: &std::process::ExitStatus) -> String {
 }
 
 /// Whether the repo has an `origin` remote. A repo without one is local: submit and land keep the
-/// change in it instead of failing on a push nobody can receive.
+/// change in it instead of failing on a push nobody can receive. Only a listing that ran and names
+/// no origin counts as none: a git that fails to run keeps the push, which then says why.
 pub(crate) fn has_origin(dir: &Path) -> bool {
-    git(dir, &["remote", "get-url", "origin"]).is_ok()
+    git(dir, &["remote"]).map_or(true, |out| out.lines().any(|l| l.trim() == "origin"))
 }
 
 /// A git call that talks to `origin` (push, fetch). It never waits for a prompt or a sign-in
