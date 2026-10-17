@@ -6,8 +6,11 @@ Nitely tracks its own build. Its backlog is the **NIT** project in Nitely, reach
 ## How to work
 
 1. Take work with `next_task`. It claims the most urgent Todo issue for you. Then call `start_task`
-   with its key: it creates the issue's branch and worktree from `main` and runs `npm ci` there, as
-   `.nitely/playbook.toml` says. Work only in that worktree, never on `main`.
+   with its key: it creates the issue's branch and a light worktree from `main` (source only: no
+   `npm ci`, no build output, about 7 MB; `.nitely/playbook.toml`, `[worktree] mode = "light"`).
+   Work only in that worktree, never on `main`. To read code as it is on `main`, use the reference
+   tree `start_task` names (`../Nitely-worktrees/.nitely-lanes/Nitely/ref`): read-only, never edit
+   or build there. A worktree made before NIT went light stays full until it lands.
 2. Use `report` for what you are doing at each step; it shows live on Andrew's board.
 3. Anything you find but will not fix now goes in with `file_issue` (kind, body, evidence). It refuses
    likely duplicates and lists them.
@@ -16,7 +19,8 @@ Nitely tracks its own build. Its backlog is the **NIT** project in Nitely, reach
 5. Before you stop, leave a `note` with `handoff: true`: what is done, what is left, what you were
    unsure about.
 6. When the work is committed, call `submit` (or `nitely submit`). It hands the branch in and
-   returns at once; in the background it runs the gate, has the other vendor review the branch
+   returns at once; in the background it runs the gate in a build lane (below), has the other vendor
+   review the branch
    (Codex reviews Claude, Claude reviews the rest), pushes, opens or updates the pull request into
    `main`, and moves the issue: back to In Progress when the review finds P0 or P1 problems (fix
    them and submit again), to Needs You when Andrew must approve, and to In Review otherwise. The
@@ -25,8 +29,9 @@ Nitely tracks its own build. Its backlog is the **NIT** project in Nitely, reach
    as before. `run_gate` alone runs just the gate.
 7. Once the review passed (and Andrew approved, when it waits for him), call `land` (or
    `nitely land NIT-n`). It lands one branch at a time: rebase onto `main`, check the review still
-   covers exactly this change, gate, fast-forward, push, clean up, and move the issue to Done. On a
-   rebase conflict, resolve it in the worktree, then submit and land again.
+   covers exactly this change, gate (in a lane, ahead of everything else queued), fast-forward,
+   push, clean up, and move the issue to Done. On a rebase conflict, resolve it in the worktree,
+   then submit and land again.
 8. Nitely is public. Code, UI text, CLI help, sample data, tests, comments, docs and commit messages
    never name another project Andrew works on, or its paths, branches, accounts or files: use
    made-up examples (`C:\Code\my-app`, "Acme", project key `APP`). An issue on the board may mention
@@ -35,16 +40,34 @@ Nitely tracks its own build. Its backlog is the **NIT** project in Nitely, reach
 
 ## Build and test
 
-- `cargo test --workspace` (core rules, MCP protocol), `cargo clippy --workspace`
+Builds and tests run in **build lanes** (docs/build-lanes.md): two warm checkouts of this repo that
+keep `target/` and `node_modules/` between requests, beside the worktrees in
+`.nitely-lanes/Nitely/lane-1` and `lane-2`. Send a command there with `run` (MCP:
+`run { command: "cargo test -p nitely-core" }`) or `nitely run -- cargo test -p nitely-core` from
+your worktree: it builds a snapshot of the worktree as it is, committed or not, and returns the exit
+code, the end of the output and the log (`run_status` waits on a long one; `nitely lanes` shows the
+lanes and the queue). A warm lane compiles a nitely-core change in seconds; your worktree would
+build everything from nothing, about 6 GB of it. So `cargo build`, `test`, `clippy`, `check`,
+`npm test` and `npm run build` in your worktree still run, but a hook reminds you to use `run`
+instead. The gate's commands, all through `run`:
+
+- `cargo test --workspace` (core rules, MCP protocol), `cargo clippy --workspace -- -D warnings`
 - `npm test` (frontend tests: `src/**/*.test.ts`, compiled by tsc and run with node:test)
 - `npm run build` (type-check and bundle the frontend)
-- `npm run tauri dev` runs the app with hot reload
+
+What still runs in your worktree, so install for it only when you need it:
+
+- `npm ci` once before the browser preview or the app: `node_modules` is not in a light worktree.
+- `npm run tauri dev` runs the app with hot reload (a full local build; rarely needed for a change
+  the preview can show)
 - `npm run dev` in a plain browser runs the frontend on sample data (`src/dev/fixtures.ts`); the
   Browser pane opens it with the `web` configuration in `.claude/launch.json`. Check every view you
   change there, in light and dark, wide and narrow. Other agents preview at the same time: use your
   own port, your own Browser pane tab (`tabs_create`), and scratch files and browser profiles in a
   folder named after your issue (docs/visualization.md, "The browser preview"). Add `?data=live` to check a view
-  against the real database, read-only (`cargo build -p nitely-cli` first)
+  against the real database, read-only: it asks the installed `nitely`, or this worktree's
+  `target/debug/nitely` when you built one (`cargo build -p nitely-cli`, only when the view needs a
+  read command your branch adds)
 - The app icon is `src-tauri/icons/icon.svg` and, for 16 to 48px, `icon-small.svg`;
   `node scripts/app-icon.mjs` makes the sizes. Windows embeds the icon in the exe when it is built,
   so a new icon shows only after a rebuild (restart `npm run tauri dev`), and a pinned taskbar
@@ -55,6 +78,8 @@ Nitely tracks its own build. Its backlog is the **NIT** project in Nitely, reach
   agents run the old one, and running MCP servers forward tool calls to it. Only when submit or land
   refuses because the installed `nitely` is older than main (the land's install step failed: see
   its warning) run `cargo run --release -p nitely-cli -- install` in the main checkout yourself.
+- `nitely lanes slim` reclaims the build output of task worktrees whose work is finished (it asks
+  first, and keeps any worktree with uncommitted or unpushed work or recent activity).
 
 ## Driving the real app
 
