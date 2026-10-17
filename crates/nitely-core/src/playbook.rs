@@ -116,6 +116,11 @@ pub struct WorktreeRules {
     /// git refuses to remove with). A failure is reported and the removal still tried.
     #[serde(default)]
     pub teardown: Vec<String>,
+    /// For a Rust repo: every task worktree builds into one shared cargo build directory beside
+    /// them, so dependencies compile once rather than once per worktree (`build_cache.rs`).
+    pub shared_build: bool,
+    /// Land clears that shared directory once it grows past this many gigabytes.
+    pub shared_build_max_gb: u64,
 }
 
 /// Dependency files whose change, by a rebase or by the agent, makes a worktree's setup stale.
@@ -424,7 +429,14 @@ impl Default for BranchRules {
 
 impl Default for WorktreeRules {
     fn default() -> Self {
-        WorktreeRules { dir: "../{repo}-worktrees/{key}-{slug}".into(), setup: vec![], setup_when_changed: vec![], teardown: vec![] }
+        WorktreeRules {
+            dir: "../{repo}-worktrees/{key}-{slug}".into(),
+            setup: vec![],
+            setup_when_changed: vec![],
+            teardown: vec![],
+            shared_build: true,
+            shared_build_max_gb: 30,
+        }
     }
 }
 
@@ -857,6 +869,8 @@ pub fn start_task(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, 
         git(repo_root, &["worktree", "add", "-b", &branch, &worktree_str, base])?;
     }
     db.log_event(actor, Some(&issue.key), Some(&worktree_str), "worktree", &format!("Started {branch} from {base}"))?;
+    let mut warnings = playbook.unknown_warnings();
+    warnings.extend(crate::build_cache::prepare(&playbook, repo_root, &worktree));
 
     let mut setup = Vec::new();
     for command in &playbook.worktree.setup {
@@ -873,7 +887,7 @@ pub fn start_task(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, 
             std::fs::write(record, setup_fingerprint(&playbook.worktree, &worktree)).ok();
         }
     }
-    Ok(Started { issue: issue.key.clone(), branch, worktree: worktree_str, created: true, setup, warnings: playbook.unknown_warnings() })
+    Ok(Started { issue: issue.key.clone(), branch, worktree: worktree_str, created: true, setup, warnings })
 }
 
 /// The ref a branch's changes are measured against: `origin/<base>` when the local `<base>` is

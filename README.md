@@ -120,6 +120,9 @@ Every command has a CLI twin (`nitely submit`, `nitely land APP-4`, ...); `nitel
 - [Signed approvals](docs/approvals.md), [the crew](docs/crew.md), [the phone](docs/phone.md), and
   where Nitely is going ([docs/vision.md](docs/vision.md)).
 
+On Windows, agents building in many worktrees at once can keep Defender busy scanning what they
+write; [docs/setup.md](docs/setup.md#windows-defender-and-a-dev-drive) shows how a Dev Drive helps.
+
 Nitely keeps its data in `%APPDATA%\Nitely` (`nitely where` prints it): a SQLite database, its
 config, and the playbooks it keeps for repos that have none.
 

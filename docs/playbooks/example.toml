@@ -20,6 +20,10 @@ setup = [
 ]
 # Before land removes the worktree: git refuses to remove a folder that still holds the link.
 teardown = ["node scripts/unlink-sdk.mjs {worktree}"]
+# A Rust repo's worktrees share one cargo build directory beside them (the default); land clears
+# it past this size. See docs/setup.md, "Builds in many worktrees".
+shared_build = true
+shared_build_max_gb = 30
 
 [gate]
 # A failing command runs once more before the gate fails; one that then passes is recorded as a

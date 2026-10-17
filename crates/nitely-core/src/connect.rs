@@ -129,10 +129,13 @@ pub fn plan(db: &Db, config: &Config, path: &str, key: Option<&str>, name: Optio
 
     let mut warnings = Vec::new();
     let playbook = playbook_plan(&root_path, &repo_name)?;
-    let integration_branch = match playbook.source.as_str() {
-        "repo" | "existing" => Playbook::load(&root_path).map(|p| p.integration_branch().to_string()).unwrap_or_default(),
-        _ => Playbook::parse(&playbook.text)?.integration_branch().to_string(),
+    let pb = match playbook.source.as_str() {
+        "repo" | "existing" => Playbook::load(&root_path).ok(),
+        _ => Some(Playbook::parse(&playbook.text)?),
     };
+    let integration_branch = pb.as_ref().map(|p| p.integration_branch().to_string()).unwrap_or_default();
+    // On Windows, where Defender's real-time scan of what builds write slows them (NIT-190).
+    warnings.extend(pb.as_ref().and_then(|p| crate::build_cache::defender_note(p, &root_path)));
     if git(&root_path, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{integration_branch}")]).is_err() {
         warnings.push(format!("there is no local branch {integration_branch}; edit the playbook's integration branch before starting tasks"));
     }

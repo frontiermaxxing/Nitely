@@ -40,6 +40,37 @@ project's brief (the project page's Brief view). Nothing is committed or run aga
 Manual setup still works (`nitely project create`, `nitely repo add`, `nitely issue import`).
 Approving and answering asks happen only in the app, never through the CLI or MCP.
 
+## Builds in many worktrees
+
+Every task gets its own worktree, so a repo with several agents at work has several checkouts
+building at once. For a Rust repo, Nitely points all of a repo's task worktrees at one shared cargo
+build directory: it writes a `.cargo/config.toml` in the folder that holds the worktrees (for
+`dir = "../{repo}-worktrees/{key}-{slug}"`, that is `my-app-worktrees`), which every build under it
+reads, the agents' own `cargo` runs included. Dependencies then compile once instead of once per
+worktree; on Nitely itself a new worktree's first `cargo test` went from 111 s and 5,500 files
+written to 47 s and about 1,500. Land clears the shared directory when it passes
+`shared_build_max_gb`, and deletes the `target/` of a worktree it has to keep because a process
+still uses it. `shared_build = false` under `[worktree]` turns it off. Nitely writes the file only
+where the folder holds nothing but worktrees, and never over a `.cargo/config.toml` of your own.
+
+### Windows: Defender and a Dev Drive
+
+Windows Defender scans every file as it is written, and builds write tens of thousands. With a
+few agents building at once, Defender can take more CPU than the builds. Windows 11's answer is a
+**Dev Drive**: a ReFS volume that Defender scans asynchronously, in its performance mode, so builds
+are not held up. Make one in **Settings > System > Storage > Advanced storage settings > Disks &
+volumes > Create Dev Drive** ([Microsoft's guide](https://learn.microsoft.com/windows/dev-drive/)),
+then put the worktrees on it in the playbook:
+
+```toml
+[worktree]
+dir = "D:/my-app-worktrees/{key}-{slug}"
+```
+
+`nitely connect` and the app's Agent setup page say when a repo's worktrees are on a volume
+Defender scans in real time, and name a Dev Drive you already have. Nitely never changes Defender's
+settings; whether to use a Dev Drive, or to exclude a folder from scanning, is yours to decide.
+
 
 ## Hooks
 

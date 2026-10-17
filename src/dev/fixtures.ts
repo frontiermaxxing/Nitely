@@ -1828,6 +1828,13 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return UPDATE;
       case "agent_setup":
         return AGENTS;
+      case "build_scan_notes":
+        return [
+          {
+            repo: "Nitely",
+            note: "Windows Defender scans every file your agents' builds write in C:\\Code\\Nitely-worktrees as it is written; a Dev Drive scans without holding builds up: make one in Settings > System > Storage > Advanced storage settings > Disks & volumes, then point the playbook's [worktree] dir at it (learn.microsoft.com/windows/dev-drive)",
+          },
+        ];
       case "rules":
         return rulesFixture.rules(String(args.project));
       case "rules_check":

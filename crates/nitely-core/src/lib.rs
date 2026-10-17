@@ -4,6 +4,7 @@
 pub mod activity;
 pub mod approval;
 pub mod brief;
+pub mod build_cache;
 pub mod config;
 pub mod connect;
 pub mod crew;

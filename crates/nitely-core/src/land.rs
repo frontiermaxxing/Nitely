@@ -528,13 +528,17 @@ pub(crate) fn cleanup(root: &Path, pb: &Playbook, worktree: &Path, branch: &str,
     let held = crate::procs::holders(worktree);
     if !held.is_empty() {
         let names: Vec<String> = held.iter().map(|h| format!("{} (pid {})", h.name, h.pid)).collect();
-        let message = format!(
+        let mut message = format!(
             "kept {path} whole because {} still use{} it; stop {}, then run `git worktree remove \"{path}\"` and `git branch -d {branch}` in {}",
             names.join(", "),
             if held.len() == 1 { "s" } else { "" },
             if held.len() == 1 { "it" } else { "them" },
             root.display()
         );
+        // Its build output is the bulk of it, and gone with the branch landed (NIT-190).
+        if let Some(freed) = crate::build_cache::free_target(worktree) {
+            message.push_str(&format!("; {freed}"));
+        }
         return (message, held);
     }
     let teardown = teardown(root, pb, worktree);
@@ -550,7 +554,9 @@ pub(crate) fn cleanup(root: &Path, pb: &Playbook, worktree: &Path, branch: &str,
         },
         Err(message) => message,
     };
-    (if teardown.is_empty() { message } else { format!("{message}; {}", teardown.join("; ")) }, vec![])
+    let mut notes = teardown;
+    notes.extend(crate::build_cache::trim(pb, root));
+    (if notes.is_empty() { message } else { format!("{message}; {}", notes.join("; ")) }, vec![])
 }
 
 /// Runs the playbook's worktree teardown in the worktree, returning what failed.

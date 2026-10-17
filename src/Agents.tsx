@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "./backend";
 import type { AgentPlan, AgentsUpdated, ConnectChange } from "./types";
 import { AgentMark, vendorInfo, vendorOf } from "./ui";
@@ -83,6 +83,11 @@ export function AgentSetup(props: {
   onUpdate: (s: UpdateStatus) => void;
 }) {
   const [result, setResult] = useState<AgentsUpdated | null>(null);
+  // Defender's real-time scan of what builds write, per repo, on Windows (NIT-190).
+  const [scanNotes, setScanNotes] = useState<{ repo: string; note: string }[]>([]);
+  useEffect(() => {
+    invoke<{ repo: string; note: string }[]>("build_scan_notes").then(setScanNotes, () => setScanNotes([]));
+  }, []);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const pending = pendingChanges(props.agents);
@@ -123,6 +128,12 @@ export function AgentSetup(props: {
         changes what it writes there, agents keep the old copy until it is updated here.
       </p>
       {error && <p className="error">{error}</p>}
+      {scanNotes.map((n) => (
+        <p key={n.repo} className="small muted">
+          {scanNotes.length > 1 ? `${n.repo}: ` : ""}
+          {n.note}.
+        </p>
+      ))}
       {!result && pending === 0 && setupErrors(props.agents) === 0 && <p className="small muted">Every agent's setup is up to date.</p>}
       <AgentChanges agents={props.agents} />
       {!result && automatic > 0 && (

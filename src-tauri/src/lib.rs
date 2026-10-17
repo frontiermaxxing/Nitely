@@ -385,6 +385,27 @@ async fn agent_setup() -> Result<Vec<nitely_core::connect::AgentPlan>, String> {
 }
 
 #[derive(Serialize)]
+struct BuildScanNote {
+    repo: String,
+    note: String,
+}
+
+/// One line per watched repo whose task worktrees Defender scans as builds write them (NIT-190).
+#[tauri::command]
+async fn build_scan_notes() -> Result<Vec<BuildScanNote>, String> {
+    let config = Config::load().map_err(err)?;
+    Ok(config
+        .repos
+        .iter()
+        .filter_map(|r| {
+            let root = std::path::Path::new(&r.root);
+            let pb = nitely_core::playbook::Playbook::load(root).ok()?;
+            nitely_core::build_cache::defender_note(&pb, root).map(|note| BuildScanNote { repo: r.name.clone(), note })
+        })
+        .collect())
+}
+
+#[derive(Serialize)]
 struct AgentsUpdated {
     done: Vec<String>,
     failed: Vec<String>,
@@ -736,6 +757,7 @@ pub fn run() {
             connect_apply,
             agent_setup,
             agent_setup_apply,
+            build_scan_notes,
             rules,
             rules_check,
             rules_save,
