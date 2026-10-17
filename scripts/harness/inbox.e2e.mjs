@@ -38,7 +38,7 @@ test("the Inbox approves an issue and answers a question, and the database shows
     assert.equal(approved.issue.state, "Approved");
 
     // The question: answer with its first option.
-    await page.click({ css: ".inbox-row", text: "Choose the default theme" });
+    await page.click({ css: ".inbox-row", text: "Should the default theme follow the system?" });
     await page.click({ css: ".dd-option", text: "Follow the system" });
     const answered = await page.waitFor(`return document.querySelector(".dd-outcome.done")?.textContent;`, { what: "the answer's outcome" });
     assert.match(answered, /Answered/);
