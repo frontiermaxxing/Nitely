@@ -165,14 +165,30 @@ fn name_of(config: &crate::Config, repo: &str) -> Option<String> {
     config.repos.iter().find(|r| crate::paths::normalize(&r.root) == want).map(|r| r.name.clone())
 }
 
+/// Whether a land queue run of `repo` can be going: a land holds the repo's lock, and the process
+/// that took it still runs. A run whose process died stays unended in its row until the next run
+/// puts its changes back in the queue, so its row alone does not say.
+fn land_running(repo: &str) -> bool {
+    let Ok(lock) = crate::land::lock_path(std::path::Path::new(repo)) else { return false };
+    let Ok(held) = std::fs::read_to_string(lock) else { return false };
+    // "<holder> pid <n> since <time>", as land.rs writes it.
+    let pid = held.split_whitespace().skip_while(|w| *w != "pid").nth(1).and_then(|p| p.parse::<u32>().ok());
+    pid.is_some_and(|p| p == std::process::id() || crate::submit_job::process_runs(p))
+}
+
 /// The batches going now: review batches under review, changes waiting for one, and every land
-/// queue with something in it.
+/// queue with something in it. A batch or run whose process is gone is not shown as going.
 pub fn overview(config: &crate::Config, db: &Db) -> Result<Overview> {
-    let mut reviewing: Vec<ReviewBatch> = db
+    let reviewing: Vec<(ReviewBatch, i64)> = db
         .conn
-        .prepare(&format!("SELECT {BATCH_COLUMNS} FROM review_batch WHERE state = 'reviewing' ORDER BY id"))?
-        .query_map([], batch_row)?
+        .prepare(&format!("SELECT {BATCH_COLUMNS}, pid FROM review_batch WHERE state = 'reviewing' ORDER BY id"))?
+        .query_map([], |r| Ok((batch_row(r)?, r.get(11)?)))?
         .collect::<rusqlite::Result<_>>()?;
+    let mut reviewing: Vec<ReviewBatch> = reviewing
+        .into_iter()
+        .filter(|(_, pid)| *pid as u32 == std::process::id() || crate::submit_job::process_runs(*pid as u32))
+        .map(|(b, _)| b)
+        .collect();
     for b in &mut reviewing {
         b.repo_name = name_of(config, &b.repo);
     }
@@ -190,7 +206,21 @@ pub fn overview(config: &crate::Config, db: &Db) -> Result<Overview> {
         .query_map([], |r| Ok((r.get(0)?, LandWait { id: r.get(1)?, issue: r.get(2)?, state: r.get(3)?, queued_at: r.get(4)?, run: r.get(5)? })))?
         .collect::<rusqlite::Result<_>>()?;
     let mut land: Vec<LandQueue> = Vec::new();
-    for (repo, entry) in rows {
+    let mut live: Vec<(String, bool)> = Vec::new();
+    for (repo, mut entry) in rows {
+        let running = match live.iter().find(|(r, _)| *r == repo) {
+            Some((_, running)) => *running,
+            None => {
+                let running = land_running(&repo);
+                live.push((repo.clone(), running));
+                running
+            }
+        };
+        // A change its dead run held waits again: the next run takes it.
+        if entry.state == "running" && !running {
+            entry.state = "queued".into();
+            entry.run = None;
+        }
         let at = match land.iter().position(|q| q.repo == repo) {
             Some(i) => i,
             None => {
@@ -365,16 +395,23 @@ mod tests {
         let dir = crate::paths::unique_temp("nitely-batches", "");
         std::fs::create_dir_all(&dir).unwrap();
         let db = Db::open(&dir.join("t.db")).unwrap();
-        let repo = "C:/Code/my-app";
-        let config = crate::Config { repos: vec![crate::RepoConfig { name: "my-app".into(), root: repo.into(), integration_branch: "main".into(), project: Some("APP".into()) }], ..Default::default() };
+        // A repo whose land lock a live process (this test) holds: its queue run is going.
+        let root = dir.join("my-app");
+        crate::test_repo::init(&root, &[("a.txt", "a")]);
+        let lock = crate::land::lock_path(&root).unwrap();
+        std::fs::write(&lock, format!("APP-5 (land queue) pid {} since now\n", std::process::id())).unwrap();
+        let repo = crate::paths::normalize(&root.to_string_lossy());
+        let pid = std::process::id();
+        let config = crate::Config { repos: vec![crate::RepoConfig { name: "my-app".into(), root: repo.clone(), integration_branch: "main".into(), project: Some("APP".into()) }], ..Default::default() };
         let exec = |sql: &str| db.conn.execute_batch(sql).unwrap();
         let shadow_review = r#"{"reviewer":"codex","verdict":"changes","findings":[{"priority":1,"text":"Drops a line."},{"priority":3,"text":"A nit."}],"flagged":[],"summary":"","seconds":9}"#;
         let conflict = r#"{"issue":"APP-6","error":"b conflicts with main or with APP-5, landing just before it in a.txt"}"#;
         // A real batch under review, a shadow one done, and a change waiting for one.
         exec(&format!(
             r#"INSERT INTO review_batch (id, repo, reviewer, issues, state, pid, started_at, shadow) VALUES
-                 (1, '{repo}', 'codex', '["APP-1","APP-2"]', 'reviewing', 1, 100, 0),
-                 (2, '{repo}', 'codex', '["APP-1","APP-3"]', 'done', 1, 50, 1);
+                 (1, '{repo}', 'codex', '["APP-1","APP-2"]', 'reviewing', {pid}, 100, 0),
+                 (2, '{repo}', 'codex', '["APP-1","APP-3"]', 'done', {pid}, 50, 1),
+                 (3, '{repo}', 'codex', '["APP-8","APP-9"]', 'reviewing', 4000000000, 100, 0);
                INSERT INTO review_queue (issue_key, repo, reviewer, note, title, branch, worktree, base, head, lines, files, pid, actor, state, batch_id, queued_at, result, shadow) VALUES
                  ('APP-1', '{repo}', 'codex', '', 'One', 'b1', 'w1', 'x', 'y', 10, '[]', 1, 'claude:s', 'reviewing', 1, 90, NULL, 0),
                  ('APP-1', '{repo}', 'codex', '', 'One', 'b1', 'w1', 'x', 'y', 10, '[]', 1, '', 'done', 2, 40, '{shadow_review}', 1),
@@ -390,7 +427,7 @@ mod tests {
                  (4, '{repo}', 'APP-7', 'claude:s', 'queued', 195, NULL, NULL);"#
         ));
         let o = overview(&config, &db).unwrap();
-        assert_eq!(o.reviewing.len(), 1, "only what is under review now");
+        assert_eq!(o.reviewing.len(), 1, "only what is under review now, by a process that still runs");
         assert_eq!((o.reviewing[0].issues.clone(), o.reviewing[0].repo_name.as_deref()), (vec!["APP-1".to_string(), "APP-2".to_string()], Some("my-app")));
         assert_eq!(o.review_waiting.iter().map(|w| w.issue.as_str()).collect::<Vec<_>>(), ["APP-4"]);
         assert_eq!(o.land.len(), 1);
@@ -407,6 +444,14 @@ mod tests {
         assert_eq!(six.lands[0].run.as_ref().unwrap().issues, ["APP-5", "APP-6"]);
         assert_eq!(six.lands[1].sent_back, Some(SentBack { why: "conflict".into(), with: vec!["APP-5".into()] }));
         assert_eq!(db.issue_batches("APP-7").unwrap().lands[0].place, Some(3), "two land ahead of it");
+
+        // The run's process died: its changes wait again, and no run shows as going.
+        std::fs::write(&lock, "APP-5 (land queue) pid 4000000000 since then\n").unwrap();
+        let o = overview(&config, &db).unwrap();
+        assert!(o.land[0].runs.is_empty());
+        assert!(o.land[0].entries.iter().all(|e| e.state == "queued" && e.run.is_none()));
+        std::fs::remove_file(&lock).unwrap();
+        assert!(overview(&config, &db).unwrap().land[0].runs.is_empty(), "nor without a lock");
         std::fs::remove_dir_all(&dir).ok();
     }
 }
