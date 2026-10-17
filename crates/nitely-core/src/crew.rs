@@ -521,8 +521,8 @@ impl Supervisor {
         self.reap(db, &rules, &mut tick)?;
         self.finish_cleanups(db, &rules)?;
         self.finish_landings(db)?;
-        if let Ok(p) = &playbook {
-            self.after_hand_in(db, p)?;
+        if playbook.is_ok() {
+            self.after_hand_in(db)?;
         }
         self.retry_answered(db)?;
         if self.self_paused && !db.crew_control(&self.project)?.paused {
@@ -790,7 +790,7 @@ impl Supervisor {
         if let Some(why) = other_branch(&worktree, &wanted, agent, &issue.key) {
             return Ok(Start::Wait(why));
         }
-        let branch = playbook::git(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]).map(|b| b.trim().to_string()).unwrap_or(wanted);
+        let branch = current_branch(&worktree).unwrap_or(wanted);
         let agent_id = agent_id.to_string();
 
         let ts = (self.clock)().ts;
@@ -1100,10 +1100,10 @@ impl Supervisor {
 
     /// Issues a worker handed in and then left (NIT-222). One its submit sent back (findings, a
     /// failed gate or push, a job that failed) goes to a new worker, with the outcome in a handoff
-    /// note. One that passed is landed here when the playbook leaves the land to the agent: a
+    /// note. One that passed and still waits to land (In Review, or Approved) is landed here: a
     /// worker's whole session for one mechanical call would cost more, and the land queue may keep
     /// it waiting.
-    fn after_hand_in(&mut self, db: &mut Db, playbook: &Playbook) -> Result<()> {
+    fn after_hand_in(&mut self, db: &mut Db) -> Result<()> {
         let now = (self.clock)().ts;
         for issue in db.list_issues(Some(&self.project), false)? {
             if !matches!(issue.state.as_str(), "In Progress" | "In Review" | "Approved") {
@@ -1115,9 +1115,10 @@ impl Supervisor {
             if busy {
                 continue;
             }
-            // Its last crew worker ended having handed it in.
+            // Its last crew worker ended having handed it in (its submit may have reached Needs You,
+            // for a person's approval, before the worker was seen to end).
             let Some(worker) = db.crew_workers_for(&issue.key)?.into_iter().next() else { continue };
-            if worker.outcome.as_deref() != Some("submitted") {
+            if !matches!(worker.outcome.as_deref(), Some("submitted" | "asked")) {
                 continue;
             }
             let Some(job) = self.handed_in(db, &issue.key, &worker.agent_id, worker.started_at)? else { continue };
@@ -1135,7 +1136,9 @@ impl Supervisor {
                     db.add_note(&issue.key, &note, "handoff", &self.actor())?;
                     db.move_issue(&issue.key, "Todo", None, Some("its submit came back; a new crew worker takes it"), &self.actor())?;
                 }
-                "In Review" | "Approved" if !playbook.land.by.by_nitely() && self.land_after.get(&issue.key).is_none_or(|t| now >= *t) => {
+                // Whoever lands: the author's land is this worker's, gone; Nitely's own land in the
+                // submit may have found the lock held, and the app retries only approvals.
+                "In Review" | "Approved" if self.land_after.get(&issue.key).is_none_or(|t| now >= *t) => {
                     self.start_land(db, &issue.key)?;
                 }
                 _ => {}
@@ -1290,10 +1293,22 @@ Then end. Do not take another issue: Nitely starts a new worker for it.
 /// Why `agent` may not work in `worktree`: it is on another branch than `wanted` (the folder pattern
 /// need not name the vendor). The same agent's branch for the issue under an older title is fine.
 fn other_branch(worktree: &Path, wanted: &str, agent: &str, key: &str) -> Option<String> {
-    let on = playbook::git(worktree, &["rev-parse", "--abbrev-ref", "HEAD"]).ok()?;
-    let on = on.trim();
+    let on = current_branch(worktree)?;
+    let on = on.as_str();
     let same = on == wanted || crate::git::parse_branch(on) == (Some(agent.to_string()), Some(key.to_uppercase()));
     (!same).then(|| format!("its worktree {} is on {on}, not {wanted}", worktree.display()))
+}
+
+/// The branch a worktree is on, or, while a rebase of a branch is in progress there (a land that
+/// stopped on a conflict), the branch being rebased.
+fn current_branch(worktree: &Path) -> Option<String> {
+    let on = playbook::git(worktree, &["rev-parse", "--abbrev-ref", "HEAD"]).ok()?.trim().to_string();
+    if on != "HEAD" {
+        return Some(on);
+    }
+    let paths = playbook::git(worktree, &["rev-parse", "--path-format=absolute", "--git-path", "rebase-merge/head-name", "--git-path", "rebase-apply/head-name"]).ok()?;
+    let rebasing = paths.lines().find_map(|p| std::fs::read_to_string(p.trim()).ok()).map(|h| h.trim().trim_start_matches("refs/heads/").to_string());
+    Some(rebasing.filter(|b| !b.is_empty()).unwrap_or(on))
 }
 
 /// The end of a setup log, for the note on the issue.
@@ -2381,7 +2396,8 @@ mod tests {
         sup.tick(&mut f.db, false).unwrap();
         assert_eq!(fake.lands.borrow().len(), 1, "landed once");
 
-        // Where Nitely lands it already, the supervisor leaves it to that.
+        // Where Nitely lands, an issue still In Review is one whose own land found the lock held:
+        // landed here too.
         let mut g = fixture(&format!("{GATE}[crew]\nworkers = 1\n[land]\nby = \"auto\"\n"));
         let fake = Fake { installed: vec!["claude"], ..Default::default() };
         let mut sup = supervisor(&g, &fake);
@@ -2391,7 +2407,41 @@ mod tests {
         g.db.move_issue("NIT-1", "In Review", None, None, &Actor::Agent(claimed)).unwrap();
         fake.exits.borrow_mut().insert(1001, 0);
         sup.tick(&mut g.db, false).unwrap();
-        assert!(fake.lands.borrow().is_empty());
+        assert_eq!(*fake.lands.borrow(), ["NIT-1"]);
+
+        // A submit that waits for a person when the worker is seen to end: the worker `asked`;
+        // once they approve, it is landed.
+        let mut h = fixture(&format!("{GATE}[crew]\nworkers = 1\n"));
+        let fake = Fake { installed: vec!["claude"], ..Default::default() };
+        let mut sup = supervisor(&h, &fake);
+        sup.tick(&mut h.db, false).unwrap();
+        let claimed = h.db.issue("NIT-1").unwrap().unwrap().claimed_by.unwrap();
+        handed_in(&h, "NIT-1", "done", Some(r#"{"state":"Needs You","next":"x"}"#));
+        h.db.move_issue("NIT-1", "Needs You", None, None, &Actor::Agent(claimed)).unwrap();
+        fake.exits.borrow_mut().insert(1001, 0);
+        assert_eq!(sup.tick(&mut h.db, false).unwrap().ended[0].outcome, "asked");
+        assert!(fake.lands.borrow().is_empty(), "nothing to land while it waits for the person");
+        h.db.move_issue("NIT-1", "Approved", None, None, &Actor::Human).unwrap();
+        sup.tick(&mut h.db, false).unwrap();
+        assert_eq!(*fake.lands.borrow(), ["NIT-1"]);
+    }
+
+    #[test]
+    fn a_worktree_left_mid_rebase_is_still_its_branchs() {
+        let f = fixture("");
+        let wt = f.base.join("wt").join("nit-1");
+        crate::test_repo::git(&f.repo, &["worktree", "add", "-q", "-b", "claude/nit-1-first", &wt.to_string_lossy()]);
+        std::fs::write(wt.join("a.txt"), "the branch's\n").unwrap();
+        crate::test_repo::git(&wt, &["add", "."]);
+        crate::test_repo::git(&wt, &["commit", "-q", "-m", "branch"]);
+        std::fs::write(f.repo.join("a.txt"), "main's\n").unwrap();
+        crate::test_repo::git(&f.repo, &["add", "a.txt"]);
+        crate::test_repo::git(&f.repo, &["commit", "-q", "-m", "main"]);
+        // A land's rebase that stopped on the conflict, left for the next worker to resolve.
+        assert!(playbook::git(&wt, &["rebase", "main"]).is_err());
+        assert_eq!(current_branch(&wt).as_deref(), Some("claude/nit-1-first"));
+        assert_eq!(other_branch(&wt, "claude/nit-1-first", "claude", "NIT-1"), None);
+        assert!(other_branch(&wt, "codex/nit-1-first", "codex", "NIT-1").is_some());
     }
 
     #[test]

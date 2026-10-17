@@ -260,14 +260,16 @@ When a worker exits, the supervisor reads its issue:
   supervisor looks at the issues whose last worker ended `submitted`. One whose submit came back
   (P0/P1 findings, a failed gate or push, a job that failed: the job's `needs_the_submitter`) goes
   back to Todo with a handoff note quoting the job's outcome, and the next free slot starts a worker
-  on it in the same worktree, with the same agent. The review's rounds count as before, and a stalled
-  one still goes to the person. One that passed (In Review, or Approved) is landed by the supervisor
-  when the playbook leaves the land to the agent (`[land] by = "author"`): `nitely land <key>` in a
-  process of its own, since a land runs the gate and may wait in the land queue. A worker started
-  only to call land would spend a session on one mechanical call. A land that stopped on the change
-  (a conflict, a failed gate, a change since its review) goes to a new worker with why. One that
-  found the land lock held, or is still waiting in the land queue, is tried again a minute later.
-  With `[land] by = "auto"` or `"human"`, Nitely's own land takes it, as before.
+  on it in the same worktree, with the same agent (a worktree a land left mid-rebase counts as on its
+  branch). The review's rounds count as before, and a stalled one still goes to the person. One that
+  passed and still waits to land (In Review, or Approved once a person approves it, also when the
+  worker ended `asked` because its submit reached Needs You first) is landed by the supervisor:
+  `nitely land <key>` in a process of its own, since a land runs the gate and may wait in the land
+  queue. A worker started only to call land would spend a session on one mechanical call. With
+  `[land] by = "auto"`, an issue still In Review is one whose own land found the lock held, so it is
+  landed the same way. A land that stopped on the change (a conflict, a failed gate, a change since
+  its review) goes to a new worker with why. One that found the land lock held, or is still waiting
+  in the land queue, is tried again a minute later.
 - **Retry cap.** When an issue reaches `attempts` (3) `failed` workers, it moves to Needs You with an
   ask instead of back to Todo: "The crew tried {key} three times without submitting. Last: {reason}.
   Logs: {paths}." with options "Try again" and "I'll take it". Answering "Try again" puts it back
