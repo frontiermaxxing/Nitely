@@ -284,9 +284,18 @@ fn settle(db: &Db, mut run: Run, pid: Option<i64>) -> Run {
     run
 }
 
+/// The folder for what lanes keep outside the repo (run logs): `lanes` beside the database the runs
+/// are recorded in, so a database and its runs' logs stay together (the data folder, or a test's
+/// own folder).
+pub fn state_dir(db: &Db) -> PathBuf {
+    let beside = db.conn.path().filter(|p| !p.is_empty()).and_then(|p| Path::new(p).parent().map(Path::to_path_buf));
+    beside.unwrap_or_else(crate::paths::data_dir).join("lanes")
+}
+
 /// Where a project's run logs go.
-fn logs_dir(project: &str) -> PathBuf {
-    crate::paths::data_dir().join("lanes").join(project.to_uppercase())
+fn logs_dir(db: &Db, project: &str) -> PathBuf {
+    let project = if project.is_empty() { "_" } else { project };
+    state_dir(db).join(project.to_uppercase())
 }
 
 /// How long a snapshot's ref and a run's log are kept.
@@ -344,7 +353,7 @@ pub fn run(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Acto
 
     let (n, _lock) = take_lane(repo_root, pb, &rules)?;
     let lane = lane_path(repo_root, pb, n);
-    let logs = logs_dir(req.project);
+    let logs = logs_dir(db, req.project);
     std::fs::create_dir_all(&logs)?;
     let log = logs.join(format!("{id}.log"));
     db.conn.execute(
@@ -794,6 +803,7 @@ mod tests {
         assert_eq!(seen, ["queued", "running"]);
         assert!(first.passed(), "{first:?}");
         assert_eq!(first.lane, Some(1));
+        assert!(Path::new(first.log.as_deref().unwrap()).starts_with(base.join("lanes")), "the log sits beside the database: {:?}", first.log);
         assert!(first.output.contains("a.txt") && first.output.contains("b.txt"), "{}", first.output);
         let lane = lane_path(&root, &pb, 1);
         assert!(lane.join("out/done.txt").exists() && lane.join("scratch.txt").exists());

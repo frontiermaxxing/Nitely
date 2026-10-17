@@ -134,7 +134,8 @@ every number above is without them.
 This is `lanes::Run`, the `lane_run` row. `exit_code` is the command's (none when it was stopped
 at the timeout); `lane_error` means the lane could not run it at all (`error` says why), which is
 never a verdict on the code. A queued or running row whose process is gone reads as `abandoned`.
-Logs live in the data folder (`lanes/<project>/<id>.log`; logs and snapshot refs are kept 7 days),
+Logs live beside the database, in the data folder (`lanes/<project>/<id>.log`; logs and snapshot
+refs are kept 7 days),
 and each run with an issue goes on its timeline as `lane_run`.
 
 A gate request whose tree and gate commands already passed is answered from its record. The retro
