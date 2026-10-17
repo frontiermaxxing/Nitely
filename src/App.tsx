@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
-import { UpdateLine, useUpdateStatus } from "./Update";
+import { ApprovalNotice, UpdateLine, useUpdateStatus } from "./Update";
 import { invoke, isLive, isPreview, listen } from "./backend";
 import type { AgentPlan, Board, Project } from "./types";
 import { AgentSetup, pendingChanges, setupErrors } from "./Agents";
@@ -272,6 +272,7 @@ export function App() {
             {error ? "Local · not reading" : isLive ? "Local · live data" : isPreview ? "Local · sample data" : "Local · live"}
           </div>
           <UpdateLine status={update} onStatus={setUpdate} />
+          <ApprovalNotice />
           {isPreview && <PreviewFoot active={view.kind === "kit"} onKit={() => setView({ kind: "kit" })} />}
         </div>
       </nav>

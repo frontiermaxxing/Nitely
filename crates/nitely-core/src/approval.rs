@@ -43,6 +43,19 @@ static EPHEMERAL: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
 /// live here instead, so a harness app never reads or replaces the person's real ones.
 static EPHEMERAL_ENTRIES: std::sync::Mutex<std::collections::BTreeMap<String, String>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
 
+/// Set when this process made a new approval key for a data folder that is not the person's own:
+/// what was approved or paired there under the shared entries before has to be done again.
+static NEW_FOLDER_KEY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// What the app tells the person when it made this data folder its own approval key (a profile on
+/// `NITELY_HOME`), once per run; None on the person's own folder or when the key was there already.
+pub fn new_folder_key_notice() -> Option<&'static str> {
+    NEW_FOLDER_KEY.load(std::sync::atomic::Ordering::Relaxed).then_some(NEW_FOLDER_KEY_NOTICE)
+}
+
+pub const NEW_FOLDER_KEY_NOTICE: &str =
+    "This profile has its own approval key now: approve waiting changes and pair phones again.";
+
 /// Called by the app when the test harness runs it: approvals are signed with a throwaway key.
 pub fn use_ephemeral_key() -> Result<()> {
     let secret = new_secret()?;
@@ -132,6 +145,10 @@ pub fn keychain_secret() -> Result<[u8; 32]> {
         Err(keyring::Error::NoEntry) => {
             let secret = new_secret()?;
             e.set_password(&hex(&secret)).map_err(|e| anyhow::anyhow!("saving the approval key in the OS keychain: {e}"))?;
+            // Only this folder's own service was looked in: the person's entries are never read.
+            if service_for(&crate::paths::data_dir(), &crate::paths::real_data_dir()) != SERVICE {
+                NEW_FOLDER_KEY.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             Ok(secret)
         }
         Err(err) => bail!("reading the approval key from the OS keychain: {err}"),
@@ -236,6 +253,15 @@ pub fn unhex<const N: usize>(s: &str) -> Option<[u8; N]> {
 
 impl Db {
     /// Logs that the keychain's public key had been changed and the app put its own back.
+    /// Records that the app made this data folder its own approval key (`new_folder_key_notice`).
+    pub fn log_new_folder_key(&self) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, 'human', NULL, 'approval_key', ?2)",
+            params![now(), NEW_FOLDER_KEY_NOTICE],
+        )?;
+        Ok(())
+    }
+
     pub fn log_approval_key_restored(&self) -> Result<()> {
         self.conn.execute(
             "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, 'human', NULL, 'approval_key', ?2)",

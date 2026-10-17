@@ -272,8 +272,20 @@ async fn move_issue(key: String, state: String, evidence: Option<String>, reason
 
 /// The app's approval signing secret, kept in the OS keychain and made the first time, with its
 /// public half beside it for `land` to check with (docs/approvals.md).
+static NEW_KEY_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The line the sidebar shows when this run made the data folder its own approval key.
+#[tauri::command]
+fn approval_notice() -> Option<&'static str> {
+    nitely_core::approval::new_folder_key_notice()
+}
+
 fn approval_key(db: &Db) -> Result<[u8; 32], String> {
     let secret = nitely_core::approval::keychain_secret().map_err(err)?;
+    // Made just now for a profile that is not the person's own folder: said once, and kept.
+    if nitely_core::approval::new_folder_key_notice().is_some() && !NEW_KEY_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        db.log_new_folder_key().map_err(err)?;
+    }
     // A public half someone changed is put back and logged.
     if nitely_core::approval::publish_public_key(&secret).map_err(err)? {
         db.log_approval_key_restored().map_err(err)?;
@@ -723,6 +735,7 @@ pub fn run() {
             network_add,
             network_remove,
             update::update_status,
+            approval_notice,
             update::check_for_update,
             update::set_update_channel,
             update::restart_to_update

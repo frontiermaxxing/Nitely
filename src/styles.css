@@ -76,6 +76,7 @@ input { accent-color: var(--fg); }
 /* The version line under it; it speaks up only when an update is ready (src/Update.tsx). */
 .nav-update { padding: 4px 10px 0 24px; font-size: var(--text-xs); color: var(--fg-3); line-height: 1.5; }
 .nav-update.ready { color: var(--fg-2); }
+.nav-update.notice { color: var(--attention-ink); }
 .nav-update .link { font: inherit; color: var(--fg); text-decoration: underline; text-underline-offset: 2px; }
 .nav-update a { color: inherit; }
 .updates .channel-choice { display: grid; gap: 6px; margin: 0 0 12px; }

@@ -60,6 +60,21 @@ export function UpdateLine({ status, onStatus }: { status: UpdateStatus | null; 
   );
 }
 
+/** One line under the version when this run gave the data folder its own approval key (a profile
+ * on NITELY_HOME): what was approved or paired there before has to be done again. */
+export function ApprovalNotice() {
+  const [notice, setNotice] = useState<string | null>(null);
+  useEffect(() => {
+    invoke<string | null>("approval_notice").then(setNotice).catch(() => setNotice(null));
+  }, []);
+  if (!notice) return null;
+  return (
+    <div className="nav-update notice" role="status">
+      {notice}
+    </div>
+  );
+}
+
 /** Agent setup's Updates card: the version, the channel to follow, and checking now. */
 export function UpdatesCard({ status, onStatus }: { status: UpdateStatus | null; onStatus: (s: UpdateStatus) => void }) {
   const [busy, setBusy] = useState(false);
