@@ -47,7 +47,7 @@ pub struct CrewRules {
     /// quarter when `next_task` keeps new work out of files in flight (overlap.rs).
     pub shared_files: Vec<String>,
     /// Replaces the default command for an agent. `{worktree}`, `{repo}`, `{git_dir}`,
-    /// `{mcp_config}` and `{nitely}` are filled in; the brief goes on stdin.
+    /// `{mcp_config}`, `{nitely}` and `{nitely_env}` are filled in; the brief goes on stdin.
     pub commands: BTreeMap<String, Vec<String>>,
 }
 
@@ -95,6 +95,9 @@ impl CrewRules {
                 "-c", "approval_policy=\"never\"",
                 "-c", "mcp_servers.nitely.command={nitely}",
                 "-c", "mcp_servers.nitely.args=[\"mcp\"]",
+                // Codex starts MCP servers with a cleared environment: without this, a crew on
+                // its own data folder (NITELY_HOME) would have workers on the real one.
+                "-c", "mcp_servers.nitely.env={nitely_env}",
                 "-c", "mcp_servers.nitely.default_tools_approval_mode=\"approve\"",
                 "-",
             ]),
@@ -773,6 +776,7 @@ impl Supervisor {
                 .replace("{git_dir}", &git_dir)
                 .replace("{mcp_config}", &mcp_config.to_string_lossy())
                 .replace("{nitely}", &toml_string(&self.nitely))
+                .replace("{nitely_env}", &toml_inline_table(&nitely_env()))
         };
         let Some(program) = self.agents.resolve(&command[0]) else {
             let why = format!("{} is not installed", command[0]);
@@ -804,10 +808,12 @@ impl Supervisor {
         Ok(Start::Running(line))
     }
 
-    /// `mcp.json` for Claude Code: the nitely server and nothing else.
+    /// `mcp.json` for Claude Code: the nitely server and nothing else, on this supervisor's data
+    /// folder (`nitely_env`).
     fn write_mcp_config(&self) -> Result<PathBuf> {
         let path = self.dir.join("mcp.json");
-        let config = serde_json::json!({ "mcpServers": { "nitely": { "command": self.nitely, "args": ["mcp"] } } });
+        let env: serde_json::Map<String, serde_json::Value> = nitely_env().into_iter().map(|(k, v)| (k, serde_json::Value::String(v))).collect();
+        let config = serde_json::json!({ "mcpServers": { "nitely": { "command": self.nitely, "args": ["mcp"], "env": env } } });
         std::fs::create_dir_all(&self.dir)?;
         std::fs::write(&path, serde_json::to_string_pretty(&config)?).with_context(|| format!("writing {}", path.display()))?;
         Ok(path)
@@ -1167,6 +1173,21 @@ fn branch_vendors(repo: &Path, key: &str) -> Vec<String> {
 /// `s` as a TOML string, for a `-c key=value` override.
 fn toml_string(s: &str) -> String {
     toml::Value::String(s.to_string()).to_string()
+}
+
+/// The variables that pick Nitely's data and agent folders, as this supervisor has them: a
+/// worker's nitely MCP server must use the same ones, and agents don't pass them on by themselves.
+fn nitely_env() -> Vec<(String, String)> {
+    ["NITELY_HOME", "NITELY_AGENT_HOME"]
+        .iter()
+        .filter_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()).map(|v| (k.to_string(), v)))
+        .collect()
+}
+
+/// `{KEY = "value", ...}`, a TOML inline table for a `-c` override.
+fn toml_inline_table(pairs: &[(String, String)]) -> String {
+    let body: Vec<String> = pairs.iter().map(|(k, v)| format!("{k} = {}", toml_string(v))).collect();
+    format!("{{{}}}", body.join(", "))
 }
 
 fn first_line(s: &str) -> &str {
@@ -1873,6 +1894,18 @@ mod tests {
     use std::cell::RefCell;
     use std::process::Command;
     use std::rc::Rc;
+
+    #[test]
+    fn codex_workers_get_the_supervisors_data_folder() {
+        let codex = CrewRules::default().command_for("codex").unwrap();
+        assert!(codex.iter().any(|a| a == "mcp_servers.nitely.env={nitely_env}"), "{codex:?}");
+        assert_eq!(toml_inline_table(&[]), "{}");
+        let env = [("NITELY_HOME".to_string(), r"C:\Temp\n h".to_string()), ("NITELY_AGENT_HOME".to_string(), "/tmp/a\"b".to_string())];
+        let table = toml_inline_table(&env);
+        assert_eq!(table, r#"{NITELY_HOME = 'C:\Temp\n h', NITELY_AGENT_HOME = '/tmp/a"b'}"#);
+        let parsed: toml::Table = format!("env = {table}").parse().unwrap();
+        assert_eq!(parsed["env"]["NITELY_HOME"].as_str(), Some(r"C:\Temp\n h"), "the value survives TOML quoting");
+    }
 
     #[test]
     fn crew_is_off_by_default_and_reads_its_section() {

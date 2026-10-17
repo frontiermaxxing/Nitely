@@ -162,7 +162,11 @@ also no OS sandbox. On Windows the sandbox also cannot enter folders under the u
 folder on Windows, as the reviewer is.
 
 Either command can be replaced per agent with `[crew.commands]`, e.g. to pick a model or loosen the
-sandbox. `{worktree}`, `{repo}` and `{mcp_config}` are filled in.
+sandbox. `{worktree}`, `{repo}`, `{mcp_config}`, `{nitely}` and `{nitely_env}` are filled in.
+`{nitely_env}` is the supervisor's `NITELY_HOME` and `NITELY_AGENT_HOME` as a TOML inline table:
+Codex starts MCP servers with a cleared environment, so a codex command that leaves out
+`-c mcp_servers.nitely.env={nitely_env}` puts the workers of a crew on its own data folder (a
+second profile, the harness) on the real one.
 
 **Before turning a crew on:** each agent's CLI must be signed in on its own. The Claude desktop app
 signs in its sessions itself, so a plain `claude -p` can fail with "OAuth session expired" while the
