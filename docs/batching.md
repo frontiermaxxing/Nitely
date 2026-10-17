@@ -266,6 +266,39 @@ the database read-only and reviews in scratch clones of the repo. It also compar
 review with the change's original one: how much two reviews of one change disagree anyway, the
 baseline batching is judged against.
 
+### What the replay found (2026-10-17)
+
+This repo's 15 most recent small first-round changes (9 to 70 lines, 1 to 5 files) went to Codex,
+each alone and then in five batches of three, in the order they were handed in:
+
+```
+                                   batched vs alone    alone (fresh) vs the original review
+same verdict                       14 of 15            14 of 15
+P0/P1 findings                     1 batched, 0 alone  1 original, 0 fresh
+same finding, priority crossed P1  1                   1
+reviewer seconds per change        33 (a batch: 100)   48
+tokens per change                  20,900              36,300 (42% fewer batched)
+```
+
+- **The one disagreement is the same defect, and batching was not the side that drifted.**
+  [NIT-166](nitely://issue/NIT-166)'s original review raised a P1 (a grid with five columns for a
+  row that still renders six). The fresh review alone called the same defect P3, which would have
+  passed the change. The batch called it P1, as the original did. Over these 15 changes, a batch
+  agreed with the original review exactly as often as a second review alone did.
+- **Attribution held.** No finding was left without a change or put on the wrong one, and no
+  change went alone after all. The other findings (all P2 and P3) stayed on their own changes.
+- **Cost:** 42% fewer tokens and 30% less reviewer time per change. Each change waits for its whole
+  batch, though: 100 s on average, against 48 s alone, plus the window.
+- **The sample is thin where it matters.** One change in 15 had a blocking finding. This shows
+  batching does not drift more than a single review does. It does not show how batches handle a
+  run of real defects.
+
+**Recommendation for NIT:** not `"small"` yet. Turn on `"shadow"` for a day of real submissions
+(a playbook change, so Andrew approves it), then read `nitely batches compare`. Turn on
+`"small"` if, over at least 30 shadowed changes, the batches' verdicts agree with the single
+reviews as often as two single reviews agree with each other, and no P0/P1 that a single review
+raised is missing from its batch.
+
 ## The land queue
 
 When a project batches landing, `land` puts the change in the project's queue instead of landing it
