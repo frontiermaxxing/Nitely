@@ -612,7 +612,7 @@ function build(): World {
       title: spec.title,
       body: spec.body ?? "",
       // What the backend sends for a native issue: the app's own link.
-      url: `nitely://issue/${spec.key}`,
+      url: `http://127.0.0.1:7423/i/${spec.key}`,
       state,
       state_type: STATE_TYPE[state],
       kind: spec.kind,

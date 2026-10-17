@@ -73,11 +73,16 @@ fn opened_link(pending: tauri::State<'_, PendingLink>) -> Option<String> {
     pending.0.lock().ok()?.take()
 }
 
-/// Opens what a `nitely://issue/KEY` link names: keeps the key for the page, tells it at once if
-/// it is listening, and brings the window forward. Anything else is ignored.
+/// Opens what an issue link names (`nitely://issue/KEY`, or the loopback web form): keeps the key
+/// for the page, tells it at once if it is listening, and brings the window forward. Anything else
+/// is ignored.
 fn open_link(app: &tauri::AppHandle, url: &str) {
-    use tauri::{Emitter, Manager};
     let Some(key) = nitely_core::issues::key_from_link(url) else { return };
+    open_issue(app, key);
+}
+
+fn open_issue(app: &tauri::AppHandle, key: String) {
+    use tauri::{Emitter, Manager};
     if let Some(pending) = app.try_state::<PendingLink>() {
         if let Ok(mut slot) = pending.0.lock() {
             *slot = Some(key.clone());
@@ -703,6 +708,13 @@ pub fn run() {
                 for url in urls {
                     open_link(app.handle(), url.as_str());
                 }
+            }
+            // The same links as web links on loopback (http://127.0.0.1:7423/i/KEY), which chats and
+            // GitHub open where they drop nitely:// (NIT-228). Only ever opens a view. Not in the
+            // harness, whose app must not answer the person's links.
+            if !harness::on() {
+                let links = app.handle().clone();
+                std::thread::spawn(move || nitely_core::links::listen(move |key| open_issue(&links, key), |e| eprintln!("issue links: {e:#}")));
             }
             let handle = app.handle().clone();
             std::thread::spawn(move || watch(handle));
