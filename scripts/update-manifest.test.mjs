@@ -17,6 +17,7 @@ test("a manifest in the updater's format", () => {
 test("a manifest never moves a channel back", () => {
   assert.equal(replaces("0.2.0", null), true);
   assert.equal(replaces("0.2.1", { version: "0.2.0" }), true);
-  assert.equal(replaces("0.2.0", { version: "0.2.0" }), false);
+  assert.equal(replaces("0.2.0", { version: "0.2.0" }), true, "a rebuild of the same version brings its new signature");
+  assert.equal(replaces("0.1.9", { version: "0.2.0" }), false);
   assert.equal(replaces("0.2.0-beta.3", { version: "0.2.0" }), false, "a beta never replaces its stable");
 });

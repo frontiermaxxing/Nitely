@@ -28,9 +28,11 @@ on:
         type: string
         required: true
 
-# One release build at a time, so two never update the same channel's manifest at once.
+# One build per tag (or for the nightly) at a time. Builds for different tags run side by side:
+# GitHub keeps only one pending run per group, so a shared group could drop a queued tag. Their
+# manifests stay right regardless: each only ever moves a channel forward.
 concurrency:
-  group: release
+  group: release-${{ inputs.ref || (github.event_name == 'schedule' && 'nightly') || github.ref }}
   cancel-in-progress: false
 
 permissions:
@@ -67,10 +69,14 @@ jobs:
       - name: Skip a nightly when main has not changed
         id: changed
         env:
-          SIGNING: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+          SIGNING_SECRET: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
         run: |
           build=true
           head=$(git rev-parse HEAD)
+          # Signed only with both halves of the key (see "Build the installer").
+          pubkey=$(node -e "console.log(require('./src-tauri/tauri.conf.json').plugins?.updater?.pubkey ?? '')" 2>/dev/null || true)
+          SIGNING=false
+          [ "$SIGNING_SECRET" = true ] && [ -n "$pubkey" ] && SIGNING=true
           if [ "$REF" = nightly ] && [ "$(git rev-parse -q --verify 'refs/tags/nightly^{commit}' || true)" = "$head" ] \
              && gh release view nightly --json assets -q '.assets[].name' 2>/dev/null | grep -q -- '-setup.exe$'; then
             if [ "$SIGNING" != true ] || gh release download updates -p nightly.json -O - 2>/dev/null | grep -q "g${head:0:7}"; then

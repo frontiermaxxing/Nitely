@@ -3,7 +3,8 @@
 // was published, and per platform the installer's URL with its updater signature. The release
 // workflow publishes one per channel (stable.json, beta.json, nightly.json) for the app to read.
 // With --current (the manifest published now), it writes nothing and exits 3 when that one is
-// already as new or newer: two builds finishing out of order never move a channel back.
+// newer: two builds finishing out of order never move a channel back. The same version replaces
+// it, so a release built again carries its new installer's signature.
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
@@ -11,7 +12,7 @@ import { compareVersions } from "./release-meta.mjs";
 
 /** Whether a manifest for `version` should replace `current` (a parsed manifest, or null). */
 export function replaces(version, current) {
-  return !current?.version || compareVersions(version, current.version) > 0;
+  return !current?.version || compareVersions(version, current.version) >= 0;
 }
 
 export function manifest({ version, url, signature, notes = "", date = new Date() }) {
@@ -31,7 +32,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   try {
     const current = args.current && existsSync(args.current) ? JSON.parse(readFileSync(args.current, "utf8")) : null;
     if (!replaces(args.version, current)) {
-      console.log(`${args.out}: the published ${current.version} is as new or newer than ${args.version}; left as it is`);
+      console.log(`${args.out}: the published ${current.version} is newer than ${args.version}; left as it is`);
       process.exit(3);
     }
     const m = manifest({
