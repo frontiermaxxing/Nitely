@@ -575,18 +575,23 @@ fn run_tool(server: &Server, name: &str, args: &Value, session: &str) -> Result<
     Ok(match name {
         "next_task" => {
             let project = project(&db)?;
-            match db.next_task(&project, &server.agent())? {
-                Some(issue) => {
+            match nitely_core::overlap::next_task(&config, &mut db, &project, &server.agent(), &[])? {
+                Some(nitely_core::overlap::Picked { issue, why }) => {
                     let root = if server.remote.is_some() { None } else { playbook::repo_for_issue(&config, issue.project.as_deref(), &server.cwd).ok() };
                     let branch = match root {
                         Some(root) => Playbook::load(&root)?.branch_for(&server.vendor, &issue),
                         None => branch_name(&server.vendor, &issue.key, &issue.title),
                     };
-                    json!({
+                    let mut out = json!({
                         "issue": issue,
                         "branch": branch,
                         "next": "Call start_task with this key for the branch and worktree, work there, report as you go, call submit when it is committed, and leave a handoff note before you stop."
-                    })
+                    });
+                    // Why this one: work in flight holds files a more urgent issue would touch.
+                    if let Some(why) = why {
+                        out["why"] = json!(why);
+                    }
+                    out
                 }
                 None => {
                     let waiting: Vec<String> = db

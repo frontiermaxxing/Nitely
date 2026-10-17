@@ -1054,6 +1054,18 @@ impl Db {
 
     /// `next_task`, passing over the issues in `except` (the crew's, for issues it cannot start now).
     pub fn next_task_except(&mut self, project: &str, agent: &str, except: &[String]) -> Result<Option<IssueRecord>> {
+        self.next_task_choosing(project, agent, except, |candidates| candidates.first().map(|(k, _, _)| k.clone()))
+    }
+
+    /// `next_task_except`, letting `choose` pick among the ready candidates, given as (key, urgency
+    /// rank, number), most urgent first (overlap::next_task prefers one clear of work in flight).
+    pub fn next_task_choosing(
+        &mut self,
+        project: &str,
+        agent: &str,
+        except: &[String],
+        choose: impl FnOnce(&[(String, i64, i64)]) -> Option<String>,
+    ) -> Result<Option<IssueRecord>> {
         let ts = now();
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let candidates: Vec<(String, i64, i64)> = {
@@ -1066,11 +1078,16 @@ impl Db {
             rows.collect::<rusqlite::Result<_>>()?
         };
         let deps = Deps::load(&tx)?;
-        let key = candidates
+        let mut ready: Vec<(String, i64, i64)> = candidates
             .into_iter()
             .filter(|(k, _, _)| deps.blocked_by(k).is_empty() && !except.iter().any(|e| e.eq_ignore_ascii_case(k)))
-            .min_by_key(|(k, priority, number)| (rank(deps.urgency(k, *priority)), *number))
-            .map(|(k, _, _)| k);
+            .map(|(k, priority, number)| {
+                let r = rank(deps.urgency(&k, priority));
+                (k, r, number)
+            })
+            .collect();
+        ready.sort_by_key(|(_, r, number)| (*r, *number));
+        let key = choose(&ready).filter(|k| ready.iter().any(|(r, _, _)| r == k));
         let Some(key) = key else {
             return Ok(None);
         };

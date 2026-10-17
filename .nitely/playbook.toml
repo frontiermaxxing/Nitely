@@ -22,6 +22,11 @@ never written or printed. A change that breaks one of these is a P0 or P1 findin
 # No [approval] rules and no review flags: agents build Nitely themselves, so a passing review approves
 # every change here and the agent lands it. A review with P0 or P1 findings still sends it back.
 
+# The crew is off here (workers = 0) until Andrew turns it on. These files nearly every change
+# touches, so holding one counts for a quarter when next_task keeps work out of files in flight.
+[crew]
+shared_files = ["src/App.tsx", "src/types.ts", "src/dev/fixtures.ts", "src-tauri/src/lib.rs", "crates/nitely-cli/src/mcp.rs"]
+
 # land fast-forwards the main checkout but runs no setup there. When a change adds a dependency,
 # install it there too, so `npm run tauri dev` keeps working (NIT-81). `npm install` rather than
 # `npm ci`: it leaves node_modules in place, so a running dev server keeps going, and a failure is

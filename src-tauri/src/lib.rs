@@ -137,6 +137,14 @@ async fn remove_project(key: String, confirm: Option<String>) -> Result<nitely_c
     nitely_core::projects::remove(&mut db()?, &key, with_issues).map_err(err)
 }
 
+/// The files each issue of `project` in flight holds: its branch's changes and the paths its body
+/// names (overlap.rs), for the branch map's hover.
+#[tauri::command]
+async fn held_files(project: String) -> Result<Vec<nitely_core::overlap::Held>, String> {
+    let config = Config::load().map_err(err)?;
+    nitely_core::overlap::held(&config, &db()?, &project).map_err(err)
+}
+
 #[tauri::command]
 async fn project_brief(project: String) -> Result<nitely_core::brief::ProjectBrief, String> {
     db()?.project_brief(&project).map_err(err)
@@ -590,6 +598,7 @@ pub fn run() {
             set_private_terms,
             project_brief,
             set_project_brief,
+            held_files,
             crew_status,
             issue_spend,
             project_spend,

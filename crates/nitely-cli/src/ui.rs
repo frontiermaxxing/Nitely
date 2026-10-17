@@ -16,6 +16,7 @@ pub const READ_ONLY: &[&str] = &[
     "projects",
     "project_brief",
     "crew_status",
+    "held_files",
     "issue_spend",
     "project_spend",
     "mirror_preview",
@@ -55,6 +56,7 @@ pub fn run(command: &str, args: &Value) -> Result<Value> {
         "snapshot" => json!(nitely_core::snapshot(&Config::load_read_only()?, &db()?)?),
         "projects" => json!(db()?.projects()?),
         "project_brief" => json!(db()?.project_brief(str_arg(args, "project")?)?),
+        "held_files" => json!(nitely_core::overlap::held(&Config::load_read_only()?, &db()?, str_arg(args, "project")?)?),
         "crew_status" => {
             let moment = nitely_core::crew::Moment::now();
             json!(nitely_core::crew::project_status(&db()?, &Config::load_read_only()?, str_arg(args, "project")?, &moment)?)

@@ -1,4 +1,6 @@
-import type { Board, IssueRecord, PrRecord, RepoView, Session, TaskRow } from "./types";
+import { useEffect, useState } from "react";
+import { invoke } from "./backend";
+import type { Board, Held, IssueRecord, PrRecord, RepoView, Session, TaskRow } from "./types";
 import { reposOf } from "./repos";
 import { ago } from "./util";
 import {
@@ -132,6 +134,7 @@ function linesOf(repo: RepoView, now: number): { flight: Line[]; loose: Line[] }
  */
 export function BranchMap(props: { board: Board; projectKey: string; now: number; onOpenIssue: (key: string) => void }) {
   const repos = reposOf(props.board, props.projectKey);
+  const held = useHeld(props.projectKey, props.board);
   if (repos.length === 0) {
     return (
       <EmptyState title="No repo is watched for this project.">
@@ -142,13 +145,39 @@ export function BranchMap(props: { board: Board; projectKey: string; now: number
   return (
     <>
       {repos.map((repo) => (
-        <RepoMap key={repo.root} repo={repo} now={props.now} onOpenIssue={props.onOpenIssue} titled={repos.length > 1} />
+        <RepoMap key={repo.root} repo={repo} now={props.now} held={held} onOpenIssue={props.onOpenIssue} titled={repos.length > 1} />
       ))}
     </>
   );
 }
 
-function RepoMap(props: { repo: RepoView; now: number; titled: boolean; onOpenIssue: (key: string) => void }) {
+/**
+ * The files each issue in flight holds (its branch's changes and the paths its body names), which
+ * `next_task` keeps new work out of. Read again whenever the board changes; an error leaves none.
+ */
+function useHeld(projectKey: string, board: Board): Map<string, string[]> {
+  const [held, setHeld] = useState<Map<string, string[]>>(new Map());
+  useEffect(() => {
+    let live = true;
+    invoke<Held[]>("held_files", { project: projectKey })
+      .then((h) => live && setHeld(new Map(h.filter((x) => x.files.length > 0).map((x) => [x.key, x.files]))))
+      .catch(() => live && setHeld(new Map()));
+    return () => {
+      live = false;
+    };
+  }, [projectKey, board]);
+  return held;
+}
+
+/** The hover of a branch line: where it is, then the files its issue holds. */
+export function lineTitle(where: string, files: string[] | undefined): string {
+  if (!files?.length) return where;
+  const shown = files.slice(0, 12);
+  const more = files.length > shown.length ? `\n…and ${files.length - shown.length} more` : "";
+  return `${where}\nHolds ${shown.join(", ")}${more}`;
+}
+
+function RepoMap(props: { repo: RepoView; now: number; titled: boolean; held: Map<string, string[]>; onOpenIssue: (key: string) => void }) {
   const { repo, now } = props;
   const { flight, loose } = linesOf(repo, now);
   const all = [...flight, ...loose];
@@ -176,11 +205,11 @@ function RepoMap(props: { repo: RepoView; now: number; titled: boolean; onOpenIs
         </div>
         <Spine repo={repo} main={main} now={now} alone={all.length === 0} />
         {flight.map((l) => (
-          <BranchLine key={l.id} line={l} base={repo.integration_branch} max={max} now={now} last={l === last} onOpenIssue={props.onOpenIssue} />
+          <BranchLine key={l.id} line={l} base={repo.integration_branch} max={max} now={now} last={l === last} held={props.held} onOpenIssue={props.onOpenIssue} />
         ))}
         {loose.length > 0 && <LooseHead loose={loose} />}
         {loose.map((l) => (
-          <BranchLine key={l.id} line={l} base={repo.integration_branch} max={max} now={now} last={l === last} onOpenIssue={props.onOpenIssue} />
+          <BranchLine key={l.id} line={l} base={repo.integration_branch} max={max} now={now} last={l === last} held={props.held} onOpenIssue={props.onOpenIssue} />
         ))}
       </div>
       {all.length === 0 && <p className="muted small bmap-none">No task branches. Agents get a branch and a worktree per issue when they start one.</p>}
@@ -300,7 +329,7 @@ function short(secs: number): string {
   return `${Math.round(s / DAY)}d`;
 }
 
-function BranchLine(props: { line: Line; base: string; max: number; now: number; last: boolean; onOpenIssue: (key: string) => void }) {
+function BranchLine(props: { line: Line; base: string; max: number; now: number; last: boolean; held: Map<string, string[]>; onOpenIssue: (key: string) => void }) {
   const { line: l, now } = props;
   const kind = !l.worktree ? "ref" : !l.branch ? "detached" : "worktree";
   // The node says who has the move: attention when it waits on you, live while an agent works.
@@ -312,7 +341,7 @@ function BranchLine(props: { line: Line; base: string; max: number; now: number;
   const where = l.worktree ?? `${l.branch} (no worktree)`;
 
   return (
-    <div className={cls} role="row" title={where}>
+    <div className={cls} role="row" title={lineTitle(where, l.issueKey ? props.held.get(l.issueKey) : undefined)}>
       <span className="bmap-graph" aria-hidden="true">
         <span className="bmap-fork" />
         <span className={`bmap-node bmap-node-${node}`} />

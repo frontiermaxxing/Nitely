@@ -152,6 +152,13 @@ export interface BranchRow {
   pr: PrRecord | null;
 }
 
+/** An issue in flight and the files it holds: its branch's changes, then paths its body names. */
+export interface Held {
+  key: string;
+  branch: string | null;
+  files: string[];
+}
+
 export interface RepoView {
   name: string;
   root: string;

@@ -84,6 +84,13 @@ start one, the crew's status says why.
    and `note` calls keep the claim fresh. Nothing ready: the slot stays empty until the next tick.
 4. **Start.** Launch the agent in the worktree with the brief (below) on stdin.
 
+Which issue: `next_task` keeps parallel workers out of each other's files. Every issue in flight
+holds the files its branch changes and the paths its body names; a ready issue whose title, body or
+labels name one of them collides, and a clear issue at most one urgency level below is taken instead
+(an urgent one never waits). Files nearly every change touches go in `crew.shared_files` and count for
+a quarter. Whenever in-flight work changed the pick, the result says why (`NIT-40 holds src/Inbox.tsx`),
+and the crew notes it on the issue. The branch map shows what each issue holds on hover.
+
 Which agent: the first in `agents` that is installed and not failing to start. An issue that already
 has a branch from an earlier attempt keeps that branch's vendor when it is in the list, so a second
 attempt continues the first one's work instead of starting a new branch beside it.

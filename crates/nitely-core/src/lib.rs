@@ -18,6 +18,7 @@ pub mod install;
 pub mod land;
 pub mod linear_import;
 pub mod mirror;
+pub mod overlap;
 pub mod issues;
 pub mod paths;
 pub mod playbook;

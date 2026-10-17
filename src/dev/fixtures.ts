@@ -9,6 +9,7 @@
 
 import * as rulesFixture from "./rules";
 import type {
+  Held,
   CrewStatus,
   CrewWorker,
   Activity,
@@ -664,6 +665,20 @@ function session(spec: IssueSpec, live: Live): Session {
     state: live.state,
     ...(spec.crew ? { crew: true } : {}),
   };
+}
+
+// ----- Files held by work in flight (overlap.rs), for the branch map's hover -----
+
+const HELD: Record<string, string[]> = {
+  "NIT-31": ["src/Pulse.tsx", "src/pulse.css", "src/types.ts"],
+  "NIT-30": ["src/IssueJourney.tsx", "crates/nitely-core/src/review.rs", "src/types.ts"],
+  "NIT-29": ["src/Activity.tsx", "crates/nitely-core/src/activity.rs"],
+};
+
+function heldFiles(project: string): Held[] {
+  return Object.entries(HELD)
+    .filter(([key]) => key.startsWith(`${project.toUpperCase()}-`))
+    .map(([key, files]) => ({ key, branch: null, files }));
 }
 
 // ----- The NIT crew: the specs marked crew are its running workers -----
@@ -1482,6 +1497,8 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         if (args.private) privateIssues.add(String(args.key));
         else privateIssues.delete(String(args.key));
         return issueMirror(String(args.key));
+      case "held_files":
+        return heldFiles(String(args.project));
       case "crew_status":
         return crewStatus(String(args.project));
       case "issue_spend":

@@ -739,13 +739,13 @@ fn run(cmd: Cmd) -> Result<()> {
                 IssueCmd::Next { project, agent } => {
                     let cwd = cwd()?;
                     let project = resolve_project(&config, &db, project.as_deref(), &cwd)?;
-                    match db.next_task(&project, &agent)? {
-                        Some(i) => {
+                    match nitely_core::overlap::next_task(&config, &mut db, &project, &agent, &[])? {
+                        Some(nitely_core::overlap::Picked { issue: i, why }) => {
                             let branch = match playbook::repo_root(&config, &cwd) {
                                 Some(root) => Playbook::load(&root)?.branch_for(&agent, &i),
                                 None => branch_name(&agent, &i.key, &i.title),
                             };
-                            print_json(&serde_json::json!({ "issue": i, "branch": branch }))
+                            print_json(&serde_json::json!({ "issue": i, "branch": branch, "why": why }))
                         }
                         None => {
                             println!("nothing ready in {project}");

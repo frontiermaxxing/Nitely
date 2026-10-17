@@ -43,6 +43,9 @@ pub struct CrewRules {
     pub setup_timeout_minutes: u64,
     /// Failed workers on one issue before it goes to a human.
     pub attempts: u32,
+    /// Files nearly every change touches (registries, shared types): holding one counts for a
+    /// quarter when `next_task` keeps new work out of files in flight (overlap.rs).
+    pub shared_files: Vec<String>,
     /// Replaces the default command for an agent. `{worktree}`, `{repo}`, `{git_dir}`,
     /// `{mcp_config}` and `{nitely}` are filled in; the brief goes on stdin.
     pub commands: BTreeMap<String, Vec<String>>,
@@ -59,6 +62,7 @@ impl Default for CrewRules {
             timeout_minutes: 180,
             setup_timeout_minutes: 30,
             attempts: 3,
+            shared_files: vec![],
             commands: BTreeMap::new(),
         }
     }
@@ -264,6 +268,8 @@ pub struct Supervisor {
     preparing: Vec<Preparing>,
     /// Agents that would not start in this run, and why.
     disabled: BTreeMap<String, String>,
+    /// Pick issues clear of the files work in flight holds (overlap.rs); reads the config.
+    avoid_overlap: bool,
     /// Workers left by an earlier supervisor have been looked for.
     adopted: bool,
     /// Issues passed over for the rest of this run, and why.
@@ -302,6 +308,7 @@ impl Supervisor {
             running: Vec::new(),
             preparing: Vec::new(),
             disabled: BTreeMap::new(),
+            avoid_overlap: false,
             adopted: false,
             waiting: BTreeMap::new(),
             launch_failures: BTreeMap::new(),
@@ -311,6 +318,12 @@ impl Supervisor {
 
     pub fn with_clock(mut self, clock: impl Fn() -> Moment + 'static) -> Supervisor {
         self.clock = Box::new(clock);
+        self
+    }
+
+    /// Picks issues clear of the files work in flight holds, reading the repos from the config.
+    pub fn avoiding_overlap(mut self) -> Supervisor {
+        self.avoid_overlap = true;
         self
     }
 
@@ -477,9 +490,19 @@ impl Supervisor {
                 return Ok(format!("paused: no agent will start ({})", why.join("; ")));
             }
             let skipped: Vec<String> = self.waiting.keys().cloned().collect();
-            let Some(issue) = db.next_task_except(&self.project, self.actor().id(), &skipped)? else {
+            let picked = if self.avoid_overlap {
+                // Read fresh: repos and their playbooks change while a crew runs.
+                let config = crate::Config::load()?;
+                crate::overlap::next_task(&config, db, &self.project, self.actor().id(), &skipped)?
+            } else {
+                db.next_task_except(&self.project, self.actor().id(), &skipped)?.map(|issue| crate::overlap::Picked { issue, why: None })
+            };
+            let Some(crate::overlap::Picked { issue, why }) = picked else {
                 return Ok(self.nothing_ready());
             };
+            if let Some(why) = why {
+                db.log_event(&self.actor(), Some(&issue.key), None, "picked", &format!("The crew picked {}: {why}", issue.key))?;
+            }
             // A second attempt continues the first one's branch, with the first one's agent: the
             // branch's prefix picks the reviewer, so another agent on it would review itself.
             let vendors = branch_vendors(&self.repo_root, &issue.key);

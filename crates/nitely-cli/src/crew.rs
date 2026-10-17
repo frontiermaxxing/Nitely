@@ -141,7 +141,8 @@ fn supervise(db: &mut Db, project: &str, root: PathBuf, once: bool, managed: boo
     };
     let interrupted = presses.clone();
     let mut sup = Supervisor::new(project, &root, &paths::data_dir().join("crew"), &nitely_command(), Box::new(SystemAgents))
-        .with_interrupt(move || interrupted.load(Ordering::SeqCst) > 0);
+        .with_interrupt(move || interrupted.load(Ordering::SeqCst) > 0)
+        .avoiding_overlap();
     eprintln!("crew for {project}, following {}", root.join(playbook::PLAYBOOK_PATH).display());
     eprintln!("Ctrl+C once: start no more workers and wait for the running ones. Twice: stop every worker that is not landing.");
 
