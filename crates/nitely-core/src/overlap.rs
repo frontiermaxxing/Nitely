@@ -58,6 +58,14 @@ pub fn paths_in(text: &str) -> Vec<String> {
     for word in text.split(|c: char| c.is_whitespace() || matches!(c, '`' | '"' | '\'' | '(' | ')' | '[' | ']' | '<' | '>' | ',' | ';')) {
         let w = word.trim_matches(|c: char| matches!(c, '.' | ':' | '!' | '?' | '*')).replace('\\', "/");
         let w = w.trim_start_matches("./").trim_end_matches('/');
+        // `src/Inbox.tsx:42` and `src/Inbox.tsx:42:7` name the file.
+        let mut w = w;
+        while let Some((head, tail)) = w.rsplit_once(':') {
+            if tail.is_empty() || !tail.chars().all(|c| c.is_ascii_digit()) {
+                break;
+            }
+            w = head;
+        }
         if w.is_empty() || w.contains("://") || w.starts_with('/') {
             continue;
         }
@@ -150,7 +158,8 @@ fn collisions(issue: &IssueRecord, held: &[Held], shared: &[String]) -> (f64, Ve
                 if hits.iter().any(|(k, x)| k == &h.key && x == f) {
                     continue;
                 }
-                weight += if shared.iter().any(|s| names(s, f)) { SHARED_WEIGHT } else { 1.0 };
+                // Shared entries are full paths; a held bare `types.ts` is the same file.
+                weight += if shared.iter().any(|s| names(s, f) || names(f, s)) { SHARED_WEIGHT } else { 1.0 };
                 hits.push((h.key.clone(), f.clone()));
             }
         }
@@ -191,6 +200,9 @@ fn choose(candidates: &[(String, i64, i64)], clash: &Clash) -> Option<(String, O
 /// `Db::next_task`, preferring an issue clear of the files work in flight holds (see `choose`).
 /// The playbook's `crew.shared_files` of the project's repos count for a quarter.
 pub fn next_task(config: &crate::Config, db: &mut Db, project: &str, agent: &str, except: &[String]) -> Result<Option<Picked>> {
+    // One pick at a time: reading what is held and claiming happen under one lock, so a second
+    // caller sees the first one's claim (its body's paths) as work in flight.
+    let _turn = PickLock::take(db);
     let held = held(config, db, project)?;
     let shared: Vec<String> = config
         .repos
@@ -213,6 +225,42 @@ pub fn next_task(config: &crate::Config, db: &mut Db, project: &str, agent: &str
     Ok(issue.map(|issue| Picked { issue, why }))
 }
 
+/// A lock file beside the database, held while one caller reads what is in flight and claims.
+/// Taken with a short wait; one older than `STALE_SECS` was left by a caller that died. Without a
+/// database file (in memory) there is nothing to share and no lock.
+struct PickLock(Option<std::path::PathBuf>);
+
+impl PickLock {
+    const STALE_SECS: u64 = 30;
+
+    fn take(db: &Db) -> PickLock {
+        let Some(path) = db.conn.path().filter(|p| !p.is_empty()).map(|p| std::path::PathBuf::from(format!("{p}.next-task.lock"))) else {
+            return PickLock(None);
+        };
+        for _ in 0..200 {
+            if std::fs::OpenOptions::new().write(true).create_new(true).open(&path).is_ok() {
+                return PickLock(Some(path));
+            }
+            let stale = std::fs::metadata(&path).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age.as_secs() > Self::STALE_SECS);
+            if stale {
+                std::fs::remove_file(&path).ok();
+                continue;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        // Ten seconds without a turn: go ahead rather than fail the call.
+        PickLock(None)
+    }
+}
+
+impl Drop for PickLock {
+    fn drop(&mut self) {
+        if let Some(path) = &self.0 {
+            std::fs::remove_file(path).ok();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,6 +269,7 @@ mod tests {
     fn finds_paths_in_prose() {
         let text = "Fix the badge in `src/Inbox.tsx` and crates\\nitely-core\\src\\crew.rs. See https://x.dev/a.b, e.g. App.tsx or src/ui/. Not v1.2 nor a sentence.";
         assert_eq!(paths_in(text), ["src/Inbox.tsx", "crates/nitely-core/src/crew.rs", "App.tsx", "src/ui"]);
+        assert_eq!(paths_in("see src/Inbox.tsx:42 and src/crew.rs:10:4, then App.tsx:7."), ["src/Inbox.tsx", "src/crew.rs", "App.tsx"]);
         // Prose that looks like paths but names no file.
         let prose = "issue.goal on github.com/frontiermaxxing/Nitely and github.event.pull_request.head.repo.fork";
         assert_eq!(paths_in(prose), Vec::<String>::new());
@@ -269,6 +318,11 @@ mod tests {
         let (key, why) = choose(&cands(&[("NIT-50", 1), ("NIT-51", 1)]), &clash).unwrap();
         assert_eq!(key, "NIT-50");
         assert!(why.unwrap().starts_with("NIT-50 is urgent"));
+
+        // A shared file held under its bare name is still shared.
+        let bare = vec![Held { key: "NIT-42".into(), branch: None, files: vec!["types.ts".into()] }];
+        let touching = [issue("NIT-56", 3, "Add a field to src/types.ts", &[])];
+        assert_eq!(clash_of(&touching, &bare, &shared)["NIT-56"].0, SHARED_WEIGHT);
 
         // A held folder or bare file name catches a candidate's full path.
         let wide = vec![Held { key: "NIT-41".into(), branch: None, files: vec!["src/ui".into(), "Backlog.tsx".into()] }];
@@ -324,6 +378,8 @@ mod tests {
         assert_eq!(picked.why.as_deref(), Some("took NIT-3 before the more urgent NIT-2, which would collide: NIT-1 holds src/Inbox.tsx"));
         let picked = next_task(&config, &mut db, "NIT", "codex:y", &[]).unwrap().unwrap();
         assert_eq!(picked.issue.key, "NIT-2", "with nothing clear left, the colliding one is still handed out");
+        let lock = std::path::PathBuf::from(format!("{}.next-task.lock", base.join("t.db").display()));
+        assert!(!lock.exists(), "the pick's turn is given back");
         std::fs::remove_dir_all(base).ok();
     }
 }
