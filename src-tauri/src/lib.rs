@@ -603,6 +603,8 @@ pub fn run() {
         .manage(update::UpdateState::default())
         .setup(|app| {
             use tauri_plugin_deep_link::DeepLinkExt;
+            // Before anything is shown: a click on a notification that started the app finds its handler.
+            notify::init(app.handle());
             // Installers register nitely:// at install; this registers it for the current user each
             // time the app starts, so a dev build opens links too (Windows and Linux; macOS needs the
             // bundled app).

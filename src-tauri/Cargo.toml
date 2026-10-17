@@ -29,3 +29,14 @@ tauri-plugin-updater = "2"
 tauri-winrt-notification = "0.8"
 # The agents' own icons, read from what is installed here (src/agent_icons.rs).
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Notification Center for decisions that wait on the person (src/notify.rs), with the click reported back.
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSBundle", "NSError", "NSString"] }
+objc2-user-notifications = { version = "0.3", features = ["block2", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# The desktop's notifications (freedesktop, over D-Bus) for the same, with the click reported back.
+notify-rust = "4"
