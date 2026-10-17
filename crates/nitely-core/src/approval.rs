@@ -34,6 +34,10 @@ pub fn agents_can_verify() -> bool {
 /// so a harness approval never lands anything real.
 static EPHEMERAL: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
 
+/// Under the test harness, the other entries the app keeps in the keychain (the paired phones)
+/// live here instead, so a harness app never reads or replaces the person's real ones.
+static EPHEMERAL_ENTRIES: std::sync::Mutex<std::collections::BTreeMap<String, String>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
 /// Called by the app when the test harness runs it: approvals are signed with a throwaway key.
 pub fn use_ephemeral_key() -> Result<()> {
     let secret = new_secret()?;
@@ -54,6 +58,9 @@ fn entry(account: &str) -> Result<keyring::Entry> {
 /// without the OS asking the person.
 #[cfg_attr(test, allow(dead_code))]
 pub(crate) fn keychain_get(account: &str) -> Result<Option<String>> {
+    if EPHEMERAL.get().is_some() {
+        return Ok(EPHEMERAL_ENTRIES.lock().unwrap().get(account).cloned());
+    }
     if !SILENT_KEYCHAIN.load(std::sync::atomic::Ordering::Relaxed) {
         bail!("on macOS only the Nitely app reads its keychain entries");
     }
@@ -66,6 +73,10 @@ pub(crate) fn keychain_get(account: &str) -> Result<Option<String>> {
 
 /// Writes a Nitely keychain entry. Only the app calls it.
 pub(crate) fn keychain_set(account: &str, text: &str) -> Result<()> {
+    if EPHEMERAL.get().is_some() {
+        EPHEMERAL_ENTRIES.lock().unwrap().insert(account.to_string(), text.to_string());
+        return Ok(());
+    }
     entry(account)?.set_password(text).map_err(|e| anyhow::anyhow!("saving {account} in the OS keychain: {e}"))
 }
 
@@ -129,6 +140,15 @@ pub fn trusted_key() -> Result<[u8; 32]> {
             Err(keyring::Error::NoEntry) => bail!("no approval key yet: open the Nitely app once so it can make one"),
             Err(e) => bail!("reading the approval key from the OS keychain: {e}"),
         }
+    }
+}
+
+/// The public key the app's own signed records (the paired phones) are checked with: the throwaway
+/// key's under the test harness, which signed them, otherwise the keychain's.
+pub fn app_key() -> Result<[u8; 32]> {
+    match EPHEMERAL.get() {
+        Some(secret) => Ok(public_of(secret)),
+        None => trusted_key(),
     }
 }
 
@@ -284,5 +304,19 @@ mod tests {
         assert!(!verify(&public_of(&new_secret().unwrap()), &message("NIT-3", "abc", 100), &sig), "another key");
         assert!(!verify(&public, &message("NIT-3", "abc", 100), "zz"), "not a signature");
         assert_eq!(unhex::<32>(&hex(&public)), Some(public));
+    }
+
+    /// The only test that turns on the harness's throwaway key: it is process-wide once set.
+    #[test]
+    fn the_harness_keeps_its_entries_off_the_os_keychain() {
+        use_ephemeral_key().unwrap();
+        let secret = keychain_secret().unwrap();
+        assert_eq!(app_key().unwrap(), public_of(&secret), "the phone list is checked with the key that signed it");
+        assert!(!publish_public_key(&secret).unwrap());
+        let account = "harness-test-entry";
+        assert_eq!(keychain_get(account).unwrap(), None);
+        keychain_set(account, "only in this process").unwrap();
+        assert_eq!(keychain_get(account).unwrap().as_deref(), Some("only in this process"));
+        assert!(entry(account).map_or(true, |e| e.get_password().is_err()), "nothing reached the OS keychain");
     }
 }

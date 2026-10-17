@@ -292,7 +292,7 @@ pub fn verified(public: &[u8; 32], list: &DeviceList) -> Option<Vec<Device>> {
 /// The paired phones, from the keychain, checked against the app's approval key. A list nobody
 /// signed, or one signed by another key, is refused: no device in it is trusted.
 pub fn load_devices() -> Result<Vec<Device>> {
-    trusted_devices(&crate::approval::trusted_key()?)
+    trusted_devices(&crate::approval::app_key()?)
 }
 
 #[cfg(test)]
