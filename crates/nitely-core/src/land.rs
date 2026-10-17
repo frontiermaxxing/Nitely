@@ -844,7 +844,7 @@ when_changed = ["billing"]
     fn a_stalled_review_asks_about_each_finding_and_waits_for_all_of_them() {
         // Rounds that do not converge (NIT-220): the person decides each open finding; the issue
         // stays the agents' and waits in Needs You until every one is decided.
-        let mut f = fixture("stalled");
+        let mut f = fixture();
         let pb_path = f.repo.join(playbook::PLAYBOOK_PATH);
         let pb = std::fs::read_to_string(&pb_path).unwrap().replace(
             "echo 'Fine.'; echo 'VERDICT: clean'",
