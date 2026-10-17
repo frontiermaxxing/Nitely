@@ -492,6 +492,10 @@ pub fn hold_interactions(db: &Db, worktree: &Path, review: &mut Review) -> Resul
 /// Why this branch is not yet on top of `key`'s landed change, or None when it is.
 fn not_on_top_of(db: &Db, worktree: &Path, key: &str) -> Result<Option<String>> {
     let Some(issue) = db.issue(key)? else { return Ok(None) };
+    // A first change that will never land holds nothing back: the review's own answer counts.
+    if issue.state_type == "canceled" {
+        return Ok(None);
+    }
     if issue.state != "Done" {
         return Ok(Some(format!("{key} has not landed yet: land it first, then rebase this onto it")));
     }
@@ -709,11 +713,18 @@ mod tests {
         assert_eq!((r.verdict.as_str(), r.previous[0].status.as_str()), ("changes", "open"));
         assert!(r.findings[0].now.as_deref().unwrap().contains("has not landed yet"), "{r:?}");
         // Landed, but not under this branch: still open.
-        q.db.conn.execute("UPDATE issue SET state = 'Done' WHERE key = ?1", [&first]).unwrap();
+        q.db.conn.execute("UPDATE issue SET state = 'Done', state_type = 'completed' WHERE key = ?1", [&first]).unwrap();
         q.db.log_event(&q.actor, Some(&first), None, "landed", &format!("Landed claude/x on main at {elsewhere}")).unwrap();
         let mut r = review("fixed");
         hold_interactions(&q.db, &wt, &mut r).unwrap();
         assert!(r.verdict == "changes" && r.findings[0].now.as_deref().unwrap().contains("not rebased onto it"), "{r:?}");
+        // Canceled, it holds nothing back either.
+        q.db.conn.execute("UPDATE issue SET state = 'Canceled', state_type = 'canceled' WHERE key = ?1", [&first]).unwrap();
+        assert_eq!(q.db.issue(&first).unwrap().unwrap().state_type, "canceled");
+        let mut r = review("fixed");
+        hold_interactions(&q.db, &wt, &mut r).unwrap();
+        assert_eq!(r.verdict, "pass");
+        q.db.conn.execute("UPDATE issue SET state = 'Done', state_type = 'completed' WHERE key = ?1", [&first]).unwrap();
         // On top of what landed, the review's own answer counts.
         git(&["reset", "-q", "--hard", &elsewhere]);
         let mut r = review("fixed");
