@@ -190,12 +190,13 @@ The same text for every agent, with the blanks filled in:
 > 3. File anything you find but will not fix with file_issue.
 > 4. If only the human can decide something, ask it, move {key} to Needs You, leave a handoff note
 >    and stop: do not wait for the answer.
-> 5. Commit, then call submit with wait: true, so you get its result here. If the review sends it back (P0 or P1 findings), fix them, commit and
->    submit again, up to three rounds; then file what is left and stop.
-> 6. When submit says it passed and no human approval is needed, call land. On a rebase conflict,
->    resolve it in the worktree, then submit and land again. If land says it could not remove the
->    worktree because a process still uses it, that process is you: Nitely removes it after you exit,
->    so do not file it.
+> 5. Commit, then call submit (without wait): it hands the change in and returns at once. Then leave
+>    the handoff note (step 7) and stop. Nitely runs the gate and the review, and lands it when it
+>    passes; if it comes back (findings, a failed gate, a land that stopped), a new worker gets it
+>    with why.
+> 6. If the issue's latest handoff says its submit or land came back, start from that: fix what it
+>    names (on a rebase conflict, resolve it in the worktree and `git rebase --continue`), commit,
+>    and submit again.
 > 7. Before you stop, for any reason, leave a note on {key} with handoff: true: what is done, what
 >    is left, what you were unsure about.
 >
@@ -250,10 +251,23 @@ When a worker exits, the supervisor reads its issue:
 | --- | --- | --- |
 | Done | `landed` | removes the worktree land kept whole while the worker ran in it, the way land would (teardown, `git worktree remove` without force, `git branch -d`), as `nitely crew clean-up` in a process of its own, stopped past `setup_timeout_minutes`; not when it was landed with `--keep` |
 | In Review, or Needs You after submit | `submitted` | nothing; a person approves, then land |
+| In Progress, still claimed, with a submit the worker queued (NIT-222) | `submitted` | nothing yet: the claim stays while the gate and review run (below) |
 | Needs You with an open ask from the worker | `asked` | nothing |
 | In Progress (or Todo), still claimed by the worker | `failed` | writes the handoff note if the worker left none since it started, from its last report, exit code and log path; clears the claim; moves the issue back to Todo |
 | Anything else (a person moved it) | `stopped` | nothing |
 
+- **Handed in, then gone (NIT-222).** Workers submit without waiting and leave. On each pass the
+  supervisor looks at the issues whose last worker ended `submitted`. One whose submit came back
+  (P0/P1 findings, a failed gate or push, a job that failed: the job's `needs_the_submitter`) goes
+  back to Todo with a handoff note quoting the job's outcome, and the next free slot starts a worker
+  on it in the same worktree, with the same agent. The review's rounds count as before, and a stalled
+  one still goes to the person. One that passed (In Review, or Approved) is landed by the supervisor
+  when the playbook leaves the land to the agent (`[land] by = "author"`): `nitely land <key>` in a
+  process of its own, since a land runs the gate and may wait in the land queue. A worker started
+  only to call land would spend a session on one mechanical call. A land that stopped on the change
+  (a conflict, a failed gate, a change since its review) goes to a new worker with why. One that
+  found the land lock held, or is still waiting in the land queue, is tried again a minute later.
+  With `[land] by = "auto"` or `"human"`, Nitely's own land takes it, as before.
 - **Retry cap.** When an issue reaches `attempts` (3) `failed` workers, it moves to Needs You with an
   ask instead of back to Todo: "The crew tried {key} three times without submitting. Last: {reason}.
   Logs: {paths}." with options "Try again" and "I'll take it". Answering "Try again" puts it back

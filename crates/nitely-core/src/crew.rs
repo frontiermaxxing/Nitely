@@ -177,6 +177,18 @@ pub trait Agents {
     /// Removes a landed worker's worktree and branch the way land would (`clean_up_worktree`), in a
     /// process of its own, so a playbook teardown that hangs never holds the supervisor up.
     fn clean_up(&self, job: &CleanUp) -> Result<Box<dyn Process>>;
+    /// Lands an issue a worker handed in and left (`nitely land <key>`), in a process of its own:
+    /// a land runs the gate and may wait in the land queue, which must not hold the supervisor up.
+    fn land(&self, job: &LandJob) -> Result<Box<dyn Process>>;
+}
+
+/// What `Agents::land` needs: `nitely land <issue>` in the repo, output to `log`.
+#[derive(Debug, Clone)]
+pub struct LandJob {
+    pub nitely: String,
+    pub repo: PathBuf,
+    pub issue: String,
+    pub log: PathBuf,
 }
 
 /// What `Agents::clean_up` needs: `nitely crew clean-up` with these, output to `log`.
@@ -311,6 +323,17 @@ enum Start {
     LaunchFailed(String),
 }
 
+/// A land the supervisor started for an issue whose worker handed it in and left.
+struct Landing {
+    issue: String,
+    since: i64,
+    log: PathBuf,
+    process: Box<dyn Process>,
+}
+
+/// How long a land that could not start (another land held the lock) waits before the next try.
+const LAND_RETRY_SECS: i64 = 60;
+
 /// A landed worker's worktree being removed, in a process of its own.
 struct Cleaning {
     issue: String,
@@ -362,6 +385,10 @@ pub struct Supervisor {
     running: Vec<Running>,
     preparing: Vec<Preparing>,
     cleaning: Vec<Cleaning>,
+    /// Lands of handed-in issues (NIT-222), and when an issue whose land could not start may try
+    /// again.
+    landings: Vec<Landing>,
+    land_after: BTreeMap<String, i64>,
     /// Agents that would not start in this run, and why.
     disabled: BTreeMap<String, String>,
     /// Pick issues clear of the files work in flight holds (overlap.rs); reads the config.
@@ -404,6 +431,8 @@ impl Supervisor {
             running: Vec::new(),
             preparing: Vec::new(),
             cleaning: Vec::new(),
+            landings: Vec::new(),
+            land_after: BTreeMap::new(),
             disabled: BTreeMap::new(),
             avoid_overlap: false,
             adopted: false,
@@ -491,6 +520,10 @@ impl Supervisor {
         }
         self.reap(db, &rules, &mut tick)?;
         self.finish_cleanups(db, &rules)?;
+        self.finish_landings(db)?;
+        if let Ok(p) = &playbook {
+            self.after_hand_in(db, p)?;
+        }
         self.retry_answered(db)?;
         if self.self_paused && !db.crew_control(&self.project)?.paused {
             // A person resumed the crew: give every agent another chance.
@@ -915,10 +948,14 @@ impl Supervisor {
             End::Exited(c) => Some(c),
             _ => None,
         };
+        // A worker hands its change in and leaves (NIT-212): a submit it made is still running, or
+        // came back after it left, and the claim stays until the supervisor acts on the result.
+        let handed_in = state == "In Progress" && still_mine && self.handed_in(db, &w.issue, &w.agent_id, w.started_at)?.is_some();
         let mut outcome = match state.as_str() {
             "Done" => "landed",
             "In Review" | "Approved" => "submitted",
             "Needs You" => "asked",
+            "In Progress" if handed_in => "submitted",
             "In Progress" if still_mine => "failed",
             "Todo" => "failed",
             _ => "stopped",
@@ -1055,6 +1092,115 @@ impl Supervisor {
         self.cleaning.len()
     }
 
+    /// The submit `agent_id` handed `key` in with since `since`: the issue's latest submit job, when
+    /// that worker queued it.
+    fn handed_in(&self, db: &Db, key: &str, agent_id: &str, since: i64) -> Result<Option<crate::submit_job::Job>> {
+        Ok(db.latest_submit_job(key)?.filter(|j| j.requested_by == agent_id && j.queued_at >= since))
+    }
+
+    /// Issues a worker handed in and then left (NIT-222). One its submit sent back (findings, a
+    /// failed gate or push, a job that failed) goes to a new worker, with the outcome in a handoff
+    /// note. One that passed is landed here when the playbook leaves the land to the agent: a
+    /// worker's whole session for one mechanical call would cost more, and the land queue may keep
+    /// it waiting.
+    fn after_hand_in(&mut self, db: &mut Db, playbook: &Playbook) -> Result<()> {
+        let now = (self.clock)().ts;
+        for issue in db.list_issues(Some(&self.project), false)? {
+            if !matches!(issue.state.as_str(), "In Progress" | "In Review" | "Approved") {
+                continue;
+            }
+            let busy = self.running.iter().any(|r| r.issue == issue.key)
+                || self.preparing.iter().any(|p| p.issue.key == issue.key)
+                || self.landings.iter().any(|l| l.issue == issue.key);
+            if busy {
+                continue;
+            }
+            // Its last crew worker ended having handed it in.
+            let Some(worker) = db.crew_workers_for(&issue.key)?.into_iter().next() else { continue };
+            if worker.outcome.as_deref() != Some("submitted") {
+                continue;
+            }
+            let Some(job) = self.handed_in(db, &issue.key, &worker.agent_id, worker.started_at)? else { continue };
+            match issue.state.as_str() {
+                "In Progress" if job.finished() && job.needs_the_submitter() && issue.claimed_by.as_deref() == Some(worker.agent_id.as_str()) => {
+                    db.mark_submit_jobs_delivered(&[job.id])?;
+                    let note = format!(
+                        "Its submit (job {}) came back after the {} worker had left: {} The review's findings and the gate's output are on this issue. \
+                         A new crew worker takes it, in {}.",
+                        job.id,
+                        worker.agent,
+                        job.outcome(),
+                        worker.worktree
+                    );
+                    db.add_note(&issue.key, &note, "handoff", &self.actor())?;
+                    db.move_issue(&issue.key, "Todo", None, Some("its submit came back; a new crew worker takes it"), &self.actor())?;
+                }
+                "In Review" | "Approved" if !playbook.land.by.by_nitely() && self.land_after.get(&issue.key).is_none_or(|t| now >= *t) => {
+                    self.start_land(db, &issue.key)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Starts `nitely land` for `key` in a process of its own.
+    fn start_land(&mut self, db: &Db, key: &str) -> Result<()> {
+        let ts = (self.clock)().ts;
+        let logs = self.dir.join(&self.project);
+        std::fs::create_dir_all(&logs).with_context(|| format!("creating {}", logs.display()))?;
+        let log = logs.join(format!("{ts}-{}-land.log", key.to_lowercase()));
+        let job = LandJob { nitely: self.nitely.clone(), repo: self.repo_root.clone(), issue: key.to_string(), log: log.clone() };
+        match self.agents.land(&job) {
+            Ok(process) => {
+                db.log_event(&self.actor(), Some(key), None, "status", &format!("Landing it for the worker that handed it in, log: {}", log.display()))?;
+                self.landings.push(Landing { issue: key.to_string(), since: ts, log, process });
+            }
+            Err(e) => {
+                db.log_event(&self.actor(), Some(key), None, "status", &format!("Could not start its land: {e:#}"))?;
+                self.land_after.insert(key.to_string(), ts + LAND_RETRY_SECS);
+            }
+        }
+        Ok(())
+    }
+
+    /// Settles the lands that ended: landed, nothing more to do (land removed the worktree); one
+    /// that could not start, or is still waiting in the land queue, tries again later; one that
+    /// stopped on the change itself (a conflict, a failed gate, a change since its review) goes to
+    /// a new worker with why.
+    fn finish_landings(&mut self, db: &mut Db) -> Result<()> {
+        let now = (self.clock)().ts;
+        let mut i = 0;
+        while i < self.landings.len() {
+            let ended = matches!(self.landings[i].process.exited(), Ok(Some(_)) | Err(_));
+            if !ended {
+                i += 1;
+                continue;
+            }
+            let l = self.landings.remove(i);
+            let Some(issue) = db.issue(&l.issue)? else { continue };
+            if issue.state == "Done" || !matches!(issue.state.as_str(), "In Review" | "Approved") {
+                self.land_after.remove(&l.issue);
+                continue;
+            }
+            let stopped = db.timeline(&l.issue)?.into_iter().rev().find(|t| t.kind == "land_failed" && t.ts >= l.since).and_then(|t| t.summary);
+            match stopped {
+                Some(why) if !why.contains("another land holds") => {
+                    let note = format!("The land stopped: {}. A new crew worker takes it from here (its land log: {}).", why.trim_start_matches("Land stopped: "), l.log.display());
+                    db.add_note(&l.issue, &note, "handoff", &self.actor())?;
+                    db.move_issue(&l.issue, "Todo", None, Some("its land stopped; a new crew worker takes it"), &self.actor())?;
+                    self.land_after.remove(&l.issue);
+                }
+                // Another land held the lock, it is still waiting in the land queue, or the land
+                // process ended without a word: later.
+                _ => {
+                    self.land_after.insert(l.issue.clone(), now + LAND_RETRY_SECS);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Failures count from the last time a person moved the issue or answered the crew about it.
     fn reset_since(&self, db: &Db, key: &str) -> Result<i64> {
         let moved = db.timeline(key)?.into_iter().filter(|t| t.actor == "human" && t.kind == "issue_moved").map(|t| t.ts).max().unwrap_or(0);
@@ -1132,8 +1278,8 @@ Work only there; never edit or commit in {repo}.
 2. Do the work. Call report with key {key} at each step, one line.
 3. File anything you find but will not fix with file_issue.
 4. If only the human can decide something, ask it, move {key} to Needs You, leave a handoff note and stop: do not wait for the answer.
-5. Commit, then call submit with wait: true, so you get its result here. If the review sends it back (P0 or P1 findings), fix them, commit and submit again, up to three rounds; then file what is left and stop.
-6. When submit says it passed and no human approval is needed, call land. On a rebase conflict, resolve it in the worktree, then submit and land again. If land says it could not remove the worktree because a process still uses it, that process is you: Nitely removes it after you exit, so do not file it.
+5. Commit, then call submit (without wait): it hands the change in and returns at once. Then leave the handoff note (step 7) and stop. Nitely runs the gate and the review, and lands it when it passes; if it comes back (findings, a failed gate, a land that stopped), a new worker gets it with why.
+6. If the issue's latest handoff says its submit or land came back, start from that: fix what it names (on a rebase conflict, resolve it in the worktree and `git rebase --continue`), commit, and submit again.
 7. Before you stop, for any reason, leave a note on {key} with handoff: true: what is done, what is left, what you were unsure about.
 
 Then end. Do not take another issue: Nitely starts a new worker for it.
@@ -1785,6 +1931,29 @@ impl Agents for SystemAgents {
         }
         Ok(Box::new(SystemProcess(cmd.spawn().with_context(|| format!("starting {} crew clean-up", job.nitely))?)))
     }
+
+    fn land(&self, job: &LandJob) -> Result<Box<dyn Process>> {
+        use std::process::Stdio;
+        if let Some(dir) = job.log.parent() {
+            std::fs::create_dir_all(dir).ok();
+        }
+        let log = std::fs::File::create(&job.log).with_context(|| format!("creating {}", job.log.display()))?;
+        let program = self.resolve(&job.nitely).unwrap_or_else(|| job.nitely.clone());
+        let mut cmd = std::process::Command::new(program);
+        cmd.args(["land", &job.issue]).current_dir(&job.repo);
+        cmd.stdin(Stdio::null()).stdout(Stdio::from(log.try_clone()?)).stderr(Stdio::from(log));
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000 | 0x0000_0200); // CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        Ok(Box::new(SystemProcess(cmd.spawn().with_context(|| format!("starting {} land {}", job.nitely, job.issue))?)))
+    }
 }
 
 /// A setup known to have ended, with this exit code.
@@ -1952,7 +2121,7 @@ mod tests {
     fn the_brief_names_the_issue_the_worktree_and_the_rules() {
         let issue = IssueRecord { key: "NIT-7".into(), title: "Fix the thing".into(), ..Default::default() };
         let b = brief(&issue, "NIT", Path::new("/w/nit-7"), "codex/nit-7-fix", Path::new("/r"));
-        for part in ["NIT-7, \"Fix the thing\"", "/w/nit-7 (branch codex/nit-7-fix)", "never edit or commit in /r", "call land", "that process is you", "handoff: true", "Do not take another issue"] {
+        for part in ["NIT-7, \"Fix the thing\"", "/w/nit-7 (branch codex/nit-7-fix)", "never edit or commit in /r", "submit (without wait)", "lands it when it passes", "handoff: true", "Do not take another issue"] {
             assert!(b.contains(part), "{part} missing from:\n{b}");
         }
     }
@@ -1977,6 +2146,9 @@ mod tests {
         cleanups: Rc<RefCell<Vec<PathBuf>>>,
         /// Removals never finish.
         hang_cleanup: bool,
+        /// Issues whose land was started, in order; what each land does to the issue.
+        lands: Rc<RefCell<Vec<String>>>,
+        land_does: Option<&'static str>,
     }
 
     struct FakeProcess {
@@ -2022,6 +2194,23 @@ mod tests {
                 assert!(!clean_up_and_report(&db, job)?.1);
                 self.exits.borrow_mut().insert(pid, 0);
             }
+            Ok(Box::new(FakeProcess { pid, exits: self.exits.clone(), stopped: self.stopped.clone() }))
+        }
+        /// Lands as the test says: `landed` (Done), `conflict` (a land that stopped on the change),
+        /// `busy` (another land held the lock).
+        fn land(&self, job: &LandJob) -> Result<Box<dyn Process>> {
+            let pid = 9000 + self.lands.borrow().len() as u32;
+            self.lands.borrow_mut().push(job.issue.clone());
+            let mut db = Db::open(self.db.as_ref().expect("the fixture sets the database")).unwrap();
+            let cli = Actor::Agent("cli".into());
+            match self.land_does.unwrap_or("landed") {
+                "landed" => {
+                    db.move_issue(&job.issue, "Done", Some("landed"), None, &cli)?;
+                }
+                "conflict" => db.log_event(&cli, Some(&job.issue), None, "land_failed", "Land stopped: the rebase stopped on conflicts in a.txt")?,
+                _ => db.log_event(&cli, Some(&job.issue), None, "land_failed", "Land stopped: another land holds the lock")?,
+            }
+            self.exits.borrow_mut().insert(pid, 0);
             Ok(Box::new(FakeProcess { pid, exits: self.exits.clone(), stopped: self.stopped.clone() }))
         }
         /// Runs start_task here and now, as `nitely start` would, unless setups hang.
@@ -2121,6 +2310,110 @@ mod tests {
         let status = status(&f.db, "NIT", &Playbook::load(&f.repo).unwrap(), &NOON, 0).unwrap();
         assert_eq!((status.running.len(), status.started_today, status.cap), (2, 4, 2));
         assert!(status.supervised);
+    }
+
+    /// A submit job for `key` that its worker queued, as `submit` (without wait) records one.
+    fn handed_in(f: &Fixture, key: &str, state: &str, result: Option<&str>) -> i64 {
+        let by = f.db.issue(key).unwrap().unwrap().claimed_by.unwrap();
+        f.db.conn
+            .execute(
+                "INSERT INTO submit_job (issue_key, worktree, branch, head, requested_by, skip_review, local_only, state, queued_at, result)
+                 VALUES (?1, 'w', 'b', 'h', ?2, 0, 0, ?3, ?4, ?5)",
+                rusqlite::params![key, by, state, NOON.ts + 1, result],
+            )
+            .unwrap();
+        f.db.conn.last_insert_rowid()
+    }
+
+    #[test]
+    fn a_worker_that_handed_in_and_left_is_no_failure_and_what_comes_back_goes_to_a_new_worker() {
+        let mut f = fixture(&format!("{GATE}[crew]\nworkers = 1\n"));
+        let fake = Fake { installed: vec!["claude"], ..Default::default() };
+        let mut sup = supervisor(&f, &fake);
+        sup.tick(&mut f.db, false).unwrap();
+        let claimed = f.db.issue("NIT-1").unwrap().unwrap().claimed_by.unwrap();
+
+        // It submits without waiting and leaves while the gate and review run.
+        let job = handed_in(&f, "NIT-1", "queued", None);
+        fake.exits.borrow_mut().insert(1001, 0);
+        let tick = sup.tick(&mut f.db, false).unwrap();
+        assert_eq!(tick.ended[0].outcome, "submitted", "{tick:?}");
+        let one = f.db.issue("NIT-1").unwrap().unwrap();
+        assert_eq!((one.state.as_str(), one.claimed_by.as_deref()), ("In Progress", Some(claimed.as_str())), "the claim stays");
+        assert!(!f.db.timeline("NIT-1").unwrap().iter().any(|t| t.kind == "handoff" && t.actor.starts_with("crew:")), "no failure note");
+        assert_eq!(tick.started.iter().map(|w| w.issue.as_str()).collect::<Vec<_>>(), ["NIT-2"], "its slot went to the next issue");
+
+        // The review sends it back while NIT-2's worker runs: it waits for a free slot as Todo,
+        // with the outcome in a handoff note.
+        f.db.conn
+            .execute("UPDATE submit_job SET state = 'done', ended_at = ?2, result = ?3 WHERE id = ?1", rusqlite::params![job, NOON.ts + 5, r#"{"state":"In Progress","next":"Fix the P1."}"#])
+            .unwrap();
+        sup.tick(&mut f.db, false).unwrap();
+        assert_eq!(f.db.issue("NIT-1").unwrap().unwrap().state, "Todo");
+        let note = f.db.timeline("NIT-1").unwrap().into_iter().rev().find(|t| t.kind == "handoff").unwrap().summary.unwrap_or_default();
+        assert!(note.contains(&format!("job {job}")) && note.contains("came back") && note.contains("Fix the P1."), "{note}");
+        assert!(f.db.submit_job(job).unwrap().unwrap().delivered_at.is_some(), "told, so no notice goes to the worker that left");
+
+        // NIT-2's worker hands in too; NIT-1 goes to a new worker, in the same worktree.
+        let two = f.db.issue("NIT-2").unwrap().unwrap().claimed_by.unwrap();
+        f.db.move_issue("NIT-2", "In Review", None, None, &Actor::Agent(two)).unwrap();
+        fake.exits.borrow_mut().insert(1002, 0);
+        let tick = sup.tick(&mut f.db, false).unwrap();
+        assert_eq!(tick.started.iter().map(|w| w.issue.as_str()).collect::<Vec<_>>(), ["NIT-1"], "{tick:?}");
+        let launches = fake.launches.borrow();
+        assert_eq!(launches[2].cwd, launches[0].cwd);
+        assert!(launches[2].brief.contains("submit (without wait)"));
+    }
+
+    #[test]
+    fn a_handed_in_change_that_passed_is_landed_by_the_supervisor() {
+        let mut f = fixture(&format!("{GATE}[crew]\nworkers = 1\n"));
+        let fake = Fake { installed: vec!["claude"], ..Default::default() };
+        let mut sup = supervisor(&f, &fake);
+        sup.tick(&mut f.db, false).unwrap();
+        let claimed = f.db.issue("NIT-1").unwrap().unwrap().claimed_by.unwrap();
+        handed_in(&f, "NIT-1", "done", Some(r#"{"state":"In Review","next":"Call land."}"#));
+        f.db.move_issue("NIT-1", "In Review", None, None, &Actor::Agent(claimed)).unwrap();
+        fake.exits.borrow_mut().insert(1001, 0);
+        sup.tick(&mut f.db, false).unwrap();
+        assert_eq!(*fake.lands.borrow(), ["NIT-1"]);
+        assert_eq!(f.db.issue("NIT-1").unwrap().unwrap().state, "Done");
+        sup.tick(&mut f.db, false).unwrap();
+        assert_eq!(fake.lands.borrow().len(), 1, "landed once");
+
+        // Where Nitely lands it already, the supervisor leaves it to that.
+        let mut g = fixture(&format!("{GATE}[crew]\nworkers = 1\n[land]\nby = \"auto\"\n"));
+        let fake = Fake { installed: vec!["claude"], ..Default::default() };
+        let mut sup = supervisor(&g, &fake);
+        sup.tick(&mut g.db, false).unwrap();
+        let claimed = g.db.issue("NIT-1").unwrap().unwrap().claimed_by.unwrap();
+        handed_in(&g, "NIT-1", "done", Some(r#"{"state":"In Review","next":"x"}"#));
+        g.db.move_issue("NIT-1", "In Review", None, None, &Actor::Agent(claimed)).unwrap();
+        fake.exits.borrow_mut().insert(1001, 0);
+        sup.tick(&mut g.db, false).unwrap();
+        assert!(fake.lands.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_land_that_stops_on_the_change_goes_to_a_new_worker_and_a_held_lock_waits() {
+        for (does, state) in [("conflict", "Todo"), ("busy", "In Review")] {
+            let mut f = fixture(&format!("{GATE}[crew]\nworkers = 1\n"));
+            let fake = Fake { installed: vec!["claude"], land_does: Some(does), ..Default::default() };
+            let mut sup = supervisor(&f, &fake);
+            sup.tick(&mut f.db, false).unwrap();
+            let claimed = f.db.issue("NIT-1").unwrap().unwrap().claimed_by.unwrap();
+            handed_in(&f, "NIT-1", "done", Some(r#"{"state":"In Review","next":"Call land."}"#));
+            f.db.move_issue("NIT-1", "In Review", None, None, &Actor::Agent(claimed)).unwrap();
+            fake.exits.borrow_mut().insert(1001, 0);
+            sup.tick(&mut f.db, false).unwrap();
+            sup.tick(&mut f.db, false).unwrap();
+            assert_eq!(f.db.issue("NIT-1").unwrap().unwrap().state, state, "{does}");
+            assert_eq!(fake.lands.borrow().len(), 1, "{does}: a held lock is tried again a minute later, not every tick");
+            if does == "conflict" {
+                let note = f.db.timeline("NIT-1").unwrap().into_iter().rev().find(|t| t.kind == "handoff").unwrap().summary.unwrap_or_default();
+                assert!(note.contains("The land stopped: the rebase stopped on conflicts in a.txt"), "{note}");
+            }
+        }
     }
 
     #[test]
