@@ -220,18 +220,40 @@ pub fn clean_up_worktree(repo: &Path, worktree: &Path, branch: &str) -> Result<S
 
 /// Runs `clean_up_worktree` for the crew, stopping waiting after `timeout_minutes` (a teardown that
 /// hangs), and records how it went on the issue itself, so the outcome is kept whether or not a
-/// supervisor is still there to see it. Returns the words recorded.
-pub fn clean_up_and_report(db: &Db, job: &CleanUp) -> Result<String> {
+/// supervisor is still there to see it. Returns the words recorded, and whether it timed out (the
+/// teardown may still run: `nitely crew clean-up` then ends everything it started).
+pub fn clean_up_and_report(db: &Db, job: &CleanUp) -> Result<(String, bool)> {
     let (tx, rx) = std::sync::mpsc::channel();
     let (repo, worktree, branch) = (job.repo.clone(), job.worktree.clone(), job.branch.clone());
     std::thread::spawn(move || tx.send(clean_up_worktree(&repo, &worktree, &branch).map_err(|e| format!("{e:#}"))).ok());
-    let said = match rx.recv_timeout(std::time::Duration::from_secs(job.timeout_minutes.max(1) * 60)) {
-        Ok(Ok(said)) => said,
-        Ok(Err(why)) => why,
-        Err(_) => format!("its removal ran past {} minutes (crew.setup_timeout_minutes); {} is left as it is", job.timeout_minutes.max(1), job.worktree.display()),
+    let (said, timed_out) = match rx.recv_timeout(std::time::Duration::from_secs(job.timeout_minutes.max(1) * 60)) {
+        Ok(Ok(said)) => (said, false),
+        Ok(Err(why)) => (why, false),
+        Err(_) => (format!("its removal ran past {} minutes (crew.setup_timeout_minutes) and was stopped; {} is left as it is", job.timeout_minutes.max(1), job.worktree.display()), true),
     };
     db.log_event(&Actor::Agent(job.actor.clone()), Some(&job.issue), None, "crew_cleaned", &format!("After the {} worker left: {said}", job.agent))?;
-    Ok(said)
+    Ok((said, timed_out))
+}
+
+/// Ends this process and everything it started (a teardown shell and what that runs). On Windows
+/// the whole tree; on Unix the process group, when this process leads its own (the supervisor
+/// starts `crew clean-up` that way), else its direct children.
+pub fn end_own_tree() -> ! {
+    let pid = std::process::id().to_string();
+    #[cfg(windows)]
+    {
+        playbook::shell_free_command("taskkill").args(["/T", "/F", "/PID", &pid]).output().ok();
+    }
+    #[cfg(unix)]
+    {
+        let group = std::process::Command::new("ps").args(["-o", "pgid=", "-p", &pid]).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+        if group.as_deref() == Some(pid.as_str()) {
+            std::process::Command::new("kill").args(["-KILL", "--", &format!("-{pid}")]).output().ok();
+        } else {
+            std::process::Command::new("pkill").args(["-KILL", "-P", &pid]).output().ok();
+        }
+    }
+    std::process::exit(1)
 }
 
 /// What `Agents::prepare` needs: `nitely start <key> --agent <vendor>` in the repo, output to `log`.
@@ -1949,7 +1971,7 @@ mod tests {
             self.cleanups.borrow_mut().push(job.worktree.clone());
             if !self.hang_cleanup {
                 let db = Db::open(self.db.as_ref().expect("the fixture sets the database")).unwrap();
-                clean_up_and_report(&db, job)?;
+                assert!(!clean_up_and_report(&db, job)?.1);
                 self.exits.borrow_mut().insert(pid, 0);
             }
             Ok(Box::new(FakeProcess { pid, exits: self.exits.clone(), stopped: self.stopped.clone() }))

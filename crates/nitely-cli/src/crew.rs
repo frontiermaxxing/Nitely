@@ -90,9 +90,13 @@ pub fn run(cmd: CrewCmd, me: &Actor) -> Result<()> {
         CrewCmd::CleanUp { repo, worktree, branch, issue, actor, agent, timeout_minutes } => {
             let log = PathBuf::new();
             let job = crew::CleanUp { nitely: String::new(), repo, worktree, branch, log, issue, actor, agent, timeout_minutes };
-            println!("{}", crew::clean_up_and_report(&db, &job)?);
-            // Past the limit a teardown may still run in its thread: leave without waiting for it.
-            std::process::exit(0);
+            let (said, timed_out) = crew::clean_up_and_report(&db, &job)?;
+            println!("{said}");
+            if timed_out {
+                // The teardown still runs: end it, and everything it started, with this process.
+                crew::end_own_tree();
+            }
+            Ok(())
         }
         CrewCmd::Resume { project } => {
             let project = resolve_project(&config, &db, project.as_deref(), &cwd)?;
