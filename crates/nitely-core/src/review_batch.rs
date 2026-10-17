@@ -272,14 +272,33 @@ fn actor_of(row: &Queued) -> Actor {
     if row.actor == "human" { Actor::Human } else { Actor::Agent(row.actor.clone()) }
 }
 
-/// A batch whose reviewing process is gone sends its changes back to be reviewed alone.
+/// A batch whose reviewing process is gone sends its changes back to be reviewed alone, and so
+/// does one that ended without writing a change's review (it stopped between its two writes).
 fn settle_dead_batch(db: &Db, batch: i64) -> Result<()> {
-    let pid: Option<i64> = db.conn.query_row("SELECT pid FROM review_batch WHERE id = ?1 AND state = 'reviewing'", [batch], |r| r.get(0)).optional()?;
-    if let Some(pid) = pid.map(|p| p as u32).filter(|p| *p != std::process::id() && !crate::submit_job::process_runs(*p)) {
-        let why = format!("the process reviewing its batch (pid {pid}) stopped");
-        db.conn.execute("UPDATE review_batch SET state = 'failed', ended_at = ?2, error = ?3 WHERE id = ?1 AND state = 'reviewing'", params![batch, now(), why])?;
-        db.conn.execute("UPDATE review_queue SET state = 'alone', why = ?2 WHERE batch_id = ?1 AND state = 'reviewing'", params![batch, why])?;
+    let found: Option<(String, i64)> = db.conn.query_row("SELECT state, pid FROM review_batch WHERE id = ?1", [batch], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+    match found {
+        Some((state, pid)) if state == "reviewing" => {
+            let pid = pid as u32;
+            if pid != std::process::id() && !crate::submit_job::process_runs(pid) {
+                fail_batch(db, batch, &format!("the process reviewing its batch (pid {pid}) stopped"))?;
+            }
+        }
+        _ => {
+            db.conn.execute(
+                "UPDATE review_queue SET state = 'alone', why = 'its batch ended without a review for it' WHERE batch_id = ?1 AND state = 'reviewing'",
+                [batch],
+            )?;
+        }
     }
+    Ok(())
+}
+
+/// Ends a batch as failed and sends its changes back alone, in one write.
+fn fail_batch(db: &Db, batch: i64, why: &str) -> Result<()> {
+    let tx = db.conn.unchecked_transaction()?;
+    tx.execute("UPDATE review_batch SET state = 'failed', ended_at = ?2, error = ?3 WHERE id = ?1", params![batch, now(), why])?;
+    tx.execute("UPDATE review_queue SET state = 'alone', why = ?2 WHERE batch_id = ?1 AND state = 'reviewing'", params![batch, why])?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -343,16 +362,36 @@ fn close_if_due(db: &Db, rules: &ReviewRules, window: Window, repo: &str, review
         )?;
         return Ok(None);
     }
-    let issues: Vec<&str> = taken.iter().map(|r| r.issue.as_str()).collect();
-    db.conn.execute(
+    claim(db, repo, reviewer, taken)
+}
+
+/// Makes a batch of the changes taken, in one write that no newer submit can slip into: only those
+/// still waiting join (one superseded since stays superseded), and with fewer than two left there
+/// is no batch and nothing changes.
+fn claim(db: &Db, repo: &str, reviewer: &str, taken: Vec<Queued>) -> Result<Option<(i64, Vec<Queued>)>> {
+    let tx = rusqlite::Transaction::new_unchecked(&db.conn, rusqlite::TransactionBehavior::Immediate)?;
+    let issues: Vec<String> = taken.iter().map(|r| r.issue.clone()).collect();
+    tx.execute(
         "INSERT INTO review_batch (repo, reviewer, issues, state, pid, started_at) VALUES (?1, ?2, ?3, 'reviewing', ?4, ?5)",
         params![repo, reviewer, serde_json::to_string(&issues)?, std::process::id(), now()],
     )?;
-    let batch = db.conn.last_insert_rowid();
-    for r in &taken {
-        db.conn.execute("UPDATE review_queue SET state = 'reviewing', batch_id = ?2 WHERE id = ?1", params![r.id, batch])?;
+    let batch = tx.last_insert_rowid();
+    let mut claimed = vec![];
+    for r in taken {
+        if tx.execute("UPDATE review_queue SET state = 'reviewing', batch_id = ?2 WHERE id = ?1 AND state = 'waiting'", params![r.id, batch])? == 1 {
+            claimed.push(r);
+        }
     }
-    Ok(Some((batch, taken)))
+    if claimed.len() < 2 {
+        // Dropping the transaction undoes it: the queue is read again on the next poll.
+        return Ok(None);
+    }
+    if claimed.len() != issues.len() {
+        let issues: Vec<&str> = claimed.iter().map(|r| r.issue.as_str()).collect();
+        tx.execute("UPDATE review_batch SET issues = ?2 WHERE id = ?1", params![batch, serde_json::to_string(&issues)?])?;
+    }
+    tx.commit()?;
+    Ok(Some((batch, claimed)))
 }
 
 /// A file name for a queue's lock.
@@ -391,11 +430,7 @@ fn run_batch(db: &Db, rules: &ReviewRules, batch: i64, rows: &[Queued]) -> Resul
         })
         .collect();
     let reviewer = rows[0].reviewer.as_str();
-    let fail = |why: String| -> Result<()> {
-        db.conn.execute("UPDATE review_batch SET state = 'failed', ended_at = ?2, error = ?3 WHERE id = ?1", params![batch, now(), why])?;
-        db.conn.execute("UPDATE review_queue SET state = 'alone', why = ?2 WHERE batch_id = ?1 AND state = 'reviewing'", params![batch, why])?;
-        Ok(())
-    };
+    let fail = |why: String| fail_batch(db, batch, &why);
     let Some(run_in) = changes.iter().map(|c| c.worktree.as_path()).find(|w| w.is_dir()) else {
         return fail("none of its changes' worktrees is there to run the reviewer in".into());
     };
@@ -613,7 +648,8 @@ mod tests {
     fn an_interaction_lets_the_first_land_and_sends_the_second_back() {
         let mut q = Queue::new();
         let sh = crate::playbook::posix_sh();
-        let reply = "cat > /dev/null; printf 'Fine.\\nVERDICT 1: clean\\nVERDICT 2: clean\\nINTERACTION 1,2: both bump the version\\n'";
+        // Written with a space after the comma, as reviewers do.
+        let reply = "cat > /dev/null; printf 'Fine.\\nVERDICT 1: clean\\nVERDICT 2: clean\\nINTERACTION 1, 2: both bump the version\\n'";
         let rules = rules(&[&sh, "-c", reply]);
         let (first, a) = q.waiting("repo-c", "Bump one");
         let (second, b) = q.waiting("repo-c", "Bump two");
@@ -650,6 +686,21 @@ mod tests {
         let (key, waiting) = q.waiting("repo-f", "Replaced");
         supersede_waiting(&q.db, &key.to_lowercase()).unwrap();
         assert_eq!(q.row(waiting).state, "superseded");
+        // Even when it happens after the batch was taken from the queue, before it is claimed: the
+        // superseded change stays superseded, and one left alone is no batch.
+        let (_, kept) = q.waiting("repo-f", "Kept");
+        let taken = vec![q.row(waiting), q.row(kept)];
+        assert!(claim(&q.db, "repo-f", "claude", taken).unwrap().is_none());
+        assert_eq!((q.row(waiting).state.as_str(), q.row(kept).state.as_str()), ("superseded", "waiting"));
+        let batches: i64 = q.db.conn.query_row("SELECT COUNT(*) FROM review_batch WHERE repo = 'repo-f'", [], |r| r.get(0)).unwrap();
+        assert_eq!(batches, 0);
+        // A batch that ended without writing a change's review sends that change back alone.
+        let (_, stranded) = q.waiting("repo-j", "Stranded");
+        q.db.conn.execute("INSERT INTO review_batch (repo, reviewer, state, pid, started_at) VALUES ('repo-j', 'claude', 'failed', ?1, ?2)", params![std::process::id(), now()]).unwrap();
+        let ended = q.db.conn.last_insert_rowid();
+        q.db.conn.execute("UPDATE review_queue SET state = 'reviewing', batch_id = ?2 WHERE id = ?1", params![stranded, ended]).unwrap();
+        settle_dead_batch(&q.db, ended).unwrap();
+        assert_eq!((q.row(stranded).state.as_str(), q.row(stranded).why.as_deref()), ("alone", Some("its batch ended without a review for it")));
     }
 
     #[test]

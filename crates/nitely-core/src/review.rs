@@ -604,8 +604,14 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
             }
             let t = t.trim_start_matches(['-', '*', ' ']);
             let Some((head, value)) = t.split_once(':') else { continue };
+            // The name, then what it is about, however it is spaced: `VERDICT 2`, `INTERACTION 1, 2`.
             let mut words = head.split_whitespace();
-            let (Some(name), Some(at), None) = (words.next(), words.next(), words.next()) else { continue };
+            let Some(name) = words.next() else { continue };
+            let at: String = words.collect();
+            if at.is_empty() {
+                continue;
+            }
+            let at = at.as_str();
             let name = name.to_uppercase();
             if name == "PREVIOUS" {
                 if let Some((k, finding)) = at.split_once('.') {
