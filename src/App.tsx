@@ -216,7 +216,8 @@ export function App() {
   useEffect(() => {
     const unlisten = listen<string>(OPEN_DECISION_EVENT, (e) => {
       setOpenIssue(null);
-      const filter = storedInboxProject();
+      // A batch's notification names no one decision: it opens every project's.
+      const filter = e.payload ? storedInboxProject() : null;
       const d = e.payload ? decisionsNow.current?.find((x) => x.id === e.payload) : undefined;
       const project = d && filter && projectOf(d)?.toUpperCase() !== filter.toUpperCase() ? projectOf(d) : filter;
       setView({ kind: "inbox", project });

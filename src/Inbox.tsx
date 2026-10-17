@@ -107,11 +107,15 @@ export function Inbox(props: {
   const ordered = groups.flatMap((g) => g.items);
   const places = askPlaces(ordered);
   const [picked, setPicked] = useState<string | null>(props.pick?.id ?? null);
-  // The app already filtered to the picked decision's project (App.tsx, a notification's click).
+  // A notification's decision is taken in the same render its pick arrives (the app filtered to its
+  // project already, App.tsx), so nothing that settles the open decision runs on the list before it.
+  const [pickTaken, setPickTaken] = useState(props.pick);
+  if (props.pick !== pickTaken) {
+    setPickTaken(props.pick);
+    if (props.pick) setPicked(props.pick.id);
+  }
   useEffect(() => {
-    if (!props.pick) return;
-    setPicked(props.pick.id);
-    props.onPicked?.();
+    if (props.pick) props.onPicked?.();
   }, [props.pick]);
   // The decision open stays open while others arrive: the first one is picked as soon as there is
   // one, and only when the picked one is settled does the pick move to the (new) first.
