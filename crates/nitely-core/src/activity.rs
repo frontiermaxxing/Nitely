@@ -132,9 +132,10 @@ fn overlap(a: &Session, b: &Session) -> bool {
 }
 
 /// An id the MCP server or the CLI wrote under (`claude:c:/code/nitely`, `cli:...`), not a
-/// hook's session id.
+/// hook's session id. Its place is compared normalized, so an id written before short names
+/// were spelled out (`claude:c:/progra~1/app`, NIT-104) still counts (NIT-134).
 fn is_agent_id(s: &Session) -> bool {
-    s.vendor == "cli" || s.id == format!("{}:{}", s.vendor, normalize(&s.cwd))
+    s.vendor == "cli" || s.id.split_once(':').is_some_and(|(vendor, place)| vendor == s.vendor && normalize(place) == normalize(&s.cwd))
 }
 
 pub fn activity(config: &Config, db: &Db, from: i64, to: i64) -> Result<Activity> {
@@ -363,6 +364,8 @@ fn attribute(lanes: &[LaneBuild], e: &Event) -> Option<usize> {
     if vendor == "human" {
         return None;
     }
+    // An actor written before short names were spelled out still names its folder (NIT-134).
+    let place = normalize(place);
     let of_vendor = |l: &LaneBuild| vendor == "cli" || l.session.vendor == vendor;
     let in_place: Vec<usize> = (0..lanes.len())
         .filter(|&i| of_vendor(&lanes[i]) && lanes[i].members.iter().any(|m| normalize(&m.cwd) == place))
@@ -639,6 +642,31 @@ mod tests {
         assert_eq!(at("codex:thread-a", t0 + 2000).as_deref(), Some("idle"), "a's turn ended");
         assert_eq!(at("codex:thread-b", t0 + 2000).as_deref(), Some("working"), "b still works");
         assert_eq!((lane("codex:thread-a").issues.clone(), lane("codex:thread-b").issues.clone()), (vec!["HAR-7".to_string()], vec![]));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn an_agent_id_written_with_short_names_still_folds_into_its_hook_session() {
+        // Before NIT-104 an MCP server in a folder reached by its 8.3 short name wrote its id in that
+        // spelling (`claude:c:/progra~1/my-app`); normalize spells it out now (NIT-134). Program
+        // Files has a short name where the volume makes them; new folders here get none.
+        let Some(program_files) = std::env::var_os("ProgramFiles").map(|p| p.to_string_lossy().into_owned()) else { return };
+        let short = crate::paths::short_path(&program_files);
+        if !cfg!(windows) || short == program_files {
+            return;
+        }
+        let (db, dir) = db();
+        let t0 = now() - 3 * 3600;
+        let cwd = format!(r"{short}\my-app");
+        let old_id = format!("claude:{}", cwd.replace('\\', "/").to_lowercase());
+        session(&db, "claude:hook-1", &cwd, t0, t0 + 1800, "working");
+        session(&db, &old_id, &cwd, t0, t0 + 1800, "working");
+        state(&db, "claude:hook-1", t0, "working");
+        event(&db, t0 + 600, &old_id, "gate_passed", "Gate passed", Some("APP-1"));
+        let a = activity(&Config::default(), &db, t0 - 60, t0 + 3000).unwrap();
+        let ids: Vec<&str> = a.lanes.iter().map(|l| l.session_id.as_str()).collect();
+        assert_eq!(ids, ["claude:hook-1"], "the old agent id is folded in, not a lane of its own");
+        assert_eq!(a.lanes[0].marks.iter().map(|m| m.kind.as_str()).collect::<Vec<_>>(), ["gate_pass"]);
         std::fs::remove_dir_all(dir).ok();
     }
 
