@@ -57,7 +57,8 @@ show) is yours to run, in the real app on throwaway data, before it becomes a li
 
 - `npm run app:build` once (a few minutes; it builds into `target/harness`, apart from the dev build),
   then `npm run app:test` runs the end-to-end tests in `scripts/harness/*.e2e.mjs` (CI runs them on
-  Windows, `.github/workflows/app.yml`).
+  Windows, `.github/workflows/app.yml`). It needs Node 22 (the driver uses its built-in WebSocket).
+  One harness app runs at a time on a machine; a second launch, from any worktree, waits for it.
 - `npm run app:drive` starts the app on seeded sample data and prints its DevTools port and data
   folder; drive it from a script with `scripts/harness/cdp.mjs` (`Page.connect(port)`: `open("#inbox")`,
   `click({ css, text })`, `waitFor(js)`, `screenshot(path)`, `invoke(command)`, `windowState()`).

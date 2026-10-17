@@ -12,7 +12,7 @@
 // and writes its notifications to harness-notifications.jsonl instead of showing them.
 
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -79,11 +79,62 @@ export function seedSample(home) {
 }
 
 /**
+ * One harness app at a time on a machine: they share an identifier, so a second would only hand
+ * over to the first (single instance) and share its WebView2 storage. A launch waits for a running
+ * one to end, across worktrees; a lock whose process is gone is taken over.
+ */
+const LOCK = join(tmpdir(), "nitely-harness.lock");
+
+function alive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === "EPERM";
+  }
+}
+
+async function takeLock(waitMs = 10 * 60 * 1000) {
+  const until = Date.now() + waitMs;
+  for (;;) {
+    try {
+      writeFileSync(LOCK, String(process.pid), { flag: "wx" });
+      return () => {
+        try {
+          if (readFileSync(LOCK, "utf8") === String(process.pid)) rmSync(LOCK, { force: true });
+        } catch {
+          // Already gone.
+        }
+      };
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+      const holder = Number(readFileSync(LOCK, "utf8").trim());
+      if (!holder || !alive(holder)) {
+        rmSync(LOCK, { force: true });
+        continue;
+      }
+      if (Date.now() > until) throw new Error(`another harness (process ${holder}) has run for over ${waitMs / 60000} minutes; end it or remove ${LOCK}`);
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+}
+
+/**
  * Starts the harness app on a new data folder, seeded by `seed(home)`, with DevTools on a free
  * port. Returns the page, the folder and `close()`, which ends the app and removes the folder.
  */
 export async function launch({ seed = seedSample, env = {}, keepHome = false } = {}) {
   if (!existsSync(exe("nitely-app"))) throw new Error(`no harness build at ${exe("nitely-app")}: run \`node scripts/harness/app.mjs build\` first`);
+  const unlock = await takeLock();
+  try {
+    return await start({ seed, env, keepHome, unlock });
+  } catch (e) {
+    unlock();
+    throw e;
+  }
+}
+
+async function start({ seed, env, keepHome, unlock }) {
   const home = mkdtempSync(join(tmpdir(), "nitely-harness-"));
   const real = norm(realDataDir());
   if (norm(home) === real || norm(home).startsWith(`${real}/`)) throw new Error(`refusing to run on the real data folder ${real}`);
@@ -111,6 +162,7 @@ export async function launch({ seed = seedSample, env = {}, keepHome = false } =
     await page.waitFor(`return document.querySelector(".sidebar") !== null;`, { timeoutMs: 30000, what: "the app's sidebar" });
   } catch (e) {
     child.kill();
+    rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     throw e;
   }
   const close = async () => {
@@ -121,6 +173,7 @@ export async function launch({ seed = seedSample, env = {}, keepHome = false } =
       await Promise.race([exited, new Promise((r) => setTimeout(r, 5000))]);
     }
     if (!keepHome) rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    unlock();
   };
   return { page, home, port, pid: child.pid, log: () => log, exited, close };
 }

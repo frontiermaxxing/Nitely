@@ -38,9 +38,10 @@ jobs:
           key: harness
           workspaces: ". -> target/harness"
 
+      # 22: the driver (scripts/harness/cdp.mjs) uses Node's built-in WebSocket.
       - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - run: npm ci

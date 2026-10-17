@@ -42,6 +42,7 @@ export class Page {
     this.ws = ws;
     this.id = 0;
     this.pending = new Map();
+    this.closed = false;
     ws.onmessage = (m) => {
       const msg = JSON.parse(m.data);
       const done = msg.id && this.pending.get(msg.id);
@@ -50,12 +51,28 @@ export class Page {
       if (msg.error) done.reject(new Error(`${msg.error.message}`));
       else done.resolve(msg.result);
     };
+    // The app gone (closed, crashed): every call still waiting fails instead of hanging.
+    ws.onclose = () => {
+      this.closed = true;
+      for (const done of this.pending.values()) done.reject(new Error("the app's page went away"));
+      this.pending.clear();
+    };
   }
 
-  send(method, params = {}) {
+  /** One DevTools call; it fails when the page goes away or gives no answer in `timeoutMs`. */
+  send(method, params = {}, { timeoutMs = 30000 } = {}) {
+    if (this.closed) return Promise.reject(new Error("the app's page went away"));
     const id = ++this.id;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`${method} got no answer in ${timeoutMs}ms`));
+      }, timeoutMs);
+      const settle = (fn) => (v) => {
+        clearTimeout(timer);
+        fn(v);
+      };
+      this.pending.set(id, { resolve: settle(resolve), reject: settle(reject) });
       this.ws.send(JSON.stringify({ id, method, params }));
     });
   }
