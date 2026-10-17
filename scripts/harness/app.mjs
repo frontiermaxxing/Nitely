@@ -243,13 +243,21 @@ function keepLog(log) {
 /** The taskbar count the app last set, and whether it drew the overlay: `{ count, drawn }` or null. */
 export function badge(home) {
   const file = join(home, "harness-badge.json");
-  return existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null;
+  try {
+    return JSON.parse(readFileSync(file, "utf8"));
+  } catch {
+    return null; // Not written yet, or being written.
+  }
 }
 
 /** The notifications the app asked to show, from its data folder (the harness records them). */
 export function notifications(home) {
   const file = join(home, "harness-notifications.jsonl");
-  return existsSync(file) ? readFileSync(file, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
+  if (!existsSync(file)) return [];
+  // Only whole lines: the app may be writing the last one while this reads.
+  const lines = readFileSync(file, "utf8").split("\n");
+  lines.pop();
+  return lines.filter(Boolean).map((l) => JSON.parse(l));
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
