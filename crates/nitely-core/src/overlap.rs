@@ -110,9 +110,10 @@ pub fn held(config: &crate::Config, db: &Db, project: &str) -> Result<Vec<Held>>
         for branch in refs.lines().map(str::trim) {
             let Some(key) = crate::git::parse_branch(branch).1 else { continue };
             let Some(issue) = issues.iter().find(|i| i.key.eq_ignore_ascii_case(&key)) else { continue };
-            let diff = playbook::git(root, &["diff", "--name-only", "--no-renames", &format!("{since}...{branch}")]).unwrap_or_default();
+            // -z: names as they are, not quoted and escaped as git prints names outside ASCII.
+            let diff = playbook::git(root, &["diff", "--name-only", "-z", "--no-renames", &format!("{since}...{branch}")]).unwrap_or_default();
             let entry = branch_files.entry(issue.key.clone()).or_insert_with(|| (branch.to_string(), vec![]));
-            entry.1.extend(diff.lines().map(|l| l.trim().replace('\\', "/")).filter(|l| !l.is_empty()));
+            entry.1.extend(diff.split('\0').map(str::trim).filter(|l| !l.is_empty()).map(str::to_string));
         }
     }
     Ok(issues
@@ -144,7 +145,8 @@ fn collisions(issue: &IssueRecord, held: &[Held], shared: &[String]) -> (f64, Ve
     let mut hits: Vec<(String, String)> = Vec::new();
     for e in expected(issue) {
         for h in held.iter().filter(|h| !h.key.eq_ignore_ascii_case(&issue.key)) {
-            for f in h.files.iter().filter(|f| names(&e, f)) {
+            // Either side may be the wider one: a held folder or file name catches a full path.
+            for f in h.files.iter().filter(|f| names(&e, f) || names(f, &e)) {
                 if hits.iter().any(|(k, x)| k == &h.key && x == f) {
                     continue;
                 }
@@ -267,6 +269,12 @@ mod tests {
         let (key, why) = choose(&cands(&[("NIT-50", 1), ("NIT-51", 1)]), &clash).unwrap();
         assert_eq!(key, "NIT-50");
         assert!(why.unwrap().starts_with("NIT-50 is urgent"));
+
+        // A held folder or bare file name catches a candidate's full path.
+        let wide = vec![Held { key: "NIT-41".into(), branch: None, files: vec!["src/ui".into(), "Backlog.tsx".into()] }];
+        let named = [issue("NIT-54", 3, "Fix src/ui/StateDot.tsx", &[]), issue("NIT-55", 3, "Fix src/Backlog.tsx", &[])];
+        let c = clash_of(&named, &wide, &[]);
+        assert_eq!((c["NIT-54"].0, c["NIT-55"].0), (1.0, 1.0));
 
         // Labels name files too; nothing in flight, nothing said.
         let labelled = [issue("NIT-53", 3, "Tidy the list", &["inbox"])];
