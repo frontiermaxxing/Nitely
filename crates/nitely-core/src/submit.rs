@@ -86,7 +86,9 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         bail!("{} has uncommitted changes; commit them first:\n{}", worktree.display(), dirty.trim_end());
     }
     let wt = worktree.to_string_lossy().into_owned();
-    if !opts.local_only {
+    let no_origin = !opts.local_only && !playbook::has_origin(&worktree);
+    let local_only = opts.local_only || no_origin;
+    if !local_only {
         // Best effort: measure against the remote's base, so work merged since the last pull isn't counted.
         git_remote(&worktree, &["fetch", "--quiet", "origin", &base]).ok();
     }
@@ -163,7 +165,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     if let Some(closes) = crate::mirror::closes_line(db, &issue.key, &root) {
         body = format!("{closes}\n\n{body}");
     }
-    if !opts.local_only {
+    if !local_only {
         match push(&worktree, &branch) {
             Ok(()) => out.pushed = true,
             Err(e) => out.pr_error = Some(format!("push failed: {e:#}")),
@@ -179,6 +181,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     let pr_line = match (&out.pr_url, &out.pr_error) {
         (Some(url), _) => format!("Pull request: {url}"),
         (None, Some(e)) => format!("No pull request: {e}"),
+        _ if no_origin => "Not pushed: the repo has no origin remote, so the change stays in it.".into(),
         _ => "Not pushed (local only).".into(),
     };
     let outcome = match (&out.review, out.approver.as_str()) {
@@ -196,7 +199,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     // The full description is on the pull request and in the app's review section.
     db.add_note(&issue.key, &format!("{outcome}. {pr_line}"), "submit", actor)?;
 
-    let push_failed = !opts.local_only && !out.pushed;
+    let push_failed = !local_only && !out.pushed;
     let by_nitely = pb.land.by.by_nitely();
     let (state, next) = if verdict == "changes" {
         ("In Progress", "The review found P0 or P1 problems. Fix them, commit, and submit again.")
@@ -222,7 +225,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     let app_lands = state == "Approved" && !crate::approval::agents_can_verify();
     if by_nitely && matches!(state, "In Review" | "Approved") && !app_lands {
         let root_dir = root.to_string_lossy().into_owned();
-        let landed = crate::land::land_now(db, config, &issue.key, &root_dir, !opts.local_only, actor);
+        let landed = crate::land::land_now(db, config, &issue.key, &root_dir, !local_only, actor);
         let (state, next) = crate::land::after_auto_land(db, &issue.key, &landed, actor)?;
         out.state = state;
         out.next = next;
@@ -555,6 +558,25 @@ require_cross_vendor = true
         assert!(!s.pushed && s.pr_error.as_deref().unwrap().contains("push failed"), "{s:?}");
         assert_eq!(s.state, "In Progress");
         assert!(s.next.contains("push failed"), "{}", s.next);
+
+        // A repo with no origin at all is local: submit hands the change in without a push, and
+        // land lands it without one.
+        sh(&repo, &["remote", "remove", "origin"]);
+        let issue = db.create_issue(&new("Local tweak"), &actor).unwrap();
+        db.move_issue(&issue.key, "In Progress", None, None, &actor).unwrap();
+        let started = playbook::start_task(&db, &repo, &issue, "claude", &actor).unwrap();
+        let wt = Path::new(&started.worktree);
+        std::fs::write(wt.join("local.txt"), "x").unwrap();
+        sh(wt, &["add", "."]);
+        sh(wt, &["commit", "-q", "-m", "local"]);
+        let opts = SubmitOptions { dir: started.worktree.as_str(), issue_key: None, skip_review: false, local_only: false };
+        let s = submit(&mut db, &config, &opts, &actor).unwrap();
+        assert!(!s.pushed && s.pr_error.is_none(), "{s:?}");
+        assert_eq!(s.state, "In Review", "{s:?}");
+        let dir = repo.to_string_lossy().into_owned();
+        let land = crate::land::LandOptions { dir: &dir, issue_key: &issue.key, push: true, keep: false, break_lock: false };
+        let landed = crate::land::land(&mut db, &config, &land, &actor).unwrap();
+        assert!(landed.landed && landed.pushed.is_none(), "{landed:?}");
         std::fs::remove_dir_all(base).ok();
     }
 }

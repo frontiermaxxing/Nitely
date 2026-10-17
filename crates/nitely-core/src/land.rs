@@ -304,6 +304,8 @@ fn after_land(root: &Path, pb: &Playbook, report: &mut Landed) {
 
 fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor: &Actor, report: &mut Landed) -> Result<()> {
     let base = report.base.clone();
+    // A repo with no origin is local: what lands stays in it.
+    let push = opts.push && playbook::has_origin(root);
     let current = git(root, &["branch", "--show-current"])?.trim().to_string();
     if current != base {
         bail!("the main checkout {} is on {current}, not {base}; land only writes {base}", root.display());
@@ -380,7 +382,7 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
         bail!("{branch} gained commits during the gate, after its review was checked; submit again");
     }
 
-    if opts.push {
+    if push {
         // The pull request should show the commits that land, not the ones from before the rebase.
         if let Err(e) = git_remote(root, &["push", "--force-with-lease", "origin", &format!("{head}:refs/heads/{branch}")]) {
             report.warnings.push(format!("the pull request may still show the pre-rebase commits ({})", first_line(&e)));
@@ -393,7 +395,7 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
     report.landed_from = Some(before.clone());
     report.head = Some(git(root, &["rev-parse", "--short", "HEAD"])?.trim().to_string());
 
-    if opts.push {
+    if push {
         match git_remote(root, &["push", "origin", &base]) {
             Ok(_) => {
                 report.pushed = Some(true);

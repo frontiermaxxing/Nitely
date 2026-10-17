@@ -610,6 +610,12 @@ fn exit_code(status: &std::process::ExitStatus) -> String {
     }
 }
 
+/// Whether the repo has an `origin` remote. A repo without one is local: submit and land keep the
+/// change in it instead of failing on a push nobody can receive.
+pub(crate) fn has_origin(dir: &Path) -> bool {
+    git(dir, &["remote", "get-url", "origin"]).is_ok()
+}
+
 /// A git call that talks to `origin` (push, fetch). It never waits for a prompt or a sign-in
 /// window: nobody is there to answer one, and Git Credential Manager has hung a land that way.
 /// For an HTTPS bitbucket.org remote with a token in the credentials file, the configured helpers
