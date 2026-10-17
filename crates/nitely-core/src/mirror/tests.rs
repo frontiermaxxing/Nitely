@@ -334,12 +334,17 @@ fn a_copy_left_on_an_old_repo_is_remembered_after_publishing_anew() {
     // Published anew on the project's repo now.
     sync_project(&db, &fake, "APP", &PrivateTerms::default(), &roots(), &mut 30, &mut MirrorReport::default()).unwrap();
     assert_eq!(db.issue_mirror(&a.key).unwrap().unwrap().status, "mirrored");
-    // Made private: withdrawn here, and the old copy still said.
+    // Made private while the host is down: nothing changes, so the next sync tries again.
     db.set_issue_private(&a.key, true, &Actor::Human).unwrap();
+    let down = Fake { gone: vec![1], ..Default::default() };
+    sync_project(&db, &down, "APP", &PrivateTerms::default(), &roots(), &mut 30, &mut MirrorReport::default()).ok();
+    assert_eq!(db.issue_mirror(&a.key).unwrap().unwrap().status, "mirrored", "a failed withdrawal is retried");
+    // Back up: taken down here as far as the token may, and the old copy said too.
     sync_project(&db, &fake, "APP", &PrivateTerms::default(), &roots(), &mut 30, &mut MirrorReport::default()).ok();
     let m = db.issue_mirror(&a.key).unwrap().unwrap();
     assert_eq!(m.status, "exposed");
-    assert!(m.reason.unwrap().contains("#7 on GitHub someone/old-app"));
+    let reason = m.reason.unwrap();
+    assert!(reason.contains("delete the issue there") && reason.contains("#7 on GitHub someone/old-app"), "{reason}");
     drop(db);
     std::fs::remove_dir_all(dir).ok();
 }

@@ -235,7 +235,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS playbook_proposal_pending ON playbook_proposal
 
 /// Bumped when a table changes shape. Tables that only mirror Bitbucket or Linear are dropped
 /// and refilled by the next sync; tables Nitely owns get real migrations.
-const SCHEMA_VERSION: i64 = 18;
+const SCHEMA_VERSION: i64 = 19;
 
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -275,6 +275,8 @@ fn migrate(conn: &Connection) -> Result<()> {
     // v17 adds approval.signature.
     add_column(conn, "approval", "signature", "TEXT NOT NULL DEFAULT ''")?;
     // v18 adds mirror_project, issue_mirror, mirror_comment and issue_private, which SCHEMA creates.
+    // v19 adds issue_mirror.left_on: copies on repos the origin no longer points at.
+    add_column(conn, "issue_mirror", "left_on", "TEXT")?;
     Ok(())
 }
 

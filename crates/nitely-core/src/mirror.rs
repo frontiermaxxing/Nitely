@@ -735,8 +735,10 @@ fn sync_issue(db: &Db, host: &dyn Host, issue: &IssueRecord, setting: &MirrorSet
         Decision::Private(why) | Decision::Held(why) if published.as_ref().is_some_and(|(_, s)| s == "mirrored") => {
             let (number, _) = published.unwrap();
             if let Err(e) = withdraw(db, host, &issue.key, number, &why) {
-                // Still public here; copies on old repos are said as well.
-                if !left.is_empty() {
+                // Taken down as far as the host allows but still readable there: copies on old
+                // repos are said as well. A withdrawal that failed outright (the host was down)
+                // stays as it was, so the next sync tries again.
+                if !left.is_empty() && db.issue_mirror(&issue.key)?.is_some_and(|m| m.status == "exposed") {
                     still_public_elsewhere(db, &issue.key, &why, &left)?;
                 }
                 return Err(e);
