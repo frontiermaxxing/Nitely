@@ -195,7 +195,7 @@ fn working_dirs() -> HashMap<u32, String> {
 }
 
 /// `lsof -F pn` output: a `p<pid>` line, then the `n<path>` of its files.
-#[cfg(any(unix, test))]
+#[cfg(any(target_os = "macos", test))]
 fn parse_lsof(text: &str) -> HashMap<u32, String> {
     let mut dirs = HashMap::new();
     let mut pid = None;
