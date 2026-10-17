@@ -24,6 +24,25 @@ export async function findPage(port, timeoutMs = 60000) {
   throw new Error(`the app's page did not appear on DevTools port ${port}: ${last}`);
 }
 
+/**
+ * What the app's browser (WebView2) says about its GPU: `SystemInfo.getInfo`, asked of the browser
+ * target, since a page cannot. `featureStatus` names each GPU feature and whether it is on.
+ */
+export async function gpuInfo(port) {
+  const { webSocketDebuggerUrl } = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
+  const ws = new WebSocket(webSocketDebuggerUrl);
+  await new Promise((resolve, reject) => {
+    ws.onopen = resolve;
+    ws.onerror = () => reject(new Error(`could not open ${webSocketDebuggerUrl}`));
+  });
+  const browser = new Page(ws);
+  try {
+    return (await browser.send("SystemInfo.getInfo")).gpu;
+  } finally {
+    browser.close();
+  }
+}
+
 export class Page {
   static async connect(port, timeoutMs) {
     const target = await findPage(port, timeoutMs);
