@@ -30,6 +30,7 @@ const KEY_COLUMNS: &[(&str, &str)] = &[
     ("issue_mirror", "issue_key"),
     ("issue_private", "issue_key"),
     ("mirror_comment", "issue_key"),
+    ("submit_job", "issue_key"),
 ];
 
 /// `key` under its project's current prefix, given `Db::project_aliases`: `OLD-12` → `NEW-12`.

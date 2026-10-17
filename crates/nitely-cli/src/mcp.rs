@@ -675,7 +675,10 @@ fn run_tool(server: &Server, name: &str, args: &Value, params: &Value) -> Result
 
     // A submit that came back to this agent is told before anything else (NIT-212).
     let returned = if name == "next_task" && server.remote.is_none() {
-        db.undelivered_submit_jobs(actor.id())?.into_iter().find(|j| j.needs_the_submitter())
+        // Only one of the project asked for: an agent working across projects gets this one's work.
+        let project = project(&db)?;
+        let of_project = |key: &str| key.split_once('-').is_some_and(|(p, _)| p.eq_ignore_ascii_case(&project));
+        db.undelivered_submit_jobs(actor.id())?.into_iter().find(|j| j.needs_the_submitter() && of_project(&j.issue))
     } else {
         None
     };

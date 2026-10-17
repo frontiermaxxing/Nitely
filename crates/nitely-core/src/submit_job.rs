@@ -143,7 +143,9 @@ impl Db {
     }
 
     fn settle_abandoned(&self, mut j: Job) -> Result<Job> {
-        let ended = j.state == "running" && j.pid.is_some_and(|p| p as u32 != std::process::id() && !process_runs(p as u32));
+        // A queued job carries the pid of the process started for it, which may die waiting for the
+        // issue's lock; a running one, the pid of the process running it.
+        let ended = matches!(j.state.as_str(), "queued" | "running") && j.pid.is_some_and(|p| p as u32 != std::process::id() && !process_runs(p as u32));
         // A process id the OS gave to something else after the job's ended would keep it running
         // forever: no submit takes this long (the review stops at its timeout).
         let stale = j.state == "running" && j.started_at.is_some_and(|t| now() - t > MAX_RUNNING_SECS);
@@ -154,7 +156,7 @@ impl Db {
                 "it ran for more than two hours without finishing; submit again"
             };
             self.conn.execute(
-                "UPDATE submit_job SET state = 'failed', ended_at = COALESCE(ended_at, ?2), error = ?3 WHERE id = ?1 AND state = 'running'",
+                "UPDATE submit_job SET state = 'failed', ended_at = COALESCE(ended_at, ?2), error = ?3 WHERE id = ?1 AND state IN ('queued', 'running')",
                 params![j.id, now(), why],
             )?;
             j.state = "failed".into();
@@ -203,7 +205,9 @@ fn process_runs(pid: u32) -> bool {
 
 /// Starts a queued job somewhere that outlives the caller.
 pub trait Runner {
-    fn start(&self, job: &Job) -> Result<()>;
+    /// The id of the process started for the job, when there is one: a job whose process is gone
+    /// before it ran is then failed rather than left queued.
+    fn start(&self, job: &Job) -> Result<Option<u32>>;
 }
 
 /// Runs `nitely submit-job <id>` as a process of its own: hidden, in its own process group, its
@@ -219,7 +223,7 @@ pub fn log_path(id: i64) -> PathBuf {
 }
 
 impl Runner for DetachedProcess {
-    fn start(&self, job: &Job) -> Result<()> {
+    fn start(&self, job: &Job) -> Result<Option<u32>> {
         use std::process::Stdio;
         let log_path = log_path(job.id);
         if let Some(dir) = log_path.parent() {
@@ -245,8 +249,12 @@ impl Runner for DetachedProcess {
             use std::os::unix::process::CommandExt;
             cmd.process_group(0);
         }
-        without_inherited_std(|| cmd.spawn()).with_context(|| format!("starting {} submit-job {}", self.nitely.display(), job.id))?;
-        Ok(())
+        let mut child = without_inherited_std(|| cmd.spawn()).with_context(|| format!("starting {} submit-job {}", self.nitely.display(), job.id))?;
+        let pid = child.id();
+        // Reaped when it ends, so a long-lived caller (an MCP server) keeps no zombie on Unix and a
+        // crashed job reads as gone.
+        std::thread::spawn(move || child.wait());
+        Ok(Some(pid))
     }
 }
 
@@ -327,11 +335,17 @@ The result comes back through next_task, submit_status, or a notice on your next
 /// process here), it runs now, in this process, and says so.
 pub fn submit_async(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: &Actor, runner: &dyn Runner) -> Result<Job> {
     let job = enqueue(db, opts, actor)?;
-    if let Err(e) = runner.start(&job) {
-        db.log_event(actor, Some(&job.issue), Some(&job.worktree), "status", &format!("Could not start submit job {} in the background ({e:#}); running it here", job.id))?;
-        return run(db, config, job.id);
+    match runner.start(&job) {
+        Err(e) => {
+            db.log_event(actor, Some(&job.issue), Some(&job.worktree), "status", &format!("Could not start submit job {} in the background ({e:#}); running it here", job.id))?;
+            run(db, config, job.id)
+        }
+        Ok(Some(pid)) => {
+            db.conn.execute("UPDATE submit_job SET pid = ?2 WHERE id = ?1 AND state = 'queued' AND pid IS NULL", params![job.id, pid])?;
+            db.submit_job(job.id)?.context("the job's record went missing")
+        }
+        Ok(None) => Ok(job),
     }
-    Ok(job)
 }
 
 /// Runs a job: the job's own process calls this. One job of an issue runs at a time (a file lock
@@ -431,9 +445,9 @@ mod tests {
     /// Records a start without starting anything.
     struct Recorded(std::sync::Mutex<Vec<i64>>);
     impl Runner for Recorded {
-        fn start(&self, job: &Job) -> Result<()> {
+        fn start(&self, job: &Job) -> Result<Option<u32>> {
             self.0.lock().unwrap().push(job.id);
-            Ok(())
+            Ok(None)
         }
     }
 
@@ -497,10 +511,21 @@ mod tests {
         assert!(gone.needs_the_submitter());
         assert_eq!(db.undelivered_submit_jobs(actor.id()).unwrap().len(), 1);
 
+        // Queued, its process gone before it ran (killed while it waited for the issue's lock):
+        // failed too, not left queued forever.
+        struct Started;
+        impl Runner for Started {
+            fn start(&self, _: &Job) -> Result<Option<u32>> {
+                Ok(Some(999999))
+            }
+        }
+        let waiting = submit_async(&mut db, &config, &opts, &actor, &Started).unwrap();
+        assert_eq!((waiting.state.as_str(), waiting.pid), ("failed", Some(999999)), "{waiting:?}");
+
         // A runner that cannot start a process: the job runs in this one, and finishes.
         struct Broken;
         impl Runner for Broken {
-            fn start(&self, _: &Job) -> Result<()> {
+            fn start(&self, _: &Job) -> Result<Option<u32>> {
                 bail!("no way to start a process here")
             }
         }
