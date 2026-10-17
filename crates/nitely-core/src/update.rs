@@ -82,7 +82,8 @@ impl Drop for Reservation {
     }
 }
 
-/// Takes every watched repo's land lock, or none: `Err` names the repos whose land is running.
+/// Takes every watched repo's land lock, or none: `Err` names the repos whose land is running. A
+/// repo whose lock can't be written for another reason is skipped: a land can't take it either.
 pub fn reserve_lands(config: &crate::Config) -> Result<Reservation, Vec<String>> {
     use std::io::Write;
     let mut taken = Reservation(Vec::new());
@@ -94,7 +95,8 @@ pub fn reserve_lands(config: &crate::Config) -> Result<Reservation, Vec<String>>
                 writeln!(f, "{UPDATE_HOLDER} pid {} since {}", std::process::id(), crate::issues::iso(crate::db::now())).ok();
                 taken.0.push(path);
             }
-            Err(_) => busy.push(repo.name.clone()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => busy.push(repo.name.clone()),
+            Err(e) => eprintln!("update: can't hold {}'s land lock ({e}); a land can't take it either", repo.name),
         }
     }
     if busy.is_empty() {

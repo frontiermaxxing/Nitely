@@ -169,7 +169,16 @@ pub async fn check(app: &AppHandle) -> UpdateStatus {
     let now = nitely_core::db::now();
     match result {
         Ok(Some(pair)) => {
-            *app.state::<UpdateState>().ready.lock().unwrap() = Some(pair);
+            // Under the same lock a channel change takes, so a change can't slip in between the
+            // generation check and storing the download.
+            let state = app.state::<UpdateState>();
+            let mut ready = state.ready.lock().unwrap();
+            if !current(app) {
+                drop(ready);
+                return state.status.lock().unwrap().clone();
+            }
+            *ready = Some(pair);
+            drop(ready);
             change(app, |s| {
                 s.checking = false;
                 s.checked_at = Some(now);
@@ -267,8 +276,13 @@ pub async fn set_update_channel(app: AppHandle, channel: String) -> Result<Updat
     config.update_channel = Some(channel.clone());
     config.save().map_err(|e| format!("{e:#}"))?;
     let state = app.state::<UpdateState>();
-    state.generation.fetch_add(1, Ordering::SeqCst);
-    state.ready.lock().unwrap().take();
+    {
+        // Under the download's lock: an older check either stored its update before this (and it
+        // is dropped here) or sees the new generation and stores nothing.
+        let mut ready = state.ready.lock().unwrap();
+        state.generation.fetch_add(1, Ordering::SeqCst);
+        *ready = None;
+    }
     change(&app, |s| {
         s.channel = channel;
         s.available = None;
