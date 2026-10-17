@@ -2,7 +2,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { decisionsOf, outcomeOf, shownDecisions, trackAfter, type Decision, type Resolved } from "./decisions.ts";
+import { askPlaces, decisionsOf, firstLine, outcomeOf, shownDecisions, trackAfter, type Decision, type Resolved } from "./decisions.ts";
 import type { Ask, Board, IssueDetail, IssueRecord } from "./types.ts";
 import type { Track } from "./ui/lifecycle.ts";
 
@@ -49,6 +49,17 @@ const ask = (id: number, key: string, at: number): Ask => ({
   answer: null,
   asked_at: at,
   answered_at: null,
+});
+
+test("NIT-172: questions sharing an issue are told apart by their own first line and their place", () => {
+  const asks = [ask(3, "X-1", NOW - 10), ask(1, "X-1", NOW - 30), ask(2, "X-1", NOW - 20), ask(4, "X-2", NOW - 5)];
+  const ds = decisionsOf(board([], asks), new Map(), NOW);
+  const places = askPlaces(ds);
+  assert.deepEqual(places.get("ask-1"), { n: 1, of: 3 });
+  assert.deepEqual(places.get("ask-3"), { n: 3, of: 3 });
+  assert.equal(places.has("ask-4"), false, "a question alone on its issue needs no number");
+  assert.equal(firstLine("\n  Which currency should prices show?\nWe sell in the EU and the US."), "Which currency should prices show?");
+  assert.equal(firstLine("   "), "");
 });
 
 test("an issue in Needs You is an approval", () => {

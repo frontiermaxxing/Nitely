@@ -127,6 +127,8 @@ interface IssueSpec {
   /** Progress lines the agent reported while working. */
   notes?: string[];
   ask?: { question: string; options: string[] };
+  /** More questions on the same issue, asked after `ask`, still open (NIT-172). */
+  moreAsks?: string[];
   /** The agent session in the issue's worktree, if one is open. */
   live?: Live;
   branch?: Partial<BranchState>;
@@ -185,6 +187,7 @@ const ISSUES: IssueSpec[] = [
     from: 9, to: 0.7, story: ["filed", "claim", "work", "gate", "review", "passhuman", "ask"],
     notes: ["Listing where P2 and P3 findings end up today"],
     ask: { question: "Should P2 and P3 review findings become issues automatically, or stay on the pull request?", options: ["File them as issues", "Leave them on the PR"] },
+    moreAsks: ["Should a P1 finding still stop the land after you approved?\nToday it does; the reviewer may be wrong about a file you know."],
     live: { state: "idle", seen: 48, activity: "Asked: where should P2 findings go?" }, branch: { ahead: 2, dirty_files: 0 }, checks: "success",
   },
   {
@@ -563,7 +566,16 @@ function build(): World {
       }
     });
 
-    if (lastAsk) world.asks.push(lastAsk);
+    // Set inside the story's callback, which TypeScript does not follow.
+    const open = lastAsk as Ask | null;
+    if (open) {
+      world.asks.push(open);
+      for (const [n, question] of (spec.moreAsks ?? []).entries()) {
+        const at = open.asked_at + 60 * (n + 1);
+        world.asks.push({ ...open, id: askId++, question, options: [], asked_at: at });
+        timeline.push({ ts: at, actor: open.asked_by, kind: "ask", summary: question });
+      }
+    }
     timeline.sort((a, b) => a.ts - b.ts);
     const updated = timeline[timeline.length - 1].ts;
     world.issues.push({

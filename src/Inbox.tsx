@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { invoke, isPreview } from "./backend";
 import { PlaybookDiff } from "./PlaybookDiff";
 import { GoalPlanDecision } from "./GoalPlanDecision";
-import { decisionsOf, detailKeys, outcomeOf, shownDecisions, trackAfter, type Decision, type DecisionKind, type Move, type Resolved } from "./decisions";
+import { askPlaces, decisionsOf, detailKeys, firstLine, outcomeOf, shownDecisions, trackAfter, type Decision, type DecisionKind, type Move, type Resolved } from "./decisions";
 import { ChecksMark } from "./Pr";
 import type { Board, IssueDetail, TaskRow } from "./types";
 import { ago } from "./util";
@@ -69,6 +69,7 @@ export function Inbox(props: {
   }, [liveIds]);
   const groups = GROUP_ORDER.map((k) => ({ kind: k, items: decisions.filter((d) => d.kind === k) })).filter((g) => g.items.length > 0);
   const ordered = groups.flatMap((g) => g.items);
+  const places = askPlaces(ordered);
   const [picked, setPicked] = useState<string | null>(props.pick?.id ?? null);
   useEffect(() => {
     if (props.pick) setPicked(props.pick.id);
@@ -205,6 +206,7 @@ export function Inbox(props: {
                 }}
                 now={now}
                 onPick={() => setPicked(d.id)}
+                place={places.get(d.id)}
                 onOpenIssue={props.onOpenIssue}
               />
             ))}
@@ -335,12 +337,13 @@ function planOf(detail: IssueDetail | undefined) {
 }
 
 /** What last happened, in one line under a decision in the list: good is teal, bad is red. */
-function eventOf(d: Decision, detail: IssueDetail | undefined): { text: string; tone: "good" | "bad" | null; agent: string | null } {
+function eventOf(d: Decision, detail: IssueDetail | undefined, place?: { n: number; of: number }): { text: string; tone: "good" | "bad" | null; agent: string | null } {
   const who = (vendor: string | null) => VENDOR_LABEL[vendorOf(vendor)];
   const agent = d.row?.session?.vendor ?? d.row?.vendor ?? null;
   switch (d.kind) {
     case "ask":
-      return { text: `${who(d.ask!.asked_by)} waits for your answer`, tone: null, agent: d.ask!.asked_by };
+      // The place first: a narrow list cuts the end of the line.
+      return { text: `${place ? `${place.n} of ${place.of} · ` : ""}${who(d.ask!.asked_by)} waits for your answer`, tone: null, agent: d.ask!.asked_by };
     case "approve": {
       if (d.issue && d.issue.origin !== "nitely") return { text: `Waits in ${originName(d.issue.origin)}`, tone: null, agent };
       const proposal = proposalOf(detail);
@@ -382,11 +385,15 @@ function InboxRow(props: {
   onPick: () => void;
   onStep: (by: 1 | -1) => void;
   onOpenIssue: (key: string) => void;
+  /** Its place among the questions on its issue, when there are several. */
+  place?: { n: number; of: number };
 }) {
   const { decision: d } = props;
   const issue = props.detail?.issue ?? d.issue;
   const done = props.resolved;
-  const ev = done ? { text: outcomeOf(done), tone: "good" as const, agent: null } : eventOf(d, props.detail);
+  const ev = done ? { text: outcomeOf(done), tone: "good" as const, agent: null } : eventOf(d, props.detail, props.place);
+  // A question reads as itself, so two on one issue never look alike; the issue stays as context.
+  const question = d.kind === "ask" && d.ask ? firstLine(d.ask.question) : "";
   return (
     <button
       className={`inbox-row${props.on ? " on" : ""}${done ? " resolved" : ""}${props.leaving ? " leaving" : ""}`}
@@ -413,7 +420,9 @@ function InboxRow(props: {
       <span className="inbox-row-text">
         <span className="inbox-row-top">
           <span className="inbox-row-key">{issue?.key ?? d.row?.branch ?? d.repo}</span>
-          <span className="inbox-row-title">{issue?.title ?? (d.row ? d.row.worktree : "")}</span>
+          <span className="inbox-row-title" title={question && issue ? issue.title : undefined}>
+            {question || issue?.title || (d.row ? d.row.worktree : "")}
+          </span>
         </span>
         <span className="inbox-row-ev">
           {ev.agent && <AgentMark vendor={ev.agent} size={16} />}

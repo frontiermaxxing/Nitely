@@ -156,6 +156,30 @@ export function shownDecisions(live: Decision[], resolved: Map<string, Resolved>
   return out.sort(byUrgency);
 }
 
+/** A question's first line with words in it: what a list row shows of it. */
+export function firstLine(question: string): string {
+  return question.split(/\r?\n/).map((l) => l.trim()).find((l) => l.length > 0) ?? "";
+}
+
+/**
+ * For questions that share an issue, each one's place among them (oldest first) and how many
+ * there are, so rows that would otherwise read alike say "question 2 of 3". A question alone on its
+ * issue is not listed.
+ */
+export function askPlaces(decisions: Decision[]): Map<string, { n: number; of: number }> {
+  const byIssue = new Map<string, Decision[]>();
+  for (const d of decisions) {
+    const key = d.kind === "ask" ? d.ask?.issue_key?.toUpperCase() : undefined;
+    if (key) byIssue.set(key, [...(byIssue.get(key) ?? []), d]);
+  }
+  const out = new Map<string, { n: number; of: number }>();
+  for (const asks of byIssue.values()) {
+    if (asks.length < 2) continue;
+    [...asks].sort((a, b) => a.ask!.asked_at - b.ask!.asked_at || a.ask!.id - b.ask!.id).forEach((d, i) => out.set(d.id, { n: i + 1, of: asks.length }));
+  }
+  return out;
+}
+
 /** What the card says once the human acted: short, in the past tense, and what comes next. */
 export function outcomeOf(r: Pick<Resolved, "move" | "answer" | "decision">): string {
   switch (r.move) {
