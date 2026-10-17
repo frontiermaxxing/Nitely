@@ -1,0 +1,10 @@
+/* ----- Goals: one row per active goal, its issues from done to queued (src/GoalRows.tsx) ----- */
+.goal-rows { display: grid; gap: 14px; margin: 4px 0 22px; }
+.goal-row { display: grid; gap: 8px; padding: 12px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); --mark-bg: var(--surface); }
+.goal-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; min-width: 0; }
+.goal-title { font-weight: var(--weight-strong); font-size: var(--text-md); min-width: 0; overflow-wrap: anywhere; }
+.goal-project { color: var(--fg-3); }
+.goal-when { color: var(--fg-2); font-size: var(--text-sm); }
+.goal-late { color: var(--fail); }
+.goal-count { margin-left: auto; color: var(--fg-2); font-size: var(--text-sm); white-space: nowrap; }
+.goal-issues { display: flex; flex-wrap: wrap; gap: 4px 14px; }

@@ -6,6 +6,7 @@ import { BoardFilters, NO_FILTER, ProjectBoard, type Filters } from "./ProjectBo
 import { BranchMap } from "./BranchMap";
 import { CrewControl } from "./CrewControl";
 import { ProjectBrief } from "./ProjectBrief";
+import { GoalRows } from "./GoalRows";
 import { ProjectSettings } from "./ProjectSettings";
 import { ProjectRules } from "./Rules";
 import { EmptyState, Loading } from "./ui";
@@ -107,6 +108,7 @@ export function ProjectPage(props: {
         {tab === "board" && issues && <BoardFilters issues={issues} board={props.board} filters={filters} onChange={setFilters} />}
       </div>
       {views && issues && issues.length > 0 && <Summary issues={issues} projectKey={props.projectKey} version={props.version} />}
+      {views && <GoalRows project={props.projectKey} version={props.version} onOpenIssue={props.onOpenIssue} />}
       {tab !== "brief" && error && <p className="error">{error}</p>}
       {((views && !issues) || (tab === "settings" && !issues) || (tab === "branches" && !props.board)) && !error && <Loading />}
       {tab === "settings" && issues && props.project && (

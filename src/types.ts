@@ -275,6 +275,28 @@ export interface Project {
 }
 
 /** What agents learned about a project, and when the setup sweep read it (crates/nitely-core/src/brief.rs). */
+/** An outcome a project works toward (crates/nitely-core/src/goals.rs). */
+export interface Goal {
+  id: number;
+  project: string;
+  title: string;
+  /** One paragraph: what is true once it is reached. */
+  outcome: string;
+  /** YYYY-MM-DD. */
+  target_date: string | null;
+  state: "active" | "done" | "dropped";
+  created_by: string;
+  created_at: number;
+  updated_at: number;
+  progress: { total: number; done: number; dropped: number; open: number };
+}
+
+/** A goal and its issues, open and closed: what a goal row draws. */
+export interface GoalDetail {
+  goal: Goal;
+  issues: IssueRecord[];
+}
+
 export interface ProjectBrief {
   project: string;
   name: string;

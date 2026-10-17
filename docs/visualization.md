@@ -311,17 +311,38 @@ It is the reference for a whole view built from these parts. It answers, in orde
 2. **Right now:** every agent with a session open, one row each: who and where, the issue, its
    mini track, what it is doing (or how long it has waited on you) and for how long. Working first,
    then waiting, then idle and stale, faded.
-3. **One flow per project:** a box per station holding its issues as chips (glyph, key, agent).
+3. **Goals:** every active goal of every project as a goal row (below), the project's key beside
+   its title. The section is left out while no project has a goal.
+4. **One flow per project:** a box per station holding its issues as chips (glyph, key, agent).
    A box with issues is raised; Needs you with issues is washed in amber; an empty one is a dashed
    outline. Stuck work (a stuck track or a rebase conflict) shows a red glyph and key in its box,
    with the reason on hover; quiet work fades. Three chips a box, then "+N more". Below 960px the
    boxes become rows.
-4. **Since you were last here:** counts that filter a feed (landed, filed, stuck, review rounds,
+5. **Since you were last here:** counts that filter a feed (landed, filed, stuck, review rounds,
    questions) and landed and submitted per hour over 24 hours. The last-seen time is saved when you
    leave the Overview (`localStorage`), not while you read it.
 
 Its data is one `pulse` command (`crates/nitely-core/src/pulse.rs`), which reads only the database.
-Git state (rebase conflicts) and live sessions come from the snapshot the app already holds.
+Git state (rebase conflicts) and live sessions come from the snapshot the app already holds. The
+goal rows read the `goals` command.
+
+## Goal rows
+
+A goal is an outcome a project works toward (`crates/nitely-core/src/goals.rs`), and a goal row
+(`GoalRow` in `src/GoalRows.tsx`) answers "how close are we to it?" in one card:
+
+- **The head:** the title (the outcome on hover), the project's key on the Overview, the target
+  date with how far off it is ("by Oct 28 · in 12 days"), in `--fail` ink once it has passed while
+  issues are open ("3 days late"), and "3/9 done" at the right.
+- **The meter:** the goal's issues by whose move they are, by the colour rule: done (`--st-done`),
+  an agent moving them (`--live`), waiting on you (`--attention`), stuck (`--fail`), queued
+  (`--line-strong`).
+- **The issues:** every issue as an `IssueToken` in station order (`goalOrder` in `src/goals.ts`):
+  done to the left, then the furthest along (landing, needs you, review, gate, working, started),
+  Todo, and Backlog last; canceled and duplicate issues are no longer part of it. The tokens wrap.
+
+Rows come active goals first, nearer target dates first. A project page shows its own goals above
+the List and the Board, under the summary; a project without goals shows none.
 
 ## Activity lanes
 
@@ -410,6 +431,7 @@ one dot. `node scripts/app-icon.mjs` makes every size and puts both in `icon.ico
 
 A project page has four views behind one switch (remembered): **List** (issues grouped by state),
 **Board**, **Branches** and **Brief**, and **Settings** beside them (never remembered as the default).
+List and Board start with the project's goal rows (see Goal rows).
 
 - **Settings** (`src/ProjectSettings.tsx`, `crates/nitely-core/src/projects.rs`): the project's
   name; its key, where a new key re-keys every issue (NIT-12 becomes NX-12, with its timeline,

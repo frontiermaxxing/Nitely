@@ -263,3 +263,4 @@
 .mirror-sample summary { font-size: var(--text-sm); }
 .mirror-title { margin: 10px 0 6px; font-weight: var(--weight-medium); }
 .mirror-body { margin: 0; padding: 10px 12px; max-height: 220px; overflow: auto; white-space: pre-wrap; font-family: var(--font-mono); font-size: 12px; line-height: 1.5; background: var(--sunken); border-radius: var(--radius); color: var(--fg-2); }
+

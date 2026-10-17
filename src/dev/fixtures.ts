@@ -35,6 +35,7 @@ import type {
   PrRecord,
   PlaybookProposal,
   Project,
+  GoalDetail,
   ProjectBrief,
   Pulse,
   RepoView,
@@ -1454,6 +1455,72 @@ const BRIEFS: Record<string, Pick<ProjectBrief, "brief" | "revision" | "updated_
   },
 };
 
+// Goals: two in Nitely (one due soon, one late) and one in Harbor; Orbit has none, so its page
+// shows no goal row.
+const dateIn = (days: number) => {
+  const d = new Date(Date.now() + days * 86400000);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
+const GOALS: { id: number; project: string; title: string; outcome: string; target_date: string | null; keys: string[] }[] = [
+  {
+    id: 1,
+    project: "NIT",
+    title: "One glance says what needs you",
+    outcome: "Andrew opens Nitely and knows in a few seconds what waits on him, what moves and what is stuck, on any view.",
+    target_date: dateIn(12),
+    keys: ["NIT-24", "NIT-25", "NIT-31", "NIT-30", "NIT-29", "NIT-44", "NIT-26", "NIT-28"],
+  },
+  {
+    id: 2,
+    project: "NIT",
+    title: "Reviews and lands need no babysitting",
+    outcome: "A submitted change is reviewed, retried when the reviewer stalls, and landed in order without anyone watching.",
+    target_date: dateIn(-3),
+    keys: ["NIT-19", "NIT-27", "NIT-33", "NIT-21", "NIT-20"],
+  },
+  {
+    id: 3,
+    project: "HAR",
+    title: "Guests book without calling",
+    outcome: "A guest finds a free date, books it and gets a receipt in their language, on a phone, without phoning the front desk.",
+    target_date: null,
+    keys: ["HAR-14", "HAR-13", "HAR-12", "HAR-16", "HAR-9", "HAR-8"],
+  },
+];
+
+/** Puts the fixture issues in their goals; the world is built before GOALS is defined. */
+function placeGoals() {
+  for (const g of GOALS) for (const key of g.keys) {
+    const i = world.issues.find((x) => x.key === key);
+    if (i && i.goal === undefined) i.goal = g.id;
+  }
+}
+
+function goals(args: Record<string, unknown>): GoalDetail[] {
+  placeGoals();
+  const project = args.project ? String(args.project).toUpperCase() : null;
+  return GOALS.filter((g) => !project || g.project === project).map((g) => {
+    const issues = world.issues.filter((i) => i.goal === g.id);
+    const done = issues.filter((i) => i.state_type === "completed").length;
+    const dropped = issues.filter((i) => i.state_type === "canceled").length;
+    return {
+      goal: {
+        id: g.id,
+        project: g.project,
+        title: g.title,
+        outcome: g.outcome,
+        target_date: g.target_date,
+        state: "active" as const,
+        created_by: "human",
+        created_at: NOW - 5 * 24 * HOUR,
+        updated_at: NOW - 5 * 24 * HOUR,
+        progress: { total: issues.length, done, dropped, open: issues.length - done - dropped },
+      },
+      issues,
+    };
+  });
+}
+
 function projectBrief(key: string): ProjectBrief {
   const p = world.projects.find((x) => x.key === key.toUpperCase());
   if (!p) throw `no project ${key}`;
@@ -1484,6 +1551,8 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return null;
       case "projects":
         return world.projects;
+      case "goals":
+        return goals(args);
       case "project_brief":
         return projectBrief(String(args.project));
       case "mirror_preview":

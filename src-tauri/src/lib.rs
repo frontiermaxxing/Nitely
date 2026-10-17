@@ -145,6 +145,12 @@ async fn held_files(project: String) -> Result<Vec<nitely_core::overlap::Held>, 
     nitely_core::overlap::held(&config, &db()?, &project).map_err(err)
 }
 
+/// The goal rows: every active goal with its issues, of one project or all of them.
+#[tauri::command]
+async fn goals(project: Option<String>) -> Result<Vec<nitely_core::goals::GoalDetail>, String> {
+    db()?.active_goals(project.as_deref()).map_err(err)
+}
+
 #[tauri::command]
 async fn project_brief(project: String) -> Result<nitely_core::brief::ProjectBrief, String> {
     db()?.project_brief(&project).map_err(err)
@@ -597,6 +603,7 @@ pub fn run() {
             private_terms,
             set_private_terms,
             project_brief,
+            goals,
             set_project_brief,
             held_files,
             crew_status,

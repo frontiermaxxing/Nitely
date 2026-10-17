@@ -124,6 +124,28 @@ impl Db {
         Ok(GoalDetail { goal, issues })
     }
 
+    /// Every active goal with its issues, of one project or of all of them (projects in key order,
+    /// goals as `goals` orders them): what the goal rows draw.
+    pub fn active_goals(&self, project: Option<&str>) -> Result<Vec<GoalDetail>> {
+        let projects: Vec<String> = match project {
+            Some(p) => vec![self.project(p)?.with_context(|| format!("no project {p}"))?.key],
+            None => self.projects()?.into_iter().map(|p| p.key).collect(),
+        };
+        let mut out = Vec::new();
+        for key in projects {
+            let goals = self.goals(&key, false)?;
+            if goals.is_empty() {
+                continue;
+            }
+            let issues = self.list_issues(Some(&key), true)?;
+            for goal in goals {
+                let mine = issues.iter().filter(|i| i.goal == Some(goal.id)).cloned().collect();
+                out.push(GoalDetail { goal, issues: mine });
+            }
+        }
+        Ok(out)
+    }
+
     /// Creates a goal (`id` None) or changes one.
     pub fn save_goal(&self, project: &str, id: Option<i64>, change: &GoalChange, actor: &Actor) -> Result<Goal> {
         let clean = |s: &Option<String>| s.as_deref().map(str::trim).map(str::to_string);
@@ -266,6 +288,12 @@ mod tests {
 
         db.set_issue_goal(&b, None, &agent).unwrap();
         assert_eq!(db.goal(g.id).unwrap().unwrap().progress.total, 1);
+
+        // The goal rows: active goals of every project, each with its issues.
+        let rows = db.active_goals(None).unwrap();
+        assert_eq!((rows.len(), rows[0].issues.len()), (1, 1));
+        db.save_goal("NIT", Some(g.id), &GoalChange { state: Some("done".into()), ..Default::default() }, &agent).unwrap();
+        assert!(db.active_goals(Some("nit")).unwrap().is_empty());
     }
 
     #[test]
