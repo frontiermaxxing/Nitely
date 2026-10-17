@@ -207,8 +207,6 @@ fn refresh_setup(rules: &WorktreeRules, worktree: &Path, main: &Path, base: &str
     match std::fs::read_to_string(&record) {
         Ok(last) if last.trim() == now => return Ok((vec![], true)),
         Ok(_) => {}
-        // A light worktree never ran setup: its gate runs it, until gates run in build lanes.
-        Err(_) if crate::light::is_light(worktree) => {}
         Err(_) => {
             std::fs::write(&record, &now).ok();
             return Ok((vec![], true));
@@ -994,10 +992,14 @@ pub fn run_gate(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<&s
         steps.push((step.run.clone(), step.skip_reason(&files)?));
     }
 
+    // A sparse worktree lacks files the gate builds (a workspace's other members): until gates run
+    // in build lanes, it becomes whole first, so the gate sees what land will.
+    let whole = crate::light::make_whole(worktree)?;
     // A stale setup fails the gate for reasons that are not the change's; set up again first.
     let retries = playbook.gate.retries;
     let mut flaked = Vec::new();
     let (mut results, mut passed) = refresh_setup(&playbook.worktree, worktree, repo_root, base, retries, &mut flaked)?;
+    results.splice(0..0, whole);
     if !passed {
         steps.clear();
     }

@@ -18,14 +18,15 @@ pub fn is_lane_path(path: &str) -> bool {
     crate::paths::normalize(path).split('/').any(|part| part == LANES_DIR)
 }
 
-/// `.nitely-lanes` beside the repo's worktrees: the parent of the playbook's worktree folder
-/// (`../{repo}-worktrees` by default). One per repo, since a lane is a checkout of one repo.
+/// `.nitely-lanes/<repo>` beside the repo's worktrees: under the parent of the playbook's worktree
+/// folder (`../{repo}-worktrees` by default), named after the repo, since a lane is a checkout of
+/// one repo and repos can share a worktree folder.
 pub fn lanes_dir(pb: &Playbook, repo_root: &Path) -> PathBuf {
     let repo = repo_root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let dir = pb.worktree.dir.replace("{repo}", &repo);
     let parent = Path::new(&dir).parent().map(Path::to_path_buf).filter(|p| !p.as_os_str().is_empty() && !p.to_string_lossy().contains('{'));
     let parent = parent.unwrap_or_else(|| PathBuf::from(format!("../{repo}-worktrees")));
-    normalize_lexically(&repo_root.join(parent).join(LANES_DIR))
+    normalize_lexically(&repo_root.join(parent).join(LANES_DIR).join(repo))
 }
 
 /// The commit the project's work starts from and its reference tree shows: the integration
@@ -139,7 +140,28 @@ pub(crate) fn add(repo_root: &Path, worktree: &Path, branch: &str, base: &str, e
     if let Some(m) = marker(worktree) {
         std::fs::write(m, "light").ok();
     }
+    // A setup record that never matches a fingerprint: the worktree counts as set up (the crew
+    // adopts it), and its first gate still runs setup (`refresh_setup`) until gates run in lanes.
+    if let Ok(record) = git(worktree, &["rev-parse", "--git-path", "nitely-setup"]) {
+        let record = PathBuf::from(record.trim());
+        std::fs::write(if record.is_absolute() { record } else { worktree.join(record) }, "light: not set up").ok();
+    }
     Ok(())
+}
+
+/// Turns a sparse worktree whole, so a gate run in it sees every file; nothing for a whole one.
+/// Returns the step to show among the gate's results.
+pub fn make_whole(worktree: &Path) -> Result<Vec<crate::playbook::CommandResult>> {
+    let Some(dirs) = sparse_set(worktree) else { return Ok(vec![]) };
+    let started = std::time::Instant::now();
+    git(worktree, &["sparse-checkout", "disable"]).context("making the sparse worktree whole for the gate")?;
+    Ok(vec![crate::playbook::CommandResult {
+        command: "git sparse-checkout disable (the gate builds every file until gates run in build lanes)".into(),
+        ok: true,
+        seconds: started.elapsed().as_secs(),
+        output: format!("It held {}; it is whole now.", dirs.join(", ")),
+        skipped: false,
+    }])
 }
 
 /// The directories a sparse worktree has, or None when it is whole.
@@ -259,7 +281,7 @@ mod tests {
         assert!(!wt.join("setup.txt").exists() && wt.join("crates/cli/src/main.rs").exists(), "whole, and nothing installed");
         assert!(is_light(&wt));
         let reference = PathBuf::from(started.reference.clone().unwrap());
-        assert_eq!(reference, base.join("wt").join(LANES_DIR).join("ref"));
+        assert_eq!(reference, base.join("wt").join(LANES_DIR).join("repo").join("ref"));
         assert!(reference.join("crates/core/src/lib.rs").exists());
         let listed = crate::git::list_worktrees(&repo.to_string_lossy()).unwrap();
         assert_eq!(listed.len(), 2, "the reference tree is nobody's work: {listed:?}");
@@ -285,7 +307,7 @@ mod tests {
 
     #[test]
     fn a_sparse_worktree_holds_the_playbook_s_and_the_issue_s_directories_and_widens() {
-        let (base, repo) = repo("nitely-sparse", "[worktree]\nmode = \"light\"\ndir = \"../wt/{key}\"\nsparse = [\"crates/core\"]\n");
+        let (base, repo) = repo("nitely-sparse", "[worktree]\nmode = \"light\"\ndir = \"../wt/{key}\"\nsparse = [\"crates/core\"]\n[gate]\ncommands = [\"git status\"]\n");
         let db = Db::open(&base.join("t.db")).unwrap();
         let actor = Actor::Agent("claude:test".into());
         let started = start_task(&db, &repo, &issue("The colors live in `src/ui/Meter.tsx`; see also nope/missing.rs."), "claude", &actor).unwrap();
@@ -302,6 +324,11 @@ mod tests {
         assert_eq!(widen(&wt, &["crates/core/src".into()]).unwrap().added, Vec::<String>::new(), "already inside crates/core");
         assert!(widen(&wt, &["nope/x.rs".into()]).unwrap_err().to_string().contains("not in this branch"));
         assert!(session_note(&Playbook::load(&repo).unwrap(), &repo, &wt).unwrap().contains("It is sparse"));
+        assert!(crate::playbook::setup_passed(&wt), "the crew counts it as set up");
+        // The gate builds every file: the worktree becomes whole first.
+        let gate = run_gate(&db, &repo, &wt, Some("NIT-7"), &actor).unwrap();
+        assert!(gate.results[0].command.starts_with("git sparse-checkout disable") && gate.passed, "{gate:?}");
+        assert!(wt.join("docs/a.md").exists() && wt.join("crates/cli/src/main.rs").exists() && sparse_set(&wt).is_none());
         // A whole worktree has nothing to widen.
         assert!(widen(&repo, &["docs".into()]).unwrap().note.contains("not sparse"));
         std::fs::remove_dir_all(base).ok();
@@ -315,7 +342,10 @@ mod tests {
         assert!(!started.light && started.reference.is_none() && PathBuf::from(&started.worktree).join("setup.txt").exists());
         assert!(!is_light(Path::new(&started.worktree)));
         let pb = Playbook::default();
-        assert_eq!(lanes_dir(&pb, Path::new("/dev/my-app")), PathBuf::from("/dev/my-app-worktrees/.nitely-lanes"));
+        assert_eq!(lanes_dir(&pb, Path::new("/dev/my-app")), PathBuf::from("/dev/my-app-worktrees/.nitely-lanes/my-app"));
+        // Repos sharing one worktree folder keep their lanes apart.
+        let shared = Playbook::parse("[worktree]\ndir = \"../worktrees/{repo}-{key}\"\n").unwrap();
+        assert_ne!(lanes_dir(&shared, Path::new("/dev/app")), lanes_dir(&shared, Path::new("/dev/api")));
         assert!(is_lane_path(r"C:\Code\my-app-worktrees\.nitely-lanes\lane-1") &&!is_lane_path("C:/Code/my-app-worktrees/app-3-x"));
         std::fs::remove_dir_all(base).ok();
     }
