@@ -33,8 +33,8 @@ Signed-off-by: Sam Lee <sam@example.com>
 
 `git commit -s` adds it. By signing off you state that you wrote the change, or otherwise have the
 right to submit it under the project's license, as the Developer Certificate of Origin 1.1 says
-(https://developercertificate.org). A pull request with an unsigned commit is not merged until
-it is signed; `git rebase --signoff main` signs every commit on your branch.
+(https://developercertificate.org). The pull request's DCO check fails, and it is not merged, until
+every commit is signed; `git rebase --signoff main` signs every commit on your branch.
 
 ## License
 
