@@ -159,7 +159,9 @@ CREATE TABLE IF NOT EXISTS approval (     -- written only from the app UI, signe
   patch_id  TEXT NOT NULL,
   by        TEXT NOT NULL,
   ts        INTEGER NOT NULL,
-  signature TEXT NOT NULL DEFAULT ''
+  signature TEXT NOT NULL DEFAULT '',
+  device    TEXT NOT NULL DEFAULT '',  -- a paired phone's id when the phone signed it (docs/phone.md)
+  signed_at INTEGER                    -- the phone's own time in what it signed
 );
 CREATE TABLE IF NOT EXISTS mirror_project ( -- projects whose issues go to their repo's tracker (mirror.rs)
   project    TEXT PRIMARY KEY,
@@ -262,7 +264,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS playbook_proposal_pending ON playbook_proposal
 
 /// Bumped when a table changes shape. Tables that only mirror Bitbucket or Linear are dropped
 /// and refilled by the next sync; tables Nitely owns get real migrations.
-const SCHEMA_VERSION: i64 = 21;
+const SCHEMA_VERSION: i64 = 22;
 
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -307,6 +309,9 @@ fn migrate(conn: &Connection) -> Result<()> {
     // v20 adds the goal table, which SCHEMA creates, and issue.goal.
     add_column(conn, "issue", "goal", "INTEGER")?;
     // v21 adds the goal_plan table, which SCHEMA creates.
+    // v22 adds approval.device and approval.signed_at: approvals a paired phone signed.
+    add_column(conn, "approval", "device", "TEXT NOT NULL DEFAULT ''")?;
+    add_column(conn, "approval", "signed_at", "INTEGER")?;
     Ok(())
 }
 

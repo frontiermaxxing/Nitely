@@ -131,6 +131,7 @@ function Pair(props: { secret: string; onAsked: (d: Device) => void }) {
 
 function Confirm(props: { device: Device; onPaired: (d: Device) => void; onGone: (why: string) => void }) {
   const { device } = props;
+  const [problem, setProblem] = useState<string | null>(null);
   useEffect(() => {
     let live = true;
     const poll = async () => {
@@ -147,6 +148,8 @@ function Confirm(props: { device: Device; onPaired: (d: Device) => void; onGone:
           saveDevice(null);
           return props.onGone("The pairing was declined in the Nitely app, or it expired.");
         }
+        // A clock that is off, say: tell the person while still asking.
+        setProblem(r.status === 200 ? null : (r.body.error ?? `The PC answered ${r.status}.`));
       } catch {
         // The PC is out of reach for a moment; keep asking.
       }
@@ -166,6 +169,7 @@ function Confirm(props: { device: Device; onPaired: (d: Device) => void; onGone:
         {device.code}
       </p>
       <p className="ph-quiet">Waiting for the PC…</p>
+      {problem && <p className="ph-error">{problem}</p>}
       <div className="ph-actions">
         <button
           className="ph-btn"

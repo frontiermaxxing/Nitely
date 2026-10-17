@@ -156,10 +156,29 @@ pub fn verified(public: &[u8; 32], list: &DeviceList) -> Option<Vec<Device>> {
 /// The paired phones, from the keychain, checked against the app's approval key. A list nobody
 /// signed, or one signed by another key, is refused: no device in it is trusted.
 pub fn load_devices() -> Result<Vec<Device>> {
-    let Some(text) = crate::approval::keychain_get(DEVICES_ACCOUNT)? else { return Ok(vec![]) };
+    trusted_devices(&crate::approval::trusted_key()?)
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_DEVICES: std::cell::RefCell<Option<DeviceList>> = const { std::cell::RefCell::new(None) };
+}
+
+/// In tests, the device list `trusted_devices` reads on this thread, instead of the keychain.
+#[cfg(test)]
+pub fn devices_in_tests(list: Option<DeviceList>) {
+    TEST_DEVICES.with(|d| *d.borrow_mut() = list);
+}
+
+/// The paired phones in the keychain's list, when it verifies with the approval key `public`.
+pub fn trusted_devices(public: &[u8; 32]) -> Result<Vec<Device>> {
+    #[cfg(test)]
+    let text = TEST_DEVICES.with(|d| d.borrow().as_ref().map(|l| serde_json::to_string(l).expect("a list")));
+    #[cfg(not(test))]
+    let text = crate::approval::keychain_get(DEVICES_ACCOUNT)?;
+    let Some(text) = text else { return Ok(vec![]) };
     let list: DeviceList = serde_json::from_str(&text).context("the phone list in the OS keychain is not one Nitely wrote")?;
-    let public = crate::approval::trusted_key()?;
-    verified(&public, &list).context("the phone list in the OS keychain is not signed by this machine's Nitely app; pair your phone again")
+    verified(public, &list).context("the phone list in the OS keychain is not signed by this machine's Nitely app; pair your phone again")
 }
 
 /// Writes the paired phones to the keychain, signed with the app's approval key. Only the app.
@@ -180,9 +199,20 @@ pub fn pair_message(secret_hex: &str, public_key_hex: &str) -> String {
     format!("nitely-pair-v1\n{secret_hex}\n{}", public_key_hex.to_ascii_lowercase())
 }
 
-/// The message a phone signs for each request after pairing.
-pub fn request_message(method: &str, path: &str, time: i64, body: &[u8]) -> String {
-    format!("nitely-phone-v1\n{method}\n{path}\n{time}\n{}", hex(&Sha256::digest(body)))
+/// The message a phone signs for each request after pairing. The nonce keeps two identical
+/// requests in the same second from carrying the same signature.
+pub fn request_message(method: &str, path: &str, time: i64, nonce: &str, body: &[u8]) -> String {
+    format!("nitely-phone-v1\n{method}\n{path}\n{time}\n{nonce}\n{}", hex(&Sha256::digest(body)))
+}
+
+/// What a phone signs to answer an ask.
+pub fn answer_message(ask: i64, answer: &str, time: i64) -> String {
+    format!("nitely-answer-v1\n{ask}\n{answer}\n{time}")
+}
+
+/// What a phone signs to send a change back to the agents.
+pub fn sendback_message(key: &str, reason: &str, time: i64) -> String {
+    format!("nitely-sendback-v1\n{}\n{reason}\n{time}", key.to_uppercase())
 }
 
 /// A QR code for `text`, as SVG.
@@ -232,6 +262,8 @@ pub struct OfferView {
 pub type Assets = Arc<dyn Fn(&str) -> Option<(Vec<u8>, String)> + Send + Sync>;
 /// The paired phones, as the server checks them on every request.
 pub type Devices = Arc<dyn Fn() -> Result<Vec<Device>> + Send + Sync>;
+/// Opens Nitely's database for a request that reads or decides.
+pub type OpenDb = Arc<dyn Fn() -> Result<crate::Db> + Send + Sync>;
 
 #[derive(Default)]
 struct State {
@@ -246,6 +278,7 @@ pub struct Phone {
     state: Mutex<State>,
     devices: Devices,
     assets: Assets,
+    db: OpenDb,
 }
 
 /// A running phone server; dropping it does not stop it, `stop` does.
@@ -263,8 +296,8 @@ impl Running {
 }
 
 impl Phone {
-    pub fn new(devices: Devices, assets: Assets) -> Arc<Phone> {
-        Arc::new(Phone { state: Mutex::new(State::default()), devices, assets })
+    pub fn new(devices: Devices, assets: Assets, db: OpenDb) -> Arc<Phone> {
+        Arc::new(Phone { state: Mutex::new(State::default()), devices, assets, db })
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
@@ -337,6 +370,14 @@ impl Phone {
         Ok(Device { id: r.id.clone(), name: r.name.clone(), public_key: r.public_key.clone(), paired_at: now() })
     }
 
+    /// Marks a request paired after the app saved its device, whatever the clock says by then: the
+    /// device is in the list, so the phone must hear it is paired.
+    pub fn mark_paired(&self, id: &str) {
+        if let Some(r) = self.state().requests.iter_mut().find(|r| r.id == id) {
+            r.status = "paired".into();
+        }
+    }
+
     /// The person's answer to a pairing request, in the app. Returns the device to add on yes.
     pub fn decide(&self, id: &str, accept: bool) -> Result<Option<Device>> {
         let mut state = self.state();
@@ -381,6 +422,26 @@ impl Phone {
                 Ok(device) => (200, Reply::Json(json!({ "name": device.name, "id": device.id }))),
                 Err((status, why)) => (status, error(why)),
             },
+            ("GET", "/phone/api/decisions") | ("POST", "/phone/api/approve") | ("POST", "/phone/api/answer") | ("POST", "/phone/api/sendback") => {
+                let device = match self.authorize(head, body) {
+                    Ok(d) => d,
+                    Err((status, why)) => return (status, error(why)),
+                };
+                let mut db = match (self.db)() {
+                    Ok(db) => db,
+                    Err(_) => return (503, error("The PC could not open Nitely's database; try again.")),
+                };
+                let result = match path {
+                    "/phone/api/decisions" => decisions(&db),
+                    "/phone/api/approve" => approve(&mut db, &device, body),
+                    "/phone/api/answer" => answer(&db, &device, body),
+                    _ => send_back(&mut db, &device, body),
+                };
+                match result {
+                    Ok(v) => (200, Reply::Json(v)),
+                    Err(Refused(status, why)) => (status, Reply::Json(json!({ "error": why }))),
+                }
+            }
             _ => (404, error("Not found.")),
         }
     }
@@ -469,13 +530,14 @@ impl Phone {
     fn check_signature(&self, head: &Head, body: &[u8], public_key_hex: &str) -> std::result::Result<(), (u16, &'static str)> {
         let time: i64 = head.header("x-nitely-time").and_then(|t| t.parse().ok()).ok_or((401, "Sign the request."))?;
         let signature = head.header("x-nitely-signature").ok_or((401, "Sign the request."))?;
+        let nonce = head.header("x-nitely-nonce").filter(|n| (8..=64).contains(&n.len()) && n.chars().all(|c| c.is_ascii_hexdigit())).ok_or((401, "Sign the request."))?;
         let t = now();
         if (time - t).abs() > SKEW {
             return Err((401, "The phone's clock is more than a minute off the PC's; set both to the network time."));
         }
         let public = unhex::<32>(public_key_hex).ok_or((401, "Bad key."))?;
         let ok = match (unhex::<64>(signature), VerifyingKey::from_bytes(&public)) {
-            (Some(sig), Ok(key)) => key.verify(request_message(&head.method, &head.path, time, body).as_bytes(), &Signature::from_bytes(&sig)).is_ok(),
+            (Some(sig), Ok(key)) => key.verify(request_message(&head.method, &head.path, time, nonce, body).as_bytes(), &Signature::from_bytes(&sig)).is_ok(),
             _ => false,
         };
         if !ok {
@@ -488,6 +550,153 @@ impl Phone {
         }
         Ok(())
     }
+}
+
+/// A decision the server refused, with the status and what to tell the person.
+struct Refused(u16, String);
+
+impl From<anyhow::Error> for Refused {
+    fn from(e: anyhow::Error) -> Refused {
+        Refused(500, format!("{e:#}"))
+    }
+}
+
+fn refuse(status: u16, why: impl Into<String>) -> Refused {
+    Refused(status, why.into())
+}
+
+/// A decision's body: what was decided, the phone's time and its signature over the decision.
+#[derive(Deserialize)]
+struct Signed<T> {
+    #[serde(flatten)]
+    what: T,
+    time: i64,
+    signature: String,
+}
+
+fn check_decision(device: &Device, message: &str, time: i64, signature: &str) -> std::result::Result<(), Refused> {
+    if (time - now()).abs() > SKEW {
+        return Err(refuse(401, "The phone's clock is more than a minute off the PC's; set both to the network time."));
+    }
+    let public = unhex::<32>(&device.public_key).ok_or_else(|| refuse(401, "Bad key."))?;
+    if !verify(&public, message, signature) {
+        return Err(refuse(400, "The decision's signature does not verify."));
+    }
+    Ok(())
+}
+
+/// An issue as the phone shows it.
+fn issue_json(i: &crate::IssueRecord) -> Value {
+    json!({ "key": i.key, "title": i.title, "kind": i.kind, "priority": i.priority, "state": i.state, "track": i.track })
+}
+
+/// What waits on the person that the phone can decide: open asks, and changes in Needs You whose
+/// latest review waits for a person's approval. The rest (a playbook change, the person's own
+/// work, an issue in Needs You for another reason) is counted as waiting at the PC.
+fn decisions(db: &crate::Db) -> std::result::Result<Value, Refused> {
+    let mut out = Vec::new();
+    let asks = db.open_asks()?;
+    for a in &asks {
+        let issue = a.issue_key.as_deref().map(|k| db.issue(k)).transpose()?.flatten();
+        out.push(json!({
+            "kind": "ask",
+            "id": format!("ask-{}", a.id),
+            "since": a.asked_at,
+            "issue": issue.as_ref().map(issue_json),
+            "ask": { "id": a.id, "question": a.question, "options": a.options, "asked_by": a.asked_by },
+        }));
+    }
+    let mut at_pc = 0;
+    for i in db.list_issues(None, false)?.into_iter().filter(|i| i.state == "Needs You") {
+        if asks.iter().any(|a| a.issue_key.as_deref().is_some_and(|k| k.eq_ignore_ascii_case(&i.key))) {
+            continue;
+        }
+        let review = db.reviews(&i.key)?.into_iter().next();
+        let approvable = i.origin == "nitely" && db.proposal_for_issue(&i.key)?.is_none() && review.as_ref().is_some_and(|r| r.approver == "human");
+        let Some(r) = review.filter(|_| approvable) else {
+            at_pc += 1;
+            continue;
+        };
+        out.push(json!({
+            "kind": "approve",
+            "id": format!("approve-{}", i.key),
+            "since": r.ts,
+            "issue": issue_json(&i),
+            "patch_id": r.patch_id,
+            "reasons": r.reasons,
+            "review": { "reviewer": r.reviewer, "verdict": r.verdict, "note": r.note, "findings": r.findings },
+        }));
+    }
+    Ok(json!({ "decisions": out, "at_pc": at_pc }))
+}
+
+/// Approves a change for the person, signed by the phone over the same message the app signs
+/// (docs/approvals.md), with the phone's own time.
+fn approve(db: &mut crate::Db, device: &Device, body: &[u8]) -> std::result::Result<Value, Refused> {
+    #[derive(Deserialize)]
+    struct Approve {
+        key: String,
+        patch: String,
+    }
+    let req: Signed<Approve> = serde_json::from_slice(body).map_err(|_| refuse(400, "Send key, patch, time and signature."))?;
+    check_decision(device, &crate::approval::message(&req.what.key, &req.what.patch, req.time), req.time, &req.signature)?;
+    let issue = db.issue(&req.what.key)?.ok_or_else(|| refuse(404, "That issue is gone."))?;
+    if issue.state != "Needs You" || issue.origin != "nitely" || db.proposal_for_issue(&issue.key)?.is_some() {
+        return Err(refuse(409, format!("{} no longer waits for your approval here.", issue.key)));
+    }
+    let review = db.reviews(&issue.key)?.into_iter().next().ok_or_else(|| refuse(409, "It has no review to approve."))?;
+    if review.patch_id != req.what.patch {
+        return Err(refuse(409, format!("{} changed since you looked; it was reviewed again. Look at it once more.", issue.key)));
+    }
+    db.move_issue(&issue.key, "Approved", None, None, &crate::Actor::Human)?;
+    let at = db.human_approval_at(&issue.key)?.ok_or_else(|| refuse(500, "The approval was not recorded."))?;
+    db.record_phone_approval(&issue.key, &req.what.patch, at, &device.id, req.time, &req.signature)?;
+    db.add_note(&issue.key, &format!("Approved from the phone “{}”.", device.name), "note", &crate::Actor::Human)?;
+    Ok(json!({ "ok": true, "state": "Approved" }))
+}
+
+fn answer(db: &crate::Db, device: &Device, body: &[u8]) -> std::result::Result<Value, Refused> {
+    #[derive(Deserialize)]
+    struct Answer {
+        ask: i64,
+        answer: String,
+    }
+    let req: Signed<Answer> = serde_json::from_slice(body).map_err(|_| refuse(400, "Send ask, answer, time and signature."))?;
+    let text = req.what.answer.trim();
+    if text.is_empty() || text.chars().count() > 4000 {
+        return Err(refuse(400, "Give an answer of up to 4000 characters."));
+    }
+    check_decision(device, &answer_message(req.what.ask, &req.what.answer, req.time), req.time, &req.signature)?;
+    let ask = db.ask(req.what.ask)?.ok_or_else(|| refuse(404, "That question is gone."))?;
+    if ask.answer.is_some() {
+        return Err(refuse(409, "That question was already answered."));
+    }
+    db.answer_ask(ask.id, text, &crate::Actor::Human)?;
+    if let Some(k) = &ask.issue_key {
+        db.add_note(k, &format!("Answered from the phone “{}”.", device.name), "note", &crate::Actor::Human)?;
+    }
+    Ok(json!({ "ok": true }))
+}
+
+fn send_back(db: &mut crate::Db, device: &Device, body: &[u8]) -> std::result::Result<Value, Refused> {
+    #[derive(Deserialize)]
+    struct SendBack {
+        key: String,
+        reason: String,
+    }
+    let req: Signed<SendBack> = serde_json::from_slice(body).map_err(|_| refuse(400, "Send key, reason, time and signature."))?;
+    let reason = req.what.reason.trim();
+    if reason.is_empty() || reason.chars().count() > 4000 {
+        return Err(refuse(400, "Say why, in up to 4000 characters."));
+    }
+    check_decision(device, &sendback_message(&req.what.key, &req.what.reason, req.time), req.time, &req.signature)?;
+    let issue = db.issue(&req.what.key)?.ok_or_else(|| refuse(404, "That issue is gone."))?;
+    if issue.state != "Needs You" || issue.origin != "nitely" {
+        return Err(refuse(409, format!("{} no longer waits for you here.", issue.key)));
+    }
+    db.move_issue(&issue.key, "Todo", None, None, &crate::Actor::Human)?;
+    db.add_note(&issue.key, &format!("Sent back from the phone “{}”: {reason}", device.name), "note", &crate::Actor::Human)?;
+    Ok(json!({ "ok": true, "state": "Todo" }))
 }
 
 enum Reply {
@@ -530,7 +739,7 @@ mod tests {
         assert_eq!(path_kind(ip("100.128.0.1"), &[ip("100.128.0.1")]), None, "outside 100.64.0.0/10");
         assert_eq!(path_kind(ip("fd7a:115c:a1e0::1"), &ts), Some(PathKind::Tunnel));
         assert_eq!(path_kind(ip("192.168.1.20"), &ts), None);
-        let phone = Phone::new(Arc::new(|| Ok(vec![])), Arc::new(|_: &str| None));
+        let phone = Phone::new(Arc::new(|| Ok(vec![])), Arc::new(|_: &str| None), Arc::new(|| anyhow::bail!("no database in this test")));
         let err = phone.start(&[ip("192.168.1.20")], 0).err().unwrap().to_string();
         assert!(err.contains("not this machine's Tailscale address"), "{err}");
     }
@@ -562,14 +771,35 @@ mod tests {
             hex(&self.key.sign(m.as_bytes()).to_bytes())
         }
         fn get(&self, base: &str, path: &str, time: i64) -> (u16, Value) {
-            let sig = self.sign(&request_message("GET", path, time, b""));
+            self.get_with(base, path, time, "0123456789abcdef")
+        }
+        fn get_with(&self, base: &str, path: &str, time: i64, nonce: &str) -> (u16, Value) {
+            let sig = self.sign(&request_message("GET", path, time, nonce, b""));
             let agent = ureq::Agent::config_builder().http_status_as_error(false).build().new_agent();
             let mut res = agent
                 .get(&format!("{base}{path}"))
                 .header("X-Nitely-Device", &self.id)
                 .header("X-Nitely-Time", &time.to_string())
+                .header("X-Nitely-Nonce", nonce)
                 .header("X-Nitely-Signature", &sig)
                 .call()
+                .unwrap();
+            (res.status().as_u16(), res.body_mut().read_json().unwrap_or(Value::Null))
+        }
+        fn post(&self, base: &str, path: &str, body: Value) -> (u16, Value) {
+            let body = body.to_string();
+            let time = now();
+            let nonce = hex(&new_secret().unwrap()[..8]);
+            let sig = self.sign(&request_message("POST", path, time, &nonce, body.as_bytes()));
+            let agent = ureq::Agent::config_builder().http_status_as_error(false).build().new_agent();
+            let mut res = agent
+                .post(&format!("{base}{path}"))
+                .header("Content-Type", "application/json")
+                .header("X-Nitely-Device", &self.id)
+                .header("X-Nitely-Time", &time.to_string())
+                .header("X-Nitely-Nonce", &nonce)
+                .header("X-Nitely-Signature", &sig)
+                .send(body)
                 .unwrap();
             (res.status().as_u16(), res.body_mut().read_json().unwrap_or(Value::Null))
         }
@@ -589,7 +819,7 @@ mod tests {
         let public = public_of(&app);
         let devices: Devices = Arc::new(move || Ok(read.lock().unwrap().as_ref().and_then(|l| verified(&public, l)).unwrap_or_default()));
         let assets: Assets = Arc::new(|p: &str| (p == "phone.html").then(|| (b"<html>phone</html>".to_vec(), content_type(p))));
-        let phone = Phone::new(devices, assets);
+        let phone = Phone::new(devices, assets, Arc::new(|| anyhow::bail!("no database in this test")));
         let running = phone.start(&["127.0.0.1".parse().unwrap()], 0).unwrap();
         let base = format!("http://{}", running.addrs[0]);
 
@@ -628,6 +858,7 @@ mod tests {
         let (status, hello) = p.get(&base, "/phone/api/hello", t + 3);
         assert_eq!((status, hello["name"].as_str()), (200, Some("Pixel")));
         assert_eq!(p.get(&base, "/phone/api/hello", t + 3).0, 409, "the same signed request twice");
+        assert_eq!(p.get_with(&base, "/phone/api/hello", t + 3, "fedcba9876543210").0, 200, "the same second, another nonce");
         assert_eq!(p.get(&base, "/phone/api/hello", t - 300).0, 401, "a request from five minutes ago");
         let stranger = FakePhone { key: ed25519_dalek::SigningKey::from_bytes(&new_secret().unwrap()), id: p.id.clone() };
         assert_eq!(stranger.get(&base, "/phone/api/hello", t + 4).0, 401, "another key under the paired id");
@@ -636,6 +867,89 @@ mod tests {
         *store.lock().unwrap() = Some(sign_list(&app, vec![]));
         assert_eq!(p.get(&base, "/phone/api/hello", t + 5).0, 401);
         running.stop();
+    }
+
+    #[test]
+    fn a_paired_phone_answers_approves_and_sends_back_and_land_trusts_its_signature() {
+        use crate::issues::{Actor, NewIssue};
+        let app = new_secret().unwrap();
+        let public = public_of(&app);
+        let mut p = FakePhone { key: ed25519_dalek::SigningKey::from_bytes(&new_secret().unwrap()), id: "d1".into() };
+        let device = Device { id: p.id.clone(), name: "Pixel".into(), public_key: p.public(), paired_at: now() };
+        let list = sign_list(&app, vec![device.clone()]);
+        let served = list.clone();
+        let devices: Devices = Arc::new(move || Ok(verified(&public, &served).unwrap_or_default()));
+        let path = crate::paths::unique_temp("nitely-phone", ".db");
+        let db_path = path.clone();
+        let phone = Phone::new(devices, Arc::new(|_: &str| None), Arc::new(move || crate::Db::open(&db_path)));
+        let running = phone.start(&["127.0.0.1".parse().unwrap()], 0).unwrap();
+        let base = format!("http://{}", running.addrs[0]);
+
+        let mut db = crate::Db::open(&path).unwrap();
+        db.create_project("NIT", "Nitely").unwrap();
+        let agent = Actor::Agent("claude:test".into());
+        let new = |title: &str| NewIssue { project: "NIT".into(), title: title.into(), kind: "feature".into(), body: "b".into(), evidence: "e".into(), source: "claude".into(), allow_similar: true, ..Default::default() };
+        let waiting = |db: &mut crate::Db, title: &str, patch: &str| {
+            let key = db.create_issue(&new(title), &agent).unwrap().key;
+            db.move_issue(&key, "In Progress", None, None, &agent).unwrap();
+            db.move_issue(&key, "Needs You", None, None, &agent).unwrap();
+            db.conn
+                .execute(
+                    "INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, reasons, ts) VALUES (?1, ?2, 'c', 'codex', 'pass', 'human', '[\"billing: a.rs\"]', ?3)",
+                    rusqlite::params![key, patch, now() - 10],
+                )
+                .unwrap();
+            key
+        };
+        let a = waiting(&mut db, "Billing fix", "p1");
+        let b = waiting(&mut db, "Pricing page", "p2");
+        let ask = db.create_ask("Which currency?", &["EUR".into(), "USD".into()], Some(&a), None, &agent).unwrap();
+
+        let (status, d) = p.get(&base, "/phone/api/decisions", now());
+        assert_eq!(status, 200, "{d}");
+        let kinds: Vec<&str> = d["decisions"].as_array().unwrap().iter().map(|x| x["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["ask", "approve"], "a's open ask stands for it; b waits for approval: {d}");
+        assert_eq!(d["decisions"][1]["patch_id"], "p2");
+
+        // An answer, signed over what it says.
+        let t = now();
+        let (status, _) = p.post(&base, "/phone/api/answer", json!({ "ask": ask.id, "answer": "EUR", "time": t, "signature": p.sign(&answer_message(ask.id, "EUR", t)) }));
+        assert_eq!(status, 200);
+        assert_eq!(db.ask(ask.id).unwrap().unwrap().answer.as_deref(), Some("EUR"));
+        let forged = p.post(&base, "/phone/api/answer", json!({ "ask": ask.id, "answer": "USD", "time": t, "signature": p.sign(&answer_message(ask.id, "EUR", t)) }));
+        assert_eq!(forged.0, 400, "a signature over another answer");
+
+        // An approval of another patch than the latest review's is refused; of the right one, it lands.
+        let t = now();
+        let stale = p.post(&base, "/phone/api/approve", json!({ "key": b, "patch": "old", "time": t, "signature": p.sign(&crate::approval::message(&b, "old", t)) }));
+        assert_eq!(stale.0, 409);
+        let (status, r) = p.post(&base, "/phone/api/approve", json!({ "key": b, "patch": "p2", "time": t, "signature": p.sign(&crate::approval::message(&b, "p2", t)) }));
+        assert_eq!(status, 200, "{r}");
+        assert_eq!(db.issue(&b).unwrap().unwrap().state, "Approved");
+        let at = db.human_approval_at(&b).unwrap().unwrap();
+        crate::approval::trust_in_tests(Some(public));
+        devices_in_tests(Some(list.clone()));
+        db.check_signed_approval(&b, "p2", at).unwrap();
+        assert!(db.check_signed_approval(&b, "p3", at).is_err(), "another patch");
+        // Removed from the list: its approvals no longer count.
+        devices_in_tests(Some(sign_list(&app, vec![])));
+        assert!(db.check_signed_approval(&b, "p2", at).is_err());
+        // A list that the app did not sign trusts nobody.
+        devices_in_tests(Some(DeviceList { devices: vec![device.clone()], signature: "00".repeat(64) }));
+        assert!(db.check_signed_approval(&b, "p2", at).is_err());
+
+        // Sending back moves a change to Todo with the reason.
+        let t = now();
+        let (status, _) = p.post(&base, "/phone/api/sendback", json!({ "key": a, "reason": "Use EUR only", "time": t, "signature": p.sign(&sendback_message(&a, "Use EUR only", t)) }));
+        assert_eq!(status, 200);
+        assert_eq!(db.issue(&a).unwrap().unwrap().state, "Todo");
+
+        // Another key under this device's id can do none of it.
+        p.key = ed25519_dalek::SigningKey::from_bytes(&new_secret().unwrap());
+        assert_eq!(p.get(&base, "/phone/api/decisions", now()).0, 401);
+        running.stop();
+        crate::approval::trust_in_tests(None);
+        devices_in_tests(None);
     }
 
     #[test]

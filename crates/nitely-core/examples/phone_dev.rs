@@ -6,11 +6,15 @@
 //!     cargo run -p nitely-core --example phone_dev
 //!
 //! then open http://127.0.0.1:7423/ (the "app") and the pairing link it shows in another tab or
-//! browser (the "phone"). Development only: nothing here is part of the app.
+//! browser (the "phone"). It uses a scratch database with a sample project, two changes waiting for
+//! approval and a question, so the phone has decisions to make. Development only: nothing here is
+//! part of the app.
 
 use nitely_core::approval::{new_secret, public_of};
 use nitely_core::http::{self, read_body, read_head, write_response, Slots};
-use nitely_core::phone::{self, sign_list, verified, Assets, DeviceList, Devices, Phone};
+use nitely_core::phone::{self, sign_list, verified, Assets, DeviceList, Devices, OpenDb, Phone};
+use nitely_core::issues::{Actor, NewIssue};
+use nitely_core::{playbook, review, submit, Db};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -23,7 +27,11 @@ fn main() -> anyhow::Result<()> {
     let devices: Devices = Arc::new(move || Ok(verified(&public, &read.lock().unwrap()).unwrap_or_default()));
     let dist = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("dist");
     let assets: Assets = Arc::new(move |p: &str| std::fs::read(dist.join(p)).ok().map(|b| (b, phone::content_type(p))));
-    let phone = Phone::new(devices, assets);
+    let db_path = nitely_core::paths::unique_temp("nitely-phone-dev", ".db");
+    seed(&db_path)?;
+    println!("scratch database: {}", db_path.display());
+    let open: OpenDb = Arc::new(move || Db::open(&db_path));
+    let phone = Phone::new(devices, assets, open);
     let running = phone.start(&["127.0.0.1".parse()?], phone::PORT)?;
     println!("phone server: {}", phone::url(running.addrs[0].ip(), running.addrs[0].port()));
 
@@ -83,4 +91,31 @@ fn main() -> anyhow::Result<()> {
 /// The phone names itself; its name goes on this page escaped.
 fn esc(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+/// A sample project with two changes waiting for approval and a question from an agent.
+fn seed(path: &std::path::Path) -> anyhow::Result<()> {
+    let mut db = Db::open(path)?;
+    db.create_project("DEMO", "Demo")?;
+    let agent = Actor::Agent("claude:demo".into());
+    let waiting = |db: &mut Db, title: &str, priority: i64, reasons: Vec<String>, findings: Vec<review::Finding>| -> anyhow::Result<String> {
+        let new = NewIssue { project: "DEMO".into(), title: title.into(), kind: "feature".into(), body: "b".into(), evidence: "e".into(), source: "claude".into(), priority, allow_similar: true, ..Default::default() };
+        let key = db.create_issue(&new, &agent)?.key;
+        db.move_issue(&key, "In Progress", None, None, &agent)?;
+        let review = review::Review { reviewer: "codex".into(), verdict: "pass".into(), findings, flagged: vec![], summary: String::new(), seconds: 80, previous: vec![], note: String::new() };
+        let gate = playbook::GateResult { passed: true, commit: "abc1234".into(), results: vec![], warnings: vec![] };
+        let s = submit::Submitted {
+            issue: key.clone(), branch: format!("claude/{}", key.to_lowercase()), base: "main".into(), patch_id: format!("patch-{}", key.to_lowercase()),
+            commit: "abc1234".into(), files: 3, gate, review: Some(review), approver: "human".into(), reasons, approval_stands: false,
+            pushed: true, pr_url: None, pr_error: None, land: None, state: "Needs You".into(), next: String::new(),
+        };
+        db.record_review(&s)?;
+        db.move_issue(&key, "Needs You", None, None, &agent)?;
+        Ok(key)
+    };
+    waiting(&mut db, "Round invoice totals to the cent", 1, vec!["billing and money: src/billing/invoice.rs".into()], vec![review::Finding { priority: 3, text: "Rename `amt` to `amount`".into(), carried: false, raised_as: None }])?;
+    waiting(&mut db, "Retry webhook deliveries with backoff", 2, vec!["the change touches the release process".into()], vec![])?;
+    let asked = waiting(&mut db, "Show prices in the visitor's currency", 3, vec![], vec![])?;
+    db.create_ask("Which currencies should the price page offer at launch?", &["EUR and USD".into(), "EUR, USD and GBP".into(), "Every currency Stripe supports".into()], Some(&asked), None, &agent)?;
+    Ok(())
 }

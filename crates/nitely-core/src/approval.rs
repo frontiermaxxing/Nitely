@@ -11,6 +11,9 @@ use crate::db::{now, Db};
 
 const SERVICE: &str = "Nitely";
 
+/// How far a phone's own time in an approval it signed may be from when the approval was recorded.
+pub const PHONE_SKEW: i64 = 120;
+
 /// In the error for an approval without a valid signature; land sends such an issue back to Needs You.
 pub const UNSIGNED: &str = "is not signed by this machine's Nitely app";
 const SECRET_ACCOUNT: &str = "approval-key";
@@ -37,6 +40,7 @@ fn entry(account: &str) -> Result<keyring::Entry> {
 
 /// A Nitely keychain entry's text; None when it does not exist. On macOS only the app reads
 /// without the OS asking the person.
+#[cfg_attr(test, allow(dead_code))]
 pub(crate) fn keychain_get(account: &str) -> Result<Option<String>> {
     if !SILENT_KEYCHAIN.load(std::sync::atomic::Ordering::Relaxed) {
         bail!("on macOS only the Nitely app reads its keychain entries");
@@ -195,11 +199,39 @@ impl Db {
         Ok(moved)
     }
 
+    /// Whether `key`'s approval at `at` of `patch` carries a signature that counts: the app's own,
+    /// or a paired phone's (docs/phone.md) when that phone is still in the device list the app
+    /// signed with `public` and signed within PHONE_SKEW of the approval.
     fn signature_verifies(&self, key: &str, patch: &str, at: i64, public: &[u8; 32]) -> Result<bool> {
-        let mut stmt = self.conn.prepare("SELECT signature FROM approval WHERE issue_key = ?1 COLLATE NOCASE AND patch_id = ?2 AND ts = ?3")?;
-        let signatures: Vec<String> = stmt.query_map(params![key, patch, at], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
-        let message = message(key, patch, at);
-        Ok(signatures.iter().any(|s| verify(public, &message, s)))
+        let mut stmt = self.conn.prepare("SELECT signature, device, signed_at FROM approval WHERE issue_key = ?1 COLLATE NOCASE AND patch_id = ?2 AND ts = ?3")?;
+        let rows: Vec<(String, String, Option<i64>)> = stmt.query_map(params![key, patch, at], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<_>>()?;
+        let mut devices: Option<Vec<crate::phone::Device>> = None;
+        for (signature, device, signed_at) in rows {
+            if device.is_empty() {
+                if verify(public, &message(key, patch, at), &signature) {
+                    return Ok(true);
+                }
+                continue;
+            }
+            let Some(signed_at) = signed_at.filter(|t| (t - at).abs() <= PHONE_SKEW) else { continue };
+            // Read once, and only when a phone signed: a list that does not verify trusts nobody.
+            let list = devices.get_or_insert_with(|| crate::phone::trusted_devices(public).unwrap_or_default());
+            let Some(public_key) = list.iter().find(|d| d.id == device).and_then(|d| unhex::<32>(&d.public_key)) else { continue };
+            if verify(&public_key, &message(key, patch, signed_at), &signature) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Records an approval a paired phone signed (docs/phone.md): the human's approval of `key` at
+    /// `at`, of `patch`, signed by `device` at the phone's own time `signed_at`.
+    pub fn record_phone_approval(&self, key: &str, patch: &str, at: i64, device: &str, signed_at: i64, signature: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO approval (issue_key, patch_id, by, ts, signature, device, signed_at) VALUES (?1, ?2, 'human', ?3, ?4, ?5, ?6)",
+            params![key.to_uppercase(), patch, at, signature, device, signed_at],
+        )?;
+        Ok(())
     }
 
     /// Whether `key`'s approval at `at` has no signature row at all yet: the app moves the issue to

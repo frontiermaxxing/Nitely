@@ -71,6 +71,13 @@ export const pairMessage = (pairSecretHex: string, publicKeyHex: string) => `nit
 /** The headers that sign a request, as crates/nitely-core/src/phone.rs `request_message` checks them. */
 export function signedHeaders(d: Device, method: string, path: string, body = ""): Record<string, string> {
   const time = Math.floor(Date.now() / 1000);
-  const message = `nitely-phone-v1\n${method}\n${path}\n${time}\n${toHex(sha256(enc.encode(body)))}`;
-  return { "X-Nitely-Device": d.id, "X-Nitely-Time": String(time), "X-Nitely-Signature": sign(d.secret, message) };
+  // Two identical requests in the same second must not carry the same signature.
+  const nonce = toHex(crypto.getRandomValues(new Uint8Array(8)));
+  const message = `nitely-phone-v1\n${method}\n${path}\n${time}\n${nonce}\n${toHex(sha256(enc.encode(body)))}`;
+  return { "X-Nitely-Device": d.id, "X-Nitely-Time": String(time), "X-Nitely-Nonce": nonce, "X-Nitely-Signature": sign(d.secret, message) };
 }
+
+/** What the phone signs for an approval: the same message the app signs (docs/approvals.md). */
+export const approvalMessage = (key: string, patch: string, time: number) => `nitely-approval-v1\n${key.toUpperCase()}\n${patch}\n${time}`;
+export const answerMessage = (ask: number, answer: string, time: number) => `nitely-answer-v1\n${ask}\n${answer}\n${time}`;
+export const sendBackMessage = (key: string, reason: string, time: number) => `nitely-sendback-v1\n${key.toUpperCase()}\n${reason}\n${time}`;

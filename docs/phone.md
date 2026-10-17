@@ -201,5 +201,7 @@ page, with randomness from `crypto.getRandomValues`, which browsers offer on any
 - `crates/nitely-core/examples/phone_dev.rs`: the real phone server on loopback with a stand-in for
   the app's Phone screen, to pair a browser tab as the phone end to end (`npm run build`, then
   `cargo run -p nitely-core --example phone_dev`).
-- Still to come: the decisions ([NIT-145](nitely://issue/NIT-145)), and phone approvals checked
-  at land ([NIT-146](nitely://issue/NIT-146)).
+- Phone decisions (`/phone/api/decisions`, `approve`, `answer`, `sendback`) are in `phone.rs`;
+  `approval.rs` checks phone-signed approvals in `land` against the signed device list (the
+  `approval` table's `device` and `signed_at`). The harness seeds a scratch database with decisions.
+- Still to come: the phone page's Inbox ([NIT-145](nitely://issue/NIT-145)).

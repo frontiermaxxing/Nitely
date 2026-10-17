@@ -28,7 +28,7 @@ impl PhoneApp {
             }
             None
         });
-        PhoneApp { phone: Phone::new(Arc::new(phone::load_devices), assets), running: Mutex::new(None) }
+        PhoneApp { phone: Phone::new(Arc::new(phone::load_devices), assets, Arc::new(nitely_core::Db::open_default)), running: Mutex::new(None) }
     }
 
     fn running(&self) -> std::sync::MutexGuard<'_, Option<Running>> {
@@ -105,7 +105,12 @@ pub async fn phone_decide(app: tauri::State<'_, PhoneApp>, id: String, accept: b
         devices.push(device);
         phone::save_devices(&secret, devices).map_err(err)?;
     }
-    app.phone.decide(&id, accept).map_err(err)?;
+    if accept {
+        // The device is in the list now, so the request is paired even if it expired meanwhile.
+        app.phone.mark_paired(&id);
+    } else {
+        app.phone.decide(&id, false).map_err(err)?;
+    }
     Ok(status(&app))
 }
 
