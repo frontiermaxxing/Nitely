@@ -46,8 +46,9 @@ the agent's transcript.
   again, and its phones pair again. Copying the old key into the folder's own entries would let a
   sandbox seeded from a copy of the person's data adopt their real key, which is the hole this
   closes. The cost falls only on profiles on a custom `NITELY_HOME`. It is not silent: the app
-  says so in one line under its version when it makes the new key, and records it as an
-  `approval_key` event, without ever reading the person's entries.
+  records an `approval_key` event when it makes the new key, without ever reading the person's
+  entries, and shows a banner saying so, at any window width and across restarts, until it is
+  dismissed.
 - **macOS:** only the app that made a keychain entry reads it without the OS asking the person. So
   on macOS an agent's `land` refuses a change that waits for approval, and the app lands it itself
   once the person approves, whatever the playbook says about who lands. Windows and Linux read the

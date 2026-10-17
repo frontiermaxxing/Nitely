@@ -272,7 +272,6 @@ export function App() {
             {error ? "Local · not reading" : isLive ? "Local · live data" : isPreview ? "Local · sample data" : "Local · live"}
           </div>
           <UpdateLine status={update} onStatus={setUpdate} />
-          <ApprovalNotice />
           {isPreview && <PreviewFoot active={view.kind === "kit"} onKit={() => setView({ kind: "kit" })} />}
         </div>
       </nav>
@@ -285,6 +284,7 @@ export function App() {
             refused here; use the app for those.
           </p>
         )}
+        <ApprovalNotice />
         {agentsError && <p className="error banner small">Could not check your agents' Nitely setup: {agentsError}</p>}
         {(agentChanges > 0 || agentErrors > 0) && view.kind !== "agents" && (
           <p className="banner notice small">

@@ -1801,7 +1801,7 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
       case "approval_notice":
         // `?approval-notice` shows the line a profile on its own data folder gets once.
         return new URLSearchParams(location.search).has("approval-notice")
-          ? "This profile has its own approval key now: approve waiting changes and pair phones again."
+          ? { text: "This profile has its own approval key now: approve waiting changes and pair phones again.", at: NOW }
           : null;
       case "check_for_update":
         UPDATE = { ...UPDATE, checked_at: NOW };

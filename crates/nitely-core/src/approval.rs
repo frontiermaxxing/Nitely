@@ -262,6 +262,16 @@ impl Db {
         Ok(())
     }
 
+    /// When the app last made this data folder its own approval key (`log_new_folder_key`), so the
+    /// app keeps saying so after a restart until the person has read it.
+    pub fn new_folder_key_at(&self) -> Result<Option<i64>> {
+        Ok(self.conn.query_row(
+            "SELECT MAX(ts) FROM event WHERE type = 'approval_key' AND summary = ?1",
+            params![NEW_FOLDER_KEY_NOTICE],
+            |r| r.get(0),
+        )?)
+    }
+
     pub fn log_approval_key_restored(&self) -> Result<()> {
         self.conn.execute(
             "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, 'human', NULL, 'approval_key', ?2)",
@@ -405,6 +415,19 @@ mod tests {
         assert_eq!(service_for(&dir.join("."), real), one);
         assert_eq!(service_for(&dir.join("sub").join(".."), real), one);
         assert_eq!(service_for(&dir.join("sub"), &dir.join("sub").join(".")), "Nitely", "the person's own folder, spelled two ways");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_new_folder_key_is_recorded_until_read() {
+        let dir = crate::paths::unique_temp("nitely-approval", "");
+        let db = Db::open(&dir.join("t.db")).unwrap();
+        assert_eq!(db.new_folder_key_at().unwrap(), None);
+        db.log_approval_key_restored().unwrap();
+        assert_eq!(db.new_folder_key_at().unwrap(), None, "another approval_key event is not this one");
+        db.log_new_folder_key().unwrap();
+        assert!(db.new_folder_key_at().unwrap().is_some());
+        drop(db);
         std::fs::remove_dir_all(&dir).ok();
     }
 

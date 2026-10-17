@@ -60,18 +60,39 @@ export function UpdateLine({ status, onStatus }: { status: UpdateStatus | null; 
   );
 }
 
-/** One line under the version when this run gave the data folder its own approval key (a profile
- * on NITELY_HOME): what was approved or paired there before has to be done again. */
+const NOTICE_SEEN_KEY = "nitely.approval-notice.seen";
+
+/** A banner when the app gave this data folder its own approval key (a profile on NITELY_HOME):
+ * what was approved or paired there before has to be done again. It stays, at any width and
+ * across restarts, until the person dismisses that notice. */
 export function ApprovalNotice() {
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ text: string; at: number } | null>(null);
+  const [seen, setSeen] = useState<number>(() => {
+    try {
+      return Number(localStorage.getItem(NOTICE_SEEN_KEY)) || 0;
+    } catch {
+      return 0;
+    }
+  });
   useEffect(() => {
-    invoke<string | null>("approval_notice").then(setNotice).catch(() => setNotice(null));
+    invoke<{ text: string; at: number } | null>("approval_notice").then(setNotice).catch(() => setNotice(null));
   }, []);
-  if (!notice) return null;
+  if (!notice || notice.at <= seen) return null;
+  const dismiss = () => {
+    setSeen(notice.at);
+    try {
+      localStorage.setItem(NOTICE_SEEN_KEY, String(notice.at));
+    } catch {
+      // Storage refused: it shows again next start.
+    }
+  };
   return (
-    <div className="nav-update notice" role="status">
-      {notice}
-    </div>
+    <p className="banner notice small" role="status">
+      {notice.text}{" "}
+      <button className="link" onClick={dismiss}>
+        Got it
+      </button>
+    </p>
   );
 }
 

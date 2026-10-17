@@ -274,10 +274,18 @@ async fn move_issue(key: String, state: String, evidence: Option<String>, reason
 /// public half beside it for `land` to check with (docs/approvals.md).
 static NEW_KEY_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// The line the sidebar shows when this run made the data folder its own approval key.
+/// What the app says when it made this data folder its own approval key: the text and when, so the
+/// person can dismiss that one notice. Kept across restarts until then.
+#[derive(serde::Serialize)]
+struct ApprovalNotice {
+    text: &'static str,
+    at: i64,
+}
+
 #[tauri::command]
-fn approval_notice() -> Option<&'static str> {
-    nitely_core::approval::new_folder_key_notice()
+fn approval_notice() -> Result<Option<ApprovalNotice>, String> {
+    let at = db()?.new_folder_key_at().map_err(err)?;
+    Ok(at.map(|at| ApprovalNotice { text: nitely_core::approval::NEW_FOLDER_KEY_NOTICE, at }))
 }
 
 fn approval_key(db: &Db) -> Result<[u8; 32], String> {
