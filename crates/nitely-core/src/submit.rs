@@ -136,18 +136,30 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     } else {
         let (vendor, _) = crate::git::parse_branch(&branch);
         let vendor = vendor.unwrap_or_default();
-        let choice = pb.review.choose(&vendor, &|r| pb.review.is_installed(r, &worktree))?;
-        let reviewer = choice.reviewer.clone();
         let previous = previous_round(db, &issue.key, &worktree)?;
-        let started = format!("Review by {reviewer}{} started", noted(&choice.note));
-        db.log_event(actor, Some(&issue.key), Some(&wt), "review_started", &started)?;
-        let mut review = match pb.review.run(&reviewer, &worktree, &since, previous.as_ref()) {
-            Ok(r) => r,
-            Err(e) => {
-                db.log_event(actor, Some(&issue.key), Some(&wt), "review_failed", &format!("Review by {reviewer} did not finish"))?;
-                return Err(e);
+        // A reviewer that cannot run (not signed in, say) is passed over for the next candidate;
+        // one that ran and did not finish its review stops the submit.
+        let mut failed: Vec<crate::review::CouldNotRun> = vec![];
+        let (choice, mut review) = loop {
+            let choice = pb.review.choose_after(&vendor, &|r| pb.review.is_installed(r, &worktree), &failed)?;
+            let reviewer = choice.reviewer.clone();
+            let started = format!("Review by {reviewer}{} started", noted(&choice.note));
+            db.log_event(actor, Some(&issue.key), Some(&wt), "review_started", &started)?;
+            match pb.review.run(&reviewer, &worktree, &since, previous.as_ref()) {
+                Ok(r) => break (choice, r),
+                Err(e) => match e.downcast::<crate::review::CouldNotRun>() {
+                    Ok(out) => {
+                        db.log_event(actor, Some(&issue.key), Some(&wt), "review_failed", &format!("Review by {reviewer} could not run ({}); trying another reviewer", out.why))?;
+                        failed.push(out);
+                    }
+                    Err(e) => {
+                        db.log_event(actor, Some(&issue.key), Some(&wt), "review_failed", &format!("Review by {reviewer} did not finish"))?;
+                        return Err(e);
+                    }
+                },
             }
         };
+        let reviewer = choice.reviewer.clone();
         review.note = choice.note.clone();
         out.reasons.extend(pb.review.independence_reason(&reviewer, &vendor, &choice.note));
         out.reasons.extend(pb.review.flag_reasons(&review));
@@ -660,6 +672,29 @@ reason = "money logic"
         db.set_owner(&issue.key, "agent", &Actor::Human).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(1100));
         assert_eq!(submit(&mut db, &config, &opts, &actor).unwrap().state, "In Progress");
+
+        // A preferred reviewer that is installed but signed out is passed over: the next one
+        // reviews, and the note says why.
+        let pb_path = repo.join(playbook::PLAYBOOK_PATH);
+        let pb = std::fs::read_to_string(&pb_path).unwrap();
+        std::fs::write(&pb_path, pb.replace("codex = [\"nitely-test-no-such-codex\"]", &format!("codex = [\"{}\", \"-c\", \"echo 'Error: not logged in' >&2; exit 1\"]", playbook::posix_sh()))).unwrap();
+        let issue = db.create_issue(&new("Signed out"), &actor).unwrap();
+        db.move_issue(&issue.key, "In Progress", None, None, &actor).unwrap();
+        let started = playbook::start_task(&db, &repo, &issue, "claude", &actor).unwrap();
+        let wt = Path::new(&started.worktree);
+        std::fs::write(wt.join("signed.txt"), "x").unwrap();
+        sh(wt, &["add", "."]);
+        sh(wt, &["commit", "-q", "-m", "signed"]);
+        let opts = SubmitOptions { dir: started.worktree.as_str(), issue_key: None, skip_review: false, local_only: true };
+        let s = submit(&mut db, &config, &opts, &actor).unwrap();
+        let review = s.review.as_ref().unwrap();
+        assert_eq!((review.reviewer.as_str(), review.note.as_str()), ("claude", "same vendor: codex could not run: not signed in"), "{s:?}");
+        let failed: String = db
+            .conn
+            .query_row("SELECT summary FROM event WHERE issue_key = ?1 AND type = 'review_failed'", [&issue.key], |r| r.get(0))
+            .unwrap();
+        assert!(failed.contains("codex could not run (not signed in)"), "{failed}");
+        std::fs::write(&pb_path, &pb).unwrap();
 
         // A playbook that requires another vendor's review sends a same-vendor one to a human, and
         // with no reviewer installed at all, submit says what to install.

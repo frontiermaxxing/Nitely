@@ -127,6 +127,43 @@ pub struct Review {
     pub note: String,
 }
 
+/// A reviewer that could not run at all: it did not start, it stopped with an error, or it is not
+/// signed in. Unlike a review that ran and found problems, another reviewer can take its place.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CouldNotRun {
+    pub reviewer: String,
+    /// Short, for the review's note: "not signed in", "exited with code 1".
+    pub why: String,
+    /// What the person can do about it, and the tail of what the reviewer printed.
+    pub detail: String,
+}
+
+impl std::fmt::Display for CouldNotRun {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the {} reviewer could not run ({}): {}", self.reviewer, self.why, self.detail)
+    }
+}
+
+impl std::error::Error for CouldNotRun {}
+
+/// Whether a failed reviewer's output says it is not signed in.
+fn says_signed_out(output: &str) -> bool {
+    let o = output.to_lowercase();
+    ["not logged in", "not signed in", "please log in", "please run /login", "log in again", "login required", "oauth", "invalid api key", "api key", "unauthorized", "401", "authentication", "expired"]
+        .iter()
+        .any(|p| o.contains(p))
+}
+
+/// What the person runs to sign a reviewer's CLI in.
+fn login_hint(reviewer: &str, rules: &ReviewRules) -> String {
+    let program = rules.commands.get(reviewer).and_then(|c| c.first()).map(String::as_str).unwrap_or(reviewer);
+    match cli_name(program).as_str() {
+        "claude" => "run `claude` in a terminal and sign in with /login".to_string(),
+        "codex" => "run `codex login`".to_string(),
+        _ => format!("sign `{program}` in"),
+    }
+}
+
 /// The reviewer `choose` picked for a branch.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Choice {
@@ -152,6 +189,14 @@ impl ReviewRules {
     /// `reviewer` map is the preference; when that one is missing, another vendor that is
     /// installed reviews, and only when none is, the author's own vendor in a fresh session.
     pub fn choose(&self, vendor: &str, installed: &dyn Fn(&str) -> bool) -> Result<Choice> {
+        self.choose_after(vendor, installed, &[])
+    }
+
+    /// `choose`, passing over the reviewers that already `failed` to run on this branch: the next
+    /// candidate reviews, and the note says why the preferred one did not.
+    pub fn choose_after(&self, vendor: &str, installed: &dyn Fn(&str) -> bool, failed: &[CouldNotRun]) -> Result<Choice> {
+        let failed_one = |r: &str| failed.iter().find(|f| f.reviewer == r);
+        let installed = |r: &str| installed(r) && failed_one(r).is_none();
         let preferred = self.reviewer_for(vendor).filter(|p| self.commands.contains_key(*p));
         let author = self.author_vendor(vendor);
         let same = |r: &str| author.is_some_and(|a| a == r);
@@ -162,13 +207,23 @@ impl ReviewRules {
             if candidates.is_empty() {
                 bail!("the playbook has no reviewer commands (add review.commands)");
             }
+            if !failed.is_empty() {
+                let each: Vec<String> = failed
+                    .iter()
+                    .map(|f| if f.why == "not signed in" { format!("{} is not signed in ({})", f.reviewer, login_hint(&f.reviewer, self)) } else { f.to_string() })
+                    .collect();
+                bail!("no reviewer could run on this machine: {}", each.join("; "));
+            }
             let wanted: Vec<String> = candidates.iter().map(|r| install_hint(r, self)).collect();
             bail!(
                 "no reviewer can run on this machine: install {} (or point review.commands in the playbook at a reviewer you have)",
                 wanted.join(" or ")
             );
         };
-        let missing = self.reviewer_for(vendor).filter(|p| *p != reviewer).map(|m| format!("{m} not installed"));
+        let missing = self.reviewer_for(vendor).filter(|p| *p != reviewer).map(|m| match failed_one(m) {
+            Some(f) => format!("{m} could not run: {}", f.why),
+            None => format!("{m} not installed"),
+        });
         let note = match (author, missing) {
             (Some(a), Some(m)) if a == reviewer => format!("same vendor: {m}"),
             (Some(a), None) if a == reviewer => "same vendor".to_string(),
@@ -381,7 +436,8 @@ using P0 for data loss or security, P1 for a definite bug in normal use, P2 for 
         let mut cmd = shell_free_command(&program);
         cmd.args(&args).current_dir(worktree).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         without_session_markers(&mut cmd);
-        let mut child = cmd.spawn().with_context(|| format!("starting the {reviewer} reviewer ({})", command[0]))?;
+        let could_not = |why: &str, detail: String| anyhow::Error::new(CouldNotRun { reviewer: reviewer.to_string(), why: why.to_string(), detail });
+        let mut child = cmd.spawn().map_err(|e| could_not("did not start", format!("{}: {e}", command[0])))?;
         let mut stdin = child.stdin.take().unwrap();
         let prompt = self.prompt(base, previous);
         let writer = std::thread::spawn(move || stdin.write_all(prompt.as_bytes()));
@@ -413,10 +469,13 @@ using P0 for data loss or security, P1 for a definite bug in normal use, P2 for 
         let stderr = err_reader.join().ok().and_then(|r| r.ok()).unwrap_or_default();
         let text = if uses_file { std::fs::read_to_string(&out_file).unwrap_or_default() } else { stdout.clone() };
         std::fs::remove_file(&out_file).ok();
+        let printed = format!("{text}\n{stdout}{stderr}");
+        let signed_out = || could_not("not signed in", format!("{}.\n{}", login_hint(reviewer, self), tail(&printed)));
         if !status.success() {
-            bail!("the {reviewer} review failed ({status}):\n{}", tail(&format!("{stdout}{stderr}")));
+            return Err(if says_signed_out(&printed) { signed_out() } else { could_not(&format!("exited with {status}"), tail(&printed)) });
         }
-        self.parse(reviewer, &text, started.elapsed().as_secs(), previous, Some(worktree))
+        // A reviewer that is signed out may still exit 0, printing why instead of a review.
+        self.parse(reviewer, &text, started.elapsed().as_secs(), previous, Some(worktree)).map_err(|e| if says_signed_out(&printed) { signed_out() } else { e })
     }
 }
 
@@ -948,6 +1007,14 @@ mod tests {
         own.reviewer.insert("claude".into(), "claude".into());
         assert_eq!(own.choose("claude", &only(&["claude", "codex"])).unwrap(), c("claude", false, "same vendor"));
 
+        // One that could not run is passed over, and the note says why, so a playbook that requires
+        // another vendor still sends the review to a person.
+        let out = |reviewer: &str, why: &str| CouldNotRun { reviewer: reviewer.into(), why: why.into(), detail: String::new() };
+        let after = |names, failed: &[CouldNotRun]| r.choose_after("claude", &only(names), failed);
+        assert_eq!(after(&["claude", "codex"], &[out("codex", "not signed in")]).unwrap(), c("claude", false, "same vendor: codex could not run: not signed in"));
+        let both = after(&["claude", "codex"], &[out("codex", "not signed in"), out("claude", "exited with exit code: 1")]).unwrap_err().to_string();
+        assert!(both.starts_with("no reviewer could run on this machine: codex is not signed in (run `codex login`); the claude reviewer could not run (exited"), "{both}");
+
         let none = r.choose("claude", &only(&[])).unwrap_err().to_string();
         assert!(none.contains("no reviewer can run") && none.contains("Codex (the `codex` CLI)") && none.contains("Claude Code"), "{none}");
 
@@ -992,5 +1059,24 @@ mod tests {
         let review = r.run("fake", &std::env::temp_dir(), "main", None).unwrap();
         assert_eq!(review.verdict, "pass");
         assert!(review.flagged.is_empty());
+
+        // A reviewer that is signed out, whether it exits with an error or with 0, could not run;
+        // one that fails otherwise could not run either; one that ran but did not finish its
+        // review is an ordinary error.
+        let sh = |script: &str| vec![crate::playbook::posix_sh(), "-c".into(), format!("cat > /dev/null; {script}")];
+        let could_not = |script: &str| {
+            let mut r = rules();
+            r.commands.insert("fake".into(), sh(script));
+            r.run("fake", &std::env::temp_dir(), "main", None).unwrap_err().downcast::<CouldNotRun>()
+        };
+        let out = could_not("echo 'Error: OAuth session expired and cannot be refreshed' >&2; exit 1").unwrap();
+        assert_eq!(out.why, "not signed in");
+        assert!(out.detail.contains("sign `") && out.detail.contains("OAuth session expired"), "{}", out.detail);
+        assert_eq!(could_not("echo 'Invalid API key - Please run /login'").unwrap().why, "not signed in");
+        assert!(could_not("echo 'disk full' >&2; exit 3").unwrap().why.starts_with("exited with"));
+        assert!(could_not("echo 'I looked around but ran out of time'").is_err(), "an unfinished review is not a reviewer that could not run");
+        let mut r = rules();
+        r.commands.insert("gone".into(), vec!["nitely-test-no-such-reviewer".into()]);
+        assert_eq!(r.run("gone", &std::env::temp_dir(), "main", None).unwrap_err().downcast::<CouldNotRun>().unwrap().why, "did not start");
     }
 }
