@@ -343,7 +343,9 @@ function eventOf(d: Decision, detail: IssueDetail | undefined, place?: { n: numb
   switch (d.kind) {
     case "ask":
       // The place first: a narrow list cuts the end of the line.
-      return { text: `${place ? `${place.n} of ${place.of} · ` : ""}${who(d.ask!.asked_by)} waits for your answer`, tone: null, agent: d.ask!.asked_by };
+      const at = place ? `${place.n} of ${place.of} · ` : "";
+      if (d.ask!.finding) return { text: `${at}${who(d.ask!.asked_by)} asks you to accept a P${d.ask!.finding.priority} finding`, tone: null, agent: d.ask!.asked_by };
+      return { text: `${at}${who(d.ask!.asked_by)} waits for your answer`, tone: null, agent: d.ask!.asked_by };
     case "approve": {
       if (d.issue && d.issue.origin !== "nitely") return { text: `Waits in ${originName(d.issue.origin)}`, tone: null, agent };
       const proposal = proposalOf(detail);
@@ -485,6 +487,14 @@ function DecisionDetail(props: {
     const id = d.ask.id;
     props.onAct("answer", () => invoke("answer_ask", { id, answer: value.trim() }).then(() => drafts.delete(id)), value.trim());
   };
+  // A review finding the agent asks the person to accept as it is: signed in the backend.
+  const finding = d.kind === "ask" ? (d.ask?.finding ?? null) : null;
+  const decideFinding = (accept: boolean, line: string) => {
+    if (!d.ask || !line.trim()) return;
+    const id = d.ask.id;
+    const text = `${accept ? "Accepted" : "Not accepted"}: ${line.trim()}`;
+    props.onAct("answer", () => invoke(accept ? "accept_finding" : "decline_finding", accept ? { id, reason: line.trim() } : { id, why: line.trim() }).then(() => drafts.delete(id)), text);
+  };
   // The keys do what the card's buttons do, and nothing once it is resolved.
   props.keys.current = resolved
     ? {}
@@ -492,7 +502,7 @@ function DecisionDetail(props: {
         // A goal plan is approved with its edits, from its own button.
         approve: d.kind === "approve" && native && !plan ? () => move("Approved") : undefined,
         todo: (d.kind === "approve" || d.kind === "land") && native && issue && !proposal && !plan ? () => move("Todo") : undefined,
-        option: d.kind === "ask" && d.ask ? (i) => d.ask!.options[i] !== undefined && answer(d.ask!.options[i]) : undefined,
+        option: d.kind === "ask" && d.ask && !finding ? (i) => d.ask!.options[i] !== undefined && answer(d.ask!.options[i]) : undefined,
         reply: d.kind === "ask" ? () => card.current?.querySelector<HTMLInputElement>(".dd-words input")?.focus() : undefined,
       };
   const finish = () =>
@@ -521,7 +531,9 @@ function DecisionDetail(props: {
   };
   const status = resolved
     ? DONE_WORD[resolved.move]
-    : d.kind === "ask"
+    : finding
+      ? "asks you to accept a review finding"
+      : d.kind === "ask"
       ? "waiting for your answer"
       : d.kind === "own"
         ? "yours to do"
@@ -536,7 +548,7 @@ function DecisionDetail(props: {
   return (
     <article className={`inbox-detail decision-${d.kind}`} ref={card}>
       <div className="dd-context">
-        <span className="dd-kind">{proposal ? "Playbook change" : plan ? "Goal plan" : KIND_WORD[d.kind]}</span>
+        <span className="dd-kind">{proposal ? "Playbook change" : plan ? "Goal plan" : finding ? "Review finding" : KIND_WORD[d.kind]}</span>
         {issue && <span className="mono muted">{issue.key}</span>}
         <span className="dd-meta" title={`Waiting since ${new Date(d.since * 1000).toLocaleString()}`}>
           {[issue?.kind, `${d.kind === "ask" ? "asked" : "waiting"} ${ago(now, d.since)}`].filter(Boolean).join(" · ")}
@@ -573,7 +585,8 @@ function DecisionDetail(props: {
             {outcomeOf(resolved)}
           </p>
         )}
-        {!resolved && d.kind === "ask" && d.ask && (
+        {!resolved && d.kind === "ask" && d.ask && finding && <DecideFinding askId={d.ask.id} busy={busy} onDecide={decideFinding} />}
+        {!resolved && d.kind === "ask" && d.ask && !finding && (
           <Answer askId={d.ask.id} options={d.ask.options} busy={busy} onAnswer={answer} />
         )}
         {!resolved && !plan && pending && proposal && (
@@ -687,6 +700,21 @@ function Body(props: { decision: Decision; detail?: IssueDetail; integration: st
 
   switch (d.kind) {
     case "ask": {
+      const f = d.ask!.finding;
+      if (f) {
+        return (
+          <>
+            <p className="decision-matter">Accept this review finding as it is?</p>
+            <p className="dd-finding">
+              <span className="dd-finding-p mono">P{f.priority}</span> {f.text}
+            </p>
+            <p className="dd-reasoning">{d.ask!.question}</p>
+            <p className="muted small">
+              Accepting signs your decision for this change: it no longer blocks the land, and the next review round is told. Send it back and it stays a defect to fix.
+            </p>
+          </>
+        );
+      }
       return <p className="decision-matter">{d.ask!.question}</p>;
     }
     case "approve": {
@@ -846,6 +874,33 @@ function Answer(props: { askId: number; options: string[]; busy: boolean; onAnsw
         </button>
       </form>
     </div>
+  );
+}
+
+/** Accept or send back a review finding, with the one line the record and the agent keep. */
+function DecideFinding(props: { askId: number; busy: boolean; onDecide: (accept: boolean, line: string) => void }) {
+  const [text, setTextState] = useState(() => drafts.get(props.askId) ?? "");
+  const setText = (value: string) => {
+    setTextState(value);
+    if (value) drafts.set(props.askId, value);
+    else drafts.delete(props.askId);
+  };
+  return (
+    <form
+      className="dd-words dd-decide-finding"
+      onSubmit={(e) => {
+        e.preventDefault();
+        props.onDecide(true, text);
+      }}
+    >
+      <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Why, in one line" aria-label="Why, in one line: the record and the agent keep it" />
+      <button className="btn primary" type="submit" disabled={props.busy || !text.trim()}>
+        Accept
+      </button>
+      <button className="btn" type="button" disabled={props.busy || !text.trim()} onClick={() => props.onDecide(false, text)}>
+        Send back
+      </button>
+    </form>
   );
 }
 

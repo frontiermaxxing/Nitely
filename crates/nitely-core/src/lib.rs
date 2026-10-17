@@ -1,6 +1,7 @@
 //! Shared core for the Nitely app and the `nitely` CLI: configuration, the SQLite
 //! event store, the git worktree reader, and agent hook parsing.
 
+pub mod accept;
 pub mod activity;
 pub mod approval;
 pub mod brief;

@@ -93,6 +93,17 @@ button.dd-title:hover { text-decoration: underline; text-decoration-color: var(-
 .dd-words input:focus { outline: none; }
 .dd-words:focus-within { border-color: var(--line-strong); }
 .dd-words .btn { min-height: 28px; }
+/* A review finding an agent asks the person to accept as it is (NIT-191). */
+.dd-finding {
+  margin: 0; padding: 8px 12px; border-left: 2px solid var(--fail); background: var(--sunken); border-radius: 0 6px 6px 0;
+  font-size: var(--text-md); line-height: 1.5; overflow-wrap: anywhere;
+}
+.dd-finding-p { color: var(--fail); font-size: var(--text-xs); margin-right: 4px; }
+.dd-reasoning { margin: 0; color: var(--fg-2); font-size: var(--text-md); line-height: 1.55; overflow-wrap: anywhere; text-wrap: pretty; }
+@media (max-width: 560px) {
+  .dd-decide-finding { flex-wrap: wrap; padding: 4px 4px 4px 14px; }
+  .dd-decide-finding input { flex-basis: 100%; }
+}
 /* A decision the human just acted on: what happened, in place of its actions, until the next one takes its place. */
 .dd-outcome {
   display: flex; align-items: center; gap: 10px; min-height: 38px; margin: 0; font-size: var(--text-md);

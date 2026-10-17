@@ -81,3 +81,6 @@ export function signedHeaders(d: Device, method: string, path: string, body = ""
 export const approvalMessage = (key: string, patch: string, time: number) => `nitely-approval-v1\n${key.toUpperCase()}\n${patch}\n${time}`;
 export const answerMessage = (ask: number, answer: string, time: number) => `nitely-answer-v1\n${ask}\n${answer}\n${time}`;
 export const sendBackMessage = (key: string, reason: string, time: number) => `nitely-sendback-v1\n${key.toUpperCase()}\n${reason}\n${time}`;
+/** What the phone signs to accept a review finding: the message the app signs (crates/nitely-core/src/accept.rs). */
+export const acceptMessage = (key: string, patch: string, finding: string, reason: string, time: number) =>
+  `nitely-accept-v1\n${key.toUpperCase()}\n${patch}\n${finding}\n${reason}\n${time}`;

@@ -300,6 +300,8 @@ export interface Ask {
   answered_at: number | null;
   /** Why it closed unanswered: its issue closed first. */
   closed?: string | null;
+  /** The review finding the agent asks the person to accept as it is (crates/nitely-core/src/accept.rs). */
+  finding?: { priority: number; text: string } | null;
 }
 
 export interface Project {

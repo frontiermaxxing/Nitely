@@ -89,6 +89,10 @@ enum Cmd {
         /// Wait for the answer and print it.
         #[arg(long)]
         wait: bool,
+        /// Ask the human to accept this P0/P1 finding of --issue's latest review as it is (its
+        /// number from 1, or its text); the question is your reasoning.
+        #[arg(long, requires = "issue")]
+        finding: Option<String>,
     },
     /// Create an issue's branch and worktree from the integration branch, per the repo's
     /// playbook (.nitely/playbook.toml), and run its setup commands. Prints the worktree.
@@ -779,9 +783,12 @@ fn run(cmd: Cmd) -> Result<()> {
                 }
             }
         }
-        Cmd::Ask { question, options, issue, wait } => {
-            let db = Db::open_default()?;
-            let ask = db.create_ask(&question, &options, issue.as_deref(), Some(&cwd()?), &me)?;
+        Cmd::Ask { question, options, issue, wait, finding } => {
+            let mut db = Db::open_default()?;
+            let ask = match (&finding, &issue) {
+                (Some(finding), Some(issue)) => db.request_acceptance(issue, finding, &question, Some(&cwd()?), &me)?,
+                _ => db.create_ask(&question, &options, issue.as_deref(), Some(&cwd()?), &me)?,
+            };
             if !wait {
                 return print_json(&ask);
             }

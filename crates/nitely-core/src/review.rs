@@ -95,6 +95,9 @@ pub struct PreviousRound {
     /// Whether `commit` is still in the branch's history. After a rebase it is not, so there is no
     /// diff since that round and the whole branch is reviewed again.
     pub in_history: bool,
+    /// Findings the person accepted as they are (NIT-191), with their reasons: the reviewer does not
+    /// raise them again. They are not in `findings`.
+    pub accepted: Vec<(Finding, String)>,
 }
 
 /// A previous round's finding and what this round says about it: `fixed`; `open`, with current code
@@ -295,6 +298,16 @@ where file, line and code are from the current branch and still show the problem
 moved or gone: check the problem itself, not the old line. If it no longer happens, it is fixed; an open answer that \
 cites no current code is not counted as open. Do not list an open one again as a defect: it stays on record by itself.\n",
             );
+        }
+        if let Some(prev) = previous.filter(|p| !p.accepted.is_empty()) {
+            p.push_str(
+                "\nThe person who owns this change accepted these findings as they are: a trade-off they decided, not a \
+defect left to fix. Do not raise them again, or anything that only restates them, unless the code they cite has changed \
+since in a way that makes them worse:\n",
+            );
+            for (f, reason) in &prev.accepted {
+                p.push_str(&format!("- [P{}] {} (accepted: {reason})\n", f.priority, f.text));
+            }
         }
         if let Some(prev) = previous.filter(|p| p.in_history) {
             p.push_str(&format!(
@@ -798,6 +811,7 @@ mod tests {
             commit: "abc1234".into(),
             findings: vec![f(1, "Drops the last row: src/a.rs, f"), f(2, "Empty name: src/b.rs, g"), f(2, "Slow loop: src/c.rs, h")],
             in_history,
+            accepted: vec![],
         }
     }
 
@@ -816,6 +830,15 @@ mod tests {
         assert!(!rebased.contains("git diff abc1234") && !rebased.contains("only if it is P0 or P1"), "{rebased}");
 
         // A clean previous round leaves no checklist, but old code still only takes P0 or P1.
+        // Findings the person accepted are told apart, not checked again.
+        let accepted = PreviousRound {
+            findings: vec![],
+            accepted: vec![(Finding { priority: 1, text: "No migration: src/k.rs, load".into(), carried: false, raised_as: None }, "no outside users yet".into())],
+            ..previous(true)
+        };
+        let p = rules().prompt("main", Some(&accepted));
+        assert!(p.contains("accepted these findings") && p.contains("- [P1] No migration: src/k.rs, load (accepted: no outside users yet)"), "{p}");
+        assert!(!p.contains("PREVIOUS <n>"), "{p}");
         let clean = PreviousRound { findings: vec![], ..previous(true) };
         let p = rules().prompt("main", Some(&clean));
         assert!(!p.contains("PREVIOUS") && p.contains("only if it is P0 or P1"), "{p}");
@@ -882,6 +905,7 @@ mod tests {
                 f(1, "Apply is not atomic: src/proposals.rs, apply"),
             ],
             in_history: true,
+            accepted: vec![],
         };
         let review = |text: &str| rules().parse("codex", &format!("{text}\nVERDICT: clean\nMONEY_OR_RELEASE: no"), 1, Some(&prev), Some(&dir)).unwrap();
         let statuses = |r: &Review| r.previous.iter().map(|p| p.status.clone()).collect::<Vec<_>>();
@@ -908,7 +932,7 @@ mod tests {
         // by an absolute path), it blocks again at P1, without the unconfirmed mark.
         let first = review("PREVIOUS 1: open\nPREVIOUS 2: fixed\nPREVIOUS 3: fixed");
         assert_eq!((first.findings[0].priority, first.findings[0].raised_as), (2, Some(1)));
-        let next = PreviousRound { commit: "def5678".into(), findings: first.findings.clone(), in_history: true };
+        let next = PreviousRound { commit: "def5678".into(), findings: first.findings.clone(), in_history: true, accepted: vec![] };
         let absolute = dir.join("src").join("proposals.rs");
         let text = format!("PREVIOUS 1: open {}:2 `let closed = true;`\nVERDICT: clean\nMONEY_OR_RELEASE: no", absolute.display());
         let r = rules().parse("codex", &text, 1, Some(&next), Some(&dir)).unwrap();

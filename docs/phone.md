@@ -139,6 +139,12 @@ changed in transit. The server answers in JSON and sends `Cache-Control: no-stor
   answers the ask as the person and records which device answered.
 - **Send back:** the phone signs `nitely-sendback-v1\n<issue key>\n<reason>\n<time>`; the issue goes
   back to Todo with the reason, as **Back to Todo** does in the desktop Inbox.
+- **Accept a review finding** (docs/approvals.md, "Accepting one review finding"): an ask that
+  carries a finding comes with the patch id of the issue's latest review. **Accept** signs the same
+  `nitely-accept-v1` message the app signs, with the person's one-line reason sent exactly as the PC
+  keeps it (`POST /phone/api/accept`); **Send back** signs `nitely-answer-v1` over the reason
+  (`POST /phone/api/decline`). An acceptance counts at `land` like a phone's approval: while the
+  phone is in the verified device list, signed within two minutes of when it was recorded.
 
 An agent on the PC cannot do any of these: it would need a key that exists only on the phone, or
 the app's approval key to add a device of its own.

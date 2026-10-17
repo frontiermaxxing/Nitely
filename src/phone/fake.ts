@@ -1,6 +1,6 @@
 // The browser preview's stand-in for the phone server (`/phone.html?fixtures`), so the phone's
 // screens can be checked without a PC: pairing is confirmed a few seconds after it is asked, and a
-// question and two approvals wait. Deciding takes them off the list until reload.
+// question, a review finding to accept and two approvals wait. Deciding takes them off the list until reload.
 import { setFake } from "./api";
 import { pairingCode } from "./keys";
 import type { PhoneDecision } from "./Inbox";
@@ -15,6 +15,20 @@ let decisions: PhoneDecision[] = [
     since: NOW() - 900,
     issue: { key: "DEMO-3", title: "Show prices in the visitor's currency", kind: "feature", priority: 3, state: "In Progress", track: track("working", { todo: NOW() - 9000, started: NOW() - 8000, working: NOW() - 7000 }) as never },
     ask: { id: 12, question: "Which currencies should the price page offer at launch? It decides the rounding in [DEMO-1](nitely://issue/DEMO-1) and the `currency` setting.", options: ["EUR and USD", "EUR, USD and GBP", "Every currency Stripe supports"], asked_by: "claude:c:/code/demo-worktrees/demo-3" },
+  },
+  {
+    kind: "ask",
+    id: "ask-14",
+    since: NOW() - 600,
+    issue: { key: "DEMO-4", title: "Keep each shop's settings apart", kind: "bug", priority: 1, state: "Needs You", track: track("needs", { todo: NOW() - 30000, started: NOW() - 28000, working: NOW() - 27000, gate: NOW() - 3000, review: NOW() - 2000, needs: NOW() - 600 }) as never },
+    ask: {
+      id: 14,
+      question: "You decided not to migrate old shop settings: there are no outside users yet. The reviewer keeps raising it; fixing it means copying settings between shops, which this change stops.",
+      options: [],
+      asked_by: "codex:c:/code/demo-worktrees/demo-4",
+      finding: { priority: 1, text: "No migration for existing shops: src/settings.ts, load: a shop set up before this starts with empty settings" },
+    },
+    patch_id: "patch-demo-4",
   },
   {
     kind: "approve",
@@ -57,7 +71,7 @@ export function installFake() {
       decisions = decisions.filter((d) => d.issue?.key !== key);
       return { status: 200, body: { ok: true } };
     }
-    if (method === "POST" && path === "/phone/api/answer") {
+    if (method === "POST" && ["/phone/api/answer", "/phone/api/accept", "/phone/api/decline"].includes(path)) {
       const ask = (JSON.parse(body) as { ask: number }).ask;
       decisions = decisions.filter((d) => d.ask?.id !== ask);
       return { status: 200, body: { ok: true } };

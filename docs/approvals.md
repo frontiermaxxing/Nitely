@@ -85,8 +85,45 @@ Changes that need no human approval are unaffected. Approvals given before this 
 signature: when the app starts, it sends every Approved issue without a valid signature back to
 Needs You, with a note, so the person approves it once more in the Inbox.
 
+## Accepting one review finding
+
+Sometimes a review keeps asking for something the person has decided against: a migration they
+ruled out, a compatibility shim nobody needs. Fixing it is not the agent's call, and looping on it
+costs a round each time. So an agent asks the person to accept that one finding as it is:
+`request_acceptance` (MCP) or `nitely ask --issue APP-4 --finding 1 "why"`, with a P0 or P1 finding
+of the issue's latest review (by number or text) and its reasoning. The issue waits in Needs You,
+and the Inbox and the phone show one decision: the finding, the agent's reasoning, a one-line
+reason, **Accept** or **Send back**.
+
+Accepting signs, with the app's key (or a paired phone's, as for approvals):
+
+```
+nitely-accept-v1
+<issue key>
+<patch id of the review it was accepted on>
+<the finding's text>
+<the person's reason>
+<time, unix seconds>
+```
+
+and stores it (`accepted_finding` table). Then:
+
+- `land` passes a review that asked for changes when every one of its P0/P1 findings is accepted by
+  a signature that verifies, for that review's patch. A row an agent writes into the database does
+  not verify, so it accepts nothing.
+- The next review round is told which findings the person accepted and why, and is asked not to
+  raise them again unless the code they cite changed. They are not in its "check these first" list,
+  so they are never carried. Only acceptances that verify are told.
+- `submit` of a patch whose only P0/P1 findings are accepted goes on as a passing review.
+- The issue goes on at once: to In Review when nothing else blocks it, to Needs You when the change
+  still waits for the person's approval, back to In Progress when other P0/P1 findings remain.
+
+**Send back** answers "Not accepted: <reason>. Fix it." and the issue goes back to Todo.
+`nitely submit --no-review` still exists for emergencies, but nothing suggests it for this.
+
 ## Code
 
+- `crates/nitely-core/src/accept.rs`: requests, signed acceptances, and what still blocks a review.
 - `crates/nitely-core/src/approval.rs`: the message, signing and verifying, the keychain entries (the
   `keyring` crate), and `Db` methods for signed approvals.
 - `src-tauri/src/lib.rs`: creating the key, signing when the person moves an issue to Approved (not

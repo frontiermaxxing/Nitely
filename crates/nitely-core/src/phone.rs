@@ -736,7 +736,12 @@ impl Phone {
                 Ok(device) => (200, Reply::Json(json!({ "name": device.name, "id": device.id }))),
                 Err((status, why)) => (status, error(why)),
             },
-            ("GET", "/phone/api/decisions") | ("POST", "/phone/api/approve") | ("POST", "/phone/api/answer") | ("POST", "/phone/api/sendback") => {
+            ("GET", "/phone/api/decisions")
+            | ("POST", "/phone/api/approve")
+            | ("POST", "/phone/api/answer")
+            | ("POST", "/phone/api/sendback")
+            | ("POST", "/phone/api/accept")
+            | ("POST", "/phone/api/decline") => {
                 let device = match self.authorize(head, body) {
                     Ok(d) => d,
                     Err((status, why)) => return (status, error(why)),
@@ -755,6 +760,8 @@ impl Phone {
                     }),
                     "/phone/api/approve" => approve(&mut db, &device, body),
                     "/phone/api/answer" => answer(&db, &device, body),
+                    "/phone/api/accept" => accept(&mut db, &device, body),
+                    "/phone/api/decline" => decline(&mut db, &device, body),
                     _ => send_back(&mut db, &device, body),
                 };
                 match result {
@@ -988,12 +995,18 @@ fn decisions(db: &crate::Db) -> std::result::Result<(Value, std::collections::Ha
         if let Some(i) = &issue {
             on_phone.insert(i.key.to_uppercase());
         }
+        // A request to accept a finding carries the patch the acceptance is signed for.
+        let patch = match (&a.finding, &issue) {
+            (Some(_), Some(i)) => db.reviews(&i.key)?.into_iter().find(|r| !r.reviewer.is_empty()).map(|r| r.patch_id),
+            _ => None,
+        };
         out.push(json!({
             "kind": "ask",
             "id": format!("ask-{}", a.id),
             "since": a.asked_at,
             "issue": issue.as_ref().map(issue_json),
-            "ask": { "id": a.id, "question": a.question, "options": a.options, "asked_by": a.asked_by },
+            "ask": { "id": a.id, "question": a.question, "options": a.options, "asked_by": a.asked_by, "finding": a.finding },
+            "patch_id": patch,
         }));
     }
     let mut at_pc = std::collections::HashSet::new();
@@ -1097,6 +1110,55 @@ fn answer(db: &crate::Db, device: &Device, body: &[u8]) -> std::result::Result<V
         db.add_note(k, &format!("Answered from the phone “{}”.", device.name), "note", &crate::Actor::Human)?;
     }
     Ok(json!({ "ok": true }))
+}
+
+/// The person accepts, on the phone, the review finding an agent asked about (NIT-191): signed by
+/// the phone over the same message the app signs, for the patch the phone showed.
+fn accept(db: &mut crate::Db, device: &Device, body: &[u8]) -> std::result::Result<Value, Refused> {
+    #[derive(Deserialize)]
+    struct Accept {
+        ask: i64,
+        patch: String,
+        reason: String,
+    }
+    let req: Signed<Accept> = serde_json::from_slice(body).map_err(|_| refuse(400, "Send ask, patch, reason, time and signature."))?;
+    let reason = one_line(&req.what.reason)?;
+    let ask = db.ask(req.what.ask)?.ok_or_else(|| refuse(404, "That request is gone."))?;
+    let (Some(key), Some(finding)) = (ask.issue_key.clone(), ask.finding.clone()) else {
+        return Err(refuse(400, "That is not a request to accept a finding."));
+    };
+    check_decision(device, &crate::accept::message(&key, &req.what.patch, &finding.text, &reason, req.time), req.time, &req.signature)?;
+    let decided = db
+        .accept_finding_from_phone(ask.id, &req.what.patch, &reason, device, req.time, &req.signature)
+        .map_err(|e| refuse(409, format!("{e:#}")))?;
+    Ok(json!({ "ok": true, "state": decided.state }))
+}
+
+/// The person sends the request back from the phone: the finding stays a defect to fix.
+fn decline(db: &mut crate::Db, device: &Device, body: &[u8]) -> std::result::Result<Value, Refused> {
+    #[derive(Deserialize)]
+    struct Decline {
+        ask: i64,
+        why: String,
+    }
+    let req: Signed<Decline> = serde_json::from_slice(body).map_err(|_| refuse(400, "Send ask, why, time and signature."))?;
+    let why = one_line(&req.what.why)?;
+    check_decision(device, &answer_message(req.what.ask, &why, req.time), req.time, &req.signature)?;
+    let decided = db.decline_finding(req.what.ask, &why, &format!(" from the phone “{}”", device.name)).map_err(|e| refuse(409, format!("{e:#}")))?;
+    Ok(json!({ "ok": true, "state": decided.state }))
+}
+
+/// A reason as the phone must send it: on one line, already as stored, so what it signed is what
+/// is kept and checked later.
+fn one_line(text: &str) -> std::result::Result<String, Refused> {
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.is_empty() || line.chars().count() > 500 {
+        return Err(refuse(400, "Give a reason on one line, of up to 500 characters."));
+    }
+    if line != text {
+        return Err(refuse(400, "Send the reason on one line, without extra spaces."));
+    }
+    Ok(line)
 }
 
 fn send_back(db: &mut crate::Db, device: &Device, body: &[u8]) -> std::result::Result<Value, Refused> {
@@ -1456,6 +1518,41 @@ mod tests {
         let d = p.get_with(&base, "/phone/api/decisions", now(), "cccccccccccccccc").1;
         let of_a: Vec<&str> = d["decisions"].as_array().unwrap().iter().filter(|x| x["issue"]["key"] == json!(a)).map(|x| x["kind"].as_str().unwrap()).collect();
         assert_eq!(of_a, ["ask", "approve"], "{d}");
+
+        // A request to accept a review finding: the phone sees the finding and the patch, and its
+        // acceptance, signed over the same message the app signs, counts while it stays paired.
+        let c = db.create_issue(&new("Keys per folder"), &agent).unwrap().key;
+        db.move_issue(&c, "In Progress", None, None, &agent).unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, findings, ts) VALUES (?1, 'p3', 'c', 'codex', 'changes', 'agent', ?2, ?3)",
+                rusqlite::params![c, r#"[{"priority":1,"text":"No migration: k.rs, load"},{"priority":1,"text":"Drops a row: r.rs, f"}]"#, now() - 10],
+            )
+            .unwrap();
+        let req = db.request_acceptance(&c, "1", "You ruled out a migration.", None, &agent).unwrap();
+        let d = p.get_with(&base, "/phone/api/decisions", now(), "bbbbbbbbbbbbbbbb").1;
+        let shown = d["decisions"].as_array().unwrap().iter().find(|x| x["ask"]["id"] == req.id).cloned().unwrap();
+        assert_eq!((shown["patch_id"].as_str(), shown["ask"]["finding"]["text"].as_str()), (Some("p3"), Some("No migration: k.rs, load")));
+        let t = now();
+        let sloppy = p.post(&base, "/phone/api/accept", json!({ "ask": req.id, "patch": "p3", "reason": "no  users", "time": t, "signature": p.sign(&crate::accept::message(&c, "p3", "No migration: k.rs, load", "no  users", t)) }));
+        assert_eq!(sloppy.0, 400, "the reason must come as it is kept");
+        let (status, r) = p.post(&base, "/phone/api/accept", json!({ "ask": req.id, "patch": "p3", "reason": "no users yet", "time": t, "signature": p.sign(&crate::accept::message(&c, "p3", "No migration: k.rs, load", "no users yet", t)) }));
+        assert_eq!(status, 200, "{r}");
+        crate::approval::trust_in_tests(Some(public));
+        devices_in_tests(Some(list.clone()));
+        let accepted = db.signed_acceptances(&c, &public).unwrap();
+        assert_eq!(accepted.iter().map(|a| (a.finding.as_str(), a.reason.as_str())).collect::<Vec<_>>(), [("No migration: k.rs, load", "no users yet")]);
+        let review = db.reviews(&c).unwrap().remove(0);
+        assert_eq!(db.unaccepted_blockers(&c, &review).unwrap().len(), 1, "the other P1 still blocks");
+        devices_in_tests(Some(sign_list(&app, vec![])));
+        assert!(db.signed_acceptances(&c, &public).unwrap().is_empty(), "unpaired: its acceptances no longer count");
+        devices_in_tests(Some(list.clone()));
+        // Sent back from the phone: it stays a defect, and the issue goes back to the agents.
+        let other = db.request_acceptance(&c, "2", "It always worked that way.", None, &agent).unwrap();
+        let t = now();
+        let (status, _) = p.post(&base, "/phone/api/decline", json!({ "ask": other.id, "why": "a real bug", "time": t, "signature": p.sign(&answer_message(other.id, "a real bug", t)) }));
+        assert_eq!(status, 200);
+        assert_eq!(db.issue(&c).unwrap().unwrap().state, "Todo");
 
         // Another key under this device's id can do none of it.
         p.key = ed25519_dalek::SigningKey::from_bytes(&new_secret().unwrap());

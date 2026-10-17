@@ -319,6 +319,20 @@ async fn answer_ask(id: i64, answer: String) -> Result<Ask, String> {
     db()?.answer_ask(id, &answer, &ME).map_err(err)
 }
 
+/// The person accepts the review finding an agent asked about (NIT-191), signed with the app's key.
+#[tauri::command]
+async fn accept_finding(id: i64, reason: String) -> Result<nitely_core::accept::Decided, String> {
+    let mut db = db()?;
+    let secret = approval_key(&db)?;
+    db.accept_finding(id, &reason, &secret).map_err(err)
+}
+
+/// The person sends the request back: the finding stays a defect to fix.
+#[tauri::command]
+async fn decline_finding(id: i64, why: String) -> Result<nitely_core::accept::Decided, String> {
+    db()?.decline_finding(id, &why, "").map_err(err)
+}
+
 /// What adding a repo would do: its project, playbook, and every agent config change.
 #[tauri::command]
 async fn connect_plan(path: String, key: Option<String>, name: Option<String>) -> Result<nitely_core::connect::ConnectPlan, String> {
@@ -732,6 +746,8 @@ pub fn run() {
             set_issue_private,
             set_owner,
             answer_ask,
+            accept_finding,
+            decline_finding,
             connect_plan,
             connect_apply,
             agent_setup,

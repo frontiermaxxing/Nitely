@@ -150,6 +150,9 @@ pub struct Ask {
     /// Why it closed unanswered: its issue closed first ("closed with NIT-3 (Done)").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub closed: Option<String>,
+    /// The review finding the agent asks the person to accept as it is (`request_acceptance`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finding: Option<crate::accept::AskedFinding>,
 }
 
 /// An agent as a person reads it: its vendor ("Codex"), not its id ("codex:c:/users/.../demo").
@@ -1519,7 +1522,7 @@ impl Db {
 /// closing an issue closed its asks (NIT-181) reads as closed with it, as one closed since does.
 const ASK_COLUMNS: &str = "a.id, a.issue_key, a.asked_by, a.question, a.options, a.answer, a.asked_at, a.answered_at,
     COALESCE(a.closed, CASE WHEN a.answer IS NULL AND i.state_type IN ('completed', 'canceled')
-                            THEN 'closed with ' || i.key || ' (' || i.state || ')' END)";
+                            THEN 'closed with ' || i.key || ' (' || i.state || ')' END), a.finding";
 
 fn ask_from_row(r: &Row) -> rusqlite::Result<Ask> {
     Ok(Ask {
@@ -1532,6 +1535,7 @@ fn ask_from_row(r: &Row) -> rusqlite::Result<Ask> {
         asked_at: r.get(6)?,
         answered_at: r.get(7)?,
         closed: r.get(8)?,
+        finding: r.get::<_, Option<String>>(9)?.and_then(|f| serde_json::from_str(&f).ok()),
     })
 }
 

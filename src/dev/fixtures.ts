@@ -126,7 +126,7 @@ interface IssueSpec {
   story: Step[];
   /** Progress lines the agent reported while working. */
   notes?: string[];
-  ask?: { question: string; options: string[] };
+  ask?: { question: string; options: string[]; finding?: { priority: number; text: string } };
   /** More questions on the same issue, asked after `ask`, still open (NIT-172). */
   moreAsks?: string[];
   /** The agent session in the issue's worktree, if one is open. */
@@ -292,6 +292,16 @@ const ISSUES: IssueSpec[] = [
   { key: "ORB-259", title: "Drag a tab into a new window on a second monitor", kind: "bug", priority: 3, vendor: "claude", from: 260, to: 150, story: ["filed", "claim", "work", "gatefail", "work", "gate", "review", "pass", "land"] },
 
   // ----- Harbor -----
+  {
+    key: "HAR-19", title: "Keep each booking site's settings apart", kind: "bug", priority: 1, vendor: "codex",
+    from: 20, to: 0.6, story: ["filed", "claim", "work", "gate", "review", "changes", "work", "gate", "review", "changes", "ask"],
+    ask: {
+      question: "You decided on Tuesday not to migrate old site settings: there are no outside users yet. The reviewer keeps raising it as P1; fixing it means copying settings between sites, which is what this change stops.",
+      options: [],
+      finding: { priority: 1, text: "No migration for existing sites: src/settings.ts, load: a site set up before this starts with empty settings" },
+    },
+    live: { state: "waiting", seen: 0.6, activity: "Asked to accept a finding" }, branch: { ahead: 4, dirty_files: 0 },
+  },
   {
     key: "HAR-14", title: "Booking form loses the date on back navigation", kind: "bug", priority: 2, vendor: "cursor",
     from: 16, to: 0.06, story: ["filed", "claim", "work", "work"],
@@ -548,7 +558,7 @@ function build(): World {
           claimed = null;
           break;
         case "ask":
-          lastAsk = { id: askId++, issue_key: spec.key, asked_by: agent, question: spec.ask!.question, options: spec.ask!.options, answer: null, asked_at: ts, answered_at: null };
+          lastAsk = { id: askId++, issue_key: spec.key, asked_by: agent, question: spec.ask!.question, options: spec.ask!.options, answer: null, asked_at: ts, answered_at: null, finding: spec.ask!.finding ?? null };
           timeline.push({ ts, actor: agent, kind: "ask", summary: spec.ask!.question });
           break;
         case "answer":
@@ -1783,6 +1793,10 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return setOwner(args);
       case "answer_ask":
         return answerAsk(args);
+      case "accept_finding":
+        return answerAsk({ id: args.id, answer: `Accepted: ${String(args.reason)}` });
+      case "decline_finding":
+        return answerAsk({ id: args.id, answer: `Not accepted: ${String(args.why)}. Fix it.` });
       case "notify":
         // The preview's notifier: src/dev/FakeToasts.tsx shows it on the page.
         window.dispatchEvent(new CustomEvent("nitely:preview-notification", { detail: args }));

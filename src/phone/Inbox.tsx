@@ -3,7 +3,7 @@ import { signedGet, signedPost, unreachable } from "./api";
 import { shownIndex, type Shown } from "./select";
 import { plain } from "./plain";
 import { Rich } from "./Rich";
-import { answerMessage, approvalMessage, sendBackMessage, sign, type Device } from "./keys";
+import { acceptMessage, answerMessage, approvalMessage, sendBackMessage, sign, type Device } from "./keys";
 import { StationTrack } from "../ui/StationTrack";
 import { SeverityMark } from "../ui/SeverityMark";
 import { VENDOR_LABEL, vendorOf } from "../ui/agents";
@@ -25,7 +25,7 @@ export interface PhoneDecision {
   id: string;
   since: number;
   issue: PhoneIssue | null;
-  ask?: { id: number; question: string; options: string[]; asked_by: string };
+  ask?: { id: number; question: string; options: string[]; asked_by: string; finding?: { priority: number; text: string } | null };
   patch_id?: string;
   reasons?: string[];
   review?: { reviewer: string; verdict: string; note: string; findings: { priority: number; text: string; carried?: boolean }[] };
@@ -171,7 +171,7 @@ function IssueHead(props: { issue: PhoneIssue }) {
 function Decision(props: { decision: PhoneDecision; device: Device; onDecided: (what: string) => void; onError: (e: string | null) => void }) {
   const { decision: d, device } = props;
   const [busy, setBusy] = useState(false);
-  const [writing, setWriting] = useState<"answer" | "sendback" | null>(null);
+  const [writing, setWriting] = useState<"answer" | "sendback" | "accept" | "decline" | null>(null);
   const [text, setText] = useState("");
 
   const send = async (path: string, body: Record<string, unknown>, what: string) => {
@@ -197,6 +197,21 @@ function Decision(props: { decision: PhoneDecision; device: Device; onDecided: (
     const time = nowSecs();
     send("/phone/api/approve", { key, patch: d.patch_id, time, signature: sign(device.secret, approvalMessage(key, d.patch_id!, time)) }, `Approved ${key}.`);
   };
+  // A review finding the agent asks the person to accept as it is (NIT-191); the reason goes on
+  // one line, as the PC keeps it, so what the phone signs is what is checked later.
+  const finding = d.kind === "ask" ? (d.ask!.finding ?? null) : null;
+  const oneLine = (s: string) => s.trim().split(/\s+/).join(" ");
+  const accept = () => {
+    const key = d.issue!.key;
+    const time = nowSecs();
+    const reason = oneLine(text);
+    send("/phone/api/accept", { ask: d.ask!.id, patch: d.patch_id, reason, time, signature: sign(device.secret, acceptMessage(key, d.patch_id!, finding!.text, reason, time)) }, `Accepted for ${key}.`);
+  };
+  const decline = () => {
+    const time = nowSecs();
+    const why = oneLine(text);
+    send("/phone/api/decline", { ask: d.ask!.id, why, time, signature: sign(device.secret, answerMessage(d.ask!.id, why, time)) }, `Sent back: it stays a defect to fix.`);
+  };
   const sendBack = () => {
     const key = d.issue!.key;
     const time = nowSecs();
@@ -206,14 +221,25 @@ function Decision(props: { decision: PhoneDecision; device: Device; onDecided: (
 
   return (
     <article className="ph-decision">
-      <div className={`ph-kind ph-kind-${d.kind}`}>{d.kind === "ask" ? `${who(d.ask!.asked_by)} asks` : "Approve this change?"}</div>
+      <div className={`ph-kind ph-kind-${d.kind}`}>{finding ? "Accept this review finding?" : d.kind === "ask" ? `${who(d.ask!.asked_by)} asks` : "Approve this change?"}</div>
       {d.issue && <IssueHead issue={d.issue} />}
 
+      {finding && (
+        <div className="ph-why">
+          <ul className="ph-findings">
+            <li>
+              <SeverityMark priority={finding.priority} /> <Rich text={finding.text} />
+            </li>
+          </ul>
+          <h2>Why {who(d.ask!.asked_by)} asks you to accept it as it is</h2>
+        </div>
+      )}
       {d.kind === "ask" && (
         <p className="ph-question">
           <Rich text={d.ask!.question} />
         </p>
       )}
+      {finding && <p className="ph-quiet">Accepting signs your decision: it no longer blocks the land, and the next review is told. Sent back, it stays a defect to fix.</p>}
       {d.kind === "approve" && (
         <div className="ph-why">
           {(d.reasons ?? []).length > 0 && (
@@ -254,14 +280,27 @@ function Decision(props: { decision: PhoneDecision; device: Device; onDecided: (
         {writing ? (
           <>
             <label className="ph-field">
-              <span>{writing === "answer" ? "Your answer" : "What should change"}</span>
-              <textarea rows={4} value={text} autoFocus onChange={(e) => setText(e.target.value)} />
+              <span>{writing === "answer" ? "Your answer" : writing === "accept" ? "Why you accept it, in one line" : writing === "decline" ? "Why not, in one line" : "What should change"}</span>
+              <textarea rows={writing === "accept" || writing === "decline" ? 2 : 4} value={text} autoFocus onChange={(e) => setText(e.target.value)} />
             </label>
-            <button className="ph-btn ph-primary" disabled={busy || !text.trim()} onClick={() => (writing === "answer" ? answer(text.trim()) : sendBack())}>
-              {writing === "answer" ? "Send answer" : "Send back"}
+            <button
+              className="ph-btn ph-primary"
+              disabled={busy || !text.trim()}
+              onClick={() => (writing === "answer" ? answer(text.trim()) : writing === "accept" ? accept() : writing === "decline" ? decline() : sendBack())}
+            >
+              {writing === "answer" ? "Send answer" : writing === "accept" ? "Accept" : "Send back"}
             </button>
             <button className="ph-btn" disabled={busy} onClick={() => (setWriting(null), setText(""))}>
               Cancel
+            </button>
+          </>
+        ) : finding ? (
+          <>
+            <button className="ph-btn ph-primary" disabled={busy || !d.patch_id} onClick={() => setWriting("accept")}>
+              Accept
+            </button>
+            <button className="ph-btn" disabled={busy} onClick={() => setWriting("decline")}>
+              Send back
             </button>
           </>
         ) : d.kind === "ask" ? (

@@ -10,7 +10,7 @@ use std::path::Path;
 use crate::db::{now, Db};
 use crate::issues::{Actor, IssueRecord};
 use crate::playbook::{self, git, git_remote, GateResult, Playbook};
-use crate::review::{PreviousRound, Review};
+use crate::review::{Finding, PreviousRound, Review};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Submitted {
@@ -166,7 +166,19 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         out.review = Some(review);
     }
     out.approver = if out.reasons.is_empty() { "agent" } else { "human" }.into();
-    let verdict = out.review.as_ref().map_or("none", |r| r.verdict.as_str()).to_string();
+    let mut verdict = out.review.as_ref().map_or("none", |r| r.verdict.as_str()).to_string();
+    // Findings the person accepted as they are, signed for this very patch, block nothing: the
+    // review is recorded as it asked, and goes on as a passing one (land checks the same).
+    let accepted_only = match &out.review {
+        Some(r) if verdict == "changes" => {
+            let accepted = db.accepted_for(&issue.key, &out.patch_id)?;
+            r.findings.iter().filter(|f| f.priority <= 1).all(|f| accepted.iter().any(|a| a.finding == f.text))
+        }
+        _ => false,
+    };
+    if accepted_only {
+        verdict = "pass".into();
+    }
     // Read before this round is recorded: the rounds before it, since the human last handed the
     // issue back (their decision to go on starts a new count).
     let stalled = match &out.review {
@@ -207,6 +219,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         _ => "Not pushed (local only).".into(),
     };
     let outcome = match (&out.review, out.approver.as_str()) {
+        (Some(r), _) if accepted_only => format!("Review by {}{} asked for changes only in findings you accepted, so it passes", r.reviewer, noted(&r.note)),
         (Some(r), _) if r.verdict == "changes" => format!("Review by {}{} requested changes", r.reviewer, noted(&r.note)),
         (Some(r), "human") if out.approval_stands => format!("Review by {}{} passed; the human's approval of this patch stands", r.reviewer, noted(&r.note)),
         (Some(r), "human") => format!("Review by {}{} passed; waits for a human", r.reviewer, noted(&r.note)),
@@ -230,9 +243,9 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     let (state, next) = if stalled.is_some() {
         // Another round would cost as much again and likely end the same: a person decides. It is
         // handed to them as their own work, so nothing offers to approve a change that failed review.
-        ("Needs You", "The review rounds are not converging, so the issue is handed to the human: stop working on it and pick up other work. They decide whether to hand it back, narrow it, or close it.")
+        ("Needs You", "The review rounds are not converging, so the issue is handed to the human: stop working on it and pick up other work. They decide whether to hand it back, narrow it, or close it. If what keeps coming back is a trade-off for them to decide, call request_acceptance with that finding and your reasoning first.")
     } else if verdict == "changes" {
-        ("In Progress", "The review found P0 or P1 problems. Fix them, commit, and submit again.")
+        ("In Progress", "The review found P0 or P1 problems. Fix them, commit, and submit again. If one is a trade-off the human decided or should decide, not a defect (they ruled out what it asks for), call request_acceptance with it and your reasoning instead of looping on it.")
     } else if push_failed {
         // Not handed in: nobody can see or merge the branch, so it must not look ready to land.
         ("In Progress", "The push failed, so the change is not handed in. Fix the remote or its access (ask the human if it is a permission error), then submit again.")
@@ -307,7 +320,19 @@ fn previous_round(db: &Db, key: &str, worktree: &Path) -> Result<Option<Previous
         return Ok(None);
     };
     let in_history = git(worktree, &["merge-base", "--is-ancestor", &last.commit_sha, "HEAD"]).is_ok();
-    Ok(Some(PreviousRound { commit: last.commit_sha, findings: last.findings, in_history }))
+    // Only acceptances that verify count: a row an agent wrote itself must not silence a finding.
+    let accepted: Vec<crate::accept::Accepted> = match crate::approval::trusted_key() {
+        Ok(public) => db.signed_acceptances(key, &public)?,
+        Err(_) => vec![],
+    };
+    let mut told: Vec<(Finding, String)> = vec![];
+    for a in &accepted {
+        if !told.iter().any(|(f, _)| f.text == a.finding) {
+            told.push((Finding { priority: a.priority, text: a.finding.clone(), carried: false, raised_as: None }, a.reason.clone()));
+        }
+    }
+    let findings = last.findings.into_iter().filter(|f| !told.iter().any(|(t, _)| t.text == f.text)).collect();
+    Ok(Some(PreviousRound { commit: last.commit_sha, findings, in_history, accepted: told }))
 }
 
 /// " (same vendor: codex not installed)" after a reviewer's name, or nothing.

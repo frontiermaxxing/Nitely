@@ -439,9 +439,17 @@ fn check_approval(db: &Db, pb: &Playbook, key: &str, worktree: &Path, base: &str
             short(&patch)
         );
     }
+    let mut accepted = String::new();
     match review.verdict.as_str() {
         "pass" | "none" => {}
-        _ => bail!("the {} review asked for changes; fix them, commit, and submit again", review.reviewer),
+        _ => {
+            // Findings the person accepted as they are, signed for this patch, block nothing.
+            let open = db.unaccepted_blockers(key, &review)?;
+            if !open.is_empty() {
+                bail!("the {} review asked for changes; fix them, commit, and submit again", review.reviewer);
+            }
+            accepted = format!("; its P0/P1 findings were accepted by a human, signed for this patch ({})", review.findings.iter().filter(|f| f.priority <= 1).count());
+        }
     }
     let files: Vec<String> = git(worktree, &["diff", "--name-only", "--no-renames", &format!("{base}...HEAD")])?.lines().map(str::to_string).collect();
     pb.approval.check_blocked(&files)?;
@@ -459,7 +467,7 @@ fn check_approval(db: &Db, pb: &Playbook, key: &str, worktree: &Path, base: &str
     }
     reasons.dedup();
     if reasons.is_empty() {
-        return Ok(format!("the {} review passed and no human approval is needed", review.reviewer));
+        return Ok(format!("the {} review passed and no human approval is needed{accepted}", review.reviewer));
     }
     match db.standing_approval(key)? {
         Some(at) => {
@@ -489,10 +497,11 @@ impl Db {
             return Ok(reviews.is_empty().then_some(at));
         };
         let base = &reviews[approved];
-        let unchanged = reviews[..approved].iter().all(|r| {
-            r.patch_id == base.patch_id && r.verdict != "changes" && r.reasons.iter().all(|x| base.reasons.contains(x))
-        });
-        Ok((base.verdict != "changes" && unchanged).then_some(at))
+        let mut unchanged = true;
+        for r in &reviews[..approved] {
+            unchanged &= r.patch_id == base.patch_id && self.review_passes(key, r)? && r.reasons.iter().all(|x| base.reasons.contains(x));
+        }
+        Ok((self.review_passes(key, base)? && unchanged).then_some(at))
     }
 
     /// When a human last moved the issue to Approved, if it is still Approved.
@@ -774,6 +783,72 @@ when_changed = ["billing"]
             let opts = LandOptions { dir: &dir, issue_key: key, push: true, keep: false, break_lock: false };
             land(&mut self.db, &crate::Config::default(), &opts, &self.actor).unwrap()
         }
+    }
+
+    #[test]
+    fn a_finding_the_person_accepted_does_not_block_the_land() {
+        let mut f = fixture("accept");
+        // A reviewer that keeps one P1 a person decided to live with.
+        let pb_path = f.repo.join(playbook::PLAYBOOK_PATH);
+        let pb = std::fs::read_to_string(&pb_path).unwrap().replace(
+            "echo 'Fine.'; echo 'VERDICT: clean'",
+            "echo 'One thing.'; echo '- [P1] No migration: keys.txt, load: old profiles lose their keys'; echo 'VERDICT: findings'",
+        );
+        std::fs::write(&pb_path, pb).unwrap();
+        sh(&f.repo, &["commit", "-q", "-am", "a reviewer with a P1"]);
+        let (a, wt) = f.submitted("Keys per folder", "keys.txt", "x");
+        let dir = f.repo.to_string_lossy().into_owned();
+        let opts = LandOptions { dir: &dir, issue_key: &a, push: true, keep: false, break_lock: false };
+        let refused = land(&mut f.db, &crate::Config::default(), &opts, &f.actor).unwrap().error.unwrap_or_default();
+        assert!(refused.contains("asked for changes"), "{refused}");
+
+        // The agent asks; a forged acceptance written into the database counts for nothing.
+        let ask = f.db.request_acceptance(&a, "1", "You ruled out a migration: there are no outside users yet.", None, &f.actor).unwrap();
+        assert_eq!(f.db.issue(&a).unwrap().unwrap().state, "Needs You");
+        let patch = f.db.reviews(&a).unwrap()[0].patch_id.clone();
+        f.db.conn
+            .execute(
+                "INSERT INTO accepted_finding (issue_key, patch_id, priority, finding, reason, ts, signature) VALUES (?1, ?2, 1, ?3, 'forged', 1, 'zz')",
+                rusqlite::params![a, patch, "No migration: keys.txt, load: old profiles lose their keys"],
+            )
+            .unwrap();
+        crate::approval::trust_in_tests(Some(crate::approval::public_of(&SECRET)));
+        assert_eq!(land(&mut f.db, &crate::Config::default(), &opts, &f.actor).unwrap().error.unwrap_or_default(), refused, "an unsigned row is no acceptance");
+
+        // The person accepts it in the app: signed, the issue goes on as a passing review would.
+        let decided = f.db.accept_finding(ask.id, "no outside users yet", &SECRET).unwrap();
+        assert_eq!((decided.state.as_str(), decided.ask.answer.as_deref()), ("In Review", Some("Accepted: no outside users yet")));
+        assert!(f.db.accept_finding(ask.id, "again", &SECRET).is_err(), "decided once");
+        // Submitted again unchanged: the reviewer still says it, and it passes on the acceptance.
+        f.submit(&wt);
+        let note = f.db.timeline(&a).unwrap().into_iter().rev().find(|e| e.kind == "submit").unwrap().summary.unwrap_or_default();
+        assert!(note.contains("only in findings you accepted"), "{note}");
+        assert_eq!(f.db.issue(&a).unwrap().unwrap().state, "In Review");
+        let r = f.land(&a);
+        assert!(r.landed && r.approval.as_deref().is_some_and(|a| a.contains("accepted by a human")), "{r:?}");
+        assert!(!wt.exists());
+        std::fs::remove_dir_all(&f.base).ok();
+    }
+
+    #[test]
+    fn a_finding_sent_back_stays_a_defect_to_fix() {
+        let mut f = fixture("decline");
+        let pb_path = f.repo.join(playbook::PLAYBOOK_PATH);
+        let pb = std::fs::read_to_string(&pb_path)
+            .unwrap()
+            .replace("echo 'Fine.'; echo 'VERDICT: clean'", "echo 'x'; echo '- [P1] Drops a row: rows.txt, f: the last row'; echo 'VERDICT: findings'");
+        std::fs::write(&pb_path, pb).unwrap();
+        sh(&f.repo, &["commit", "-q", "-am", "a reviewer with a P1"]);
+        let (a, _) = f.submitted("Rows", "rows.txt", "x");
+        let wrong = f.db.request_acceptance(&a, "Nothing like it", "why", None, &f.actor).unwrap_err().to_string();
+        assert!(wrong.contains("1. [P1] Drops a row"), "lists what can be accepted: {wrong}");
+        let ask = f.db.request_acceptance(&a, "Drops a row: rows.txt, f: the last row", "It is how the export always worked.", None, &f.actor).unwrap();
+        assert_eq!(ask.finding.as_ref().map(|f| f.priority), Some(1));
+        let decided = f.db.decline_finding(ask.id, "it is a real bug", "").unwrap();
+        assert_eq!(decided.state, "Todo");
+        assert!(decided.ask.answer.unwrap().starts_with("Not accepted: it is a real bug"));
+        assert!(f.db.unaccepted_blockers(&a, &f.db.reviews(&a).unwrap()[0]).unwrap().len() == 1);
+        std::fs::remove_dir_all(&f.base).ok();
     }
 
     #[test]
