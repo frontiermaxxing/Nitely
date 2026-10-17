@@ -6,7 +6,7 @@ import { AgentSetup, pendingChanges, setupErrors } from "./Agents";
 import { Inbox, useDecisionDetails } from "./Inbox";
 import { decisionsOf } from "./decisions";
 import { Settings, isSettingsSection, type SettingsSection } from "./Settings";
-import { Now } from "./Now";
+import { Now, movingCounts, movingTitle } from "./Now";
 import { Pulse } from "./Pulse";
 import { Activity } from "./Activity";
 import { ProjectPage, isProjectTab, type ProjectTab } from "./Project";
@@ -218,7 +218,8 @@ export function App() {
   // New ones are told outside the window too, except while the Inbox is in front of the person.
   useNotifications(decisions, inboxDetails, now, focused && view.kind === "inbox" && !openIssue);
   const inboxCount = decisions?.length ?? 0;
-  const working = board?.repos.flatMap((r) => r.rows).filter((r) => r.session?.state === "working").length ?? 0;
+  // Agents moving, here and on other machines: state, so on the sidebar where it is seen at a glance.
+  const moving = board ? movingCounts(board, now) : { here: 0, elsewhere: 0, total: 0 };
 
   return (
     <div className="shell">
@@ -235,7 +236,7 @@ export function App() {
         </button>
         <NavItem active={view.kind === "pulse"} onClick={() => setView({ kind: "pulse" })} label={HOME_LABEL} />
         <NavItem active={view.kind === "inbox"} onClick={() => setView({ kind: "inbox" })} label="Inbox" count={inboxCount} tone="attention" />
-        <NavItem active={view.kind === "now"} onClick={() => setView({ kind: "now" })} label="Now" count={working} tone="live" />
+        <NavItem active={view.kind === "now"} onClick={() => setView({ kind: "now" })} label="Now" count={moving.total} tone="live" title={movingTitle(moving)} />
         <NavItem active={view.kind === "activity"} onClick={() => setView({ kind: "activity" })} label="Activity" />
         <div className="nav-heading">Projects</div>
         {projects.map((p) => (
@@ -408,9 +409,11 @@ function NavItem(props: {
   hint?: string;
   count?: number;
   tone?: "attention" | "live";
+  /** What the count is made of, on hover. */
+  title?: string;
 }) {
   return (
-    <button className={`nav-item${props.active ? " active" : ""}`} onClick={props.onClick} aria-current={props.active ? "page" : undefined}>
+    <button className={`nav-item${props.active ? " active" : ""}`} onClick={props.onClick} aria-current={props.active ? "page" : undefined} title={props.title}>
       <span className="nav-label">{props.label}</span>
       {props.hint && <span className="nav-hint">{props.hint}</span>}
       <CountBadge count={props.count ?? 0} tone={props.tone} />

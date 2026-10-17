@@ -167,17 +167,31 @@ function Card(props: { row: TaskRow; integration: string; now: number; onOpenIss
 
 const VENDOR_NAME: Record<string, string> = { ...VENDOR_LABEL, claude: "Claude Code" };
 
+/**
+ * The agents moving now: in this machine's worktrees and on other machines (through `nitely
+ * serve`). Now's header and the sidebar's Now count both say it, so the two always agree.
+ */
+export function movingCounts(board: Board, now: number): { here: number; elsewhere: number; total: number } {
+  const here = board.repos.flatMap((r) => r.rows).filter((r) => livenessOf(r.session, now) === "working").length;
+  const elsewhere = board.remote_sessions.filter((s) => livenessOf(s, now) === "working").length;
+  return { here, elsewhere, total: here + elsewhere };
+}
+
+/** What a moving count is made of, for its hover. */
+export const movingTitle = (m: { here: number; elsewhere: number }) =>
+  m.elsewhere > 0 ? `${m.here} working here, ${m.elsewhere} on other machines` : `${m.here} working`;
+
 /** The page in one line: how many agents move, wait on you, or sit idle. */
 function Glance({ board, needs, now, onInbox }: { board: Board; needs: number; now: number; onInbox: () => void }) {
   const rows = board.repos.flatMap((r) => r.rows);
   const count = (l: string) => rows.filter((r) => livenessOf(r.session, now) === l).length;
-  const working = count("working");
+  const moving = movingCounts(board, now);
   const idle = count("idle") + count("stale");
-  if (rows.length === 0) return null;
+  if (rows.length === 0 && moving.total === 0) return null;
   return (
     <>
-      <span className="head-note live-ink">
-        <Ticker value={working} /> moving
+      <span className="head-note live-ink" title={movingTitle(moving)}>
+        <Ticker value={moving.total} /> moving
       </span>
       {needs > 0 && (
         <button className="link head-note attention-ink" onClick={onInbox}>

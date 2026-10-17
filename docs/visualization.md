@@ -406,7 +406,8 @@ prose, and motion that loops (other than the breathing dot), flashes, bounces or
 ## The sidebar and Now
 
 The sidebar holds the mark and name, "Go to…" (the palette), the views with their counts
-(Overview; Inbox in a filled amber badge; Now in teal figures; Activity), the projects with a dot
+(Overview; Inbox in a filled amber badge; Now in teal figures, the agents moving here and on other
+machines, as Now's header counts them, with which on hover; Activity), the projects with a dot
 per agent session in their repos (amber waiting on you first, then teal working, at most five),
 "+ Add project", and at the foot Agent setup with a dot per installed agent (teal up to date, amber
 an update is ready, red needs a look), Settings, and the line "Local · live".
