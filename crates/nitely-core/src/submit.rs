@@ -305,6 +305,10 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     Ok(out)
 }
 
+/// A review from a batch with the reviewer that ran it, or None, and what a batch found that a
+/// single review must carry.
+type FromBatch = (Option<(crate::review::Choice, Review)>, Vec<Finding>);
+
 /// The change's review from a review batch, when its project batches reviews and it may join one;
 /// otherwise None (the timeline says why), with what a batch found for it that its single review
 /// must carry.
@@ -322,7 +326,7 @@ fn in_a_batch(
     reasons: &[String],
     previous: Option<&PreviousRound>,
     actor: &Actor,
-) -> Result<(Option<(crate::review::Choice, Review)>, Vec<Finding>)> {
+) -> Result<FromBatch> {
     let wt = worktree.to_string_lossy().into_owned();
     let choice = pb.review.choose(vendor, &|r| pb.review.is_installed(r, worktree))?;
     let lines = crate::review_batch::changed_lines(worktree, since)?;
