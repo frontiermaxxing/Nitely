@@ -169,7 +169,12 @@ pub fn hold_checkout(repo_root: &Path, pb: &Playbook) -> Result<Option<LaneLock>
     let until = Instant::now() + Duration::from_secs(rules.timeout_minutes.max(1) * 60);
     loop {
         if let Some(lock) = try_lock(repo_root, pb, 1)? {
-            recover_large(repo_root, &rules.keep);
+            let said = recover_large(repo_root, &rules.keep);
+            // Still at a request's commit (it changed since, or going back would overwrite a
+            // file): not the checkout the caller expects, so it is not handed over.
+            if lent_to_request(repo_root).is_some() && git(repo_root, &["symbolic-ref", "--quiet", "HEAD"]).is_err() {
+                bail!("{}", said.unwrap_or_else(|| "your main checkout is still at a build request's commit".into()));
+            }
             return Ok(Some(lock));
         }
         if Instant::now() > until {
@@ -237,6 +242,8 @@ pub struct Lends {
     pub last: Option<String>,
     /// The branch it goes back to, while it is lent now.
     pub lent: Option<String>,
+    /// The commit it was lent at, while it is lent now.
+    pub commit: Option<String>,
 }
 
 pub fn lends(repo_root: &Path) -> Lends {
@@ -245,18 +252,34 @@ pub fn lends(repo_root: &Path) -> Lends {
     let count = lines.next().and_then(|n| n.trim().parse().ok()).unwrap_or(0);
     let last = lines.next().map(|b| b.trim().to_string()).filter(|b| !b.is_empty());
     let lent = (lines.next().map(str::trim) == Some("lent")).then(|| last.clone()).flatten();
-    Lends { count, last, lent }
+    let commit = lines.next().map(|c| c.trim().to_string()).filter(|c| lent.is_some() && !c.is_empty());
+    Lends { count, last, lent, commit }
+}
+
+/// Whether the main checkout's own playbook file can be trusted while the checkout is as `l` says:
+/// always while it is not lent; while it is, only when the request's commit has no playbook, so
+/// the file there is the person's own (untracked) one, which the lend left alone.
+pub fn playbook_on_disk_is_theirs(repo_root: &Path, l: &Lends) -> bool {
+    match (&l.lent, &l.commit) {
+        (None, _) => true,
+        (Some(_), Some(commit)) => git(repo_root, &["cat-file", "-e", &format!("{commit}:{}", playbook::PLAYBOOK_PATH)]).is_err(),
+        (Some(_), None) => false,
+    }
 }
 
 const LENDS: &str = "nitely-lane-lends";
 
 /// Moves the lend count on, noting the branch and whether the checkout is now lent. Written to a
 /// file beside it and renamed over it, so a reader sees the old state or the new one, never half.
-fn count_lend(root: &Path, branch: &str, lent: bool) -> Result<()> {
+fn count_lend(root: &Path, branch: &str, lent_at: Option<&str>) -> Result<()> {
     if let Some(file) = git_path(root, LENDS) {
         let count = lends(root).count + 1;
         let next = file.with_extension("next");
-        std::fs::write(&next, format!("{count}\n{branch}\n{}\n", if lent { "lent" } else { "back" })).with_context(|| format!("writing {}", next.display()))?;
+        let state = match lent_at {
+            Some(commit) => format!("lent\n{commit}"),
+            None => "back".into(),
+        };
+        std::fs::write(&next, format!("{count}\n{branch}\n{state}\n")).with_context(|| format!("writing {}", next.display()))?;
         std::fs::rename(&next, &file).with_context(|| format!("writing {}", file.display()))?;
     }
     Ok(())
@@ -276,7 +299,7 @@ fn switch_large(root: &Path, branch: &str, commit: &str, keep: &[String]) -> Res
         bail!("the request's commit tracks {p}, which your checkout has as an ignored file; it was left alone and the request not run");
     }
     // Counted before anything changes, so a playbook read meanwhile knows to read the branch's.
-    count_lend(root, branch, true)?;
+    count_lend(root, branch, Some(commit))?;
     if let Some(mark) = return_mark(root) {
         std::fs::write(&mark, branch).with_context(|| format!("writing {}", mark.display()))?;
     }
@@ -296,7 +319,7 @@ fn return_large(root: &Path, branch: &str) -> Result<()> {
     }
     git(root, &["checkout", "--quiet", branch]).with_context(|| format!("putting your checkout back on {branch}"))?;
     // Counted again once it is back (see `Lends`).
-    count_lend(root, branch, false)?;
+    count_lend(root, branch, None)?;
     if let Some(mark) = return_mark(root) {
         std::fs::remove_file(mark).ok();
     }
@@ -316,7 +339,7 @@ fn recover_large(root: &Path, keep: &[String]) -> Option<String> {
     let detached = git(root, &["symbolic-ref", "--quiet", "HEAD"]).is_err();
     if !detached {
         // Put back by hand: no longer lent.
-        count_lend(root, &branch, false).ok();
+        count_lend(root, &branch, None).ok();
         std::fs::remove_file(&mark).ok();
         return None;
     }
@@ -334,14 +357,28 @@ fn recover_large(root: &Path, keep: &[String]) -> Option<String> {
 /// person's checkout, unlike a lane, every other process using the folder is theirs.
 fn stop_recorded(lane: &Path) {
     let Some(file) = pid_file(lane) else { return };
-    let Ok(text) = std::fs::read_to_string(&file) else { return };
-    let (pid, command) = text.split_once('\n').unwrap_or((text.as_str(), ""));
-    if let Ok(pid) = pid.trim().parse::<u32>() {
-        if !command.trim().is_empty() && crate::procs::command_line(pid).is_some_and(|line| line.contains(command.trim())) {
+    stop_recorded_command(&file);
+    std::fs::remove_file(&file).ok();
+}
+
+/// Stops the command a pid file names, when that process still runs it and started when recorded.
+fn stop_recorded_command(file: &Path) {
+    let Ok(text) = std::fs::read_to_string(file) else { return };
+    // "<pid>\n<command>": the pid is stopped only while it still runs that command, since the
+    // system may have given the number to another process once the command ended.
+    // "<pid> <start time>\n<command>": the same command at the same number with the same start is
+    // the process the request left; one that got the number since (running the same command in
+    // another lane, say) has another start time.
+    let (head, command) = text.split_once('\n').unwrap_or((text.as_str(), ""));
+    let mut head = head.split_whitespace();
+    if let Some(Ok(pid)) = head.next().map(str::parse::<u32>) {
+        let recorded = head.next();
+        let same_command = !command.trim().is_empty() && crate::procs::command_line(pid).is_some_and(|line| line.contains(command.trim()));
+        let same_start = recorded.is_some_and(|t| crate::procs::started(pid).as_deref() == Some(t));
+        if same_command && same_start {
             stop_tree(pid);
         }
     }
-    std::fs::remove_file(&file).ok();
 }
 
 // ----- snapshots -----
@@ -1420,22 +1457,7 @@ fn pid_file(lane: &Path) -> Option<PathBuf> {
 /// under its build directory). Only when the last request did not end normally.
 fn stop_leftovers(lane: &Path) {
     let Some(file) = pid_file(lane) else { return };
-    let Ok(text) = std::fs::read_to_string(&file) else { return };
-    // "<pid>\n<command>": the pid is stopped only while it still runs that command, since the
-    // system may have given the number to another process once the command ended.
-    // "<pid> <start time>\n<command>": the same command at the same number with the same start is
-    // the process the request left; one that got the number since (running the same command in
-    // another lane, say) has another start time.
-    let (head, command) = text.split_once('\n').unwrap_or((text.as_str(), ""));
-    let mut head = head.split_whitespace();
-    if let Some(Ok(pid)) = head.next().map(str::parse::<u32>) {
-        let recorded = head.next();
-        let same_command = !command.trim().is_empty() && crate::procs::command_line(pid).is_some_and(|line| line.contains(command.trim()));
-        let same_start = recorded.is_some_and(|t| crate::procs::started(pid).as_deref() == Some(t));
-        if same_command && same_start {
-            stop_tree(pid);
-        }
-    }
+    stop_recorded_command(&file);
     for h in crate::procs::holders(lane) {
         stop_tree(h.pid);
     }
@@ -2535,6 +2557,7 @@ commands = []
         assert_eq!(lent_to_request(&root), None);
         assert_eq!(lends(&root).count, before.count + 2, "and each return, so a read that began during the lend sees the count move");
         assert!(std::fs::read_to_string(git_path(&root, LENDS).unwrap()).unwrap().ends_with("main\nback\n"), "lent and back in the same file, read at once");
+        assert_eq!(during.commit.as_deref(), Some(work.as_str()));
 
         // A checkout put back by hand after a crash is no longer lent once Nitely sees it.
         switch_large(&root, "main", &work, &keep).unwrap();
@@ -2543,6 +2566,37 @@ commands = []
         assert_eq!(recover_large(&root, &keep), None);
         assert_eq!(lent_to_request(&root), None);
         assert_eq!(Playbook::load(&root).unwrap().gate.commands, ["main-gate"]);
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn the_persons_own_untracked_playbook_stays_in_force_while_lent() {
+        let base = crate::paths::unique_temp("nitely-large-ownrules", "");
+        let (root, agent, pb) = large(&base, "");
+        let keep = pb.lanes.clone().unwrap().keep;
+        std::fs::write(git_path(&root, "info/exclude").unwrap(), ".nitely/\n").unwrap();
+        std::fs::create_dir_all(root.join(".nitely")).unwrap();
+        std::fs::write(root.join(playbook::PLAYBOOK_PATH), "[gate]\ncommands = [\"theirs\"]\n").unwrap();
+        let work = git(&agent, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        switch_large(&root, "main", &work, &keep).unwrap();
+        assert_eq!(Playbook::load(&root).unwrap().gate.commands, ["theirs"], "the request's commit has no playbook, so the one on disk is theirs");
+        return_large(&root, "main").unwrap();
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn after_land_steps_never_run_on_a_requests_commit() {
+        let base = crate::paths::unique_temp("nitely-large-hold", "");
+        let (root, agent, pb) = large(&base, "");
+        let keep = pb.lanes.clone().unwrap().keep;
+        let work = git(&agent, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        switch_large(&root, "main", &work, &keep).unwrap();
+        std::fs::write(root.join("src/b.txt"), "theirs\n").unwrap();
+        let e = hold_checkout(&root, &pb).err().expect("refused").to_string();
+        assert!(e.contains("stays detached"), "{e}");
+        git_ok(&root, &["checkout", "--", "src/b.txt"]);
+        assert!(hold_checkout(&root, &pb).unwrap().is_some());
+        assert_eq!(on_branch(&root), "main");
         std::fs::remove_dir_all(base).ok();
     }
 

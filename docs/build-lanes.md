@@ -145,7 +145,9 @@ As built (NIT-201), `large_repo = true` under `[lanes]`:
   in the git folder (`nitely-lane-lends`, replaced whole) holds a count, the branch and "lent" or
   "back": it says "lent", with the count moved, before the checkout goes to a snapshot, and "back",
   with the count moved again, once it has returned. A read that began while it said "lent", or that
-  sees the count moved when it looks again, reads the branch's playbook instead.
+  sees the count moved when it looks again, reads the branch's playbook instead, or, when the branch
+  has none committed, the person's own untracked one when the request's commit has no playbook (the
+  lend leaves it alone), else the one Nitely keeps for the repo.
 - **The queue.** A request waiting for the checkout holds up no other project's request for a
   machine slot.
 - **After a crash.** A checkout left detached with the return note is put back on its branch by the

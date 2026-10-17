@@ -482,29 +482,47 @@ impl Playbook {
                 pb
             }))
         };
-        let lends = crate::lanes::lends(repo_root);
-        if let Some(pb) = lends.lent.as_deref().and_then(from_branch) {
-            return pb;
-        }
         let read = |path: &Option<PathBuf>| -> Result<Option<String>> {
             match path {
                 Some(path) => Ok(Some(std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?)),
                 None => Ok(None),
             }
         };
-        let mut path = if lends.lent.is_some() { Playbook::stored_path_for(repo_root, config) } else { Playbook::path_in(repo_root, config) };
-        let mut text = read(&path)?;
-        // A request that lent the checkout while it was read: what was read may be a snapshot's,
-        // so the branch's is read instead, or, when the branch has none, the one Nitely keeps for
-        // the repo; never what was read from the checkout.
-        let after = crate::lanes::lends(repo_root);
-        if lends.lent.is_none() && (after.count != lends.count || after.lent.is_some()) {
-            if let Some(pb) = after.lent.or(after.last).as_deref().and_then(from_branch) {
+        // Read until the checkout's state is the same before and after the read (each lend and
+        // each return moves the count), so what was read is what that state allows: the file on
+        // disk, unless a request's commit with a playbook of its own may be there.
+        let mut settled = None;
+        let mut last = None;
+        for _ in 0..5 {
+            let before = crate::lanes::lends(repo_root);
+            if let Some(pb) = before.lent.as_deref().and_then(from_branch) {
                 return pb;
             }
-            path = Playbook::stored_path_for(repo_root, config);
-            text = read(&path)?;
+            let path = if crate::lanes::playbook_on_disk_is_theirs(repo_root, &before) {
+                Playbook::path_in(repo_root, config)
+            } else {
+                Playbook::stored_path_for(repo_root, config)
+            };
+            let text = read(&path)?;
+            let after = crate::lanes::lends(repo_root);
+            if after == before {
+                settled = Some((path, text));
+                break;
+            }
+            last = after.lent.or(after.last);
         }
+        // Lent and given back over and over while it was read: the branch's, else the stored one.
+        let (path, text) = match settled {
+            Some(read_once) => read_once,
+            None => {
+                if let Some(pb) = last.as_deref().and_then(from_branch) {
+                    return pb;
+                }
+                let path = Playbook::stored_path_for(repo_root, config);
+                let text = read(&path)?;
+                (path, text)
+            }
+        };
         let (Some(path), Some(text)) = (path, text) else {
             let mut pb = Playbook::default();
             crate::rules::apply_defaults(&mut pb, "", defaults);
