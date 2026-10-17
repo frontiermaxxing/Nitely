@@ -474,8 +474,10 @@ using P0 for data loss or security, P1 for a definite bug in normal use, P2 for 
         if !status.success() {
             return Err(if says_signed_out(&printed) { signed_out() } else { could_not(&format!("exited with {status}"), tail(&printed)) });
         }
-        // A reviewer that is signed out may still exit 0, printing why instead of a review.
-        self.parse(reviewer, &text, started.elapsed().as_secs(), previous, Some(worktree)).map_err(|e| if says_signed_out(&printed) { signed_out() } else { e })
+        // A reviewer that is signed out may still exit 0, printing why instead of a review: a short
+        // reply with no findings in it. A long or partial review that mentions logins is unfinished.
+        let only_a_login_message = printed.len() < 1000 && !text.contains("- [P") && says_signed_out(&printed);
+        self.parse(reviewer, &text, started.elapsed().as_secs(), previous, Some(worktree)).map_err(|e| if only_a_login_message { signed_out() } else { e })
     }
 }
 
@@ -1075,6 +1077,10 @@ mod tests {
         assert_eq!(could_not("echo 'Invalid API key - Please run /login'").unwrap().why, "not signed in");
         assert!(could_not("echo 'disk full' >&2; exit 3").unwrap().why.starts_with("exited with"));
         assert!(could_not("echo 'I looked around but ran out of time'").is_err(), "an unfinished review is not a reviewer that could not run");
+        assert!(
+            could_not("echo '- [P1] Leaks the token: auth.rs, login: the API key is logged on a 401'").is_err(),
+            "an unfinished review about logins is not a reviewer that is signed out"
+        );
         let mut r = rules();
         r.commands.insert("gone".into(), vec!["nitely-test-no-such-reviewer".into()]);
         assert_eq!(r.run("gone", &std::env::temp_dir(), "main", None).unwrap_err().downcast::<CouldNotRun>().unwrap().why, "did not start");
