@@ -31,6 +31,8 @@ export function WindowControls() {
     const win = getCurrentWindow();
     const check = () => win.isMaximized().then(setMaximized, () => {});
     check();
+    // A window can open without the focus (the test harness's does), so ask rather than assume.
+    win.isFocused().then(setFocused, () => {});
     const stops = [win.onResized(check), win.onFocusChanged(({ payload }) => setFocused(payload))];
     return () => stops.forEach((s) => s.then((stop) => stop()));
   }, []);

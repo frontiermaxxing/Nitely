@@ -29,6 +29,18 @@ pub fn agents_can_verify() -> bool {
     !cfg!(target_os = "macos")
 }
 
+/// Under the test harness (src-tauri/src/harness.rs) the app signs with a key that lives only in its
+/// process and never reads or writes the OS keychain. `land` still trusts only the keychain's key,
+/// so a harness approval never lands anything real.
+static EPHEMERAL: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+
+/// Called by the app when the test harness runs it: approvals are signed with a throwaway key.
+pub fn use_ephemeral_key() -> Result<()> {
+    let secret = new_secret()?;
+    let _ = EPHEMERAL.set(secret);
+    Ok(())
+}
+
 /// Called by the app at start: it made the keychain entries, so it reads them without a prompt.
 pub fn keychain_is_silent() {
     SILENT_KEYCHAIN.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -59,6 +71,9 @@ pub(crate) fn keychain_set(account: &str, text: &str) -> Result<()> {
 
 /// The app's signing secret, made and saved in the keychain the first time. Only the app calls it.
 pub fn keychain_secret() -> Result<[u8; 32]> {
+    if let Some(secret) = EPHEMERAL.get() {
+        return Ok(*secret);
+    }
     let e = entry(SECRET_ACCOUNT)?;
     match e.get_password() {
         Ok(hex) => unhex::<32>(&hex).context("the approval key in the OS keychain is not one Nitely made"),
@@ -74,6 +89,9 @@ pub fn keychain_secret() -> Result<[u8; 32]> {
 /// Puts the public half of `secret` in the keychain, where land reads it; true when it replaced a
 /// different one (someone changed it).
 pub fn publish_public_key(secret: &[u8; 32]) -> Result<bool> {
+    if EPHEMERAL.get().is_some() {
+        return Ok(false);
+    }
     let public = hex(&public_of(secret));
     let e = entry(PUBLIC_ACCOUNT)?;
     let was = e.get_password().ok();

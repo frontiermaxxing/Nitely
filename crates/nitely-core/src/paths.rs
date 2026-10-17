@@ -6,9 +6,12 @@ pub fn data_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("NITELY_HOME") {
         return PathBuf::from(dir);
     }
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("Nitely")
+    real_data_dir()
+}
+
+/// The person's own data directory, whatever `NITELY_HOME` says: what the test harness refuses.
+pub fn real_data_dir() -> PathBuf {
+    dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("Nitely")
 }
 
 pub fn db_path() -> PathBuf {

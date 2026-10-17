@@ -50,6 +50,31 @@ Nitely tracks its own build. Its backlog is the **NIT** project in Nitely, reach
   checkout: it puts the new `nitely` where hooks and MCP run it, even while agents run the old one
   (`cargo install` fails then on Windows), and running MCP servers forward tool calls to it.
 
+## Driving the real app
+
+A live check (the title bar, notifications, window state, anything the browser preview cannot
+show) is yours to run, in the real app on throwaway data, before it becomes a live-check issue:
+
+- `npm run app:build` once (a few minutes; it builds into `target/harness`, apart from the dev build),
+  then `npm run app:test` runs the end-to-end tests in `scripts/harness/*.e2e.mjs` (CI runs them on
+  Windows, `.github/workflows/app.yml`).
+- `npm run app:drive` starts the app on seeded sample data and prints its DevTools port and data
+  folder; drive it from a script with `scripts/harness/cdp.mjs` (`Page.connect(port)`: `open("#inbox")`,
+  `click({ css, text })`, `waitFor(js)`, `screenshot(path)`, `invoke(command)`, `windowState()`).
+  In a test, `launch()` from `scripts/harness/app.mjs` does the same with your own seed and
+  `close()` cleans up; `notifications(home)` reads the toasts the app asked to show.
+- It never touches the person's Nitely: its own identifier (so its own window, lock, storage and
+  app data), a new temp data folder each run (the app refuses `NITELY_HARNESS=1` without one, and the
+  real one always), no `nitely://` registration, a throwaway approval key instead of the keychain,
+  and notifications written to `harness-notifications.jsonl` instead of shown (`NITELY_HARNESS_TOASTS=1`
+  shows them). The window opens without taking the focus, but it is on the person's screen while
+  a test runs (window.e2e.mjs maximizes it for a moment).
+- One real toast, confirmed from Windows' notification history: `node scripts/harness/toast.check.mjs`
+  (it shows a toast on the desktop, so it is not part of `app:test`).
+- What a driven window cannot do: OS input outside the page (Alt+Space, Win+arrows, dragging the
+  window, resizing by its border, clicking a toast). Do not send OS input on the person's desktop;
+  leave those steps in the live-check issue, numbered, for them.
+
 ## Layout
 
 - `crates/nitely-core`: database, issues and their rules, git reader, playbooks (`playbook.rs`),

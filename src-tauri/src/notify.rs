@@ -10,6 +10,13 @@ pub const OPEN_DECISION_EVENT: &str = "nitely://open-decision";
 /// Shows one toast. `decision` is the decision a click opens, or none for a batch (the Inbox).
 #[tauri::command]
 pub fn notify(app: AppHandle, title: String, body: String, decision: Option<String>) -> Result<(), String> {
+    if crate::harness::on() {
+        // Under the test harness: written down for the test, and shown only when it asks.
+        crate::harness::record_notification(&title, &body, decision.as_deref());
+        if !crate::harness::real_toasts() {
+            return Ok(());
+        }
+    }
     show(&app, &title, &body, decision)
 }
 
@@ -42,6 +49,9 @@ fn show(_app: &AppHandle, _title: &str, _body: &str, _decision: Option<String>) 
 /// frontend as `size` by `size` RGBA), the badge elsewhere. Zero clears it.
 #[tauri::command]
 pub fn set_badge(app: AppHandle, count: u32, rgba: Option<Vec<u8>>, size: u32) -> Result<(), String> {
+    if crate::harness::on() {
+        crate::harness::record_badge(count, rgba.as_ref().is_some_and(|px| px.len() == (size * size * 4) as usize));
+    }
     let Some(window) = app.get_webview_window("main") else { return Ok(()) };
     #[cfg(windows)]
     {

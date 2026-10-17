@@ -1,0 +1,58 @@
+# The real app, driven end to end on Windows (scripts/harness, AGENTS.md "Driving the real app"):
+# the harness build on throwaway data, the Inbox approving and answering. Apart from ci.yml, which
+# runs exactly the playbook's gate.
+
+name: App end to end
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: app-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  inbox:
+    name: Inbox in the real app (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: harness
+          workspaces: ". -> target/harness"
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run app:build
+
+      - run: npm run app:test
+
+      - name: Screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-screens
+          path: target/harness/screens
+          if-no-files-found: ignore

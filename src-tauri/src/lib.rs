@@ -1,4 +1,5 @@
 mod agent_icons;
+mod harness;
 mod notify;
 
 mod phone;
@@ -531,6 +532,28 @@ fn watch(app: tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Under the test harness the app must touch nothing of the person's; it does not start at all
+    // when the harness forgot its own data folder.
+    match harness::mode() {
+        Ok(on) => harness::set(on),
+        Err(e) => {
+            eprintln!("harness: {e}");
+            std::process::exit(2);
+        }
+    }
+    let context = tauri::generate_context!();
+    // The harness build (scripts/harness/tauri.harness.conf.json) runs only under the harness.
+    if context.config().identifier.ends_with(".harness") && !harness::on() {
+        eprintln!("harness: this is the test harness build; it runs only under scripts/harness/app.mjs (NITELY_HARNESS=1 and a throwaway NITELY_HOME)");
+        std::process::exit(2);
+    }
+    if harness::on() {
+        if let Err(e) = nitely_core::approval::use_ephemeral_key() {
+            eprintln!("harness: {e}");
+            std::process::exit(2);
+        }
+    }
+
     std::thread::spawn(|| loop {
         if let Err(e) = run_sync() {
             eprintln!("sync: {e:#}");
@@ -567,7 +590,9 @@ pub fn run() {
             // time the app starts, so a dev build opens links too (Windows and Linux; macOS needs the
             // bundled app).
             #[cfg(any(windows, target_os = "linux"))]
-            if let Err(e) = app.deep_link().register_all() {
+            if harness::on() {
+                // The harness build must not take over the person's nitely:// links.
+            } else if let Err(e) = app.deep_link().register_all() {
                 eprintln!("deep link: {e}");
             }
             let links = app.handle().clone();
@@ -660,6 +685,6 @@ pub fn run() {
             network_add,
             network_remove
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running Nitely");
 }
