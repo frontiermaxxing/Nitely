@@ -30,6 +30,7 @@ pub mod procs;
 pub mod proposals;
 pub mod projects;
 pub mod relay;
+pub mod release_notes;
 pub mod remote;
 pub mod similar;
 pub mod review;

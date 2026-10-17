@@ -1,0 +1,49 @@
+# Promotes a beta to stable in one run: tags the beta's commit v1.2.3 and builds that tag as a
+# stable release (release.yml), so the stable installer is built by CI from exactly the code the
+# beta shipped, stamped with the stable version. Run it from the Actions tab: "Promote a beta",
+# with the beta's tag (docs/releasing.md).
+
+name: Promote a beta
+
+on:
+  workflow_dispatch:
+    inputs:
+      beta:
+        description: "The beta tag to promote, e.g. v0.2.0-beta.3"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    outputs:
+      stable: ${{ steps.tag.outputs.stable }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Tag the beta's commit as stable
+        id: tag
+        env:
+          BETA: ${{ inputs.beta }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node scripts/release-meta.mjs promote "$BETA" | tee -a "$GITHUB_OUTPUT"
+          stable=$(node scripts/release-meta.mjs promote "$BETA" | sed 's/^stable=//')
+          sha=$(git rev-parse -q --verify "refs/tags/${BETA}^{commit}") || { echo "::error::no tag $BETA"; exit 1; }
+          if git rev-parse -q --verify "refs/tags/$stable" >/dev/null; then echo "::error::$stable already exists"; exit 1; fi
+          gh release view "$BETA" >/dev/null || { echo "::error::$BETA has no release; promote a beta that was published"; exit 1; }
+          git tag "$stable" "$sha"
+          git push origin "refs/tags/$stable"
+          echo "tagged $stable at $sha"
+
+  # A tag pushed with the workflow token starts no workflow, so the build is called here.
+  release:
+    needs: tag
+    uses: ./.github/workflows/release.yml
+    with:
+      ref: ${{ needs.tag.outputs.stable }}
+    secrets: inherit

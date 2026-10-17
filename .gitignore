@@ -3,3 +3,4 @@
 /dist
 /src-tauri/gen
 /.test-build
+/src-tauri/binaries

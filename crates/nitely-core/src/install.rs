@@ -27,7 +27,7 @@ pub struct Installed {
 }
 
 /// The executable agents run as `nitely` to install `from` over: the first on PATH outside
-/// Cargo's own build folders, else Cargo's install folder. `cargo run` puts its target folders
+/// Cargo's own build folders, else a folder on PATH to put it in (`fallback_dir`). `cargo run` puts its target folders
 /// first on PATH on Windows, and `target/<profile>/deps` holds a copy of the build; installing
 /// over either would quietly change nothing. A PATH copy identical to the build is still the
 /// target, so installing the same build twice changes nothing rather than overwriting a later
@@ -35,7 +35,21 @@ pub struct Installed {
 pub fn default_target(from: &Path) -> Option<PathBuf> {
     let exe = if cfg!(windows) { "nitely.exe" } else { "nitely" };
     let folders: Vec<PathBuf> = std::env::var_os("PATH").map(|path| std::env::split_paths(&path).collect()).unwrap_or_default();
-    first_installed(&folders, from, exe).or_else(|| dirs::home_dir().map(|h| h.join(".cargo").join("bin").join(exe)))
+    let cargo = dirs::home_dir().map(|h| h.join(".cargo").join("bin"));
+    let windows_apps = if cfg!(windows) { dirs::data_local_dir().map(|d| d.join("Microsoft").join("WindowsApps")) } else { None };
+    first_installed(&folders, from, exe).or_else(|| fallback_dir(&folders, cargo, windows_apps).map(|d| d.join(exe)))
+}
+
+/// Where a first install goes: Cargo's install folder when it is on PATH (a machine that builds
+/// Nitely), else the user's WindowsApps folder when it is (Windows puts it on every account's
+/// PATH, so the release installer's copy is found without changing PATH), else Cargo's folder.
+fn fallback_dir(path: &[PathBuf], cargo: Option<PathBuf>, windows_apps: Option<PathBuf>) -> Option<PathBuf> {
+    let on_path = |d: &PathBuf| path.iter().any(|p| crate::paths::normalize(&p.to_string_lossy()) == crate::paths::normalize(&d.to_string_lossy()));
+    match (&cargo, &windows_apps) {
+        (Some(c), _) if on_path(c) => cargo,
+        (_, Some(w)) if on_path(w) => windows_apps,
+        _ => cargo,
+    }
 }
 
 /// The first `exe` in `dirs` that is neither `from` itself nor in a folder Cargo builds into: a
@@ -179,6 +193,18 @@ pub fn stamp(path: &Path) -> Option<(u64, std::time::SystemTime)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_first_install_goes_to_a_folder_on_path() {
+        let cargo = PathBuf::from("C:/Users/sam/.cargo/bin");
+        let apps = PathBuf::from("C:/Users/sam/AppData/Local/Microsoft/WindowsApps");
+        let path = |dirs: &[&str]| dirs.iter().map(PathBuf::from).collect::<Vec<_>>();
+        let pick = |p: &[PathBuf]| fallback_dir(p, Some(cargo.clone()), Some(apps.clone()));
+        assert_eq!(pick(&path(&[r"C:\Users\sam\.cargo\bin", r"C:\Users\sam\AppData\Local\Microsoft\WindowsApps"])), Some(cargo.clone()), "a Rust machine keeps Cargo's folder");
+        assert_eq!(pick(&path(&[r"C:\Windows", r"C:\Users\sam\AppData\Local\Microsoft\WindowsApps\"])), Some(apps.clone()), "no Rust: the folder Windows puts on PATH");
+        assert_eq!(pick(&path(&[r"C:\Windows"])), Some(cargo.clone()), "neither on PATH: Cargo's folder, as before");
+        assert_eq!(fallback_dir(&path(&[r"C:\Windows"]), None, None), None);
+    }
 
     #[test]
     fn installs_over_the_first_path_copy_outside_cargos_folders() {

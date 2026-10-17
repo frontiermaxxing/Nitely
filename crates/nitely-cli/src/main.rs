@@ -217,6 +217,25 @@ enum Cmd {
     Sync,
     /// Print where Nitely keeps its data.
     Where,
+    /// Print release notes as Markdown: the issues whose commits landed since a tag, with their
+    /// titles and pull requests. The release workflow writes each release's notes with it.
+    ReleaseNotes {
+        /// The version the notes are for, e.g. 0.2.0.
+        #[arg(long)]
+        version: String,
+        /// The previous release's tag; every commit when omitted.
+        #[arg(long)]
+        since: Option<String>,
+        /// The last commit in the release.
+        #[arg(long, default_value = "HEAD")]
+        until: String,
+        /// The GitHub repo (owner/name) its pull requests are in, for links.
+        #[arg(long)]
+        github: Option<String>,
+        /// The repo to read; the current folder by default.
+        #[arg(long, default_value = ".")]
+        repo: String,
+    },
     /// Serve this machine's backlog to agents on other machines on the local network: the MCP
     /// server over HTTP at /mcp, answered only for this machine's networks and with a token made
     /// in the app (Other machines), and announced over mDNS so `nitely discover` finds it.
@@ -1004,6 +1023,14 @@ dry run: would create {} issue(s) ({} to {}) and {} comment(s) in {} {}; run aga
             if !report.errors.is_empty() {
                 std::process::exit(1);
             }
+            Ok(())
+        }
+        Cmd::ReleaseNotes { version, since, until, github, repo } => {
+            // Titles come from this machine's issues when it has them; CI has none and uses the
+            // commits' own subjects. Read-only: notes never change the board.
+            let db = paths::db_path().exists().then(|| Db::open_read_only(&paths::db_path()).ok()).flatten();
+            let (entries, other) = nitely_core::release_notes::entries(std::path::Path::new(&repo), since.as_deref(), &until, db.as_ref())?;
+            print!("{}", nitely_core::release_notes::markdown(&version, &entries, &other, github.as_deref()));
             Ok(())
         }
         Cmd::Where => {

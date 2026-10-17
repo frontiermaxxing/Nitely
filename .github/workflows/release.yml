@@ -1,0 +1,216 @@
+# Builds and publishes Nitely's releases (docs/releasing.md):
+#   nightly  every day at 05:00 UTC when main changed since the last nightly (or on demand): the
+#            rolling pre-release "nightly", replaced each time
+#   beta     a pushed tag v1.2.3-beta.N: a pre-release
+#   stable   a pushed tag v1.2.3, or promote.yml turning a beta into one: a full release
+#   test     a pushed tag v1.2.3-test.N: a draft only collaborators see, to try this workflow
+# Each build runs the gate, stamps the version (scripts/release-meta.mjs decides it), builds the
+# nitely CLI and the NSIS installer that carries it, installs that installer on the runner to check
+# it, writes the notes with `nitely release-notes`, and publishes. With the updater signing key set
+# (the TAURI_SIGNING_PRIVATE_KEY secret), it also signs the installer for the updater and updates
+# the channel's manifest under the "updates" release.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  schedule:
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "nightly, or a tag to build again"
+        default: nightly
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        required: true
+
+concurrency:
+  group: release-${{ inputs.ref || github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+      GH_TOKEN: ${{ github.token }}
+      REF: ${{ inputs.ref || (github.event_name == 'schedule' && 'nightly') || github.ref_name }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # The runner's TEMP is an 8.3 short path; see ci.yml.
+      - name: Long temp path
+        run: |
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v5
+        with:
+          # A tag given as input (a rebuild, or promote.yml) is checked out by name; otherwise the
+          # pushed tag, or main for a scheduled or dispatched nightly.
+          ref: ${{ inputs.ref && inputs.ref != 'nightly' && format('refs/tags/{0}', inputs.ref) || github.ref }}
+          fetch-depth: 0
+
+      - name: Skip a nightly when main has not changed
+        id: changed
+        run: |
+          if [ "$REF" = nightly ] && [ "$(git rev-parse -q --verify 'refs/tags/nightly^{commit}' || true)" = "$(git rev-parse HEAD)" ]; then
+            echo "main has not changed since the last nightly"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Rust toolchain
+        if: steps.changed.outputs.build == 'true'
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.changed.outputs.build == 'true'
+
+      - uses: actions/setup-node@v5
+        if: steps.changed.outputs.build == 'true'
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Git identity
+        if: steps.changed.outputs.build == 'true'
+        run: |
+          git config --global user.name "Nitely CI"
+          git config --global user.email "ci@example.com"
+
+      - name: Decide the channel and version
+        if: steps.changed.outputs.build == 'true'
+        id: meta
+        run: |
+          node scripts/release-meta.mjs "$REF" "$(git rev-parse HEAD)" | tee -a "$GITHUB_OUTPUT"
+          # The previous release on a lower or equal channel, for the notes.
+          prev=$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude '*-test.*' --exclude "$REF" HEAD 2>/dev/null || true)
+          echo "previous=$prev" | tee -a "$GITHUB_OUTPUT"
+
+      - run: npm ci
+        if: steps.changed.outputs.build == 'true'
+
+      - name: Gate
+        if: steps.changed.outputs.build == 'true'
+        run: |
+          npm run build
+          npm test
+          cargo test --workspace --locked
+          cargo clippy --workspace --locked -- -D warnings
+
+      - name: Stamp the version
+        if: steps.changed.outputs.build == 'true'
+        run: node scripts/version.mjs set "${{ steps.meta.outputs.version }}"
+
+      - name: Build the nitely CLI
+        if: steps.changed.outputs.build == 'true'
+        run: |
+          cargo build --release --locked -p nitely-cli
+          mkdir -p src-tauri/binaries
+          cp target/release/nitely.exe src-tauri/binaries/nitely-x86_64-pc-windows-msvc.exe
+          target/release/nitely.exe --version
+
+      - name: Build the installer
+        if: steps.changed.outputs.build == 'true'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            npx tauri build --config src-tauri/tauri.release.json --config '{"bundle":{"createUpdaterArtifacts":true}}'
+          else
+            echo "::warning::No TAURI_SIGNING_PRIVATE_KEY secret: building without updater signatures, and no update manifest is published (docs/releasing.md)."
+            npx tauri build --config src-tauri/tauri.release.json
+          fi
+          ls -l target/release/bundle/nsis
+
+      - name: Collect the release files
+        if: steps.changed.outputs.build == 'true'
+        id: files
+        run: |
+          v="${{ steps.meta.outputs.version }}"
+          mkdir -p out
+          setup=$(ls target/release/bundle/nsis/*-setup.exe | head -1)
+          cp "$setup" "out/Nitely_${v}_x64-setup.exe"
+          [ -f "$setup.sig" ] && cp "$setup.sig" "out/Nitely_${v}_x64-setup.exe.sig"
+          cp target/release/nitely.exe "out/nitely_${v}_x86_64-pc-windows-msvc.exe"
+          (cd out && sha256sum * > SHA256SUMS.txt)
+          ls -l out
+
+      # Install what users will download, silently, on this runner: the app lands in the user's
+      # programs and the CLI where agents run `nitely`.
+      - name: Check the installer
+        if: steps.changed.outputs.build == 'true'
+        shell: pwsh
+        run: |
+          $v = "${{ steps.meta.outputs.version }}"
+          $p = Start-Process -FilePath "out\Nitely_${v}_x64-setup.exe" -ArgumentList "/S" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "the installer exited with $($p.ExitCode)" }
+          $dir = @("Nitely", "Programs\Nitely") | ForEach-Object { Join-Path $env:LOCALAPPDATA $_ } | Where-Object { Test-Path (Join-Path $_ "nitely.exe") } | Select-Object -First 1
+          if (-not $dir) { throw "found no install folder holding the app and nitely.exe" }
+          $app = Get-ChildItem $dir -Filter *.exe | Where-Object { $_.Name -notin @("nitely.exe", "uninstall.exe") } | Select-Object -First 1
+          if (-not $app) { Get-ChildItem $dir; throw "no app executable in $dir" }
+          $cli = (Get-Command nitely -ErrorAction SilentlyContinue).Source
+          if (-not $cli) { $cli = Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\nitely.exe" }
+          if (-not (Test-Path $cli)) { throw "the installer put no nitely CLI where agents find it" }
+          $out = & $cli --version
+          Write-Output "installed $app; CLI at ${cli}: $out"
+          if ("$out" -notmatch [regex]::Escape($v)) { throw "the installed CLI says '$out', not $v" }
+
+      - name: Write the notes
+        if: steps.changed.outputs.build == 'true'
+        run: |
+          since=()
+          [ -n "${{ steps.meta.outputs.previous }}" ] && since=(--since "${{ steps.meta.outputs.previous }}")
+          target/release/nitely.exe release-notes --version "${{ steps.meta.outputs.version }}" "${since[@]}" --github "$GITHUB_REPOSITORY" > notes.md
+          cat >> notes.md <<'EOF'
+
+          ---
+          **Installing:** download `Nitely_*_x64-setup.exe` and run it; no administrator rights are needed. The installer is not code-signed yet, so Windows SmartScreen warns the first time: choose **More info**, then **Run anyway**. `SHA256SUMS.txt` lists each file's checksum. The `nitely_*` file is the command-line tool on its own.
+          EOF
+          cat notes.md
+
+      - name: Publish the release
+        if: steps.changed.outputs.build == 'true'
+        run: |
+          tag="${{ steps.meta.outputs.tag }}"
+          flags=()
+          [ "${{ steps.meta.outputs.prerelease }}" = true ] && flags+=(--prerelease)
+          [ "${{ steps.meta.outputs.draft }}" = true ] && flags+=(--draft)
+          if [ "$tag" = nightly ]; then
+            # The rolling nightly: the previous one goes, with its tag, and this commit takes it.
+            gh release delete nightly --yes --cleanup-tag 2>/dev/null || true
+            git push -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/tags/nightly"
+          fi
+          gh release create "$tag" out/* --verify-tag --title "${{ steps.meta.outputs.title }}" --notes-file notes.md "${flags[@]}"
+
+      - name: Update the channel manifests
+        if: steps.changed.outputs.build == 'true' && steps.meta.outputs.manifests != ''
+        run: |
+          v="${{ steps.meta.outputs.version }}"
+          sig="out/Nitely_${v}_x64-setup.exe.sig"
+          if [ ! -f "$sig" ]; then
+            echo "::warning::No updater signature, so the ${{ steps.meta.outputs.manifests }} manifest stays as it was."
+            exit 0
+          fi
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${{ steps.meta.outputs.tag }}/Nitely_${v}_x64-setup.exe"
+          gh release view updates >/dev/null 2>&1 || gh release create updates --prerelease --title "Update manifests" \
+            --notes "What installed copies of Nitely read to find their channel's newest version. Not a release to download."
+          for channel in ${{ steps.meta.outputs.manifests }}; do
+            node scripts/update-manifest.mjs --version "$v" --url "$url" --sig "$sig" --notes notes.md --out "$channel.json"
+            gh release upload updates "$channel.json" --clobber
+          done

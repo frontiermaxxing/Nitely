@@ -38,8 +38,13 @@ you what each agent is doing right now. An inbox holds the decisions only you sh
 
 ## Install
 
-Nitely runs on Windows today; macOS is next. Ready-made installers will come from GitHub Releases.
-Until then, build it from source:
+Nitely runs on Windows today; macOS is next. Installers are published on
+[GitHub Releases](https://github.com/frontiermaxxing/Nitely/releases): stable releases, plus beta and
+nightly pre-releases ([docs/releasing.md](docs/releasing.md)). Download `Nitely_*_x64-setup.exe` and
+run it; it needs no administrator rights and puts the `nitely` command where your agents find it.
+The installer isn't code-signed yet, so SmartScreen warns the first time (**More info → Run anyway**).
+
+To build it from source instead:
 
 1. Install [Rust](https://rustup.rs) (MSVC toolchain), [Node.js](https://nodejs.org) 20 or newer,
    and Visual Studio Build Tools with "Desktop development with C++". WebView2 ships with Windows 11.
