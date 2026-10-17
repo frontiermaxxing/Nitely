@@ -4,9 +4,28 @@ import { useEffect, useRef, useState } from "react";
 import { invoke, isPreview } from "./backend";
 import { PlaybookChangeDecision } from "./PlaybookChangeDecision";
 import { GoalPlanDecision } from "./GoalPlanDecision";
-import { APPROVALS, askPlaces, decisionsOf, detailKeys, firstLine, groupApprovals, outcomeOf, shownDecisions, trackAfter, type Decision, type DecisionKind, type Move, type Resolved } from "./decisions";
+import {
+  APPROVALS,
+  askPlaces,
+  decisionsOf,
+  detailKeys,
+  firstLine,
+  groupApprovals,
+  inProject,
+  nextProject,
+  outcomeOf,
+  projectCounts,
+  projectOf,
+  shownDecisions,
+  trackAfter,
+  type Decision,
+  type DecisionKind,
+  type Move,
+  type ProjectCount,
+  type Resolved,
+} from "./decisions";
 import { ChecksMark } from "./Pr";
-import type { Board, IssueDetail, TaskRow } from "./types";
+import type { Board, IssueDetail, Project, TaskRow } from "./types";
 import { ago } from "./util";
 import {
   AgentMark,
@@ -45,6 +64,10 @@ export function Inbox(props: {
   onChanged: () => void;
   /** Opens Settings on its Notifications section. */
   onNotifySettings: () => void;
+  /** The project the list is filtered to (null: all of them), and the projects' names. */
+  project: string | null;
+  onProject: (project: string | null) => void;
+  projects: Project[];
 }) {
   const { board, details, now } = props;
   const live = decisionsOf(board, details, now);
@@ -61,10 +84,20 @@ export function Inbox(props: {
   // What the open decision's keys do, set by its card each render.
   const keys = useRef<DecisionKeys>({});
   const decisions = shownDecisions(live, resolved, gone);
-  const waiting = decisions.filter((d) => !resolved.has(d.id));
+  const allWaiting = decisions.filter((d) => !resolved.has(d.id));
+  // The project chips count every decision waiting; the list, its count and its groups are the
+  // project picked.
+  const counts = projectCounts(allWaiting);
+  const filter = props.project;
+  const waiting = inProject(allWaiting, filter);
   // Several changes waiting for approval at once are one card (docs/batching.md); the count above
   // still counts each.
-  const listed = groupApprovals(decisions, details, new Set(resolved.keys()));
+  const listed = groupApprovals(inProject(decisions, filter), details, new Set(resolved.keys()));
+  // A project with nothing left (its last decision just left the list) goes back to All.
+  const filterEmpty = !!filter && inProject(decisions, filter).length === 0;
+  useEffect(() => {
+    if (filterEmpty) props.onProject(null);
+  }, [filterEmpty]);
   const liveIds = live.map((d) => d.id).join(" ");
   useEffect(() => {
     const ids = new Set(liveIds.split(" "));
@@ -75,7 +108,11 @@ export function Inbox(props: {
   const places = askPlaces(ordered);
   const [picked, setPicked] = useState<string | null>(props.pick?.id ?? null);
   useEffect(() => {
-    if (props.pick) setPicked(props.pick.id);
+    if (!props.pick) return;
+    setPicked(props.pick.id);
+    // A notification's decision outside the project filtered on switches the filter to its project.
+    const d = live.find((x) => x.id === props.pick!.id);
+    if (d && filter && projectOf(d)?.toUpperCase() !== filter.toUpperCase()) props.onProject(projectOf(d));
   }, [props.pick]);
   // The decision open stays open while others arrive: the first one is picked as soon as there is
   // one, and only when the picked one is settled does the pick move to the (new) first.
@@ -160,10 +197,15 @@ export function Inbox(props: {
   }
 
   // a, t, 1-9 and r act on the open decision, and only while the focus is on it: its row or its
-  // card. Never on one in the background.
+  // card. Never on one in the background. p cycles the project filter from anywhere in the Inbox.
   const onKeyDown = (e: React.KeyboardEvent) => {
     // A held key repeats: it must not go on to approve or answer the decisions that follow.
     if (e.repeat || e.ctrlKey || e.metaKey || e.altKey || typing(e.target)) return;
+    if ((e.key === "p" || e.key === "P") && !document.querySelector(".panel") && counts.length > 1) {
+      e.preventDefault();
+      props.onProject(nextProject(counts, filter, e.shiftKey ? -1 : 1));
+      return;
+    }
     const on = (e.target as HTMLElement).closest(".inbox-row.on, .inbox-detail");
     // Not while an issue sheet covers the Inbox: the decision under it is not the one in view.
     if (!on || document.querySelector(".panel")) return;
@@ -190,6 +232,9 @@ export function Inbox(props: {
             <NotifyLink onOpen={props.onNotifySettings} />
           </div>
           <p className="inbox-sub">Only decisions an agent cannot make.{oldest !== null && ` Oldest ${ago(now, oldest).replace(" ago", "")}.`}</p>
+          {(counts.length > 1 || filter) && (
+            <ProjectFilter counts={counts} total={allWaiting.length} project={filter} projects={props.projects} onProject={props.onProject} />
+          )}
         </div>
         {groups.map((g) => (
           <div key={g.kind} className="inbox-group">
@@ -235,6 +280,11 @@ export function Inbox(props: {
           <span>
             <kbd>1–9</kbd> answer
           </span>
+          {counts.length > 1 && (
+            <span>
+              <kbd>p</kbd> next project
+            </span>
+          )}
           <span>
             <kbd>?</kbd> all keys
           </span>
@@ -269,6 +319,48 @@ export function Inbox(props: {
       )}
     </div>
   );
+}
+
+/**
+ * The Inbox's project filter (NIT-236): All, then each project with decisions waiting and how many,
+ * as one segmented control. Its counts are every decision's, whatever the filter.
+ */
+function ProjectFilter(props: { counts: ProjectCount[]; total: number; project: string | null; projects: Project[]; onProject: (p: string | null) => void }) {
+  const name = (key: string) => props.projects.find((p) => p.key.toUpperCase() === key.toUpperCase())?.name ?? key;
+  const on = (key: string | null) => (props.project ?? "").toUpperCase() === (key ?? "").toUpperCase();
+  return (
+    <div className="seg inbox-projects" role="tablist" aria-label="Filter by project">
+      <button role="tab" aria-selected={on(null)} className={on(null) ? "on" : undefined} onClick={() => props.onProject(null)} title="Every project's decisions">
+        All <span className="inbox-project-n">{props.total}</span>
+      </button>
+      {props.counts.map((c) => (
+        <button key={c.project} role="tab" aria-selected={on(c.project)} className={on(c.project) ? "on" : undefined} onClick={() => props.onProject(c.project)} title={`${name(c.project)}: ${c.count} waiting`}>
+          {name(c.project)} <span className="inbox-project-n">{c.count}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** Where the Inbox keeps the project it was last filtered to, for the next time it opens. */
+const PROJECT_KEY = "nitely.inbox.project";
+
+/** The project the Inbox was last filtered to, or null for all. Storage can be missing or refuse. */
+export function storedInboxProject(): string | null {
+  try {
+    return localStorage.getItem(PROJECT_KEY) || null;
+  } catch {
+    return null;
+  }
+}
+
+export function storeInboxProject(project: string | null) {
+  try {
+    if (project) localStorage.setItem(PROJECT_KEY, project);
+    else localStorage.removeItem(PROJECT_KEY);
+  } catch {
+    // Not kept: the filter still applies until the window closes.
+  }
 }
 
 /** The open decision's keys; a key it does not offer is left out. */

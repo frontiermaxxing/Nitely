@@ -3,8 +3,8 @@ import { ApprovalNotice, UpdateLine, useUpdateStatus } from "./Update";
 import { invoke, isLive, isPreview, listen } from "./backend";
 import type { AgentPlan, Board, Project } from "./types";
 import { AgentSetup, pendingChanges, setupErrors } from "./Agents";
-import { Inbox, useDecisionDetails } from "./Inbox";
-import { decisionsOf } from "./decisions";
+import { Inbox, storeInboxProject, storedInboxProject, useDecisionDetails } from "./Inbox";
+import { decisionsOf, projectCounts } from "./decisions";
 import { Settings, isSettingsSection, type SettingsSection } from "./Settings";
 import { Now, movingCounts, movingTitle } from "./Now";
 import { Pulse } from "./Pulse";
@@ -35,7 +35,8 @@ const REFRESH_GAP_MS = 1000;
 
 export type View =
   | { kind: "pulse" }
-  | { kind: "inbox" }
+  /** `project`: the Inbox filtered to one project; null for all, undefined for the one it had last. */
+  | { kind: "inbox"; project?: string | null }
   | { kind: "now" }
   | { kind: "activity" }
   | { kind: "project"; key: string; tab?: ProjectTab; goal?: GoalFocus }
@@ -44,8 +45,8 @@ export type View =
   | { kind: "settings"; section?: SettingsSection; project?: string }
   | { kind: "kit" };
 
-// The view and the open issue live in the URL hash (`#now`, `#project/NIT/board`, `#inbox@NIT-12`), so
-// a reload keeps them and the browser preview can open any screen directly.
+// The view and the open issue live in the URL hash (`#now`, `#project/NIT/board`, `#inbox@NIT-12`,
+// `#inbox?project=NIT`), so a reload keeps them and the browser preview can open any screen directly.
 function fromHash(hash: string): { view: View; issue: string | null } {
   let raw = hash.replace(/^#\/?/, "");
   try {
@@ -53,7 +54,8 @@ function fromHash(hash: string): { view: View; issue: string | null } {
   } catch {
     // A malformed escape: use the hash as it is rather than fail to start.
   }
-  const [path, issue] = raw.split("@");
+  const [route, issue] = raw.split("@");
+  const [path, query = ""] = route.split("?");
   const [kind, key, tab] = path.split("/");
   const plain = ["pulse", "inbox", "now", "activity", "add", "agents"].concat(isPreview ? ["kit"] : []);
   // The home view was called Pulse, and Phone and Other machines were views of their own before
@@ -67,9 +69,11 @@ function fromHash(hash: string): { view: View; issue: string | null } {
         ? { kind: "settings", ...(isSettingsSection(key) ? { section: key, ...(key === "crew" && tab ? { project: tab.toUpperCase() } : {}) } : {}) }
         : moved[kind]
           ? { kind: "settings", section: moved[kind] }
-          : plain.includes(named)
-            ? ({ kind: named } as View)
-            : { kind: "pulse" };
+          : named === "inbox"
+            ? { kind: "inbox", ...(new URLSearchParams(query).get("project") ? { project: new URLSearchParams(query).get("project")!.toUpperCase() } : {}) }
+            : plain.includes(named)
+              ? ({ kind: named } as View)
+              : { kind: "pulse" };
   return { view, issue: issue ? issue.toUpperCase() : null };
 }
 
@@ -81,14 +85,22 @@ function toHash(view: View, issue: string | null): string {
         ? `settings${view.section ? `/${view.section}${view.project ? `/${view.project}` : ""}` : ""}`
         : view.kind === "pulse"
           ? "overview"
-          : view.kind;
+          : view.kind === "inbox" && view.project
+            ? `inbox?project=${view.project}`
+            : view.kind;
   return `#${path}${issue ? `@${issue}` : ""}`;
+}
+
+/** The Inbox opened without a project named opens on the one it was last filtered to. */
+function withInboxProject(view: View): View {
+  return view.kind === "inbox" && view.project === undefined ? { kind: "inbox", project: storedInboxProject() } : view;
 }
 
 export function App() {
   const [board, setBoard] = useState<Board | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
-  const [view, setView] = useState<View>(() => fromHash(location.hash).view);
+  const [view, setViewState] = useState<View>(() => withInboxProject(fromHash(location.hash).view));
+  const setView = useCallback((v: View) => setViewState(withInboxProject(v)), []);
   const [openIssue, setOpenIssue] = useState<string | null>(() => fromHash(location.hash).issue);
   const [palette, setPalette] = useState(false);
   const openPalette = useCallback(() => setPalette(true), []);
@@ -218,6 +230,16 @@ export function App() {
   // New ones are told outside the window too, except while the Inbox is in front of the person.
   useNotifications(decisions, inboxDetails, now, focused && view.kind === "inbox" && !openIssue);
   const inboxCount = decisions?.length ?? 0;
+  // Each project's share of it, for the links to its filtered Inbox (the sidebar, a project's head).
+  const inboxByProject = decisions ? projectCounts(decisions) : [];
+  const waitingIn = (key: string) => inboxByProject.find((c) => c.project === key.toUpperCase())?.count ?? 0;
+  // The Inbox's project filter, in the URL; however it was set (a chip, a link, the palette), it is
+  // kept for the next time the Inbox opens.
+  const filterInbox = useCallback((project: string | null) => setView({ kind: "inbox", project }), [setView]);
+  const inboxProject = view.kind === "inbox" ? (view.project ?? null) : undefined;
+  useEffect(() => {
+    if (inboxProject !== undefined) storeInboxProject(inboxProject);
+  }, [inboxProject]);
   // Agents moving, here and on other machines: state, so on the sidebar where it is seen at a glance.
   const moving = board ? movingCounts(board, now) : { here: 0, elsewhere: 0, total: 0 };
 
@@ -240,17 +262,24 @@ export function App() {
         <NavItem active={view.kind === "activity"} onClick={() => setView({ kind: "activity" })} label="Activity" />
         <div className="nav-heading">Projects</div>
         {projects.map((p) => (
-          <button
-            key={p.key}
-            className={`nav-item nav-project${view.kind === "project" && view.key === p.key ? " active" : ""}`}
-            onClick={() => setView({ kind: "project", key: p.key })}
-            aria-current={view.kind === "project" && view.key === p.key ? "page" : undefined}
-            title={`${p.name}: ${p.open_issues} open`}
-          >
-            <span className="nav-label">{p.name}</span>
-            <LiveDots states={board ? liveStates(board, p.key, now) : []} />
-            <span className="nav-hint">{p.key}</span>
-          </button>
+          <div key={p.key} className="nav-project-row">
+            <button
+              className={`nav-item nav-project${view.kind === "project" && view.key === p.key ? " active" : ""}`}
+              onClick={() => setView({ kind: "project", key: p.key })}
+              aria-current={view.kind === "project" && view.key === p.key ? "page" : undefined}
+              title={`${p.name}: ${p.open_issues} open`}
+            >
+              <span className="nav-label">{p.name}</span>
+              <LiveDots states={board ? liveStates(board, p.key, now) : []} />
+              <span className={`nav-hint${waitingIn(p.key) ? " nav-hint-under" : ""}`}>{p.key}</span>
+            </button>
+            {/* What waits on you in it, where its key is: a link to the Inbox filtered to it. */}
+            {waitingIn(p.key) > 0 && (
+              <button className="nav-project-inbox" onClick={() => filterInbox(p.key)} title={`${waitingIn(p.key)} waiting on you in ${p.name}: open the Inbox on them`}>
+                {waitingIn(p.key)}
+              </button>
+            )}
+          </div>
         ))}
         <button className={`nav-item nav-add${view.kind === "add" ? " active" : ""}`} onClick={() => setView({ kind: "add" })}>
           <span className="nav-label">+ Add project</span>
@@ -331,6 +360,9 @@ export function App() {
             onOpenIssue={setOpenIssue}
             onChanged={changed}
             onNotifySettings={() => setView({ kind: "settings", section: "notifications" })}
+            project={view.project ?? null}
+            onProject={filterInbox}
+            projects={projects}
           />
         )}
         {view.kind === "now" && board && <Now board={board} version={version} needs={inboxCount} now={now} onOpenIssue={setOpenIssue} onChanged={changed} onGo={setView} />}
@@ -378,6 +410,8 @@ export function App() {
             onChanged={changed}
             onMoved={(key) => setView(key ? { kind: "project", key, tab: "settings" } : { kind: "pulse" })}
             onCrewSettings={() => setView({ kind: "settings", section: "crew", project: view.key })}
+            waiting={waitingIn(view.key)}
+            onInbox={() => filterInbox(view.key)}
           />
         )}
       </main>

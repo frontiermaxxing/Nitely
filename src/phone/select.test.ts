@@ -1,6 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { shownIndex } from "./select.ts";
+import { phoneProjects, shownIndex } from "./select.ts";
+
+test("NIT-236: the phone filters by project, and goes back to all once the project has nothing left", () => {
+  const keys = ["APP-1", "WEB-2", "APP-3", null];
+  assert.deepEqual(phoneProjects(keys, null), { counts: [{ project: "APP", count: 2 }, { project: "WEB", count: 1 }], project: null });
+  assert.equal(phoneProjects(keys, "web").project, "WEB");
+  assert.equal(phoneProjects(["APP-1"], "WEB").project, null);
+});
 
 test("the shown decision stays on screen when one is added before it", () => {
   assert.equal(shownIndex(["new", "a", "b"], { id: "a", index: 0 }), 1);

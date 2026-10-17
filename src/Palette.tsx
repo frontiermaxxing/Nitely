@@ -132,6 +132,9 @@ export function Palette(props: {
     };
     const all: Item[] = [
       ...VIEWS.map((v): Item => ({ id: `view-${v.label}`, label: v.label, hint: "view", group: "Go to", run: go({ ...v.view }) })),
+      // The Inbox filtered to one project, or to none (NIT-236).
+      { id: "inbox-all", label: "Inbox, every project", hint: "view", group: "Go to", run: go({ kind: "inbox", project: null }) },
+      ...props.projects.map((p): Item => ({ id: `inbox-${p.key}`, label: `${p.name} inbox`, hint: p.key, group: "Go to", run: go({ kind: "inbox", project: p.key }) })),
       ...props.projects.flatMap((p) =>
         (["list", "board", "branches", "brief", "rules", "settings"] as const).map(
           (tab): Item => ({
@@ -338,12 +341,13 @@ export function KeysSheet(props: { onClose: () => void }) {
       ],
     ],
     [
-      "On the decision open in the Inbox",
+      "In the Inbox, on the decision open",
       [
         ["a", "Approve"],
         ["t", "Send back to Todo"],
         ["1–9", "Answer with that option"],
         ["r", "Answer in your own words"],
+        ["p", "Next project's decisions (shift p: the one before)"],
       ],
     ],
     [

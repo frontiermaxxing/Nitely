@@ -13,7 +13,7 @@ let decisions: PhoneDecision[] = [
     kind: "ask",
     id: "ask-12",
     since: NOW() - 900,
-    issue: { key: "DEMO-3", title: "Show prices in the visitor's currency", kind: "feature", priority: 3, state: "In Progress", track: track("working", { todo: NOW() - 9000, started: NOW() - 8000, working: NOW() - 7000 }) as never },
+    issue: { key: "SHOP-3", title: "Show prices in the visitor's currency", kind: "feature", priority: 3, state: "In Progress", track: track("working", { todo: NOW() - 9000, started: NOW() - 8000, working: NOW() - 7000 }) as never },
     ask: { id: 12, question: "Which currencies should the price page offer at launch? It decides the rounding in [DEMO-1](nitely://issue/DEMO-1) and the `currency` setting.", options: ["EUR and USD", "EUR, USD and GBP", "Every currency Stripe supports"], asked_by: "claude:c:/code/demo-worktrees/demo-3" },
   },
   {
@@ -41,9 +41,9 @@ let decisions: PhoneDecision[] = [
   },
   {
     kind: "approve",
-    id: "approve-DEMO-2",
+    id: "approve-SHOP-2",
     since: NOW() - 1800,
-    issue: { key: "DEMO-2", title: "Retry webhook deliveries with backoff", kind: "feature", priority: 2, state: "Needs You", track: track("needs", { todo: NOW() - 20000, started: NOW() - 18000, working: NOW() - 15000, gate: NOW() - 4000, review: NOW() - 3000, "needs": NOW() - 1800 }) as never },
+    issue: { key: "SHOP-2", title: "Retry webhook deliveries with backoff", kind: "feature", priority: 2, state: "Needs You", track: track("needs", { todo: NOW() - 20000, started: NOW() - 18000, working: NOW() - 15000, gate: NOW() - 4000, review: NOW() - 3000, "needs": NOW() - 1800 }) as never },
     patch_id: "patch-demo-2",
     reasons: ["the change touches the release process"],
     review: { reviewer: "claude", verdict: "pass", note: "same vendor: codex not installed", findings: [] },

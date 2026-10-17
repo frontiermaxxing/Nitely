@@ -60,6 +60,9 @@ export function ProjectPage(props: {
   onMoved: (key: string | null) => void;
   /** Opens Settings on this project's crew. */
   onCrewSettings: () => void;
+  /** Decisions of this project waiting on you, and the Inbox filtered to them. */
+  waiting?: number;
+  onInbox?: () => void;
 }) {
   const remembered = rememberedTab();
   const tab = props.tab ?? (props.goal != null && remembered !== "list" && remembered !== "board" ? "list" : remembered);
@@ -96,6 +99,11 @@ export function ProjectPage(props: {
         <h1>
           {props.project?.name ?? props.projectKey} <span className="muted mono">{props.projectKey}</span>
         </h1>
+        {!!props.waiting && props.onInbox && (
+          <button className="link head-note attention-ink" onClick={props.onInbox} title="Open the Inbox on this project's decisions">
+            {props.waiting} waiting on you
+          </button>
+        )}
         <CrewControl
           projectKey={props.projectKey}
           version={props.version}

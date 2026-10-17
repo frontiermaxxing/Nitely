@@ -2,7 +2,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { APPROVALS, askPlaces, decisionsOf, groupApprovals, issueDecision, firstLine, outcomeOf, shownDecisions, trackAfter, type Decision, type Resolved } from "./decisions.ts";
+import { APPROVALS, askPlaces, decisionsOf, groupApprovals, inProject, issueDecision, keyProject, nextProject, projectCounts, projectOf, firstLine, outcomeOf, shownDecisions, trackAfter, type Decision, type Resolved } from "./decisions.ts";
 import type { Ask, Board, IssueDetail, IssueRecord } from "./types.ts";
 import type { Track } from "./ui/lifecycle.ts";
 
@@ -226,4 +226,32 @@ test("a fresh rebase conflict waits from when the rebase stopped, not from the b
   const old = { ...row, state: { ...row.state, rebase_started_at: null } };
   const b2 = { ...b, repos: [{ ...b.repos[0], rows: [old] }] } as unknown as Board;
   assert.equal(decisionsOf(b2, new Map(), NOW)[0].since, NOW - 5 * 86400);
+});
+
+test("NIT-236: the Inbox filters by project, its counts add up, and grouped approvals follow the filter", () => {
+  const inApp = (key: string, state = "Needs You") => ({ ...issue(key, state), project: "APP" });
+  const inWeb = (key: string) => ({ ...issue(key, "Needs You"), project: "WEB" });
+  const issues = [inApp("APP-1"), inApp("APP-2"), inWeb("WEB-1"), inApp("APP-3")];
+  // A question on an issue the board does not list still belongs to its key's project.
+  const asks = [ask(1, "WEB-7", NOW - 50), { ...ask(2, "APP-9", NOW - 40), issue_key: null }];
+  const details = new Map(issues.map((i) => [i.key, detail(i)] as [string, IssueDetail]));
+  const ds = decisionsOf(board(issues, asks), details, NOW);
+  assert.deepEqual(projectCounts(ds), [
+    { project: "APP", count: 3 },
+    { project: "WEB", count: 2 },
+  ]);
+  assert.equal(ds.find((d) => d.id === "ask-2")!.project, null, "a question on no issue is in no project: only All shows it");
+  assert.deepEqual(inProject(ds, "web").map((d) => d.id).sort(), ["approve-WEB-1", "ask-1"]);
+  assert.equal(inProject(ds, null).length, ds.length);
+  // Grouped within the project filtered on: WEB's one approval is its own card, APP's three are one.
+  assert.equal(groupApprovals(inProject(ds, "WEB"), details).find((d) => d.id === APPROVALS), undefined);
+  const app = groupApprovals(inProject(ds, "APP"), details).find((d) => d.id === APPROVALS)!;
+  assert.equal(app.group!.length, 3);
+  assert.equal(projectOf(app), "APP");
+  assert.equal(projectOf(groupApprovals(ds, details).find((d) => d.id === APPROVALS)!), null, "a card mixing projects is in none");
+  // Cycling: All, then each project in the chips' order, then All again.
+  const counts = projectCounts(ds);
+  assert.deepEqual([nextProject(counts, null, 1), nextProject(counts, "APP", 1), nextProject(counts, "WEB", 1), nextProject(counts, null, -1)], ["APP", "WEB", null, "WEB"]);
+  assert.equal(nextProject(counts, "GONE", 1), "APP", "a project with nothing left cycles from All");
+  assert.deepEqual([keyProject("nit-12"), keyProject("feature/x"), keyProject(null)], ["NIT", null, null]);
 });

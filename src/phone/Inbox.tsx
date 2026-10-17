@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { signedGet, signedPost, unreachable } from "./api";
-import { shownIndex, type Shown } from "./select";
+import { keyProject, phoneProjects, shownIndex, type Shown } from "./select";
 import { plain } from "./plain";
 import { Rich } from "./Rich";
 import { acceptMessage, answerMessage, approvalMessage, sendBackMessage, sign, type Device } from "./keys";
@@ -76,7 +76,16 @@ export function Inbox(props: { device: Device; onGone: (why: string) => void }) 
     };
   }, [load]);
 
-  const list = data?.decisions ?? [];
+  // The project filter (NIT-236): kept on the phone, and back to all once its project has nothing left.
+  const [wanted, setWanted] = useState<string | null>(storedProject);
+  const all = data?.decisions ?? [];
+  const { counts, project } = phoneProjects(all.map((d) => d.issue?.key), wanted);
+  const pickProject = (p: string | null) => {
+    setWanted(p);
+    storeProject(p);
+    setShown({ id: null, index: 0 });
+  };
+  const list = project ? all.filter((d) => keyProject(d.issue?.key) === project) : all;
   const index = shownIndex(list.map((d) => d.id), shown);
   const current = list[index];
   // Whatever is on screen is pinned by id, the first one included, and its position follows it on
@@ -133,6 +142,16 @@ export function Inbox(props: { device: Device; onGone: (why: string) => void }) 
           </div>
         </div>
       )}
+      {counts.length > 1 && (
+        <select className="ph-project" aria-label="Project" value={project ?? ""} onChange={(e) => pickProject(e.target.value || null)}>
+          <option value="">Every project ({all.length})</option>
+          {counts.map((c) => (
+            <option key={c.project} value={c.project}>
+              {c.project} ({c.count})
+            </option>
+          ))}
+        </select>
+      )}
       {current && (
         <>
           <div className="ph-nav">
@@ -152,6 +171,24 @@ export function Inbox(props: { device: Device; onGone: (why: string) => void }) 
       )}
     </section>
   );
+}
+
+/** Where the phone keeps the project its Inbox is filtered to. Storage can be missing or refuse. */
+const PROJECT_KEY = "nitely.phone.project";
+function storedProject(): string | null {
+  try {
+    return localStorage.getItem(PROJECT_KEY) || null;
+  } catch {
+    return null;
+  }
+}
+function storeProject(project: string | null) {
+  try {
+    if (project) localStorage.setItem(PROJECT_KEY, project);
+    else localStorage.removeItem(PROJECT_KEY);
+  } catch {
+    // Not kept: the filter holds until the page closes.
+  }
 }
 
 function IssueHead(props: { issue: PhoneIssue }) {

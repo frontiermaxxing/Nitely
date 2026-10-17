@@ -23,6 +23,8 @@ export interface Decision {
   urgency: number;
   /** The Inbox's card for several change approvals at once (`groupApprovals`): each one. */
   group?: Decision[];
+  /** The project it belongs to (`projectOf`), for the Inbox's project filter. */
+  project?: string | null;
 }
 
 export const KIND_LABEL: Record<DecisionKind, string> = {
@@ -95,6 +97,9 @@ export function decisionsOf(board: Board, details: Map<string, IssueDetail>, now
   for (const i of board.needs_me_issues) known.set(i.key, i);
   const issueOf = (key: string | null) => (key ? details.get(key)?.issue ?? known.get(key) ?? null : null);
   const out: Decision[] = [];
+  // Each decision's project: its issue's, else its repo's, else its key's prefix.
+  const repoProject = new Map(board.repos.map((r) => [r.name, r.project]));
+  const withProject = (d: Decision): Decision => ({ ...d, project: d.issue?.project ?? (d.repo ? repoProject.get(d.repo) : null) ?? projectOf(d) });
 
   for (const ask of board.asks) {
     const at = rowOf(ask.issue_key);
@@ -143,7 +148,54 @@ export function decisionsOf(board: Board, details: Map<string, IssueDetail>, now
     out.push({ id: `land-${row.issue.key}`, kind: "land", issue: detail?.issue ?? row.issue, row, repo, ask: null, since: stopped?.ts ?? now, urgency: urgencyOf(detail?.issue ?? row.issue) });
   }
 
-  return out.sort(byUrgency);
+  return out.map(withProject).sort(byUrgency);
+}
+
+/** "NIT" for "NIT-12"; null for anything that is not an issue key. */
+export function keyProject(key: string | null | undefined): string | null {
+  return key?.match(/^([A-Za-z][A-Za-z0-9]*)-\d+$/)?.[1].toUpperCase() ?? null;
+}
+
+/** The project a decision belongs to, for the Inbox's filter; null when nothing says (a session outside any project). */
+export function projectOf(d: Decision): string | null {
+  if (d.project !== undefined && d.project !== null) return d.project;
+  if (d.group?.length) {
+    const all = new Set(d.group.map(projectOf));
+    return all.size === 1 ? [...all][0] : null;
+  }
+  return d.issue?.project ?? keyProject(d.issue?.key ?? d.ask?.issue_key ?? d.row?.issue_key);
+}
+
+/** A project with decisions waiting, and how many. */
+export interface ProjectCount {
+  project: string;
+  count: number;
+}
+
+/**
+ * The Inbox's project chips: each project with decisions waiting and how many, most first, then by
+ * key. Each decision counts once, so the counts add up to the Inbox's (a decision without a
+ * project counts only under All).
+ */
+export function projectCounts(decisions: Decision[]): ProjectCount[] {
+  const counts = new Map<string, number>();
+  for (const d of decisions) {
+    const p = projectOf(d);
+    if (p) counts.set(p, (counts.get(p) ?? 0) + 1);
+  }
+  return [...counts].map(([project, count]) => ({ project, count })).sort((a, b) => b.count - a.count || a.project.localeCompare(b.project));
+}
+
+/** The decisions of `project`, or all of them for null. */
+export function inProject(decisions: Decision[], project: string | null): Decision[] {
+  return project ? decisions.filter((d) => projectOf(d)?.toUpperCase() === project.toUpperCase()) : decisions;
+}
+
+/** The project after (`by` 1) or before (-1) `current` in the chips' order, All (null) between the last and the first. */
+export function nextProject(counts: ProjectCount[], current: string | null, by: 1 | -1): string | null {
+  const order: (string | null)[] = [null, ...counts.map((c) => c.project)];
+  const at = Math.max(0, order.findIndex((p) => (p ?? "").toUpperCase() === (current ?? "").toUpperCase()));
+  return order[(at + by + order.length) % order.length];
 }
 
 /** The id of the Inbox's card that holds several change approvals at once. */
