@@ -74,8 +74,9 @@ impl std::error::Error for Superseded {}
 pub enum Outcome {
     /// Its review from the batch.
     Reviewed(Review),
-    /// It is to be reviewed by itself after all, and why.
-    Alone(String),
+    /// It is to be reviewed by itself after all, and why, with what its batch found that its single
+    /// review must carry (an interaction with another change).
+    Alone(String, Vec<Finding>),
 }
 
 /// A change submit wants reviewed.
@@ -154,7 +155,7 @@ const POLL: Duration = Duration::from_millis(500);
 pub fn review_in_batch(db: &Db, rules: &ReviewRules, c: &Candidate, actor: &Actor) -> Result<Outcome> {
     let window = match Window::parse(&rules.batch_window) {
         Ok(w) => w,
-        Err(e) => return Ok(Outcome::Alone(format!("{e:#}"))),
+        Err(e) => return Ok(Outcome::Alone(format!("{e:#}"), vec![])),
     };
     let git = |args: &[&str]| crate::playbook::git(c.worktree, args).map(|o| o.trim().to_string());
     let base = git(&["rev-parse", c.base])?;
@@ -196,9 +197,12 @@ pub fn review_in_batch(db: &Db, rules: &ReviewRules, c: &Candidate, actor: &Acto
                 let review: Review = serde_json::from_str(row.result.as_deref().unwrap_or("")).context("reading the change's review from its batch")?;
                 return Ok(Outcome::Reviewed(review));
             }
-            "alone" => return Ok(Outcome::Alone(row.why.unwrap_or_default())),
+            "alone" => {
+                let carried = row.result.as_deref().and_then(|r| serde_json::from_str(r).ok()).unwrap_or_default();
+                return Ok(Outcome::Alone(row.why.unwrap_or_default(), carried));
+            }
             "superseded" => bail!(Superseded),
-            "abandoned" => return Ok(Outcome::Alone("it was taken out of the queue as abandoned".into())),
+            "abandoned" => return Ok(Outcome::Alone("it was taken out of the queue as abandoned".into(), vec![])),
             "reviewing" => settle_dead_batch(db, row.batch_id.unwrap_or_default())?,
             _ => {
                 if let Some((batch, rows)) = close_if_due(db, rules, window, &repo, &row.reviewer)? {
@@ -301,6 +305,15 @@ fn close_if_due(db: &Db, rules: &ReviewRules, window: Window, repo: &str, review
     }
     let Some(oldest) = waiting.first() else { return Ok(None) };
     let max = rules.batch_max.max(2);
+    // A batch whose process died must not keep the queue busy.
+    let reviewing: Vec<i64> = db
+        .conn
+        .prepare("SELECT id FROM review_batch WHERE repo = ?1 AND reviewer = ?2 AND state = 'reviewing'")?
+        .query_map(params![repo, reviewer], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for batch in reviewing {
+        settle_dead_batch(db, batch)?;
+    }
     let busy: bool = db.conn.query_row(
         "SELECT EXISTS (SELECT 1 FROM review_batch WHERE repo = ?1 AND reviewer = ?2 AND state = 'reviewing')",
         params![repo, reviewer],
@@ -396,19 +409,30 @@ fn run_batch(db: &Db, rules: &ReviewRules, batch: i64, rows: &[Queued]) -> Resul
     };
     let parsed = rules.parse_batch(reviewer, &reply.text, reply.seconds, &changes);
     let mut reviews = parsed.reviews;
+    // What a change reviewed alone after all must still carry from the batch.
+    let mut carried: Vec<Vec<Finding>> = vec![vec![]; rows.len()];
     for (j, k, what) in &parsed.interactions {
         let (first, second) = (&keys[*j], &keys[*k]);
-        if let Ok(r) = &mut reviews[*k] {
-            r.findings.push(Finding {
-                priority: 1,
-                text: format!(
-                    "Interacts with {first}, reviewed in the same batch: {what}. Once {first} has landed, rebase onto it and submit again: it is then reviewed alone on top of it."
-                ),
-                carried: false,
-                raised_as: None,
-                now: None,
-            });
-            r.verdict = "changes".into();
+        // It cites the files both touch, so it keeps pointing at code on the branch.
+        let shared: Vec<&String> = rows[*k].files.iter().filter(|f| rows[*j].files.contains(f)).collect();
+        let cited: Vec<&String> = if shared.is_empty() { rows[*k].files.iter().collect() } else { shared };
+        let cited: Vec<&str> = cited.iter().map(|f| f.as_str()).collect();
+        let finding = Finding {
+            priority: 1,
+            text: format!(
+                "{INTERACTS}{first}{SAME_BATCH} {what} ({}). Once {first} has landed, rebase onto it and submit again: it is then reviewed alone on top of it.",
+                cited.join(", ")
+            ),
+            carried: false,
+            raised_as: None,
+            now: None,
+        };
+        match &mut reviews[*k] {
+            Ok(r) => {
+                r.findings.push(finding);
+                r.verdict = "changes".into();
+            }
+            Err(_) => carried[*k].push(finding),
         }
         let note = format!("Reviewed in a batch with {second}, which interacts with it: {what}. {second} is reviewed again on top of this change once it lands.");
         db.add_note(first, &note, "review", &actor_of(&rows[*j]))?;
@@ -426,7 +450,8 @@ fn run_batch(db: &Db, rules: &ReviewRules, batch: i64, rows: &[Queued]) -> Resul
                 )?;
             }
             Err(why) => {
-                db.conn.execute("UPDATE review_queue SET state = 'alone', why = ?2 WHERE id = ?1", params![r.id, why])?;
+                let carried = serde_json::to_string(&carried[i])?;
+                db.conn.execute("UPDATE review_queue SET state = 'alone', why = ?2, result = ?3 WHERE id = ?1", params![r.id, why, carried])?;
             }
         }
     }
@@ -436,6 +461,49 @@ fn run_batch(db: &Db, rules: &ReviewRules, batch: i64, rows: &[Queued]) -> Resul
 
 fn first_line(text: &str) -> String {
     text.lines().next().unwrap_or("").chars().take(300).collect()
+}
+
+/// How the finding an interaction gives the second change starts: `Interacts with NIT-4, reviewed
+/// in the same batch:`.
+const INTERACTS: &str = "Interacts with ";
+const SAME_BATCH: &str = ", reviewed in the same batch:";
+
+/// Keeps an interaction finding from a batch open until the change it interacts with has landed
+/// and this branch holds what landed, whatever a later review says of it: the second change must be
+/// reviewed on top of the first. Recomputes the verdict.
+pub fn hold_interactions(db: &Db, worktree: &Path, review: &mut Review) -> Result<()> {
+    let mut held = vec![];
+    for r in review.previous.iter_mut() {
+        let Some(first) = r.text.strip_prefix(INTERACTS).and_then(|rest| rest.split_once(SAME_BATCH)).map(|(key, _)| key.trim().to_string()) else { continue };
+        if let Some(why) = not_on_top_of(db, worktree, &first)? {
+            r.status = "open".into();
+            r.now = Some(why.clone());
+            held.push(Finding { priority: r.priority.min(1), text: r.text.clone(), carried: true, raised_as: None, now: Some(why) });
+        }
+    }
+    for f in held {
+        review.findings.retain(|x| !x.text.starts_with(&f.text));
+        review.findings.push(f);
+    }
+    review.verdict = if review.findings.iter().any(|f| f.priority <= 1) { "changes" } else { "pass" }.into();
+    Ok(())
+}
+
+/// Why this branch is not yet on top of `key`'s landed change, or None when it is.
+fn not_on_top_of(db: &Db, worktree: &Path, key: &str) -> Result<Option<String>> {
+    let Some(issue) = db.issue(key)? else { return Ok(None) };
+    if issue.state != "Done" {
+        return Ok(Some(format!("{key} has not landed yet: land it first, then rebase this onto it")));
+    }
+    let landed: Option<String> = db
+        .conn
+        .query_row("SELECT summary FROM event WHERE issue_key = ?1 COLLATE NOCASE AND type = 'landed' ORDER BY id DESC LIMIT 1", [key], |r| r.get(0))
+        .optional()?;
+    let Some(at) = landed.and_then(|s| s.split_whitespace().last().map(|w| w.trim_end_matches('.').to_string())) else { return Ok(None) };
+    if crate::playbook::git(worktree, &["merge-base", "--is-ancestor", &at, "HEAD"]).is_ok() {
+        return Ok(None);
+    }
+    Ok(Some(format!("{key} landed at {at}, and this branch is not rebased onto it yet")))
 }
 
 /// A newer submit of an issue replaces its change waiting in the queue.
@@ -551,7 +619,7 @@ mod tests {
         let (one, two) = (review(a), review(b));
         assert_eq!((one.verdict.as_str(), one.batch.as_ref().unwrap().with.clone()), ("pass", vec![second.clone()]));
         assert_eq!(two.verdict, "changes");
-        assert!(two.findings[0].text.starts_with(&format!("Interacts with {first}, reviewed in the same batch: both bump the version.")), "{two:?}");
+        assert!(two.findings[0].text.starts_with(&format!("Interacts with {first}, reviewed in the same batch: both bump the version (a.txt). Once {first} has landed")), "{two:?}");
         let said = |k: &str| q.db.timeline(k).unwrap().into_iter().filter_map(|t| t.summary).collect::<Vec<_>>();
         assert!(said(&first).iter().any(|s| s.contains(&format!("{second} is reviewed again on top of this change"))), "{:?}", said(&first));
         assert!(said(&second).iter().any(|s| s == &format!("Review by claude started in a batch with {first}")), "{:?}", said(&second));
@@ -578,5 +646,78 @@ mod tests {
         let (key, waiting) = q.waiting("repo-f", "Replaced");
         supersede_waiting(&q.db, &key.to_lowercase()).unwrap();
         assert_eq!(q.row(waiting).state, "superseded");
+    }
+
+    #[test]
+    fn a_dead_batch_does_not_keep_a_busy_queue_waiting() {
+        let mut q = Queue::new();
+        q.db.conn.execute("INSERT INTO review_batch (repo, reviewer, state, pid, started_at) VALUES ('repo-g', 'claude', 'reviewing', 999999, ?1)", [now()]).unwrap();
+        let (_, lone) = q.waiting("repo-g", "After a crash");
+        assert!(close_if_due(&q.db, &rules(&[]), Window::Busy, "repo-g", "claude").unwrap().is_none());
+        assert_eq!(q.row(lone).state, "alone", "the dead batch no longer counts as busy");
+    }
+
+    #[test]
+    fn an_interaction_reaches_a_change_reviewed_alone_after_all() {
+        let mut q = Queue::new();
+        let sh = crate::playbook::posix_sh();
+        // No VERDICT for change 2: it is reviewed alone, and that review must carry the interaction.
+        let reply = "cat > /dev/null; printf 'VERDICT 1: clean\\nINTERACTION 1,2: both bump the version\\n'";
+        let rules = rules(&[&sh, "-c", reply]);
+        let (first, _) = q.waiting("repo-h", "Bump one");
+        let (_, b) = q.waiting("repo-h", "Bump two");
+        let (batch, rows) = close_if_due(&q.db, &rules, Window::After(Duration::from_secs(300)), "repo-h", "claude").unwrap().unwrap();
+        run_batch(&q.db, &rules, batch, &rows).unwrap();
+        let row = q.row(b);
+        assert_eq!(row.state, "alone");
+        let carried: Vec<Finding> = serde_json::from_str(row.result.as_deref().unwrap()).unwrap();
+        assert!(carried.len() == 1 && carried[0].priority == 1 && carried[0].text.starts_with(&format!("Interacts with {first}, reviewed in the same batch:")), "{carried:?}");
+    }
+
+    #[test]
+    fn an_interaction_stays_open_until_the_first_change_landed_under_the_second() {
+        let mut q = Queue::new();
+        let (first, _) = q.waiting("repo-i", "Lands first");
+        // The second change's branch: one commit on top of a base.
+        let wt = q.base.join("second");
+        std::fs::create_dir_all(&wt).unwrap();
+        let git = |args: &[&str]| crate::playbook::git(&wt, args).unwrap().trim().to_string();
+        git(&["init", "-q"]);
+        std::fs::write(wt.join("a.txt"), "1").unwrap();
+        git(&["add", "."]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "elsewhere"]);
+        let elsewhere = git(&["rev-parse", "HEAD"]);
+        git(&["reset", "-q", "--hard", &base]);
+
+        let text = format!("Interacts with {first}, reviewed in the same batch: both bump the version (a.txt). Once {first} has landed, rebase onto it and submit again: it is then reviewed alone on top of it.");
+        // The next review calls it fixed, but nothing has landed: it stays open, at P1.
+        let review = |status: &str| Review {
+            reviewer: "codex".into(),
+            verdict: "pass".into(),
+            findings: vec![],
+            flagged: vec![],
+            summary: String::new(),
+            seconds: 1,
+            previous: vec![crate::review::Recheck { priority: 1, text: text.clone(), status: status.into(), now: None }],
+            note: String::new(),
+            batch: None,
+        };
+        let mut r = review("fixed");
+        hold_interactions(&q.db, &wt, &mut r).unwrap();
+        assert_eq!((r.verdict.as_str(), r.previous[0].status.as_str()), ("changes", "open"));
+        assert!(r.findings[0].now.as_deref().unwrap().contains("has not landed yet"), "{r:?}");
+        // Landed, but not under this branch: still open.
+        q.db.conn.execute("UPDATE issue SET state = 'Done' WHERE key = ?1", [&first]).unwrap();
+        q.db.log_event(&q.actor, Some(&first), None, "landed", &format!("Landed claude/x on main at {elsewhere}")).unwrap();
+        let mut r = review("fixed");
+        hold_interactions(&q.db, &wt, &mut r).unwrap();
+        assert!(r.verdict == "changes" && r.findings[0].now.as_deref().unwrap().contains("not rebased onto it"), "{r:?}");
+        // On top of what landed, the review's own answer counts.
+        git(&["reset", "-q", "--hard", &elsewhere]);
+        let mut r = review("fixed");
+        hold_interactions(&q.db, &wt, &mut r).unwrap();
+        assert_eq!((r.verdict.as_str(), r.findings.len()), ("pass", 0));
     }
 }

@@ -145,10 +145,12 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         let (vendor, _) = crate::git::parse_branch(&branch);
         let vendor = vendor.unwrap_or_default();
         let previous = previous_round(db, &issue.key, &worktree)?;
-        let batched = if opts.batch && pb.review.batch != crate::review::BatchMode::Off {
+        // From a batch: the review, or what its review found for this change that its single review
+        // must carry (an interaction with another change).
+        let (batched, extra) = if opts.batch && pb.review.batch != crate::review::BatchMode::Off {
             in_a_batch(db, &pb, &issue, &root, &worktree, &branch, &since, &files, &vendor, &out.reasons, previous.as_ref(), actor)?
         } else {
-            None
+            (None, vec![])
         };
         // A reviewer that cannot run (not signed in, say) is passed over for the next candidate;
         // one that ran and did not finish its review stops the submit.
@@ -172,6 +174,8 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
                 },
             }
         } };
+        review.findings.extend(extra);
+        crate::review_batch::hold_interactions(db, &worktree, &mut review)?;
         let reviewer = choice.reviewer.clone();
         review.note = choice.note.clone();
         out.reasons.extend(pb.review.independence_reason(&reviewer, &vendor, &choice.note));
@@ -301,8 +305,9 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     Ok(out)
 }
 
-/// The change's review from a review batch, when its project batches reviews and it may join one:
-/// None when it is reviewed alone after all (the timeline says why).
+/// The change's review from a review batch, when its project batches reviews and it may join one;
+/// otherwise None (the timeline says why), with what a batch found for it that its single review
+/// must carry.
 #[allow(clippy::too_many_arguments)]
 fn in_a_batch(
     db: &Db,
@@ -317,21 +322,21 @@ fn in_a_batch(
     reasons: &[String],
     previous: Option<&PreviousRound>,
     actor: &Actor,
-) -> Result<Option<(crate::review::Choice, Review)>> {
+) -> Result<(Option<(crate::review::Choice, Review)>, Vec<Finding>)> {
     let wt = worktree.to_string_lossy().into_owned();
     let choice = pb.review.choose(vendor, &|r| pb.review.is_installed(r, worktree))?;
     let lines = crate::review_batch::changed_lines(worktree, since)?;
     let large_repo = pb.lanes.as_ref().is_some_and(|l| l.large_repo);
     if let Some(why) = crate::review_batch::why_alone(db, &pb.review, vendor, &choice, reasons, files, lines, previous, large_repo, &issue.key)? {
         db.log_event(actor, Some(&issue.key), Some(&wt), "status", &format!("Reviewed alone, not in a batch: {why}"))?;
-        return Ok(None);
+        return Ok((None, vec![]));
     }
     let candidate = crate::review_batch::Candidate { issue, repo: root, worktree, branch, base: since, files, lines, choice: &choice };
     match crate::review_batch::review_in_batch(db, &pb.review, &candidate, actor)? {
-        crate::review_batch::Outcome::Reviewed(review) => Ok(Some((choice, review))),
-        crate::review_batch::Outcome::Alone(why) => {
+        crate::review_batch::Outcome::Reviewed(review) => Ok((Some((choice, review)), vec![])),
+        crate::review_batch::Outcome::Alone(why, carried) => {
             db.log_event(actor, Some(&issue.key), Some(&wt), "status", &format!("Reviewed alone after all: {why}"))?;
-            Ok(None)
+            Ok((None, carried))
         }
     }
 }

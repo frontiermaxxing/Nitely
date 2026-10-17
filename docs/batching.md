@@ -227,8 +227,11 @@ whose diff introduces it, and that a problem that only appears when two changes 
   `git show <head>:<path>`; every worktree of a repository sees every branch's commits. Its tokens
   count toward that first change's issue.
 - **An interaction** becomes a P1 finding on the second change ("Interacts with NIT-x, reviewed in
-  the same batch: ... Once NIT-x has landed, rebase onto it and submit again"), and a note on both.
-  Its next submit has an open P1, so it is reviewed alone, on top of the first.
+  the same batch: ... (the files both touch). Once NIT-x has landed, rebase onto it and submit
+  again"), and a note on both; when the second change's own part of the reply could not be used,
+  its single review carries the finding. Its next submit has an open P1, so it is reviewed alone,
+  and the finding stays open, whatever that review says, until NIT-x is Done and the branch holds
+  the commit it landed at.
 - **What waits stops being waited for:** a job that dies while waiting leaves the queue
   (`abandoned`), a batch whose reviewing process dies sends its changes back alone, and a newer
   submit of the issue replaces its waiting change (`superseded`; its job ends as superseded).
