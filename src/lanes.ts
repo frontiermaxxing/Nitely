@@ -7,9 +7,14 @@ import type { LaneRun, ProjectLanes } from "./types";
 export interface LaneChip {
   project: string;
   lane: number;
-  /** running a request; idle at a commit; not made yet (made on its first request); or unhealthy:
-   * its last request ended in a lane problem, not a test failure. */
-  state: "running" | "idle" | "unmade" | "unhealthy";
+  /** running a request; idle at a commit; not made yet (made on its first request); unhealthy:
+   * its last request ended in a lane problem, not a test failure; or waiting: the person's main
+   * checkout (large-repo mode) has changes or is on another branch, so a request waits for it. */
+  state: "running" | "idle" | "unmade" | "unhealthy" | "waiting";
+  /** Large-repo mode: the lane is the person's own main checkout. */
+  checkout: boolean;
+  /** Why a request waits for the main checkout. */
+  waitingFor: string | null;
   /** The request it runs now. */
   run: LaneRun | null;
   /** The commit it holds. */
@@ -20,11 +25,14 @@ export interface LaneChip {
 
 /** The chips of a project's lanes, in lane order. A running request wins over an older problem. */
 export function laneChips(p: ProjectLanes): LaneChip[] {
+  const checkout = !!p.rules.large_repo;
   return p.lanes.map((l) => {
     const run = p.queue.find((r) => r.state === "running" && r.lane === l.lane) ?? null;
     const last = (p.last ?? p.recent).find((r) => r.lane === l.lane) ?? null;
-    const base = { project: p.project, lane: l.lane, run, at: l.at, problem: null };
+    const waitingFor = checkout ? (p.queue.find((r) => r.state === "queued" && r.waiting_for)?.waiting_for ?? null) : null;
+    const base = { project: p.project, lane: l.lane, run, at: l.at, problem: null, checkout, waitingFor };
     if (run) return { ...base, state: "running" };
+    if (waitingFor) return { ...base, state: "waiting" };
     if (last?.state === "lane_error") return { ...base, state: "unhealthy", problem: firstLine(last.error) ?? "the lane could not run its last request" };
     return { ...base, state: l.made ? "idle" : "unmade" };
   });
@@ -63,13 +71,21 @@ export function forHowLong(seconds: number): string {
   return m ? `${Math.floor(s / 3600)}h ${m}m` : `${Math.floor(s / 3600)}h`;
 }
 
+/** What a chip calls its lane after the project: its number, or the main checkout in large-repo mode. */
+export function chipName(c: LaneChip): string {
+  return c.checkout ? `${c.project} main checkout` : `${c.project} ${c.lane}`;
+}
+
 /** What a chip says after its project and lane. */
 export function chipWords(c: LaneChip, now: number): string {
   switch (c.state) {
     case "running": {
       const r = c.run!;
-      return [r.command, r.issue, forHowLong(now - (r.started_at ?? r.queued_at))].filter(Boolean).join(" · ");
+      const words = [r.command, r.issue, forHowLong(now - (r.started_at ?? r.queued_at))].filter(Boolean).join(" · ");
+      return c.checkout ? `building in your checkout: ${words}` : words;
     }
+    case "waiting":
+      return `waiting: ${c.waitingFor}`;
     case "unhealthy":
       return `problem: ${c.problem}`;
     case "unmade":

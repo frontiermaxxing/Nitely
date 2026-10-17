@@ -120,6 +120,42 @@ untracked outside the build directories) and on the integration branch, under th
 the app says what is building. After the request it checks out the integration branch again. The
 person can also edit in a light worktree like an agent, and then the main checkout is only a lane.
 
+As built (NIT-201), `large_repo = true` under `[lanes]`:
+
+- **When it runs.** A request waits its turn like any other, then waits for the checkout: on the
+  integration branch, no merge, rebase, cherry-pick or revert under way, and `git status` showing
+  nothing outside `keep`. Ignored files are the person's and do not count. The reason it waits
+  ("your checkout has a change: notes.txt", "your checkout is on spike, not main") is on the
+  request (`lane_run.waiting_for`) and on the app's chip. It is checked again under the lane lock
+  right before use. A checkout that stays busy past `timeout_minutes` ends the request as a lane
+  problem with that reason.
+- **What it does to the checkout.** It notes the branch (git folder, `nitely-lane-return`), then
+  `git checkout --detach <snapshot>`: never forced, so git refuses rather than overwrite. The
+  exception is a file git counts as expendable: an ignored file at a path the snapshot tracks, or
+  where the snapshot needs a folder. The request refuses that case itself before switching. Setup
+  runs when its fingerprint changed, then the command. Afterwards, whatever the command did, a plain
+  `git checkout <branch>`, with the same check first: a file that appeared during the request where
+  the branch tracks one keeps the checkout detached, and the request says so, rather than overwrite
+  it. Nothing is stashed, committed, cleaned or force-checked-out, and only the request's own
+  recorded command is ever stopped, never another process using the folder.
+  Lane hygiene (the size cap) never runs there: the person's build directories are theirs to trim.
+- **The rules while it is lent.** While a request has the checkout, the files in it are a snapshot
+  of an agent's work, playbook included. `Playbook::load` then reads the playbook from the branch
+  the checkout goes back to, so a submit or land meanwhile never runs on an agent's rules. One file
+  in the git folder (`nitely-lane-lends`, replaced whole) holds a count, the branch and "lent" or
+  "back": it says "lent", with the count moved, before the checkout goes to a snapshot, and "back",
+  with the count moved again, once it has returned. A read that began while it said "lent", or that
+  sees the count moved when it looks again, reads the branch's playbook instead.
+- **The queue.** A request waiting for the checkout holds up no other project's request for a
+  machine slot.
+- **After a crash.** A checkout left detached with the return note is put back on its branch by the
+  next request, by `land`, or by `nitely lanes reset`, but only while nothing in it changed. If the
+  person started working there, it is left as it is.
+- **Land.** Land holds the checkout lock while it checks the branch, fast-forwards and runs its
+  after steps, so a request never has the checkout detached under it.
+- **Tests** use throwaway repos in the temp folder. Every step that touches the checkout asserts
+  that it is in the temp folder when built for tests, so a test cannot reach a real checkout.
+
 **Copy-on-write.** Where the filesystem clones files for free (APFS `clonefile`, btrfs or XFS
 reflink, ReFS block clone), a second lane starts as a clone of the first, build output included.
 Elsewhere it starts cold. Clones are an optimization, never required: this PC's NTFS has none, and
@@ -204,6 +240,12 @@ instead (`base = "every 4h"`) for repos where moving costs a dependency sync, so
 times a day, not per agent. Agents still rebase onto the real tip at land; the base only decides
 how far snapshots are from what the lanes have built.
 
+As built (NIT-201): `base = "every <n>h"` keeps the base in `<lanes dir>/base` (commit and time) and
+moves it to the tip once `n` hours have passed. New branches (`start_task`, full or light) and the
+reference tree start from it; a branch that already exists is never moved. Lanes still rest at their
+last request's snapshot rather than at the base. Without the key, or with `base = "tip"`, nothing
+changes.
+
 ### Steering agents to `run`
 
 - Instructions: a light worktree's session instructions say that builds and tests go through `run`,
@@ -234,7 +276,8 @@ The same design everywhere; only lane creation differs.
 - **Issue timeline:** each run with command, exit, seconds and "Open log", like crew logs.
 - **Settings** (NIT-168): the machine budget and each project's lanes (count, size cap, executor,
   base policy). Large-repo mode says, in the project header, when the person's own checkout is
-  building.
+  building. As built (NIT-201): the chip is named "<project> main checkout" and says "building in
+  your checkout: …" or "waiting: <why>"; Settings explains the mode and the base schedule.
 
 As built (NIT-205): `lanes_overview` (src-tauri) reads `lanes::status` for every connected repo with
 `[lanes]`; `src/lanes.ts` turns it into chips. A lane is unhealthy when its last finished request

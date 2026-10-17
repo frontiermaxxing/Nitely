@@ -739,7 +739,19 @@ const BUILD_LANES: ProjectLanes[] = [
     [{ lane: 1, path: "l1", made: true, busy: false, at: "a1b2c3d" }, { lane: 2, path: "l2", made: false, busy: false, at: null }],
     [],
     []),
+  // Large-repo mode: the person's own checkout is the lane. `?checkout=waiting` shows a request
+  // waiting for it to be clean.
+  largeRepo(),
 ];
+
+function largeRepo(): ProjectLanes {
+  const waitingNow = new URLSearchParams(location.search).get("checkout") === "waiting";
+  const queue = waitingNow
+    ? [laneRun(77, "ATL", "queued", null, { issue: "ATL-9", command: "ninja -C out/debug tests", waiting_for: "your checkout has 3 changes, src/ui/frame.cc and more" })]
+    : [laneRun(76, "ATL", "running", 1, { issue: "ATL-8", command: "ninja -C out/debug tests", started_at: NOW - 23 * MIN })];
+  const p = lanesOf("ATL", "atlas", 1, [{ lane: 1, path: "C:\\Code\\atlas", made: true, busy: !waitingNow, at: "5e6f7a8" }], queue, []);
+  return { ...p, dir: "C:\\Code\\worktrees\\.nitely-lanes\\atlas", rules: { ...p.rules, keep: ["out"], timeout_minutes: 240, large_repo: true, base: "every 4h" } };
+}
 
 function lanesOverview(): LanesOverview {
   // `?slots` shows the machine's build budget, which the scheduler adds.

@@ -72,9 +72,13 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
     let common = PathBuf::from(git(&root, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?.trim());
     let lock = Lock::take(&common.join(LOCK_FILE), &issue.key, opts.break_lock)?;
     let result = run(db, &root, &pb, &issue.key, opts, actor, &mut report);
-    // Still under the lock, so the next land cannot change the main checkout mid-build.
+    // Still under the lock, so the next land cannot change the main checkout mid-build; and, in
+    // large-repo mode, with the checkout held from build requests.
     if result.is_ok() && report.landed {
-        after_land(&root, &pb, &mut report);
+        match crate::lanes::hold_checkout(&root, &pb) {
+            Ok(_held) => after_land(&root, &pb, &mut report),
+            Err(e) => report.warnings.push(format!("the after-land steps did not run: {e:#}")),
+        }
     }
     drop(lock);
 
@@ -306,7 +310,10 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
     let base = report.base.clone();
     // A repo with no origin is local: what lands stays in it.
     let push = opts.push && playbook::has_origin(root);
+    // Large-repo mode: a build request may have the main checkout detached for a moment.
+    let held = crate::lanes::hold_checkout(root, pb)?;
     let current = git(root, &["branch", "--show-current"])?.trim().to_string();
+    drop(held);
     if current != base {
         bail!("the main checkout {} is on {current}, not {base}; land only writes {base}", root.display());
     }
@@ -392,7 +399,12 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
     }
 
     report.commits = git(root, &["log", "--oneline", &format!("{base}..{head}")])?.lines().map(str::to_string).collect();
+    let held = crate::lanes::hold_checkout(root, pb)?;
+    if held.is_some() && git(root, &["branch", "--show-current"])?.trim() != base {
+        bail!("the main checkout left {base} during the gate; land again once it is back on {base}");
+    }
     git(root, &["merge", "--ff-only", &head]).context("the main checkout refused the fast-forward (do uncommitted edits there overlap the change?)")?;
+    drop(held);
     report.landed = true;
     report.landed_from = Some(before.clone());
     report.head = Some(git(root, &["rev-parse", "--short", "HEAD"])?.trim().to_string());

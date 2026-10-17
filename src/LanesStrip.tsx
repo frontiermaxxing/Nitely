@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "./backend";
-import { capWords, chipWords, laneChips, sizeWords, waiting, type LaneChip } from "./lanes";
+import { capWords, chipName, chipWords, laneChips, sizeWords, waiting, type LaneChip } from "./lanes";
 import type { LanesOverview } from "./types";
 import { StateDot } from "./ui";
 import "./styles/lanes.css";
@@ -64,10 +64,12 @@ function Chip(props: { chip: LaneChip; now: number; onOpenIssue: (key: string) =
   const words = chipWords(c, props.now);
   return (
     <div className={`lane-chip lane-${c.state}`} title={c.state === "running" ? `${c.run!.kind}: ${c.run!.command}` : words}>
-      {c.state === "unhealthy" ? <span className="lane-problem-dot" role="img" aria-label="Unhealthy" /> : <StateDot state={c.state === "running" ? "working" : c.state === "idle" ? "idle" : "ended"} />}
-      <span className="lane-name mono">
-        {c.project} {c.lane}
-      </span>
+      {c.state === "unhealthy" ? (
+        <span className="lane-problem-dot" role="img" aria-label="Unhealthy" />
+      ) : (
+        <StateDot state={c.state === "running" ? "working" : c.state === "idle" ? "idle" : c.state === "waiting" ? "waiting" : "ended"} />
+      )}
+      <span className="lane-name mono">{chipName(c)}</span>
       {issue ? (
         <button className="lane-words link" onClick={() => props.onOpenIssue(issue)}>
           {words}
@@ -110,10 +112,23 @@ export function LanesSettings(props: { version: number }) {
           </h3>
           <dl className="lanes-facts">
             <dt>Lanes</dt>
-            <dd>
-              {p.rules.count} on this machine
-              {p.lanes.some((l) => !l.made) && <span className="muted"> ({p.lanes.filter((l) => l.made).length} made so far)</span>}
-            </dd>
+            {p.rules.large_repo ? (
+              <dd>
+                Your main checkout (large-repo mode). A build runs there only while it is clean and on its integration branch, and puts it back on that branch after;
+                nothing in it is stashed, committed or cleaned.
+              </dd>
+            ) : (
+              <dd>
+                {p.rules.count} on this machine
+                {p.lanes.some((l) => !l.made) && <span className="muted"> ({p.lanes.filter((l) => l.made).length} made so far)</span>}
+              </dd>
+            )}
+            {p.rules.base && p.rules.base !== "tip" && (
+              <>
+                <dt>New work starts from</dt>
+                <dd>the integration branch as it was when the base last moved; it moves {p.rules.base}</dd>
+              </>
+            )}
             <dt>Keeps between runs</dt>
             <dd className="mono">{p.rules.keep.join(", ") || "nothing"}</dd>
             <dt>Stops a run after</dt>

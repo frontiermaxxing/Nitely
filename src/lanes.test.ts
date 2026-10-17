@@ -2,7 +2,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { bytesWords, capWords, chipWords, forHowLong, laneChips, laneRunId, sizeWords, waiting } from "./lanes.ts";
+import { bytesWords, capWords, chipName, chipWords, forHowLong, laneChips, laneRunId, sizeWords, waiting } from "./lanes.ts";
 import type { LaneRun, ProjectLanes } from "./types.ts";
 
 const run = (id: number, state: string, lane: number | null, more: Partial<LaneRun> = {}): LaneRun =>
@@ -60,6 +60,23 @@ test("a lane's size against its cap", () => {
   assert.equal(capWords(p), "twice each lane's first build");
   assert.equal(capWords({ ...p, rules: { ...p.rules, size_cap_gb: 20 } }), "20 GB per lane");
   assert.equal(bytesWords(1024 ** 3), "1.0 GB");
+});
+
+test("in large-repo mode the chip is the main checkout: building, or waiting and why", () => {
+  const big = (queue: LaneRun[]): ProjectLanes => ({
+    ...project(queue, []),
+    rules: { count: 1, keep: ["out"], timeout_minutes: 240, large_repo: true, base: "every 4h" },
+    lanes: [{ lane: 1, path: "C:/Code/my-app", made: true, busy: false, at: "1a2b3c4" }],
+  });
+  const [building] = laneChips(big([run(5, "running", 1)]));
+  assert.equal(chipName(building), "APP main checkout");
+  assert.equal(chipWords(building, 1010 + 60), "building in your checkout: cargo test · APP-4 · 1m");
+  const [held] = laneChips(big([run(6, "queued", null, { waiting_for: "your checkout has a change: notes.txt" })]));
+  assert.equal(held.state, "waiting");
+  assert.equal(chipWords(held, 0), "waiting: your checkout has a change: notes.txt");
+  const [idle] = laneChips(big([]));
+  assert.equal(chipWords(idle, 0), "idle at 1a2b3c4");
+  assert.equal(chipName(laneChips(project([], []))[0]), "APP 1", "lanes keep their numbers");
 });
 
 test("durations and the run a timeline entry names", () => {

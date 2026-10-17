@@ -473,12 +473,43 @@ impl Playbook {
         // Tests build their own playbooks; the defaults of whoever runs them must not leak in.
         let none = crate::rules::RuleDefaults::default();
         let defaults = if cfg!(test) { &none } else { config.map(|c| &c.rule_defaults).unwrap_or(&none) };
-        let Some(path) = Playbook::path_in(repo_root, config) else {
+        // Large-repo mode: while a build request has the main checkout at an agent's snapshot, its
+        // playbook there is the agent's; the rules are the ones on the branch it goes back to.
+        let from_branch = |branch: &str| -> Option<Result<Playbook>> {
+            let text = git(repo_root, &["show", &format!("{branch}:{PLAYBOOK_PATH}")]).ok()?;
+            Some(Playbook::parse(&text).with_context(|| format!("in {PLAYBOOK_PATH} on {branch}")).map(|mut pb| {
+                crate::rules::apply_defaults(&mut pb, &text, defaults);
+                pb
+            }))
+        };
+        let lends = crate::lanes::lends(repo_root);
+        if let Some(pb) = lends.lent.as_deref().and_then(from_branch) {
+            return pb;
+        }
+        let read = |path: &Option<PathBuf>| -> Result<Option<String>> {
+            match path {
+                Some(path) => Ok(Some(std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?)),
+                None => Ok(None),
+            }
+        };
+        let mut path = if lends.lent.is_some() { Playbook::stored_path_for(repo_root, config) } else { Playbook::path_in(repo_root, config) };
+        let mut text = read(&path)?;
+        // A request that lent the checkout while it was read: what was read may be a snapshot's,
+        // so the branch's is read instead, or, when the branch has none, the one Nitely keeps for
+        // the repo; never what was read from the checkout.
+        let after = crate::lanes::lends(repo_root);
+        if lends.lent.is_none() && (after.count != lends.count || after.lent.is_some()) {
+            if let Some(pb) = after.lent.or(after.last).as_deref().and_then(from_branch) {
+                return pb;
+            }
+            path = Playbook::stored_path_for(repo_root, config);
+            text = read(&path)?;
+        }
+        let (Some(path), Some(text)) = (path, text) else {
             let mut pb = Playbook::default();
             crate::rules::apply_defaults(&mut pb, "", defaults);
             return Ok(pb);
         };
-        let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         let mut pb = Playbook::parse(&text).with_context(|| format!("in {}", path.display()))?;
         crate::rules::apply_defaults(&mut pb, &text, defaults);
         Ok(pb)
@@ -498,6 +529,11 @@ impl Playbook {
         if in_repo.exists() {
             return Some(in_repo);
         }
+        Playbook::stored_path_for(repo_root, config)
+    }
+
+    /// The playbook Nitely keeps for `repo_root`, when it is connected and has one there.
+    fn stored_path_for(repo_root: &Path, config: Option<&crate::Config>) -> Option<PathBuf> {
         let config = config?;
         let root = crate::paths::normalize(&repo_root.to_string_lossy());
         let repo = config.repos.iter().find(|r| crate::paths::normalize(&r.root) == root)?;
@@ -957,15 +993,23 @@ pub fn start_task(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, 
 
     let base = playbook.integration_branch();
     let branch_exists = git(repo_root, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_ok();
+    // A new branch starts from the base commit when the playbook moves it on a schedule
+    // (`[lanes] base = "every 4h"`), so agents share one starting point between moves; otherwise
+    // from the integration branch's tip, as always.
+    let from = match playbook.lanes.as_ref().and_then(|l| l.base_every_hours()) {
+        Some(_) if !branch_exists => crate::light::base_commit(&playbook, repo_root)?,
+        _ => base.to_string(),
+    };
+    let from_words = if from == base { base.to_string() } else { format!("{base} at {}", &from[..from.len().min(9)]) };
     if crate::light::wanted(&playbook) {
-        return start_light(db, repo_root, &playbook, issue, branch, worktree, base, branch_exists, actor);
+        return start_light(db, repo_root, &playbook, issue, branch, worktree, base, &from, branch_exists, actor);
     }
     if branch_exists {
         git(repo_root, &["worktree", "add", &worktree_str, &branch])?;
     } else {
-        git(repo_root, &["worktree", "add", "-b", &branch, &worktree_str, base])?;
+        git(repo_root, &["worktree", "add", "-b", &branch, &worktree_str, &from])?;
     }
-    db.log_event(actor, Some(&issue.key), Some(&worktree_str), "worktree", &format!("Started {branch} from {base}"))?;
+    db.log_event(actor, Some(&issue.key), Some(&worktree_str), "worktree", &format!("Started {branch} from {from_words}"))?;
 
     let mut setup = Vec::new();
     for command in &playbook.worktree.setup {
@@ -998,13 +1042,14 @@ pub fn start_task(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, 
 /// `start_task` for a playbook that asks for light worktrees: source only, no setup, sparse when the
 /// playbook names directories, and the reference tree made or moved to the base.
 #[allow(clippy::too_many_arguments)]
-fn start_light(db: &Db, repo_root: &Path, playbook: &Playbook, issue: &IssueRecord, branch: String, worktree: PathBuf, base: &str, exists: bool, actor: &Actor) -> Result<Started> {
+fn start_light(db: &Db, repo_root: &Path, playbook: &Playbook, issue: &IssueRecord, branch: String, worktree: PathBuf, base: &str, start: &str, exists: bool, actor: &Actor) -> Result<Started> {
     let worktree_str = worktree.to_string_lossy().into_owned();
-    let from = if exists { format!("refs/heads/{branch}") } else { base.to_string() };
+    let from = if exists { format!("refs/heads/{branch}") } else { start.to_string() };
     let sparse = crate::light::sparse_dirs(playbook, repo_root, &from, &format!("{}\n{}", issue.title, issue.body));
-    crate::light::add(repo_root, &worktree, &branch, base, exists, &sparse)?;
+    crate::light::add(repo_root, &worktree, &branch, start, exists, &sparse)?;
     let shape = if sparse.is_empty() { "light".to_string() } else { format!("light, sparse: {}", sparse.join(", ")) };
-    db.log_event(actor, Some(&issue.key), Some(&worktree_str), "worktree", &format!("Started {branch} from {base} ({shape})"))?;
+    let from_words = if start == base { base.to_string() } else { format!("{base} at {}", &start[..start.len().min(9)]) };
+    db.log_event(actor, Some(&issue.key), Some(&worktree_str), "worktree", &format!("Started {branch} from {from_words} ({shape})"))?;
     let mut warnings = playbook.unknown_warnings();
     // Reading code outside the worktree needs it, but a worktree without it still works.
     let reference = match crate::light::reference_tree(playbook, repo_root) {

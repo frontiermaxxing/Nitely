@@ -30,13 +30,15 @@ pub fn lanes_dir(pb: &Playbook, repo_root: &Path) -> PathBuf {
 }
 
 /// The commit the project's work starts from and its reference tree shows: the integration
-/// branch's tip, origin's when the local branch is behind it.
+/// branch's tip, origin's when the local branch is behind it; or, with `[lanes] base = "every
+/// <n>h"`, that tip as it was when the base last moved, at most `n` hours ago.
 pub fn base_commit(pb: &Playbook, repo_root: &Path) -> Result<String> {
     let base = crate::playbook::diff_base(repo_root, pb.integration_branch());
-    Ok(git(repo_root, &["rev-parse", "--verify", &format!("{base}^{{commit}}")])
+    let tip = git(repo_root, &["rev-parse", "--verify", &format!("{base}^{{commit}}")])
         .with_context(|| format!("the integration branch {base} has no commit"))?
         .trim()
-        .to_string())
+        .to_string();
+    Ok(crate::lanes::scheduled_base(pb, repo_root, &tip)?.unwrap_or(tip))
 }
 
 /// The reference tree's folder, whether or not it exists yet.
@@ -421,6 +423,20 @@ mod tests {
         let pb = Playbook::parse("[lanes]\nheavy = [\"^make\\\\b\"]\n").unwrap();
         assert_eq!(heavy_in(&pb, "cd x; make all").as_deref(), Some("make all"));
         assert!(heavy_in(&pb, "cargo test").is_none());
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn a_new_branch_starts_from_the_scheduled_base_not_the_tip() {
+        let (base, repo) = repo("nitely-sched", "[worktree]\ndir = \"../wt/{key}\"\n[lanes]\nbase = \"every 4h\"\n");
+        let db = Db::open(&base.join("t.db")).unwrap();
+        let pb = Playbook::load(&repo).unwrap();
+        let first = base_commit(&pb, &repo).unwrap();
+        std::fs::write(repo.join("README.md"), "moved").unwrap();
+        assert!(crate::playbook::run_git(Command::new("git").arg("-C").arg(&repo).args(["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "next"])).unwrap().status.success());
+        let started = start_task(&db, &repo, &issue(""), "claude", &Actor::Agent("claude:test".into())).unwrap();
+        let head = git(Path::new(&started.worktree), &["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(head.trim(), first, "cut from the base, which moves every 4 hours, not from main's newer tip");
         std::fs::remove_dir_all(base).ok();
     }
 

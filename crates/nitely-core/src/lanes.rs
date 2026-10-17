@@ -34,6 +34,14 @@ pub struct LaneRules {
     /// How big a lane's build directories may grow, in GB, before `hygiene` trims them; unset, twice
     /// the size of its first build.
     pub size_cap_gb: Option<f64>,
+    /// The person's own main checkout is the repo's one lane (a repo too big for a second
+    /// checkout). A request runs there only while it is clean and on the integration branch, and
+    /// puts it back on that branch after; nothing there is ever stashed, committed or cleaned.
+    pub large_repo: bool,
+    /// When the project's base commit moves: `tip` (the integration branch's tip, always) or
+    /// `every <n>h`, so new worktrees and the reference tree start from a commit that moves a few
+    /// times a day and a dependency sync runs that often, not for every agent.
+    pub base: String,
 }
 
 /// The commands that build or test when the playbook names none.
@@ -47,7 +55,27 @@ impl Default for LaneRules {
             timeout_minutes: 30,
             heavy: DEFAULT_HEAVY.iter().map(|s| s.to_string()).collect(),
             size_cap_gb: None,
+            large_repo: false,
+            base: "tip".into(),
         }
+    }
+}
+
+impl LaneRules {
+    /// Lanes the repo has: one in large-repo mode, the person's checkout.
+    pub fn lanes(&self) -> u32 {
+        if self.large_repo {
+            1
+        } else {
+            self.count.max(1)
+        }
+    }
+
+    /// `every <n>h` as hours; None for `tip` or anything else.
+    pub fn base_every_hours(&self) -> Option<u64> {
+        let b = self.base.trim();
+        let n = b.strip_prefix("every").map(str::trim).unwrap_or(b).strip_suffix('h')?;
+        n.trim().parse().ok().filter(|h: &u64| *h > 0)
     }
 }
 
@@ -58,7 +86,262 @@ pub fn dir(repo_root: &Path, pb: &Playbook) -> PathBuf {
 }
 
 fn lane_path(repo_root: &Path, pb: &Playbook, n: u32) -> PathBuf {
+    if pb.lanes.as_ref().is_some_and(|l| l.large_repo) {
+        return repo_root.to_path_buf();
+    }
     dir(repo_root, pb).join(format!("lane-{n}"))
+}
+
+// ----- the base commit (NIT-201) -----
+
+/// The base commit when the playbook moves it on a schedule (`[lanes] base = "every <n>h"`): the
+/// integration branch's tip as it was when the base last moved, moved to the tip once `n` hours
+/// have passed. None when the base is the tip (the default). Kept in the lanes folder.
+pub fn scheduled_base(pb: &Playbook, repo_root: &Path, tip: &str) -> Result<Option<String>> {
+    let Some(hours) = pb.lanes.as_ref().and_then(|l| l.base_every_hours()) else { return Ok(None) };
+    let file = dir(repo_root, pb).join("base");
+    if let Ok(text) = std::fs::read_to_string(&file) {
+        let mut lines = text.lines();
+        let (commit, at) = (lines.next().unwrap_or("").trim().to_string(), lines.next().and_then(|t| t.trim().parse::<i64>().ok()).unwrap_or(0));
+        let fresh = now() - at < (hours * 3600) as i64;
+        if fresh && !commit.is_empty() && git(repo_root, &["cat-file", "-e", &format!("{commit}^{{commit}}")]).is_ok() {
+            return Ok(Some(commit));
+        }
+    }
+    std::fs::create_dir_all(file.parent().unwrap())?;
+    std::fs::write(&file, format!("{tip}\n{}\n", now())).with_context(|| format!("writing {}", file.display()))?;
+    Ok(Some(tip.to_string()))
+}
+
+// ----- large-repo mode: the person's checkout is the lane (NIT-201) -----
+
+/// Why the person's checkout cannot take a request now, in words, or None when it can: it is on
+/// the integration branch, nothing is in the middle of a merge or rebase, and nothing tracked has
+/// changed and nothing is untracked outside the build directories. Ignored files are theirs and
+/// are never touched, so they do not count.
+pub fn checkout_busy(root: &Path, pb: &Playbook, keep: &[String]) -> Result<Option<String>> {
+    let branch = pb.integration_branch();
+    for (file, what) in [("MERGE_HEAD", "a merge"), ("CHERRY_PICK_HEAD", "a cherry-pick"), ("REVERT_HEAD", "a revert"), ("rebase-merge", "a rebase"), ("rebase-apply", "a rebase")] {
+        if git_path(root, file).is_some_and(|p| p.exists()) {
+            return Ok(Some(format!("your checkout is in the middle of {what}")));
+        }
+    }
+    let on = git(root, &["symbolic-ref", "--quiet", "--short", "HEAD"]).map(|s| s.trim().to_string()).unwrap_or_default();
+    if on != branch {
+        let at = if on.is_empty() { "a detached HEAD".to_string() } else { on };
+        return Ok(Some(format!("your checkout is on {at}, not {branch}")));
+    }
+    let status = git(root, &["status", "--porcelain=v1", "-z", "--untracked-files=all"])?;
+    let changed: Vec<&str> = status.split('\0').filter(|e| e.len() > 3).map(|e| &e[3..]).filter(|p| !in_keep(keep, p)).collect();
+    Ok(match changed.as_slice() {
+        [] => None,
+        [one] => Some(format!("your checkout has a change: {one}")),
+        [first, rest @ ..] => Some(format!("your checkout has {} changes, {first} and more", rest.len() + 1)),
+    })
+}
+
+/// A test drives large-repo mode only on a throwaway repo in the temp folder: anywhere else it would
+/// be a person's checkout, so the test stops before it is touched.
+#[cfg(test)]
+fn guard_throwaway(root: &Path) {
+    let temp = crate::paths::normalize(&std::env::temp_dir().to_string_lossy());
+    let at = crate::paths::normalize(&root.to_string_lossy());
+    assert!(at.starts_with(&format!("{temp}/")), "a test may use large-repo mode only on a throwaway repo under {temp}, not {at}");
+}
+
+#[cfg(not(test))]
+fn guard_throwaway(_: &Path) {}
+
+/// A repo-relative path inside one of the build directories.
+fn in_keep(keep: &[String], path: &str) -> bool {
+    keep.iter().any(|k| {
+        let k = k.trim_matches('/');
+        !k.is_empty() && (path == k || path.starts_with(&format!("{k}/")))
+    })
+}
+
+/// In large-repo mode, the person's checkout held for something other than a request (land's
+/// fast-forward, its after steps): waits for the request using it to finish, up to the lane's
+/// timeout, and puts back a checkout a dead request left detached. None without large-repo mode.
+pub fn hold_checkout(repo_root: &Path, pb: &Playbook) -> Result<Option<LaneLock>> {
+    let Some(rules) = pb.lanes.as_ref().filter(|l| l.large_repo) else { return Ok(None) };
+    guard_throwaway(repo_root);
+    let until = Instant::now() + Duration::from_secs(rules.timeout_minutes.max(1) * 60);
+    loop {
+        if let Some(lock) = try_lock(repo_root, pb, 1)? {
+            recover_large(repo_root, &rules.keep);
+            return Ok(Some(lock));
+        }
+        if Instant::now() > until {
+            bail!("a build request has had the main checkout for over {} minutes", rules.timeout_minutes);
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+/// What a checkout of `to` would overwrite without asking: git treats ignored files as expendable,
+/// so a path `to` tracks and HEAD does not, already on disk (as an ignored file, or one made since
+/// the last checkout), or under such a file, which git would delete to make the directory. Paths in
+/// `keep` (build output) do not count. Returns the first such path.
+fn would_overwrite(root: &Path, to: &str, keep: &[String]) -> Result<Option<String>> {
+    let added = git(root, &["diff", "--name-only", "-z", "--no-renames", "--diff-filter=A", "HEAD", to])?;
+    let mut leaves = Vec::new();
+    let mut parents = std::collections::BTreeSet::new();
+    for p in added.split('\0').filter(|p| !p.is_empty() && !in_keep(keep, p)) {
+        leaves.push(p.to_string());
+        let mut at = p;
+        while let Some((parent, _)) = at.rsplit_once('/') {
+            parents.insert(parent.to_string());
+            at = parent;
+        }
+    }
+    for p in &leaves {
+        let Ok(meta) = root.join(p).symlink_metadata() else { continue };
+        if !meta.is_dir() {
+            return Ok(Some(p.clone()));
+        }
+        // A folder where `to` has a file: git removes it rightly when all it holds is tracked.
+        if !git(root, &["ls-files", "-z", "--others", "--", p])?.trim_matches('\0').is_empty() {
+            return Ok(Some(p.clone()));
+        }
+    }
+    // A file where `to` has a directory, unless HEAD tracks it (then git replaces it rightly).
+    let files: Vec<&String> = parents.iter().filter(|p| root.join(p).symlink_metadata().is_ok_and(|m| !m.is_dir())).collect();
+    if files.is_empty() {
+        return Ok(None);
+    }
+    let mut args = vec!["ls-files", "-z", "--"];
+    args.extend(files.iter().map(|p| p.as_str()));
+    let tracked = git(root, &args)?;
+    let tracked: Vec<&str> = tracked.split('\0').collect();
+    Ok(files.into_iter().find(|p| !tracked.contains(&p.as_str())).cloned())
+}
+
+/// The branch the main checkout goes back to while a build request has it (large-repo mode), from
+/// the note the request left: the files in it are then a snapshot of someone's work, so the
+/// project's rules are read from that branch instead (`Playbook::load`). Read without running git.
+pub fn lent_to_request(repo_root: &Path) -> Option<String> {
+    lends(repo_root).lent
+}
+
+/// How often the main checkout has been lent to a request or given back, the branch it comes back
+/// to, and whether it is lent now, in one file replaced whole (so one read sees one state):
+/// `Playbook::load` reads it before and after reading the playbook. It moves to "lent" before the
+/// checkout goes to a snapshot and to "back", with the count moved again, once it is back. So a read
+/// of the playbook that could have seen a snapshot's files either began while it said "lent", or
+/// sees the count moved when it looks again.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Lends {
+    pub count: u64,
+    /// The branch of the last lend.
+    pub last: Option<String>,
+    /// The branch it goes back to, while it is lent now.
+    pub lent: Option<String>,
+}
+
+pub fn lends(repo_root: &Path) -> Lends {
+    let text = std::fs::read_to_string(repo_root.join(".git").join(LENDS)).unwrap_or_default();
+    let mut lines = text.lines();
+    let count = lines.next().and_then(|n| n.trim().parse().ok()).unwrap_or(0);
+    let last = lines.next().map(|b| b.trim().to_string()).filter(|b| !b.is_empty());
+    let lent = (lines.next().map(str::trim) == Some("lent")).then(|| last.clone()).flatten();
+    Lends { count, last, lent }
+}
+
+const LENDS: &str = "nitely-lane-lends";
+
+/// Moves the lend count on, noting the branch and whether the checkout is now lent. Written to a
+/// file beside it and renamed over it, so a reader sees the old state or the new one, never half.
+fn count_lend(root: &Path, branch: &str, lent: bool) -> Result<()> {
+    if let Some(file) = git_path(root, LENDS) {
+        let count = lends(root).count + 1;
+        let next = file.with_extension("next");
+        std::fs::write(&next, format!("{count}\n{branch}\n{}\n", if lent { "lent" } else { "back" })).with_context(|| format!("writing {}", next.display()))?;
+        std::fs::rename(&next, &file).with_context(|| format!("writing {}", file.display()))?;
+    }
+    Ok(())
+}
+
+/// Where the checkout notes the branch a request will put it back on, while the request has it
+/// detached; found after a crash, it says Nitely left it there.
+fn return_mark(root: &Path) -> Option<PathBuf> {
+    git_path(root, "nitely-lane-return")
+}
+
+/// Puts the person's checkout at `commit` for a request: a plain detached checkout, which git
+/// refuses rather than overwrite anything, after noting the branch to come back to.
+fn switch_large(root: &Path, branch: &str, commit: &str, keep: &[String]) -> Result<()> {
+    guard_throwaway(root);
+    if let Some(p) = would_overwrite(root, commit, keep)? {
+        bail!("the request's commit tracks {p}, which your checkout has as an ignored file; it was left alone and the request not run");
+    }
+    // Counted before anything changes, so a playbook read meanwhile knows to read the branch's.
+    count_lend(root, branch, true)?;
+    if let Some(mark) = return_mark(root) {
+        std::fs::write(&mark, branch).with_context(|| format!("writing {}", mark.display()))?;
+    }
+    git(root, &["checkout", "--quiet", "--detach", commit]).context("putting your checkout at the request's commit")?;
+    Ok(())
+}
+
+/// Back on `branch` after a request: a plain checkout (never forced), so a file the build changed
+/// stops it rather than being thrown away.
+fn return_large(root: &Path, branch: &str) -> Result<()> {
+    guard_throwaway(root);
+    if let Some(p) = would_overwrite(root, branch, &[])? {
+        bail!(
+            "putting your checkout back on {branch} would overwrite {p}, which appeared while the request ran; it was left alone, and your checkout stays at the \
+             request's commit: move {p} away, then run `nitely lanes reset`"
+        );
+    }
+    git(root, &["checkout", "--quiet", branch]).with_context(|| format!("putting your checkout back on {branch}"))?;
+    // Counted again once it is back (see `Lends`).
+    count_lend(root, branch, false)?;
+    if let Some(mark) = return_mark(root) {
+        std::fs::remove_file(mark).ok();
+    }
+    Ok(())
+}
+
+/// After a request that did not finish (its process died): the checkout Nitely left detached goes
+/// back to its branch, when nothing in it changed since. Returns what it did, or why it left the
+/// checkout as it is, in words.
+fn recover_large(root: &Path, keep: &[String]) -> Option<String> {
+    let mark = return_mark(root)?;
+    let branch = std::fs::read_to_string(&mark).ok()?.trim().to_string();
+    if branch.is_empty() {
+        std::fs::remove_file(&mark).ok();
+        return None;
+    }
+    let detached = git(root, &["symbolic-ref", "--quiet", "HEAD"]).is_err();
+    if !detached {
+        // Put back by hand: no longer lent.
+        count_lend(root, &branch, false).ok();
+        std::fs::remove_file(&mark).ok();
+        return None;
+    }
+    let status = git(root, &["status", "--porcelain=v1", "-z", "--untracked-files=all"]).unwrap_or_default();
+    if let Some(changed) = status.split('\0').filter(|e| e.len() > 3).map(|e| &e[3..]).find(|p| !in_keep(keep, p)) {
+        return Some(format!("your checkout stays detached at the request's commit: {changed} changed since; put it back on {branch} once that is safe"));
+    }
+    match return_large(root, &branch) {
+        Ok(()) => Some(format!("put your checkout back on {branch}, where a request that did not finish had left it detached")),
+        Err(e) => Some(format!("your checkout stays detached: {e:#}")),
+    }
+}
+
+/// Stops only the command the last request recorded, when it still runs that command. In the
+/// person's checkout, unlike a lane, every other process using the folder is theirs.
+fn stop_recorded(lane: &Path) {
+    let Some(file) = pid_file(lane) else { return };
+    let Ok(text) = std::fs::read_to_string(&file) else { return };
+    let (pid, command) = text.split_once('\n').unwrap_or((text.as_str(), ""));
+    if let Ok(pid) = pid.trim().parse::<u32>() {
+        if !command.trim().is_empty() && crate::procs::command_line(pid).is_some_and(|line| line.contains(command.trim())) {
+            stop_tree(pid);
+        }
+    }
+    std::fs::remove_file(&file).ok();
 }
 
 // ----- snapshots -----
@@ -221,6 +504,8 @@ pub struct Run {
     pub output: String,
     /// Why the lane could not run it (state lane_error), in words.
     pub error: Option<String>,
+    /// Large-repo mode: why it waits for the person's checkout (a change there, another branch).
+    pub waiting_for: Option<String>,
 }
 
 impl Run {
@@ -231,7 +516,7 @@ impl Run {
 }
 
 const COLUMNS: &str = "id, project, repo, issue_key, requested_by, kind, snapshot, tree, base, command, state, lane, executor, \
-queued_at, started_at, ended_at, exit_code, timed_out, setup_ran, files_switched, log_path, output, error, pid";
+queued_at, started_at, ended_at, exit_code, timed_out, setup_ran, files_switched, log_path, output, error, waiting_for, pid";
 
 fn row(r: &rusqlite::Row) -> rusqlite::Result<(Run, Option<i64>)> {
     Ok((
@@ -259,8 +544,9 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<(Run, Option<i64>)> {
             log: r.get(20)?,
             output: r.get(21)?,
             error: r.get(22)?,
+            waiting_for: r.get(23)?,
         },
-        r.get(23)?,
+        r.get(24)?,
     ))
 }
 
@@ -466,11 +752,13 @@ fn run_with(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Act
         }
     }
     let done = db.lane_run(id)?.context("the run's record went missing")?;
+    let at = if rules.large_repo { "the main checkout".to_string() } else { format!("lane {n}") };
     let said = match (&done.error, done.exit_code, done.timed_out) {
+        (Some(e), _, _) if rules.large_repo => format!("The main checkout could not run `{}`: {}", done.command, e.lines().next().unwrap_or("")),
         (Some(e), _, _) => format!("Lane {n} could not run `{}`: {}", done.command, e.lines().next().unwrap_or("")),
-        (None, _, true) => format!("`{}` ran past {} minutes in lane {n} and was stopped", done.command, rules.timeout_minutes),
-        (None, Some(code), _) => format!("Ran `{}` in lane {n}: exit {code} after {} s", done.command, ended - done.started_at.unwrap_or(ended)),
-        (None, None, _) => format!("Ran `{}` in lane {n}", done.command),
+        (None, _, true) => format!("`{}` ran past {} minutes in {at} and was stopped", done.command, rules.timeout_minutes),
+        (None, Some(code), _) => format!("Ran `{}` in {at}: exit {code} after {} s", done.command, ended - done.started_at.unwrap_or(ended)),
+        (None, None, _) => format!("Ran `{}` in {at}", done.command),
     };
     if let Some(key) = req.issue {
         db.log_event(actor, Some(key), Some(&lane.to_string_lossy()), "lane_run", &format!("{said} (run {id})")).ok();
@@ -759,16 +1047,22 @@ fn in_order(mut waiting: Vec<Waiting>, last_started: &std::collections::HashMap<
 /// it, and fewer requests ahead of it, of repos with a free lane, than there are free slots. A
 /// repo whose lanes are all busy does not hold up the others.
 fn my_turn(db: &Db, id: i64, slots: u32, alive: &mut dyn FnMut(i64) -> bool) -> Result<bool> {
-    let mut stmt = db.conn.prepare("SELECT id, project, repo, priority, state, pid, lane_count, queued_at FROM lane_run WHERE state IN ('queued', 'running')")?;
-    let rows: Vec<(Waiting, String, Option<i64>, i64, i64)> = stmt
+    let mut stmt = db.conn.prepare("SELECT id, project, repo, priority, state, pid, lane_count, waiting_for IS NOT NULL FROM lane_run WHERE state IN ('queued', 'running')")?;
+    let rows: Vec<(Waiting, String, Option<i64>, i64, bool)> = stmt
         .query_map([], |r| Ok((Waiting { id: r.get(0)?, project: r.get(1)?, repo: r.get(2)?, priority: r.get(3)? }, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)))?
         .collect::<rusqlite::Result<_>>()?;
+    let mut held_by_checkout: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut running_by_repo: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
     let mut lanes_by_repo: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
     let mut running = 0i64;
     let mut waiting = Vec::new();
-    for (w, state, pid, lane_count, _queued_at) in rows {
+    for (w, state, pid, lane_count, waits_for_checkout) in rows {
         let repo = crate::paths::normalize(&w.repo);
+        // Waiting for the person's checkout (large-repo mode), neither it nor its repo's requests
+        // behind it can start, so they hold up no other project's request.
+        if waits_for_checkout && w.id != id {
+            held_by_checkout.insert(repo.clone());
+        }
         lanes_by_repo.insert(repo.clone(), lane_count.max(1));
         // A request whose process is gone holds nothing and waits for nothing.
         if w.id != id && pid.is_some_and(|p| !alive(p)) {
@@ -802,7 +1096,7 @@ fn my_turn(db: &Db, id: i64, slots: u32, alive: &mut dyn FnMut(i64) -> bool) -> 
             return Ok(false);
         }
         let free_lanes = lanes_by_repo.get(&repo).copied().unwrap_or(1) - running_by_repo.get(&repo).copied().unwrap_or(0);
-        if free_lanes > 0 {
+        if free_lanes > 0 && !held_by_checkout.contains(&repo) {
             ahead_that_can_start += 1;
         }
     }
@@ -812,7 +1106,7 @@ fn my_turn(db: &Db, id: i64, slots: u32, alive: &mut dyn FnMut(i64) -> bool) -> 
 
 /// Waits for request `id`'s turn, then holds a machine slot and one of the repo's lanes.
 fn take_turn(db: &Db, id: i64, repo_root: &Path, pb: &Playbook, rules: &LaneRules, slots: u32) -> Result<(u32, LaneLock, SlotLock)> {
-    db.conn.execute("UPDATE lane_run SET lane_count = ?2 WHERE id = ?1", params![id, rules.count.max(1)])?;
+    db.conn.execute("UPDATE lane_run SET lane_count = ?2 WHERE id = ?1", params![id, rules.lanes()])?;
     // Whether a requester's process still runs, asked again every few seconds at most.
     let mut known: std::collections::HashMap<i64, (bool, Instant)> = std::collections::HashMap::new();
     let mut alive = |pid: i64| -> bool {
@@ -828,12 +1122,32 @@ fn take_turn(db: &Db, id: i64, repo_root: &Path, pb: &Playbook, rules: &LaneRule
             }
         }
     };
-    loop {
+    let mut busy_since = None;
+    'turn: loop {
         if my_turn(db, id, slots, &mut alive)? {
+            // A checkout a request has (or a dead one left) is looked at under the lock, where one
+            // left behind is put back first.
+            if rules.large_repo && lent_to_request(repo_root).is_none() {
+                if let Some(why) = checkout_busy(repo_root, pb, &rules.keep)? {
+                    wait_for_checkout(db, id, &why, &mut busy_since, rules)?;
+                    continue 'turn;
+                }
+            }
             for k in 1..=slots.max(1) {
                 let Some(slot) = try_slot(db, k)? else { continue };
-                for n in 1..=rules.count.max(1) {
+                for n in 1..=rules.lanes() {
                     if let Some(lock) = try_lock(repo_root, pb, n)? {
+                        // The person's checkout: checked again under the lock, right before use.
+                        if rules.large_repo {
+                            recover_large(repo_root, &rules.keep);
+                            if let Some(why) = checkout_busy(repo_root, pb, &rules.keep)? {
+                                drop(lock);
+                                drop(slot);
+                                wait_for_checkout(db, id, &why, &mut busy_since, rules)?;
+                                continue 'turn;
+                            }
+                            db.conn.execute("UPDATE lane_run SET waiting_for = NULL WHERE id = ?1", [id])?;
+                        }
                         return Ok((n, lock, slot));
                     }
                 }
@@ -842,6 +1156,19 @@ fn take_turn(db: &Db, id: i64, repo_root: &Path, pb: &Playbook, rules: &LaneRule
         }
         std::thread::sleep(Duration::from_millis(300));
     }
+}
+
+/// Records why request `id` waits for the person's checkout, and gives up after the lane's
+/// timeout: a checkout left dirty all afternoon is not one to build in.
+fn wait_for_checkout(db: &Db, id: i64, why: &str, since: &mut Option<Instant>, rules: &LaneRules) -> Result<()> {
+    db.conn.execute("UPDATE lane_run SET waiting_for = ?2 WHERE id = ?1", params![id, why])?;
+    let minutes = rules.timeout_minutes.max(1);
+    if since.get_or_insert_with(Instant::now).elapsed() > Duration::from_secs(minutes * 60) {
+        let long = if minutes == 1 { "a minute".to_string() } else { format!("{minutes} minutes") };
+        bail!("{why}, for over {long}, so the request was not run; it runs only while your checkout is clean and on its integration branch");
+    }
+    std::thread::sleep(Duration::from_secs(2));
+    Ok(())
 }
 
 struct Outcome {
@@ -859,6 +1186,23 @@ fn serve(repo_root: &Path, pb: &Playbook, rules: &LaneRules, lane: &Path, log: &
         bail!("snapshot {} is missing from the repo (expired or cleaned up); make a new one", &req.snapshot.commit[..req.snapshot.commit.len().min(9)]);
     }
     let limit = Duration::from_secs(rules.timeout_minutes.max(1) * 60);
+    if rules.large_repo {
+        // The person's checkout: no forced checkout, no clean, nothing else stopped; and back on
+        // its branch afterwards, whatever came of the command.
+        stop_recorded(lane);
+        let switched = git(lane, &["diff", "--name-only", "HEAD", &req.snapshot.commit]).map(|o| o.lines().count() as i64).unwrap_or(0);
+        switch_large(lane, base, &req.snapshot.commit, &rules.keep)?;
+        let ran = (|| -> Result<(bool, Option<i32>, bool)> {
+            let setup_ran = ensure_setup(repo_root, pb, lane, base, log, limit)?;
+            let (exit_code, timed_out) = exec(lane, log, limit)?;
+            Ok((setup_ran, exit_code, timed_out))
+        })();
+        let back = return_large(lane, base);
+        let (setup_ran, exit_code, timed_out) = ran?;
+        back.with_context(|| format!("the command ran (exit {}), but", exit_code.map_or("none".to_string(), |c| c.to_string())))?;
+        let output = std::fs::read_to_string(log).map(|t| playbook::tail(&t)).unwrap_or_default();
+        return Ok(Outcome { exit_code, timed_out, setup_ran, files_switched: switched, output });
+    }
     let files_switched = if !lane.join(".git").exists() {
         create_lane(repo_root, lane, &req.snapshot.commit)?;
         git(lane, &["ls-files"]).map(|o| o.lines().count() as i64).unwrap_or(0)
@@ -1317,7 +1661,7 @@ fn status_with(db: &Db, repo_root: &Path, pb: &Playbook, project: &str, probe_lo
     // The queue by this repo directly: a long build stays in it whatever finished since (NIT-223).
     let queue = db.open_lane_runs(project, &root)?;
     let mut lanes = Vec::new();
-    for n in 1..=rules.count.max(1) {
+    for n in 1..=rules.lanes() {
         let path = lane_path(repo_root, pb, n);
         let made = path.join(".git").exists();
         let busy = if probe_locks { try_lock(repo_root, pb, n)?.is_none() } else { queue.iter().any(|r| r.state == "running" && r.lane == Some(n)) };
@@ -1357,6 +1701,15 @@ fn status_with(db: &Db, repo_root: &Path, pb: &Playbook, project: &str, probe_lo
 pub fn reset(repo_root: &Path, pb: &Playbook) -> Result<Vec<String>> {
     let Some(rules) = pb.lanes.clone() else { bail!("{} has no [lanes] in its playbook", repo_root.display()) };
     let mut said = Vec::new();
+    if rules.large_repo {
+        // The person's checkout is never cleaned: only put back on its branch when a request that
+        // died left it detached.
+        let Some(_lock) = try_lock(repo_root, pb, 1)? else {
+            return Ok(vec!["your checkout: busy with a request, left alone".into()]);
+        };
+        said.push(recover_large(repo_root, &rules.keep).unwrap_or_else(|| "your checkout: nothing to do (it is never cleaned)".into()));
+        return Ok(said);
+    }
     for n in 1..=rules.count.max(1) {
         let path = lane_path(repo_root, pb, n);
         if !path.join(".git").exists() {
@@ -1894,6 +2247,371 @@ commands = []
         let lanes = status(&db, &root, &pb, "APP").unwrap().unwrap();
         assert_eq!(lanes.budget.jobs, n);
         assert_eq!(lanes.running_on_machine, 0);
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// A throwaway repo standing in for a person's large checkout (never a real one: every
+    /// checkout-touching step asserts it is under the temp folder), and an agent's worktree of it
+    /// with one commit of work.
+    fn large(base: &Path, extra: &str) -> (PathBuf, PathBuf, Playbook) {
+        let root = repo(base);
+        guard_throwaway(&root);
+        let agent = base.join("agent");
+        git_ok(&root, &["worktree", "add", "-q", "-b", "app-1", &agent.to_string_lossy()]);
+        std::fs::write(agent.join("src/a.txt"), "agent's\n").unwrap();
+        git_ok(&agent, &["commit", "-qam", "agent work"]);
+        let pb = playbook_with(&format!("[lanes]\nlarge_repo = true\nkeep = [\"out\"]\ntimeout_minutes = 1\n{extra}"));
+        (root, agent, pb)
+    }
+
+    fn git_ok(dir: &Path, args: &[&str]) {
+        assert!(playbook::run_git(Command::new("git").arg("-C").arg(dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args)).unwrap().status.success(), "{args:?}");
+    }
+
+    fn on_branch(root: &Path) -> String {
+        git(root, &["symbolic-ref", "--quiet", "--short", "HEAD"]).map(|s| s.trim().to_string()).unwrap_or_default()
+    }
+
+    #[test]
+    fn the_test_guard_refuses_a_checkout_outside_the_temp_folder() {
+        let caught = std::panic::catch_unwind(|| guard_throwaway(Path::new(env!("CARGO_MANIFEST_DIR"))));
+        assert!(caught.is_err(), "the repo's own checkout is not a throwaway");
+        guard_throwaway(&crate::paths::unique_temp("nitely-guard", ""));
+    }
+
+    #[test]
+    fn the_main_checkout_is_ready_only_when_clean_and_on_its_branch() {
+        let base = crate::paths::unique_temp("nitely-large-ready", "");
+        let (root, _agent, pb) = large(&base, "");
+        let keep = pb.lanes.clone().unwrap().keep;
+        assert_eq!(checkout_busy(&root, &pb, &keep).unwrap(), None);
+
+        std::fs::write(root.join("src/a.txt"), "half done\n").unwrap();
+        assert!(checkout_busy(&root, &pb, &keep).unwrap().unwrap().contains("src/a.txt"));
+        std::fs::write(root.join("notes.txt"), "mine\n").unwrap();
+        assert!(checkout_busy(&root, &pb, &keep).unwrap().unwrap().contains("2 changes"));
+        git_ok(&root, &["checkout", "--", "src/a.txt"]);
+        std::fs::remove_file(root.join("notes.txt")).unwrap();
+
+        git_ok(&root, &["switch", "-q", "-c", "spike"]);
+        assert!(checkout_busy(&root, &pb, &keep).unwrap().unwrap().contains("on spike, not main"));
+        git_ok(&root, &["switch", "-q", "main"]);
+
+        // Ignored files and the build directories are not changes.
+        std::fs::create_dir_all(root.join("scratch")).unwrap();
+        std::fs::write(root.join("scratch/mine.txt"), "mine\n").unwrap();
+        std::fs::create_dir_all(root.join("out")).unwrap();
+        std::fs::write(root.join("out/old.o"), "x").unwrap();
+        assert_eq!(checkout_busy(&root, &pb, &keep).unwrap(), None);
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn a_request_runs_in_the_main_checkout_and_puts_it_back_on_its_branch() {
+        let base = crate::paths::unique_temp("nitely-large-run", "");
+        let (root, agent, pb) = large(&base, "");
+        let db = Db::open(&base.join("t.db")).unwrap();
+        let actor = Actor::Agent("claude:test".into());
+        std::fs::create_dir_all(root.join("scratch")).unwrap();
+        std::fs::write(root.join("scratch/mine.txt"), "mine\n").unwrap();
+        let main_at = git(&root, &["rev-parse", "HEAD"]).unwrap();
+
+        let snap = snapshot(&agent).unwrap();
+        let build = if cfg!(windows) { "type src\\a.txt && (if not exist out mkdir out) && echo built > out\\done.txt" } else { "cat src/a.txt && mkdir -p out && echo built > out/done.txt" };
+        let req = Request { project: "APP", issue: Some("APP-1"), kind: Kind::Run, snapshot: &snap, command: build };
+        let ran = run(&db, &root, &pb, &req, &actor, &mut |_| {}).unwrap();
+        assert!(ran.passed(), "{ran:?}");
+        assert!(ran.output.contains("agent's"), "it built the agent's commit: {}", ran.output);
+        assert_eq!(ran.files_switched, Some(1));
+        assert_eq!(ran.waiting_for, None);
+
+        // Back on main at the same commit, the person's files as they were, the build output kept.
+        assert_eq!(on_branch(&root), "main");
+        assert_eq!(git(&root, &["rev-parse", "HEAD"]).unwrap(), main_at);
+        assert_eq!(std::fs::read_to_string(root.join("src/a.txt")).unwrap().replace('\r', ""), "one\n");
+        assert_eq!(std::fs::read_to_string(root.join("scratch/mine.txt")).unwrap(), "mine\n");
+        assert!(root.join("out/done.txt").exists());
+        assert!(git(&root, &["status", "--porcelain"]).unwrap().trim().is_empty());
+        assert!(!return_mark(&root).unwrap().exists());
+
+        let said: Vec<String> = db.timeline("APP-1").unwrap().into_iter().filter(|t| t.kind == "lane_run").filter_map(|t| t.summary).collect();
+        assert!(said[0].contains("in the main checkout"), "{said:?}");
+        let lanes = status(&db, &root, &pb, "APP").unwrap().unwrap();
+        assert_eq!(lanes.lanes.len(), 1);
+        assert_eq!(crate::paths::normalize(&lanes.lanes[0].path), crate::paths::normalize(&root.to_string_lossy()));
+        assert!(lanes.rules.large_repo);
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn a_request_waits_while_the_main_checkout_has_changes_and_says_why() {
+        let base = crate::paths::unique_temp("nitely-large-wait", "");
+        let (root, agent, pb) = large(&base, "");
+        let db_path = base.join("t.db");
+        let db = Db::open(&db_path).unwrap();
+        std::fs::write(root.join("notes.txt"), "mine\n").unwrap();
+
+        // The person finishes with their change a moment later.
+        let (r, n) = (root.clone(), db_path.clone());
+        let person = std::thread::spawn(move || {
+            let db = Db::open(&n).unwrap();
+            let started = Instant::now();
+            loop {
+                let why: Option<String> = db.conn.query_row("SELECT waiting_for FROM lane_run ORDER BY id DESC LIMIT 1", [], |row| row.get(0)).optional().unwrap().flatten();
+                if let Some(why) = why {
+                    std::fs::remove_file(r.join("notes.txt")).unwrap();
+                    return why;
+                }
+                assert!(started.elapsed() < Duration::from_secs(30), "the request never said it was waiting");
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+        let snap = snapshot(&agent).unwrap();
+        let req = Request { project: "APP", issue: None, kind: Kind::Run, snapshot: &snap, command: "echo ok" };
+        let ran = run(&db, &root, &pb, &req, &Actor::Agent("claude:test".into()), &mut |_| {}).unwrap();
+        let why = person.join().unwrap();
+        assert!(why.contains("notes.txt"), "{why}");
+        assert!(ran.passed() && ran.waiting_for.is_none(), "{ran:?}");
+        assert_eq!(on_branch(&root), "main");
+
+        // A checkout that stays busy past the lane's timeout: the request gives up, saying why.
+        let rules = pb.lanes.clone().unwrap();
+        let mut since = Instant::now().checked_sub(Duration::from_secs(120));
+        let e = wait_for_checkout(&db, ran.id, "your checkout has a change: notes.txt", &mut since, &rules).unwrap_err().to_string();
+        assert!(e.contains("notes.txt, for over a minute"), "{e}");
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn a_commit_that_would_overwrite_an_ignored_file_is_refused() {
+        let base = crate::paths::unique_temp("nitely-large-ignored", "");
+        let (root, agent, pb) = large(&base, "");
+        let db = Db::open(&base.join("t.db")).unwrap();
+        std::fs::create_dir_all(agent.join("scratch")).unwrap();
+        std::fs::write(agent.join("scratch/plan.txt"), "the agent's\n").unwrap();
+        git_ok(&agent, &["add", "-f", "scratch/plan.txt"]);
+        git_ok(&agent, &["commit", "-qm", "track a scratch file"]);
+        std::fs::create_dir_all(root.join("scratch")).unwrap();
+        std::fs::write(root.join("scratch/plan.txt"), "the person's\n").unwrap();
+
+        let snap = snapshot(&agent).unwrap();
+        let req = Request { project: "APP", issue: None, kind: Kind::Run, snapshot: &snap, command: "echo ok" };
+        let ran = run(&db, &root, &pb, &req, &Actor::Agent("claude:test".into()), &mut |_| {}).unwrap();
+        assert_eq!(ran.state, "lane_error");
+        assert!(ran.error.as_deref().unwrap().contains("scratch/plan.txt"), "{ran:?}");
+        assert_eq!(std::fs::read_to_string(root.join("scratch/plan.txt")).unwrap(), "the person's\n");
+        assert_eq!(on_branch(&root), "main");
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn a_checkout_a_dead_request_left_detached_goes_back_unless_it_changed() {
+        let base = crate::paths::unique_temp("nitely-large-crash", "");
+        let (root, agent, pb) = large(&base, "");
+        let keep = pb.lanes.clone().unwrap().keep;
+        let work = git(&agent, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+        // As a request leaves it when its process dies mid-command.
+        switch_large(&root, "main", &work, &keep).unwrap();
+        assert_eq!(on_branch(&root), "");
+        assert!(checkout_busy(&root, &pb, &keep).unwrap().unwrap().contains("detached"));
+        assert!(reset(&root, &pb).unwrap()[0].contains("back on main"));
+        assert_eq!(on_branch(&root), "main");
+        assert!(!return_mark(&root).unwrap().exists());
+
+        // Changed while detached (the person started working there): left as it is.
+        switch_large(&root, "main", &work, &keep).unwrap();
+        std::fs::write(root.join("src/b.txt"), "theirs\n").unwrap();
+        assert!(recover_large(&root, &keep).unwrap().contains("stays detached at the request's commit: src/b.txt changed"));
+        assert_eq!(on_branch(&root), "");
+        assert_eq!(std::fs::read_to_string(root.join("src/b.txt")).unwrap(), "theirs\n");
+
+        // Something other than a request holds the checkout (land): requests wait for it.
+        git_ok(&root, &["checkout", "--", "src/b.txt"]);
+        let held = hold_checkout(&root, &pb).unwrap().expect("held in large-repo mode");
+        assert_eq!(on_branch(&root), "main", "held, and put back first");
+        assert!(try_lock(&root, &pb, 1).unwrap().is_none());
+        drop(held);
+        assert!(hold_checkout(&root, &playbook_with("[lanes]\n")).unwrap().is_none());
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn an_ignored_file_where_the_commit_needs_a_folder_is_refused() {
+        let base = crate::paths::unique_temp("nitely-large-parent", "");
+        let (root, agent, pb) = large(&base, "");
+        let db = Db::open(&base.join("t.db")).unwrap();
+        // `cache` is ignored here only, and the person has a file by that name.
+        std::fs::write(git_path(&root, "info/exclude").unwrap(), "cache\n").unwrap();
+        std::fs::write(root.join("cache"), "the person's\n").unwrap();
+        std::fs::create_dir_all(agent.join("cache")).unwrap();
+        std::fs::write(agent.join("cache/x.txt"), "x\n").unwrap();
+        git_ok(&agent, &["add", "-f", "cache/x.txt"]);
+        git_ok(&agent, &["commit", "-qm", "a cache folder"]);
+
+        let snap = snapshot(&agent).unwrap();
+        let req = Request { project: "APP", issue: None, kind: Kind::Run, snapshot: &snap, command: "echo ok" };
+        let ran = run(&db, &root, &pb, &req, &Actor::Agent("claude:test".into()), &mut |_| {}).unwrap();
+        assert_eq!(ran.state, "lane_error");
+        assert!(ran.error.as_deref().unwrap().contains("tracks cache,"), "{ran:?}");
+        assert_eq!(std::fs::read_to_string(root.join("cache")).unwrap(), "the person's\n");
+        assert_eq!(on_branch(&root), "main");
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn a_file_that_appeared_during_the_request_keeps_the_checkout_from_going_back_over_it() {
+        let base = crate::paths::unique_temp("nitely-large-back", "");
+        let (root, agent, pb) = large(&base, "");
+        let db = Db::open(&base.join("t.db")).unwrap();
+        git_ok(&agent, &["rm", "-q", "src/b.txt"]);
+        git_ok(&agent, &["commit", "-qm", "drop b"]);
+
+        // The command makes a file where main tracks one: going back would overwrite it.
+        let snap = snapshot(&agent).unwrap();
+        let make = if cfg!(windows) { "echo built> src\\b.txt" } else { "echo built > src/b.txt" };
+        let req = Request { project: "APP", issue: None, kind: Kind::Run, snapshot: &snap, command: make };
+        let ran = run(&db, &root, &pb, &req, &Actor::Agent("claude:test".into()), &mut |_| {}).unwrap();
+        assert_eq!(ran.state, "lane_error");
+        assert!(ran.error.as_deref().unwrap().contains("would overwrite src/b.txt"), "{ran:?}");
+        assert_eq!(on_branch(&root), "", "left at the request's commit rather than overwrite");
+        assert!(std::fs::read_to_string(root.join("src/b.txt")).unwrap().starts_with("built"));
+        assert!(reset(&root, &pb).unwrap()[0].contains("stays detached"));
+
+        std::fs::remove_file(root.join("src/b.txt")).unwrap();
+        assert!(reset(&root, &pb).unwrap()[0].contains("back on main"));
+        assert_eq!(std::fs::read_to_string(root.join("src/b.txt")).unwrap().replace('\r', ""), "two\n");
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn a_file_the_request_made_a_folder_comes_back_as_a_file() {
+        let base = crate::paths::unique_temp("nitely-large-dir", "");
+        let (root, _agent, pb) = large(&base, "");
+        let db = Db::open(&base.join("t.db")).unwrap();
+        std::fs::write(root.join("tools"), "a file on main\n").unwrap();
+        git_ok(&root, &["add", "tools"]);
+        git_ok(&root, &["commit", "-qm", "tools"]);
+        let other = base.join("agent3");
+        git_ok(&root, &["worktree", "add", "-q", "-b", "app-3", &other.to_string_lossy()]);
+        git_ok(&other, &["rm", "-q", "tools"]);
+        std::fs::create_dir_all(other.join("tools")).unwrap();
+        std::fs::write(other.join("tools/run.txt"), "a folder now\n").unwrap();
+        git_ok(&other, &["add", "tools"]);
+        git_ok(&other, &["commit", "-qm", "tools becomes a folder"]);
+
+        let snap = snapshot(&other).unwrap();
+        let req = Request { project: "APP", issue: None, kind: Kind::Run, snapshot: &snap, command: "echo ok" };
+        let ran = run(&db, &root, &pb, &req, &Actor::Agent("claude:test".into()), &mut |_| {}).unwrap();
+        assert!(ran.passed(), "{ran:?}");
+        assert_eq!(on_branch(&root), "main");
+        assert_eq!(std::fs::read_to_string(root.join("tools")).unwrap().replace('\r', ""), "a file on main\n");
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn while_a_request_has_the_checkout_the_rules_come_from_its_branch() {
+        let base = crate::paths::unique_temp("nitely-large-rules", "");
+        let (root, _agent, pb) = large(&base, "");
+        let keep = pb.lanes.clone().unwrap().keep;
+        std::fs::create_dir_all(root.join(".nitely")).unwrap();
+        std::fs::write(root.join(playbook::PLAYBOOK_PATH), "[gate]\ncommands = [\"main-gate\"]\n").unwrap();
+        git_ok(&root, &["add", "."]);
+        git_ok(&root, &["commit", "-qm", "playbook"]);
+        let other = base.join("agent2");
+        git_ok(&root, &["worktree", "add", "-q", "-b", "app-2", &other.to_string_lossy()]);
+        std::fs::write(other.join(playbook::PLAYBOOK_PATH), "[gate]\ncommands = [\"agent-gate\"]\n").unwrap();
+        git_ok(&other, &["commit", "-qam", "weaker rules"]);
+        let work = git(&other, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+        let before = lends(&root);
+        switch_large(&root, "main", &work, &keep).unwrap();
+        assert_eq!(lent_to_request(&root).as_deref(), Some("main"));
+        let during = lends(&root);
+        assert_eq!((during.count, during.last.as_deref()), (before.count + 1, Some("main")), "each lend counts, so a read across one shows it");
+        assert!(std::fs::read_to_string(root.join(playbook::PLAYBOOK_PATH)).unwrap().contains("agent-gate"));
+        assert_eq!(Playbook::load(&root).unwrap().gate.commands, ["main-gate"], "the branch's rules, not the snapshot's");
+        return_large(&root, "main").unwrap();
+        assert_eq!(lent_to_request(&root), None);
+        assert_eq!(lends(&root).count, before.count + 2, "and each return, so a read that began during the lend sees the count move");
+        assert!(std::fs::read_to_string(git_path(&root, LENDS).unwrap()).unwrap().ends_with("main\nback\n"), "lent and back in the same file, read at once");
+
+        // A checkout put back by hand after a crash is no longer lent once Nitely sees it.
+        switch_large(&root, "main", &work, &keep).unwrap();
+        git_ok(&root, &["checkout", "-q", "main"]);
+        assert_eq!(lent_to_request(&root).as_deref(), Some("main"));
+        assert_eq!(recover_large(&root, &keep), None);
+        assert_eq!(lent_to_request(&root), None);
+        assert_eq!(Playbook::load(&root).unwrap().gate.commands, ["main-gate"]);
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn a_snapshots_playbook_never_counts_when_the_branch_has_none() {
+        let base = crate::paths::unique_temp("nitely-large-norules", "");
+        let (root, agent, pb) = large(&base, "");
+        let keep = pb.lanes.clone().unwrap().keep;
+        std::fs::create_dir_all(agent.join(".nitely")).unwrap();
+        std::fs::write(agent.join(playbook::PLAYBOOK_PATH), "[gate]\ncommands = [\"agent-gate\"]\n").unwrap();
+        git_ok(&agent, &["add", "."]);
+        git_ok(&agent, &["commit", "-qm", "a playbook of its own"]);
+        let work = git(&agent, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+        switch_large(&root, "main", &work, &keep).unwrap();
+        assert!(root.join(playbook::PLAYBOOK_PATH).exists());
+        assert!(Playbook::load(&root).unwrap().gate.commands.is_empty(), "main has no playbook, so not the snapshot's either");
+        return_large(&root, "main").unwrap();
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn a_request_waiting_for_its_checkout_holds_up_no_other_project() {
+        let base = crate::paths::unique_temp("nitely-large-turn", "");
+        std::fs::create_dir_all(&base).unwrap();
+        let db = Db::open(&base.join("t.db")).unwrap();
+        let me = std::process::id() as i64;
+        let row = |project: &str, waiting_for: Option<&str>| -> i64 {
+            db.conn
+                .execute(
+                    "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, priority, lane_count, waiting_for)
+                     VALUES (?1, ?2, 'x', 'run', 's', 't', 'b', 'c', 'queued', 'local', 1, ?3, 3, 1, ?4)",
+                    params![project, format!("C:/Code/{project}"), me, waiting_for],
+                )
+                .unwrap();
+            db.conn.last_insert_rowid()
+        };
+        let mut alive = |_: i64| true;
+        let big = row("BIG", None);
+        let big2 = row("BIG", None);
+        let small = row("SML", None);
+        assert!(!my_turn(&db, small, 1, &mut alive).unwrap(), "one slot, and BIG's request is first");
+        db.conn.execute("UPDATE lane_run SET waiting_for = 'your checkout has a change: notes.txt' WHERE id = ?1", [big]).unwrap();
+        assert!(my_turn(&db, small, 1, &mut alive).unwrap(), "BIG waits for its checkout, and its second request behind it, so SML goes");
+        assert!(my_turn(&db, big, 1, &mut alive).unwrap(), "and BIG keeps its own place");
+        assert!(!my_turn(&db, big2, 1, &mut alive).unwrap(), "behind its own repo's first");
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn the_base_moves_only_on_its_schedule() {
+        let every = |b: &str| LaneRules { base: b.into(), ..Default::default() }.base_every_hours();
+        assert_eq!((every("every 4h"), every("4h"), every("tip"), every("every 0h"), every("every day")), (Some(4), Some(4), None, None, None));
+
+        let base = crate::paths::unique_temp("nitely-base", "");
+        let root = repo(&base);
+        let first = git(&root, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        assert_eq!(crate::light::base_commit(&playbook_with("[lanes]\n"), &root).unwrap(), first);
+        let pb = playbook_with("[lanes]\nbase = \"every 4h\"\n");
+        assert_eq!(crate::light::base_commit(&pb, &root).unwrap(), first);
+
+        std::fs::write(root.join("src/a.txt"), "two\n").unwrap();
+        git_ok(&root, &["commit", "-qam", "next"]);
+        let second = git(&root, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        assert_eq!(crate::light::base_commit(&pb, &root).unwrap(), first, "not yet: the base moved under 4 hours ago");
+        assert_eq!(crate::light::base_commit(&playbook_with("[lanes]\n"), &root).unwrap(), second, "the tip, without a schedule");
+
+        std::fs::write(dir(&root, &pb).join("base"), format!("{first}\n{}\n", now() - 5 * 3600)).unwrap();
+        assert_eq!(crate::light::base_commit(&pb, &root).unwrap(), second, "moved after 4 hours");
         std::fs::remove_dir_all(base).ok();
     }
 
