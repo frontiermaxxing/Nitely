@@ -24,8 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Add macos-latest when Mac becomes a target (NIT-13).
-        os: [windows-latest]
+        os: [windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
@@ -64,3 +63,24 @@ jobs:
       - run: cargo test --workspace
 
       - run: cargo clippy --workspace -- -D warnings
+
+      # The Mac app and disk image, built as a release builds them, with the CLI inside: proves the
+      # app bundles on a Mac. Unsigned; nothing is published from here.
+      - name: Mac bundle
+        if: runner.os == 'macOS'
+        run: |
+          cargo build --release --locked -p nitely-cli
+          triple=$(rustc -vV | sed -n 's/^host: //p')
+          mkdir -p src-tauri/binaries
+          cp target/release/nitely "src-tauri/binaries/nitely-$triple"
+          npx tauri build --config src-tauri/tauri.release.json --bundles app,dmg
+          ls -l target/release/bundle/macos target/release/bundle/dmg
+          test -x target/release/bundle/macos/Nitely.app/Contents/MacOS/nitely
+
+      - name: Mac bundle files
+        if: runner.os == 'macOS' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-bundle
+          path: target/release/bundle/dmg/*.dmg
+          if-no-files-found: ignore
