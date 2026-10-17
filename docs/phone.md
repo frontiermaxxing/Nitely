@@ -30,18 +30,35 @@ that never leaves the phone, and `land` checks that signature as it checks the a
 
 ## Choosing where it listens
 
-The phone server never binds `0.0.0.0` on its own. When the person turns it on, the app lists this
-machine's network addresses (Wi-Fi, Ethernet, a VPN such as Tailscale) and the person picks the ones
-to listen on. Only those are bound, and only clients on those networks' subnets are answered (as
-`nitely serve` does). Turning it off, or quitting the app, closes the sockets. Loopback is offered
-for trying it on the PC itself.
+The phone page carries the code that signs with the phone's key, so the path that delivers it must
+be one nobody in between can change. Over plain HTTP on a LAN, anyone who can intercept traffic
+there (a hostile device on the Wi-Fi spoofing ARP, say) could replace the page with one that sends
+the key away or signs approvals the person never made. Request signatures cannot help when the
+signing code itself is replaced. So the phone server serves only over a path that is encrypted and
+authenticated end to end:
+
+- **A tunnel address**, such as Tailscale's (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`). WireGuard
+  encrypts and authenticates every packet between the person's own devices, so plain HTTP inside it
+  is safe from the network in between. This is the first version's way, and it works on the same
+  Wi-Fi as well as away from home: both devices only need to be on the person's tailnet.
+- **HTTPS** with a certificate the phone already trusts (a Tailscale HTTPS certificate, or a local
+  certificate authority the person installs on the phone). This is how a plain LAN without a tunnel
+  will work; it is the follow-up [NIT-147](nitely://issue/NIT-147).
+
+Plain HTTP on an ordinary LAN address is refused, and the app says why. Loopback is offered for
+trying it on the PC itself.
+
+The phone server never binds `0.0.0.0`. When the person turns it on, the app lists this machine's
+addresses that qualify and the person picks the ones to listen on. Only those are bound, and only
+clients on those networks are answered (as `nitely serve` does). Turning it off, or quitting the
+app, closes the sockets.
 
 ## Pairing
 
 1. In the app the person presses **Pair a phone**. The app makes a **pairing offer**: a random
    32-byte secret, single use, valid for 10 minutes, held only in the app's memory (never written to
    the database or a file). The app shows a QR code for
-   `http://<chosen address>:7422/phone/#pair=<secret>`. The secret is in the URL's fragment, which a
+   `http://<chosen tunnel address>:7422/phone/#pair=<secret>`. The secret is in the URL's fragment, which a
    browser does not send in requests or `Referer` headers.
 2. The phone opens the page. It makes an **Ed25519 key pair** on the phone (randomness from
    `crypto.getRandomValues`; the private key is stored in the page's own storage on the phone and is
@@ -117,10 +134,12 @@ the app's approval key to add a device of its own.
 - **Pairing replay:** the secret closes on first use; a replayed pairing request finds no offer.
 - **Request replay or tampering on the network:** each request is signed with its time and body,
   refused outside a 60-second window, and refused when its signature was already seen.
-- **Someone on the same network reading traffic:** the first version speaks plain HTTP on the LAN,
-  so an eavesdropper on that network can read the decisions shown (issue titles, ask questions,
-  review summaries) and see which the person made. They cannot act: they hold no device key. The
-  setup screen says this, and the person picks which networks to listen on. HTTPS is a follow-up.
+- **Someone on the same network reading or changing traffic:** the phone server speaks only inside
+  an encrypted, authenticated tunnel (or, later, HTTPS), so they can neither read the decisions nor
+  replace the page that holds the key ("Choosing where it listens").
+- **Another device on the person's tailnet:** it is the person's own device, or one they shared the
+  tailnet with. It still cannot act without a paired device key; it could read the page's code, which
+  holds nothing secret.
 - **An agent on the PC:** it cannot produce a device signature (the key is on the phone) or add a
   device (the list is signed by the app's key). As in docs/approvals.md, an agent that tampers with
   the OS keychain to steal the app's key is out of scope.
@@ -134,11 +153,11 @@ the app's approval key to add a device of its own.
 
 ## Why the phone signs in plain JavaScript
 
-Browsers expose WebCrypto only to secure origins (HTTPS or localhost), and the phone page is served
-over plain HTTP on the LAN. So the page signs with a small audited pure-JavaScript Ed25519
-implementation (`@noble/ed25519` with `@noble/hashes`), bundled into the page, with randomness from
-`crypto.getRandomValues`, which browsers offer on any origin. When the phone server gains HTTPS, the
-page can move to WebCrypto with a non-extractable key.
+Browsers expose WebCrypto only to secure origins (HTTPS or localhost), and a tunnel address over
+plain HTTP is not one, even though the tunnel protects it. So the page signs with a small audited
+pure-JavaScript Ed25519 implementation (`@noble/ed25519` with `@noble/hashes`), bundled into the
+page, with randomness from `crypto.getRandomValues`, which browsers offer on any origin. With HTTPS
+([NIT-147](nitely://issue/NIT-147)) the page can move to WebCrypto with a non-extractable key.
 
 ## The one-hand Inbox
 
@@ -156,9 +175,11 @@ page can move to WebCrypto with a non-extractable key.
 
 ## Later
 
-- **Beyond the LAN:** the person runs a tunnel of their own, such as Tailscale, and picks its
-  address in "Choosing where it listens"; nothing else changes. A relay Nitely would run is out of
-  scope ([NIT-148](nitely://issue/NIT-148)).
+- **A plain LAN without a tunnel:** HTTPS with a certificate the phone trusts, then web push
+  ([NIT-147](nitely://issue/NIT-147)).
+- **Away from home:** a tunnel already reaches anywhere the phone has a connection; checking it end
+  to end and the setup words on the Phone screen are [NIT-148](nitely://issue/NIT-148). A relay
+  Nitely would run is out of scope.
 - **Notifications on the phone:** web push needs a secure origin and a push service, so it waits for
   HTTPS ([NIT-147](nitely://issue/NIT-147)). Until then, the desktop notifications (NIT-124) and
   a home-screen shortcut to the phone page.
