@@ -64,10 +64,11 @@ enum Cmd {
         #[arg(long)]
         session: Option<String>,
     },
-    /// Build lanes and the disk task worktrees use (docs/build-lanes.md).
+    /// Build lanes and the disk task worktrees use (docs/build-lanes.md): `status` (the default),
+    /// `reset`, `show <run>`, `slim`.
     Lanes {
         #[command(subcommand)]
-        command: LanesCmd,
+        command: Option<LanesCmd>,
     },
     /// Goals: the outcomes a project works toward, and the issues that get it there.
     Goal {
@@ -133,11 +134,6 @@ enum Cmd {
         shell: Option<String>,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
-    },
-    /// The repo's build lanes: `status` (the default), `reset`, or `show <run>`.
-    Lanes {
-        #[command(subcommand)]
-        command: Option<lanes::LanesCmd>,
     },
     /// Hand in the current worktree's branch: gate, cross-vendor review, push, pull request.
     Submit {
@@ -307,6 +303,18 @@ enum TokensCmd {
 
 #[derive(Subcommand)]
 enum LanesCmd {
+    /// The repo's lanes, what waits and runs in them, and the last runs (the default).
+    Status {
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Put every free lane back to a clean checkout of the commit it holds; build output stays.
+    Reset {
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// One run's record, then its log.
+    Show { id: i64 },
     /// Delete the build directories (the playbook's [lanes] keep, else target and node_modules) of
     /// task worktrees whose work is finished: nothing uncommitted, the branch pushed or landed, and
     /// nothing using the folder. Lists them and asks first.
@@ -655,7 +663,11 @@ fn run(cmd: Cmd) -> Result<()> {
                 state: "working".into(),
             })
         }
-        Cmd::Lanes { command: LanesCmd::Slim { project, yes } } => {
+        Cmd::Lanes { command: None } => lanes::status(None),
+        Cmd::Lanes { command: Some(LanesCmd::Status { project }) } => lanes::status(project),
+        Cmd::Lanes { command: Some(LanesCmd::Reset { project }) } => lanes::reset(project),
+        Cmd::Lanes { command: Some(LanesCmd::Show { id }) } => lanes::show(id),
+        Cmd::Lanes { command: Some(LanesCmd::Slim { project, yes }) } => {
             use nitely_core::slim::{human, plan, reclaim};
             let config = Config::load()?;
             let db = Db::open_default().ok();
@@ -1026,7 +1038,6 @@ fn run(cmd: Cmd) -> Result<()> {
         }
         Cmd::Crew { command } => crew::run(command, &me),
         Cmd::Run { issue, shell, command } => lanes::run(issue, shell, command, &me),
-        Cmd::Lanes { command } => lanes::lanes(command),
         Cmd::Agents { yes } => {
             let config = Config::load()?;
             if config.repos.is_empty() {

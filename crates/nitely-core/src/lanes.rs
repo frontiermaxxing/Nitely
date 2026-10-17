@@ -23,7 +23,8 @@ use crate::playbook::{self, git, Playbook};
 pub struct LaneRules {
     /// Lanes for this repo on this machine.
     pub count: u32,
-    /// Build directories (repo-relative) a lane keeps between requests, e.g. `target`.
+    /// Build directories (repo-relative) a lane keeps between requests; `target` and `node_modules`
+    /// unless the playbook says (the same list `nitely lanes slim` reclaims).
     pub keep: Vec<String>,
     /// A command running longer is stopped, with everything it started.
     pub timeout_minutes: u64,
@@ -31,7 +32,7 @@ pub struct LaneRules {
 
 impl Default for LaneRules {
     fn default() -> Self {
-        LaneRules { count: 1, keep: vec![], timeout_minutes: 30 }
+        LaneRules { count: 1, keep: crate::slim::DEFAULT_KEEP.iter().map(|s| s.to_string()).collect(), timeout_minutes: 30 }
     }
 }
 

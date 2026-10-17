@@ -1,7 +1,7 @@
 //! `nitely run` and `nitely lanes`: build lanes from the command line (docs/build-lanes.md).
 
 use anyhow::{Context, Result};
-use clap::Subcommand;
+
 use nitely_core::lanes;
 use nitely_core::playbook::{self, Playbook};
 use nitely_core::{resolve_project, Actor, Config, Db};
@@ -10,22 +10,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::{cwd, print_json};
-
-#[derive(Subcommand)]
-pub enum LanesCmd {
-    /// The repo's lanes, what waits and runs in them, and the last runs (the default).
-    Status {
-        #[arg(long)]
-        project: Option<String>,
-    },
-    /// Put every free lane back to a clean checkout of the commit it holds; build output stays.
-    Reset {
-        #[arg(long)]
-        project: Option<String>,
-    },
-    /// One run's record, then its log.
-    Show { id: i64 },
-}
 
 /// The repo a project's lanes belong to, and the project's key.
 fn repo_of(config: &Config, db: &Db, project: Option<&str>) -> Result<(std::path::PathBuf, String, Playbook)> {
@@ -36,38 +20,42 @@ fn repo_of(config: &Config, db: &Db, project: Option<&str>) -> Result<(std::path
     Ok((root, project, pb))
 }
 
-pub fn lanes(cmd: Option<LanesCmd>) -> Result<()> {
+/// `nitely lanes [status]`: the repo's lanes, its queue and its last runs, as JSON.
+pub fn status(project: Option<String>) -> Result<()> {
     let config = Config::load()?;
     let db = Db::open_default()?;
-    match cmd.unwrap_or(LanesCmd::Status { project: None }) {
-        LanesCmd::Status { project } => {
-            let (root, project, pb) = repo_of(&config, &db, project.as_deref())?;
-            match lanes::status(&db, &root, &pb, &project)? {
-                Some(s) => print_json(&s),
-                None => {
-                    eprintln!("{} has no [lanes] in its playbook, so it has no build lanes (docs/build-lanes.md)", root.display());
-                    Ok(())
-                }
-            }
-        }
-        LanesCmd::Reset { project } => {
-            let (root, _, pb) = repo_of(&config, &db, project.as_deref())?;
-            for line in lanes::reset(&root, &pb)? {
-                println!("{line}");
-            }
-            Ok(())
-        }
-        LanesCmd::Show { id } => {
-            let run = db.lane_run(id)?.with_context(|| format!("no run {id}"))?;
-            print_json(&run)?;
-            if let Some(log) = &run.log {
-                if let Ok(text) = std::fs::read_to_string(log) {
-                    println!("\n--- {log}\n{text}");
-                }
-            }
+    let (root, project, pb) = repo_of(&config, &db, project.as_deref())?;
+    match lanes::status(&db, &root, &pb, &project)? {
+        Some(s) => print_json(&s),
+        None => {
+            eprintln!("{} has no [lanes] in its playbook, so it has no build lanes (docs/build-lanes.md)", root.display());
             Ok(())
         }
     }
+}
+
+/// `nitely lanes reset`: every free lane back to a clean checkout of what it holds.
+pub fn reset(project: Option<String>) -> Result<()> {
+    let config = Config::load()?;
+    let db = Db::open_default()?;
+    let (root, _, pb) = repo_of(&config, &db, project.as_deref())?;
+    for line in lanes::reset(&root, &pb)? {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// `nitely lanes show <id>`: one run's record, then its log.
+pub fn show(id: i64) -> Result<()> {
+    let db = Db::open_default()?;
+    let run = db.lane_run(id)?.with_context(|| format!("no run {id}"))?;
+    print_json(&run)?;
+    if let Some(log) = &run.log {
+        if let Ok(text) = std::fs::read_to_string(log) {
+            println!("\n--- {log}\n{text}");
+        }
+    }
+    Ok(())
 }
 
 /// `nitely run -- <command>`: the current worktree as a snapshot, in a lane, its output followed as

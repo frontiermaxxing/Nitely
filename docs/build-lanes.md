@@ -247,7 +247,7 @@ sparse = ["crates/nitely-core"]      # optional: cone-mode directories every wor
 
 [lanes]                              # no [lanes]: no lanes, everything works as before
 count = 2                            # lanes for this project on this machine
-keep = ["target", "node_modules"]    # build directories a lane keeps between requests
+keep = ["target", "node_modules"]    # build directories a lane keeps between requests (the default)
 timeout_minutes = 30                 # a command running longer is stopped with what it started
 heavy = ["^cargo (build|test|clippy)", "^npm (ci|install|test|run build)"]
 executor = "local"                   # "local", "machine:<name>" or "ci" (the gate only)
