@@ -3,7 +3,7 @@
 // This file decides what is new and what to say; useNotifications (src/App.tsx) batches it and
 // src-tauri/src/notify.rs shows it.
 
-import type { Decision } from "./decisions";
+import { projectOf, type Decision } from "./decisions.ts";
 import type { IssueDetail } from "./types";
 import { VENDOR_LABEL, vendorOf } from "./ui/agents.ts";
 
@@ -122,7 +122,7 @@ export function freshDecisions(
   seen: Seen | null,
   settings: NotifySettings,
   now: number,
-  opts: { inboxInView: boolean; at?: Date },
+  opts: { inboxInView: boolean; at?: Date; inboxProject?: string | null },
 ): { fresh: Fresh[]; seen: Seen } {
   const next: Seen = {};
   for (const [id, ts] of Object.entries(seen ?? {})) if (now - ts < FORGET_SECS) next[id] = ts;
@@ -136,12 +136,21 @@ export function freshDecisions(
     // it waits unseen.
     if (!known && seen !== null && (d.kind === "approve" || d.kind === "own") && d.issue && !details.has(d.issue.key)) continue;
     next[id] = now;
-    if (seen === null || known || opts.inboxInView || quiet) continue;
+    if (seen === null || known || inView(d, opts) || quiet) continue;
     const kind = kindOf(d, d.issue ? details.get(d.issue.key) : undefined);
     if (!kind || !settings.kinds[kind]) continue;
     fresh.push({ decision: d, kind, line: lineOf(d, kind) });
   }
   return { fresh, seen: next };
+}
+
+/**
+ * Whether the person has the decision in front of them: the Inbox is in view and lists it. With the
+ * Inbox filtered to a project (NIT-236), another project's decisions are not in view, so they still
+ * notify.
+ */
+export function inView(d: Decision, opts: { inboxInView: boolean; inboxProject?: string | null }): boolean {
+  return opts.inboxInView && (!opts.inboxProject || projectOf(d)?.toUpperCase() === opts.inboxProject.toUpperCase());
 }
 
 /** One notification for a batch: the decision itself when it is one, else how many and the first two. */

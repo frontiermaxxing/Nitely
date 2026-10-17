@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Decision } from "./decisions.ts";
-import { DEFAULT_SETTINGS, FORGET_SECS, freshDecisions, inQuiet, kindOf, messageOf, type NotifySettings } from "./notify.ts";
+import { DEFAULT_SETTINGS, FORGET_SECS, freshDecisions, inQuiet, inView, kindOf, messageOf, type NotifySettings } from "./notify.ts";
 import type { Ask, IssueDetail, IssueRecord } from "./types.ts";
 
 const NOW = 1_800_000_000;
@@ -124,4 +124,14 @@ test("a decision that keeps waiting stays seen as long as it waits", () => {
     assert.equal(r.fresh.length, 0);
     seen = r.seen;
   }
+});
+
+test("NIT-236: with the Inbox filtered to a project, another project's new decisions still notify", () => {
+  const mine = decision("approve", "APP-1", { project: "APP" });
+  const theirs = decision("approve", "WEB-1", { project: "WEB" });
+  const at = { at: new Date(2026, 9, 16, 15, 0) };
+  const r = freshDecisions([mine, theirs], all([mine, theirs]), {}, DEFAULT_SETTINGS, NOW, { inboxInView: true, inboxProject: "app", ...at });
+  assert.deepEqual(r.fresh.map((f) => f.decision.id), ["approve-WEB-1"]);
+  assert.equal(freshDecisions([theirs], all([theirs]), {}, DEFAULT_SETTINGS, NOW, { inboxInView: true, ...at }).fresh.length, 0, "unfiltered, the Inbox in view lists it");
+  assert.deepEqual([inView(mine, { inboxInView: true, inboxProject: "APP" }), inView(theirs, { inboxInView: true, inboxProject: "APP" }), inView(mine, { inboxInView: false })], [true, false, false]);
 });

@@ -15,7 +15,6 @@ import {
   nextProject,
   outcomeOf,
   projectCounts,
-  projectOf,
   shownDecisions,
   trackAfter,
   type Decision,
@@ -58,8 +57,9 @@ export function Inbox(props: {
   /** From useDecisionDetails, which the app runs so the nav count and this page agree. */
   details: Map<string, IssueDetail>;
   now: number;
-  /** A decision to open, from a notification's click; `at` makes a second click on the same one count. */
+  /** A decision to open, from a notification's click; `at` makes a second click on the same one count. Told once taken (`onPicked`), so a later visit does not take it again. */
   pick?: { id: string; at: number } | null;
+  onPicked?: () => void;
   onOpenIssue: (key: string) => void;
   onChanged: () => void;
   /** Opens Settings on its Notifications section. */
@@ -107,12 +107,11 @@ export function Inbox(props: {
   const ordered = groups.flatMap((g) => g.items);
   const places = askPlaces(ordered);
   const [picked, setPicked] = useState<string | null>(props.pick?.id ?? null);
+  // The app already filtered to the picked decision's project (App.tsx, a notification's click).
   useEffect(() => {
     if (!props.pick) return;
     setPicked(props.pick.id);
-    // A notification's decision outside the project filtered on switches the filter to its project.
-    const d = live.find((x) => x.id === props.pick!.id);
-    if (d && filter && projectOf(d)?.toUpperCase() !== filter.toUpperCase()) props.onProject(projectOf(d));
+    props.onPicked?.();
   }, [props.pick]);
   // The decision open stays open while others arrive: the first one is picked as soon as there is
   // one, and only when the picked one is settled does the pick move to the (new) first.

@@ -5,7 +5,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "./backend";
 import type { Decision } from "./decisions";
-import { DEFAULT_SETTINGS, NOTIFY_KINDS, freshDecisions, inQuiet, messageOf, type Fresh, type NotifySettings, type Seen } from "./notify";
+import { DEFAULT_SETTINGS, NOTIFY_KINDS, freshDecisions, inQuiet, inView, messageOf, type Fresh, type NotifySettings, type Seen } from "./notify";
 import type { IssueDetail } from "./types";
 
 /** Decisions that arrive within this long of each other become one notification. */
@@ -56,12 +56,12 @@ export function useNotifySettings(): [NotifySettings, (s: NotifySettings) => voi
  * Notifies about new decisions and keeps the taskbar count. `decisions` is null until the board
  * has loaded; `inboxInView` is true while the window has focus on the Inbox, which lists them all.
  */
-export function useNotifications(decisions: Decision[] | null, details: Map<string, IssueDetail>, now: number, inboxInView: boolean) {
+export function useNotifications(decisions: Decision[] | null, details: Map<string, IssueDetail>, now: number, inboxInView: boolean, inboxProject: string | null = null) {
   const [settings] = useNotifySettings();
   const pending = useRef<Fresh[]>([]);
   const timer = useRef<number | null>(null);
-  const latest = useRef({ decisions, inboxInView });
-  latest.current = { decisions, inboxInView };
+  const latest = useRef({ decisions, inboxInView, inboxProject });
+  latest.current = { decisions, inboxInView, inboxProject };
 
   const ids = decisions?.map((d) => d.id).join(" ") ?? null;
   const detailIds = [...details.keys()].join(" ");
@@ -70,7 +70,7 @@ export function useNotifications(decisions: Decision[] | null, details: Map<stri
   useEffect(() => {
     if (!decisions) return;
     const now = Math.floor(Date.now() / 1000);
-    const { fresh, seen } = freshDecisions(decisions, details, read<Seen>(SEEN_KEY), settings, now, { inboxInView });
+    const { fresh, seen } = freshDecisions(decisions, details, read<Seen>(SEEN_KEY), settings, now, { inboxInView, inboxProject });
     write(SEEN_KEY, seen);
     if (fresh.length === 0) return;
     pending.current.push(...fresh);
@@ -81,13 +81,14 @@ export function useNotifications(decisions: Decision[] | null, details: Map<stri
       // of them by now or quiet hours began.
       const still = new Set(latest.current.decisions?.map((d) => d.id));
       const wanted = loadSettings();
-      const batch = pending.current.filter((f) => still.has(f.decision.id) && wanted.kinds[f.kind]);
+      // Nor what the Inbox in front of them lists now (with a project filter, only that project's).
+      const batch = pending.current.filter((f) => still.has(f.decision.id) && wanted.kinds[f.kind] && !inView(f.decision, latest.current));
       pending.current = [];
-      if (batch.length === 0 || latest.current.inboxInView || inQuiet(wanted, new Date())) return;
+      if (batch.length === 0 || inQuiet(wanted, new Date())) return;
       invoke("notify", messageOf(batch)).catch(() => {});
     }, BATCH_MS);
     // Runs when the list, its details or the settings change, not on every render.
-  }, [ids, detailIds, settings, inboxInView, minute]);
+  }, [ids, detailIds, settings, inboxInView, inboxProject, minute]);
   useEffect(() => () => void (timer.current !== null && clearTimeout(timer.current)), []);
 
   const count = decisions?.length ?? 0;

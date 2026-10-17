@@ -4,7 +4,7 @@ import { invoke, isLive, isPreview, listen } from "./backend";
 import type { AgentPlan, Board, Project } from "./types";
 import { AgentSetup, pendingChanges, setupErrors } from "./Agents";
 import { Inbox, storeInboxProject, storedInboxProject, useDecisionDetails } from "./Inbox";
-import { decisionsOf, projectCounts } from "./decisions";
+import { decisionsOf, projectCounts, projectOf, type Decision } from "./decisions";
 import { Settings, isSettingsSection, type SettingsSection } from "./Settings";
 import { Now, movingCounts, movingTitle } from "./Now";
 import { Pulse } from "./Pulse";
@@ -208,12 +208,18 @@ export function App() {
     };
   }, []);
 
-  // A click on a notification opens the Inbox on that decision (or on the first, for a batch).
+  // A click on a notification opens the Inbox on that decision (or on the first, for a batch). One
+  // outside the project the Inbox is filtered to switches the filter to its project, here, so the
+  // Inbox opens already on it.
   const [inboxPick, setInboxPick] = useState<{ id: string; at: number } | null>(null);
+  const decisionsNow = useRef<Decision[] | null>(null);
   useEffect(() => {
     const unlisten = listen<string>(OPEN_DECISION_EVENT, (e) => {
       setOpenIssue(null);
-      setView({ kind: "inbox" });
+      const filter = storedInboxProject();
+      const d = e.payload ? decisionsNow.current?.find((x) => x.id === e.payload) : undefined;
+      const project = d && filter && projectOf(d)?.toUpperCase() !== filter.toUpperCase() ? projectOf(d) : filter;
+      setView({ kind: "inbox", project });
       if (e.payload) setInboxPick({ id: e.payload, at: Date.now() });
     });
     return () => {
@@ -228,7 +234,8 @@ export function App() {
   // null until the board has loaded: "nothing needs you" must never be said before it is known.
   const decisions = board ? decisionsOf(board, inboxDetails, now) : null;
   // New ones are told outside the window too, except while the Inbox is in front of the person.
-  useNotifications(decisions, inboxDetails, now, focused && view.kind === "inbox" && !openIssue);
+  useNotifications(decisions, inboxDetails, now, focused && view.kind === "inbox" && !openIssue, view.kind === "inbox" ? (view.project ?? null) : null);
+  decisionsNow.current = decisions;
   const inboxCount = decisions?.length ?? 0;
   // Each project's share of it, for the links to its filtered Inbox (the sidebar, a project's head).
   const inboxByProject = decisions ? projectCounts(decisions) : [];
@@ -357,6 +364,7 @@ export function App() {
             details={inboxDetails}
             now={now}
             pick={inboxPick}
+            onPicked={() => setInboxPick(null)}
             onOpenIssue={setOpenIssue}
             onChanged={changed}
             onNotifySettings={() => setView({ kind: "settings", section: "notifications" })}

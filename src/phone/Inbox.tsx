@@ -86,6 +86,10 @@ export function Inbox(props: { device: Device; onGone: (why: string) => void }) 
     setShown({ id: null, index: 0 });
   };
   const list = project ? all.filter((d) => keyProject(d.issue?.key) === project) : all;
+  // A project with nothing left is let go of for good: new work in it later does not filter again.
+  useEffect(() => {
+    if (data && wanted && !project) pickProject(null);
+  }, [data, wanted, project]);
   const index = shownIndex(list.map((d) => d.id), shown);
   const current = list[index];
   // Whatever is on screen is pinned by id, the first one included, and its position follows it on
@@ -142,7 +146,8 @@ export function Inbox(props: { device: Device; onGone: (why: string) => void }) 
           </div>
         </div>
       )}
-      {counts.length > 1 && (
+      {/* While filtered, always: it is the way back to every project. */}
+      {(counts.length > 1 || project !== null) && (
         <select className="ph-project" aria-label="Project" value={project ?? ""} onChange={(e) => pickProject(e.target.value || null)}>
           <option value="">Every project ({all.length})</option>
           {counts.map((c) => (
