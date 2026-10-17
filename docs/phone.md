@@ -288,7 +288,8 @@ real `tailscale status`.
 
 ## Later
 
-- Keeping the PC awake while the phone server is on, so a phone away from home finds it.
+- Keeping the PC awake while the phone server is on, so a phone away from home finds it
+  ([NIT-183](nitely://issue/NIT-183)).
 
 ## Build order
 
