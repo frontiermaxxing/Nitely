@@ -182,7 +182,14 @@ impl GoalPlan {
     }
 }
 
-const COLUMNS: &str = "id, issue_key, project, plan, status, created_by, created_at, outcome, goal_id";
+/// How long an approval holds its plan. One that has not finished by then was interrupted (the
+/// app quit midway), and the plan is pending again: approving it resumes with what was created.
+const APPROVAL_LEASE_SECS: i64 = 120;
+
+/// A plan's columns, an interrupted approval (`?2` is the moment its lease began) read as pending.
+const COLUMNS: &str = "id, issue_key, project, plan,
+    CASE WHEN status = 'approving' AND IFNULL(decided_at, 0) < ?2 THEN 'pending' ELSE status END,
+    created_by, created_at, outcome, goal_id";
 
 fn view(r: &rusqlite::Row) -> rusqlite::Result<GoalPlanView> {
     let plan: String = r.get(3)?;
@@ -204,7 +211,11 @@ impl Db {
     pub fn goal_plan_for_issue(&self, key: &str) -> Result<Option<GoalPlanView>> {
         Ok(self
             .conn
-            .query_row(&format!("SELECT {COLUMNS} FROM goal_plan WHERE issue_key = ?1 COLLATE NOCASE ORDER BY id DESC LIMIT 1"), [key], view)
+            .query_row(
+                &format!("SELECT {COLUMNS} FROM goal_plan WHERE issue_key = ?1 COLLATE NOCASE ORDER BY id DESC LIMIT 1"),
+                params![key, now() - APPROVAL_LEASE_SECS],
+                view,
+            )
             .optional()?)
     }
 
@@ -282,33 +293,62 @@ impl Db {
             bail!("only the person approves a goal plan");
         }
         let v = self.goal_plan_for_issue(key)?.filter(|v| v.status == "pending").with_context(|| format!("{key} carries no pending goal plan"))?;
-        // Claim the decision first, so two approvals at once cannot both create a goal.
-        if self.conn.execute("UPDATE goal_plan SET status = 'approving' WHERE id = ?1 AND status = 'pending'", [v.id])? == 0 {
+        // Claim the decision first, so two approvals at once cannot both create a goal. A claim
+        // older than the lease was interrupted and is taken over.
+        let ts = now();
+        let claimed = self.conn.execute(
+            "UPDATE goal_plan SET status = 'approving', decided_at = ?2
+             WHERE id = ?1 AND (status = 'pending' OR (status = 'approving' AND IFNULL(decided_at, 0) < ?3))",
+            params![v.id, ts, ts - APPROVAL_LEASE_SECS],
+        )?;
+        if claimed == 0 {
             bail!("{key}'s goal plan was decided just now");
         }
         let result = self.approve_claimed(key, &v, edit, actor);
         if result.is_err() {
-            self.conn.execute("UPDATE goal_plan SET status = 'pending' WHERE id = ?1 AND status = 'approving'", [v.id]).ok();
+            self.conn
+                .execute("UPDATE goal_plan SET status = 'pending', decided_at = NULL WHERE id = ?1 AND status = 'approving'", [v.id])
+                .ok();
         }
         result
     }
 
     fn approve_claimed(&mut self, key: &str, v: &GoalPlanView, edit: &PlanEdit, actor: &Actor) -> Result<PlanApproved> {
-        let plan = v.plan.edited(edit);
+        let mut plan = v.plan.edited(edit);
+        // Keys stored under a project's old prefix name the same issues under its new one.
+        plan.planning_issue = plan.planning_issue.as_deref().map(|k| self.current_key(k)).transpose()?;
+        plan.existing = plan.existing.iter().map(|k| self.current_key(k)).collect::<Result<_>>()?;
         let author = Actor::Agent(v.created_by.clone());
         let own: Vec<String> = std::iter::once(v.issue_key.clone()).chain(plan.planning_issue.clone()).collect();
-        if !plan.issues.is_empty() {
+        // An interrupted approval left its goal, and maybe its filed issues: carry on with them.
+        let resumed = match v.goal_id {
+            Some(id) => self.goal(id)?,
+            None => None,
+        };
+        let already_filed = match &resumed {
+            Some(g) => self.list_issues(Some(&v.project), true)?.into_iter().filter(|i| i.goal == Some(g.id) && !plan.existing.contains(&i.key)).count(),
+            None => 0,
+        };
+        if !plan.issues.is_empty() && already_filed == 0 {
             self.check_batch(&batch(&plan, &v.project, None, &source_of(&author), &own))?;
         }
-        let change = GoalChange { title: Some(plan.title.clone()), outcome: Some(plan.outcome.clone()), target_date: plan.target_date.clone(), state: None };
-        let goal = self.save_goal(&v.project, None, &change, actor)?;
-        let filed = if plan.issues.is_empty() {
+        let goal = match resumed {
+            Some(g) => g,
+            None => {
+                let change = GoalChange { title: Some(plan.title.clone()), outcome: Some(plan.outcome.clone()), target_date: plan.target_date.clone(), state: None };
+                let goal = self.save_goal(&v.project, None, &change, actor)?;
+                self.conn.execute("UPDATE goal_plan SET goal_id = ?2 WHERE id = ?1", params![v.id, goal.id])?;
+                goal
+            }
+        };
+        let filed = if plan.issues.is_empty() || already_filed > 0 {
             BatchFiled::default()
         } else {
             match self.create_issues(&batch(&plan, &v.project, Some(goal.id), &source_of(&author), &own), &author) {
                 Ok(f) => f,
                 Err(e) => {
                     // Nothing was filed (create_issues is one transaction): the goal goes too.
+                    self.conn.execute("UPDATE goal_plan SET goal_id = NULL WHERE id = ?1", [v.id])?;
                     self.conn.execute("DELETE FROM goal WHERE id = ?1", [goal.id])?;
                     return Err(e);
                 }
@@ -321,12 +361,13 @@ impl Db {
                 Err(e) => not_attached.push(format!("{k}: {e:#}")),
             }
         }
+        let new = filed.filed.len().max(already_filed);
         let outcome = format!(
             "Goal {} \"{}\" with {} new issue{}{}{}",
             goal.id,
             goal.title,
-            filed.filed.len(),
-            if filed.filed.len() == 1 { "" } else { "s" },
+            new,
+            if new == 1 { "" } else { "s" },
             if attached.is_empty() { String::new() } else { format!(" and {} existing", attached.len()) },
             if filed.skipped.is_empty() { String::new() } else { format!("; {} skipped as duplicates", filed.skipped.len()) },
         );
@@ -478,6 +519,36 @@ mod tests {
         let a = db.approve_goal_plan(&proposed.issue.key, &PlanEdit::default(), &Actor::Human).unwrap();
         assert_eq!((a.filed.filed.len(), a.filed.skipped.len()), (1, 0), "{:?}", a.filed.skipped);
         assert_eq!(a.goal.progress.total, 1);
+
+        // The same after the project took a new key: the plan still knows its planning issue.
+        let mut db = self::db();
+        let ask = db.start_goal("NIT", "sign the Windows installer", &Actor::Human).unwrap();
+        let proposed = db.propose_goal("NIT", &p, Some(&ask.key), &agent()).unwrap();
+        db.rekey_project("NIT", "NX").unwrap();
+        let a = db.approve_goal_plan(&proposed.issue.key.replace("NIT-", "NX-"), &PlanEdit::default(), &Actor::Human).unwrap();
+        assert_eq!((a.filed.filed.len(), a.filed.skipped.len()), (1, 0), "{:?}", a.filed.skipped);
+    }
+
+    #[test]
+    fn an_interrupted_approval_is_taken_up_again_and_finishes_what_it_started() {
+        let mut db = db();
+        let p = db.propose_goal("NIT", &plan(), None, &agent()).unwrap();
+        let key = p.issue.key.clone();
+        db.approve_goal_plan(&key, &PlanEdit::default(), &Actor::Human).unwrap();
+        let goal = db.goal_plan_for_issue(&key).unwrap().unwrap().goal_id.unwrap();
+        let filed = |db: &Db| db.list_issues(Some("NIT"), true).unwrap().into_iter().filter(|i| i.goal == Some(goal)).count();
+        let n = filed(&db);
+        // Wind the plan back to how the app left it when it quit after filing, before finishing.
+        db.conn.execute("UPDATE goal_plan SET status = 'approving', decided_at = ?1, outcome = NULL", [now()]).unwrap();
+        db.conn.execute("UPDATE issue SET state = 'Needs You', state_type = 'unstarted' WHERE key = ?1", [&key]).unwrap();
+        assert_eq!(db.goal_plan_for_issue(&key).unwrap().unwrap().status, "approving");
+        assert!(db.approve_goal_plan(&key, &PlanEdit::default(), &Actor::Human).is_err(), "a running approval holds the plan");
+        db.conn.execute("UPDATE goal_plan SET decided_at = ?1", [now() - APPROVAL_LEASE_SECS - 1]).unwrap();
+        assert_eq!(db.goal_plan_for_issue(&key).unwrap().unwrap().status, "pending", "an interrupted one lets go");
+        let a = db.approve_goal_plan(&key, &PlanEdit::default(), &Actor::Human).unwrap();
+        assert_eq!(a.goal.id, goal, "the goal it created is the one it finishes");
+        assert_eq!((filed(&db), a.filed.filed.len(), db.goals("NIT", true).unwrap().len()), (n, 0, 1), "nothing filed twice");
+        assert_eq!(a.issue.state, "Done");
     }
 
     #[test]
