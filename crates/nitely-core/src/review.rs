@@ -470,6 +470,14 @@ impl CurrentCode {
         if self.files.contains(&path) || (self.files.is_empty() && self.root.join(&path).is_file()) {
             return Some(path);
         }
+        // Written with 8.3 short names (`src/FOOBAR~1.RS`): the tracked file at the same place once
+        // short names are spelled out (NIT-133).
+        if path.contains('~') {
+            let place = crate::paths::normalize(&self.root.join(&path).to_string_lossy());
+            if let Some(f) = self.files.iter().find(|f| crate::paths::normalize(&self.root.join(f).to_string_lossy()) == place) {
+                return Some(f.clone());
+            }
+        }
         let mut ends = self.files.iter().filter(|f| f.ends_with(&format!("/{path}")));
         match (ends.next(), ends.next()) {
             (Some(one), None) => Some(one.clone()),
@@ -775,6 +783,24 @@ mod tests {
         let r = rules().parse("codex", text, 3, Some(&prev), None).unwrap();
         assert!(r.findings.is_empty() && r.verdict == "pass");
         assert!(rules().parse("codex", "PREVIOUS 1: fixed\nMONEY_OR_RELEASE: no", 1, Some(&prev), None).is_err());
+    }
+
+    #[test]
+    fn a_citation_in_short_names_finds_the_tracked_file() {
+        // New files get no 8.3 name where the volume makes none, but Program Files usually has one
+        // (PROGRA~1); treat the drive as the worktree and Program Files as a tracked path (NIT-133).
+        let Some(program_files) = std::env::var_os("ProgramFiles").map(|p| p.to_string_lossy().into_owned()) else { return };
+        let short = crate::paths::short_path(&program_files);
+        if !cfg!(windows) || short == program_files {
+            return;
+        }
+        let root = Path::new(&program_files).parent().unwrap().to_path_buf();
+        let name = |p: &str| Path::new(p).file_name().unwrap().to_string_lossy().into_owned();
+        let code = CurrentCode { root: root.clone(), files: vec![format!("{}/Common Files", name(&program_files))] };
+        let tracked = Some(code.files[0].clone());
+        assert_eq!(code.resolve(&format!("{}/Common Files", name(&short))), tracked, "relative, short folder");
+        assert_eq!(code.resolve(&format!(r"{short}\Common Files")), tracked, "absolute, short folder");
+        assert_eq!(code.resolve(&format!("{}/Other Files", name(&short))), None, "a file that is not tracked");
     }
 
     #[test]
