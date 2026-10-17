@@ -445,6 +445,9 @@ fn claude_plan(nitely: &str, repoint: bool) -> Result<AgentPlan> {
     for (event, matcher) in CLAUDE_EVENTS {
         let list = hooks.entry(event.to_string()).or_insert_with(|| json!([]));
         let mut present = false;
+        // Nitely's hooks taken out of an entry shared with others, moved whole (a chain or an
+        // option the user added comes along) into an entry of their own.
+        let mut moved: Vec<Value> = Vec::new();
         for entry in list.as_array_mut().into_iter().flatten() {
             let mut ours = false;
             for h in entry.get_mut("hooks").and_then(Value::as_array_mut).into_iter().flatten() {
@@ -457,12 +460,17 @@ fn claude_plan(nitely: &str, repoint: bool) -> Result<AgentPlan> {
                     entry["matcher"] = json!(m);
                 } else if let Some(hooks) = hooks {
                     // Other hooks share the entry: they keep its matcher, and Nitely's moves to an
-                    // entry of its own (added below), so widening it widens nothing of theirs.
-                    hooks.retain(|h| !h.get("command").and_then(Value::as_str).is_some_and(|c| is_ours(c, "claude")));
-                    ours = false;
+                    // entry of its own, so widening it widens nothing of theirs.
+                    let (mine, theirs): (Vec<Value>, Vec<Value>) =
+                        hooks.drain(..).partition(|h| h.get("command").and_then(Value::as_str).is_some_and(|c| is_ours(c, "claude")));
+                    *hooks = theirs;
+                    moved.extend(mine);
                 }
             }
             present |= ours;
+        }
+        if let (false, Some(m), Some(a)) = (moved.is_empty(), matcher, list.as_array_mut()) {
+            a.push(json!({ "matcher": m, "hooks": moved }));
         }
         if !present {
             let mut entry = json!({ "hooks": [{ "type": "command", "command": command, "timeout": 5 }] });
@@ -831,14 +839,15 @@ mod tests {
         // Another hook in the same old entry keeps its matcher; Nitely's moves out on its own.
         let mut shared: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
         shared["hooks"]["PreToolUse"] = json!([{ "matcher": "mcp__.*", "hooks": [
-            { "type": "command", "command": "audit-mcp" }, { "type": "command", "command": "nitely hook claude", "timeout": 5 }
+            { "type": "command", "command": "audit-mcp" }, { "type": "command", "command": "nitely hook claude && notify-user", "timeout": 9 }
         ] }]);
         std::fs::write(&settings, serde_json::to_string_pretty(&shared).unwrap()).unwrap();
         assert!(apply_agents(&agent_plans("nitely", true)).1.is_empty());
         let now: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
         let pre = now["hooks"]["PreToolUse"].as_array().unwrap();
         assert_eq!((pre.len(), &pre[0]["matcher"], &pre[0]["hooks"][0]["command"], pre[0]["hooks"].as_array().unwrap().len()), (2, &json!("mcp__.*"), &json!("audit-mcp"), 1));
-        assert_eq!((&pre[1]["matcher"], &pre[1]["hooks"][0]["command"]), (&json!("mcp__.*|Bash|PowerShell"), &json!("nitely hook claude")));
+        assert_eq!((&pre[1]["matcher"], &pre[1]["hooks"][0]["command"]), (&json!("mcp__.*|Bash|PowerShell"), &json!("nitely hook claude && notify-user")), "moved as the user wrote it");
+        assert_eq!(pre[1]["hooks"][0]["timeout"], 9);
         assert_eq!(pending_changes(&agent_plans("nitely", true)), 0);
         let mut chained = json!({ "command": "nitely hook claude && notify-user" });
         assert!(point_at(&mut chained, "claude", "nitely hook claude", true), "still counts as Nitely's");
