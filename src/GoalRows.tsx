@@ -49,7 +49,8 @@ export function GoalRow(props: { detail: GoalDetail; showProject?: boolean; onOp
   const placed = goalOrder(props.detail.issues);
   const c = goalCounts(placed);
   const total = placed.length;
-  const when = targetLine(goal.target_date, new Date(), total > 0 && c.done === total);
+  // Late only while something is left to do.
+  const when = targetLine(goal.target_date, new Date(), c.done === total);
   return (
     <div className="goal-row">
       <div className="goal-head">

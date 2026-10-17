@@ -25,6 +25,10 @@ test("a goal's issues run from done to queued, closed ones left out", () => {
 test("counts follow the colour rule", () => {
   const c = goalCounts(goalOrder([issue("A-1", "Done", "completed"), issue("A-2", "Needs You", "started"), issue("A-3", "In Progress", "started"), issue("A-4", "Todo", "unstarted"), issue("A-5", "Backlog", "backlog")]));
   assert.deepEqual(c, { done: 1, moving: 1, needs: 1, stuck: 0, queued: 2 });
+  // An agent waiting on an answer counts as waiting on you.
+  const asking = goalOrder([issue("A-6", "In Progress", "started")]);
+  asking[0].track = { ...asking[0].track, asking: true };
+  assert.equal(goalCounts(asking).needs, 1);
 });
 
 test("the target date says how far off or how late it is", () => {

@@ -41,7 +41,8 @@ export function goalCounts(placed: Placed[]): GoalCounts {
   for (const { track: t } of placed) {
     if (t.station === "done") c.done++;
     else if (t.stuck) c.stuck++;
-    else if (t.station === "needs") c.needs++;
+    // An agent's open question waits on you too, whatever state the issue is in.
+    else if (t.station === "needs" || t.asking) c.needs++;
     else if (t.station === "todo" || t.backlog) c.queued++;
     else c.moving++;
   }
