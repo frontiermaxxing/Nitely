@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { invoke, isPreview } from "./backend";
 import { PlaybookChangeDecision } from "./PlaybookChangeDecision";
 import { GoalPlanDecision } from "./GoalPlanDecision";
-import { askPlaces, decisionsOf, detailKeys, firstLine, outcomeOf, shownDecisions, trackAfter, type Decision, type DecisionKind, type Move, type Resolved } from "./decisions";
+import { APPROVALS, askPlaces, decisionsOf, detailKeys, firstLine, groupApprovals, outcomeOf, shownDecisions, trackAfter, type Decision, type DecisionKind, type Move, type Resolved } from "./decisions";
 import { ChecksMark } from "./Pr";
 import type { Board, IssueDetail, TaskRow } from "./types";
 import { ago } from "./util";
@@ -62,12 +62,15 @@ export function Inbox(props: {
   const keys = useRef<DecisionKeys>({});
   const decisions = shownDecisions(live, resolved, gone);
   const waiting = decisions.filter((d) => !resolved.has(d.id));
+  // Several changes waiting for approval at once are one card (docs/batching.md); the count above
+  // still counts each.
+  const listed = groupApprovals(decisions, details, new Set(resolved.keys()));
   const liveIds = live.map((d) => d.id).join(" ");
   useEffect(() => {
     const ids = new Set(liveIds.split(" "));
     setGone((g) => ([...g].every((id) => ids.has(id)) ? g : new Set([...g].filter((id) => ids.has(id)))));
   }, [liveIds]);
-  const groups = GROUP_ORDER.map((k) => ({ kind: k, items: decisions.filter((d) => d.kind === k) })).filter((g) => g.items.length > 0);
+  const groups = GROUP_ORDER.map((k) => ({ kind: k, items: listed.filter((d) => d.kind === k) })).filter((g) => g.items.length > 0);
   const ordered = groups.flatMap((g) => g.items);
   const places = askPlaces(ordered);
   const [picked, setPicked] = useState<string | null>(props.pick?.id ?? null);
@@ -76,7 +79,13 @@ export function Inbox(props: {
   }, [props.pick]);
   // The decision open stays open while others arrive: the first one is picked as soon as there is
   // one, and only when the picked one is settled does the pick move to the (new) first.
-  const open = ordered.find((d) => d.id === picked) ?? ordered[0] ?? null;
+  // A change picked (from a notification) inside the approvals card opens the card; the card, once
+  // down to one change, opens that one.
+  const open =
+    ordered.find((d) => d.id === picked || d.group?.some((m) => m.id === picked)) ??
+    (picked === APPROVALS ? ordered.find((d) => d.kind === "approve") : undefined) ??
+    ordered[0] ??
+    null;
   useEffect(() => {
     if (open && open.id !== picked) setPicked(open.id);
   }, [open, picked]);
@@ -186,7 +195,7 @@ export function Inbox(props: {
           <div key={g.kind} className="inbox-group">
             <div className="inbox-group-head">
               <span>{GROUP_LABEL[g.kind]}</span>
-              <span>{g.items.length}</span>
+              <span>{g.items.reduce((n, d) => n + (d.group?.length ?? 1), 0)}</span>
             </div>
             {g.items.map((d) => (
               <InboxRow
@@ -231,7 +240,20 @@ export function Inbox(props: {
           </span>
         </div>
       </div>
-      {open && (
+      {open?.group && (
+        <ApprovalsCard
+          key={open.id}
+          decision={open}
+          details={details}
+          resolved={resolved}
+          failed={failed}
+          now={now}
+          onOpenIssue={props.onOpenIssue}
+          onAct={act}
+          keys={keys}
+        />
+      )}
+      {open && !open.group && (
         <DecisionDetail
           key={open.id}
           decision={open}
@@ -391,7 +413,11 @@ function InboxRow(props: {
   const { decision: d } = props;
   const issue = props.detail?.issue ?? d.issue;
   const done = props.resolved;
-  const ev = done ? { text: outcomeOf(done), tone: "good" as const, agent: null } : eventOf(d, props.detail, props.place);
+  const ev = d.group
+    ? { text: "Each is approved or sent back on its own", tone: null, agent: null }
+    : done
+      ? { text: outcomeOf(done), tone: "good" as const, agent: null }
+      : eventOf(d, props.detail, props.place);
   // A question reads as itself, so two on one issue never look alike; the issue stays as context.
   const question = d.kind === "ask" && d.ask ? firstLine(d.ask.question) : "";
   return (
@@ -419,9 +445,9 @@ function InboxRow(props: {
       </span>
       <span className="inbox-row-text">
         <span className="inbox-row-top">
-          <span className="inbox-row-key">{issue?.key ?? d.row?.branch ?? d.repo}</span>
-          <span className="inbox-row-title" title={question && issue ? issue.title : undefined}>
-            {question || issue?.title || (d.row ? d.row.worktree : "")}
+          <span className="inbox-row-key">{d.group ? `${d.group.length} changes` : (issue?.key ?? d.row?.branch ?? d.repo)}</span>
+          <span className="inbox-row-title" title={question && issue ? issue.title : d.group ? d.group.map((m) => m.issue?.key).join(", ") : undefined}>
+            {d.group ? "wait for your approval" : question || issue?.title || (d.row ? d.row.worktree : "")}
           </span>
         </span>
         <span className="inbox-row-ev">
@@ -627,6 +653,110 @@ function DecisionDetail(props: {
       </div>
       {note && <p className="muted small">{note}</p>}
       {error && <p className="error small">{error}</p>}
+    </article>
+  );
+}
+
+/**
+ * Several changes waiting for approval at once, as one card (docs/batching.md): each with why it
+ * waits, its review, and its own Approve and Send back, plus Approve all, which approves them one
+ * after another, so each change's patch is signed on its own as a single approval signs it.
+ */
+function ApprovalsCard(props: {
+  decision: Decision;
+  details: Map<string, IssueDetail>;
+  resolved: Map<string, Resolved>;
+  failed: Map<string, string>;
+  now: number;
+  onOpenIssue: (key: string) => void;
+  onAct: (d: Decision, move: Move, run: () => Promise<unknown>) => Promise<void>;
+  keys: React.MutableRefObject<DecisionKeys>;
+}) {
+  const { decision: g, now } = props;
+  const members = g.group ?? [];
+  const waiting = members.filter((m) => !props.resolved.has(m.id));
+  const [all, setAll] = useState(false);
+  const move = (m: Decision, state: "Approved" | "Todo") =>
+    props.onAct(m, state === "Approved" ? "approve" : "todo", () => invoke("move_issue", { key: m.issue!.key, state, evidence: null, reason: null }));
+  const approveAll = async () => {
+    setAll(true);
+    // One at a time: each approval signs its own change's patch.
+    for (const m of waiting) await move(m, "Approved");
+    setAll(false);
+  };
+  // No key approves several at once: a and t act on one decision.
+  props.keys.current = {};
+  return (
+    <article className="inbox-detail decision-approve decision-approvals">
+      <div className="dd-context">
+        <span className="dd-kind">Approvals</span>
+        <span className="dd-meta" title={`The oldest has waited since ${new Date(g.since * 1000).toLocaleString()}`}>
+          oldest waiting {ago(now, g.since)}
+        </span>
+      </div>
+      <p className="dd-title">
+        {members.length} changes wait for your approval
+      </p>
+      <p className="muted small">Each is its own decision. Approve all approves them one by one, so each change's patch is signed on its own.</p>
+      <ol className="approvals-list">
+        {members.map((m) => {
+          const detail = props.details.get(m.issue!.key);
+          const issue = detail?.issue ?? m.issue!;
+          const done = props.resolved.get(m.id);
+          const review = detail?.reviews[0];
+          const reasons = review?.reasons ?? [];
+          const error = props.failed.get(m.id);
+          return (
+            <li key={m.id} className={`approvals-item${done ? " resolved" : ""}`}>
+              <div className="approvals-head">
+                <button className="link mono" onClick={() => props.onOpenIssue(issue.key)} title="Open the issue">
+                  {issue.key}
+                </button>
+                <button className="approvals-title" onClick={() => props.onOpenIssue(issue.key)} title="Open the issue">
+                  {issue.title}
+                </button>
+                <span className="muted small">{ago(now, m.since).replace(" ago", "")}</span>
+              </div>
+              <p className="approvals-why small">
+                {reasons.length > 0 ? `${capital(listReasons(reasons))}.` : "The playbook wants a person to approve this change."}{" "}
+                {review?.reviewer && (
+                  <span className="approvals-review">
+                    <AgentMark vendor={review.reviewer} size={14} /> {VENDOR_LABEL[vendorOf(review.reviewer)]}{" "}
+                    {review.verdict === "changes" ? <span className="decision-changes">asked for changes</span> : "passed"}
+                    <FindingDots findings={review.findings} />
+                    {review.findings.length > 0 ? describeFindings(review.findings) : "no findings"}
+                  </span>
+                )}
+              </p>
+              {done ? (
+                <p className={`dd-outcome${done.done ? " done" : ""}`} role="status">
+                  <ResultMark result={done.done ? "pass" : "pending"} size={16} />
+                  {outcomeOf(done)}
+                </p>
+              ) : (
+                <div className="actions">
+                  <button className="btn primary" disabled={all} onClick={() => move(m, "Approved")}>
+                    Approve
+                  </button>
+                  <button className="btn" disabled={all} onClick={() => move(m, "Todo")}>
+                    Send back to Todo
+                  </button>
+                </div>
+              )}
+              {error && <p className="error small">{error}</p>}
+            </li>
+          );
+        })}
+      </ol>
+      {waiting.length > 1 && (
+        <div className="dd-actions">
+          <div className="actions">
+            <button className="btn primary" disabled={all} onClick={approveAll}>
+              {all ? "Approving…" : `Approve all ${waiting.length}`}
+            </button>
+          </div>
+        </div>
+      )}
     </article>
   );
 }

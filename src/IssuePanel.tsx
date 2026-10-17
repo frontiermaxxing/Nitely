@@ -6,6 +6,7 @@ import type { Goal, IssueDetail, IssueRecord, IssueSpend, LinkedIssue } from "./
 import { agentLabel, agentTitle, ago, openExternal, PRIORITY } from "./util";
 import { IssueJourney, WhoHadIt } from "./IssueJourney";
 import { issueDecision, type Move } from "./decisions";
+import { batchEvents, issueBatchStation, type BatchEvent } from "./batches";
 import { GoalPlanDecision } from "./GoalPlanDecision";
 import { PlaybookChangeDecision } from "./PlaybookChangeDecision";
 import { MirrorFact } from "./Mirror";
@@ -34,7 +35,53 @@ const KIND_LABEL: Record<string, string> = {
   crew_started: "crew started",
   crew_ended: "crew ended",
   lane_run: "build lane",
+  review_batch: "review batch",
+  shadow_batch: "shadow batch",
+  land_queue: "land queue",
 };
+
+/** One event of the issue's timeline. */
+function EventLine({ event: t, now }: { event: IssueDetail["timeline"][number]; now: number }) {
+  return (
+    <li className={`tl-${t.kind}`}>
+      <span className="tl-mark">
+        <AgentMark vendor={t.actor} size={14} title={agentTitle(t.actor, t.place)} />
+      </span>
+      <div className="tl-meta">
+        <span className="tl-kind">{KIND_LABEL[t.kind] ?? t.kind}</span> <span title={agentTitle(t.actor, t.place)}>{agentLabel(t.actor)}</span> · {ago(now, t.ts)}
+      </div>
+      {t.summary && <div className="tl-text">{t.summary}</div>}
+      {crewLog(t) && <CrewLogLink path={crewLog(t)!} />}
+      {laneRunId(t) !== null && <LaneLogLink id={laneRunId(t)!} />}
+    </li>
+  );
+}
+
+/** A review batch or land queue run the issue went through, with the gate's log for a land. */
+function BatchLine({ line: b, now }: { line: BatchEvent; now: number }) {
+  const queue = b.kind === "land_queue";
+  return (
+    <li className={`tl-${b.kind}${b.tone ? ` tl-${b.tone}` : ""}`}>
+      <span className="tl-mark">
+        <AgentMark vendor={b.actor} size={14} title={queue ? "Nitely's land queue" : agentTitle(b.actor)} />
+      </span>
+      <div className="tl-meta">
+        <span className="tl-kind">{KIND_LABEL[b.kind]}</span> {queue ? "Nitely" : agentLabel(b.actor)} · {ago(now, b.ts)}
+      </div>
+      <div className="tl-text">{b.text}</div>
+      {b.laneRun !== null && <LaneLogLink id={b.laneRun} label="Open the gate's log" />}
+    </li>
+  );
+}
+
+/** The issue's events and its batches' lines (batches.ts), in time order. */
+type TimelineItem = { ts: number; event?: IssueDetail["timeline"][number]; batch?: BatchEvent };
+function timelineItems(detail: IssueDetail): TimelineItem[] {
+  const items: TimelineItem[] = detail.timeline.map((event) => ({ ts: event.ts, event }));
+  for (const batch of batchEvents(detail.issue.key, detail.batches)) items.push({ ts: batch.ts, batch });
+  // Stable: events at the same second keep their order, and a batch's line comes after them.
+  return items.map((it, i) => ({ it, i })).sort((a, b) => a.it.ts - b.it.ts || a.i - b.i).map((x) => x.it);
+}
 
 /** The worker log a crew entry names (docs/crew.md), e.g. `... log: C:\\...\\crew\\NIT\\1-nit-3-codex.log`. */
 export function crewLog(t: { kind: string; summary: string | null }): string | null {
@@ -56,12 +103,12 @@ function CrewLogLink({ path }: { path: string }) {
 }
 
 /** Opens a build lane run's log, by the run's id; the app finds the log in the run's record. */
-function LaneLogLink({ id }: { id: number }) {
+function LaneLogLink({ id, label = "Open log" }: { id: number; label?: string }) {
   const [error, setError] = useState<string | null>(null);
   return (
     <div className="tl-text">
       <button className="link" title={`Run ${id}`} onClick={() => invoke("open_lane_log", { id }).then(() => setError(null), (e) => setError(String(e)))}>
-        Open log
+        {label}
       </button>
       {error && <span className="error small"> {error}</span>}
     </div>
@@ -269,27 +316,18 @@ export function IssuePanel(props: {
                   <StationTrack key={issue.key} track={track} size="full" now={props.now} />
                 </div>
               )}
+              {issueBatchStation(issue.key, detail.batches) && <p className="panel-batch small">{capital(issueBatchStation(issue.key, detail.batches)!)}</p>}
               <WhoHadIt detail={detail} now={props.now} />
               <IssueJourney key={issue.key} detail={detail} now={props.now} />
               <SpendLine key={`spend-${issue.key}`} detail={detail} now={props.now} />
               <details className="panel-timeline">
                 <summary>
-                  Timeline <span className="muted">· {detail.timeline.length} event{detail.timeline.length === 1 ? "" : "s"}</span>
+                  Timeline <span className="muted">· {timelineItems(detail).length} event{timelineItems(detail).length === 1 ? "" : "s"}</span>
                 </summary>
                 <ol className="timeline">
-                  {detail.timeline.map((t, n) => (
-                    <li key={n} className={`tl-${t.kind}`}>
-                      <span className="tl-mark">
-                        <AgentMark vendor={t.actor} size={14} title={agentTitle(t.actor, t.place)} />
-                      </span>
-                      <div className="tl-meta">
-                        <span className="tl-kind">{KIND_LABEL[t.kind] ?? t.kind}</span> <span title={agentTitle(t.actor, t.place)}>{agentLabel(t.actor)}</span> · {ago(props.now, t.ts)}
-                      </div>
-                      {t.summary && <div className="tl-text">{t.summary}</div>}
-                      {crewLog(t) && <CrewLogLink path={crewLog(t)!} />}
-                      {laneRunId(t) !== null && <LaneLogLink id={laneRunId(t)!} />}
-                    </li>
-                  ))}
+                  {timelineItems(detail).map((item, n) =>
+                    item.batch ? <BatchLine key={n} line={item.batch} now={props.now} /> : <EventLine key={n} event={item.event!} now={props.now} />,
+                  )}
                   {detail.timeline.length === 0 && <li className="muted small">Nothing recorded yet.</li>}
                 </ol>
               </details>

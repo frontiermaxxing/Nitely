@@ -1,0 +1,23 @@
+/* Review batches and the land queue (docs/batching.md): the board's rows, one per running batch. */
+.batch-rows { display: flex; flex-direction: column; gap: 6px; }
+.batch-row {
+  display: grid; grid-template-columns: auto minmax(0, max-content) minmax(0, 1fr) auto auto; align-items: center; gap: 4px 12px;
+  min-height: 36px; padding: 6px 12px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+  font-size: var(--text-sm); --mark-bg: var(--surface);
+}
+.batch-review, .batch-land { border-color: color-mix(in oklch, var(--live) 40%, var(--line)); }
+/* Recorded only: quieter, and never in the live color. */
+.batch-shadow { border-style: dashed; color: var(--fg-2); }
+.batch-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.batch-shadow .batch-title { font-weight: 500; }
+.batch-keys { display: flex; flex-wrap: wrap; gap: 4px 10px; min-width: 0; }
+.batch-keys .link { font-size: var(--text-xs); }
+.batch-step { color: var(--fg-2); white-space: nowrap; }
+.batch-age { font-variant-numeric: tabular-nums; font-size: var(--text-xs); }
+
+@media (max-width: 560px) {
+  .batch-row { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .batch-keys, .batch-step { grid-column: 2 / -1; }
+  .batch-age { grid-column: 3; grid-row: 1; }
+  .batch-step { white-space: normal; }
+}

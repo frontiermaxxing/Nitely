@@ -5,6 +5,9 @@ import type { Board, SyncStatus, TaskRow } from "./types";
 import { ago } from "./util";
 import { exampleRepoPath } from "./AddProject";
 import { LanesStrip } from "./LanesStrip";
+import { BatchesStrip, useBatches } from "./BatchesStrip";
+import { batchStation, landQueueLength } from "./batches";
+import type { BatchesOverview } from "./types";
 import {
   AgentMark,
   EmptyState,
@@ -37,6 +40,7 @@ export function Now(props: {
   const { board, now } = props;
   const [showMain, setShowMain] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const batches = useBatches(props.version);
 
   const syncNow = async () => {
     setSyncing(true);
@@ -55,7 +59,8 @@ export function Now(props: {
           Show main checkouts
         </label>
       </div>
-      <LanesStrip version={props.version} now={now} onOpenIssue={props.onOpenIssue} />
+      <LanesStrip version={props.version} now={now} onOpenIssue={props.onOpenIssue} landQueue={landQueueLength(batches)} />
+      <BatchesStrip batches={batches} now={now} onOpenIssue={props.onOpenIssue} />
       {board.repos.length === 0 && (
         <EmptyState title="No repos yet.">
           <p>Add one from the sidebar, or from a terminal:</p>
@@ -75,7 +80,7 @@ export function Now(props: {
             ) : (
               <div className="now-cards">
                 {rows.map((row) => (
-                  <Card key={row.worktree} row={row} integration={repo.integration_branch} now={now} onOpenIssue={props.onOpenIssue} />
+                  <Card key={row.worktree} row={row} integration={repo.integration_branch} batches={batches} now={now} onOpenIssue={props.onOpenIssue} />
                 ))}
               </div>
             )}
@@ -99,7 +104,7 @@ export function Now(props: {
 }
 
 /** A worktree as a card: who is in it, on what, how far it got, and its last three things. */
-function Card(props: { row: TaskRow; integration: string; now: number; onOpenIssue: (key: string) => void }) {
+function Card(props: { row: TaskRow; integration: string; batches: BatchesOverview | null; now: number; onOpenIssue: (key: string) => void }) {
   const { row, now } = props;
   const s = row.session;
   const live = livenessOf(s, now);
@@ -112,10 +117,15 @@ function Card(props: { row: TaskRow; integration: string; now: number; onOpenIss
   if (s?.last_activity) log.push({ t: live === "working" ? "now" : ago(now, s.last_seen_at).replace(" ago", ""), text: s.last_activity, tone: live === "waiting" ? "attention" : undefined });
   if (st?.last_commit_subject && st.last_commit_at) log.push({ t: ago(now, st.last_commit_at).replace(" ago", ""), text: st.last_commit_subject });
   if (s) log.push({ t: ago(now, s.started_at).replace(" ago", ""), text: `Session started${row.branch ? ` on ${row.branch}` : ""}` });
+  // A batch holding the issue says so: "in a review batch with NIT-4", "landing, 2nd in the queue".
+  const inBatch = row.issue ? batchStation(row.issue.key, props.batches) : null;
   const state = st?.rebase_in_progress
     ? { text: "Rebase stopped", color: "var(--fail)" }
     : track
-      ? { text: track.stuck ?? STATION_LABEL[track.station], color: track.closed ? "var(--fg-3)" : stationColor(track.station, !!track.stuck) }
+      ? {
+          text: track.stuck ?? (inBatch ? inBatch.charAt(0).toUpperCase() + inBatch.slice(1) : STATION_LABEL[track.station]),
+          color: track.closed ? "var(--fg-3)" : stationColor(track.station, !!track.stuck),
+        }
       : null;
 
   return (

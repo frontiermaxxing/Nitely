@@ -2,7 +2,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { askPlaces, decisionsOf, issueDecision, firstLine, outcomeOf, shownDecisions, trackAfter, type Decision, type Resolved } from "./decisions.ts";
+import { APPROVALS, askPlaces, decisionsOf, groupApprovals, issueDecision, firstLine, outcomeOf, shownDecisions, trackAfter, type Decision, type Resolved } from "./decisions.ts";
 import type { Ask, Board, IssueDetail, IssueRecord } from "./types.ts";
 import type { Track } from "./ui/lifecycle.ts";
 
@@ -160,6 +160,31 @@ test("NIT-227: a pending playbook change or goal plan is its own decision, never
   // The Inbox lists it as the same decision: an approval card that shows the change, not own work.
   const ds = decisionsOf(board([proposalIssue]), new Map([["X-6", pending]]), NOW);
   assert.deepEqual(ds.map((d) => [d.id, d.kind]), [["approve-X-6", "approve"]]);
+});
+
+test("NIT-218: several changes waiting for approval are one card, each still its own decision", () => {
+  const a = issue("X-1", "Needs You", 3);
+  const b = issue("X-2", "Needs You", 2);
+  const c = issue("X-3", "Needs You", 3);
+  const proposal = { ...issue("X-4", "Needs You"), owner: "human" };
+  const asked = ask(9, "X-5", NOW - 100);
+  const details = new Map<string, IssueDetail>([
+    ["X-1", detail(a)],
+    ["X-2", detail(b)],
+    ["X-4", { ...detail(proposal), proposal: { status: "pending" } } as unknown as IssueDetail],
+  ]);
+  const ds = decisionsOf(board([a, b, c, proposal], [asked]), details, NOW);
+  const shown = groupApprovals(ds, details);
+  const group = shown.find((d) => d.id === APPROVALS)!;
+  // X-3's details are not read yet (it could be a playbook change), and X-4 is one: both on their own cards.
+  assert.deepEqual(group.group!.map((d) => d.id), ["approve-X-2", "approve-X-1"], "most urgent first");
+  assert.equal(group.urgency, 2);
+  assert.deepEqual(shown.filter((d) => d !== group).map((d) => d.id).sort(), ["approve-X-3", "approve-X-4", "ask-9"]);
+  // One change alone is its own card, as before; one just approved stays in the card meanwhile.
+  assert.deepEqual(groupApprovals(ds, new Map([["X-1", detail(a)]])), ds);
+  const approved = { ...a, state: "Approved" };
+  const after = new Map(details).set("X-1", detail(approved));
+  assert.deepEqual(groupApprovals(ds, after, new Set(["approve-X-1"])).find((d) => d.id === APPROVALS)!.group!.map((d) => d.id), ["approve-X-2", "approve-X-1"]);
 });
 
 test("the human's own work is its own kind of decision, in any open state outside Backlog", () => {

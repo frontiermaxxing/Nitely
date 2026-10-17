@@ -22,6 +22,7 @@ pub const READ_ONLY: &[&str] = &[
     "held_files",
     "issue_spend",
     "lanes_overview",
+    "batches_overview",
     "project_spend",
     "mirror_preview",
     "issue_mirror",
@@ -70,6 +71,8 @@ pub fn run(command: &str, args: &Value) -> Result<Value> {
         "crew_settings" => json!(nitely_core::crew_settings::crew_for_project(&Config::load_read_only()?, &db()?, str_arg(args, "project")?)?),
         "issue_spend" => json!(nitely_core::usage::spend_of_issue(&Config::load_read_only()?, &db()?, str_arg(args, "key")?)?),
         "lanes_overview" => json!(nitely_core::lanes::overview(&Config::load_read_only()?, &db()?)?),
+        // A database a newer schema has not reached yet has no batches to show.
+        "batches_overview" => json!(nitely_core::batches::overview(&Config::load_read_only()?, &db()?).unwrap_or_default()),
         "project_spend" => {
             let days = args.get("days").and_then(Value::as_u64).unwrap_or(14) as usize;
             json!(nitely_core::usage::spend_of_project(&Config::load_read_only()?, &db()?, str_arg(args, "project")?, int_arg(args, "dayStart")?, days)?)

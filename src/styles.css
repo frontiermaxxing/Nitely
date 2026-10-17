@@ -283,6 +283,8 @@ footer .btn { margin-left: auto; }
 .panel-track {
   margin: 0 0 24px; padding: 20px 22px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg);
 }
+/* What batch holds the issue now (docs/batching.md), under its track. */
+.panel-batch { margin: -14px 0 20px; color: var(--fg-2); }
 .panel-waiting {
   display: flex; flex-direction: column; gap: 10px; padding: 14px; border-radius: var(--radius-lg);
   background: var(--attention-wash); border: 1px solid var(--attention);
@@ -310,6 +312,9 @@ footer .btn { margin-left: auto; }
 .tl-kind { font-weight: 600; color: var(--fg); }
 .tl-gate_failed .tl-kind, .tl-land_failed .tl-kind, .tl-review_failed .tl-kind { color: var(--st-stuck); }
 .tl-ask .tl-kind { color: var(--attention-ink); }
+.tl-bad .tl-kind { color: var(--st-stuck); }
+/* A shadow batch only records: quieter than the events that decided. */
+.tl-shadow_batch .tl-kind, .tl-shadow_batch .tl-text { color: var(--fg-3); }
 .tl-text { margin-top: 2px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .pr-row { padding: 7px 0; border-bottom: 1px solid var(--line); }
 .pr-row:last-child { border-bottom: 0; }

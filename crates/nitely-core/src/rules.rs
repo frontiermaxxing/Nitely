@@ -121,6 +121,48 @@ pub struct RulesView {
     pub land_by: Field<LandBy>,
     pub focus: Field<String>,
     pub reviewers: Vec<Reviewer>,
+    /// How it batches reviews and lands; shown here, set in the playbook.
+    pub batching: Batching,
+}
+
+/// The playbook's `[review] batch` and `[land] batch` settings (docs/batching.md, NIT-218).
+#[derive(Debug, Clone, Serialize)]
+pub struct Batching {
+    /// off | small | all | shadow
+    pub review: crate::review::BatchMode,
+    pub review_window: String,
+    pub review_max: usize,
+    pub small_lines: usize,
+    pub small_files: usize,
+    pub max_lines: usize,
+    /// off | waiting | all
+    pub land: crate::playbook::LandBatch,
+    pub land_window_seconds: u64,
+    pub land_max: usize,
+    /// Why changes land alone all the same, when `land` batches but the repo cannot.
+    pub land_alone: Option<String>,
+}
+
+fn batching(pb: &Playbook) -> Batching {
+    use crate::playbook::LandBatch;
+    let land_alone = match (&pb.land.batch, &pb.lanes) {
+        (LandBatch::Off, _) => None,
+        (_, None) => Some("a batch is gated in a build lane, and this repo has no [lanes]".into()),
+        (_, Some(l)) if l.large_repo => Some("large-repo mode lands each change alone".into()),
+        _ => None,
+    };
+    Batching {
+        review: pb.review.batch,
+        review_window: pb.review.batch_window.clone(),
+        review_max: pb.review.batch_max.max(2),
+        small_lines: pb.review.small_lines,
+        small_files: pb.review.small_files,
+        max_lines: pb.review.max_lines,
+        land: pb.land.batch,
+        land_window_seconds: pb.land.batch_window().as_secs(),
+        land_max: pb.land.batch_max(),
+        land_alone,
+    }
 }
 
 /// A save from the Rules view. The per-project lists replace what the playbook has; a None
@@ -206,6 +248,7 @@ fn view(config: &crate::Config, repo: &crate::RepoConfig) -> Result<RulesView> {
         land_by: field(set.land_by, d.land_by.as_ref(), pb.land.by, base.land.by),
         focus: field(set.focus, d.focus.as_ref(), pb.review.focus.clone(), base.review.focus.clone()),
         reviewers,
+        batching: batching(&pb),
     })
 }
 

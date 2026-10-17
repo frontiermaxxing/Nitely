@@ -113,6 +113,8 @@ pub struct IssueDetail {
     pub proposal: Option<crate::proposals::Proposal>,
     /// The goal plan the issue carries, when an agent drafted one (goal_plans.rs).
     pub goal_plan: Option<crate::goal_plans::GoalPlanView>,
+    /// Its review batches and trips through a land queue (NIT-218).
+    pub batches: crate::batches::IssueBatches,
 }
 
 /// Both directions of an issue's blocked-by relations, closed issues included.
@@ -1437,6 +1439,8 @@ impl Db {
             reviews: self.reviews(&issue.key)?,
             proposal: self.proposal_for_issue(&issue.key)?,
             goal_plan: self.goal_plan_for_issue(&issue.key)?,
+            // A database a newer schema has not reached yet (the read-only preview) shows none.
+            batches: self.issue_batches(&issue.key).unwrap_or_default(),
             issue,
         }))
     }

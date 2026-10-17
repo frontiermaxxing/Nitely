@@ -24,7 +24,7 @@ export function useLanes(version: number): LanesOverview | null {
  * The build lanes on Now and Overview (docs/build-lanes.md): one chip per lane with its project,
  * what it runs or that it is idle, and each project's queue. Nothing when no repo has lanes.
  */
-export function LanesStrip(props: { version: number; now: number; onOpenIssue: (key: string) => void }) {
+export function LanesStrip(props: { version: number; now: number; onOpenIssue: (key: string) => void; landQueue?: number }) {
   const lanes = useLanes(props.version);
   if (!lanes || lanes.projects.length === 0) return null;
   return (
@@ -34,6 +34,12 @@ export function LanesStrip(props: { version: number; now: number; onOpenIssue: (
         {lanes.slots && (
           <span className="head-note">
             builds {lanes.slots.used} of {lanes.slots.total}
+          </span>
+        )}
+        {/* The land queue gates its stacks in these lanes (docs/batching.md). */}
+        {!!props.landQueue && (
+          <span className="head-note" title="Reviewed changes waiting in or landing through a land queue">
+            {props.landQueue} in the land queue
           </span>
         )}
       </h2>

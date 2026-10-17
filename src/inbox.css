@@ -104,6 +104,24 @@ button.dd-title:hover { text-decoration: underline; text-decoration-color: var(-
   .dd-decide-finding { flex-wrap: wrap; padding: 4px 4px 4px 14px; }
   .dd-decide-finding input { flex-basis: 100%; }
 }
+/* Several changes waiting for approval at once (docs/batching.md): one card, each change its own decision. */
+.approvals-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.approvals-item {
+  display: flex; flex-direction: column; gap: 8px; padding: 14px 18px; background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--radius-lg); --mark-bg: var(--surface);
+}
+.approvals-item.resolved { border-color: color-mix(in oklch, var(--live) 35%, var(--line)); }
+.approvals-item .actions { margin-top: 0; }
+.approvals-head { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.approvals-head .mono { font-size: var(--text-sm); flex: none; }
+.approvals-title {
+  flex: 1; min-width: 0; padding: 0; border: 0; background: none; text-align: left; cursor: pointer; font-size: 15px;
+  font-weight: var(--weight-medium); overflow-wrap: anywhere;
+}
+.approvals-title:hover { text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
+.approvals-why { margin: 0; color: var(--fg-2); line-height: 1.55; }
+.approvals-review { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; color: var(--fg-2); }
+
 /* A decision the human just acted on: what happened, in place of its actions, until the next one takes its place. */
 .dd-outcome {
   display: flex; align-items: center; gap: 10px; min-height: 38px; margin: 0; font-size: var(--text-md);

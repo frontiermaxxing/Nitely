@@ -400,6 +400,24 @@ identical patch. Reusing a pass for the same patch and reviewing only the differ
   on its own.
 - **Overview:** the land queue's length next to the lanes strip (build-lanes.md).
 
+### As built (NIT-218)
+
+- `crates/nitely-core/src/batches.rs` reads it all for the app, from the queues' own rows: the
+  review batches under review and the changes waiting for one (`review_batch`, `review_queue`), and
+  each land queue with its running run (`land_queue`, `land_run`). The run records its step as it
+  goes (`land_run.step`: "stacking", "gating the stack", "bisecting: gating 2 of 3", "landing").
+  `batches_overview` is the board's read; an issue's detail carries its own batches.
+- Why a change went back is read from what the batch said: a review verdict with its own P0/P1, or
+  only an interaction finding (it waits for the other change to land); a land error that bisection
+  or the one-file guess found, a conflict with the changes stacked before it, a branch that moved.
+- A shadow batch (NIT-217) shows on the board in a dashed, quiet row ("recorded only") and on the
+  timeline greyed, "Recorded only; its own review decided". It never sets an issue's station.
+- The Inbox groups change approvals only when each one's details say it is a plain approval: a
+  playbook change, a goal plan or a mirrored issue keeps its own card. Approve all calls the same
+  approve as each card's button, one change after another, so each patch is signed on its own.
+- Rules shows the project's `[review] batch` and `[land] batch` settings read-only, and says when a
+  land batch cannot run (no `[lanes]`, large-repo mode).
+
 ## The playbook
 
 ```toml

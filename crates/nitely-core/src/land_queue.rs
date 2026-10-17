@@ -111,6 +111,9 @@ pub struct Run {
     pub sent_back: Vec<String>,
     pub gates: u32,
     pub head: Option<String>,
+    /// What it is doing while it runs: "stacking", "gating the stack", "bisecting: gating 2 of
+    /// 3", "landing" (NIT-218). None once it ended.
+    pub step: Option<String>,
 }
 
 fn keys(text: String) -> Vec<String> {
@@ -140,7 +143,7 @@ impl Db {
     pub fn land_run(&self, id: i64) -> Result<Option<Run>> {
         Ok(self
             .conn
-            .query_row("SELECT id, repo, started_at, ended_at, issues, landed, sent_back, gates, head FROM land_run WHERE id = ?1", [id], |r| {
+            .query_row("SELECT id, repo, started_at, ended_at, issues, landed, sent_back, gates, head, step FROM land_run WHERE id = ?1", [id], |r| {
                 Ok(Run {
                     id: r.get(0)?,
                     repo: r.get(1)?,
@@ -151,6 +154,7 @@ impl Db {
                     sent_back: keys(r.get(6)?),
                     gates: r.get(7)?,
                     head: r.get(8)?,
+                    step: r.get(9)?,
                 })
             })
             .optional()?)
@@ -330,6 +334,7 @@ fn run_batch(db: &mut Db, root: &Path, pb: &Playbook, batch: Vec<Entry>) -> Resu
         params![repo_key(root), now(), issues.join(",")],
     )?;
     let run = db.conn.last_insert_rowid();
+    step(db, run, "stacking")?;
     for e in &batch {
         db.conn.execute("UPDATE land_queue SET state = 'running', run_id = ?2 WHERE id = ?1", params![e.id, run])?;
         let others: Vec<&str> = issues.iter().filter(|k| **k != e.issue).map(String::as_str).collect();
@@ -359,8 +364,14 @@ fn run_batch(db: &mut Db, root: &Path, pb: &Playbook, batch: Vec<Entry>) -> Resu
     let mut gates = 0u32;
     let outcome = gate_and_land(db, root, pb, run, &stack, stacked, &before, &mut gates);
     let head = git(root, &["rev-parse", "--short", &base]).ok().map(|s| s.trim().to_string());
-    db.conn.execute("UPDATE land_run SET ended_at = ?2, gates = ?3, head = ?4 WHERE id = ?1", params![run, now(), gates, head])?;
+    db.conn.execute("UPDATE land_run SET ended_at = ?2, gates = ?3, head = ?4, step = NULL WHERE id = ?1", params![run, now(), gates, head])?;
     outcome
+}
+
+/// Says what the run is doing now, for the app's board row.
+fn step(db: &Db, run: i64, what: &str) -> Result<()> {
+    db.conn.execute("UPDATE land_run SET step = ?2 WHERE id = ?1", params![run, what])?;
+    Ok(())
 }
 
 /// Gates the stack's tip and lands it; on a failure, finds the change that broke it.
@@ -370,6 +381,7 @@ fn gate_and_land(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stack: &Path
         return Ok(());
     }
     let k = stacked.len();
+    step(db, run, "gating the stack")?;
     let full = gate_prefix(db, root, stack, &stacked, k, gates)?;
     if full.passed {
         return land_prefix(db, root, pb, run, stacked, before, &full, *gates);
@@ -396,6 +408,7 @@ fn gate_and_land(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stack: &Path
             }
         }
         if restacked {
+            step(db, run, &format!("bisecting: gating without {}", stacked[suspect].entry.issue))?;
             let without = gate_prefix(db, root, stack, &others, others.len(), gates)?;
             if without.passed {
                 let bad = &stacked[suspect];
@@ -412,6 +425,7 @@ fn gate_and_land(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stack: &Path
     let mut passing: Option<GateResult> = None;
     while hi - lo > 1 {
         let mid = (lo + hi) / 2;
+        step(db, run, &format!("bisecting: gating {mid} of {k}"))?;
         let g = gate_prefix(db, root, stack, &stacked, mid, gates)?;
         if g.passed {
             lo = mid;
@@ -531,6 +545,7 @@ fn stack_one(db: &Db, root: &Path, pb: &Playbook, stack: &Path, entry: &Entry, o
 #[allow(clippy::too_many_arguments)]
 fn land_prefix(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stacked: Vec<Stacked>, before: &str, gate: &GateResult, gates: u32) -> Result<()> {
     let base = pb.integration_branch().to_string();
+    step(db, run, "landing")?;
     let tip = stacked.last().expect("something to land").tip.clone();
     if land::rev(root, &base)? != before {
         // Something else wrote the integration branch meanwhile: they wait for the next run.

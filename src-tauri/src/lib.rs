@@ -584,6 +584,12 @@ async fn lanes_overview() -> Result<nitely_core::lanes::Overview, String> {
     nitely_core::lanes::overview(&Config::load().map_err(err)?, &db()?).map_err(err)
 }
 
+/// Review batches and land queues going now, for the board (docs/batching.md, NIT-218).
+#[tauri::command]
+async fn batches_overview() -> Result<nitely_core::batches::Overview, String> {
+    nitely_core::batches::overview(&Config::load().map_err(err)?, &db()?).map_err(err)
+}
+
 /// Opens a build lane run's log, named by the run's id in its issue's timeline. The path comes
 /// from the run's record, and only a `.log` file in Nitely's lanes folder opens.
 #[tauri::command]
@@ -757,6 +763,7 @@ pub fn run() {
             crew_save,
             open_crew_log,
             lanes_overview,
+            batches_overview,
             open_lane_log,
             issues,
             issue_detail,

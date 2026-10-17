@@ -2,7 +2,7 @@
 // playbook (read-only), one whose playbook Nitely keeps (editable, with rules that send changes to
 // a person), and one with no playbook yet. Saves change the data until reload; the loosening check
 // follows crates/nitely-core/src/rules.rs.
-import type { DefaultsView, DryRun, LandBy, RuleDefaults, RuleField, RulesEdit, RulesView } from "../types";
+import type { Batching, DefaultsView, DryRun, LandBy, RuleDefaults, RuleField, RulesEdit, RulesView } from "../types";
 
 const BUILT_IN_REVIEWER: Record<string, string> = { "*": "claude", claude: "codex", codex: "claude" };
 const REVIEWERS = [
@@ -83,8 +83,20 @@ function view(s: Stored): RulesView {
     land_by: field<LandBy>(e.land_by, defaults.land_by, "author"),
     focus: field(e.focus, defaults.focus, ""),
     reviewers: REVIEWERS,
+    batching: BATCHING[s.repo] ?? OFF,
   };
 }
+
+// How each sample repo batches (docs/batching.md): Nitely reviews small changes together and lands
+// what waits together; Orbit measures batched review in shadow and asks for a queue it cannot run.
+const OFF: Batching = {
+  review: "off", review_window: "5m", review_max: 3, small_lines: 100, small_files: 5, max_lines: 1500,
+  land: "off", land_window_seconds: 0, land_max: 5, land_alone: null,
+};
+const BATCHING: Record<string, Batching> = {
+  Nitely: { ...OFF, review: "small", land: "waiting" },
+  Orbit: { ...OFF, review: "shadow", land: "all", land_window_seconds: 300, land_alone: "a batch is gated in a build lane, and this repo has no [lanes]" },
+};
 
 /** The effective rules an edit makes, for the loosening check. */
 function effective(e: RulesEdit, d: RuleDefaults) {

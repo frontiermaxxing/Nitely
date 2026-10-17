@@ -523,13 +523,18 @@ fn first_line(text: &str) -> String {
 const INTERACTS: &str = "Interacts with ";
 const SAME_BATCH: &str = ", reviewed in the same batch:";
 
+/// The change an interaction finding names (`Interacts with NIT-4, reviewed in the same batch: ...`).
+pub fn interaction_with(text: &str) -> Option<&str> {
+    text.strip_prefix(INTERACTS).and_then(|rest| rest.split_once(SAME_BATCH)).map(|(key, _)| key.trim())
+}
+
 /// Keeps an interaction finding from a batch open until the change it interacts with has landed
 /// and this branch holds what landed, whatever a later review says of it: the second change must be
 /// reviewed on top of the first. Recomputes the verdict.
 pub fn hold_interactions(db: &Db, worktree: &Path, review: &mut Review) -> Result<()> {
     let mut held = vec![];
     for r in review.previous.iter_mut() {
-        let Some(first) = r.text.strip_prefix(INTERACTS).and_then(|rest| rest.split_once(SAME_BATCH)).map(|(key, _)| key.trim().to_string()) else { continue };
+        let Some(first) = interaction_with(&r.text).map(str::to_string) else { continue };
         if let Some(why) = not_on_top_of(db, worktree, &first)? {
             r.status = "open".into();
             r.now = Some(why.clone());

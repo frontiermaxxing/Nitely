@@ -373,6 +373,89 @@ export interface IssueDetail {
   proposal?: PlaybookProposal | null;
   /** The goal plan the issue carries, when an agent drafted one (crates/nitely-core/src/goal_plans.rs). */
   goal_plan?: GoalPlanView | null;
+  /** Its review batches and trips through a land queue (crates/nitely-core/src/batches.rs). */
+  batches?: IssueBatches;
+}
+
+/** A review batch: changes of one repository reviewed in one reviewer call (batches.rs `ReviewBatch`). */
+export interface ReviewBatch {
+  id: number;
+  repo: string;
+  repo_name: string | null;
+  reviewer: string;
+  /** Its changes, in the order the reviewer got them. */
+  issues: string[];
+  /** reviewing | done | failed */
+  state: string;
+  /** Recorded only: each change's single review decided it (`[review] batch = "shadow"`). */
+  shadow: boolean;
+  started_at: number;
+  ended_at: number | null;
+  seconds: number | null;
+  tokens: number | null;
+  error: string | null;
+}
+
+/** A land queue run: its changes in stack order, what became of them, and what it is doing (land_queue.rs `Run`). */
+export interface LandRun {
+  id: number;
+  repo: string;
+  started_at: number;
+  ended_at: number | null;
+  issues: string[];
+  landed: string[];
+  sent_back: string[];
+  gates: number;
+  head: string | null;
+  /** While it runs: "stacking", "gating the stack", "bisecting: gating 2 of 3", "landing". */
+  step: string | null;
+}
+
+/** The batches going now, for the board (batches.rs `Overview`). */
+export interface BatchesOverview {
+  reviewing: ReviewBatch[];
+  review_waiting: { issue: string; repo_name: string | null; reviewer: string; shadow: boolean; queued_at: number; lines: number }[];
+  land: {
+    repo: string;
+    repo_name: string | null;
+    /** Oldest first: their place in the queue. */
+    entries: { id: number; issue: string; state: "queued" | "running" | string; queued_at: number; run: number | null }[];
+    runs: LandRun[];
+  }[];
+}
+
+/** Why a change went back from a batch (batches.rs `SentBack`). */
+export interface SentBack {
+  why: "own" | "interacts" | "bisected" | "gate" | "conflict" | "moved" | "stopped" | "other" | string;
+  /** The changes it names: the one it interacts or conflicts with. */
+  with: string[];
+}
+
+/** An issue's review batches and land queue trips, newest first (batches.rs `IssueBatches`). */
+export interface IssueBatches {
+  reviews: {
+    batch: ReviewBatch;
+    /** reviewing | done | alone */
+    state: string;
+    verdict: string | null;
+    blocking: number;
+    minor: number;
+    why: string | null;
+    sent_back: SentBack | null;
+  }[];
+  lands: {
+    id: number;
+    /** queued | running | landed | sent_back */
+    state: string;
+    queued_at: number;
+    ended_at: number | null;
+    place: number | null;
+    run: LandRun | null;
+    lane_run: number | null;
+    head: string | null;
+    error: string | null;
+    sent_back: SentBack | null;
+  }[];
 }
 
 /** One issue of a goal plan, as the agent drafted it. */
@@ -641,6 +724,23 @@ export interface RulesView {
   land_by: RuleField<LandBy>;
   focus: RuleField<string>;
   reviewers: ReviewerInfo[];
+  /** How it batches reviews and lands; set in the playbook (rules.rs `Batching`). */
+  batching?: Batching;
+}
+
+/** The playbook's `[review] batch` and `[land] batch` settings (docs/batching.md). */
+export interface Batching {
+  review: "off" | "small" | "all" | "shadow";
+  review_window: string;
+  review_max: number;
+  small_lines: number;
+  small_files: number;
+  max_lines: number;
+  land: "off" | "waiting" | "all";
+  land_window_seconds: number;
+  land_max: number;
+  /** Why changes land alone all the same, when `land` batches but the repo cannot. */
+  land_alone: string | null;
 }
 
 /** A save from the Rules view; a null default-able value inherits again. */

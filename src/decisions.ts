@@ -21,6 +21,8 @@ export interface Decision {
   since: number;
   /** 1 (urgent) to 4 (low); 5 when the issue has no priority or there is no issue. */
   urgency: number;
+  /** The Inbox's card for several change approvals at once (`groupApprovals`): each one. */
+  group?: Decision[];
 }
 
 export const KIND_LABEL: Record<DecisionKind, string> = {
@@ -142,6 +144,40 @@ export function decisionsOf(board: Board, details: Map<string, IssueDetail>, now
   }
 
   return out.sort(byUrgency);
+}
+
+/** The id of the Inbox's card that holds several change approvals at once. */
+export const APPROVALS = "approvals";
+
+/**
+ * The decisions as the Inbox lists them: when several changes wait for the person's approval at
+ * once, they are one card ("3 changes wait for your approval") holding each of them, to approve or
+ * send back one by one or all at once (docs/batching.md). Only plain change approvals group: a
+ * playbook change, a goal plan or a mirrored issue is decided on its own card. A change just acted
+ * on (`held`) stays in the card until the Inbox moves on from it.
+ */
+export function groupApprovals(decisions: Decision[], details: Map<string, IssueDetail>, held: Set<string> = new Set()): Decision[] {
+  const plain = (d: Decision) => {
+    if (d.kind !== "approve" || d.issue?.origin !== "nitely") return false;
+    if (held.has(d.id)) return true;
+    // Without its details it is not known yet whether it is a playbook change or a goal plan.
+    const detail = details.get(d.issue.key);
+    return !!detail && issueDecision(detail.issue, detail) === "approve";
+  };
+  const members = decisions.filter(plain);
+  if (members.length < 2) return decisions;
+  const group: Decision = {
+    id: APPROVALS,
+    kind: "approve",
+    issue: null,
+    row: null,
+    repo: null,
+    ask: null,
+    since: Math.min(...members.map((d) => d.since)),
+    urgency: Math.min(...members.map((d) => d.urgency)),
+    group: [...members].sort(byUrgency),
+  };
+  return [...decisions.filter((d) => !members.includes(d)), group].sort(byUrgency);
 }
 
 /** Most urgent first and, at the same urgency, the one that has waited longest first. */

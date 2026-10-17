@@ -12,6 +12,10 @@ import * as rulesFixture from "./rules";
 import type {
   LaneRun,
   LanesOverview,
+  BatchesOverview,
+  IssueBatches,
+  LandRun,
+  ReviewBatch,
   ProjectLanes,
   Held,
   CrewEdit,
@@ -231,6 +235,30 @@ const ISSUES: IssueSpec[] = [
   {
     key: "NIT-21", title: "Gate output is cut at 4 KB in the timeline", kind: "bug", priority: 3, vendor: "codex",
     from: 34, to: 2.5, story: ["filed", "claim", "work", "gate", "review", "pass"], branch: { ahead: 2, dirty_files: 0 }, checks: "failure",
+  },
+  // Batched review and the land queue (docs/batching.md): NIT-50 and NIT-51 are in a review batch
+  // with NIT-30; NIT-29, NIT-52 and NIT-54 land together while bisection runs; NIT-53 waits behind.
+  {
+    key: "NIT-50", title: "Say which review batch a change is in", kind: "improvement", priority: 3, vendor: "codex",
+    from: 6, to: 0.25, story: ["filed", "claim", "work", "gate", "review"],
+    live: { state: "idle", seen: 5, activity: "Submitted; in a review batch" }, branch: { ahead: 1, dirty_files: 0 }, checks: "pending",
+  },
+  {
+    key: "NIT-51", title: "Typo in the help for nitely run", kind: "bug", priority: 4, vendor: "codex",
+    from: 3, to: 0.2, story: ["filed", "claim", "work", "gate", "review"], branch: { ahead: 1, dirty_files: 0 },
+  },
+  {
+    key: "NIT-52", title: "Keep the lanes strip on one line at narrow widths", kind: "bug", priority: 3, vendor: "claude",
+    from: 9, to: 0.4, story: ["filed", "claim", "work", "gate", "review", "pass"],
+    live: { state: "idle", seen: 4, activity: "Landing in a queue run" }, branch: { ahead: 2, dirty_files: 0 }, checks: "success",
+  },
+  {
+    key: "NIT-53", title: "Name the failing gate step in a land's error", kind: "improvement", priority: 3, vendor: "cursor",
+    from: 8, to: 0.3, story: ["filed", "claim", "work", "gate", "review", "pass"], branch: { ahead: 1, dirty_files: 0 }, checks: "success",
+  },
+  {
+    key: "NIT-54", title: "Drop the unused sync retry setting", kind: "improvement", priority: 4, vendor: "codex",
+    from: 12, to: 0.5, story: ["filed", "claim", "work", "gate", "review", "pass"], branch: { ahead: 1, dirty_files: 0 }, checks: "success",
   },
   { key: "NIT-20", title: "Approvals signed with a key in the OS keychain", kind: "feature", priority: 1, from: 200, to: 200, story: ["filed"] },
   { key: "NIT-19", title: "Retry a failed review once before failing submit", kind: "improvement", priority: 3, from: 180, to: 90, story: ["filed", "cancel"] },
@@ -759,6 +787,87 @@ function lanesOverview(): LanesOverview {
   return { projects: new URLSearchParams(location.search).has("nolanes") ? [] : BUILD_LANES, slots };
 }
 
+// ----- Review batches and the land queue (docs/batching.md); `?batches=none` shows none -----
+
+const NIT_REPO = "C:/Code/nitely";
+
+function reviewBatch(id: number, issues: string[], more: Partial<ReviewBatch> = {}): ReviewBatch {
+  return {
+    id, repo: NIT_REPO, repo_name: "nitely", reviewer: "claude", issues, state: "reviewing", shadow: false, started_at: NOW - 3 * MIN,
+    ended_at: null, seconds: null, tokens: null, error: null, ...more,
+  };
+}
+
+function landRun(id: number, issues: string[], more: Partial<LandRun> = {}): LandRun {
+  return { id, repo: NIT_REPO, started_at: NOW - 6 * MIN, ended_at: null, issues, landed: [], sent_back: [], gates: 0, head: null, step: null, ...more };
+}
+
+// A review batch of three, a shadow batch that only records, and a queue run bisecting a stack of
+// three with one more change waiting behind it.
+const REVIEWING = reviewBatch(12, ["NIT-30", "NIT-50", "NIT-51"]);
+const SHADOW = reviewBatch(13, ["ORB-261", "ORB-263"], { repo: "C:/Code/orbit", repo_name: "orbit", reviewer: "codex", shadow: true, started_at: NOW - 2 * MIN });
+const RUN = landRun(7, ["NIT-29", "NIT-52", "NIT-54"], { step: "bisecting: gating 1 of 3", gates: 2 });
+const EARLIER_RUN = landRun(6, ["NIT-24", "NIT-46"], { started_at: NOW - 5 * HOUR - 20 * MIN, ended_at: NOW - 5 * HOUR, landed: ["NIT-24"], sent_back: ["NIT-46"], gates: 3, head: "4b8e1f0" });
+
+function batchesOverview(): BatchesOverview {
+  if (new URLSearchParams(location.search).get("batches") === "none") return { reviewing: [], review_waiting: [], land: [] };
+  return {
+    reviewing: [REVIEWING, SHADOW],
+    review_waiting: [],
+    land: [
+      {
+        repo: NIT_REPO,
+        repo_name: "nitely",
+        entries: [
+          { id: 30, issue: "NIT-29", state: "running", queued_at: NOW - 7 * MIN, run: 7 },
+          { id: 31, issue: "NIT-52", state: "running", queued_at: NOW - 7 * MIN, run: 7 },
+          { id: 32, issue: "NIT-54", state: "running", queued_at: NOW - 6 * MIN - 30, run: 7 },
+          { id: 33, issue: "NIT-53", state: "queued", queued_at: NOW - 2 * MIN, run: null },
+        ],
+        runs: [RUN],
+      },
+    ],
+  };
+}
+
+type BatchReview = IssueBatches["reviews"][number];
+type BatchLand = IssueBatches["lands"][number];
+const inBatch = (b: ReviewBatch, more: Partial<BatchReview> = {}): BatchReview => ({ batch: b, state: "reviewing", verdict: null, blocking: 0, minor: 0, why: null, sent_back: null, ...more });
+const trip = (id: number, state: string, run: LandRun | null, more: Partial<BatchLand> = {}): BatchLand => ({
+  id, state, queued_at: (run?.started_at ?? NOW) - 60, ended_at: null, place: null, run, lane_run: null, head: null, error: null, sent_back: null, ...more,
+});
+
+/** Each issue's batches, for its timeline and station. */
+function issueBatches(key: string): IssueBatches | undefined {
+  if (new URLSearchParams(location.search).get("batches") === "none") return undefined;
+  const done = { ...SHADOW, state: "done", ended_at: NOW - 1 * MIN, seconds: 96 };
+  const map: Record<string, IssueBatches> = {
+    "NIT-30": { reviews: [inBatch(REVIEWING)], lands: [] },
+    "NIT-50": { reviews: [inBatch(REVIEWING)], lands: [] },
+    "NIT-51": { reviews: [inBatch(REVIEWING)], lands: [] },
+    // An earlier batch sent NIT-29 back for its own P1; its fix now lands in the run that bisects.
+    "NIT-29": {
+      reviews: [
+        inBatch(reviewBatch(9, ["NIT-29", "NIT-21"], { reviewer: "codex", state: "done", started_at: NOW - 2 * HOUR - 8 * MIN, ended_at: NOW - 2 * HOUR }), {
+          state: "done", verdict: "changes", blocking: 1, minor: 1, sent_back: { why: "own", with: [] },
+        }),
+      ],
+      lands: [trip(30, "running", RUN)],
+    },
+    "NIT-52": { reviews: [], lands: [trip(31, "running", RUN)] },
+    "NIT-54": { reviews: [], lands: [trip(32, "running", RUN)] },
+    "NIT-53": { reviews: [], lands: [trip(33, "queued", null, { queued_at: NOW - 2 * MIN, place: 4 })] },
+    "NIT-24": { reviews: [], lands: [trip(20, "landed", EARLIER_RUN, { ended_at: NOW - 5 * HOUR, lane_run: 38, head: "4b8e1f0" })] },
+    "NIT-46": {
+      reviews: [],
+      lands: [trip(21, "sent_back", EARLIER_RUN, { ended_at: NOW - 5 * HOUR, lane_run: 37, error: "the gate failed at `npm run build`: bisecting the stack found that its change is the one that fails the gate.", sent_back: { why: "bisected", with: [] } })],
+    },
+    "ORB-261": { reviews: [inBatch(done, { state: "done", verdict: "pass", minor: 1 })], lands: [] },
+    "ORB-263": { reviews: [inBatch(done, { state: "done", verdict: "changes", blocking: 1, sent_back: { why: "own", with: [] } })], lands: [] },
+  };
+  return map[key];
+}
+
 // Its gate ran in a lane before: the timeline names the run, and Open log asks the app for it.
 world.timelines.get("NIT-31")?.push(
   { ts: NOW - 7 * MIN, actor: "claude", kind: "lane_run", summary: "Ran `cargo test -p nitely-core` in lane 2: exit 0 after 63 s (run 40)" },
@@ -1198,6 +1307,7 @@ function detail(key: string): IssueDetail {
     reviews: world.reviews.get(issue.key) ?? [],
     proposal: PROPOSALS.get(issue.key) ?? null,
     goal_plan: PLANS.get(issue.key) ?? null,
+    batches: issueBatches(issue.key),
   };
 }
 
@@ -1872,6 +1982,8 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         throw "The preview has no logs to open; the app opens them.";
       case "lanes_overview":
         return lanesOverview();
+      case "batches_overview":
+        return batchesOverview();
       case "open_lane_log":
         throw "The preview has no logs to open; the app opens them.";
       case "set_project_brief":
