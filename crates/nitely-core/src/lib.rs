@@ -11,6 +11,7 @@ pub mod instructions;
 pub mod credentials;
 pub mod db;
 pub mod git;
+pub mod goals;
 pub mod github;
 pub mod hook;
 pub mod install;

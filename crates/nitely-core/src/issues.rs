@@ -62,6 +62,8 @@ pub struct IssueRecord {
     pub claimed_by: Option<String>,
     /// `agent`, or `human` for work only the human can do (see `OWNERS`).
     pub owner: String,
+    /// The goal it belongs to (`goals.rs`), if any.
+    pub goal: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
     /// Open issues that must close before this one can start. `next_task` skips it until then.
@@ -180,6 +182,8 @@ pub struct NewIssue {
     pub blocked_by: Vec<String>,
     /// Areas and platforms, e.g. `ios`, `billing`; normalized by `normalize_label`.
     pub labels: Vec<String>,
+    /// An active goal of the same project to file it into.
+    pub goal: Option<i64>,
 }
 
 /// One issue of a `file_issues` batch: a new issue, and the ref the batch's other items name it by
@@ -252,6 +256,7 @@ struct CheckedIssue {
     priority: i64,
     owner: String,
     labels: Vec<String>,
+    goal: Option<i64>,
     state: &'static str,
     state_type: &'static str,
 }
@@ -272,8 +277,8 @@ fn insert_issue(tx: &rusqlite::Connection, c: &CheckedIssue, blockers: &[String]
     let key = format!("{}-{number}", c.project);
     tx.execute(
         "INSERT INTO issue (key, origin, project, number, title, body, state, state_type, kind, source,
-           priority, evidence, created_at, updated_at, owner, labels)
-         VALUES (?1, 'nitely', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, ?13, ?14)",
+           priority, evidence, created_at, updated_at, owner, labels, goal)
+         VALUES (?1, 'nitely', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, ?13, ?14, ?15)",
         params![
             key,
             c.project,
@@ -288,7 +293,8 @@ fn insert_issue(tx: &rusqlite::Connection, c: &CheckedIssue, blockers: &[String]
             c.evidence,
             iso(ts),
             c.owner,
-            serde_json::to_string(&c.labels)?
+            serde_json::to_string(&c.labels)?,
+            c.goal
         ],
     )?;
     let filed = if c.owner == "human" { format!("Filed as {}, the human's own work", c.state) } else { format!("Filed as {}", c.state) };
@@ -307,7 +313,7 @@ fn insert_issue(tx: &rusqlite::Connection, c: &CheckedIssue, blockers: &[String]
 }
 
 const ISSUE_COLUMNS: &str = "key, origin, project, title, body, url, state, state_type, kind, source,
-    priority, labels, evidence, claimed_by, created_at, updated_at, owner";
+    priority, labels, evidence, claimed_by, created_at, updated_at, owner, goal";
 
 /// The scheme the app registers, so a link to an issue opens it in Nitely.
 pub const LINK_SCHEME: &str = "nitely";
@@ -361,6 +367,7 @@ fn issue_from_row(r: &Row) -> rusqlite::Result<IssueRecord> {
         created_at: r.get(14)?,
         updated_at: r.get(15)?,
         owner: r.get(16)?,
+        goal: r.get(17)?,
         ..Default::default()
     })
 }
@@ -766,6 +773,9 @@ impl Db {
         if state == "Approved" {
             bail!("an issue cannot be filed as Approved");
         }
+        if let Some(goal) = new.goal {
+            self.goal_for(Some(&project.key), goal)?;
+        }
         Ok(CheckedIssue {
             project: project.key,
             title: title.to_string(),
@@ -776,6 +786,7 @@ impl Db {
             priority: new.priority,
             owner: owner.to_string(),
             labels: normalize_labels(&new.labels)?,
+            goal: new.goal,
             state,
             state_type,
         })

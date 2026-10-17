@@ -63,6 +63,11 @@ enum Cmd {
         #[arg(long)]
         session: Option<String>,
     },
+    /// Goals: the outcomes a project works toward, and the issues that get it there.
+    Goal {
+        #[command(subcommand)]
+        command: GoalCmd,
+    },
     /// Projects: a backlog with its own issue prefix.
     Project {
         #[command(subcommand)]
@@ -246,6 +251,39 @@ enum TokensCmd {
 }
 
 #[derive(Subcommand)]
+enum GoalCmd {
+    /// A project's active goals with their progress (--all for done and dropped ones too).
+    List {
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        all: bool,
+    },
+    /// One goal and its issues.
+    Show { id: i64 },
+    /// Create a goal (no --id: --title and --outcome needed) or change one.
+    Save {
+        #[arg(long)]
+        id: Option<i64>,
+        #[arg(long)]
+        title: Option<String>,
+        /// One paragraph: what is true once it is reached.
+        #[arg(long)]
+        outcome: Option<String>,
+        /// YYYY-MM-DD; an empty value clears it.
+        #[arg(long)]
+        target: Option<String>,
+        /// active, done or dropped.
+        #[arg(long)]
+        state: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Put an issue in a goal, or take it out with goal 0.
+    Attach { key: String, goal: i64 },
+}
+
+#[derive(Subcommand)]
 enum ProjectCmd {
     /// Create a project, e.g. `nitely project create NIT Nitely`.
     Create { key: String, name: String },
@@ -303,6 +341,9 @@ enum IssueCmd {
         /// An issue that must close before this one can start (repeatable).
         #[arg(long)]
         blocked_by: Vec<String>,
+        /// An active goal of the project to file it into.
+        #[arg(long)]
+        goal: Option<i64>,
     },
     /// File many issues at once from a JSON list (a file, or - for stdin). Each item has a `ref`
     /// and file_issue's fields; its blocked_by may name refs of the same list. Prints each ref's key.
@@ -537,6 +578,25 @@ fn run(cmd: Cmd) -> Result<()> {
                 state: "working".into(),
             })
         }
+        Cmd::Goal { command } => {
+            let db = Db::open_default()?;
+            match command {
+                GoalCmd::List { project, all } => {
+                    let project = resolve_project(&Config::load()?, &db, project.as_deref(), &cwd()?)?;
+                    print_json(&db.goals(&project, all)?)
+                }
+                GoalCmd::Show { id } => print_json(&db.goal_detail(id)?),
+                GoalCmd::Save { id, title, outcome, target, state, project } => {
+                    let project = match id {
+                        Some(_) => String::new(),
+                        None => resolve_project(&Config::load()?, &db, project.as_deref(), &cwd()?)?,
+                    };
+                    let change = nitely_core::goals::GoalChange { title, outcome, target_date: target, state };
+                    print_json(&db.save_goal(&project, id, &change, &me)?)
+                }
+                GoalCmd::Attach { key, goal } => print_json(&db.set_issue_goal(&key, Some(goal).filter(|g| *g > 0), &me)?),
+            }
+        }
         Cmd::Project { command } => {
             let mut db = Db::open_default()?;
             match command {
@@ -562,10 +622,10 @@ fn run(cmd: Cmd) -> Result<()> {
             let config = Config::load()?;
             let mut db = Db::open_default()?;
             match command {
-                IssueCmd::Create { title, kind, source, evidence, body, priority, project, state, owner, labels, allow_similar, blocked_by } => {
+                IssueCmd::Create { title, kind, source, evidence, body, priority, project, state, owner, labels, allow_similar, blocked_by, goal } => {
                     let project = resolve_project(&config, &db, project.as_deref(), &cwd()?)?;
                     let issue = db.create_issue(
-                        &NewIssue { project, title, body, kind, source, evidence, priority, allow_similar, state, owner, blocked_by, labels },
+                        &NewIssue { project, title, body, kind, source, evidence, priority, allow_similar, state, owner, blocked_by, labels, goal },
                         &me,
                     )?;
                     print_json(&issue)
@@ -596,6 +656,7 @@ fn run(cmd: Cmd) -> Result<()> {
                                 owner: opt(item, "owner"),
                                 blocked_by: strings(item, "blocked_by"),
                                 labels: strings(item, "labels"),
+                                goal: item.get("goal").and_then(|g| g.as_i64()).filter(|g| *g > 0),
                             },
                         })
                         .collect();
@@ -661,6 +722,7 @@ fn run(cmd: Cmd) -> Result<()> {
                             owner: Some(field(&item, "owner")).filter(|s| !s.is_empty()),
                             allow_similar: false,
                             blocked_by: Vec::new(),
+                            goal: None,
                             labels: item
                                 .get("labels")
                                 .and_then(|a| a.as_array())

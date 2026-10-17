@@ -246,6 +246,27 @@ fn tools() -> Value {
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
+            "name": "goals",
+            "description": "A project's goals: the outcomes it works toward, with how many of each one's issues are done, open or dropped. Give id for one goal with all its issues. Active goals only unless include_closed.",
+            "inputSchema": { "type": "object", "properties": {
+                "id": { "type": "integer" },
+                "include_closed": { "type": "boolean" },
+                "project": { "type": "string" }
+            } }
+        },
+        {
+            "name": "save_goal",
+            "description": "Create a goal (no id: title and outcome needed) or change one: title, outcome (one paragraph on what is true once it is reached), target_date (YYYY-MM-DD, empty clears it), state (active, done, dropped). Put issues in it with goal on file_issue, file_issues or update_issue.",
+            "inputSchema": { "type": "object", "properties": {
+                "id": { "type": "integer" },
+                "title": { "type": "string" },
+                "outcome": { "type": "string" },
+                "target_date": { "type": "string" },
+                "state": { "type": "string", "enum": ["active", "done", "dropped"] },
+                "project": { "type": "string" }
+            } }
+        },
+        {
             "name": "get_project",
             "description": "The project's brief (what earlier agents learned about it: vision, state of each area, target order, open questions for the owner) and its setup marker (null until the first-run sweep has run; otherwise the commit it read). Read it before exploring the repo.",
             "inputSchema": { "type": "object", "properties": {
@@ -292,6 +313,7 @@ fn tools() -> Value {
                 "owner": { "type": "string", "enum": OWNERS, "description": "human for work only the human can do (buy hardware, sign a contract, use a console only they can reach); next_task never hands it out. Defaults to agent." },
                 "project": { "type": "string" },
                 "allow_similar": { "type": "boolean" },
+                "goal": { "type": "integer", "description": "An active goal of the project to file it into (the goals tool lists them)." },
                 "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Issues that must close before this one can start, e.g. [\"NIT-9\"]." },
                 "labels": { "type": "array", "items": { "type": "string" }, "description": "Areas and platforms, e.g. [\"ios\", \"billing\"]: reuse the project's labels (list_issues shows them); kind and priority have their own fields." }
             } }
@@ -311,6 +333,7 @@ fn tools() -> Value {
                     "state": { "type": "string", "enum": ["Todo", "Backlog", "Needs You"] },
                     "owner": { "type": "string", "enum": OWNERS },
                     "allow_similar": { "type": "boolean" },
+                    "goal": { "type": "integer", "description": "An active goal of the project to file it into (the goals tool lists them)." },
                     "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Refs of this batch or existing issue keys." },
                     "labels": { "type": "array", "items": { "type": "string" }, "description": "Areas and platforms; reuse the project's labels." }
                 } } }
@@ -327,6 +350,7 @@ fn tools() -> Value {
                 "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Issues to add as blockers of this one." },
                 "remove_blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Blockers to remove." },
                 "owner": { "type": "string", "enum": ["human"], "description": "human makes it the human's own work." },
+                "goal": { "type": "integer", "description": "Put it in this active goal of its project; 0 takes it out of its goal." },
                 "labels": { "type": "array", "items": { "type": "string" }, "description": "Labels to add (areas and platforms)." },
                 "remove_labels": { "type": "array", "items": { "type": "string" }, "description": "Labels to remove." }
             } }
@@ -502,6 +526,7 @@ fn new_issue(args: &Value, project: &str, vendor: &str) -> Result<NewIssue> {
         allow_similar: args.get("allow_similar").and_then(Value::as_bool).unwrap_or(false),
         state: str_arg(args, "state").map(str::to_string),
         owner: str_arg(args, "owner").map(str::to_string),
+        goal: args.get("goal").and_then(Value::as_i64).filter(|g| *g > 0),
         blocked_by: keys_arg(args, "blocked_by"),
         labels: keys_arg(args, "labels"),
     })
@@ -625,6 +650,25 @@ fn run_tool(server: &Server, name: &str, args: &Value, session: &str) -> Result<
             json!(issues)
         }
         "setup_guide" => json!({ "guide": nitely_core::instructions::SETUP_GUIDE }),
+        "goals" => match args.get("id").and_then(Value::as_i64) {
+            Some(id) => json!(db.goal_detail(id)?),
+            None => json!(db.goals(&project(&db)?, args.get("include_closed").and_then(Value::as_bool).unwrap_or(false))?),
+        },
+        "save_goal" => {
+            let change = nitely_core::goals::GoalChange {
+                title: str_arg(args, "title").map(str::to_string),
+                outcome: str_arg(args, "outcome").map(str::to_string),
+                // An empty string clears the date, so it is read as given.
+                target_date: args.get("target_date").and_then(Value::as_str).map(str::to_string),
+                state: str_arg(args, "state").map(str::to_string),
+            };
+            let id = args.get("id").and_then(Value::as_i64);
+            let project = match id {
+                Some(_) => String::new(),
+                None => project(&db)?,
+            };
+            json!(db.save_goal(&project, id, &change, &actor)?)
+        }
         "get_project" => json!(db.project_brief(&project(&db)?)?),
         "set_project_brief" => {
             let revision = args.get("revision").and_then(Value::as_i64).ok_or_else(|| anyhow!("missing revision: pass the one get_project returned"))?;
@@ -679,8 +723,9 @@ fn run_tool(server: &Server, name: &str, args: &Value, session: &str) -> Result<
             let (add, remove) = (keys_arg(args, "blocked_by"), keys_arg(args, "remove_blocked_by"));
             let owner = str_arg(args, "owner");
             let (add_labels, remove_labels) = (keys_arg(args, "labels"), keys_arg(args, "remove_labels"));
-            if str_arg(args, "state").is_none() && add.is_empty() && remove.is_empty() && owner.is_none() && add_labels.is_empty() && remove_labels.is_empty() {
-                bail!("give a state, blocked_by, remove_blocked_by, labels, remove_labels or owner");
+            let goal = args.get("goal").and_then(Value::as_i64);
+            if str_arg(args, "state").is_none() && add.is_empty() && remove.is_empty() && owner.is_none() && add_labels.is_empty() && remove_labels.is_empty() && goal.is_none() {
+                bail!("give a state, blocked_by, remove_blocked_by, labels, remove_labels, owner or goal");
             }
             // Refuse bad labels before anything changes.
             nitely_core::issues::normalize_labels(&add_labels)?;
@@ -701,6 +746,9 @@ fn run_tool(server: &Server, name: &str, args: &Value, session: &str) -> Result<
             }
             if let Some(owner) = owner {
                 db.set_owner(key, owner, &actor)?;
+            }
+            if let Some(goal) = goal {
+                db.set_issue_goal(key, Some(goal).filter(|g| *g > 0), &actor)?;
             }
             let mut out = match str_arg(args, "state") {
                 Some(state) => json!(db.move_issue(key, state, str_arg(args, "evidence"), str_arg(args, "reason"), &actor)?),

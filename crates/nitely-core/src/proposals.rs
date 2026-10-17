@@ -560,6 +560,7 @@ impl Db {
                 labels: vec!["playbook".into()],
                 // Only the human decides it, so no agent is ever handed it.
                 owner: Some("human".into()),
+                goal: None,
             },
             actor,
         );

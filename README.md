@@ -84,6 +84,7 @@ Until then, build it from source:
 | `run_gate`, `submit`, `land` | Run the gate; hand in a branch for review and a pull request; merge it |
 | `setup_guide`, `get_project`, `set_project_brief`, `mark_setup_complete` | Set up a project and keep its brief |
 | `propose_playbook_change` | Suggest a rule change for you to apply or reject |
+| `goals`, `save_goal` | Group issues under an outcome and see how far along each goal is (`goal` on filing and updates) |
 
 Every command has a CLI twin (`nitely submit`, `nitely land APP-4`, ...); `nitely --help` lists them.
 

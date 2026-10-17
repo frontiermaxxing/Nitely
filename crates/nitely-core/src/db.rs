@@ -37,10 +37,23 @@ CREATE TABLE IF NOT EXISTS issue (
   claimed_by TEXT,
   claimed_at INTEGER,
   owner      TEXT NOT NULL DEFAULT 'agent', -- 'human' for work only a human can do; next_task skips it
+  goal       INTEGER,                      -- the goal it belongs to, if any
   created_at TEXT NOT NULL DEFAULT '',
   updated_at TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS issue_project ON issue (project, state_type);
+CREATE TABLE IF NOT EXISTS goal (          -- an outcome a project works toward, and its issues
+  id          INTEGER PRIMARY KEY,
+  project     TEXT NOT NULL,
+  title       TEXT NOT NULL,
+  outcome     TEXT NOT NULL,               -- one paragraph: what is true once it is reached
+  target_date TEXT,                        -- YYYY-MM-DD
+  state       TEXT NOT NULL DEFAULT 'active', -- active | done | dropped
+  created_by  TEXT NOT NULL,
+  created_at  INTEGER NOT NULL,
+  updated_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS goal_project ON goal (project, state);
 CREATE TABLE IF NOT EXISTS issue_blocker (  -- issue_key cannot start before blocker_key closes
   issue_key   TEXT NOT NULL,
   blocker_key TEXT NOT NULL,
@@ -235,7 +248,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS playbook_proposal_pending ON playbook_proposal
 
 /// Bumped when a table changes shape. Tables that only mirror Bitbucket or Linear are dropped
 /// and refilled by the next sync; tables Nitely owns get real migrations.
-const SCHEMA_VERSION: i64 = 19;
+const SCHEMA_VERSION: i64 = 20;
 
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -277,6 +290,8 @@ fn migrate(conn: &Connection) -> Result<()> {
     // v18 adds mirror_project, issue_mirror, mirror_comment and issue_private, which SCHEMA creates.
     // v19 adds issue_mirror.left_on: copies on repos the origin no longer points at.
     add_column(conn, "issue_mirror", "left_on", "TEXT")?;
+    // v20 adds the goal table, which SCHEMA creates, and issue.goal.
+    add_column(conn, "issue", "goal", "INTEGER")?;
     Ok(())
 }
 

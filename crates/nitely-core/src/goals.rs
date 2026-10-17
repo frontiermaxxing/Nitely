@@ -1,0 +1,316 @@
+//! Goals: an outcome a project works toward ("strangers can install Nitely"), with the issues that
+//! get it there. An issue belongs to at most one goal; blockers still link issues across goals. A
+//! goal is active until someone marks it done or dropped, and its progress is its issues' states.
+
+use crate::db::{now, Db};
+use crate::issues::{Actor, IssueRecord};
+use anyhow::{bail, Context, Result};
+use rusqlite::{params, OptionalExtension};
+use serde::Serialize;
+
+pub const GOAL_STATES: &[&str] = &["active", "done", "dropped"];
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Goal {
+    pub id: i64,
+    pub project: String,
+    pub title: String,
+    /// One paragraph: what is true once the goal is reached.
+    pub outcome: String,
+    /// `YYYY-MM-DD`, or none.
+    pub target_date: Option<String>,
+    /// active, done or dropped.
+    pub state: String,
+    pub created_by: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub progress: Progress,
+}
+
+/// How a goal's issues stand: every issue counts once.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Progress {
+    pub total: i64,
+    /// Done.
+    pub done: i64,
+    /// Canceled or duplicate: no longer part of the work.
+    pub dropped: i64,
+    /// Everything else.
+    pub open: i64,
+}
+
+/// A goal with its issues, open and closed.
+#[derive(Debug, Clone, Serialize)]
+pub struct GoalDetail {
+    pub goal: Goal,
+    pub issues: Vec<IssueRecord>,
+}
+
+/// What `save_goal` changes; `None` leaves a field as it is. A new goal needs a title and outcome.
+#[derive(Debug, Clone, Default)]
+pub struct GoalChange {
+    pub title: Option<String>,
+    pub outcome: Option<String>,
+    /// `Some("")` clears the date.
+    pub target_date: Option<String>,
+    pub state: Option<String>,
+}
+
+const COLUMNS: &str = "g.id, g.project, g.title, g.outcome, g.target_date, g.state, g.created_by, g.created_at, g.updated_at,
+    (SELECT COUNT(*) FROM issue i WHERE i.goal = g.id),
+    (SELECT COUNT(*) FROM issue i WHERE i.goal = g.id AND i.state_type = 'completed'),
+    (SELECT COUNT(*) FROM issue i WHERE i.goal = g.id AND i.state_type = 'canceled')";
+
+fn goal_from_row(r: &rusqlite::Row) -> rusqlite::Result<Goal> {
+    let (total, done, dropped): (i64, i64, i64) = (r.get(9)?, r.get(10)?, r.get(11)?);
+    Ok(Goal {
+        id: r.get(0)?,
+        project: r.get(1)?,
+        title: r.get(2)?,
+        outcome: r.get(3)?,
+        target_date: r.get(4)?,
+        state: r.get(5)?,
+        created_by: r.get(6)?,
+        created_at: r.get(7)?,
+        updated_at: r.get(8)?,
+        progress: Progress { total, done, dropped, open: total - done - dropped },
+    })
+}
+
+/// `YYYY-MM-DD` with a real month and day, or nothing.
+fn check_date(date: &str) -> Result<Option<String>> {
+    let date = date.trim();
+    if date.is_empty() {
+        return Ok(None);
+    }
+    let parts: Vec<&str> = date.split('-').collect();
+    let ok = parts.len() == 3
+        && parts[0].len() == 4
+        && parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+        && (1..=12).contains(&parts[1].parse::<u32>().unwrap_or(0))
+        && (1..=31).contains(&parts[2].parse::<u32>().unwrap_or(0))
+        && parts[1].len() == 2
+        && parts[2].len() == 2;
+    if !ok {
+        bail!("a target date is YYYY-MM-DD, e.g. 2026-12-01");
+    }
+    Ok(Some(date.to_string()))
+}
+
+impl Db {
+    /// A project's goals, active ones first and nearer target dates first; closed ones only when
+    /// asked for.
+    pub fn goals(&self, project: &str, include_closed: bool) -> Result<Vec<Goal>> {
+        let p = self.project(project)?.with_context(|| format!("no project {project}"))?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {COLUMNS} FROM goal g WHERE g.project = ?1 AND (?2 OR g.state = 'active')
+             ORDER BY g.state != 'active', g.target_date IS NULL, g.target_date, g.id"
+        ))?;
+        let rows = stmt.query_map(params![p.key, include_closed], goal_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn goal(&self, id: i64) -> Result<Option<Goal>> {
+        Ok(self.conn.query_row(&format!("SELECT {COLUMNS} FROM goal g WHERE g.id = ?1"), [id], goal_from_row).optional()?)
+    }
+
+    /// A goal and every issue in it, the open ones in the order `list_issues` gives.
+    pub fn goal_detail(&self, id: i64) -> Result<GoalDetail> {
+        let goal = self.goal(id)?.with_context(|| format!("no goal {id}"))?;
+        let issues = self.list_issues(Some(&goal.project), true)?.into_iter().filter(|i| i.goal == Some(id)).collect();
+        Ok(GoalDetail { goal, issues })
+    }
+
+    /// Creates a goal (`id` None) or changes one.
+    pub fn save_goal(&self, project: &str, id: Option<i64>, change: &GoalChange, actor: &Actor) -> Result<Goal> {
+        let clean = |s: &Option<String>| s.as_deref().map(str::trim).map(str::to_string);
+        let (title, outcome) = (clean(&change.title), clean(&change.outcome));
+        if title.as_deref() == Some("") || outcome.as_deref() == Some("") {
+            bail!("a goal's title and outcome cannot be empty");
+        }
+        let target = change.target_date.as_deref().map(check_date).transpose()?;
+        if let Some(state) = change.state.as_deref() {
+            if !GOAL_STATES.contains(&state) {
+                bail!("a goal's state is one of {}", GOAL_STATES.join(", "));
+            }
+        }
+        let ts = now();
+        let id = match id {
+            None => {
+                let p = self.project(project)?.with_context(|| format!("no project {project}"))?;
+                let (Some(title), Some(outcome)) = (title, outcome) else {
+                    bail!("a new goal needs a title and an outcome: one paragraph on what is true once it is reached");
+                };
+                self.conn.execute(
+                    "INSERT INTO goal (project, title, outcome, target_date, state, created_by, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                    params![p.key, title, outcome, target.flatten(), change.state.as_deref().unwrap_or("active"), actor.id(), ts],
+                )?;
+                self.conn.last_insert_rowid()
+            }
+            Some(id) => {
+                let goal = self.goal(id)?.with_context(|| format!("no goal {id}"))?;
+                self.conn.execute(
+                    "UPDATE goal SET title = ?2, outcome = ?3, target_date = ?4, state = ?5, updated_at = ?6 WHERE id = ?1",
+                    params![
+                        id,
+                        title.unwrap_or(goal.title),
+                        outcome.unwrap_or(goal.outcome),
+                        match target {
+                            Some(t) => t,
+                            None => goal.target_date,
+                        },
+                        change.state.clone().unwrap_or(goal.state),
+                        ts
+                    ],
+                )?;
+                id
+            }
+        };
+        self.goal(id)?.context("goal vanished")
+    }
+
+    /// Puts an issue in a goal of its project, or (`None`) takes it out of the one it is in. Only
+    /// active goals take new issues. Logged on the issue's timeline.
+    pub fn set_issue_goal(&self, key: &str, goal: Option<i64>, actor: &Actor) -> Result<IssueRecord> {
+        let issue = self.issue(key)?.with_context(|| format!("no issue {key}"))?;
+        if issue.origin != "nitely" {
+            bail!("{} is mirrored from {}; only native issues have goals", issue.key, issue.origin);
+        }
+        if issue.goal == goal {
+            return Ok(issue);
+        }
+        let summary = match goal {
+            Some(id) => format!("Goal: {}", self.goal_for(issue.project.as_deref(), id)?.title),
+            None => match issue.goal.and_then(|g| self.goal(g).ok().flatten()) {
+                Some(old) => format!("Left goal: {}", old.title),
+                None => "Left its goal".to_string(),
+            },
+        };
+        let ts = now();
+        self.conn.execute("UPDATE issue SET goal = ?2, updated_at = ?3 WHERE key = ?1", params![issue.key, goal, crate::issues::iso(ts)])?;
+        self.conn.execute(
+            "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, ?2, ?3, 'goal_changed', ?4)",
+            params![ts, actor.id(), issue.key, summary],
+        )?;
+        self.issue(&issue.key)?.context("issue vanished")
+    }
+
+    /// The goal `id`, if an issue of `project` may join it: same project, and active.
+    pub(crate) fn goal_for(&self, project: Option<&str>, id: i64) -> Result<Goal> {
+        let goal = self.goal(id)?.with_context(|| format!("no goal {id}; list them with the goals tool"))?;
+        if project.is_some_and(|p| !p.eq_ignore_ascii_case(&goal.project)) {
+            bail!("goal {id} belongs to {}, not {}", goal.project, project.unwrap_or_default());
+        }
+        if goal.state != "active" {
+            bail!("goal {id} ({}) is {}; reopen it (state active) before adding issues", goal.title, goal.state);
+        }
+        Ok(goal)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::NewIssue;
+
+    fn db() -> Db {
+        let dir = crate::paths::unique_temp("nitely-goals", "");
+        let db = Db::open(&dir.join("t.db")).unwrap();
+        db.create_project("NIT", "Nitely").unwrap();
+        db.create_project("OPS", "Ops").unwrap();
+        db
+    }
+
+    fn issue(db: &mut Db, project: &str, title: &str, goal: Option<i64>) -> String {
+        let new = NewIssue {
+            project: project.into(),
+            title: title.into(),
+            body: format!("{title}, in full"),
+            kind: "feature".into(),
+            source: "claude".into(),
+            evidence: "none yet".into(),
+            allow_similar: true,
+            goal,
+            ..Default::default()
+        };
+        db.create_issue(&new, &Actor::Agent("claude:/w".into())).unwrap().key
+    }
+
+    #[test]
+    fn goals_hold_issues_and_count_their_progress() {
+        let mut db = db();
+        let agent = Actor::Agent("claude:/w".into());
+        let release = GoalChange { title: Some("Public release".into()), outcome: Some("Strangers install it.".into()), target_date: Some("2026-12-01".into()), ..Default::default() };
+        let g = db.save_goal("nit", None, &release, &agent).unwrap();
+        assert_eq!((g.project.as_str(), g.state.as_str(), g.target_date.as_deref()), ("NIT", "active", Some("2026-12-01")));
+
+        let a = issue(&mut db, "NIT", "Signed installers", Some(g.id));
+        let b = issue(&mut db, "NIT", "Auto-update", None);
+        db.set_issue_goal(&b, Some(g.id), &agent).unwrap();
+        assert_eq!(db.issue(&b).unwrap().unwrap().goal, Some(g.id));
+        assert!(db.timeline(&b).unwrap().iter().any(|e| e.kind == "goal_changed" && e.summary.as_deref() == Some("Goal: Public release")));
+        db.move_issue(&a, "Done", Some("shipped"), None, &agent).unwrap();
+
+        let d = db.goal_detail(g.id).unwrap();
+        assert_eq!(d.issues.len(), 2);
+        assert_eq!((d.goal.progress.total, d.goal.progress.done, d.goal.progress.open), (2, 1, 1));
+
+        db.set_issue_goal(&b, None, &agent).unwrap();
+        assert_eq!(db.goal(g.id).unwrap().unwrap().progress.total, 1);
+    }
+
+    #[test]
+    fn issues_join_only_an_active_goal_of_their_project() {
+        let mut db = db();
+        let agent = Actor::Agent("claude:/w".into());
+        let new = |t: &str| GoalChange { title: Some(t.into()), outcome: Some("o".into()), ..Default::default() };
+        let ops = db.save_goal("OPS", None, &new("Ops goal"), &agent).unwrap();
+        let nit = db.save_goal("NIT", None, &new("Nit goal"), &agent).unwrap();
+        let key = issue(&mut db, "NIT", "Something", None);
+        assert!(db.set_issue_goal(&key, Some(ops.id), &agent).unwrap_err().to_string().contains("belongs to OPS"));
+        assert!(db.set_issue_goal(&key, Some(999), &agent).is_err());
+        db.save_goal("NIT", Some(nit.id), &GoalChange { state: Some("done".into()), ..Default::default() }, &agent).unwrap();
+        assert!(db.set_issue_goal(&key, Some(nit.id), &agent).unwrap_err().to_string().contains("is done"));
+        // Filing straight into a closed goal is refused too, and files nothing.
+        let filed = db.create_issue(
+            &NewIssue { project: "NIT".into(), title: "Late".into(), body: "b".into(), kind: "bug".into(), source: "claude".into(), evidence: "e".into(), goal: Some(nit.id), ..Default::default() },
+            &agent,
+        );
+        assert!(filed.is_err());
+        assert_eq!(db.list_issues(Some("NIT"), true).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn goals_follow_a_new_key_and_go_with_the_project() {
+        let mut db = db();
+        let agent = Actor::Agent("claude:/w".into());
+        let g = db.save_goal("OPS", None, &GoalChange { title: Some("Calm on-call".into()), outcome: Some("o".into()), ..Default::default() }, &agent).unwrap();
+        issue(&mut db, "OPS", "Page less", Some(g.id));
+        db.rekey_project("OPS", "OP").unwrap();
+        let moved = db.goals("op", false).unwrap();
+        assert_eq!((moved.len(), moved[0].progress.total), (1, 1));
+        db.remove_project("OP", true).unwrap();
+        assert!(db.goal(g.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn goals_list_active_first_by_date_and_validate_their_fields() {
+        let db = db();
+        let agent = Actor::Human;
+        let new = |t: &str, d: Option<&str>| GoalChange { title: Some(t.into()), outcome: Some("o".into()), target_date: d.map(str::to_string), ..Default::default() };
+        let later = db.save_goal("NIT", None, &new("Later", Some("2027-03-01")), &agent).unwrap();
+        db.save_goal("NIT", None, &new("Undated", None), &agent).unwrap();
+        db.save_goal("NIT", None, &new("Sooner", Some("2026-11-01")), &agent).unwrap();
+        db.save_goal("NIT", Some(later.id), &GoalChange { state: Some("dropped".into()), ..Default::default() }, &agent).unwrap();
+        let titles = |all: bool| db.goals("NIT", all).unwrap().into_iter().map(|g| g.title).collect::<Vec<_>>();
+        assert_eq!(titles(false), ["Sooner", "Undated"]);
+        assert_eq!(titles(true), ["Sooner", "Undated", "Later"]);
+        assert!(db.save_goal("NIT", None, &new("Bad date", Some("2026-13-01")), &agent).is_err());
+        assert!(db.save_goal("NIT", None, &GoalChange { title: Some("No outcome".into()), ..Default::default() }, &agent).is_err());
+        assert!(db.save_goal("NIT", Some(later.id), &GoalChange { state: Some("paused".into()), ..Default::default() }, &agent).is_err());
+        // Clearing the date.
+        let cleared = db.save_goal("NIT", Some(later.id), &GoalChange { target_date: Some(String::new()), ..Default::default() }, &agent).unwrap();
+        assert_eq!(cleared.target_date, None);
+    }
+}

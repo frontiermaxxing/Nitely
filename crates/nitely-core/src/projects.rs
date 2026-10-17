@@ -247,6 +247,7 @@ impl Db {
         tx.execute("UPDATE project SET key = ?2 WHERE key = ?1", params![from, to])?;
         tx.execute("UPDATE project_alias SET project = ?2 WHERE project = ?1", params![from, to])?;
         tx.execute("UPDATE project_brief SET project = ?2 WHERE project = ?1", params![from, to])?;
+        tx.execute("UPDATE goal SET project = ?2 WHERE project = ?1", params![from, to])?;
         tx.execute("UPDATE crew_worker SET project = ?2 WHERE project = ?1", params![from, to])?;
         tx.execute("UPDATE mirror_project SET project = ?2 WHERE project = ?1", params![from, to])?;
         tx.execute("DELETE FROM crew_control WHERE project = ?1", [&to])?;
@@ -292,6 +293,7 @@ impl Db {
         tx.execute("DELETE FROM issue WHERE project = ?1", [&key])?;
         tx.execute("DELETE FROM project_alias WHERE project = ?1", [&key])?;
         tx.execute("DELETE FROM project_brief WHERE project = ?1", [&key])?;
+        tx.execute("DELETE FROM goal WHERE project = ?1", [&key])?;
         tx.execute("DELETE FROM crew_control WHERE project = ?1", [&key])?;
         // A project made again under this key starts with the mirror off and nothing published.
         tx.execute("DELETE FROM mirror_project WHERE project = ?1", [&key])?;
