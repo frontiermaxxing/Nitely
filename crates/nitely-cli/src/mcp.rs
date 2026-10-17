@@ -835,6 +835,7 @@ fn run_tool(server: &Server, name: &str, args: &Value, params: &Value) -> Result
             // Check the move first, so a refused move leaves the blockers as they were.
             if let Some(state) = str_arg(args, "state") {
                 db.check_move(key, state, str_arg(args, "evidence"), str_arg(args, "reason"), &actor)?;
+                db.check_open_asks(key, state)?;
             }
             db.change_blockers(key, &add, &remove, &actor)?;
             let mut note = None;
@@ -850,10 +851,7 @@ fn run_tool(server: &Server, name: &str, args: &Value, params: &Value) -> Result
                 db.set_issue_goal(key, Some(goal).filter(|g| *g > 0), &actor)?;
             }
             let mut out = match str_arg(args, "state") {
-                Some(state) => {
-                    db.check_open_asks(key, state)?;
-                    json!(db.move_issue(key, state, str_arg(args, "evidence"), str_arg(args, "reason"), &actor)?)
-                }
+                Some(state) => json!(db.move_issue(key, state, str_arg(args, "evidence"), str_arg(args, "reason"), &actor)?),
                 None => json!(db.issue(key)?.with_context(|| format!("no issue {key}"))?),
             };
             if let Some(note) = note {

@@ -1092,7 +1092,8 @@ impl Db {
     /// Done (NIT-220). Nitely's own closing moves decide their asks themselves: a land closes what
     /// was asked about the change, an approved playbook change or goal plan answers its issue.
     pub fn check_open_asks(&self, key: &str, to: &str) -> Result<()> {
-        if !to.eq_ignore_ascii_case("done") {
+        // As move_issue reads the state, so no spelling of Done gets past.
+        if parse_state(to)?.0 != "Done" {
             return Ok(());
         }
         let issue = self.issue(key)?.with_context(|| format!("no issue {key}"))?;
@@ -1986,6 +1987,7 @@ mod tests {
         // first, or the issue canceled. Nitely's own closing moves (a land) close it with the issue.
         let refused = db.check_open_asks(&done.key, "Done").unwrap_err().to_string();
         assert!(refused.contains("1 open question: answer it first"), "{refused}");
+        assert!(db.check_open_asks(&done.key, " done ").is_err(), "as move_issue reads it");
         assert!(db.check_open_asks(&done.key, "Canceled").is_ok());
         db.move_issue(&done.key, "Done", Some("landed"), None, &agent).unwrap();
         let closed = db.ask(open.id).unwrap().unwrap();
