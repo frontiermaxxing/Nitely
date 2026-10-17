@@ -37,6 +37,7 @@ import type {
   PlaybookProposal,
   Project,
   GoalDetail,
+  GoalPlanView,
   ProjectBrief,
   Pulse,
   RepoView,
@@ -309,6 +310,10 @@ const ISSUES: IssueSpec[] = [
   {
     key: "HAR-17", title: "Renew the payment provider's live API key", kind: "live-check", priority: 2, vendor: "claude", from: 4, to: 4, story: ["filed"], owner: "human",
     body: "The provider's dashboard shows the live key expires on the 30th. Rotate it there and paste the new one into the deploy secrets; no agent can sign in to that dashboard.\n\nFound while checking why the staging checkout warned about the key.",
+  },
+  {
+    key: "HAR-18", title: "Plan: Guests can change a booking themselves", kind: "feature", priority: 2, vendor: "claude", from: 1.2, to: 1.2, story: ["filed"], owner: "human",
+    body: "claude drafted this goal from what you asked for: \"let guests change their own bookings\". Approve to create the goal and file its issues; cancel it with a reason to file nothing.",
   },
   { key: "HAR-9", title: "Price shows twice on small screens", kind: "bug", priority: 3, vendor: "cursor", from: 130, to: 75, story: ["filed", "claim", "work", "gate", "review", "pass", "land"] },
   {
@@ -1039,7 +1044,58 @@ function detail(key: string): IssueDetail {
     prs: world.prs.get(issue.key) ?? [],
     reviews: world.reviews.get(issue.key) ?? [],
     proposal: PROPOSALS.get(issue.key) ?? null,
+    goal_plan: PLANS.get(issue.key) ?? null,
   };
+}
+
+// A goal plan an agent drafted (see HAR-18's story); the person decides it in the Inbox.
+const PLANS = new Map<string, GoalPlanView>([
+  [
+    "HAR-18",
+    {
+      id: 1,
+      issue_key: "HAR-18",
+      project: "HAR",
+      plan: {
+        sentence: "let guests change their own bookings",
+        title: "Guests can change a booking themselves",
+        outcome: "A guest moves or cancels their own booking from the confirmation email, within the house rules, and the front desk only hears about it.",
+        target_date: null,
+        issues: [
+          { ref: "link", title: "Signed manage-booking link in the confirmation email", kind: "feature", body: "b", evidence: "none yet", priority: 2 },
+          { ref: "page", title: "Manage-booking page: move to another free date", kind: "feature", body: "b", evidence: "none yet", priority: 2, blocked_by: ["link"] },
+          { ref: "cancel", title: "Cancel within the free-cancellation window", kind: "feature", body: "b", evidence: "none yet", priority: 2, blocked_by: ["link"] },
+          { ref: "notify", title: "Tell the front desk about every change", kind: "feature", body: "b", evidence: "none yet", priority: 3, blocked_by: ["page", "cancel"] },
+        ],
+        existing: ["HAR-14"],
+      },
+      status: "pending",
+      created_by: "claude:c:/development/harbor",
+      created_at: NOW - 1.2 * HOUR,
+      outcome: null,
+      goal_id: null,
+    },
+  ],
+]);
+
+/** As nitely-core's approve_goal_plan: the plan is decided and its issue closed (the preview files nothing). */
+function approveGoalPlan(args: Record<string, unknown>) {
+  const plan = PLANS.get(String(args.key));
+  if (!plan || plan.status !== "pending") throw `${String(args.key)} carries no pending goal plan`;
+  const edit = (args.edit ?? {}) as { title?: string; drop?: string[] };
+  const kept = plan.plan.issues.filter((i) => !(edit.drop ?? []).includes(i.ref)).length + plan.plan.existing.length;
+  plan.status = "approved";
+  plan.outcome = `Goal "${edit.title || plan.plan.title}" with ${kept} issues`;
+  moveIssue({ key: plan.issue_key, state: "Done", evidence: `Approved: ${plan.outcome}.` });
+  return { outcome: plan.outcome };
+}
+
+/** As nitely-core's start_goal: the planning issue an agent picks up (the preview only says so). */
+function startGoal(args: Record<string, unknown>) {
+  const sentence = String(args.sentence ?? "").trim();
+  if (!sentence) throw "say in a sentence what the goal is";
+  const n = world.issues.filter((i) => i.project === String(args.project)).length + 100;
+  return { ...world.issues[0], key: `${String(args.project)}-${n}`, title: `Plan a goal: ${sentence}`, state: "Todo", state_type: "unstarted" };
 }
 
 // Playbook changes agents proposed, by the issue that carries them (see HAR-15's story).
@@ -1181,6 +1237,11 @@ function moveIssue(args: Record<string, unknown>) {
   const why = (args.evidence ?? args.reason) as string | null;
   world.timelines.get(issue.key)!.push({ ts, actor: "human", kind: "issue_moved", summary: `${issue.state} → ${to}${why ? `: ${why}` : ""}` });
   // Approving a proposed playbook change applies it (the playbook Nitely keeps) and closes the issue.
+  const plan = PLANS.get(issue.key);
+  if (plan?.status === "pending" && to === "Canceled") {
+    plan.status = "rejected";
+    plan.outcome = String(args.reason);
+  }
   const proposal = PROPOSALS.get(issue.key);
   const applies = proposal?.status === "pending" && to === "Approved";
   if (proposal?.status === "pending" && (applies || to === "Canceled")) {
@@ -1552,6 +1613,10 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return null;
       case "projects":
         return world.projects;
+      case "approve_goal_plan":
+        return approveGoalPlan(args);
+      case "start_goal":
+        return startGoal(args);
       case "goals":
         return goals(args);
       case "project_brief":

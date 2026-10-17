@@ -32,6 +32,25 @@ const VIEWS: { label: string; view: View }[] = [
   { label: "Add project", view: { kind: "add" } },
 ];
 
+/**
+ * Starting a goal: "Start a goal" with nothing more typed, then, for "goal <sentence>", one
+ * action per project that files the issue an agent picks up to draft the plan.
+ */
+function goalItems(query: string, projects: Project[], begin: () => void): Item[] {
+  const sentence = query.trim().match(/^goal:?\s+(.+)$/i)?.[1]?.trim();
+  if (!sentence) return [{ id: "goal-start", label: "Start a goal", hint: "type goal and a sentence", group: "Actions", run: begin }];
+  return projects.map((p) => ({
+    id: `goal-${p.key}`,
+    label: `Start the goal “${sentence}” in ${p.name}`,
+    hint: p.key,
+    group: "Actions" as Group,
+    act: async () => {
+      const issue = await invoke<IssueRecord>("start_goal", { project: p.key, sentence });
+      return `Filed ${issue.key}: an agent drafts the plan for you to approve.`;
+    },
+  }));
+}
+
 /** An issue key: a project key (letters, then letters or digits), a dash, a number. */
 const KEY = /^[A-Za-z][A-Za-z0-9]*-\d+$/;
 
@@ -89,6 +108,7 @@ export function Palette(props: {
         ),
       ),
       ...issues.map((i): Item => ({ id: `issue-${i.key}`, label: `${i.key} ${i.title}`, issue: i, group: "Issues", run: open(i.key) })),
+      ...goalItems(query, props.projects, () => setQuery("goal ")),
       ...issues.flatMap(actionsOf),
     ];
     // With nothing typed, only where to go; issues and actions need a word of what you mean. A
@@ -97,7 +117,9 @@ export function Palette(props: {
     const found = q
       ? all.filter(
           (it) =>
-            (it.label.toLowerCase().includes(q) || it.hint?.toLowerCase() === q) && (!named || it.group !== "Actions" || it.issue?.key.toLowerCase() === named),
+            // Goal actions answer "goal <sentence>", which no label holds.
+            (it.id.startsWith("goal-") && q.startsWith("goal")) ||
+            ((it.label.toLowerCase().includes(q) || it.hint?.toLowerCase() === q) && (!named || it.group !== "Actions" || it.issue?.key.toLowerCase() === named)),
         )
       : all.filter((it) => it.group === "Go to");
     // An exact key always comes first, so "nit-1" never opens NIT-100; one that no list shows

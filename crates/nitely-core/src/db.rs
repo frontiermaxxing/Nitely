@@ -54,6 +54,20 @@ CREATE TABLE IF NOT EXISTS goal (          -- an outcome a project works toward,
   updated_at  INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS goal_project ON goal (project, state);
+CREATE TABLE IF NOT EXISTS goal_plan (     -- a goal and its issues an agent drafted; the person decides it
+  id          INTEGER PRIMARY KEY,
+  issue_key   TEXT NOT NULL,               -- the human-owned issue in Needs You that carries it
+  project     TEXT NOT NULL,
+  plan        TEXT NOT NULL,               -- JSON: sentence, title, outcome, target_date, issues, existing
+  status      TEXT NOT NULL,               -- pending | approved | rejected
+  created_by  TEXT NOT NULL,
+  created_at  INTEGER NOT NULL,
+  decided_by  TEXT,
+  decided_at  INTEGER,
+  outcome     TEXT,                        -- what approving filed, or why it was rejected
+  goal_id     INTEGER                      -- the goal approving created
+);
+CREATE INDEX IF NOT EXISTS goal_plan_issue ON goal_plan (issue_key);
 CREATE TABLE IF NOT EXISTS issue_blocker (  -- issue_key cannot start before blocker_key closes
   issue_key   TEXT NOT NULL,
   blocker_key TEXT NOT NULL,
@@ -248,7 +262,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS playbook_proposal_pending ON playbook_proposal
 
 /// Bumped when a table changes shape. Tables that only mirror Bitbucket or Linear are dropped
 /// and refilled by the next sync; tables Nitely owns get real migrations.
-const SCHEMA_VERSION: i64 = 20;
+const SCHEMA_VERSION: i64 = 21;
 
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -292,6 +306,7 @@ fn migrate(conn: &Connection) -> Result<()> {
     add_column(conn, "issue_mirror", "left_on", "TEXT")?;
     // v20 adds the goal table, which SCHEMA creates, and issue.goal.
     add_column(conn, "issue", "goal", "INTEGER")?;
+    // v21 adds the goal_plan table, which SCHEMA creates.
     Ok(())
 }
 

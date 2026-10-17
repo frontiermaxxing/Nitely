@@ -78,7 +78,7 @@ fn goal_from_row(r: &rusqlite::Row) -> rusqlite::Result<Goal> {
 }
 
 /// `YYYY-MM-DD` with a real month and day, or nothing.
-fn check_date(date: &str) -> Result<Option<String>> {
+pub(crate) fn check_date(date: &str) -> Result<Option<String>> {
     let date = date.trim();
     if date.is_empty() {
         return Ok(None);

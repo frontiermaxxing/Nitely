@@ -85,6 +85,7 @@ Until then, build it from source:
 | `setup_guide`, `get_project`, `set_project_brief`, `mark_setup_complete` | Set up a project and keep its brief |
 | `propose_playbook_change` | Suggest a rule change for you to apply or reject |
 | `goals`, `save_goal` | Group issues under an outcome and see how far along each goal is (`goal` on filing and updates) |
+| `propose_goal` | Draft a goal and its issues from your sentence, for you to approve (and edit) in the Inbox |
 
 Every command has a CLI twin (`nitely submit`, `nitely land APP-4`, ...); `nitely --help` lists them.
 

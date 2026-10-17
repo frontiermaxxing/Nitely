@@ -111,6 +111,8 @@ pub struct IssueDetail {
     pub reviews: Vec<crate::submit::ReviewRecord>,
     /// The playbook change the issue carries, when an agent proposed one.
     pub proposal: Option<crate::proposals::Proposal>,
+    /// The goal plan the issue carries, when an agent drafted one (goal_plans.rs).
+    pub goal_plan: Option<crate::goal_plans::GoalPlanView>,
 }
 
 /// Both directions of an issue's blocked-by relations, closed issues included.
@@ -184,6 +186,16 @@ pub struct NewIssue {
     pub labels: Vec<String>,
     /// An active goal of the same project to file it into.
     pub goal: Option<i64>,
+}
+
+/// A batch that passed its checks: each item's ref and checked issue, its blockers split into items
+/// of the batch and existing issues, and the order to file it in (blockers first).
+struct PreparedBatch<'a> {
+    refs: Vec<&'a str>,
+    checked: Vec<CheckedIssue>,
+    local: Vec<Vec<usize>>,
+    existing: Vec<Vec<String>>,
+    order: Vec<usize>,
 }
 
 /// One issue of a `file_issues` batch: a new issue, and the ref the batch's other items name it by
@@ -631,7 +643,13 @@ impl Db {
     /// refuse the whole batch before anything is filed. An item that looks like an open issue (or
     /// an earlier item of the batch) is skipped unless it allows similar; items that named it are
     /// blocked by the issue it duplicates instead.
-    pub fn create_issues(&mut self, items: &[BatchItem], actor: &Actor) -> Result<BatchFiled> {
+    /// Checks a batch as `create_issues` would before filing anything (refs, each item, blockers
+    /// and cycles), without filing it.
+    pub fn check_batch(&self, items: &[BatchItem]) -> Result<()> {
+        self.prepare_batch(items).map(|_| ())
+    }
+
+    fn prepare_batch<'a>(&self, items: &'a [BatchItem]) -> Result<PreparedBatch<'a>> {
         if items.is_empty() {
             bail!("give at least one issue");
         }
@@ -684,6 +702,12 @@ impl Db {
                 }
             }
         }
+
+        Ok(PreparedBatch { refs, checked, local, existing, order })
+    }
+
+    pub fn create_issues(&mut self, items: &[BatchItem], actor: &Actor) -> Result<BatchFiled> {
+        let PreparedBatch { refs, checked, local, existing, order } = self.prepare_batch(items)?;
 
         // Duplicates of open issues are found before the transaction; of earlier items, as it goes.
         let mut duplicates: Vec<Vec<Duplicate>> = Vec::with_capacity(items.len());
@@ -1009,6 +1033,9 @@ impl Db {
         if let Some(moved) = self.before_move(&issue.key, state, reason, actor)? {
             return Ok(moved);
         }
+        if let Some(moved) = self.before_plan_move(&issue.key, state, reason, actor)? {
+            return Ok(moved);
+        }
         let evidence = evidence.map(str::trim).filter(|e| !e.is_empty());
         let reason = reason.map(str::trim).filter(|r| !r.is_empty());
 
@@ -1171,6 +1198,7 @@ impl Db {
         }
         let owner = owner.trim();
         self.check_owner_change(key, owner)?;
+        self.check_plan_owner_change(key, owner)?;
         if !OWNERS.contains(&owner) {
             bail!("owner must be one of {}", OWNERS.join(", "));
         }
@@ -1287,6 +1315,7 @@ impl Db {
             prs: self.prs_for_issue(&issue.key)?,
             reviews: self.reviews(&issue.key)?,
             proposal: self.proposal_for_issue(&issue.key)?,
+            goal_plan: self.goal_plan_for_issue(&issue.key)?,
             issue,
         }))
     }

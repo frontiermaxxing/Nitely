@@ -187,6 +187,7 @@ needs you, and the action in place. The first decision is open until you pick an
 | Question     | an open `ask`                                         | the question              | its options, or an answer in words |
 | Approval     | an issue in Needs You                                 | why it needs a person (the review's reasons) | Approve, Send back to Todo, Open the worktree |
 | Playbook change | an issue carrying a pending `propose_playbook_change` | who proposes it and for which repo, their reasons, and the diff against the playbook as it is now | Apply change, Reject… with a reason |
+| Goal plan | an issue carrying a pending `propose_goal` | who drafted it from which sentence; the goal's title, outcome and date as fields, and its issues as a checklist with their blockers | Approve and file N (after edits and leaving items out), Reject… with a reason |
 | Conflict     | a worktree with a rebase stopped on a conflict        | the rebase and its base   | Open the worktree |
 | Waiting      | an agent session waiting for input in its terminal   | what it asks              | Open the worktree |
 | Land stopped | the track is stuck at Landing and no agent is working | why the land stopped      | Open the worktree, Send back to Todo |
@@ -340,6 +341,11 @@ A goal is an outcome a project works toward (`crates/nitely-core/src/goals.rs`),
 - **The issues:** every issue as an `IssueToken` in station order (`goalOrder` in `src/goals.ts`):
   done to the left, then the furthest along (landing, needs you, review, gate, working, started),
   Todo, and Backlog last; canceled and duplicate issues are no longer part of it. The tokens wrap.
+
+A goal starts from one sentence: the palette's "Start a goal" (type `goal` and the sentence) files
+a "Plan a goal" issue; an agent drafts the goal and its issues with `propose_goal`, which files a
+human-owned "Plan: …" issue; the Inbox shows it as a Goal plan decision (`GoalPlanDecision`), and
+approving creates the goal and files its issues in one batch.
 
 Rows come active goals first, nearer target dates first. A project page shows its own goals above
 the List and the Board, under the summary; a project without goals shows none.

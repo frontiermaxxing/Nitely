@@ -8,3 +8,22 @@
 .goal-late { color: var(--fail); }
 .goal-count { margin-left: auto; color: var(--fg-2); font-size: var(--text-sm); white-space: nowrap; }
 .goal-issues { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+
+/* ----- A goal plan in the Inbox (src/GoalPlanDecision.tsx) ----- */
+.gp { display: grid; gap: 10px; }
+.gp-fields { display: grid; gap: 6px; }
+.gp-title, .gp-outcome, .gp-date input {
+  font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line-strong);
+  border-radius: var(--radius); padding: 6px 9px; min-width: 0;
+}
+.gp-title { font-weight: var(--weight-strong); }
+.gp-outcome { resize: vertical; line-height: 1.5; font-size: var(--text-md); }
+.gp-title:focus, .gp-outcome:focus, .gp-date input:focus { outline: 2px solid var(--focus); outline-offset: -1px; }
+.gp-date { display: flex; align-items: center; gap: 8px; font-size: var(--text-sm); color: var(--fg-2); }
+.gp-items { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.gp-items label { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; padding: 3px 0; cursor: default; }
+.gp-items input { margin: 0; align-self: center; }
+.gp-ref { color: var(--fg-3); font-size: 11.5px; }
+.gp-item-title { min-width: 0; overflow-wrap: anywhere; }
+.gp-item-meta { color: var(--fg-3); font-size: var(--text-xs); }
+.gp-left .gp-item-title { color: var(--fg-3); text-decoration: line-through; }

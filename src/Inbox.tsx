@@ -3,6 +3,7 @@ import { typing } from "./Palette";
 import { useEffect, useRef, useState } from "react";
 import { invoke, isPreview } from "./backend";
 import { PlaybookDiff } from "./PlaybookDiff";
+import { GoalPlanDecision } from "./GoalPlanDecision";
 import { decisionsOf, detailKeys, outcomeOf, shownDecisions, trackAfter, type Decision, type DecisionKind, type Move, type Resolved } from "./decisions";
 import { ChecksMark } from "./Pr";
 import type { Board, IssueDetail, TaskRow } from "./types";
@@ -328,6 +329,11 @@ function proposalOf(detail: IssueDetail | undefined) {
   return p && (p.status === "pending" || p.status === "applied" || p.status === "rejected") ? p : null;
 }
 
+/** The goal plan an issue's decision is about: pending, or just decided (the card held after acting). */
+function planOf(detail: IssueDetail | undefined) {
+  return detail?.goal_plan ?? null;
+}
+
 /** What last happened, in one line under a decision in the list: good is teal, bad is red. */
 function eventOf(d: Decision, detail: IssueDetail | undefined): { text: string; tone: "good" | "bad" | null; agent: string | null } {
   const who = (vendor: string | null) => VENDOR_LABEL[vendorOf(vendor)];
@@ -339,6 +345,8 @@ function eventOf(d: Decision, detail: IssueDetail | undefined): { text: string; 
       if (d.issue && d.issue.origin !== "nitely") return { text: `Waits in ${originName(d.issue.origin)}`, tone: null, agent };
       const proposal = proposalOf(detail);
       if (proposal) return { text: `${who(proposal.created_by)} proposes a playbook change`, tone: null, agent: proposal.created_by };
+      const plan = planOf(detail);
+      if (plan) return { text: `${who(plan.created_by)} drafted a goal`, tone: null, agent: plan.created_by };
       const review = detail?.reviews[0];
       if (!review?.reviewer) return { text: detail ? "No review ran" : "Reading its review", tone: detail ? "bad" : null, agent };
       const reviewed = journeyOf(detail?.timeline, detail?.reviews).rounds.filter((r) => r.review && r.review.verdict !== "none").length;
@@ -453,8 +461,10 @@ function DecisionDetail(props: {
   const track = at && resolved ? trackAfter(at, resolved.move, now) : at;
   // A playbook change an agent proposed: approving applies it, canceling with a reason rejects it.
   const proposal = d.kind === "approve" ? proposalOf(detail) : null;
-  const pending = proposal?.status === "pending";
-  const agent = d.kind === "ask" ? d.ask!.asked_by : (d.row?.session?.vendor ?? d.row?.vendor ?? proposal?.created_by ?? null);
+  // A goal and its issues an agent drafted: decided in GoalPlanDecision.
+  const plan = d.kind === "approve" ? planOf(detail) : null;
+  const pending = proposal?.status === "pending" || !!plan;
+  const agent = d.kind === "ask" ? d.ask!.asked_by : (d.row?.session?.vendor ?? d.row?.vendor ?? proposal?.created_by ?? plan?.created_by ?? null);
   const live = livenessOf(d.row?.session, now);
 
   const move = (state: "Approved" | "Todo") =>
@@ -471,7 +481,7 @@ function DecisionDetail(props: {
     ? {}
     : {
         approve: d.kind === "approve" && native ? () => move("Approved") : undefined,
-        todo: (d.kind === "approve" || d.kind === "land") && native && issue && !proposal ? () => move("Todo") : undefined,
+        todo: (d.kind === "approve" || d.kind === "land") && native && issue && !proposal && !plan ? () => move("Todo") : undefined,
         option: d.kind === "ask" && d.ask ? (i) => d.ask!.options[i] !== undefined && answer(d.ask!.options[i]) : undefined,
         reply: d.kind === "ask" ? () => card.current?.querySelector<HTMLInputElement>(".dd-words input")?.focus() : undefined,
       };
@@ -509,12 +519,14 @@ function DecisionDetail(props: {
         ? LIVENESS_LABEL[live]
         : proposal
           ? "proposed a playbook change"
-          : "no session open";
+          : plan
+            ? "drafted a goal"
+            : "no session open";
 
   return (
     <article className={`inbox-detail decision-${d.kind}`} ref={card}>
       <div className="dd-context">
-        <span className="dd-kind">{proposal ? "Playbook change" : KIND_WORD[d.kind]}</span>
+        <span className="dd-kind">{proposal ? "Playbook change" : plan ? "Goal plan" : KIND_WORD[d.kind]}</span>
         {issue && <span className="mono muted">{issue.key}</span>}
         <span className="dd-meta" title={`Waiting since ${new Date(d.since * 1000).toLocaleString()}`}>
           {[issue?.kind, `${d.kind === "ask" ? "asked" : "waiting"} ${ago(now, d.since)}`].filter(Boolean).join(" · ")}
@@ -536,7 +548,11 @@ function DecisionDetail(props: {
         {agent ? <AgentMark vendor={agent} state={d.kind === "ask" ? null : live} size={22} /> : <span className="dd-nobody" />}
         <div className="dd-card-body">
           <p className="dd-who">{[agent && VENDOR_LABEL[vendorOf(agent)], d.row?.branch, status].filter(Boolean).join(" · ")}</p>
-          <Body decision={d} detail={detail} integration={props.integration} now={now} />
+          {plan && issue ? (
+            <GoalPlanDecision plan={plan} issueKey={issue.key} resolved={!!resolved} onAct={props.onAct} />
+          ) : (
+            <Body decision={d} detail={detail} integration={props.integration} now={now} />
+          )}
           {(d.kind === "conflict" || d.kind === "input" || d.kind === "land") && d.row && <p className="decision-path mono">{d.row.worktree}</p>}
         </div>
       </div>
@@ -550,7 +566,7 @@ function DecisionDetail(props: {
         {!resolved && d.kind === "ask" && d.ask && (
           <Answer askId={d.ask.id} options={d.ask.options} busy={busy} onAnswer={answer} />
         )}
-        {!resolved && pending && proposal && (
+        {!resolved && !plan && pending && proposal && (
           <>
             <div className="actions">
               <button className="btn primary" disabled={busy || !!proposal.stale} onClick={apply}>

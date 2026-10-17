@@ -95,7 +95,8 @@ export function decisionsOf(board: Board, details: Map<string, IssueDetail>, now
     // it): an issue the detail shows approved, or moved anywhere else, is no longer a decision.
     const i = details.get(listed.key)?.issue ?? listed;
     // A playbook change is the human's own issue but a decision to approve, not work to do.
-    const own = isOwnWork(i) && details.get(i.key)?.proposal?.status !== "pending";
+    const d = details.get(i.key);
+    const own = isOwnWork(i) && d?.proposal?.status !== "pending" && d?.goal_plan?.status !== "pending";
     if (!own && !needsHuman(i) && !isOwnWork(i)) continue;
     const at = rowOf(i.key);
     out.push({ id: `${own ? "own" : "approve"}-${i.key}`, kind: own ? "own" : "approve", issue: i, row: at?.row ?? null, repo: at?.repo ?? null, ask: null, since: waitingSince(i, details.get(i.key)), urgency: urgencyOf(i) });

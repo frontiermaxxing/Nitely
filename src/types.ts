@@ -332,6 +332,35 @@ export interface IssueDetail {
   reviews: ReviewRecord[];
   /** The playbook change the issue carries, when an agent proposed one (crates/nitely-core/src/proposals.rs). */
   proposal?: PlaybookProposal | null;
+  /** The goal plan the issue carries, when an agent drafted one (crates/nitely-core/src/goal_plans.rs). */
+  goal_plan?: GoalPlanView | null;
+}
+
+/** One issue of a goal plan, as the agent drafted it. */
+export interface PlanItem {
+  ref: string;
+  title: string;
+  kind: string;
+  body: string;
+  evidence: string;
+  priority?: number;
+  labels?: string[];
+  blocked_by?: string[];
+  owner?: string;
+  state?: string;
+}
+
+/** A goal and its issues an agent drafted from the person's sentence, decided once in the Inbox. */
+export interface GoalPlanView {
+  id: number;
+  issue_key: string;
+  project: string;
+  plan: { sentence: string; title: string; outcome: string; target_date: string | null; issues: PlanItem[]; existing: string[] };
+  status: "pending" | "approved" | "rejected";
+  created_by: string;
+  created_at: number;
+  outcome: string | null;
+  goal_id: number | null;
 }
 
 /** A playbook change an agent proposed; approving its issue applies it, canceling rejects it. */

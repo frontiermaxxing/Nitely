@@ -146,6 +146,18 @@ async fn held_files(project: String) -> Result<Vec<nitely_core::overlap::Held>, 
     nitely_core::overlap::held(&config, &db()?, &project).map_err(err)
 }
 
+/// Approves the goal plan an issue carries, with the person's edits: creates the goal and files its issues.
+#[tauri::command]
+async fn approve_goal_plan(key: String, edit: Option<nitely_core::goal_plans::PlanEdit>) -> Result<nitely_core::goal_plans::PlanApproved, String> {
+    db()?.approve_goal_plan(&key, &edit.unwrap_or_default(), &ME).map_err(err)
+}
+
+/// Files the issue an agent picks up to draft a goal from the person's sentence (the palette).
+#[tauri::command]
+async fn start_goal(project: String, sentence: String) -> Result<IssueRecord, String> {
+    db()?.start_goal(&project, &sentence, &ME).map_err(err)
+}
+
 /// The goal rows: every active goal with its issues, of one project or all of them.
 #[tauri::command]
 async fn goals(project: Option<String>) -> Result<Vec<nitely_core::goals::GoalDetail>, String> {
@@ -607,6 +619,8 @@ pub fn run() {
             set_private_terms,
             project_brief,
             goals,
+            approve_goal_plan,
+            start_goal,
             set_project_brief,
             held_files,
             crew_status,

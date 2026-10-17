@@ -154,6 +154,10 @@ whether to file all of them or only priorities 1 to 3.
   reason = "vendored code is updated by the vendoring script"
   ```
 
+- **First goals.** Group the work into the 1 to 3 outcomes the target order leads to, and draft
+  each with `propose_goal`: a title, a one-paragraph outcome, and the issues you filed in Phase 5
+  that belong in it as `existing` (add new issues only for gaps). The person approves each in the
+  Inbox; the board then shows a row per goal with how far along it is.
 - **The brief.** `get_project`, then `set_project_brief` with the revision it returned:
   - **Vision**, marked as inference ("Inferred from the code, not confirmed by the owner");
   - **State of each area**: what works, what is half built, what is missing, with issue links;

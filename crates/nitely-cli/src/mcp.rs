@@ -255,6 +255,31 @@ fn tools() -> Value {
             } }
         },
         {
+            "name": "propose_goal",
+            "description": "Draft a goal and the issues that reach it from what the person asked for, for them to decide in the Inbox: approving creates the goal and files every issue into it in one batch (they may edit or leave items out first); rejecting files nothing. Checked as file_issues checks a batch (refs, blockers, cycles) before anything is filed. Pass planning_issue when you were handed a \"Plan a goal\" issue; it closes once the plan is filed. Do not file the issues yourself.",
+            "inputSchema": { "type": "object", "required": ["sentence", "title", "outcome"], "properties": {
+                "sentence": { "type": "string", "description": "What the person asked for, in their words." },
+                "title": { "type": "string" },
+                "outcome": { "type": "string", "description": "One paragraph: what is true once the goal is reached." },
+                "target_date": { "type": "string", "description": "YYYY-MM-DD, only if the person gave one." },
+                "issues": { "type": "array", "items": { "type": "object", "required": ["ref", "title", "kind", "body", "evidence"], "properties": {
+                    "ref": { "type": "string" },
+                    "title": { "type": "string" },
+                    "kind": { "type": "string", "enum": KINDS },
+                    "body": { "type": "string" },
+                    "evidence": { "type": "string" },
+                    "priority": { "type": "integer", "minimum": 0, "maximum": 4 },
+                    "labels": { "type": "array", "items": { "type": "string" } },
+                    "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Refs of this plan or existing issue keys." },
+                    "owner": { "type": "string", "enum": OWNERS },
+                    "state": { "type": "string", "enum": ["Todo", "Backlog", "Needs You"] }
+                } } },
+                "existing": { "type": "array", "items": { "type": "string" }, "description": "Open issues of the project that belong in the goal." },
+                "planning_issue": { "type": "string" },
+                "project": { "type": "string" }
+            } }
+        },
+        {
             "name": "save_goal",
             "description": "Create a goal (no id: title and outcome needed) or change one: title, outcome (one paragraph on what is true once it is reached), target_date (YYYY-MM-DD, empty clears it), state (active, done, dropped). Put issues in it with goal on file_issue, file_issues or update_issue.",
             "inputSchema": { "type": "object", "properties": {
@@ -659,6 +684,17 @@ fn run_tool(server: &Server, name: &str, args: &Value, session: &str) -> Result<
             Some(id) => json!(db.goal_detail(id)?),
             None => json!(db.goals(&project(&db)?, args.get("include_closed").and_then(Value::as_bool).unwrap_or(false))?),
         },
+        "propose_goal" => {
+            let plan = nitely_core::goal_plans::GoalPlan {
+                sentence: req(args, "sentence")?.into(),
+                title: req(args, "title")?.into(),
+                outcome: req(args, "outcome")?.into(),
+                target_date: str_arg(args, "target_date").map(str::to_string),
+                issues: serde_json::from_value(args.get("issues").cloned().unwrap_or(json!([]))).context("issues: each needs ref, title, kind, body and evidence")?,
+                existing: keys_arg(args, "existing"),
+            };
+            json!(db.propose_goal(&project(&db)?, &plan, str_arg(args, "planning_issue"), &actor)?)
+        }
         "save_goal" => {
             let change = nitely_core::goals::GoalChange {
                 title: str_arg(args, "title").map(str::to_string),
@@ -834,7 +870,7 @@ mod tests {
     fn the_setup_guide_names_only_tools_that_exist() {
         let names: Vec<String> = tools().as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
         let guide = nitely_core::instructions::SETUP_GUIDE;
-        for tool in ["get_project", "propose_playbook_change", "ask", "file_issues", "list_issues", "set_project_brief", "mark_setup_complete", "note"] {
+        for tool in ["get_project", "propose_playbook_change", "propose_goal", "ask", "file_issues", "list_issues", "set_project_brief", "mark_setup_complete", "note"] {
             assert!(guide.contains(&format!("`{tool}`")), "the guide uses {tool}");
             assert!(names.contains(&tool.to_string()), "{tool} is a tool");
         }
