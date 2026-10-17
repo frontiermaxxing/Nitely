@@ -32,12 +32,12 @@ fn main() -> anyhow::Result<()> {
     println!("scratch database: {}", db_path.display());
     let open: OpenDb = Arc::new(move || Db::open(&db_path));
     let phone = Phone::new(devices, assets, open, Arc::new(|_: &Db| vec![]));
-    let running = phone.start(&["127.0.0.1".parse()?], phone::PORT)?;
-    println!("phone server: {}", phone::url(running.addrs[0].ip(), running.addrs[0].port()));
+    let running = phone.start(&["127.0.0.1".parse()?], phone::PORT, None)?;
+    println!("phone server: {}", running.pages()[0]);
 
     let admin = TcpListener::bind("127.0.0.1:7423")?;
     println!("the app's Phone screen, standing in: http://127.0.0.1:7423/");
-    let addrs = running.addrs.clone();
+    let pages = running.pages();
     let offer: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let handler: http::Handler = Arc::new(move |stream: &mut TcpStream, _: SocketAddr| {
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -47,7 +47,7 @@ fn main() -> anyhow::Result<()> {
         let field = |k: &str| form.split('&').find_map(|kv| kv.strip_prefix(&format!("{k}="))).map(str::to_string);
         if head.method == "POST" {
             match head.path.as_str() {
-                "/offer" => *offer.lock().unwrap() = phone.offer(&addrs).ok().and_then(|o| o.urls.into_iter().next()),
+                "/offer" => *offer.lock().unwrap() = phone.offer(&pages).ok().and_then(|o| o.urls.into_iter().next()),
                 "/decide" => {
                     if let (Some(id), Some(accept)) = (field("id"), field("accept")) {
                         if let Ok(Some(device)) = phone.decide(&id, accept == "yes") {

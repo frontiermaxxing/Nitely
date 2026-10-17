@@ -7,8 +7,8 @@ import "./phone-setup.css";
 
 /**
  * Pairing a phone and the paired phones (docs/phone.md). The phone server runs in this app, off
- * until the person turns it on, and only on addresses whose path to the phone nobody in between
- * can change: this machine, or a tunnel such as Tailscale. A phone pairs only when the person
+ * until the person turns it on, and only where nobody in between can change the page: inside
+ * Tailscale, or over HTTPS with a certificate the phone trusts. A phone pairs only when the person
  * confirms it here, after comparing the code on both screens.
  */
 export function PhoneSetup(props: { now: number }) {
@@ -18,6 +18,18 @@ export function PhoneSetup(props: { now: number }) {
   const [removing, setRemoving] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // How the phone reaches the page: plain HTTP inside Tailscale, or HTTPS with a certificate the
+  // phone trusts (Tailscale's for this PC, or the person's own).
+  const [mode, setMode] = useState<"none" | "tailscale" | "files">("none");
+  const [tsName, setTsName] = useState<{ name: string | null; why: string | null } | null>(null);
+  const [files, setFiles] = useState({ cert: "", key: "", host: "" });
+  useEffect(() => {
+    if (mode !== "tailscale" || tsName) return;
+    invoke<string>("phone_tailscale_name").then(
+      (name) => setTsName({ name, why: null }),
+      (e) => setTsName({ name: null, why: String(e) }),
+    );
+  }, [mode, tsName]);
 
   const load = useCallback(() => {
     invoke<PhoneStatus>("phone_status").then(
@@ -52,6 +64,11 @@ export function PhoneSetup(props: { now: number }) {
   if (!status) return <div className="page">{error ? <p className="error">{error}</p> : <Loading />}</div>;
   const on = status.listening.length > 0;
   const tunnels = status.addresses.filter((a) => a.kind === "tunnel");
+  const https = mode !== "none";
+  // Over HTTPS the certificate guards the page, so any of this PC's addresses will do.
+  const usable = (a: (typeof status.addresses)[number]) => https || !!a.kind;
+  const ready = mode === "none" || (mode === "tailscale" ? !!tsName?.name : !!(files.cert.trim() && files.key.trim() && files.host.trim()));
+  const tls = mode === "none" ? null : { kind: mode, ...files };
   const expired = offer !== null && offer.expires < props.now;
 
   return (
@@ -93,29 +110,66 @@ export function PhoneSetup(props: { now: number }) {
         ) : (
           <>
             <p className="small muted">
-              Only addresses whose path to the phone is encrypted end to end: this PC's Tailscale address, with Tailscale on the phone too. Plain Wi-Fi is not offered,
-              because anyone who can intercept it could change the page that holds the phone's key.
+              The phone page holds the phone's key, so nobody between the PC and the phone may be able to change it: the page goes only inside Tailscale, or over
+              HTTPS with a certificate the phone trusts.
             </p>
+            <div className="phone-modes" role="radiogroup" aria-label="How the phone reaches it">
+              <label className="phone-mode">
+                <input type="radio" name="phone-mode" checked={mode === "none"} onChange={() => setMode("none")} />
+                <span>
+                  <strong>Inside Tailscale</strong>
+                  <span className="small muted"> Plain HTTP on this PC's Tailscale address; Tailscale on the phone too.</span>
+                </span>
+              </label>
+              <label className="phone-mode">
+                <input type="radio" name="phone-mode" checked={mode === "tailscale"} onChange={() => setMode("tailscale")} />
+                <span>
+                  <strong>HTTPS with Tailscale's certificate</strong>
+                  <span className="small muted"> A real certificate for this PC's tailnet name, which phones trust. Turn on MagicDNS and HTTPS Certificates in the Tailscale admin console first.</span>
+                  {mode === "tailscale" && tsName && (
+                    <span className={`small ${tsName.name ? "mono" : "error"}`}>{tsName.name ?? tsName.why}</span>
+                  )}
+                </span>
+              </label>
+              <label className="phone-mode">
+                <input type="radio" name="phone-mode" checked={mode === "files"} onChange={() => setMode("files")} />
+                <span>
+                  <strong>HTTPS with your own certificate</strong>
+                  <span className="small muted"> PEM files, for a name the phone resolves to this PC, from a certificate authority the phone trusts.</span>
+                </span>
+              </label>
+              {mode === "files" && (
+                <div className="phone-files">
+                  <input className="mono" placeholder="Certificate file (PEM)" aria-label="Certificate file" value={files.cert} onChange={(e) => setFiles({ ...files, cert: e.target.value })} />
+                  <input className="mono" placeholder="Private key file (PEM)" aria-label="Private key file" value={files.key} onChange={(e) => setFiles({ ...files, key: e.target.value })} />
+                  <input className="mono" placeholder="Name on the certificate" aria-label="Name on the certificate" value={files.host} onChange={(e) => setFiles({ ...files, host: e.target.value })} />
+                </div>
+              )}
+            </div>
             <div className="phone-addresses">
               {status.addresses.map((a) => (
-                <label key={a.ip} className={`phone-address${a.kind ? "" : " phone-address-no"}`}>
+                <label key={a.ip} className={`phone-address${usable(a) ? "" : " phone-address-no"}`}>
                   <input
                     type="checkbox"
-                    disabled={!a.kind}
-                    checked={picked.includes(a.ip)}
+                    disabled={!usable(a)}
+                    checked={usable(a) && picked.includes(a.ip)}
                     onChange={(e) => setPicked(e.target.checked ? [...picked, a.ip] : picked.filter((p) => p !== a.ip))}
                   />
                   <span className="mono">{a.ip}</span>
                   <span className="small muted">
                     {a.interface}
-                    {a.kind === "loopback" ? ", for trying it on this PC" : a.kind === "tunnel" ? ", tunnel" : ", ordinary network: not offered"}
+                    {a.kind === "loopback" ? ", for trying it on this PC" : a.kind === "tunnel" ? ", tunnel" : https ? "" : ", ordinary network: HTTPS only"}
                   </span>
                 </label>
               ))}
             </div>
-            {tunnels.length === 0 && <p className="small">No tunnel address yet. Install Tailscale on this PC and on the phone, sign both in, and it shows up here.</p>}
+            {tunnels.length === 0 && mode !== "files" && <p className="small">No Tailscale address yet. Install Tailscale on this PC and on the phone, sign both in, and it shows up here.</p>}
             <div className="actions">
-              <button className="btn primary" disabled={busy || picked.length === 0} onClick={() => run(() => invoke<PhoneStatus>("phone_start", { ips: picked }))}>
+              <button
+                className="btn primary"
+                disabled={busy || !ready || !status.addresses.some((a) => usable(a) && picked.includes(a.ip))}
+                onClick={() => run(() => invoke<PhoneStatus>("phone_start", { ips: picked.filter((ip) => status.addresses.some((a) => a.ip === ip && usable(a))), tls }))}
+              >
                 Turn on
               </button>
             </div>

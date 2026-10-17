@@ -56,7 +56,7 @@ pub struct PhoneStatus {
 }
 
 fn status(app: &PhoneApp) -> PhoneStatus {
-    let listening = app.running().as_ref().map(|r| r.addrs.iter().map(|a| phone::url(a.ip(), a.port())).collect()).unwrap_or_default();
+    let listening = app.running().as_ref().map(|r| r.pages()).unwrap_or_default();
     let (devices, devices_error) = match phone::load_devices() {
         Ok(d) => (d, None),
         Err(e) => (vec![], Some(format!("{e:#}"))),
@@ -69,14 +69,46 @@ pub async fn phone_status(app: tauri::State<'_, PhoneApp>) -> Result<PhoneStatus
     Ok(status(&app))
 }
 
-/// Starts the phone server on `ips` (loopback or tunnel addresses only), replacing a running one.
+/// How the phone server is reached: plain HTTP on loopback or the Tailscale address (`none`),
+/// HTTPS with Tailscale's certificate for this machine (`tailscale`), or with the person's own
+/// certificate and key files (`files`, with the name on the certificate).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct TlsChoice {
+    kind: String,
+    #[serde(default)]
+    cert: String,
+    #[serde(default)]
+    key: String,
+    #[serde(default)]
+    host: String,
+}
+
+fn tls_for(choice: Option<TlsChoice>) -> Result<Option<phone::Tls>, String> {
+    let Some(c) = choice else { return Ok(None) };
+    match c.kind.as_str() {
+        "none" => Ok(None),
+        "tailscale" => phone::tailscale_tls(&nitely_core::paths::data_dir().join("phone-tls")).map(Some).map_err(err),
+        "files" => phone::tls_from_files(std::path::Path::new(c.cert.trim()), std::path::Path::new(c.key.trim()), &c.host).map(Some).map_err(err),
+        other => Err(format!("{other} is not a way to serve the phone page")),
+    }
+}
+
+/// The name Tailscale can give this machine a certificate for, or why it cannot yet.
 #[tauri::command]
-pub async fn phone_start(app: tauri::State<'_, PhoneApp>, ips: Vec<String>) -> Result<PhoneStatus, String> {
+pub async fn phone_tailscale_name() -> Result<String, String> {
+    phone::tailscale_cert_name().map_err(err)
+}
+
+/// Starts the phone server on `ips`, replacing a running one: over plain HTTP only on loopback or
+/// the Tailscale address, over HTTPS (`tls`) on any of this machine's addresses.
+#[tauri::command]
+pub async fn phone_start(app: tauri::State<'_, PhoneApp>, ips: Vec<String>, tls: Option<TlsChoice>) -> Result<PhoneStatus, String> {
     let ips: Vec<IpAddr> = ips.iter().map(|ip| ip.parse::<IpAddr>().map_err(|_| format!("{ip} is not an address"))).collect::<Result<_, _>>()?;
+    let tls = tls_for(tls)?;
     if let Some(old) = app.running().take() {
         old.stop();
     }
-    let running = app.phone.start(&ips, phone::PORT).map_err(err)?;
+    let running = app.phone.start(&ips, phone::PORT, tls).map_err(err)?;
     *app.running() = Some(running);
     Ok(status(&app))
 }
@@ -93,11 +125,11 @@ pub async fn phone_stop(app: tauri::State<'_, PhoneApp>) -> Result<PhoneStatus, 
 /// A new pairing offer: the QR code and links, valid for ten minutes and one phone.
 #[tauri::command]
 pub async fn phone_pair(app: tauri::State<'_, PhoneApp>) -> Result<OfferView, String> {
-    let addrs = app.running().as_ref().map(|r| r.addrs.clone()).unwrap_or_default();
-    if addrs.is_empty() {
+    let pages = app.running().as_ref().map(|r| r.pages()).unwrap_or_default();
+    if pages.is_empty() {
         return Err("Turn the phone server on first.".into());
     }
-    app.phone.offer(&addrs).map_err(err)
+    app.phone.offer(&pages).map_err(err)
 }
 
 /// The person's answer to a pairing request; a yes adds the phone to the list the app signs.

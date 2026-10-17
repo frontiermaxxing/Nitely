@@ -111,6 +111,22 @@ pub fn accept_until(listener: TcpListener, allow: Arc<dyn Fn(IpAddr) -> bool + S
     }
 }
 
+/// A connection a request is read from and answered on: a plain TCP stream, or TLS over one
+/// (the phone server over HTTPS). Timeouts are set on the TCP stream underneath.
+pub trait Conn: Read + Write {
+    fn tcp(&self) -> &TcpStream;
+    /// Says the answer is complete; the read side stays open for `linger`.
+    fn close_write(&mut self) {
+        let _ = self.tcp().shutdown(std::net::Shutdown::Write);
+    }
+}
+
+impl Conn for TcpStream {
+    fn tcp(&self) -> &TcpStream {
+        self
+    }
+}
+
 /// A request's line and headers, and whatever of the body came with them.
 pub struct Head {
     pub method: String,
@@ -135,7 +151,7 @@ pub fn time_left(stream: &TcpStream, deadline: Instant) -> std::result::Result<(
     stream.set_read_timeout(Some(left)).map_err(|_| (408, "Request timed out."))
 }
 
-pub fn read_head(stream: &mut TcpStream, deadline: Instant) -> std::result::Result<Head, (u16, &'static str)> {
+pub fn read_head<C: Conn + ?Sized>(stream: &mut C, deadline: Instant) -> std::result::Result<Head, (u16, &'static str)> {
     let mut buf = Vec::with_capacity(1024);
     let mut chunk = [0u8; 2048];
     let end = loop {
@@ -145,7 +161,7 @@ pub fn read_head(stream: &mut TcpStream, deadline: Instant) -> std::result::Resu
         if buf.len() > MAX_HEAD {
             return Err((431, "Request headers too large."));
         }
-        time_left(stream, deadline)?;
+        time_left(stream.tcp(), deadline)?;
         match stream.read(&mut chunk) {
             Ok(0) => return Err((400, "Incomplete request.")),
             Ok(n) => buf.extend_from_slice(&chunk[..n]),
@@ -171,7 +187,7 @@ pub fn read_head(stream: &mut TcpStream, deadline: Instant) -> std::result::Resu
 
 /// The body, by Content-Length only and within MAX_BODY; chunked or oversized bodies are refused
 /// without being read. No Content-Length on a GET is an empty body.
-pub fn read_body(stream: &mut TcpStream, head: &Head, deadline: Instant) -> std::result::Result<Vec<u8>, (u16, &'static str)> {
+pub fn read_body<C: Conn + ?Sized>(stream: &mut C, head: &Head, deadline: Instant) -> std::result::Result<Vec<u8>, (u16, &'static str)> {
     if head.header("transfer-encoding").is_some() {
         return Err((411, "Send the body with a Content-Length."));
     }
@@ -188,7 +204,7 @@ pub fn read_body(stream: &mut TcpStream, head: &Head, deadline: Instant) -> std:
     let mut got = body.len();
     body.resize(len, 0);
     while got < len {
-        time_left(stream, deadline)?;
+        time_left(stream.tcp(), deadline)?;
         match stream.read(&mut body[got..]) {
             Ok(0) | Err(_) => return Err((408, "Request body timed out.")),
             Ok(n) => got += n,
@@ -197,11 +213,11 @@ pub fn read_body(stream: &mut TcpStream, head: &Head, deadline: Instant) -> std:
     Ok(body)
 }
 
-pub fn write_json(stream: &mut TcpStream, status: u16, headers: &[(&str, &str)], body: &Value) {
+pub fn write_json<C: Conn + ?Sized>(stream: &mut C, status: u16, headers: &[(&str, &str)], body: &Value) {
     write_response(stream, status, "application/json", headers, body.to_string().as_bytes());
 }
 
-pub fn write_response(stream: &mut TcpStream, status: u16, content_type: &str, headers: &[(&str, &str)], body: &[u8]) {
+pub fn write_response<C: Conn + ?Sized>(stream: &mut C, status: u16, content_type: &str, headers: &[(&str, &str)], body: &[u8]) {
     let reason = match status {
         200 => "OK",
         202 => "Accepted",
@@ -226,8 +242,7 @@ pub fn write_response(stream: &mut TcpStream, status: u16, content_type: &str, h
     }
     out.push_str("\r\n");
     let _ = stream.write_all(out.as_bytes()).and_then(|_| stream.write_all(body)).and_then(|_| stream.flush());
-    // Says the answer is complete; the read side stays open for `linger`.
-    let _ = stream.shutdown(std::net::Shutdown::Write);
+    stream.close_write();
 }
 
 /// Reads and drops what the client still sends (the rest of a refused request) until it closes,

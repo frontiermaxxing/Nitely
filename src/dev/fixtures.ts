@@ -1732,6 +1732,8 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return rulesFixture.ruleDefaultsSave(args);
       case "phone_status":
         return phoneFixture.phoneStatus();
+      case "phone_tailscale_name":
+        return phoneFixture.phoneTailscaleName();
       case "phone_start":
         return phoneFixture.phoneStart(args);
       case "phone_stop":

@@ -27,3 +27,14 @@
 .phone-device:first-child { border-top: 0; }
 .phone-device > .btn, .phone-confirm { margin-left: auto; }
 .phone-confirm { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+
+.phone-modes { display: grid; gap: 8px; margin: 8px 0 12px; }
+.phone-mode { display: flex; gap: 10px; align-items: flex-start; font-size: var(--text-md); cursor: pointer; }
+.phone-mode input { margin-top: 4px; }
+.phone-mode > span { display: grid; gap: 2px; }
+.phone-files { display: grid; gap: 6px; margin-left: 24px; }
+.phone-files input {
+  min-height: 32px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--bg);
+  font-size: 12.5px; color: var(--fg); min-width: 0;
+}
+.phone-files input:focus { outline: 2px solid var(--focus); outline-offset: -1px; }

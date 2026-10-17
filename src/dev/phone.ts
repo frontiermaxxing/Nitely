@@ -32,8 +32,18 @@ export function phoneStatus(): PhoneStatus {
   return status();
 }
 
+export function phoneTailscaleName(): string {
+  return "pc.tail1234.ts.net";
+}
+
 export function phoneStart(args: Record<string, unknown>): PhoneStatus {
   const ips = args.ips as string[];
+  const tls = args.tls as { kind: string; host: string } | null;
+  if (tls && tls.kind !== "none") {
+    const host = tls.kind === "tailscale" ? phoneTailscaleName() : tls.host.trim();
+    listening = [`https://${host}:7422/phone/`];
+    return status();
+  }
   const bad = ips.find((ip) => !ADDRESSES.find((a) => a.ip === ip)?.kind);
   if (bad) throw `${bad} is not this machine's Tailscale address, and plain HTTP on any other network could be changed by anyone who can intercept traffic; pick the Tailscale address (docs/phone.md)`;
   listening = ips.map((ip) => `http://${ip}:7422/phone/`);

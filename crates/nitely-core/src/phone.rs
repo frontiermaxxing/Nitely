@@ -72,14 +72,116 @@ pub fn in_tailscale_range(ip: IpAddr) -> bool {
 /// This machine's addresses on its tailnet, as the Tailscale client reports them (`tailscale ip`);
 /// empty when Tailscale is not installed or not signed in.
 pub fn tailscale_ips() -> Vec<IpAddr> {
-    let candidates = ["tailscale", r"C:\Program Files\Tailscale\tailscale.exe", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"];
-    for program in candidates {
-        let Ok(out) = crate::playbook::shell_free_command(program).arg("ip").stdin(std::process::Stdio::null()).output() else { continue };
-        if out.status.success() {
-            return String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| l.trim().parse().ok()).filter(|ip| in_tailscale_range(*ip)).collect();
-        }
+    match tailscale(&["ip"]) {
+        Ok(out) => out.lines().filter_map(|l| l.trim().parse().ok()).filter(|ip| in_tailscale_range(*ip)).collect(),
+        Err(_) => vec![],
     }
-    vec![]
+}
+
+/// Runs the Tailscale CLI, wherever it is installed, and returns what it printed.
+fn tailscale(args: &[&str]) -> Result<String> {
+    let candidates = ["tailscale", r"C:\Program Files\Tailscale\tailscale.exe", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"];
+    let mut last = None;
+    for program in candidates {
+        let Ok(out) = crate::playbook::shell_free_command(program).args(args).stdin(std::process::Stdio::null()).output() else { continue };
+        if out.status.success() {
+            return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
+        }
+        last = Some(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    match last {
+        Some(err) => bail!("tailscale {}: {err}", args.join(" ")),
+        None => bail!("the Tailscale CLI is not installed on this PC"),
+    }
+}
+
+/// The phone server's certificate, and the name on it that the phone's link uses. With it, the
+/// page is served over HTTPS, so the path to the phone need not be a tunnel: the certificate,
+/// which the phone already trusts, is what stops anyone in between from changing the page.
+#[derive(Clone)]
+pub struct Tls {
+    pub config: Arc<rustls::ServerConfig>,
+    pub host: String,
+}
+
+/// A certificate and key in PEM files, for `host` (a name on the certificate).
+pub fn tls_from_files(cert: &std::path::Path, key: &std::path::Path, host: &str) -> Result<Tls> {
+    use rustls_pki_types::pem::PemObject;
+    use rustls_pki_types::{CertificateDer, PrivateKeyDer};
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty() || !host.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.') {
+        bail!("give the name on the certificate, e.g. pc.example.ts.net");
+    }
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert)
+        .with_context(|| format!("reading {}", cert.display()))?
+        .collect::<std::result::Result<_, _>>()
+        .with_context(|| format!("{} is not a PEM certificate", cert.display()))?;
+    if certs.is_empty() {
+        bail!("{} holds no certificate", cert.display());
+    }
+    let key = PrivateKeyDer::from_pem_file(key).with_context(|| format!("{} is not a PEM private key", key.display()))?;
+    let config = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .context("TLS")?
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .context("the certificate and key do not go together")?;
+    Ok(Tls { config: Arc::new(config), host })
+}
+
+/// The name Tailscale can issue this machine a certificate for, from `tailscale status`.
+pub fn tailscale_cert_name() -> Result<String> {
+    let status: Value = serde_json::from_str(&tailscale(&["status", "--json"])?).context("tailscale status said something unexpected")?;
+    status
+        .get("CertDomains")
+        .and_then(Value::as_array)
+        .and_then(|d| d.first())
+        .and_then(Value::as_str)
+        .map(|d| d.trim_end_matches('.').to_string())
+        .context("Tailscale gives this machine no certificate yet: in the Tailscale admin console, turn on MagicDNS and HTTPS Certificates (DNS page), then try again")
+}
+
+/// A Tailscale HTTPS certificate for this machine (a real one, which phones trust), kept in `dir`
+/// and renewed by `tailscale cert` when it nears expiry.
+pub fn tailscale_tls(dir: &std::path::Path) -> Result<Tls> {
+    let name = tailscale_cert_name()?;
+    std::fs::create_dir_all(dir)?;
+    let (cert, key) = (dir.join(format!("{name}.crt")), dir.join(format!("{name}.key")));
+    tailscale(&["cert", "--cert-file", &cert.to_string_lossy(), "--key-file", &key.to_string_lossy(), &name])?;
+    tls_from_files(&cert, &key, &name)
+}
+
+/// TLS over one connection's TCP stream.
+struct TlsConn<'a> {
+    conn: rustls::ServerConnection,
+    sock: &'a mut TcpStream,
+}
+
+impl std::io::Read for TlsConn<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        rustls::Stream::new(&mut self.conn, self.sock).read(buf)
+    }
+}
+
+impl std::io::Write for TlsConn<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        rustls::Stream::new(&mut self.conn, self.sock).write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        rustls::Stream::new(&mut self.conn, self.sock).flush()
+    }
+}
+
+impl http::Conn for TlsConn<'_> {
+    fn tcp(&self) -> &TcpStream {
+        self.sock
+    }
+    fn close_write(&mut self) {
+        use std::io::Write;
+        self.conn.send_close_notify();
+        let _ = self.flush();
+        let _ = self.sock.shutdown(std::net::Shutdown::Write);
+    }
 }
 
 /// One of this machine's addresses, as the app's Phone screen offers it.
@@ -302,10 +404,24 @@ pub struct Phone {
 /// A running phone server; dropping it does not stop it, `stop` does.
 pub struct Running {
     pub addrs: Vec<SocketAddr>,
+    /// The certificate's name when it serves HTTPS.
+    pub host: Option<String>,
     stoppers: Vec<Stopper>,
 }
 
 impl Running {
+    /// The phone page's address on each address it listens on: by the certificate's name over
+    /// HTTPS (one link), else by address.
+    pub fn pages(&self) -> Vec<String> {
+        match &self.host {
+            Some(host) => {
+                let port = self.addrs.first().map_or(PORT, |a| a.port());
+                vec![if port == 443 { format!("https://{host}/phone/") } else { format!("https://{host}:{port}/phone/") }]
+            }
+            None => self.addrs.iter().map(|a| url(a.ip(), a.port())).collect(),
+        }
+    }
+
     pub fn stop(&self) {
         for s in &self.stoppers {
             s.stop();
@@ -322,16 +438,25 @@ impl Phone {
         self.state.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// Listens on each of `ips` (each must be loopback or a tunnel address) at `port`.
-    pub fn start(self: &Arc<Phone>, ips: &[IpAddr], port: u16) -> Result<Running> {
+    /// Listens on each of `ips` at `port`. Without `tls` each must be loopback or this machine's
+    /// Tailscale address; with it, any of this machine's addresses, since the certificate guards
+    /// the page.
+    pub fn start(self: &Arc<Phone>, ips: &[IpAddr], port: u16, tls: Option<Tls>) -> Result<Running> {
         if ips.is_empty() {
             bail!("pick at least one address to listen on");
         }
-        let tailscale = if ips.iter().all(|ip| ip.is_loopback()) { vec![] } else { tailscale_ips() };
-        if let Some(ip) = ips.iter().find(|ip| path_kind(**ip, &tailscale).is_none()) {
-            bail!("{ip} is not this machine's Tailscale address, and plain HTTP on any other network could be changed by anyone who can intercept traffic; pick the Tailscale address (docs/phone.md)");
+        if let Some(ip) = ips.iter().find(|ip| ip.is_unspecified()) {
+            bail!("{ip} would listen everywhere; pick the addresses one by one");
         }
-        let mut running = Running { addrs: vec![], stoppers: vec![] };
+        if tls.is_none() {
+            let tailscale = if ips.iter().all(|ip| ip.is_loopback()) { vec![] } else { tailscale_ips() };
+            if let Some(ip) = ips.iter().find(|ip| path_kind(**ip, &tailscale).is_none()) {
+                bail!("{ip} is not this machine's Tailscale address, and plain HTTP on any other network could be changed by anyone who can intercept traffic; pick the Tailscale address, or use HTTPS (docs/phone.md)");
+            }
+        }
+        let networks = Arc::new(if tls.is_some() { crate::relay::networks() } else { vec![] });
+        let config = tls.as_ref().map(|t| t.config.clone());
+        let mut running = Running { addrs: vec![], host: tls.map(|t| t.host), stoppers: vec![] };
         for ip in ips {
             let listener = match TcpListener::bind(SocketAddr::new(*ip, port)) {
                 Ok(l) => l,
@@ -343,10 +468,25 @@ impl Phone {
             let addr = listener.local_addr()?;
             let flag = Arc::new(AtomicBool::new(false));
             let me = self.clone();
-            let handler: http::Handler = Arc::new(move |stream: &mut TcpStream, _peer: SocketAddr| me.connection(stream));
-            // Loopback answers only this machine; a tunnel address only the tunnel's peers.
+            let config = config.clone();
+            let handler: http::Handler = Arc::new(move |stream: &mut TcpStream, _peer: SocketAddr| match &config {
+                Some(config) => {
+                    let Ok(conn) = rustls::ServerConnection::new(config.clone()) else { return };
+                    me.connection(&mut TlsConn { conn, sock: stream });
+                }
+                None => me.connection(stream),
+            });
+            // Loopback answers only this machine; otherwise the tunnel's peers, and over HTTPS also
+            // this machine's networks.
             let own = *ip;
-            let allow = Arc::new(move |peer: IpAddr| if own.is_loopback() { peer.is_loopback() } else { in_tailscale_range(peer) });
+            let networks = networks.clone();
+            let allow = Arc::new(move |peer: IpAddr| {
+                if own.is_loopback() {
+                    peer.is_loopback()
+                } else {
+                    in_tailscale_range(peer) || (!networks.is_empty() && crate::relay::is_local_to(peer, &networks))
+                }
+            });
             let stop = flag.clone();
             std::thread::spawn(move || http::accept_until(listener, allow, Arc::new(Slots::default()), handler, stop));
             running.addrs.push(addr);
@@ -356,11 +496,12 @@ impl Phone {
     }
 
     /// A new pairing offer, replacing any open one; the secret is only in what this returns.
-    pub fn offer(&self, addrs: &[SocketAddr]) -> Result<OfferView> {
+    /// `pages` are the phone page's addresses (`Running::pages`).
+    pub fn offer(&self, pages: &[String]) -> Result<OfferView> {
         let (secret, secret_hex) = random_hex::<32>()?;
         let expires = now() + OFFER_SECONDS;
         self.state().offer = Some(Offer { secret, expires });
-        let urls: Vec<String> = addrs.iter().map(|a| format!("{}#pair={secret_hex}", url(a.ip(), a.port()))).collect();
+        let urls: Vec<String> = pages.iter().map(|p| format!("{p}#pair={secret_hex}")).collect();
         let qr_svg = match urls.first() {
             Some(u) => qr_svg(u)?,
             None => String::new(),
@@ -409,7 +550,7 @@ impl Phone {
         Ok(accept.then(|| Device { id: request.id.clone(), name: request.name.clone(), public_key: request.public_key.clone(), paired_at: now() }))
     }
 
-    fn connection(&self, stream: &mut TcpStream) {
+    fn connection<C: http::Conn + ?Sized>(&self, stream: &mut C) {
         let deadline = Instant::now() + IO_TIMEOUT;
         let head = match read_head(stream, deadline) {
             Ok(h) => h,
@@ -784,7 +925,7 @@ mod tests {
         assert_eq!(path_kind(ip("fd7a:115c:a1e0::1"), &ts), Some(PathKind::Tunnel));
         assert_eq!(path_kind(ip("192.168.1.20"), &ts), None);
         let phone = Phone::new(Arc::new(|| Ok(vec![])), Arc::new(|_: &str| None), Arc::new(|| anyhow::bail!("no database in this test")), Arc::new(|_: &crate::Db| vec![]));
-        let err = phone.start(&[ip("192.168.1.20")], 0).err().unwrap().to_string();
+        let err = phone.start(&[ip("192.168.1.20")], 0, None).err().unwrap().to_string();
         assert!(err.contains("not this machine's Tailscale address"), "{err}");
     }
 
@@ -864,7 +1005,7 @@ mod tests {
         let devices: Devices = Arc::new(move || Ok(read.lock().unwrap().as_ref().and_then(|l| verified(&public, l)).unwrap_or_default()));
         let assets: Assets = Arc::new(|p: &str| (p == "phone.html").then(|| (b"<html>phone</html>".to_vec(), content_type(p))));
         let phone = Phone::new(devices, assets, Arc::new(|| anyhow::bail!("no database in this test")), Arc::new(|_: &crate::Db| vec![]));
-        let running = phone.start(&["127.0.0.1".parse().unwrap()], 0).unwrap();
+        let running = phone.start(&["127.0.0.1".parse().unwrap()], 0, None).unwrap();
         let base = format!("http://{}", running.addrs[0]);
 
         let agent = ureq::Agent::config_builder().http_status_as_error(false).build().new_agent();
@@ -873,7 +1014,7 @@ mod tests {
         assert!(page.headers().get("content-security-policy").is_some());
         assert_eq!(page.body_mut().read_to_string().unwrap(), "<html>phone</html>");
 
-        let offer = phone.offer(&running.addrs).unwrap();
+        let offer = phone.offer(&running.pages()).unwrap();
         let secret = offer.urls[0].split("#pair=").nth(1).unwrap().to_string();
         assert!(offer.qr_svg.starts_with("<?xml") || offer.qr_svg.contains("<svg"));
         let mut p = FakePhone { key: ed25519_dalek::SigningKey::from_bytes(&new_secret().unwrap()), id: String::new() };
@@ -927,7 +1068,7 @@ mod tests {
         let db_path = path.clone();
         // Two worktrees the app sees waiting: an agent at its prompt, a stopped rebase.
         let phone = Phone::new(devices, Arc::new(|_: &str| None), Arc::new(move || crate::Db::open(&db_path)), Arc::new(|_: &crate::Db| vec!["worktree:C:/wt/x".to_string(), "worktree:C:/wt/y".to_string()]));
-        let running = phone.start(&["127.0.0.1".parse().unwrap()], 0).unwrap();
+        let running = phone.start(&["127.0.0.1".parse().unwrap()], 0, None).unwrap();
         let base = format!("http://{}", running.addrs[0]);
 
         let mut db = crate::Db::open(&path).unwrap();
@@ -999,6 +1140,55 @@ mod tests {
         running.stop();
         crate::approval::trust_in_tests(None);
         devices_in_tests(None);
+    }
+
+    #[test]
+    fn serves_the_page_over_https_with_the_given_certificate() {
+        use std::io::{Read, Write};
+        let made = rcgen::generate_simple_self_signed(vec!["nitely.test".to_string()]).unwrap();
+        let dir = crate::paths::unique_temp("nitely-phone-tls", "");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (cert, key) = (dir.join("pc.crt"), dir.join("pc.key"));
+        std::fs::write(&cert, made.cert.pem()).unwrap();
+        std::fs::write(&key, made.key_pair.serialize_pem()).unwrap();
+        assert!(tls_from_files(&cert, &key, "").is_err(), "a name is needed for the link");
+        let other = rcgen::generate_simple_self_signed(vec!["other.test".to_string()]).unwrap();
+        std::fs::write(dir.join("other.key"), other.key_pair.serialize_pem()).unwrap();
+        assert!(tls_from_files(&cert, &dir.join("other.key"), "nitely.test").is_err(), "a key that is not the certificate's");
+        let tls = tls_from_files(&cert, &key, "Nitely.Test.").unwrap();
+
+        let assets: Assets = Arc::new(|p: &str| (p == "phone.html").then(|| (b"<html>phone</html>".to_vec(), content_type(p))));
+        let phone = Phone::new(Arc::new(|| Ok(vec![])), assets, Arc::new(|| anyhow::bail!("no database in this test")), Arc::new(|_: &crate::Db| vec![]));
+        let running = phone.start(&["127.0.0.1".parse().unwrap()], 0, Some(tls)).unwrap();
+        let port = running.addrs[0].port();
+        assert_eq!(running.pages(), [format!("https://nitely.test:{port}/phone/")]);
+        let offer = phone.offer(&running.pages()).unwrap();
+        assert!(offer.urls[0].starts_with(&format!("https://nitely.test:{port}/phone/#pair=")));
+
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(made.cert.der().clone()).unwrap();
+        let config = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let mut conn = rustls::ClientConnection::new(Arc::new(config), "nitely.test".try_into().unwrap()).unwrap();
+        let mut sock = TcpStream::connect(running.addrs[0]).unwrap();
+        let mut stream = rustls::Stream::new(&mut conn, &mut sock);
+        stream.write_all(b"GET /phone/ HTTP/1.1\r\nHost: nitely.test\r\n\r\n").unwrap();
+        let mut answer = String::new();
+        let _ = stream.read_to_string(&mut answer);
+        assert!(answer.starts_with("HTTP/1.1 200") && answer.ends_with("<html>phone</html>"), "{answer}");
+
+        // Plain HTTP to the HTTPS port gets no page.
+        let mut plain = TcpStream::connect(running.addrs[0]).unwrap();
+        plain.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+        plain.write_all(b"GET /phone/ HTTP/1.1\r\n\r\n").unwrap();
+        let mut got = Vec::new();
+        let _ = plain.read_to_end(&mut got);
+        assert!(!String::from_utf8_lossy(&got).contains("<html>phone</html>"));
+        running.stop();
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

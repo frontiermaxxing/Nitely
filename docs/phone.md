@@ -40,11 +40,22 @@ authenticated end to end:
 - **This machine's Tailscale address**: one the Tailscale client itself reports (`tailscale ip`),
   not merely an address in its ranges (`100.64.0.0/10` is also used by carriers' NAT). WireGuard
   encrypts and authenticates every packet between the person's own devices, so plain HTTP inside it
-  is safe from the network in between. Other tunnels can follow once Nitely can tell they are one. This is the first version's way, and it works on the same
-  Wi-Fi as well as away from home: both devices only need to be on the person's tailnet.
-- **HTTPS** with a certificate the phone already trusts (a Tailscale HTTPS certificate, or a local
-  certificate authority the person installs on the phone). This is how a plain LAN without a tunnel
-  will work; it is the follow-up [NIT-147](nitely://issue/NIT-147).
+  is safe from the network in between. Other tunnels can follow once Nitely can tell they are one.
+  It works on the same Wi-Fi as well as away from home: both devices only need to be on the
+  person's tailnet.
+- **HTTPS** with a certificate the phone already trusts. TLS authenticates the page whatever network
+  carries it, so over HTTPS any of this machine's addresses may serve, a plain LAN address included.
+  The Phone screen offers two certificates:
+  - **Tailscale's certificate for this machine.** The app runs `tailscale cert` for the machine's
+    tailnet name (`pc.tail1234.ts.net`, from `tailscale status --json`), a real Let's Encrypt
+    certificate every phone trusts, and keeps it in the data directory (`phone-tls/`). The person
+    must first turn on **MagicDNS** and **HTTPS Certificates** in the Tailscale admin console (DNS
+    page); until then the Phone screen shows Tailscale's own reason. The name resolves only inside
+    the tailnet, so the phone needs Tailscale too.
+  - **The person's own certificate**: PEM certificate and key files, and the name on the
+    certificate. The phone must resolve that name to this machine and trust the certificate's
+    authority (a public one, or a local authority the person installed on the phone). Nitely makes
+    no certificate authority and runs no server.
 
 Plain HTTP on an ordinary LAN address is refused, and the app says why. Loopback is offered for
 trying it on the PC itself.
@@ -52,7 +63,12 @@ trying it on the PC itself.
 The phone server never binds `0.0.0.0`. When the person turns it on, the app lists this machine's
 addresses that qualify and the person picks the ones to listen on. Only those are bound, and only
 clients on those networks are answered (as `nitely serve` does). Turning it off, or quitting the
-app, closes the sockets.
+app, closes the sockets. Over HTTPS the pairing QR carries `https://<name>:7422/phone/`, the name on
+the certificate, rather than an address.
+
+The phone keeps its key in storage scoped to the page's origin, so a phone paired over
+`http://100.101.7.42:7422` is a stranger to `https://pc.tail1234.ts.net:7422`: after switching, pair
+it again (and remove the old entry).
 
 ## Pairing
 
@@ -136,8 +152,11 @@ the app's approval key to add a device of its own.
 - **Request replay or tampering on the network:** each request is signed with its time and body,
   refused outside a 60-second window, and refused when its signature was already seen.
 - **Someone on the same network reading or changing traffic:** the phone server speaks only inside
-  an encrypted, authenticated tunnel (or, later, HTTPS), so they can neither read the decisions nor
-  replace the page that holds the key ("Choosing where it listens").
+  an encrypted, authenticated tunnel or over HTTPS with a certificate the phone trusts, so they can
+  neither read the decisions nor replace the page that holds the key ("Choosing where it listens").
+- **A stolen certificate key:** whoever holds it and can reach the phone on that name could serve a
+  page of their own. Tailscale's key lives in the data directory like the database; the person's
+  own key is wherever they keep it. Revoke and reissue it as for any HTTPS site.
 - **Another device on the person's tailnet:** it is the person's own device, or one they shared the
   tailnet with. It still cannot act without a paired device key; it could read the page's code, which
   holds nothing secret.
@@ -147,7 +166,7 @@ the app's approval key to add a device of its own.
 - **A stolen phone:** revoke it in the app. Until then it can do what the person could: answer and
   approve. The phone's own lock screen is its protection; the page keeps no password.
 - **A malicious page in the phone's browser:** the key lives in storage scoped to the phone server's
-  origin (`http://<address>:7422`), which serves only the phone page, with a strict
+  origin (`http://<address>:7422` or `https://<name>:7422`), which serves only the phone page, with a strict
   Content-Security-Policy (`default-src 'self'`).
 - **Denial of service** by anyone on the chosen networks: the server keeps `nitely serve`'s limits
   (connection caps, timeouts, bounded bodies).
@@ -157,8 +176,9 @@ the app's approval key to add a device of its own.
 Browsers expose WebCrypto only to secure origins (HTTPS or localhost), and a tunnel address over
 plain HTTP is not one, even though the tunnel protects it. So the page signs with a small audited
 pure-JavaScript Ed25519 implementation (`@noble/ed25519` with `@noble/hashes`), bundled into the
-page, with randomness from `crypto.getRandomValues`, which browsers offer on any origin. With HTTPS
-([NIT-147](nitely://issue/NIT-147)) the page can move to WebCrypto with a non-extractable key.
+page, with randomness from `crypto.getRandomValues`, which browsers offer on any origin. Over HTTPS
+the page could use WebCrypto with a non-extractable key instead; it keeps one code path for both
+until plain HTTP inside the tunnel goes away.
 
 ## The one-hand Inbox
 
@@ -176,14 +196,12 @@ page, with randomness from `crypto.getRandomValues`, which browsers offer on any
 
 ## Later
 
-- **A plain LAN without a tunnel:** HTTPS with a certificate the phone trusts, then web push
-  ([NIT-147](nitely://issue/NIT-147)).
 - **Away from home:** a tunnel already reaches anywhere the phone has a connection; checking it end
   to end and the setup words on the Phone screen are [NIT-148](nitely://issue/NIT-148). A relay
   Nitely would run is out of scope.
-- **Notifications on the phone:** web push needs a secure origin and a push service, so it waits for
-  HTTPS ([NIT-147](nitely://issue/NIT-147)). Until then, the desktop notifications (NIT-124) and
-  a home-screen shortcut to the phone page.
+- **Notifications on the phone:** web push needs a secure origin, which HTTPS now gives, and the
+  browser's own push service; it is [NIT-159](nitely://issue/NIT-159). Until then, the desktop
+  notifications (NIT-124) and a home-screen shortcut to the phone page.
 
 ## Build order
 
@@ -195,7 +213,10 @@ page, with randomness from `crypto.getRandomValues`, which browsers offer on any
 
 - `crates/nitely-core/src/phone.rs`: which addresses may serve, pairing offers and requests, the
   signed device list in the keychain, signed requests, the phone server's routes.
-- `crates/nitely-core/src/http.rs`: the strict HTTP layer it shares with `nitely serve`.
+- `crates/nitely-core/src/http.rs`: the strict HTTP layer it shares with `nitely serve`, over any
+  `Conn` (a TCP stream, or `phone.rs`'s TLS over one).
+- HTTPS (`phone.rs`): `Tls` from PEM files (`tls_from_files`) or from `tailscale cert`
+  (`tailscale_tls`), with rustls; `start` takes it, and `Running::pages` gives the `https://` link.
 - `src-tauri/src/phone.rs`: turning the server on and off, pairing and revoking from the app.
 - `src/PhoneSetup.tsx`: the app's Phone screen. `phone.html`, `src/phone/`: the phone page.
 - `crates/nitely-core/examples/phone_dev.rs`: the real phone server on loopback with a stand-in for
