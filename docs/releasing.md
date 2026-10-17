@@ -77,12 +77,29 @@ make it yourself:
 2. On GitHub: **Settings → Secrets and variables → Actions → New repository secret**. Add
    `TAURI_SIGNING_PRIVATE_KEY` (the contents of `nitely-updater.key`) and
    `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
-3. Give an agent the **public** key (`nitely-updater.key.pub`; it is safe to share). It goes into
-   `src-tauri/tauri.conf.json` under `plugins.updater.pubkey` with the auto-update work (NIT-93).
+3. Give an agent the **public** key (`nitely-updater.key.pub`; it is safe to share) to land in
+   `src-tauri/tauri.conf.json` as `plugins.updater.pubkey` (empty until then).
 
 Until both halves are in place (the secret, and the public key in `tauri.conf.json`), releases
-still publish installers; they just carry no updater signature, and no manifest changes. A
+still publish installers; they just carry no updater signature, no manifest changes, and the app
+they install doesn't check for updates (Agent setup → Updates says so). Copies installed before
+the key existed don't update themselves: install a later release over them once, by hand. A
 manifest only ever moves forward: a build that finishes after a newer one leaves it alone.
+
+## How installed copies update
+
+The app checks the manifest of the channel it follows (Agent setup → Updates: stable by default
+on a stable build, the build's own channel otherwise) when it starts and every four hours. It
+verifies the update against the public key, including the version it was signed for, and downloads
+it in the background. The sidebar then shows "Restart to update"; it installs then, or when Nitely
+quits, and never while a land runs (it waits for every land to finish). The installer puts the new
+`nitely` CLI in place the way `nitely install` does, so agents in the middle of a call keep the
+copy they started with, and the crew keeps running. Builds from source (`npm run tauri dev`,
+`cargo build`) never check: their channel is `dev`. `nitely --version` prints the channel.
+
+Moving to a more settled channel (nightly to beta or stable) asks first: its newest version can be
+older than the build you run. An older build refuses a database a newer one upgraded and says which
+version to install (`nitely.db.upgraded-by` beside the database records it).
 
 ## Cutting the first stable release (Andrew)
 
