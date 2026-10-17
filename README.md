@@ -1,190 +1,118 @@
 # Nitely
 
-A desktop app for running a team of coding agents: a backlog they take work from, a live view of
-what each one is doing, and an inbox for the calls only you should make. Where it is going:
-[docs/vision.md](docs/vision.md). Milestone 1 design: [docs/design.md](docs/design.md). How agents
-work on this repo: [AGENTS.md](AGENTS.md).
+[![CI](https://github.com/frontiermaxxing/Nitely/actions/workflows/ci.yml/badge.svg)](https://github.com/frontiermaxxing/Nitely/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-**Views:** Inbox (agents' questions with an answer box, issues waiting on you with Approve, stuck
-worktrees), Now (every worktree with its agent, PR and git state), and one backlog per project with
-an issue panel showing the full timeline.
+**One person, a team of coding agents.** Nitely is a desktop app and a command-line tool for
+running Claude Code, Codex and Cursor agents across several repos at once. It gives them one
+backlog to take work from and one set of rules for branches, tests, reviews and merging. It shows
+you what each agent is doing right now. An inbox holds the decisions only you should make.
 
-**For agents:** `nitely mcp` is an MCP server with `next_task` (atomic claim of the most urgent Todo
-issue), `report`, `note` (with handoffs), `file_issue` (duplicate check, evidence required),
-`update_issue` (Done needs evidence; only a human approves), `ask` and `get_answer`, and
-`get_project` / `set_project_brief` / `mark_setup_complete` for the project's brief (what agents
-learned about it, editable on the project's Brief view) and whether its setup sweep has run.
-`propose_playbook_change` files a change to the repo's playbook for the human to apply or reject in
-the Inbox; agents never change the rules themselves.
+![Nitely's Overview: what needs you, the agents moving, stuck work, and every agent with a session open](docs/img/readme-overview.png)
 
-## Layout
+## What it does
+
+- **A backlog agents work from.** Each project has its own issues (`APP-12`) with kind, priority,
+  evidence and a full timeline. Agents claim the most urgent one with `next_task`, so two agents
+  never start the same issue. They report as they go and leave a handoff note when they stop.
+- **The same workflow for every agent.** A repo's playbook (`.nitely/playbook.toml`) says how a
+  task becomes work: its branch and worktree, the gate that must pass, which vendor reviews whose
+  work, which changes wait for you, and how landing works. `start_task`, `submit` and `land` run
+  it, the same way for every vendor.
+- **Cross-vendor review.** Codex reviews Claude's branches and Claude reviews Codex's (or whatever
+  you set). A review with serious findings sends the work back. A change that touches paths you
+  care about (billing, releases) waits for you.
+- **One merge at a time.** `land` is the only writer of the integration branch. It holds a lock,
+  rebases, checks that the review covers exactly this change, runs the gate, then fast-forwards
+  and pushes.
+- **A live view of every agent.** Overview, Now and Activity show which agent works on what, what
+  it last did, and what is stuck. Hooks report tool calls, commands and file paths, never your
+  prompts or file contents.
+- **Only real decisions reach you.** The Inbox holds agents' questions, approvals, conflicts and
+  stopped lands. Approving and answering happen only in the app: no command or tool an agent can
+  run does either.
+- **Optional: Nitely runs the agents.** A project's crew keeps a set number of headless agents
+  working through its backlog, within daily limits and quiet hours ([docs/crew.md](docs/crew.md)).
+
+![The Inbox: a question from an agent, with the issue's track and an answer box](docs/img/readme-inbox.png)
+
+## Install
+
+Nitely runs on Windows today; macOS is next. Ready-made installers will come from GitHub Releases.
+Until then, build it from source:
+
+1. Install [Rust](https://rustup.rs) (MSVC toolchain), [Node.js](https://nodejs.org) 20 or newer,
+   and Visual Studio Build Tools with "Desktop development with C++". WebView2 ships with Windows 11.
+2. Build and install:
+
+   ```powershell
+   git clone https://github.com/frontiermaxxing/Nitely.git
+   cd Nitely
+   npm install
+   cargo run --release -p nitely-cli -- install    # puts nitely.exe on your PATH
+   npm run tauri build                             # the app and its installers, in target/release/bundle
+   ```
+
+   `npm run tauri dev` runs the app from source with hot reload instead.
+
+## Quick start
+
+1. **Connect a repo you already work in.** In the app, choose **+ Add project**, or run:
+
+   ```powershell
+   nitely connect C:\Code\my-app          # shows what it will do
+   nitely connect C:\Code\my-app --yes    # does it
+   ```
+
+   This creates the project, watches the repo and its worktrees, keeps a playbook for it, and
+   connects every agent it finds at user level (MCP server, hooks, instructions). Nothing is written
+   into the repo. Details: [docs/setup.md](docs/setup.md).
+2. **Seed the board.** In the repo, ask an agent to set it up (`/nitely-setup` in Claude Code).
+   It sweeps the repo read-only, files what it finds and writes the project's brief.
+3. **Let agents work.** Tell an agent to take the next task, or turn on the project's crew. Watch
+   Overview, answer the Inbox, and approve what waits for you.
+
+## What agents get
+
+`nitely mcp` is an MCP server, registered for each agent by `nitely connect`:
+
+| Tools | What they do |
+| --- | --- |
+| `next_task`, `start_task` | Claim the most urgent issue; create its branch and worktree and run setup |
+| `report`, `note`, `ask`, `get_answer` | Say what they are doing, leave handoffs, ask you something |
+| `file_issue`, `file_issues`, `update_issue`, `get_issue`, `list_issues` | Work the backlog (evidence required; Done needs proof; only you approve) |
+| `run_gate`, `submit`, `land` | Run the gate; hand in a branch for review and a pull request; merge it |
+| `setup_guide`, `get_project`, `set_project_brief`, `mark_setup_complete` | Set up a project and keep its brief |
+| `propose_playbook_change` | Suggest a rule change for you to apply or reject |
+
+Every command has a CLI twin (`nitely submit`, `nitely land APP-4`, ...); `nitely --help` lists them.
+
+## More
+
+- [Setting up a repo](docs/setup.md): what connecting writes, agent instructions, hooks.
+- [Playbooks](docs/playbooks.md): branches, gates, reviews, approvals, landing, and private terms
+  that must never reach a repo. [A worked example](docs/playbooks/example.toml).
+- [GitHub, Bitbucket and Linear](docs/integrations.md): pull requests, checks and the one-time move
+  off Linear.
+- [Agents on other machines](docs/other-machines.md): share this machine's backlog on your network.
+- [Signed approvals](docs/approvals.md), [the crew](docs/crew.md), and where Nitely is going
+  ([docs/vision.md](docs/vision.md)).
+
+Nitely keeps its data in `%APPDATA%\Nitely` (`nitely where` prints it): a SQLite database, its
+config, and the playbooks it keeps for repos that have none.
+
+## Building on Nitely
 
 | Path | What |
-|---|---|
-| `crates/nitely-core` | Config, SQLite store, git reader, hook parsing, the Now snapshot |
-| `crates/nitely-cli` | The `nitely` binary agents and hooks call |
+| --- | --- |
+| `crates/nitely-core` | Issues and their rules, playbooks, review, land, git, sync, the SQLite store |
+| `crates/nitely-cli` | The `nitely` binary: CLI, MCP server, hooks |
 | `src-tauri` | The Tauri 2 desktop shell |
-| `src` | React + TypeScript frontend (Vite) |
+| `src` | The React + TypeScript frontend; `npm run dev` runs it on sample data in a browser |
 
-## Prerequisites (Windows)
-
-Rust (MSVC toolchain, via rustup), Node 20+, Visual Studio Build Tools with "Desktop development
-with C++", and WebView2 (already on Windows 11).
-
-## Run it
-
-```powershell
-npm install
-cargo install --path crates/nitely-cli     # puts nitely.exe on PATH (~/.cargo/bin)
-nitely connect C:\Code\my-app --yes      # a repo you work in
-npm run tauri dev
-```
-
-`cargo test` runs the core tests. `nitely now` prints the same board as JSON, and `nitely where`
-prints where the database and config live (`%APPDATA%\Nitely`).
-
-## Add a project
-
-In the app, choose **+ Add project** and pick a folder you already work in (for example
-`C:\Code\my-app`). Nitely shows what it will do before it does anything:
-
-- creates the project (key and name editable) and watches the repo and its worktrees;
-- picks a playbook: the repo's own `.nitely/playbook.toml` if it has one, otherwise one generated
-  from the repo (its default branch, `cargo test`, npm scripts). A generated playbook is kept in
-  Nitely's data folder, not in the repo;
-- connects every agent it finds, at user level, so nothing is written into the repo:
-  - Claude Code: hooks in `~/.claude/settings.json` (existing hooks kept), the `nitely` and
-    `nitely-setup` skills in `~/.claude/skills`, and `claude mcp add --scope user nitely -- nitely mcp`;
-  - Codex: `[mcp_servers.nitely]` and `notify` in `~/.codex/config.toml` (comments kept), and the
-    workflow between `<!-- nitely:start -->` markers in `~/.codex/AGENTS.md`;
-  - Cursor: `~/.cursor/mcp.json` and `~/.cursor/hooks.json`.
-
-Every agent session that starts in a connected repo gets that repo's instructions (project key,
-integration branch, gate, workflow) from the session-start hook and the MCP server. Running it again
-changes only what is out of date. The CLI does the same:
-
-```powershell
-nitely connect C:\Code\my-app                 # show the plan
-nitely connect C:\Code\my-app --project APP --yes
-```
-
-The skill, Codex instructions and hook and MCP registrations live in your home folder, so they go
-stale when a newer Nitely writes them differently. The app then shows a banner to review and update
-them; `nitely agents` shows the same, and `nitely agents --yes` updates them.
-
-**Seed the board.** A new project's board starts empty. Ask an agent in the repo to set it up
-(`/nitely-setup` in Claude Code; any agent can follow the `setup_guide` MCP tool). It sweeps the
-repo read-only, checks the integration branch and the gate first, files what it finds (human-only
-work goes to your Needs You), proposes review rules for you to approve in the Inbox, and writes the
-project's brief (the project page's Brief view). Nothing is committed or run against live systems.
-
-Manual setup still works (`nitely project create`, `nitely repo add`, `nitely issue import`).
-Approving and answering asks happen only in the app, never through the CLI or MCP.
-
-## Playbooks
-
-A repo's `.nitely/playbook.toml` says how a task becomes work: the branch it is cut from, the
-branch and worktree names, the commands that set up a new worktree, and the gate that must pass
-before a pull request. `nitely start NIT-3 --agent claude` (MCP: `start_task`) creates the branch
-and worktree and runs setup; `nitely gate` (MCP: `run_gate`) runs the gate in the current worktree.
-`nitely submit` (MCP: `submit`) hands in a committed branch: it runs the gate, has another vendor
-review it with a fixed closing format (`VERDICT`, plus the playbook's yes/no flags), decides whether
-a human must approve (`[approval]` paths, or a flag the reviewer raised), pushes, and opens or updates
-the pull request on GitHub or Bitbucket. The review is stored for that exact patch, so landing can
-check it. `nitely land NIT-4` (MCP: `land`) is then the only writer of the integration branch:
-one land at a time under a lock, rebase, a review that must cover exactly the rebased change, a
-human approval in Nitely when the change needs one, the gate, a fast-forward and a push. All of it
-shows on the issue's timeline and in the app. A repo without a playbook gets `main`, `{vendor}/{key}-{slug}`
-branches and worktrees in `../{repo}-worktrees/`. Nitely's own is in [.nitely/playbook.toml](.nitely/playbook.toml).
-Gate steps can depend on what the branch changes (`when_changed`, `unless_only`), commands can use
-`{main}`, `{worktree}` and `{base}`, and `[approval] blocked_paths` lists paths no task branch may
-touch. [docs/playbooks/example.toml](docs/playbooks/example.toml) is a worked example of a full
-playbook for a made-up monorepo: per-OS branches, worktree setup and teardown, gate steps that skip
-what a change cannot affect, review flags, and paths that wait for you.
-
-## Private terms
-
-If you work on public code next to private work, list what must never reach a project's repos
-(another project's name, a client, a local folder) in the project's **Settings** in the app, or for
-every project at once. `submit` and `land` refuse a branch that adds one to a line, a new file path
-or a commit message in any of its commits, and say only where (`src/app.ts:12 (commit 1a2b3c4):
-term 2 of APP's list`). The list stays in Nitely's data folder on this machine; no MCP tool or CLI
-command shows it, so it never reaches an agent's context.
-
-## GitHub
-
-Watched repos whose `origin` is on GitHub get their pull requests, approvals and CI checks synced,
-with no setup beyond a signed-in GitHub CLI (`gh auth login`). Nitely uses `NITELY_GITHUB_TOKEN`
-or `GITHUB_TOKEN` instead when set. A PR shows on the issue its branch names (`claude/nit-7-...`).
-
-## Bitbucket and Linear
-
-Nitely reads `credentials.json` in its data folder (`%APPDATA%\Nitely` on Windows; `nitely where`
-prints it) and never writes it:
-
-```json
-{
-  "bitbucket": { "email": "you@example.com", "apiToken": "…", "workspace": "acme", "repo": "my-app" },
-  "linear": { "apiKey": "lin_api_…", "projectId": "…" }
-}
-```
-
-Either section can be left out. Nitely reads no other location: if you kept this file somewhere
-else before, move it here (or point `NITELY_CREDENTIALS` at it).
-
-The app syncs every 60 seconds and on "Sync now"; `nitely sync` does the same from a terminal and prints what it got. Both are read-only on Bitbucket and Linear. Pull
-requests come from each watched repo's Bitbucket `origin` plus the repo named in the credentials
-file; issues are the open ones in the Linear project the file names. To leave Linear, `nitely
-import-linear --project APP` moves a Linear project into native issues once, keeping its keys; it
-shows what it would do until you add `--yes`, and `--state "Needs Review=Needs You"` chooses the
-Nitely state for a Linear state Nitely has no name for (an open state named "Needs …" is Needs You
-unless you choose otherwise). To keep such a choice for the Linear mirror
-too, put it in `config.json` in the data folder: `"linear_states": { "Needs Review": "Needs You" }`.
-
-## Agents on other machines on your network
-
-The backlog lives in the database on the machine that runs Nitely. `nitely serve` lets agents on
-other machines on the same local network (a Mac beside a Windows PC, say) reach it: it is the
-`nitely` MCP server over HTTP at `/mcp`, so Claude Code there needs no Nitely install.
-
-1. In the app, open **Other machines** and add one (say `mac`, default project APP). It shows that
-   machine's token once, inside the command to run there, with a Copy button.
-2. Run `nitely serve` on this machine. It listens on port 7421 and announces itself on the network.
-3. On the other machine, run the copied command:
-
-```bash
-claude mcp add --transport http nitely "http://192.168.1.68:7421/mcp" --header "Authorization: Bearer nly_..."
-```
-
-`nitely discover` (or `dns-sd -B _nitely._tcp` on a Mac without Nitely) finds this machine's address.
-
-- **Local network only.** Requests from addresses outside the machine's own networks (private
-  ranges, link-local, or the same subnet as one of its interfaces) are refused, so a forwarded port
-  never exposes the backlog. It speaks plain HTTP: keep it to a network you trust.
-- **A token per machine, made only in the app.** It is shown once, to you; no command an agent can
-  run prints or stores a token, and Nitely keeps only its hash. `nitely tokens list` shows names and
-  projects, and removing a machine (in the app, or `nitely tokens remove mac`) cuts it off. Its
-  agents act as `claude@mac`, and the token's project is the default for their calls.
-- **The backlog, not the repo.** Remote agents get `next_task`, `list_issues`, `get_issue`,
-  `file_issue`, `update_issue`, `report`, `note`, `ask`, `get_answer` and the project brief tools. `start_task`, `run_gate`,
-  `submit` and `land` work in a repo on the machine that runs them, so they are not offered.
-  Approving stays in the app, as everywhere.
-- **Firewall.** The first time `nitely serve` listens, Windows may ask whether to allow it on private
-  networks; allow it there, and only there.
-- `nitely discover` checks each announced address before listing it, so what it prints answers.
-- Remote agents show on Now under "On other machines", and count among the agents working on Pulse.
-- The server is small on purpose: one thread per connection (32 at most, 4 per address), one
-  10-second deadline per request however slowly it arrives, a
-  Content-Length body of at most 1 MB, and the connection closed after each answer.
-
-## Hooks
-
-`nitely connect` installs them. The hooks (`nitely hook claude|codex|cursor`) record tool names,
-commands and file paths, never prompt text or file contents, and always exit 0, so they can't block
-an agent. [docs/claude-hooks.json](docs/claude-hooks.json) is the Claude Code part, for setting it
-up by hand.
-
-Agents can also report directly: `nitely status "running test:gate"` from inside a worktree.
+The gate is `cargo test --workspace`, `cargo clippy --workspace -- -D warnings`, `npm test` and
+`npm run build`; CI runs it on every pull request. Nitely builds itself: its backlog is the NIT
+project, and [AGENTS.md](AGENTS.md) is how agents work on this repo.
 
 ## Contributing
 
@@ -195,4 +123,5 @@ Issues and pull requests are welcome; [CONTRIBUTING.md](CONTRIBUTING.md) says ho
 
 Copyright 2026 Quixet LLC. Licensed under the [Apache License 2.0](LICENSE); see [NOTICE](NOTICE).
 A Nitely build includes open-source packages under their own licenses, listed in
-[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). Claude, Codex and Cursor are their owners'
+trademarks; Nitely is not affiliated with them.
