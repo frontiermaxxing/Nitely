@@ -2,8 +2,6 @@ import { useState } from "react";
 import { invoke } from "./backend";
 import type { AgentPlan, AgentsUpdated, ConnectChange } from "./types";
 import { AgentMark, vendorInfo, vendorOf } from "./ui";
-import { RuleDefaultsCard } from "./Rules";
-import { UpdatesCard, type UpdateStatus } from "./Update";
 
 /** Changes still needed by the installed agents. */
 export function pendingChanges(agents: AgentPlan[]): number {
@@ -79,8 +77,6 @@ export function AgentSetup(props: {
   agents: AgentPlan[];
   onUpdated: () => void;
   onRecheck: () => void;
-  update: UpdateStatus | null;
-  onUpdate: (s: UpdateStatus) => void;
 }) {
   const [result, setResult] = useState<AgentsUpdated | null>(null);
   const [busy, setBusy] = useState(false);
@@ -132,8 +128,6 @@ export function AgentSetup(props: {
           </button>
         </div>
       )}
-      <RuleDefaultsCard />
-      <UpdatesCard status={props.update} onStatus={props.onUpdate} />
       {result && (
         <section>
           <h2>Done</h2>

@@ -20,7 +20,7 @@ that never leaves the phone, and `land` checks that signature as it checks the a
 
 1. **The phone server** runs inside the Nitely app, not in `nitely serve`. The app is the person's
    process: it already holds the approval key, and the phone's actions are the person's. It is off
-   until the person turns it on in the app (Phone, beside Other machines), and it stops when the app
+   until the person turns it on in the app (Settings, Phone), and it stops when the app
    quits. It listens on its own port (7422), separate from `nitely serve`'s MCP port.
 2. **The phone page** is a small web app the phone server serves (`/phone/`), built from this repo
    like the desktop UI (`phone.html`, a second Vite entry) and embedded in the app. The phone

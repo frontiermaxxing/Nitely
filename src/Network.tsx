@@ -72,15 +72,7 @@ export function Network(props: { board: Board | null; projects: Project[]; now: 
   const validName = /^[a-z0-9-]{1,32}$/.test(name.trim().toLowerCase());
 
   return (
-    <div className="page page-form">
-      <div className="page-head">
-        <h1>Other machines</h1>
-      </div>
-      <p className="page-lead">
-        Agents on another machine on this network (a Mac beside this PC, say) reach this backlog through{" "}
-        <span className="mono">nitely serve</span> here. Each machine gets its own token; its agents show as{" "}
-        <span className="mono">claude@name</span>, file and take issues, and never approve.
-      </p>
+    <div className="network">
       {error && <p className="error">{error}</p>}
 
       {made && (

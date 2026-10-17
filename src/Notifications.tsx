@@ -2,38 +2,11 @@
 // never twice, not in quiet hours or while the Inbox is in view, and the count on the taskbar.
 // What was already told and the settings live in this machine's app storage.
 
-import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "./backend";
 import type { Decision } from "./decisions";
 import { DEFAULT_SETTINGS, NOTIFY_KINDS, freshDecisions, inQuiet, messageOf, type Fresh, type NotifySettings, type Seen } from "./notify";
 import type { IssueDetail } from "./types";
-
-const OPEN_SETTINGS = "nitely:notify-settings";
-let settingsAsked = false;
-
-/**
- * Opens the Inbox's notification settings from elsewhere (the palette's "Notification settings"):
- * at once when the Inbox is on screen, or as soon as it comes.
- */
-export function askNotifySettings() {
-  settingsAsked = true;
-  window.dispatchEvent(new Event(OPEN_SETTINGS));
-}
-
-/** Whether the Inbox shows its notification settings: open when asked for, toggled from its head. */
-export function useNotifySettingsOpen(): [boolean, Dispatch<SetStateAction<boolean>>] {
-  const [open, setOpen] = useState(() => settingsAsked);
-  useEffect(() => {
-    settingsAsked = false;
-    const on = () => {
-      settingsAsked = false;
-      setOpen(true);
-    };
-    window.addEventListener(OPEN_SETTINGS, on);
-    return () => window.removeEventListener(OPEN_SETTINGS, on);
-  }, []);
-  return [open, setOpen];
-}
 
 /** Decisions that arrive within this long of each other become one notification. */
 const BATCH_MS = 4000;
@@ -146,17 +119,11 @@ function badgePixels(count: number, size: number): number[] | null {
   return Array.from(g.getImageData(0, 0, size, size).data);
 }
 
-/** Which decisions notify, and quiet hours. */
-export function NotifySettingsPanel(props: { onClose: () => void }) {
+/** Which decisions notify, and quiet hours: Settings' Notifications section. */
+export function NotifySettingsPanel() {
   const [settings, save] = useNotifySettings();
   return (
     <section className="settings-card notify-settings" aria-label="Notifications">
-      <div className="notify-settings-head">
-        <h2>Notifications</h2>
-        <button className="link" onClick={props.onClose}>
-          Done
-        </button>
-      </div>
       <p className="settings-why">When a decision starts waiting on you, Nitely tells you once, outside the window. Several at once come as one.</p>
       {NOTIFY_KINDS.map(({ kind, label }) => (
         <label key={kind} className="notify-kind">

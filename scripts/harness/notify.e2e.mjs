@@ -80,13 +80,15 @@ test("nothing is told while the Inbox is in view or in quiet hours, nor again af
   const ask = (question) => nitely(home, "ask", question, "--issue", "APP-1");
   const countIs = (n) => until(() => badge(home)?.count === n, `the taskbar count of ${n}`);
   const told = () => notifications(home).length;
-  // The quiet-hours switch in the Inbox's notification settings, and the hours around now.
+  // The quiet-hours switch in Settings' Notifications, reached from the Inbox's link, and the
+  // hours around now.
   const quietHours = async (on) => {
     await page.open("#inbox");
-    if (!(await page.eval(`return document.querySelector(".notify-settings") !== null;`))) await page.click({ css: ".inbox-notify-link" });
-    await page.waitFor(`return document.querySelector(".notify-quiet input[type=checkbox]") !== null;`, { what: "the quiet-hours switch" });
-    // Opening the panel glides the Inbox's rows down past it; a click while they pass would land on a row.
-    await page.waitFor(`return !document.getAnimations().some((a) => a.id === "ui-flip" && a.playState === "running");`, { what: "the rows to settle" });
+    await page.click({ css: ".inbox-notify-link" });
+    await page.waitFor(`return location.hash === "#settings/notifications" && document.querySelector(".notify-quiet input[type=checkbox]") !== null;`, { what: "Settings on its Notifications" });
+    // Settings brings the section back into view while the sections above it load; a click while
+    // it moves could land elsewhere.
+    await sleep(2000);
     if ((await page.eval(`return document.querySelector(".notify-quiet input[type=checkbox]").checked;`)) !== on) await page.click({ css: ".notify-quiet input[type=checkbox]" });
     if (on) {
       const hhmm = (d) => d.toTimeString().slice(0, 5);
@@ -104,7 +106,6 @@ test("nothing is told while the Inbox is in view or in quiet hours, nor again af
       await page.waitFor(`return document.querySelector('input[aria-label="Quiet until"]').value === ${JSON.stringify(to)};`, { what: "the quiet hours set" });
     }
     await page.waitFor(`return JSON.parse(localStorage.getItem("nitely.notify.settings") ?? "{}").quiet?.on === ${on};`, { what: `quiet hours ${on ? "on" : "off"} saved` });
-    await page.click({ css: ".notify-settings-head .link", text: "Done" });
     await page.open("#overview");
   };
   try {

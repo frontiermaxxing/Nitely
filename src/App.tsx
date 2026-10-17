@@ -5,8 +5,7 @@ import type { AgentPlan, Board, Project } from "./types";
 import { AgentSetup, pendingChanges, setupErrors } from "./Agents";
 import { Inbox, useDecisionDetails } from "./Inbox";
 import { decisionsOf } from "./decisions";
-import { Network } from "./Network";
-import { PhoneSetup } from "./PhoneSetup";
+import { Settings, isSettingsSection, type SettingsSection } from "./Settings";
 import { Now } from "./Now";
 import { Pulse } from "./Pulse";
 import { Activity } from "./Activity";
@@ -42,8 +41,7 @@ export type View =
   | { kind: "project"; key: string; tab?: ProjectTab; goal?: GoalFocus }
   | { kind: "add" }
   | { kind: "agents" }
-  | { kind: "network" }
-  | { kind: "phone" }
+  | { kind: "settings"; section?: SettingsSection; project?: string }
   | { kind: "kit" };
 
 // The view and the open issue live in the URL hash (`#now`, `#project/NIT/board`, `#inbox@NIT-12`), so
@@ -57,18 +55,33 @@ function fromHash(hash: string): { view: View; issue: string | null } {
   }
   const [path, issue] = raw.split("@");
   const [kind, key, tab] = path.split("/");
-  const plain = ["pulse", "inbox", "now", "activity", "add", "agents", "network", "phone"].concat(isPreview ? ["kit"] : []);
-  // The home view was called Pulse; old links still land on it.
+  const plain = ["pulse", "inbox", "now", "activity", "add", "agents"].concat(isPreview ? ["kit"] : []);
+  // The home view was called Pulse, and Phone and Other machines were views of their own before
+  // Settings held them: old links still land on them.
   const named = kind === "overview" ? "pulse" : kind;
+  const moved: Record<string, SettingsSection> = { phone: "phone", network: "machines" };
   const view: View =
     kind === "project" && key
       ? { kind: "project", key: key.toUpperCase(), ...(isProjectTab(tab) ? { tab } : {}) }
-      : plain.includes(named) ? ({ kind: named } as View) : { kind: "pulse" };
+      : kind === "settings"
+        ? { kind: "settings", ...(isSettingsSection(key) ? { section: key, ...(key === "crew" && tab ? { project: tab.toUpperCase() } : {}) } : {}) }
+        : moved[kind]
+          ? { kind: "settings", section: moved[kind] }
+          : plain.includes(named)
+            ? ({ kind: named } as View)
+            : { kind: "pulse" };
   return { view, issue: issue ? issue.toUpperCase() : null };
 }
 
 function toHash(view: View, issue: string | null): string {
-  const path = view.kind === "project" ? `project/${view.key}${view.tab ? `/${view.tab}` : ""}` : view.kind === "pulse" ? "overview" : view.kind;
+  const path =
+    view.kind === "project"
+      ? `project/${view.key}${view.tab ? `/${view.tab}` : ""}`
+      : view.kind === "settings"
+        ? `settings${view.section ? `/${view.section}${view.project ? `/${view.project}` : ""}` : ""}`
+        : view.kind === "pulse"
+          ? "overview"
+          : view.kind;
   return `#${path}${issue ? `@${issue}` : ""}`;
 }
 
@@ -224,14 +237,6 @@ export function App() {
         <NavItem active={view.kind === "inbox"} onClick={() => setView({ kind: "inbox" })} label="Inbox" count={inboxCount} tone="attention" />
         <NavItem active={view.kind === "now"} onClick={() => setView({ kind: "now" })} label="Now" count={working} tone="live" />
         <NavItem active={view.kind === "activity"} onClick={() => setView({ kind: "activity" })} label="Activity" />
-        <NavItem
-          active={view.kind === "network"}
-          onClick={() => setView({ kind: "network" })}
-          label="Other machines"
-          count={(board?.remote_sessions ?? []).filter((s) => livenessOf(s, now) === "working").length}
-          tone="live"
-        />
-        <NavItem active={view.kind === "phone"} onClick={() => setView({ kind: "phone" })} label="Phone" />
         <div className="nav-heading">Projects</div>
         {projects.map((p) => (
           <button
@@ -266,6 +271,13 @@ export function App() {
                   <span key={a.agent} className={`nav-dot nav-dot-${setupTone(a)}`} title={`${a.agent}: ${SETUP_WORDS[setupTone(a)]}`} />
                 ))}
             </span>
+          </button>
+          <button
+            className={`nav-item${view.kind === "settings" ? " active" : ""}`}
+            onClick={() => setView({ kind: "settings" })}
+            aria-current={view.kind === "settings" ? "page" : undefined}
+          >
+            <span className="nav-label">Settings</span>
           </button>
           <div className="nav-status">
             <span className={`nav-dot nav-dot-${error ? "fail" : "ok"}`} />
@@ -302,18 +314,39 @@ export function App() {
             </button>
           </p>
         )}
-        {view.kind === "agents" && <AgentSetup agents={agents} onUpdated={loadAgents} onRecheck={loadAgents} update={update} onUpdate={setUpdate} />}
+        {view.kind === "agents" && <AgentSetup agents={agents} onUpdated={loadAgents} onRecheck={loadAgents} />}
         {view.kind === "pulse" && <Pulse board={board} decisions={decisions} now={now} version={version} onOpenIssue={setOpenIssue} onGo={setView} />}
         {(view.kind === "inbox" || view.kind === "now") && !board && !error && (
           <div className="page">
             <Loading />
           </div>
         )}
-        {view.kind === "inbox" && board && <Inbox board={board} details={inboxDetails} now={now} pick={inboxPick} onOpenIssue={setOpenIssue} onChanged={changed} />}
+        {view.kind === "inbox" && board && (
+          <Inbox
+            board={board}
+            details={inboxDetails}
+            now={now}
+            pick={inboxPick}
+            onOpenIssue={setOpenIssue}
+            onChanged={changed}
+            onNotifySettings={() => setView({ kind: "settings", section: "notifications" })}
+          />
+        )}
         {view.kind === "now" && board && <Now board={board} needs={inboxCount} now={now} onOpenIssue={setOpenIssue} onChanged={changed} onGo={setView} />}
         {view.kind === "activity" && <Activity now={now} version={version} projects={projects} onOpenIssue={setOpenIssue} />}
-        {view.kind === "network" && <Network board={board} projects={projects} now={now} />}
-        {view.kind === "phone" && <PhoneSetup now={now} />}
+        {view.kind === "settings" && (
+          <Settings
+            section={view.section}
+            project={view.project}
+            board={board}
+            projects={projects}
+            now={now}
+            update={update}
+            onUpdate={setUpdate}
+            onGo={setView}
+            onChanged={changed}
+          />
+        )}
         {view.kind === "add" && (
           <AddProject
             onAdded={(key) => {
@@ -341,6 +374,7 @@ export function App() {
             onOpenIssue={setOpenIssue}
             onChanged={changed}
             onMoved={(key) => setView(key ? { kind: "project", key, tab: "settings" } : { kind: "pulse" })}
+            onCrewSettings={() => setView({ kind: "settings", section: "crew", project: view.key })}
           />
         )}
       </main>

@@ -230,7 +230,7 @@ which issue and what it needs ("NIT-42 asks: keep the old flag?"). A click opens
 decision, or on the list for a batch. What was told is remembered across restarts (approvals and the
 person's own work by issue, the rest by decision), the first run takes what already waits as told,
 and nothing is told while the Inbox has the window's focus, in quiet hours, or for a kind turned off
-under "Notifications" in the Inbox's head. The taskbar button carries the count of waiting decisions
+in Settings, Notifications (the Inbox's head links there). The taskbar button carries the count of waiting decisions
 (an overlay on Windows). In the browser preview, `src/dev/FakeToasts.tsx` shows them in the corner,
 and `nitelyDev.ask("NIT-28", "…")` in the console adds a question to try it.
 
@@ -406,11 +406,10 @@ prose, and motion that loops (other than the breathing dot), flashes, bounces or
 ## The sidebar and Now
 
 The sidebar holds the mark and name, "Go to…" (the palette), the views with their counts
-(Overview; Inbox in a filled amber badge; Now in teal figures; Activity; Other machines, with the
-agents working there in teal figures; Phone), the projects with a dot per agent session in
-their repos (amber waiting on you first, then teal working, at most five), "+ Add project", and at
-the foot Agent setup with a dot per installed agent (teal up to date, amber an update is ready, red
-needs a look) and the line "Local · live".
+(Overview; Inbox in a filled amber badge; Now in teal figures; Activity), the projects with a dot
+per agent session in their repos (amber waiting on you first, then teal working, at most five),
+"+ Add project", and at the foot Agent setup with a dot per installed agent (teal up to date, amber
+an update is ready, red needs a look), Settings, and the line "Local · live".
 
 **The title bar.** On Windows the app has no native title bar (`src-tauri/tauri.windows.conf.json`
 sets `decorations: false`, with the shadow kept for the window's edge and resize borders). The
@@ -482,13 +481,22 @@ List and Board start with the project's goal rows (see Goal rows).
 
 ## Settings
 
+What applies to all of Nitely on the machine is in one view, **Settings** (`src/Settings.tsx`, at
+the sidebar's foot), in sections: Notifications, Updates, Review defaults, Crew (every project's
+crew, a card per repo), Phone and Other machines. Each section is `#settings/<section>`
+(`#settings/crew/NIT` for one project's crew), and the view scrolls there; what links into it goes
+to its section: the Inbox's Notifications, a project header's crew control, the palette ("Phone
+settings", "Crew settings", …). Old `#phone` and `#network` links land on their sections. A
+project's own settings (its name, key, private terms and mirror) stay on its Settings tab, and its
+review and landing rules on its Rules tab, which says what it inherits from Settings.
+
 Every setting is a card (`.settings-card`, src/styles.css): its name as the heading, a line of why
 in `--fg-2` (`.settings-why`), then the controls, the button that saves them last. Stacked cards sit
-14px apart. A project's Settings and Rules, the review defaults and Updates on Agent setup, Phone,
-Other machines and the Inbox's notification settings all use it, so a setting looks the same wherever
-it lives.
+14px apart. A section's title (`.settings-section-title`) names it once, so a card that is the whole
+section leaves its own title out (`titled={false}`). A project's Settings and Rules use the same
+cards, so a setting looks the same wherever it lives.
 
-- **A page that is mostly settings** (Add project, Agent setup, Phone, Other machines) is a form
+- **A page that is mostly settings** (Add project, Agent setup, Settings) is a form
   page (`page page-form`): the same frame as every view, so the title does not move from one page to
   the next, but narrower, with a lead paragraph under the title (`page-lead`). A project's Settings
   and Rules tabs stack their cards in `.settings` (720px).
@@ -507,7 +515,7 @@ it lives.
   project or issue; arrows pick, Enter goes, Esc closes. An exact key ("nit-12") opens that issue.
   Results come in groups ("Go to", "Issues", "Actions") with a count of matches. "Go to" has every
   view in the sidebar, each project's tabs (List, Board, Branches, Brief, Rules, Settings) and
-  "Notification settings", which opens the Inbox with them open. Actions are what you can do to
+  Settings and each of its sections ("Notifications settings", "Crew settings", …). Actions are what you can do to
   an issue you named: "Approve NIT-12" when it waits on you, "Move NIT-12 to Todo" or "to
   Backlog", through the same `move_issue` the Inbox uses; and what the app's controls do
   elsewhere: "Start a goal", "Pause the crew in Nitely" (or Resume), "Check for updates". A view
@@ -550,9 +558,9 @@ and inside Tauri nothing changes.
 - Agents: `.claude/launch.json` has a `web` configuration (port 5173), so the Browser pane's
   `preview_start` with name `web` opens it. Or run `npm run dev -- --port <port> --strictPort`.
 - Routes are in the hash: `#overview` (the default; `#pulse` still works), `#inbox`, `#now`, `#activity`, `#project/NIT`,
-  `#agents`, `#add`, `#kit`, and `@KEY` opens an issue panel (`#now@NIT-29`). `?hours=1|6|12|24`
+  `#agents`, `#settings` (and `#settings/<section>`, see Settings), `#add`, `#kit`, and `@KEY` opens an issue panel (`#now@NIT-29`). `?hours=1|6|12|24`
   opens Activity at that window. A project's view follows its key: `#project/NIT/list`,
-  `#project/NIT/board`, `#project/NIT/branches`, `#project/NIT/brief`, `#project/NIT/rules` (review and landing rules, with a dry run); without one, the last view picked. App-wide review and landing defaults are on `#agents`.
+  `#project/NIT/board`, `#project/NIT/branches`, `#project/NIT/brief`, `#project/NIT/rules` (review and landing rules, with a dry run); without one, the last view picked. App-wide review and landing defaults are on `#settings/reviews`.
 - Theme: the switch at the bottom of the sidebar, or `?theme=light|dark` in the URL, or the
   browser's color scheme. `[data-theme]` on `<html>` forces a theme.
 - The fixtures are four projects (NIT, AND, HAR, and OLD with no issues, for trying Settings), 40 issues across every state, nine agent

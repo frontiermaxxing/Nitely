@@ -58,6 +58,8 @@ export function ProjectPage(props: {
   onChanged: () => void;
   /** The project goes by another key now, or was removed (null). */
   onMoved: (key: string | null) => void;
+  /** Opens Settings on this project's crew. */
+  onCrewSettings: () => void;
 }) {
   const remembered = rememberedTab();
   const tab = props.tab ?? (props.goal != null && remembered !== "list" && remembered !== "board" ? "list" : remembered);
@@ -65,8 +67,6 @@ export function ProjectPage(props: {
   const [showClosed, setShowClosed] = useState(false);
   const [filters, setFilters] = useState<Filters>(NO_FILTER);
   const [error, setError] = useState<string | null>(null);
-  // Bumped when the header's crew control asks for the Crew section, which scrolls to itself.
-  const [crewFocus, setCrewFocus] = useState(0);
 
   // Closed issues are always loaded: the header counts what landed lately and the board shows
   // recent Done ones, even while the list hides them.
@@ -100,10 +100,7 @@ export function ProjectPage(props: {
           projectKey={props.projectKey}
           version={props.version}
           now={props.now}
-          onSettings={() => {
-            setCrewFocus((n) => n + 1);
-            pick("settings");
-          }}
+          onSettings={props.onCrewSettings}
         />
         <div className="seg" role="tablist" aria-label="Project view">
           {PROJECT_TABS.map((t) => (
@@ -125,7 +122,7 @@ export function ProjectPage(props: {
       {tab !== "brief" && error && <p className="error">{error}</p>}
       {((views && !issues) || (tab === "settings" && !issues) || (tab === "branches" && !props.board)) && !error && <Loading />}
       {tab === "settings" && issues && props.project && (
-        <ProjectSettings project={props.project} issueCount={issues.length} crewFocus={crewFocus} onChanged={props.onChanged} onMoved={props.onMoved} />
+        <ProjectSettings project={props.project} issueCount={issues.length} onChanged={props.onChanged} onMoved={props.onMoved} onCrewSettings={props.onCrewSettings} />
       )}
       {views && issues?.length === 0 && (
         <EmptyState title="No issues yet.">

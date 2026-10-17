@@ -61,7 +61,7 @@ export function PhoneSetup(props: { now: number }) {
     setBusy(false);
   };
 
-  if (!status) return <div className="page">{error ? <p className="error">{error}</p> : <Loading />}</div>;
+  if (!status) return error ? <p className="error">{error}</p> : <Loading />;
   const on = status.listening.length > 0;
   const tunnels = status.addresses.filter((a) => a.kind === "tunnel");
   const https = mode !== "none";
@@ -72,14 +72,7 @@ export function PhoneSetup(props: { now: number }) {
   const expired = offer !== null && offer.expires < props.now;
 
   return (
-    <div className="page page-form phone-setup">
-      <div className="page-head">
-        <h1>Phone</h1>
-      </div>
-      <p className="page-lead">
-        Answer the agents' questions and approve their changes from your phone. A paired phone can do that and nothing else, and every approval it gives is
-        signed with a key that never leaves it.
-      </p>
+    <div className="phone-setup">
       {error && <p className="error">{error}</p>}
 
       <section className="settings-card">

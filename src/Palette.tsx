@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "./backend";
 import type { View } from "./App";
-import { askNotifySettings } from "./Notifications";
+import { SETTINGS_SECTIONS } from "./Settings";
 import type { UpdateStatus } from "./Update";
 import { HOME_LABEL } from "./util";
 import type { CrewStatus, IssueRecord, Project } from "./types";
@@ -30,8 +30,9 @@ const VIEWS: { label: string; view: View }[] = [
   { label: "Inbox", view: { kind: "inbox" } },
   { label: "Now", view: { kind: "now" } },
   { label: "Activity", view: { kind: "activity" } },
-  { label: "Other machines", view: { kind: "network" } },
-  { label: "Phone", view: { kind: "phone" } },
+  { label: "Settings", view: { kind: "settings" } },
+  // Each section of Settings by its own name too ("phone", "crew"), as the sidebar once had some.
+  ...SETTINGS_SECTIONS.map((s) => ({ label: `${s.label} settings`, view: { kind: "settings", section: s.id } as View })),
   { label: "Agent setup", view: { kind: "agents" } },
   { label: "Add project", view: { kind: "add" } },
 ];
@@ -69,7 +70,7 @@ function crewItems(crews: { project: Project; crew: CrewStatus }[]): Item[] {
   }));
 }
 
-/** Checking for a newer Nitely now, as Agent setup's "Check now" does. */
+/** Checking for a newer Nitely now, as Settings' Updates "Check now" does. */
 const UPDATE_ITEM: Item = {
   id: "update-check",
   label: "Check for updates",
@@ -79,7 +80,7 @@ const UPDATE_ITEM: Item = {
     if (s.disabled) return `Not checking: ${s.disabled}.`;
     if (s.error) throw s.error;
     if (s.available) return s.available.ready ? `${s.available.version} is ready; restart to update.` : `Downloading ${s.available.version}.`;
-    return s.checking ? "Checking now; Agent setup says what it finds." : `Nitely ${s.version} is up to date.`;
+    return s.checking ? "Checking now; Settings, Updates says what it finds." : `Nitely ${s.version} is up to date.`;
   },
 };
 
@@ -131,16 +132,6 @@ export function Palette(props: {
     };
     const all: Item[] = [
       ...VIEWS.map((v): Item => ({ id: `view-${v.label}`, label: v.label, hint: "view", group: "Go to", run: go(v.view) })),
-      {
-        id: "notify-settings",
-        label: "Notification settings",
-        hint: "Inbox",
-        group: "Go to",
-        run: () => {
-          askNotifySettings();
-          go({ kind: "inbox" })();
-        },
-      },
       ...props.projects.flatMap((p) =>
         (["list", "board", "branches", "brief", "rules", "settings"] as const).map(
           (tab): Item => ({

@@ -566,6 +566,16 @@ details summary { cursor: pointer; color: var(--fg-2); }
 .settings-card { padding: 16px 18px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); }
 .settings-card h2 { margin: 0 0 8px; }
 .settings-card + .settings-card { margin-top: 14px; }
+/* The Settings view: an index of its sections, then each section's title above its cards. */
+.settings-index { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: -8px 0 8px; font-size: var(--text-sm); }
+.settings-index .link { color: var(--fg-2); text-decoration: none; }
+.settings-index .link:hover, .settings-index .link.on { color: var(--fg); text-decoration: underline; }
+.settings-section { scroll-margin-top: 16px; }
+.settings-section-title { margin: 32px 0 6px; font-size: var(--text-lg); }
+.settings-section > .settings-why { max-width: 720px; }
+.settings-project { scroll-margin-top: 16px; }
+.settings-project + .settings-project { margin-top: 18px; }
+.settings-project h3 { display: flex; align-items: baseline; gap: 8px; margin: 14px 0 8px; font-size: var(--text-md); font-weight: var(--weight-medium); }
 .settings > .settings-card + .settings-card { margin-top: 0; }
 .settings-why { margin: 0 0 12px; font-size: var(--text-md); line-height: 1.55; color: var(--fg-2); text-wrap: pretty; }
 .settings-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }

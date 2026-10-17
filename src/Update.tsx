@@ -84,8 +84,8 @@ export function ApprovalNotice() {
   );
 }
 
-/** Agent setup's Updates card: the version, the channel to follow, and checking now. */
-export function UpdatesCard({ status, onStatus }: { status: UpdateStatus | null; onStatus: (s: UpdateStatus) => void }) {
+/** The Updates card in Settings: the version, the channel to follow, and checking now. */
+export function UpdatesCard({ status, onStatus, titled = true }: { status: UpdateStatus | null; onStatus: (s: UpdateStatus) => void; titled?: boolean }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<string | null>(null);
@@ -109,7 +109,7 @@ export function UpdatesCard({ status, onStatus }: { status: UpdateStatus | null;
 
   return (
     <section className="settings-card updates">
-      <h2>Updates</h2>
+      {titled && <h2>Updates</h2>}
       <p className="settings-why">
         Nitely {status.version}, {status.build_channel === "dev" ? "built from source" : `from the ${status.build_channel} channel`}. It checks for a
         newer version every few hours, downloads it in the background, and installs it only when you restart it or quit, never while a land

@@ -3,7 +3,6 @@ import { invoke } from "./backend";
 import type { Project } from "./types";
 import { PrivateTerms } from "./PrivateTerms";
 import { MirrorSettings } from "./Mirror";
-import { CrewSettings } from "./CrewSettings";
 
 interface Rekeyed {
   from: string;
@@ -32,11 +31,11 @@ export function ProjectSettings(props: {
   project: Project;
   /** Issues in the project, open and closed. */
   issueCount: number;
-  /** Bumped to bring the Crew section into view. */
-  crewFocus?: number;
   onChanged: () => void;
   /** The project now goes by another key, or is gone (null). */
   onMoved: (key: string | null) => void;
+  /** Opens Settings on this project's crew. */
+  onCrewSettings: () => void;
 }) {
   const { project } = props;
   const [name, setName] = useState(project.name);
@@ -124,7 +123,13 @@ export function ProjectSettings(props: {
         {!keyOk && key.trim() !== "" && <p className="settings-hint">2 to 10 letters or digits, starting with a letter.</p>}
       </section>
 
-      <CrewSettings projectKey={project.key} focus={props.crewFocus} onSaved={props.onChanged} />
+      <section className="settings-card">
+        <h2>Crew</h2>
+        <p className="settings-why">The agents Nitely runs on this project's Todo issues are set with the app's other settings, beside every other project's crew.</p>
+        <button className="btn" onClick={props.onCrewSettings}>
+          Open the crew in Settings
+        </button>
+      </section>
 
       <PrivateTerms projectKey={project.key} />
 

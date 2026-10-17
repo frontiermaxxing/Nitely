@@ -8,7 +8,7 @@ The backlog lives in the database on the machine that runs Nitely. `nitely serve
 other machines on the same local network (a Mac beside a Windows PC, say) reach it: it is the
 `nitely` MCP server over HTTP at `/mcp`, so Claude Code there needs no Nitely install.
 
-1. In the app, open **Other machines** and add one (say `mac`, default project APP). It shows that
+1. In the app, open **Settings**, **Other machines** and add one (say `mac`, default project APP). It shows that
    machine's token once, inside the command to run there, with a Copy button.
 2. Run `nitely serve` on this machine. It listens on port 7421 and announces itself on the network.
 3. On the other machine, run the copied command:

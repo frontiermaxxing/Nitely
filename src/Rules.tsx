@@ -442,8 +442,8 @@ export function ProjectRules(props: { projectKey: string }) {
   );
 }
 
-/** The app-wide defaults, beside Agent setup: what a project that sets nothing uses. */
-export function RuleDefaultsCard() {
+/** The app-wide defaults, in Settings: what a project that sets nothing uses. */
+export function RuleDefaultsCard({ titled = true }: { titled?: boolean } = {}) {
   const [view, setView] = useState<DefaultsView | null>(null);
   const [draft, setDraft] = useState<RuleDefaults>({});
   const [loosens, setLoosens] = useState<string[] | null>(null);
@@ -494,7 +494,7 @@ export function RuleDefaultsCard() {
 
   return (
     <section className="settings-card rules-defaults">
-      <h2>Review and landing defaults</h2>
+      {titled && <h2>Review and landing defaults</h2>}
       <p className="settings-why">What every project uses unless its playbook sets its own. A project's Rules tab shows what it inherits from here.</p>
       <div className="rules-field">
         <div className="rules-field-head">

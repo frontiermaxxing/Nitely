@@ -27,7 +27,6 @@ import {
   useFlip,
   vendorOf,
 } from "./ui";
-import { NotifySettingsPanel, useNotifySettingsOpen } from "./Notifications";
 import "./inbox.css";
 
 /**
@@ -44,9 +43,10 @@ export function Inbox(props: {
   pick?: { id: string; at: number } | null;
   onOpenIssue: (key: string) => void;
   onChanged: () => void;
+  /** Opens Settings on its Notifications section. */
+  onNotifySettings: () => void;
 }) {
   const { board, details, now } = props;
-  const [settingsOpen, setSettingsOpen] = useNotifySettingsOpen();
   const live = decisionsOf(board, details, now);
   // A decision the human acts on resolves at once and says what happened, in place, before the
   // next one takes its place; the board can take a moment longer to drop it, so those the Inbox
@@ -142,9 +142,8 @@ export function Inbox(props: {
       <div className="page inbox">
         <div className="page-head">
           <h1>Inbox</h1>
-          <NotifyLink open={settingsOpen} onToggle={() => setSettingsOpen((o) => !o)} />
+          <NotifyLink onOpen={props.onNotifySettings} />
         </div>
-        {settingsOpen && <NotifySettingsPanel onClose={() => setSettingsOpen(false)} />}
         <EmptyState title="Nothing needs you.">Agents show up here when they ask something, wait on your approval, or get stuck.</EmptyState>
         <AtWork board={board} now={now} onOpenIssue={props.onOpenIssue} />
       </div>
@@ -179,10 +178,9 @@ export function Inbox(props: {
                 <Ticker value={waiting.length} /> need{waiting.length === 1 ? "s" : ""} you
               </span>
             )}
-            <NotifyLink open={settingsOpen} onToggle={() => setSettingsOpen((o) => !o)} />
+            <NotifyLink onOpen={props.onNotifySettings} />
           </div>
           <p className="inbox-sub">Only decisions an agent cannot make.{oldest !== null && ` Oldest ${ago(now, oldest).replace(" ago", "")}.`}</p>
-          {settingsOpen && <NotifySettingsPanel onClose={() => setSettingsOpen(false)} />}
         </div>
         {groups.map((g) => (
           <div key={g.kind} className="inbox-group">
@@ -280,10 +278,10 @@ function without<V>(m: Map<string, V>, id: string): Map<string, V> {
   return n;
 }
 
-/** Opens and closes the notification settings, from the Inbox's head. */
-function NotifyLink(props: { open: boolean; onToggle: () => void }) {
+/** Opens the notification settings (Settings, Notifications), from the Inbox's head. */
+function NotifyLink(props: { onOpen: () => void }) {
   return (
-    <button className="link inbox-notify-link" aria-expanded={props.open} onClick={props.onToggle}>
+    <button className="link inbox-notify-link" onClick={props.onOpen}>
       Notifications
     </button>
   );
