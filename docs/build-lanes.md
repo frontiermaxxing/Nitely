@@ -54,7 +54,11 @@ What the numbers say:
   Switching changed at most 6 files and took 0.1 to 0.6 s.
 - Touching `lib.rs` costs what any other file in the crate costs: cargo rebuilds per crate.
 - A lane's `target/` grows as it alternates (6.4 GB after the cold gate, 8.3 GB after 17 requests,
-  2.3 GB of it incremental caches), so lanes need a size cap (below).
+  2.3 GB of it incremental caches), so lanes need a size cap (below). Those sizes are with full
+  debuginfo; this repo's lighter `[profile.dev]` (line tables for its own code, none for
+  dependencies, NIT-224) halves them: `cargo test --workspace --no-run` leaves 3.0 GB instead of
+  6.6, builds cold in 66 s instead of 81 to 92, and rebuilds after a nitely-core change in 5.5 s
+  instead of 8.2.
 
 For a browser-engine-sized C++ repo on this machine (measured read-only from git's objects, never
 touching that checkout): 503,779 files and 4.35 GB of source in its main repository, plus separately
@@ -264,7 +268,8 @@ changes.
 The same design everywhere; only lane creation differs.
 
 - **Windows (NTFS):** lanes start cold; light worktrees do the rest (288 files to scan instead of
-  9,775 per issue). Defender exclusions help but need admin, so they are only advice in the docs.
+  9,775 per issue). Defender exclusions help but need admin, so they are only advice in the docs
+  ([setup.md](setup.md#faster-builds-on-windows-optional)).
   ReFS block cloning is used where a lane sits on a ReFS volume.
 - **macOS (APFS):** a second lane is a `clonefile` copy of the first, build output included, in
   seconds and at almost no disk.

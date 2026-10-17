@@ -40,6 +40,46 @@ project's brief (the project page's Brief view). Nothing is committed or run aga
 Manual setup still works (`nitely project create`, `nitely repo add`, `nitely issue import`).
 Approving and answering asks happen only in the app, never through the CLI or MCP.
 
+## Faster builds on Windows (optional)
+
+Nothing here is needed: Nitely works without it, and it never changes these settings itself. It is
+for when several agents build at once and the PC feels slow.
+
+Windows Defender scans every file a build writes, and a Rust or npm build writes thousands. With a
+few builds at once, Defender can take more CPU than the builds do (four cores, on one PC with seven
+agents). [Build lanes](build-lanes.md) already cut what gets built (agents edit in light worktrees,
+and a few warm lanes per project do the building), so this matters less than it did. Two things help
+further, and both are yours to decide:
+
+- **Exclude the folder your builds happen in** from real-time scanning. Builds then run at full
+  speed; the trade-off is that Defender no longer scans files as they are written there, so only
+  exclude folders that hold your own repos' worktrees and build output. With the default playbook,
+  worktrees and lanes are both under the folder beside your repo (`C:\Code\my-app-worktrees` for
+  `C:\Code\my-app`). From an administrator PowerShell:
+
+  ```powershell
+  Add-MpPreference -ExclusionPath "C:\Code\my-app-worktrees"
+  ```
+
+  or **Windows Security > Virus & threat protection > Manage settings > Exclusions**. Your own
+  checkout's `target` folder can be excluded the same way. `Remove-MpPreference -ExclusionPath ...`
+  undoes it.
+- **A Dev Drive** (Windows 11): a ReFS volume that Defender scans asynchronously, so builds are not
+  held up. Make one in **Settings >
+  System > Storage > Advanced storage settings > Disks & volumes > Create Dev Drive**
+  ([Microsoft's guide](https://learn.microsoft.com/windows/dev-drive/)), then point the playbook's
+  `[worktree] dir` at it. It needs free disk space to give it and admin rights to create.
+
+**sccache** caches compiled crates across checkouts. It does not help a warm lane: the lane already
+keeps its build, and the workspace's own crates, which every change recompiles, are not cached. On
+this repo it could save at most 42 of a cold lane's 66 s (dependencies compiled, workspace not),
+which a lane pays once, so Nitely does not set it up. If you use it anyway, `RUSTC_WRAPPER=sccache`
+in your environment reaches lanes too, since they run with Nitely's environment.
+
+This repo's own debug profile is lighter for the same reason (`[profile.dev]` in `Cargo.toml`: line
+numbers for its own code, no debuginfo for dependencies), which halves a lane's `target/`. A Rust
+repo of yours can do the same.
+
 
 ## Hooks
 

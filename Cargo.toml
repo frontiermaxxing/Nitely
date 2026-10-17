@@ -15,3 +15,13 @@ serde_json = { version = "1", features = ["preserve_order"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 dirs = "6"
 clap = { version = "4", features = ["derive"] }
+
+# Debug builds keep file and line numbers for the workspace's own code, so a backtrace still names
+# the line, and no debuginfo for dependencies. A build lane's target/ is half the size (3.0 against
+# 6.6 GB) and a nitely-core change compiles in 5.5 s against 8.2 (NIT-224). For a debugger session
+# that shows variables in this workspace's code, build with CARGO_PROFILE_DEV_DEBUG=full.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

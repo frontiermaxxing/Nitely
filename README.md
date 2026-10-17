@@ -122,6 +122,9 @@ Every command has a CLI twin (`nitely submit`, `nitely land APP-4`, ...); `nitel
 - [Signed approvals](docs/approvals.md), [the crew](docs/crew.md), [the phone](docs/phone.md), and
   where Nitely is going ([docs/vision.md](docs/vision.md)).
 
+With many agents building on Windows, a Defender exclusion or a Dev Drive can make builds faster;
+neither is needed ([docs/setup.md](docs/setup.md#faster-builds-on-windows-optional)).
+
 Nitely keeps its data in `%APPDATA%\Nitely` (`nitely where` prints it): a SQLite database, its
 config, and the playbooks it keeps for repos that have none.
 
