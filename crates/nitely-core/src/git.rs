@@ -63,8 +63,11 @@ fn git(dir: &str, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// The repo's worktrees, without what Nitely keeps beside them for itself (the reference tree and
+/// build lanes under `.nitely-lanes`), which are nobody's work.
 pub fn list_worktrees(repo_root: &str) -> Result<Vec<Worktree>> {
-    Ok(parse_worktrees(&git(repo_root, &["worktree", "list", "--porcelain"])?))
+    let all = parse_worktrees(&git(repo_root, &["worktree", "list", "--porcelain"])?);
+    Ok(all.into_iter().filter(|w| !crate::light::is_lane_path(&w.path)).collect())
 }
 
 /// Parses `git worktree list --porcelain`. The first entry is the main worktree.

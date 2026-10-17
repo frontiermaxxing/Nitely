@@ -56,8 +56,14 @@ pub fn for_dir(config: &Config, dir: &str) -> Option<String> {
         .filter(|p| crate::Db::open_read_only(&crate::paths::db_path()).and_then(|db| db.project_brief(p)).is_ok_and(|b| b.setup.is_none()))
         .map(|p| format!("\n\n{}", setup_offer(p)))
         .unwrap_or_default();
+    // A light worktree says what it is and where the rest of the code is.
+    let light = crate::playbook::current_worktree(dir)
+        .ok()
+        .and_then(|(top, _)| crate::light::session_note(&pb, std::path::Path::new(&repo.root), &top))
+        .map(|n| format!("\n\n{n}"))
+        .unwrap_or_default();
     Some(format!(
-        "This repo ({}) is connected to Nitely.{project} Tasks branch from and land on {}. {gate}{offer}\n\n{WORKFLOW}",
+        "This repo ({}) is connected to Nitely.{project} Tasks branch from and land on {}. {gate}{offer}{light}\n\n{WORKFLOW}",
         repo.name,
         pb.integration_branch()
     ))

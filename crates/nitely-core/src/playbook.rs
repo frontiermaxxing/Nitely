@@ -111,11 +111,27 @@ pub struct WorktreeRules {
     /// usual lockfiles and manifests at the worktree's root (`SETUP_FILES`).
     #[serde(default)]
     pub setup_when_changed: Vec<String>,
+    /// "full" (the default): a worktree with its setup run, built in place. "light": source only,
+    /// no setup, sharing the repo's objects (docs/build-lanes.md, `light.rs`).
+    pub mode: WorktreeMode,
+    /// Light worktrees only: cone-mode directories every worktree starts with, plus those of the
+    /// paths the issue names; empty means whole. Widened on demand (`widen`).
+    #[serde(default)]
+    pub sparse: Vec<String>,
     /// Run in the worktree, in order, before land removes it: undo what setup made that
     /// `git worktree remove` cannot take down (a sparse checkout of a submodule, a nested worktree
     /// git refuses to remove with). A failure is reported and the removal still tried.
     #[serde(default)]
     pub teardown: Vec<String>,
+}
+
+/// How `start_task` makes a worktree.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorktreeMode {
+    #[default]
+    Full,
+    Light,
 }
 
 /// Dependency files whose change, by a rebase or by the agent, makes a worktree's setup stale.
@@ -191,6 +207,8 @@ fn refresh_setup(rules: &WorktreeRules, worktree: &Path, main: &Path, base: &str
     match std::fs::read_to_string(&record) {
         Ok(last) if last.trim() == now => return Ok((vec![], true)),
         Ok(_) => {}
+        // A light worktree never ran setup: its gate runs it, until gates run in build lanes.
+        Err(_) if crate::light::is_light(worktree) => {}
         Err(_) => {
             std::fs::write(&record, &now).ok();
             return Ok((vec![], true));
@@ -424,7 +442,14 @@ impl Default for BranchRules {
 
 impl Default for WorktreeRules {
     fn default() -> Self {
-        WorktreeRules { dir: "../{repo}-worktrees/{key}-{slug}".into(), setup: vec![], setup_when_changed: vec![], teardown: vec![] }
+        WorktreeRules {
+            dir: "../{repo}-worktrees/{key}-{slug}".into(),
+            setup: vec![],
+            setup_when_changed: vec![],
+            mode: WorktreeMode::Full,
+            sparse: vec![],
+            teardown: vec![],
+        }
     }
 }
 
@@ -548,7 +573,7 @@ fn fill(pattern: &str, vendor: &str, issue: &IssueRecord, repo: &str) -> String 
 }
 
 /// Resolves `..` without touching the disk (the worktree does not exist yet).
-fn normalize_lexically(p: &Path) -> PathBuf {
+pub(crate) fn normalize_lexically(p: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for c in p.components() {
         match c {
@@ -807,6 +832,15 @@ pub struct Started {
     pub setup: Vec<CommandResult>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// A light worktree: source only, its setup not run (docs/build-lanes.md).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub light: bool,
+    /// The directories a sparse worktree holds; empty when it is whole.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sparse: Vec<String>,
+    /// The read-only reference tree at the project's base commit, for reading code outside it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -846,11 +880,26 @@ pub fn start_task(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, 
     let worktree_str = worktree.to_string_lossy().into_owned();
 
     if worktree.join(".git").exists() {
-        return Ok(Started { issue: issue.key.clone(), branch, worktree: worktree_str, created: false, setup: vec![], warnings: playbook.unknown_warnings() });
+        let light = crate::light::is_light(&worktree);
+        let reference = Some(crate::light::reference_path(&playbook, repo_root)).filter(|r| light && r.join(".git").exists());
+        return Ok(Started {
+            issue: issue.key.clone(),
+            branch,
+            worktree: worktree_str,
+            created: false,
+            setup: vec![],
+            warnings: playbook.unknown_warnings(),
+            light,
+            sparse: crate::light::sparse_set(&worktree).unwrap_or_default(),
+            reference: reference.map(|r| r.to_string_lossy().into_owned()),
+        });
     }
 
     let base = playbook.integration_branch();
     let branch_exists = git(repo_root, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_ok();
+    if crate::light::wanted(&playbook) {
+        return start_light(db, repo_root, &playbook, issue, branch, worktree, base, branch_exists, actor);
+    }
     if branch_exists {
         git(repo_root, &["worktree", "add", &worktree_str, &branch])?;
     } else {
@@ -873,7 +922,39 @@ pub fn start_task(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, 
             std::fs::write(record, setup_fingerprint(&playbook.worktree, &worktree)).ok();
         }
     }
-    Ok(Started { issue: issue.key.clone(), branch, worktree: worktree_str, created: true, setup, warnings: playbook.unknown_warnings() })
+    Ok(Started {
+        issue: issue.key.clone(),
+        branch,
+        worktree: worktree_str,
+        created: true,
+        setup,
+        warnings: playbook.unknown_warnings(),
+        light: false,
+        sparse: vec![],
+        reference: None,
+    })
+}
+
+/// `start_task` for a playbook that asks for light worktrees: source only, no setup, sparse when the
+/// playbook names directories, and the reference tree made or moved to the base.
+#[allow(clippy::too_many_arguments)]
+fn start_light(db: &Db, repo_root: &Path, playbook: &Playbook, issue: &IssueRecord, branch: String, worktree: PathBuf, base: &str, exists: bool, actor: &Actor) -> Result<Started> {
+    let worktree_str = worktree.to_string_lossy().into_owned();
+    let from = if exists { format!("refs/heads/{branch}") } else { base.to_string() };
+    let sparse = crate::light::sparse_dirs(playbook, repo_root, &from, &format!("{}\n{}", issue.title, issue.body));
+    crate::light::add(repo_root, &worktree, &branch, base, exists, &sparse)?;
+    let shape = if sparse.is_empty() { "light".to_string() } else { format!("light, sparse: {}", sparse.join(", ")) };
+    db.log_event(actor, Some(&issue.key), Some(&worktree_str), "worktree", &format!("Started {branch} from {base} ({shape})"))?;
+    let mut warnings = playbook.unknown_warnings();
+    // Reading code outside the worktree needs it, but a worktree without it still works.
+    let reference = match crate::light::reference_tree(playbook, repo_root) {
+        Ok(r) => Some(r.to_string_lossy().into_owned()),
+        Err(e) => {
+            warnings.push(format!("the reference tree could not be made: {e:#}"));
+            None
+        }
+    };
+    Ok(Started { issue: issue.key.clone(), branch, worktree: worktree_str, created: true, setup: vec![], warnings, light: true, sparse, reference })
 }
 
 /// The ref a branch's changes are measured against: `origin/<base>` when the local `<base>` is

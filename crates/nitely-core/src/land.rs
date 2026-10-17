@@ -424,6 +424,12 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
     };
     report.cleanup = Some(cleanup);
     report.held_by = held_by;
+    // The base moved: so does the reference tree light worktrees read code from, when there is one.
+    if crate::light::reference_path(pb, root).join(".git").exists() {
+        if let Err(e) = crate::light::reference_tree(pb, root) {
+            report.warnings.push(format!("the reference tree stayed at the old base: {e:#}"));
+        }
+    }
     Ok(())
 }
 

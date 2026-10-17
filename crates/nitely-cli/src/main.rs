@@ -102,6 +102,12 @@ enum Cmd {
         #[arg(long, default_value = "cli")]
         agent: String,
     },
+    /// Add paths to the current sparse light worktree (each file's directory, or the directory).
+    Widen {
+        /// Relative to the repo root, e.g. src/billing src/ui/Meter.tsx.
+        #[arg(required = true)]
+        paths: Vec<String>,
+    },
     /// Run the playbook's gate commands in the current worktree and record the result.
     Gate {
         /// The issue; defaults to the one the branch names.
@@ -832,6 +838,15 @@ fn run(cmd: Cmd) -> Result<()> {
             println!("{}", started.worktree);
             if started.setup.iter().any(|r| !r.ok) {
                 std::process::exit(1);
+            }
+            Ok(())
+        }
+        Cmd::Widen { paths } => {
+            let (worktree, _) = playbook::current_worktree(&cwd()?)?;
+            let widened = nitely_core::light::widen(&worktree, &paths)?;
+            println!("{}", widened.note);
+            if !widened.sparse.is_empty() {
+                println!("Now holds: {}", widened.sparse.join(", "));
             }
             Ok(())
         }

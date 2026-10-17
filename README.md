@@ -99,6 +99,7 @@ To build it from source:
 | Tools | What they do |
 | --- | --- |
 | `next_task`, `start_task` | Claim the most urgent issue; create its branch and worktree and run setup |
+| `widen` | Add directories to a sparse light worktree (`[worktree] mode = "light"`, docs/build-lanes.md) |
 | `report`, `note`, `ask`, `get_answer` | Say what they are doing, leave handoffs, ask you something |
 | `request_acceptance` | Ask you to accept one review finding as it is (a trade-off you decided), signed when you do |
 | `file_issue`, `file_issues`, `update_issue`, `get_issue`, `list_issues` | Work the backlog (evidence required; Done needs proof; only you approve) |

@@ -33,7 +33,7 @@ pub(crate) struct Remote {
 }
 
 /// Tools that work in a repo on this machine, so not for an agent elsewhere.
-const LOCAL_ONLY: &[&str] = &["start_task", "run_gate", "submit", "land"];
+const LOCAL_ONLY: &[&str] = &["start_task", "run_gate", "submit", "land", "widen"];
 
 impl Server {
     pub(crate) fn remote(name: &str, project: Option<String>) -> Server {
@@ -228,6 +228,15 @@ fn tools() -> Value {
             "description": "Create the issue's branch and worktree from the integration branch, following the repo's playbook (.nitely/playbook.toml), and run its setup commands. Safe to call again: it returns the existing worktree. Work only inside the returned worktree.",
             "inputSchema": { "type": "object", "required": ["key"], "properties": {
                 "key": { "type": "string", "description": "e.g. NIT-12" }
+            } }
+        },
+        {
+            "name": "widen",
+            "description": "Add paths to a sparse light worktree: each file's directory, or the directory itself, so you can edit there. A whole worktree already has every path.",
+            "inputSchema": { "type": "object", "required": ["paths"], "properties": {
+                "paths": { "type": "array", "items": { "type": "string" }, "description": "Relative to the repo root, e.g. [\"src/billing\", \"src/ui/Meter.tsx\"]." },
+                "key": { "type": "string", "description": "The issue whose worktree to widen; defaults to the worktree you are in." },
+                "worktree": { "type": "string", "description": "Defaults to the worktree you are in." }
             } }
         },
         {
@@ -679,6 +688,11 @@ fn run_tool(server: &Server, name: &str, args: &Value, params: &Value) -> Result
             let issue = db.issue(key)?.with_context(|| format!("no issue {key}"))?;
             let root = playbook::repo_for_issue(&config, issue.project.as_deref(), &server.cwd)?;
             json!(playbook::start_task(&db, &root, &issue, &server.vendor, &actor)?)
+        }
+        "widen" => {
+            let dir = task_dir(&config, &db, args, &server.cwd)?;
+            let (worktree, _) = playbook::current_worktree(&dir)?;
+            json!(nitely_core::light::widen(&worktree, &keys_arg(args, "paths"))?)
         }
         "run_gate" => {
             let dir = task_dir(&config, &db, args, &server.cwd)?;
