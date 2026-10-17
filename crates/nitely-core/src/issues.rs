@@ -1431,7 +1431,7 @@ impl Db {
         Ok(self
             .conn
             .query_row(
-                "SELECT id, issue_key, asked_by, question, options, answer, asked_at, answered_at, closed FROM ask WHERE id = ?1",
+                &format!("SELECT {ASK_COLUMNS} FROM ask a LEFT JOIN issue i ON i.key = a.issue_key COLLATE NOCASE WHERE a.id = ?1"),
                 [id],
                 ask_from_row,
             )
@@ -1442,11 +1442,12 @@ impl Db {
     /// closed it (and one asked before that rule, on an issue closed since, is passed over too).
     pub fn open_asks(&self) -> Result<Vec<Ask>> {
         let mut stmt = self.conn.prepare(
-            "SELECT a.id, a.issue_key, a.asked_by, a.question, a.options, a.answer, a.asked_at, a.answered_at, a.closed
-             FROM ask a LEFT JOIN issue i ON i.key = a.issue_key COLLATE NOCASE
-             WHERE a.answer IS NULL AND a.closed IS NULL
-               AND (i.key IS NULL OR i.state_type NOT IN ('completed', 'canceled'))
-             ORDER BY a.asked_at",
+            &format!(
+                "SELECT {ASK_COLUMNS} FROM ask a LEFT JOIN issue i ON i.key = a.issue_key COLLATE NOCASE
+                 WHERE a.answer IS NULL AND a.closed IS NULL
+                   AND (i.key IS NULL OR i.state_type NOT IN ('completed', 'canceled'))
+                 ORDER BY a.asked_at"
+            ),
         )?;
         let rows = stmt.query_map([], ask_from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -1477,6 +1478,12 @@ impl Db {
         self.ask(id)?.context("ask vanished")
     }
 }
+
+/// An ask's columns, read joined to its issue as `i`. An unanswered ask whose issue closed before
+/// closing an issue closed its asks (NIT-181) reads as closed with it, as one closed since does.
+const ASK_COLUMNS: &str = "a.id, a.issue_key, a.asked_by, a.question, a.options, a.answer, a.asked_at, a.answered_at,
+    COALESCE(a.closed, CASE WHEN a.answer IS NULL AND i.state_type IN ('completed', 'canceled')
+                            THEN 'closed with ' || i.key || ' (' || i.state || ')' END)";
 
 fn ask_from_row(r: &Row) -> rusqlite::Result<Ask> {
     Ok(Ask {
@@ -1886,9 +1893,10 @@ mod tests {
         db.move_issue(&other.key, "Canceled", None, Some("not needed"), &Actor::Human).unwrap();
         assert!(db.ask(elsewhere.id).unwrap().unwrap().closed.is_some());
         let stale = db.create_issue(&new("Old work"), &Actor::Human).unwrap();
-        db.create_ask("Still there?", &[], Some(&stale.key), None, &agent).unwrap();
+        let old = db.create_ask("Still there?", &[], Some(&stale.key), None, &agent).unwrap();
         db.conn.execute("UPDATE issue SET state = 'Done', state_type = 'completed' WHERE key = ?1", [&stale.key]).unwrap();
         assert!(db.open_asks().unwrap().is_empty());
+        assert_eq!(db.ask(old.id).unwrap().unwrap().closed.as_deref(), Some("closed with NIT-3 (Done)"), "an agent waiting on it hears it closed");
         std::fs::remove_dir_all(dir).ok();
     }
 

@@ -788,9 +788,14 @@ fn run(cmd: Cmd) -> Result<()> {
             eprintln!("waiting for an answer to ask {} in the Nitely app…", ask.id);
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(3));
-                if let Some(answer) = db.ask(ask.id)?.and_then(|a| a.answer) {
+                let now = db.ask(ask.id)?.with_context(|| format!("ask {} vanished", ask.id))?;
+                if let Some(answer) = now.answer {
                     println!("{answer}");
                     return Ok(());
+                }
+                // Its issue closed first: no answer is coming.
+                if let Some(why) = now.closed {
+                    bail!("ask {} {why}, unanswered", ask.id);
                 }
             }
         }
