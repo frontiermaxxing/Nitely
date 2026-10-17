@@ -455,7 +455,11 @@ fn claude_plan(nitely: &str, repoint: bool) -> Result<AgentPlan> {
             }
         }
     }
-    changes.push(Change::json(&settings_path, "hooks that show each session's status, and give it the repo's instructions at start", &settings));
+    changes.push(Change::json(
+        &settings_path,
+        "hooks that show each session's status, give it the repo's instructions at start, and tell Nitely which session makes each MCP call",
+        &settings,
+    ));
 
     let skill = dir.join("skills").join("nitely").join("SKILL.md");
     changes.push(Change::file(
@@ -781,6 +785,19 @@ mod tests {
         assert_eq!(pending_in(&moved), vec![settings.to_string_lossy().into_owned()]);
         assert!(apply_agents(&moved).1.is_empty());
         assert!(!std::fs::read_to_string(&settings).unwrap().contains("C:/old"));
+
+        // Settings from before a hook was added (PreToolUse, NIT-194) are one change: the hook is
+        // added beside the others, and the next check finds nothing to do.
+        let mut older: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        older["hooks"].as_object_mut().unwrap().remove("PreToolUse");
+        std::fs::write(&settings, serde_json::to_string_pretty(&older).unwrap()).unwrap();
+        let behind = agent_plans("nitely", true);
+        assert_eq!(pending_in(&behind), vec![settings.to_string_lossy().into_owned()]);
+        assert_eq!(pending_changes(&behind), 1, "one change to make");
+        assert!(apply_agents(&behind).1.is_empty());
+        let now: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(now["hooks"]["PreToolUse"][0]["matcher"], "mcp__.*");
+        assert_eq!(pending_changes(&agent_plans("nitely", true)), 0);
         let mut chained = json!({ "command": "nitely hook claude && notify-user" });
         assert!(point_at(&mut chained, "claude", "nitely hook claude", true), "still counts as Nitely's");
         assert_eq!(chained["command"], "nitely hook claude && notify-user", "but is left as the user wrote it");
@@ -849,6 +866,22 @@ args = [\"nitely\", \"mcp\"]
         assert!(apply_agents(&broken).1[0].contains("not valid JSON"));
         std::env::remove_var("NITELY_AGENT_HOME");
         std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// docs/claude-hooks.json, the hooks for setting Claude Code up by hand (docs/setup.md), names
+    /// the same events and matchers `connect` writes.
+    #[test]
+    fn the_hooks_for_setting_up_by_hand_are_the_ones_connect_writes() {
+        let doc: Value = serde_json::from_str(include_str!("../../../docs/claude-hooks.json")).unwrap();
+        let hooks = doc["hooks"].as_object().unwrap();
+        let written: Vec<(String, Option<String>)> = CLAUDE_EVENTS.iter().map(|(e, m)| (e.to_string(), m.map(str::to_string))).collect();
+        let documented: Vec<(String, Option<String>)> = hooks.iter().map(|(e, list)| (e.clone(), list[0]["matcher"].as_str().map(str::to_string))).collect();
+        let sorted = |mut v: Vec<(String, Option<String>)>| {
+            v.sort();
+            v
+        };
+        assert_eq!(sorted(documented), sorted(written));
+        assert!(hooks.values().all(|list| list[0]["hooks"][0]["command"] == "nitely hook claude"));
     }
 
     #[test]
