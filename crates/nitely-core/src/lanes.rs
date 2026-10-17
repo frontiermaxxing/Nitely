@@ -845,42 +845,66 @@ pub struct Overview {
 }
 
 /// The lanes of every connected repo whose playbook has `[lanes]`. A repo whose playbook does not
-/// read is left out; its own views say why.
+/// read is left out; its own views say why. It writes nothing (no lock files, no playbook copies),
+/// so the read-only live preview can show it too: a lane is busy when a request runs in it.
 pub fn overview(config: &crate::Config, db: &Db) -> Result<Overview> {
     let mut projects = Vec::new();
     for repo in &config.repos {
         let Some(project) = repo.project.as_deref() else { continue };
         let root = Path::new(&repo.root);
-        let Ok(pb) = Playbook::load(root) else { continue };
-        let Some(lanes) = status(db, root, &pb, project)? else { continue };
-        let mine = crate::paths::normalize(&repo.root);
-        let finished: Vec<Run> = db
-            .lane_runs(project, 500)?
-            .into_iter()
-            .filter(|r| crate::paths::normalize(&r.repo) == mine && r.state != "queued" && r.state != "running")
-            .collect();
-        let last = lanes.lanes.iter().filter_map(|l| finished.iter().find(|r| r.lane == Some(l.lane)).cloned()).collect();
+        let Ok(pb) = Playbook::load_with(root, config) else { continue };
+        let Some(lanes) = status_with(db, root, &pb, project, false)? else { continue };
+        let mut last = Vec::new();
+        for l in &lanes.lanes {
+            if let Some(r) = db.last_finished_lane_run(project, &repo.root, l.lane)? {
+                last.push(r);
+            }
+        }
         projects.push(ShownLanes { lanes, last });
     }
     Ok(Overview { projects, slots: None })
 }
 
+impl Db {
+    /// The newest finished run of lane `lane` of `repo`'s lanes in `project`, however long ago.
+    pub fn last_finished_lane_run(&self, project: &str, repo: &str, lane: u32) -> Result<Option<Run>> {
+        let mine = crate::paths::normalize(repo);
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {COLUMNS} FROM lane_run WHERE project = ?1 COLLATE NOCASE AND lane = ?2 AND state NOT IN ('queued', 'running') ORDER BY id DESC"
+        ))?;
+        let mut rows = stmt.query(params![project, lane as i64])?;
+        while let Some(r) = rows.next()? {
+            let (run, _) = row(r)?;
+            if crate::paths::normalize(&run.repo) == mine {
+                return Ok(Some(run));
+            }
+        }
+        Ok(None)
+    }
+}
+
 /// The repo's lanes, its queue and its last runs. None when its playbook has no `[lanes]`.
 pub fn status(db: &Db, repo_root: &Path, pb: &Playbook, project: &str) -> Result<Option<Lanes>> {
+    status_with(db, repo_root, pb, project, true)
+}
+
+/// `status`; with `probe_locks`, a lane is busy when its lock is held (which opens the lock file),
+/// otherwise when a running request names it.
+fn status_with(db: &Db, repo_root: &Path, pb: &Playbook, project: &str, probe_locks: bool) -> Result<Option<Lanes>> {
     let Some(rules) = pb.lanes.clone() else { return Ok(None) };
-    let mut lanes = Vec::new();
-    for n in 1..=rules.count.max(1) {
-        let path = lane_path(repo_root, pb, n);
-        let made = path.join(".git").exists();
-        let busy = try_lock(repo_root, pb, n)?.is_none();
-        let at = made.then(|| git(&path, &["rev-parse", "--short", "HEAD"]).ok().map(|s| s.trim().to_string())).flatten();
-        lanes.push(LaneState { lane: n, path: path.to_string_lossy().into_owned(), made, busy, at });
-    }
     let runs = db.lane_runs(project, 50)?;
     let root = repo_root.to_string_lossy();
     let mine = |r: &&Run| crate::paths::normalize(&r.repo) == crate::paths::normalize(&root);
     let mut queue: Vec<Run> = runs.iter().filter(mine).filter(|r| r.state == "queued" || r.state == "running").cloned().collect();
     queue.reverse();
+    let mut lanes = Vec::new();
+    for n in 1..=rules.count.max(1) {
+        let path = lane_path(repo_root, pb, n);
+        let made = path.join(".git").exists();
+        let busy = if probe_locks { try_lock(repo_root, pb, n)?.is_none() } else { queue.iter().any(|r| r.state == "running" && r.lane == Some(n)) };
+        let at = made.then(|| git(&path, &["rev-parse", "--short", "HEAD"]).ok().map(|s| s.trim().to_string())).flatten();
+        lanes.push(LaneState { lane: n, path: path.to_string_lossy().into_owned(), made, busy, at });
+    }
     let recent = runs.iter().filter(mine).filter(|r| r.state != "queued" && r.state != "running").take(10).cloned().collect();
     Ok(Some(Lanes { project: project.to_uppercase(), repo: root.into_owned(), dir: dir(repo_root, pb).to_string_lossy().into_owned(), rules, lanes, queue, recent }))
 }
@@ -951,7 +975,7 @@ count = 2
                 .unwrap();
         };
         insert(2, "lane_error", 1, Some("the switch failed twice"));
-        for i in 0..12 {
+        for i in 0..600 {
             insert(1, "done", 10 + i, None);
         }
         let config = crate::Config {
@@ -964,6 +988,7 @@ count = 2
         assert!(shown.lanes.recent.iter().all(|r| r.lane == Some(1)), "the last few runs are all lane 1's");
         assert_eq!(shown.last.iter().map(|r| (r.lane, r.state.as_str())).collect::<Vec<_>>(), [(Some(1), "done"), (Some(2), "lane_error")]);
         assert!(o.slots.is_none(), "no machine budget until the scheduler keeps one");
+        assert!(!dir(&root, &playbook_with("[lanes]\n")).exists(), "reading the lanes writes nothing: no lane folder, no lock file");
         // A repo without [lanes] is left out.
         std::fs::write(root.join(playbook::PLAYBOOK_PATH), "[gate]
 commands = []
