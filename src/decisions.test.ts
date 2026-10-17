@@ -2,7 +2,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { askPlaces, decisionsOf, firstLine, outcomeOf, shownDecisions, trackAfter, type Decision, type Resolved } from "./decisions.ts";
+import { askPlaces, decisionsOf, issueDecision, firstLine, outcomeOf, shownDecisions, trackAfter, type Decision, type Resolved } from "./decisions.ts";
 import type { Ask, Board, IssueDetail, IssueRecord } from "./types.ts";
 import type { Track } from "./ui/lifecycle.ts";
 
@@ -144,6 +144,22 @@ test("NIT-220: review findings waiting on the person are the issue's only decisi
   assert.deepEqual(decisionsOf(board([own], [request(7, "Drops a row: a.rs")]), new Map(), NOW).map((d) => d.kind), ["ask"]);
   // A plain question on an issue that waits for approval leaves the approval in place.
   assert.deepEqual(decisionsOf(board([stalled], [ask(9, "X-5", NOW - 30)]), new Map(), NOW).map((d) => d.kind).sort(), ["approve", "ask"]);
+});
+
+test("NIT-227: a pending playbook change or goal plan is its own decision, never work to mark done", () => {
+  const proposalIssue = { ...issue("X-6", "Needs You"), owner: "human" };
+  const pending = { ...detail(proposalIssue), proposal: { status: "pending" } } as unknown as IssueDetail;
+  assert.equal(issueDecision(proposalIssue, pending), "playbook");
+  const plan = { ...detail(proposalIssue), goal_plan: { status: "pending" } } as unknown as IssueDetail;
+  assert.equal(issueDecision(proposalIssue, plan), "goal-plan");
+  // Decided (applied), it is no longer a playbook decision; with no detail yet it reads as the owner says.
+  const applied = { ...detail(proposalIssue), proposal: { status: "applied" } } as unknown as IssueDetail;
+  assert.equal(issueDecision(proposalIssue, applied), "own");
+  assert.equal(issueDecision(issue("X-7", "Needs You")), "approve");
+  assert.equal(issueDecision(issue("X-8", "Todo")), null);
+  // The Inbox lists it as the same decision: an approval card that shows the change, not own work.
+  const ds = decisionsOf(board([proposalIssue]), new Map([["X-6", pending]]), NOW);
+  assert.deepEqual(ds.map((d) => [d.id, d.kind]), [["approve-X-6", "approve"]]);
 });
 
 test("the human's own work is its own kind of decision, in any open state outside Backlog", () => {

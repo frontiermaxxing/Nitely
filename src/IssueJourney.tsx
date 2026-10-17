@@ -1,9 +1,13 @@
 import { useState } from "react";
 import type { IssueDetail } from "./types";
+import { issueDecision, type IssueDecision } from "./decisions";
 import { ChecksMark } from "./Pr";
 import { ago, openExternal } from "./util";
 import { AgentMark, FindingDots, ResultMark, SeverityMark, VENDOR_LABEL, journeyOf, vendorOf, type Round } from "./ui";
 import "./issue.css";
+
+/** What the person's cell in Who had it says, by what the issue waits on them for (decisions.ts). */
+const WAITING_LABEL: Record<NonNullable<IssueDecision>, string> = { playbook: "Decide", "goal-plan": "Decide", own: "Yours to do", approve: "Approve?" };
 
 const OUTCOME: Record<Round["outcome"], string> = {
   changes: "changes asked",
@@ -258,7 +262,7 @@ export function WhoHadIt(props: { detail: IssueDetail; now: number }) {
   }
   if (detail.issue.state === "Needs You") {
     const since = [...detail.timeline].reverse().find((e) => e.kind === "submit" || (e.kind === "issue_moved" && /→ Needs You/.test(e.summary ?? "")));
-    cells.push({ lane: "human", label: detail.issue.owner === "human" ? "Yours to do" : "Approve?", sub: since ? ago(now, since.ts).replace(" ago", "") : "now", tone: "needs" });
+    cells.push({ lane: "human", label: WAITING_LABEL[issueDecision(detail.issue, detail) ?? "approve"], sub: since ? ago(now, since.ts).replace(" ago", "") : "now", tone: "needs" });
   }
   if (cells.length === 0) return null;
   const shown = cells.slice(-MAX_CELLS);

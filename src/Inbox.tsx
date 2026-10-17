@@ -2,7 +2,7 @@ import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { typing } from "./Palette";
 import { useEffect, useRef, useState } from "react";
 import { invoke, isPreview } from "./backend";
-import { PlaybookDiff } from "./PlaybookDiff";
+import { PlaybookChangeDecision } from "./PlaybookChangeDecision";
 import { GoalPlanDecision } from "./GoalPlanDecision";
 import { askPlaces, decisionsOf, detailKeys, firstLine, outcomeOf, shownDecisions, trackAfter, type Decision, type DecisionKind, type Move, type Resolved } from "./decisions";
 import { ChecksMark } from "./Pr";
@@ -506,16 +506,6 @@ function DecisionDetail(props: {
   const finish = () =>
     props.onAct("done", () => invoke("move_issue", { key: issue!.key, state: "Done", evidence: "Done by the human, outside Nitely.", reason: null }));
   const handBack = () => props.onAct("handback", () => invoke("set_owner", { key: issue!.key, owner: "agent" }));
-  const [rejecting, setRejecting] = useState(false);
-  const [why, setWhy] = useState("");
-  const apply = () =>
-    props.onAct(
-      "apply",
-      () => invoke("move_issue", { key: issue!.key, state: "Approved", evidence: null, reason: null }),
-      proposal?.in_repo ? "Committed on the integration branch." : "The playbook is changed.",
-    );
-  const reject = () =>
-    why.trim() && props.onAct("reject", () => invoke("move_issue", { key: issue!.key, state: "Canceled", evidence: null, reason: why.trim() }), why.trim());
   const reveal = async (path: string) => {
     if (isPreview) {
       setNote("In the app this opens the folder in Explorer.");
@@ -570,6 +560,8 @@ function DecisionDetail(props: {
           <p className="dd-who">{[agent && VENDOR_LABEL[vendorOf(agent)], d.row?.branch, status].filter(Boolean).join(" · ")}</p>
           {plan && issue ? (
             <GoalPlanDecision plan={plan} issueKey={issue.key} resolved={!!resolved} onAct={props.onAct} />
+          ) : proposal && issue ? (
+            <PlaybookChangeDecision proposal={proposal} issueKey={issue.key} resolved={!!resolved} busy={busy} onAct={props.onAct} />
           ) : (
             <Body decision={d} detail={detail} integration={props.integration} now={now} />
           )}
@@ -586,32 +578,6 @@ function DecisionDetail(props: {
         {!resolved && d.kind === "ask" && d.ask && finding && <DecideFinding askId={d.ask.id} busy={busy} onDecide={decideFinding} />}
         {!resolved && d.kind === "ask" && d.ask && !finding && (
           <Answer askId={d.ask.id} options={d.ask.options} busy={busy} onAnswer={answer} />
-        )}
-        {!resolved && !plan && pending && proposal && (
-          <>
-            <div className="actions">
-              <button className="btn primary" disabled={busy || !!proposal.stale} onClick={apply}>
-                Apply change
-              </button>
-              <button className="btn" disabled={busy} onClick={() => setRejecting((r) => !r)} aria-expanded={rejecting}>
-                Reject…
-              </button>
-            </div>
-            {rejecting && (
-              <form
-                className="dd-words"
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  reject();
-                }}
-              >
-                <input autoFocus value={why} onChange={(e) => setWhy(e.target.value)} placeholder="Why not? The agent reads this." aria-label="Why the change is rejected" />
-                <button className="btn" type="submit" disabled={!why.trim()}>
-                  Reject
-                </button>
-              </form>
-            )}
-          </>
         )}
         {!resolved && !pending && d.kind === "approve" && issue?.origin === "nitely" && (
           <div className="actions">
@@ -719,35 +685,6 @@ function Body(props: { decision: Decision; detail?: IssueDetail; integration: st
       // A mirrored issue waits for the human in its own tracker; Nitely ran no playbook on it.
       if (d.issue && d.issue.origin !== "nitely") {
         return <p className="decision-matter">It waits for you in {originName(d.issue.origin)} ({d.issue.state}).</p>;
-      }
-      const proposal = proposalOf(detail);
-      if (proposal) {
-        return (
-          <>
-            <p className="decision-matter">
-              {who(proposal.created_by)} proposes a change to {proposal.in_repo ? ".nitely/playbook.toml" : "the playbook Nitely keeps"} for {proposal.repo}.
-            </p>
-            <p className="decision-why pb-why">{proposal.why}</p>
-            <PlaybookDiff lines={proposal.diff} />
-            {proposal.status !== "pending" ? (
-              proposal.outcome && <p className="decision-why pb-applies">{proposal.outcome}</p>
-            ) : proposal.stale ? (
-              <p className="error small">It no longer applies to the playbook as it is now: {proposal.stale}. Reject it and ask for a new one.</p>
-            ) : (
-              <p className="decision-why pb-applies">
-                {proposal.in_repo ? (
-                  <>
-                    Approving commits it to <span className="mono">.nitely/playbook.toml</span> on the integration branch it names.
-                  </>
-                ) : (
-                  <>
-                    Approving writes it to <span className="mono">{proposal.path}</span>.
-                  </>
-                )}
-              </p>
-            )}
-          </>
-        );
       }
       const { rounds } = journeyOf(detail?.timeline, detail?.reviews);
       const review = detail?.reviews[0];

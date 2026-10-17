@@ -5,6 +5,9 @@ import { laneRunId } from "./lanes";
 import type { Goal, IssueDetail, IssueRecord, IssueSpend, LinkedIssue } from "./types";
 import { agentLabel, agentTitle, ago, openExternal, PRIORITY } from "./util";
 import { IssueJourney, WhoHadIt } from "./IssueJourney";
+import { issueDecision, type Move } from "./decisions";
+import { GoalPlanDecision } from "./GoalPlanDecision";
+import { PlaybookChangeDecision } from "./PlaybookChangeDecision";
 import { MirrorFact } from "./Mirror";
 import { typing } from "./Palette";
 import { AgentMark, IssueToken, Labels, Loading, PrMark, PriorityMark, StationGlyph, StationTrack, VENDOR_LABEL, trackOf, vendorOf } from "./ui";
@@ -177,9 +180,21 @@ export function IssuePanel(props: {
 
   const issue = detail?.issue;
   const track = detail && trackOf(detail.issue, detail.timeline, detail.reviews);
-  // The human's own work waits on them in any open state, and is never an approval of a change.
-  const own = issue?.owner === "human" && issue.origin === "nitely" && !["completed", "canceled"].includes(issue.state_type);
-  const waiting = issue?.state === "Needs You" && !own;
+  // The same decision the Inbox shows for it (decisions.ts): a playbook change or goal plan to
+  // decide, the human's own work, or a change to approve. Never the own-work card for a proposal.
+  const decision = issue && issue.origin === "nitely" ? issueDecision(issue, detail ?? undefined) : null;
+  const own = decision === "own";
+  const waiting = decision === "approve";
+  // A decision's buttons act through the backend; the sheet then reloads to show what came of it.
+  const [acting, setActing] = useState(false);
+  const act = (_move: Move, run: () => Promise<unknown>) => {
+    setActing(true);
+    setError(null);
+    run()
+      .then(() => props.onChanged())
+      .catch((e) => setError(String(e)))
+      .finally(() => setActing(false));
+  };
   const waitedSince = detail ? [...detail.timeline].reverse().find((e) => e.kind === "submit" || (e.kind === "issue_moved" && /→ Needs You/.test(e.summary ?? ""))) : undefined;
   const review = detail?.reviews[0];
   const pr = detail?.prs[0];
@@ -282,6 +297,18 @@ export function IssuePanel(props: {
         </div>
         {issue && detail && (
           <div className="panel-rail">
+            {decision === "playbook" && detail.proposal && (
+              <div className="panel-waiting panel-decision">
+                <p className="panel-waiting-head">Playbook change{waitedSince && ` · ${ago(props.now, waitedSince.ts).replace(" ago", "")}`}</p>
+                <PlaybookChangeDecision proposal={detail.proposal} issueKey={issue.key} resolved={false} busy={acting} onAct={act} />
+              </div>
+            )}
+            {decision === "goal-plan" && detail.goal_plan && (
+              <div className="panel-waiting panel-decision">
+                <p className="panel-waiting-head">Goal plan</p>
+                <GoalPlanDecision plan={detail.goal_plan} issueKey={issue.key} resolved={acting} onAct={act} />
+              </div>
+            )}
             {own && (
               <div className="panel-waiting">
                 <p className="panel-waiting-head">Your own work</p>

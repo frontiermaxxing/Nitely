@@ -51,6 +51,20 @@ export const needsHuman = (i: IssueRecord) => i.state === NEEDS_HUMAN;
 /** Open work only the human can do, outside Backlog: it waits on them whatever its state. */
 export const isOwnWork = (i: IssueRecord) => i.owner === "human" && !["completed", "canceled"].includes(i.state_type) && i.state !== "Backlog";
 
+/**
+ * What an issue waits on the person for, as the one decision the Inbox and the issue panel both
+ * show (NIT-227): a playbook change or a goal plan to decide (their issues are the person's so no
+ * agent is handed them, but they are never work to mark done), their own work, a change to
+ * approve, or nothing.
+ */
+export type IssueDecision = "playbook" | "goal-plan" | "own" | "approve" | null;
+export function issueDecision(i: IssueRecord, detail?: IssueDetail): IssueDecision {
+  if (detail?.proposal?.status === "pending") return "playbook";
+  if (detail?.goal_plan?.status === "pending") return "goal-plan";
+  if (isOwnWork(i)) return "own";
+  return needsHuman(i) ? "approve" : null;
+}
+
 const urgencyOf = (i: IssueRecord | null | undefined) => {
   const u = i ? i.urgency || i.priority : 0;
   return u > 0 ? u : 5;
@@ -100,8 +114,7 @@ export function decisionsOf(board: Board, details: Map<string, IssueDetail>, now
     // it): an issue the detail shows approved, or moved anywhere else, is no longer a decision.
     const i = details.get(listed.key)?.issue ?? listed;
     // A playbook change is the human's own issue but a decision to approve, not work to do.
-    const d = details.get(i.key);
-    const own = isOwnWork(i) && d?.proposal?.status !== "pending" && d?.goal_plan?.status !== "pending";
+    const own = issueDecision(i, details.get(i.key)) === "own";
     if (!own && !needsHuman(i) && !isOwnWork(i)) continue;
     const at = rowOf(i.key);
     out.push({ id: `${own ? "own" : "approve"}-${i.key}`, kind: own ? "own" : "approve", issue: i, row: at?.row ?? null, repo: at?.repo ?? null, ask: null, since: waitingSince(i, details.get(i.key)), urgency: urgencyOf(i) });
