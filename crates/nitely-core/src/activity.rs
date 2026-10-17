@@ -439,7 +439,7 @@ fn is_commit(summary: &str) -> bool {
 
 /// Issue keys named in a summary: `NIT-27`, or a worktree folder like `nit-27-activity-lanes`.
 /// Only keys of stored issues count, so `utf-8` is not an issue.
-fn issue_keys(summary: &str, prefixes: &HashSet<String>, keys: &HashSet<String>) -> Vec<String> {
+pub(crate) fn issue_keys(summary: &str, prefixes: &HashSet<String>, keys: &HashSet<String>) -> Vec<String> {
     let lower = summary.to_lowercase();
     let bytes = lower.as_bytes();
     let mut out: Vec<String> = Vec::new();

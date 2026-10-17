@@ -7,7 +7,9 @@
 //!
 //! A session's usage belongs to the issue its branch (or worktree folder) names, as `nitely-3-…` is
 //! NIT-3, and to the project of the repo its folder is in. A session that works on issues from the
-//! main checkout counts toward the project only.
+//! main checkout gives each response to the issue it last named before it, in a tool call its hooks
+//! recorded (`start_task: NIT-3`, a path in the issue's worktree) or a report it wrote; until it
+//! names one, it counts toward the project only.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -355,10 +357,77 @@ pub fn scan_in(config: &Config, aliases: &HashMap<String, String>, since: i64, c
     out
 }
 
-/// As `scan_in`, from the agents' usual folders.
+/// As `scan_in`, from the agents' usual folders, with a main-checkout session's usage given to the
+/// issue it was on at the time (`by_session`).
 pub fn scan(config: &Config, db: &Db, since: i64) -> Vec<Attributed> {
     let aliases = db.project_aliases().unwrap_or_default();
-    scan_in(config, &aliases, since, claude_home().as_deref(), codex_home().as_deref())
+    let mut records = scan_in(config, &aliases, since, claude_home().as_deref(), codex_home().as_deref());
+    if let Ok(touches) = db.session_touches(since - TOUCH_LOOKBACK_SECS) {
+        by_session(&mut records, &touches);
+    }
+    records
+}
+
+/// How far before a scan's start a session's last named issue is looked for: a session that took
+/// an issue in the morning is still on it in the afternoon.
+const TOUCH_LOOKBACK_SECS: i64 = 2 * 86_400;
+
+/// The issues each session named, by its hook id (`claude:<session>`, as the transcripts' session
+/// id), in time order.
+pub type Touches = HashMap<String, Vec<(i64, String)>>;
+
+/// Tools that read about an issue or triage it rather than work on it: naming one there does not
+/// move the session onto it (a coordinator reads and moves many).
+const NOT_WORK_TOOLS: &[&str] = &["get_issue", "list_issues", "file_issue", "file_issues", "update_issue", "get_answer", "get_project"];
+
+impl Db {
+    /// The issues each session named since `since`: the issue of an event it wrote (a report, a
+    /// note), else the one issue a tool call names (`start_task: NIT-3`, a path in its worktree).
+    /// A call that names several, or only reads about or triages one, says nothing.
+    pub fn session_touches(&self, since: i64) -> Result<Touches> {
+        let keys: std::collections::HashSet<String> = {
+            let mut stmt = self.conn.prepare("SELECT key FROM issue")?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let prefixes: std::collections::HashSet<String> = keys.iter().filter_map(|k| k.split_once('-')).map(|(p, _)| p.to_lowercase()).collect();
+        let mut stmt = self.conn.prepare(
+            "SELECT actor, ts, issue_key, COALESCE(summary, '') FROM event
+             WHERE ts >= ?1 AND (actor LIKE 'claude:%' OR actor LIKE 'codex:%') AND (issue_key IS NOT NULL OR summary IS NOT NULL)
+             ORDER BY ts, id",
+        )?;
+        let rows = stmt.query_map([since], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, String>(3)?)))?;
+        let mut out = Touches::new();
+        for row in rows {
+            let (actor, ts, issue, summary) = row?;
+            let tool = summary.split_once(':').map(|(t, _)| t).unwrap_or_default();
+            let key = match issue {
+                Some(k) => Some(k),
+                None if NOT_WORK_TOOLS.iter().any(|t| tool.ends_with(t)) => None,
+                None => match crate::activity::issue_keys(&summary, &prefixes, &keys)[..] {
+                    [ref k] => Some(k.clone()),
+                    _ => None,
+                },
+            };
+            if let Some(k) = key {
+                out.entry(actor).or_default().push((ts, k.to_uppercase()));
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Gives each usage no branch or folder placed (a session in the main checkout) to the issue its
+/// session named last before it, when that issue is in the usage's project.
+pub fn by_session(records: &mut [Attributed], touches: &Touches) {
+    for r in records.iter_mut().filter(|r| r.issue.is_none()) {
+        let Some(named) = touches.get(&format!("{}:{}", r.usage.vendor, r.usage.session)) else { continue };
+        let last = named.partition_point(|(ts, _)| *ts <= r.usage.ts);
+        r.issue = last
+            .checked_sub(1)
+            .map(|i| named[i].1.clone())
+            .filter(|k| r.project.as_deref().is_some_and(|p| k.split('-').next().is_some_and(|kp| kp.eq_ignore_ascii_case(p))));
+    }
 }
 
 /// The project of the watched repo `cwd` is in: its main checkout or a worktree in the folder its
@@ -681,6 +750,45 @@ mod tests {
         assert_eq!(p.by_agent.iter().map(|a| (a.vendor.as_str(), a.tokens)).collect::<Vec<_>>(), [("codex", 320), ("claude", 85)]);
         assert_eq!(p.top_issues.iter().map(|i| (i.key.as_str(), i.tokens)).collect::<Vec<_>>(), [("NIT-3", 85)]);
         assert_eq!(project_tokens_since(&records, "nit", today + 10 * 3600 + 1800), 340, "since 10:30: the Codex turn at 11:00 and the reply at 12:00");
+        drop(db);
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn a_main_checkout_session_works_on_the_issue_it_named_last() {
+        let base = crate::paths::unique_temp("nitely-usage-touch", "");
+        let mut db = Db::open(&base.join("t.db")).unwrap();
+        db.create_project("NIT", "Nitely").unwrap();
+        let new = |title: &str| crate::NewIssue { project: "NIT".into(), title: title.into(), body: "b".into(), kind: "feature".into(), source: "claude".into(), evidence: "e".into(), priority: 3, allow_similar: true, ..Default::default() };
+        let human = crate::Actor::Human;
+        let (a, b) = (db.create_issue(&new("One"), &human).unwrap().key, db.create_issue(&new("Two"), &human).unwrap().key);
+        let tool = |ts: i64, actor: &str, summary: &str| {
+            db.conn.execute("INSERT INTO event (ts, actor, type, summary) VALUES (?1, ?2, 'tool', ?3)", rusqlite::params![ts, actor, summary]).unwrap();
+        };
+        tool(100, "claude:s1", &format!("mcp__nitely__start_task: {a}"));
+        tool(200, "claude:s1", &format!("mcp__nitely__get_issue: {b}"));
+        tool(210, "claude:s1", &format!("mcp__nitely__update_issue: {b}"));
+        tool(220, "claude:s1", &format!("Bash: diff {a} {b}"));
+        tool(300, "claude:s1", r"Read: C:\dev\app-worktrees\nit-2-two\src\lib.rs");
+        tool(150, "claude:other", &format!("mcp__nitely__start_task: {b}"));
+        db.conn.execute("INSERT INTO event (ts, actor, type, summary, issue_key) VALUES (400, 'codex:c1', 'status', 'Fixing it', ?1)", [&a]).unwrap();
+        let touches = db.session_touches(0).unwrap();
+        assert_eq!(touches["claude:s1"], [(100, a.clone()), (300, b.clone())], "reading, triaging and naming two say nothing");
+
+        let usage = |vendor: &'static str, session: &str, ts: i64| Attributed {
+            usage: Usage { vendor, session: session.into(), ts, model: "m".into(), input: 1, output: 1, cache_read: 0, cache_write: 0, cwd: r"C:\dev\app".into(), branch: "main".into() },
+            project: Some("NIT".into()),
+            issue: None,
+        };
+        let mut records = vec![usage("claude", "s1", 50), usage("claude", "s1", 120), usage("claude", "s1", 250), usage("claude", "s1", 300), usage("codex", "c1", 500), usage("claude", "s9", 500)];
+        by_session(&mut records, &touches);
+        let got: Vec<Option<&str>> = records.iter().map(|r| r.issue.as_deref()).collect();
+        assert_eq!(got, [None, Some(a.as_str()), Some(a.as_str()), Some(b.as_str()), Some(a.as_str()), None]);
+
+        // A branch's issue stands, and an issue of another project is not taken.
+        let mut placed = vec![Attributed { issue: Some("NIT-9".into()), ..usage("claude", "s1", 250) }, Attributed { project: Some("APP".into()), ..usage("claude", "s1", 250) }];
+        by_session(&mut placed, &touches);
+        assert_eq!(placed.iter().map(|r| r.issue.as_deref()).collect::<Vec<_>>(), [Some("NIT-9"), None]);
         drop(db);
         std::fs::remove_dir_all(base).ok();
     }

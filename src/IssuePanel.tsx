@@ -68,7 +68,7 @@ function SpendLine(props: { detail: IssueDetail; now: number }) {
   const line = issueSpendLine(props.detail, spend, props.now);
   if (!line) return null;
   return (
-    <p className="spend-line" title="Tokens are new input, cache writes and output, read from the agents' session files. Work done from the main checkout counts toward the project, not the issue.">
+    <p className="spend-line" title="Tokens are new input, cache writes and output, read from the agents' session files. Work done from the main checkout counts toward the issue the session last named.">
       {line}
     </p>
   );
