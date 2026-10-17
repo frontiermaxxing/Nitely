@@ -591,8 +591,10 @@ fn issue_json(i: &crate::IssueRecord) -> Value {
 }
 
 /// What waits on the person that the phone can decide: open asks, and changes in Needs You whose
-/// latest review waits for a person's approval. The rest (a playbook change, the person's own
-/// work, an issue in Needs You for another reason) is counted as waiting at the PC.
+/// latest review waits for a person's approval. What only the PC can settle is counted in
+/// `at_pc`: an issue in Needs You for another reason (a playbook change, no review), the person's
+/// own open work, and a land that stopped. Agents waiting at their own prompt and worktree
+/// conflicts are seen only by the app, so the phone never says nothing else waits.
 fn decisions(db: &crate::Db) -> std::result::Result<Value, Refused> {
     let mut out = Vec::new();
     let asks = db.open_asks()?;
@@ -607,8 +609,14 @@ fn decisions(db: &crate::Db) -> std::result::Result<Value, Refused> {
         }));
     }
     let mut at_pc = 0;
-    for i in db.list_issues(None, false)?.into_iter().filter(|i| i.state == "Needs You") {
+    for i in db.list_issues(None, false)? {
         if asks.iter().any(|a| a.issue_key.as_deref().is_some_and(|k| k.eq_ignore_ascii_case(&i.key))) {
+            continue;
+        }
+        if i.state != "Needs You" {
+            let own_work = i.owner == "human" && !matches!(i.state_type.as_str(), "completed" | "canceled") && i.state != "Backlog";
+            let stopped_land = i.track.station == "landing" && i.track.stuck.is_some();
+            at_pc += usize::from(own_work || stopped_land);
             continue;
         }
         let review = db.reviews(&i.key)?.into_iter().next();
@@ -641,6 +649,10 @@ fn approve(db: &mut crate::Db, device: &Device, body: &[u8]) -> std::result::Res
     let req: Signed<Approve> = serde_json::from_slice(body).map_err(|_| refuse(400, "Send key, patch, time and signature."))?;
     check_decision(device, &crate::approval::message(&req.what.key, &req.what.patch, req.time), req.time, &req.signature)?;
     let issue = db.issue(&req.what.key)?.ok_or_else(|| refuse(404, "That issue is gone."))?;
+    // Signed for the key the phone saw; under a project's new key it would not verify at land.
+    if !issue.key.eq_ignore_ascii_case(&req.what.key) {
+        return Err(refuse(409, format!("{} is {} now; look at it again.", req.what.key, issue.key)));
+    }
     if issue.state != "Needs You" || issue.origin != "nitely" || db.proposal_for_issue(&issue.key)?.is_some() {
         return Err(refuse(409, format!("{} no longer waits for your approval here.", issue.key)));
     }
@@ -909,6 +921,10 @@ mod tests {
         assert_eq!(status, 200, "{d}");
         let kinds: Vec<&str> = d["decisions"].as_array().unwrap().iter().map(|x| x["kind"].as_str().unwrap()).collect();
         assert_eq!(kinds, ["ask", "approve"], "a's open ask stands for it; b waits for approval: {d}");
+        assert_eq!(d["at_pc"], 0);
+        let own = db.create_issue(&NewIssue { owner: Some("human".into()), ..new("Call the bank") }, &agent).unwrap().key;
+        assert_eq!(p.get_with(&base, "/phone/api/decisions", now(), "aaaaaaaaaaaaaaaa").1["at_pc"], 1, "the person's own work waits at the PC");
+        db.move_issue(&own, "Canceled", None, Some("done elsewhere"), &Actor::Human).unwrap();
         assert_eq!(d["decisions"][1]["patch_id"], "p2");
 
         // An answer, signed over what it says.
