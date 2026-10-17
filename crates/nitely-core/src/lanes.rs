@@ -98,7 +98,8 @@ pub fn snapshot(worktree: &Path) -> Result<Snapshot> {
             list.push(0);
         }
         // Each path as the worktree has it now: added or updated when present, removed when gone.
-        with_index(&["update-index", "--add", "--remove", "-z", "--stdin"], Some(&list))?;
+        // --replace: a folder that became a file (or the other way) replaces what the index had.
+        with_index(&["update-index", "--add", "--remove", "--replace", "-z", "--stdin"], Some(&list))?;
         let tree = with_index(&["write-tree"], None)?;
         let commit = with_index(&["commit-tree", &tree, "-p", &head, "-m", "nitely run: uncommitted work"], None)?;
         Ok((commit, tree))
@@ -387,8 +388,10 @@ pub fn run(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Acto
 /// Deletes snapshot refs and logs older than `KEEP_SECS`. Best effort.
 fn expire(db: &Db, repo_root: &Path, project: &str) {
     let cutoff = now() - KEEP_SECS;
-    let Ok(mut stmt) = db.conn.prepare("SELECT id, log_path FROM lane_run WHERE project = ?1 COLLATE NOCASE AND queued_at < ?2 AND log_path IS NOT NULL") else { return };
-    let old: Vec<(i64, String)> = stmt.query_map(params![project, cutoff], |r| Ok((r.get(0)?, r.get(1)?))).map(|rows| rows.flatten().collect()).unwrap_or_default();
+    // This repo's runs only: its refs are the ones this can delete.
+    let Ok(mut stmt) = db.conn.prepare("SELECT id, log_path FROM lane_run WHERE project = ?1 COLLATE NOCASE AND repo = ?2 AND queued_at < ?3 AND log_path IS NOT NULL") else { return };
+    let repo = repo_root.to_string_lossy().into_owned();
+    let old: Vec<(i64, String)> = stmt.query_map(params![project, repo, cutoff], |r| Ok((r.get(0)?, r.get(1)?))).map(|rows| rows.flatten().collect()).unwrap_or_default();
     for (id, log) in old {
         std::fs::remove_file(&log).ok();
         git(repo_root, &["update-ref", "-d", &format!("refs/nitely/runs/{id}")]).ok();
@@ -476,10 +479,16 @@ fn ensure_setup(repo_root: &Path, pb: &Playbook, lane: &Path, base: &str, log: &
     if pb.worktree.setup.is_empty() {
         return Ok(false);
     }
-    let record = playbook::setup_record(lane).context("the lane has no git folder for its setup record")?;
+    let record = git_path(lane, "nitely-lane-setup").context("the lane has no git folder for its setup record")?;
     let now = playbook::setup_fingerprint(&pb.worktree, lane);
-    if std::fs::read_to_string(&record).is_ok_and(|last| last.trim() == now) {
-        return Ok(false);
+    // The record: the fingerprint, then the untracked paths setup made. Setup ran and still holds
+    // only while both match: a clean that took what setup made (not in `keep`) means it runs again.
+    if let Ok(last) = std::fs::read_to_string(&record) {
+        let mut lines = last.lines();
+        let same = lines.next().is_some_and(|f| f.trim() == now);
+        if same && lines.filter(|p| !p.trim().is_empty()).all(|p| lane.join(p.trim()).exists()) {
+            return Ok(false);
+        }
     }
     std::fs::remove_file(&record).ok();
     for command in &pb.worktree.setup {
@@ -498,17 +507,32 @@ fn ensure_setup(repo_root: &Path, pb: &Playbook, lane: &Path, base: &str, log: &
             }
         }
     }
-    std::fs::write(&record, now).with_context(|| format!("writing {}", record.display()))?;
+    // What setup left that git does not track, by its top-level path: `node_modules`, `.venv`.
+    let status = git(lane, &["status", "--porcelain=v1", "-z", "--ignored=matching", "--untracked-files=normal"]).unwrap_or_default();
+    let mut made: Vec<String> = status
+        .split('\0')
+        .filter_map(|e| e.strip_prefix("!! ").or_else(|| e.strip_prefix("?? ")))
+        .filter_map(|p| p.trim_end_matches('/').split('/').next().map(str::to_string))
+        .filter(|p| !p.is_empty())
+        .collect();
+    made.sort();
+    made.dedup();
+    std::fs::write(&record, format!("{now}\n{}", made.join("\n"))).with_context(|| format!("writing {}", record.display()))?;
     Ok(true)
+}
+
+/// A file in `dir`'s own git folder (per worktree), named `name`.
+fn git_path(dir: &Path, name: &str) -> Option<PathBuf> {
+    let path = git(dir, &["rev-parse", "--git-path", name]).ok()?;
+    let path = PathBuf::from(path.trim());
+    Some(if path.is_absolute() { path } else { dir.join(path) })
 }
 
 /// Where a lane keeps the pid of the command running in it: in its own git folder, gone once the
 /// command ends. Found at the start of a request, it means the last one's process died with its
 /// command still running.
 fn pid_file(lane: &Path) -> Option<PathBuf> {
-    let path = git(lane, &["rev-parse", "--git-path", "nitely-lane-pid"]).ok()?;
-    let path = PathBuf::from(path.trim());
-    Some(if path.is_absolute() { path } else { lane.join(path) })
+    git_path(lane, "nitely-lane-pid")
 }
 
 /// Stops what a request that died left running in `lane`: the command it recorded, with what that
@@ -723,6 +747,13 @@ mod tests {
         let files = git(&root, &["ls-tree", "-r", "--name-only", &snap.commit]).unwrap();
         assert_eq!(files.lines().collect::<Vec<_>>(), [".gitignore", "src/a.txt", "src/c.txt"], "ignored files stay out");
         assert_eq!(git(&root, &["show", &format!("{}:src/a.txt", snap.commit)]).unwrap(), "one, changed\n");
+
+        // A tracked folder that became a file.
+        std::fs::remove_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src"), "now a file\n").unwrap();
+        let snap = snapshot(&root).unwrap();
+        let files = git(&root, &["ls-tree", "-r", "--name-only", &snap.commit]).unwrap();
+        assert_eq!(files.lines().collect::<Vec<_>>(), [".gitignore", "src"]);
         std::fs::remove_dir_all(base).ok();
     }
 
@@ -820,6 +851,23 @@ mod tests {
         assert!(second.passed() && second.setup_ran, "a failed setup is never taken as done: {second:?}");
         let third = run(&db, &root, &pb, &req, &actor, &mut |_| {}).unwrap();
         assert!(third.passed() && !third.setup_ran, "and a passed one is not run again");
+
+        // What setup makes and `keep` does not list goes with the clean, so setup runs again; what
+        // `keep` lists stays, and setup does not.
+        let makes = if cfg!(windows) { "if not exist deps mkdir deps && echo x > deps\\ok.txt" } else { "mkdir -p deps && echo x > deps/ok.txt" };
+        let needs = if cfg!(windows) { "if not exist deps\\ok.txt exit 9" } else { "test -e deps/ok.txt || exit 9" };
+        let other = crate::paths::unique_temp("nitely-lane-keep", "");
+        let root2 = repo(&other);
+        let snap2 = snapshot(&root2).unwrap();
+        for (keep, again) in [("", true), ("keep = [\"deps\"]\n", false)] {
+            let pb2 = playbook_with(&format!("[worktree]\nsetup = [{makes:?}]\n[lanes]\n{keep}"));
+            let req2 = Request { project: "APP", issue: None, kind: Kind::Run, snapshot: &snap2, command: needs };
+            assert!(run(&db, &root2, &pb2, &req2, &actor, &mut |_| {}).unwrap().passed());
+            let next = run(&db, &root2, &pb2, &req2, &actor, &mut |_| {}).unwrap();
+            assert!(next.passed(), "{next:?}");
+            assert_eq!(next.setup_ran, again, "keep {keep:?}");
+        }
+        std::fs::remove_dir_all(other).ok();
 
         // A command left running by a request whose process died is stopped before the next one.
         let lane = lane_path(&root, &pb, 1);
