@@ -49,7 +49,10 @@ Before anything leaves the machine:
 An issue that becomes private after it was published is **withdrawn**: its host issue is deleted
 when the token may (admin rights on GitHub). Otherwise its comments are deleted, its title and text
 are replaced with a note, and it is closed as not planned; but hosts keep an edited text's earlier
-versions, so the issue is marked **still public** and the issue panel says to delete it on the host. The issue panel shows each issue's place:
+versions, so the issue is marked **still public** and the issue panel says to delete it on the host.
+When the repo's origin moves, Nitely publishes anew on the new repo and never writes to the old
+one; an issue made private while its copy is still up there is marked **still public** too, with
+where to take it down. The issue panel shows each issue's place:
 its link on the host, or private, held back or withdrawn, and why.
 
 ## Running

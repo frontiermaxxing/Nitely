@@ -142,7 +142,7 @@ CREATE TABLE IF NOT EXISTS mirror_project ( -- projects whose issues go to their
 );
 CREATE TABLE IF NOT EXISTS issue_mirror (   -- an issue's place in the mirror
   issue_key   TEXT PRIMARY KEY,
-  status      TEXT NOT NULL,            -- mirrored, private, held or withdrawn
+  status      TEXT NOT NULL,            -- mirrored, private, held, withdrawn or exposed (still public)
   reason      TEXT,
   host        TEXT,
   repo        TEXT,
@@ -150,6 +150,7 @@ CREATE TABLE IF NOT EXISTS issue_mirror (   -- an issue's place in the mirror
   url         TEXT,
   fingerprint TEXT,                     -- of what was last sent, to send only changes
   last_event  INTEGER NOT NULL DEFAULT 0, -- the last timeline event considered for a comment
+  left_on     TEXT,                     -- copies on repos the origin no longer points at, as #7 on GitHub o/r
   updated_at  INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS mirror_comment ( -- comments the mirror posted, to take down if the issue goes private

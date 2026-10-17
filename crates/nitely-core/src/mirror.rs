@@ -93,10 +93,14 @@ pub fn sanitize_with_home(text: &str, roots: &[String], home: Option<&str>) -> S
     // the last part, the file, ends at a space.
     // A folder's name may hold spaces but not end with one, so prose between two paths is not taken
     // for a folder; a file's name may hold spaces when it ends with an extension (`report v2.pdf`).
-    // Network paths (`\\server\share\…`) never go out.
+    // Network and extended paths (`\\server\share\…`, `\\?\C:\…`, `//server/share/…`) never go out,
+    // whole: their folders may hold a drive's colon.
     let file = r#"[^\s\\/"'`<>|,;)\]]*(?: [^\s\\/"'`<>|,;)\]]*\.[A-Za-z0-9]{1,8}\b)?"#;
-    let unc = regex::Regex::new(&format!(r#"\\\\[^\s\\/"'`<>|]+\\(?:[^\\/\n"'`<>|:]*[^\s\\/"'`<>|:]\\)*{file}"#)).unwrap();
-    let text = unc.replace_all(&text, "<local path>").into_owned();
+    let folder = r#"[^\\/\n"'`<>|]*[^\s\\/"'`<>|]"#;
+    // With forward slashes a colon ends a folder, so `… or https://…` after the path is not taken in.
+    let plain = r#"[^/\n"'`<>|:]*[^\s/"'`<>|:]"#;
+    let unc = regex::Regex::new(&format!(r#"\\\\[^\s\\/"'`<>|]+[\\/](?:{folder}[\\/])*{file}|(^|[\s"'`(\[])//[^\s\\/"'`<>|:]+/(?:{plain}/)*{file}"#)).unwrap();
+    let text = unc.replace_all(&text, |c: &regex::Captures| format!("{}<local path>", c.get(1).map_or("", |m| m.as_str()))).into_owned();
     let path = regex::Regex::new(&format!(
         r#"(?i)\b[A-Z]:[\\/](?:[^\\/\n"'`<>|:]*[^\s\\/"'`<>|:][\\/])*{file}|(?:^|[\s"'`(\[])(/[^\s/"'`<>|,;)\]]+/(?:[^/\n"'`<>|]*[^\s/"'`<>|]/)*{file})"#
     ))
@@ -120,16 +124,15 @@ pub fn sanitize_with_home(text: &str, roots: &[String], home: Option<&str>) -> S
         let dots = ".".repeat(p.len() - trimmed.len());
         let p = trimmed;
         let n = normalize(p);
-        let relative = roots
-            .iter()
-            .find_map(|r| match r.strip_prefix(WORKTREES) {
-                // A worktree folder: what is inside a task's worktree, after the task's own folder.
-                Some(dir) => n.strip_prefix(&format!("{dir}/"))?.split_once('/').map(|(_, inner)| inner.to_string()),
-                // The repo's main checkout.
-                None => n.strip_prefix(&format!("{r}/")).map(str::to_string),
-            })
-            // A `..` could climb out of the repo: such a path is not inside it.
-            .filter(|rel| !rel.split('/').any(|part| part == ".."));
+        // A `..` anywhere could climb out of the repo or its worktree folder: such a path is never
+        // taken to be inside it.
+        let climbs = n.split('/').any(|part| part == "..");
+        let relative = roots.iter().filter(|_| !climbs).find_map(|r| match r.strip_prefix(WORKTREES) {
+            // A worktree folder: what is inside a task's worktree, after the task's own folder.
+            Some(dir) => n.strip_prefix(&format!("{dir}/"))?.split_once('/').map(|(_, inner)| inner.to_string()),
+            // The repo's main checkout.
+            None => n.strip_prefix(&format!("{r}/")).map(str::to_string),
+        });
         // Keep the original case for the relative part.
         let shown = match relative {
             Some(rel) if !rel.is_empty() => p.replace('\\', "/")[p.len() - rel.len()..].to_string(),
@@ -667,7 +670,7 @@ fn sync_issue(db: &Db, host: &dyn Host, issue: &IssueRecord, setting: &MirrorSet
     let here = db.conn.query_row("SELECT host = ?2 AND repo = ?3 FROM issue_mirror WHERE issue_key = ?1", params![issue.key, host.name(), host.repo()], |r| r.get::<_, Option<bool>>(0)).optional()?.flatten().unwrap_or(false);
     let published = known.as_ref().filter(|_| here).and_then(|m| m.number.map(|n| (n, m.status.clone())));
     // Still public on a repo the project's origin no longer points at.
-    let elsewhere: Option<(i64, String)> = match known.as_ref().filter(|m| !here && m.status == "mirrored") {
+    let elsewhere: Option<(i64, String)> = match known.as_ref().filter(|m| !here && (m.status == "mirrored" || m.status == "exposed")) {
         Some(m) => match m.number {
             Some(n) => {
                 let repo: Option<String> = db.conn.query_row("SELECT repo FROM issue_mirror WHERE issue_key = ?1", [&issue.key], |r| r.get(0))?;
@@ -677,14 +680,24 @@ fn sync_issue(db: &Db, host: &dyn Host, issue: &IssueRecord, setting: &MirrorSet
         },
         None => None,
     };
+    // Copies on repos the origin pointed at before, which Nitely can no longer reach.
+    let left_on: Option<String> = db.conn.query_row("SELECT left_on FROM issue_mirror WHERE issue_key = ?1", [&issue.key], |r| r.get(0)).optional()?.flatten();
+    let mut left: Vec<String> = left_on.iter().flat_map(|l| l.split("; ").map(str::to_string)).collect();
+    left.extend(elsewhere.as_ref().map(|(n, on)| format!("#{n} on {on}")));
     let eligible = published.is_some()
+        || !left.is_empty()
         || created >= setting.enabled_at
         || setting.backfill == "all"
         || (setting.backfill == "open" && issue.is_open());
     if !eligible {
         return Ok(());
     }
-    match decide(issue, db.marked_private(&issue.key)?, terms, roots)? {
+    let decision = decide(issue, db.marked_private(&issue.key)?, terms, roots)?;
+    let why = match &decision {
+        Decision::Private(why) | Decision::Held(why) => Some(why.clone()),
+        Decision::Publish(_) => None,
+    };
+    match decision {
         Decision::Publish(out) => {
             let fingerprint = out.fingerprint();
             let unchanged = db.conn.query_row("SELECT fingerprint = ?2 AND status = 'mirrored' FROM issue_mirror WHERE issue_key = ?1", params![issue.key, fingerprint], |r| r.get::<_, bool>(0)).optional()?.unwrap_or(false);
@@ -697,7 +710,8 @@ fn sync_issue(db: &Db, host: &dyn Host, issue: &IssueRecord, setting: &MirrorSet
                     *budget -= 1;
                     report.created += 1;
                     db.conn.execute("DELETE FROM mirror_comment WHERE issue_key = ?1", [&issue.key])?;
-                    db.conn.execute("UPDATE issue_mirror SET host = NULL, repo = NULL, number = NULL, url = NULL WHERE issue_key = ?1", [&issue.key])?;
+                    // The old repo's copy is remembered, to be reported if the issue goes private.
+                    db.conn.execute("UPDATE issue_mirror SET host = NULL, repo = NULL, number = NULL, url = NULL, left_on = ?2 WHERE issue_key = ?1", params![issue.key, (!left.is_empty()).then(|| left.join("; "))])?;
                     db.save_mirror(&issue.key, "mirrored", None, Some((host.name(), host.repo(), number, &url)), Some(&open.fingerprint()))?;
                     // Comments start from now: a backfill does not replay old history.
                     let last: i64 = db.conn.query_row("SELECT COALESCE(MAX(id), 0) FROM event WHERE issue_key = ?1 COLLATE NOCASE", [&issue.key], |r| r.get(0))?;
@@ -720,23 +734,39 @@ fn sync_issue(db: &Db, host: &dyn Host, issue: &IssueRecord, setting: &MirrorSet
         }
         Decision::Private(why) | Decision::Held(why) if published.as_ref().is_some_and(|(_, s)| s == "mirrored") => {
             let (number, _) = published.unwrap();
-            withdraw(db, host, &issue.key, number, &why)?;
+            if let Err(e) = withdraw(db, host, &issue.key, number, &why) {
+                // Still public here; copies on old repos are said as well.
+                if !left.is_empty() {
+                    still_public_elsewhere(db, &issue.key, &why, &left)?;
+                }
+                return Err(e);
+            }
             *budget = budget.saturating_sub(1);
             report.withdrawn += 1;
         }
         // Still public on the host (it could not be deleted): that stays said until it is.
         Decision::Private(_) | Decision::Held(_) if published.as_ref().is_some_and(|(_, s)| s == "exposed") => {}
-        // Published on a repo that is no longer the project's: Nitely cannot reach it to take it
-        // down, so it says where it still is rather than calling it private.
-        Decision::Private(why) | Decision::Held(why) if elsewhere.is_some() => {
-            let (number, on) = elsewhere.unwrap();
-            let left = format!("{why}, but it is still published as #{number} on {on}, which is no longer this project's repo: take it down there");
-            db.save_mirror(&issue.key, "exposed", Some(&left), None, None)?;
-        }
         Decision::Private(why) => db.save_mirror(&issue.key, if published.is_some() { "withdrawn" } else { "private" }, Some(&why), None, None)?,
         Decision::Held(why) => db.save_mirror(&issue.key, if published.is_some() { "withdrawn" } else { "held" }, Some(&why), None, None)?,
     }
+    // Copies on repos that are no longer the project's: Nitely cannot reach them to take them
+    // down, so it says where they still are rather than calling the issue private.
+    if let Some(why) = why.filter(|_| !left.is_empty()) {
+        still_public_elsewhere(db, &issue.key, &why, &left)?;
+    }
     Ok(())
+}
+
+/// Marks the issue still public because of copies left on repos the origin no longer points at,
+/// keeping what is said about a copy on the current repo.
+fn still_public_elsewhere(db: &Db, key: &str, why: &str, left: &[String]) -> Result<()> {
+    let elsewhere = format!("still published as {}, which is no longer this project's repo: take it down there", left.join(" and "));
+    let reason = match db.issue_mirror(key)? {
+        Some(m) if m.status == "exposed" && m.reason.as_ref().is_some_and(|r| !r.contains(&elsewhere)) => format!("{}; it is also {elsewhere}", m.reason.unwrap()),
+        Some(m) if m.status == "exposed" && m.reason.is_some() => m.reason.unwrap(),
+        _ => format!("{why}, but it is {elsewhere}"),
+    };
+    db.save_mirror(key, "exposed", Some(&reason), None, None)
 }
 
 /// Posts the issue's timeline entries an outsider can follow, since the last one posted. One with
@@ -801,15 +831,27 @@ fn withdraw(db: &Db, host: &dyn Host, key: &str, number: i64, why: &str) -> Resu
 /// mirrors: for "Keep private" after the mirror was turned off.
 pub fn withdraw_now(config: &Config, db: &Db, key: &str) -> Result<()> {
     let Some(m) = db.issue_mirror(key)? else { return Ok(()) };
-    let (Some(number), "mirrored") = (m.number, m.status.as_str()) else { return Ok(()) };
+    // Still up: published, or a withdrawal that could not delete it.
+    let (Some(number), "mirrored" | "exposed") = (m.number, m.status.as_str()) else { return Ok(()) };
     let issue = db.issue(key)?.with_context(|| format!("no issue {key}"))?;
-    let (host, _) = host_for(config, issue.project.as_deref().unwrap_or_default())?;
     let (on, repo): (Option<String>, Option<String>) = db.conn.query_row("SELECT host, repo FROM issue_mirror WHERE issue_key = ?1", [&issue.key], |r| Ok((r.get(0)?, r.get(1)?)))?;
-    if on.as_deref() != Some(host.name()) || repo.as_deref() != Some(host.repo()) {
-        bail!("{key} was published on {} {}, which is no longer this project's repo; take it down there", on.unwrap_or_default(), repo.unwrap_or_default());
-    }
+    let host = host_for(config, issue.project.as_deref().unwrap_or_default()).ok().map(|(h, _)| h);
+    let Some(host) = host.filter(|h| on.as_deref() == Some(h.name()) && repo.as_deref() == Some(h.repo())) else {
+        // Nitely cannot reach that repo any more: the issue says where it is still public.
+        let left = format!("marked private, but it is still published as #{number} on {} {}, which is no longer this project's repo: take it down there", on.unwrap_or_default(), repo.unwrap_or_default());
+        db.save_mirror(key, "exposed", Some(&left), None, None)?;
+        bail!("{key}: {left}");
+    };
     let _lock = SyncLock::take().context("a mirror sync is running; try again in a moment")?;
-    withdraw(db, host.as_ref(), &issue.key, number, "marked private")
+    withdraw(db, host.as_ref(), &issue.key, number, "marked private")?;
+    // Copies left on repos the origin no longer points at are said too.
+    let left_on: Option<String> = db.conn.query_row("SELECT left_on FROM issue_mirror WHERE issue_key = ?1", [key], |r| r.get(0))?;
+    if let Some(left_on) = left_on {
+        let left: Vec<String> = left_on.split("; ").map(str::to_string).collect();
+        still_public_elsewhere(db, key, "marked private", &left)?;
+        bail!("{key} is still published as {}, which is no longer this project's repo: take it down there", left.join(" and "));
+    }
+    Ok(())
 }
 
 /// The mirror's lock file in Nitely's data folder: one sync at a time across processes. One older

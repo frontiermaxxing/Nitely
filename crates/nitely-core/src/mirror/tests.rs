@@ -88,6 +88,17 @@ fn local_paths_and_agent_ids_go_out_neutral() {
     assert_eq!(sanitize_with_home(r"On \\server\secret share\notes.txt now", &roots, None), "On <local path> now");
     assert_eq!(sanitize_with_home(r"C:\code\app\..\app-secrets\x\notes.txt", &roots, None), "<local path>");
     assert_eq!(sanitize_with_home(r"Read C:\Docs\report v2.pdf and more", &roots, None), "Read <local path> and more");
+    // Extended and device paths, and a forward-slash share, go out whole; a URL is left alone.
+    assert_eq!(sanitize_with_home(r"See \\?\C:\Data\customer-private\notes.txt now", &roots, None), "See <local path> now");
+    assert_eq!(sanitize_with_home(r"See \\?\UNC\server\share\x.txt", &roots, None), "See <local path>");
+    assert_eq!(sanitize_with_home(r"See \\.\pipe\private-pipe", &roots, None), "See <local path>");
+    assert_eq!(sanitize_with_home("See //server/private share/x.txt or https://example.com/a/b", &roots, None), "See <local path> or https://example.com/a/b");
+    // A `..` through a worktree folder or a task folder is not inside the repo either.
+    assert_eq!(sanitize_with_home(r"C:\code\app-worktrees\..\app-secrets\x\notes.txt", &roots, None), "<local path>");
+    assert_eq!(sanitize_with_home(r"C:\code\app-worktrees\app-3\..\..\private\notes.txt", &roots, None), "<local path>");
+    assert_eq!(sanitize_with_home(r"C:\code\app-worktrees\app-3\src\main.rs", &roots, None), "src/main.rs");
+    // A folder with a space, in a path that is not under the home folder.
+    assert_eq!(sanitize_with_home(r"C:\Users\Sam Lee\Private\notes.txt", &roots, None), "<local path>");
 }
 
 #[test]
@@ -287,6 +298,45 @@ fn a_publication_left_on_an_old_repo_is_reported_not_hidden() {
     db.set_issue_private(&a.key, true, &Actor::Human).unwrap();
     let fake = Fake::default();
     sync_project(&db, &fake, "APP", &PrivateTerms::default(), &roots(), &mut 30, &mut MirrorReport::default()).unwrap();
+    let m = db.issue_mirror(&a.key).unwrap().unwrap();
+    assert_eq!(m.status, "exposed");
+    assert!(m.reason.unwrap().contains("#7 on GitHub someone/old-app"));
+    drop(db);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn a_publication_still_up_on_an_old_repo_stays_reported() {
+    let (mut db, dir) = db();
+    let agent = Actor::Agent("claude:x".into());
+    db.set_mirror("APP", Some("all"), &Actor::Human).unwrap();
+    let a = db.create_issue(&new("Add export", "Export the list."), &agent).unwrap();
+    // A withdrawal on the old repo that could not delete it, then the origin moved.
+    db.save_mirror(&a.key, "exposed", Some("x"), Some(("GitHub", "someone/old-app", 7, "https://github.com/someone/old-app/issues/7")), Some("x")).unwrap();
+    db.set_issue_private(&a.key, true, &Actor::Human).unwrap();
+    let fake = Fake::default();
+    sync_project(&db, &fake, "APP", &PrivateTerms::default(), &roots(), &mut 30, &mut MirrorReport::default()).unwrap();
+    let m = db.issue_mirror(&a.key).unwrap().unwrap();
+    assert_eq!(m.status, "exposed");
+    assert!(m.reason.unwrap().contains("#7 on GitHub someone/old-app"));
+    drop(db);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn a_copy_left_on_an_old_repo_is_remembered_after_publishing_anew() {
+    let (mut db, dir) = db();
+    let agent = Actor::Agent("claude:x".into());
+    db.set_mirror("APP", Some("all"), &Actor::Human).unwrap();
+    let a = db.create_issue(&new("Add export", "Export the list."), &agent).unwrap();
+    db.save_mirror(&a.key, "mirrored", None, Some(("GitHub", "someone/old-app", 7, "https://github.com/someone/old-app/issues/7")), Some("x")).unwrap();
+    let fake = Fake::default();
+    // Published anew on the project's repo now.
+    sync_project(&db, &fake, "APP", &PrivateTerms::default(), &roots(), &mut 30, &mut MirrorReport::default()).unwrap();
+    assert_eq!(db.issue_mirror(&a.key).unwrap().unwrap().status, "mirrored");
+    // Made private: withdrawn here, and the old copy still said.
+    db.set_issue_private(&a.key, true, &Actor::Human).unwrap();
+    sync_project(&db, &fake, "APP", &PrivateTerms::default(), &roots(), &mut 30, &mut MirrorReport::default()).ok();
     let m = db.issue_mirror(&a.key).unwrap().unwrap();
     assert_eq!(m.status, "exposed");
     assert!(m.reason.unwrap().contains("#7 on GitHub someone/old-app"));
