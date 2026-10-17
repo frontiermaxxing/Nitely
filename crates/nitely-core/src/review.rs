@@ -553,7 +553,9 @@ impl CurrentCode {
     fn confirms_open(&self, said: &str) -> bool {
         let squash = |s: &str| s.split_whitespace().collect::<String>();
         let lone_path = |q: &str| q.split_whitespace().count() == 1 && !citations(q).is_empty();
-        let quotes: Vec<String> = quoted(said).into_iter().filter(|q| !lone_path(q) && squash(q).len() >= 6).collect();
+        // Any length counts here: the quote must sit within a few lines of the cited one, so even
+        // `n - 1` cannot match by chance the way it could anywhere in a file.
+        let quotes: Vec<String> = quoted(said).into_iter().filter(|q| !lone_path(q) && !squash(q).is_empty()).collect();
         let at_line = citations(said).into_iter().filter_map(|(p, line)| Some((self.resolve(&p)?, line?))).any(|(f, line)| {
             let Ok(body) = std::fs::read_to_string(self.root.join(&f)) else { return false };
             let lines: Vec<&str> = body.lines().collect();
@@ -983,6 +985,11 @@ mod tests {
         assert_eq!(statuses(&r), ["fixed", "fixed", "unconfirmed"], "the quote is on line 2, not near 12");
         let r = review("PREVIOUS 1: fixed\nPREVIOUS 2: fixed\nPREVIOUS 3: open proposals.rs:2 `let closed = true;`");
         assert_eq!(statuses(&r), ["fixed", "fixed", "unconfirmed"], "no reason given");
+        // A short quote at its line is enough.
+        let r = review("PREVIOUS 1: fixed
+PREVIOUS 2: fixed
+PREVIOUS 3: open proposals.rs:2 `true` still closes before the write");
+        assert_eq!(statuses(&r), ["fixed", "fixed", "open"]);
 
         // Not mentioned: carried as it was while the file it names exists, unconfirmed once it is gone.
         let r = review("`PREVIOUS 1: fixed`\nPREVIOUS 2: fixed");
