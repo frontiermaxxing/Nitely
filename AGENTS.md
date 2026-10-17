@@ -53,12 +53,22 @@ Nitely tracks its own build. Its backlog is the **NIT** project in Nitely, reach
 ## Driving the real app
 
 A live check (the title bar, notifications, window state, anything the browser preview cannot
-show) is yours to run, in the real app on throwaway data, before it becomes a live-check issue:
+show) is yours to run, in the real app on throwaway data, before it becomes a live-check issue.
+**CI is where it runs.** `.github/workflows/app.yml` runs `npm run app:test` on Windows for every
+pull request into `main`: push the branch (`submit` does) and read that job's result and its
+screenshots. The harness opens a real window on the screen it runs on, and on the person's PC that
+once came just before a hard freeze (NIT-188), so:
 
-- `npm run app:build` once (a few minutes; it builds into `target/harness`, apart from the dev build),
-  then `npm run app:test` runs the end-to-end tests in `scripts/harness/*.e2e.mjs` (CI runs them on
-  Windows, `.github/workflows/app.yml`). It needs Node 22 (the driver uses its built-in WebSocket).
-  One harness app runs at a time on a machine; a second launch, from any worktree, waits for it.
+- `npm run app:test`, `npm run app:drive` and `toast.check.mjs` refuse to start outside CI unless
+  `NITELY_HARNESS_LOCAL=1` is set for that run. Set it only when an issue really needs a local run,
+  one run at a time, and never while the person is likely using the PC for something else.
+- Even then the window never maximizes, restores or minimizes off CI (window.e2e.mjs leaves those
+  steps to CI), and the harness app's WebView2 draws without the GPU (`--disable-gpu
+  --disable-gpu-compositing` in `scripts/harness/tauri.harness.conf.json`; inbox.e2e.mjs checks it).
+- `npm run app:build` (a few minutes; it builds into `target/harness`, apart from the dev build) is
+  safe anywhere: it only compiles. The tests are `scripts/harness/*.e2e.mjs`; they need Node 22 (the
+  driver uses its built-in WebSocket). One harness app runs at a time on a machine; a second launch,
+  from any worktree, waits for it.
 - `npm run app:drive` starts the app on seeded sample data and prints its DevTools port (WebView2 picks it
   and writes it to DevToolsActivePort) and data
   folder; drive it from a script with `scripts/harness/cdp.mjs` (`Page.connect(port)`: `open("#inbox")`,

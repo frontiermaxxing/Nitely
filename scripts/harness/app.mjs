@@ -114,12 +114,27 @@ async function takeLock(waitMs = 10 * 60 * 1000) {
 }
 
 /**
+ * Whether this runs in CI (GitHub Actions sets CI=true), where the app's window is on a desktop
+ * nobody is using. Everywhere else it is on a person's screen: there a run needs their opt-in, the
+ * window never maximizes (window.e2e.mjs), and it never uses the GPU (tauri.harness.conf.json),
+ * since a GPU-composited window resizing on a busy desktop is the likeliest trigger of the hard
+ * freeze in NIT-188.
+ */
+export const ON_CI = process.env.CI === "true";
+
+const LOCAL_REFUSED = `The harness app opens a real window on this PC's screen, so it runs in CI by default
+(.github/workflows/app.yml runs npm run app:test on every pull request). Run it here only when an
+issue needs it, one run at a time, and not while the person is using the PC for something else:
+set NITELY_HARNESS_LOCAL=1 for that run (AGENTS.md, "Driving the real app").`;
+
+/**
  * Starts the harness app on a new data folder, seeded by `seed(home)`, with DevTools on a free
  * port. Returns the page, the folder, `restart()`, which closes the app as the person would and
  * starts it again on the same data and storage, and `close()`, which ends the app and removes the
  * folder.
  */
 export async function launch({ seed = seedSample, env = {}, keepHome = false } = {}) {
+  if (!ON_CI && process.env.NITELY_HARNESS_LOCAL !== "1") throw new Error(LOCAL_REFUSED);
   if (!existsSync(exe("nitely-app"))) throw new Error(`no harness build at ${exe("nitely-app")}: run \`node scripts/harness/app.mjs build\` first`);
   const unlock = await takeLock();
   try {
@@ -296,7 +311,10 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const what = process.argv[2];
   if (what === "build") build();
   else if (what === "drive") {
-    const app = await launch({ keepHome: process.argv.includes("--keep") });
+    const app = await launch({ keepHome: process.argv.includes("--keep") }).catch((e) => {
+      console.error(e.message);
+      process.exit(1);
+    });
     console.log(JSON.stringify({ devtools: `http://127.0.0.1:${app.port}`, home: app.home, pid: app.pid }, null, 2));
     console.log("The app runs on throwaway data. Drive it with scripts/harness/cdp.mjs (Page.connect(port)). Ctrl+C ends it.");
     const stop = async () => {

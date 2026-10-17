@@ -15,6 +15,16 @@ test("the Inbox approves an issue and answers a question, and the database shows
   const app = await launch();
   const { page, home } = app;
   try {
+    // The app draws without the GPU (tauri.harness.conf.json, NIT-188): WebGL, if there is any,
+    // runs on the CPU's SwiftShader, never on a graphics card.
+    const gl = await page.eval(`
+      const gl = document.createElement("canvas").getContext("webgl");
+      if (!gl) return "no WebGL";
+      const info = gl.getExtension("WEBGL_debug_renderer_info");
+      return String(info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER));`);
+    console.log(`WebGL renderer: ${gl}`);
+    assert.match(gl, /^no WebGL$|SwiftShader/i, "the harness app's WebView runs without the GPU");
+
     await page.open("#inbox");
     await page.waitFor(`return document.querySelectorAll(".inbox-row").length >= 2;`, { what: "two decisions in the Inbox" });
     await page.screenshot(join(SCREENS, "inbox-seeded.png"));

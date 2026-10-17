@@ -12,7 +12,7 @@
         "decorations": false,
         "shadow": true,
         "focus": false,
-        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --remote-debugging-port=0"
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --remote-debugging-port=0 --disable-gpu --disable-gpu-compositing"
       }
     ]
   }
