@@ -2,6 +2,11 @@
 //! when the person approves. `land` verifies with the public key, which it also reads from the
 //! keychain (its own entry, which holds nothing secret): a key written into Nitely's database or
 //! files is never trusted.
+//!
+//! Every keychain entry belongs to one data folder: the person's own uses the service `Nitely`,
+//! any other (`NITELY_HOME`: a test, a sandbox, a second profile) a service of its own, so a
+//! process on another data folder can never read the person's key or sign with it. The test
+//! harness goes further and never opens the keychain at all.
 
 use anyhow::{bail, Context, Result};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
@@ -50,8 +55,26 @@ pub fn keychain_is_silent() {
     SILENT_KEYCHAIN.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// The keychain service for the data folder `data`: `Nitely` for the person's own (`real`), and for
+/// any other `Nitely (<hash of its path>)`, which nothing on the person's own folder reads.
+pub(crate) fn service_for(data: &std::path::Path, real: &std::path::Path) -> String {
+    let folder = crate::paths::normalize(&data.to_string_lossy());
+    if folder == crate::paths::normalize(&real.to_string_lossy()) {
+        return SERVICE.to_string();
+    }
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(folder.as_bytes());
+    format!("{SERVICE} ({})", hex(&digest[..8]))
+}
+
+/// The one place Nitely opens a keychain entry: in this data folder's service, and never under the
+/// test harness.
 fn entry(account: &str) -> Result<keyring::Entry> {
-    keyring::Entry::new(SERVICE, account).map_err(|e| anyhow::anyhow!("the OS keychain: {e}"))
+    if EPHEMERAL.get().is_some() {
+        bail!("the test harness never opens the OS keychain");
+    }
+    let service = service_for(&crate::paths::data_dir(), &crate::paths::real_data_dir());
+    keyring::Entry::new(&service, account).map_err(|e| anyhow::anyhow!("the OS keychain: {e}"))
 }
 
 /// A Nitely keychain entry's text; None when it does not exist. On macOS only the app reads
@@ -317,6 +340,42 @@ mod tests {
         assert_eq!(keychain_get(account).unwrap(), None);
         keychain_set(account, "only in this process").unwrap();
         assert_eq!(keychain_get(account).unwrap().as_deref(), Some("only in this process"));
-        assert!(entry(account).map_or(true, |e| e.get_password().is_err()), "nothing reached the OS keychain");
+        assert!(entry(account).is_err(), "the harness never opens the OS keychain");
+    }
+
+    #[test]
+    fn another_data_folder_has_keychain_entries_of_its_own() {
+        let real = std::path::Path::new(r"C:\Users\you\AppData\Roaming\Nitely");
+        assert_eq!(service_for(real, real), "Nitely", "the person's own folder keeps the entries it always had");
+        assert_eq!(service_for(std::path::Path::new("C:/Users/you/AppData/Roaming/Nitely/"), real), "Nitely", "however it is spelled");
+        let sandbox = service_for(std::path::Path::new(r"C:\Users\you\AppData\Local\Temp\nitely-harness-x"), real);
+        let profile = service_for(std::path::Path::new(r"D:\nitely-second"), real);
+        assert!(sandbox.starts_with("Nitely (") && profile.starts_with("Nitely ("), "{sandbox} {profile}");
+        assert_ne!(sandbox, profile);
+        assert_eq!(sandbox, service_for(std::path::Path::new(r"C:\Users\you\AppData\Local\Temp\nitely-harness-x"), real), "stable");
+    }
+
+    /// Every keychain entry is opened by `entry`, which picks the data folder's service: nothing
+    /// else in the crate may open one, or a process on another data folder could reach the
+    /// person's approval key.
+    #[test]
+    fn only_entry_opens_the_keychain() {
+        let mut folders = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+        let mut opened = Vec::new();
+        while let Some(folder) = folders.pop() {
+            for file in std::fs::read_dir(&folder).unwrap() {
+                let path = file.unwrap().path();
+                if path.is_dir() {
+                    folders.push(path);
+                    continue;
+                }
+                let text = if path.extension().is_some_and(|e| e == "rs") { std::fs::read_to_string(&path).unwrap() } else { continue };
+                let n = text.matches(concat!("keyring::", "Entry::new")).count();
+                if n > 0 {
+                    opened.push((path.file_name().unwrap().to_string_lossy().into_owned(), n));
+                }
+            }
+        }
+        assert_eq!(opened, [("approval.rs".to_string(), 1)]);
     }
 }

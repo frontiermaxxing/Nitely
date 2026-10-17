@@ -82,8 +82,9 @@ once came just before a hard freeze (NIT-188), so:
   show and its taskbar count.
 - It never touches the person's Nitely: its own identifier (so its own window, lock, storage and
   app data), a new temp data folder each run (the app refuses `NITELY_HARNESS=1` without one, and the
-  real one always), no `nitely://` registration, a throwaway approval key instead of the keychain,
-  and notifications written to `harness-notifications.jsonl` instead of shown (`NITELY_HARNESS_TOASTS=1`
+  real one always), no `nitely://` registration, no OS keychain at all (a throwaway approval key and
+  paired-phone list in the process; its CLI calls, on the temp data folder, get keychain entries of
+  their own, never the person's), and notifications written to `harness-notifications.jsonl` instead of shown (`NITELY_HARNESS_TOASTS=1`
   shows them). The window opens without taking the focus, but it is on the person's screen while
   a test runs (window.e2e.mjs maximizes it for a moment).
 - One real toast, confirmed from Windows' notification history: `node scripts/harness/toast.check.mjs`

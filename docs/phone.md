@@ -94,7 +94,8 @@ it again (and remove the old entry).
 
 ## The device list
 
-Kept in the OS keychain (service `Nitely`, account `phone-devices`), as JSON:
+Kept in the OS keychain (service `Nitely`, account `phone-devices`; another data folder has a
+service of its own, see [approvals.md](approvals.md#the-key)), as JSON:
 `{devices: [{id, name, public_key, paired_at}], signature}`, the signature by the app's approval
 key over the canonical list. The app writes it when the person confirms a pairing or revokes a
 device; the phone server and `land` read it and verify its signature with the approval key's public

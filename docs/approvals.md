@@ -35,6 +35,12 @@ the agent's transcript.
   that entry; a key in Nitely's database or files is never trusted.
 - The app checks the public entry against its private key when it starts and before every
   approval, and puts its own back (logged as an `approval_key` event) if it was changed.
+- **One data folder, one set of entries.** The service `Nitely` belongs to the person's own data
+  folder. A process on any other (`NITELY_HOME`: a test, a sandbox, a second profile) uses the
+  service `Nitely (<hash of the folder's path>)` for every entry (the key, its public half, the
+  paired phones, the push key), so it can neither read the person's key nor sign with it, and its
+  approvals never verify against the person's. The test harness opens no keychain entry at all.
+  Only `entry` in `approval.rs` opens one, and a test keeps it that way.
 - **macOS:** only the app that made a keychain entry reads it without the OS asking the person. So
   on macOS an agent's `land` refuses a change that waits for approval, and the app lands it itself
   once the person approves, whatever the playbook says about who lands. Windows and Linux read the
