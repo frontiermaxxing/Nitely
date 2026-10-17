@@ -114,7 +114,7 @@ a:hover { text-decoration-color: currentColor; }
 .link:hover { text-decoration-color: currentColor; }
 .toggle { margin-left: auto; color: var(--fg-2); display: flex; gap: 6px; align-items: center; font-size: var(--text-sm); cursor: pointer; }
 .btn {
-  border: 1px solid var(--line-strong); background: none; border-radius: 6px; padding: 4px 12px;
+  white-space: nowrap; border: 1px solid var(--line-strong); background: none; border-radius: 6px; padding: 4px 12px;
   min-height: 30px; cursor: pointer; font-size: 12.5px; color: var(--fg);
   display: inline-flex; align-items: center; gap: 8px;
   transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
@@ -184,7 +184,7 @@ a:hover { text-decoration-color: currentColor; }
   .remote-who { grid-area: who; }
   .remote-state { grid-area: state; }
   .remote-doing { grid-area: doing; }
-  .remote-row > .btn, .remote-row > .net-confirm { grid-area: end; }
+  .remote-row > .btn, .remote-row > .net-confirm, .remote-end { grid-area: end; }
 }
 .remote-row + .remote-row { border-top: 1px solid var(--line); }
 .remote-doing { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }

@@ -235,10 +235,11 @@ function Remote({ sessions, now }: { sessions: Board["remote_sessions"]; now: nu
               <span className="remote-who">
                 {VENDOR_LABEL[vendorOf(s.id)]} <span className="muted">on {s.cwd.replace(/^remote:/, "")}</span>
               </span>
-              <StateDot state={live} />
-              <span className="small">{livenessLabel(s, now)}</span>
+              <span className="remote-state small">
+                <StateDot state={live} /> {livenessLabel(s, now)}
+              </span>
               <span className="remote-doing small">{s.last_activity ?? <span className="muted">–</span>}</span>
-              <span className="muted small">{ago(now, s.last_seen_at)}</span>
+              <span className="remote-end muted small">{ago(now, s.last_seen_at)}</span>
             </div>
           );
         })}
