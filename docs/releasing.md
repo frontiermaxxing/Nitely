@@ -40,8 +40,10 @@ committing it. After a stable `0.2.0` ships, land a change that sets main to `0.
 3. Installs the new installer silently on the runner and checks that the app and the CLI are in
    place and report the right version.
 4. Writes the notes with `nitely release-notes`: every issue whose commits landed since the
-   previous release tag, with its title and a link to its pull requests. Commits that name no issue
-   are listed after them. A note on SmartScreen follows, since the installer is not code-signed yet
+   previous release (for a stable release, the previous stable one, so the notes cover its betas
+   too), with its title and a link to its pull requests. Commits that name no issue are listed
+   after them. The very first release lists no history: commits from before Nitely checked them
+   for private terms (NIT-80) never reach public notes. A note on SmartScreen follows, since the installer is not code-signed yet
    (NIT-94).
 5. Publishes the installer, the CLI on its own, and `SHA256SUMS.txt`.
 6. With the updater key set (below), signs the installer for the updater and updates the channel's

@@ -97,8 +97,10 @@ jobs:
         id: meta
         run: |
           node scripts/release-meta.mjs "$REF" "$(git rev-parse HEAD)" | tee -a "$GITHUB_OUTPUT"
-          # The previous release on a lower or equal channel, for the notes.
-          prev=$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude '*-test.*' --exclude "$REF" HEAD 2>/dev/null || true)
+          # The previous release, for the notes: for a stable one the previous stable (so its notes
+          # cover everything its betas had), else the previous beta or stable. None: the first.
+          if grep -q '^channel=stable$' <(node scripts/release-meta.mjs "$REF" x); then exclude='*-*'; else exclude='*-test.*'; fi
+          prev=$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude "$exclude" --exclude "$REF" HEAD 2>/dev/null || true)
           echo "previous=$prev" | tee -a "$GITHUB_OUTPUT"
 
       - run: npm ci
@@ -118,6 +120,10 @@ jobs:
 
       - name: Build the nitely CLI
         if: steps.changed.outputs.build == 'true'
+        env:
+          # Built into the CLI and the app: `nitely --version` names it, and the app's updater
+          # follows it by default. Builds from source are "dev" and never update themselves.
+          NITELY_CHANNEL: ${{ steps.meta.outputs.channel }}
         run: |
           cargo build --release --locked -p nitely-cli
           mkdir -p src-tauri/binaries
@@ -127,6 +133,7 @@ jobs:
       - name: Build the installer
         if: steps.changed.outputs.build == 'true'
         env:
+          NITELY_CHANNEL: ${{ steps.meta.outputs.channel }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
@@ -151,13 +158,15 @@ jobs:
           (cd out && sha256sum * > SHA256SUMS.txt)
           ls -l out
 
-      # Install what users will download, silently, on this runner: the app lands in the user's
-      # programs and the CLI where agents run `nitely`.
+      # Install what users will download, silently, on this runner, as on a machine without Rust:
+      # Cargo's folder is taken off PATH, so the CLI must land in a folder Windows keeps on PATH.
       - name: Check the installer
         if: steps.changed.outputs.build == 'true'
         shell: pwsh
         run: |
           $v = "${{ steps.meta.outputs.version }}"
+          $env:PATH = ($env:PATH -split ";" | Where-Object { $_ -and $_ -notmatch "\\.cargo\\bin" }) -join ";"
+          Remove-Item (Join-Path $env:USERPROFILE ".cargo\bin\nitely.exe") -ErrorAction SilentlyContinue
           $p = Start-Process -FilePath "out\Nitely_${v}_x64-setup.exe" -ArgumentList "/S" -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "the installer exited with $($p.ExitCode)" }
           $dir = @("Nitely", "Programs\Nitely") | ForEach-Object { Join-Path $env:LOCALAPPDATA $_ } | Where-Object { Test-Path (Join-Path $_ "nitely.exe") } | Select-Object -First 1
@@ -165,8 +174,7 @@ jobs:
           $app = Get-ChildItem $dir -Filter *.exe | Where-Object { $_.Name -notin @("nitely.exe", "uninstall.exe") } | Select-Object -First 1
           if (-not $app) { Get-ChildItem $dir; throw "no app executable in $dir" }
           $cli = (Get-Command nitely -ErrorAction SilentlyContinue).Source
-          if (-not $cli) { $cli = Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\nitely.exe" }
-          if (-not (Test-Path $cli)) { throw "the installer put no nitely CLI where agents find it" }
+          if (-not $cli) { throw "the installer put no nitely CLI on PATH, where agents find it" }
           $out = & $cli --version
           Write-Output "installed $app; CLI at ${cli}: $out"
           if ("$out" -notmatch [regex]::Escape($v)) { throw "the installed CLI says '$out', not $v" }

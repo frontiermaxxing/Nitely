@@ -62,6 +62,16 @@ fn strip_key(subject: &str, key: &str) -> String {
     subject.replace(&format!("({key})"), "").trim().trim_end_matches([':', '-']).trim().to_string()
 }
 
+/// The notes for the first release, which has no previous one to count from. They list nothing:
+/// the history before it holds commits written before Nitely checked them for private terms
+/// (NIT-80), and release notes are public.
+pub fn first_release(version: &str) -> String {
+    format!(
+        "## Nitely {version}\n\nThe first release of Nitely: one person running a team of coding agents across repos and vendors. \
+         The README says what it does and how to start.\n"
+    )
+}
+
 /// The notes as Markdown: a heading, one line per issue with a link to its pull requests on
 /// GitHub (`repo` is `owner/name`), and the commits that name no issue.
 pub fn markdown(version: &str, entries: &[Entry], other: &[String], repo: Option<&str>) -> String {
@@ -117,6 +127,8 @@ mod tests {
         assert!(md.contains("- **APP-2** Add the login page ([pull request](https://github.com/acme/app/pulls?q=is%3Apr+APP-2+in%3Atitle))"), "{md}");
         assert!(md.contains("Other changes:\n\n- Bump a dependency"), "{md}");
         assert!(markdown("0.2.1", &[], &[], None).contains("No changes"));
+        let first = first_release("0.1.0");
+        assert!(first.starts_with("## Nitely 0.1.0\n") && !first.contains("- **"), "the first release lists no history: {first}");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

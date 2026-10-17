@@ -223,7 +223,8 @@ enum Cmd {
         /// The version the notes are for, e.g. 0.2.0.
         #[arg(long)]
         version: String,
-        /// The previous release's tag; every commit when omitted.
+        /// The previous release's tag. Without one these are the first release's notes, which list
+        /// no history.
         #[arg(long)]
         since: Option<String>,
         /// The last commit in the release.
@@ -1028,8 +1029,12 @@ dry run: would create {} issue(s) ({} to {}) and {} comment(s) in {} {}; run aga
         Cmd::ReleaseNotes { version, since, until, github, repo } => {
             // Titles come from this machine's issues when it has them; CI has none and uses the
             // commits' own subjects. Read-only: notes never change the board.
+            let Some(since) = since else {
+                print!("{}", nitely_core::release_notes::first_release(&version));
+                return Ok(());
+            };
             let db = paths::db_path().exists().then(|| Db::open_read_only(&paths::db_path()).ok()).flatten();
-            let (entries, other) = nitely_core::release_notes::entries(std::path::Path::new(&repo), since.as_deref(), &until, db.as_ref())?;
+            let (entries, other) = nitely_core::release_notes::entries(std::path::Path::new(&repo), Some(&since), &until, db.as_ref())?;
             print!("{}", nitely_core::release_notes::markdown(&version, &entries, &other, github.as_deref()));
             Ok(())
         }
