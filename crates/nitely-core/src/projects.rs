@@ -145,8 +145,14 @@ pub fn remove(db: &mut Db, key: &str, with_issues: bool) -> Result<Removed> {
 /// not. The worktree folder itself is not one: it may be shared with other repos (`../{key}-{slug}`
 /// puts every task beside the repos).
 fn folders_of(config: &crate::Config, db: &Db, project: &str) -> Vec<String> {
-    let aliases = db.project_aliases().unwrap_or_default();
-    let mine = |name: &str| crate::git::parse_branch(name).1.map(|k| current_key(&aliases, &k)).is_some_and(|k| k.split_once('-').is_some_and(|(p, _)| p.eq_ignore_ascii_case(project)));
+    // A task folder starts with one of the project's keys, now or before a re-key, and a number
+    // (`app2-14-...` for APP2-14); keys may hold digits, so it is matched against them directly.
+    let mut keys: Vec<String> = vec![project.to_lowercase()];
+    keys.extend(db.project_aliases().unwrap_or_default().into_iter().filter(|(_, now)| now.eq_ignore_ascii_case(project)).map(|(was, _)| was.to_lowercase()));
+    let mine = |name: &str| {
+        let name = name.to_lowercase();
+        keys.iter().any(|k| name.strip_prefix(&format!("{k}-")).is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit())))
+    };
     let named: Vec<String> = {
         let rows = db.conn.prepare("SELECT cwd FROM session WHERE state != 'ended' UNION SELECT cwd FROM ask WHERE answered_at IS NULL AND cwd IS NOT NULL").and_then(|mut stmt| {
             let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
@@ -492,7 +498,7 @@ mod tests {
         db.create_project("OTH", "Other").unwrap();
         let worktrees = root.parent().unwrap().join("app-worktrees");
         // Sessions in task folders of the worktree folder: one for APP, one for another project.
-        for (id, task) in [("codex:a", "app-3-fix-login"), ("codex:o", "oth-4-docs")] {
+        for (id, task) in [("codex:a", "app-3-fix-login"), ("codex:o", "oth-4-docs"), ("codex:p", "app2-5-other")] {
             let cwd = worktrees.join(task).join("src").to_string_lossy().into_owned();
             db.record(&crate::db::NewEvent { session_id: id.into(), vendor: "codex".into(), cwd, kind: "tool".into(), summary: None, state: "working".into() }).unwrap();
         }
@@ -500,6 +506,12 @@ mod tests {
         let task = crate::paths::normalize(&worktrees.join("app-3-fix-login").to_string_lossy());
         assert_eq!(folders, [crate::paths::normalize(&root.to_string_lossy()), task], "its checkout and its own task folder, never the shared worktree folder");
         assert!(folders_of(&config, &db, "NONE").is_empty());
+        // A key with digits finds its own task folders, and APP's are not APP2's.
+        db.create_project("APP2", "App two").unwrap();
+        let two = crate::Config { repos: vec![repo("app2", &root.to_string_lossy(), Some("APP2"))], ..Default::default() };
+        let folders: Vec<String> = folders_of(&two, &db, "APP2").iter().map(|f| crate::paths::normalize(f)).collect();
+        assert_eq!(folders.last(), Some(&crate::paths::normalize(&worktrees.join("app2-5-other").to_string_lossy())));
+        assert_eq!(folders.len(), 2);
     }
 
     #[test]

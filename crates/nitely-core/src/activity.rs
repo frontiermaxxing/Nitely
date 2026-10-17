@@ -345,42 +345,53 @@ pub fn activity(config: &Config, db: &Db, from: i64, to: i64) -> Result<Activity
 
 /// When each wait in `rows` that an ask began stops being a wait: the ask's answer, or the wait's
 /// own start when the ask no longer exists. An ask records its wait at the moment it is asked, as
-/// an `ask` event of one of `ids` with the question, from the folder the ask was asked in. A wait
-/// still open, one a Notification hook began (a permission prompt), and one the session moved on
-/// from before the answer came (it worked, asked again or ended) stay as they are.
+/// an `ask` event of one of `ids` saying "Asked: <question>", from the folder the ask was asked in.
+/// A wait still open, one a Notification hook began (a permission prompt), and one the session
+/// moved on from before the answer came (it worked, went idle, asked again or ended) stay as they
+/// are; the same wait said again (a note written while waiting) is not moving on.
 fn ask_waits_end(db: &Db, ids: &[String], rows: &[(i64, u8, String)]) -> Result<Vec<i64>> {
-    let mut out = Vec::new();
+    // The waits an ask began: when, the question, and the folder it was asked from.
+    let mut asked: Vec<(i64, String, Option<String>)> = Vec::new();
     for &(ts, _, ref state) in rows {
-        if state != "waiting" {
+        if state != "waiting" || asked.iter().any(|(t, _, _)| *t == ts) {
             continue;
         }
-        let mut asked: Option<(String, Option<String>)> = None;
         for id in ids {
-            asked = db
+            let found: Option<(String, Option<String>)> = db
                 .conn
-                .query_row("SELECT summary, cwd FROM event WHERE actor = ?1 AND type = 'ask' AND ts = ?2 LIMIT 1", params![id, ts], |r| {
-                    Ok((r.get::<_, Option<String>>(0)?.unwrap_or_default(), r.get::<_, Option<String>>(1)?))
-                })
+                .query_row(
+                    "SELECT summary, cwd FROM event WHERE actor = ?1 AND type = 'ask' AND ts = ?2 AND summary LIKE 'Asked: %' ORDER BY id DESC LIMIT 1",
+                    params![id, ts],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
                 .optional()?;
-            if asked.is_some() {
+            if let Some((summary, cwd)) = found {
+                asked.push((ts, summary.trim_start_matches("Asked: ").to_string(), cwd));
                 break;
             }
         }
-        let Some((summary, cwd)) = asked else { continue };
-        let question = summary.strip_prefix("Asked: ").unwrap_or(&summary);
+    }
+    let mut out = Vec::new();
+    for (ts, question, cwd) in &asked {
         let place = cwd.as_deref().map(normalize);
         let candidates: Vec<(Option<String>, Option<i64>)> = {
             let mut stmt = db.conn.prepare("SELECT cwd, answered_at FROM ask WHERE question = ?1 AND asked_at BETWEEN ?2 - 5 AND ?2 + 5 ORDER BY ABS(asked_at - ?2)")?;
             let found = stmt.query_map(params![question, ts], |r| Ok((r.get(0)?, r.get(1)?)))?;
             found.collect::<rusqlite::Result<_>>()?
         };
-        // The same question from the same folder: another agent asking it elsewhere is not this one.
-        let ask = candidates.into_iter().find(|(asked_in, _)| asked_in.as_deref().map(normalize) == place).map(|(_, answered)| answered);
-        let next = rows.iter().map(|(t, _, _)| *t).filter(|t| *t > ts).min();
+        // The same question from the same folder: another agent asking it elsewhere is not this
+        // one. Where either side does not say its folder, the question and the moment decide.
+        let same_place = |asked_in: &Option<String>| match (asked_in.as_deref().map(normalize), &place) {
+            (Some(a), Some(p)) => a == *p,
+            _ => true,
+        };
+        let ask = candidates.into_iter().find(|(asked_in, _)| same_place(asked_in)).map(|(_, answered)| answered);
+        // What it did next on its own: another state, or a wait another ask began.
+        let next = rows.iter().filter(|(t, _, st)| *t > *ts && (st != "waiting" || asked.iter().any(|(a, _, _)| a == t))).map(|(t, _, _)| *t).min();
         match ask {
-            Some(Some(answered)) if next.is_none_or(|n| answered < n) => out.push(answered.max(ts)),
+            Some(Some(answered)) if next.is_none_or(|n| answered < n) => out.push(answered.max(*ts)),
             Some(_) => {}
-            None => out.push(ts),
+            None => out.push(*ts),
         }
     }
     Ok(out)
@@ -653,6 +664,18 @@ mod tests {
         state(&db, "claude:prompt", t0 + 60, "waiting");
         event(&db, t0 + 60, "claude:prompt", "waiting", "Waiting for input", None);
 
+        // One writes a note while it waits (the same wait said again), and its ask, filed on an
+        // issue, also left an issue event of the same moment with no folder: answered, it goes idle.
+        session(&db, "codex:noted", "C:\\code\\app", t0, t0 + 200, "waiting");
+        state(&db, "codex:noted", t0 + 60, "waiting");
+        state(&db, "codex:noted", t0 + 200, "waiting");
+        event(&db, t0 + 60, "codex:noted", "ask", "Which port?", None);
+        event(&db, t0 + 60, "codex:noted", "ask", "Asked: Which port?", None);
+        db.conn.execute("UPDATE event SET cwd = 'C:/code/app' WHERE actor = 'codex:noted' AND summary LIKE 'Asked: %'", []).unwrap();
+        let noted = db.create_ask("Which port?", &[], None, Some("C:\\code\\app"), &agent).unwrap();
+        db.answer_ask(noted.id, "5182", &crate::Actor::Human).unwrap();
+        db.conn.execute("UPDATE ask SET asked_at = ?2, answered_at = ?3 WHERE id = ?1", params![noted.id, t0 + 60, t0 + 400]).unwrap();
+
         // One moved on before its answer came: the late answer changes nothing.
         session(&db, "codex:moved", "C:\\code\\app", t0, t0 + 300, "working");
         state(&db, "codex:moved", t0 + 60, "waiting");
@@ -671,6 +694,7 @@ mod tests {
         let lane = |id: &str| a.lanes.iter().find(|l| l.session_id == id).unwrap_or_else(|| panic!("{id}"));
         let waits = |id: &str| lane(id).segments.iter().filter(|s| s.state == "waiting").map(|s| (s.from - t0, s.to - t0)).collect::<Vec<_>>();
         assert_eq!(waits("codex:moved"), [(60, 300)], "until it moved on, not until the late answer");
+        assert_eq!(waits("codex:noted").last().map(|w| w.1), Some(400), "until the answer, past the note");
         assert_eq!(lane("codex:moved").segments.iter().find(|s| s.from - t0 == 300).map(|s| s.state.as_str()), Some("working"));
         assert_eq!(waits("codex:answered"), [(60, 600)], "until the answer");
         assert!(waits("codex:gone").is_empty(), "an ask that is gone waits on no one");
