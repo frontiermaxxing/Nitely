@@ -206,11 +206,17 @@ fn would_overwrite(root: &Path, to: &str, keep: &[String]) -> Result<Option<Stri
     let added = git(root, &["diff", "--name-only", "-z", "--no-renames", "--diff-filter=A", "HEAD", to])?;
     let mut leaves = Vec::new();
     let mut parents = std::collections::BTreeSet::new();
-    for p in added.split('\0').filter(|p| !p.is_empty() && !in_keep(keep, p)) {
-        leaves.push(p.to_string());
+    for p in added.split('\0').filter(|p| !p.is_empty()) {
+        if !in_keep(keep, p) {
+            leaves.push(p.to_string());
+        }
+        // Every folder on the way that is not itself build output: a path into a kept directory
+        // deep down (`assets/target/x.rs`) still needs `assets` to be a folder or free.
         let mut at = p;
         while let Some((parent, _)) = at.rsplit_once('/') {
-            parents.insert(parent.to_string());
+            if !in_keep(keep, &format!("{parent}/")) {
+                parents.insert(parent.to_string());
+            }
             at = parent;
         }
     }
@@ -1865,7 +1871,8 @@ fn serve(repo_root: &Path, pb: &Playbook, rules: &LaneRules, lane: &Path, log: &
     let output = std::fs::read_to_string(log).map(|t| playbook::tail(&t)).unwrap_or_default();
     // Between requests, still holding the lane: best effort, it never fails the request.
     if let Some(record) = git_path(lane, SIZE_RECORD) {
-        hygiene(lane, rules, &record, log);
+        let subs: Vec<String> = pb.submodules.iter().map(|m| m.path().to_string()).collect();
+        hygiene(lane, rules, &subs, &record, log);
     }
     Ok(Outcome { exit_code, timed_out, peak, setup_ran, files_switched, output })
 }
@@ -1909,13 +1916,21 @@ fn read_size(record: &Path) -> Option<(u64, u64, u64)> {
 /// lane's baseline, at least `MIN_CAP`: the largest build output (incremental caches aside, which
 /// are what grows) over its first `LEARN_REQUESTS` requests. Records the size after, the baseline
 /// and the count. Nothing it removes is anyone's work. Says what it did in the log.
-fn hygiene(lane: &Path, rules: &LaneRules, record: &Path, log: &Path) {
-    hygiene_with(lane, rules, record, log, MIN_CAP)
+fn hygiene(lane: &Path, rules: &LaneRules, subs: &[String], record: &Path, log: &Path) {
+    hygiene_with(lane, rules, subs, record, log, MIN_CAP)
 }
 
-fn hygiene_with(lane: &Path, rules: &LaneRules, record: &Path, log: &Path, floor: u64) {
+fn hygiene_with(lane: &Path, rules: &LaneRules, subs: &[String], record: &Path, log: &Path, floor: u64) {
     use std::io::Write;
-    let dirs = kept_dirs(lane, &rules.keep);
+    // The lane's own, and those its submodules' checkouts hold for a name entry (their caches
+    // count toward the cap as the lane's do).
+    let mut dirs = kept_dirs(lane, &rules.keep);
+    let names: Vec<String> = rules.keep.iter().filter(|k| keep_anywhere(k).is_some()).cloned().collect();
+    for sub in subs.iter().filter(|_| !names.is_empty()) {
+        dirs.extend(kept_dirs(&lane.join(sub), &names).into_iter().map(|d| format!("{}/{d}", sub.trim_matches('/'))));
+    }
+    dirs.sort();
+    dirs.dedup();
     let measured = keep_size(lane, &dirs);
     let output = measured.saturating_sub(incremental_size(lane, &dirs));
     let (recorded, served) = read_size(record).map_or((0, 0), |(_, b, n)| (b, n));
@@ -2690,6 +2705,22 @@ mod tests {
         assert!(checkout_busy(&root, &lend, &names).unwrap().is_some_and(|w| w.contains("src/node_modules/vendored.js")), "a tracked change counts");
         g(&["checkout", "--", "src/node_modules/vendored.js"]);
 
+        // A snapshot adding a file deep in a kept folder (`assets/target/parser.rs`) still finds an
+        // ignored file of the person's where it needs the folder `assets` on the way.
+        let targets = vec!["target".to_string()];
+        std::fs::create_dir_all(root.join("assets/target")).unwrap();
+        std::fs::write(root.join("assets/target/parser.rs"), "x").unwrap();
+        g(&["add", "-f", "assets"]);
+        g(&["commit", "-q", "-m", "assets"]);
+        let adds = git(&root, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        g(&["reset", "-q", "--hard", "HEAD~1"]);
+        std::fs::remove_dir_all(root.join("assets")).ok();
+        std::fs::create_dir_all(root.join(".git").join("info")).unwrap();
+        std::fs::write(root.join(".git").join("info").join("exclude"), "assets\n").unwrap();
+        std::fs::write(root.join("assets"), "the person's").unwrap();
+        assert_eq!(would_overwrite(&root, &adds, &targets).unwrap().as_deref(), Some("assets"));
+        std::fs::remove_file(root.join("assets")).unwrap();
+
         // The same meaning for what counts as build output in a person's checkout.
         assert!(in_keep(&names, "pkg-a/node_modules/dep.js") && in_keep(&names, "pkg-b/web/node_modules/"));
         assert!(!in_keep(&names, "src/node_modules") && !in_keep(&names, "docs/node_modules.md"), "a file of that name is not the directory");
@@ -2798,7 +2829,7 @@ commands = []
         };
         let rules = LaneRules { keep: vec!["target".into()], ..Default::default() };
         // Without the floor, so a few bytes stand for gigabytes.
-        let hygiene = |lane: &Path, rules: &LaneRules, record: &Path, log: &Path| hygiene_with(lane, rules, record, log, 0);
+        let hygiene = |lane: &Path, rules: &LaneRules, record: &Path, log: &Path| hygiene_with(lane, rules, &[], record, log, 0);
         // The first request's build output sets the baseline, its incremental caches aside: a cap
         // of twice 600 bytes.
         fill("target/debug/app", 600);

@@ -598,6 +598,13 @@ pub fn sync_lane(root: &Path, pb: &Playbook, lane: &Path, commit: &str, keep: &[
                 _ => vec![],
             };
             more.extend(kept.iter().cloned());
+            // And the folders a name entry keeps there now (`extra/node_modules`): narrowing the
+            // cone would delete them before the clean could keep them.
+            let checkout = lane.join(path);
+            if checked_out(&checkout) {
+                let named: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+                more.extend(crate::lanes::kept_dirs(&checkout, &named));
+            }
             cone(s, &more)
         };
         let at = lane.join(path);
