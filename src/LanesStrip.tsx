@@ -59,7 +59,7 @@ export function LanesStrip(props: { version: number; now: number; onOpenIssue: (
                   className="lanes-queue"
                   title={p.queue
                     .filter((r) => r.state === "queued")
-                    .map((r) => `${r.issue ?? "no issue"}: ${r.command}${r.waiting_memory ? ` (${r.waiting_memory})` : ""}`)
+                    .map((r) => `${r.issue ?? "no issue"}: ${r.command}${(r.waiting_why ?? r.waiting_memory) ? ` (${r.waiting_why ?? r.waiting_memory})` : ""}`)
                     .join("\n")}
                 >
                   {queued} waiting

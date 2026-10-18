@@ -548,6 +548,10 @@ pub struct Run {
     pub waiting_memory: Option<String>,
     /// The most memory the run's processes held at once, in bytes, where the system tells it.
     pub peak_memory: Option<i64>,
+    /// Why it waits, in words, where the queue was read for it (`nitely lanes`, the app): the
+    /// machine's slots, its own repo's queue or lanes, the person's checkout, or memory (NIT-291).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waiting_why: Option<String>,
 }
 
 impl Run {
@@ -589,6 +593,7 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<(Run, Option<i64>)> {
             waiting_for: r.get(23)?,
             waiting_memory: r.get(24)?,
             peak_memory: r.get(25)?,
+            waiting_why: None,
         },
         r.get(26)?,
     ))
@@ -780,7 +785,7 @@ fn run_with(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Act
     // Until it runs, a failure here (a lock that cannot be opened, a log folder that cannot be made)
     // closes the request's row: a queued row left behind would hold up the requests after it.
     let started = (|| -> Result<_> {
-        let (n, lock, slot) = take_turn(db, id, repo_root, pb, &rules, machine_budget().slots, &mut read_memory, &mut memory_limits)?;
+        let (n, lock, slot) = take_turn(db, id, repo_root, pb, &rules, &mut slots_now(), &mut read_memory, &mut memory_limits)?;
         let logs = logs_dir(db, req.project);
         std::fs::create_dir_all(&logs)?;
         let log = logs.join(format!("{id}.log"));
@@ -1039,8 +1044,13 @@ pub struct Budget {
     pub from: String,
 }
 
-/// Cores per slot, when the machine decides.
-const CORES_PER_SLOT: u32 = 8;
+/// Cores per slot, when the machine decides: many small requests (an agent's clippy and one test
+/// module) beat a few wide ones, so 32 threads make 5 slots of 6 jobs (NIT-291).
+const CORES_PER_SLOT: u32 = 6;
+
+/// Memory per slot above the floor, when the machine decides. A full gate of this repo peaks at
+/// 4 to 6 GB (NIT-266); each run is still held to its cap, and nothing starts below the floor.
+const MEMORY_PER_SLOT: u64 = 8 * machine::GIB;
 
 /// The cores builds may use between them: all but 2, or 75%, whichever is more, so the person's
 /// own apps always have some (NIT-266).
@@ -1050,15 +1060,14 @@ pub fn build_cores(cores: u32) -> u32 {
 }
 
 /// The budget for `cores` and the machine's memory `limits`, unless `set` says how many slots.
-/// When the machine decides, a slot per 8 cores, and no more slots than runs at their memory cap
-/// fit above the floor.
+/// When the machine decides, a slot per 6 cores, and one per 8 GB above the memory floor.
 pub fn budget_for(cores: u32, limits: Option<&machine::Limits>, set: Option<(u32, &str)>) -> Budget {
     let cores = cores.max(1);
     let (slots, from) = match set.filter(|(n, _)| *n > 0) {
         Some((n, from)) => (n, from.to_string()),
         None => {
             let by_cores = cores / CORES_PER_SLOT;
-            let by_memory = limits.map(|l| (l.total.saturating_sub(l.floor) / l.cap.max(1)) as u32).unwrap_or(by_cores);
+            let by_memory = limits.map(|l| (l.total.saturating_sub(l.floor) / MEMORY_PER_SLOT) as u32).unwrap_or(by_cores);
             (by_cores.min(by_memory).max(1), "machine".to_string())
         }
     };
@@ -1147,6 +1156,20 @@ fn try_slot(db: &Db, k: u32) -> Result<Option<SlotLock>> {
     }
 }
 
+//// The machine's build slots as a waiting request reads them: the budget again every few seconds
+/// (it reads Nitely's config), so raising `build_slots` lets what already waits use them (NIT-291).
+fn slots_now() -> impl FnMut() -> u32 {
+    let mut last: Option<(u32, Instant)> = None;
+    move || match last {
+        Some((n, at)) if at.elapsed() < Duration::from_secs(3) => n,
+        _ => {
+            let n = machine_budget().slots;
+            last = Some((n, Instant::now()));
+            n
+        }
+    }
+}
+
 /// A queued request as the queue orders them.
 #[derive(Debug, Clone)]
 struct Waiting {
@@ -1154,63 +1177,176 @@ struct Waiting {
     project: String,
     repo: String,
     priority: i64,
+    /// run | gate | land
+    kind: String,
+    queued_at: i64,
 }
 
-/// The order requests start in: priority first (land, then submit's gate, then the rest), then
-/// each project's first waiting request before any project's second, then the oldest.
-/// Among requests at the same place in their projects' queues, the project served longest ago
-/// goes first (`last_started`, by upper-case project; never served counts as longest ago), so a
-/// project whose request just started or ran waits behind the others' next, whenever its own was
-/// queued.
-fn in_order(mut waiting: Vec<Waiting>, last_started: &std::collections::HashMap<String, i64>) -> Vec<Waiting> {
-    waiting.sort_by_key(|w| (w.priority, w.id));
+/// How long a request waits before it counts as one priority higher (NIT-291): an agent's `run`
+/// waiting 5 minutes goes as a gate, 10 minutes as a land, so a busy team's gates and lands never
+/// keep it waiting for good.
+const AGE_STEP_SECS: i64 = 5 * 60;
+
+/// `w`'s priority after its wait at `now`: one step up for each `AGE_STEP_SECS`, at most to a land's.
+fn aged(w: &Waiting, now: i64) -> i64 {
+    (w.priority - (now - w.queued_at).max(0) / AGE_STEP_SECS).max(1)
+}
+
+/// The order requests start in: priority first (land, then submit's gate, then the rest; raised by
+/// how long each has waited, `aged`), then each project's first waiting request before any
+/// project's second, then the oldest. Among requests at the same place in their projects' queues,
+/// the project served longest ago goes first (`last_started`, by upper-case project; never served
+/// counts as longest ago), so a project whose request just started or ran waits behind the
+/// others' next, whenever its own was queued.
+fn in_order(waiting: Vec<Waiting>, last_started: &std::collections::HashMap<String, i64>, now: i64) -> Vec<Waiting> {
+    let mut waiting: Vec<(i64, Waiting)> = waiting.into_iter().map(|w| (aged(&w, now), w)).collect();
+    waiting.sort_by_key(|(p, w)| (*p, w.id));
     let mut seen: std::collections::HashMap<(i64, String), usize> = std::collections::HashMap::new();
     let mut ranked: Vec<(i64, usize, i64, i64, Waiting)> = waiting
         .into_iter()
-        .map(|w| {
+        .map(|(p, w)| {
             let project = w.project.to_uppercase();
-            let n = seen.entry((w.priority, project.clone())).or_default();
+            let n = seen.entry((p, project.clone())).or_default();
             *n += 1;
             let last = last_started.get(&project).copied().unwrap_or(i64::MIN);
-            (w.priority, *n, last, w.id, w)
+            (p, *n, last, w.id, w)
         })
         .collect();
     ranked.sort_by_key(|(p, n, last, id, _)| (*p, *n, *last, *id));
     ranked.into_iter().map(|(_, _, _, _, w)| w).collect()
 }
 
-/// Whether request `id` may try for a slot and a lane now: no request of its own repo is ahead of
-/// it, and fewer requests ahead of it, of repos with a free lane, than there are free slots. A
-/// repo whose lanes are all busy does not hold up the others.
-fn my_turn(db: &Db, id: i64, slots: u32, alive: &mut dyn FnMut(i64) -> bool) -> Result<bool> {
-    let mut stmt = db.conn.prepare("SELECT id, project, repo, priority, state, pid, lane_count, waiting_for IS NOT NULL FROM lane_run WHERE state IN ('queued', 'running')")?;
-    let rows: Vec<(Waiting, String, Option<i64>, i64, bool)> = stmt
-        .query_map([], |r| Ok((Waiting { id: r.get(0)?, project: r.get(1)?, repo: r.get(2)?, priority: r.get(3)? }, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)))?
-        .collect::<rusqlite::Result<_>>()?;
-    let mut held_by_checkout: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut running_by_repo: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
-    let mut lanes_by_repo: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
-    let mut running = 0i64;
+/// A request in the queue as `turns` reads it.
+#[derive(Debug, Clone)]
+struct QueueRow {
+    w: Waiting,
+    running: bool,
+    /// Its requester's process still runs.
+    alive: bool,
+    lane_count: i64,
+    /// Large-repo mode: it waits for the person's checkout.
+    waits_for_checkout: bool,
+    issue: Option<String>,
+    started_at: Option<i64>,
+}
+
+/// Where a queued request stands.
+#[derive(Debug, Clone, PartialEq)]
+enum Turn {
+    /// It may try for a slot and a lane now.
+    Go,
+    /// It may try, but every lane of its repo is busy, so its lane's lock will decide.
+    LanesBusy(String),
+    /// Not yet, and why, in words.
+    Wait(String),
+}
+
+/// Where each live queued request stands, given the machine's `slots`. A request goes when no
+/// request of its own repo is ahead of it and fewer requests ahead of it that can start (of repos
+/// with a free lane) than there are free slots. While an agent's `run` that could start waits, a
+/// gate or land leaves the last free slot to it on a machine with 3 slots or more, so a short run
+/// never waits out a row of long gates (NIT-291). A repo whose lanes are all busy holds up no other.
+fn turns(rows: Vec<QueueRow>, slots: u32, served: &std::collections::HashMap<String, i64>, now: i64) -> std::collections::HashMap<i64, Turn> {
+    use std::collections::{HashMap, HashSet};
+    let repo_of = |w: &Waiting| crate::paths::normalize(&w.repo);
+    let mut held_by_checkout: HashSet<String> = HashSet::new();
+    let mut running_by_repo: HashMap<String, i64> = HashMap::new();
+    let mut lanes_by_repo: HashMap<String, i64> = HashMap::new();
+    let mut running: Vec<&QueueRow> = Vec::new();
     let mut waiting = Vec::new();
-    for (w, state, pid, lane_count, waits_for_checkout) in rows {
-        let repo = crate::paths::normalize(&w.repo);
-        // Waiting for the person's checkout (large-repo mode), neither it nor its repo's requests
-        // behind it can start, so they hold up no other project's request.
-        if waits_for_checkout && w.id != id {
+    for row in &rows {
+        let repo = repo_of(&row.w);
+        if row.waits_for_checkout {
             held_by_checkout.insert(repo.clone());
         }
-        lanes_by_repo.insert(repo.clone(), lane_count.max(1));
+        lanes_by_repo.insert(repo.clone(), row.lane_count.max(1));
         // A request whose process is gone holds nothing and waits for nothing.
-        if w.id != id && pid.is_some_and(|p| !alive(p)) {
+        if !row.alive {
             continue;
         }
-        if state == "running" {
-            running += 1;
+        if row.running {
+            running.push(row);
             *running_by_repo.entry(repo).or_default() += 1;
         } else {
-            waiting.push(w);
+            waiting.push(row.w.clone());
         }
     }
+    let free_lanes = |repo: &str| lanes_by_repo.get(repo).copied().unwrap_or(1) - running_by_repo.get(repo).copied().unwrap_or(0);
+    let can_start = |repo: &str| free_lanes(repo) > 0 && !held_by_checkout.contains(repo);
+    let free_slots = (slots as i64 - running.len() as i64).max(0);
+    let run_could_start = waiting.iter().any(|w| w.kind == "run" && can_start(&repo_of(w)));
+    let reserve = i64::from(slots >= 3 && run_could_start);
+    let busy = || {
+        let mut list: Vec<&&QueueRow> = running.iter().collect();
+        list.sort_by_key(|r| r.started_at.unwrap_or(now));
+        list.iter()
+            .map(|r| {
+                let minutes = (now - r.started_at.unwrap_or(now)).max(0) / 60;
+                format!("{} {} {minutes} m", r.issue.as_deref().unwrap_or(&r.w.project), r.w.kind)
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut first_of_repo: HashMap<String, i64> = HashMap::new();
+    let mut ahead: Vec<i64> = Vec::new();
+    let mut out = HashMap::new();
+    for w in in_order(waiting, served, now) {
+        let repo = repo_of(&w);
+        if let Some(first) = first_of_repo.get(&repo) {
+            out.insert(w.id, Turn::Wait(format!("waiting: behind request {first} of the same repo")));
+            continue;
+        }
+        first_of_repo.insert(repo.clone(), w.id);
+        let usable = free_slots - if w.kind == "run" { 0 } else { reserve };
+        let turn = if (ahead.len() as i64) < usable {
+            if free_lanes(&repo) > 0 {
+                Turn::Go
+            } else {
+                Turn::LanesBusy(format!("waiting: all {} of its repo's lanes are busy", lanes_by_repo.get(&repo).copied().unwrap_or(1)))
+            }
+        } else if free_slots == 0 {
+            Turn::Wait(format!("waiting: {} of {slots} machine slots in use ({})", running.len(), busy()))
+        } else if (ahead.len() as i64) < free_slots {
+            Turn::Wait("waiting: the last free machine slot is kept for an agent's run".to_string())
+        } else {
+            let ids = ahead.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
+            Turn::Wait(format!("waiting: the free machine slots go to requests ahead ({ids})"))
+        };
+        if turn == Turn::Go && can_start(&repo) {
+            ahead.push(w.id);
+        }
+        out.insert(w.id, turn);
+    }
+    out
+}
+
+/// The queue as `turns` reads it, with each requester's liveness from `alive` (the asking
+/// request's own counts as alive), and when each project last had a turn.
+#[allow(clippy::type_complexity)]
+fn queue_rows(db: &Db, me: Option<i64>, alive: &mut dyn FnMut(i64) -> bool) -> Result<(Vec<QueueRow>, std::collections::HashMap<String, i64>)> {
+    let mut stmt = db.conn.prepare(
+        "SELECT id, project, repo, priority, kind, queued_at, state, pid, lane_count, waiting_for IS NOT NULL, issue_key, started_at FROM lane_run WHERE state IN ('queued', 'running')",
+    )?;
+    let raw: Vec<(Waiting, String, Option<i64>, i64, bool, Option<String>, Option<i64>)> = stmt
+        .query_map([], |r| {
+            Ok((
+                Waiting { id: r.get(0)?, project: r.get(1)?, repo: r.get(2)?, priority: r.get(3)?, kind: r.get(4)?, queued_at: r.get(5)? },
+                r.get(6)?,
+                r.get(7)?,
+                r.get(8)?,
+                r.get(9)?,
+                r.get(10)?,
+                r.get(11)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let rows = raw
+        .into_iter()
+        .map(|(w, state, pid, lane_count, waits_for_checkout, issue, started_at)| {
+            let is_alive = Some(w.id) == me || pid.is_none_or(&mut *alive);
+            QueueRow { w, running: state == "running", alive: is_alive, lane_count, waits_for_checkout, issue, started_at }
+        })
+        .collect();
     // When each project last had a turn (a request of it started), so the one served longest ago
     // goes first and one project's backlog never holds up the rest.
     let mut served: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
@@ -1220,24 +1356,27 @@ fn my_turn(db: &Db, id: i64, slots: u32, alive: &mut dyn FnMut(i64) -> bool) -> 
         let slot = served.entry(project.to_uppercase()).or_insert(at);
         *slot = (*slot).max(at);
     }
-    let free_slots = (slots as i64 - running).max(0);
-    let mine = crate::paths::normalize(&waiting.iter().find(|w| w.id == id).map(|w| w.repo.clone()).unwrap_or_default());
-    let mut ahead_that_can_start = 0;
-    for w in in_order(waiting, &served) {
-        if w.id == id {
-            return Ok(ahead_that_can_start < free_slots);
-        }
-        let repo = crate::paths::normalize(&w.repo);
-        if repo == mine {
-            return Ok(false);
-        }
-        let free_lanes = lanes_by_repo.get(&repo).copied().unwrap_or(1) - running_by_repo.get(&repo).copied().unwrap_or(0);
-        if free_lanes > 0 && !held_by_checkout.contains(&repo) {
-            ahead_that_can_start += 1;
-        }
-    }
-    // Not queued (any more): nothing to wait for.
-    Ok(true)
+    Ok((rows, served))
+}
+
+/// Whether request `id` may try for a slot and a lane now (`turns`). Not queued (any more):
+/// nothing to wait for.
+fn my_turn(db: &Db, id: i64, slots: u32, alive: &mut dyn FnMut(i64) -> bool) -> Result<bool> {
+    let (rows, served) = queue_rows(db, Some(id), alive)?;
+    Ok(!matches!(turns(rows, slots, &served, now()).get(&id), Some(Turn::Wait(_))))
+}
+
+/// Why each queued request waits, for `nitely lanes` and the app (NIT-291): the machine's slots,
+/// its own repo's queue or lanes, the person's checkout, or memory. Reads only.
+fn waiting_reasons(db: &Db) -> Result<std::collections::HashMap<i64, String>> {
+    let (rows, served) = queue_rows(db, None, &mut |pid| crate::crew::pid_alive(pid as u32))?;
+    Ok(turns(rows, machine_budget().slots, &served, now())
+        .into_iter()
+        .filter_map(|(id, t)| match t {
+            Turn::Go => None,
+            Turn::LanesBusy(why) | Turn::Wait(why) => Some((id, why)),
+        })
+        .collect())
 }
 
 /// Waits for request `id`'s turn, then holds a machine slot and one of the repo's lanes, and starts
@@ -1251,7 +1390,7 @@ fn take_turn(
     repo_root: &Path,
     pb: &Playbook,
     rules: &LaneRules,
-    slots: u32,
+    slots: &mut dyn FnMut() -> u32,
     memory: &mut dyn FnMut() -> Option<machine::Memory>,
     limits: &mut dyn FnMut() -> Option<machine::Limits>,
 ) -> Result<(u32, LaneLock, SlotLock)> {
@@ -1274,6 +1413,8 @@ fn take_turn(
     let mut busy_since = None;
     let mut waits_for_memory = false;
     'turn: loop {
+        // The budget read again on every look, so a change in Settings counts at once (NIT-291).
+        let slots = slots();
         if my_turn(db, id, slots, &mut alive)? {
             // A checkout a request has (or a dead one left) is looked at under the lock, where one
             // left behind is put back first.
@@ -1371,7 +1512,8 @@ pub fn hold_machine<'a>(db: &'a Db, repo_root: &Path, worktree: &Path, project: 
         Kind::Gate => 2,
         Kind::Run => 3,
     };
-    let slots = machine_budget().slots;
+    let mut slots_now = slots_now();
+    let slots = slots_now();
     db.conn.execute(
         "INSERT INTO lane_run (project, repo, issue_key, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, priority, lane_count)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?6, ?8, 'queued', 'worktree', ?9, ?10, ?11, ?12)",
@@ -1382,6 +1524,7 @@ pub fn hold_machine<'a>(db: &'a Db, repo_root: &Path, worktree: &Path, project: 
     let taken = (|| -> Result<SlotLock> {
         let mut alive = |pid: i64| pid as u32 == std::process::id() || crate::crew::pid_alive(pid as u32);
         loop {
+            let slots = slots_now();
             if my_turn(db, id, slots, &mut alive)? {
                 if let Some(slot) = (1..=slots.max(1)).find_map(|k| try_slot(db, k).ok().flatten()) {
                     // The limits read again on every look, so a change in Settings counts at once.
@@ -2021,7 +2164,15 @@ fn status_with(db: &Db, repo_root: &Path, pb: &Playbook, project: &str, probe_lo
     let Some(rules) = pb.lanes.clone() else { return Ok(None) };
     let root = repo_root.to_string_lossy();
     // The queue by this repo directly: a long build stays in it whatever finished since (NIT-223).
-    let queue = db.open_lane_runs(project, &root)?;
+    let mut queue = db.open_lane_runs(project, &root)?;
+    // Why each waits: the person's checkout or memory where it said so, else where it stands in
+    // the machine's queue (NIT-291).
+    if queue.iter().any(|r| r.state == "queued") {
+        let mut reasons = waiting_reasons(db)?;
+        for r in queue.iter_mut().filter(|r| r.state == "queued") {
+            r.waiting_why = r.waiting_for.clone().map(|w| format!("waiting: {w}")).or_else(|| r.waiting_memory.clone()).or_else(|| reasons.remove(&r.id));
+        }
+    }
     let mut lanes = Vec::new();
     for n in 1..=rules.lanes() {
         let path = lane_path(repo_root, pb, n);
@@ -2568,10 +2719,10 @@ commands = []
     #[test]
     fn the_budget_comes_from_cores_and_memory_unless_set() {
         let gb = |n: u64| machine::limits_for(n * machine::GIB, None, None);
-        // 64 GB: a 12.8 GB floor and 16 GB cap leave room for 3 runs at their cap; 30 of 32 cores.
+        // 32 threads and 64 GB: 5 slots of 6 jobs (30 of 32 cores), 6 by the memory above the floor.
         let b = budget_for(32, Some(&gb(64)), None);
-        assert_eq!((b.slots, b.jobs, b.from.as_str(), b.memory_gb), (3, 10, "machine", Some(64)));
-        assert_eq!(budget_for(32, Some(&gb(16)), None).slots, 2, "memory caps it");
+        assert_eq!((b.slots, b.jobs, b.from.as_str(), b.memory_gb), (5, 6, "machine", Some(64)));
+        assert_eq!(budget_for(32, Some(&gb(24)), None).slots, 2, "memory caps it");
         assert_eq!((budget_for(4, Some(&gb(8)), None).slots, budget_for(4, Some(&gb(8)), None).jobs), (1, 3), "always one, and a core left over");
         assert_eq!(budget_for(8, None, None).slots, 1, "memory unknown: cores decide");
         let set = budget_for(32, Some(&gb(64)), Some((6, "settings")));
@@ -2761,19 +2912,108 @@ wanted {shown}", ran.output);
 
     #[test]
     fn the_queue_goes_by_priority_then_one_per_project_then_age() {
-        let w = |id, project: &str, priority| Waiting { id, project: project.into(), repo: format!("C:/Code/{project}"), priority };
+        let w = |id, project: &str, priority| Waiting { id, project: project.into(), repo: format!("C:/Code/{project}"), priority, kind: "run".into(), queued_at: 1000 };
         let none = std::collections::HashMap::new();
-        let order: Vec<i64> = in_order(vec![w(1, "A", 3), w(2, "A", 3), w(3, "B", 3), w(4, "A", 2), w(5, "C", 1), w(6, "B", 3)], &none).into_iter().map(|w| w.id).collect();
+        let order: Vec<i64> = in_order(vec![w(1, "A", 3), w(2, "A", 3), w(3, "B", 3), w(4, "A", 2), w(5, "C", 1), w(6, "B", 3)], &none, 1000).into_iter().map(|w| w.id).collect();
         assert_eq!(order, [5, 4, 1, 3, 2, 6]);
         // A1 started: A2 waits behind B1, though it is older.
         // A was served last (A1 started): A2 waits behind B1, though it is older.
         let a_served = std::collections::HashMap::from([("A".to_string(), 10)]);
-        let order: Vec<i64> = in_order(vec![w(2, "A", 3), w(3, "B", 3)], &a_served).into_iter().map(|w| w.id).collect();
+        let order: Vec<i64> = in_order(vec![w(2, "A", 3), w(3, "B", 3)], &a_served, 1000).into_iter().map(|w| w.id).collect();
         assert_eq!(order, [3, 2]);
         // Both served, B more recently: A's goes first.
         let both = std::collections::HashMap::from([("A".to_string(), 10), ("B".to_string(), 20)]);
-        let order: Vec<i64> = in_order(vec![w(2, "A", 3), w(3, "B", 3)], &both).into_iter().map(|w| w.id).collect();
+        let order: Vec<i64> = in_order(vec![w(2, "A", 3), w(3, "B", 3)], &both, 1000).into_iter().map(|w| w.id).collect();
         assert_eq!(order, [2, 3]);
+    }
+
+    fn waiting(id: i64, project: &str, kind: &str, queued_at: i64) -> Waiting {
+        let priority = match kind {
+            "land" => 1,
+            "gate" => 2,
+            _ => 3,
+        };
+        Waiting { id, project: project.into(), repo: format!("C:/Code/{project}"), priority, kind: kind.into(), queued_at }
+    }
+
+    fn queued(w: Waiting) -> QueueRow {
+        QueueRow { w, running: false, alive: true, lane_count: 1, waits_for_checkout: false, issue: None, started_at: None }
+    }
+
+    fn running(w: Waiting, issue: &str, started_at: i64) -> QueueRow {
+        QueueRow { running: true, issue: Some(issue.into()), started_at: Some(started_at), ..queued(w) }
+    }
+
+    /// A run's priority rises with its wait: 5 minutes makes it a gate, 10 a land (NIT-291).
+    #[test]
+    fn a_waiting_run_rises_past_newer_gates_and_lands() {
+        let none = std::collections::HashMap::new();
+        let now = 10_000;
+        let order = |list: Vec<Waiting>| in_order(list, &none, now).into_iter().map(|w| w.id).collect::<Vec<_>>();
+        assert_eq!(order(vec![waiting(1, "A", "run", now - 60), waiting(2, "B", "gate", now)]), [2, 1], "a fresh run waits for a gate");
+        assert_eq!(order(vec![waiting(1, "A", "run", now - 6 * 60), waiting(2, "B", "gate", now)]), [1, 2], "after 5 minutes it goes as one, and is older");
+        assert_eq!(order(vec![waiting(1, "A", "run", now - 11 * 60), waiting(2, "B", "land", now)]), [1, 2], "after 10, as a land");
+        assert_eq!(aged(&waiting(1, "A", "run", 0), now), 1, "never past a land's");
+    }
+
+    /// While a run that could start waits, gates and lands leave it the last free slot, and every
+    /// request that waits says why (NIT-291).
+    #[test]
+    fn the_last_free_slot_is_kept_for_a_run_and_each_wait_says_why() {
+        let none = std::collections::HashMap::new();
+        let now = 10_000;
+        let rows = vec![
+            running(waiting(1, "AND", "gate", now - 1500), "AND-302", now - 1440),
+            running(waiting(2, "AND2", "gate", now - 1200), "AND-335", now - 1140),
+            queued(waiting(3, "NIT", "gate", now - 100)),
+            queued(waiting(4, "APP", "run", now - 30)),
+            queued(waiting(5, "APP", "run", now - 20)),
+        ];
+        let t = turns(rows.clone(), 3, &none, now);
+        assert_eq!(t[&4], Turn::Go, "{t:?}");
+        assert_eq!(t[&3], Turn::Wait("waiting: the last free machine slot is kept for an agent's run".into()));
+        assert_eq!(t[&5], Turn::Wait("waiting: behind request 4 of the same repo".into()));
+        // With two slots none is kept: the gate, first in line, goes.
+        let t = turns(rows.clone(), 2, &none, now);
+        assert_eq!(t[&3], Turn::Wait("waiting: 2 of 2 machine slots in use (AND-302 gate 24 m, AND-335 gate 19 m)".into()), "{t:?}");
+        let t = turns(rows.clone(), 4, &none, now);
+        assert_eq!((&t[&3], &t[&4]), (&Turn::Go, &Turn::Go), "a slot each: {t:?}");
+        // A run whose repo's lanes are all busy keeps no slot from the gate.
+        let mut busy = rows.clone();
+        busy.push(running(waiting(6, "APP", "run", now - 50), "APP-1", now - 40));
+        let t = turns(busy, 4, &none, now);
+        assert_eq!(t[&3], Turn::Go, "{t:?}");
+        assert_eq!(t[&4], Turn::Wait("waiting: the free machine slots go to requests ahead (3)".into()));
+    }
+
+    /// `nitely lanes` and the app show why each queued request waits.
+    #[test]
+    fn the_queue_says_why_a_request_waits() {
+        let base = crate::paths::unique_temp("nitely-lane-why", "");
+        let root = repo(&base);
+        let db = Db::open(&base.join("t.db")).unwrap();
+        let pb = playbook_with("[lanes]
+");
+        let me = std::process::id() as i64;
+        let add = |state: &str, waiting_memory: Option<&str>| -> i64 {
+            db.conn
+                .execute(
+                    "INSERT INTO lane_run (project, repo, issue_key, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, started_at, pid, priority, lane_count, waiting_memory)
+                     VALUES ('APP', ?1, 'APP-1', 'x', 'run', 's', 't', 'b', 'c', ?2, 'local', ?3, CASE WHEN ?2 = 'running' THEN ?3 ELSE NULL END, ?4, 3, 1, ?5)",
+                    params![root.to_string_lossy(), state, now(), me, waiting_memory],
+                )
+                .unwrap();
+            db.conn.last_insert_rowid()
+        };
+        add("running", None);
+        let behind = add("queued", None);
+        let memory = add("queued", Some("waiting for memory: 5.0 GB free, new work starts above 12.8 GB"));
+        let shown = status(&db, &root, &pb, "APP").unwrap().unwrap();
+        let why = |id: i64| shown.queue.iter().find(|r| r.id == id).and_then(|r| r.waiting_why.clone());
+        // Its repo's one lane is busy, or (a machine with one slot) the machine's: either way, said.
+        assert!(why(behind).is_some_and(|w| w == "waiting: all 1 of its repo's lanes are busy" || w.starts_with("waiting: 1 of 1 machine slots in use (APP-1 run")), "{:?}", why(behind));
+        assert!(why(memory).unwrap().starts_with("waiting for memory"));
+        std::fs::remove_dir_all(base).ok();
     }
 
     #[test]
@@ -2786,7 +3026,7 @@ wanted {shown}", ran.output);
             db.conn
                 .execute(
                     "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, priority, lane_count, started_at)
-                     VALUES (?1, ?2, 'x', 'run', 's', 't', 'b', 'c', ?3, 'local', 1, ?4, ?5, ?6, CASE WHEN ?3 = 'queued' THEN NULL ELSE 2 END)",
+                     VALUES (?1, ?2, 'x', 'run', 's', 't', 'b', 'c', ?3, 'local', CAST(strftime('%s', 'now') AS INTEGER), ?4, ?5, ?6, CASE WHEN ?3 = 'queued' THEN NULL ELSE 2 END)",
                     params![project, format!("C:/Code/{project}"), state, pid, priority, lanes],
                 )
                 .unwrap();

@@ -870,6 +870,8 @@ export interface LaneRun {
   waiting_memory?: string | null;
   /** The most memory it held at once, in bytes, where the system tells it. */
   peak_memory?: number | null;
+  /** Why a queued request waits, in words: "waiting: 3 of 3 machine slots in use (…)" (NIT-291). */
+  waiting_why?: string | null;
 }
 
 /** The machine's memory and how builds share it (machine.rs `Now`, NIT-266); bytes. */

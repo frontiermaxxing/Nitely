@@ -102,19 +102,26 @@ agent's worktree share the objects, and a forced checkout cannot conflict. Base 
 (`git diff --binary`) is only how a request travels to another machine or to CI.
 
 **Machine scheduler.** One budget for the whole machine across all projects: build slots from cores
-and memory (one slot per 8 logical cores, and no more slots than runs at their memory cap fit above
-the memory floor, at least 1), or `build_slots` in Nitely's config (the app's Settings, NIT-205), or
-`NITELY_BUILD_SLOTS` for one shell. Builds share all the cores but 2, or 75%, whichever is more, so
+and memory (one slot per 6 logical cores and per 8 GB above the memory floor, at least 1: 5 slots of
+6 jobs on 32 threads and 64 GB, NIT-291), or `build_slots` in Nitely's config (the app's Settings,
+NIT-205), or `NITELY_BUILD_SLOTS` for one shell; a waiting request reads the budget again every few
+seconds, so a change counts for what already waits. Builds share all the cores but 2, or 75%, whichever is more, so
 the person's own apps always have some; each request gets its slot's share of those: `{jobs}` in a
 command, and `NITELY_JOBS`, `CARGO_BUILD_JOBS`, `RUST_TEST_THREADS` and `MAKEFLAGS=-j` in its
 environment, and `--test-concurrency=<jobs>` after a `node --test` that sets none (node takes no such
 setting from the environment; this repo's `npm test` reads `NITELY_JOBS`). A slot is an OS file lock beside the database, so a crashed requester frees its slot as
-it frees its lane. Order: land, then submit's gate, then `run`; within each, round-robin across
+it frees its lane. Order: land, then submit's gate, then `run`, each request one step up for every 5
+minutes it has waited (a `run` waiting 5 minutes goes as a gate, 10 as a land), so a busy team's
+gates and lands never keep an agent's run waiting for good; within each, round-robin across
 projects (each project's first waiting request before any project's second, and among those the
 project served longest ago first, so one project's backlog never holds up the rest), then the
-oldest. A request starts when no request of
-its own repo is ahead of it and there is a free slot after the requests ahead of it that could start;
-a repo whose lanes are all busy holds up no other repo. (The person's own requests do not yet go
+oldest. A request starts when no request of its own repo is ahead of it and there is a free slot
+after the requests ahead of it that could start; a repo whose lanes are all busy holds up no other
+repo. On a machine with 3 slots or more, a gate or land leaves the last free slot to an agent's
+`run` that could start, so a minute of clippy never waits out two half-hour gates (NIT-291). Each
+queued request says why it waits (`waiting_why` in `nitely lanes`, on the strip): "waiting: 3 of 3
+machine slots in use (AND-302 gate 24 m, …)", "behind request 41 of the same repo", "all 2 of its
+repo's lanes are busy", the person's checkout, or memory. (The person's own requests do not yet go
 first.)
 
 **Executors.** Where a request runs, per project in the playbook: a local lane (the default),
