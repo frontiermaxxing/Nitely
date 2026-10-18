@@ -993,31 +993,6 @@ pub(crate) fn citations(text: &str) -> Vec<(String, Option<usize>)> {
     out
 }
 
-/// Whether two findings are the same one, perhaps in other words (NIT-353): the same text, or they
-/// point at a place in common, a file and the code in it (`title: file, symbol: what`), as a later
-/// review round restates a finding it still sees. Findings about other code in the same file are
-/// not the same, nor are findings that name no place and say it otherwise.
-pub fn same_finding(a: &str, b: &str) -> bool {
-    a.trim() == b.trim() || !places(a).is_disjoint(&places(b))
-}
-
-/// The places a finding points at, as (file, symbol): each `file[:line], symbol:` of the format
-/// findings are reported in, a finding that cites several separating them with `;`. Backticks,
-/// line numbers and case do not count.
-fn places(text: &str) -> std::collections::BTreeSet<(String, String)> {
-    let body = text.split_once(": ").map_or(text, |(_, rest)| rest);
-    let mut out = std::collections::BTreeSet::new();
-    for part in body.split(';') {
-        let Some((at, rest)) = part.split_once(", ") else { continue };
-        let Some((file, _)) = citations(at).pop() else { continue };
-        let symbol = rest.split(": ").next().unwrap_or("").trim().trim_matches('`').trim().to_lowercase();
-        if !symbol.is_empty() && symbol.len() <= 80 && symbol.chars().any(char::is_alphabetic) {
-            out.insert((file.replace('\\', "/").trim_start_matches("./").to_lowercase(), symbol));
-        }
-    }
-    out
-}
-
 /// The `backticked` pieces of a text.
 fn quoted(text: &str) -> Vec<String> {
     text.split('`').skip(1).step_by(2).map(str::to_string).collect()
@@ -1245,22 +1220,6 @@ mod tests {
             flags: vec![Flag { name: "MONEY_OR_RELEASE".into(), question: "the change alters billing".into(), reason: "money or release logic".into() }],
             ..Default::default()
         }
-    }
-
-    #[test]
-    fn a_finding_in_other_words_is_the_same_finding_and_other_code_in_its_file_is_not() {
-        // Two rounds' words for one finding (NIT-353): the same places, cited in another order.
-        let first = "Release install remains under the land lock: `.nitely/playbook.toml:46`, release-install step; `crates/nitely-core/src/land.rs:416`, `after_land_outside_lock`: the existing install step never sets `outside_lock = true`.";
-        let again = "Release install still holds the land lock: `crates/nitely-core/src/land.rs:416`, `after_land_outside_lock`: only steps with `outside_lock = true` use the new path, but `.nitely/playbook.toml:46` leaves that unset.";
-        assert!(same_finding(first, again) && same_finding(again, first));
-        assert!(same_finding("Drops a row: rows.txt, f: the last row", " Drops a row: rows.txt, f: the last row"));
-        // A place named without backticks, at another line.
-        assert!(same_finding("Drops the last row: src/rows.rs:12, export: the loop stops early.", "Skips the final row: src/rows.rs:14, export: it is never written."));
-        // The same file, other code: another finding, whatever values both quote.
-        assert!(!same_finding(again, "Wrong exit code: `crates/nitely-core/src/land.rs:500`, `land_queue`: a failed push reads as landed with `outside_lock = true`."));
-        assert!(!same_finding("Drops a row: rows.txt, f: returns `None`", "Skips a row: rows.txt, g: returns `None`"));
-        // The same name, another file: another finding.
-        assert!(!same_finding(again, "Lock leaks: `crates/nitely-core/src/lanes.rs:90`, `after_land_outside_lock`: the lock is never dropped."));
     }
 
     #[test]

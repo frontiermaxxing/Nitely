@@ -74,9 +74,8 @@ impl Db {
             bail!("the person already accepted that finding for this patch");
         }
         let asked = AskedFinding { priority: found.priority, text: found.text.clone() };
-        // One decision per finding: a request already open for it, in this wording or an earlier
-        // one, stands, with this wording and this reasoning (NIT-353).
-        let ask = match self.open_request_for(&issue.key, &found.text, &review.findings)? {
+        // One decision per finding: a request already open for it stands, with this reasoning (NIT-353).
+        let ask = match self.open_request_for(&issue.key, &found.text)? {
             Some(open) => {
                 self.conn.execute("UPDATE ask SET finding = ?2, question = ?3 WHERE id = ?1", params![open.id, serde_json::to_string(&asked)?, why])?;
                 open
@@ -103,8 +102,7 @@ impl Db {
         let open: Vec<Ask> = self.open_asks()?.into_iter().filter(|a| a.issue_key.as_deref().is_some_and(|k| k.eq_ignore_ascii_case(&issue.key))).collect();
         let question = format!("The review rounds are not converging ({why}). Accept this finding as it is if it is a trade-off you decided; send it back and it stays a defect to fix.");
         for f in self.unaccepted_blockers(&issue.key, &review)? {
-            // One request per finding; one already open for it stands. Superseded requests followed
-            // their findings into this round's words before this runs, so a likeness is another blocker.
+            // One request per finding; one already open for it stands.
             if open.iter().any(|a| a.finding.as_ref().is_some_and(|x| x.text == f.text)) {
                 continue;
             }
@@ -255,45 +253,28 @@ impl Db {
         Ok((ask, key, finding, review))
     }
 
-    /// Brings `key`'s open requests to accept a finding up to its latest review (`findings`). A
-    /// request whose finding the round raised again in other words stays open, with the new
-    /// wording, so the person can still answer it (NIT-353). One the round no longer raises at
-    /// all closes: it was fixed, so there is nothing to decide. Two open for one finding become
-    /// one: the newest stands. Returns how many closed.
+    /// Brings `key`'s open requests to accept a finding up to its latest review (`findings`). Each
+    /// round is told the findings the person is deciding, to report one that still holds in the
+    /// same words (`submit::review_context`, NIT-353): whether a finding in other words is the same
+    /// one is the reviewer's judgement, which no likeness of file or code can make safely (two
+    /// blockers in one function are two decisions). So a request stands while its words do, and one
+    /// the round no longer raises closes. Two open in the same words become one: the newest stands.
+    /// Returns how many closed.
     pub fn close_superseded_requests(&self, key: &str, findings: &[Finding]) -> Result<usize> {
         let mut open = self.open_finding_requests(key)?;
         open.sort_by_key(|a| std::cmp::Reverse(a.id));
         let words = |a: &Ask| a.finding.as_ref().map(|f| f.text.clone()).unwrap_or_default();
         let mut closing: Vec<(i64, String)> = vec![];
-        // Requests in the same words are one: the newest stands, newest first.
+        // Requests in the same words are one: the newest stands.
         let mut first: Vec<(String, i64)> = vec![];
-        let mut left: Vec<&Ask> = vec![];
         for a in &open {
             match first.iter().find(|(w, _)| *w == words(a)) {
                 Some((_, newer)) => closing.push((a.id, format!("closed: ask #{newer} asks for the same finding"))),
+                None if findings.iter().any(|x| x.text == words(a)) => first.push((words(a), a.id)),
                 None => {
                     first.push((words(a), a.id));
-                    left.push(a);
+                    closing.push((a.id, "closed: the latest review no longer has that finding".to_string()));
                 }
-            }
-        }
-        // A request whose words the latest review still has stands for that finding. One whose words
-        // are gone follows its finding into the new words only when that is plain: one finding not
-        // held by another request is like it, and no other such request is like that one. Otherwise
-        // a likeness could hand one blocker's decision to another in the same code.
-        let held = |t: &str| left.iter().any(|a| words(a) == t);
-        let free: Vec<&Finding> = findings.iter().filter(|x| x.priority <= 1 && !held(&x.text)).collect();
-        let gone: Vec<&Ask> = left.iter().copied().filter(|a| !findings.iter().any(|x| x.text == words(a))).collect();
-        let like = |a: &Ask| -> Vec<usize> { free.iter().enumerate().filter(|(_, x)| crate::review::same_finding(&x.text, &words(a))).map(|(i, _)| i).collect() };
-        for a in &gone {
-            let mine = like(a);
-            let alone = mine.len() == 1 && !gone.iter().any(|b| b.id != a.id && like(b).contains(&mine[0]));
-            if alone {
-                let x = free[mine[0]];
-                let reworded = AskedFinding { priority: x.priority, text: x.text.clone() };
-                self.conn.execute("UPDATE ask SET finding = ?2 WHERE id = ?1", params![a.id, serde_json::to_string(&reworded)?])?;
-            } else {
-                closing.push((a.id, "closed: the latest review no longer has that finding".to_string()));
             }
         }
         for (id, why) in &closing {
@@ -307,24 +288,15 @@ impl Db {
         Ok(self.open_asks()?.into_iter().filter(|a| a.issue_key.as_deref().is_some_and(|k| k.eq_ignore_ascii_case(key)) && a.finding.is_some()).collect())
     }
 
-    /// The open request to accept `finding` of `key`, in its wording or an earlier one; the newest
-    /// when there are several. A request whose own words are still a finding of the latest review
-    /// (`latest`) is that finding's, however alike the two look: two blockers in one function are
-    /// two decisions.
-    fn open_request_for(&self, key: &str, finding: &str, latest: &[Finding]) -> Result<Option<Ask>> {
+    /// The open request to accept `finding` of `key`, the newest when there are several.
+    fn open_request_for(&self, key: &str, finding: &str) -> Result<Option<Ask>> {
         let mut open = self.open_finding_requests(key)?;
         open.sort_by_key(|a| std::cmp::Reverse(a.id));
-        let exact = open.iter().position(|a| a.finding.as_ref().is_some_and(|f| f.text == finding));
-        let like = || {
-            open.iter().position(|a| {
-                a.finding.as_ref().is_some_and(|f| !latest.iter().any(|x| x.text == f.text) && crate::review::same_finding(&f.text, finding))
-            })
-        };
-        Ok(exact.or_else(like).map(|i| open.swap_remove(i)))
+        Ok(open.iter().position(|a| a.finding.as_ref().is_some_and(|f| f.text == finding)).map(|i| open.swap_remove(i)))
     }
 
-    /// Closes the other open requests for the finding the person just decided in ask `decided`, in
-    /// its very words: one decision answers them all. One merely like it may be another blocker.
+    /// Closes the other open requests for the finding the person just decided in ask `decided`: one
+    /// decision answers them all.
     fn close_decided_alike(&self, key: &str, decided: i64, finding: &str) -> Result<()> {
         for a in self.open_finding_requests(key)? {
             if a.id != decided && a.finding.as_ref().is_some_and(|f| f.text == finding) {

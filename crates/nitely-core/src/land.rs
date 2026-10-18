@@ -1282,33 +1282,32 @@ when_changed = ["billing"]
     }
 
     #[test]
-    fn a_finding_reworded_across_rounds_keeps_one_open_request() {
+    fn a_finding_the_rounds_keep_raising_keeps_one_open_request() {
         let mut f = fixture();
         let (a, _) = f.submitted("Lock", "lock.txt", "x");
-        // The same P1 in three rounds' words: the places it cites, in another order, and the code it names.
-        let words = [
-            "Install holds the land lock: `.nitely/playbook.toml:46`, release-install step; `crates/app/src/land.rs:416`, `after_land_outside_lock`: the step never sets `outside_lock = true`.",
-            "Install still holds the land lock: `crates/app/src/land.rs:416`, `after_land_outside_lock`: only steps with `outside_lock = true` take the new path, and `.nitely/playbook.toml:46` leaves it unset.",
-            "The release install runs under the land lock: `crates/app/src/land.rs:420`, `after_land_outside_lock`: nothing sets it for the install step.",
-        ];
-        reviewed_with(&f, &a, words[0], 1);
+        let blocker = "Install holds the land lock: `crates/app/src/land.rs:416`, `after_land_outside_lock`: the install step never sets `outside_lock = true`.";
+        let other = "Ignores a failed push: `crates/app/src/land.rs:500`, `after_land_outside_lock`: the push result is dropped.";
+        reviewed_with(&f, &a, blocker, 1);
         let ask = f.db.request_acceptance(&a, "1", "Only the person changes the playbook.", None, &f.actor).unwrap();
-        for (i, text) in words.iter().enumerate().skip(1) {
-            reviewed_with(&f, &a, text, 1 + i as i64);
+        // Later rounds are told its words and say it the same way: it stays one open request.
+        let no_gate = crate::playbook::GateResult { passed: true, commit: "c".into(), results: vec![], warnings: vec![], flaked: vec![], lane_run: None };
+        for round in 2..4 {
+            reviewed_with(&f, &a, blocker, round);
             let latest = f.db.reviews(&a).unwrap().remove(0);
-            assert_eq!(f.db.close_superseded_requests(&a, &latest.findings).unwrap(), 0, "round {i} rewords it: nothing closes");
-            let now = f.db.ask(ask.id).unwrap().unwrap();
-            assert!(now.closed.is_none() && now.answer.is_none(), "{now:?}");
-            assert_eq!(now.finding.map(|f| f.text).as_deref(), Some(*text), "the request shows the newest words");
+            assert_eq!(f.db.close_superseded_requests(&a, &latest.findings).unwrap(), 0, "round {round}");
+            assert!(f.db.ask(ask.id).unwrap().unwrap().closed.is_none());
+            assert!(crate::submit::review_context(&f.db, &f.db.issue(&a).unwrap().unwrap(), &no_gate).unwrap().contains(blocker), "each round is told the words being decided");
         }
         // Asking again is that same request, and the issue waits for the person again, as asking does.
         f.db.move_issue(&a, "In Progress", None, None, &f.actor).unwrap();
         assert_eq!(f.db.request_acceptance(&a, "1", "Still only the person.", None, &f.actor).unwrap().id, ask.id);
         assert_eq!(f.db.issue(&a).unwrap().unwrap().state, "Needs You");
         assert_eq!(f.db.open_asks().unwrap().iter().filter(|q| q.issue_key.as_deref() == Some(a.as_str())).count(), 1, "one decision in the Inbox");
-        crate::approval::trust_in_tests(Some(crate::approval::public_of(&SECRET)));
-        f.db.accept_finding(ask.id, "the playbook is the person's", &SECRET).unwrap();
-        assert!(f.db.unaccepted_blockers(&a, &f.db.reviews(&a).unwrap()[0]).unwrap().is_empty());
+        // Another blocker in the same code is another decision, and the first one's request is not its.
+        reviewed_with(&f, &a, other, 4);
+        let latest = f.db.reviews(&a).unwrap().remove(0);
+        assert_eq!(f.db.close_superseded_requests(&a, &latest.findings).unwrap(), 1, "the round no longer raises the first");
+        assert_eq!(f.db.ask(ask.id).unwrap().unwrap().finding.map(|x| x.text).as_deref(), Some(blocker));
         std::fs::remove_dir_all(&f.base).ok();
     }
 
@@ -1327,34 +1326,16 @@ when_changed = ["billing"]
             )
             .unwrap();
         let first = f.db.request_acceptance(&a, "1", "The old export did the same.", None, &f.actor).unwrap();
-        let second = f.db.request_acceptance(&a, "2", "Writes are retried upstream.", None, &f.actor).unwrap();
-        assert_ne!(first.id, second.id, "two blockers in one function are two decisions");
-        assert_eq!(f.db.close_superseded_requests(&a, &two).unwrap(), 0);
-        for (ask, text) in [(first.id, &two[0].text), (second.id, &two[1].text)] {
-            assert_eq!(f.db.ask(ask).unwrap().unwrap().finding.map(|x| x.text).as_ref(), Some(text));
-        }
-        // Both reworded in one round: which is which is not plain, so neither takes the other's.
-        let reworded = vec![
-            crate::review::Finding { priority: 1, text: "Loses the final row: src/rows.rs:13, export: it is never written.".into(), carried: false, raised_as: None, now: None },
-            crate::review::Finding { priority: 1, text: "Swallows write errors: src/rows.rs:31, export: the result is ignored.".into(), carried: false, raised_as: None, now: None },
-        ];
-        assert_eq!(f.db.close_superseded_requests(&a, &reworded).unwrap(), 2);
-        // Escalation asks about each blocker the person has no request for, alike or not.
-        f.db.conn
-            .execute(
-                "INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, findings, ts) VALUES (?1, 'p1', 'c', 'fake', 'changes', 'agent', ?2, ?3)",
-                rusqlite::params![a, serde_json::to_string(&two).unwrap(), crate::db::now() + 2],
-            )
-            .unwrap();
-        let kept = f.db.request_acceptance(&a, "1", "The old export did the same.", None, &f.actor).unwrap();
+        // Escalation asks about the blocker the person has no request for.
         f.db.ask_to_decide_findings(&a, "rounds did not converge", &f.actor).unwrap();
         let open: Vec<_> = f.db.open_asks().unwrap().into_iter().filter(|q| q.issue_key.as_deref() == Some(a.as_str())).collect();
-        assert_eq!(open.len(), 2, "{open:?}");
+        assert_eq!(open.len(), 2, "two blockers in one function are two decisions: {open:?}");
+        assert_eq!(f.db.close_superseded_requests(&a, &two).unwrap(), 0);
         // Deciding one leaves the other blocker's request open.
         crate::approval::trust_in_tests(Some(crate::approval::public_of(&SECRET)));
-        f.db.accept_finding(kept.id, "the old export did the same", &SECRET).unwrap();
-        let other = open.iter().find(|q| q.id != kept.id).unwrap();
-        assert!(f.db.ask(other.id).unwrap().unwrap().closed.is_none());
+        f.db.accept_finding(first.id, "the old export did the same", &SECRET).unwrap();
+        let second = open.iter().find(|q| q.id != first.id).unwrap();
+        assert!(f.db.ask(second.id).unwrap().unwrap().closed.is_none());
         std::fs::remove_dir_all(&f.base).ok();
     }
 
