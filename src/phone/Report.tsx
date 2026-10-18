@@ -42,7 +42,8 @@ function sinceLabel(since: number, now: number): string {
  */
 export function LastDay(props: { device: Device; open: boolean; version: number }) {
   const [open, setOpen] = useState(props.open);
-  const [since] = useState(() => readSeen());
+  // Read again when the phone comes back to the page: the visit it left saved where this one starts.
+  const [since, setSince] = useState(() => readSeen());
   const [report, setReport] = useState<GoalReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   // The newest report read while open: where the next visit starts.
@@ -67,7 +68,10 @@ export function LastDay(props: { device: Device; open: boolean; version: number 
 
   useEffect(() => {
     const save = () => read.current !== null && writeSeen(read.current);
-    const onHide = () => document.visibilityState === "hidden" && save();
+    const onHide = () => {
+      if (document.visibilityState === "hidden") save();
+      else setSince(readSeen());
+    };
     document.addEventListener("visibilitychange", onHide);
     window.addEventListener("pagehide", save);
     return () => {
