@@ -49,6 +49,12 @@ export function goalCounts(placed: Placed[]): GoalCounts {
   return c;
 }
 
+/** "2 working · 3 landed today": the crew on a goal now and its last day's landings, or null when neither. */
+export function crewOnGoal(goal: { working?: number; landed_today?: number }): string | null {
+  const parts = [goal.working ? `${goal.working} working` : null, goal.landed_today ? `${goal.landed_today} landed today` : null].filter(Boolean);
+  return parts.length ? parts.join(" · ") : null;
+}
+
 /** "by Dec 1 · in 12 days", "by Nov 2 · 3 days late", or null without a date. Late only while open. */
 export function targetLine(date: string | null | undefined, today: Date, complete: boolean): { text: string; late: boolean } | null {
   if (!date) return null;

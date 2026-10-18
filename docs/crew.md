@@ -27,6 +27,7 @@ setup_timeout_minutes = 30    # a worktree setup running longer is stopped; its 
 attempts = 3                  # failed workers on one issue before it goes to a human
 idle_minutes = 30             # a worker with no output and no report this long is stopped as hung (0: off)
 min_free_disk_gb = 10         # no new worker while less is free where worktrees go (0: off)
+goal_workers = 2              # optional: workers on one goal at once (a goal's own budget wins)
 
 [crew.commands]               # optional: replaces the default command for an agent
 codex = ["codex", "exec", "--sandbox", "danger-full-access", "..."]
@@ -86,9 +87,18 @@ start one, the crew's status says why.
    (`crew_worker.phase = setup`), so a new supervisor watches it, or starts it again when it is gone. The claim is recorded under the worker's agent id
    (`claude:<worktree>`), the same id the worker's MCP server will use, so the worker's own `report`
    and `note` calls keep the claim fresh. Nothing ready: the slot stays empty until the next tick.
-4. **Start.** Launch the agent in the worktree with the brief (below) on stdin.
+4. **Start.** Launch the agent in the worktree with the brief (below) on stdin, and a port of its
+   own for a browser preview (`NITELY_PREVIEW_PORT`, from 5190 up, one no running worker has).
 
-Which issue: `next_task` keeps parallel workers out of each other's files. Every issue in flight
+Which issue first: approved goals (NIT-243, [coordinator.md](coordinator.md)). The project's active
+goals are worked in the person's order (a goal's `rank`, set with `save_goal` or `nitely goal save
+--rank`; unranked ones after, nearest target date first, then oldest), and each goal's issues in
+plan order, the order they were filed. A goal at its worker budget (its own `workers`, else
+`goal_workers`) leaves its other issues waiting and its slots to the next goal; so does a goal with
+nothing ready. Issues in no goal come after every goal's. Priority 1 goes first wherever it is. Each
+goal row shows how many workers are on it and what of it landed in the last day.
+
+Which issue among those: `next_task` keeps parallel workers out of each other's files. Every issue in flight
 holds the files its branch changes and the paths its body names; a ready issue whose title, body or
 labels name one of them collides, and a clear issue at most one urgency level below is taken instead
 (an urgent one never waits). Files nearly every change touches go in `crew.shared_files` and count for

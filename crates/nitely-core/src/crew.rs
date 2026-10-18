@@ -7,7 +7,7 @@
 use anyhow::{bail, Context, Result};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use crate::db::{now, Db};
@@ -53,6 +53,9 @@ pub struct CrewRules {
     /// No new worker starts while less than this is free where worktrees go (GB); 0 is off. Memory
     /// is the machine's own admission (NIT-266, machine.rs).
     pub min_free_disk_gb: u64,
+    /// How many workers may work on one goal at once (a goal's own `workers` wins); 0, the
+    /// default, is no cap below `workers`.
+    pub goal_workers: u32,
     /// Replaces the default command for an agent. `{worktree}`, `{repo}`, `{git_dir}`,
     /// `{mcp_config}`, `{nitely}` and `{nitely_env}` are filled in; the brief goes on stdin.
     pub commands: BTreeMap<String, Vec<String>>,
@@ -72,6 +75,7 @@ impl Default for CrewRules {
             shared_files: vec![],
             idle_minutes: 30,
             min_free_disk_gb: 10,
+            goal_workers: 0,
             commands: BTreeMap::new(),
         }
     }
@@ -389,7 +393,12 @@ struct Running {
     process: Box<dyn Process>,
     /// The log's length when last looked at, and when it last grew: a sign the worker is alive.
     seen: std::cell::Cell<(u64, i64)>,
+    /// Its browser preview's port, when it was given one (not to a worker taken over).
+    port: Option<u16>,
 }
+
+/// The ports workers are given for their browser preview, one each.
+const PREVIEW_PORTS: std::ops::Range<u16> = 5190..5290;
 
 /// Tokens a project used since a time (`usage::project_tokens_since` over a scan).
 type TokensSince = Box<dyn Fn(&str, i64) -> u64>;
@@ -668,12 +677,15 @@ impl Supervisor {
                 return Ok(format!("paused: no agent will start ({})", why.join("; ")));
             }
             let skipped: Vec<String> = self.waiting.keys().cloned().collect();
+            // Approved goals first, in the person's order and within each one's worker budget.
+            let order = self.goal_order(db, rules)?;
             let picked = if self.avoid_overlap {
                 // Read fresh: repos and their playbooks change while a crew runs.
                 let config = crate::Config::load()?;
-                crate::overlap::next_task(&config, db, &self.project, self.actor().id(), &skipped)?
+                crate::overlap::next_task_ordered(&config, db, &self.project, self.actor().id(), &skipped, Some(&order))?
             } else {
-                db.next_task_except(&self.project, self.actor().id(), &skipped)?.map(|issue| crate::overlap::Picked { issue, why: None })
+                db.next_task_choosing(&self.project, self.actor().id(), &skipped, |c| order.arrange(c).first().map(|(k, _, _)| k.clone()))?
+                    .map(|issue| crate::overlap::Picked { issue, why: None })
             };
             let Some(crate::overlap::Picked { issue, why }) = picked else {
                 return Ok(self.nothing_ready());
@@ -697,6 +709,40 @@ impl Supervisor {
             self.handle_start(db, &issue.key, &agent, started, tick)?;
         }
         Ok(if self.preparing.is_empty() { "working".into() } else { format!("working; setting up {}", self.preparing.iter().map(|p| p.issue.key.as_str()).collect::<Vec<_>>().join(", ")) })
+    }
+
+    /// The project's active goals in the person's order, and which have room for another worker:
+    /// a goal's own `workers`, else the playbook's `goal_workers`, counts the workers running or
+    /// setting up on its issues.
+    fn goal_order(&self, db: &Db, rules: &CrewRules) -> Result<crate::overlap::GoalOrder> {
+        let goals = db.goals(&self.project, false)?;
+        let active: std::collections::HashSet<i64> = goals.iter().map(|g| g.id).collect();
+        let goal_of: HashMap<String, i64> =
+            db.list_issues(Some(&self.project), false)?.into_iter().filter_map(|i| i.goal.filter(|g| active.contains(g)).map(|g| (i.key, g))).collect();
+        let busy = self.running.iter().map(|r| r.issue.as_str()).chain(self.preparing.iter().map(|p| p.issue.key.as_str()));
+        let mut working: HashMap<i64, i64> = HashMap::new();
+        for key in busy {
+            if let Some(g) = goal_of.get(key) {
+                *working.entry(*g).or_default() += 1;
+            }
+        }
+        let mut order = crate::overlap::GoalOrder { goal_of, ..Default::default() };
+        for g in goals {
+            let budget = g.workers.or((rules.goal_workers > 0).then_some(rules.goal_workers as i64));
+            if budget.is_some_and(|b| working.get(&g.id).copied().unwrap_or(0) >= b) {
+                order.full.insert(g.id);
+            } else {
+                order.open.push(g.id);
+            }
+        }
+        Ok(order)
+    }
+
+    /// A port for a new worker's browser preview: the first of `PREVIEW_PORTS` that no running
+    /// worker has and that is free on this machine.
+    fn preview_port(&self) -> Option<u16> {
+        let taken: Vec<u16> = self.running.iter().filter_map(|r| r.port).collect();
+        PREVIEW_PORTS.clone().find(|p| !taken.contains(p) && std::net::TcpListener::bind(("127.0.0.1", *p)).is_ok())
     }
 
     /// What follows an attempt to start a worker on `key`.
@@ -867,14 +913,19 @@ impl Supervisor {
             return Ok(Start::LaunchFailed(why));
         };
         db.crew_worker_working(id, &log, ts)?;
+        let port = self.preview_port();
+        let mut env = vec![("NITELY_CREW".into(), id.to_string()), ("NITELY_PROJECT".into(), self.project.clone())];
+        if let Some(p) = port {
+            env.push(("NITELY_PREVIEW_PORT".into(), p.to_string()));
+        }
         let launch = Launch {
             agent: agent.into(),
             program,
             args: command[1..].iter().map(|a| fill(a)).collect(),
             cwd: worktree.clone(),
-            brief: brief(issue, &self.project, &worktree, &branch, &self.repo_root),
+            brief: brief(issue, &self.project, &worktree, &branch, &self.repo_root, port),
             log: log.clone(),
-            env: vec![("NITELY_CREW".into(), id.to_string()), ("NITELY_PROJECT".into(), self.project.clone())],
+            env,
         };
         let process = match self.agents.start(&launch) {
             Ok(p) => p,
@@ -887,7 +938,7 @@ impl Supervisor {
         db.crew_worker_pid(id, process.pid())?;
         db.log_event(&self.actor(), Some(&issue.key), Some(&worktree.to_string_lossy()), "crew_started", &format!("Crew worker started ({agent}), log: {}", log.display()))?;
         let line = WorkerLine { issue: issue.key.clone(), agent: agent.into(), outcome: String::new(), log: log.to_string_lossy().into_owned() };
-        self.running.push(Running { id, issue: issue.key.clone(), agent: agent.into(), agent_id, worktree, started_at: ts, log, process, seen: std::cell::Cell::new((0, ts)) });
+        self.running.push(Running { id, issue: issue.key.clone(), agent: agent.into(), agent_id, worktree, started_at: ts, log, process, seen: std::cell::Cell::new((0, ts)), port });
         Ok(Start::Running(line))
     }
 
@@ -944,6 +995,7 @@ impl Supervisor {
                 log: PathBuf::from(w.log),
                 process: Box::new(Gone),
                 seen: std::cell::Cell::new((0, w.started_at)),
+                port: None,
             };
             match w.pid.and_then(|pid| self.agents.adopt(pid)) {
                 Some(process) => self.running.push(Running { process, ..running }),
@@ -1403,13 +1455,16 @@ impl Supervisor {
 }
 
 /// The brief every worker gets on stdin.
-pub fn brief(issue: &IssueRecord, project: &str, worktree: &Path, branch: &str, repo: &Path) -> String {
+pub fn brief(issue: &IssueRecord, project: &str, worktree: &Path, branch: &str, repo: &Path, port: Option<u16>) -> String {
     if crate::goal_plans::is_planning(issue) {
         return planner_brief(issue, project, worktree, repo);
     }
     // A light worktree with lanes builds through `run` (docs/build-lanes.md).
     let lanes = Playbook::load(repo).ok().is_some_and(|pb| pb.lanes.is_some());
-    let light = if lanes && crate::light::is_light(worktree) { format!("\n{}\n", crate::light::RUN_LINE) } else { String::new() };
+    let mut light = if lanes && crate::light::is_light(worktree) { format!("\n{}\n", crate::light::RUN_LINE) } else { String::new() };
+    if let Some(p) = port {
+        light.push_str(&format!("\nFor a browser preview (`npm run dev`), use port {p} (also in NITELY_PREVIEW_PORT): other workers preview at the same time on theirs.\n"));
+    }
     let (key, title, wt, repo) = (&issue.key, &issue.title, worktree.display(), repo.display());
     format!(
         "You are a Nitely crew worker: Nitely started you to work on one issue, {key}, \"{title}\", in project {project}. \
@@ -2391,8 +2446,8 @@ mod tests {
     #[test]
     fn the_brief_names_the_issue_the_worktree_and_the_rules() {
         let issue = IssueRecord { key: "NIT-7".into(), title: "Fix the thing".into(), ..Default::default() };
-        let b = brief(&issue, "NIT", Path::new("/w/nit-7"), "codex/nit-7-fix", Path::new("/r"));
-        for part in ["NIT-7, \"Fix the thing\"", "/w/nit-7 (branch codex/nit-7-fix)", "never edit or commit in /r", "submit (without wait)", "lands it when it passes", "handoff: true", "Do not take another issue"] {
+        let b = brief(&issue, "NIT", Path::new("/w/nit-7"), "codex/nit-7-fix", Path::new("/r"), Some(5191));
+        for part in ["NIT-7, \"Fix the thing\"", "/w/nit-7 (branch codex/nit-7-fix)", "never edit or commit in /r", "submit (without wait)", "lands it when it passes", "handoff: true", "Do not take another issue", "use port 5191"] {
             assert!(b.contains(part), "{part} missing from:\n{b}");
         }
     }
@@ -2919,6 +2974,68 @@ min_free_disk_gb = 100000000
         std::fs::write(&lock, format!("NIT-2 pid {} since now\n", std::process::id())).unwrap();
         assert_eq!(crate::land::clear_dead_lock(&f.repo), None);
         assert!(lock.exists());
+    }
+
+    #[test]
+    fn approved_goals_are_worked_in_the_persons_order_within_each_ones_budget() {
+        let mut f = fixture(&format!("{GATE}[crew]\nworkers = 4\ngoal_workers = 1\n"));
+        let human = Actor::Human;
+        // Two more issues, less urgent than NIT-2 and NIT-3.
+        for title in ["Goal work, first", "Goal work, second"] {
+            let new = NewIssue { project: "NIT".into(), title: title.into(), body: "wanted".into(), kind: "feature".into(), source: "human".into(), evidence: "seen".into(), priority: 4, ..Default::default() };
+            f.db.create_issue(&new, &human).unwrap();
+        }
+        let goal = |title: &str, rank: i64| {
+            let change = crate::goals::GoalChange { title: Some(title.into()), outcome: Some("o".into()), rank: Some(rank), ..Default::default() };
+            f.db.save_goal("NIT", None, &change, &human).unwrap().id
+        };
+        let (first, second) = (goal("Ranked first", 1), goal("Ranked second", 2));
+        // The plan's order is the order its issues were filed: NIT-4, then NIT-5.
+        f.db.set_issue_goal("NIT-5", Some(first), &human).unwrap();
+        f.db.set_issue_goal("NIT-4", Some(first), &human).unwrap();
+        f.db.set_issue_goal("NIT-3", Some(second), &human).unwrap();
+
+        let fake = Fake { installed: vec!["claude"], ..Default::default() };
+        let mut sup = supervisor(&f, &fake);
+        let tick = sup.tick(&mut f.db, false).unwrap();
+        let started: Vec<&str> = tick.started.iter().map(|w| w.issue.as_str()).collect();
+        // Priority 1 first wherever it is; then the first goal's next issue though it is the least
+        // urgent; then, that goal at its budget of one, the second goal; then work in no goal.
+        assert_eq!(started, ["NIT-1", "NIT-4", "NIT-3", "NIT-2"], "{tick:?}");
+        let goals = f.db.goals("NIT", false).unwrap();
+        assert_eq!(goals.iter().map(|g| (g.id, g.working)).collect::<Vec<_>>(), [(first, 1), (second, 1)], "the rows say who works on each");
+
+        // NIT-4's worker hands it in and leaves: its goal has room again, and NIT-5 is next.
+        let four = f.db.issue("NIT-4").unwrap().unwrap().claimed_by.unwrap();
+        f.db.move_issue("NIT-4", "In Review", None, None, &Actor::Agent(four)).unwrap();
+        fake.exits.borrow_mut().insert(1002, 0);
+        let tick = sup.tick(&mut f.db, false).unwrap();
+        assert_eq!(tick.started.iter().map(|w| w.issue.as_str()).collect::<Vec<_>>(), ["NIT-5"], "{tick:?}");
+
+        // Each worker previews on its own port.
+        let ports: Vec<String> = fake.launches.borrow().iter().filter_map(|l| l.env.iter().find(|(k, _)| k == "NITELY_PREVIEW_PORT").map(|(_, v)| v.clone())).collect();
+        let distinct: std::collections::BTreeSet<&String> = ports.iter().collect();
+        assert!(ports.len() >= 4 && distinct.len() == ports.len() - 1, "one port per worker running at once, one freed and given again: {ports:?}");
+    }
+
+    #[test]
+    fn a_goal_with_nothing_ready_yields_its_slots_and_a_goals_own_budget_wins() {
+        let mut f = fixture(&format!("{GATE}[crew]\nworkers = 2\ngoal_workers = 1\n"));
+        let human = Actor::Human;
+        let change = |title: &str, rank: i64, workers: Option<i64>| crate::goals::GoalChange { title: Some(title.into()), outcome: Some("o".into()), rank: Some(rank), workers, ..Default::default() };
+        // The first goal's only issue is blocked; the second may take two workers at once.
+        let blocked = f.db.save_goal("NIT", None, &change("Blocked", 1, None), &human).unwrap().id;
+        let wide = f.db.save_goal("NIT", None, &change("Wide", 2, Some(2)), &human).unwrap().id;
+        f.db.set_issue_goal("NIT-1", Some(blocked), &human).unwrap();
+        f.db.add_blocker("NIT-1", "NIT-3", &human).unwrap();
+        f.db.set_issue_goal("NIT-2", Some(wide), &human).unwrap();
+        f.db.set_issue_goal("NIT-3", Some(wide), &human).unwrap();
+        let fake = Fake { installed: vec!["claude"], ..Default::default() };
+        let mut sup = supervisor(&f, &fake);
+        let tick = sup.tick(&mut f.db, false).unwrap();
+        let mut started: Vec<&str> = tick.started.iter().map(|w| w.issue.as_str()).collect();
+        started.sort();
+        assert_eq!(started, ["NIT-2", "NIT-3"], "{tick:?}");
     }
 
     #[test]

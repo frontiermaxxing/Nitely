@@ -422,7 +422,7 @@ impl Db {
             title: Some(plan.title.clone()),
             outcome: Some(plan.outcome.clone()),
             target_date: Some(plan.target_date.clone().unwrap_or_default()),
-            state: None,
+            ..Default::default()
         };
         let goal = match resumed {
             Some(g) => self.save_goal(&v.project, Some(g.id), &change, actor)?,

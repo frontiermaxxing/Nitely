@@ -342,6 +342,14 @@ export interface Goal {
   created_at: number;
   updated_at: number;
   progress: { total: number; done: number; dropped: number; open: number };
+  /** The person's order among the project's active goals, lower first; Crew works goals in it. */
+  rank?: number | null;
+  /** How many crew workers may work on it at once; null leaves it to the playbook. */
+  workers?: number | null;
+  /** Crew workers on its issues now. */
+  working?: number;
+  /** Its issues that landed in the last day. */
+  landed_today?: number;
 }
 
 /** A goal and its issues, open and closed: what a goal row draws. */

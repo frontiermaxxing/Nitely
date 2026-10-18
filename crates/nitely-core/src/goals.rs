@@ -25,6 +25,16 @@ pub struct Goal {
     pub created_at: i64,
     pub updated_at: i64,
     pub progress: Progress,
+    /// Where the person put it among the project's active goals: lower first. None until they do;
+    /// such goals come after ranked ones, nearest target date first, then oldest.
+    pub rank: Option<i64>,
+    /// How many crew workers may work on it at once; None leaves it to the playbook's
+    /// `[crew] goal_workers`.
+    pub workers: Option<i64>,
+    /// Crew workers on its issues now.
+    pub working: i64,
+    /// Its issues that landed in the last day.
+    pub landed_today: i64,
 }
 
 /// How a goal's issues stand: every issue counts once.
@@ -54,12 +64,24 @@ pub struct GoalChange {
     /// `Some("")` clears the date.
     pub target_date: Option<String>,
     pub state: Option<String>,
+    /// `Some(0)` clears the rank.
+    pub rank: Option<i64>,
+    /// `Some(0)` clears the goal's own worker budget, leaving it to the playbook.
+    pub workers: Option<i64>,
 }
 
 const COLUMNS: &str = "g.id, g.project, g.title, g.outcome, g.target_date, g.state, g.created_by, g.created_at, g.updated_at,
     (SELECT COUNT(*) FROM issue i WHERE i.goal = g.id),
     (SELECT COUNT(*) FROM issue i WHERE i.goal = g.id AND i.state_type = 'completed'),
-    (SELECT COUNT(*) FROM issue i WHERE i.goal = g.id AND i.state_type = 'canceled')";
+    (SELECT COUNT(*) FROM issue i WHERE i.goal = g.id AND i.state_type = 'canceled'),
+    g.rank, g.workers,
+    (SELECT COUNT(*) FROM crew_worker w JOIN issue i ON i.key = w.issue_key WHERE i.goal = g.id AND w.ended_at IS NULL),
+    (SELECT COUNT(DISTINCT e.issue_key) FROM event e JOIN issue i ON i.key = e.issue_key
+      WHERE i.goal = g.id AND e.type = 'landed' AND e.ts >= CAST(strftime('%s', 'now') AS INTEGER) - 86400)";
+
+/// How a project's active goals are ordered: the person's rank, then the nearest target date,
+/// then the oldest. What Crew works first (NIT-243) and the order the goal rows show.
+const ORDER: &str = "g.state != 'active', g.rank IS NULL, g.rank, g.target_date IS NULL, g.target_date, g.id";
 
 fn goal_from_row(r: &rusqlite::Row) -> rusqlite::Result<Goal> {
     let (total, done, dropped): (i64, i64, i64) = (r.get(9)?, r.get(10)?, r.get(11)?);
@@ -74,6 +96,10 @@ fn goal_from_row(r: &rusqlite::Row) -> rusqlite::Result<Goal> {
         created_at: r.get(7)?,
         updated_at: r.get(8)?,
         progress: Progress { total, done, dropped, open: total - done - dropped },
+        rank: r.get(12)?,
+        workers: r.get(13)?,
+        working: r.get(14)?,
+        landed_today: r.get(15)?,
     })
 }
 
@@ -106,8 +132,7 @@ impl Db {
     pub fn goals(&self, project: &str, include_closed: bool) -> Result<Vec<Goal>> {
         let p = self.project(project)?.with_context(|| format!("no project {project}"))?;
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT {COLUMNS} FROM goal g WHERE g.project = ?1 AND (?2 OR g.state = 'active')
-             ORDER BY g.state != 'active', g.target_date IS NULL, g.target_date, g.id"
+            "SELECT {COLUMNS} FROM goal g WHERE g.project = ?1 AND (?2 OR g.state = 'active') ORDER BY {ORDER}"
         ))?;
         let rows = stmt.query_map(params![p.key, include_closed], goal_from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -154,6 +179,12 @@ impl Db {
             bail!("a goal's title and outcome cannot be empty");
         }
         let target = change.target_date.as_deref().map(check_date).transpose()?;
+        if change.rank.is_some_and(|r| r < 0) || change.workers.is_some_and(|w| w < 0) {
+            bail!("a goal's rank and worker budget are whole numbers, 0 to clear");
+        }
+        // 0 clears: (given, value).
+        let (rank_given, rank) = (change.rank.is_some(), change.rank.filter(|r| *r > 0));
+        let (workers_given, workers) = (change.workers.is_some(), change.workers.filter(|w| *w > 0));
         if let Some(state) = change.state.as_deref() {
             if !GOAL_STATES.contains(&state) {
                 bail!("a goal's state is one of {}", GOAL_STATES.join(", "));
@@ -167,9 +198,9 @@ impl Db {
                     bail!("a new goal needs a title and an outcome: one paragraph on what is true once it is reached");
                 };
                 self.conn.execute(
-                    "INSERT INTO goal (project, title, outcome, target_date, state, created_by, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
-                    params![p.key, title, outcome, target.flatten(), change.state.as_deref().unwrap_or("active"), actor.id(), ts],
+                    "INSERT INTO goal (project, title, outcome, target_date, state, created_by, created_at, updated_at, rank, workers)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8, ?9)",
+                    params![p.key, title, outcome, target.flatten(), change.state.as_deref().unwrap_or("active"), actor.id(), ts, rank, workers],
                 )?;
                 self.conn.last_insert_rowid()
             }
@@ -178,9 +209,10 @@ impl Db {
                 // fields at once both keep their edit.
                 let changed = self.conn.execute(
                     "UPDATE goal SET title = COALESCE(?2, title), outcome = COALESCE(?3, outcome),
-                       target_date = CASE WHEN ?4 THEN ?5 ELSE target_date END, state = COALESCE(?6, state), updated_at = ?7
+                       target_date = CASE WHEN ?4 THEN ?5 ELSE target_date END, state = COALESCE(?6, state), updated_at = ?7,
+                       rank = CASE WHEN ?8 THEN ?9 ELSE rank END, workers = CASE WHEN ?10 THEN ?11 ELSE workers END
                      WHERE id = ?1",
-                    params![id, title, outcome, target.is_some(), target.flatten(), change.state, ts],
+                    params![id, title, outcome, target.is_some(), target.flatten(), change.state, ts, rank_given, rank, workers_given, workers],
                 )?;
                 if changed == 0 {
                     bail!("no goal {id}");
@@ -357,4 +389,25 @@ mod tests {
         let cleared = db.save_goal("NIT", Some(later.id), &GoalChange { target_date: Some(String::new()), ..Default::default() }, &agent).unwrap();
         assert_eq!(cleared.target_date, None);
     }
+
+    #[test]
+    fn the_person_ranks_goals_and_sets_their_budget_and_rows_count_the_crew() {
+        let db = db();
+        let human = Actor::Human;
+        let new = |t: &str, d: Option<&str>| GoalChange { title: Some(t.into()), outcome: Some("o".into()), target_date: d.map(str::to_string), ..Default::default() };
+        let soon = db.save_goal("NIT", None, &new("Soon", Some("2026-11-01")), &human).unwrap();
+        let old = db.save_goal("NIT", None, &new("Old", None), &human).unwrap();
+        let picked = db.save_goal("NIT", None, &new("Picked", None), &human).unwrap();
+        let titles = |db: &Db| db.goals("NIT", false).unwrap().into_iter().map(|g| g.title).collect::<Vec<_>>();
+        assert_eq!(titles(&db), ["Soon", "Old", "Picked"], "unranked: nearest date, then oldest");
+        db.save_goal("NIT", Some(picked.id), &GoalChange { rank: Some(1), workers: Some(2), ..Default::default() }, &human).unwrap();
+        db.save_goal("NIT", Some(old.id), &GoalChange { rank: Some(2), ..Default::default() }, &human).unwrap();
+        assert_eq!(titles(&db), ["Picked", "Old", "Soon"], "ranked ones first, in rank order");
+        let g = db.goal(picked.id).unwrap().unwrap();
+        assert_eq!((g.rank, g.workers, g.working, g.landed_today), (Some(1), Some(2), 0, 0));
+        let cleared = db.save_goal("NIT", Some(picked.id), &GoalChange { rank: Some(0), workers: Some(0), ..Default::default() }, &human).unwrap();
+        assert_eq!((cleared.rank, cleared.workers), (None, None), "0 clears");
+        assert!(db.save_goal("NIT", Some(soon.id), &GoalChange { rank: Some(-1), ..Default::default() }, &human).is_err());
+    }
+
 }

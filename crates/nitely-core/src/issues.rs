@@ -1842,7 +1842,7 @@ mod tests {
         db.create_project("NIT", "Nitely").unwrap();
         let h = Actor::Human;
         let goal = |db: &Db, title: &str, target: Option<&str>| {
-            let change = crate::goals::GoalChange { title: Some(title.into()), outcome: Some("o".into()), target_date: target.map(str::to_string), state: None };
+            let change = crate::goals::GoalChange { title: Some(title.into()), outcome: Some("o".into()), target_date: target.map(str::to_string), ..Default::default() };
             db.save_goal("NIT", None, &change, &h).unwrap().id
         };
         let (later, sooner, open, shelved) = (goal(&db, "Later", Some("2027-03-01")), goal(&db, "Sooner", Some("2026-11-01")), goal(&db, "Open", None), goal(&db, "Shelved", Some("2026-10-20")));

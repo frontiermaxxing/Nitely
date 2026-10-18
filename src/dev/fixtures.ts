@@ -1928,6 +1928,9 @@ function goalRecord(g: (typeof GOALS)[number]): Goal {
     created_at: NOW - 5 * 24 * HOUR,
     updated_at: NOW - 5 * 24 * HOUR,
     progress: { total: issues.length, done, dropped, open: issues.length - done - dropped },
+    // The crew on it: one worker per issue an agent moves, and what of it landed today.
+    working: issues.filter((i) => i.state_type === "started").length,
+    landed_today: Math.min(done, 2),
   };
 }
 

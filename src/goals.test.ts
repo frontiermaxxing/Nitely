@@ -2,7 +2,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { goalCounts, goalOrder, targetLine } from "./goals.ts";
+import { crewOnGoal, goalCounts, goalOrder, targetLine } from "./goals.ts";
 import type { IssueRecord } from "./types.ts";
 
 const issue = (key: string, state: string, state_type: string): IssueRecord =>
@@ -39,4 +39,12 @@ test("the target date says how far off or how late it is", () => {
   assert.deepEqual(targetLine("2026-10-14", today, false), { text: "by Oct 14 · 3 days late", late: true });
   assert.deepEqual(targetLine("2026-10-14", today, true), { text: "by Oct 14", late: false });
   assert.equal(targetLine("2027-01-05", today, false)?.text, "by Jan 5, 2027 · in 80 days");
+});
+
+test("a goal row says who works on it and what landed today, and nothing when neither", () => {
+  assert.equal(crewOnGoal({ working: 2, landed_today: 3 }), "2 working · 3 landed today");
+  assert.equal(crewOnGoal({ working: 1, landed_today: 0 }), "1 working");
+  assert.equal(crewOnGoal({ landed_today: 4 }), "4 landed today");
+  assert.equal(crewOnGoal({ working: 0, landed_today: 0 }), null);
+  assert.equal(crewOnGoal({}), null);
 });

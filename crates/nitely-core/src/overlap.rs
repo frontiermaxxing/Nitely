@@ -6,7 +6,7 @@
 
 use anyhow::Result;
 use serde::Serialize;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use crate::db::Db;
@@ -222,9 +222,54 @@ fn choose(candidates: &[(String, i64, i64)], clash: &Clash) -> Option<(String, O
     }
 }
 
+/// What Crew works first (NIT-243, docs/coordinator.md): the project's active goals in the
+/// person's order, each with room for so many workers.
+#[derive(Debug, Clone, Default)]
+pub struct GoalOrder {
+    /// The goal of each open issue that is in an active goal.
+    pub goal_of: HashMap<String, i64>,
+    /// Active goals in order that have room for another worker.
+    pub open: Vec<i64>,
+    /// Active goals at their worker budget: their issues wait, unless priority 1.
+    pub full: HashSet<i64>,
+}
+
+impl GoalOrder {
+    /// The candidates (key, urgency rank, number) as Crew takes them: priority 1 first, wherever
+    /// it is; then the open goals' issues, goal by goal, each goal's in plan order (the order they
+    /// were filed); then issues in no goal, as `next_task` orders them. A full goal's other issues
+    /// are left out.
+    pub fn arrange(&self, candidates: &[(String, i64, i64)]) -> Vec<(String, i64, i64)> {
+        // (class, goal's place, order within it, candidate): urgent, in a goal, in none.
+        let mut keyed: Vec<(u8, usize, i64, usize)> = candidates
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| {
+                let at = i as i64;
+                match self.goal_of.get(&c.0) {
+                    _ if c.1 <= 1 => Some((0, 0, at, i)),
+                    Some(g) if self.full.contains(g) => None,
+                    Some(g) => Some(match self.open.iter().position(|o| o == g) {
+                        Some(place) => (1, place, c.2, i),
+                        None => (2, 0, at, i),
+                    }),
+                    None => Some((2, 0, at, i)),
+                }
+            })
+            .collect();
+        keyed.sort();
+        keyed.into_iter().map(|(_, _, _, i)| candidates[i].clone()).collect()
+    }
+}
+
 /// `Db::next_task`, preferring an issue clear of the files work in flight holds (see `choose`).
 /// The playbook's `crew.shared_files` of the project's repos count for a quarter.
 pub fn next_task(config: &crate::Config, db: &mut Db, project: &str, agent: &str, except: &[String]) -> Result<Option<Picked>> {
+    next_task_ordered(config, db, project, agent, except, None)
+}
+
+/// `next_task`, taking the candidates in `order` first (Crew's goals) when given.
+pub fn next_task_ordered(config: &crate::Config, db: &mut Db, project: &str, agent: &str, except: &[String], order: Option<&GoalOrder>) -> Result<Option<Picked>> {
     // One pick at a time: reading what is held and claiming happen under one lock, so a second
     // caller sees the first one's claim (its body's paths) as work in flight.
     let _turn = PickLock::take(db);
@@ -243,7 +288,8 @@ pub fn next_task(config: &crate::Config, db: &mut Db, project: &str, agent: &str
     };
     let mut why = None;
     let issue = db.next_task_choosing(project, agent, except, |candidates| {
-        let (key, reason) = choose(candidates, &clash)?;
+        let arranged = order.map(|o| o.arrange(candidates));
+        let (key, reason) = choose(arranged.as_deref().unwrap_or(candidates), &clash)?;
         why = reason;
         Some(key)
     })?;

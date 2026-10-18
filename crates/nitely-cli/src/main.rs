@@ -440,6 +440,14 @@ enum GoalCmd {
         /// active, done or dropped.
         #[arg(long)]
         state: Option<String>,
+        /// Its place among the project's active goals, lower first: Crew works them in this
+        /// order. 0 clears it.
+        #[arg(long)]
+        rank: Option<i64>,
+        /// How many crew workers may work on it at once; 0 leaves it to the playbook's
+        /// [crew] goal_workers.
+        #[arg(long)]
+        workers: Option<i64>,
         #[arg(long)]
         project: Option<String>,
     },
@@ -985,12 +993,12 @@ fn run(cmd: Cmd) -> Result<()> {
                     print_json(&db.goals(&project, all)?)
                 }
                 GoalCmd::Show { id } => print_json(&db.goal_detail(id)?),
-                GoalCmd::Save { id, title, outcome, target, state, project } => {
+                GoalCmd::Save { id, title, outcome, target, state, rank, workers, project } => {
                     let project = match id {
                         Some(_) => String::new(),
                         None => resolve_project(&Config::load()?, &db, project.as_deref(), &cwd()?)?,
                     };
-                    let change = nitely_core::goals::GoalChange { title, outcome, target_date: target, state };
+                    let change = nitely_core::goals::GoalChange { title, outcome, target_date: target, state, rank, workers };
                     print_json(&db.save_goal(&project, id, &change, &me)?)
                 }
                 GoalCmd::Attach { key, goal } => print_json(&db.set_issue_goal(&key, Some(goal).filter(|g| *g > 0), &me)?),

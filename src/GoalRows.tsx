@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "./backend";
 import type { GoalDetail } from "./types";
-import { goalCounts, goalOrder, targetLine } from "./goals";
+import { crewOnGoal, goalCounts, goalOrder, targetLine } from "./goals";
 import { IssueToken, Meter } from "./ui";
 import "./goal-rows.css";
 
@@ -53,6 +53,18 @@ export function GoalRows(props: { project?: string; version: number; onOpenIssue
   );
 }
 
+/** The crew on a goal: workers on its issues now, and what landed in the last day. Nothing when neither. */
+function CrewOnGoal(props: { goal: GoalDetail["goal"] }) {
+  const words = crewOnGoal(props.goal);
+  if (!words) return null;
+  const budget = props.goal.workers ? `, at most ${props.goal.workers} at once` : "";
+  return (
+    <span className="goal-crew" title={`Crew workers on this goal now${budget}, and its issues landed in the last 24 hours`}>
+      {words}
+    </span>
+  );
+}
+
 /** One goal: its title and date, a meter of whose move its issues are, then the issues in station order. */
 export function GoalRow(props: { detail: GoalDetail; showProject?: boolean; focused?: boolean; onOpenIssue: (key: string) => void }) {
   const { goal } = props.detail;
@@ -74,6 +86,7 @@ export function GoalRow(props: { detail: GoalDetail; showProject?: boolean; focu
         </span>
         {props.showProject && <span className="mono goal-project">{goal.project}</span>}
         {when && <span className={`goal-when${when.late ? " goal-late" : ""}`}>{when.text}</span>}
+        <CrewOnGoal goal={goal} />
         <span className="goal-count" title={`${c.done} of ${total} issues done`}>
           <span className="mono">{c.done}</span>/<span className="mono">{total}</span> done
         </span>
