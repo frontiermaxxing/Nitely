@@ -323,7 +323,15 @@ pub fn clear_dead_lock(root: &Path) -> Option<String> {
     if pid == std::process::id() || crate::crew::pid_alive(pid) {
         return None;
     }
-    std::fs::remove_file(&path).ok()?;
+    // Moved aside first, then checked: when the dead land's lock was released and a new land took
+    // the lock in between, what was moved is the new land's, and it goes straight back.
+    let aside = path.with_extension(format!("dead-{}", std::process::id()));
+    std::fs::rename(&path, &aside).ok()?;
+    if std::fs::read_to_string(&aside).ok().as_deref() != Some(text.as_str()) {
+        std::fs::rename(&aside, &path).ok();
+        return None;
+    }
+    std::fs::remove_file(&aside).ok();
     Some(holder)
 }
 

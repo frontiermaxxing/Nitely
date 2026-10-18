@@ -387,6 +387,8 @@ struct Running {
     started_at: i64,
     log: PathBuf,
     process: Box<dyn Process>,
+    /// The log's length when last looked at, and when it last grew: a sign the worker is alive.
+    seen: std::cell::Cell<(u64, i64)>,
 }
 
 /// Tokens a project used since a time (`usage::project_tokens_since` over a scan).
@@ -762,6 +764,8 @@ impl Supervisor {
     /// Starts the workers whose worktree setup finished, sends a failed or too slow one to a
     /// person, and, when `start` is false (the crew is stopping), hands finished ones back.
     fn advance(&mut self, db: &mut Db, playbook: &Playbook, start: bool, tick: &mut Tick) -> Result<()> {
+        let worktrees = playbook.worktrees_folder(&self.repo_root).unwrap_or_else(|| self.repo_root.clone());
+        let disk_short = start && !self.preparing.is_empty() && crate::machine::disk_short(&worktrees, playbook.crew.min_free_disk_gb).is_some();
         let deadline = playbook.crew.setup_timeout_minutes.max(1) as i64 * 60;
         let now = (self.clock)().ts;
         let mut i = 0;
@@ -785,8 +789,9 @@ impl Supervisor {
                 continue;
             };
             // Set up and ready, a worker still launches only while the machine has memory for it
-            // (NIT-266); until then it waits here, its setup done, and is looked at again next tick.
-            if start && matches!(exited, Ok(0)) && self.agents.memory_turn().is_some() {
+            // (NIT-266) and the disk room (NIT-246); until then it waits here, its setup done, and is
+            // looked at again next tick.
+            if start && matches!(exited, Ok(0)) && (disk_short || self.agents.memory_turn().is_some()) {
                 i += 1;
                 continue;
             }
@@ -882,7 +887,7 @@ impl Supervisor {
         db.crew_worker_pid(id, process.pid())?;
         db.log_event(&self.actor(), Some(&issue.key), Some(&worktree.to_string_lossy()), "crew_started", &format!("Crew worker started ({agent}), log: {}", log.display()))?;
         let line = WorkerLine { issue: issue.key.clone(), agent: agent.into(), outcome: String::new(), log: log.to_string_lossy().into_owned() };
-        self.running.push(Running { id, issue: issue.key.clone(), agent: agent.into(), agent_id, worktree, started_at: ts, log, process });
+        self.running.push(Running { id, issue: issue.key.clone(), agent: agent.into(), agent_id, worktree, started_at: ts, log, process, seen: std::cell::Cell::new((0, ts)) });
         Ok(Start::Running(line))
     }
 
@@ -938,6 +943,7 @@ impl Supervisor {
                 started_at: w.started_at,
                 log: PathBuf::from(w.log),
                 process: Box::new(Gone),
+                seen: std::cell::Cell::new((0, w.started_at)),
             };
             match w.pid.and_then(|pid| self.agents.adopt(pid)) {
                 Some(process) => self.running.push(Running { process, ..running }),
@@ -986,9 +992,20 @@ impl Supervisor {
     /// When a running worker last showed it is alive: its log last grew, or it last called a nitely
     /// tool (a report, a note, a submit), or it started.
     fn last_sign(&self, db: &Db, w: &Running) -> Result<i64> {
-        let logged = std::fs::metadata(&w.log).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64);
+        // The log's length, read through an open handle: Windows can keep a file's directory entry
+        // (its size and modified time) stale while the worker still holds the file open writing.
+        let len = std::fs::File::open(&w.log).and_then(|f| f.metadata()).map(|m| m.len()).ok();
+        let (seen, grown) = w.seen.get();
+        let grown = match len {
+            Some(l) if l != seen => {
+                let now = (self.clock)().ts;
+                w.seen.set((l, now));
+                now
+            }
+            _ => grown,
+        };
         let called: Option<i64> = db.conn.query_row("SELECT MAX(ts) FROM event WHERE actor = ?1", [&w.agent_id], |r| r.get(0))?;
-        Ok([Some(w.started_at), logged, called].into_iter().flatten().max().unwrap_or(w.started_at))
+        Ok([w.started_at, grown, called.unwrap_or(0)].into_iter().max().unwrap_or(w.started_at))
     }
 
     /// Records how a worker ended, read from its issue's state, and deals with a worker that ended
@@ -1239,7 +1256,11 @@ impl Supervisor {
             return Ok(false);
         }
         let opts = crate::submit::SubmitOptions { dir: &job.worktree, issue_key: Some(key), skip_review: job.skip_review, local_only: job.local_only, batch: true };
-        let again = crate::submit_job::enqueue(db, &opts, &Actor::Agent(worker.agent_id.clone()))?;
+        // One that cannot be handed in as it is (uncommitted changes since) goes to a new worker
+        // instead, with its handoff; it never holds up the rest of the pass.
+        let Ok(again) = crate::submit_job::enqueue(db, &opts, &Actor::Agent(worker.agent_id.clone())) else {
+            return Ok(false);
+        };
         db.mark_submit_jobs_delivered(&[job.id])?;
         match self.agents.run_submit_job(&self.nitely, &again) {
             Ok(Some(pid)) => {
@@ -2790,7 +2811,14 @@ workers = 1
         // Quiet for 19 minutes: still working.
         at.set(at.get() + 19 * 60);
         assert!(sup.tick(&mut f.db, false).unwrap().ended.is_empty());
-        at.set(at.get() + 2 * 60);
+        // Output in its log (read through a handle, not the directory entry) keeps it alive.
+        let log = fake.launches.borrow()[0].log.clone();
+        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        std::fs::write(&log, "still building").unwrap();
+        at.set(at.get() + 19 * 60);
+        assert!(sup.tick(&mut f.db, false).unwrap().ended.is_empty(), "its log grew since the last look");
+        // Silent for 21 minutes after the supervisor saw it last grow: hung.
+        at.set(at.get() + 21 * 60);
         let tick = sup.tick(&mut f.db, false).unwrap();
         assert_eq!(tick.ended[0].outcome, "failed", "{tick:?}");
         assert!(fake.stopped.borrow().contains(&1001), "stopped with what it started");
@@ -2852,6 +2880,28 @@ workers = 1
         sup.tick(&mut f.db, false).unwrap();
         assert_eq!(fake.resubmits.borrow().len(), 1);
         assert_eq!(f.db.issue("NIT-1").unwrap().unwrap().state, "Todo");
+    }
+
+    #[test]
+    fn a_worker_whose_setup_finished_waits_while_the_disk_is_short() {
+        let mut f = fixture(&format!("{GATE}[crew]
+workers = 1
+"));
+        let fake = Fake { installed: vec!["claude"], hang_setup: true, ..Default::default() };
+        let mut sup = supervisor(&f, &fake);
+        sup.tick(&mut f.db, false).unwrap();
+        assert_eq!(sup.setting_up(), 1);
+        // Its setup ends while the disk has filled up: it does not launch, and waits.
+        std::fs::write(f.repo.join(playbook::PLAYBOOK_PATH), format!("[worktree]
+dir = \"../wt/{{key}}\"
+{GATE}[crew]
+workers = 1
+min_free_disk_gb = 100000000
+")).unwrap();
+        fake.exits.borrow_mut().insert(5000, 0);
+        let tick = sup.tick(&mut f.db, false).unwrap();
+        assert!(tick.started.is_empty() && fake.launches.borrow().is_empty(), "{tick:?}");
+        assert_eq!(sup.setting_up(), 1, "still waiting, its setup done");
     }
 
     #[test]
