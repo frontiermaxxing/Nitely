@@ -646,9 +646,12 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
     // A crew worker runs in the worktree until land returns to it; the supervisor removes the
     // worktree once the worker has exited (crew::Supervisor::clean_up_landed).
     let crew_in_it = !temporary && db.crew_worker_in(&worktree)?;
-    let (cleanup, held_by) = if crew_in_it && opts.keep {
-        // Said on the issue, so the supervisor does not remove it once the worker exits.
+    if !temporary && opts.keep {
+        // Said on the issue, so neither a crew supervisor once its worker exits nor a later land
+        // (leftovers.rs) removes it.
         db.log_event(actor, Some(key), Some(&worktree.to_string_lossy()), "land_kept", "Kept the worktree and branch (--keep)")?;
+    }
+    let (cleanup, held_by) = if crew_in_it && opts.keep {
         (format!("kept {} (--keep)", worktree.display()), vec![])
     } else if crew_in_it {
         (format!("kept {} whole: the crew worker running in it removes it once it exits", worktree.display()), vec![])
@@ -1637,6 +1640,40 @@ when_changed = ["billing"]
         let (b, _) = f.submitted("Bump a crate", "Cargo.lock", "x");
         let r = f.land(&b);
         assert!(r.landed && r.warnings.is_empty(), "the after step set it up: {r:?}");
+        std::fs::remove_dir_all(&f.base).ok();
+    }
+
+    #[test]
+    fn later_lands_leave_a_kept_worktree_and_remove_closed_ones_nothing_keeps() {
+        let mut f = fixture();
+        // Landed with --keep: kept, and said so for later lands.
+        let (a, kept) = f.submitted("Kept", "kept.txt", "x");
+        let dir = f.repo.to_string_lossy().into_owned();
+        let opts = LandOptions { dir: &dir, issue_key: &a, push: true, keep: true, break_lock: false };
+        assert!(land(&mut f.db, &crate::Config::default(), &opts, &f.actor).unwrap().landed);
+        // Closed without a land: its branch merged by hand, the issue canceled.
+        let (c, merged) = f.submitted("Merged by hand", "hand.txt", "y");
+        let branch = sh(&merged, &["rev-parse", "--abbrev-ref", "HEAD"]).trim().to_string();
+        sh(&f.repo, &["merge", "-q", "--ff-only", &branch]);
+        f.db.move_issue(&c, "Canceled", None, Some("merged by hand"), &f.actor).unwrap();
+        // What a land that git stopped halfway leaves: a folder git no longer lists.
+        let stray = merged.parent().unwrap().join("nit-stray-left-behind");
+        std::fs::create_dir_all(stray.join("target")).unwrap();
+        f.db.log_event(&f.actor, Some(&c), Some(&stray.to_string_lossy()), "worktree_held", "Worktree kept after landing").unwrap();
+
+        let pb = Playbook::load(&f.repo).unwrap();
+        let found = crate::leftovers::leftovers(&f.db, &f.repo, &pb, false, &Actor::Human).unwrap();
+        let of = |p: &Path| found.iter().find(|l| crate::paths::normalize(&l.worktree.to_string_lossy()) == crate::paths::normalize(&p.to_string_lossy())).cloned();
+        assert!(of(&kept).and_then(|l| l.stays).is_some_and(|s| s.contains("on purpose")), "{found:?}");
+        assert!(of(&merged).is_some_and(|l| l.stays.is_none()), "{found:?}");
+        assert!(of(&stray).is_some_and(|l| l.stays.is_none()), "{found:?}");
+
+        let (b, _) = f.submitted("Next", "next.txt", "z");
+        let r = f.land(&b);
+        assert!(r.landed, "{r:?}");
+        assert!(kept.exists(), "--keep holds at the next land too");
+        assert!(!merged.exists() && !stray.exists(), "{r:?}");
+        assert_eq!(r.tidied.len(), 2, "{r:?}");
         std::fs::remove_dir_all(&f.base).ok();
     }
 

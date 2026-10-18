@@ -411,8 +411,9 @@ enum LanesCmd {
     Show { id: i64 },
     /// Take a queued run out of the queue, when its requester will not come for it.
     Cancel { id: i64 },
-    /// Worktrees of landed, closed issues that a land had to keep (a process still used them): each
-    /// with why it stays. The next land removes the ones nothing keeps; --remove does it now.
+    /// Worktrees of closed issues still on disk, most often ones a land had to keep because a
+    /// process still used them: each with why it stays. The next land removes the ones nothing
+    /// keeps; --remove does it now.
     Leftovers {
         /// Only this project's repos.
         #[arg(long)]

@@ -664,10 +664,9 @@ fn land_prefix(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stacked: Vec<S
         let (cleanup, held_by) = match &s.worktree {
             Some(wt) if s.entry.keep || !moved => {
                 let why = if moved { "--keep" } else { "it gained commits after the gate" };
-                // Said on the issue, so a crew supervisor does not remove it once its worker exits.
-                if db.crew_worker_in(wt)? {
-                    db.log_event(&actor, Some(&s.entry.issue), Some(&wt.to_string_lossy()), "land_kept", &format!("Kept the worktree and branch ({why})"))?;
-                }
+                // Said on the issue, so neither a crew supervisor once its worker exits nor a later
+                // land (leftovers.rs) removes it.
+                db.log_event(&actor, Some(&s.entry.issue), Some(&wt.to_string_lossy()), "land_kept", &format!("Kept the worktree and branch ({why})"))?;
                 (format!("kept {} and {} ({why})", wt.display(), s.branch), vec![])
             }
             Some(wt) if db.crew_worker_in(wt)? => (format!("kept {} whole: the crew worker running in it removes it once it exits", wt.display()), vec![]),
