@@ -515,7 +515,7 @@ fn tools() -> Value {
         },
         {
             "name": "propose_goal",
-            "description": "Draft a goal and the issues that reach it from what the person asked for, for them to decide in the Inbox: approving creates the goal and files every issue into it in one batch (they may edit or leave items out first); rejecting files nothing. Checked as file_issues checks a batch (refs, blockers, cycles) before anything is filed, but not held to its 10 items: the person decides the plan as one. Keep it to what one goal needs; a plan of more than about 30 issues is likely two goals. Pass planning_issue when you were handed a \"Plan a goal\" issue; it closes once the plan is filed. Do not file the issues yourself.",
+            "description": "Draft a goal and the issues that reach it from what the person asked for, for them to decide in the Inbox: approving creates the goal and files every issue into it in one batch (they may edit or leave items out first); rejecting files nothing. Checked as file_issues checks a batch (refs, blockers, cycles) before anything is filed, but not held to its 10 items: the person decides the plan as one. Keep it to what one goal needs; a plan of more than about 30 issues is likely two goals. List the issues in the order to work them; each names the files it touches and its size. Pass planning_issue when you were handed a \"Plan a goal\" issue; it closes once the plan is filed. Do not file the issues yourself.",
             "inputSchema": { "type": "object", "required": ["sentence", "title", "outcome"], "properties": {
                 "sentence": { "type": "string", "description": "What the person asked for, in their words." },
                 "title": { "type": "string" },
@@ -531,7 +531,9 @@ fn tools() -> Value {
                     "labels": { "type": "array", "items": { "type": "string" } },
                     "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Refs of this plan or existing issue keys." },
                     "owner": { "type": "string", "enum": OWNERS },
-                    "state": { "type": "string", "enum": ["Todo", "Backlog", "Needs You"] }
+                    "state": { "type": "string", "enum": ["Todo", "Backlog", "Needs You"] },
+                    "touches": { "type": "array", "items": { "type": "string" }, "description": "The files it will change (src/App.tsx), so parallel workers stay apart. Required except for a live check or the person's own task." },
+                    "size": { "type": "string", "enum": ["S", "M", "L"], "description": "S: an hour or two, M: a day, L: more." }
                 } } },
                 "existing": { "type": "array", "items": { "type": "string" }, "description": "Open issues of the project that belong in the goal." },
                 "planning_issue": { "type": "string" },

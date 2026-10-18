@@ -1302,6 +1302,9 @@ impl Supervisor {
 
 /// The brief every worker gets on stdin.
 pub fn brief(issue: &IssueRecord, project: &str, worktree: &Path, branch: &str, repo: &Path) -> String {
+    if crate::goal_plans::is_planning(issue) {
+        return planner_brief(issue, project, worktree, repo);
+    }
     // A light worktree with lanes builds through `run` (docs/build-lanes.md).
     let lanes = Playbook::load(repo).ok().is_some_and(|pb| pb.lanes.is_some());
     let light = if lanes && crate::light::is_light(worktree) { format!("\n{}\n", crate::light::RUN_LINE) } else { String::new() };
@@ -1323,6 +1326,25 @@ Work only there; never edit or commit in {repo}.
 
 Then end. Do not take another issue: Nitely starts a new worker for it.
 {light}"
+    )
+}
+
+/// The brief of a worker that plans a goal from the person's sentence: it reads and drafts, and
+/// changes nothing. `propose_goal` closes its issue, which the supervisor reads as the work done.
+fn planner_brief(issue: &IssueRecord, project: &str, worktree: &Path, repo: &Path) -> String {
+    let (key, title, wt, repo) = (&issue.key, &issue.title, worktree.display(), repo.display());
+    format!(
+        "You are a Nitely crew worker: Nitely started you to plan a goal, {key}, \"{title}\", in project {project}. \
+Nobody is watching this session; nobody will answer a question here.
+
+The issue is claimed for you. Its worktree, {wt}, is there for you to read the code: change nothing in it, and never edit or commit in {repo}.
+
+1. Read the issue with get_issue {key}: the person's sentence, and how to plan it. Then the repo's AGENTS.md and the project's brief (get_project).
+2. Draft the plan with propose_goal, passing planning_issue {key}: the goal, its issues in the order to work them, each with the files it touches and its size, and the existing issues that belong in it. Call report with key {key} at each step, one line.
+3. If the sentence is too unclear to plan, ask it, move {key} to Needs You, leave a handoff note and stop: do not wait for the answer.
+4. Before you stop, leave a note on {key} with handoff: true: the plan's issue, or why there is none.
+
+Do not commit, submit or file issues yourself: the person approves the plan in the Inbox, and that files them. Then end."
     )
 }
 
@@ -2222,6 +2244,21 @@ mod tests {
         assert_eq!(quiet_until("09:00-17:30", at(8, 59)).unwrap(), None);
         assert!(quiet_until("late", 0).is_err());
         assert!(quiet_until("25:00-07:00", 0).is_err());
+    }
+
+    #[test]
+    fn a_planning_issue_gets_the_planners_brief() {
+        let issue = IssueRecord {
+            key: "NIT-9".into(),
+            title: "Plan a goal: make Nitely installable".into(),
+            labels: vec!["goal".into(), "planning".into()],
+            ..Default::default()
+        };
+        let b = brief(&issue, "NIT", Path::new("/w/nit-9"), "claude/nit-9-plan", Path::new("/r"));
+        for part in ["plan a goal, NIT-9", "propose_goal, passing planning_issue NIT-9", "files it touches", "change nothing in it", "Do not commit, submit"] {
+            assert!(b.contains(part), "missing {part:?} in {b}");
+        }
+        assert!(!b.contains("submit (without wait)"));
     }
 
     #[test]

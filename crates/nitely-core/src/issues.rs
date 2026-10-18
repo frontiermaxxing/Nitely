@@ -1230,27 +1230,29 @@ impl Db {
     ) -> Result<Option<IssueRecord>> {
         let ts = now();
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        // Each candidate with its goal's place: 0 for an active goal with a target date, 1 for one
-        // without, 2 for no active goal; then the target date.
-        let candidates: Vec<(String, i64, i64, i64, Option<String>)> = {
+        // Each candidate with whether it plans a goal (0: a whole goal waits on it, so it goes
+        // ahead of other work of its urgency), its goal's place: 0 for an active goal with a target
+        // date, 1 for one without, 2 for no active goal; then the target date.
+        let candidates: Vec<(String, i64, i64, i64, i64, Option<String>)> = {
             let mut stmt = tx.prepare(
                 "SELECT i.key, i.priority, i.number,
+                        CASE WHEN i.labels LIKE '%\"planning\"%' THEN 0 ELSE 1 END,
                         CASE WHEN g.id IS NULL THEN 2 WHEN g.target_date IS NULL THEN 1 ELSE 0 END, g.target_date
                  FROM issue i LEFT JOIN goal g ON g.id = i.goal AND g.state = 'active'
                  WHERE i.project = ?1 COLLATE NOCASE AND i.origin = 'nitely' AND i.owner != 'human'
                    AND (i.state = 'Todo' OR (i.state = 'In Progress' AND i.claimed_at < ?2))",
             )?;
-            let rows = stmt.query_map(params![project, ts - CLAIM_TTL_SECS], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?;
+            let rows = stmt.query_map(params![project, ts - CLAIM_TTL_SECS], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?;
             rows.collect::<rusqlite::Result<_>>()?
         };
         let deps = Deps::load(&tx)?;
         let mut ready: Vec<_> = candidates
             .into_iter()
             .filter(|(k, ..)| deps.blocked_by(k).is_empty() && !except.iter().any(|e| e.eq_ignore_ascii_case(k)))
-            .map(|(k, priority, number, goal, target)| ((rank(deps.urgency(&k, priority)), goal, target, number), k))
+            .map(|(k, priority, number, planning, goal, target)| ((rank(deps.urgency(&k, priority)), planning, goal, target, number), k))
             .collect();
         ready.sort();
-        let ready: Vec<(String, i64, i64)> = ready.into_iter().map(|((r, _, _, number), k)| (k, r, number)).collect();
+        let ready: Vec<(String, i64, i64)> = ready.into_iter().map(|((r, _, _, _, number), k)| (k, r, number)).collect();
         let key = choose(&ready).filter(|k| ready.iter().any(|(r, _, _)| r == k));
         let Some(key) = key else {
             return Ok(None);

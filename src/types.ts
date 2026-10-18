@@ -487,6 +487,10 @@ export interface PlanItem {
   blocked_by?: string[];
   owner?: string;
   state?: string;
+  /** The files it will change, which Crew uses to keep parallel workers apart. */
+  touches?: string[];
+  /** S, M or L. */
+  size?: string;
 }
 
 /** A goal and its issues an agent drafted from the person's sentence, decided once in the Inbox. */

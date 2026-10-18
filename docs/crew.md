@@ -93,6 +93,14 @@ labels name one of them collides, and a clear issue at most one urgency level be
 a quarter. Whenever in-flight work changed the pick, the result says why (`NIT-40 holds src/Inbox.tsx`),
 and the crew notes it on the issue. The branch map shows what each issue holds on hover.
 
+A "Plan a goal" issue (the palette's sentence, labeled `planning`) goes ahead of other work of its
+urgency, since a whole goal waits on it; only more urgent work goes first. Its worker gets the
+planner's brief instead (crew.rs `planner_brief`): read the issue, the brief and the code, draft the
+plan with `propose_goal` (the goal, its issues in the order to work them, each with the files it
+touches and its size, and existing issues that belong in it), and change nothing. The plan closes
+the issue and waits in the Inbox as one decision; approving it files the issues, and each one's
+files go into its body, where the overlap check above reads them before any branch exists.
+
 Which agent: the first in `agents` that is installed and not failing to start. An issue that already
 has a branch from an earlier attempt keeps that branch's vendor when it is in the list, so a second
 attempt continues the first one's work instead of starting a new branch beside it.

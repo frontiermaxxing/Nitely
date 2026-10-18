@@ -29,4 +29,5 @@
 .gp-ref { color: var(--fg-3); font-size: 11.5px; }
 .gp-item-title { min-width: 0; overflow-wrap: anywhere; }
 .gp-item-meta { color: var(--fg-3); font-size: var(--text-xs); }
+.gp-item-touches { flex-basis: 100%; color: var(--fg-3); font-size: 11px; overflow-wrap: anywhere; padding-left: 20px; }
 .gp-left .gp-item-title { color: var(--fg-3); text-decoration: line-through; }

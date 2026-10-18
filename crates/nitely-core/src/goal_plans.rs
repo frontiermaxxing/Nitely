@@ -31,6 +31,64 @@ pub struct PlanItem {
     pub owner: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
+    /// The files it will change, so Crew keeps parallel workers out of each other's files before
+    /// either has a branch (docs/coordinator.md, decision 3). Written into the filed issue's body,
+    /// where the overlap check reads paths.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub touches: Vec<String>,
+    /// S, M or L: an hour or two, a day, more than a day of one agent's work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<String>,
+}
+
+/// The label of a "Plan a goal" issue: `next_task` and Crew take it ahead of other work of the same
+/// urgency, since a whole goal waits on it, and Crew gives its worker the planner's brief.
+pub const PLANNING_LABEL: &str = "planning";
+
+/// Whether `issue` asks for a goal plan.
+pub fn is_planning(issue: &IssueRecord) -> bool {
+    issue.labels.iter().any(|l| l.eq_ignore_ascii_case(PLANNING_LABEL))
+}
+
+/// Sizes a planned issue may have.
+pub const SIZES: &[&str] = &["S", "M", "L"];
+
+impl PlanItem {
+    /// A live check or the person's own task changes no files; every other issue names them.
+    fn changes_files(&self) -> bool {
+        self.kind != "live-check" && self.owner.as_deref() != Some("human")
+    }
+
+    /// Why this item cannot be planned as it is, if it cannot.
+    fn check(&self) -> Option<String> {
+        let r = &self.local_ref;
+        if let Some(s) = self.size.as_deref().filter(|s| !SIZES.contains(s)) {
+            return Some(format!("{r}: size is S, M or L, not {s}"));
+        }
+        if self.changes_files() && self.touches.is_empty() {
+            return Some(format!(
+                "{r}: name the files it will change in touches (paths like src/App.tsx), so Crew keeps parallel workers apart; only a live check or the person's own task leaves it empty"
+            ));
+        }
+        let not_files: Vec<&str> = self.touches.iter().map(String::as_str).filter(|t| crate::overlap::paths_in(t).is_empty()).collect();
+        if !not_files.is_empty() {
+            return Some(format!("{r}: touches names files with their extension (src/App.tsx, crates/app/src/lib.rs), not {}", not_files.join(", ")));
+        }
+        None
+    }
+
+    /// The body the filed issue gets: the drafted body, then the files and size Crew reads.
+    fn filed_body(&self) -> String {
+        let mut body = self.body.trim_end().to_string();
+        if !self.touches.is_empty() {
+            let files: Vec<String> = self.touches.iter().map(|t| format!("`{}`", t.trim())).collect();
+            body.push_str(&format!("\n\nTouches: {}", files.join(", ")));
+        }
+        if let Some(s) = &self.size {
+            body.push_str(&format!("\nSize: {s}"));
+        }
+        body
+    }
 }
 
 /// What an agent proposes: the goal, the new issues, and existing issues that belong in it.
@@ -118,7 +176,7 @@ fn batch(plan: &GoalPlan, project: &str, goal: Option<i64>, source: &str, own: &
             issue: NewIssue {
                 project: project.to_string(),
                 title: i.title.clone(),
-                body: i.body.clone(),
+                body: i.filed_body(),
                 kind: i.kind.clone(),
                 source: source.to_string(),
                 evidence: i.evidence.clone(),
@@ -150,7 +208,9 @@ fn describe(plan: &GoalPlan, who: &str) -> String {
     for i in &plan.issues {
         let blockers = if i.blocked_by.is_empty() { String::new() } else { format!(" (after {})", i.blocked_by.join(", ")) };
         let p = if i.priority > 0 { format!(", P{}", i.priority) } else { String::new() };
-        out.push_str(&format!("- `{}` {} [{}{p}]{blockers}\n", i.local_ref, i.title.trim(), i.kind));
+        let size = i.size.as_deref().map(|s| format!(", {s}")).unwrap_or_default();
+        let touches = if i.touches.is_empty() { String::new() } else { format!("; touches {}", i.touches.join(", ")) };
+        out.push_str(&format!("- `{}` {} [{}{p}{size}]{blockers}{touches}\n", i.local_ref, i.title.trim(), i.kind));
     }
     if !plan.existing.is_empty() {
         out.push_str(&format!("\nExisting issues it would gather: {}\n", plan.existing.join(", ")));
@@ -186,6 +246,17 @@ impl GoalPlan {
 /// How long an approval holds its plan. One that has not finished by then was interrupted (the
 /// app quit midway), and the plan is pending again: approving it resumes with what was created.
 const APPROVAL_LEASE_SECS: i64 = 120;
+
+/// What a planning issue asks of the agent that takes it (a crew worker, or any agent).
+pub const PLANNER: &str = "Draft it with `propose_goal`, passing this issue as planning_issue. Nothing else: no code changes, no commit, no submit.
+
+1. Read the project's brief (`get_project`), then the code the goal is about, enough to name the files each step changes.
+2. The goal: a short title, and a one-paragraph outcome that says what is true once it is reached and how anyone can tell. A target date only if the person gave one.
+3. The issues, in the order to work them (Crew starts them in this order, as blockers and free workers allow). Each one is a change one agent can land on its own, with evidence and blockers, a size (S: an hour or two, M: a day, L: more; split an L when you can), and `touches`: the files it will change. Two issues that touch the same files cannot run at once, so split by file where the work allows, and say so with blockers where it does not.
+4. Existing open issues of the project that belong in the goal (`list_issues`): pass them as existing rather than filing them again.
+5. Keep the person's part to what only they can do (a decision, an account, a live check on their desktop), and say it plainly in that issue.
+
+Do not file the issues yourself: the person approves the plan in the Inbox, and that files them. If the sentence is too unclear to plan, ask (the person answers in the Inbox) instead of guessing.";
 
 /// A plan's columns, an interrupted approval (`?2` is the moment its lease began) read as pending.
 const COLUMNS: &str = "id, issue_key, project, plan,
@@ -237,6 +308,9 @@ impl Db {
         crate::goals::check_date(plan.target_date.as_deref().unwrap_or(""))?;
         if plan.issues.is_empty() && plan.existing.is_empty() {
             bail!("a plan needs issues: new ones, existing ones, or both");
+        }
+        if let Some(why) = plan.issues.iter().find_map(PlanItem::check) {
+            bail!("{why}");
         }
         if !plan.issues.is_empty() {
             self.check_batch(&batch(plan, &p.key, None, &source_of(actor), &[]))?;
@@ -445,14 +519,14 @@ impl Db {
                 project: project.to_string(),
                 title: format!("Plan a goal: {short}"),
                 body: format!(
-                    "The person wants: \"{sentence}\"\n\nDraft it with `propose_goal`, passing this issue as planning_issue: a goal (a short title and a one-paragraph outcome, a target date only if they gave one) and the issues that get there, each with evidence and blockers, plus existing issues of the project that belong in it (`list_issues`). Read the project's brief first (`get_project`). Do not file the issues yourself: the person approves the plan in the Inbox, and that files them."
+                    "The person wants: \"{sentence}\"\n\n{PLANNER}"
                 ),
                 kind: "feature".into(),
                 source: if *actor == Actor::Human { "human".into() } else { source_of(actor) },
                 evidence: "Asked for from the command palette.".into(),
                 priority: 2,
                 allow_similar: true,
-                labels: vec!["goal".into()],
+                labels: vec!["goal".into(), PLANNING_LABEL.into()],
                 ..Default::default()
             },
             actor,
@@ -483,6 +557,8 @@ mod tests {
             evidence: "none yet".into(),
             priority: 2,
             blocked_by: blocked_by.iter().map(|s| s.to_string()).collect(),
+            touches: vec![format!("src/{r}.rs")],
+            size: Some("M".into()),
             ..Default::default()
         }
     }
@@ -504,7 +580,7 @@ mod tests {
         let mut db = db();
         let p = db.propose_goal("NIT", &plan(), None, &agent()).unwrap();
         assert_eq!((p.issue.state.as_str(), p.issue.owner.as_str()), ("Needs You", "human"));
-        assert!(p.issue.body.contains("`sign` Sign the Windows installer [feature, P2] (after ci)"), "{}", p.issue.body);
+        assert!(p.issue.body.contains("`sign` Sign the Windows installer [feature, P2, M] (after ci); touches src/sign.rs"), "{}", p.issue.body);
         assert_eq!(db.list_issues(Some("NIT"), true).unwrap().len(), 1, "only the plan's issue");
         assert!(db.goals("NIT", true).unwrap().is_empty());
 
@@ -646,5 +722,57 @@ mod tests {
         let goal = db.goals("NIT", false).unwrap().remove(0);
         assert_eq!(goal.progress.total, 4);
         assert_eq!(db.issue(&old.key).unwrap().unwrap().goal, Some(goal.id));
+    }
+
+    #[test]
+    fn every_planned_change_names_its_files_and_the_filed_issue_carries_them() {
+        let mut db = db();
+        let mut p = plan();
+        p.issues[1].touches.clear();
+        let e = db.propose_goal("NIT", &p, None, &agent()).unwrap_err().to_string();
+        assert!(e.contains("sign: name the files it will change"), "{e}");
+        p.issues[1].touches = vec!["the installer".into()];
+        let e = db.propose_goal("NIT", &p, None, &agent()).unwrap_err().to_string();
+        assert!(e.contains("not the installer"), "{e}");
+        p.issues[1].touches = vec!["src-tauri/tauri.conf.json".into(), "scripts/sign.ps1".into()];
+        p.issues[1].size = Some("XL".into());
+        assert!(db.propose_goal("NIT", &p, None, &agent()).unwrap_err().to_string().contains("S, M or L"));
+        p.issues[1].size = Some("L".into());
+        // A live check and the person's own task change no files.
+        let mut check = item("live", "Install it on a clean PC", &["sign"]);
+        check.kind = "live-check".into();
+        check.touches.clear();
+        p.issues.push(check);
+        let proposed = db.propose_goal("NIT", &p, None, &agent()).unwrap();
+        db.move_issue(&proposed.issue.key, "Approved", None, None, &Actor::Human).unwrap();
+        let sign = db.list_issues(Some("NIT"), true).unwrap().into_iter().find(|i| i.title == "Sign the Windows installer").unwrap();
+        assert!(sign.body.ends_with("Touches: `src-tauri/tauri.conf.json`, `scripts/sign.ps1`\nSize: L"), "{}", sign.body);
+        assert_eq!(crate::overlap::paths_in(&sign.body), vec!["src-tauri/tauri.conf.json".to_string(), "scripts/sign.ps1".to_string()], "the overlap check reads them");
+    }
+
+    #[test]
+    fn a_planning_issue_asks_for_a_plan_and_nothing_else() {
+        let mut db = db();
+        let ask = db.start_goal("NIT", "make Nitely installable by strangers", &Actor::Human).unwrap();
+        assert!(ask.body.starts_with("The person wants: \"make Nitely installable by strangers\""));
+        assert!(ask.body.contains("no code changes, no commit, no submit") && ask.body.contains("`touches`"), "{}", ask.body);
+        assert!(is_planning(&ask));
+    }
+
+    #[test]
+    fn a_planning_issue_goes_ahead_of_other_work_of_its_urgency_but_not_of_more_urgent_work() {
+        let mut db = db();
+        let filed = |db: &mut Db, title: &str, priority: i64| {
+            db.create_issue(&NewIssue { project: "NIT".into(), title: title.into(), body: "b".into(), kind: "bug".into(), source: "human".into(), evidence: "e".into(), priority, ..Default::default() }, &Actor::Human)
+                .unwrap()
+        };
+        let older = filed(&mut db, "An older P2 bug", 2);
+        let urgent = filed(&mut db, "A data-loss bug", 1);
+        let ask = db.start_goal("NIT", "make Nitely installable by strangers", &Actor::Human).unwrap();
+        let first = db.next_task("NIT", "claude:a").unwrap().unwrap();
+        assert_eq!(first.key, urgent.key, "priority 1 still goes first");
+        let second = db.next_task("NIT", "claude:b").unwrap().unwrap();
+        assert_eq!(second.key, ask.key, "a whole goal waits on the plan");
+        assert_eq!(db.next_task("NIT", "claude:c").unwrap().unwrap().key, older.key);
     }
 }
