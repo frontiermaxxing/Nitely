@@ -212,7 +212,7 @@ impl Db {
                AND ((e.actor != 'human' AND e.type = 'issue_moved' AND e.summary LIKE '%→ Needs You%')
                  OR (e.actor != 'human' AND e.type = 'issue_created' AND e.summary LIKE 'Filed as Needs You%')
                  OR e.type = ?2
-                 OR (e.type = 'note' AND e.actor = 'human' AND e.summary LIKE 'Accepted%' AND (instr(e.summary, ?3) > 0 OR instr(e.summary, ?4) > 0)))
+                 OR (e.type = 'note' AND e.actor = 'human' AND e.summary LIKE 'Accepted%' AND (substr(e.summary, -length(?3) - 6) = 'Then ' || ?3 || '.' OR substr(e.summary, -length(?4) - 6) = 'Then ' || ?4 || '.')))
              ORDER BY e.ts, e.id",
         )?;
         let rows = moves.query_map(rusqlite::params![since, crate::accept::AWAITS_APPROVAL, crate::accept::WAITS_FOR_APPROVAL, crate::accept::APPROVE_IN_THE_APP], |r| {
@@ -373,6 +373,9 @@ mod tests {
         db.add_note(&accepted, waits, crate::accept::AWAITS_APPROVAL, &Actor::Human).unwrap();
         // Accepted before the event existed: its note alone says the change waits.
         let old = issue(&mut db, "Receipts", None);
+        // A reason that quotes the phrase, on an acceptance that left other findings to decide: no approval.
+        let quoted = issue(&mut db, "Quotes", None);
+        db.add_note(&quoted, &format!("Accepted [P1] Words: they said \"{}\". Then 1 other P0/P1 finding(s) wait for your decision.", crate::accept::WAITS_FOR_APPROVAL), "note", &Actor::Human).unwrap();
         let ask = db.create_ask("Receipts keep the old layout.", &[], Some(&old), None, &agent).unwrap();
         db.conn.execute("UPDATE ask SET finding = '{\"priority\":1,\"text\":\"Layout\"}', answer = 'Accepted: fine', answered_at = ?2 WHERE id = ?1", rusqlite::params![ask.id, now()]).unwrap();
         db.move_issue(&old, "Needs You", None, None, &agent).unwrap();
