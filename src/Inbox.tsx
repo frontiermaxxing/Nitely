@@ -26,7 +26,9 @@ import {
   type Resolved,
 } from "./decisions";
 import { ChecksMark } from "./Pr";
-import type { Board, IssueDetail, Project, TaskRow } from "./types";
+import type { Board, IssueDetail, Project, TaskRow, Waiting } from "./types";
+import { useWaits } from "./WaitingStrip";
+import { behindSummary, waitLine, waitOf } from "./waits";
 import { ago } from "./util";
 import {
   AgentMark,
@@ -70,8 +72,12 @@ export function Inbox(props: {
   project: string | null;
   onProject: (project: string | null) => void;
   projects: Project[];
+  /** Moves on whenever the data changes: what the Inbox reads besides the board (waits) reads again. */
+  version: number;
 }) {
   const { board, details, now } = props;
+  // What a decision's request waits for, when it waits (NIT-322): an agent stuck on a queued gate.
+  const waits = useWaits(props.version);
   const live = decisionsOf(board, details, now);
   // A decision the human acts on resolves at once and says what happened, in place, before the
   // next one takes its place; the board can take a moment longer to drop it, so those the Inbox
@@ -320,6 +326,7 @@ export function Inbox(props: {
           onOpenIssue={props.onOpenIssue}
           onAct={(move, run, answer) => act(open, move, run, answer)}
           keys={keys}
+          waiting={open.issue ? waitOf(open.issue.key, waits) : null}
         />
       )}
     </div>
@@ -575,6 +582,8 @@ function DecisionDetail(props: {
   onOpenIssue: (key: string) => void;
   onAct: (move: Move, run: () => Promise<unknown>, answer?: string) => Promise<void>;
   keys: React.MutableRefObject<DecisionKeys>;
+  /** What a request of its issue waits for now, if one waits. */
+  waiting?: Waiting | null;
 }) {
   const { decision: d, now, resolved } = props;
   // A decision just acted on can leave the details the Inbox reads (an applied playbook change is
@@ -676,6 +685,12 @@ function DecisionDetail(props: {
         <div className="dd-track">
           <StationTrack track={track} size="full" now={now} />
         </div>
+      )}
+      {props.waiting && !resolved && (
+        <p className="dd-wait">
+          {waitLine(props.waiting)}
+          {behindSummary(props.waiting, now) && <span className="muted">, {behindSummary(props.waiting, now)}</span>}
+        </p>
       )}
       <div className="dd-card">
         {agent ? <AgentMark vendor={agent} state={d.kind === "ask" ? null : live} size={22} /> : <span className="dd-nobody" />}

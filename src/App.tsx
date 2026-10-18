@@ -381,6 +381,7 @@ export function App() {
             project={view.project ?? null}
             onProject={filterInbox}
             projects={projects}
+            version={version}
           />
         )}
         {view.kind === "now" && board && <Now board={board} version={version} needs={inboxCount} now={now} onOpenIssue={setOpenIssue} onChanged={changed} onGo={setView} />}

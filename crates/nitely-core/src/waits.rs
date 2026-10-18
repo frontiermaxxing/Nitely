@@ -73,47 +73,32 @@ fn behind_run(r: &Run) -> Behind {
     Behind { what, issue, since: r.started_at.or(Some(r.queued_at)) }
 }
 
-/// One repo's lanes as `lane_waits` reads them: its project, how many lanes, and its queue
-/// (running and queued requests).
+/// One repo's lanes as `lane_waits` reads them: its project and its queue (running and queued
+/// requests).
 pub struct RepoQueue<'a> {
     pub project: &'a str,
-    pub lanes: usize,
     pub queue: &'a [Run],
 }
 
 /// Why each queued lane run waits, from the lanes overview.
 pub fn lane_waits(o: &lanes::Overview) -> Vec<Waiting> {
-    let repos: Vec<RepoQueue> = o.projects.iter().map(|p| RepoQueue { project: &p.lanes.project, lanes: p.lanes.lanes.len(), queue: &p.lanes.queue }).collect();
-    lane_waits_of(&repos, o.slots.as_ref().map(|s| (s.used, s.total)))
+    let repos: Vec<RepoQueue> = o.projects.iter().map(|p| RepoQueue { project: &p.lanes.project, queue: &p.lanes.queue }).collect();
+    lane_waits_of(&repos)
 }
 
-/// Why each queued lane run waits: the person's checkout, memory, every lane of its repo busy,
-/// every build slot of the machine in use (`slots`: used, total), or the requests ahead of it.
-pub fn lane_waits_of(repos: &[RepoQueue], slots: Option<(u32, u32)>) -> Vec<Waiting> {
+/// Why each queued lane run waits: the scheduler's own reason (NIT-291's `waiting_why`), with what
+/// it waits behind. One the scheduler gave no reason for says only its place in its queue: the
+/// reason is the scheduler's alone, never worked out a second time here.
+pub fn lane_waits_of(repos: &[RepoQueue]) -> Vec<Waiting> {
     let running_anywhere: Vec<&Run> = repos.iter().flat_map(|p| p.queue.iter()).filter(|r| r.state == "running").collect();
-    let slots_full = slots.is_some_and(|(used, total)| total > 0 && used >= total);
     let mut out = Vec::new();
     for p in repos {
         let running: Vec<&Run> = p.queue.iter().filter(|r| r.state == "running").collect();
         let queued: Vec<&Run> = p.queue.iter().filter(|r| r.state == "queued").collect();
-        let lanes = p.lanes.max(1);
         for (i, r) in queued.iter().enumerate() {
-            let (why, behind): (String, Vec<Behind>) = if let Some(w) = &r.waiting_why {
-                scheduler_says(w, &running, &running_anywhere, repos)
-            } else if let Some(w) = &r.waiting_for {
-                (format!("waits for your checkout: {w}"), vec![])
-            } else if let Some(w) = &r.waiting_memory {
-                (w.clone(), vec![])
-            } else if running.len() >= lanes {
-                let n = if lanes == 1 { "its one lane is".to_string() } else { format!("all {lanes} of its lanes are") };
-                (format!("{n} busy in {}", p.project), running.iter().map(|x| behind_run(x)).collect())
-            } else if slots_full {
-                let (used, total) = slots.expect("slots_full");
-                (format!("{used} of {total} build slots in use"), running_anywhere.iter().map(|x| behind_run(x)).collect())
-            } else if i > 0 {
-                (format!("{} in {}'s queue", ordinal(i + 1), p.project), vec![behind_run(queued[i - 1])])
-            } else {
-                ("starting".to_string(), vec![])
+            let (why, behind): (String, Vec<Behind>) = match &r.waiting_why {
+                Some(w) => scheduler_says(w, &running, &running_anywhere, repos),
+                None => (format!("{} in {}'s queue", ordinal(i + 1), p.project), vec![]),
             };
             out.push(Waiting {
                 kind: kind_of(r).into(),
@@ -359,7 +344,7 @@ mod tests {
         let mut ahead = run(6, "queued", "APP-6", "run", 50);
         ahead.waiting_why = Some("waiting: the free machine slots go to requests ahead (4, 5)".into());
         let queue = [run(1, "running", "APP-1", "gate", 10), run(2, "running", "APP-2", "land", 12), slots, repo, ahead];
-        let w = lane_waits_of(&[RepoQueue { project: "APP", lanes: 3, queue: &queue }], Some((2, 2)));
+        let w = lane_waits_of(&[RepoQueue { project: "APP", queue: &queue }]);
         assert_eq!(w[0].why, "2 of 2 machine slots in use", "the runs move to behind, where each opens");
         assert_eq!(w[0].behind.iter().map(|b| b.what.as_str()).collect::<Vec<_>>(), ["run 1: APP-1 gate", "run 2: APP-2 land"]);
         assert_eq!((w[1].why.as_str(), w[1].behind[0].what.as_str()), ("behind request 4 of the same repo", "run 4: APP-4 gate"));
@@ -367,23 +352,19 @@ mod tests {
     }
 
     #[test]
-    fn a_queued_lane_run_says_why_and_behind_what() {
+    fn a_queued_lane_run_says_the_schedulers_reason_and_its_place() {
+        let mut busy = run(3, "queued", "APP-3", "run", 20);
+        busy.waiting_why = Some("waiting: all 2 of its repo's lanes are busy".into());
         let mut memory = run(5, "queued", "APP-5", "run", 40);
-        memory.waiting_memory = Some("waiting for memory: 3.1 GB free, needs 6".into());
-        let queue = [run(1, "running", "APP-1", "gate", 10), run(2, "running", "APP-2", "land", 12), run(3, "queued", "APP-3", "run", 20), run(4, "queued", "APP-4", "gate", 30), memory];
-        let w = lane_waits_of(&[RepoQueue { project: "APP", lanes: 2, queue: &queue }], Some((2, 4)));
+        memory.waiting_why = Some("waiting for memory: 3.1 GB free, needs 6".into());
+        let queue = [run(1, "running", "APP-1", "gate", 10), run(2, "running", "APP-2", "land", 12), busy, run(4, "queued", "APP-4", "gate", 30), memory];
+        let w = lane_waits_of(&[RepoQueue { project: "APP", queue: &queue }]);
         assert_eq!(w.len(), 3);
-        assert_eq!((w[0].kind.as_str(), w[0].why.as_str(), w[0].place), ("run", "all 2 of its lanes are busy in APP", Some(1)));
+        assert_eq!((w[0].kind.as_str(), w[0].why.as_str(), w[0].place), ("run", "all 2 of its repo's lanes are busy", Some(1)));
         assert_eq!(w[0].behind.iter().map(|b| b.what.as_str()).collect::<Vec<_>>(), ["run 1: APP-1 gate", "run 2: APP-2 land"]);
         assert_eq!(w[0].behind[0].since, Some(15), "held since it started");
+        assert_eq!((w[1].why.as_str(), w[1].behind.len()), ("2nd in APP's queue", 0), "no reason from the scheduler: only its place, nothing guessed");
         assert_eq!(w[2].why, "waiting for memory: 3.1 GB free, needs 6");
-        // A free lane, but every build slot of the machine in use: behind every run going.
-        let queue = [run(1, "running", "APP-1", "gate", 10), run(3, "queued", "APP-3", "run", 20), run(4, "queued", "APP-4", "gate", 30)];
-        let w = lane_waits_of(&[RepoQueue { project: "APP", lanes: 2, queue: &queue }], Some((3, 3)));
-        assert_eq!(w[0].why, "3 of 3 build slots in use");
-        // Nothing full: the next starts, the one after waits behind it.
-        let w = lane_waits_of(&[RepoQueue { project: "APP", lanes: 3, queue: &queue }], Some((1, 3)));
-        assert_eq!((w[0].why.as_str(), w[1].why.as_str(), w[1].behind[0].what.as_str()), ("starting", "2nd in APP's queue", "run 3: APP-3 run"));
     }
 
     #[test]
