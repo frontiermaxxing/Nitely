@@ -130,6 +130,12 @@ fn wait_cap() -> Duration {
 /// The wait cap for the client this server answers, in seconds (`cap_for`).
 static CLIENT_WAIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(300);
 
+/// Sets the wait cap for the client `vendor` this process answers: from `initialize`, or from the
+/// vendor a forwarded or detached call carries, since those never see `initialize`.
+fn for_client(vendor: &str) {
+    CLIENT_WAIT.store(cap_for(vendor), std::sync::atomic::Ordering::Relaxed);
+}
+
 /// The wait cap for a client (NIT-314): Claude Code gives a call 30 minutes without a word; Codex
 /// gives one 60 seconds by default, and other clients are not known to give more.
 fn cap_for(vendor: &str) -> u64 {
@@ -312,6 +318,7 @@ pub fn run_detached() -> Result<()> {
     std::io::stdin().read_line(&mut input)?;
     let request: Value = serde_json::from_str(&input).context("mcp-detached takes {vendor, cwd, params, session, out} on stdin")?;
     let server = Server { vendor: str_arg(&request, "vendor").unwrap_or("agent").to_string(), cwd: req(&request, "cwd")?.to_string(), exe: None, remote: None };
+    for_client(&server.vendor);
     let params = request.get("params").cloned().unwrap_or(json!({}));
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
@@ -376,7 +383,7 @@ fn initialize(server: &mut Server, params: &Value) -> Value {
         "agent"
     }
     .into();
-    CLIENT_WAIT.store(cap_for(&server.vendor), std::sync::atomic::Ordering::Relaxed);
+    for_client(&server.vendor);
     let requested = params.get("protocolVersion").and_then(Value::as_str).unwrap_or("");
     let version = if SUPPORTED_VERSIONS.contains(&requested) { requested } else { SUPPORTED_VERSIONS[0] };
     // The repo's own instructions when Nitely watches it, else the general workflow.
@@ -894,6 +901,8 @@ pub fn serve_calls() -> Result<()> {
         std::thread::spawn(move || {
             let _busy = busy;
             let server = Server { vendor: str_arg(&request, "vendor").unwrap_or("agent").to_string(), cwd: str_arg(&request, "cwd").unwrap_or(".").to_string(), exe: None, remote: None };
+            // Forwarded calls never see `initialize`: the client's cap comes with them.
+            for_client(&server.vendor);
             let result = call_tool(&server, request.get("params").unwrap_or(&json!({})));
             send(&out, &json!({ "id": request.get("id"), "result": result }));
         });
@@ -914,6 +923,7 @@ pub fn call_once() -> Result<()> {
         exe: None,
         remote: None,
     };
+    for_client(&server.vendor);
     let result = call_tool(&server, request.get("params").unwrap_or(&json!({})));
     println!("{}", serde_json::to_string(&result)?);
     Ok(())
