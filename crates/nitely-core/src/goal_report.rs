@@ -210,9 +210,10 @@ impl Db {
         let rows = moves.query_map([since], |r| {
             Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, Option<bool>>(5)?))
         })?;
+        let rows: Vec<_> = rows.collect::<rusqlite::Result<_>>()?;
+        let keys: Vec<Option<String>> = rows.iter().map(|r| r.1.clone()).collect();
         let mut approvals: Vec<Needed> = Vec::new();
-        for row in rows {
-            let (ts, issue_key, kind, summary, title, waits) = row?;
+        for (n, (ts, issue_key, kind, summary, title, waits)) in rows.into_iter().enumerate() {
             if !of_project(&issue_key) {
                 continue;
             }
@@ -220,10 +221,15 @@ impl Db {
             for earlier in approvals.iter_mut().filter(|n| n.issue_key == issue_key) {
                 earlier.open = false;
             }
-            let accepting: Vec<bool> = findings.iter().filter(|(fk, fts, _)| issue_key.as_ref() == Some(fk) && (fts - ts).abs() <= 10).map(|f| f.2).collect();
+            // request_acceptance moves with no reason, right after its ask; a submit's move says why.
+            let bare = kind == "issue_moved" && !summary.contains(": ");
+            let accepting: Vec<bool> =
+                if bare { findings.iter().filter(|(fk, fts, _)| issue_key.as_ref() == Some(fk) && (fts - ts).abs() <= 10).map(|f| f.2).collect() } else { Vec::new() };
             let why = if !accepting.is_empty() {
                 // Its ask says it; once decided, an issue still in Needs You waits for approval.
-                if accepting.iter().any(|open| *open) || waits != Some(true) {
+                // Only while nothing came after it: a later request is what waits now.
+                let later = keys[n + 1..].contains(&issue_key);
+                if accepting.iter().any(|open| *open) || waits != Some(true) || later {
                     continue;
                 }
                 "waits for your approval after the finding you decided".to_string()
@@ -354,6 +360,13 @@ mod tests {
         let ask = db.create_ask("Retries are out of scope here.", &[], Some(&accepted), None, &agent).unwrap();
         db.conn.execute("UPDATE ask SET finding = '{\"priority\":1,\"text\":\"No retries\"}', answer = 'accept', answered_at = ?2 WHERE id = ?1", rusqlite::params![ask.id, now()]).unwrap();
         db.move_issue(&accepted, "Needs You", None, None, &agent).unwrap();
+        // A finding the person declined, fixed, and back for approval: one approval, the later one.
+        let declined = issue(&mut db, "Exports", None);
+        let ask = db.create_ask("The old format is gone.", &[], Some(&declined), None, &agent).unwrap();
+        db.conn.execute("UPDATE ask SET finding = '{\"priority\":1,\"text\":\"Old format\"}', answer = 'decline', answered_at = ?2 WHERE id = ?1", rusqlite::params![ask.id, now()]).unwrap();
+        db.move_issue(&declined, "Needs You", None, None, &agent).unwrap();
+        db.move_issue(&declined, "In Progress", None, None, &agent).unwrap();
+        db.move_issue(&declined, "Needs You", None, Some("approve the fix"), &agent).unwrap();
         // Filed straight into Needs You, as a goal plan or a playbook proposal is.
         let new = NewIssue {
             project: "NIT".into(),
@@ -379,6 +392,8 @@ mod tests {
             ("approval", accepted.as_str(), false),
             ("asked", accepted.as_str(), false),
             ("approval", accepted.as_str(), true),
+            ("asked", declined.as_str(), false),
+            ("approval", declined.as_str(), true),
             ("approval", plan.as_str(), true),
         ];
         want.sort();
