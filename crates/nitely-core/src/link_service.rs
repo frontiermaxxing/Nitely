@@ -239,11 +239,23 @@ pub fn uninstall(nitely: &Path) -> Result<Status> {
     }
     let os = Os::current();
     let reg = registration(nitely, &crate::connect::agent_home(), os);
+    // Taking off what is not there fails too, so a failure counts only when something stays registered.
+    let mut failed = None;
     for c in &reg.off {
-        quiet(c).ok();
+        if let Err(e) = quiet(c) {
+            failed.get_or_insert(e);
+        }
     }
     for (path, _) in &reg.files {
-        std::fs::remove_file(path).ok();
+        if let Err(e) = std::fs::remove_file(path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                failed.get_or_insert(anyhow::Error::new(e).context(format!("removing {}", path.display())));
+            }
+        }
+    }
+    forget_cached();
+    if registered_command(os, &reg).is_some() {
+        return Err(failed.unwrap_or_else(|| anyhow::anyhow!("still registered")).context(format!("could not take the issue links listener off at {}", reg.place)));
     }
     let mut config = crate::Config::load()?;
     config.links_service = Some(false);
