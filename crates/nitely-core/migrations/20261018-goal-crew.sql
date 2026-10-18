@@ -3,3 +3,5 @@
 -- work on it at once (none: the playbook's [crew] goal_workers).
 ALTER TABLE goal ADD COLUMN rank INTEGER;
 ALTER TABLE goal ADD COLUMN workers INTEGER;
+-- The browser preview port a crew worker was given, so no supervisor gives it to another.
+ALTER TABLE crew_worker ADD COLUMN port INTEGER;

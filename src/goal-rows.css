@@ -7,6 +7,7 @@
 .goal-when { color: var(--fg-2); font-size: var(--text-sm); }
 .goal-late { color: var(--fail); }
 .goal-count { margin-left: auto; color: var(--fg-2); font-size: var(--text-sm); white-space: nowrap; }
+.goal-first { font-size: var(--text-sm); white-space: nowrap; }
 .goal-crew { color: var(--fg-2); font-size: var(--text-sm); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .goal-issues { display: flex; flex-wrap: wrap; gap: 4px 14px; }
 .goal-focus { animation: goal-focus 2.4s ease-out; }

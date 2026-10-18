@@ -1930,18 +1930,31 @@ function goalRecord(g: (typeof GOALS)[number]): Goal {
     progress: { total: issues.length, done, dropped, open: issues.length - done - dropped },
     // The crew on it: one worker per issue an agent moves, and what of it landed today.
     working: issues.filter((i) => i.state_type === "started").length,
+    rank: goalRanks.get(g.id) ?? null,
     landed_today: Math.min(done, 2),
   };
 }
 
-/** As the goals command: the active goals, with their issues. */
+/** The person's order of goals (goal_order): rank by goal id. */
+const goalRanks = new Map<number, number>();
+
+/** As the goals command: the active goals, with their issues, ranked ones first. */
 function goals(args: Record<string, unknown>): GoalDetail[] {
   placeGoals();
   const project = args.project ? String(args.project).toUpperCase() : null;
-  return GOALS.filter((g) => (!project || g.project === project) && (g.state ?? "active") === "active").map((g) => ({
-    goal: goalRecord(g),
-    issues: world.issues.filter((i) => i.goal === g.id),
-  }));
+  const rank = (id: number) => goalRanks.get(id) ?? Number.MAX_SAFE_INTEGER;
+  return GOALS.filter((g) => (!project || g.project === project) && (g.state ?? "active") === "active")
+    .sort((a, b) => rank(a.id) - rank(b.id))
+    .map((g) => ({ goal: goalRecord(g), issues: world.issues.filter((i) => i.goal === g.id) }));
+}
+
+/** As goal_order: the given goals first, the project's others after in their order. */
+function goalOrder(args: Record<string, unknown>): Goal[] {
+  const project = String(args.project).toUpperCase();
+  const ids = (args.ids as number[]).map(Number);
+  const rest = goals({ project }).map((g) => g.goal.id).filter((id) => !ids.includes(id));
+  [...ids, ...rest].forEach((id, n) => goalRanks.set(id, n + 1));
+  return goals({ project }).map((g) => g.goal);
 }
 
 /** As goal_choices: every goal of a project, closed ones too. */
@@ -2008,6 +2021,8 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return startGoal(args);
       case "goals":
         return goals(args);
+      case "goal_order":
+        return goalOrder(args);
       case "goal_choices":
         return goalChoices(args);
       case "set_issue_goal":

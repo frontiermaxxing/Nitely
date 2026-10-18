@@ -88,11 +88,13 @@ start one, the crew's status says why.
    (`claude:<worktree>`), the same id the worker's MCP server will use, so the worker's own `report`
    and `note` calls keep the claim fresh. Nothing ready: the slot stays empty until the next tick.
 4. **Start.** Launch the agent in the worktree with the brief (below) on stdin, and a port of its
-   own for a browser preview (`NITELY_PREVIEW_PORT`, from 5190 up, one no running worker has).
+   own for a browser preview (`NITELY_PREVIEW_PORT`, from 5190 up, one no running worker of any
+   project has: the worker's row keeps it).
 
 Which issue first: approved goals (NIT-243, [coordinator.md](coordinator.md)). The project's active
-goals are worked in the person's order (a goal's `rank`, set with `save_goal` or `nitely goal save
---rank`; unranked ones after, nearest target date first, then oldest), and each goal's issues in
+goals are worked in the person's order (a goal's `rank`, set in the app with "Work this goal first";
+only the person can, since it decides what the crew works on; unranked ones after, nearest target
+date first, then oldest), and each goal's issues in
 plan order, the order they were filed. A goal at its worker budget (its own `workers`, else
 `goal_workers`) leaves its other issues waiting and its slots to the next goal; so does a goal with
 nothing ready. Issues in no goal come after every goal's. Priority 1 goes first wherever it is. Each

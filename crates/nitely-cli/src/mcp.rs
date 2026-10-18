@@ -542,15 +542,13 @@ fn tools() -> Value {
         },
         {
             "name": "save_goal",
-            "description": "Create a goal (no id: title and outcome needed) or change one: title, outcome (one paragraph on what is true once it is reached), target_date (YYYY-MM-DD, empty clears it), state (active, done, dropped), rank (the person's order among active goals, lower first; Crew works goals in it; 0 clears), workers (how many crew workers may work on it at once; 0 leaves it to the playbook). Put issues in it with goal on file_issue, file_issues or update_issue.",
+            "description": "Create a goal (no id: title and outcome needed) or change one: title, outcome (one paragraph on what is true once it is reached), target_date (YYYY-MM-DD, empty clears it), state (active, done, dropped). The person orders goals and sets how many crew workers each may have, in the app. Put issues in it with goal on file_issue, file_issues or update_issue.",
             "inputSchema": { "type": "object", "properties": {
                 "id": { "type": "integer" },
                 "title": { "type": "string" },
                 "outcome": { "type": "string" },
                 "target_date": { "type": "string" },
                 "state": { "type": "string", "enum": ["active", "done", "dropped"] },
-                "rank": { "type": "integer" },
-                "workers": { "type": "integer" },
                 "project": { "type": "string" }
             } }
         },
@@ -1259,8 +1257,7 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
                 // An empty string clears the date, so it is read as given.
                 target_date: args.get("target_date").and_then(Value::as_str).map(str::to_string),
                 state: str_arg(args, "state").map(str::to_string),
-                rank: args.get("rank").and_then(Value::as_i64),
-                workers: args.get("workers").and_then(Value::as_i64),
+                ..Default::default()
             };
             let id = args.get("id").and_then(Value::as_i64);
             let project = match id {

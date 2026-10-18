@@ -15,6 +15,8 @@ export type GoalFocus = { id: number; at: number };
 export function GoalRows(props: { project?: string; version: number; onOpenIssue: (key: string) => void; heading?: boolean; focus?: GoalFocus }) {
   const [goals, setGoals] = useState<GoalDetail[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Bumped after the person reorders, to read the goals again.
+  const [reordered, setReordered] = useState(0);
 
   useEffect(() => {
     let live = true;
@@ -24,13 +26,21 @@ export function GoalRows(props: { project?: string; version: number; onOpenIssue
     return () => {
       live = false;
     };
-  }, [props.project, props.version]);
+  }, [props.project, props.version, reordered]);
+
+  // The crew works a project's goals in this order: the person puts one first (NIT-243).
+  const first = (id: number) => {
+    if (!props.project) return;
+    invoke("goal_order", { project: props.project, ids: [id] })
+      .then(() => setReordered((n) => n + 1))
+      .catch((e) => setError(String(e)));
+  };
 
   if (error) return <p className="error">{error}</p>;
   if (!goals || goals.length === 0) return null;
   const rows = (
     <div className="goal-rows">
-      {goals.map((g) => (
+      {goals.map((g, n) => (
         <GoalRow
           // A new request for the same goal remounts its row, so the scroll and the outline run again.
           key={g.goal.id === props.focus?.id ? `${g.goal.id}@${props.focus.at}` : g.goal.id}
@@ -38,6 +48,7 @@ export function GoalRows(props: { project?: string; version: number; onOpenIssue
           showProject={!props.project}
           focused={g.goal.id === props.focus?.id}
           onOpenIssue={props.onOpenIssue}
+          onFirst={props.project && n > 0 ? () => first(g.goal.id) : undefined}
         />
       ))}
     </div>
@@ -66,7 +77,7 @@ function CrewOnGoal(props: { goal: GoalDetail["goal"] }) {
 }
 
 /** One goal: its title and date, a meter of whose move its issues are, then the issues in station order. */
-export function GoalRow(props: { detail: GoalDetail; showProject?: boolean; focused?: boolean; onOpenIssue: (key: string) => void }) {
+export function GoalRow(props: { detail: GoalDetail; showProject?: boolean; focused?: boolean; onOpenIssue: (key: string) => void; onFirst?: () => void }) {
   const { goal } = props.detail;
   // Opened from an issue's goal: scrolled to and marked for a moment.
   const row = useRef<HTMLDivElement>(null);
@@ -87,6 +98,11 @@ export function GoalRow(props: { detail: GoalDetail; showProject?: boolean; focu
         {props.showProject && <span className="mono goal-project">{goal.project}</span>}
         {when && <span className={`goal-when${when.late ? " goal-late" : ""}`}>{when.text}</span>}
         <CrewOnGoal goal={goal} />
+        {props.onFirst && (
+          <button className="link goal-first" onClick={props.onFirst} title="The crew works this project's goals in order, top first">
+            Work this goal first
+          </button>
+        )}
         <span className="goal-count" title={`${c.done} of ${total} issues done`}>
           <span className="mono">{c.done}</span>/<span className="mono">{total}</span> done
         </span>

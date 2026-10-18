@@ -739,9 +739,13 @@ impl Supervisor {
     }
 
     /// A port for a new worker's browser preview: the first of `PREVIEW_PORTS` that no running
-    /// worker has and that is free on this machine.
-    fn preview_port(&self) -> Option<u16> {
-        let taken: Vec<u16> = self.running.iter().filter_map(|r| r.port).collect();
+    /// worker of any project has (their rows say, so a restarted supervisor knows too) and that is
+    /// free on this machine.
+    fn preview_port(&self, db: &Db) -> Option<u16> {
+        let mut taken: Vec<u16> = self.running.iter().filter_map(|r| r.port).collect();
+        if let Ok(mut stmt) = db.conn.prepare("SELECT port FROM crew_worker WHERE ended_at IS NULL AND port IS NOT NULL") {
+            taken.extend(stmt.query_map([], |r| r.get::<_, i64>(0)).into_iter().flatten().flatten().map(|p| p as u16));
+        }
         PREVIEW_PORTS.clone().find(|p| !taken.contains(p) && std::net::TcpListener::bind(("127.0.0.1", *p)).is_ok())
     }
 
@@ -913,7 +917,10 @@ impl Supervisor {
             return Ok(Start::LaunchFailed(why));
         };
         db.crew_worker_working(id, &log, ts)?;
-        let port = self.preview_port();
+        let port = self.preview_port(db);
+        if let Some(p) = port {
+            db.conn.execute("UPDATE crew_worker SET port = ?2 WHERE id = ?1", params![id, p])?;
+        }
         let mut env = vec![("NITELY_CREW".into(), id.to_string()), ("NITELY_PROJECT".into(), self.project.clone())];
         if let Some(p) = port {
             env.push(("NITELY_PREVIEW_PORT".into(), p.to_string()));
@@ -995,7 +1002,7 @@ impl Supervisor {
                 log: PathBuf::from(w.log),
                 process: Box::new(Gone),
                 seen: std::cell::Cell::new((0, w.started_at)),
-                port: None,
+                port: w.port,
             };
             match w.pid.and_then(|pid| self.agents.adopt(pid)) {
                 Some(process) => self.running.push(Running { process, ..running }),
@@ -1640,6 +1647,9 @@ pub struct CrewWorker {
     pub reason: Option<String>,
     /// `setup` while its worktree is being set up, then `work`.
     pub phase: String,
+    /// Its browser preview's port, when it was given one.
+    #[serde(skip)]
+    pub port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1696,6 +1706,7 @@ fn worker_row(r: &rusqlite::Row) -> rusqlite::Result<CrewWorker> {
         reason: r.get(11)?,
         agent_id: r.get(12)?,
         phase: r.get(13)?,
+        port: r.get::<_, Option<i64>>(14)?.map(|p| p as u16),
     })
 }
 
@@ -1794,7 +1805,7 @@ pub fn project_status(db: &Db, config: &crate::Config, project: &str, moment: &M
     Ok((status.cap > 0 || !status.running.is_empty() || status.supervised).then_some(status))
 }
 
-const WORKER_COLUMNS: &str = "id, project, issue_key, agent, pid, worktree, log_path, started_at, ended_at, exit_code, outcome, reason, agent_id, phase";
+const WORKER_COLUMNS: &str = "id, project, issue_key, agent, pid, worktree, log_path, started_at, ended_at, exit_code, outcome, reason, agent_id, phase, port";
 
 impl Db {
     /// Marks the sessions a crew worker runs: in its worktree, started once the worker had. A
@@ -2436,7 +2447,7 @@ mod tests {
             labels: vec!["goal".into(), "planning".into()],
             ..Default::default()
         };
-        let b = brief(&issue, "NIT", Path::new("/w/nit-9"), "claude/nit-9-plan", Path::new("/r"));
+        let b = brief(&issue, "NIT", Path::new("/w/nit-9"), "claude/nit-9-plan", Path::new("/r"), None);
         for part in ["plan a goal, NIT-9", "propose_goal, passing planning_issue NIT-9", "files it touches", "change nothing in it", "Do not commit, submit"] {
             assert!(b.contains(part), "missing {part:?} in {b}");
         }

@@ -179,6 +179,9 @@ impl Db {
             bail!("a goal's title and outcome cannot be empty");
         }
         let target = change.target_date.as_deref().map(check_date).transpose()?;
+        if (change.rank.is_some() || change.workers.is_some()) && *actor != Actor::Human {
+            bail!("only the person orders goals and sets how many workers each may have, in the app: that decides what the crew works on");
+        }
         if change.rank.is_some_and(|r| r < 0) || change.workers.is_some_and(|w| w < 0) {
             bail!("a goal's rank and worker budget are whole numbers, 0 to clear");
         }
@@ -221,6 +224,27 @@ impl Db {
             }
         };
         self.goal(id)?.context("goal vanished")
+    }
+
+    /// The person's order of a project's active goals: `ids` first to last get ranks 1, 2, ...; the
+    /// project's other active goals keep theirs after them, in their order. Only the person orders
+    /// goals, since Crew works them in this order (NIT-243).
+    pub fn order_goals(&self, project: &str, ids: &[i64], actor: &Actor) -> Result<Vec<Goal>> {
+        if *actor != Actor::Human {
+            bail!("only the person orders goals, in the app: that decides what the crew works on");
+        }
+        let goals = self.goals(project, false)?;
+        for id in ids {
+            if !goals.iter().any(|g| g.id == *id) {
+                bail!("goal {id} is not an active goal of {project}");
+            }
+        }
+        let rest = goals.iter().map(|g| g.id).filter(|g| !ids.contains(g));
+        let ts = now();
+        for (n, id) in ids.iter().copied().chain(rest).enumerate() {
+            self.conn.execute("UPDATE goal SET rank = ?2, updated_at = ?3 WHERE id = ?1", params![id, n as i64 + 1, ts])?;
+        }
+        self.goals(project, false)
     }
 
     /// Refuses what `set_issue_goal` would refuse, without changing anything.
@@ -408,6 +432,15 @@ mod tests {
         let cleared = db.save_goal("NIT", Some(picked.id), &GoalChange { rank: Some(0), workers: Some(0), ..Default::default() }, &human).unwrap();
         assert_eq!((cleared.rank, cleared.workers), (None, None), "0 clears");
         assert!(db.save_goal("NIT", Some(soon.id), &GoalChange { rank: Some(-1), ..Default::default() }, &human).is_err());
+        // Only the person orders goals: an agent's rank or budget is refused.
+        let agent = Actor::Agent("claude:x".into());
+        assert!(db.save_goal("NIT", Some(soon.id), &GoalChange { rank: Some(1), ..Default::default() }, &agent).unwrap_err().to_string().contains("only the person"));
+        assert!(db.save_goal("NIT", Some(soon.id), &GoalChange { workers: Some(1), ..Default::default() }, &agent).is_err());
+        assert!(db.order_goals("NIT", &[soon.id], &agent).is_err());
+        // Ordering: the ones given first, the others after in their order.
+        let ordered: Vec<String> = db.order_goals("NIT", &[soon.id], &human).unwrap().into_iter().map(|g| g.title).collect();
+        assert_eq!(ordered, ["Soon", "Old", "Picked"]);
+        assert!(db.order_goals("NIT", &[999], &human).is_err());
     }
 
 }

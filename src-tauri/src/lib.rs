@@ -259,6 +259,19 @@ async fn set_issue_goal(key: String, goal: Option<i64>) -> Result<IssueRecord, S
     db.set_issue_goal(&key, goal, &ME).map_err(err)
 }
 
+/// The person's order of a project's active goals (`ids` first): what Crew works first.
+#[tauri::command]
+async fn goal_order(project: String, ids: Vec<i64>) -> Result<Vec<nitely_core::goals::Goal>, String> {
+    db()?.order_goals(&project, &ids, &ME).map_err(err)
+}
+
+/// How many crew workers may work on a goal at once; 0 leaves it to the playbook.
+#[tauri::command]
+async fn goal_workers(id: i64, workers: i64) -> Result<nitely_core::goals::Goal, String> {
+    let change = nitely_core::goals::GoalChange { workers: Some(workers), ..Default::default() };
+    db()?.save_goal("", Some(id), &change, &ME).map_err(err)
+}
+
 /// The goal rows: every active goal with its issues, of one project or all of them.
 #[tauri::command]
 async fn goals(project: Option<String>) -> Result<Vec<nitely_core::goals::GoalDetail>, String> {
@@ -870,6 +883,8 @@ pub fn run() {
             set_private_terms,
             project_brief,
             goals,
+            goal_order,
+            goal_workers,
             goal_choices,
             set_issue_goal,
             approve_goal_plan,
