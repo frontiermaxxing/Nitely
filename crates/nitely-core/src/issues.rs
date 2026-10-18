@@ -398,23 +398,16 @@ const ISSUE_COLUMNS: &str = "key, origin, project, title, body, url, state, stat
 /// The scheme the app registers, so a link to an issue opens it in Nitely.
 pub const LINK_SCHEME: &str = "nitely";
 
-/// `nitely://issue/NIT-14`: the link that opens a native issue in the app. Agents put it wherever
-/// they name an issue (replies, commits, pull requests, notes), as Linear links are used.
+/// `nitely://issue/NIT-14`: the app's own link to a native issue, which the OS opens in the app even
+/// when it is closed. Agents write the web form (`links::issue_url`), which chats and GitHub open.
 pub fn issue_link(key: &str) -> String {
     format!("{LINK_SCHEME}://issue/{}", key.to_uppercase())
 }
 
-/// The issue key a `nitely://issue/KEY` link names, if it is one ("nitely://issue/nit-14/" works too).
+/// The issue key a link names, in either form: `nitely://issue/NIT-14` or the app's loopback
+/// `http://127.0.0.1:7423/i/NIT-14` (`links::key_from_url`).
 pub fn key_from_link(link: &str) -> Option<String> {
-    let rest = link.trim().strip_prefix(LINK_SCHEME)?.strip_prefix("://")?;
-    let key = rest.strip_prefix("issue/")?.trim_end_matches('/');
-    let (project, number) = key.split_once('-')?;
-    let ok = !project.is_empty()
-        && project.starts_with(|c: char| c.is_ascii_alphabetic())
-        && project.chars().all(|c| c.is_ascii_alphanumeric())
-        && !number.is_empty()
-        && number.chars().all(|c| c.is_ascii_digit());
-    ok.then(|| key.to_uppercase())
+    crate::links::key_from_url(link)
 }
 
 fn issue_from_row(r: &Row) -> rusqlite::Result<IssueRecord> {
@@ -423,7 +416,7 @@ fn issue_from_row(r: &Row) -> rusqlite::Result<IssueRecord> {
     let stored: String = r.get(5)?;
     // A native issue's link is always the app's own. What is stored for it is where it came from
     // (an imported Linear issue's address), shown beside it but never handed out as its link.
-    let (url, external_url) = if origin == "nitely" { (issue_link(&key), stored) } else { (stored, String::new()) };
+    let (url, external_url) = if origin == "nitely" { (crate::links::issue_url(&key), stored) } else { (stored, String::new()) };
     // Native labels read in their normal form (an import may have stored "Bug"); a mirror's stay as
     // its tracker spells them.
     let labels: String = r.get(11)?;
@@ -823,7 +816,7 @@ impl Db {
             key_of[i] = Some(key.clone());
             out.filed.push(Filed {
                 local_ref: refs[i].to_string(),
-                url: issue_link(&key),
+                url: crate::links::issue_url(&key),
                 key,
                 title: c.title.clone(),
                 project: c.project.clone(),
@@ -2055,6 +2048,7 @@ mod tests {
     #[test]
     fn native_issues_carry_their_app_link() {
         assert_eq!(issue_link("nit-14"), "nitely://issue/NIT-14");
+        assert_eq!(key_from_link("http://127.0.0.1:7423/i/nit-14"), Some("NIT-14".into()));
         assert_eq!(key_from_link("nitely://issue/NIT-14"), Some("NIT-14".into()));
         assert_eq!(key_from_link("nitely://issue/nit-14/"), Some("NIT-14".into()));
         assert_eq!(key_from_link("nitely://issue/N2-7"), Some("N2-7".into()));
@@ -2065,15 +2059,17 @@ mod tests {
         let (mut db, _dir) = db();
         db.create_project("NIT", "Nitely").unwrap();
         let issue = db.create_issue(&new("Links that open the app"), &Actor::Agent("claude:x".into())).unwrap();
-        assert_eq!(issue.url, issue_link(&issue.key));
+        // The web form, which chats and GitHub open; the app answers it on loopback.
+        assert_eq!(issue.url, crate::links::issue_url(&issue.key));
+        assert!(issue.url.starts_with("http://127.0.0.1:") && issue.url.ends_with("/i/NIT-1"), "{}", issue.url);
         assert_eq!(db.list_issues(Some("NIT"), false).unwrap()[0].url, issue.url);
 
         // An imported issue keeps where it came from, but its link is still the app's.
         let linear = "https://linear.app/x/issue/NIT-1/links";
         db.conn.execute("UPDATE issue SET url = ?2 WHERE key = ?1", rusqlite::params![issue.key, linear]).unwrap();
         let imported = db.issue(&issue.key).unwrap().unwrap();
-        assert_eq!((imported.url.as_str(), imported.external_url.as_str()), (issue_link(&issue.key).as_str(), linear));
-        assert_eq!(db.list_issues(Some("NIT"), false).unwrap()[0].url, issue_link(&issue.key));
+        assert_eq!((imported.url.as_str(), imported.external_url.as_str()), (issue.url.as_str(), linear));
+        assert_eq!(db.list_issues(Some("NIT"), false).unwrap()[0].url, issue.url);
     }
 
     #[test]

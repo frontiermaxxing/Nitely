@@ -11,6 +11,18 @@ export type Inline =
   | { t: "em"; s: string }
   | { t: "link"; s: string; href: string };
 
+/**
+ * The issue key a link names, in either form agents write: `nitely://issue/NIT-12`, or the app's
+ * loopback web form `http://127.0.0.1:7423/i/NIT-12` (crates/nitely-core/src/links.rs). Inside the
+ * app both open the issue's panel; elsewhere the web form is the one chats and GitHub open.
+ */
+export function issueKeyOf(href: string): string | null {
+  const m =
+    /^nitely:\/\/issue\/([A-Za-z][A-Za-z0-9]*-\d+)\/?$/.exec(href.trim()) ??
+    /^http:\/\/(?:127\.0\.0\.1|localhost):\d+\/i\/([A-Za-z][A-Za-z0-9]*-\d+)\/?$/.exec(href.trim());
+  return m ? m[1].toUpperCase() : null;
+}
+
 export interface ListItem {
   depth: number;
   text: Inline[];

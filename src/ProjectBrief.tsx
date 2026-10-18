@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { invoke } from "./backend";
 import type { ProjectBrief as Brief } from "./types";
-import { parseMarkdown, type Inline } from "./markdown";
+import { type Inline, issueKeyOf, parseMarkdown } from "./markdown";
 import { AgentMark, EmptyState, Loading } from "./ui";
 import { agentLabel, ago, openExternal } from "./util";
 
@@ -181,10 +181,10 @@ function Markdown(props: { src: string; onOpenIssue: (key: string) => void }) {
         case "em":
           return <em key={i}>{p.s}</em>;
         case "link": {
-          const issue = /^nitely:\/\/issue\/([A-Za-z][A-Za-z0-9]*-\d+)$/.exec(p.href);
+          const issue = issueKeyOf(p.href);
           if (issue)
             return (
-              <button key={i} className="link" onClick={() => props.onOpenIssue(issue[1].toUpperCase())}>
+              <button key={i} className="link" onClick={() => props.onOpenIssue(issue)}>
                 {p.s}
               </button>
             );

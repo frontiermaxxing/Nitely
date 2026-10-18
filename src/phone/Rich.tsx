@@ -1,4 +1,4 @@
-import { parseInline } from "../markdown";
+import { issueKeyOf, parseInline } from "../markdown";
 
 /**
  * An agent's line of text with its inline markdown shown, not printed: code, bold, italics, and
@@ -18,7 +18,7 @@ export function Rich(props: { text: string }) {
           case "em":
             return <em key={i}>{p.s}</em>;
           case "link":
-            return p.href.startsWith("nitely://") ? (
+            return issueKeyOf(p.href) ? (
               <span key={i} className="ph-key">
                 {p.s}
               </span>
