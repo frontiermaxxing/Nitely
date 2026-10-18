@@ -78,9 +78,9 @@ impl Job {
 
 impl Db {
     /// The submit that came back to `requested_by` with work for it, in `project`, for `next_task`
-    /// to hand back before any new issue: its issue's latest submit, while the issue is still In
-    /// Progress. One that a later submit (a foreground one makes no job) or a land made moot is
-    /// marked told, so it does not come back later.
+    /// to hand back before any new issue: its issue's latest submit, while nothing has answered it
+    /// since. One made moot by a later submit (a foreground one makes no job, but records a review)
+    /// or by the issue closing is marked told, so it does not come back later.
     pub fn returned_submit(&self, requested_by: &str, project: &str) -> Result<Option<Job>> {
         let of_project = |key: &str| key.split_once('-').is_some_and(|(p, _)| p.eq_ignore_ascii_case(project));
         for j in self.undelivered_submit_jobs(requested_by)? {
@@ -88,8 +88,15 @@ impl Db {
                 continue;
             }
             let latest = self.latest_submit_job(&j.issue)?.is_some_and(|l| l.id == j.id);
-            let still_in_progress = self.issue(&j.issue)?.is_some_and(|i| i.state == "In Progress");
-            if latest && still_in_progress {
+            let open = self.issue(&j.issue)?.is_some_and(|i| i.is_open());
+            // Its own review, if it got that far, was recorded before it ended.
+            let ended = j.ended_at.unwrap_or(j.queued_at);
+            let reviewed_since: bool = self.conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM review WHERE issue_key = ?1 COLLATE NOCASE AND ts > ?2)",
+                params![j.issue, ended],
+                |r| r.get(0),
+            )?;
+            if latest && open && !reviewed_since {
                 return Ok(Some(j));
             }
             self.mark_submit_jobs_delivered(&[j.id])?;
@@ -619,12 +626,19 @@ mod tests {
         let dir = wt.to_string_lossy().into_owned();
         let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: false };
         let job = enqueue(&db, &opts, &actor).unwrap();
-        db.conn.execute("UPDATE submit_job SET state = 'failed', error = 'the gate failed' WHERE id = ?1", [job.id]).unwrap();
+        db.conn.execute("UPDATE submit_job SET state = 'failed', error = 'the gate failed', ended_at = ?2 WHERE id = ?1", params![job.id, now()]).unwrap();
         let project = key.split('-').next().unwrap().to_string();
         assert_eq!(db.returned_submit(actor.id(), &project).unwrap().map(|j| j.id), Some(job.id));
         assert_eq!(db.returned_submit(actor.id(), "OTHER").unwrap(), None, "only the project asked for");
-        // A foreground submit passed since (it makes no job): the failure is moot, and told.
+        // Still In Review from an earlier pass, its new submit failed: that failure comes back.
         db.move_issue(&key, "In Review", None, None, &actor).unwrap();
+        assert_eq!(db.returned_submit(actor.id(), &project).unwrap().map(|j| j.id), Some(job.id));
+        // A foreground submit reviewed it since (it makes no job): the failure is moot, and told.
+        db.conn.execute(
+            "INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, ts) VALUES (?1, 'p', 'c', 'codex', 'pass', 'agent', ?2)",
+            params![key, now() + 1],
+        )
+        .unwrap();
         assert_eq!(db.returned_submit(actor.id(), &project).unwrap(), None);
         assert!(db.undelivered_submit_jobs(actor.id()).unwrap().is_empty());
         std::fs::remove_dir_all(base).ok();
