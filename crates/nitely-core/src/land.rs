@@ -97,6 +97,13 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
             return Err(e);
         }
     };
+    if let Some(before) = &lock.took_over {
+        report.warnings.push(if opts.break_lock {
+            format!("broke the land lock {before} held")
+        } else {
+            format!("took over the land lock {before} left: the land that took it is gone")
+        });
+    }
     let result = run(db, &root, &pb, &issue.key, opts, actor, &mut report);
     // Still under the lock, so the next land cannot change the main checkout mid-build; and, in
     // large-repo mode, with the checkout held from build requests.
@@ -172,6 +179,45 @@ pub(crate) fn held_by_live_land(root: &Path) -> bool {
 pub(crate) fn lock_path(root: &Path) -> Result<PathBuf> {
     let common = PathBuf::from(git(root, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?.trim());
     Ok(common.join(LOCK_FILE))
+}
+
+/// The main checkout's git `index.lock`, when there is one.
+fn index_lock(root: &Path) -> Option<PathBuf> {
+    let dir = git(root, &["rev-parse", "--path-format=absolute", "--git-dir"]).ok()?;
+    Some(PathBuf::from(dir.trim()).join("index.lock")).filter(|p| p.exists())
+}
+
+/// Why git cannot change the main checkout, when an `index.lock` there is older than this land's
+/// lock. Git holds that file for one command only, so one from before the land began was left by a
+/// git that ended without removing it (the machine went down mid-command), and git refuses every
+/// change to the checkout while it is there (NIT-280).
+pub(crate) fn left_index_lock(root: &Path) -> Option<String> {
+    let path = index_lock(root)?;
+    let made = std::fs::metadata(&path).and_then(|m| m.modified()).ok()?;
+    let began = std::fs::metadata(lock_path(root).ok()?).and_then(|m| m.modified()).ok()?;
+    // A git that started a moment before the land may still be running.
+    if made + std::time::Duration::from_secs(60) > began {
+        return None;
+    }
+    let at = made.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64;
+    Some(format!(
+        "{} is from {}, before this land began: a git command that ended without removing it left it, and git changes nothing in {} while it is there. If no git command is running there, delete that file and land again",
+        path.display(),
+        crate::issues::iso(at),
+        root.display()
+    ))
+}
+
+/// What a refused fast-forward of the main checkout says: an `index.lock` there for what it is,
+/// else the likeliest cause.
+pub(crate) fn refused_fast_forward(root: &Path) -> String {
+    if let Some(why) = left_index_lock(root) {
+        return format!("the main checkout refused the fast-forward: {why}");
+    }
+    match index_lock(root) {
+        Some(path) => format!("the main checkout refused the fast-forward: a git command is running there ({} exists); land again once it ends", path.display()),
+        None => "the main checkout refused the fast-forward (do uncommitted edits there overlap the change?)".to_string(),
+    }
 }
 
 /// Who Nitely lands as when it lands a change itself, not the agent that wrote it.
@@ -258,7 +304,8 @@ pub fn land_approved(db: &mut Db, config: &crate::Config, reported: &mut HashMap
             Ok((false, _)) => continue,
             // Another land is running: a later round lands it. A lock that old is probably left by a
             // land that died, which only a person can tell, so it is reported (once).
-            Ok((true, root)) => match lock_age(&root) {
+            // A lock whose land is gone is taken over by this one.
+            Ok((true, root)) => match lock_age(&root).filter(|_| !lock_path(&root).is_ok_and(|p| held_by_dead(&p))) {
                 Some(age) if age > LOCK_STALE_SECS => Err(anyhow::anyhow!(
                     "the land lock in {} is over an hour old; if no land is running, land it with break_lock",
                     root.display()
@@ -315,8 +362,12 @@ fn approval_repo(config: &crate::Config, issue: &IssueRecord, dir: &str) -> Resu
 /// mid-land): its file says `<holder> pid <pid> since <time>`. Returns the holder it named. A lock
 /// whose process still runs, or whose pid cannot be read, is left alone.
 pub fn clear_dead_lock(root: &Path) -> Option<String> {
-    let path = lock_path(root).ok()?;
-    let text = std::fs::read_to_string(&path).ok()?;
+    clear_dead(&lock_path(root).ok()?)
+}
+
+/// `clear_dead_lock` for the lock file at `path`.
+fn clear_dead(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
     let mut words = text.split_whitespace();
     let holder = words.next()?.to_string();
     let pid: u32 = words.skip_while(|w| *w != "pid").nth(1)?.parse().ok()?;
@@ -326,9 +377,9 @@ pub fn clear_dead_lock(root: &Path) -> Option<String> {
     // Moved aside first, then checked: when the dead land's lock was released and a new land took
     // the lock in between, what was moved is the new land's, and it goes straight back.
     let aside = path.with_extension(format!("dead-{}", std::process::id()));
-    std::fs::rename(&path, &aside).ok()?;
+    std::fs::rename(path, &aside).ok()?;
     if std::fs::read_to_string(&aside).ok().as_deref() != Some(text.as_str()) {
-        std::fs::rename(&aside, &path).ok();
+        std::fs::rename(&aside, path).ok();
         return None;
     }
     std::fs::remove_file(&aside).ok();
@@ -404,6 +455,10 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
     drop(held);
     if current != base {
         bail!("the main checkout {} is on {current}, not {base}; land only writes {base}", root.display());
+    }
+    // Said before the gate, not after it, when the fast-forward would fail.
+    if let Some(why) = left_index_lock(root) {
+        bail!("{why}");
     }
 
     let (branch, found) = branch_of(root, key)?;
@@ -494,7 +549,7 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
         } else {
             format!("; {}", stuck.join("; "))
         };
-        return Err(e).context(format!("the main checkout refused the fast-forward (do uncommitted edits there overlap the change?){back}"));
+        return Err(e).context(format!("{}{back}", refused_fast_forward(root)));
     }
     drop(held);
     report.landed = true;
@@ -775,12 +830,17 @@ The merged branch was kept; delete it with `git branch -d` once the folder is go
     ))
 }
 
-pub(crate) struct Lock(PathBuf);
+pub(crate) struct Lock {
+    path: PathBuf,
+    /// The holder named by a lock this one replaced, left by a land whose process is gone.
+    pub(crate) took_over: Option<String>,
+}
 
 impl Lock {
-    /// The lock, or None when another land holds it (a stale one is broken with `break_lock`).
+    /// The lock, or None when another land holds it. A lock whose land is gone (the machine went
+    /// down mid-land) is taken over; one whose process still runs is broken only with `break_lock`.
     pub(crate) fn try_take(path: &Path, holder: &str, break_lock: bool) -> Result<Option<Lock>> {
-        if path.exists() && !break_lock {
+        if path.exists() && !break_lock && !held_by_dead(path) {
             return Ok(None);
         }
         match Lock::take(path, holder, break_lock) {
@@ -792,13 +852,23 @@ impl Lock {
     }
 
     fn take(path: &Path, holder: &str, break_lock: bool) -> Result<Lock> {
+        // A land that died with the machine left its lock, and nothing would land again until a
+        // person broke it (NIT-280).
+        let mut took_over = if break_lock { None } else { clear_dead(path) };
         if path.exists() {
             let held = std::fs::read_to_string(path).unwrap_or_default();
             if !break_lock {
                 let age = std::fs::metadata(path).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).map_or(0, |d| d.as_secs());
-                let stale = if age > LOCK_STALE_SECS { " It is over an hour old; if no land is running, land again with break_lock." } else { "" };
+                // Its process still runs, or it would have been taken over: a land that hangs, or
+                // another program that got the number since.
+                let stale = if age > LOCK_STALE_SECS {
+                    " It is over an hour old and its process still runs; if that is no land, land again with break_lock."
+                } else {
+                    ""
+                };
                 bail!("another land holds {}: {}.{stale}", path.display(), held.trim());
             }
+            took_over = held.split_whitespace().next().map(str::to_string);
             std::fs::remove_file(path).ok();
         }
         use std::io::Write;
@@ -808,14 +878,22 @@ impl Lock {
             .open(path)
             .with_context(|| format!("another land took {} just now", path.display()))?;
         writeln!(f, "{holder} pid {} since {}", std::process::id(), crate::issues::iso(now()))?;
-        Ok(Lock(path.to_path_buf()))
+        Ok(Lock { path: path.to_path_buf(), took_over })
     }
 }
 
 impl Drop for Lock {
     fn drop(&mut self) {
-        std::fs::remove_file(&self.0).ok();
+        std::fs::remove_file(&self.path).ok();
     }
+}
+
+/// Whether the lock at `path` names a process that is gone. A lock that cannot be read, or names
+/// no pid, is not.
+fn held_by_dead(path: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else { return false };
+    let pid = text.split_whitespace().skip_while(|w| *w != "pid").nth(1).and_then(|p| p.parse::<u32>().ok());
+    pid.is_some_and(|pid| pid != std::process::id() && !crate::procs::alive(pid))
 }
 
 /// (path, branch) for every worktree, the main checkout first.
@@ -1280,9 +1358,10 @@ when_changed = ["billing"]
         let reasons = &f.db.reviews(&d).unwrap()[0].reasons;
         assert!(reasons.iter().any(|r| r.contains("lands only what a human approved")), "{reasons:?}");
         approve(&mut f.db, &d);
-        // Another land holds the lock: the approval lands in a later round, once it is free.
+        // Another land holds the lock (a live process: this one): the approval lands in a later
+        // round, once it is free.
         let lock = f.repo.join(".git").join(LOCK_FILE);
-        std::fs::write(&lock, "NIT-9 pid 1").unwrap();
+        std::fs::write(&lock, format!("NIT-9 pid {}", std::process::id())).unwrap();
         let linked = crate::Config { repos: vec![linked(&f.repo, "repo")], ..Default::default() };
         assert!(land_approved(&mut f.db, &linked, &mut reported).unwrap().is_empty());
         assert_eq!(state(&f, &d), "Approved");
@@ -1445,15 +1524,52 @@ when_changed = ["billing"]
         assert!(rebase_in_progress(&wt));
         sh(&wt, &["rebase", "--abort"]);
 
+        // Held by a live process (this one).
         let lock = f.repo.join(".git").join(LOCK_FILE);
-        std::fs::write(&lock, "NIT-9 pid 1").unwrap();
+        let held = format!("NIT-9 pid {}", std::process::id());
+        std::fs::write(&lock, &held).unwrap();
         let dir = f.repo.to_string_lossy().into_owned();
         let opts = LandOptions { dir: &dir, issue_key: &a, push: false, keep: true, break_lock: false };
         let err = land(&mut f.db, &crate::Config::default(), &opts, &f.actor).unwrap_err().to_string();
         assert!(err.contains("another land holds"), "{err}");
         // Said on the issue, with the repo, so the app shows what the land waits behind (NIT-335).
         let refused = f.db.timeline(&a).unwrap().into_iter().rev().find(|t| t.kind == "land_refused").expect("a land_refused event");
-        assert!(refused.summary.as_deref().is_some_and(|s| s.contains("NIT-9 pid 1")), "{refused:?}");
+        assert!(refused.summary.as_deref().is_some_and(|s| s.contains(&held)), "{refused:?}");
+        std::fs::remove_dir_all(&f.base).ok();
+    }
+
+    /// A land that died with the machine leaves its lock, and a git that died mid-command leaves
+    /// the main checkout's index.lock. The next land takes the lock over by itself, and says what
+    /// the index.lock is instead of a refused fast-forward (NIT-280).
+    #[test]
+    fn a_dead_lands_lock_is_taken_over_and_a_left_index_lock_is_named() {
+        let mut f = fixture();
+        let lock = f.repo.join(".git").join(LOCK_FILE);
+        std::fs::write(&lock, "NIT-9 pid 4000000000 since 2026-10-18T05:06:53Z\n").unwrap();
+        let (a, _) = f.submitted("Dead lock", "dead.txt", "x");
+        let r = f.land(&a);
+        assert!(r.landed, "{r:?}");
+        assert!(r.warnings.iter().any(|w| w.contains("took over the land lock NIT-9")), "{r:?}");
+        assert!(!lock.exists(), "released after the land");
+
+        let (b, _) = f.submitted("Left index lock", "left.txt", "x");
+        let index_lock = f.repo.join(".git").join("index.lock");
+        let left = std::fs::File::create(&index_lock).unwrap();
+        left.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600)).unwrap();
+        drop(left);
+        let r = f.land(&b);
+        let err = r.error.as_deref().unwrap_or_default();
+        assert!(!r.landed && err.contains("index.lock") && err.contains("before this land began") && err.contains("delete that file"), "{r:?}");
+        assert!(index_lock.exists(), "never deleted by land: a git may still be running there");
+
+        // One a git made a moment ago is that git's, still running.
+        std::fs::write(&lock, format!("NIT-9 pid {}", std::process::id())).unwrap();
+        std::fs::remove_file(&index_lock).unwrap();
+        std::fs::write(&index_lock, "").unwrap();
+        assert_eq!(left_index_lock(&f.repo), None);
+        assert!(refused_fast_forward(&f.repo).contains("a git command is running there"));
+        std::fs::remove_file(&index_lock).unwrap();
+        assert!(refused_fast_forward(&f.repo).contains("uncommitted edits"));
         std::fs::remove_dir_all(&f.base).ok();
     }
 

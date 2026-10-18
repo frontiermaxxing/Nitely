@@ -340,7 +340,10 @@ own, and the app signs each approved patch, as today.
   queue until nothing waits, landing other agents' changes too. The others wait on their own row and
   return once it landed or was sent back, or after 20 minutes saying it is still waiting. Landing
   again then finds the same row, not a second one. A run that died leaves its rows `running`; the
-  next run, under the lock, queues them again.
+  next run, under the lock, queues them again. A lock whose process is gone (the machine went down
+  mid-land) counts as free: the next land takes it over and says so. A git `index.lock` in the main
+  checkout from before the land began, left by a git that died mid-command, stops the land before
+  its gate with the file's path; land never deletes it, since a git may still be running there.
 - **Stacking.** The stack is built in its own worktree, `<lanes dir>/stack`, by rebasing each branch
   head onto the tip before it there. An agent's branch is moved only when its change lands, so a
   change sent back keeps the branch it handed in. A conflict says "conflicts with main or with

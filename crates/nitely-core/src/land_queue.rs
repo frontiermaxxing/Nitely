@@ -213,6 +213,10 @@ fn land_waiting(db: &mut Db, root: &Path, key: &str, opts: &LandOptions, actor: 
             return result_of(db, &entry);
         }
         if let Some(lock) = land::Lock::try_take(&lock_path, &format!("{key} (land queue)"), break_lock)? {
+            if let Some(before) = &lock.took_over {
+                let said = if break_lock { format!("Broke the land lock {before} held") } else { format!("Took over the land lock {before} left: the land that took it is gone") };
+                db.log_event(actor, Some(key), Some(&root.to_string_lossy()), "status", &said)?;
+            }
             break_lock = false;
             run_queue(db, root)?;
             drop(lock);
@@ -347,6 +351,10 @@ fn run_batch(db: &mut Db, root: &Path, pb: &Playbook, batch: Vec<Entry>) -> Resu
     let current = git(root, &["branch", "--show-current"])?.trim().to_string();
     if current != base {
         bail!("the main checkout {} is on {current}, not {base}; land only writes {base}", root.display());
+    }
+    // Said before the gate, not after it, when the fast-forward would fail.
+    if let Some(why) = land::left_index_lock(root) {
+        bail!("{why}");
     }
     let before = land::rev(root, &base)?;
     let stack = stack_worktree(root, pb, &before)?;
@@ -583,7 +591,7 @@ fn land_prefix(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stacked: Vec<S
             }
         }
     }
-    git(root, &["merge", "--ff-only", &tip]).context("the main checkout refused the fast-forward (do uncommitted edits there overlap the change?)")?;
+    git(root, &["merge", "--ff-only", &tip]).with_context(|| land::refused_fast_forward(root))?;
     let head = git(root, &["rev-parse", "--short", "HEAD"])?.trim().to_string();
     let pushed = push.then(|| git_remote(root, &["push", "origin", &base]));
     // The after steps once for the whole stack, still under the lock.

@@ -478,9 +478,10 @@ fn tools() -> Value {
         },
         {
             "name": "land",
-            "description": "Land a submitted issue on the integration branch: one land at a time, rebase onto the integration branch, check that the review covers exactly this change (and that the human approved it when the playbook says so), run the gate, fast-forward, push, clean up the worktree, and move the issue to Done. A rebase conflict is left in progress for you to resolve. With `[land] batch` in the playbook, a change that arrives while another land runs waits in the repo's land queue and lands together with what else waited (stacked, gated once in a build lane, pushed once); land returns once it landed or was sent back with why.",
+            "description": "Land a submitted issue on the integration branch: one land at a time, rebase onto the integration branch, check that the review covers exactly this change (and that the human approved it when the playbook says so), run the gate, fast-forward, push, clean up the worktree, and move the issue to Done. A rebase conflict is left in progress for you to resolve. With `[land] batch` in the playbook, a change that arrives while another land runs waits in the repo's land queue and lands together with what else waited (stacked, gated once in a build lane, pushed once); land returns once it landed or was sent back with why. A lock left by a land whose process is gone is taken over on its own; break_lock takes over one whose process still runs, only when you know no land is running.",
             "inputSchema": { "type": "object", "required": ["key"], "properties": {
-                "key": { "type": "string" }
+                "key": { "type": "string" },
+                "break_lock": { "type": "boolean", "description": "Take over the land lock even though the process that took it still runs (a land that hangs, or another program with its old number)." }
             } }
         },
         {
@@ -1207,7 +1208,8 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             let root = playbook::repo_for_issue(&config, issue.project.as_deref(), &server.cwd)?;
             nitely_core::install::check_current(&config, &root.to_string_lossy(), env!("NITELY_COMMIT"))?;
             if detached.is_some() {
-                let opts = nitely_core::land::LandOptions { dir: &server.cwd, issue_key: key, push: true, keep: false, break_lock: false };
+                let break_lock = args.get("break_lock").and_then(Value::as_bool).unwrap_or(false);
+                let opts = nitely_core::land::LandOptions { dir: &server.cwd, issue_key: key, push: true, keep: false, break_lock };
                 json!(nitely_core::land::land(&mut db, &config, &opts, &actor)?)
             } else {
                 run_apart(server, session, params, |log, _| {
