@@ -172,7 +172,7 @@ export function Pulse(props: {
       <div className="page-head">
         <h1>{HOME_LABEL}</h1>
         <span className="head-note">{new Date(now * 1000).toLocaleString([], { weekday: "long", hour: "numeric", minute: "2-digit" })}</span>
-        {data && <span className="head-note pulse-since">{sinceLine(data, first)}</span>}
+        {data && <span className="head-note pulse-since">{sinceLine(data, first, ctx)}</span>}
       </div>
       {error && <p className="error">{error}</p>}
       {!data && !error && <Loading />}
@@ -207,21 +207,28 @@ export function Pulse(props: {
   );
 }
 
-/** "12 got stuck, 1 still is": issues, not their failed runs (NIT-356). */
-function stuckLine(stuck: { got: number; still: number } | undefined, failures: number): string | null {
+/**
+ * "12 got stuck, 1 still is": issues, not their failed runs (NIT-356). Which still are is the stuck
+ * tile's own rule (`stuckReason`), so the line and the tile never disagree.
+ */
+function stuckLine(data: PulseData, ctx: Context): string | null {
+  const stuck = data.stuck_issues;
+  const failures = data.happened_counts.stuck;
   if (!stuck) return failures ? `${failures} ${failures === 1 ? "failure" : "failures"}` : null;
   if (!stuck.got) return null;
-  const still = stuck.still === 0 ? "none still are" : `${stuck.still} still ${stuck.still === 1 ? "is" : "are"}`;
+  const got = new Set(stuck.keys);
+  const now = data.projects.flatMap((p) => p.issues).filter((f) => got.has(f.issue.key.toUpperCase()) && stuckReason(f, ctx.rows.get(f.issue.key), ctx.now)).length;
+  const still = now === 0 ? "none still are" : `${now} still ${now === 1 ? "is" : "are"}`;
   return `${stuck.got} got stuck, ${still}`;
 }
 
 /** "Last here 10:36 · since then 1 landed, 1 question"; on a first visit, "In the last day: 1 landed". */
-function sinceLine(data: PulseData, first: boolean): string {
+function sinceLine(data: PulseData, first: boolean, ctx: Context): string {
   const c = data.happened_counts;
   const parts = [
     c.landed && `${c.landed} landed`,
     c.asked && `${c.asked} ${c.asked === 1 ? "question" : "questions"}`,
-    stuckLine(data.stuck_issues, c.stuck),
+    stuckLine(data, ctx),
   ].filter(Boolean);
   if (first) return parts.length ? `In the last day: ${parts.join(", ")}` : "Nothing in the last day";
   return `Last here ${when(data.since)} · ${parts.length ? `since then ${parts.join(", ")}` : "nothing new since"}`;

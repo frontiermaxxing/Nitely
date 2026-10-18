@@ -101,11 +101,13 @@ pub struct HappenedCounts {
     pub asked: i64,
 }
 
-/// Issues that got stuck since `since`, and how many of them still are.
+/// Issues that got stuck since `since`. Which of them still are is the app's to say, by the rule
+/// its stuck tile draws with (quiet work and rebase conflicts too), so the two never disagree.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct StuckIssues {
     pub got: i64,
-    pub still: i64,
+    /// Their keys, upper-cased, sorted.
+    pub keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -202,9 +204,9 @@ pub fn pulse(db: &Db, since: i64, day_start: i64) -> Result<Pulse> {
         happened: db.happened_since(since)?,
         happened_counts: db.happened_counts(since)?,
         stuck_issues: {
-            let got = db.stuck_since(since)?;
-            let still = issues.iter().filter(|i| i.is_open() && i.track.stuck.is_some() && got.contains(&i.key.to_uppercase())).count() as i64;
-            StuckIssues { got: got.len() as i64, still }
+            let mut keys: Vec<String> = db.stuck_since(since)?.into_iter().collect();
+            keys.sort();
+            StuckIssues { got: keys.len() as i64, keys }
         },
         throughput,
         landed_today,
@@ -392,8 +394,8 @@ mod tests {
         let kinds: Vec<&str> = p.happened.iter().map(|h| h.kind).collect();
         assert!(kinds.contains(&"filed") && kinds.contains(&"stuck"));
         assert_eq!((p.happened_counts.filed, p.happened_counts.stuck), (2, 1));
-        // The failure is one issue's, which is still stuck (NIT-356).
-        assert_eq!((p.stuck_issues.got, p.stuck_issues.still), (1, 1));
+        // The failure is one issue's (NIT-356).
+        assert_eq!((p.stuck_issues.got, p.stuck_issues.keys.clone()), (1, vec![a.key.to_uppercase()]));
         assert_eq!(p.throughput.len(), HOURS as usize);
         assert_eq!(p.landed_today, 0);
     }

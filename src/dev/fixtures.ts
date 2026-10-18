@@ -1316,9 +1316,8 @@ function pulse(sinceArg: number, dayStart: number): Pulse {
     .map((e) => ({ ts: e.ts, kind: HAPPENING[e.kind], issue_key: e.key, actor: e.actor, summary: e.summary }));
   const happened_counts = { landed: 0, filed: 0, stuck: 0, review: 0, asked: 0 };
   for (const h of all) happened_counts[h.kind]++;
-  // As pulse.rs counts them: the issues behind the failures, and those still stuck.
+  // As pulse.rs counts them: the issues behind the failures.
   const gotStuck = new Set(all.filter((h) => h.kind === "stuck" && h.issue_key).map((h) => h.issue_key!.toUpperCase()));
-  const stillStuck = projects.flatMap((p) => p.issues).filter((f) => f.issue.track?.stuck && gotStuck.has(f.issue.key.toUpperCase())).length;
   const end = (Math.floor(now / HOUR) + 1) * HOUR;
   const start = end - 24 * HOUR;
   const throughput = Array.from({ length: 24 }, (_, h) => ({ start: start + h * HOUR, landed: 0, submitted: 0 }));
@@ -1336,7 +1335,7 @@ function pulse(sinceArg: number, dayStart: number): Pulse {
     approvals: world.issues.filter((i) => i.state === "Needs You"),
     happened: all.slice(0, 300),
     happened_counts,
-    stuck_issues: { got: gotStuck.size, still: stillStuck },
+    stuck_issues: { got: gotStuck.size, keys: [...gotStuck].sort() },
     throughput,
     landed_today: events.filter((e) => e.kind === "landed" && e.ts >= dayStart).length,
     report: goalReport(since),

@@ -723,7 +723,7 @@ export interface Pulse {
   /** Everything since `since`, counted per kind, past the list's limit. */
   happened_counts: Record<Happening["kind"], number>;
   /** The issues behind the `stuck` count, which counts every failed gate, stopped land and unfinished review (NIT-356). */
-  stuck_issues?: { got: number; still: number };
+  stuck_issues?: { got: number; keys: string[] };
   throughput: PulseHour[];
   landed_today: number;
   /** Since `since`, by goal (NIT-247). */
