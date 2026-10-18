@@ -278,6 +278,12 @@ const FORMAT: i64 = LEGACY_VERSION + 1;
 /// never touch the same lines. Never edit, rename or remove one that has landed: each runs once per
 /// database and is recorded by name in `schema_migration`, and a database holding a name this build
 /// does not list was upgraded by a newer Nitely, so this build refuses it.
+/// How long a write waits for another process's write to finish before it fails as "database is
+/// locked". Many processes write the one database (hooks on every tool call, MCP servers, lanes,
+/// submit and land jobs, the app), and while builds load the machine one commit can take seconds;
+/// SQLite's wait is not first come first served, so a writer can wait behind several. At 5 s, a
+/// queued submit or lane run died of that wait (NIT-346).
+pub(crate) const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const MIGRATIONS: &[(&str, &str)] = include!(concat!(env!("OUT_DIR"), "/migrations.rs"));
 
 /// The record of which named migrations a database has run.
@@ -583,7 +589,7 @@ pub fn refused_by_this_build(path: &Path) -> Result<Option<String>> {
         return Ok(None);
     }
     let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI)?;
-    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    conn.busy_timeout(BUSY_TIMEOUT)?;
     Ok(match standing(&conn, MIGRATIONS)? {
         Standing::Newer(what) => Some(newer_database(path, &what)),
         Standing::Current | Standing::Behind => None,
@@ -614,7 +620,7 @@ impl Db {
             std::fs::create_dir_all(dir)?;
         }
         let conn = Connection::open(path)?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
         // Only an outdated database is written to here. Every app command opens the database, and
         // a write on open moves `data_version`, which the app's watcher reads as a change: it would
         // refresh, open the database again, and loop.
@@ -650,7 +656,7 @@ impl Db {
     /// being migrated; the app migrates it on its next start.
     pub fn open_read_only(path: &Path) -> Result<Db> {
         let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI)?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
         Ok(Db { conn })
     }
 
@@ -862,6 +868,25 @@ impl Db {
 
 #[cfg(test)]
 mod tests {
+    /// A write waits out another process's write that holds the lock past the 5 s it once waited,
+    /// as a queued submit or lane run must while a loaded machine commits slowly (NIT-346).
+    #[test]
+    fn a_write_waits_out_a_long_write_of_another_connection() {
+        let dir = crate::paths::unique_temp("nitely-busy", "");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        let holder = super::Db::open(&path).unwrap();
+        holder.conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let other = path.clone();
+        let writer = std::thread::spawn(move || super::Db::open(&other).and_then(|db| db.note_tool_call("call-1", "session-1")));
+        std::thread::sleep(std::time::Duration::from_secs(6));
+        assert!(!writer.is_finished(), "it waits while the lock is held");
+        holder.conn.execute_batch("COMMIT").unwrap();
+        writer.join().unwrap().unwrap();
+        assert_eq!(holder.session_of_tool_call("call-1").unwrap().as_deref(), Some("session-1"));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     /// A cargo build that is not installed never upgrades the person's own database; anywhere
     /// else, and for an installed nitely, it does (NIT-330).
     #[test]

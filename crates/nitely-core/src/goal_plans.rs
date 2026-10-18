@@ -427,8 +427,9 @@ impl Db {
         let goal = match resumed {
             Some(g) => self.save_goal(&v.project, Some(g.id), &change, actor)?,
             None => {
-                // The goal and the plan's note of it commit together, so a retry always finds it.
-                let tx = self.conn.unchecked_transaction()?;
+                // The goal and the plan's note of it commit together, so a retry always finds it;
+                // immediate, so its reads cannot leave it unable to write (NIT-346).
+                let tx = rusqlite::Transaction::new_unchecked(&self.conn, rusqlite::TransactionBehavior::Immediate)?;
                 let goal = self.save_goal(&v.project, None, &change, actor)?;
                 self.conn.execute("UPDATE goal_plan SET goal_id = ?2 WHERE id = ?1", params![v.id, goal.id])?;
                 tx.commit()?;

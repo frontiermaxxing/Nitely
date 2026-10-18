@@ -25,7 +25,9 @@ impl Db {
     /// is known to have stopped (its last event, for one found long gone), so Activity does not
     /// draw it working or waiting up to the moment it was noticed.
     pub fn end_session(&self, id: &str, at: i64, why: &str) -> Result<bool> {
-        let tx = self.conn.unchecked_transaction()?;
+        // Immediate: it reads, then writes, and a read transaction that another write overtook
+        // cannot become a write one; it would fail at once instead of waiting (NIT-346).
+        let tx = rusqlite::Transaction::new_unchecked(&self.conn, rusqlite::TransactionBehavior::Immediate)?;
         let found: Option<(String, String, String, i64)> = tx
             .query_row("SELECT vendor, cwd, state, last_seen_at FROM session WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
             .optional()?;
