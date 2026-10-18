@@ -2867,9 +2867,9 @@ commands = []
         let snap = snapshot(&root).unwrap();
         let actor = Actor::Agent("claude:test".into());
         let leave = if cfg!(windows) {
-            r"echo temp=%TEMP% tmp=%TMP% && echo left> %TEMP%\left.txt && git init -q %TEMP%\made && dir /b %TEMP%\made\.git"
+            r#"echo temp=%TEMP% tmp=%TMP% && echo left> "%TEMP%\left.txt" && git init -q "%TEMP%\made" && dir /b "%TEMP%\made\.git""#
         } else {
-            "echo temp=$TEMP tmp=$TMPDIR && echo left > $TMPDIR/left.txt && git init -q $TMPDIR/made && ls $TMPDIR/made/.git"
+            r#"echo temp=$TEMP tmp=$TMPDIR && echo left > "$TMPDIR/left.txt" && git init -q "$TMPDIR/made" && ls "$TMPDIR/made/.git""#
         };
         let req = Request { project: "APP", issue: None, kind: Kind::Run, snapshot: &snap, command: leave };
         let ran = run(&db, &root, &pb, &req, &actor, &mut |_| {}).unwrap();
