@@ -318,9 +318,21 @@ pub fn resolve_nitely(nitely: &str) -> Option<PathBuf> {
         return Some(p.to_path_buf()).filter(|p| p.exists());
     }
     if nitely == "nitely" {
-        return crate::install::installed_on_path();
+        return crate::install::installed_on_path().or_else(|| launcher_in(&path_folders()));
     }
     which(nitely)
+}
+
+fn path_folders() -> Vec<PathBuf> {
+    std::env::var_os("PATH").map(|path| std::env::split_paths(&path).collect()).unwrap_or_default()
+}
+
+/// A `nitely.cmd` or `nitely.bat` launcher on PATH (Windows), which Cargo never builds.
+fn launcher_in(path: &[PathBuf]) -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return None;
+    }
+    path.iter().flat_map(|d| ["nitely.cmd", "nitely.bat"].map(|n| d.join(n))).find(|p| p.is_file())
 }
 
 /// The nitely command agents run, when Nitely can find it (on PATH, or beside this program).
@@ -766,12 +778,11 @@ fn suggest_key(db: &Db, name: &str) -> Result<String> {
 /// `nitely` when an installed one is on PATH; else the full path of the binary next to this one;
 /// else None. A copy in Cargo's build folders does not count as installed (NIT-257).
 fn nitely_command() -> Option<String> {
-    let folders: Vec<PathBuf> = std::env::var_os("PATH").map(|path| std::env::split_paths(&path).collect()).unwrap_or_default();
-    choose_nitely(&folders, std::env::current_exe().ok().as_deref())
+    choose_nitely(&path_folders(), std::env::current_exe().ok().as_deref())
 }
 
 fn choose_nitely(path: &[PathBuf], me: Option<&Path>) -> Option<String> {
-    if crate::install::installed_in(path).is_some() {
+    if crate::install::installed_in(path).is_some() || launcher_in(path).is_some() {
         return Some("nitely".into());
     }
     let exe = if cfg!(windows) { "nitely.exe" } else { "nitely" };
@@ -811,6 +822,11 @@ mod tests {
         std::fs::remove_file(installed.join(exe)).unwrap();
         let beside = choose_nitely(&[debug.clone()], Some(&app)).unwrap();
         assert!(beside.ends_with(&format!("debug/{exe}")), "with none installed, the one beside the app: {beside}");
+        if cfg!(windows) {
+            std::fs::write(installed.join("nitely.cmd"), "@echo off").unwrap();
+            assert_eq!(choose_nitely(&[debug.clone(), installed.clone()], Some(&app)).as_deref(), Some("nitely"), "a launcher counts as installed");
+            assert_eq!(launcher_in(&[debug.clone(), installed.clone()]), Some(installed.join("nitely.cmd")));
+        }
         std::fs::remove_dir_all(&root).ok();
     }
 

@@ -95,12 +95,15 @@ fn open_issue(app: &tauri::AppHandle, key: String) {
 /// Who answers issue links on 127.0.0.1:7423 (NIT-229). When the listener that starts at login is
 /// registered, it owns the port and hands each link here through nitely://; the app only makes sure
 /// it runs. When it is not, the app answers them itself, and lets the port go as soon as the
-/// listener is registered.
+/// listener is registered. A registration with no nitely here to start it leaves them to the app.
 fn answer_links(app: tauri::AppHandle) {
     use nitely_core::{link_service, links};
+    fn hand_over() -> bool {
+        link_service::registered() && nitely_core::connect::nitely_command_path().is_some()
+    }
     let mut told = false;
     loop {
-        if link_service::registered() {
+        if hand_over() {
             if links::probe() != Some(links::Role::Service) {
                 if let Some(n) = nitely_core::connect::nitely_command_path() {
                     link_service::start(&n).ok();
@@ -111,7 +114,7 @@ fn answer_links(app: tauri::AppHandle) {
                 Ok(listener) => {
                     told = false;
                     let open = app.clone();
-                    links::serve(listener, links::Role::App, move |key| open_issue(&open, key), || !link_service::registered());
+                    links::serve(listener, links::Role::App, move |key| open_issue(&open, key), || !hand_over());
                     continue;
                 }
                 Err(e) if !told && links::probe().is_none() => {
