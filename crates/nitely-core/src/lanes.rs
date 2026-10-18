@@ -858,8 +858,8 @@ fn run_with(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Act
         std::fs::create_dir_all(&logs)?;
         let log = logs.join(format!("{id}.log"));
         let started = db.conn.execute(
-            "UPDATE lane_run SET state = 'running', lane = ?2, started_at = ?3, log_path = ?4 WHERE id = ?1 AND state = 'queued'",
-            params![id, n, now(), log.to_string_lossy()],
+            "UPDATE lane_run SET state = 'running', lane = ?2, started_at = ?3, log_path = ?4, memory_cap = ?5 WHERE id = ?1 AND state = 'queued'",
+            params![id, n, now(), log.to_string_lossy(), run_cap().map(|c| c as i64)],
         )?;
         if started == 0 {
             bail!("run {id} was taken out of the queue before it started");
@@ -1237,6 +1237,37 @@ fn try_slot(db: &Db, k: u32) -> Result<Option<SlotLock>> {
     }
 }
 
+/// The cap a run starting now gets (`cap_for` with the machine's slots now), as admission sees it.
+fn run_cap() -> Option<u64> {
+    memory_limits().map(|l| cap_for(&l, machine_budget().slots))
+}
+
+/// Why request `id` must wait for the memory the running runs may still take (NIT-323), or None:
+/// each running run may grow to the cap it started with (one started before the slots were raised
+/// keeps its larger cap), so a new one starts only while those caps and its own fit above the
+/// floor. A run whose cap was not recorded (an older nitely started it) counts at the new one's.
+fn caps_fit(db: &Db, id: i64, limits: Option<&machine::Limits>, slots: u32) -> Result<Option<String>> {
+    let Some(limits) = limits.filter(|l| l.floor > 0) else { return Ok(None) };
+    let room = limits.total.saturating_sub(limits.floor);
+    let mine = cap_for(limits, slots);
+    let mut stmt = db.conn.prepare("SELECT memory_cap, pid, pid_started FROM lane_run WHERE state = 'running' AND id != ?1")?;
+    let rows: Vec<(Option<i64>, Option<i64>, Option<String>)> = stmt.query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<_>>()?;
+    let taken: u64 = rows
+        .into_iter()
+        .filter(|(_, pid, started)| pid.is_none_or(|p| p as u32 == std::process::id() || requester_alive(p as u32, started.as_deref())))
+        .map(|(cap, _, _)| cap.map_or(mine, |c| c.max(0) as u64))
+        .sum();
+    if taken.saturating_add(mine) <= room {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "waiting for memory: the running builds may grow to {} and this one to {}, more than the {} above the floor",
+        machine::gb(taken),
+        machine::gb(mine),
+        machine::gb(room)
+    )))
+}
+
 /// The machine's build slots as a waiting request reads them: the budget again every few seconds
 /// (it reads Nitely's config), so raising `build_slots` lets what already waits use them (NIT-291).
 fn slots_now() -> impl FnMut() -> u32 {
@@ -1340,7 +1371,9 @@ fn turns(rows: Vec<QueueRow>, slots: u32, served: &std::collections::HashMap<Str
     let mut waiting = Vec::new();
     for row in &rows {
         let repo = repo_of(&row.w);
-        if row.waits_for_checkout {
+        // Only a request that still holds its place: a stale one's checkout-wait mark would keep
+        // its repo's fresh run from the last free slot (the NIT-325 review).
+        if row.waits_for_checkout && row.alive {
             held_by_checkout.insert(repo.clone());
         }
         lanes_by_repo.insert(repo.clone(), row.lane_count.max(1));
@@ -1591,7 +1624,12 @@ fn take_turn(
                             }
                             db.conn.execute("UPDATE lane_run SET waiting_for = NULL WHERE id = ?1", [id])?;
                         }
-                        if let Some(why) = machine::admit_once(&state_dir(db), limits().as_ref(), memory)? {
+                        let limits = limits();
+                        let why = match caps_fit(db, id, limits.as_ref(), slots)? {
+                            Some(why) => Some(why),
+                            None => machine::admit_once(&state_dir(db), limits.as_ref(), memory)?,
+                        };
+                        if let Some(why) = why {
                             // Held while it waits, the slot and lane would keep the rest waiting too.
                             drop(lock);
                             drop(slot);
@@ -1680,7 +1718,12 @@ pub fn hold_machine<'a>(db: &'a Db, repo_root: &Path, worktree: &Path, project: 
             if my_turn(db, id, slots, &mut alive)? {
                 if let Some(slot) = (1..=slots.max(1)).find_map(|k| try_slot(db, k).ok().flatten()) {
                     // The limits read again on every look, so a change in Settings counts at once.
-                    match machine::admit_once(&state_dir(db), memory_limits().as_ref(), &mut read_memory)? {
+                    let limits = memory_limits();
+                    let why = match caps_fit(db, id, limits.as_ref(), slots)? {
+                        Some(why) => Some(why),
+                        None => machine::admit_once(&state_dir(db), limits.as_ref(), &mut read_memory)?,
+                    };
+                    match why {
                         None => return Ok(slot),
                         Some(why) => {
                             drop(slot);
@@ -1708,7 +1751,11 @@ pub fn hold_machine<'a>(db: &'a Db, repo_root: &Path, worktree: &Path, project: 
         }
     };
     let clear = if waits_for_memory { ", waiting_memory = NULL" } else { "" };
-    if db.conn.execute(&format!("UPDATE lane_run SET state = 'running', started_at = ?2{clear} WHERE id = ?1 AND state = 'queued'"), params![id, now()])? == 0 {
+    if db.conn.execute(
+        &format!("UPDATE lane_run SET state = 'running', started_at = ?2, memory_cap = ?3{clear} WHERE id = ?1 AND state = 'queued'"),
+        params![id, now(), run_cap().map(|c| c as i64)],
+    )? == 0
+    {
         bail!("run {id} was taken out of the queue before it started");
     }
     Ok(MachineTurn { db, id, _slot: slot, finished: false })
@@ -2926,6 +2973,41 @@ let id = db.conn.last_insert_rowid();
         assert_eq!(cap_for(&l, 3), 16 * machine::GIB, "the set cap when the slots fit");
         assert!(cap_for(&l, 1000) >= machine::GIB / 4, "never below a quarter GB");
         assert!(5 * cap_for(&l, 5) <= l.total - l.floor);
+    }
+
+    /// Raising the slots while builds run starts no new one until the caps the running ones
+    /// started with and its own fit above the floor (NIT-323).
+    #[test]
+    fn a_new_run_waits_while_the_running_runs_caps_fill_the_room() {
+        let base = crate::paths::unique_temp("nitely-lane-caps", "");
+        std::fs::create_dir_all(&base).unwrap();
+        let db = Db::open(&base.join("t.db")).unwrap();
+        let me = std::process::id() as i64;
+        let gib = machine::GIB as i64;
+        let add = |state: &str, cap: Option<i64>| -> i64 {
+            db.conn
+                .execute(
+                    "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, priority, lane_count, memory_cap)
+                     VALUES ('APP', 'C:/Code/app', 'x', 'gate', 's', 't', 'b', 'c', ?1, 'local', 1, ?2, 2, 3, ?3)",
+                    params![state, me, cap],
+                )
+                .unwrap();
+            db.conn.last_insert_rowid()
+        };
+        let l = machine::limits_for(64 * machine::GIB, None, None); // 51.2 GB above the floor
+        let waiting = add("queued", None);
+        assert_eq!(caps_fit(&db, waiting, Some(&l), 3).unwrap(), None, "nothing running");
+        for _ in 0..3 {
+            add("running", Some(16 * gib));
+        }
+        // The slots raised to 6: 8.5 GB each, but three runs still hold 16 GB caps.
+        let why = caps_fit(&db, waiting, Some(&l), 6).unwrap().unwrap();
+        assert!(why.starts_with("waiting for memory: the running builds may grow to 48.0 GB"), "{why}");
+        db.conn.execute("UPDATE lane_run SET state = 'done' WHERE memory_cap = ?1 AND id = (SELECT MIN(id) FROM lane_run WHERE memory_cap = ?1)", [16 * gib]).unwrap();
+        assert_eq!(caps_fit(&db, waiting, Some(&l), 6).unwrap(), None, "one ended: 32 + 8.5 fit");
+        let off = machine::limits_for(64 * machine::GIB, Some((0.0, "settings")), None);
+        assert_eq!(caps_fit(&db, waiting, Some(&off), 6).unwrap(), None, "a floor of 0 turns it off");
+        std::fs::remove_dir_all(base).ok();
     }
 
     #[test]

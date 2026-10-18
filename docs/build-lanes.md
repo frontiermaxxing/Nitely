@@ -296,6 +296,10 @@ priority. So Nitely holds what it starts to the machine:
   memory in the lane", a lane problem and not the code's failure, never the machine's. Elsewhere the
   run's tree is measured every second or two and stopped the same way. Each lane run records its peak
   (`peak_memory`, and a line at the end of its log).
+  A run's cap is also at most the memory above the floor shared by the slots (5 slots on 64 GB: 10.2
+  GB each), and each run records the cap it started with (`memory_cap`): a new run starts only while
+  the running runs' caps and its own fit above the floor, so raising the slots while builds run waits
+  for the older, larger caps to end (NIT-323).
 - **Priority.** All of them run at below-normal CPU priority with low I/O and memory priority on
   Windows (the job holds the priority of everything in it; what a command starts inherits the I/O
   priority), and at nice 10 elsewhere. Below normal costs nothing on an idle machine.
