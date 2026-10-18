@@ -86,7 +86,13 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
             let why = format!("{e:#}");
             // Held, or taken by another land between the look and the take: refused all the same.
             if why.starts_with("another land holds") || why.starts_with("another land took") {
-                db.log_event(actor, Some(&issue.key), Some(&root.to_string_lossy()), "land_refused", &format!("Land refused: {}", why.lines().next().unwrap_or("")))?;
+                // The holder as the lock names it, so a lost race names the land that won it too.
+                let holder = lock_path(&root).ok().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| t.lines().next().map(|l| l.trim().to_string()));
+                let said = match holder {
+                    Some(h) if !why.contains(&h) => format!("Land refused: {} (held by {h})", why.lines().next().unwrap_or("")),
+                    _ => format!("Land refused: {}", why.lines().next().unwrap_or("")),
+                };
+                db.log_event(actor, Some(&issue.key), Some(&root.to_string_lossy()), "land_refused", &said)?;
             }
             return Err(e);
         }
