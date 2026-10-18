@@ -1,5 +1,6 @@
 # The real app, driven end to end on Windows (scripts/harness, AGENTS.md "Driving the real app"):
-# the harness build on throwaway data, the Inbox approving and answering. Apart from ci.yml, which
+# the harness build on throwaway data, the Inbox approving and answering, and one scenario across
+# every feature (scenario.e2e.mjs: connect to a signed Accept). Apart from ci.yml, which
 # runs exactly the playbook's gate.
 
 name: App end to end

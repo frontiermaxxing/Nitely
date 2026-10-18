@@ -48,6 +48,9 @@ function realDataDir() {
 
 const norm = (p) => resolve(p).replace(/\\/g, "/").replace(/\/$/, "").toLowerCase();
 
+/** The harness's own nitely, built beside the app: what agents and the crew run in a scenario. */
+export const harnessNitely = () => exe("nitely");
+
 /** Runs the harness's nitely CLI on the run's data folder, e.g. to seed it or read it back. */
 export function nitely(home, ...args) {
   return run(exe("nitely"), args, { capture: true, env: { ...personsEnv(), NITELY_HOME: home, NITELY_AGENT_HOME: agentsOf(home) } });

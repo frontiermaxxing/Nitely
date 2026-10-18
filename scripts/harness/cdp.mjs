@@ -149,6 +149,11 @@ export class Page {
     await this.send("Input.dispatchKeyEvent", { type: "keyUp", key, code, modifiers });
   }
 
+  /** Types `text` into the focused field, as a person typing would (one input event). */
+  async type(text) {
+    await this.send("Input.insertText", { text });
+  }
+
   /** The window's contents as PNG, saved to `path`. */
   async screenshot(path) {
     const shot = await this.send("Page.captureScreenshot", { format: "png" });

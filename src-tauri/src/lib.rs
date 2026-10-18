@@ -612,7 +612,9 @@ fn keep_crews_once(started: &mut std::collections::HashMap<String, std::time::In
             continue;
         }
         started.insert(project.clone(), std::time::Instant::now());
-        let Some(nitely) = crew::nitely_on_path() else {
+        // Under the harness, its own nitely beside the app, never the person's installed one.
+        let found = if harness::on() { harness::nitely() } else { crew::nitely_on_path() };
+        let Some(nitely) = found else {
             db.crew_set_status(&project, "the app could not start the crew: no nitely on PATH (run `nitely install`)")?;
             continue;
         };

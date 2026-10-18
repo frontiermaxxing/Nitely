@@ -89,6 +89,15 @@ pub fn record_badge(count: u32, drawn: bool) {
     let _ = std::fs::write(Path::new(&home).join("harness-badge.json"), serde_json::json!({ "count": count, "drawn": drawn }).to_string());
 }
 
+/// The harness's own `nitely`, built beside the app (scripts/harness/app.mjs builds both into
+/// target/harness): what the app starts a crew's supervisor with under the harness, so a crew in a
+/// test runs this build on the run's data, never the `nitely` installed on the person's PATH.
+pub fn nitely() -> Option<PathBuf> {
+    let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    let exe = dir.join(if cfg!(windows) { "nitely.exe" } else { "nitely" });
+    exe.is_file().then_some(exe)
+}
+
 /// `p` with its links and junctions resolved, as far as it exists: the nearest folder that does,
 /// resolved, and the rest of the path after it.
 fn resolved(p: &Path) -> PathBuf {
@@ -173,6 +182,7 @@ mod tests {
             "CurrentVersion\\Run",
             "CLAUDE_CONFIG_DIR",
             "CODEX_HOME",
+            "nitely_on_path",
         ];
         // (file, what it reaches, how many lines, or 0 for any): why the harness is clear of it.
         const LISTED: &[(&str, &str, usize, &str)] = &[
@@ -193,6 +203,8 @@ mod tests {
             ("src-tauri/src/notify.rs", "notify_rust::", 0, "as Toast::new"),
             ("src-tauri/src/notify.rs", "UNUserNotificationCenter", 0, "as Toast::new; init() skips the Mac's center under the harness"),
             ("src-tauri/src/update.rs", "updater_builder", 0, "base_status disables updates under the harness"),
+            ("crates/nitely-core/src/crew.rs", "nitely_on_path", 1, "the installed nitely, for a crew's supervisor; the app asks harness::nitely instead under the harness"),
+            ("src-tauri/src/lib.rs", "nitely_on_path", 1, "keep_crews_once uses harness::nitely under the harness"),
         ];
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
         let mut files = Vec::new();

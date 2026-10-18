@@ -119,6 +119,14 @@ once came just before a hard freeze (NIT-188), so:
   scheduled task, a login item, the registry) fails `everything_the_app_reaches_outside_its_folders_is_listed`
   in src-tauri/src/harness.rs until it is listed there with how the harness stays clear of it.
   The window opens without taking the focus, but it is on the screen while a test runs.
+- `scenario.e2e.mjs` runs one whole flow across features (NIT-253) on a throwaway repo it connects:
+  setup, a crew worker, async submit, review alone and batched, gates in a build lane, the land
+  queue landing two changes on one gate, a finding the agent asks to have accepted, its
+  notification and the signed Accept in the Inbox, checking the board, tracks and timelines at
+  each step. Its agents and reviewer are fakes (`fake-agent.mjs`, the crew's command;
+  `fake-reviewer.mjs`, the playbook's reviewer) acting through `nitely mcp` (`mcp.mjs`), and the
+  app starts the crew's supervisor with the harness's own `nitely`. Add a step there when a new
+  feature crosses others.
 - One real toast, confirmed from Windows' notification history: `node scripts/harness/toast.check.mjs`
   (it shows a toast on the desktop, so it is not part of `app:test`).
 - What a driven window cannot do: OS input outside the page (Alt+Space, Win+arrows, dragging the
