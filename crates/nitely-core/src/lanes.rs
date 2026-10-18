@@ -1274,7 +1274,14 @@ fn turns(rows: Vec<QueueRow>, slots: u32, served: &std::collections::HashMap<Str
     let free_lanes = |repo: &str| lanes_by_repo.get(repo).copied().unwrap_or(1) - running_by_repo.get(repo).copied().unwrap_or(0);
     let can_start = |repo: &str| free_lanes(repo) > 0 && !held_by_checkout.contains(repo);
     let free_slots = (slots as i64 - running.len() as i64).max(0);
-    let run_could_start = waiting.iter().any(|w| w.kind == "run" && can_start(&repo_of(w)));
+    let ordered = in_order(waiting, served, now);
+    // Only a repo's first request can start, so only a run that is first in its repo keeps a slot:
+    // one behind its own repo's gate would keep the slot from that gate and never take it.
+    let mut firsts: HashSet<String> = HashSet::new();
+    let run_could_start = ordered.iter().any(|w| {
+        let repo = repo_of(w);
+        firsts.insert(repo.clone()) && w.kind == "run" && can_start(&repo)
+    });
     let reserve = i64::from(slots >= 3 && run_could_start);
     let busy = || {
         let mut list: Vec<&&QueueRow> = running.iter().collect();
@@ -1290,7 +1297,7 @@ fn turns(rows: Vec<QueueRow>, slots: u32, served: &std::collections::HashMap<Str
     let mut first_of_repo: HashMap<String, i64> = HashMap::new();
     let mut ahead: Vec<i64> = Vec::new();
     let mut out = HashMap::new();
-    for w in in_order(waiting, served, now) {
+    for w in ordered {
         let repo = repo_of(&w);
         if let Some(first) = first_of_repo.get(&repo) {
             out.insert(w.id, Turn::Wait(format!("waiting: behind request {first} of the same repo")));
@@ -2984,6 +2991,17 @@ wanted {shown}", ran.output);
         let t = turns(busy, 4, &none, now);
         assert_eq!(t[&3], Turn::Go, "{t:?}");
         assert_eq!(t[&4], Turn::Wait("waiting: the free machine slots go to requests ahead (3)".into()));
+        // A run behind its own repo's gate cannot start before that gate, so it keeps no slot from
+        // it: the gate goes (the NIT-291 review's case).
+        let same_repo = vec![
+            running(waiting(1, "AND", "gate", now - 1500), "AND-302", now - 1440),
+            running(waiting(2, "AND2", "gate", now - 1200), "AND-335", now - 1140),
+            queued(waiting(3, "NIT", "gate", now - 100)),
+            queued(waiting(4, "NIT", "run", now - 30)),
+        ];
+        let t = turns(same_repo, 3, &none, now);
+        assert_eq!(t[&3], Turn::Go, "{t:?}");
+        assert_eq!(t[&4], Turn::Wait("waiting: behind request 3 of the same repo".into()));
     }
 
     /// `nitely lanes` and the app show why each queued request waits.
