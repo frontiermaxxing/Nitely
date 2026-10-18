@@ -70,9 +70,10 @@ impl PlanItem {
                 "{r}: name the files it will change in touches (paths like src/App.tsx), so Crew keeps parallel workers apart; only a live check or the person's own task leaves it empty"
             ));
         }
-        let not_files: Vec<&str> = self.touches.iter().map(String::as_str).filter(|t| crate::overlap::paths_in(t).is_empty()).collect();
+        // Any file the repo has (Dockerfile, .gitignore, main.tf), but a path, not a description.
+        let not_files: Vec<&str> = self.touches.iter().map(|t| t.trim()).filter(|t| t.is_empty() || t.chars().any(char::is_whitespace)).collect();
         if !not_files.is_empty() {
-            return Some(format!("{r}: touches names files with their extension (src/App.tsx, crates/app/src/lib.rs), not {}", not_files.join(", ")));
+            return Some(format!("{r}: touches names files by their path in the repo (src/App.tsx, Dockerfile), not {}", not_files.join(", ")));
         }
         None
     }
@@ -734,7 +735,7 @@ mod tests {
         p.issues[1].touches = vec!["the installer".into()];
         let e = db.propose_goal("NIT", &p, None, &agent()).unwrap_err().to_string();
         assert!(e.contains("not the installer"), "{e}");
-        p.issues[1].touches = vec!["src-tauri/tauri.conf.json".into(), "scripts/sign.ps1".into()];
+        p.issues[1].touches = vec!["src-tauri/tauri.conf.json".into(), "scripts/sign.ps1".into(), "Dockerfile".into()];
         p.issues[1].size = Some("XL".into());
         assert!(db.propose_goal("NIT", &p, None, &agent()).unwrap_err().to_string().contains("S, M or L"));
         p.issues[1].size = Some("L".into());
@@ -746,8 +747,8 @@ mod tests {
         let proposed = db.propose_goal("NIT", &p, None, &agent()).unwrap();
         db.move_issue(&proposed.issue.key, "Approved", None, None, &Actor::Human).unwrap();
         let sign = db.list_issues(Some("NIT"), true).unwrap().into_iter().find(|i| i.title == "Sign the Windows installer").unwrap();
-        assert!(sign.body.ends_with("Touches: `src-tauri/tauri.conf.json`, `scripts/sign.ps1`\nSize: L"), "{}", sign.body);
-        assert_eq!(crate::overlap::paths_in(&sign.body), vec!["src-tauri/tauri.conf.json".to_string(), "scripts/sign.ps1".to_string()], "the overlap check reads them");
+        assert!(sign.body.ends_with("Touches: `src-tauri/tauri.conf.json`, `scripts/sign.ps1`, `Dockerfile`\nSize: L"), "{}", sign.body);
+        assert_eq!(crate::overlap::paths_in(&sign.body), ["src-tauri/tauri.conf.json", "scripts/sign.ps1", "Dockerfile"], "the overlap check reads every one, extension or not");
     }
 
     #[test]

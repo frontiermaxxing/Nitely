@@ -55,6 +55,16 @@ fn in_flight(issue: &IssueRecord) -> bool {
 /// backticks and trailing punctuation are dropped; backslashes become `/`.
 pub fn paths_in(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
+    // A planned issue's `Touches:` line (goal_plans.rs) names files whatever they are called:
+    // `Dockerfile`, `.gitignore` and `main.tf` too, which prose alone would not count.
+    for line in text.lines().filter_map(|l| l.trim_start().strip_prefix("Touches:")) {
+        for t in line.split('`').skip(1).step_by(2) {
+            let t = t.trim().replace('\\', "/");
+            if !t.is_empty() && !t.chars().any(char::is_whitespace) && !out.contains(&t) {
+                out.push(t);
+            }
+        }
+    }
     for word in text.split(|c: char| c.is_whitespace() || matches!(c, '`' | '"' | '\'' | '(' | ')' | '[' | ']' | '<' | '>' | ',' | ';')) {
         let w = word.trim_matches(|c: char| matches!(c, '.' | ':' | '!' | '?' | '*')).replace('\\', "/");
         let w = w.trim_start_matches("./").trim_end_matches('/');
