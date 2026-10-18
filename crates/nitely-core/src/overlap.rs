@@ -55,14 +55,9 @@ fn in_flight(issue: &IssueRecord) -> bool {
 /// backticks and trailing punctuation are dropped; backslashes become `/`.
 pub fn paths_in(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    // A planned issue's `Touches:` line (goal_plans.rs) names files whatever they are called:
-    // `Dockerfile`, `.gitignore` and `main.tf` too, which prose alone would not count.
-    for line in text.lines().filter_map(|l| l.trim_start().strip_prefix("Touches:")) {
-        for t in line.split('`').skip(1).step_by(2) {
-            let t = t.trim().replace('\\', "/");
-            if !t.is_empty() && !t.chars().any(char::is_whitespace) && !out.contains(&t) {
-                out.push(t);
-            }
+    for t in touches_in(text) {
+        if !out.contains(&t) {
+            out.push(t);
         }
     }
     for word in text.split(|c: char| c.is_whitespace() || matches!(c, '`' | '"' | '\'' | '(' | ')' | '[' | ']' | '<' | '>' | ',' | ';')) {
@@ -87,6 +82,22 @@ pub fn paths_in(text: &str) -> Vec<String> {
         let dir = w.contains('/') && !w.contains('.') && w.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_'));
         if (has_ext || dir) && !w.chars().any(|c| c.is_whitespace()) && !out.iter().any(|o| o == w) {
             out.push(w.to_string());
+        }
+    }
+    out
+}
+
+/// The files a planned issue's `Touches:` line names (goal_plans.rs), whatever they are called:
+/// `Dockerfile`, `.gitignore`, `main.tf` and `docs/Release Notes.md` too, which prose alone would
+/// not count.
+pub fn touches_in(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines().filter_map(|l| l.trim_start().strip_prefix("Touches:")) {
+        for t in line.split('`').skip(1).step_by(2) {
+            let t = t.trim().replace('\\', "/");
+            if !t.is_empty() && !out.contains(&t) {
+                out.push(t);
+            }
         }
     }
     out
@@ -139,7 +150,9 @@ pub fn held(config: &crate::Config, db: &Db, project: &str) -> Result<Vec<Held>>
         .map(|i| {
             let (branch, mut files) = branch_files.remove(&i.key).map_or((None, vec![]), |(b, f)| (Some(b), f));
             let mut seen: BTreeSet<String> = files.iter().map(|f| f.to_lowercase()).collect();
-            for p in paths_in(&format!("{}\n{}", i.title, i.body)).into_iter().filter(|p| real(p)) {
+            // Files a plan declared count as they are; prose counts when it reads as a real path.
+            let declared = touches_in(&i.body);
+            for p in paths_in(&format!("{}\n{}", i.title, i.body)).into_iter().filter(|p| declared.contains(p) || real(p)) {
                 if seen.insert(p.to_lowercase()) {
                     files.push(p);
                 }
