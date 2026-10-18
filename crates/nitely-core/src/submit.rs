@@ -558,23 +558,31 @@ pub fn patch_id(worktree: &Path, base: &str) -> Result<String> {
 /// A submodule's move counts by the code it changes (`--submodule=diff`), not by the commit ids it
 /// points at, so a rebase of the submodule that leaves its code the same keeps the patch. The
 /// `Submodule <path> <a>..<b>:` header lines that its diff follows go (patch-id would start a new
-/// patch at each). A move whose code git cannot show (`(commits not present)`, a new submodule)
-/// counts by its header, commit ids and all, so a pointer never changes unseen.
+/// patch at each). When git cannot show a move's code (`(commits not present)`, a new submodule),
+/// every pointer the change moves counts by its full commit ids, so a pointer never changes unseen.
 pub fn patch_id_range(worktree: &Path, base: &str, head: &str) -> Result<String> {
     let diff = git(worktree, &["diff", "-U0", "--submodule=diff", &format!("{base}...{head}")])?;
-    let mut pointers = String::new();
+    let mut unseen = false;
     let diff: String = diff
         .split_inclusive('\n')
         .filter(|l| {
             if !l.starts_with("Submodule ") {
                 return true;
             }
-            if !l.trim_end().ends_with(':') {
-                pointers.push_str(l);
-            }
+            unseen |= !l.trim_end().ends_with(':');
             false
         })
         .collect();
+    // The header abbreviates the commit ids; the raw diff has them whole.
+    let pointers: String = if unseen {
+        git(worktree, &["diff", "--raw", "--no-abbrev", "--no-renames", &format!("{base}...{head}")])?
+            .lines()
+            .filter(|l| l.split_whitespace().take(2).any(|m| m.trim_start_matches(':') == "160000"))
+            .map(|l| format!("{l}\n"))
+            .collect()
+    } else {
+        String::new()
+    };
     if diff.is_empty() && pointers.is_empty() {
         return Ok("empty".into());
     }

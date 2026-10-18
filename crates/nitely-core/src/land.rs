@@ -412,8 +412,11 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
     }
 
     if push {
-        // The pull request should show the commits that land, not the ones from before the rebase.
-        if let Err(e) = git_remote(root, &["push", "--force-with-lease", "origin", &format!("{head}:refs/heads/{branch}")]) {
+        // The pull request should show the commits that land, not the ones from before the rebase:
+        // the submodules' rebased task branches first, so its pointers resolve.
+        let pushed = crate::submodules::push_task(pb, &worktree, &branch)
+            .and_then(|_| git_remote(root, &["push", "--force-with-lease", "origin", &format!("{head}:refs/heads/{branch}")]).map(|_| ()));
+        if let Err(e) = pushed {
             report.warnings.push(format!("the pull request may still show the pre-rebase commits ({})", first_line(&e)));
         }
     }

@@ -126,6 +126,9 @@ pub struct Moving {
     pub repo: PathBuf,
     pub branch: String,
     pub before: String,
+    /// Where the base pointed it: where the repo's own copy is checked out after `git submodule
+    /// update`, which can be behind `before`.
+    pub pinned: Option<String>,
     pub head: String,
 }
 
@@ -166,7 +169,8 @@ pub fn rebase(root: &Path, pb: &Playbook, worktree: &Path, base: &str) -> Result
             }
         }
         let head = git(&at, &["rev-parse", "HEAD"])?.trim().to_string();
-        moving.push(Moving { path: path.to_string(), repo, branch, before, head });
+        let pinned = pointer(worktree, base, path)?;
+        moving.push(Moving { path: path.to_string(), repo, branch, before, head, pinned });
     }
     Ok(moving)
 }
@@ -234,8 +238,10 @@ pub struct Undo {
     head: String,
     /// The checkout that has the branch, when one does: put back with `reset --keep` there.
     checkout: Option<PathBuf>,
-    /// The repo's own copy, detached at the old tip and moved along with the branch.
+    /// The repo's own copy, detached where the main checkout had it and moved along with the branch.
     followed: bool,
+    /// Where that copy was before it followed.
+    was: String,
 }
 
 /// The checkout of `repo` that has `branch`, if any.
@@ -274,12 +280,14 @@ pub fn fast_forward(moving: &[Moving]) -> Result<Vec<Undo>> {
             undo(&done);
             return Err(e);
         }
-        // The usual state after `git submodule update`: the repo's copy detached at the commit the
-        // repo pointed at. It follows, or the main checkout would build the old code.
+        // The repo's copy detached where the main checkout had it: at the old tip, or where the repo
+        // pointed it (`git submodule update` leaves it there, which can be behind the tip). It
+        // follows, or the main checkout would build the old code.
         let detached = checkout.is_none() && git(&m.repo, &["symbolic-ref", "-q", "HEAD"]).is_err();
-        let followed = detached && git(&m.repo, &["rev-parse", "HEAD"]).is_ok_and(|h| h.trim() == m.before);
-        let mut u = Undo { repo: m.repo.clone(), branch: m.branch.clone(), before: m.before.clone(), head: m.head.clone(), checkout, followed: false };
-        if followed {
+        let was = git(&m.repo, &["rev-parse", "HEAD"]).map(|h| h.trim().to_string()).unwrap_or_default();
+        let follows = detached && (was == m.before || m.pinned.as_deref() == Some(was.as_str()));
+        let mut u = Undo { repo: m.repo.clone(), branch: m.branch.clone(), before: m.before.clone(), head: m.head.clone(), checkout, followed: false, was };
+        if follows {
             if let Err(e) = git(&m.repo, &["checkout", "-q", "--detach", &m.head]) {
                 done.push(u);
                 undo(&done);
@@ -297,7 +305,7 @@ pub fn undo(done: &[Undo]) -> Vec<String> {
     let mut failed = Vec::new();
     for u in done.iter().rev() {
         if u.followed {
-            if let Err(e) = git(&u.repo, &["checkout", "-q", "--detach", &u.before]) {
+            if let Err(e) = git(&u.repo, &["checkout", "-q", "--detach", &u.was]) {
                 failed.push(format!("the submodule checkout {} could not be put back ({})", u.repo.display(), crate::land::first_line(&e)));
             }
         }
@@ -333,7 +341,9 @@ pub fn push_task(pb: &Playbook, worktree: &Path, branch: &str) -> Result<()> {
         let Some(remote) = s.remote.as_deref().filter(|r| !r.trim().is_empty()) else { continue };
         let at = worktree.join(s.path());
         if checked_out(&at) {
-            git_remote(&at, &["push", "--force", remote, &format!("HEAD:refs/heads/{branch}")]).with_context(|| format!("pushing the submodule {}'s {branch} to {remote}", s.path()))?;
+            // As the repo's own: a rebased branch replaces its old head, never commits it has not seen.
+            git_remote(&at, &["push", "--force-with-lease", "-u", remote, &format!("HEAD:refs/heads/{branch}")])
+                .with_context(|| format!("pushing the submodule {}'s {branch} to {remote}", s.path()))?;
         }
     }
     Ok(())
