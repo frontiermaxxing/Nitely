@@ -1055,8 +1055,10 @@ when_changed = ["billing"]
     fn keeps_a_worktree_a_process_still_uses() {
         let mut f = fixture();
         let (a, wt) = f.submitted("Pulse view", "pulse.txt", "x");
-        // A dev server started in the worktree, as the browser preview asks agents to do.
-        let mut server = std::process::Command::new(playbook::posix_sh()).arg("-c").arg(format!("sleep 30; : {}", wt.display())).spawn().unwrap();
+        // A dev server started in the worktree, as the browser preview asks agents to do. It runs
+        // until the test stops it (at most ten minutes): on a busy machine the land below can take minutes, and a server
+        // that ended first would rightly leave the worktree free (NIT-309).
+        let mut server = std::process::Command::new(playbook::posix_sh()).arg("-c").arg(format!("sleep 600; : {}", wt.display())).spawn().unwrap();
         // Land sees it the way this does; wait until it shows (NIT-122).
         assert!(crate::procs::tests::held_by(&wt, server.id()).iter().any(|h| h.pid == server.id()), "the server is listed");
         let r = f.land(&a);
