@@ -3847,14 +3847,15 @@ wanted {shown}", ran.output);
             db.conn.last_insert_rowid()
         };
         let mut alive = |_: &Requester| true;
-        // As on 2026-10-18: an old binary's run, queued 12 minutes ago (aged level with a land, and
-        // first by id), and a land queued by the new one.
+        // As on 2026-10-18: an old binary's run, queued 12 minutes ago, which aging puts ahead of
+        // a gate the new binary queued since (a waiting land goes first in its repo whatever aged
+        // past it, NIT-332, so the gate stands in for the newer request here).
         let old = add("run", 3, now() - 12 * 60, None);
-        let land = add("land", 1, now() - 10, Some(SCHEDULER));
-        assert!(my_turn(&db, land, 5, &mut alive).unwrap(), "the old binary's run holds the land up no longer");
+        let gate = add("gate", 2, now() - 10, Some(SCHEDULER));
+        assert!(my_turn(&db, gate, 5, &mut alive).unwrap(), "the old binary's run holds the gate up no longer");
         assert!(my_turn(&db, old, 5, &mut alive).unwrap(), "asking, a request is never passed over itself");
         db.conn.execute("UPDATE lane_run SET scheduler = ?2 WHERE id = ?1", params![old, SCHEDULER]).unwrap();
-        assert!(!my_turn(&db, land, 5, &mut alive).unwrap(), "under one scheduler, the order holds as before");
+        assert!(!my_turn(&db, gate, 5, &mut alive).unwrap(), "under one scheduler, the order holds as before");
         std::fs::remove_dir_all(base).ok();
     }
 
