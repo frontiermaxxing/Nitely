@@ -519,8 +519,9 @@ fn upgraded_by_path(db: &Path) -> std::path::PathBuf {
 }
 
 /// Why this build must not upgrade the database at `db` (NIT-330), or None when it may: `db` is the
-/// person's own (`real_db`), and this program `exe` is a cargo build's output (a `target/<profile>`
-/// folder holding `.fingerprint`), not the installed nitely or a release. Such a build, a branch's
+/// person's own (`real_db`), and this program `exe` is a cargo build's output (in or below a
+/// `target/<profile>` folder holding `.fingerprint`, a bundle included), not the installed nitely
+/// or a release. Such a build, a branch's
 /// run by hand in a lane or a worktree, would apply its own migrations, and then every installed
 /// nitely refuses the database until someone reverts it. `allowed` (NITELY_UPGRADE_REAL_DATA) lets
 /// it anyway; `pending` is the first migration it would run.
@@ -536,9 +537,10 @@ fn may_not_upgrade(db: &Path, real_db: &Path, exe: Option<&Path>, pending: Optio
         return None;
     }
     let exe = exe?;
-    let dir = exe.parent()?;
-    let profile = if dir.file_name().is_some_and(|n| n == "deps") { dir.parent()? } else { dir };
-    if !profile.join(".fingerprint").is_dir() {
+    // The cargo profile folder (`target/<profile>`, holding `.fingerprint`) the program is in, or
+    // below: beside it, in `deps`, or deep in a bundle (a macOS debug app runs from
+    // `target/debug/bundle/macos/<App>.app/Contents/MacOS`, NIT-336). Six folders up at most.
+    if !exe.ancestors().skip(1).take(6).any(|dir| dir.join(".fingerprint").is_dir()) {
         return None;
     }
     let what = pending.map(|m| format!(" (migration {m})")).unwrap_or_default();
@@ -876,6 +878,9 @@ mod tests {
         let why = may_not_upgrade(&real, &real, Some(&built), Some("20261018-triage"), false).unwrap();
         assert!(why.contains("is a build that is not installed") && why.contains("migration 20261018-triage") && why.contains("NITELY_HOME"), "{why}");
         assert!(may_not_upgrade(&real, &real, Some(&profile.join("deps").join("nitely_core-1.exe")), None, false).is_some(), "a test binary in deps too");
+        // A macOS debug app bundle runs well below the profile folder (NIT-336).
+        let bundle = profile.join("bundle").join("macos").join("Nitely.app").join("Contents").join("MacOS").join("nitely-app");
+        assert!(may_not_upgrade(&real, &real, Some(&bundle), None, false).is_some(), "a debug app bundle");
         assert_eq!(may_not_upgrade(&base.join("scratch.db"), &real, Some(&built), None, false), None, "any other database");
         let installed = base.join("bin").join("nitely.exe");
         assert_eq!(may_not_upgrade(&real, &real, Some(&installed), None, false), None, "the installed nitely");
