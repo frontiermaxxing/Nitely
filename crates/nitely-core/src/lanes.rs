@@ -786,9 +786,9 @@ pub fn run_in(config: &crate::Config, db: &Db, dir: &str, issue: Option<&str>, c
 /// is written as the request moves (queued, running, done), so another process can follow it with
 /// `Db::lane_run`. `on_event` is called with the run when it is queued and when it starts.
 pub fn run(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Actor, on_event: &mut dyn FnMut(&Run)) -> Result<Run> {
-    // The machine's share as it is when the command starts, not when it was queued (NIT-291).
-    run_with(db, repo_root, pb, req, actor, on_event, &mut |lane, log, limit, temp| {
-        let share = share();
+    // The machine's share as it is when the command starts, not when it was queued (NIT-291), with
+    // the cap it was admitted with (NIT-323).
+    run_with(db, repo_root, pb, req, actor, on_event, &mut |lane, log, limit, temp, share| {
         let command = req.command.replace("{jobs}", &share.jobs.to_string());
         run_logged(&command, lane, log, limit, share, Some(temp))
     })
@@ -796,7 +796,7 @@ pub fn run(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Acto
 
 /// What runs in a lane once it holds the request's snapshot: given the lane, the log, the time
 /// limit and the request's temporary folder (`lane_temp`), it returns how the command ended.
-type Exec<'a> = dyn FnMut(&Path, &Path, Duration, &Path) -> Result<Ended> + 'a;
+type Exec<'a> = dyn FnMut(&Path, &Path, Duration, &Path, Share) -> Result<Ended> + 'a;
 
 /// How a lane command ended.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -858,7 +858,7 @@ fn run_with(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Act
         std::fs::create_dir_all(&logs)?;
         let log = logs.join(format!("{id}.log"));
         let started = db.conn.execute(
-            "UPDATE lane_run SET state = 'running', lane = ?2, started_at = ?3, log_path = ?4, memory_cap = ?5 WHERE id = ?1 AND state = 'queued'",
+            "UPDATE lane_run SET state = 'running', lane = ?2, started_at = ?3, log_path = ?4, memory_cap = COALESCE(memory_cap, ?5) WHERE id = ?1 AND state = 'queued'",
             params![id, n, now(), log.to_string_lossy(), run_cap().map(|c| c as i64)],
         )?;
         if started == 0 {
@@ -883,7 +883,12 @@ fn run_with(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Act
         on_event(&r);
     }
 
-    let outcome = serve(repo_root, pb, &rules, &lane, &log, req, exec);
+    // What it runs with: the machine's cores now, and the cap it was admitted with, so what runs is
+    // what admission counted (NIT-323).
+    let recorded: Option<i64> = db.conn.query_row("SELECT memory_cap FROM lane_run WHERE id = ?1", [id], |r| r.get(0)).optional()?.flatten();
+    let now_share = share();
+    let run_share = Share { jobs: now_share.jobs, cap: recorded.map(|c| c.max(0) as u64).or(now_share.cap) };
+    let outcome = serve(repo_root, pb, &rules, &lane, &log, req, run_share, exec);
     let ended = now();
     match outcome {
         Ok(o) => {
@@ -987,9 +992,9 @@ pub fn gate(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Op
     let mut flaked: Vec<playbook::Flake> = Vec::new();
     let retries = pb.gate.retries;
     let req = Request { project: &project, issue, kind, snapshot: &snap, command: &key };
-    let run = run_with(db, repo_root, pb, &req, actor, &mut |_| {}, &mut |lane: &Path, log: &Path, limit: Duration, temp: &Path| {
-        // The machine's share as it is when the gate starts, not when it was queued (NIT-291).
-        let share = share();
+    let run = run_with(db, repo_root, pb, &req, actor, &mut |_| {}, &mut |lane: &Path, log: &Path, limit: Duration, temp: &Path, share: Share| {
+        // The machine's share as it is when the gate starts, not when it was queued (NIT-291), with
+        // the cap it was admitted with (NIT-323).
         let mut peak: Option<u64> = None;
         for (command, skip) in steps {
             if let Some(why) = skip {
@@ -1245,17 +1250,23 @@ fn run_cap() -> Option<u64> {
 /// Why request `id` must wait for the memory the running runs may still take (NIT-323), or None:
 /// each running run may grow to the cap it started with (one started before the slots were raised
 /// keeps its larger cap), so a new one starts only while those caps and its own fit above the
-/// floor. A run whose cap was not recorded (an older nitely started it) counts at the new one's.
+/// floor. A run whose cap was not recorded (an older nitely started it) counts at the full cap;
+/// a queued one that reserved its cap counts too (`reserve_cap`, under the admission lock).
 fn caps_fit(db: &Db, id: i64, limits: Option<&machine::Limits>, slots: u32) -> Result<Option<String>> {
     let Some(limits) = limits.filter(|l| l.floor > 0) else { return Ok(None) };
     let room = limits.total.saturating_sub(limits.floor);
     let mine = cap_for(limits, slots);
-    let mut stmt = db.conn.prepare("SELECT memory_cap, pid, pid_started FROM lane_run WHERE state = 'running' AND id != ?1")?;
+    // The running runs, and the queued ones that reserved their cap (admitted, about to start).
+    let mut stmt = db.conn.prepare(
+        "SELECT memory_cap, pid, pid_started FROM lane_run WHERE id != ?1 AND (state = 'running' OR (state = 'queued' AND memory_cap IS NOT NULL))",
+    )?;
     let rows: Vec<(Option<i64>, Option<i64>, Option<String>)> = stmt.query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<_>>()?;
+    // A run an older nitely started recorded no cap: it may hold the full one.
+    let unrecorded = limits.cap.min(room);
     let taken: u64 = rows
         .into_iter()
         .filter(|(_, pid, started)| pid.is_none_or(|p| p as u32 == std::process::id() || requester_alive(p as u32, started.as_deref())))
-        .map(|(cap, _, _)| cap.map_or(mine, |c| c.max(0) as u64))
+        .map(|(cap, _, _)| cap.map_or(unrecorded, |c| c.max(0) as u64))
         .sum();
     if taken.saturating_add(mine) <= room {
         return Ok(None);
@@ -1266,6 +1277,14 @@ fn caps_fit(db: &Db, id: i64, limits: Option<&machine::Limits>, slots: u32) -> R
         machine::gb(mine),
         machine::gb(room)
     )))
+}
+
+/// Records the cap request `id` is admitted with, while it still holds the admission lock, so the
+/// next request to ask counts it before it is running (NIT-323).
+fn reserve_cap(db: &Db, id: i64, limits: Option<&machine::Limits>, slots: u32) -> Result<()> {
+    let cap = limits.map(|l| cap_for(l, slots) as i64);
+    db.conn.execute("UPDATE lane_run SET memory_cap = ?2 WHERE id = ?1", params![id, cap])?;
+    Ok(())
 }
 
 /// The machine's build slots as a waiting request reads them: the budget again every few seconds
@@ -1625,10 +1644,13 @@ fn take_turn(
                             db.conn.execute("UPDATE lane_run SET waiting_for = NULL WHERE id = ?1", [id])?;
                         }
                         let limits = limits();
-                        let why = match caps_fit(db, id, limits.as_ref(), slots)? {
-                            Some(why) => Some(why),
-                            None => machine::admit_once(&state_dir(db), limits.as_ref(), memory)?,
-                        };
+                        let why = machine::admit_once_with(
+                            &state_dir(db),
+                            limits.as_ref(),
+                            memory,
+                            &mut || caps_fit(db, id, limits.as_ref(), slots),
+                            &mut || reserve_cap(db, id, limits.as_ref(), slots),
+                        )?;
                         if let Some(why) = why {
                             // Held while it waits, the slot and lane would keep the rest waiting too.
                             drop(lock);
@@ -1719,10 +1741,13 @@ pub fn hold_machine<'a>(db: &'a Db, repo_root: &Path, worktree: &Path, project: 
                 if let Some(slot) = (1..=slots.max(1)).find_map(|k| try_slot(db, k).ok().flatten()) {
                     // The limits read again on every look, so a change in Settings counts at once.
                     let limits = memory_limits();
-                    let why = match caps_fit(db, id, limits.as_ref(), slots)? {
-                        Some(why) => Some(why),
-                        None => machine::admit_once(&state_dir(db), limits.as_ref(), &mut read_memory)?,
-                    };
+                    let why = machine::admit_once_with(
+                        &state_dir(db),
+                        limits.as_ref(),
+                        &mut read_memory,
+                        &mut || caps_fit(db, id, limits.as_ref(), slots),
+                        &mut || reserve_cap(db, id, limits.as_ref(), slots),
+                    )?;
                     match why {
                         None => return Ok(slot),
                         Some(why) => {
@@ -1752,7 +1777,7 @@ pub fn hold_machine<'a>(db: &'a Db, repo_root: &Path, worktree: &Path, project: 
     };
     let clear = if waits_for_memory { ", waiting_memory = NULL" } else { "" };
     if db.conn.execute(
-        &format!("UPDATE lane_run SET state = 'running', started_at = ?2, memory_cap = ?3{clear} WHERE id = ?1 AND state = 'queued'"),
+        &format!("UPDATE lane_run SET state = 'running', started_at = ?2, memory_cap = COALESCE(memory_cap, ?3){clear} WHERE id = ?1 AND state = 'queued'"),
         params![id, now(), run_cap().map(|c| c as i64)],
     )? == 0
     {
@@ -1784,7 +1809,8 @@ struct Outcome {
 }
 
 /// The four steps, in a lane this process holds.
-fn serve(repo_root: &Path, pb: &Playbook, rules: &LaneRules, lane: &Path, log: &Path, req: &Request, exec: &mut Exec) -> Result<Outcome> {
+#[allow(clippy::too_many_arguments)]
+fn serve(repo_root: &Path, pb: &Playbook, rules: &LaneRules, lane: &Path, log: &Path, req: &Request, share: Share, exec: &mut Exec) -> Result<Outcome> {
     let base = pb.integration_branch();
     if git(repo_root, &["cat-file", "-e", &format!("{}^{{commit}}", req.snapshot.commit)]).is_err() {
         bail!("snapshot {} is missing from the repo (expired or cleaned up); make a new one", &req.snapshot.commit[..req.snapshot.commit.len().min(9)]);
@@ -1800,8 +1826,8 @@ fn serve(repo_root: &Path, pb: &Playbook, rules: &LaneRules, lane: &Path, log: &
         let ran = (|| -> Result<(bool, Ended)> {
             // After what a dead request left running was stopped, so its files can go.
             let temp = lane_temp(repo_root, pb, lane);
-            let setup_ran = ensure_setup(repo_root, pb, lane, base, log, limit, &temp)?;
-            Ok((setup_ran, exec(lane, log, limit, &temp)?))
+            let setup_ran = ensure_setup(repo_root, pb, lane, base, log, limit, &temp, share)?;
+            Ok((setup_ran, exec(lane, log, limit, &temp, share)?))
         })();
         let back = return_large(lane, base);
         let (setup_ran, ended) = ran?;
@@ -1821,8 +1847,8 @@ fn serve(repo_root: &Path, pb: &Playbook, rules: &LaneRules, lane: &Path, log: &
     crate::submodules::sync_lane(repo_root, pb, lane, &req.snapshot.commit, &rules.keep)?;
     // After what a dead request left running was stopped, so its files can go.
     let temp = lane_temp(repo_root, pb, lane);
-    let setup_ran = ensure_setup(repo_root, pb, lane, base, log, limit, &temp)?;
-    let Ended { code: exit_code, timed_out, peak } = exec(lane, log, limit, &temp)?;
+    let setup_ran = ensure_setup(repo_root, pb, lane, base, log, limit, &temp, share)?;
+    let Ended { code: exit_code, timed_out, peak } = exec(lane, log, limit, &temp, share)?;
     let output = std::fs::read_to_string(log).map(|t| playbook::tail(&t)).unwrap_or_default();
     // Between requests, still holding the lane: best effort, it never fails the request.
     if let Some(record) = git_path(lane, SIZE_RECORD) {
@@ -2000,7 +2026,7 @@ fn create_lane(repo_root: &Path, lane: &Path, commit: &str) -> Result<()> {
 /// written only after every command passed, so a setup that failed or was stopped runs again next
 /// time. Returns whether setup ran.
 #[allow(clippy::too_many_arguments)]
-fn ensure_setup(repo_root: &Path, pb: &Playbook, lane: &Path, base: &str, log: &Path, limit: Duration, temp: &Path) -> Result<bool> {
+fn ensure_setup(repo_root: &Path, pb: &Playbook, lane: &Path, base: &str, log: &Path, limit: Duration, temp: &Path, share: Share) -> Result<bool> {
     if pb.worktree.setup.is_empty() {
         return Ok(false);
     }
@@ -2016,7 +2042,6 @@ fn ensure_setup(repo_root: &Path, pb: &Playbook, lane: &Path, base: &str, log: &
         }
     }
     std::fs::remove_file(&record).ok();
-    let share = share();
     for command in &pb.worktree.setup {
         let command = playbook::expand(command, repo_root, lane, base).replace("{jobs}", &share.jobs.to_string());
         // Run again on failure as the gate's commands are (`[gate] retries`): a setup that fails
@@ -3007,7 +3032,51 @@ let id = db.conn.last_insert_rowid();
         assert_eq!(caps_fit(&db, waiting, Some(&l), 6).unwrap(), None, "one ended: 32 + 8.5 fit");
         let off = machine::limits_for(64 * machine::GIB, Some((0.0, "settings")), None);
         assert_eq!(caps_fit(&db, waiting, Some(&off), 6).unwrap(), None, "a floor of 0 turns it off");
+
+        // A queued request that reserved its cap under the admission lock counts before it runs:
+        // two requests never both take the same room (the NIT-323 review).
+        let other = add("queued", None);
+        reserve_cap(&db, other, Some(&l), 6).unwrap();
+        add("queued", None); // waiting, nothing reserved: counts for nothing
+        assert_eq!(caps_fit(&db, waiting, Some(&l), 6).unwrap(), None, "32 running, 8.5 reserved and 8.5 more fit in 51.2");
+        let third = add("queued", None);
+        reserve_cap(&db, third, Some(&l), 6).unwrap();
+        let why = caps_fit(&db, waiting, Some(&l), 6).unwrap().unwrap();
+        assert!(why.contains("may grow to 49.1 GB"), "32 GB running and two 8.5 GB reserved: {why}");
+
+        // A run an older nitely started recorded no cap: it counts at the full one, 16 GB.
+        db.conn.execute("DELETE FROM lane_run WHERE id != ?1", [waiting]).unwrap();
+        for _ in 0..3 {
+            add("running", None);
+        }
+        let why = caps_fit(&db, waiting, Some(&l), 6).unwrap().unwrap();
+        assert!(why.contains("may grow to 48.0 GB"), "{why}");
         std::fs::remove_dir_all(base).ok();
+    }
+
+    /// Checked and reserved under the one lock: the second request to ask sees the first's cap.
+    #[test]
+    fn admission_checks_and_reserves_under_one_lock() {
+        let dir = crate::paths::unique_temp("nitely-admit-with", "");
+        let l = machine::limits_for(64 * machine::GIB, None, None);
+        let plenty = || Some(machine::Memory { total: 64 * machine::GIB, available: 50 * machine::GIB });
+        let reserved = std::cell::Cell::new(0u64);
+        let ask = || {
+            machine::admit_once_with(
+                &dir,
+                Some(&l),
+                &mut || plenty(),
+                &mut || Ok((reserved.get() + 30 * machine::GIB > 51 * machine::GIB).then(|| "no room".to_string())),
+                &mut || {
+                    reserved.set(reserved.get() + 30 * machine::GIB);
+                    Ok(())
+                },
+            )
+            .unwrap()
+        };
+        assert_eq!(ask(), None, "the first takes its room");
+        assert_eq!(ask().as_deref(), Some("no room"), "the second sees it taken");
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

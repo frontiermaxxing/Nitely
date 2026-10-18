@@ -145,13 +145,30 @@ fn since_last_start(dir: &Path) -> Option<Duration> {
 /// machine), and when it may, records the start, so the next process to ask sees it. Returns why it
 /// must wait, or None once it may go.
 pub fn admit_once(dir: &Path, limits: Option<&Limits>, read: &mut dyn FnMut() -> Option<Memory>) -> Result<Option<String>> {
+    admit_once_with(dir, limits, read, &mut || Ok(None), &mut || Ok(()))
+}
+
+/// `admit_once`, with the caller's own `check` first and its `commit` once the run may go, all
+/// under the one lock, so two processes never both take what only one of them may (NIT-323: two
+/// requests each finding room for their cap before either recorded it).
+pub fn admit_once_with(
+    dir: &Path,
+    limits: Option<&Limits>,
+    read: &mut dyn FnMut() -> Option<Memory>,
+    check: &mut dyn FnMut() -> Result<Option<String>>,
+    commit: &mut dyn FnMut() -> Result<()>,
+) -> Result<Option<String>> {
     let Some(limits) = limits else { return Ok(None) };
     std::fs::create_dir_all(dir)?;
     let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("admission.lock"))?;
     lock.lock()?;
+    if let Some(why) = check()? {
+        return Ok(Some(why));
+    }
     if let Some(why) = admission(read(), limits, since_last_start(dir)) {
         return Ok(Some(why));
     }
+    commit()?;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
     std::fs::write(last_start_file(dir), now.to_string()).ok();
     Ok(None)
