@@ -20,3 +20,6 @@ mdns-sd = "0.13"
 
 ureq = { version = "3", features = ["json"] }
 
+
+[dev-dependencies]
+rusqlite.workspace = true

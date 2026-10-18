@@ -2,6 +2,10 @@
 //! This is how agents work with Nitely: take the next issue, report progress, leave notes, file
 //! what they find, and ask the human. Every call acts as an agent, never as the human, so it can
 //! not approve or answer.
+//!
+//! Each tool call runs on a thread of its own and is answered when it ends, so a long one (a lane
+//! run, a land) never holds up the agent's next calls; a call the client cancels is not answered;
+//! and no call waits past `wait_cap`, below the clients' own timeouts (NIT-308).
 
 use anyhow::{anyhow, bail, Context, Result};
 use nitely_core::db::NewEvent;
@@ -9,13 +13,17 @@ use nitely_core::issues::{branch_name, BatchItem, KINDS, OWNERS, SOURCES, STATES
 use nitely_core::playbook::{self, Playbook};
 use nitely_core::{paths, resolve_project, Actor, Config, Db, NewIssue};
 use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::time::SystemTime;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Mutex, MutexGuard};
+use std::time::{Duration, SystemTime};
 
 const SUPPORTED_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
+#[derive(Clone)]
 pub(crate) struct Server {
     vendor: String,
     cwd: String,
@@ -27,6 +35,7 @@ pub(crate) struct Server {
 }
 
 /// An agent on another machine: the name of its token, and the project it works in by default.
+#[derive(Clone)]
 pub(crate) struct Remote {
     pub name: String,
     pub project: Option<String>,
@@ -107,26 +116,87 @@ fn crew_worker() -> bool {
     std::env::var_os("NITELY_CREW").is_some()
 }
 
+/// The longest one call waits in this server before it answers that it is still waiting: below
+/// the idle timeouts MCP clients give a call (Claude Code's is 30 minutes, others' are shorter), so
+/// no call outlives the client that made it. `NITELY_MCP_WAIT_CAP` (seconds) sets it, for tests.
+fn wait_cap() -> Duration {
+    let secs = std::env::var("NITELY_MCP_WAIT_CAP").ok().and_then(|s| s.parse().ok()).unwrap_or(300);
+    Duration::from_secs(secs)
+}
+
+/// A lock that another thread's panic does not poison for the rest.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Writes one message as a whole line: replies from several threads never interleave.
+fn send(out: &Mutex<std::io::Stdout>, message: &Value) {
+    let mut out = lock(out);
+    writeln!(out, "{message}").ok();
+    out.flush().ok();
+}
+
 pub fn serve() -> Result<()> {
     let exe = std::env::current_exe().ok().and_then(|p| nitely_core::install::stamp(&p).map(|s| (p, s)));
-    let mut server = Server { vendor: "agent".into(), cwd: std::env::current_dir()?.to_string_lossy().into_owned(), exe, remote: None };
+    let server = Mutex::new(Server { vendor: "agent".into(), cwd: std::env::current_dir()?.to_string_lossy().into_owned(), exe, remote: None });
+    let out = Arc::new(Mutex::new(std::io::stdout()));
+    // Calls the client cancelled while they ran: their answers are not sent.
+    let cancelled: Arc<Mutex<HashSet<String>>> = Arc::default();
     let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout().lock();
     for line in stdin.lock().lines() {
         let line = line?;
         if line.trim().is_empty() {
             continue;
         }
-        let response = match serde_json::from_str::<Value>(&line) {
-            Ok(msg) => handle(&mut server, &msg),
-            Err(e) => Some(error_response(Value::Null, -32700, &format!("parse error: {e}"))),
+        let msg = match serde_json::from_str::<Value>(&line) {
+            Ok(msg) => msg,
+            Err(e) => {
+                send(&out, &error_response(Value::Null, -32700, &format!("parse error: {e}")));
+                continue;
+            }
         };
-        if let Some(r) = response {
-            writeln!(stdout, "{}", serde_json::to_string(&r)?)?;
-            stdout.flush()?;
+        match (msg.get("method").and_then(Value::as_str).unwrap_or(""), msg.get("id")) {
+            ("notifications/cancelled", _) => {
+                if let Some(id) = msg.pointer("/params/requestId") {
+                    lock(&cancelled).insert(id.to_string());
+                }
+            }
+            // A tool call runs on its own thread: a long one holds up nothing after it.
+            ("tools/call", Some(id)) => {
+                let (mut server, out, cancelled, id) = (lock(&server).clone(), Arc::clone(&out), Arc::clone(&cancelled), id.to_string());
+                std::thread::spawn(move || {
+                    let reply = handle(&mut server, &msg);
+                    if !lock(&cancelled).remove(&id) {
+                        if let Some(reply) = reply {
+                            send(&out, &reply);
+                        }
+                    }
+                });
+            }
+            // The rest (initialize, tools/list, ping) is quick, and initialize sets who calls.
+            _ => {
+                let reply = handle(&mut lock(&server), &msg);
+                if let Some(reply) = reply {
+                    send(&out, &reply);
+                }
+            }
         }
     }
     Ok(())
+}
+
+/// Runs `work` on a thread of its own and waits for it up to `wait_cap`. Past that, answers with
+/// what `pending` says and leaves the work running in this process, to finish on its own.
+fn within_cap(work: impl FnOnce() -> Result<Value> + Send + 'static, pending: impl FnOnce() -> Result<Value>) -> Result<Value> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        tx.send(work()).ok();
+    });
+    match rx.recv_timeout(wait_cap()) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => pending(),
+        Err(mpsc::RecvTimeoutError::Disconnected) => bail!("the call stopped without an answer"),
+    }
 }
 
 pub(crate) fn handle(server: &mut Server, msg: &Value) -> Option<Value> {
@@ -507,9 +577,86 @@ fn call_tool(server: &Server, params: &Value) -> Value {
 /// same, or the new one cannot take the call; then it runs here.
 fn forward(server: &Server, params: &Value) -> Option<Value> {
     let (exe, stamp) = server.exe.as_ref()?;
-    if nitely_core::install::stamp(exe).as_ref() == Some(stamp) {
+    let installed = nitely_core::install::stamp(exe)?;
+    if &installed == stamp {
         return None;
     }
+    let mut result = match forwarder(exe, installed, &server.cwd) {
+        Some(f) => f.call(server, params).or_else(|| forward_once(server, params, exe))?,
+        None => forward_once(server, params, exe)?,
+    };
+    // Says which build answered, for whoever debugs an agent's session.
+    result["_meta"] = json!({ "nitely_forwarded": exe.to_string_lossy() });
+    Some(result)
+}
+
+/// The newer build this server forwards to, as one child that stays: `nitely mcp-calls` takes the
+/// calls on its stdin, runs each on a thread of its own and answers each by id when it ends. One
+/// process for all of a server's calls, rather than one per call (NIT-308).
+struct Forwarder {
+    stamp: (u64, SystemTime),
+    stdin: Mutex<std::process::ChildStdin>,
+    waiting: Arc<Mutex<HashMap<u64, mpsc::Sender<Value>>>>,
+    next: AtomicU64,
+    /// Its stdout closed: it exited.
+    gone: Arc<AtomicBool>,
+    _child: std::process::Child,
+}
+
+static FORWARDER: Mutex<Option<Arc<Forwarder>>> = Mutex::new(None);
+
+/// The forwarding child for the build installed now, started when there is none for it yet.
+fn forwarder(exe: &std::path::Path, stamp: (u64, SystemTime), cwd: &str) -> Option<Arc<Forwarder>> {
+    let mut slot = lock(&FORWARDER);
+    if let Some(f) = slot.as_ref().filter(|f| f.stamp == stamp && !f.gone.load(Ordering::SeqCst)) {
+        return Some(Arc::clone(f));
+    }
+    let mut cmd = Command::new(exe);
+    cmd.arg("mcp-calls").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+    if std::path::Path::new(cwd).is_dir() {
+        cmd.current_dir(cwd);
+    }
+    let mut child = cmd.spawn().ok()?;
+    let (stdin, stdout) = (child.stdin.take()?, child.stdout.take()?);
+    let waiting: Arc<Mutex<HashMap<u64, mpsc::Sender<Value>>>> = Arc::default();
+    let gone = Arc::new(AtomicBool::new(false));
+    let (answers, done) = (Arc::clone(&waiting), Arc::clone(&gone));
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
+            let Ok(reply) = serde_json::from_str::<Value>(&line) else { continue };
+            let Some(id) = reply.get("id").and_then(Value::as_u64) else { continue };
+            if let Some(waiter) = lock(&answers).remove(&id) {
+                waiter.send(reply.get("result").cloned().unwrap_or(Value::Null)).ok();
+            }
+        }
+        // It exited: whoever still waits runs the call here instead.
+        done.store(true, Ordering::SeqCst);
+        lock(&answers).clear();
+    });
+    let f = Arc::new(Forwarder { stamp, stdin: Mutex::new(stdin), waiting, next: AtomicU64::new(1), gone, _child: child });
+    *slot = Some(Arc::clone(&f));
+    Some(f)
+}
+
+impl Forwarder {
+    /// The call's result from the child; None when the child cannot take it (it exited).
+    fn call(&self, server: &Server, params: &Value) -> Option<Value> {
+        let id = self.next.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = mpsc::channel();
+        lock(&self.waiting).insert(id, tx);
+        let request = json!({ "id": id, "vendor": server.vendor, "cwd": server.cwd, "params": params });
+        if self.gone.load(Ordering::SeqCst) || writeln!(lock(&self.stdin), "{request}").is_err() {
+            lock(&self.waiting).remove(&id);
+            return None;
+        }
+        let result = rx.recv().ok()?;
+        (!result.is_null()).then_some(result)
+    }
+}
+
+/// `forward` through a process of its own for this one call: for a newer build without
+/// `mcp-calls`, or when its child exited.
+fn forward_once(server: &Server, params: &Value, exe: &std::path::Path) -> Option<Value> {
     let mut cmd = Command::new(exe);
     cmd.arg("mcp-call").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
     if std::path::Path::new(&server.cwd).is_dir() {
@@ -522,10 +669,25 @@ fn forward(server: &Server, params: &Value) -> Option<Value> {
     if !out.status.success() {
         return None;
     }
-    let mut result: Value = serde_json::from_slice(&out.stdout).ok()?;
-    // Says which build answered, for whoever debugs an agent's session.
-    result["_meta"] = json!({ "nitely_forwarded": exe.to_string_lossy() });
-    Some(result)
+    serde_json::from_slice(&out.stdout).ok()
+}
+
+/// `nitely mcp-calls`: the calls an older `nitely mcp` forwards to this build, one JSON object
+/// per line on stdin ({id, vendor, cwd, params}). Each runs on a thread of its own and is answered
+/// as {id, result} when it ends; the process ends when the server that started it does.
+pub fn serve_calls() -> Result<()> {
+    let out = Arc::new(Mutex::new(std::io::stdout()));
+    for line in std::io::stdin().lock().lines() {
+        let line = line?;
+        let Ok(request) = serde_json::from_str::<Value>(&line) else { continue };
+        let out = Arc::clone(&out);
+        std::thread::spawn(move || {
+            let server = Server { vendor: str_arg(&request, "vendor").unwrap_or("agent").to_string(), cwd: str_arg(&request, "cwd").unwrap_or(".").to_string(), exe: None, remote: None };
+            let result = call_tool(&server, request.get("params").unwrap_or(&json!({})));
+            send(&out, &json!({ "id": request.get("id"), "result": result }));
+        });
+    }
+    Ok(())
 }
 
 /// `nitely mcp-call`: runs one tool call given on stdin as {vendor, cwd, params} and prints its
@@ -750,17 +912,39 @@ fn run_tool(server: &Server, name: &str, args: &Value, params: &Value) -> Result
         }
         "run" => {
             let dir = task_dir(&config, &db, args, &server.cwd)?;
-            json!(nitely_core::lanes::run_in(&config, &db, &dir, str_arg(args, "key"), req(args, "command")?, &actor, &mut |_| {})?)
+            let (key, command) = (str_arg(args, "key").map(str::to_string), req(args, "command")?.to_string());
+            let (config, by) = (config.clone(), actor.clone());
+            // Its id, once it is queued, for the answer past the cap.
+            let (queued, id) = mpsc::channel();
+            within_cap(
+                move || {
+                    let db = Db::open_default()?;
+                    let run = nitely_core::lanes::run_in(&config, &db, &dir, key.as_deref(), &command, &by, &mut |r| {
+                        queued.send(r.id).ok();
+                    })?;
+                    Ok(json!(run))
+                },
+                || {
+                    let id = id.try_recv().context("the run was not queued yet")?;
+                    let mut run = json!(db.lane_run(id)?.with_context(|| format!("no run {id}"))?);
+                    run["next"] = json!(format!("Still {} after {}s: call run_status with id {id} (and wait_seconds) for the result.", run["state"].as_str().unwrap_or("queued"), wait_cap().as_secs()));
+                    Ok(run)
+                },
+            )?
         }
         "run_status" => match args.get("id").and_then(Value::as_i64) {
             Some(id) => {
-                let wait = args.get("wait_seconds").and_then(Value::as_u64).unwrap_or(0).min(600);
+                let wait = args.get("wait_seconds").and_then(Value::as_u64).unwrap_or(0).min(600).min(wait_cap().as_secs());
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait);
                 loop {
                     let run = db.lane_run(id)?.with_context(|| format!("no run {id}"))?;
                     let open = run.state == "queued" || run.state == "running";
                     if !open || std::time::Instant::now() >= deadline {
-                        break json!(run);
+                        let mut out = json!(run);
+                        if open && wait > 0 {
+                            out["next"] = json!(format!("Still {} after {wait}s: call run_status with id {id} again.", run.state));
+                        }
+                        break out;
                     }
                     std::thread::sleep(std::time::Duration::from_secs(1));
                 }
@@ -770,10 +954,18 @@ fn run_tool(server: &Server, name: &str, args: &Value, params: &Value) -> Result
         "submit" => {
             let dir = task_dir(&config, &db, args, &server.cwd)?;
             nitely_core::install::check_current(&config, &dir, env!("NITELY_COMMIT"))?;
-            let opts = nitely_core::submit::SubmitOptions { dir: &dir, issue_key: str_arg(args, "key"), skip_review: false, local_only: false, batch: false };
             if args.get("wait").and_then(Value::as_bool).unwrap_or(false) {
-                json!(nitely_core::submit::submit(&mut db, &config, &opts, &actor)?)
+                let (config, by, key) = (config.clone(), actor.clone(), str_arg(args, "key").map(str::to_string));
+                within_cap(
+                    move || {
+                        let mut db = Db::open_default()?;
+                        let opts = nitely_core::submit::SubmitOptions { dir: &dir, issue_key: key.as_deref(), skip_review: false, local_only: false, batch: false };
+                        Ok(json!(nitely_core::submit::submit(&mut db, &config, &opts, &by)?))
+                    },
+                    || Ok(json!({ "still_running": true, "next": format!("The submit is still running after {}s; it goes on here. Call submit_status with the issue key for its result.", wait_cap().as_secs()) })),
+                )?
             } else {
+                let opts = nitely_core::submit::SubmitOptions { dir: &dir, issue_key: str_arg(args, "key"), skip_review: false, local_only: false, batch: false };
                 let runner = nitely_core::submit_job::DetachedProcess { nitely: std::env::current_exe()? };
                 let job = nitely_core::submit_job::submit_async(&mut db, &config, &opts, &actor, &runner)?;
                 job_json(&db, &job, &actor)?
@@ -785,7 +977,7 @@ fn run_tool(server: &Server, name: &str, args: &Value, params: &Value) -> Result
                 (None, Some(key)) => db.latest_submit_job(key)?.with_context(|| format!("{key} has no submit yet"))?,
                 (None, None) => bail!("pass the job id submit returned, or the issue key"),
             };
-            let seconds = args.get("wait_seconds").and_then(Value::as_u64).unwrap_or(0).min(600);
+            let seconds = args.get("wait_seconds").and_then(Value::as_u64).unwrap_or(0).min(600).min(wait_cap().as_secs());
             let job = nitely_core::submit_job::wait(&db, job.id, std::time::Duration::from_secs(seconds))?;
             job_json(&db, &job, &actor)?
         }
@@ -794,8 +986,16 @@ fn run_tool(server: &Server, name: &str, args: &Value, params: &Value) -> Result
             let issue = db.issue(key)?.with_context(|| format!("no issue {key}"))?;
             let root = playbook::repo_for_issue(&config, issue.project.as_deref(), &server.cwd)?;
             nitely_core::install::check_current(&config, &root.to_string_lossy(), env!("NITELY_COMMIT"))?;
-            let opts = nitely_core::land::LandOptions { dir: &server.cwd, issue_key: key, push: true, keep: false, break_lock: false };
-            json!(nitely_core::land::land(&mut db, &config, &opts, &actor)?)
+            let (config, by, cwd, key) = (config.clone(), actor.clone(), server.cwd.clone(), key.to_string());
+            let waiting = key.clone();
+            within_cap(
+                move || {
+                    let mut db = Db::open_default()?;
+                    let opts = nitely_core::land::LandOptions { dir: &cwd, issue_key: &key, push: true, keep: false, break_lock: false };
+                    Ok(json!(nitely_core::land::land(&mut db, &config, &opts, &by)?))
+                },
+                || Ok(json!({ "still_running": true, "next": format!("The land of {waiting} is still running after {}s; it goes on here. get_issue {waiting} shows when it landed or why it stopped.", wait_cap().as_secs()) })),
+            )?
         }
         "get_issue" => {
             let key = req(args, "key")?;

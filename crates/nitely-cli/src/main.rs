@@ -46,6 +46,10 @@ enum Cmd {
     /// newer build is installed.
     #[command(hide = true)]
     McpCall,
+    /// Run the MCP tool calls an older `nitely mcp` forwards, one JSON object per line on stdin,
+    /// each answered by id when it ends.
+    #[command(hide = true)]
+    McpCalls,
     /// Put this build (or --from) where agents run `nitely` from, even while agents run the old
     /// one: on Windows the running one is moved aside, and old copies nothing runs are deleted.
     Install {
@@ -599,6 +603,13 @@ fn main() {
             }
             return;
         }
+        Cmd::McpCalls => {
+            if let Err(e) = mcp::serve_calls() {
+                eprintln!("nitely mcp-calls: {e:#}");
+                std::process::exit(1);
+            }
+            return;
+        }
         Cmd::Ui { command, args } => {
             // Refused commands exit 2, so the preview can tell them from failures.
             if !ui::READ_ONLY.contains(&command.as_str()) {
@@ -697,7 +708,7 @@ fn run(cmd: Cmd) -> Result<()> {
     // only in the app.
     let me = Actor::Agent("cli".into());
     match cmd {
-        Cmd::Hook { .. } | Cmd::Mcp | Cmd::McpCall | Cmd::Ui { .. } => unreachable!(),
+        Cmd::Hook { .. } | Cmd::Mcp | Cmd::McpCall | Cmd::McpCalls | Cmd::Ui { .. } => unreachable!(),
         Cmd::Serve { listen, no_advertise } => serve::serve(Some(&listen), !no_advertise),
         Cmd::Tokens { command } => match command {
             TokensCmd::List => print_json(&nitely_core::relay::list_tokens()?),
