@@ -1369,7 +1369,7 @@ fn my_turn(db: &Db, id: i64, slots: u32, alive: &mut dyn FnMut(i64) -> bool) -> 
 /// Why each queued request waits, for `nitely lanes` and the app (NIT-291): the machine's slots,
 /// its own repo's queue or lanes, the person's checkout, or memory. Reads only.
 fn waiting_reasons(db: &Db) -> Result<std::collections::HashMap<i64, String>> {
-    let (rows, served) = queue_rows(db, None, &mut |pid| crate::crew::pid_alive(pid as u32))?;
+    let (rows, served) = queue_rows(db, None, &mut |pid| requester_alive(pid as u32))?;
     Ok(turns(rows, machine_budget().slots, &served, now())
         .into_iter()
         .filter_map(|(id, t)| match t {
