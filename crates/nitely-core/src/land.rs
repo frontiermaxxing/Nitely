@@ -84,7 +84,8 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
             // Refused because another land holds the lock: said on the issue, so the app can show
             // what this land waits behind until its agent lands again (NIT-335).
             let why = format!("{e:#}");
-            if why.starts_with("another land holds") {
+            // Held, or taken by another land between the look and the take: refused all the same.
+            if why.starts_with("another land holds") || why.starts_with("another land took") {
                 db.log_event(actor, Some(&issue.key), Some(&root.to_string_lossy()), "land_refused", &format!("Land refused: {}", why.lines().next().unwrap_or("")))?;
             }
             return Err(e);

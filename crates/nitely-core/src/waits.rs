@@ -192,32 +192,42 @@ fn landing_now(db: &Db, repo: &str) -> Result<Option<Waiting>> {
 }
 
 /// Lands refused because another land held the lock (a `land_refused` event, NIT-335), whose issue
-/// has not landed or been handed in again since and still waits to land. Each waits behind the
-/// land holding the lock now, or says the lock is free again and its agent can land it.
+/// has done nothing since (no new submit, gate or land) and still waits to land. Each waits behind
+/// the land holding the lock now, behind a lock whose process is gone (it stays until a land
+/// breaks it), or says the lock is free and its agent can land it.
 fn refused_waits(db: &Db) -> Result<Vec<Waiting>> {
-    let since = crate::db::now() - REFUSED_FOR_SECS;
     let rows: Vec<(String, i64, Option<String>)> = db
         .conn
         .prepare(
             "SELECT e.issue_key, e.ts, e.cwd FROM event e
-             WHERE e.type = 'land_refused' AND e.ts >= ?1
-               AND e.id = (SELECT MAX(id) FROM event x WHERE x.issue_key = e.issue_key COLLATE NOCASE AND x.type IN ('land_refused', 'landed', 'land_failed', 'submit'))
+             WHERE e.type = 'land_refused'
+               AND e.id = (SELECT MAX(id) FROM event x WHERE x.issue_key = e.issue_key COLLATE NOCASE
+                           AND x.type IN ('land_refused', 'landed', 'land_failed', 'submit', 'submit_queued', 'gate_failed', 'gate_passed'))
              ORDER BY e.id",
         )?
-        .query_map([since], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<rusqlite::Result<_>>()?;
     let mut out = Vec::new();
     for (key, at, repo) in rows {
         if !db.issue(&key)?.is_some_and(|i| i.state == "In Review" || i.state == "Approved") {
             continue;
         }
-        let holder = repo.as_deref().and_then(|r| land_lock(r).filter(|_| crate::batches::land_running(r)));
-        let (why, behind) = match holder {
-            Some((holder, since)) if !holder.split_whitespace().next().is_some_and(|k| k.eq_ignore_ascii_case(&key)) => (
+        let lock = repo.as_deref().and_then(land_lock);
+        let live = repo.as_deref().is_some_and(crate::batches::land_running);
+        let holds = |holder: &str| holder.split_whitespace().next().is_some_and(|k| k.eq_ignore_ascii_case(&key));
+        let (why, behind) = match lock {
+            Some((holder, _)) if holds(&holder) => continue,
+            Some((holder, since)) if live => (
                 "its land was refused: another land holds the lock; its agent lands again once it is free".to_string(),
                 vec![Behind { what: format!("{holder}, holding the land lock"), issue: holder.split_whitespace().next().map(str::to_string), since }],
             ),
-            Some(_) => continue,
+            // The lock file outlived its land: every land is refused until one breaks it.
+            Some((holder, since)) => (
+                "its land was refused, and the land lock's process is gone: land again with break_lock".to_string(),
+                vec![Behind { what: format!("{holder}, a land lock whose process is gone"), issue: holder.split_whitespace().next().map(str::to_string), since }],
+            ),
+            // Free a long while: its agent was told to land again, and the row has said so.
+            None if crate::db::now() - at > REFUSED_FOR_SECS => continue,
             None => ("its land was refused while another land held the lock; the lock is free now: land it again".to_string(), vec![]),
         };
         out.push(Waiting { kind: "land_refused".into(), project: project_of(&key), issue: Some(key), since: at, why, place: None, behind });
@@ -225,7 +235,7 @@ fn refused_waits(db: &Db) -> Result<Vec<Waiting>> {
     Ok(out)
 }
 
-/// How long a refused land counts as waiting: its agent was told to land again.
+/// How long a refused land counts as waiting once the lock is free: its agent was told to land again.
 const REFUSED_FOR_SECS: i64 = 2 * 3600;
 
 /// Submit jobs not started: each waits for its issue's previous submit to finish.
@@ -482,8 +492,13 @@ mod tests {
         let w = waits(&db, vec![], &[repo.clone()]).unwrap();
         assert!(w.waiting.iter().any(|x| x.issue.as_deref() == Some(refused.as_str()) && x.why.ends_with("the lock is free now: land it again")), "{w:?}");
         assert!(w.waiting.iter().all(|x| x.kind != "landing"), "nobody lands now");
-        // Handed in again since: nothing to wait for from that refusal.
-        db.log_event(&actor, Some(&refused), Some(&repo), "submit", "Review passed").unwrap();
+        // The lock file outlived its land: refused until a land breaks it, and it says so.
+        std::fs::write(&lock, format!("{landing} pid 4000000000 since then\n")).unwrap();
+        let w = waits(&db, vec![], &[repo.clone()]).unwrap();
+        assert!(w.waiting.iter().any(|x| x.issue.as_deref() == Some(refused.as_str()) && x.why.ends_with("land again with break_lock")), "{w:?}");
+        std::fs::remove_file(&lock).unwrap();
+        // Handed in again since (even only queued): nothing to wait for from that refusal.
+        db.log_event(&actor, Some(&refused), Some(&repo), "submit_queued", "Submitted for the gate and review").unwrap();
         assert!(waits(&db, vec![], &[repo]).unwrap().waiting.is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
