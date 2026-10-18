@@ -60,6 +60,7 @@ pub mod push;
 pub mod watch;
 pub mod submit;
 pub mod submit_job;
+pub mod triage;
 pub mod submodules;
 pub mod review_batch;
 pub mod review_compare;

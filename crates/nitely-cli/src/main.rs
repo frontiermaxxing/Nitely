@@ -186,6 +186,17 @@ enum Cmd {
         #[arg(long)]
         wait: Option<u64>,
     },
+    /// Answers a triage question; `triage` starts it as a process of its own.
+    #[command(hide = true)]
+    TriageJob { id: i64 },
+    /// How often the person's Inbox was needed per landed issue, over the last days, and what
+    /// triage answered instead (NIT-245).
+    InboxRate {
+        #[arg(long, default_value = "NIT")]
+        project: String,
+        #[arg(long, default_value_t = 1)]
+        days: u64,
+    },
     /// Runs a queued submit; `nitely submit` starts it in the background.
     #[command(hide = true)]
     SubmitJob { id: i64 },
@@ -1185,6 +1196,16 @@ fn run(cmd: Cmd) -> Result<()> {
                 std::process::exit(1);
             }
             Ok(())
+        }
+        Cmd::TriageJob { id } => {
+            let config = Config::load()?;
+            let mut db = Db::open_default()?;
+            print_json(&nitely_core::triage::answer(&mut db, &config, id)?)
+        }
+        Cmd::InboxRate { project, days } => {
+            let db = Db::open_default()?;
+            let since = nitely_core::db::now() - days as i64 * 86_400;
+            print_json(&nitely_core::triage::inbox_rate(&db, &project, since)?)
         }
         Cmd::SubmitJob { id } => {
             let config = Config::load()?;

@@ -31,6 +31,7 @@ const KEY_COLUMNS: &[(&str, &str)] = &[
     ("issue_private", "issue_key"),
     ("mirror_comment", "issue_key"),
     ("submit_job", "issue_key"),
+    ("triage", "issue_key"),
     ("review_queue", "issue_key"),
 ];
 

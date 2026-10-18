@@ -124,6 +124,27 @@ or hard to undo: credentials, accounts, money, legal text, signing identities, p
 only they can do. And the rules themselves: the playbook changes through
 `propose_playbook_change`, applied by the person.
 
+## Triage, as built (NIT-245)
+
+- **A question goes to `triage`, not `ask`.** The MCP tool records it and returns at once. A
+  process of its own (`nitely triage-job`) puts it to the playbook's reviewer for the asking agent's
+  vendor, read-only in the agent's worktree, with what the board knows: the issue, its latest
+  review's findings, and the work in flight with the files each holds. The reply ends with
+  `ANSWER:` and `PERSON:`. An answer is a note on the issue ("Triage answered ..."), and the agent
+  hears it as a notice on its next nitely call or from `get_triage`. A reply that says the question
+  is on the closed list becomes an ask in the Inbox, with what triage found, and the agent is told
+  the ask's id. `ask` stays for the closed list, and its description says so.
+- **A stalled review is checked fresh first.** When submit finds the rounds not converging, it runs
+  the review once more without the earlier rounds. If that review finds no P0 or P1, the carried
+  findings were stale: the fresh review is recorded (note `fresh, without the earlier rounds`) and
+  the change goes on. If it still finds some, those are what the person is asked to decide.
+- **A land conflict already goes back to its worker:** an agent's own land returns the conflict to
+  it; an automatic land and the land queue move the issue to In Progress with a note saying what
+  it conflicts with; Crew hands the issue to a worker (NIT-222).
+- **Measuring it:** `nitely inbox-rate --days N` counts the asks that reached the person, the
+  issues landed, asks per landed issue, and what triage answered and escalated. Before triage, on
+  2026-10-16 and 17: 18 asks for 186 landed issues, 0.10 per landed issue, a third of them noise.
+
 ## Build order
 
 1. [NIT-243](nitely://issue/NIT-243): the supervisor works an approved goal in plan order, within

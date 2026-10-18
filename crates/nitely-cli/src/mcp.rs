@@ -44,7 +44,7 @@ pub(crate) struct Remote {
 }
 
 /// Tools that work in a repo on this machine, so not for an agent elsewhere.
-const LOCAL_ONLY: &[&str] = &["start_task", "run_gate", "run", "submit", "submit_status", "land", "widen"];
+const LOCAL_ONLY: &[&str] = &["start_task", "run_gate", "run", "submit", "submit_status", "land", "widen", "triage", "get_triage"];
 
 impl Server {
     pub(crate) fn remote(name: &str, project: Option<String>) -> Server {
@@ -663,7 +663,7 @@ fn tools() -> Value {
         },
         {
             "name": "ask",
-            "description": "Ask the human something only they can decide. It goes to their inbox. Returns an id; check it with get_answer. Keep working on whatever does not depend on the answer. Never ask for an approval: when a change needs one, submit already puts it in their inbox.",
+            "description": "Ask the human something only they can decide: a product question (scope, wording, what to build), something irreversible or outside this machine (credentials, accounts, licenses, signing, money), or a task only they can do. It goes to their inbox. Returns an id; check it with get_answer. Keep working on whatever does not depend on the answer. Never ask for an approval: when a change needs one, submit already puts it in their inbox. A question about the board or the code (who holds a file, whether an issue is done, whether a finding is stale, resubmit or wait) goes to triage instead.",
             "inputSchema": { "type": "object", "required": ["question"], "properties": {
                 "question": { "type": "string" },
                 "options": { "type": "array", "items": { "type": "string" } },
@@ -677,6 +677,22 @@ fn tools() -> Value {
                 "key": { "type": "string", "description": "The issue." },
                 "finding": { "type": "string", "description": "The finding: its number in the latest review's findings (from 1) or its exact text." },
                 "why": { "type": "string", "description": "Why it should stand as it is: the decision it follows from, and what fixing it would cost. The human reads this." }
+            } }
+        },
+        {
+            "name": "triage",
+            "description": "Put a question about the board or the code to triage instead of the human: who holds a file, whether an issue is already done or another worker has it, whether a carried review finding still applies, resubmit or wait, which issue a change belongs to. A triage agent answers it from the board and the repository, read-only, and records the answer as a note on the issue. Only if the question turns out to be the human's (a product question, something irreversible, accepting a finding) does it go to their inbox, with what triage found. Returns at once with an id; the answer comes as a notice on your next nitely call, or from get_triage.",
+            "inputSchema": { "type": "object", "required": ["question"], "properties": {
+                "question": { "type": "string", "description": "What you want to know, with what you already checked." },
+                "key": { "type": "string", "description": "The issue it is about." }
+            } }
+        },
+        {
+            "name": "get_triage",
+            "description": "Triage's answer to a question you put to it: its state (open, answered, escalated to the human's inbox, failed) and answer. wait_seconds (up to 600) waits for it.",
+            "inputSchema": { "type": "object", "required": ["id"], "properties": {
+                "id": { "type": "integer" },
+                "wait_seconds": { "type": "integer" }
             } }
         },
         {
@@ -1394,6 +1410,17 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
                 None => json!({ "id": ask.id, "question": ask.question, "answer": ask.answer }),
             }
         }
+        "triage" => {
+            let q = nitely_core::triage::ask(&db, req(args, "question")?, str_arg(args, "key"), Some(&server.place()), &actor)?;
+            let q = nitely_core::triage::start(&mut db, &config, &q, &std::env::current_exe()?)?;
+            triage_json(&db, &q, &actor)?
+        }
+        "get_triage" => {
+            let id = args.get("id").and_then(Value::as_i64).ok_or_else(|| anyhow!("missing id"))?;
+            let seconds = args.get("wait_seconds").and_then(Value::as_u64).unwrap_or(0).min(600);
+            let q = nitely_core::triage::wait(&db, id, std::time::Duration::from_secs(seconds))?;
+            triage_json(&db, &q, &actor)?
+        }
         other => bail!("unknown tool {other}"),
     };
     // Submits of this agent's that finished since its last call: one line each (NIT-212).
@@ -1403,8 +1430,30 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             db.mark_submit_jobs_delivered(&done.iter().map(|j| j.id).collect::<Vec<_>>())?;
             out["notices"] = json!(done.iter().map(|j| j.outcome()).collect::<Vec<_>>());
         }
+        // Triage's answers to this agent's questions (NIT-245), told once.
+        let answered = db.undelivered_triage(actor.id())?;
+        if !answered.is_empty() {
+            db.mark_triage_delivered(&answered.iter().map(|q| q.id).collect::<Vec<_>>())?;
+            let mut notices = out.get("notices").and_then(Value::as_array).cloned().unwrap_or_default();
+            notices.extend(answered.iter().map(|q| json!(q.outcome())));
+            out["notices"] = json!(notices);
+        }
     }
     Ok(out)
+}
+
+/// A triage question as triage and get_triage return it. An answered one is told to its asker
+/// here, so it is not repeated as a notice.
+fn triage_json(db: &Db, q: &nitely_core::triage::Question, actor: &nitely_core::issues::Actor) -> Result<Value> {
+    if q.finished() && q.asked_by == actor.id() {
+        db.mark_triage_delivered(&[q.id])?;
+    }
+    let mut v = json!(q);
+    v["outcome"] = json!(q.outcome());
+    if !q.finished() {
+        v["next"] = json!(nitely_core::triage::ASKED_NEXT);
+    }
+    Ok(v)
 }
 
 /// A submit job as submit and submit_status return it. A finished one is told to its submitter

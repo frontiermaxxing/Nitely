@@ -220,7 +220,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     }
     // Read before this round is recorded: the rounds before it, since the human last decided on the
     // issue's findings or handed it back (their decision to go on starts a new count).
-    let stalled = match &out.review {
+    let mut stalled = match &out.review {
         Some(r) if verdict == "changes" && issue.origin == "nitely" => {
             let since = db.handed_back_at(&issue.key)?.max(db.findings_decided_at(&issue.key)?);
             let earlier: Vec<ReviewRecord> = db.reviews(&issue.key)?.into_iter().filter(|r| r.ts > since).collect();
@@ -228,6 +228,31 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         }
         _ => None,
     };
+    // Before stalled rounds go to the person, a fresh review that has not seen them looks (NIT-245):
+    // what it no longer finds was carried stale, and what it still finds is what the person decides.
+    if let (Some(why), Some(r)) = (stalled.clone(), out.review.clone()) {
+        db.log_event(actor, Some(&issue.key), Some(&wt), "status", "The review rounds are not converging: a fresh review, without the earlier rounds, looks before it goes to the person")?;
+        // Fresh of the rounds, not of what the change is for (NIT-282).
+        let mut rules = pb.review.clone();
+        rules.context = review_context(db, &issue, &out.gate)?;
+        if let Ok(mut fresh) = rules.run(&r.reviewer, &worktree, &since, None) {
+            fresh.note = if r.note.is_empty() { FRESH.to_string() } else { format!("{}; {FRESH}", r.note) };
+            for reason in pb.review.flag_reasons(&fresh) {
+                if !out.reasons.contains(&reason) {
+                    out.reasons.push(reason);
+                }
+            }
+            let blocking: Vec<String> = fresh.findings.iter().filter(|f| f.priority <= 1).map(|f| format!("[P{}] {}", f.priority, f.text)).collect();
+            if blocking.is_empty() {
+                verdict = "pass".into();
+                stalled = None;
+            } else {
+                stalled = Some(format!("{}; a fresh review without the earlier rounds still finds: {}", why.split(". Open:").next().unwrap_or(&why), blocking.join("; ")));
+            }
+            out.review = Some(fresh);
+            out.approver = if out.reasons.is_empty() { "agent" } else { "human" }.into();
+        }
+    }
     db.record_review(&out)?;
     let review_id = db.conn.last_insert_rowid();
     if out.review.is_some() {
@@ -489,6 +514,9 @@ does not.\n",
     }
     Ok(c)
 }
+
+/// The note on a review run fresh, without the rounds before it, before stalled rounds escalate.
+const FRESH: &str = "fresh, without the earlier rounds";
 
 /// How many review rounds in a row may ask for changes before the issue goes to a person.
 pub const MAX_ROUNDS: usize = 5;
@@ -951,11 +979,13 @@ money=no; case "$files" in *billing*) money=yes;; esac
 case "$prompt" in
   *"PREVIOUS <n>"*) case "$files" in
        *stuck*) echo "PREVIOUS 1: open stuck.txt:1 \`let stuck = 1;\` is still never read"; echo "VERDICT: clean";;
+       *stale*) echo "PREVIOUS 1: open stale.txt:1 \`let stale = 1;\` is still never read"; echo "VERDICT: clean";;
        *) echo "PREVIOUS 1: open edge.txt:1 \`let edge = 2;\` still skips the empty line"; echo "VERDICT: clean";;
      esac;;
   *) case "$files" in
        *edge*) echo "- [P2] Edge case: edge.txt, the empty line"; echo "VERDICT: findings";;
        *stuck*) echo "- [P1] Stuck: stuck.txt, the x is never read"; echo "VERDICT: findings";;
+       *stale*) if [ -f ../stale-seen ]; then echo "Fine."; echo "VERDICT: clean"; else touch ../stale-seen; echo "- [P1] Stale: stale.txt, the x is never read"; echo "VERDICT: findings"; fi;;
        *) echo "Fine."; echo "VERDICT: clean";;
      esac;;
 esac
@@ -1415,5 +1445,23 @@ focus = \"Money first.\"
         assert!(c.contains("- [P1] No migration: keys.txt, load (accepted: no outside users yet)"), "{c}");
         assert!(c.contains("They are not exemptions"), "{c}");
         assert!(!c.contains("forged") && !c.contains("Never log in"), "an unsigned row is no acceptance: {c}");
+    }
+
+    #[test]
+    fn a_finding_only_the_rounds_carry_is_checked_fresh_before_it_goes_to_a_person() {
+        let mut f = fixture();
+        // The reviewer raises a P1 once, and two rounds carry it as open; a review that has not
+        // seen those rounds finds nothing (NIT-245).
+        let (issue, wt) = f.started("Stale finding");
+        std::fs::write(wt.join("stale.txt"), "let stale = 1;").unwrap();
+        sh(&wt, &["add", "."]);
+        sh(&wt, &["commit", "-q", "-m", "stale"]);
+        let states: Vec<String> = (0..3).map(|_| f.submit(&wt, true).unwrap().state).collect();
+        assert_eq!(states, ["In Progress", "In Progress", "In Review"]);
+        let last = &f.db.reviews(&issue.key).unwrap()[0];
+        assert_eq!((last.verdict.as_str(), last.note.as_str()), ("pass", "same vendor: codex not installed; fresh, without the earlier rounds"));
+        assert!(f.db.open_asks().unwrap().iter().all(|a| a.issue_key.as_deref() != Some(issue.key.as_str())), "nothing for the person");
+        let said: Vec<String> = f.db.timeline(&issue.key).unwrap().into_iter().filter_map(|t| t.summary).collect();
+        assert!(said.iter().any(|s| s.contains("a fresh review, without the earlier rounds, looks")), "{said:?}");
     }
 }

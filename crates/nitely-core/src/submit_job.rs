@@ -14,7 +14,7 @@ use anyhow::{bail, Context, Result};
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::db::{now, Db};
@@ -274,14 +274,21 @@ pub fn log_path(id: i64) -> PathBuf {
 
 impl Runner for DetachedProcess {
     fn start(&self, job: &Job) -> Result<Option<u32>> {
+        spawn_nitely(&self.nitely, &["submit-job".into(), job.id.to_string()], Path::new(&job.worktree), &log_path(job.id)).map(Some)
+    }
+}
+
+/// Starts `nitely <args>` as a process of its own in `cwd`: hidden, in its own process group, its
+/// output in `log`, so it carries on after its caller exits. Its pid.
+pub fn spawn_nitely(nitely: &Path, args: &[String], cwd: &Path, log_path: &Path) -> Result<u32> {
+    {
         use std::process::Stdio;
-        let log_path = log_path(job.id);
         if let Some(dir) = log_path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let log = std::fs::OpenOptions::new().create(true).append(true).open(&log_path).with_context(|| format!("opening {}", log_path.display()))?;
-        let mut cmd = std::process::Command::new(&self.nitely);
-        cmd.args(["submit-job", &job.id.to_string()]).current_dir(&job.worktree);
+        let log = std::fs::OpenOptions::new().create(true).append(true).open(log_path).with_context(|| format!("opening {}", log_path.display()))?;
+        let mut cmd = std::process::Command::new(nitely);
+        cmd.args(args).current_dir(cwd);
         cmd.stdin(Stdio::null()).stdout(Stdio::from(log.try_clone()?)).stderr(Stdio::from(log));
         // Not part of the agent's session: its reviewer starts as a fresh one (review.rs).
         for (name, _) in std::env::vars() {
@@ -289,12 +296,12 @@ impl Runner for DetachedProcess {
                 cmd.env_remove(name);
             }
         }
-        let mut child = spawn_detached(&mut cmd).with_context(|| format!("starting {} submit-job {}", self.nitely.display(), job.id))?;
+        let mut child = spawn_detached(&mut cmd).with_context(|| format!("starting {} {}", nitely.display(), args.join(" ")))?;
         let pid = child.id();
         // Reaped when it ends, so a long-lived caller (an MCP server) keeps no zombie on Unix and a
         // crashed job reads as gone.
         std::thread::spawn(move || child.wait());
-        Ok(Some(pid))
+        Ok(pid)
     }
 }
 
