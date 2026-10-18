@@ -17,6 +17,8 @@ use crate::submit::patch_id;
 /// A lock older than this probably belongs to a land that died.
 const LOCK_STALE_SECS: u64 = 60 * 60;
 pub const LOCK_FILE: &str = "nitely-land.lock";
+/// A git `index.lock` made this long before a land began may still be that git's, running.
+pub(crate) const INDEX_LOCK_GRACE_SECS: u64 = 60;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -190,13 +192,13 @@ fn index_lock(root: &Path) -> Option<PathBuf> {
 /// Why git cannot change the main checkout, when an `index.lock` there is older than this land's
 /// lock. Git holds that file for one command only, so one from before the land began was left by a
 /// git that ended without removing it (the machine went down mid-command), and git refuses every
-/// change to the checkout while it is there (NIT-280).
-pub(crate) fn left_index_lock(root: &Path) -> Option<String> {
+/// change to the checkout while it is there (NIT-280). Before the gate, one from the minute before
+/// the land began may be a git still running; once the fast-forward was refused, it is not.
+pub(crate) fn left_index_lock(root: &Path, grace_secs: u64) -> Option<String> {
     let path = index_lock(root)?;
     let made = std::fs::metadata(&path).and_then(|m| m.modified()).ok()?;
     let began = std::fs::metadata(lock_path(root).ok()?).and_then(|m| m.modified()).ok()?;
-    // A git that started a moment before the land may still be running.
-    if made + std::time::Duration::from_secs(60) > began {
+    if made + std::time::Duration::from_secs(grace_secs) >= began {
         return None;
     }
     let at = made.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64;
@@ -211,7 +213,7 @@ pub(crate) fn left_index_lock(root: &Path) -> Option<String> {
 /// What a refused fast-forward of the main checkout says: an `index.lock` there for what it is,
 /// else the likeliest cause.
 pub(crate) fn refused_fast_forward(root: &Path) -> String {
-    if let Some(why) = left_index_lock(root) {
+    if let Some(why) = left_index_lock(root, 0) {
         return format!("the main checkout refused the fast-forward: {why}");
     }
     match index_lock(root) {
@@ -457,7 +459,7 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
         bail!("the main checkout {} is on {current}, not {base}; land only writes {base}", root.display());
     }
     // Said before the gate, not after it, when the fast-forward would fail.
-    if let Some(why) = left_index_lock(root) {
+    if let Some(why) = left_index_lock(root, INDEX_LOCK_GRACE_SECS) {
         bail!("{why}");
     }
 
@@ -1566,7 +1568,7 @@ when_changed = ["billing"]
         std::fs::write(&lock, format!("NIT-9 pid {}", std::process::id())).unwrap();
         std::fs::remove_file(&index_lock).unwrap();
         std::fs::write(&index_lock, "").unwrap();
-        assert_eq!(left_index_lock(&f.repo), None);
+        assert_eq!(left_index_lock(&f.repo, INDEX_LOCK_GRACE_SECS), None);
         assert!(refused_fast_forward(&f.repo).contains("a git command is running there"));
         std::fs::remove_file(&index_lock).unwrap();
         assert!(refused_fast_forward(&f.repo).contains("uncommitted edits"));

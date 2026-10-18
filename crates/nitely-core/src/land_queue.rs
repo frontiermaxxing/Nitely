@@ -348,12 +348,23 @@ fn run_batch(db: &mut Db, root: &Path, pb: &Playbook, batch: Vec<Entry>) -> Resu
         let with = if others.is_empty() { String::new() } else { format!(" with {}", others.join(", ")) };
         db.log_event(&e.actor(), Some(&e.issue), None, "status", &format!("Landing in queue run {run}{with}"))?;
     }
+    let mut gates = 0u32;
+    let outcome = stack_and_land(db, root, pb, run, batch, &base, &mut gates);
+    // Ended however it ended, so a run that stopped early is not shown landing.
+    let head = git(root, &["rev-parse", "--short", &base]).ok().map(|s| s.trim().to_string());
+    db.conn.execute("UPDATE land_run SET ended_at = ?2, gates = ?3, head = ?4, step = NULL WHERE id = ?1", params![run, now(), gates, head])?;
+    outcome
+}
+
+/// `run_batch`'s work once its run is recorded: stack the batch onto `base`, gate it, land it.
+fn stack_and_land(db: &mut Db, root: &Path, pb: &Playbook, run: i64, batch: Vec<Entry>, base: &str, gates: &mut u32) -> Result<()> {
+    let base = base.to_string();
     let current = git(root, &["branch", "--show-current"])?.trim().to_string();
     if current != base {
         bail!("the main checkout {} is on {current}, not {base}; land only writes {base}", root.display());
     }
     // Said before the gate, not after it, when the fast-forward would fail.
-    if let Some(why) = land::left_index_lock(root) {
+    if let Some(why) = land::left_index_lock(root, land::INDEX_LOCK_GRACE_SECS) {
         bail!("{why}");
     }
     let before = land::rev(root, &base)?;
@@ -372,11 +383,7 @@ fn run_batch(db: &mut Db, root: &Path, pb: &Playbook, batch: Vec<Entry>) -> Resu
             }
         }
     }
-    let mut gates = 0u32;
-    let outcome = gate_and_land(db, root, pb, run, &stack, stacked, &before, &mut gates);
-    let head = git(root, &["rev-parse", "--short", &base]).ok().map(|s| s.trim().to_string());
-    db.conn.execute("UPDATE land_run SET ended_at = ?2, gates = ?3, head = ?4, step = NULL WHERE id = ?1", params![run, now(), gates, head])?;
-    outcome
+    gate_and_land(db, root, pb, run, &stack, stacked, &before, gates)
 }
 
 /// Says what the run is doing now, for the app's board row.
@@ -1031,6 +1038,28 @@ batch = "waiting"
         assert!(r.landed, "{r:?}");
         assert_eq!(r.batch.unwrap().entry, entry, "the same place in the queue, not a second one");
         assert!(f.db.land_queue_entry(entry).unwrap().unwrap().delivered_at.is_some(), "told once");
+        std::fs::remove_dir_all(&f.base).ok();
+    }
+
+    /// A git index.lock left in the main checkout stops the queue's run before the gate, says what
+    /// it is, and ends the run, so nothing shows it landing (NIT-280).
+    #[test]
+    fn a_left_index_lock_stops_the_run_and_ends_it() {
+        let mut f = fixture();
+        let (a, _) = f.submitted("A", &[("a.txt", "a")]);
+        let dir = f.repo.to_string_lossy().into_owned();
+        let opts = LandOptions { dir: &dir, issue_key: &a, push: true, keep: false, break_lock: false };
+        let held = land::Lock::try_take(&land::lock_path(&f.repo).unwrap(), "another land", false).unwrap().unwrap();
+        land_waiting(&mut f.db, &f.repo, &a, &opts, &f.actor, Duration::from_millis(300)).unwrap();
+        drop(held);
+        let index_lock = f.repo.join(".git").join("index.lock");
+        let left = std::fs::File::create(&index_lock).unwrap();
+        left.set_modified(std::time::SystemTime::now() - Duration::from_secs(2 * 3600)).unwrap();
+        drop(left);
+        let r = land::land(&mut f.db, &crate::Config::default(), &opts, &f.actor).unwrap();
+        assert!(!r.landed && r.error.as_deref().is_some_and(|e| e.contains("index.lock") && e.contains("before this land began")), "{r:?}");
+        let open: i64 = f.db.conn.query_row("SELECT COUNT(*) FROM land_run WHERE ended_at IS NULL", [], |row| row.get(0)).unwrap();
+        assert_eq!(open, 0, "the run ended");
         std::fs::remove_dir_all(&f.base).ok();
     }
 
