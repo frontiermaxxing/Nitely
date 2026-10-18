@@ -597,7 +597,10 @@ impl Db {
 pub(crate) fn cleanup(root: &Path, pb: &Playbook, worktree: &Path, branch: &str, temporary: bool, keep: bool) -> (String, Vec<crate::procs::Holder>) {
     let issue = crate::IssueRecord { key: "x".into(), title: "x".into(), ..Default::default() };
     let layout_dir = pb.worktree_for(root, "x", &issue);
-    let ours = layout_dir.parent().is_some_and(|d| worktree.starts_with(d));
+    // Compared as paths::normalize spells them: git names a worktree by its real path, which may
+    // differ in spelling from the repo's configured root (`/private/var` for `/var` on a Mac, a
+    // long name for an 8.3 one like `RUNNER~1` on Windows), and the worktree is ours all the same.
+    let ours = layout_dir.parent().is_some_and(|d| crate::paths::is_within(&worktree.to_string_lossy(), &d.to_string_lossy()));
     if !(temporary || (ours && !keep)) {
         return (format!("kept {} (not made by start_task, or --keep)", worktree.display()), vec![]);
     }
@@ -982,6 +985,25 @@ when_changed = ["billing"]
         assert!(f.db.ask(open.id).unwrap().unwrap().closed.as_deref().is_some_and(|c| c.contains("sent back")));
         assert_eq!(f.db.close_superseded_requests(&a, &[]).unwrap(), 0);
         std::fs::remove_dir_all(&f.base).ok();
+    }
+
+    #[test]
+    fn removes_its_own_worktree_however_its_path_is_spelled() {
+        let mut f = fixture();
+        let (_, wt) = f.submitted("Spelled", "spelled.txt", "x");
+        let branch = sh(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]).trim().to_string();
+        // The worktree as git or the system may name it, which need not be how the repo's root is
+        // spelled: through `/private` on a Mac, with 8.3 short names on Windows (NIT-261).
+        let text = wt.to_string_lossy().into_owned();
+        let other = if cfg!(target_os = "macos") && text.starts_with("/var/") {
+            format!("/private{text}")
+        } else {
+            crate::paths::short_path(&text)
+        };
+        let pb = Playbook::load(&f.repo).unwrap();
+        let (message, _) = cleanup(&f.repo, &pb, Path::new(&other), &branch, false, false);
+        assert!(message.starts_with("removed the worktree"), "{message} ({other})");
+        assert!(!wt.exists());
     }
 
     #[test]
