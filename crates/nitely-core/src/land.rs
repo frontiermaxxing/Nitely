@@ -1015,6 +1015,8 @@ mod tests {
         // A killed land's: its mark names a process that is gone and the lock came with it, so
         // both go and the land goes on.
         std::fs::write(&mark, "fast-forward pid 4000000000 since then").unwrap();
+        // Made anew: rewriting an empty file with nothing leaves its time as it was.
+        std::fs::remove_file(&lock).unwrap();
         std::fs::write(&lock, "").unwrap();
         fast_forward_main(&repo, &next).unwrap();
         assert!(!lock.exists() && !mark.exists());
