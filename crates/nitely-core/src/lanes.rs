@@ -1324,9 +1324,12 @@ enum Turn {
 /// Where each live queued request stands, given the machine's `slots`. A request goes when no
 /// request of its own repo is ahead of it and fewer requests ahead of it that can start (of repos
 /// with a free lane) than there are free slots. While an agent's `run` that could start waits, a
-/// gate or land leaves the last free slot to it on a machine with 3 slots or more, so a short run
-/// never waits out a row of long gates (NIT-291). A repo whose lanes are all busy holds up no other.
-fn turns(rows: Vec<QueueRow>, slots: u32, served: &std::collections::HashMap<String, i64>, now: i64) -> std::collections::HashMap<i64, Turn> {
+/// gate leaves the last free slot to it on a machine with 3 slots or more, so a short run never
+/// waits out a row of long gates (NIT-291). A repo whose lanes are all busy holds up no other.
+/// While a live land holds a repo's land lock (`landing`, by normalized repo) and no land of that
+/// repo runs yet, the rest leave that repo one lane and the machine one slot: the land's gate is
+/// coming, and every other land waits on it, so it never waits out a submit's gate (NIT-332).
+fn turns(rows: Vec<QueueRow>, slots: u32, served: &std::collections::HashMap<String, i64>, now: i64, landing: &std::collections::HashSet<String>) -> std::collections::HashMap<i64, Turn> {
     use std::collections::{HashMap, HashSet};
     let repo_of = |w: &Waiting| crate::paths::normalize(&w.repo);
     let mut held_by_checkout: HashSet<String> = HashSet::new();
@@ -1352,7 +1355,13 @@ fn turns(rows: Vec<QueueRow>, slots: u32, served: &std::collections::HashMap<Str
         }
     }
     let free_lanes = |repo: &str| lanes_by_repo.get(repo).copied().unwrap_or(1) - running_by_repo.get(repo).copied().unwrap_or(0);
-    let can_start = |repo: &str| free_lanes(repo) > 0 && !held_by_checkout.contains(repo);
+    let land_running: HashSet<String> = running.iter().filter(|r| r.w.kind == "land").map(|r| repo_of(&r.w)).collect();
+    let keeps_for_land = |repo: &str| landing.contains(repo) && !land_running.contains(repo);
+    let kept_slots = landing.iter().filter(|r| keeps_for_land(r)).count() as i64;
+    // The lanes a request of `kind` may take: all of them for a land, one fewer for the rest
+    // while the repo's land is coming.
+    let lanes_for = |repo: &str, kind: &str| free_lanes(repo) - i64::from(kind != "land" && keeps_for_land(repo));
+    let can_start = |repo: &str, kind: &str| lanes_for(repo, kind) > 0 && !held_by_checkout.contains(repo);
     let free_slots = (slots as i64 - running.len() as i64).max(0);
     let ordered = in_order(waiting, served, now);
     // Only a repo's first request can start, so only a run that is first in its repo keeps a slot:
@@ -1360,7 +1369,7 @@ fn turns(rows: Vec<QueueRow>, slots: u32, served: &std::collections::HashMap<Str
     let mut firsts: HashSet<String> = HashSet::new();
     let run_could_start = ordered.iter().any(|w| {
         let repo = repo_of(w);
-        firsts.insert(repo.clone()) && w.kind == "run" && can_start(&repo)
+        firsts.insert(repo.clone()) && w.kind == "run" && can_start(&repo, &w.kind)
     });
     let reserve = i64::from(slots >= 3 && run_could_start);
     let busy = || {
@@ -1384,22 +1393,33 @@ fn turns(rows: Vec<QueueRow>, slots: u32, served: &std::collections::HashMap<Str
             continue;
         }
         first_of_repo.insert(repo.clone(), w.id);
-        let usable = free_slots - if w.kind == "run" { 0 } else { reserve };
+        // A land takes any free slot; a run leaves one for a land that is coming; a gate leaves one
+        // for each, a run that could start and a land.
+        let (for_run, for_land) = match w.kind.as_str() {
+            "land" => (0, 0),
+            "run" => (0, kept_slots),
+            _ => (reserve, kept_slots),
+        };
+        let usable = free_slots - for_run - for_land;
         let turn = if (ahead.len() as i64) < usable {
-            if free_lanes(&repo) > 0 {
+            if lanes_for(&repo, &w.kind) > 0 {
                 Turn::Go
+            } else if free_lanes(&repo) > 0 {
+                Turn::Wait("waiting: a lane of its repo is kept for the land in progress".to_string())
             } else {
                 Turn::LanesBusy(format!("waiting: all {} of its repo's lanes are busy", lanes_by_repo.get(&repo).copied().unwrap_or(1)))
             }
         } else if free_slots == 0 {
             Turn::Wait(format!("waiting: {} of {slots} machine slots in use ({})", running.len(), busy()))
+        } else if (ahead.len() as i64) < free_slots - for_run {
+            Turn::Wait("waiting: a machine slot is kept for the land in progress".to_string())
         } else if (ahead.len() as i64) < free_slots {
             Turn::Wait("waiting: the last free machine slot is kept for an agent's run".to_string())
         } else {
             let ids = ahead.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
             Turn::Wait(format!("waiting: the free machine slots go to requests ahead ({ids})"))
         };
-        if turn == Turn::Go && can_start(&repo) {
+        if turn == Turn::Go && can_start(&repo, &w.kind) {
             ahead.push(w.id);
         }
         out.insert(w.id, turn);
@@ -1469,14 +1489,22 @@ fn my_turn(db: &Db, id: i64, slots: u32, alive: &mut dyn FnMut(&Requester) -> bo
     // Looking is what keeps a queued request's place (NIT-270).
     db.conn.execute("UPDATE lane_run SET polled_at = ?2 WHERE id = ?1", params![id, now()])?;
     let (rows, served) = queue_rows(db, Some(id), alive)?;
-    Ok(!matches!(turns(rows, slots, &served, now()).get(&id), Some(Turn::Wait(_))))
+    let landing = landing_repos(&rows);
+    Ok(!matches!(turns(rows, slots, &served, now(), &landing).get(&id), Some(Turn::Wait(_))))
+}
+
+/// The repos among `rows` (normalized) whose land lock a live land holds (NIT-332).
+fn landing_repos(rows: &[QueueRow]) -> std::collections::HashSet<String> {
+    let repos: std::collections::HashSet<&str> = rows.iter().map(|r| r.w.repo.as_str()).collect();
+    repos.into_iter().filter(|repo| crate::land::held_by_live_land(Path::new(repo))).map(crate::paths::normalize).collect()
 }
 
 /// Why each queued request waits, for `nitely lanes` and the app (NIT-291): the machine's slots,
 /// its own repo's queue or lanes, the person's checkout, or memory. Reads only.
 fn waiting_reasons(db: &Db) -> Result<std::collections::HashMap<i64, String>> {
     let (rows, served) = queue_rows(db, None, &mut |r: &Requester| !r.gone())?;
-    Ok(turns(rows, machine_budget().slots, &served, now())
+    let landing = landing_repos(&rows);
+    Ok(turns(rows, machine_budget().slots, &served, now(), &landing)
         .into_iter()
         .filter_map(|(id, t)| match t {
             Turn::Go => None,
@@ -3111,19 +3139,19 @@ wanted {shown}", ran.output);
             queued(waiting(4, "APP", "run", now - 30)),
             queued(waiting(5, "APP", "run", now - 20)),
         ];
-        let t = turns(rows.clone(), 3, &none, now);
+        let t = turns(rows.clone(), 3, &none, now, &Default::default());
         assert_eq!(t[&4], Turn::Go, "{t:?}");
         assert_eq!(t[&3], Turn::Wait("waiting: the last free machine slot is kept for an agent's run".into()));
         assert_eq!(t[&5], Turn::Wait("waiting: behind request 4 of the same repo".into()));
         // With two slots none is kept: the gate, first in line, goes.
-        let t = turns(rows.clone(), 2, &none, now);
+        let t = turns(rows.clone(), 2, &none, now, &Default::default());
         assert_eq!(t[&3], Turn::Wait("waiting: 2 of 2 machine slots in use (AND-302 gate 24 m, AND-335 gate 19 m)".into()), "{t:?}");
-        let t = turns(rows.clone(), 4, &none, now);
+        let t = turns(rows.clone(), 4, &none, now, &Default::default());
         assert_eq!((&t[&3], &t[&4]), (&Turn::Go, &Turn::Go), "a slot each: {t:?}");
         // A run whose repo's lanes are all busy keeps no slot from the gate.
         let mut busy = rows.clone();
         busy.push(running(waiting(6, "APP", "run", now - 50), "APP-1", now - 40));
-        let t = turns(busy, 4, &none, now);
+        let t = turns(busy, 4, &none, now, &Default::default());
         assert_eq!(t[&3], Turn::Go, "{t:?}");
         assert_eq!(t[&4], Turn::Wait("waiting: the free machine slots go to requests ahead (3)".into()));
         // A run behind its own repo's gate cannot start before that gate, so it keeps no slot from
@@ -3134,9 +3162,55 @@ wanted {shown}", ran.output);
             queued(waiting(3, "NIT", "gate", now - 100)),
             queued(waiting(4, "NIT", "run", now - 30)),
         ];
-        let t = turns(same_repo, 3, &none, now);
+        let t = turns(same_repo, 3, &none, now, &Default::default());
         assert_eq!(t[&3], Turn::Go, "{t:?}");
         assert_eq!(t[&4], Turn::Wait("waiting: behind request 3 of the same repo".into()));
+    }
+
+    /// While a land holds its repo's land lock and its gate has not started, the rest leave that
+    /// repo a lane and the machine a slot, so the land's gate starts as soon as it is asked for
+    /// (NIT-332).
+    #[test]
+    fn a_land_in_progress_keeps_a_lane_and_a_slot_for_its_gate() {
+        let none = std::collections::HashMap::new();
+        let now = 10_000;
+        let nit = |w: Waiting| QueueRow { lane_count: 3, ..queued(w) };
+        let nit_running = |w: Waiting, issue: &str| QueueRow { lane_count: 3, ..running(w, issue, now - 60) };
+        let rows = vec![
+            nit_running(waiting(1, "NIT", "gate", now - 300), "NIT-1"),
+            nit_running(waiting(2, "NIT", "gate", now - 200), "NIT-2"),
+            nit(waiting(3, "NIT", "gate", now - 100)),
+            queued(waiting(4, "APP", "run", now - 30)),
+        ];
+        let landing = std::collections::HashSet::from([crate::paths::normalize("C:/Code/NIT")]);
+        // No land in progress: the gate takes NIT's last lane.
+        let t = turns(rows.clone(), 5, &none, now, &Default::default());
+        assert_eq!((&t[&3], &t[&4]), (&Turn::Go, &Turn::Go), "{t:?}");
+        // A land holds the lock: NIT's last lane waits for its gate; another repo's run still goes.
+        let t = turns(rows.clone(), 5, &none, now, &landing);
+        assert_eq!(t[&3], Turn::Wait("waiting: a lane of its repo is kept for the land in progress".into()), "{t:?}");
+        assert_eq!(t[&4], Turn::Go);
+        // Its gate, when asked for, goes ahead of the queue into that lane.
+        let mut asked = rows.clone();
+        asked.push(nit(waiting(5, "NIT", "land", now - 1)));
+        let t = turns(asked, 5, &none, now, &landing);
+        assert_eq!(t[&5], Turn::Go, "{t:?}");
+        assert_eq!(t[&3], Turn::Wait("waiting: behind request 5 of the same repo".into()));
+        // Once the land's gate runs, nothing more is kept: the gate takes the last lane.
+        let mut gating = rows.clone();
+        gating[1] = nit_running(waiting(2, "NIT", "land", now - 200), "NIT-9");
+        let t = turns(gating, 5, &none, now, &landing);
+        assert_eq!(t[&3], Turn::Go, "{t:?}");
+        // On a full machine the slot is kept too: another repo's gate leaves the last one free.
+        let tight = vec![
+            running(waiting(1, "AND", "gate", now - 300), "AND-1", now - 60),
+            running(waiting(2, "AND2", "gate", now - 300), "AND-2", now - 60),
+            queued(waiting(3, "WEB", "gate", now - 100)),
+        ];
+        let t = turns(tight.clone(), 3, &none, now, &landing);
+        assert_eq!(t[&3], Turn::Wait("waiting: a machine slot is kept for the land in progress".into()), "{t:?}");
+        let t = turns(tight, 3, &none, now, &Default::default());
+        assert_eq!(t[&3], Turn::Go, "{t:?}");
     }
 
     /// `nitely lanes` and the app show why each queued request waits.

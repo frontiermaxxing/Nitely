@@ -138,6 +138,18 @@ pub(crate) fn record_stopped(db: &mut Db, key: &str, msg: &str, report: &mut Lan
     Ok(())
 }
 
+/// Whether a live land holds `root`'s land lock: its file names the process that took it. The
+/// lanes keep that land a lane while it does (NIT-332). Read often, so a main checkout's lock is
+/// found without asking git.
+pub(crate) fn held_by_live_land(root: &Path) -> bool {
+    let dot_git = root.join(".git");
+    let path = if dot_git.is_dir() { dot_git.join(LOCK_FILE) } else { match lock_path(root) { Ok(p) => p, Err(_) => return false } };
+    let Ok(held) = std::fs::read_to_string(&path) else { return false };
+    // "<holder> pid <pid> since <time>"
+    let mut words = held.split_whitespace().skip_while(|w| *w != "pid");
+    words.nth(1).and_then(|p| p.parse::<u32>().ok()).is_some_and(crate::procs::alive)
+}
+
 /// The repo's land lock file, in its common git dir.
 pub(crate) fn lock_path(root: &Path) -> Result<PathBuf> {
     let common = PathBuf::from(git(root, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?.trim());
@@ -809,6 +821,22 @@ pub(crate) fn first_line(e: &anyhow::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The lanes keep a lane for a land only while the process that took its lock lives (NIT-332).
+    #[test]
+    fn a_land_lock_counts_only_while_its_process_lives() {
+        let root = crate::paths::unique_temp("nitely-land-held", "");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        assert!(!held_by_live_land(&root), "no lock");
+        let lock = root.join(".git").join(LOCK_FILE);
+        std::fs::write(&lock, format!("NIT-9 pid {} since 2026-10-18T12:00:00Z
+", std::process::id())).unwrap();
+        assert!(held_by_live_land(&root), "held by this process");
+        std::fs::write(&lock, "NIT-9 pid 4000000000 since 2026-10-18T12:00:00Z
+").unwrap();
+        assert!(!held_by_live_land(&root), "its process is gone");
+        std::fs::remove_dir_all(root).ok();
+    }
     use crate::issues::NewIssue;
     use crate::submit::{submit, SubmitOptions};
 
