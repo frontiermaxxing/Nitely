@@ -527,14 +527,40 @@ fn list() -> Vec<Proc> {
 
 #[cfg(windows)]
 fn list_by_powershell() -> Vec<Proc> {
-    let script = "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine | ConvertTo-Json -Compress";
+    win32_process(None)
+}
+
+/// `Win32_Process` through PowerShell, every process or those `filter` (a WQL condition) picks.
+#[cfg(windows)]
+fn win32_process(filter: Option<&str>) -> Vec<Proc> {
+    let filter = filter.map(|f| format!(" -Filter \"{f}\"")).unwrap_or_default();
+    // In UTF-8, so a command line outside the console's code page reads as it is (NIT-366).
+    let script = format!(
+        "[Console]::OutputEncoding = [Text.Encoding]::UTF8; Get-CimInstance Win32_Process{filter} | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine | ConvertTo-Json -Compress"
+    );
     // By its full path when it is where Windows keeps it, so a narrow PATH does not hide it.
     let system = std::env::var_os("SystemRoot").map(|r| std::path::Path::new(&r).join("System32").join("WindowsPowerShell").join("v1.0").join("powershell.exe"));
     let program = system.filter(|p| p.is_file()).map_or_else(|| "powershell".to_string(), |p| p.to_string_lossy().into_owned());
-    let out = crate::playbook::shell_free_command(&program).args(["-NoProfile", "-NonInteractive", "-Command", script]).output();
+    let out = crate::playbook::shell_free_command(&program).args(["-NoProfile", "-NonInteractive", "-Command", &script]).output();
     let Ok(out) = out else { return Vec::new() };
-    let text = String::from_utf8_lossy(&out.stdout);
-    serde_json::from_str::<Vec<Proc>>(text.trim()).unwrap_or_default()
+    parse_win32_json(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// `ConvertTo-Json`'s processes: a list, or one object when only one matched. Windows PowerShell
+/// writes control characters other than tab, newline and carriage return into strings as they
+/// are, which JSON forbids, so one command line holding, say, 0x1A (what Windows passes for an
+/// argument character its ANSI code page lacks, a "→" from an agent's shell) made the whole list
+/// unreadable (NIT-366). With `-Compress` none can stand outside a string, so each is escaped; and a row that
+/// still does not read is left out, not the list.
+#[cfg(any(windows, test))]
+fn parse_win32_json(text: &str) -> Vec<Proc> {
+    let escaped: String = text.trim().chars().map(|c| if (c as u32) < 0x20 { format!("\\u{:04x}", c as u32) } else { c.to_string() }).collect();
+    let rows = match serde_json::from_str::<serde_json::Value>(&escaped) {
+        Ok(serde_json::Value::Array(rows)) => rows,
+        Ok(one @ serde_json::Value::Object(_)) => vec![one],
+        _ => return Vec::new(),
+    };
+    rows.into_iter().filter_map(|row| serde_json::from_value(row).ok()).collect()
 }
 
 /// What `Win32_Process` gives, read the way it reads it: a snapshot of the processes, then each
@@ -1085,14 +1111,35 @@ pub(crate) mod tests {
         }
     }
 
+    /// A control character in one command line, which Windows PowerShell's ConvertTo-Json leaves
+    /// unescaped, no longer empties the whole list (NIT-366).
+    #[test]
+    fn a_control_character_in_one_command_line_keeps_the_list() {
+        let text = concat!(
+            r#"[{"ProcessId":4,"ParentProcessId":0,"Name":"System","ExecutablePath":null,"CommandLine":null},"#,
+            r#"{"ProcessId":60,"ParentProcessId":4,"Name":"bash.exe","ExecutablePath":"C:\\bash.exe","CommandLine":"bash -c 'a"#,
+            "\u{1a}",
+            r#"b'"}]"#,
+            "\r\n"
+        );
+        let procs = parse_win32_json(text);
+        assert_eq!(procs.iter().map(|p| p.process_id).collect::<Vec<_>>(), [4, 60]);
+        assert_eq!(procs[1].command_line.as_deref(), Some("bash -c 'a\u{1a}b'"));
+        assert!(parse_win32_json("not json").is_empty());
+        // One match is one object; a row that does not read is left out, not the list.
+        assert_eq!(parse_win32_json(r#"{"ProcessId":7,"Name":"one.exe"}"#).len(), 1);
+        assert_eq!(parse_win32_json(r#"[{"ProcessId":"x"},{"ProcessId":8}]"#).iter().map(|p| p.process_id).collect::<Vec<_>>(), [8]);
+    }
+
     /// The Windows API list reads what PowerShell's Win32_Process does, for this process and the
     /// ones that started it.
     #[cfg(windows)]
     #[test]
     fn the_api_list_matches_win32_process() {
         let native = win::list().expect("a process snapshot");
-        let by_powershell = list_by_powershell();
         let me = std::process::id();
+        // Only this process: what other processes run on the machine is no part of it (NIT-366).
+        let by_powershell = win32_process(Some(&format!("ProcessId={me}")));
         let mine = native.iter().find(|p| p.process_id == me).expect("lists this process");
         let theirs = by_powershell.iter().find(|p| p.process_id == me).expect("PowerShell lists this process");
         assert_eq!(mine.parent_process_id, theirs.parent_process_id);
