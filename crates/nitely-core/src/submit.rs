@@ -153,7 +153,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         let vendor = vendor.unwrap_or_default();
         let previous = previous_round(db, &issue.key, &worktree)?;
         // The same patch passed review last time: that pass carries over (NIT-185).
-        let reused = reused_pass(db, &pb.review, &issue.key, &out.patch_id, &vendor, &|r| pb.review.is_installed(r, &worktree))?;
+        let reused = reused_pass(db, &pb.review, &issue.key, &diff_id(&worktree, &since)?, &vendor, &|r| pb.review.is_installed(r, &worktree))?;
         if let Some((_, r)) = &reused {
             let at = r.reused.as_deref().unwrap_or_default();
             db.log_event(actor, Some(&issue.key), Some(&wt), "status", &format!("The same patch passed review at {}: that pass carries over, so it is not reviewed again", &at[..at.len().min(7)]))?;
@@ -227,7 +227,8 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     db.record_review(&out)?;
     let review_id = db.conn.last_insert_rowid();
     if out.review.is_some() {
-        db.conn.execute("UPDATE review SET rules = ?2 WHERE id = ?1", rusqlite::params![review_id, rules_of(&pb.review)])?;
+        let diff = diff_id(&worktree, &since).ok();
+        db.conn.execute("UPDATE review SET rules = ?2, diff_id = ?3 WHERE id = ?1", rusqlite::params![review_id, rules_of(&pb.review), diff])?;
     }
     if let Some(shadow) = out.shadow.as_mut() {
         shadow.review_id = review_id;
@@ -491,23 +492,24 @@ pub(crate) fn previous_round_at(db: &Db, key: &str, dir: &Path, head: &str, befo
 /// The last review's pass, carried over when it reviewed this very patch: nothing in the change is
 /// new to review. It keeps that review's reviewer, note, findings and flags, and says where it is
 /// from. Only the latest review counts, so a pass followed by a review that asked for changes is not
-/// carried over to a later return to the same patch. It must have run under the same review rules
-/// (a flag added since was never asked) and by the reviewer that would be chosen now.
+/// carried over to a later return to the same patch. It must have seen this very diff (`diff_id`),
+/// run under the same review rules (a flag added since was never asked), and been by the reviewer
+/// that would be chosen now.
 fn reused_pass(
     db: &Db,
     rules: &crate::review::ReviewRules,
     key: &str,
-    patch_id: &str,
+    diff: &str,
     vendor: &str,
     installed: &dyn Fn(&str) -> bool,
 ) -> Result<Option<(crate::review::Choice, Review)>> {
-    if matches!(patch_id, "empty" | "unknown" | "") {
+    if diff.is_empty() {
         return Ok(None);
     }
     let last = db
         .conn
         .query_row(
-            "SELECT reviewer, verdict, patch_id, commit_sha, findings, flagged, note, rules FROM review
+            "SELECT reviewer, verdict, COALESCE(diff_id, ''), commit_sha, findings, flagged, note, rules FROM review
              WHERE issue_key = ?1 COLLATE NOCASE AND reviewer != '' ORDER BY ts DESC, id DESC LIMIT 1",
             [key],
             |r| {
@@ -518,8 +520,8 @@ fn reused_pass(
             },
         )
         .optional()?;
-    let Some(((reviewer, verdict, last_patch, commit), (findings, flagged, note, ran_under))) = last else { return Ok(None) };
-    if verdict != "pass" || last_patch != patch_id || ran_under.as_deref() != Some(rules_of(rules).as_str()) {
+    let Some(((reviewer, verdict, last_diff, commit), (findings, flagged, note, ran_under))) = last else { return Ok(None) };
+    if verdict != "pass" || last_diff != diff || ran_under.as_deref() != Some(rules_of(rules).as_str()) {
         return Ok(None);
     }
     if rules.choose(vendor, installed).ok().map(|c| c.reviewer).as_deref() != Some(reviewer.as_str()) {
@@ -540,6 +542,29 @@ fn reused_pass(
     };
     let choice = crate::review::Choice { independent: rules.is_independent(&reviewer, vendor), reviewer, note };
     Ok(Some((choice, review)))
+}
+
+/// The change's diff exactly, as git's hash of it: what each hunk changes, where, and in what
+/// context. Two changes with one patch-id can differ here (the same edit in another function); a
+/// rebase that touched none of the change's files leaves it as it was. Empty for no diff.
+fn diff_id(worktree: &Path, base: &str) -> Result<String> {
+    let diff = git(worktree, &["diff", "--no-color", "--no-ext-diff", &format!("{base}...HEAD")])?;
+    if diff.is_empty() {
+        return Ok(String::new());
+    }
+    use std::io::Write;
+    let mut child = playbook::shell_free_command("git")
+        .arg("-C")
+        .arg(worktree)
+        .args(["hash-object", "--stdin"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()?;
+    let mut stdin = child.stdin.take().unwrap();
+    let writer = std::thread::spawn(move || stdin.write_all(diff.as_bytes()));
+    let out = child.wait_with_output()?;
+    writer.join().ok();
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// The review rules as recorded with a review, to tell whether they changed since.
@@ -1262,5 +1287,27 @@ focus = \"Money first.\"
         assert_eq!(previous.passed_on.as_deref(), Some(base.trim()));
         let rewritten = f.submit(&wt, true).unwrap();
         assert!(rewritten.review.as_ref().is_some_and(|r| r.reused.is_none()), "{rewritten:?}");
+    }
+
+    #[test]
+    fn the_same_edit_somewhere_else_is_reviewed_though_its_patch_id_is_the_same() {
+        let mut f = fixture();
+        let two = |a: u8, b: u8| format!("fn a() {{\n    let x = {a};\n}}\n\n// one\n// two\n// three\n// four\n\nfn b() {{\n    let x = {b};\n}}\n");
+        std::fs::write(f.repo.join("two.rs"), two(1, 1)).unwrap();
+        sh(&f.repo, &["add", "."]);
+        sh(&f.repo, &["commit", "-q", "-m", "two functions"]);
+        sh(&f.repo, &["push", "-q", "origin", "main"]);
+        let (_, wt) = f.started("Same edit");
+        std::fs::write(wt.join("two.rs"), two(2, 1)).unwrap();
+        sh(&wt, &["commit", "-q", "-am", "x in a"]);
+        let in_a = f.submit(&wt, true).unwrap();
+        assert!(in_a.review.as_ref().is_some_and(|r| r.verdict == "pass"));
+        // The same line change, made in b instead: git's patch-id cannot tell them apart.
+        sh(&wt, &["reset", "-q", "--hard", "HEAD~1"]);
+        std::fs::write(wt.join("two.rs"), two(1, 2)).unwrap();
+        sh(&wt, &["commit", "-q", "-am", "x in b"]);
+        let in_b = f.submit(&wt, true).unwrap();
+        assert_eq!(in_b.patch_id, in_a.patch_id);
+        assert!(in_b.review.as_ref().is_some_and(|r| r.reused.is_none()), "another change gets its own review: {in_b:?}");
     }
 }
