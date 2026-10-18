@@ -55,7 +55,7 @@ fn setup(name: &str) -> Setup {
 }
 
 fn nitely(s: &Setup, args: &[&str]) -> Value {
-    let out = Command::new(env!("CARGO_BIN_EXE_nitely")).args(args).current_dir(&s.worktree).env("NITELY_HOME", &s.home).output().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_nitely")).args(args).current_dir(&s.worktree).env("NITELY_HOME", &s.home).env("NITELY_MEMORY_FLOOR_GB", "0").output().unwrap();
     assert!(out.status.success(), "nitely {args:?}: {}", String::from_utf8_lossy(&out.stderr));
     serde_json::from_slice(&out.stdout).unwrap()
 }
@@ -65,7 +65,7 @@ fn tool(s: &Setup, name: &str, arguments: Value) -> Value {
     let mut child = Command::new(env!("CARGO_BIN_EXE_nitely"))
         .arg("mcp-call")
         .current_dir(&s.worktree)
-        .env("NITELY_HOME", &s.home)
+        .env("NITELY_HOME", &s.home).env("NITELY_MEMORY_FLOOR_GB", "0")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()

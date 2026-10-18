@@ -784,7 +784,12 @@ function largeRepo(): ProjectLanes {
 function lanesOverview(): LanesOverview {
   // `?slots` shows the machine's build budget, which the scheduler adds.
   const slots = new URLSearchParams(location.search).has("slots") ? { used: 1, total: 4 } : null;
-  return { projects: new URLSearchParams(location.search).has("nolanes") ? [] : BUILD_LANES, slots };
+  // `?memory=low` shows a request waiting for the machine's memory (NIT-266).
+  const low = new URLSearchParams(location.search).get("memory") === "low";
+  const GB = 1024 ** 3;
+  const machine = { memory: { total: 64 * GB, available: (low ? 6.2 : 38.4) * GB }, limits: { total: 64 * GB, floor: 12.8 * GB, cap: 16 * GB, floor_from: "default", cap_from: "default" }, below_normal: true };
+  const waiting_for_memory = low ? "waiting for memory: 6.2 GB free, new work starts above 12.8 GB" : null;
+  return { projects: new URLSearchParams(location.search).has("nolanes") ? [] : BUILD_LANES, slots, machine, waiting_for_memory };
 }
 
 // ----- Review batches and the land queue (docs/batching.md); `?batches=none` shows none -----
@@ -1982,6 +1987,8 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         throw "The preview has no logs to open; the app opens them.";
       case "lanes_overview":
         return lanesOverview();
+      case "set_machine_limits":
+        return lanesOverview().machine;
       case "batches_overview":
         return batchesOverview();
       case "open_lane_log":

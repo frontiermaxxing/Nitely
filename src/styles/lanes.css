@@ -1,5 +1,7 @@
 /* Build lanes (docs/build-lanes.md): the strip on Now and Overview, and Settings' section. */
 .lanes-strip h2 { display: flex; align-items: baseline; gap: 8px; }
+/* Nothing new starts until the machine has memory again (NIT-266). */
+.lanes-strip h2 .head-note.memory-wait { color: var(--attention-ink); }
 .lanes-chips { display: flex; flex-direction: column; gap: 8px; }
 .lanes-project { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .lane-chip {

@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use crate::db::{now, Db};
 use crate::issues::Actor;
+use crate::machine;
 use crate::playbook::{self, git, Playbook};
 
 /// A playbook's `[lanes]`. Without the table a repo has no lanes and everything works as before.
@@ -543,6 +544,10 @@ pub struct Run {
     pub error: Option<String>,
     /// Large-repo mode: why it waits for the person's checkout (a change there, another branch).
     pub waiting_for: Option<String>,
+    /// Why it waits for the machine's memory (NIT-266): "waiting for memory: 6.2 GB free, …".
+    pub waiting_memory: Option<String>,
+    /// The most memory the run's processes held at once, in bytes, where the system tells it.
+    pub peak_memory: Option<i64>,
 }
 
 impl Run {
@@ -553,7 +558,7 @@ impl Run {
 }
 
 const COLUMNS: &str = "id, project, repo, issue_key, requested_by, kind, snapshot, tree, base, command, state, lane, executor, \
-queued_at, started_at, ended_at, exit_code, timed_out, setup_ran, files_switched, log_path, output, error, waiting_for, pid";
+queued_at, started_at, ended_at, exit_code, timed_out, setup_ran, files_switched, log_path, output, error, waiting_for, waiting_memory, peak_memory, pid";
 
 fn row(r: &rusqlite::Row) -> rusqlite::Result<(Run, Option<i64>)> {
     Ok((
@@ -582,8 +587,10 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<(Run, Option<i64>)> {
             output: r.get(21)?,
             error: r.get(22)?,
             waiting_for: r.get(23)?,
+            waiting_memory: r.get(24)?,
+            peak_memory: r.get(25)?,
         },
-        r.get(24)?,
+        r.get(26)?,
     ))
 }
 
@@ -704,14 +711,24 @@ pub fn run_in(config: &crate::Config, db: &Db, dir: &str, issue: Option<&str>, c
 /// is written as the request moves (queued, running, done), so another process can follow it with
 /// `Db::lane_run`. `on_event` is called with the run when it is queued and when it starts.
 pub fn run(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Actor, on_event: &mut dyn FnMut(&Run)) -> Result<Run> {
-    let jobs = machine_budget().jobs;
-    let command = req.command.replace("{jobs}", &jobs.to_string());
-    run_with(db, repo_root, pb, req, actor, on_event, &mut |lane, log, limit| run_logged(&command, lane, log, limit, jobs))
+    let share = share();
+    let command = req.command.replace("{jobs}", &share.jobs.to_string());
+    run_with(db, repo_root, pb, req, actor, on_event, &mut |lane, log, limit| run_logged(&command, lane, log, limit, share))
 }
 
 /// What runs in a lane once it holds the request's snapshot: given the lane, the log and the time
-/// limit, it returns the exit code (None when stopped) and whether it ran past the limit.
-type Exec<'a> = dyn FnMut(&Path, &Path, Duration) -> Result<(Option<i32>, bool)> + 'a;
+/// limit, it returns how the command ended.
+type Exec<'a> = dyn FnMut(&Path, &Path, Duration) -> Result<Ended> + 'a;
+
+/// How a lane command ended.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ended {
+    /// Its exit code; None when it was stopped.
+    pub code: Option<i32>,
+    pub timed_out: bool,
+    /// The most memory it and what it started held at once, in bytes, where the system tells it.
+    pub peak: Option<u64>,
+}
 
 /// `run`, with what happens in the lane given by `exec` (one command, or a gate's commands).
 fn run_with(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Actor, on_event: &mut dyn FnMut(&Run), exec: &mut Exec) -> Result<Run> {
@@ -743,7 +760,7 @@ fn run_with(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Act
     // Until it runs, a failure here (a lock that cannot be opened, a log folder that cannot be made)
     // closes the request's row: a queued row left behind would hold up the requests after it.
     let started = (|| -> Result<_> {
-        let (n, lock, slot) = take_turn(db, id, repo_root, pb, &rules, machine_budget().slots)?;
+        let (n, lock, slot) = take_turn(db, id, repo_root, pb, &rules, machine_budget().slots, &mut read_memory, memory_limits().as_ref())?;
         let logs = logs_dir(db, req.project);
         std::fs::create_dir_all(&logs)?;
         let log = logs.join(format!("{id}.log"));
@@ -775,8 +792,8 @@ fn run_with(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Act
     match outcome {
         Ok(o) => {
             db.conn.execute(
-                "UPDATE lane_run SET state = 'done', ended_at = ?2, exit_code = ?3, timed_out = ?4, setup_ran = ?5, files_switched = ?6, output = ?7 WHERE id = ?1",
-                params![id, ended, o.exit_code, o.timed_out, o.setup_ran, o.files_switched, o.output],
+                "UPDATE lane_run SET state = 'done', ended_at = ?2, exit_code = ?3, timed_out = ?4, setup_ran = ?5, files_switched = ?6, output = ?7, peak_memory = ?8 WHERE id = ?1",
+                params![id, ended, o.exit_code, o.timed_out, o.setup_ran, o.files_switched, o.output, o.peak.map(|p| p as i64)],
             )?;
         }
         Err(e) => {
@@ -850,7 +867,7 @@ pub fn gate(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Op
     } else {
         db.conn
             .query_row(
-                "SELECT id FROM lane_run WHERE repo = ?1 AND tree = ?2 AND command = ?3 AND kind IN ('gate', 'land') AND state = 'done' AND exit_code = 0 ORDER BY id DESC LIMIT 1",
+                "SELECT id FROM lane_run WHERE repo = ?1 AND tree = ?2 AND command = ?3 AND kind IN ('gate', 'land') AND state = 'done' AND exit_code = 0 AND executor = 'local' ORDER BY id DESC LIMIT 1",
                 params![root, snap.tree, key],
                 |r| r.get(0),
             )
@@ -873,25 +890,28 @@ pub fn gate(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Op
     let mut results: Vec<playbook::CommandResult> = Vec::new();
     let mut flaked: Vec<playbook::Flake> = Vec::new();
     let retries = pb.gate.retries;
-    let jobs = machine_budget().jobs;
+    let share = share();
     let req = Request { project: &project, issue, kind, snapshot: &snap, command: &key };
     let run = run_with(db, repo_root, pb, &req, actor, &mut |_| {}, &mut |lane: &Path, log: &Path, limit: Duration| {
+        let mut peak: Option<u64> = None;
         for (command, skip) in steps {
             if let Some(why) = skip {
                 results.push(skipped(why, command));
                 continue;
             }
-            let command = playbook::expand(command, repo_root, lane, &base).replace("{jobs}", &jobs.to_string());
+            let command = playbook::expand(command, repo_root, lane, &base).replace("{jobs}", &share.jobs.to_string());
             let started = Instant::now();
             let mut failures: Vec<String> = Vec::new();
             loop {
                 let from = std::fs::metadata(log).map(|m| m.len()).unwrap_or(0);
-                let (code, timed_out) = run_logged(&command, lane, log, limit, jobs)?;
+                let ended = run_logged(&command, lane, log, limit, share)?;
+                let (code, timed_out) = (ended.code, ended.timed_out);
+                peak = peak.max(ended.peak);
                 let output = log_since(log, from);
                 let seconds = started.elapsed().as_secs();
                 if timed_out {
                     results.push(playbook::CommandResult { command: command.clone(), ok: false, seconds, output, skipped: false });
-                    return Ok((None, true));
+                    return Ok(Ended { code: None, timed_out: true, peak });
                 }
                 if code == Some(0) {
                     if !failures.is_empty() {
@@ -908,12 +928,12 @@ pub fn gate(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Op
                 }
                 if failures.len() as u32 >= retries {
                     results.push(playbook::CommandResult { command: command.clone(), ok: false, seconds, output, skipped: false });
-                    return Ok((code, false));
+                    return Ok(Ended { code, timed_out: false, peak });
                 }
                 failures.push(output);
             }
         }
-        Ok((Some(0), false))
+        Ok(Ended { code: Some(0), timed_out: false, peak })
     })?;
     if let Some(why) = &run.error {
         // The setup's own output too, so the caller sees why it failed.
@@ -973,7 +993,7 @@ fn try_lock(repo_root: &Path, pb: &Playbook, n: u32) -> Result<Option<LaneLock>>
 #[derive(Debug, Clone, Serialize)]
 pub struct Budget {
     pub slots: u32,
-    /// Cores for one request: the machine's cores shared by its slots.
+    /// Cores for one request: the cores left for builds (all but the headroom) shared by its slots.
     pub jobs: u32,
     pub cores: u32,
     pub memory_gb: Option<u64>,
@@ -982,22 +1002,32 @@ pub struct Budget {
     pub from: String,
 }
 
-/// Cores per slot, and memory per slot, when the machine decides.
+/// Cores per slot, when the machine decides.
 const CORES_PER_SLOT: u32 = 8;
-const GB_PER_SLOT: u64 = 8;
 
-/// The budget for `cores` and `memory_gb`, unless `set` says how many slots.
-pub fn budget_for(cores: u32, memory_gb: Option<u64>, set: Option<(u32, &str)>) -> Budget {
+/// The cores builds may use between them: all but 2, or 75%, whichever is more, so the person's
+/// own apps always have some (NIT-266).
+pub fn build_cores(cores: u32) -> u32 {
+    let cores = cores.max(1);
+    cores.saturating_sub(2).max(cores * 3 / 4).max(1)
+}
+
+/// The budget for `cores` and the machine's memory `limits`, unless `set` says how many slots.
+/// When the machine decides, a slot per 8 cores, and no more slots than runs at their memory cap
+/// fit above the floor.
+pub fn budget_for(cores: u32, limits: Option<&machine::Limits>, set: Option<(u32, &str)>) -> Budget {
     let cores = cores.max(1);
     let (slots, from) = match set.filter(|(n, _)| *n > 0) {
         Some((n, from)) => (n, from.to_string()),
         None => {
             let by_cores = cores / CORES_PER_SLOT;
-            let by_memory = memory_gb.map(|m| (m / GB_PER_SLOT) as u32).unwrap_or(by_cores);
+            let by_memory = limits.map(|l| (l.total.saturating_sub(l.floor) / l.cap.max(1)) as u32).unwrap_or(by_cores);
             (by_cores.min(by_memory).max(1), "machine".to_string())
         }
     };
-    Budget { slots, jobs: (cores / slots).max(1), cores, memory_gb, from }
+    // Rounded, so 63.9 GB of usable memory counts as the 64 it is sold as.
+    let memory_gb = limits.map(|l| (l.total + (1 << 29)) >> 30);
+    Budget { slots, jobs: (build_cores(cores) / slots).max(1), cores, memory_gb, from }
 }
 
 /// This machine's budget: `NITELY_BUILD_SLOTS`, else `build_slots` in Nitely's config, else from
@@ -1007,30 +1037,61 @@ pub fn machine_budget() -> Budget {
     let env = std::env::var("NITELY_BUILD_SLOTS").ok().and_then(|v| v.trim().parse::<u32>().ok());
     let settings = crate::Config::load_read_only().ok().and_then(|c| c.build_slots);
     let set = env.map(|n| (n, "NITELY_BUILD_SLOTS")).or(settings.map(|n| (n, "settings")));
-    budget_for(cores, memory_gb(), set)
+    budget_for(cores, machine::limits().as_ref(), set)
 }
 
-/// The machine's memory in GB, asked once per process. None when it cannot be told.
-fn memory_gb() -> Option<u64> {
-    static MEMORY: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
-    *MEMORY.get_or_init(|| {
-        let bytes: Option<u64> = if cfg!(windows) {
-            playbook::shell_free_command("powershell")
-                .args(["-NoProfile", "-NonInteractive", "-Command", "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory"])
-                .output()
-                .ok()
-                .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
-        } else if cfg!(target_os = "macos") {
-            std::process::Command::new("sysctl").args(["-n", "hw.memsize"]).output().ok().and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
-        } else {
-            std::fs::read_to_string("/proc/meminfo").ok().and_then(|t| {
-                let kb = t.lines().find(|l| l.starts_with("MemTotal:"))?.split_whitespace().nth(1)?.parse::<u64>().ok()?;
-                Some(kb * 1024)
-            })
-        };
-        // Rounded, so 63.9 GB of usable memory counts as the 64 it is sold as.
-        bytes.map(|b| (b + (1 << 29)) >> 30)
-    })
+/// What one request gets of the machine: cores for its build tools, and the memory it and all it
+/// starts may hold (NIT-266).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Share {
+    pub jobs: u32,
+    pub cap: Option<u64>,
+}
+
+/// This machine's share for one request.
+pub fn share() -> Share {
+    Share { jobs: machine_budget().jobs, cap: machine::limits().map(|l| l.cap) }
+}
+
+/// Holds a build command to its share of cores: the build tools that read one get it from the
+/// environment (`NITELY_JOBS`, `CARGO_BUILD_JOBS`, `MAKEFLAGS`, and `RUST_TEST_THREADS` for the
+/// tests cargo runs).
+pub fn share_env(cmd: &mut std::process::Command, jobs: u32) {
+    let jobs = jobs.to_string();
+    cmd.env("NITELY_JOBS", &jobs).env("CARGO_BUILD_JOBS", &jobs).env("RUST_TEST_THREADS", &jobs).env("MAKEFLAGS", format!("-j{jobs}"));
+}
+
+/// `command` with `--test-concurrency=<jobs>` after a `node --test` that sets none: node runs a
+/// test file per core otherwise, and takes no such setting from the environment.
+pub fn node_tests_share(command: &str, jobs: u32) -> String {
+    static NODE_TEST: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    if command.contains("--test-concurrency") {
+        return command.to_string();
+    }
+    let re = NODE_TEST.get_or_init(|| regex::Regex::new(r"(^|[\s&|;(])(node(?:\.exe)?(?:\s+-[^\s]+)*?\s+--test)(\s|$)").unwrap());
+    re.replace_all(command, |c: &regex::Captures| format!("{}{} --test-concurrency={jobs}{}", &c[1], &c[2], &c[3])).into_owned()
+}
+
+/// The machine's memory now, as the scheduler reads it (a test's own readings in tests).
+#[cfg(not(test))]
+fn read_memory() -> Option<machine::Memory> {
+    machine::memory()
+}
+
+/// The limits admission holds requests to (None in tests that give no readings: never waits).
+#[cfg(not(test))]
+fn memory_limits() -> Option<machine::Limits> {
+    machine::limits()
+}
+
+#[cfg(test)]
+fn read_memory() -> Option<machine::Memory> {
+    tests::FAKE_MEMORY.with(|f| f.borrow_mut().as_mut().and_then(|next| next()))
+}
+
+#[cfg(test)]
+fn memory_limits() -> Option<machine::Limits> {
+    tests::FAKE_MEMORY.with(|f| f.borrow().is_some()).then(|| machine::limits_for(64 * machine::GIB, None, None))
 }
 
 /// A machine slot's lock: an OS file lock beside the database, so a process that dies frees it.
@@ -1141,8 +1202,20 @@ fn my_turn(db: &Db, id: i64, slots: u32, alive: &mut dyn FnMut(i64) -> bool) -> 
     Ok(true)
 }
 
-/// Waits for request `id`'s turn, then holds a machine slot and one of the repo's lanes.
-fn take_turn(db: &Db, id: i64, repo_root: &Path, pb: &Playbook, rules: &LaneRules, slots: u32) -> Result<(u32, LaneLock, SlotLock)> {
+/// Waits for request `id`'s turn, then holds a machine slot and one of the repo's lanes, and starts
+/// only once the machine's memory admits it (`machine::admit_once` with `limits`, reading `memory`):
+/// until then it lets both go again and says why it waits (`waiting_memory`).
+#[allow(clippy::too_many_arguments)]
+fn take_turn(
+    db: &Db,
+    id: i64,
+    repo_root: &Path,
+    pb: &Playbook,
+    rules: &LaneRules,
+    slots: u32,
+    memory: &mut dyn FnMut() -> Option<machine::Memory>,
+    limits: Option<&machine::Limits>,
+) -> Result<(u32, LaneLock, SlotLock)> {
     db.conn.execute("UPDATE lane_run SET lane_count = ?2 WHERE id = ?1", params![id, rules.lanes()])?;
     // Whether a requester's process still runs, asked again every few seconds at most.
     let mut known: std::collections::HashMap<i64, (bool, Instant)> = std::collections::HashMap::new();
@@ -1160,6 +1233,7 @@ fn take_turn(db: &Db, id: i64, repo_root: &Path, pb: &Playbook, rules: &LaneRule
         }
     };
     let mut busy_since = None;
+    let mut waits_for_memory = false;
     'turn: loop {
         if my_turn(db, id, slots, &mut alive)? {
             // A checkout a request has (or a dead one left) is looked at under the lock, where one
@@ -1185,6 +1259,18 @@ fn take_turn(db: &Db, id: i64, repo_root: &Path, pb: &Playbook, rules: &LaneRule
                             }
                             db.conn.execute("UPDATE lane_run SET waiting_for = NULL WHERE id = ?1", [id])?;
                         }
+                        if let Some(why) = machine::admit_once(&state_dir(db), limits, memory)? {
+                            // Held while it waits, the slot and lane would keep the rest waiting too.
+                            drop(lock);
+                            drop(slot);
+                            db.conn.execute("UPDATE lane_run SET waiting_memory = ?2 WHERE id = ?1", params![id, why])?;
+                            waits_for_memory = true;
+                            std::thread::sleep(Duration::from_secs(2));
+                            continue 'turn;
+                        }
+                        if waits_for_memory {
+                            db.conn.execute("UPDATE lane_run SET waiting_memory = NULL WHERE id = ?1", [id])?;
+                        }
                         return Ok((n, lock, slot));
                     }
                 }
@@ -1193,6 +1279,100 @@ fn take_turn(db: &Db, id: i64, repo_root: &Path, pb: &Playbook, rules: &LaneRule
         }
         std::thread::sleep(Duration::from_millis(300));
     }
+}
+
+/// A gate that runs in a worktree, outside lanes (a repo without `[lanes]`), holding one of the
+/// machine's build slots as a lane request does: a row of its own (executor `worktree`) that the
+/// scheduler counts and orders like the rest, the same wait for memory, and `running_on_machine`
+/// counts it (NIT-266). `finish` ends the row; dropped first, it ends as a lane problem.
+pub struct MachineTurn<'a> {
+    db: &'a Db,
+    id: i64,
+    _slot: SlotLock,
+    finished: bool,
+}
+
+impl MachineTurn<'_> {
+    /// The row's id.
+    pub fn id(&self) -> i64 {
+        self.id
+    }
+
+    pub fn finish(mut self, passed: bool) {
+        self.db
+            .conn
+            .execute("UPDATE lane_run SET state = 'done', ended_at = ?2, exit_code = ?3 WHERE id = ?1", params![self.id, now(), if passed { 0 } else { 1 }])
+            .ok();
+        self.finished = true;
+    }
+}
+
+impl Drop for MachineTurn<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.db
+                .conn
+                .execute(
+                    "UPDATE lane_run SET state = 'lane_error', ended_at = ?2, error = 'the gate stopped before it finished' WHERE id = ?1 AND state IN ('queued', 'running')",
+                    params![self.id, now()],
+                )
+                .ok();
+        }
+    }
+}
+
+/// Waits for a machine slot and the machine's memory for a gate in `worktree` outside lanes, and
+/// holds the slot until the turn ends (`MachineTurn`).
+#[allow(clippy::too_many_arguments)]
+pub fn hold_machine<'a>(db: &'a Db, repo_root: &Path, worktree: &Path, project: &str, issue: Option<&str>, kind: Kind, command: &str, actor: &Actor) -> Result<MachineTurn<'a>> {
+    let rev = |what: &str| git(worktree, &["rev-parse", what]).map(|s| s.trim().to_string()).unwrap_or_default();
+    let (head, tree) = (rev("HEAD"), rev("HEAD^{tree}"));
+    let priority = match kind {
+        Kind::Land => 1,
+        Kind::Gate => 2,
+        Kind::Run => 3,
+    };
+    let slots = machine_budget().slots;
+    db.conn.execute(
+        "INSERT INTO lane_run (project, repo, issue_key, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, priority, lane_count)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?6, ?8, 'queued', 'worktree', ?9, ?10, ?11, ?12)",
+        params![project.to_uppercase(), repo_root.to_string_lossy(), issue, actor.id(), kind.as_str(), head, tree, command, now(), std::process::id(), priority, slots],
+    )?;
+    let id = db.conn.last_insert_rowid();
+    let limits = memory_limits();
+    let mut waits_for_memory = false;
+    let taken = (|| -> Result<SlotLock> {
+        let mut alive = |pid: i64| pid as u32 == std::process::id() || crate::crew::pid_alive(pid as u32);
+        loop {
+            if my_turn(db, id, slots, &mut alive)? {
+                if let Some(slot) = (1..=slots.max(1)).find_map(|k| try_slot(db, k).ok().flatten()) {
+                    match machine::admit_once(&state_dir(db), limits.as_ref(), &mut read_memory)? {
+                        None => return Ok(slot),
+                        Some(why) => {
+                            drop(slot);
+                            db.conn.execute("UPDATE lane_run SET waiting_memory = ?2 WHERE id = ?1", params![id, why])?;
+                            waits_for_memory = true;
+                            std::thread::sleep(Duration::from_secs(2));
+                            continue;
+                        }
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+    })();
+    let slot = match taken {
+        Ok(slot) => slot,
+        Err(e) => {
+            db.conn
+                .execute("UPDATE lane_run SET state = 'lane_error', ended_at = ?2, error = ?3 WHERE id = ?1", params![id, now(), format!("{e:#}")])
+                .ok();
+            return Err(e);
+        }
+    };
+    let clear = if waits_for_memory { ", waiting_memory = NULL" } else { "" };
+    db.conn.execute(&format!("UPDATE lane_run SET state = 'running', started_at = ?2{clear} WHERE id = ?1"), params![id, now()])?;
+    Ok(MachineTurn { db, id, _slot: slot, finished: false })
 }
 
 /// Records why request `id` waits for the person's checkout, and gives up after the lane's
@@ -1211,6 +1391,7 @@ fn wait_for_checkout(db: &Db, id: i64, why: &str, since: &mut Option<Instant>, r
 struct Outcome {
     exit_code: Option<i32>,
     timed_out: bool,
+    peak: Option<u64>,
     setup_ran: bool,
     files_switched: i64,
     output: String,
@@ -1229,16 +1410,15 @@ fn serve(repo_root: &Path, pb: &Playbook, rules: &LaneRules, lane: &Path, log: &
         stop_recorded(lane);
         let switched = git(lane, &["diff", "--name-only", "HEAD", &req.snapshot.commit]).map(|o| o.lines().count() as i64).unwrap_or(0);
         switch_large(lane, base, &req.snapshot.commit, &rules.keep)?;
-        let ran = (|| -> Result<(bool, Option<i32>, bool)> {
+        let ran = (|| -> Result<(bool, Ended)> {
             let setup_ran = ensure_setup(repo_root, pb, lane, base, log, limit)?;
-            let (exit_code, timed_out) = exec(lane, log, limit)?;
-            Ok((setup_ran, exit_code, timed_out))
+            Ok((setup_ran, exec(lane, log, limit)?))
         })();
         let back = return_large(lane, base);
-        let (setup_ran, exit_code, timed_out) = ran?;
-        back.with_context(|| format!("the command ran (exit {}), but", exit_code.map_or("none".to_string(), |c| c.to_string())))?;
+        let (setup_ran, ended) = ran?;
+        back.with_context(|| format!("the command ran (exit {}), but", ended.code.map_or("none".to_string(), |c| c.to_string())))?;
         let output = std::fs::read_to_string(log).map(|t| playbook::tail(&t)).unwrap_or_default();
-        return Ok(Outcome { exit_code, timed_out, setup_ran, files_switched: switched, output });
+        return Ok(Outcome { exit_code: ended.code, timed_out: ended.timed_out, peak: ended.peak, setup_ran, files_switched: switched, output });
     }
     let files_switched = if !lane.join(".git").exists() {
         create_lane(repo_root, lane, &req.snapshot.commit)?;
@@ -1250,13 +1430,13 @@ fn serve(repo_root: &Path, pb: &Playbook, rules: &LaneRules, lane: &Path, log: &
         switched
     };
     let setup_ran = ensure_setup(repo_root, pb, lane, base, log, limit)?;
-    let (exit_code, timed_out) = exec(lane, log, limit)?;
+    let Ended { code: exit_code, timed_out, peak } = exec(lane, log, limit)?;
     let output = std::fs::read_to_string(log).map(|t| playbook::tail(&t)).unwrap_or_default();
     // Between requests, still holding the lane: best effort, it never fails the request.
     if let Some(record) = git_path(lane, SIZE_RECORD) {
         hygiene(lane, rules, &record, log);
     }
-    Ok(Outcome { exit_code, timed_out, setup_ran, files_switched, output })
+    Ok(Outcome { exit_code, timed_out, peak, setup_ran, files_switched, output })
 }
 
 /// The file in a lane's git folder that keeps the size of its build directories after its last
@@ -1406,13 +1586,15 @@ fn ensure_setup(repo_root: &Path, pb: &Playbook, lane: &Path, base: &str, log: &
         }
     }
     std::fs::remove_file(&record).ok();
+    let share = share();
     for command in &pb.worktree.setup {
-        let command = playbook::expand(command, repo_root, lane, base).replace("{jobs}", &machine_budget().jobs.to_string());
+        let command = playbook::expand(command, repo_root, lane, base).replace("{jobs}", &share.jobs.to_string());
         // Run again on failure as the gate's commands are (`[gate] retries`): a setup that fails
         // once, on a busy machine, then passes is not the change's fault.
         let mut tries = 0;
         loop {
-            match run_logged(&command, lane, log, limit, machine_budget().jobs)? {
+            let ended = run_logged(&command, lane, log, limit, share)?;
+            match (ended.code, ended.timed_out) {
                 (Some(0), _) => break,
                 (_, true) => bail!("setup ran past {} minutes in the lane and was stopped: {command}", limit.as_secs() / 60),
                 (code, false) if tries >= pb.gate.retries => {
@@ -1489,15 +1671,19 @@ fn switch(lane: &Path, commit: &str, keep: &[String]) -> Result<()> {
 }
 
 /// Runs `command` in `dir` with its output appended to `log`, stopping it and everything it started
-/// after `limit`. Returns its exit code (None when stopped) and whether it timed out.
-fn run_logged(command: &str, dir: &Path, log: &Path, limit: Duration, jobs: u32) -> Result<(Option<i32>, bool)> {
+/// after `limit`, held to the machine's `share` for one request: its cores, its memory cap and a
+/// priority below the person's own apps (NIT-266). A run over its cap is stopped and fails as out
+/// of memory in the lane, a lane problem rather than the command's. Returns how it ended.
+fn run_logged(command: &str, dir: &Path, log: &Path, limit: Duration, share: Share) -> Result<Ended> {
     use std::io::Write;
+    let command = node_tests_share(command, share.jobs);
+    let command = command.as_str();
     let mut file = std::fs::OpenOptions::new().create(true).append(true).open(log)?;
     writeln!(file, "$ {command}")?;
     let mut cmd = playbook::shell_command(command);
-    cmd.current_dir(dir).stdin(std::process::Stdio::null()).stdout(file.try_clone()?).stderr(file);
+    cmd.current_dir(dir).stdin(std::process::Stdio::null()).stdout(file.try_clone()?).stderr(file.try_clone()?);
     // The machine's share for one request (NIT-199), for the build tools that read it.
-    cmd.env("NITELY_JOBS", jobs.to_string()).env("CARGO_BUILD_JOBS", jobs.to_string()).env("MAKEFLAGS", format!("-j{jobs}"));
+    share_env(&mut cmd, share.jobs);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -1512,12 +1698,14 @@ fn run_logged(command: &str, dir: &Path, log: &Path, limit: Duration, jobs: u32)
     }
     // On Windows the command and all it starts go in a job that ends with this process: a crash of
     // the requester (even before the pid is written) leaves nothing running in the lane, and what
-    // the command left running ends when it does (NIT-223).
-    let guard = crate::procs::TreeGuard::new();
-    if let Some(g) = &guard {
-        g.prepare(&mut cmd);
-    }
-    let mut child = match cmd.spawn() {
+    // the command left running ends when it does (NIT-223). The job also holds it to its memory cap
+    // and below-normal priority (NIT-266).
+    let guard = crate::procs::TreeGuard::with(crate::procs::Contain { memory_cap: share.cap, low_priority: true, end_with_guard: true });
+    let spawned = match &guard {
+        Some(g) => g.spawn(&mut cmd),
+        None => cmd.spawn(),
+    };
+    let mut child = match spawned {
         Ok(c) => c,
         Err(e) => {
             if let Some(p) = &pids {
@@ -1526,31 +1714,45 @@ fn run_logged(command: &str, dir: &Path, log: &Path, limit: Duration, jobs: u32)
             return Err(e).with_context(|| format!("starting {command}"));
         }
     };
-    if let Some(g) = &guard {
-        g.adopt(&child);
-    }
     if let Some(p) = &pids {
         let started = crate::procs::started(child.id()).unwrap_or_default();
         std::fs::write(p, format!("{} {started}\n{command}", child.id())).ok();
     }
     let started = Instant::now();
-    let result = loop {
+    let over_memory = || guard.as_ref().is_some_and(|g| g.over_memory());
+    let (code, timed_out, out_of_memory) = loop {
         if let Some(status) = child.try_wait()? {
-            break (status.code(), false);
+            // A process the cap stopped may have ended before it was seen.
+            break (status.code(), false, over_memory());
         }
-        if started.elapsed() > limit {
+        let oom = over_memory();
+        if oom || started.elapsed() > limit {
+            if let Some(g) = &guard {
+                g.stop();
+            }
             stop_tree(child.id());
             child.kill().ok();
             child.wait().ok();
-            break (None, true);
+            break (None, !oom, oom);
         }
         std::thread::sleep(Duration::from_millis(200));
     };
     if let Some(p) = &pids {
         std::fs::remove_file(p).ok();
     }
+    let peak = guard.as_ref().and_then(|g| g.peak_memory());
     drop(guard);
-    Ok(result)
+    let cap = share.cap.map(machine::gb).unwrap_or_default();
+    if out_of_memory {
+        let why = format!("out of memory in the lane: `{command}` and what it started went over its {cap} memory cap and were stopped. This is a lane problem, not a test failure; Settings > Build lanes sets the cap");
+        writeln!(file, "{why}").ok();
+        bail!(why);
+    }
+    if let Some(peak) = peak {
+        let of = if cap.is_empty() { String::new() } else { format!(" of its {cap} cap") };
+        writeln!(file, "(peak memory {}{of})", machine::gb(peak)).ok();
+    }
+    Ok(Ended { code, timed_out, peak })
 }
 
 /// Stops `pid` and everything it started.
@@ -1599,6 +1801,10 @@ pub struct Lanes {
     pub budget: Budget,
     /// Requests running on this machine now, across every project.
     pub running_on_machine: i64,
+    /// The machine's memory, its floor and cap, and the priority builds run at (NIT-266).
+    pub machine: machine::Now,
+    /// Why the first request waiting on the machine's memory waits, when one does.
+    pub waiting_for_memory: Option<String>,
 }
 
 /// One repo's lanes for the app (NIT-205): `status`, plus the last finished run in each lane,
@@ -1625,6 +1831,10 @@ pub struct Overview {
     pub projects: Vec<ShownLanes>,
     /// Absent until the scheduler keeps a machine budget.
     pub slots: Option<Slots>,
+    /// The machine's memory, its floor and cap, and the priority builds run at (NIT-266).
+    pub machine: machine::Now,
+    /// Why the first request waiting on the machine's memory waits, when one does.
+    pub waiting_for_memory: Option<String>,
 }
 
 /// The lanes of every connected repo whose playbook has `[lanes]`. A repo whose playbook does not
@@ -1647,7 +1857,19 @@ pub fn overview(config: &crate::Config, db: &Db) -> Result<Overview> {
     }
     // The machine's budget and what runs in it, the same for every repo ("builds 1 of 4").
     let slots = projects.first().map(|p| Slots { used: p.lanes.running_on_machine.max(0) as u32, total: p.lanes.budget.slots });
-    Ok(Overview { projects, slots })
+    Ok(Overview { projects, slots, machine: machine::now(), waiting_for_memory: waiting_for_memory(db)? })
+}
+
+/// Why the oldest request still waiting on the machine's memory waits, if one does.
+fn waiting_for_memory(db: &Db) -> Result<Option<String>> {
+    let ids: Vec<i64> =
+        db.conn.prepare("SELECT id FROM lane_run WHERE state = 'queued' AND waiting_memory IS NOT NULL ORDER BY id")?.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    for id in ids {
+        if let Some(r) = db.lane_run(id)?.filter(|r| r.state == "queued") {
+            return Ok(r.waiting_memory);
+        }
+    }
+    Ok(None)
 }
 
 impl Db {
@@ -1719,6 +1941,8 @@ fn status_with(db: &Db, repo_root: &Path, pb: &Playbook, project: &str, probe_lo
         recent,
         budget: machine_budget(),
         running_on_machine,
+        machine: machine::now(),
+        waiting_for_memory: waiting_for_memory(db)?,
     }))
 }
 
@@ -1759,6 +1983,15 @@ pub fn reset(repo_root: &Path, pb: &Playbook) -> Result<Vec<String>> {
 mod tests {
     use super::*;
     use std::process::Command;
+
+    type Readings = Box<dyn FnMut() -> Option<machine::Memory>>;
+
+    thread_local! {
+        /// The machine's memory as this test's requests read it; none set, they never wait.
+        pub(super) static FAKE_MEMORY: std::cell::RefCell<Option<Readings>> = const { std::cell::RefCell::new(None) };
+    }
+
+    const NO_CAP: Share = Share { jobs: 1, cap: None };
 
     fn repo(base: &Path) -> PathBuf {
         let root = base.join("app");
@@ -1852,8 +2085,8 @@ commands = []
         let log = base.join("run.log");
         // A marker no other process carries: an address only this test pings.
         let marker = "ping -n 40 127.0.0.97";
-        let (code, timed_out) = run_logged(&format!("start \"\" /B {marker} >NUL & exit /b 0"), &base, &log, Duration::from_secs(30), 1).unwrap();
-        assert_eq!((code, timed_out), (Some(0), false));
+        let ended = run_logged(&format!("start \"\" /B {marker} >NUL & exit /b 0"), &base, &log, Duration::from_secs(30), NO_CAP).unwrap();
+        assert_eq!((ended.code, ended.timed_out), (Some(0), false));
         let left = (0..25).all(|_| {
             std::thread::sleep(Duration::from_millis(200));
             crate::procs::holders(&base).is_empty() && !crate::procs::running_with(marker)
@@ -2174,14 +2407,135 @@ commands = []
 
     #[test]
     fn the_budget_comes_from_cores_and_memory_unless_set() {
-        let b = budget_for(32, Some(64), None);
-        assert_eq!((b.slots, b.jobs, b.from.as_str()), (4, 8, "machine"));
-        assert_eq!(budget_for(32, Some(16), None).slots, 2, "memory caps it");
-        assert_eq!((budget_for(4, Some(8), None).slots, budget_for(4, Some(8), None).jobs), (1, 4), "always one");
+        let gb = |n: u64| machine::limits_for(n * machine::GIB, None, None);
+        // 64 GB: a 12.8 GB floor and 16 GB cap leave room for 3 runs at their cap; 30 of 32 cores.
+        let b = budget_for(32, Some(&gb(64)), None);
+        assert_eq!((b.slots, b.jobs, b.from.as_str(), b.memory_gb), (3, 10, "machine", Some(64)));
+        assert_eq!(budget_for(32, Some(&gb(16)), None).slots, 2, "memory caps it");
+        assert_eq!((budget_for(4, Some(&gb(8)), None).slots, budget_for(4, Some(&gb(8)), None).jobs), (1, 3), "always one, and a core left over");
         assert_eq!(budget_for(8, None, None).slots, 1, "memory unknown: cores decide");
-        let set = budget_for(32, Some(64), Some((6, "settings")));
+        let set = budget_for(32, Some(&gb(64)), Some((6, "settings")));
         assert_eq!((set.slots, set.jobs, set.from.as_str()), (6, 5, "settings"));
-        assert_eq!(budget_for(32, Some(64), Some((0, "settings"))).from, "machine", "0 is not a setting");
+        assert_eq!(budget_for(32, Some(&gb(64)), Some((0, "settings"))).from, "machine", "0 is not a setting");
+    }
+
+    #[test]
+    fn builds_leave_cores_for_the_person() {
+        assert_eq!([build_cores(32), build_cores(8), build_cores(4), build_cores(2), build_cores(1)], [30, 6, 3, 1, 1]);
+    }
+
+    #[test]
+    fn node_tests_get_the_share_of_cores() {
+        assert_eq!(node_tests_share("node --test dist/", 6), "node --test --test-concurrency=6 dist/");
+        assert_eq!(node_tests_share("npm ci && node --enable-source-maps --test a.js", 3), "npm ci && node --enable-source-maps --test --test-concurrency=3 a.js");
+        assert_eq!(node_tests_share("node --test-reporter=spec --test", 2), "node --test-reporter=spec --test --test-concurrency=2");
+        assert_eq!(node_tests_share("node --test --test-concurrency=1 x", 6), "node --test --test-concurrency=1 x", "one it sets stays");
+        assert_eq!(node_tests_share("cargo test --workspace", 6), "cargo test --workspace");
+        assert_eq!(node_tests_share("mynode --test", 6), "mynode --test");
+    }
+
+    /// A request waits, saying why, while the machine's memory is under its floor, and starts once
+    /// it frees (NIT-266).
+    #[test]
+    fn a_request_waits_for_memory_and_says_so() {
+        let base = crate::paths::unique_temp("nitely-lane-memory", "");
+        let root = repo(&base);
+        let db_path = base.join("t.db");
+        let db = Db::open(&db_path).unwrap();
+        let pb = playbook_with("[lanes]\n");
+        let snap = snapshot(&root).unwrap();
+        let seen: std::rc::Rc<std::cell::RefCell<Vec<Option<String>>>> = Default::default();
+        let mem = |free_gb: u64| Some(machine::Memory { total: 64 * machine::GIB, available: free_gb * machine::GIB });
+        let mut readings = vec![mem(5), mem(6), mem(40)].into_iter();
+        let (watch, path) = (seen.clone(), db_path.clone());
+        let next: Readings = Box::new(move || {
+            // What the queue shows while it waits, read as another process would.
+            let other = Db::open(&path).unwrap();
+            let why: Option<String> = other.conn.query_row("SELECT waiting_memory FROM lane_run ORDER BY id DESC LIMIT 1", [], |r| r.get(0)).unwrap();
+            watch.borrow_mut().push(why);
+            readings.next().flatten()
+        });
+        FAKE_MEMORY.with(|f| *f.borrow_mut() = Some(next));
+        let req = Request { project: "APP", issue: None, kind: Kind::Run, snapshot: &snap, command: "echo built" };
+        let ran = run(&db, &root, &pb, &req, &Actor::Agent("claude:test".into()), &mut |_| {});
+        FAKE_MEMORY.with(|f| *f.borrow_mut() = None);
+        let ran = ran.unwrap();
+        assert!(ran.passed(), "{ran:?}");
+        let seen = seen.borrow();
+        assert_eq!(seen.len(), 3, "{seen:?}");
+        assert!(seen[1].as_deref().is_some_and(|w| w.starts_with("waiting for memory: 5.0 GB free")), "{seen:?}");
+        assert_eq!(ran.waiting_memory, None, "cleared once it started");
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// A run that goes over its memory cap is stopped and fails as a lane problem, never as the
+    /// command's failure, and never by taking the machine's memory (NIT-266).
+    #[test]
+    fn a_run_over_its_memory_cap_is_stopped_as_out_of_memory_in_the_lane() {
+        if Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        let base = crate::paths::unique_temp("nitely-lane-cap", "");
+        std::fs::create_dir_all(&base).unwrap();
+        let log = base.join("run.log");
+        // 800 MB, written to so it is really held, against a 300 MB cap.
+        let hog = "node -e \"const b = Buffer.alloc(800 * 1024 * 1024, 1); setTimeout(() => console.log(b.length), 15000)\"";
+        let started = Instant::now();
+        let cap = Share { jobs: 1, cap: Some(300 << 20) };
+        let err = run_logged(hog, &base, &log, Duration::from_secs(60), cap).unwrap_err();
+        assert!(format!("{err:#}").starts_with("out of memory in the lane"), "{err:#}");
+        assert!(started.elapsed() < Duration::from_secs(14), "stopped at its cap, not waited out");
+        assert!(std::fs::read_to_string(&log).unwrap().contains("out of memory in the lane"));
+        // Under its cap, a run ends as usual, with its peak where the system tells it.
+        let fine = run_logged("node -e \"console.log(1)\"", &base, &log, Duration::from_secs(60), Share { jobs: 1, cap: Some(2 << 30) }).unwrap();
+        assert_eq!(fine.code, Some(0));
+        if cfg!(windows) {
+            assert!(fine.peak.is_some_and(|p| p > 1 << 20 && p < 2 << 30), "{fine:?}");
+        }
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// A lane command and what it starts run below the person's own apps: below-normal priority
+    /// and low I/O priority on Windows, nice 10 elsewhere (NIT-266).
+    #[test]
+    fn a_lane_command_runs_below_normal() {
+        let base = crate::paths::unique_temp("nitely-lane-nice", "");
+        std::fs::create_dir_all(&base).unwrap();
+        let log = base.join("run.log");
+        let ask = if cfg!(windows) {
+            "powershell -NoProfile -Command \"(Get-Process -Id $PID).PriorityClass\""
+        } else {
+            "sh -c 'ps -o nice= -p $$'"
+        };
+        let ended = run_logged(ask, &base, &log, Duration::from_secs(60), NO_CAP).unwrap();
+        assert_eq!(ended.code, Some(0));
+        let said = std::fs::read_to_string(&log).unwrap();
+        let want = if cfg!(windows) { "BelowNormal" } else { "10" };
+        assert!(said.lines().any(|l| l.trim() == want), "{said}");
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// A gate outside lanes holds a machine slot as a lane request does, and counts as running.
+    #[test]
+    fn a_gate_outside_lanes_takes_a_machine_slot() {
+        let base = crate::paths::unique_temp("nitely-lane-outside", "");
+        let root = repo(&base);
+        let db = Db::open(&base.join("t.db")).unwrap();
+        let pb = playbook_with("[lanes]\n");
+        let turn = hold_machine(&db, &root, &root, "app", Some("APP-1"), Kind::Gate, "cargo test", &Actor::Agent("claude:test".into())).unwrap();
+        let row = db.lane_run(turn.id()).unwrap().unwrap();
+        assert_eq!((row.state.as_str(), row.executor.as_str(), row.kind.as_str()), ("running", "worktree", "gate"));
+        assert_eq!(status(&db, &root, &pb, "APP").unwrap().unwrap().running_on_machine, 1, "it counts against the machine");
+        let id = turn.id();
+        turn.finish(true);
+        let row = db.lane_run(id).unwrap().unwrap();
+        assert_eq!((row.state.as_str(), row.exit_code), ("done", Some(0)));
+        // One dropped before it finished ends as a lane problem, never left running.
+        let turn = hold_machine(&db, &root, &root, "app", None, Kind::Land, "cargo test", &Actor::Agent("claude:test".into())).unwrap();
+        let id = turn.id();
+        drop(turn);
+        assert_eq!(db.lane_run(id).unwrap().unwrap().state, "lane_error");
+        std::fs::remove_dir_all(base).ok();
     }
 
     #[test]
@@ -2685,8 +3039,8 @@ commands = []
         let log = base.join("run.log");
         let sleeper = if cfg!(windows) { "ping -n 30 127.0.0.1 >NUL" } else { "sleep 30" };
         let started = Instant::now();
-        let (code, timed_out) = run_logged(sleeper, &base, &log, Duration::from_secs(1), 1).unwrap();
-        assert!(timed_out && code.is_none());
+        let ended = run_logged(sleeper, &base, &log, Duration::from_secs(1), NO_CAP).unwrap();
+        assert!(ended.timed_out && ended.code.is_none());
         assert!(started.elapsed() < Duration::from_secs(20), "stopped, not waited out");
         std::fs::remove_dir_all(base).ok();
     }

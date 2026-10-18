@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "./backend";
-import { capWords, chipName, chipWords, laneChips, sizeWords, waiting, type LaneChip } from "./lanes";
-import type { LanesOverview } from "./types";
+import { capWords, chipName, chipWords, laneChips, limitsOf, machineWords, memoryWords, sizeWords, waiting, type LaneChip } from "./lanes";
+import type { LanesOverview, MachineNow } from "./types";
 import { StateDot } from "./ui";
 import "./styles/lanes.css";
 
@@ -31,9 +31,12 @@ export function LanesStrip(props: { version: number; now: number; onOpenIssue: (
     <section className="lanes-strip" aria-label="Build lanes">
       <h2>
         Build lanes
-        {lanes.slots && (
-          <span className="head-note">
-            builds {lanes.slots.used} of {lanes.slots.total}
+        {machineWords(lanes).length > 0 && (
+          <span
+            className={`head-note${lanes.waiting_for_memory ? " memory-wait" : ""}`}
+            title={[lanes.waiting_for_memory, lanes.machine?.below_normal && "Builds, gates, reviews and crew workers run below your own apps."].filter(Boolean).join("\n")}
+          >
+            {machineWords(lanes).join(" · ")}
           </span>
         )}
         {/* The land queue gates its stacks in these lanes (docs/batching.md). */}
@@ -52,7 +55,13 @@ export function LanesStrip(props: { version: number; now: number; onOpenIssue: (
                 <Chip key={c.lane} chip={c} now={props.now} onOpenIssue={props.onOpenIssue} />
               ))}
               {queued > 0 && (
-                <span className="lanes-queue" title={p.queue.filter((r) => r.state === "queued").map((r) => `${r.issue ?? "no issue"}: ${r.command}`).join("\n")}>
+                <span
+                  className="lanes-queue"
+                  title={p.queue
+                    .filter((r) => r.state === "queued")
+                    .map((r) => `${r.issue ?? "no issue"}: ${r.command}${r.waiting_memory ? ` (${r.waiting_memory})` : ""}`)
+                    .join("\n")}
+                >
                   {queued} waiting
                 </span>
               )}
@@ -87,29 +96,97 @@ function Chip(props: { chip: LaneChip; now: number; onOpenIssue: (key: string) =
   );
 }
 
-/** Settings' Build lanes section: each repo's lanes as its playbook sets them, and where they live. */
+/** The machine's memory floor and run cap (NIT-266): what is free now, and a field for each. */
+function MachineLimits(props: { machine: MachineNow | undefined; slots: LanesOverview["slots"]; onSaved: () => void }) {
+  const l = props.machine?.limits;
+  const gb = (bytes: number | undefined) => (bytes == null ? "" : (bytes / 1024 ** 3).toFixed(1));
+  const setting = (from: string | undefined, bytes: number | undefined) => (from === "settings" && bytes != null ? String(+(bytes / 1024 ** 3).toFixed(2)) : "");
+  const [floor, setFloor] = useState(setting(l?.floor_from, l?.floor));
+  const [cap, setCap] = useState(setting(l?.cap_from, l?.cap));
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const words = memoryWords(props.machine);
+  const parsed = limitsOf(floor, cap);
+  const save = async () => {
+    if (typeof parsed === "string") return;
+    setBusy(true);
+    try {
+      await invoke("set_machine_limits", parsed);
+      setNote("Saved. Requests waiting now use it from their next look.");
+      props.onSaved();
+    } catch (e) {
+      setNote(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="settings-project lanes-settings">
+      <h3>This machine</h3>
+      <p className="settings-why small">
+        Builds, gates, reviews and crew workers run at below-normal priority, so your own apps come first. Nothing new starts while free memory is under the floor, and a
+        run that goes over its cap is stopped as out of memory in the lane, never taking the machine with it.
+        {props.slots && (
+          <>
+            {" "}
+            Up to {props.slots.total} builds run at once ({props.slots.used} now).
+          </>
+        )}
+        {words.free && <> {words.free}.</>}
+      </p>
+      <div className="crew-grid">
+        <label className="crew-field" htmlFor="machine-floor">
+          <span className="crew-label">Memory floor</span>
+          <span className="crew-hint muted">{words.floor ? `now ${words.floor}; ` : ""}0 turns the wait off</span>
+        </label>
+        <span className="crew-budget">
+          <input id="machine-floor" className="mono crew-number" inputMode="decimal" placeholder={gb(l?.floor)} value={floor} onChange={(e) => setFloor(e.target.value)} />
+          <span className="muted small">GB</span>
+        </span>
+        <label className="crew-field" htmlFor="machine-cap">
+          <span className="crew-label">Memory cap</span>
+          <span className="crew-hint muted">{words.cap ? `now ${words.cap}; ` : ""}empty is the default</span>
+        </label>
+        <span className="crew-budget">
+          <input id="machine-cap" className="mono crew-number" inputMode="decimal" placeholder={gb(l?.cap)} value={cap} onChange={(e) => setCap(e.target.value)} />
+          <span className="muted small">GB</span>
+        </span>
+      </div>
+      <div className="settings-row crew-save">
+        <button className="btn primary" disabled={busy || typeof parsed === "string"} onClick={save}>
+          Save
+        </button>
+        {typeof parsed === "string" && <span className="error small">{parsed}</span>}
+      </div>
+      {note && <p className="muted small">{note}</p>}
+    </div>
+  );
+}
+
+/** Settings' Build lanes section: the machine's limits, then each repo's lanes as its playbook sets
+ * them, and where they live. */
 export function LanesSettings(props: { version: number }) {
-  const lanes = useLanes(props.version);
+  const [saved, setSaved] = useState(0);
+  const lanes = useLanes(props.version + saved);
   if (!lanes) return null;
+  const machine = <MachineLimits key={saved} machine={lanes.machine} slots={lanes.slots} onSaved={() => setSaved((n) => n + 1)} />;
   if (lanes.projects.length === 0) {
     return (
-      <p className="muted small">
-        No project has build lanes yet. A project gets them when its playbook has a <span className="mono">[lanes]</span> table: builds and tests then run in a few warm
-        checkouts instead of in every agent's worktree.
-      </p>
+      <>
+        {machine}
+        <p className="muted small">
+          No project has build lanes yet. A project gets them when its playbook has a <span className="mono">[lanes]</span> table: builds and tests then run in a few warm
+          checkouts instead of in every agent's worktree.
+        </p>
+      </>
     );
   }
   return (
     <>
+      {machine}
       <p className="settings-why small">
-        {lanes.slots ? (
-          <>
-            This machine runs up to {lanes.slots.total} builds at once ({lanes.slots.used} now).
-          </>
-        ) : (
-          <>Each lane runs one request at a time; requests wait in their project's queue, oldest first.</>
-        )}{" "}
-        Change a project's lanes in its playbook's <span className="mono">[lanes]</span> table.
+        Each lane runs one request at a time; requests wait in their project's queue. Change a project's lanes in its playbook's{" "}
+        <span className="mono">[lanes]</span> table.
       </p>
       {lanes.projects.map((p) => (
         <div key={`${p.project}-${p.repo}`} className="settings-project lanes-settings">

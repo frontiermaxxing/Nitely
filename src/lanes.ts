@@ -1,7 +1,7 @@
 // What the app says about build lanes (docs/build-lanes.md, "What the app shows"): one chip per
 // lane on Now and Overview, and each run on its issue's timeline. Pure, so its tests run alone.
 
-import type { LaneRun, ProjectLanes } from "./types";
+import type { LaneRun, LanesOverview, MachineNow, ProjectLanes } from "./types";
 
 /** One lane as its chip shows it. */
 export interface LaneChip {
@@ -69,6 +69,38 @@ export function forHowLong(seconds: number): string {
   if (s < 3600) return `${Math.floor(s / 60)}m`;
   const m = Math.floor((s % 3600) / 60);
   return m ? `${Math.floor(s / 3600)}h ${m}m` : `${Math.floor(s / 3600)}h`;
+}
+
+/** What the strip's heading says about the machine: "builds 2 of 3 · waiting for memory · below
+ * normal priority" (NIT-266). */
+export function machineWords(o: LanesOverview): string[] {
+  const words: string[] = [];
+  if (o.slots) words.push(`builds ${o.slots.used} of ${o.slots.total}`);
+  if (o.waiting_for_memory) words.push("waiting for memory");
+  if (o.machine?.below_normal) words.push("below normal priority");
+  return words;
+}
+
+/** Settings' words for the machine's memory: free now, and each limit with where it comes from. */
+export function memoryWords(m: MachineNow | undefined): { free: string | null; floor: string | null; cap: string | null } {
+  const from = (f: string) => (f === "default" ? "default" : f === "settings" ? "set here" : `set by ${f}`);
+  const l = m?.limits;
+  return {
+    free: m?.memory ? `${bytesWords(m.memory.available)} of ${bytesWords(m.memory.total)} free now` : null,
+    floor: l ? (l.floor === 0 ? `off (${from(l.floor_from)})` : `${bytesWords(l.floor)} free (${from(l.floor_from)})`) : null,
+    cap: l ? `${bytesWords(l.cap)} per run (${from(l.cap_from)})` : null,
+  };
+}
+
+/** The Settings form's floor and cap as the command takes them, GB or null for the default, or
+ * what is wrong with them. */
+export function limitsOf(floor: string, cap: string): { floorGb: number | null; capGb: number | null } | string {
+  const gb = (v: string) => (v.trim() === "" ? null : Number(v));
+  const floorGb = gb(floor);
+  const capGb = gb(cap);
+  if (floorGb !== null && (!Number.isFinite(floorGb) || floorGb < 0)) return "The floor is a number of GB, 0 or more (0 turns the wait off).";
+  if (capGb !== null && (!Number.isFinite(capGb) || capGb < 0.25)) return "The cap is a number of GB, at least 0.25.";
+  return { floorGb, capGb };
 }
 
 /** What a chip calls its lane after the project: its number, or the main checkout in large-repo mode. */

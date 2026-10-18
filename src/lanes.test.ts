@@ -2,7 +2,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { bytesWords, capWords, chipName, chipWords, forHowLong, laneChips, laneRunId, sizeWords, waiting } from "./lanes.ts";
+import { bytesWords, capWords, chipName, chipWords, forHowLong, laneChips, laneRunId, limitsOf, machineWords, memoryWords, sizeWords, waiting } from "./lanes.ts";
 import type { LaneRun, ProjectLanes } from "./types.ts";
 
 const run = (id: number, state: string, lane: number | null, more: Partial<LaneRun> = {}): LaneRun =>
@@ -85,4 +85,27 @@ test("durations and the run a timeline entry names", () => {
   assert.equal(laneRunId({ kind: "lane_run", summary: "Lane 1 could not run `x`: busy" }), null);
   assert.equal(laneRunId({ kind: "lane_run", summary: "The gate for 1a2b3c4 passed in lane run 12 already; not run again" }), 12);
   assert.equal(laneRunId({ kind: "crew_started", summary: "(run 3)" }), null);
+});
+
+test("the strip's heading says how many build, that one waits for memory, and that they run below normal", () => {
+  const GB = 1024 ** 3;
+  const machine = { memory: { total: 64 * GB, available: 6 * GB }, limits: { total: 64 * GB, floor: 12.8 * GB, cap: 16 * GB, floor_from: "default", cap_from: "settings" }, below_normal: true };
+  assert.deepEqual(machineWords({ projects: [], slots: { used: 2, total: 3 }, machine, waiting_for_memory: "waiting for memory: 6.0 GB free" }), [
+    "builds 2 of 3",
+    "waiting for memory",
+    "below normal priority",
+  ]);
+  assert.deepEqual(machineWords({ projects: [], slots: null }), [], "an older backend says nothing about the machine");
+  assert.deepEqual(memoryWords(machine), { free: "6.0 GB of 64.0 GB free now", floor: "12.8 GB free (default)", cap: "16.0 GB per run (set here)" });
+  const off = { ...machine, limits: { ...machine.limits, floor: 0, floor_from: "NITELY_MEMORY_FLOOR_GB" } };
+  assert.equal(memoryWords(off).floor, "off (set by NITELY_MEMORY_FLOOR_GB)");
+  assert.deepEqual(memoryWords(undefined), { free: null, floor: null, cap: null });
+});
+
+test("the floor and cap fields take GB, empty for the default", () => {
+  assert.deepEqual(limitsOf("", ""), { floorGb: null, capGb: null });
+  assert.deepEqual(limitsOf("0", "12.5"), { floorGb: 0, capGb: 12.5 });
+  assert.match(limitsOf("-1", "") as string, /floor/);
+  assert.match(limitsOf("", "0.1") as string, /cap/);
+  assert.match(limitsOf("lots", "") as string, /floor/);
 });

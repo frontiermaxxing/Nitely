@@ -23,4 +23,8 @@ function find(dir) {
 rmSync(OUT, { recursive: true, force: true });
 run(["node_modules/typescript/bin/tsc", "-p", "tsconfig.test.json"]);
 // The frontend's compiled tests, and the tests of the repo's own scripts (scripts/*.test.mjs).
-run(["--enable-source-maps", "--test", ...find(OUT), ...find("scripts")]);
+// In a build lane, as many test files at once as the lane's share of cores (NITELY_JOBS), not one
+// per core of the machine (NIT-266).
+const jobs = Number(process.env.NITELY_JOBS);
+const concurrency = Number.isInteger(jobs) && jobs > 0 ? [`--test-concurrency=${jobs}`] : [];
+run(["--enable-source-maps", "--test", ...concurrency, ...find(OUT), ...find("scripts")]);

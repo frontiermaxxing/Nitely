@@ -28,6 +28,14 @@ pub struct Config {
     /// None works it out from the machine's cores and memory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_slots: Option<u32>,
+    /// Nothing new (a lane request, a gate, a review, a crew worker) starts while less memory than
+    /// this is free, in GB; 0 turns the wait off (machine.rs, NIT-266). None: 20% of memory or 8 GB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_floor_gb: Option<f64>,
+    /// What one run and all it starts may hold, in GB; a run over it is stopped as out of memory in
+    /// the lane (machine.rs, NIT-266). None: 25% of memory or 16 GB, whichever is smaller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_cap_gb: Option<f64>,
     /// The listener for issue links that starts at login (link_service.rs, NIT-229): None is on
     /// (once a repo is connected), `false` when the person turned it off.
     #[serde(default, skip_serializing_if = "Option::is_none")]

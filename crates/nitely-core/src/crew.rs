@@ -180,6 +180,11 @@ pub trait Agents {
     /// Lands an issue a worker handed in and left (`nitely land <key>`), in a process of its own:
     /// a land runs the gate and may wait in the land queue, which must not hold the supervisor up.
     fn land(&self, job: &LandJob) -> Result<Box<dyn Process>>;
+    /// Why no new worker may start now because the machine is short of memory (NIT-266), or None
+    /// when one may.
+    fn memory_turn(&self) -> Option<String> {
+        None
+    }
 }
 
 /// What `Agents::land` needs: `nitely land <issue>` in the repo, output to `log`.
@@ -604,6 +609,9 @@ impl Supervisor {
                 return Ok(format!("{} of {} started today", rules.max_per_day(), rules.max_per_day()));
             }
             if let Some(why) = self.over_budget(rules, &moment) {
+                return Ok(why);
+            }
+            if let Some(why) = self.agents.memory_turn() {
                 return Ok(why);
             }
             let installed: Vec<String> = rules
@@ -1894,12 +1902,23 @@ impl Agents for SystemAgents {
         for (k, v) in &launch.env {
             cmd.env(k, v);
         }
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            // No console window, and its own process group: Ctrl+C in the supervisor's console
-            // must not reach a worker that may be landing.
-            cmd.creation_flags(0x0800_0000 | 0x0000_0200); // CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+        // Held as a build is (NIT-266): below-normal priority, and it and what it starts to a run's
+        // memory cap; it outlives this supervisor all the same.
+        let share = crate::lanes::share();
+        crate::lanes::share_env(&mut cmd, share.jobs);
+        let guard = crate::procs::TreeGuard::with(crate::procs::Contain { memory_cap: share.cap, low_priority: true, end_with_guard: false });
+        // No console window, and its own process group: Ctrl+C in the supervisor's console must not
+        // reach a worker that may be landing.
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        match &guard {
+            Some(g) => g.prepare_with(&mut cmd, CREATE_NEW_PROCESS_GROUP),
+            None => {
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    cmd.creation_flags(0x0800_0000 | CREATE_NEW_PROCESS_GROUP); // CREATE_NO_WINDOW
+                }
+            }
         }
         #[cfg(unix)]
         {
@@ -1907,6 +1926,9 @@ impl Agents for SystemAgents {
             cmd.process_group(0);
         }
         let mut child = cmd.spawn().with_context(|| format!("starting {}", launch.program))?;
+        if let Some(g) = &guard {
+            g.adopt(&child);
+        }
         let mut stdin = child.stdin.take().context("no stdin")?;
         let brief = launch.brief.clone();
         std::thread::spawn(move || {
@@ -1918,6 +1940,10 @@ impl Agents for SystemAgents {
 
     fn adopt(&self, pid: u32) -> Option<Box<dyn Process>> {
         pid_alive(pid).then(|| Box::new(Adopted(pid)) as Box<dyn Process>)
+    }
+
+    fn memory_turn(&self) -> Option<String> {
+        crate::machine::would_wait()
     }
 
     fn prepare(&self, prep: &Prepare) -> Result<Box<dyn Process>> {

@@ -646,6 +646,23 @@ async fn lanes_overview() -> Result<nitely_core::lanes::Overview, String> {
     nitely_core::lanes::overview(&Config::load().map_err(err)?, &db()?).map_err(err)
 }
 
+/// Sets the machine's memory floor and run cap, in GB (Settings, NIT-266): None puts back the
+/// default; a floor of 0 turns the wait for memory off.
+#[tauri::command]
+async fn set_machine_limits(floor_gb: Option<f64>, cap_gb: Option<f64>) -> Result<nitely_core::machine::Now, String> {
+    if floor_gb.is_some_and(|f| !f.is_finite() || f < 0.0) {
+        return Err("the floor is a number of GB, 0 or more".into());
+    }
+    if cap_gb.is_some_and(|c| !c.is_finite() || c < 0.25) {
+        return Err("the cap is a number of GB, at least 0.25".into());
+    }
+    let mut config = Config::load().map_err(err)?;
+    config.memory_floor_gb = floor_gb;
+    config.memory_cap_gb = cap_gb;
+    config.save().map_err(err)?;
+    Ok(nitely_core::machine::now())
+}
+
 /// Review batches and land queues going now, for the board (docs/batching.md, NIT-218).
 #[tauri::command]
 async fn batches_overview() -> Result<nitely_core::batches::Overview, String> {
@@ -834,6 +851,7 @@ pub fn run() {
             crew_save,
             open_crew_log,
             lanes_overview,
+            set_machine_limits,
             batches_overview,
             open_lane_log,
             issues,

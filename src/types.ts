@@ -866,6 +866,20 @@ export interface LaneRun {
   error: string | null;
   /** Large-repo mode: why it waits for the person's main checkout (a change there, another branch). */
   waiting_for?: string | null;
+  /** Why it waits for the machine's memory: "waiting for memory: 6.2 GB free, …" (NIT-266). */
+  waiting_memory?: string | null;
+  /** The most memory it held at once, in bytes, where the system tells it. */
+  peak_memory?: number | null;
+}
+
+/** The machine's memory and how builds share it (machine.rs `Now`, NIT-266); bytes. */
+export interface MachineNow {
+  memory: { total: number; available: number } | null;
+  /** Nothing new starts below `floor` free; one run and all it starts may hold `cap`. `*_from`:
+   * `default`, `settings` or the environment variable that set it. */
+  limits: { total: number; floor: number; cap: number; floor_from: string; cap_from: string } | null;
+  /** Builds, gates, reviews and crew workers run at below-normal priority. */
+  below_normal: boolean;
 }
 
 /** One repo's build lanes, as `nitely lanes status` shows them (lanes.rs `Lanes`). */
@@ -890,4 +904,7 @@ export interface ProjectLanes {
 export interface LanesOverview {
   projects: ProjectLanes[];
   slots: { used: number; total: number } | null;
+  machine?: MachineNow;
+  /** Why the first request waiting on the machine's memory waits, when one does. */
+  waiting_for_memory?: string | null;
 }

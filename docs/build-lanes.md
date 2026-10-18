@@ -102,10 +102,13 @@ agent's worktree share the objects, and a forced checkout cannot conflict. Base 
 (`git diff --binary`) is only how a request travels to another machine or to CI.
 
 **Machine scheduler.** One budget for the whole machine across all projects: build slots from cores
-and memory (one slot per 8 logical cores and 8 GB, at least 1), or `build_slots` in Nitely's config
-(the app's Settings, NIT-205), or `NITELY_BUILD_SLOTS` for one shell. Each request gets the slot's
-share of cores: `{jobs}` in a command, and `NITELY_JOBS`, `CARGO_BUILD_JOBS` and `MAKEFLAGS=-j` in its
-environment. A slot is an OS file lock beside the database, so a crashed requester frees its slot as
+and memory (one slot per 8 logical cores, and no more slots than runs at their memory cap fit above
+the memory floor, at least 1), or `build_slots` in Nitely's config (the app's Settings, NIT-205), or
+`NITELY_BUILD_SLOTS` for one shell. Builds share all the cores but 2, or 75%, whichever is more, so
+the person's own apps always have some; each request gets its slot's share of those: `{jobs}` in a
+command, and `NITELY_JOBS`, `CARGO_BUILD_JOBS`, `RUST_TEST_THREADS` and `MAKEFLAGS=-j` in its
+environment, and `--test-concurrency=<jobs>` after a `node --test` that sets none (node takes no such
+setting from the environment; this repo's `npm test` reads `NITELY_JOBS`). A slot is an OS file lock beside the database, so a crashed requester frees its slot as
 it frees its lane. Order: land, then submit's gate, then `run`; within each, round-robin across
 projects (each project's first waiting request before any project's second, and among those the
 project served longest ago first, so one project's backlog never holds up the rest), then the
@@ -262,6 +265,34 @@ changes.
   is today's behavior: slower, and the build output lands in that worktree. The cleanup below reclaims
   it.
 - The crew's brief says the same, and crew workers always start in light worktrees.
+
+### The machine's memory (NIT-266)
+
+On 2026-10-18 the person's PC froze: two lanes each running a full gate, another project's gates
+outside lanes, reviews and about 14 agent sessions filled its 63 GB, and nothing ran at lower
+priority. So Nitely holds what it starts to the machine:
+
+- **Admission.** A lane request, a gate outside lanes, a review and a new crew worker start only while
+  the machine's free memory is above a floor: 20% of memory or 8 GB, whichever is larger, never more
+  than half (`memory_floor_gb` in Settings, `NITELY_MEMORY_FLOOR_GB` for one shell; 0 turns it off).
+  Within a run's cap of the floor, a request also waits until the last run to start has had 20 s to
+  grow, so two requests never both take the same free memory. Free memory is read through the OS
+  (`GlobalMemoryStatusEx`, `/proc/meminfo`, `kern.memorystatus_level`), never a shell. A request
+  that waits says so (`waiting_memory`: "waiting for memory: 6.2 GB free, new work starts above
+  12.8 GB"), in `nitely lanes` and on the strip; it lets its slot and lane go while it waits.
+- **A cap per run.** Each lane command, gate command outside lanes, review and crew worker runs in a
+  job object (Windows) whose memory is capped: 25% of memory or 16 GB, whichever is smaller
+  (`memory_cap_gb`, `NITELY_MEMORY_CAP_GB`). A run that reaches it is stopped and ends as "out of
+  memory in the lane", a lane problem and not the code's failure, never the machine's. Elsewhere the
+  run's tree is measured every second or two and stopped the same way. Each lane run records its peak
+  (`peak_memory`, and a line at the end of its log).
+- **Priority.** All of them run at below-normal CPU priority with low I/O and memory priority on
+  Windows (the job holds the priority of everything in it; what a command starts inherits the I/O
+  priority), and at nice 10 elsewhere. Below normal costs nothing on an idle machine.
+- **Gates outside lanes** (a project with no `[lanes]`) hold a machine slot too, as a `lane_run` row
+  with executor `worktree`: the scheduler orders them with the rest and "builds N of M" counts them.
+- A command a review or a crew worker runs through `nitely run` leaves the review's or worker's job
+  for one of its own, so only the lane's cap counts for it.
 
 ### What each OS gets
 

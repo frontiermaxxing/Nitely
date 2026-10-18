@@ -878,14 +878,57 @@ pub(crate) fn shell_command(command: &str) -> Command {
     cmd
 }
 
-/// Runs one playbook command through the platform shell.
+/// Runs one playbook command through the platform shell, held to the machine's share for one
+/// build as a lane command is: its cores, its memory cap, below-normal priority (NIT-266). What it
+/// leaves running (a setup's daemon) keeps running, still held to them. A command over its cap is
+/// stopped, and that is an error, not the command's failure.
 pub(crate) fn run_shell(command: &str, dir: &Path) -> Result<(bool, String, u64)> {
-    let mut cmd = shell_command(command);
+    use std::io::Read;
+    let share = crate::lanes::share();
+    let command = crate::lanes::node_tests_share(command, share.jobs);
+    let mut cmd = shell_command(&command);
+    cmd.current_dir(dir).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    crate::lanes::share_env(&mut cmd, share.jobs);
     let started = Instant::now();
-    let out = cmd.current_dir(dir).output().with_context(|| format!("running {command}"))?;
-    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-    text.push_str(&String::from_utf8_lossy(&out.stderr));
-    Ok((out.status.success(), tail(&text), started.elapsed().as_secs()))
+    let guard = crate::procs::TreeGuard::with(crate::procs::Contain { memory_cap: share.cap, low_priority: true, end_with_guard: false });
+    let spawned = match &guard {
+        Some(g) => g.spawn(&mut cmd),
+        None => cmd.spawn(),
+    };
+    let mut child = spawned.with_context(|| format!("running {command}"))?;
+    let read = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut p) = pipe {
+                p.read_to_end(&mut bytes).ok();
+            }
+            bytes
+        })
+    };
+    let out = read(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let err = read(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let over = || guard.as_ref().is_some_and(|g| g.over_memory());
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break Some(status);
+        }
+        if over() {
+            if let Some(g) = &guard {
+                g.stop();
+            }
+            child.kill().ok();
+            child.wait().ok();
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    let mut text = String::from_utf8_lossy(&out.join().unwrap_or_default()).into_owned();
+    text.push_str(&String::from_utf8_lossy(&err.join().unwrap_or_default()));
+    let Some(status) = status.filter(|_| !over()) else {
+        let cap = share.cap.map(crate::machine::gb).unwrap_or_default();
+        bail!("out of memory: `{command}` and what it started went over its {cap} memory cap and were stopped (Settings > Build lanes sets the cap)\n{}", tail(&text));
+    };
+    Ok((status.success(), tail(&text), started.elapsed().as_secs()))
 }
 
 pub(crate) fn tail(s: &str) -> String {
@@ -1181,6 +1224,11 @@ pub fn run_gate_as(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option
         return Ok(gate);
     }
 
+    // Outside lanes too, the gate takes one of the machine's build slots and waits for its memory,
+    // so a project without lanes cannot take the whole machine from the rest (NIT-266).
+    let project = issue_key.and_then(|k| db.issue(k).ok().flatten()).and_then(|i| i.project).unwrap_or_default();
+    let key: Vec<&str> = steps.iter().filter(|(_, skip)| skip.is_none()).map(|(c, _)| c.as_str()).collect();
+    let turn = crate::lanes::hold_machine(db, repo_root, worktree, &project, issue_key, kind, &key.join("\n"), actor)?;
     // A sparse worktree lacks files the gate builds (a workspace's other members): without build
     // lanes, it becomes whole first, so the gate sees what land will.
     let whole = crate::light::make_whole(worktree)?;
@@ -1206,6 +1254,7 @@ pub fn run_gate_as(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option
             break;
         }
     }
+    turn.finish(passed);
     record_gate(db, issue_key, worktree, actor, &commit, results, passed, flaked, playbook.unknown_warnings())
 }
 

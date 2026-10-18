@@ -691,7 +691,6 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
             .get(reviewer)
             .filter(|c| !c.is_empty())
             .with_context(|| format!("the playbook has no command for the {reviewer} reviewer (add review.commands.{reviewer})"))?;
-        let started = Instant::now();
         // Two reviews from one process in one second each get their own (NIT-116).
         let out_file = crate::paths::unique_temp("nitely-review", ".txt");
         let uses_file = command.iter().any(|a| a.contains("{output}"));
@@ -704,7 +703,20 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
         cmd.args(&args).current_dir(worktree).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         without_session_markers(&mut cmd);
         let could_not = |why: &str, detail: String| anyhow::Error::new(CouldNotRun { reviewer: reviewer.to_string(), why: why.to_string(), detail });
-        let mut child = cmd.spawn().map_err(|e| could_not("did not start", format!("{}: {e}", command[0])))?;
+        // A review counts against the machine as a build does (NIT-266): it starts only while the
+        // machine has memory to spare, and it and what it runs (a reviewer may build and test) are
+        // held to a run's cap, its share of cores and below-normal priority.
+        crate::machine::admit_here(&mut |_| {})?;
+        // The review's own time starts once it may run.
+        let started = Instant::now();
+        let share = crate::lanes::share();
+        crate::lanes::share_env(&mut cmd, share.jobs);
+        let guard = crate::procs::TreeGuard::with(crate::procs::Contain { memory_cap: share.cap, low_priority: true, end_with_guard: true });
+        let spawned = match &guard {
+            Some(g) => g.spawn(&mut cmd),
+            None => cmd.spawn(),
+        };
+        let mut child = spawned.map_err(|e| could_not("did not start", format!("{}: {e}", command[0])))?;
         let mut stdin = child.stdin.take().unwrap();
         let prompt = prompt.to_string();
         let writer = std::thread::spawn(move || stdin.write_all(prompt.as_bytes()));
@@ -725,9 +737,21 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
                 break status;
             }
             if started.elapsed() > deadline {
+                if let Some(g) = &guard {
+                    g.stop();
+                }
                 child.kill().ok();
                 child.wait().ok();
                 bail!("the {reviewer} review took longer than {} minutes and was stopped", self.timeout_minutes);
+            }
+            if guard.as_ref().is_some_and(|g| g.over_memory()) {
+                if let Some(g) = &guard {
+                    g.stop();
+                }
+                child.kill().ok();
+                child.wait().ok();
+                let cap = share.cap.map(crate::machine::gb).unwrap_or_default();
+                return Err(could_not("ran out of memory", format!("it and what it started went over the {cap} memory cap a run has (Settings > Build lanes) and were stopped")));
             }
             std::thread::sleep(Duration::from_millis(250));
         };

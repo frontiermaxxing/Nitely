@@ -103,14 +103,39 @@ pub fn started(pid: u32) -> Option<String> {
     }
 }
 
+/// How a guarded tree runs (NIT-266).
+#[derive(Debug, Clone, Copy)]
+pub struct Contain {
+    /// What the whole tree may hold in memory, in bytes. On Windows the job refuses memory past it
+    /// and says so; elsewhere the tree is measured every second or two. Either way `over_memory`
+    /// then answers true and the caller stops it.
+    pub memory_cap: Option<u64>,
+    /// Below-normal CPU priority with low I/O and memory priority on Windows, nice 10 elsewhere, so
+    /// the person's own apps always come first.
+    pub low_priority: bool,
+    /// The tree ends when the guard drops (or this process dies). A crew worker, which must outlive
+    /// its supervisor, keeps running instead, still held to the cap and priority.
+    pub end_with_guard: bool,
+}
+
+impl Default for Contain {
+    fn default() -> Self {
+        Contain { memory_cap: None, low_priority: false, end_with_guard: true }
+    }
+}
+
 /// Everything a command starts, held so it can all be ended together, and ended with this process:
 /// on Windows a job object that kills its processes when its last handle closes, which is when this
 /// guard drops or this process dies; elsewhere nothing (the command runs in its own process group
 /// there, and a process's folder can be read to find what it left). A build lane runs each command
 /// in one, so nothing a request started outlives it, even when the requester crashes (NIT-223).
+/// With `Contain`, it also holds the tree to a memory cap and a lower priority (NIT-266).
 pub struct TreeGuard {
     #[cfg(windows)]
     job: win::Job,
+    contain: Contain,
+    #[cfg(not(windows))]
+    watch: std::sync::Mutex<unix::Watch>,
 }
 
 // Elsewhere the guard holds nothing, but dropping it ends what it guards on every system alike.
@@ -122,26 +147,65 @@ impl Drop for TreeGuard {
 impl TreeGuard {
     /// A new, empty guard; None when the system will not make one (the command then runs unguarded).
     pub fn new() -> Option<TreeGuard> {
+        TreeGuard::with(Contain::default())
+    }
+
+    /// A guard that also holds what it guards as `contain` says.
+    pub fn with(contain: Contain) -> Option<TreeGuard> {
         #[cfg(windows)]
         {
-            win::Job::new().map(|job| TreeGuard { job })
+            win::Job::new(&contain).map(|job| TreeGuard { job, contain })
         }
         #[cfg(not(windows))]
         {
-            Some(TreeGuard {})
+            Some(TreeGuard { contain, watch: std::sync::Mutex::new(unix::Watch::default()) })
         }
     }
 
     /// Makes `cmd` start suspended (Windows), so `adopt` puts it in the guard before it can start
     /// anything. The command must then be adopted, or it never runs.
     pub fn prepare(&self, cmd: &mut std::process::Command) {
+        self.prepare_with(cmd, 0);
+    }
+
+    /// `prepare`, with more Windows creation flags (`CREATE_NEW_PROCESS_GROUP`, say) for `cmd`.
+    pub fn prepare_with(&self, cmd: &mut std::process::Command, flags: u32) {
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x0800_0000 | 0x0000_0004); // CREATE_NO_WINDOW | CREATE_SUSPENDED
+            cmd.creation_flags(0x0800_0000 | 0x0000_0004 | flags); // CREATE_NO_WINDOW | CREATE_SUSPENDED
         }
         #[cfg(not(windows))]
-        let _ = cmd;
+        {
+            let _ = flags;
+            if self.contain.low_priority {
+                unix::nice(cmd);
+            }
+        }
+    }
+
+    /// Starts `cmd` in the guard (`prepare` and `adopt`). On Windows it first tries to start it
+    /// apart from any job this process is in (a review's or a crew worker's), so only this guard's
+    /// cap counts for it; where that job does not allow it, inside.
+    pub fn spawn(&self, cmd: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+        #[cfg(windows)]
+        let child = {
+            self.prepare_with(cmd, 0x0100_0000); // CREATE_BREAKAWAY_FROM_JOB
+            match cmd.spawn() {
+                Err(e) if e.raw_os_error() == Some(5) => {
+                    self.prepare(cmd);
+                    cmd.spawn()?
+                }
+                other => other?,
+            }
+        };
+        #[cfg(not(windows))]
+        let child = {
+            self.prepare(cmd);
+            cmd.spawn()?
+        };
+        self.adopt(&child);
+        Ok(child)
     }
 
     /// Puts `child`, started by a `prepare`d command, in the guard, then lets it run: everything it
@@ -151,13 +215,61 @@ impl TreeGuard {
         {
             use std::os::windows::io::AsRawHandle;
             let added = self.job.assign(child.as_raw_handle());
+            if self.contain.low_priority {
+                // I/O and memory priority are the process's own, which what it starts inherits;
+                // the job holds the CPU priority of everything in it.
+                win::lower(child.as_raw_handle());
+            }
             win::resume(child.as_raw_handle());
             added
         }
         #[cfg(not(windows))]
         {
-            let _ = child;
+            if let Ok(mut w) = self.watch.lock() {
+                w.root = Some(child.id());
+            }
             true
+        }
+    }
+
+    /// Whether what the guard holds went over its memory cap (always false without one).
+    pub fn over_memory(&self) -> bool {
+        let Some(cap) = self.contain.memory_cap else { return false };
+        #[cfg(windows)]
+        {
+            let _ = cap;
+            self.job.memory_limit_hit()
+        }
+        #[cfg(not(windows))]
+        {
+            self.watch.lock().map(|mut w| w.over(cap)).unwrap_or(false)
+        }
+    }
+
+    /// The most memory what the guard holds has used at once, in bytes, where the system tells it
+    /// (on Windows exactly; elsewhere as last measured, only with a cap).
+    pub fn peak_memory(&self) -> Option<u64> {
+        #[cfg(windows)]
+        {
+            self.job.peak_memory()
+        }
+        #[cfg(not(windows))]
+        {
+            self.watch.lock().ok().map(|w| w.peak).filter(|p| *p > 0)
+        }
+    }
+
+    /// Ends everything the guard holds now.
+    pub fn stop(&self) {
+        #[cfg(windows)]
+        {
+            self.job.terminate();
+        }
+        #[cfg(not(windows))]
+        {
+            if let Some(root) = self.watch.lock().ok().and_then(|w| w.root) {
+                unix::kill_tree(root);
+            }
         }
     }
 }
@@ -251,6 +363,116 @@ fn normalize(s: &str) -> String {
     if cfg!(windows) { out.to_lowercase() } else { out }
 }
 
+/// Off Windows, a guard's priority is the command's nice value (what it starts inherits it), and
+/// its cap is measured: the resident memory of the command and everything under it, every second
+/// or two (NIT-266).
+#[cfg(not(windows))]
+mod unix {
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+
+    extern "C" {
+        fn setpriority(which: i32, who: u32, prio: i32) -> i32;
+    }
+
+    /// Starts `cmd` at nice 10.
+    pub fn nice(cmd: &mut std::process::Command) {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: setpriority is a plain system call, safe between fork and exec.
+        unsafe {
+            cmd.pre_exec(|| {
+                setpriority(0, 0, 10); // PRIO_PROCESS, this process
+                Ok(())
+            });
+        }
+    }
+
+    #[derive(Default)]
+    pub struct Watch {
+        pub root: Option<u32>,
+        pub peak: u64,
+        last: Option<Instant>,
+        over: bool,
+    }
+
+    impl Watch {
+        /// Whether the tree under `root` holds more than `cap` bytes, measured at most every
+        /// second (Linux) or two (macOS, where it costs a `ps`).
+        pub fn over(&mut self, cap: u64) -> bool {
+            let every = if cfg!(target_os = "linux") { Duration::from_secs(1) } else { Duration::from_secs(2) };
+            if self.over || self.last.is_some_and(|t| t.elapsed() < every) {
+                return self.over;
+            }
+            self.last = Some(Instant::now());
+            let Some(root) = self.root else { return false };
+            let used = tree(root).iter().map(|(_, _, rss)| rss).sum::<u64>();
+            self.peak = self.peak.max(used);
+            self.over = used > cap;
+            self.over
+        }
+    }
+
+    /// (pid, parent, resident bytes) of `root` and every process under it.
+    fn tree(root: u32) -> Vec<(u32, u32, u64)> {
+        let all = processes();
+        let mut children: HashMap<u32, Vec<&(u32, u32, u64)>> = HashMap::new();
+        for p in &all {
+            children.entry(p.1).or_default().push(p);
+        }
+        let mut out: Vec<(u32, u32, u64)> = all.iter().filter(|p| p.0 == root).cloned().collect();
+        let mut i = 0;
+        while i < out.len() {
+            let pid = out[i].0;
+            for c in children.get(&pid).into_iter().flatten() {
+                if !out.iter().any(|o| o.0 == c.0) {
+                    out.push(**c);
+                }
+            }
+            i += 1;
+        }
+        out
+    }
+
+    #[cfg(target_os = "linux")]
+    fn processes() -> Vec<(u32, u32, u64)> {
+        extern "C" {
+            fn getpagesize() -> i32;
+        }
+        // SAFETY: a plain call.
+        let page = unsafe { getpagesize() }.max(4096) as u64;
+        let Ok(dir) = std::fs::read_dir("/proc") else { return vec![] };
+        dir.flatten()
+            .filter_map(|e| {
+                let pid: u32 = e.file_name().to_str()?.parse().ok()?;
+                let stat = std::fs::read_to_string(e.path().join("stat")).ok()?;
+                // After the name in parentheses: state, ppid, ..., rss (in pages) 22 fields on.
+                let rest: Vec<&str> = stat.rsplit_once(')')?.1.split_whitespace().collect();
+                Some((pid, rest.get(1)?.parse().ok()?, rest.get(21)?.parse::<u64>().ok()? * page))
+            })
+            .collect()
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn processes() -> Vec<(u32, u32, u64)> {
+        let Ok(out) = std::process::Command::new("ps").args(["-A", "-o", "pid=,ppid=,rss="]).output() else { return vec![] };
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| {
+                let mut w = l.split_whitespace();
+                Some((w.next()?.parse().ok()?, w.next()?.parse().ok()?, w.next()?.parse::<u64>().ok()? * 1024))
+            })
+            .collect()
+    }
+
+    /// Kills `root` and everything under it.
+    pub fn kill_tree(root: u32) {
+        let pids: Vec<String> = tree(root).iter().map(|p| p.0.to_string()).collect();
+        if !pids.is_empty() {
+            std::process::Command::new("kill").arg("-KILL").args(&pids).output().ok();
+        }
+    }
+}
+
 /// From the Windows API, or from PowerShell when that fails: starting PowerShell for the same list
 /// takes a second or two, more on a busy machine, and land asks before every cleanup (NIT-208).
 #[cfg(windows)]
@@ -317,11 +539,28 @@ mod win {
         fn GetProcessTimes(process: Handle, creation: *mut u64, exit: *mut u64, kernel: *mut u64, user: *mut u64) -> i32;
         fn CreateJobObjectW(attributes: *mut c_void, name: *const u16) -> Handle;
         fn SetInformationJobObject(job: Handle, class: u32, info: *mut c_void, length: u32) -> i32;
+        fn QueryInformationJobObject(job: Handle, class: u32, info: *mut c_void, length: u32, returned: *mut u32) -> i32;
         fn AssignProcessToJobObject(job: Handle, process: Handle) -> i32;
+        fn TerminateJobObject(job: Handle, exit_code: u32) -> i32;
+        fn CreateIoCompletionPort(file: Handle, existing: Handle, key: usize, threads: u32) -> Handle;
+        fn GetQueuedCompletionStatus(port: Handle, bytes: *mut u32, key: *mut usize, overlapped: *mut *mut c_void, millis: u32) -> i32;
+        fn SetProcessInformation(process: Handle, class: u32, info: *mut c_void, size: u32) -> i32;
     }
 
+    const JOB_OBJECT_ASSOCIATE_COMPLETION_PORT_INFORMATION: u32 = 7;
     const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: u32 = 9;
+    const JOB_OBJECT_LIMIT_PRIORITY_CLASS: u32 = 0x20;
+    const JOB_OBJECT_LIMIT_JOB_MEMORY: u32 = 0x200;
+    const JOB_OBJECT_LIMIT_BREAKAWAY_OK: u32 = 0x800;
     const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x2000;
+    const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x4000;
+    const JOB_OBJECT_MSG_PROCESS_MEMORY_LIMIT: u32 = 9;
+    const JOB_OBJECT_MSG_JOB_MEMORY_LIMIT: u32 = 10;
+    /// `ProcessIoPriority` and its `IoPriorityLow`; `ProcessMemoryPriority` and its below normal.
+    const PROCESS_IO_PRIORITY: u32 = 33;
+    const IO_PRIORITY_LOW: u32 = 1;
+    const PROCESS_MEMORY_PRIORITY: u32 = 0;
+    const MEMORY_PRIORITY_BELOW_NORMAL: u32 = 4;
 
     #[repr(C)]
     struct BasicLimits {
@@ -346,6 +585,12 @@ mod win {
         peak_job_memory: usize,
     }
 
+    #[repr(C)]
+    struct CompletionPort {
+        key: *mut c_void,
+        port: Handle,
+    }
+
     /// When `pid` started (its creation FILETIME), or None.
     pub fn started(pid: u32) -> Option<String> {
         // SAFETY: a plain call; the handle is closed below.
@@ -361,14 +606,21 @@ mod win {
         ok.then(|| creation.to_string())
     }
 
-    /// A job object whose processes end when it is closed.
-    pub struct Job(Handle);
+    /// A job object: its processes end when it is closed (unless it was made to let them run on),
+    /// held to its memory cap and priority, with a completion port that tells when the cap was hit.
+    pub struct Job {
+        job: Handle,
+        port: Handle,
+        hit: std::sync::atomic::AtomicBool,
+    }
 
-    // The handle is only used to assign processes and is closed once, from whichever thread drops it.
+    // The handles are only used through calls that are safe from any thread, and each is closed
+    // once, from whichever thread drops the job.
     unsafe impl Send for Job {}
+    unsafe impl Sync for Job {}
 
     impl Job {
-        pub fn new() -> Option<Job> {
+        pub fn new(contain: &super::Contain) -> Option<Job> {
             // SAFETY: an unnamed job with default security; the handle is closed in drop.
             let job = unsafe { CreateJobObjectW(std::ptr::null_mut(), std::ptr::null()) };
             if job.is_null() {
@@ -376,7 +628,19 @@ mod win {
             }
             // SAFETY: all zeros is a valid ExtendedLimits.
             let mut limits: ExtendedLimits = unsafe { std::mem::zeroed() };
-            limits.basic.limit_flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            // What it holds may start a lane command of its own in a job apart (TreeGuard::spawn).
+            limits.basic.limit_flags = JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+            if contain.end_with_guard {
+                limits.basic.limit_flags |= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            }
+            if contain.low_priority {
+                limits.basic.limit_flags |= JOB_OBJECT_LIMIT_PRIORITY_CLASS;
+                limits.basic.priority_class = BELOW_NORMAL_PRIORITY_CLASS;
+            }
+            if let Some(cap) = contain.memory_cap {
+                limits.basic.limit_flags |= JOB_OBJECT_LIMIT_JOB_MEMORY;
+                limits.job_memory_limit = cap.min(usize::MAX as u64) as usize;
+            }
             let size = std::mem::size_of::<ExtendedLimits>() as u32;
             // SAFETY: `limits` is the struct the class names, of `size` bytes.
             let ok = unsafe { SetInformationJobObject(job, JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, (&mut limits as *mut ExtendedLimits).cast(), size) } != 0;
@@ -385,25 +649,86 @@ mod win {
                 unsafe { CloseHandle(job) };
                 return None;
             }
-            Some(Job(job))
+            // The port the job posts "the memory cap was hit" to; without one, the cap still holds
+            // but goes unreported.
+            let mut port = std::ptr::null_mut();
+            if contain.memory_cap.is_some() {
+                // SAFETY: a new port, not tied to a file; closed in drop.
+                port = unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, std::ptr::null_mut(), 0, 1) };
+                if !port.is_null() {
+                    let mut info = CompletionPort { key: job, port };
+                    // SAFETY: the struct the class names, of its size.
+                    let tied = unsafe {
+                        SetInformationJobObject(job, JOB_OBJECT_ASSOCIATE_COMPLETION_PORT_INFORMATION, (&mut info as *mut CompletionPort).cast(), std::mem::size_of::<CompletionPort>() as u32)
+                    } != 0;
+                    if !tied {
+                        // SAFETY: the port's handle, closed once.
+                        unsafe { CloseHandle(port) };
+                        port = std::ptr::null_mut();
+                    }
+                }
+            }
+            Some(Job { job, port, hit: std::sync::atomic::AtomicBool::new(false) })
         }
 
         pub fn assign(&self, process: std::os::windows::io::RawHandle) -> bool {
             // SAFETY: both handles are open: the job's own, and a child's process handle.
-            unsafe { AssignProcessToJobObject(self.0, process.cast()) != 0 }
+            unsafe { AssignProcessToJobObject(self.job, process.cast()) != 0 }
+        }
+
+        /// Whether the job has posted that it hit its memory cap (once it has, always true).
+        pub fn memory_limit_hit(&self) -> bool {
+            use std::sync::atomic::Ordering;
+            if self.port.is_null() || self.hit.load(Ordering::Relaxed) {
+                return self.hit.load(Ordering::Relaxed);
+            }
+            loop {
+                let (mut message, mut key, mut overlapped) = (0u32, 0usize, std::ptr::null_mut());
+                // SAFETY: the port's handle and three out values; 0 ms, so it never blocks.
+                let got = unsafe { GetQueuedCompletionStatus(self.port, &mut message, &mut key, &mut overlapped, 0) } != 0;
+                if !got {
+                    break;
+                }
+                if message == JOB_OBJECT_MSG_JOB_MEMORY_LIMIT || message == JOB_OBJECT_MSG_PROCESS_MEMORY_LIMIT {
+                    self.hit.store(true, Ordering::Relaxed);
+                }
+            }
+            self.hit.load(Ordering::Relaxed)
+        }
+
+        /// The most memory the job's processes held at once (committed), in bytes.
+        pub fn peak_memory(&self) -> Option<u64> {
+            // SAFETY: all zeros is a valid ExtendedLimits.
+            let mut limits: ExtendedLimits = unsafe { std::mem::zeroed() };
+            let size = std::mem::size_of::<ExtendedLimits>() as u32;
+            // SAFETY: `limits` is the struct the class names, of `size` bytes.
+            let ok = unsafe { QueryInformationJobObject(self.job, JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, (&mut limits as *mut ExtendedLimits).cast(), size, std::ptr::null_mut()) } != 0;
+            (ok && limits.peak_job_memory > 0).then_some(limits.peak_job_memory as u64)
+        }
+
+        pub fn terminate(&self) {
+            // SAFETY: the job's open handle.
+            unsafe { TerminateJobObject(self.job, 1) };
         }
     }
 
     impl Drop for Job {
         fn drop(&mut self) {
-            // SAFETY: the job's handle, closed once; its processes end with it.
-            unsafe { CloseHandle(self.0) };
+            // SAFETY: the job's handle and its port's, each closed once; unless it lets them run on,
+            // its processes end with it.
+            unsafe {
+                CloseHandle(self.job);
+                if !self.port.is_null() {
+                    CloseHandle(self.port);
+                }
+            }
         }
     }
 
     #[link(name = "ntdll")]
     extern "system" {
         fn NtQueryInformationProcess(process: Handle, class: u32, info: *mut c_void, length: u32, returned: *mut u32) -> i32;
+        fn NtSetInformationProcess(process: Handle, class: u32, info: *mut c_void, length: u32) -> i32;
         fn NtResumeProcess(process: Handle) -> i32;
     }
 
@@ -411,6 +736,40 @@ mod win {
     pub fn resume(process: std::os::windows::io::RawHandle) {
         // SAFETY: a child's open process handle.
         unsafe { NtResumeProcess(process.cast()) };
+    }
+
+    /// Low I/O priority and below-normal memory priority for a child (before it runs), so its disk
+    /// work queues behind the person's and its pages are the first trimmed. Best effort.
+    pub fn lower(process: std::os::windows::io::RawHandle) {
+        let (mut io, mut memory) = (IO_PRIORITY_LOW, MEMORY_PRIORITY_BELOW_NORMAL);
+        // SAFETY: a child's open process handle and a u32 of the size given, for each call.
+        unsafe {
+            NtSetInformationProcess(process.cast(), PROCESS_IO_PRIORITY, (&mut io as *mut u32).cast(), 4);
+            SetProcessInformation(process.cast(), PROCESS_MEMORY_PRIORITY, (&mut memory as *mut u32).cast(), 4);
+        }
+    }
+
+    /// A process's CPU priority class and I/O priority (for tests).
+    #[cfg(test)]
+    pub fn priorities(pid: u32) -> Option<(u32, u32)> {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetPriorityClass(process: Handle) -> u32;
+        }
+        // SAFETY: a plain call; the handle is closed below.
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if process.is_null() {
+            return None;
+        }
+        let mut io = 0u32;
+        // SAFETY: the open handle, a u32 out value of the size given; then closed once.
+        let (class, read) = unsafe {
+            let class = GetPriorityClass(process);
+            let read = NtQueryInformationProcess(process, PROCESS_IO_PRIORITY, (&mut io as *mut u32).cast(), 4, std::ptr::null_mut());
+            CloseHandle(process);
+            (class, read)
+        };
+        (read >= 0).then_some((class, io))
     }
 
     /// Every process, or None when the snapshot fails.
@@ -550,6 +909,28 @@ fn parse_lsof(text: &str) -> HashMap<u32, String> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// What a contained command starts runs below normal too, CPU and I/O alike: the job holds the
+    /// priority class, and the low I/O priority given to the command passes to its children
+    /// (NIT-266).
+    #[cfg(windows)]
+    #[test]
+    fn what_a_low_priority_guard_starts_runs_below_normal() {
+        let guard = TreeGuard::with(Contain { memory_cap: Some(1 << 30), low_priority: true, end_with_guard: true }).unwrap();
+        // A marker no other process carries: an address only this test pings.
+        let mut cmd = crate::playbook::shell_command("ping -n 20 127.0.0.98 >NUL");
+        let mut child = guard.spawn(&mut cmd).unwrap();
+        let ping = (0..50).find_map(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            win::list()?.into_iter().find(|p| p.parent_process_id == child.id() && p.name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case("PING.EXE")))
+        });
+        let ping = ping.expect("the command's ping started");
+        // BELOW_NORMAL_PRIORITY_CLASS, IoPriorityLow; the shell itself the same.
+        assert_eq!(win::priorities(ping.process_id), Some((0x4000, 1)), "the ping it started");
+        assert_eq!(win::priorities(child.id()), Some((0x4000, 1)), "the command");
+        guard.stop();
+        child.wait().unwrap();
+    }
 
     #[test]
     fn reads_working_dirs_from_lsof() {
