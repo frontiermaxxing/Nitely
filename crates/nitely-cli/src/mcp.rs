@@ -119,11 +119,21 @@ fn crew_worker() -> bool {
 }
 
 /// The longest one call waits in this server before it answers that it is still waiting: below
-/// the idle timeouts MCP clients give a call (Claude Code's is 30 minutes, others' are shorter), so
-/// no call outlives the client that made it. `NITELY_MCP_WAIT_CAP` (seconds) sets it, for tests.
+/// the timeout the client gives a call, so no call outlives the client that made it. The client
+/// says who it is when it connects (`initialize`), which sets this. `NITELY_MCP_WAIT_CAP`
+/// (seconds) sets it, for tests.
 fn wait_cap() -> Duration {
-    let secs = std::env::var("NITELY_MCP_WAIT_CAP").ok().and_then(|s| s.parse().ok()).unwrap_or(300);
+    let secs = std::env::var("NITELY_MCP_WAIT_CAP").ok().and_then(|s| s.parse().ok()).unwrap_or_else(|| CLIENT_WAIT.load(std::sync::atomic::Ordering::Relaxed));
     Duration::from_secs(secs)
+}
+
+/// The wait cap for the client this server answers, in seconds (`cap_for`).
+static CLIENT_WAIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(300);
+
+/// The wait cap for a client (NIT-314): Claude Code gives a call 30 minutes without a word; Codex
+/// gives one 60 seconds by default, and other clients are not known to give more.
+fn cap_for(vendor: &str) -> u64 {
+    if vendor == "claude" { 300 } else { 50 }
 }
 
 /// A lock that another thread's panic does not poison for the rest.
@@ -366,6 +376,7 @@ fn initialize(server: &mut Server, params: &Value) -> Value {
         "agent"
     }
     .into();
+    CLIENT_WAIT.store(cap_for(&server.vendor), std::sync::atomic::Ordering::Relaxed);
     let requested = params.get("protocolVersion").and_then(Value::as_str).unwrap_or("");
     let version = if SUPPORTED_VERSIONS.contains(&requested) { requested } else { SUPPORTED_VERSIONS[0] };
     // The repo's own instructions when Nitely watches it, else the general workflow.
@@ -1586,6 +1597,13 @@ mod tests {
         assert!(handle(&mut s, &json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })).is_none());
         let tools = handle(&mut s, &json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" })).unwrap();
         assert!(tools["result"]["tools"].as_array().unwrap().len() >= 8);
+    }
+
+    #[test]
+    fn a_call_answers_within_the_timeout_its_client_gives_it() {
+        // Codex's default tool timeout is 60 s; Claude Code's idle timeout is 30 minutes (NIT-314).
+        assert!(cap_for("codex") < 60 && cap_for("cursor") < 60 && cap_for("agent") < 60);
+        assert_eq!(cap_for("claude"), 300);
     }
 
     #[test]
