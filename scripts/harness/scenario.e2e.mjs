@@ -10,7 +10,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { harnessNitely, launch, nitely, notifications } from "./app.mjs";
@@ -253,8 +253,7 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
   } catch (e) {
     await shot("failed").catch(() => {});
     console.error(app.log());
-    console.error(`--- the crew's supervisor ---
-${crewLogs(home)}`);
+    console.error(`--- the crew's logs ---\n${crewLogs(home)}`);
     throw e;
   } finally {
     for (const c of lands) if (c.exitCode === null) c.kill();
@@ -276,10 +275,14 @@ function stopAll(exe) {
   spawnSync("powershell.exe", ["-NoProfile", "-Command", `Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq '${path}' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`], { stdio: "ignore" });
 }
 
-/** For a failed run: what the crew's supervisor said, when the worker never got going. */
+/** For a failed run: what the crew's supervisor and each of its workers said. */
 function crewLogs(home) {
+  const dir = join(home, "crew", "APP");
   try {
-    return readFileSync(join(home, "crew", "APP", "supervisor.log"), "utf8");
+    return readdirSync(dir)
+      .filter((f) => f.endsWith(".log"))
+      .map((f) => `--- ${f} ---\n${readFileSync(join(dir, f), "utf8")}`)
+      .join("\n");
   } catch {
     return "";
   }

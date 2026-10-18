@@ -8,9 +8,10 @@ import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { connect } from "./mcp.mjs";
 
-// The crew fills {nitely} in as a TOML string (for Codex's -c settings): quoted, backslashes doubled.
+// The crew fills {nitely} in as a TOML string (for Codex's -c settings): a literal string in single
+// quotes when the path has backslashes (Windows), else a basic one in double quotes.
 const arg = process.argv[2];
-const nitely = arg.startsWith('"') ? JSON.parse(arg) : arg;
+const nitely = arg.startsWith("'") ? arg.slice(1, -1) : arg.startsWith('"') ? JSON.parse(arg) : arg;
 const brief = await new Promise((resolve) => {
   let text = "";
   process.stdin.setEncoding("utf8");
