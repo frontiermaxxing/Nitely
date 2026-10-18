@@ -1987,8 +1987,19 @@ fn take_turn(
                 }
             }
         }
+        // This look did not reach admission: what holds it now is its turn, a slot or a lane, so
+        // an earlier memory reason would say the wrong thing (NIT-360).
+        forget_memory_wait(db, id, &mut waits_for_memory)?;
         std::thread::sleep(Duration::from_millis(300));
     }
+}
+
+/// Clears request `id`'s memory reason (`waiting_memory`) once it waits for something else.
+fn forget_memory_wait(db: &Db, id: i64, waits_for_memory: &mut bool) -> Result<()> {
+    if std::mem::take(waits_for_memory) {
+        db.conn.execute("UPDATE lane_run SET waiting_memory = NULL WHERE id = ?1", [id])?;
+    }
+    Ok(())
 }
 
 /// A gate that runs in a worktree, outside lanes (a repo without `[lanes]`), holding one of the
@@ -2078,6 +2089,8 @@ pub fn hold_machine<'a>(db: &'a Db, repo_root: &Path, worktree: &Path, project: 
                     }
                 }
             }
+            // Waiting for its turn or a slot now, not for memory (NIT-360).
+            forget_memory_wait(db, id, &mut waits_for_memory)?;
             std::thread::sleep(Duration::from_millis(300));
         }
     })();
@@ -3721,6 +3734,51 @@ let id = db.conn.last_insert_rowid();
         assert_eq!(seen.len(), 3, "{seen:?}");
         assert!(seen[1].as_deref().is_some_and(|w| w.starts_with("waiting for memory: 5.0 GB free")), "{seen:?}");
         assert_eq!(ran.waiting_memory, None, "cleared once it started");
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// A request that waited on memory and then waits for a slot says so, not "waiting for
+    /// memory" (NIT-360): the memory reason goes once a look does not reach admission.
+    #[test]
+    fn a_memory_reason_goes_once_a_request_waits_for_a_slot() {
+        let base = crate::paths::unique_temp("nitely-lane-memory-gone", "");
+        let root = repo(&base);
+        let db_path = base.join("t.db");
+        let db = Db::open(&db_path).unwrap();
+        let pb = playbook_with("[lanes]\n");
+        let snap = snapshot(&root).unwrap();
+        let mem = |free_gb: u64| Some(machine::Memory { total: 64 * machine::GIB, available: free_gb * machine::GIB });
+        let mut first = true;
+        let next: Readings = Box::new(move || if std::mem::take(&mut first) { mem(5) } else { mem(40) });
+        FAKE_MEMORY.with(|f| *f.borrow_mut() = Some(next));
+        // Another request takes every slot while this one waits on memory, and gives them back once
+        // the queue stops saying memory.
+        let path = db_path.clone();
+        let other = std::thread::spawn(move || {
+            let db = Db::open(&path).unwrap();
+            let reason = || db.conn.query_row("SELECT waiting_memory, state FROM lane_run ORDER BY id DESC LIMIT 1", [], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?))).optional().unwrap();
+            let started = Instant::now();
+            while !reason().is_some_and(|(why, _)| why.is_some()) {
+                assert!(started.elapsed() < Duration::from_secs(30), "it never waited on memory");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let held: Vec<SlotLock> = (1..=machine_budget().slots.max(1)).filter_map(|k| try_slot(&db, k).unwrap()).collect();
+            let cleared = loop {
+                match reason() {
+                    Some((None, state)) if state == "queued" => break true,
+                    Some((_, state)) if state != "queued" => break false,
+                    _ if started.elapsed() > Duration::from_secs(30) => break false,
+                    _ => std::thread::sleep(Duration::from_millis(20)),
+                }
+            };
+            drop(held);
+            cleared
+        });
+        let req = Request { project: "APP", issue: None, kind: Kind::Run, snapshot: &snap, command: "echo built" };
+        let ran = run(&db, &root, &pb, &req, &Actor::Agent("claude:test".into()), &mut |_| {});
+        FAKE_MEMORY.with(|f| *f.borrow_mut() = None);
+        assert!(other.join().unwrap(), "while it waited for a slot it no longer said memory");
+        assert!(ran.unwrap().passed());
         std::fs::remove_dir_all(base).ok();
     }
 
