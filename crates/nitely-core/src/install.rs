@@ -44,9 +44,14 @@ pub fn default_target(from: &Path) -> Option<PathBuf> {
 /// `cargo run` (the app's `npm run tauri dev`) Cargo puts its target folders first on PATH, and the
 /// copy there is whatever the last debug build left, often older than the installed one (NIT-193).
 pub fn installed_on_path() -> Option<PathBuf> {
-    let exe = if cfg!(windows) { "nitely.exe" } else { "nitely" };
     let folders: Vec<PathBuf> = std::env::var_os("PATH").map(|path| std::env::split_paths(&path).collect()).unwrap_or_default();
-    first_installed(&folders, Path::new(""), exe)
+    installed_in(&folders)
+}
+
+/// `installed_on_path` for a PATH given as its folders.
+pub fn installed_in(folders: &[PathBuf]) -> Option<PathBuf> {
+    let exe = if cfg!(windows) { "nitely.exe" } else { "nitely" };
+    first_installed(folders, Path::new(""), exe)
 }
 
 /// Where a first install goes: Cargo's install folder when it is on PATH (a machine that builds

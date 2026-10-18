@@ -309,11 +309,16 @@ fn with_links(mut plans: Vec<AgentPlan>, config: &Config, nitely: Option<&str>) 
     plans
 }
 
-/// The full path of the nitely command connect writes (`nitely` on PATH, or a path).
+/// The full path of the nitely command connect writes (`nitely` on PATH, or a path). A bare
+/// `nitely` is the installed one agents run, never the copy a debug build left in Cargo's target
+/// folder, which `cargo run` (the app's `npm run tauri dev`) puts first on the app's PATH (NIT-257).
 pub fn resolve_nitely(nitely: &str) -> Option<PathBuf> {
     let p = Path::new(nitely);
     if p.components().count() > 1 {
         return Some(p.to_path_buf()).filter(|p| p.exists());
+    }
+    if nitely == "nitely" {
+        return crate::install::installed_on_path();
     }
     which(nitely)
 }
@@ -715,6 +720,15 @@ fn run(command: &str) -> Result<()> {
     run_in(command, std::env::var_os("NITELY_AGENT_HOME").as_deref())
 }
 
+/// A failed setup command's message: clap's own words when a nitely older than this app does not
+/// know the command, which say nothing about why, become that.
+fn failure(command: &str, stderr: &str) -> String {
+    if stderr.contains("unrecognized subcommand") && command.contains("nitely") {
+        return format!("the nitely in `{command}` is older than this app and does not have that command; install the current one (`cargo run --release -p nitely-cli -- install` in a Nitely checkout) and apply again");
+    }
+    stderr.trim().lines().last().unwrap_or("failed").to_string()
+}
+
 /// Runs an agent's own command. With an agents' home other than the person's (tests, the test
 /// harness), the agent's CLI (`claude mcp add --scope user`) finds its config from the home folder,
 /// so it gets that one as its home, and none of its own variables pointing back at the person's.
@@ -725,7 +739,7 @@ fn run_in(command: &str, agents: Option<&std::ffi::OsStr>) -> Result<()> {
     }
     let out = cmd.output().with_context(|| format!("running {command}"))?;
     if !out.status.success() {
-        bail!("{}", String::from_utf8_lossy(&out.stderr).trim().lines().last().unwrap_or("failed"));
+        bail!("{}", failure(command, &String::from_utf8_lossy(&out.stderr)));
     }
     Ok(())
 }
@@ -749,17 +763,19 @@ fn suggest_key(db: &Db, name: &str) -> Result<String> {
     bail!("no free project key for {name}; choose one")
 }
 
-/// `nitely` when it is on PATH; else the full path of the binary next to this one; else None.
+/// `nitely` when an installed one is on PATH; else the full path of the binary next to this one;
+/// else None. A copy in Cargo's build folders does not count as installed (NIT-257).
 fn nitely_command() -> Option<String> {
-    if which("nitely").is_some() {
+    let folders: Vec<PathBuf> = std::env::var_os("PATH").map(|path| std::env::split_paths(&path).collect()).unwrap_or_default();
+    choose_nitely(&folders, std::env::current_exe().ok().as_deref())
+}
+
+fn choose_nitely(path: &[PathBuf], me: Option<&Path>) -> Option<String> {
+    if crate::install::installed_in(path).is_some() {
         return Some("nitely".into());
     }
     let exe = if cfg!(windows) { "nitely.exe" } else { "nitely" };
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join(exe)))
-        .filter(|p| p.exists())
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
+    me.and_then(|p| p.parent().map(|d| d.join(exe))).filter(|p| p.exists()).map(|p| p.to_string_lossy().replace('\\', "/"))
 }
 
 fn which(program: &str) -> Option<PathBuf> {
@@ -775,6 +791,36 @@ fn which(program: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agents_get_the_installed_nitely_not_a_debug_builds_copy() {
+        // Under `cargo run` (npm run tauri dev) the app's PATH starts with Cargo's target folder,
+        // whose nitely is whatever the last debug build left (NIT-257).
+        let root = crate::paths::unique_temp("nitely-pick", "");
+        let exe = if cfg!(windows) { "nitely.exe" } else { "nitely" };
+        let debug = root.join("target").join("debug");
+        std::fs::create_dir_all(debug.join(".fingerprint")).unwrap();
+        std::fs::write(debug.join(exe), "stale").unwrap();
+        let installed = root.join("cargo-bin");
+        std::fs::create_dir_all(&installed).unwrap();
+        let app = debug.join(if cfg!(windows) { "nitely-app.exe" } else { "nitely-app" });
+
+        std::fs::write(installed.join(exe), "current").unwrap();
+        assert_eq!(choose_nitely(&[debug.clone(), installed.clone()], Some(&app)).as_deref(), Some("nitely"));
+        assert_eq!(crate::install::installed_in(&[debug.clone(), installed.clone()]), Some(installed.join(exe)), "a bare nitely resolves past the debug copy");
+        std::fs::remove_file(installed.join(exe)).unwrap();
+        let beside = choose_nitely(&[debug.clone()], Some(&app)).unwrap();
+        assert!(beside.ends_with(&format!("debug/{exe}")), "with none installed, the one beside the app: {beside}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn an_older_nitely_is_named_instead_of_clap_s_words() {
+        let clap = "error: unrecognized subcommand 'links'\n\nUsage: nitely.exe <COMMAND>\n\nFor more information, try '--help'.\n";
+        let why = failure("\"C:/Code/target/debug/nitely.exe\" links install", clap);
+        assert!(why.contains("older than this app") && why.contains("cargo run --release -p nitely-cli -- install"), "{why}");
+        assert_eq!(failure("claude mcp add nitely", "boom\nlast line\n"), "last line");
+    }
 
     #[test]
     fn instruction_block_is_replaced_not_repeated() {

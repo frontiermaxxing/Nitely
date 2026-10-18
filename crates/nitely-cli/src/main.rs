@@ -749,7 +749,7 @@ fn run(cmd: Cmd) -> Result<()> {
         Cmd::Links { command } => {
             let me_exe = std::env::current_exe()?;
             let s = match command {
-                LinksCmd::Serve => return nitely_core::link_service::serve(&me_exe),
+                LinksCmd::Serve => return nitely_core::link_service::serve(),
                 LinksCmd::Status => nitely_core::link_service::status(&Config::load()?, &me_exe),
                 LinksCmd::Install => nitely_core::link_service::install(&me_exe)?,
                 LinksCmd::Uninstall => nitely_core::link_service::uninstall(&me_exe)?,

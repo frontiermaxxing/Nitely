@@ -100,12 +100,10 @@ fn answer_links(app: tauri::AppHandle) {
     use nitely_core::{link_service, links};
     let mut told = false;
     loop {
-        let nitely = nitely_core::connect::nitely_command_path();
-        let registered = nitely.as_deref().is_some_and(link_service::registered);
-        if registered {
+        if link_service::registered() {
             if links::probe() != Some(links::Role::Service) {
-                if let Some(n) = &nitely {
-                    link_service::start(n).ok();
+                if let Some(n) = nitely_core::connect::nitely_command_path() {
+                    link_service::start(&n).ok();
                 }
             }
         } else {
@@ -113,8 +111,7 @@ fn answer_links(app: tauri::AppHandle) {
                 Ok(listener) => {
                     told = false;
                     let open = app.clone();
-                    let keep = nitely.clone();
-                    links::serve(listener, links::Role::App, move |key| open_issue(&open, key), move || !keep.as_deref().is_some_and(link_service::registered));
+                    links::serve(listener, links::Role::App, move |key| open_issue(&open, key), || !link_service::registered());
                     continue;
                 }
                 Err(e) if !told && links::probe().is_none() => {

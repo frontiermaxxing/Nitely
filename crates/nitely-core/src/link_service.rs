@@ -196,10 +196,25 @@ pub fn status(config: &crate::Config, nitely: &Path) -> Status {
     }
 }
 
+/// Whether `nitely` has the `links` command: one built before it would fail at every login.
+pub fn has_links(nitely: &Path) -> bool {
+    quiet(&[nitely.to_string_lossy().into_owned(), "links".into(), "--help".into()]).is_ok()
+}
+
+fn older(nitely: &Path) -> String {
+    format!(
+        "the nitely at {} is older than this app and has no `links` command; install the current one (`cargo run --release -p nitely-cli -- install` in a Nitely checkout) and try again",
+        nitely.display()
+    )
+}
+
 /// Registers the listener for `nitely` and starts it now, and records that the person wants it.
 pub fn install(nitely: &Path) -> Result<Status> {
     if !allowed() {
         bail!("issue links are never registered at login under the test harness or a stand-in agents' home");
+    }
+    if !has_links(nitely) {
+        bail!("{}", older(nitely));
     }
     let os = Os::current();
     let reg = registration(nitely, &crate::connect::agent_home(), os);
@@ -288,8 +303,9 @@ pub fn start(nitely: &Path) -> Result<()> {
 
 static REGISTERED: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
 
-/// Whether the listener is registered at login, asked of the OS at most every 30 seconds.
-pub fn registered(nitely: &Path) -> bool {
+/// Whether the listener is registered at login, asked of the OS at most every 30 seconds. Whichever
+/// nitely it runs: the app yields the port to it without having to find a nitely itself.
+pub fn registered() -> bool {
     if !allowed() {
         return false;
     }
@@ -300,7 +316,7 @@ pub fn registered(nitely: &Path) -> bool {
         }
     }
     let os = Os::current();
-    let yes = registered_command(os, &registration(nitely, &crate::connect::agent_home(), os)).is_some();
+    let yes = registered_command(os, &registration(Path::new("nitely"), &crate::connect::agent_home(), os)).is_some();
     *cache = Some((Instant::now(), yes));
     yes
 }
@@ -325,12 +341,15 @@ pub fn open_in_app(key: &str) {
 /// `nitely links serve`: answers issue links on the port while it is registered (or for as long as
 /// it runs, when started by hand), each one opening the app. Another listener already on the port
 /// means this one is not needed; something else holding it is waited out.
-pub fn serve(nitely: &Path) -> Result<()> {
+pub fn serve() -> Result<()> {
     if !allowed() {
         bail!("issue links are not served at login under the test harness or a stand-in agents' home");
     }
-    let by_login = registered(nitely);
-    let keep = || !by_login || registered(nitely);
+    // One listener at a time: the app starts one whenever nothing answers, and a second one would
+    // wait beside the first for the port (NIT-257).
+    let Some(_one) = only_one(&crate::paths::data_dir())? else { return Ok(()) };
+    let by_login = registered();
+    let keep = || !by_login || registered();
     loop {
         match links::bind() {
             Ok(listener) => {
@@ -348,6 +367,19 @@ pub fn serve(nitely: &Path) -> Result<()> {
     }
 }
 
+/// The listener's lock in `dir`, or None while another listener holds it. An OS file lock, so a
+/// listener that dies lets go of it.
+fn only_one(dir: &Path) -> Result<Option<std::fs::File>> {
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join("links-serve.lock");
+    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&path).with_context(|| format!("opening {}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(e)) => Err(e).with_context(|| format!("locking {}", path.display())),
+    }
+}
+
 /// Agent setup's change for issue links: what `nitely links install` would do, when it is not done
 /// and the person has not turned it off; nothing otherwise.
 pub fn setup_change(config: &crate::Config, nitely: &str) -> Option<crate::connect::Change> {
@@ -358,7 +390,11 @@ pub fn setup_change(config: &crate::Config, nitely: &str) -> Option<crate::conne
     let os = Os::current();
     let reg = registration(&path, &crate::connect::agent_home(), os);
     let now = registered_command(os, &reg);
-    let action = if now.as_deref() == Some(reg.command.as_str()) { "unchanged" } else { "run" };
+    let mut action = if now.as_deref() == Some(reg.command.as_str()) { "unchanged" } else { "run" };
+    // Running `links install` with a nitely that has no such command fails with clap's words alone.
+    if action == "run" && !has_links(&path) {
+        action = "manual";
+    }
     Some(crate::connect::Change {
         target: reg.place,
         action: action.into(),
@@ -367,7 +403,7 @@ pub fn setup_change(config: &crate::Config, nitely: &str) -> Option<crate::conne
             links::PORT
         ),
         before: now,
-        after: format!("\"{}\" links install", path.display()),
+        after: if action == "manual" { older(&path) } else { format!("\"{}\" links install", path.display()) },
     })
 }
 
@@ -397,13 +433,32 @@ mod tests {
     }
 
     #[test]
+    fn one_listener_at_a_time() {
+        let dir = crate::paths::unique_temp("nitely-links-lock", "");
+        let first = only_one(&dir).unwrap();
+        assert!(first.is_some(), "the first listener takes the lock");
+        assert!(only_one(&dir).unwrap().is_none(), "a second one finds it held and leaves");
+        drop(first);
+        assert!(only_one(&dir).unwrap().is_some(), "free again once the first is gone");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_nitely_without_links_is_named_not_run() {
+        let missing = Path::new("C:/no/such/nitely.exe");
+        assert!(!has_links(missing));
+        let why = older(missing);
+        assert!(why.contains("older than this app") && why.contains("nitely-cli -- install"), "{why}");
+    }
+
+    #[test]
     fn never_touches_login_items_from_tests() {
         // Tests (and the harness, and a stand-in agents' home) never register anything at login.
         assert!(!allowed());
         let nitely = Path::new("nitely");
         assert!(install(nitely).unwrap_err().to_string().contains("never registered"));
-        assert!(uninstall(nitely).is_err() && serve(nitely).is_err() && start(nitely).is_err());
-        assert!(!registered(nitely));
+        assert!(uninstall(nitely).is_err() && serve().is_err() && start(nitely).is_err());
+        assert!(!registered());
         assert!(setup_change(&crate::Config::default(), "nitely").is_none());
     }
 }
