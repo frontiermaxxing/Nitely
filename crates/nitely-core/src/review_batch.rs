@@ -417,7 +417,7 @@ impl Drop for Scratch {
 /// files): a change's own files after its worktree is gone.
 fn checkout_at(repo: &Path, head: &str) -> Result<PathBuf> {
     let dir = crate::paths::unique_temp("nitely-batch-change", "");
-    let clone = crate::playbook::run_git(std::process::Command::new("git").args(["clone", "--quiet", "--shared", "--no-checkout"]).arg(repo).arg(&dir))?;
+    let clone = crate::playbook::run_git(crate::playbook::shell_free_command("git").args(["clone", "--quiet", "--shared", "--no-checkout"]).arg(repo).arg(&dir))?;
     if !clone.status.success() {
         bail!("could not clone {}: {}", repo.display(), String::from_utf8_lossy(&clone.stderr).trim());
     }
