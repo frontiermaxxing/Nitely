@@ -6,6 +6,7 @@ import type { LaneRun, LanesOverview, MachineNow, ProjectLanes } from "./types";
 /** One lane as its chip shows it. */
 export interface LaneChip {
   project: string;
+  /** Its number; 0 is the quick lane, only for quick runs (NIT-347). */
   lane: number;
   /** running a request; idle at a commit; not made yet (made on its first request); unhealthy:
    * its last request ended in a lane problem, not a test failure; or waiting: the person's main
@@ -23,10 +24,11 @@ export interface LaneChip {
   problem: string | null;
 }
 
-/** The chips of a project's lanes, in lane order. A running request wins over an older problem. */
+/** The chips of a project's lanes, in lane order. A running request wins over an older problem.
+ * The quick lane has a chip once it is made: most repos never need one. */
 export function laneChips(p: ProjectLanes): LaneChip[] {
   const checkout = !!p.rules.large_repo;
-  return p.lanes.map((l) => {
+  return p.lanes.filter((l) => l.made || !isQuick(l)).map((l) => {
     const run = p.queue.find((r) => r.state === "running" && r.lane === l.lane) ?? null;
     const last = (p.last ?? p.recent).find((r) => r.lane === l.lane) ?? null;
     const waitingFor = checkout ? (p.queue.find((r) => r.state === "queued" && r.waiting_for)?.waiting_for ?? null) : null;
@@ -79,7 +81,7 @@ export function capWords(p: ProjectLanes): string {
 export function sizeWords(p: ProjectLanes): string[] {
   return p.lanes
     .filter((l) => l.size_bytes != null)
-    .map((l) => `lane ${l.lane}: ${bytesWords(l.size_bytes!)}${l.cap_bytes ? ` of ${bytesWords(l.cap_bytes)}` : ""}`);
+    .map((l) => `${isQuick(l) ? "quick lane" : `lane ${l.lane}`}: ${bytesWords(l.size_bytes!)}${l.cap_bytes ? ` of ${bytesWords(l.cap_bytes)}` : ""}`);
 }
 
 /** "42s", "3m", "1h 5m": how long something has run. */
@@ -129,7 +131,13 @@ export function limitsOf(floor: string, cap: string): { floorGb: number | null; 
 
 /** What a chip calls its lane after the project: its number, or the main checkout in large-repo mode. */
 export function chipName(c: LaneChip): string {
-  return c.checkout ? `${c.project} main checkout` : `${c.project} ${c.lane}`;
+  if (c.checkout) return `${c.project} main checkout`;
+  return c.lane === 0 ? `${c.project} quick` : `${c.project} ${c.lane}`;
+}
+
+/** The quick lane (NIT-347), by its flag or, from an older nitely, its number. */
+function isQuick(l: { lane: number; quick?: boolean }): boolean {
+  return !!l.quick || l.lane === 0;
 }
 
 /** What a chip says after its project and lane. */

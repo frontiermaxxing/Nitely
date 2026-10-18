@@ -121,9 +121,16 @@ after the requests ahead of it that could start; a repo whose lanes are all busy
 repo. On a machine with 3 slots or more, a gate or land leaves the last free slot to an agent's
 `run` that could start, so a minute of clippy never waits out two half-hour gates (NIT-291). A quick
 run (a `run` whose command's last runs took under two minutes at the median, or, with none,
-one that names a test filter) may take a free lane ahead of its repo's queued gates, one lane per
-repo at most and never ahead of a waiting land or in a one-lane repo, so gates are never starved;
-one that runs past three times its usual time is just a run (NIT-347). Each
+one that names a test filter) takes its repo's quick lane, `lane-quick`, ahead of the repo's queued
+gates, even when every numbered lane is busy: one more checkout, made on its first quick run, for
+one quick run at a time. The numbered lanes stay the queue's, so gates are never starved. With
+every machine slot busy it may take the machine's one quick slot (one in all, never one per repo,
+and only for a quick run); memory admission still decides when it starts, so the RAM floor holds.
+The quick lane keeps to the size cap like any lane, shows in `nitely lanes`, and `slim` leaves it
+alone like the rest. It is off in large-repo mode (a lane of a Chromium-sized repo is too much
+disk) and with `quick = false`; there a quick run may take a free lane ahead of its repo's gates,
+one lane at most and never ahead of a waiting land or in a one-lane repo. One that runs past three
+times its usual time is just a run (NIT-347). Each
 queued request says why it waits (`waiting_why` in `nitely lanes`, on the strip): "waiting: 3 of 3
 machine slots in use (AND-302 gate 24 m, …)", "behind request 41 of the same repo", "all 2 of its
 repo's lanes are busy", the person's checkout, or memory. Each request records the scheduler it waits
@@ -403,6 +410,7 @@ heavy = ["^cargo (build|test|clippy)", "^npm (ci|install|test|run build)"]
 executor = "local"                   # "local", "machine:<name>" or "ci" (the gate only)
 base = "tip"                         # or "every 4h"
 large_repo = false                   # true: the main checkout is the only lane
+quick = true                         # false: no quick lane for short runs (off in large-repo mode)
 ```
 
 ## Risks

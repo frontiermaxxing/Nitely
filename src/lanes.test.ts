@@ -79,6 +79,18 @@ test("in large-repo mode the chip is the main checkout: building, or waiting and
   assert.equal(chipName(laneChips(project([], []))[0]), "APP 1", "lanes keep their numbers");
 });
 
+test("the quick lane has a chip once it is made, and is called quick", () => {
+  const quick = (made: boolean, queue: LaneRun[] = []): ProjectLanes => {
+    const p = project(queue, []);
+    return { ...p, lanes: [...p.lanes, { lane: 0, quick: true, path: "lq", made, busy: false, at: made ? "9a8b7c6" : null, size_bytes: made ? 1024 ** 3 : null }] };
+  };
+  assert.equal(laneChips(quick(false)).length, 3, "not made yet: most repos never need it");
+  const chips = laneChips(quick(true, [run(12, "running", 0, { command: "cargo test -p app waits" })]));
+  assert.deepEqual(chips.map(chipName), ["APP 1", "APP 2", "APP 3", "APP quick"]);
+  assert.equal(chips[3].state, "running");
+  assert.deepEqual(sizeWords(quick(true)), ["quick lane: 1.0 GB"]);
+});
+
 test("durations and the run a timeline entry names", () => {
   assert.deepEqual([forHowLong(42), forHowLong(180), forHowLong(3900), forHowLong(7200)], ["42s", "3m", "1h 5m", "2h"]);
   assert.equal(laneRunId({ kind: "lane_run", summary: "Ran `cargo test` in lane 1: exit 0 after 42 s (run 17)" }), 17);
