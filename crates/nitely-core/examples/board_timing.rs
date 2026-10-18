@@ -33,14 +33,16 @@ fn main() -> anyhow::Result<()> {
     println!("git read, nothing moved:           {warm_ms:7.0} ms {}", said(&warm));
 
     if let Some(wt) = std::env::args().nth(1) {
-        let file = std::path::Path::new(&wt).join("board-timing.txt");
-        std::fs::write(&file, "x")?;
+        // A file of its own: created new, so nothing already there is touched.
+        let name = format!("board-timing-{}-{}.txt", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos());
+        let file = std::path::Path::new(&wt).join(&name);
+        std::io::Write::write_all(&mut std::fs::File::create_new(&file)?, b"x")?;
         let git = |args: &[&str]| nitely_core::playbook::run_git(Command::new("git").arg("-C").arg(&wt).args(args));
-        git(&["add", "board-timing.txt"])?;
+        git(&["add", "--", &name])?;
         let t = Instant::now();
         let after = snapshot::read_git_from(&config, Some(&warm), &idle);
         println!("git read, one worktree's index moved: {:4.0} ms {}", ms(t), said(&after));
-        git(&["rm", "-q", "--cached", "board-timing.txt"])?;
+        git(&["rm", "-q", "--cached", "--", &name])?;
         std::fs::remove_file(&file).ok();
         drop(after);
     }

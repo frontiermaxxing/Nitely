@@ -122,6 +122,8 @@ pub struct GitState {
 
 struct RepoGit {
     root: String,
+    /// What its branches were counted against.
+    integration_branch: String,
     worktrees: Result<Vec<git::Worktree>, String>,
     /// Every local branch with its counts and last commit, from one `for-each-ref`.
     branches: Vec<git::BranchRef>,
@@ -140,6 +142,8 @@ struct RepoGit {
 #[derive(Clone)]
 struct Counted {
     fingerprint: Option<u64>,
+    /// The commit it was on.
+    head: String,
     at: Instant,
     dirty: Option<u32>,
     /// The whole state, for a worktree whose branch the repo's one `for-each-ref` does not count
@@ -194,10 +198,11 @@ type Listed = (Result<Vec<git::Worktree>, String>, Vec<git::BranchRef>, Option<S
 /// commit come from the repo's branches, so they are as current as the refs.
 pub fn read_git_from(config: &Config, before: Option<&GitState>, active: &(dyn Fn(&str) -> bool + Sync)) -> GitState {
     let fingerprint = crate::watch::repos_fingerprint(config);
-    let earlier = |root: &str| before.and_then(|b| b.repos.iter().find(|r| r.root == root));
+    // Counts against another integration branch are not reused.
+    let earlier = |repo: &RepoConfig| before.and_then(|b| b.repos.iter().find(|r| r.root == repo.root && r.integration_branch == repo.integration_branch));
     let heads: Vec<Listed> = par_map(&config.repos, |repo: &RepoConfig| {
         let fp = crate::watch::repo_fingerprint(std::path::Path::new(&repo.root));
-        if let Some(e) = earlier(&repo.root).filter(|e| e.fingerprint == fp && e.listed_at.elapsed() < REPO_FRESH) {
+        if let Some(e) = earlier(repo).filter(|e| e.fingerprint == fp && e.listed_at.elapsed() < REPO_FRESH) {
             return (e.worktrees.clone(), e.branches.clone(), e.slug.clone(), fp, e.listed_at);
         }
         let worktrees = git::list_worktrees(&repo.root).map_err(|e| e.to_string());
@@ -206,7 +211,7 @@ pub fn read_git_from(config: &Config, before: Option<&GitState>, active: &(dyn F
         (worktrees, branches, slug, fp, Instant::now())
     });
     // A repo whose worktrees and branches were reused: its refs did not move.
-    let still: Vec<bool> = heads.iter().zip(&config.repos).map(|(h, repo)| earlier(&repo.root).is_some_and(|e| e.listed_at == h.4)).collect();
+    let still: Vec<bool> = heads.iter().zip(&config.repos).map(|(h, repo)| earlier(repo).is_some_and(|e| e.listed_at == h.4)).collect();
     let integration: Vec<u64> = config.repos.iter().map(|r| git::ref_fingerprint(&r.root, &r.integration_branch)).collect();
     let jobs: Vec<(&git::Worktree, &RepoConfig, &[git::BranchRef], u64)> = heads
         .iter()
@@ -222,11 +227,13 @@ pub fn read_git_from(config: &Config, before: Option<&GitState>, active: &(dyn F
         let counted_by_repo = line.is_some_and(|b| b.ahead.is_some() && b.behind.is_some());
         let fp = git::worktree_fingerprint(&wt.path);
         let fresh = if active(&wt.path) { ACTIVE_FRESH } else { IDLE_FRESH };
-        let last = earlier(&repo.root).and_then(|e| {
+        let last = earlier(repo).and_then(|e| {
             let i = e.worktrees.as_ref().ok()?.iter().position(|w| w.path == wt.path)?;
             e.counted.get(i).cloned()
         });
-        let reuse = last.filter(|c| fp.is_some() && c.fingerprint == fp && c.dirty.is_some() && c.at.elapsed() < fresh);
+        // The commit it is on comes from the repo's listing, which moves with every ref: a branch
+        // moved under it (`git update-ref`) leaves its HEAD file and index as they were.
+        let reuse = last.filter(|c| fp.is_some() && c.fingerprint == fp && c.head == wt.head && c.dirty.is_some() && c.at.elapsed() < fresh);
         // Not counted by the repo's branches: its counts against the integration branch are its
         // own reads, current while neither it nor the repo's refs moved.
         if !counted_by_repo {
@@ -241,6 +248,7 @@ pub fn read_git_from(config: &Config, before: Option<&GitState>, active: &(dyn F
             None => (
                 Counted {
                     fingerprint: git::worktree_fingerprint(&wt.path),
+                    head: wt.head.clone(),
                     at: Instant::now(),
                     dirty: state.as_ref().ok().map(|s| s.dirty_files),
                     state: state.as_ref().ok().filter(|_| !counted_by_repo).cloned(),
@@ -260,7 +268,7 @@ pub fn read_git_from(config: &Config, before: Option<&GitState>, active: &(dyn F
         .map(|((worktrees, branches, slug, fingerprint, listed_at), repo)| {
             let n = worktrees.as_ref().map_or(0, Vec::len);
             let (states, counted): (Vec<_>, Vec<_>) = read.by_ref().take(n).map(|(s, c, _)| (s, c)).unzip();
-            RepoGit { root: repo.root.clone(), states, worktrees, branches, slug, fingerprint, listed_at, counted }
+            RepoGit { root: repo.root.clone(), integration_branch: repo.integration_branch.clone(), states, worktrees, branches, slug, fingerprint, listed_at, counted }
         })
         .collect();
     GitState { repos, fingerprint, read_at: Instant::now(), relisted, recounted }
@@ -621,6 +629,17 @@ mod tests {
         sh(&wt, &["commit", "-q", "-m", "b"]);
         let fourth = read_git_from(&config, Some(&third), &idle);
         assert_eq!((of(&fourth).ahead, of(&fourth).dirty_files), (1, 0));
+        // The branch moved back under it: HEAD file and index stand, but its commit differs, so
+        // the index (still holding b.txt) is counted against the new one.
+        sh(&wt, &["update-ref", "refs/heads/claude/app-1-x", "main"]);
+        sh(&root, &["branch", "develop", "claude/app-1-x@{1}"]);
+        let fifth = read_git_from(&config, Some(&fourth), &idle);
+        assert_eq!((of(&fifth).ahead, of(&fifth).dirty_files), (0, 1));
+        // Another integration branch, no ref moved: nothing counted against the old one is reused.
+        let mut moved = config.clone();
+        moved.repos[0].integration_branch = "develop".into();
+        let sixth = read_git_from(&moved, Some(&fifth), &idle);
+        assert_eq!((sixth.relisted, of(&sixth).behind), (1, 1));
         std::fs::remove_dir_all(&dir).ok();
     }
 
