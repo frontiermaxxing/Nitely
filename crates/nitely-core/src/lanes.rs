@@ -1156,7 +1156,7 @@ fn try_slot(db: &Db, k: u32) -> Result<Option<SlotLock>> {
     }
 }
 
-//// The machine's build slots as a waiting request reads them: the budget again every few seconds
+/// The machine's build slots as a waiting request reads them: the budget again every few seconds
 /// (it reads Nitely's config), so raising `build_slots` lets what already waits use them (NIT-291).
 fn slots_now() -> impl FnMut() -> u32 {
     let mut last: Option<(u32, Instant)> = None;
