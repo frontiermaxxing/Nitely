@@ -455,15 +455,26 @@ pub(crate) fn after_land(root: &Path, pb: &Playbook, report: &mut Landed) {
 pub(crate) fn fast_forward_main(root: &Path, to: &str) -> Result<()> {
     let git_dir = PathBuf::from(git(root, &["rev-parse", "--absolute-git-dir"])?.trim());
     let (index_lock, mark) = (git_dir.join("index.lock"), git_dir.join("nitely-fast-forward"));
+    let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    // A lock taken while a fast-forward ran: from `since`, within the time one takes.
+    let taken_during = |since: std::time::SystemTime| modified(&index_lock).is_some_and(|t| t + FF_SLACK >= since && t <= since + FF_TAKES);
     if let Ok(text) = std::fs::read_to_string(&mark) {
         let pid = text.split_whitespace().skip_while(|w| *w != "pid").nth(1).and_then(|p| p.parse::<u32>().ok());
         if !pid.is_some_and(crate::procs::alive) {
-            std::fs::remove_file(&index_lock).ok();
+            // Only the dead land's own lock: one taken long after it is someone else's.
+            if modified(&mark).is_some_and(taken_during) {
+                std::fs::remove_file(&index_lock).ok();
+            }
             std::fs::remove_file(&mark).ok();
         }
     }
+    let started = std::time::SystemTime::now();
     std::fs::write(&mark, format!("fast-forward pid {} since {}", std::process::id(), crate::issues::iso(now()))).ok();
     let done = git(root, &["merge", "--ff-only", to]);
+    // Our git has ended: a lock it took and did not let go (it was killed) is stale now.
+    if done.is_err() && taken_during(started) {
+        std::fs::remove_file(&index_lock).ok();
+    }
     std::fs::remove_file(&mark).ok();
     done.map(|_| ()).map_err(|e| {
         if index_lock.exists() {
@@ -473,6 +484,11 @@ pub(crate) fn fast_forward_main(root: &Path, to: &str) -> Result<()> {
         }
     })
 }
+
+/// How long a fast-forward of the main checkout may take, for telling its lock from a later one.
+const FF_TAKES: std::time::Duration = std::time::Duration::from_secs(120);
+/// File times are coarse on some file systems: a lock may read as a little older than the mark.
+const FF_SLACK: std::time::Duration = std::time::Duration::from_secs(2);
 
 fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor: &Actor, report: &mut Landed) -> Result<()> {
     let base = report.base.clone();
@@ -985,13 +1001,21 @@ mod tests {
         git(&repo, &["checkout", "-q", "main"]).unwrap();
         let git_dir = repo.join(".git");
         let (lock, mark) = (git_dir.join("index.lock"), git_dir.join("nitely-fast-forward"));
-        // Someone else's lock: left alone, and the error names it.
+        // Someone else's lock, from before this land: left alone, and the error names it.
         std::fs::write(&lock, "").unwrap();
+        std::fs::File::options().write(true).open(&lock).unwrap().set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(600)).unwrap();
         let err = format!("{:#}", fast_forward_main(&repo, &next).unwrap_err());
         assert!(err.contains("index.lock exists"), "{err}");
         assert!(lock.exists() && !mark.exists());
-        // A killed land's: its mark names a process that is gone, so both go and the land goes on.
+        // A dead land's mark, but the lock was taken long after it: someone else's, left alone.
         std::fs::write(&mark, "fast-forward pid 4000000000 since then").unwrap();
+        std::fs::File::options().write(true).open(&mark).unwrap().set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600)).unwrap();
+        assert!(fast_forward_main(&repo, &next).is_err());
+        assert!(lock.exists() && !mark.exists(), "the mark goes, the lock stays");
+        // A killed land's: its mark names a process that is gone and the lock came with it, so
+        // both go and the land goes on.
+        std::fs::write(&mark, "fast-forward pid 4000000000 since then").unwrap();
+        std::fs::write(&lock, "").unwrap();
         fast_forward_main(&repo, &next).unwrap();
         assert!(!lock.exists() && !mark.exists());
         assert_eq!(git(&repo, &["rev-parse", "HEAD"]).unwrap().trim(), next);
