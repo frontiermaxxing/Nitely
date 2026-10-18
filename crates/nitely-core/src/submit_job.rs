@@ -222,6 +222,19 @@ fn runs_job(command_line: &str, job: &Job) -> bool {
 /// How a job whose process died says so, which a crew supervisor reads to run it again.
 pub const ABANDONED: &str = "its process ended before it finished";
 
+/// Fails job `id` with `why` when its process cannot open the database at `path` because a newer
+/// build upgraded it (NIT-314): through a plain connection, since `Db::open` refuses it. It reads
+/// as ABANDONED, so a crew supervisor hands it in again as it does a job whose process died.
+pub fn fail_unopened(path: &Path, id: i64, why: &str) -> Result<()> {
+    let conn = rusqlite::Connection::open(path)?;
+    conn.busy_timeout(Duration::from_secs(10))?;
+    conn.execute(
+        "UPDATE submit_job SET state = 'failed', ended_at = ?2, error = ?3 WHERE id = ?1 AND state IN ('queued', 'running')",
+        params![id, now(), format!("{ABANDONED}: {why}; submit again once the newer version is installed")],
+    )?;
+    Ok(())
+}
+
 /// Whether a process runs: asked of the OS directly, since a job's status is read often and a
 /// wrong "gone" fails a job that is about to finish.
 pub(crate) fn process_runs(pid: u32) -> bool {

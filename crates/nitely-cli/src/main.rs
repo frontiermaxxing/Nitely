@@ -4,6 +4,7 @@
 mod crew;
 mod lanes;
 mod mcp;
+mod newer;
 mod serve;
 mod ui;
 
@@ -617,6 +618,7 @@ enum RepoCmd {
 /// stack frames in a debug build, past the 1 MB Windows gives a process's main thread, and a new
 /// subcommand can tip it over (the binary then dies at start with a stack overflow).
 fn main() {
+    newer::started();
     let worker = std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
         .spawn(cli_main)
@@ -1288,7 +1290,14 @@ fn run(cmd: Cmd) -> Result<()> {
         }
         Cmd::TriageJob { id } => {
             let config = Config::load()?;
-            let mut db = Db::open_default()?;
+            let mut db = match Db::open_default() {
+                Ok(db) => db,
+                Err(e) if newer::is_newer_database(&e) => {
+                    newer::hand_over_or_return();
+                    bail!("{}", newer::older_build(&e));
+                }
+                Err(e) => return Err(e),
+            };
             print_json(&nitely_core::triage::answer(&mut db, &config, id)?)
         }
         Cmd::InboxRate { project, days } => {
@@ -1298,7 +1307,17 @@ fn run(cmd: Cmd) -> Result<()> {
         }
         Cmd::SubmitJob { id } => {
             let config = Config::load()?;
-            let mut db = Db::open_default()?;
+            let mut db = match Db::open_default() {
+                Ok(db) => db,
+                // Older than the database: the job goes to the newer build being installed, or
+                // says why it stopped, not that its process ended for no reason (NIT-314).
+                Err(e) if newer::is_newer_database(&e) => {
+                    newer::hand_over_or_return();
+                    nitely_core::submit_job::fail_unopened(&paths::db_path(), id, &newer::older_build(&e))?;
+                    return Err(e);
+                }
+                Err(e) => return Err(e),
+            };
             let job = nitely_core::submit_job::run_in_background(&mut db, &config, id)?;
             print_json(&job)?;
             Ok(())

@@ -308,6 +308,13 @@ pub fn run_detached() -> Result<()> {
     ANSWER.set(PathBuf::from(req(&request, "out")?)).ok();
     let answer = match run_tool_as(&server, name, &args, &params, Some(req(&request, "session")?)) {
         Ok(v) => json!({ "ok": v }),
+        // Older than the database: the newer build being installed answers instead (NIT-314).
+        Err(e) if crate::newer::is_newer_database(&e) => {
+            if crate::newer::hand_over_with_input(&input) {
+                return Ok(());
+            }
+            json!({ "error": crate::newer::older_build(&e) })
+        }
         Err(e) => json!({ "error": format!("{e:#}") }),
     };
     println!("{answer}");
