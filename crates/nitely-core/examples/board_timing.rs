@@ -35,7 +35,7 @@ fn main() -> anyhow::Result<()> {
     if let Some(wt) = std::env::args().nth(1) {
         let file = std::path::Path::new(&wt).join("board-timing.txt");
         std::fs::write(&file, "x")?;
-        let git = |args: &[&str]| Command::new("git").arg("-C").arg(&wt).args(args).status();
+        let git = |args: &[&str]| nitely_core::playbook::run_git(Command::new("git").arg("-C").arg(&wt).args(args));
         git(&["add", "board-timing.txt"])?;
         let t = Instant::now();
         let after = snapshot::read_git_from(&config, Some(&warm), &idle);
