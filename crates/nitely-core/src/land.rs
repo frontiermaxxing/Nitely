@@ -451,7 +451,7 @@ pub(crate) fn after_land(root: &Path, pb: &Playbook, report: &mut Landed) {
 /// mid-way would leave index.lock and every git command there would fail. A file naming this
 /// process goes beside the index first; a later land that finds index.lock with such a file whose
 /// process is gone knows the lock is a killed land's, and removes both (NIT-341). A lock with no
-/// such file (the person's own git, another tool) is left alone, and the error says where it is.
+/// such file (the person's own git, another tool) is left alone.
 pub(crate) fn fast_forward_main(root: &Path, to: &str) -> Result<()> {
     let git_dir = PathBuf::from(git(root, &["rev-parse", "--absolute-git-dir"])?.trim());
     let (index_lock, mark) = (git_dir.join("index.lock"), git_dir.join("nitely-fast-forward"));
@@ -478,13 +478,8 @@ pub(crate) fn fast_forward_main(root: &Path, to: &str) -> Result<()> {
         std::fs::remove_file(&index_lock).ok();
     }
     std::fs::remove_file(&mark).ok();
-    done.map(|_| ()).map_err(|e| {
-        if index_lock.exists() {
-            e.context(format!("{} exists: another git command holds the main checkout's index; if none runs there, remove it", index_lock.display()))
-        } else {
-            e
-        }
-    })
+    // What a refusal means for the person, a lock left there included: `refused_fast_forward`.
+    done.map(|_| ())
 }
 
 /// How long a fast-forward of the main checkout may take, for telling its lock from a later one.
@@ -1007,7 +1002,7 @@ mod tests {
         std::fs::write(&lock, "").unwrap();
         std::fs::File::options().write(true).open(&lock).unwrap().set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(600)).unwrap();
         let err = format!("{:#}", fast_forward_main(&repo, &next).unwrap_err());
-        assert!(err.contains("index.lock exists"), "{err}");
+        assert!(err.contains("index.lock"), "{err}");
         assert!(lock.exists() && !mark.exists());
         // A dead land's mark, but the lock was taken long after it: someone else's, left alone.
         std::fs::write(&mark, "fast-forward pid 4000000000 since then").unwrap();
