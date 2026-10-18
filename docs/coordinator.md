@@ -63,7 +63,7 @@ Andrew", and once it read the code to confirm a finding was stale (lanes.rs:78 o
 | **Keep workers apart** | Lanes by area; file ownership said in notes ("I'm not editing crew.rs"); agreements between lanes through issue notes | `next_task` holds back an issue whose files overlap work in flight (NIT-139, from branch diffs and paths the body names); the planner names each issue's files so overlap sees them before any branch exists | NIT-243, NIT-244 |
 | **Start the next thing** | 39 messages, most of them when a lane finished ("Next lane for you"); 36 wake-ups to notice | The supervisor fills free slots with the next ready issue of the active goal, in plan order | NIT-243 |
 | **Watch** | Read worker reports, `list_events`, CI runs (`gh run list`) | The goal view and the morning report: landed / total, at risk, expected finish | NIT-247 |
-| **Answer routine questions** | 11 of the 30 messages back were questions: who owns NIT-182, resubmit or wait, can an agent unpark a human-owned issue | Triage: a crew worker with a triage brief answers routine asks from the board and the code, and records the answer | NIT-245 |
+| **Answer routine questions** | 11 of the 30 messages back were questions: who owns NIT-182, resubmit or wait, can an agent unpark a human-owned issue | Triage: an agent's routine question goes to a triage worker, never the Inbox; the answer is a note on the issue, and only a question that is the person's becomes an ask | NIT-245 |
 | **Decide what reaches the person** | "Don't route this through Andrew"; stale carried findings checked by hand | Triage rules (below), on top of what already landed: stale findings re-checked (NIT-214), stalled rounds become signed acceptance requests (NIT-220), accepted findings let land through (NIT-191) | NIT-245 |
 | **Carry decisions** | 22 messages beginning "Andrew approved", "Andrew decided", "Product decision" | Gone: the person answers in the Inbox and the asking agent gets the answer (`get_answer`); a goal plan's approval files its issues | done |
 | **Recover** | After the freeze, one message to each of 7 lanes: check worktrees for a half-finished rebase or lost commit, rerun any gate or submit whose result you didn't see | The supervisor, at start and on every pass: worktrees checked, interrupted submit jobs run again, orphaned lane locks and runs cleared, hung workers stopped | NIT-246 |
@@ -88,12 +88,15 @@ Andrew", and once it read the code to confirm a finding was stale (lanes.rs:78 o
 3. **The plan names files.** Every planned issue says which files it touches, in its body, where
    `next_task`'s overlap check already reads paths. That is how two workers stay apart before
    either has a branch. It replaces "lanes by area".
-4. **Triage handles the routine, and records it.** An agent's ask goes to triage first when it is
-   about the board or the code: who holds a file, whether an issue is already done, whether a
-   carried finding still applies, resubmit or wait. A triage worker answers from the database and
-   the repository, and its answer is on the issue for the person to see. Stuck work is triage's
-   too: a land conflict goes back to its worker (as Crew does now, NIT-222), and a review that keeps
-   carrying a finding is reviewed fresh before it escalates.
+4. **Triage handles the routine, and records it; the Inbox stays the person's.** An ask is answered
+   by the person only, and that guard stays (`answer_ask` refuses any other actor). A question about
+   the board or the code is not an ask: who holds a file, whether an issue is already done, whether a
+   carried finding still applies, resubmit or wait. The agent sends it as a triage question, which a
+   triage worker answers from the database and the repository with a note on the issue, which the
+   asking agent reads and the person can see. Only when the question turns out to be on the closed
+   list below does triage file it as an ask, with what it found. Stuck work is triage's too: a land
+   conflict goes back to its worker (as Crew does now, NIT-222), and a review that keeps carrying a
+   finding is reviewed fresh before it escalates.
 5. **What reaches the person is a closed list:** a goal plan to approve; a change that needs their
    approval; a product question (scope, wording, what to build); something irreversible or outside
    the machine (credentials, accounts, licenses, signing, money); a finding an agent wants accepted
