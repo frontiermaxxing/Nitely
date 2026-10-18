@@ -64,13 +64,13 @@ export function GoalRows(props: { project?: string; version: number; onOpenIssue
   );
 }
 
-/** The crew on a goal: workers on its issues now, and what landed in the last day. Nothing when neither. */
+/** The crew on a goal: workers on its issues now, and what landed today. Nothing when neither. */
 function CrewOnGoal(props: { goal: GoalDetail["goal"] }) {
   const words = crewOnGoal(props.goal);
   if (!words) return null;
   const budget = props.goal.workers ? `, at most ${props.goal.workers} at once` : "";
   return (
-    <span className="goal-crew" title={`Crew workers on this goal now${budget}, and its issues landed in the last 24 hours`}>
+    <span className="goal-crew" title={`Crew workers on this goal now${budget}, and its issues landed since midnight`}>
       {words}
     </span>
   );

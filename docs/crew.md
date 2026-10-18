@@ -98,7 +98,8 @@ date first, then oldest), and each goal's issues in
 plan order, the order they were filed. A goal at its worker budget (its own `workers`, else
 `goal_workers`) leaves its other issues waiting and its slots to the next goal; so does a goal with
 nothing ready. Issues in no goal come after every goal's. Priority 1 goes first wherever it is. Each
-goal row shows how many workers are on it and what of it landed in the last day.
+goal row shows how many workers are on it and what of it landed today. A goal at its budget holds
+back even its priority 1 issues; planning issues (NIT-244) go first with priority 1.
 
 Which issue among those: `next_task` keeps parallel workers out of each other's files. Every issue in flight
 holds the files its branch changes and the paths its body names; a ready issue whose title, body or

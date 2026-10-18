@@ -230,15 +230,18 @@ pub struct GoalOrder {
     pub goal_of: HashMap<String, i64>,
     /// Active goals in order that have room for another worker.
     pub open: Vec<i64>,
-    /// Active goals at their worker budget: their issues wait, unless priority 1.
+    /// Active goals at their worker budget: their issues wait, whatever their priority.
     pub full: HashSet<i64>,
+    /// Issues that go first with priority 1: planning issues, which make the goals the rest
+    /// waits on (NIT-244).
+    pub first: HashSet<String>,
 }
 
 impl GoalOrder {
-    /// The candidates (key, urgency rank, number) as Crew takes them: priority 1 first, wherever
-    /// it is; then the open goals' issues, goal by goal, each goal's in plan order (the order they
-    /// were filed); then issues in no goal, as `next_task` orders them. A full goal's other issues
-    /// are left out.
+    /// The candidates (key, urgency rank, number) as Crew takes them: priority 1 and planning
+    /// issues first, wherever they are; then the open goals' issues, goal by goal, each goal's in
+    /// plan order (the order they were filed); then issues in no goal, as `next_task` orders them.
+    /// A goal at its budget has its issues left out, urgent ones too: the budget is the person's.
     pub fn arrange(&self, candidates: &[(String, i64, i64)]) -> Vec<(String, i64, i64)> {
         // (class, goal's place, order within it, candidate): urgent, in a goal, in none.
         let mut keyed: Vec<(u8, usize, i64, usize)> = candidates
@@ -247,8 +250,8 @@ impl GoalOrder {
             .filter_map(|(i, c)| {
                 let at = i as i64;
                 match self.goal_of.get(&c.0) {
-                    _ if c.1 <= 1 => Some((0, 0, at, i)),
                     Some(g) if self.full.contains(g) => None,
+                    _ if c.1 <= 1 || self.first.contains(&c.0) => Some((0, 0, at, i)),
                     Some(g) => Some(match self.open.iter().position(|o| o == g) {
                         Some(place) => (1, place, c.2, i),
                         None => (2, 0, at, i),
@@ -457,4 +460,21 @@ mod tests {
         assert!(!lock.exists(), "the pick's turn is given back");
         std::fs::remove_dir_all(base).ok();
     }
+
+    #[test]
+    fn goal_order_keeps_budgets_for_urgent_work_and_puts_planning_first() {
+        let order = GoalOrder {
+            goal_of: [("APP-1".to_string(), 1), ("APP-2".to_string(), 1), ("APP-3".to_string(), 2)].into_iter().collect(),
+            open: vec![2],
+            full: [1].into_iter().collect(),
+            first: ["APP-9".to_string()].into_iter().collect(),
+        };
+        // (key, urgency rank, number) as next_task orders them.
+        let candidates = [("APP-1".to_string(), 1, 1), ("APP-2".to_string(), 3, 2), ("APP-3".to_string(), 4, 3), ("APP-8".to_string(), 2, 8), ("APP-9".to_string(), 2, 9)];
+        let keys: Vec<String> = order.arrange(&candidates).into_iter().map(|(k, _, _)| k).collect();
+        // Goal 1 is at its budget: even its priority 1 issue waits. The planning issue goes first,
+        // then the open goal's issue, then work in no goal.
+        assert_eq!(keys, ["APP-9", "APP-3", "APP-8"]);
+    }
+
 }

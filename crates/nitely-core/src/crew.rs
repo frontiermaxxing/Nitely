@@ -717,8 +717,9 @@ impl Supervisor {
     fn goal_order(&self, db: &Db, rules: &CrewRules) -> Result<crate::overlap::GoalOrder> {
         let goals = db.goals(&self.project, false)?;
         let active: std::collections::HashSet<i64> = goals.iter().map(|g| g.id).collect();
-        let goal_of: HashMap<String, i64> =
-            db.list_issues(Some(&self.project), false)?.into_iter().filter_map(|i| i.goal.filter(|g| active.contains(g)).map(|g| (i.key, g))).collect();
+        let open = db.list_issues(Some(&self.project), false)?;
+        let first = open.iter().filter(|i| crate::goal_plans::is_planning(i)).map(|i| i.key.clone()).collect();
+        let goal_of: HashMap<String, i64> = open.into_iter().filter_map(|i| i.goal.filter(|g| active.contains(g)).map(|g| (i.key, g))).collect();
         let busy = self.running.iter().map(|r| r.issue.as_str()).chain(self.preparing.iter().map(|p| p.issue.key.as_str()));
         let mut working: HashMap<i64, i64> = HashMap::new();
         for key in busy {
@@ -726,7 +727,7 @@ impl Supervisor {
                 *working.entry(*g).or_default() += 1;
             }
         }
-        let mut order = crate::overlap::GoalOrder { goal_of, ..Default::default() };
+        let mut order = crate::overlap::GoalOrder { goal_of, first, ..Default::default() };
         for g in goals {
             let budget = g.workers.or((rules.goal_workers > 0).then_some(rules.goal_workers as i64));
             if budget.is_some_and(|b| working.get(&g.id).copied().unwrap_or(0) >= b) {

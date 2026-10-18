@@ -348,7 +348,7 @@ export interface Goal {
   workers?: number | null;
   /** Crew workers on its issues now. */
   working?: number;
-  /** Its issues that landed in the last day. */
+  /** Its issues that landed since local midnight. */
   landed_today?: number;
 }
 

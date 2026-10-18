@@ -33,7 +33,7 @@ pub struct Goal {
     pub workers: Option<i64>,
     /// Crew workers on its issues now.
     pub working: i64,
-    /// Its issues that landed in the last day.
+    /// Its issues that landed since local midnight.
     pub landed_today: i64,
 }
 
@@ -77,7 +77,7 @@ const COLUMNS: &str = "g.id, g.project, g.title, g.outcome, g.target_date, g.sta
     g.rank, g.workers,
     (SELECT COUNT(*) FROM crew_worker w JOIN issue i ON i.key = w.issue_key WHERE i.goal = g.id AND w.ended_at IS NULL),
     (SELECT COUNT(DISTINCT e.issue_key) FROM event e JOIN issue i ON i.key = e.issue_key
-      WHERE i.goal = g.id AND e.type = 'landed' AND e.ts >= CAST(strftime('%s', 'now') AS INTEGER) - 86400)";
+      WHERE i.goal = g.id AND e.type = 'landed' AND e.ts >= CAST(strftime('%s', 'now', 'localtime', 'start of day', 'utc') AS INTEGER))";
 
 /// How a project's active goals are ordered: the person's rank, then the nearest target date,
 /// then the oldest. What Crew works first (NIT-243) and the order the goal rows show.
