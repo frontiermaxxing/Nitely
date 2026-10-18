@@ -552,15 +552,40 @@ fn may_not_upgrade(db: &Path, real_db: &Path, exe: Option<&Path>, pending: Optio
 /// channel to an older one): it does not open it, so it can never write in a form the newer build
 /// misreads. `what` says what it does not know.
 fn newer_database(path: &Path, what: &str) -> String {
-    // Two builds of one version (development builds) tell apart only by what the database holds.
+    // What the database holds decides, never the version: a nightly of 0.1.0 sorts below a dev build
+    // of 0.1.0 and may still be newer code, or older (NIT-239). The versions only say which build.
     let by = std::fs::read_to_string(upgraded_by_path(path))
         .ok()
         .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty() && v != crate::update::VERSION);
-    match by {
-        Some(v) => format!("this database was upgraded by Nitely {v}; this is Nitely {}. Install {v} or newer", crate::update::VERSION),
-        None => format!("this database was upgraded by a newer Nitely ({what}); install the newer version"),
+        .filter(|v| !v.is_empty() && *v != build_stamp() && v != crate::update::VERSION);
+    let who = match by {
+        Some(v) => format!("Nitely {v} upgraded it, and this is Nitely {}", build_stamp()),
+        None => format!("a newer Nitely upgraded it; this is Nitely {}", build_stamp()),
+    };
+    format!(
+        "this database has {what}: {who}. Use that build or a newer one: from source, `cargo run --release -p nitely-cli -- install` in your checkout; otherwise update the app"
+    )
+}
+
+/// This build as the upgrade stamp names it: its version and channel, e.g. `0.1.0 (dev)`.
+fn build_stamp() -> String {
+    format!("{} ({})", crate::update::VERSION, crate::update::BUILD_CHANNEL)
+}
+
+/// Why this build would refuse the database at `path` (a build with a migration or a format it
+/// does not have upgraded it), or None: current, behind (this build would upgrade it), or not made
+/// yet. Reads it without changing it, for `nitely install`, which must never put in place a build
+/// that cannot open the person's database.
+pub fn refused_by_this_build(path: &Path) -> Result<Option<String>> {
+    if !path.exists() {
+        return Ok(None);
     }
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI)?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    Ok(match standing(&conn, MIGRATIONS)? {
+        Standing::Newer(what) => Some(newer_database(path, &what)),
+        Standing::Current | Standing::Behind => None,
+    })
 }
 
 impl Db {
@@ -594,7 +619,7 @@ impl Db {
                 use_wal(&conn).context("switching the database to WAL")?;
                 upgrade(&conn, migrations).context("upgrading the database")?;
                 // Who upgraded it, so an older build can say which version to install (`newer_database`).
-                std::fs::write(upgraded_by_path(path), crate::update::VERSION).ok();
+                std::fs::write(upgraded_by_path(path), build_stamp()).ok();
             }
         }
         Ok(Db { conn })
@@ -853,14 +878,35 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("t.db");
         drop(Db::open(&path).unwrap());
-        assert_eq!(std::fs::read_to_string(upgraded_by_path(&path)).unwrap(), crate::update::VERSION, "the upgrade names its version");
+        assert_eq!(std::fs::read_to_string(upgraded_by_path(&path)).unwrap(), build_stamp(), "the upgrade names its version and channel");
+        assert_eq!(refused_by_this_build(&path).unwrap(), None, "current");
+        assert_eq!(refused_by_this_build(&dir.join("none.db")).unwrap(), None, "not made yet");
+        assert!(!dir.join("none.db").exists(), "and not made by asking");
         Connection::open(&path).unwrap().pragma_update(None, "user_version", FORMAT + 1).unwrap();
-        std::fs::write(upgraded_by_path(&path), "9.9.0-nightly.20261016.g1a2b3c4").unwrap();
+        std::fs::write(upgraded_by_path(&path), "9.9.0-nightly.20261016.g1a2b3c4 (nightly)").unwrap();
         let err = Db::open(&path).err().unwrap().to_string();
-        assert!(err.contains("upgraded by Nitely 9.9.0-nightly.20261016.g1a2b3c4") && err.contains("Install 9.9.0-nightly"), "{err}");
+        assert!(err.contains(&format!("this database has schema {}", FORMAT + 1)) && err.contains("Nitely 9.9.0-nightly.20261016.g1a2b3c4 (nightly) upgraded it"), "{err}");
+        assert!(err.contains(&format!("this is Nitely {}", build_stamp())) && err.contains("cargo run --release -p nitely-cli -- install"), "{err}");
+        assert_eq!(refused_by_this_build(&path).unwrap(), Some(err), "install asks the same question, read-only");
         std::fs::remove_file(upgraded_by_path(&path)).unwrap();
         let err = Db::open(&path).err().unwrap().to_string();
-        assert!(err.contains(&format!("schema {}", FORMAT + 1)), "{err}");
+        assert!(err.contains(&format!("schema {}", FORMAT + 1)) && err.contains("a newer Nitely upgraded it"), "{err}");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A dev build of 0.1.0 with a migration a nightly of 0.1.0 does not have (NIT-239): the
+    /// nightly refuses by the migration, whatever the versions say, and names both builds.
+    #[test]
+    fn the_migration_decides_not_the_version() {
+        let dir = crate::paths::unique_temp("nitely-newer-migration", "");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        let newer: Vec<(&str, &str)> = MIGRATIONS.iter().copied().chain([("20991231-later", "CREATE TABLE later (id INTEGER PRIMARY KEY);")]).collect();
+        drop(Db::open_with(&path, &newer).unwrap());
+        std::fs::write(upgraded_by_path(&path), "0.9.0 (dev)").unwrap();
+        let err = Db::open(&path).err().unwrap().to_string();
+        assert!(err.contains("this database has migration 20991231-later, which this build does not have") && err.contains("Nitely 0.9.0 (dev) upgraded it"), "{err}");
+        assert!(refused_by_this_build(&path).unwrap().is_some());
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -930,7 +976,7 @@ mod tests {
         drop(Db::open_with(&path, &[PLANS, SIZE]).unwrap());
         std::fs::remove_file(upgraded_by_path(&path)).unwrap();
         let err = Db::open_with(&path, &[PLANS]).err().unwrap().to_string();
-        assert!(err.contains("upgraded by a newer Nitely (migration 20261018-issue-size"), "{err}");
+        assert!(err.contains("this database has migration 20261018-issue-size, which this build does not have: a newer Nitely upgraded it"), "{err}");
         std::fs::remove_dir_all(dir).ok();
     }
 

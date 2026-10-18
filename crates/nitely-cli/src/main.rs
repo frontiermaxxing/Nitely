@@ -806,6 +806,17 @@ fn run(cmd: Cmd) -> Result<()> {
                 }
             };
             let to = to.or_else(|| nitely_core::install::default_target(&from)).ok_or_else(|| anyhow::anyhow!("no home folder; pass --to"))?;
+            // Never put in place a build that cannot open the person's database: every hook, MCP
+            // call and `nitely run` would get its refusal. The app's installer runs this after an
+            // update, and a nightly once replaced a newer dev build that way (NIT-239). Only this
+            // build's own migrations are known here, so the check is for installing itself.
+            let me = std::env::current_exe()?;
+            let itself = from.canonicalize().ok().zip(me.canonicalize().ok()).is_some_and(|(a, b)| a == b);
+            if itself {
+                if let Some(why) = nitely_core::db::refused_by_this_build(&paths::db_path())? {
+                    bail!("not installing {} over {}: it could not open your database ({why}). The nitely there stays", from.display(), to.display());
+                }
+            }
             print_json(&nitely_core::install::install(&from, &to)?)
         }
         Cmd::Status { text, session } => {

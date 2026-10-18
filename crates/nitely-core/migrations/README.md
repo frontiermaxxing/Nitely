@@ -17,4 +17,6 @@ Two branches that each add a file touch no common lines, so they rebase without 
 
 Never edit, rename or delete a file that has landed: databases have run it under that name, and a
 database holding a name a build does not have is one a newer Nitely upgraded, which that build
-refuses to open.
+refuses to open, whatever the versions say; `nitely install` will not put such a build in place, so an
+update from an older channel cannot replace the CLI agents use with one that refuses their database
+(NIT-239).
