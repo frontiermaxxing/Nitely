@@ -169,12 +169,7 @@ impl Db {
     /// The acceptances on `key` that count: signed by the app's key, or by a phone still paired that
     /// signed within PHONE_SKEW of it, for the patch `patch`.
     pub fn accepted_for(&self, key: &str, patch: &str) -> Result<Vec<Accepted>> {
-        self.accepted_with(key, patch, crate::approval::trusted_key().ok())
-    }
-
-    /// `accepted_for`, checked with the key `public` (none: nothing counts).
-    fn accepted_with(&self, key: &str, patch: &str, public: Option<[u8; 32]>) -> Result<Vec<Accepted>> {
-        let Some(public) = public else { return Ok(vec![]) };
+        let Ok(public) = crate::approval::trusted_key() else { return Ok(vec![]) };
         Ok(self.signed_acceptances(key, &public)?.into_iter().filter(|a| a.patch_id == patch).collect())
     }
 
@@ -219,12 +214,7 @@ impl Db {
 
     /// The P0/P1 findings of `review` the person has not accepted for its patch: what still blocks it.
     pub fn unaccepted_blockers(&self, key: &str, review: &ReviewRecord) -> Result<Vec<Finding>> {
-        self.blockers_with(key, review, crate::approval::trusted_key().ok())
-    }
-
-    /// `unaccepted_blockers`, with acceptances checked with the key `public`.
-    fn blockers_with(&self, key: &str, review: &ReviewRecord, public: Option<[u8; 32]>) -> Result<Vec<Finding>> {
-        let accepted = self.accepted_with(key, &review.patch_id, public)?;
+        let accepted = self.accepted_for(key, &review.patch_id)?;
         Ok(review.findings.iter().filter(|f| f.priority <= 1 && !accepted.iter().any(|a| a.finding == f.text)).cloned().collect())
     }
 
@@ -287,11 +277,12 @@ impl Db {
     fn after_acceptance(&mut self, _ask: Ask, key: &str, finding: &AskedFinding, reason: &str, from: &str) -> Result<Decided> {
         let answered = self.answer_ask(_ask.id, &format!("Accepted: {reason}"), &Actor::Human)?;
         let review = self.reviews(key)?.into_iter().find(|r| !r.reviewer.is_empty()).context("no review")?;
-        // Where the issue goes is decided with the key the person just signed with: the keychain's,
-        // or under the test harness its throwaway one, so a harness run moves as a real one does.
-        // What lands is still checked against the keychain's key alone (land, `accepted_for`), so
-        // nothing the harness signed ever lands (NIT-157).
-        let blocking = self.blockers_with(key, &review, crate::approval::app_key().ok())?;
+        // The finding the person just accepted is decided by this call, whatever key signed it: under
+        // the test harness its throwaway key, which `accepted_for` never trusts. So a harness run
+        // moves as a real one does, while land still checks every acceptance against the keychain's
+        // key alone and nothing the harness signed ever lands (NIT-157).
+        let mut blocking = self.unaccepted_blockers(key, &review)?;
+        blocking.retain(|f| f.text != finding.text);
         // Handing a person's own issue back to the agents moves it, so its state is read after.
         if self.issue(key)?.with_context(|| format!("no issue {key}"))?.owner == "human" {
             self.set_owner(key, "agent", &Actor::Human)?;
