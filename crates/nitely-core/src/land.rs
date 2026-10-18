@@ -195,6 +195,8 @@ fn index_lock(root: &Path) -> Option<PathBuf> {
 /// change to the checkout while it is there (NIT-280). Before the gate, one from the minute before
 /// the land began may be a git still running; once the fast-forward was refused, it is not.
 pub(crate) fn left_index_lock(root: &Path, grace_secs: u64) -> Option<String> {
+    // A killed land's own lock is cleared, not judged (NIT-341).
+    clear_killed_fast_forward(root);
     let path = index_lock(root)?;
     let made = std::fs::metadata(&path).and_then(|m| m.modified()).ok()?;
     let began = std::fs::metadata(lock_path(root).ok()?).and_then(|m| m.modified()).ok()?;
@@ -447,6 +449,27 @@ pub(crate) fn after_land(root: &Path, pb: &Playbook, report: &mut Landed) {
     }
 }
 
+/// Removes the index.lock a land killed mid fast-forward left, with its mark: only when the mark's
+/// process is gone and the lock was taken during that fast-forward (one taken long after is
+/// someone else's). Run before anything judges a lock there, so a land after the killed one goes on.
+pub(crate) fn clear_killed_fast_forward(root: &Path) {
+    let Ok(git_dir) = git(root, &["rev-parse", "--absolute-git-dir"]) else { return };
+    let git_dir = PathBuf::from(git_dir.trim());
+    let (index_lock, mark) = (git_dir.join("index.lock"), git_dir.join("nitely-fast-forward"));
+    let Ok(text) = std::fs::read_to_string(&mark) else { return };
+    let pid = text.split_whitespace().skip_while(|w| *w != "pid").nth(1).and_then(|p| p.parse::<u32>().ok());
+    if pid.is_some_and(crate::procs::alive) {
+        return;
+    }
+    let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    if let (Some(since), Some(t)) = (modified(&mark), modified(&index_lock)) {
+        if t + FF_SLACK >= since && t <= since + FF_TAKES {
+            std::fs::remove_file(&index_lock).ok();
+        }
+    }
+    std::fs::remove_file(&mark).ok();
+}
+
 /// The main checkout's fast-forward to `to`. It writes that checkout's index, so a land killed
 /// mid-way would leave index.lock and every git command there would fail. A file naming this
 /// process goes beside the index first; a later land that finds index.lock with such a file whose
@@ -456,18 +479,7 @@ pub(crate) fn fast_forward_main(root: &Path, to: &str) -> Result<()> {
     let git_dir = PathBuf::from(git(root, &["rev-parse", "--absolute-git-dir"])?.trim());
     let (index_lock, mark) = (git_dir.join("index.lock"), git_dir.join("nitely-fast-forward"));
     let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
-    // A lock taken while a fast-forward ran: from `since`, within the time one takes.
-    let taken_during = |since: std::time::SystemTime| modified(&index_lock).is_some_and(|t| t + FF_SLACK >= since && t <= since + FF_TAKES);
-    if let Ok(text) = std::fs::read_to_string(&mark) {
-        let pid = text.split_whitespace().skip_while(|w| *w != "pid").nth(1).and_then(|p| p.parse::<u32>().ok());
-        if !pid.is_some_and(crate::procs::alive) {
-            // Only the dead land's own lock: one taken long after it is someone else's.
-            if modified(&mark).is_some_and(taken_during) {
-                std::fs::remove_file(&index_lock).ok();
-            }
-            std::fs::remove_file(&mark).ok();
-        }
-    }
+    clear_killed_fast_forward(root);
     let started = std::time::SystemTime::now();
     std::fs::write(&mark, format!("fast-forward pid {} since {}", std::process::id(), crate::issues::iso(now()))).ok();
     let done = git(root, &["merge", "--ff-only", to]);
