@@ -105,11 +105,11 @@ pub fn registration(nitely: &Path, home: &Path, os: Os) -> Registration {
         }
         Os::Linux(true) => {
             let unit = home.join(".config").join("systemd").join("user").join(UNIT);
-            // Started with the graphical session, not at boot: the app it opens needs the session's
-            // display, which a unit started before login never has (NIT-249).
+            // Started with the user manager, which every session has (graphical-session.target is
+            // never reached on a desktop without systemd integration). One started before the
+            // session's display borrows it when it opens a link (`open_in_app`, NIT-249).
             let text = format!(
-                "[Unit]\nDescription=Nitely issue links (http://127.0.0.1:{}/i/KEY)\nPartOf=graphical-session.target\nAfter=graphical-session.target\n\n\
-[Service]\nExecStart=\"{exe}\" links serve\nRestart=on-failure\n\n[Install]\nWantedBy=graphical-session.target\n",
+                "[Unit]\nDescription=Nitely issue links (http://127.0.0.1:{}/i/KEY)\n\n[Service]\nExecStart=\"{exe}\" links serve\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n",
                 links::PORT
             );
             Registration {
@@ -124,6 +124,34 @@ pub fn registration(nitely: &Path, home: &Path, os: Os) -> Registration {
             let entry = home.join(".config").join("autostart").join(DESKTOP);
             let text = format!("[Desktop Entry]\nType=Application\nName=Nitely issue links\nExec=\"{exe}\" links serve\nNoDisplay=true\nX-GNOME-Autostart-enabled=true\n");
             Registration { place: entry.to_string_lossy().into_owned(), command: format!("\"{exe}\" links serve"), files: vec![(entry, text)], on: vec![], off: vec![] }
+        }
+    }
+}
+
+/// On Linux, the other way to register: a user manager can answer at one login and not at another,
+/// so a listener registered either way is still registered (NIT-249).
+fn other_kind(os: Os) -> Option<Os> {
+    match os {
+        Os::Linux(systemd) => Some(Os::Linux(!systemd)),
+        _ => None,
+    }
+}
+
+/// What runs at login now, either way it is registered on this OS.
+fn registered_any(os: Os, nitely: &Path, home: &Path) -> Option<String> {
+    registered_command(os, &registration(nitely, home, os)).or_else(|| other_kind(os).and_then(|o| registered_command(o, &registration(nitely, home, o))))
+}
+
+/// Takes the other kind of registration off (Linux), so only one starts the listener at login.
+fn take_off_other_kind(os: Os, nitely: &Path, home: &Path) {
+    if let Some(other) = other_kind(os) {
+        let reg = registration(nitely, home, other);
+        // Without a user manager `systemctl --user disable` fails; removing the unit is enough then.
+        for c in &reg.off {
+            quiet(c).ok();
+        }
+        for (path, _) in &reg.files {
+            std::fs::remove_file(path).ok();
         }
     }
 }
@@ -192,12 +220,14 @@ pub struct Status {
 /// The listener's status for `nitely` (the path that should run at login).
 pub fn status(config: &crate::Config, nitely: &Path) -> Status {
     let os = Os::current();
-    let reg = registration(nitely, &crate::connect::agent_home(), os);
+    let home = crate::connect::agent_home();
+    let reg = registration(nitely, &home, os);
     let now = if allowed() { registered_command(os, &reg) } else { None };
+    let any = if allowed() { now.clone().or_else(|| registered_any(os, nitely, &home)) } else { None };
     Status {
         allowed: allowed(),
         off: config.links_service == Some(false),
-        registered: now.is_some(),
+        registered: any.is_some(),
         current: now.as_deref() == Some(reg.command.as_str()),
         answering: links::probe().map(|r| if r == Role::App { "app" } else { "service" }),
         place: reg.place,
@@ -227,7 +257,9 @@ pub fn install(nitely: &Path) -> Result<Status> {
         bail!("{}", older(nitely));
     }
     let os = Os::current();
-    let reg = registration(nitely, &crate::connect::agent_home(), os);
+    let home = crate::connect::agent_home();
+    let reg = registration(nitely, &home, os);
+    take_off_other_kind(os, nitely, &home);
     // A registration from an older path goes first, so only one listener runs at login.
     if os != Os::Windows {
         for c in &reg.off {
@@ -263,7 +295,9 @@ pub fn uninstall(nitely: &Path) -> Result<Status> {
         bail!("nothing to take off: issue links are never registered under the test harness or a stand-in agents' home");
     }
     let os = Os::current();
-    let reg = registration(nitely, &crate::connect::agent_home(), os);
+    let home = crate::connect::agent_home();
+    let reg = registration(nitely, &home, os);
+    take_off_other_kind(os, nitely, &home);
     // Taking off what is not there fails too, so a failure counts only when something stays registered.
     let mut failed = None;
     for c in &reg.off {
@@ -279,7 +313,7 @@ pub fn uninstall(nitely: &Path) -> Result<Status> {
         }
     }
     forget_cached();
-    if registered_command(os, &reg).is_some() {
+    if registered_any(os, nitely, &home).is_some() {
         return Err(failed.unwrap_or_else(|| anyhow::anyhow!("still registered")).context(format!("could not take the issue links listener off at {}", reg.place)));
     }
     let mut config = crate::Config::load()?;
@@ -326,7 +360,7 @@ pub fn registered() -> bool {
         }
     }
     let os = Os::current();
-    let yes = registered_command(os, &registration(Path::new("nitely"), &crate::connect::agent_home(), os)).is_some();
+    let yes = registered_any(os, Path::new("nitely"), &crate::connect::agent_home()).is_some();
     *cache = Some((Instant::now(), yes));
     yes
 }
@@ -364,8 +398,47 @@ fn session_env(shown: &str) -> Vec<(String, String)> {
         .lines()
         .filter_map(|l| l.split_once('='))
         .filter(|(k, _)| WANTED.contains(k))
-        .map(|(k, v)| (k.to_string(), v.trim_matches(|c| c == '"' || c == '\'').to_string()))
+        .map(|(k, v)| (k.to_string(), unquote(v)))
         .collect()
+}
+
+/// A value as `systemctl show-environment` prints it: plain, or shell-quoted when it has special
+/// characters (`$'/tmp/auth file'`, with C escapes inside).
+fn unquote(v: &str) -> String {
+    if let Some(inner) = v.strip_prefix("$'").and_then(|v| v.strip_suffix('\'')) {
+        let mut out = String::new();
+        let mut chars = inner.chars();
+        while let Some(c) = chars.next() {
+            if c != '\\' {
+                out.push(c);
+                continue;
+            }
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('r') => out.push('\r'),
+                Some('x') => {
+                    let hex: String = chars.clone().take(2).collect();
+                    match u8::from_str_radix(&hex, 16) {
+                        Ok(b) => {
+                            out.push(b as char);
+                            chars.nth(hex.len() - 1);
+                        }
+                        Err(_) => out.push('x'),
+                    }
+                }
+                Some(other) => out.push(other),
+                None => out.push('\\'),
+            }
+        }
+        return out;
+    }
+    for q in ['\'', '"'] {
+        if let Some(inner) = v.strip_prefix(q).and_then(|v| v.strip_suffix(q)) {
+            return inner.to_string();
+        }
+    }
+    v.to_string()
 }
 
 /// `nitely links serve`: answers issue links on the port while it is registered, each one opening
@@ -462,10 +535,11 @@ mod tests {
         let l = registration(nitely, home, Os::Linux(true));
         assert!(PathBuf::from(&l.place) == home.join(".config").join("systemd").join("user").join("nitely-links.service") && l.files[0].1.contains("ExecStart=\"/usr/local/bin/nitely\" links serve"));
         assert!(l.on.iter().any(|c| c.join(" ") == "systemctl --user enable --now nitely-links.service"));
-        // With the graphical session, never before it: the app it opens needs the display.
+        // With the user manager, which every session starts; graphical-session.target is not reached
+        // on a desktop without systemd integration.
         let unit = &l.files[0].1;
-        assert!(unit.contains("PartOf=graphical-session.target") && unit.contains("After=graphical-session.target") && unit.contains("WantedBy=graphical-session.target"), "{unit}");
-        assert!(!unit.contains("default.target"));
+        assert!(unit.contains("WantedBy=default.target") && !unit.contains("graphical-session"), "{unit}");
+        assert_eq!((other_kind(Os::Linux(true)), other_kind(Os::Linux(false)), other_kind(Os::Windows)), (Some(Os::Linux(false)), Some(Os::Linux(true)), None));
         let x = registration(nitely, home, Os::Linux(false));
         assert!(PathBuf::from(&x.place) == home.join(".config").join("autostart").join("nitely-links.desktop") && x.files[0].1.contains("Exec=\"/usr/local/bin/nitely\" links serve"));
     }
@@ -480,6 +554,11 @@ mod tests {
         assert_eq!(get("DBUS_SESSION_BUS_ADDRESS"), Some("unix:path=/run/user/1000/bus"), "a value with = in it is kept whole");
         assert_eq!(get("XAUTHORITY"), Some("/run/user/1000/.mutter-Xwaylandauth"), "quotes come off");
         assert_eq!(get("PATH"), None, "only what opening a window needs");
+        let escaped = session_env("XAUTHORITY=$'/tmp/auth file'\nDISPLAY=$'\\x3a1'\nXDG_CURRENT_DESKTOP=$'it\\'s'\n");
+        let get = |k: &str| escaped.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
+        assert_eq!(get("XAUTHORITY"), Some("/tmp/auth file"), "systemd's $'...' quoting is decoded");
+        assert_eq!(get("DISPLAY"), Some(":1"));
+        assert_eq!(get("XDG_CURRENT_DESKTOP"), Some("it's"));
         assert!(session_env("").is_empty());
     }
 
