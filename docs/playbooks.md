@@ -39,14 +39,24 @@ it) can have a task change both, and land both together. Declare the submodule:
 path = "engine"     # the submodule's folder in this repo
 branch = "main"     # the submodule's integration branch; the repo's own name when left out
 remote = "origin"   # where the submodule's branch is pushed; left out, it stays on this machine
+sparse = ["core", "ui/widgets"]  # cone-mode directories to check out; left out, the whole submodule
+checkout = "when_needed"         # or "every_task": when a task gets the submodule's worktree
 ```
 
 Leave `remote` out for a submodule with no remote of its own (its only remote is an upstream you
 never push to): its integration branch then lives only in the repo's own copy of the submodule.
 
-- **start_task** cuts the task branch in the submodule too, from its integration branch, as a
-  worktree of the repo's own copy of the submodule at `<worktree>/engine`. Commit there, then commit
-  the moved pointer in the task worktree (`git add engine`), like any other change.
+- **start_task** cuts the task branch in the submodule too, as a worktree of the repo's own copy of
+  the submodule at `<worktree>/engine`, from the commit the repo points it at. Commit there, then
+  commit the moved pointer in the task worktree (`git add engine`), like any other change. With
+  `checkout = "when_needed"` (the default) it does so only when the task needs it: when the issue
+  names a path in it (`engine/core/net.c`), when the task already has work there, or on the first
+  `widen` of a path under it (`nitely widen engine/ui/widgets`, MCP: `widen`). A task that never
+  touches the submodule never writes it, its folder left empty as an unchecked-out submodule's is.
+  `"every_task"` makes it for every task (when the repo's tests read the submodule, say). With
+  `sparse`, the worktree is a cone-mode sparse checkout of those directories, plus those of the
+  paths the issue names in it; `widen` adds more. A large submodule then costs a task only the
+  part it works in.
 - **submit** refuses a submodule with uncommitted changes or commits the pointer does not name (the
   reviewer would not see them), and the reviewer reads the submodule's code in the diff
   (`git diff --submodule=diff`), not a one-line pointer change. The review's patch covers the
@@ -64,7 +74,8 @@ never push to): its integration branch then lives only in the repo's own copy of
   change leaves alone is moved in the task's worktree to where the rebased branch points it, so the
   gate builds what lands. A repo with declared submodules lands each change alone, never in a batch.
 - **gate steps** can run only when the submodule moved (`when_changed = ["^engine$"]`). In a build
-  lane the submodule is checked out at the commit the snapshot points at, and `[lanes] keep` entries
+  lane the submodule is checked out at the commit the snapshot points at, sparse over its `sparse`
+  directories plus those the snapshot changes in it since the base, and `[lanes] keep` entries
   under its folder (`"engine/out"`) keep its build output between requests. Large-repo mode builds
   in your checkout and leaves its submodules alone, so it refuses a snapshot that points one
   elsewhere.

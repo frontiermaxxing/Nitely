@@ -1383,7 +1383,7 @@ when_changed = ["billing"]
         let upstream = base.join("engine-upstream");
         crate::test_repo::init(&upstream, &[("core.c", "int core;\n")]);
         let repo = base.join("repo");
-        let playbook = PLAYBOOK.replace("{sh}", &playbook::posix_sh()) + "[[submodules]]\npath = \"engine\"\n";
+        let playbook = PLAYBOOK.replace("{sh}", &playbook::posix_sh()) + "[[submodules]]\npath = \"engine\"\ncheckout = \"every_task\"\n";
         crate::test_repo::init(&repo, &[(playbook::PLAYBOOK_PATH, &playbook), ("shared.txt", "one\n")]);
         sh(&repo, &["-c", "protocol.file.allow=always", "submodule", "add", "-q", &upstream.to_string_lossy(), "engine"]);
         sh(&repo, &["commit", "-q", "-m", "the engine"]);

@@ -1087,7 +1087,7 @@ pub fn start_task(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, 
 
     if worktree.join(".git").exists() {
         // A start that failed at the submodules (one not checked out yet) finishes them now.
-        for line in crate::submodules::start(repo_root, &playbook, &worktree, &branch)? {
+        for line in crate::submodules::start(repo_root, &playbook, &worktree, &branch, &format!("{}\n{}", issue.title, issue.body))? {
             db.log_event(actor, Some(&issue.key), Some(&worktree_str), "worktree", &format!("Started the submodule branch {line}"))?;
         }
         let light = crate::light::is_light(&worktree);
@@ -1124,7 +1124,7 @@ pub fn start_task(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, 
         git(repo_root, &["worktree", "add", "-b", &branch, &worktree_str, &from])?;
     }
     db.log_event(actor, Some(&issue.key), Some(&worktree_str), "worktree", &format!("Started {branch} from {from_words}"))?;
-    for line in crate::submodules::start(repo_root, &playbook, &worktree, &branch)? {
+    for line in crate::submodules::start(repo_root, &playbook, &worktree, &branch, &format!("{}\n{}", issue.title, issue.body))? {
         db.log_event(actor, Some(&issue.key), Some(&worktree_str), "worktree", &format!("Started the submodule branch {line}"))?;
     }
 
@@ -1172,7 +1172,7 @@ fn start_light(db: &Db, repo_root: &Path, playbook: &Playbook, issue: &IssueReco
         }
     }
     crate::light::add(repo_root, &worktree, &branch, start, exists, &sparse)?;
-    for line in crate::submodules::start(repo_root, playbook, &worktree, &branch)? {
+    for line in crate::submodules::start(repo_root, playbook, &worktree, &branch, &format!("{}\n{}", issue.title, issue.body))? {
         db.log_event(actor, Some(&issue.key), Some(&worktree_str), "worktree", &format!("Started the submodule branch {line}"))?;
     }
     let shape = if sparse.is_empty() { "light".to_string() } else { format!("light, sparse: {}", sparse.join(", ")) };

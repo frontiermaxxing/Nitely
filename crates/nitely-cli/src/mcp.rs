@@ -232,7 +232,7 @@ fn tools() -> Value {
         },
         {
             "name": "widen",
-            "description": "Add paths to a sparse light worktree: each file's directory, or the directory itself, so you can edit there. A whole worktree already has every path.",
+            "description": "Add paths to a sparse light worktree: each file's directory, or the directory itself, so you can edit there. A whole worktree already has every path. A path in a submodule the playbook declares goes to that submodule: its worktree is made now when the task has none, sparse when the playbook says so.",
             "inputSchema": { "type": "object", "required": ["paths"], "properties": {
                 "paths": { "type": "array", "items": { "type": "string" }, "description": "Relative to the repo root, e.g. [\"src/billing\", \"src/ui/Meter.tsx\"]." },
                 "key": { "type": "string", "description": "The issue whose worktree to widen; defaults to the worktree you are in." },

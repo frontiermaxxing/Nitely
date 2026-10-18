@@ -100,7 +100,7 @@ pub fn sparse_dirs(pb: &Playbook, repo_root: &Path, base: &str, text: &str) -> V
 
 /// The directory a path names at `rev`: itself when it is one, its parent when it is a file, and
 /// nothing for a file at the root (cone mode always has those) or a path that does not exist.
-fn dir_of(repo_root: &Path, rev: &str, path: &str) -> Option<String> {
+pub(crate) fn dir_of(repo_root: &Path, rev: &str, path: &str) -> Option<String> {
     let path = path.trim().trim_start_matches("./").trim_matches('/');
     let kind = git(repo_root, &["cat-file", "-t", &format!("{rev}:{path}")]).ok()?;
     match kind.trim() {
@@ -111,7 +111,7 @@ fn dir_of(repo_root: &Path, rev: &str, path: &str) -> Option<String> {
 }
 
 /// Without repeats, and without a directory another one in the list already holds.
-fn dedupe(mut dirs: Vec<String>) -> Vec<String> {
+pub(crate) fn dedupe(mut dirs: Vec<String>) -> Vec<String> {
     dirs.sort();
     dirs.dedup();
     let all = dirs.clone();
@@ -190,8 +190,18 @@ pub fn widen(worktree: &Path, paths: &[String]) -> Result<Widened> {
     if paths.iter().all(|p| p.trim().is_empty()) {
         bail!("name the paths to add, e.g. src/billing or src/billing/invoice.rs");
     }
+    // Paths in a declared submodule go to the submodule's worktree, made now when the task has none.
+    let root = crate::git::main_root(&worktree.to_string_lossy()).map(PathBuf::from);
+    let (paths, said) = match root.as_ref().map(|r| (r, Playbook::load(r))) {
+        Some((root, Ok(pb))) if !pb.submodules.is_empty() => crate::submodules::widen(root, &pb, worktree, paths)?,
+        _ => (paths.to_vec(), vec![]),
+    };
+    if paths.iter().all(|p| p.trim().is_empty()) {
+        return Ok(Widened { added: vec![], sparse: sparse_set(worktree).unwrap_or_default(), note: said.join(" ") });
+    }
+    let said = |note: String| if said.is_empty() { note } else { format!("{} {note}", said.join(" ")) };
     let Some(before) = sparse_set(worktree) else {
-        return Ok(Widened { added: vec![], sparse: vec![], note: "This worktree is not sparse: every path is already here.".into() });
+        return Ok(Widened { added: vec![], sparse: vec![], note: said("This worktree is not sparse: every path is already here.".into()) });
     };
     let mut missing = Vec::new();
     let mut dirs = Vec::new();
@@ -212,7 +222,7 @@ pub fn widen(worktree: &Path, paths: &[String]) -> Result<Widened> {
         git(worktree, &args).context("widening the sparse checkout")?;
     }
     let sparse = sparse_set(worktree).unwrap_or_default();
-    let note = if added.is_empty() { "Already here.".to_string() } else { format!("Added {}.", added.join(", ")) };
+    let note = said(if added.is_empty() { "Already here.".to_string() } else { format!("Added {}.", added.join(", ")) });
     Ok(Widened { added, sparse, note })
 }
 

@@ -121,7 +121,8 @@ enum Cmd {
         #[arg(long, default_value = "cli")]
         agent: String,
     },
-    /// Add paths to the current sparse light worktree (each file's directory, or the directory).
+    /// Add paths to the current sparse light worktree (each file's directory, or the directory); a
+    /// path in a declared submodule makes or widens that submodule's worktree.
     Widen {
         /// Relative to the repo root, e.g. src/billing src/ui/Meter.tsx.
         #[arg(required = true)]
