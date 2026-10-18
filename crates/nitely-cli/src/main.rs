@@ -357,7 +357,8 @@ enum LinksCmd {
     Install,
     /// Take it off at login; the running one stops within a minute and the app answers links again.
     Uninstall,
-    /// Run the listener (what login starts): answers links on 127.0.0.1:7423 and opens the app.
+    /// Run the listener (what login starts): answers links on 127.0.0.1:7423 and opens the app, for
+    /// as long as it is registered (`nitely links install`).
     Serve,
 }
 

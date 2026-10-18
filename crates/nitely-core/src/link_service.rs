@@ -338,9 +338,11 @@ pub fn open_in_app(key: &str) {
     }
 }
 
-/// `nitely links serve`: answers issue links on the port while it is registered (or for as long as
-/// it runs, when started by hand), each one opening the app. Another listener already on the port
-/// means this one is not needed; something else holding it is waited out.
+/// `nitely links serve`: answers issue links on the port while it is registered, each one opening
+/// the app. Another listener already on the port means this one is not needed; something else
+/// holding it is waited out. It never outlives its registration: a listener the app started just as
+/// you turned links off (the app asks the OS at most every 30 seconds) once took itself for one
+/// started by hand and kept the port for good, so the app could not answer links again (NIT-258).
 pub fn serve() -> Result<()> {
     if !allowed() {
         bail!("issue links are not served at login under the test harness or a stand-in agents' home");
@@ -348,8 +350,10 @@ pub fn serve() -> Result<()> {
     // One listener at a time: the app starts one whenever nothing answers, and a second one would
     // wait beside the first for the port (NIT-257).
     let Some(_one) = only_one(&crate::paths::data_dir())? else { return Ok(()) };
-    let by_login = registered();
-    let keep = || !by_login || registered();
+    if !registered() {
+        bail!("issue links are not registered at login; `nitely links install` registers and starts the listener");
+    }
+    let keep = registered;
     loop {
         match links::bind() {
             Ok(listener) => {
