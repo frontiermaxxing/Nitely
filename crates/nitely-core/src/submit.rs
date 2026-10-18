@@ -202,8 +202,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         next: String::new(),
     };
     if !out.gate.passed && out.gate.skipped.is_none() {
-        let failed = out.gate.results.last().map(|r| r.command.as_str()).unwrap_or("");
-        out.next = format!("The gate failed at `{failed}`. Fix it, commit, and submit again.");
+        out.next = after_failed_gate(&out.gate);
         return Ok(out);
     }
 
@@ -671,6 +670,19 @@ does not.\n",
         }
     }
     Ok(c)
+}
+
+/// What to do after a gate that did not pass: fix the step that failed, or, when a step ran past
+/// the lane's time limit, nothing in the change (NIT-310).
+fn after_failed_gate(gate: &GateResult) -> String {
+    if let Some(r) = gate.timed_out() {
+        return format!(
+            "The gate did not finish: `{}` ran past the lane's time limit and was stopped, which says nothing about this change. Read its log for where it hung, then submit again; a gate that needs longer needs a larger `[lanes] timeout_minutes`.",
+            r.command
+        );
+    }
+    let failed = gate.results.last().map(|r| r.command.as_str()).unwrap_or("");
+    format!("The gate failed at `{failed}`. Fix it, commit, and submit again.")
 }
 
 /// The note on a review run fresh, without the rounds before it, before stalled rounds escalate.
@@ -1860,6 +1872,18 @@ focus = \"Money first.\"
         assert!(f.db.open_asks().unwrap().iter().all(|a| a.issue_key.as_deref() != Some(issue.key.as_str())), "nothing for the person");
         let said: Vec<String> = f.db.timeline(&issue.key).unwrap().into_iter().filter_map(|t| t.summary).collect();
         assert!(said.iter().any(|s| s.contains("a fresh review, without the earlier rounds, looks")), "{said:?}");
+    }
+
+    #[test]
+    fn a_gate_step_that_ran_past_the_lane_limit_is_not_a_failure_to_fix() {
+        let step = |command: &str, timed_out: bool| playbook::CommandResult { command: command.into(), ok: false, seconds: 2700, output: String::new(), skipped: false, timed_out };
+        let gate = |r: playbook::CommandResult| GateResult { passed: false, commit: "abc1234".into(), results: vec![r], warnings: vec![], flaked: vec![], lane_run: Some(250) };
+        let stopped = after_failed_gate(&gate(step("npm run test:gate", true)));
+        assert!(stopped.contains("did not finish") && stopped.contains("`npm run test:gate` ran past the lane's time limit") && !stopped.contains("Fix it"), "{stopped}");
+        assert_eq!(after_failed_gate(&gate(step("cargo test", false))), "The gate failed at `cargo test`. Fix it, commit, and submit again.");
+        // Stored gates from before the field read as not timed out.
+        let old: playbook::CommandResult = serde_json::from_str(r#"{"command":"x","ok":false,"seconds":1,"output":""}"#).unwrap();
+        assert!(!old.timed_out);
     }
 
     #[test]

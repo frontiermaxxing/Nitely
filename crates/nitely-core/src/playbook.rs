@@ -287,7 +287,7 @@ pub(crate) fn refresh_setup(rules: &WorktreeRules, worktree: &Path, main: &Path,
         let (ok, output, seconds, flake) = run_retrying(&command, worktree, retries)?;
         let command = format!("{command} (setup again: a dependency file changed)");
         flakes.extend(flake.map(|f| Flake { command: command.clone(), ..f }));
-        results.push(CommandResult { command, ok, seconds, output, skipped: false });
+        results.push(CommandResult { command, ok, seconds, output, skipped: false, timed_out: false });
         if !ok {
             return Ok((results, false));
         }
@@ -1146,6 +1146,17 @@ pub struct CommandResult {
     pub output: String,
     #[serde(default)]
     pub skipped: bool,
+    /// It ran past the lane's time limit and was stopped (NIT-310): that says nothing about the
+    /// change, so the gate is not passed, but nobody is told to fix the code.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub timed_out: bool,
+}
+
+impl GateResult {
+    /// The step that stopped the gate when it ran past the lane's time limit, rather than failed.
+    pub fn timed_out(&self) -> Option<&CommandResult> {
+        self.results.iter().find(|r| r.timed_out)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1231,7 +1242,7 @@ pub fn start_task(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, 
     for command in &playbook.worktree.setup {
         let command = &expand(command, repo_root, &worktree, base);
         let (ok, output, seconds) = run_shell_kind(command, &worktree, "setup")?;
-        setup.push(CommandResult { command: command.clone(), ok, seconds, output, skipped: false });
+        setup.push(CommandResult { command: command.clone(), ok, seconds, output, skipped: false, timed_out: false });
         if !ok {
             db.log_event(actor, Some(&issue.key), Some(&worktree_str), "setup_failed", &format!("{command} failed"))?;
             break;
@@ -1398,12 +1409,12 @@ fn run_gate_inner(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<
         if crate::project_yolo::all_enabled(db, yolo_keys)? { return crate::project_yolo::skipped_gate(db, worktree, yolo_keys, actor); }
         let command = expand(&command, repo_root, worktree, base);
         if let Some(why) = skip {
-            results.push(CommandResult { command, ok: true, seconds: 0, output: format!("skipped: {why}"), skipped: true });
+            results.push(CommandResult { command, ok: true, seconds: 0, output: format!("skipped: {why}"), skipped: true, timed_out: false });
             continue;
         }
         let (ok, output, seconds, flake) = run_retrying(&command, worktree, retries)?;
         flaked.extend(flake);
-        results.push(CommandResult { command, ok, seconds, output, skipped: false });
+        results.push(CommandResult { command, ok, seconds, output, skipped: false, timed_out: false });
         if !ok {
             passed = false;
             break;

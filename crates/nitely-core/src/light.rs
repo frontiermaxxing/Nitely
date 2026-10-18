@@ -163,6 +163,7 @@ pub fn make_whole(worktree: &Path) -> Result<Vec<crate::playbook::CommandResult>
         seconds: started.elapsed().as_secs(),
         output: format!("It held {}; it is whole now.", dirs.join(", ")),
         skipped: false,
+        timed_out: false,
     }])
 }
 

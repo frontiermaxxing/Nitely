@@ -472,12 +472,12 @@ pub(crate) fn after_land(root: &Path, pb: &Playbook, report: &mut Landed) {
             Some(Err(e)) => Some(format!("its patterns do not parse: {}", first_line(&e))),
         };
         if let Some(why) = skip {
-            report.after.push(playbook::CommandResult { command, ok: true, seconds: 0, output: format!("skipped: {why}"), skipped: true });
+            report.after.push(playbook::CommandResult { command, ok: true, seconds: 0, output: format!("skipped: {why}"), skipped: true, timed_out: false });
             continue;
         }
         let result = match playbook::run_shell_kind(&command, root, "install") {
-            Ok((ok, output, seconds)) => playbook::CommandResult { command, ok, seconds, output, skipped: false },
-            Err(e) => playbook::CommandResult { command, ok: false, seconds: 0, output: format!("{e:#}"), skipped: false },
+            Ok((ok, output, seconds)) => playbook::CommandResult { command, ok, seconds, output, skipped: false, timed_out: false },
+            Err(e) => playbook::CommandResult { command, ok: false, seconds: 0, output: format!("{e:#}"), skipped: false, timed_out: false },
         };
         if result.ok {
             covered.push(step);
@@ -621,6 +621,9 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
     let passed = gate.passed || gate.skipped.is_some();
     report.gate = Some(gate);
     if !passed {
+        if let Some(r) = report.gate.as_ref().and_then(|g| g.timed_out()) {
+            bail!("the gate did not finish: `{}` ran past the lane's time limit and was stopped, which says nothing about {branch}; land again", r.command);
+        }
         bail!("the gate failed; fix it on {branch}, submit, and land again");
     }
     if rev(root, &base)? != before {

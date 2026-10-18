@@ -1046,7 +1046,7 @@ fn gate_inner(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: 
     let short = snap.commit[..snap.commit.len().min(7)].to_string();
     let project = issue.and_then(|k| db.issue(k).ok().flatten()).and_then(|i| i.project).unwrap_or_default();
     let base = pb.integration_branch().to_string();
-    let skipped = |why: &str, command: &str| playbook::CommandResult { command: command.to_string(), ok: true, seconds: 0, output: format!("skipped: {why}"), skipped: true };
+    let skipped = |why: &str, command: &str| playbook::CommandResult { command: command.to_string(), ok: true, seconds: 0, output: format!("skipped: {why}"), skipped: true, timed_out: false };
     // The commands as the playbook writes them: the record's command, and what an earlier pass of
     // the same tree must have run.
     let to_run: Vec<&str> = steps.iter().filter(|(_, skip)| skip.is_none()).map(|(c, _)| c.as_str()).collect();
@@ -1111,7 +1111,8 @@ fn gate_inner(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: 
                 let output = log_since(log, from);
                 let seconds = started.elapsed().as_secs();
                 if timed_out {
-                    results.push(playbook::CommandResult { command: command.clone(), ok: false, seconds, output, skipped: false });
+                    let output = format!("Ran past the lane's {}-minute limit and was stopped.\n{output}", limit.as_secs() / 60);
+                    results.push(playbook::CommandResult { command: command.clone(), ok: false, seconds, output, skipped: false, timed_out: true });
                     return Ok(Ended { code: None, timed_out: true, peak });
                 }
                 if code == Some(0) {
@@ -1124,11 +1125,11 @@ fn gate_inner(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: 
                         });
                         flaked.push(playbook::Flake { command: command.clone(), tests, output: failures.swap_remove(0) });
                     }
-                    results.push(playbook::CommandResult { command: command.clone(), ok: true, seconds, output, skipped: false });
+                    results.push(playbook::CommandResult { command: command.clone(), ok: true, seconds, output, skipped: false, timed_out: false });
                     break;
                 }
                 if failures.len() as u32 >= retries {
-                    results.push(playbook::CommandResult { command: command.clone(), ok: false, seconds, output, skipped: false });
+                    results.push(playbook::CommandResult { command: command.clone(), ok: false, seconds, output, skipped: false, timed_out: false });
                     return Ok(Ended { code, timed_out: false, peak });
                 }
                 failures.push(output);
@@ -1147,7 +1148,7 @@ fn gate_inner(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: 
     if let Some(why) = &run.error {
         // The setup's own output too, so the caller sees why it failed.
         let output = if run.output.trim().is_empty() { why.clone() } else { format!("{why}\n{}", run.output) };
-        results.push(playbook::CommandResult { command: format!("lane {}", run.lane.unwrap_or(0)), ok: false, seconds: 0, output, skipped: false });
+        results.push(playbook::CommandResult { command: format!("lane {}", run.lane.unwrap_or(0)), ok: false, seconds: 0, output, skipped: false, timed_out: false });
     }
     Ok(GateRun { yolo_skipped, commit: short, passed: run.passed() && !yolo_skipped, results, flaked, run: Some(run.id), warnings })
 }
