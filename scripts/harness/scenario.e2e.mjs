@@ -191,7 +191,7 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
     assert.equal(d4.reviews[0].verdict, "pass");
     assert.equal(d3.reviews[0].verdict, "changes", "its own P1, from the same batch");
     assert.match(d3.reviews[0].findings[0].text, /Risky default/);
-    assert.ok(d2.timeline.some((t) => t.kind === "review_started" && (t.summary ?? "").includes(`in a batch with ${C}`)), "the timeline says which batch");
+    assert.ok(d2.timeline.some((t) => t.kind === "review_started" && /in a batch with /.test(t.summary ?? "") && (t.summary ?? "").includes(C) && (t.summary ?? "").includes(D)), "the timeline says which batch");
     assert.equal(d3.batches.reviews[0].sent_back?.why, "own", "and why the batch sent it back");
     assert.equal(d3.issue.state, "In Progress", "back to its agent");
 
