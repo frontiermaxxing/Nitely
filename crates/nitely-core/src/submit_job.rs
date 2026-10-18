@@ -41,6 +41,8 @@ pub struct Job {
     pub started_at: Option<i64>,
     pub ended_at: Option<i64>,
     pub pid: Option<i64>,
+    /// Run by a process of its own (`nitely submit-job <id>`), not in its caller.
+    pub detached: bool,
     /// What `submit` returned, as it does when it blocks.
     pub result: Option<Value>,
     pub error: Option<String>,
@@ -74,8 +76,30 @@ impl Job {
     }
 }
 
+impl Db {
+    /// The submit that came back to `requested_by` with work for it, in `project`, for `next_task`
+    /// to hand back before any new issue: its issue's latest submit, while the issue is still In
+    /// Progress. One that a later submit (a foreground one makes no job) or a land made moot is
+    /// marked told, so it does not come back later.
+    pub fn returned_submit(&self, requested_by: &str, project: &str) -> Result<Option<Job>> {
+        let of_project = |key: &str| key.split_once('-').is_some_and(|(p, _)| p.eq_ignore_ascii_case(project));
+        for j in self.undelivered_submit_jobs(requested_by)? {
+            if !j.needs_the_submitter() || !of_project(&j.issue) {
+                continue;
+            }
+            let latest = self.latest_submit_job(&j.issue)?.is_some_and(|l| l.id == j.id);
+            let still_in_progress = self.issue(&j.issue)?.is_some_and(|i| i.state == "In Progress");
+            if latest && still_in_progress {
+                return Ok(Some(j));
+            }
+            self.mark_submit_jobs_delivered(&[j.id])?;
+        }
+        Ok(None)
+    }
+}
+
 const COLUMNS: &str =
-    "id, issue_key, worktree, branch, head, requested_by, skip_review, local_only, state, queued_at, started_at, ended_at, pid, result, error, delivered_at";
+    "id, issue_key, worktree, branch, head, requested_by, skip_review, local_only, state, queued_at, started_at, ended_at, pid, result, error, delivered_at, detached";
 
 fn row(r: &rusqlite::Row) -> rusqlite::Result<Job> {
     let result: Option<String> = r.get(13)?;
@@ -96,6 +120,7 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<Job> {
         result: result.and_then(|t| serde_json::from_str(&t).ok()),
         error: r.get(14)?,
         delivered_at: r.get(15)?,
+        detached: r.get(16)?,
     })
 }
 
@@ -151,9 +176,9 @@ impl Db {
             return Ok(j);
         }
         // Long after the job started, its process id may be one the OS has given to another program
-        // since: past that, the process must still be a nitely (when its command line can be read).
+        // since: past that, the process must still be this job's (when its command line can be read).
         let since = j.started_at.unwrap_or(j.queued_at);
-        let reused = || now() - since > PID_CHECK_AFTER_SECS && crate::procs::command_line(pid).is_some_and(|c| !c.to_lowercase().contains("nitely"));
+        let reused = || now() - since > PID_CHECK_AFTER_SECS && crate::procs::command_line(pid).is_some_and(|c| !runs_job(&c, &j));
         if process_runs(pid) && !reused() {
             return Ok(j);
         }
@@ -174,6 +199,18 @@ impl Db {
 }
 
 const PID_CHECK_AFTER_SECS: i64 = 30 * 60;
+
+/// Whether a process's command line is the one running `job`: `nitely submit-job <id>` for a job
+/// run by a process of its own (a queued job's pid is always that process's), or a nitely for one
+/// run in its caller.
+fn runs_job(command_line: &str, job: &Job) -> bool {
+    let c = command_line.to_lowercase();
+    if job.detached || job.state == "queued" {
+        c.split_whitespace().collect::<Vec<_>>().windows(2).any(|w| w[0] == "submit-job" && w[1] == job.id.to_string())
+    } else {
+        c.contains("nitely")
+    }
+}
 
 /// Whether a process runs: asked of the OS directly, since a job's status is read often and a
 /// wrong "gone" fails a job that is about to finish.
@@ -359,14 +396,14 @@ pub fn submit_async(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, a
 /// Runs a job: the job's own process calls this. One job of an issue runs at a time (a file lock
 /// per issue); a job superseded while it waited does nothing.
 pub fn run(db: &mut Db, config: &crate::Config, id: i64) -> Result<Job> {
-    run_job(db, config, id).map(|(job, _)| job)
+    run_job(db, config, id, false).map(|(job, _)| job)
 }
 
 /// `run`, then, once the job has handed its result back and released the issue, its change's
 /// shadow batch (`[review] batch = "shadow"`, NIT-217). Only the job's own process does this: it
 /// waits for the batch's window, and nobody waits on that process.
 pub fn run_in_background(db: &mut Db, config: &crate::Config, id: i64) -> Result<Job> {
-    let (job, shadow) = run_job(db, config, id)?;
+    let (job, shadow) = run_job(db, config, id, true)?;
     if let Some(shadow) = shadow {
         if let Err(e) = crate::review_batch::shadow(db, &shadow) {
             eprintln!("the shadow batch of {} did not finish: {e:#}", job.issue);
@@ -375,7 +412,9 @@ pub fn run_in_background(db: &mut Db, config: &crate::Config, id: i64) -> Result
     Ok(job)
 }
 
-fn run_job(db: &mut Db, config: &crate::Config, id: i64) -> Result<(Job, Option<crate::review_batch::Shadow>)> {
+/// `detached`: this is the job's own process, which nobody waits on; otherwise the job runs in its
+/// caller (no process could be started), which waits for it, so it never waits for a review batch.
+fn run_job(db: &mut Db, config: &crate::Config, id: i64, detached: bool) -> Result<(Job, Option<crate::review_batch::Shadow>)> {
     let job = db.submit_job(id)?.with_context(|| format!("no submit job {id}"))?;
     if job.state != "queued" {
         return Ok((job, None));
@@ -385,8 +424,8 @@ fn run_job(db: &mut Db, config: &crate::Config, id: i64) -> Result<(Job, Option<
     let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(locks.join(format!("{}.lock", job.issue.to_uppercase())))?;
     lock.lock().context("waiting for the issue's previous submit")?;
     let started = db.conn.execute(
-        "UPDATE submit_job SET state = 'running', started_at = ?2, pid = ?3 WHERE id = ?1 AND state = 'queued'",
-        params![id, now(), std::process::id()],
+        "UPDATE submit_job SET state = 'running', started_at = ?2, pid = ?3, detached = ?4 WHERE id = ?1 AND state = 'queued'",
+        params![id, now(), std::process::id(), detached],
     )?;
     if started == 0 {
         // Superseded while it waited for the lock.
@@ -394,7 +433,7 @@ fn run_job(db: &mut Db, config: &crate::Config, id: i64) -> Result<(Job, Option<
     }
     let actor = if job.requested_by == "human" { Actor::Human } else { Actor::Agent(job.requested_by.clone()) };
     // Only a submit in the background may wait for a review batch: nobody waits on it (NIT-216).
-    let opts = SubmitOptions { dir: &job.worktree, issue_key: Some(&job.issue), skip_review: job.skip_review, local_only: job.local_only, batch: true };
+    let opts = SubmitOptions { dir: &job.worktree, issue_key: Some(&job.issue), skip_review: job.skip_review, local_only: job.local_only, batch: detached };
     let outcome = crate::submit::submit(db, config, &opts, &actor);
     match &outcome {
         Ok(s) => {
@@ -570,5 +609,55 @@ mod tests {
         let said: Vec<String> = db.timeline(&key).unwrap().into_iter().filter_map(|t| t.summary).collect();
         assert!(said.iter().any(|s| s.contains("running it here")), "{said:?}");
         std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn a_failed_submit_comes_back_only_while_its_issue_waits_for_it() {
+        let (base, db_path, _config, key, wt) = fixture();
+        let mut db = Db::open(&db_path).unwrap();
+        let actor = Actor::Agent("codex:session-1".into());
+        let dir = wt.to_string_lossy().into_owned();
+        let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: false };
+        let job = enqueue(&db, &opts, &actor).unwrap();
+        db.conn.execute("UPDATE submit_job SET state = 'failed', error = 'the gate failed' WHERE id = ?1", [job.id]).unwrap();
+        let project = key.split('-').next().unwrap().to_string();
+        assert_eq!(db.returned_submit(actor.id(), &project).unwrap().map(|j| j.id), Some(job.id));
+        assert_eq!(db.returned_submit(actor.id(), "OTHER").unwrap(), None, "only the project asked for");
+        // A foreground submit passed since (it makes no job): the failure is moot, and told.
+        db.move_issue(&key, "In Review", None, None, &actor).unwrap();
+        assert_eq!(db.returned_submit(actor.id(), &project).unwrap(), None);
+        assert!(db.undelivered_submit_jobs(actor.id()).unwrap().is_empty());
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn a_reused_process_id_is_not_the_job() {
+        let job = |state: &str, detached: bool| Job {
+            id: 42,
+            issue: "APP-1".into(),
+            worktree: String::new(),
+            branch: String::new(),
+            head: String::new(),
+            requested_by: String::new(),
+            skip_review: false,
+            local_only: false,
+            state: state.into(),
+            queued_at: 0,
+            started_at: None,
+            ended_at: None,
+            pid: Some(7),
+            detached,
+            result: None,
+            error: None,
+            delivered_at: None,
+        };
+        let own = r#"C:\Users\me\.cargo\bin\nitely.exe submit-job 42"#;
+        assert!(runs_job(own, &job("running", true)) && runs_job(own, &job("queued", false)));
+        // Another job's process, or a long-lived nitely that took the number: not this job.
+        assert!(!runs_job(r#"C:\Users\me\.cargo\bin\nitely.exe submit-job 420"#, &job("running", true)));
+        assert!(!runs_job(r#"C:\Users\me\.cargo\bin\nitely.exe mcp"#, &job("running", true)));
+        // Run in its caller (no process could be started): that caller is a nitely.
+        assert!(runs_job(r#"C:\Users\me\.cargo\bin\nitely.exe mcp"#, &job("running", false)));
+        assert!(!runs_job(r#"C:\Windows\System32\notepad.exe"#, &job("running", false)));
     }
 }
