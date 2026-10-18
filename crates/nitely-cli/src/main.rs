@@ -68,7 +68,14 @@ enum Cmd {
         /// Where to put it; the `nitely` on PATH by default, else ~/.cargo/bin.
         #[arg(long)]
         to: Option<std::path::PathBuf>,
+        /// Install a --from build too old to say whether it opens your database.
+        #[arg(long)]
+        force: bool,
     },
+    /// Exit 0 when this build can open the database, else 3 and say why: what `install --from`
+    /// asks another build before putting it in place.
+    #[command(hide = true)]
+    CheckDatabase,
     /// Report what you are doing, from the current directory's worktree.
     Status {
         /// One line, e.g. "running test:gate".
@@ -789,7 +796,14 @@ fn run(cmd: Cmd) -> Result<()> {
             }
             print_json(&found)
         }
-        Cmd::Install { from, to } => {
+        Cmd::CheckDatabase => match nitely_core::db::refused_by_this_build(&paths::db_path())? {
+            Some(why) => {
+                eprintln!("{why}");
+                std::process::exit(3);
+            }
+            None => Ok(()),
+        },
+        Cmd::Install { from, to, force } => {
             let from = match from {
                 Some(f) => f,
                 None => {
@@ -816,14 +830,28 @@ fn run(cmd: Cmd) -> Result<()> {
             }
             // Never put in place a build that cannot open the person's database: every hook, MCP
             // call and `nitely run` would get its refusal. The app's installer runs this after an
-            // update, and a nightly once replaced a newer dev build that way (NIT-239). Only this
-            // build's own migrations are known here, so the check is for installing itself.
+            // update, and a nightly once replaced a newer dev build that way (NIT-239). This build
+            // answers for itself; another build is asked (`check-database`), since only it knows
+            // its migrations.
             let me = std::env::current_exe()?;
             let itself = from.canonicalize().ok().zip(me.canonicalize().ok()).is_some_and(|(a, b)| a == b);
-            if itself {
-                if let Some(why) = nitely_core::db::refused_by_this_build(&paths::db_path())? {
-                    bail!("not installing {} over {}: it could not open your database ({why}). The nitely there stays", from.display(), to.display());
+            let refused = if itself {
+                nitely_core::db::refused_by_this_build(&paths::db_path())?
+            } else {
+                let asked = std::process::Command::new(&from).arg("check-database").output();
+                match asked.as_ref().map(|o| (o.status.code(), String::from_utf8_lossy(&o.stderr).trim().to_string())) {
+                    Ok((Some(0), _)) => None,
+                    Ok((Some(3), why)) => Some(why),
+                    _ if force => None,
+                    _ => bail!(
+                        "not installing {}: it cannot say whether it opens your database (a build older than this check, or not a nitely). Install it with --force to replace {} anyway",
+                        from.display(),
+                        to.display()
+                    ),
                 }
+            };
+            if let Some(why) = refused {
+                bail!("not installing {} over {}: it could not open your database ({why}). The nitely there stays", from.display(), to.display());
             }
             print_json(&nitely_core::install::install(&from, &to)?)
         }

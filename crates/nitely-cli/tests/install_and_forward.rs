@@ -139,6 +139,23 @@ fn install_refuses_a_build_that_could_not_open_the_database() {
     assert!(!out.status.success() && said.contains("could not open your database") && said.contains("20991231-later"), "{said}");
     assert_eq!(std::fs::read(&installed).unwrap(), b"the newer nitely", "the nitely in place stays");
 
+    // Another build given with --from is asked: a copy of this one answers for itself that it
+    // cannot open the database.
+    let other = dir.join(if cfg!(windows) { "other.exe" } else { "other" });
+    std::fs::copy(built, &other).unwrap();
+    let out = Command::new(built).args(["install", "--from"]).arg(&other).arg("--to").arg(&installed).env("NITELY_HOME", &home).env("NITELY_INSTALL_WITHIN", &dir).output().unwrap();
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success() && said.contains("20991231-later"), "{said}");
+    // One that cannot say (not a nitely, or one older than the check) goes in only with --force.
+    let mute = dir.join("mute.bin");
+    std::fs::write(&mute, b"not a program").unwrap();
+    let out = Command::new(built).args(["install", "--from"]).arg(&mute).arg("--to").arg(&installed).env("NITELY_HOME", &home).env("NITELY_INSTALL_WITHIN", &dir).output().unwrap();
+    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("--force"), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(std::fs::read(&installed).unwrap(), b"the newer nitely");
+    let out = Command::new(built).args(["install", "--force", "--from"]).arg(&mute).arg("--to").arg(&installed).env("NITELY_HOME", &home).env("NITELY_INSTALL_WITHIN", &dir).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(std::fs::read(&installed).unwrap(), b"not a program", "--force installs it");
+
     // And no test installs outside its own folder, whatever PATH finds.
     let out = Command::new(built).args(["install", "--to"]).arg(std::env::temp_dir().join("elsewhere").join(exe)).env("NITELY_HOME", dir.join("empty")).env("NITELY_INSTALL_WITHIN", &dir).output().unwrap();
     assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("NITELY_INSTALL_WITHIN allows only"), "{}", String::from_utf8_lossy(&out.stderr));
