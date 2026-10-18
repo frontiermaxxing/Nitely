@@ -309,9 +309,13 @@ priority. So Nitely holds what it starts to the machine:
   run's tree is measured every second or two and stopped the same way. Each lane run records its peak
   (`peak_memory`, and a line at the end of its log).
   A run's cap is also at most the memory above the floor shared by the slots (5 slots on 64 GB: 10.2
-  GB each), and each run records the cap it started with (`memory_cap`): a new run starts only while
-  the running runs' caps and its own fit above the floor, so raising the slots while builds run waits
-  for the older, larger caps to end (NIT-323).
+  GB each), and each run records the cap it started with (`memory_cap`). Admission sets aside what a
+  run is expected to take (`memory_reserved`, in `nitely lanes`): the p90 of the peaks its command
+  reached in its last 20 runs in its repo, plus a quarter, at least 2 GB, and its full cap for a
+  command with no history. A new run starts only while what is set aside for the running runs and
+  its own fit above the floor (NIT-323). Setting the caps aside instead left the machine's quick slot
+  standing empty with 5 runs going, though real peaks were well under the caps (NIT-363). The floor
+  check of the memory free now still comes first, and each run is still stopped at its cap.
 - **Priority.** All of them run at below-normal CPU priority with low I/O and memory priority on
   Windows (the job holds the priority of everything in it; what a command starts inherits the I/O
   priority), and at nice 10 elsewhere. Below normal costs nothing on an idle machine.

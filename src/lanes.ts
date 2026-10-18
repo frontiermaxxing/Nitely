@@ -145,7 +145,8 @@ export function chipWords(c: LaneChip, now: number): string {
   switch (c.state) {
     case "running": {
       const r = c.run!;
-      const words = [r.command, r.issue, forHowLong(now - (r.started_at ?? r.queued_at))].filter(Boolean).join(" · ");
+      const reserved = r.memory_reserved ? `${bytesWords(r.memory_reserved)} set aside` : null;
+      const words = [r.command, r.issue, forHowLong(now - (r.started_at ?? r.queued_at)), reserved].filter(Boolean).join(" · ");
       return c.checkout ? `building in your checkout: ${words}` : words;
     }
     case "waiting":

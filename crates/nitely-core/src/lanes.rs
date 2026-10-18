@@ -597,6 +597,13 @@ pub struct Run {
     pub waiting_memory: Option<String>,
     /// The most memory the run's processes held at once, in bytes, where the system tells it.
     pub peak_memory: Option<i64>,
+    /// What admission set aside for it, in bytes (NIT-363): its command's expected peak
+    /// (`expected_peak`), which the next runs' admission counts.
+    #[serde(default)]
+    pub memory_reserved: Option<i64>,
+    /// The cap it is held to, in bytes: past it, its processes are stopped (NIT-266).
+    #[serde(default)]
+    pub memory_cap: Option<i64>,
     /// Why it waits, in words, where the queue was read for it (`nitely lanes`, the app): the
     /// machine's slots, its own repo's queue or lanes, the person's checkout, or memory (NIT-291).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -612,7 +619,7 @@ impl Run {
 
 const COLUMNS: &str = "id, project, repo, issue_key, requested_by, kind, snapshot, tree, base, command, state, lane, executor, \
 queued_at, started_at, ended_at, exit_code, timed_out, setup_ran, files_switched, log_path, output, error, waiting_for, waiting_memory, peak_memory, pid, \
-pid_started";
+pid_started, memory_reserved, memory_cap";
 
 /// The process that asked for a run (NIT-270): its pid and when it started.
 #[derive(Debug, Clone, Default)]
@@ -657,6 +664,8 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<(Run, Requester)> {
             waiting_for: r.get(23)?,
             waiting_memory: r.get(24)?,
             peak_memory: r.get(25)?,
+            memory_reserved: r.get(28)?,
+            memory_cap: r.get(29)?,
             waiting_why: None,
         },
         Requester { pid: r.get(26)?, started: r.get(27)? },
@@ -1305,18 +1314,22 @@ fn run_cap() -> Option<u64> {
     memory_limits().map(|l| cap_for(&l, machine_budget().slots))
 }
 
-/// Why request `id` must wait for the memory the running runs may still take (NIT-323), or None:
-/// each running run may grow to the cap it started with (one started before the slots were raised
-/// keeps its larger cap), so a new one starts only while those caps and its own fit above the
-/// floor. A run whose cap was not recorded (an older nitely started it) counts at the full cap;
-/// a queued one that reserved its cap counts too (`reserve_cap`, under the admission lock).
+/// Why request `id` must wait for the memory the running runs are expected to take (NIT-323), or
+/// None: a new run starts only while what is set aside for the running runs and its own expected
+/// peak fit above the floor. What is set aside for a run is its command's expected peak
+/// (`expected_peak`, NIT-363), not the cap it is held to: runs rarely come near their cap, and
+/// setting caps aside left slots standing empty with memory to spare. A run with nothing set aside
+/// counts at the cap it started with, and one an older nitely started, with neither recorded, at
+/// the full cap; a queued one that reserved counts too (`reserve_cap`, under the admission lock).
+/// Admission's check of the memory free now against the floor comes first and still stands, and
+/// each run is still stopped at its cap.
 fn caps_fit(db: &Db, id: i64, limits: Option<&machine::Limits>, slots: u32) -> Result<Option<String>> {
     let Some(limits) = limits.filter(|l| l.floor > 0) else { return Ok(None) };
     let room = limits.total.saturating_sub(limits.floor);
-    let mine = cap_for(limits, slots);
-    // The running runs, and the queued ones that reserved their cap (admitted, about to start).
+    let mine = expected_peak_of(db, id, cap_for(limits, slots))?;
+    // The running runs, and the queued ones that reserved (admitted, about to start).
     let mut stmt = db.conn.prepare(
-        "SELECT memory_cap, pid, pid_started FROM lane_run WHERE id != ?1 AND (state = 'running' OR (state = 'queued' AND memory_cap IS NOT NULL))",
+        "SELECT COALESCE(memory_reserved, memory_cap), pid, pid_started FROM lane_run WHERE id != ?1 AND (state = 'running' OR (state = 'queued' AND memory_cap IS NOT NULL))",
     )?;
     let rows: Vec<(Option<i64>, Option<i64>, Option<String>)> = stmt.query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<_>>()?;
     // A run an older nitely started recorded no cap: it may hold the full one.
@@ -1330,19 +1343,53 @@ fn caps_fit(db: &Db, id: i64, limits: Option<&machine::Limits>, slots: u32) -> R
         return Ok(None);
     }
     Ok(Some(format!(
-        "waiting for memory: the running builds may grow to {} and this one to {}, more than the {} above the floor",
+        "waiting for memory: the running builds have {} set aside and this one needs {}, more than the {} above the floor",
         machine::gb(taken),
         machine::gb(mine),
         machine::gb(room)
     )))
 }
 
-/// Records the cap request `id` is admitted with, while it still holds the admission lock, so the
-/// next request to ask counts it before it is running (NIT-323).
+/// Records the cap request `id` is admitted with, and what is set aside for it (its expected peak,
+/// NIT-363), while it still holds the admission lock, so the next request to ask counts it before
+/// it is running (NIT-323).
 fn reserve_cap(db: &Db, id: i64, limits: Option<&machine::Limits>, slots: u32) -> Result<()> {
-    let cap = limits.map(|l| cap_for(l, slots) as i64);
-    db.conn.execute("UPDATE lane_run SET memory_cap = ?2 WHERE id = ?1", params![id, cap])?;
+    let cap = limits.map(|l| cap_for(l, slots));
+    let reserved = match cap {
+        Some(cap) => Some(expected_peak_of(db, id, cap)? as i64),
+        None => None,
+    };
+    db.conn.execute("UPDATE lane_run SET memory_cap = ?2, memory_reserved = ?3 WHERE id = ?1", params![id, cap.map(|c| c as i64), reserved])?;
     Ok(())
+}
+
+/// How many of a command's last finished runs in its repo its expected peak is read from.
+const PEAK_HISTORY: i64 = 20;
+
+/// The least admission sets aside for a run with history (NIT-363).
+const MIN_RESERVED: u64 = 2 * machine::GIB;
+
+/// What request `id` is expected to take at its peak (NIT-363), from the peaks its command's last
+/// runs in its repo reached (`expected_peak`).
+fn expected_peak_of(db: &Db, id: i64, cap: u64) -> Result<u64> {
+    let (repo, command): (String, String) = db.conn.query_row("SELECT repo, command FROM lane_run WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    let mut stmt = db.conn.prepare(
+        "SELECT peak_memory FROM lane_run WHERE repo = ?1 AND command = ?2 AND id != ?3 AND state = 'done' AND peak_memory IS NOT NULL ORDER BY id DESC LIMIT ?4",
+    )?;
+    let peaks: Vec<i64> = stmt.query_map(params![repo, command, id, PEAK_HISTORY], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    Ok(expected_peak(&peaks, cap))
+}
+
+/// The p90 of `peaks` plus a quarter, at least `MIN_RESERVED`, never more than `cap`; `cap` when
+/// there are none: a command with no history may take its whole cap.
+fn expected_peak(peaks: &[i64], cap: u64) -> u64 {
+    if peaks.is_empty() {
+        return cap;
+    }
+    let mut peaks: Vec<u64> = peaks.iter().map(|p| (*p).max(0) as u64).collect();
+    peaks.sort_unstable();
+    let p90 = peaks[((peaks.len() - 1) * 9).div_ceil(10)];
+    (p90 + p90 / 4).max(MIN_RESERVED).min(cap)
 }
 
 /// The machine's build slots as a waiting request reads them: the budget again every few seconds
@@ -3636,7 +3683,7 @@ let id = db.conn.last_insert_rowid();
         }
         // The slots raised to 6: 8.5 GB each, but three runs still hold 16 GB caps.
         let why = caps_fit(&db, waiting, Some(&l), 6).unwrap().unwrap();
-        assert!(why.starts_with("waiting for memory: the running builds may grow to 48.0 GB"), "{why}");
+        assert!(why.starts_with("waiting for memory: the running builds have 48.0 GB set aside"), "{why}");
         db.conn.execute("UPDATE lane_run SET state = 'done' WHERE memory_cap = ?1 AND id = (SELECT MIN(id) FROM lane_run WHERE memory_cap = ?1)", [16 * gib]).unwrap();
         assert_eq!(caps_fit(&db, waiting, Some(&l), 6).unwrap(), None, "one ended: 32 + 8.5 fit");
         let off = machine::limits_for(64 * machine::GIB, Some((0.0, "settings")), None);
@@ -3651,7 +3698,7 @@ let id = db.conn.last_insert_rowid();
         let third = add("queued", None);
         reserve_cap(&db, third, Some(&l), 6).unwrap();
         let why = caps_fit(&db, waiting, Some(&l), 6).unwrap().unwrap();
-        assert!(why.contains("may grow to 49.1 GB"), "32 GB running and two 8.5 GB reserved: {why}");
+        assert!(why.contains("have 49.1 GB set aside"), "32 GB running and two 8.5 GB reserved: {why}");
 
         // A run an older nitely started recorded no cap: it counts at the full one, 16 GB.
         db.conn.execute("DELETE FROM lane_run WHERE id != ?1", [waiting]).unwrap();
@@ -3659,7 +3706,63 @@ let id = db.conn.last_insert_rowid();
             add("running", None);
         }
         let why = caps_fit(&db, waiting, Some(&l), 6).unwrap().unwrap();
-        assert!(why.contains("may grow to 48.0 GB"), "{why}");
+        assert!(why.contains("have 48.0 GB set aside"), "{why}");
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// What admission sets aside for a run is its command's expected peak, not its cap (NIT-363):
+    /// the p90 of its last peaks plus a quarter, at least 2 GB, at most the cap; the cap with no
+    /// history.
+    #[test]
+    fn a_run_reserves_its_commands_expected_peak() {
+        let gib = machine::GIB as i64;
+        let cap = 10 * machine::GIB;
+        assert_eq!(expected_peak(&[], cap), cap, "no history: the whole cap");
+        assert_eq!(expected_peak(&[4 * gib], cap), 5 * machine::GIB, "4 GB and a quarter");
+        assert_eq!(expected_peak(&[gib / 2, gib], cap), 2 * machine::GIB, "at least 2 GB");
+        assert_eq!(expected_peak(&[9 * gib, 9 * gib], cap), cap, "never past the cap it is held to");
+        let peaks: Vec<i64> = (1..=10).map(|g| g * gib).collect();
+        assert_eq!(expected_peak(&peaks, 20 * machine::GIB), 10 * machine::GIB + 10 * machine::GIB / 4, "the p90 of ten is the largest");
+        let peaks: Vec<i64> = (1..=20).map(|g| g * gib / 4).collect();
+        assert_eq!(expected_peak(&peaks, cap), 19 * machine::GIB / 4 + 19 * machine::GIB / 16, "of twenty, the 19th");
+
+        // In admission: five gates whose command peaked near 4 GB leave room for a sixth run, where
+        // their 10 GB caps would not; one that never ran sets its whole cap aside.
+        let base = crate::paths::unique_temp("nitely-lane-reserved", "");
+        std::fs::create_dir_all(&base).unwrap();
+        let db = Db::open(&base.join("t.db")).unwrap();
+        let me = std::process::id() as i64;
+        let add = |state: &str, command: &str, peak: Option<i64>| -> i64 {
+            db.conn
+                .execute(
+                    "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, priority, lane_count, peak_memory)
+                     VALUES ('APP', 'C:/Code/app', 'x', 'gate', 's', 't', 'b', ?1, ?2, 'local', 1, ?3, 2, 3, ?4)",
+                    params![command, state, me, peak],
+                )
+                .unwrap();
+            db.conn.last_insert_rowid()
+        };
+        for _ in 0..5 {
+            add("done", "cargo test --workspace", Some(4 * gib));
+        }
+        let l = machine::limits_for(64 * machine::GIB, None, None); // 51.2 GB above the floor, 10.2 GB a slot
+        for _ in 0..5 {
+            let id = add("queued", "cargo test --workspace", None);
+            reserve_cap(&db, id, Some(&l), 5).unwrap();
+            db.conn.execute("UPDATE lane_run SET state = 'running' WHERE id = ?1", [id]).unwrap();
+        }
+        let run = db.lane_run(db.conn.last_insert_rowid()).unwrap().unwrap();
+        assert_eq!((run.memory_reserved, run.memory_cap), (Some(5 * gib), Some(cap_for(&l, 5) as i64)), "shown in `nitely lanes`: what is set aside, and the cap it is held to");
+        let sixth = add("queued", "cargo test --workspace", None);
+        assert_eq!(caps_fit(&db, sixth, Some(&l), 5).unwrap(), None, "25 GB set aside and 5 more fit in 51.2");
+        let new = add("queued", "cargo build --release", None);
+        assert_eq!(caps_fit(&db, new, Some(&l), 5).unwrap(), None, "25 + its whole 10.2 GB cap fit too");
+        for _ in 0..2 {
+            let id = add("queued", "cargo build --release", None);
+            reserve_cap(&db, id, Some(&l), 5).unwrap();
+        }
+        let why = caps_fit(&db, new, Some(&l), 5).unwrap().unwrap();
+        assert!(why.starts_with("waiting for memory: the running builds have 45.5 GB set aside and this one needs 10.2 GB"), "{why}");
         std::fs::remove_dir_all(base).ok();
     }
 

@@ -71,6 +71,8 @@ test("in large-repo mode the chip is the main checkout: building, or waiting and
   const [building] = laneChips(big([run(5, "running", 1)]));
   assert.equal(chipName(building), "APP main checkout");
   assert.equal(chipWords(building, 1010 + 60), "building in your checkout: cargo test · APP-4 · 1m");
+  const [reserved] = laneChips(big([run(5, "running", 1, { memory_reserved: 5 * 1024 ** 3 })]));
+  assert.equal(chipWords(reserved, 1010 + 60), "building in your checkout: cargo test · APP-4 · 1m · 5.0 GB set aside", "what admission set aside (NIT-363)");
   const [held] = laneChips(big([run(6, "queued", null, { waiting_for: "your checkout has a change: notes.txt" })]));
   assert.equal(held.state, "waiting");
   assert.equal(chipWords(held, 0), "waiting: your checkout has a change: notes.txt");

@@ -420,6 +420,8 @@ mod tests {
             waiting_for: None,
             waiting_memory: None,
             peak_memory: None,
+            memory_reserved: None,
+            memory_cap: None,
             waiting_why: None,
         }
     }
