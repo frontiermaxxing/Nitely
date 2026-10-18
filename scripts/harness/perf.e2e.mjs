@@ -14,13 +14,16 @@ import { launch, nitely } from "./app.mjs";
 const SCREENS = join("target", "harness", "screens");
 mkdirSync(SCREENS, { recursive: true });
 
+// From CI's Windows runner, the harness's debug build (2026-10-18): start-up 3.2 s, the Inbox with
+// 100 decisions 110 ms, an issue panel 223 ms, the heap 4.4 to 4.7 MB over 240 refreshes (about 2 MB
+// an hour). The budgets give a slower run about two and a half times that.
 const BUDGET = {
   /** Process started to the first board drawn. */
-  startMs: 15000,
+  startMs: 8000,
   /** The Inbox opened to its decisions drawn. */
-  inboxMs: 5000,
+  inboxMs: 1500,
   /** An issue's panel opened to its details drawn. */
-  issueMs: 3000,
+  issueMs: 1500,
   /** The page's live JS heap, after a garbage collection, growing over an hour of live updates. */
   heapGrowthPerHourMb: 20,
 };
