@@ -25,8 +25,7 @@ impl PhoneApp {
             // `tauri dev` serves the desktop page from Vite and embeds nothing; the phone page
             // then comes from the last `npm run build`.
             if cfg!(debug_assertions) {
-                let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("dist").join(path);
-                return std::fs::read(&file).ok().map(|bytes| (bytes, phone::content_type(path)));
+                return dev_asset(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("dist"), path);
             }
             None
         });
@@ -48,6 +47,29 @@ impl PhoneApp {
         self.awake.lock().unwrap_or_else(|p| p.into_inner())
     }
 }
+
+/// A file of a dev build's phone server, from `dist` as the last `npm run build` left it. Without a
+/// built phone page (`dist` older than the phone, or never built), the phone gets a page that says
+/// so, instead of a bare "Not found." (NIT-203): build, then reload the page on the phone, with no
+/// restart of the app.
+fn dev_asset(dist: &std::path::Path, path: &str) -> Option<(Vec<u8>, String)> {
+    if let Ok(bytes) = std::fs::read(dist.join(path)) {
+        return Some((bytes, phone::content_type(path)));
+    }
+    (path == "phone.html").then(|| (NOT_BUILT.replace("{dist}", &dist.display().to_string()).into_bytes(), phone::content_type(path)))
+}
+
+/// What a dev build's phone server shows while its phone page is not built.
+const NOT_BUILT: &str = r#"<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Nitely: phone page not built</title></head>
+<body style="font: 16px/1.5 system-ui, sans-serif; margin: 24px; max-width: 34em">
+<h1 style="font-size: 20px">The phone page is not built</h1>
+<p>This Nitely is a development build: it serves the phone page from <code>{dist}</code>, which has no <code>phone.html</code> yet.</p>
+<p>Run <code>npm run build</code> in the repo on the PC, then reload this page. The app does not need a restart.</p>
+</body>
+</html>
+"#;
 
 /// The Phone screen: whether the server runs and where, the addresses it could use, the paired
 /// phones, and pairing requests waiting for the person.
@@ -199,4 +221,23 @@ pub async fn phone_revoke(app: tauri::State<'_, PhoneApp>, id: String) -> Result
     devices.retain(|d| d.id != id);
     phone::save_devices(&secret, devices).map_err(err)?;
     Ok(status(&app))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_dev_build_without_a_phone_page_says_to_build_it() {
+        let dist = nitely_core::paths::unique_temp("nitely-dist", "");
+        std::fs::create_dir_all(dist.join("assets")).unwrap();
+        let (page, kind) = dev_asset(&dist, "phone.html").unwrap();
+        let page = String::from_utf8(page).unwrap();
+        assert!(page.contains("npm run build") && page.contains(&dist.display().to_string()), "{page}");
+        assert!(kind.starts_with("text/html"), "{kind}");
+        assert!(dev_asset(&dist, "assets/phone-1.js").is_none(), "only the page has a stand-in");
+        std::fs::write(dist.join("phone.html"), "<html>the phone</html>").unwrap();
+        assert_eq!(dev_asset(&dist, "phone.html").unwrap().0, b"<html>the phone</html>", "built: the real page, no restart");
+        std::fs::remove_dir_all(dist).ok();
+    }
 }

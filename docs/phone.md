@@ -317,7 +317,10 @@ real `tailscale status`.
   `Conn` (a TCP stream, or `phone.rs`'s TLS over one).
 - HTTPS (`phone.rs`): `Tls` from PEM files (`tls_from_files`) or from `tailscale cert`
   (`tailscale_tls`), with rustls; `start` takes it, and `Running::pages` gives the `https://` link.
-- `src-tauri/src/phone.rs`: turning the server on and off, pairing and revoking from the app.
+- `src-tauri/src/phone.rs`: turning the server on and off, pairing and revoking from the app. A
+  development build (`npm run tauri dev`) embeds no frontend and serves the phone page from `dist/`
+  as the last `npm run build` left it; until that has built `phone.html`, the phone gets a page
+  saying to run `npm run build` and reload, with no restart of the app.
 - `src/PhoneSetup.tsx`: the app's Phone screen. `phone.html`, `src/phone/`: the phone page.
 - `crates/nitely-core/examples/phone_dev.rs`: the real phone server on loopback with a stand-in for
   the app's Phone screen, to pair a browser tab as the phone end to end (`npm run build`, then
