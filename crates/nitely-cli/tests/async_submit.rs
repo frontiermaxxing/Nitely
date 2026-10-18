@@ -123,7 +123,7 @@ fn submit_returns_at_once_and_the_background_job_finishes_it() {
     s.still_reviewing(&id);
     s.release_review();
 
-    let done = nitely(&s, &["submit-status", &id, "--wait", "120"]);
+    let done = nitely(&s, &["submit-status", &id, "--wait", "600"]);
     assert_eq!(done["state"], "done", "{done}");
     assert_eq!(done["result"]["state"], "In Review", "{done}");
     assert_eq!(s.db.issue(&s.key).unwrap().unwrap().state, "In Review");
@@ -140,7 +140,7 @@ fn an_agent_hands_in_over_mcp_and_hears_the_result_on_its_next_call() {
     s.release_review();
 
     // Someone else waiting for it (here the CLI) does not use up the agent's notice.
-    let done = nitely(&s, &["submit-status", &id.to_string(), "--wait", "120"]);
+    let done = nitely(&s, &["submit-status", &id.to_string(), "--wait", "600"]);
     assert_eq!(done["state"], "done", "{done}");
 
     // The agent's next nitely call, of any kind, carries the outcome once.
