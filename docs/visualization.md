@@ -328,11 +328,18 @@ It is the reference for a whole view built from these parts. It answers, in orde
    outline. Stuck work (a stuck track or a rebase conflict) shows a red glyph and key in its box,
    with the reason on hover; quiet work fades. Three chips a box, then "+N more". Below 960px the
    boxes become rows.
-5. **Since you were last here:** counts that filter a feed (landed, filed, stuck, review rounds,
-   questions) and landed and submitted per hour over 24 hours. The last-seen time is saved when you
-   leave the Overview (`localStorage`), not while you read it.
+5. **Since you were last here:** first the same span by goal (NIT-247): a card per active goal
+   with what of it landed (tokens), its done count, its finish at this pace and what is at risk;
+   what landed outside any goal; what triage answered without you; and "You were needed 9 times:
+   4 questions, 5 approvals · 8 still wait" in attention ink over every one of them (time, kind,
+   issue, what, "waits" while open; the latest five, then "Show all"). Then counts that filter a
+   feed (landed, filed, stuck, review rounds, questions) and landed and submitted per hour over 24
+   hours. The last-seen time is saved when you leave the Overview (`localStorage`), not while you
+   read it.
 
-Its data is one `pulse` command (`crates/nitely-core/src/pulse.rs`), which reads only the database.
+Its data is one `pulse` command (`crates/nitely-core/src/pulse.rs`), which reads only the database;
+its `report` is `goal_report` (`crates/nitely-core/src/goal_report.rs`), which `nitely report
+--hours 12` prints and the phone reads too.
 Git state (rebase conflicts) and live sessions come from the snapshot the app already holds. The
 goal rows read the `goals` command.
 
@@ -343,10 +350,15 @@ A goal is an outcome a project works toward (`crates/nitely-core/src/goals.rs`),
 
 - **The head:** the title (the outcome on hover), the project's key on the Overview, the target
   date with how far off it is ("by Oct 28 · in 12 days"), in `--fail` ink once it has passed while
-  issues are open ("3 days late"), and "3/9 done" at the right.
+  issues are open ("3 days late"), the finish at this pace ("done ~Nov 8 at this pace", from its
+  issues landed over the last three days; in `--fail` ink when that is after the target date;
+  left out while nothing of it landed lately), and "3/9 done" at the right.
 - **The meter:** the goal's issues by whose move they are, by the colour rule: done (`--st-done`),
   an agent moving them (`--live`), waiting on you (`--attention`), stuck (`--fail`), queued
   (`--line-strong`).
+- **At risk:** its open issues that may hold it up, one reason each, the most pressing:
+  "stuck: …" in `--fail`, "waits on you" or "asked you something" in `--attention-ink`, and
+  "4 review rounds" (three or more) in plain ink (`risks` in `goal_report.rs`). Left out when none.
 - **The issues:** every issue as an `IssueToken` in station order (`goalOrder` in `src/goals.ts`):
   done to the left, then the furthest along (landing, needs you, review, gate, working, started),
   Todo, and Backlog last; canceled and duplicate issues are no longer part of it. The tokens wrap.

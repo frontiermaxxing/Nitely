@@ -10,7 +10,9 @@ that never leaves the phone, and `land` checks that signature as it checks the a
 ## What the phone can do, and what not
 
 - **Can:** see the decisions waiting on the person (asks and approvals), answer an ask, approve a
-  change, send a change back to the agents with a reason.
+  change, send a change back to the agents with a reason. Read the last day by goal (what landed,
+  what is at risk, when each goal will be done, where the person was needed), folded under the
+  decisions (`/phone/api/report`, NIT-247).
 - **Cannot:** anything else. No issue edits, no filing, no settings, no rules, no code, no other
   view of the backlog. The server the phone talks to has no other routes.
 - Other kinds of decision in the desktop Inbox (your own work, a stopped land, a conflict) show on
@@ -325,7 +327,8 @@ real `tailscale status`.
 - `crates/nitely-core/examples/phone_dev.rs`: the real phone server on loopback with a stand-in for
   the app's Phone screen, to pair a browser tab as the phone end to end (`npm run build`, then
   `cargo run -p nitely-core --example phone_dev`).
-- Phone decisions (`/phone/api/decisions`, `approve`, `answer`, `sendback`) are in `phone.rs`;
+- Phone decisions (`/phone/api/decisions`, `approve`, `answer`, `sendback`) and the last day's
+  report (`/phone/api/report`, read-only, `src/phone/Report.tsx`) are in `phone.rs`;
   `approval.rs` checks phone-signed approvals in `land` against the signed device list (the
   `approval` table's `device` and `signed_at`). The harness seeds a scratch database with decisions.
 - Notifications: `crates/nitely-core/src/push.rs` (the VAPID key, RFC 8291 encryption, sending,

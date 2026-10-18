@@ -50,6 +50,10 @@ import type {
   Project,
   Goal,
   GoalDetail,
+  GoalFinish,
+  GoalReport,
+  GoalRisk,
+  ReportNeeded,
   GoalPlanView,
   ProjectBrief,
   Pulse,
@@ -1331,6 +1335,7 @@ function pulse(sinceArg: number, dayStart: number): Pulse {
     happened_counts,
     throughput,
     landed_today: events.filter((e) => e.kind === "landed" && e.ts >= dayStart).length,
+    report: goalReport(since),
   };
 }
 
@@ -1945,7 +1950,76 @@ function goals(args: Record<string, unknown>): GoalDetail[] {
   const rank = (id: number) => goalRanks.get(id) ?? Number.MAX_SAFE_INTEGER;
   return GOALS.filter((g) => (!project || g.project === project) && (g.state ?? "active") === "active")
     .sort((a, b) => rank(a.id) - rank(b.id))
-    .map((g) => ({ goal: goalRecord(g), issues: world.issues.filter((i) => i.goal === g.id) }));
+    .map((g) => {
+      const goal = goalRecord(g);
+      const mine = world.issues.filter((i) => i.goal === g.id);
+      return { goal, issues: mine, risks: goalRisks(mine), finish: goalFinish(g.id, goal.progress.open) };
+    });
+}
+
+// As crates/nitely-core/src/goal_report.rs (NIT-247).
+
+/** A goal's open issues that may hold it up, the most pressing reason each. */
+function goalRisks(mine: IssueRecord[]): GoalRisk[] {
+  return mine
+    .filter((i) => i.state_type !== "completed" && i.state_type !== "canceled")
+    .flatMap((i) => {
+      const t = i.track;
+      const why = t?.stuck ? `stuck: ${t.stuck}` : i.state === "Needs You" ? "waits on you" : t?.asking ? "asked you something" : (t?.rounds ?? 0) >= 3 ? `${t!.rounds} review rounds` : null;
+      return why ? [{ key: i.key, title: i.title, why }] : [];
+    });
+}
+
+const landedEvents = () => [...world.timelines.entries()].flatMap(([key, tl]) => tl.filter((t) => t.kind === "landed").map((t) => ({ key, ts: t.ts })));
+
+/** When a goal will be done at its last three days' pace. */
+function goalFinish(id: number, open: number): GoalFinish | null {
+  if (open <= 0) return null;
+  const now = Math.floor(Date.now() / 1000);
+  const keys = new Set(world.issues.filter((i) => i.goal === id).map((i) => i.key));
+  const landed = new Set(landedEvents().filter((e) => keys.has(e.key) && e.ts >= now - 3 * 24 * HOUR).map((e) => e.key)).size;
+  if (landed === 0) return null;
+  const per_day = landed / 3;
+  return { at: now + Math.round((open / per_day) * 24 * HOUR), per_day };
+}
+
+/** As the goal_report command: what happened since `since`, by goal. */
+function goalReport(since: number): GoalReport {
+  const active = goals({});
+  const byKey = new Map<string, { key: string; title: string; ts: number }>();
+  for (const e of landedEvents()) {
+    if (e.ts < since) continue;
+    const prev = byKey.get(e.key);
+    if (!prev || prev.ts < e.ts) byKey.set(e.key, { key: e.key, title: world.issues.find((i) => i.key === e.key)?.title ?? e.key, ts: e.ts });
+  }
+  const landed = [...byKey.values()].sort((a, b) => a.ts - b.ts);
+  const goalOf = (key: string) => world.issues.find((i) => i.key === key)?.goal;
+  const inGoal = new Set(active.map((g) => g.goal.id));
+  const needed: ReportNeeded[] = [
+    ...world.asks.filter((a) => a.asked_at >= since).map((a) => ({
+      ts: a.asked_at,
+      kind: "asked" as const,
+      issue_key: a.issue_key,
+      summary: a.finding ? `accept a finding? ${a.question.split("\n")[0]}` : a.question.split("\n")[0],
+      open: a.answer === null && !a.closed,
+    })),
+    ...[...world.timelines.entries()].flatMap(([key, tl]) =>
+      tl
+        .filter((t) => t.ts >= since && t.kind === "issue_moved" && t.actor !== "human" && (t.summary ?? "").includes("→ Needs You"))
+        .map((t) => ({ ts: t.ts, kind: "approval" as const, issue_key: key, summary: (t.summary ?? "").split(": ")[1] ?? "waited for your approval", open: world.issues.find((i) => i.key === key)?.state === "Needs You" })),
+    ),
+  ].sort((a, b) => a.ts - b.ts || (a.issue_key ?? "").localeCompare(b.issue_key ?? ""));
+  return {
+    since,
+    now: Math.floor(Date.now() / 1000),
+    goals: active.map((g) => ({ goal: g.goal, landed: landed.filter((l) => goalOf(l.key) === g.goal.id), risks: g.risks ?? [], finish: g.finish ?? null })),
+    other_landed: landed.filter((l) => !inGoal.has(goalOf(l.key) ?? -1)),
+    needed,
+    triaged: [
+      { ts: Math.max(since, Math.floor(Date.now() / 1000) - 2 * HOUR), issue_key: "NIT-30", question: "Does NIT-29 already change the review track?", answer: "No: NIT-29 only adds the lanes; the track is NIT-30's." },
+      { ts: Math.max(since, Math.floor(Date.now() / 1000) - HOUR), issue_key: "HAR-14", question: "Is the date picker shared with HAR-13?", answer: "Yes, src/booking/DatePicker.tsx." },
+    ],
+  };
 }
 
 /** As goal_order: the given goals first, the project's others after in their order. */
@@ -2021,6 +2095,8 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return startGoal(args);
       case "goals":
         return goals(args);
+      case "goal_report":
+        return goalReport(Number(args.since));
       case "goal_order":
         return goalOrder(args);
       case "goal_choices":

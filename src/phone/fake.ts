@@ -4,6 +4,7 @@
 import { setFake } from "./api";
 import { pairingCode } from "./keys";
 import type { PhoneDecision } from "./Inbox";
+import type { GoalReport } from "../types";
 
 const NOW = () => Math.floor(Date.now() / 1000);
 const track = (station: string, reached: Record<string, number>) => ({ station, reached, rounds: 0, stuck: null, asking: false, closed: null, backlog: false });
@@ -65,6 +66,7 @@ export function installFake() {
       if (method === "POST") notifying = (JSON.parse(body) as { endpoint: string | null }).endpoint !== null;
       return { status: 200, body: { subscribed: notifying, key: "BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8" } };
     }
+    if (path === "/phone/api/report") return { status: 200, body: report() };
     if (path === "/phone/api/decisions") return { status: 200, body: { decisions, at_pc: 2 } };
     if (method === "POST" && ["/phone/api/approve", "/phone/api/sendback"].includes(path)) {
       const key = (JSON.parse(body) as { key: string }).key;
@@ -78,4 +80,33 @@ export function installFake() {
     }
     return { status: 404, body: { error: "Not found." } };
   });
+}
+
+/** The last day by goal, as /phone/api/report answers. */
+function report(): GoalReport & { error?: string } {
+  const now = NOW();
+  const goal = (id: number, title: string, done: number, total: number) => ({
+    id, project: "DEMO", title, outcome: "", target_date: null, state: "active" as const, created_by: "human", created_at: now - 9 * 86400, updated_at: now - 86400,
+    progress: { total, done, dropped: 0, open: total - done },
+  });
+  return {
+    since: now - 86400,
+    now,
+    goals: [
+      {
+        goal: goal(1, "Invoices people can trust", 5, 9),
+        landed: [{ key: "DEMO-6", title: "Show tax per line", ts: now - 30000 }, { key: "DEMO-7", title: "Store totals in cents", ts: now - 9000 }],
+        risks: [{ key: "DEMO-1", title: "Round invoice totals to the cent", why: "waits on you" }, { key: "DEMO-9", title: "Credit notes", why: "stuck: the gate failed twice" }],
+        finish: { at: now + 4 * 86400, per_day: 1 },
+      },
+      { goal: goal(2, "Shops in every currency", 1, 6), landed: [], risks: [{ key: "SHOP-3", title: "Show prices in the visitor's currency", why: "asked you something" }], finish: null },
+    ],
+    other_landed: [{ key: "DEMO-11", title: "Fix a typo on the receipt", ts: now - 4000 }],
+    triaged: [{ ts: now - 5000, issue_key: "DEMO-7", question: "Is DEMO-6 done?", answer: "Yes, it landed this morning." }],
+    needed: [
+      { ts: now - 3600, kind: "approval", issue_key: "DEMO-1", summary: "billing and money: src/billing/invoice.rs", open: true },
+      { ts: now - 2000, kind: "asked", issue_key: "DEMO-2", summary: "Keep the old receipt layout?", open: false },
+      { ts: now - 900, kind: "asked", issue_key: "SHOP-3", summary: "Which currencies should the price page offer at launch?", open: true },
+    ],
+  };
 }

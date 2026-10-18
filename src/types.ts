@@ -356,6 +356,55 @@ export interface Goal {
 export interface GoalDetail {
   goal: Goal;
   issues: IssueRecord[];
+  /** Its open issues that may hold it up. */
+  risks?: GoalRisk[];
+  /** When it will be done at its recent pace; null when nothing of it landed lately. */
+  finish?: GoalFinish | null;
+}
+
+// Mirrors crates/nitely-core/src/goal_report.rs (NIT-247).
+
+/** An open issue of a goal that may hold it up: stuck, waiting on you, or through many review rounds. */
+export interface GoalRisk {
+  key: string;
+  title: string;
+  /** "stuck: …", "waits on you", "asked you something", "4 review rounds". */
+  why: string;
+}
+
+export interface GoalFinish {
+  /** Unix seconds. */
+  at: number;
+  /** Its issues landed per day over the last three days. */
+  per_day: number;
+}
+
+export interface ReportLanded {
+  key: string;
+  title: string;
+  ts: number;
+}
+
+/** A place the person was needed: an agent's question (or a finding to accept), or a change that waited for approval. */
+export interface ReportNeeded {
+  ts: number;
+  kind: "asked" | "approval";
+  issue_key: string | null;
+  summary: string;
+  /** Still waiting on them. */
+  open: boolean;
+}
+
+/** What happened since `since`, per active goal, and every place the person was needed. */
+export interface GoalReport {
+  since: number;
+  now: number;
+  goals: { goal: Goal; landed: ReportLanded[]; risks: GoalRisk[]; finish: GoalFinish | null }[];
+  /** Issues in no active goal that landed since `since`. */
+  other_landed: ReportLanded[];
+  needed: ReportNeeded[];
+  /** Questions triage answered so you were not needed. */
+  triaged: { ts: number; issue_key: string | null; question: string; answer: string }[];
 }
 
 export interface ProjectBrief {
@@ -675,6 +724,8 @@ export interface Pulse {
   happened_counts: Record<Happening["kind"], number>;
   throughput: PulseHour[];
   landed_today: number;
+  /** Since `since`, by goal (NIT-247). */
+  report?: GoalReport;
 }
 
 // Mirrors crates/nitely-core/src/activity.rs: what every agent session did over a window.

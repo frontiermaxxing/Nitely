@@ -16,6 +16,7 @@ pub mod credentials;
 pub mod db;
 pub mod git;
 pub mod goal_plans;
+pub mod goal_report;
 pub mod goals;
 pub mod http;
 pub mod github;

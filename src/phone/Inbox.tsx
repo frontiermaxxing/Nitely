@@ -3,6 +3,7 @@ import { signedGet, signedPost, unreachable } from "./api";
 import { keyProject, phoneProjects, shownIndex, type Shown } from "./select";
 import { plain } from "./plain";
 import { Rich } from "./Rich";
+import { LastDay } from "./Report";
 import { acceptMessage, answerMessage, approvalMessage, sendBackMessage, sign, type Device } from "./keys";
 import { StationTrack } from "../ui/StationTrack";
 import { SeverityMark } from "../ui/SeverityMark";
@@ -174,6 +175,7 @@ export function Inbox(props: { device: Device; onGone: (why: string) => void }) 
           <Decision key={current.id} decision={current} device={device} onDecided={decided} onError={setError} />
         </>
       )}
+      {data && <LastDay device={device} open={list.length === 0} />}
     </section>
   );
 }

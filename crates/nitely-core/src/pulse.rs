@@ -39,6 +39,9 @@ pub struct Pulse {
     /// Landed and submitted per hour, oldest first, the last ending with the current hour.
     pub throughput: Vec<Hour>,
     pub landed_today: i64,
+    /// Since `since`, per active goal: what landed, what is at risk, when it will be done; and
+    /// every place the person was needed (NIT-247).
+    pub report: crate::goal_report::Report,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -190,6 +193,7 @@ pub fn pulse(db: &Db, since: i64, day_start: i64) -> Result<Pulse> {
         happened_counts: db.happened_counts(since)?,
         throughput,
         landed_today,
+        report: db.goal_report(None, since)?,
     })
 }
 

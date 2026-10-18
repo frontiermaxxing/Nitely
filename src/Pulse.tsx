@@ -2,9 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "./backend";
 import type { View } from "./App";
 import { KIND_LABEL as DECISION_LABEL, type Decision, type DecisionKind } from "./decisions";
-import type { Board, FlowIssue, Happening, IssueRecord, ProjectFlow, Pulse as PulseData, Session, TaskRow } from "./types";
+import type { Board, FlowIssue, GoalReport, Happening, IssueRecord, ProjectFlow, Pulse as PulseData, Session, TaskRow } from "./types";
 import { HOME_LABEL, agentLabel, agentTitle, ago } from "./util";
-import { GoalRows } from "./GoalRows";
+import { GoalRisks, GoalRows } from "./GoalRows";
+import { finishLine, neededLine, triagedLine } from "./goals";
 import { LanesStrip } from "./LanesStrip";
 import { useBatches } from "./BatchesStrip";
 import { WaitingStrip, useWaits } from "./WaitingStrip";
@@ -509,6 +510,7 @@ function Since({ data, ctx, first }: { data: PulseData; ctx: Context; first: boo
           {when(data.since)}, {ago(ctx.now, data.since)}
         </span>
       </div>
+      {data.report && <ByGoal report={data.report} issues={issues} ctx={ctx} />}
       <div className="since-top">
         <div className="since-counts" role="group" aria-label="Filter what happened">
           {kinds.map((k) => (
@@ -573,5 +575,98 @@ function Since({ data, ctx, first }: { data: PulseData; ctx: Context; first: boo
         </button>
       )}
     </section>
+  );
+}
+
+/**
+ * The same span by goal (NIT-247): per active goal what landed, what is at risk and when it will be
+ * done at this pace, what landed outside any goal, and every place you were needed.
+ */
+function ByGoal({ report, issues, ctx }: { report: GoalReport; issues: Map<string, IssueRecord>; ctx: Context }) {
+  const [allNeeded, setAllNeeded] = useState(false);
+  const today = new Date(ctx.now * 1000);
+  const needed = neededLine(report.needed);
+  const triaged = triagedLine(report.triaged?.length ?? 0);
+  const token = (key: string, title: string) => {
+    const issue = issues.get(key);
+    return issue ? (
+      <IssueToken key={key} issue={issue} onOpen={ctx.onOpenIssue} />
+    ) : (
+      <button key={key} className="link mono small" onClick={() => ctx.onOpenIssue(key)} title={title}>
+        {key}
+      </button>
+    );
+  };
+  if (report.goals.length === 0 && report.other_landed.length === 0 && !needed && !triaged) return null;
+  const shownNeeded = allNeeded ? report.needed : report.needed.slice(-5);
+  return (
+    <div className="by-goal">
+      {report.goals.length > 0 && (
+        <ul className="by-goal-list">
+          {report.goals.map((g) => {
+            const pace = finishLine(g.finish, g.goal.target_date, today);
+            return (
+              <li key={g.goal.id} className="by-goal-row">
+                <div className="by-goal-head">
+                  <span className="by-goal-title" title={g.goal.outcome}>
+                    {g.goal.title}
+                  </span>
+                  <span className="by-goal-landed">
+                    <span className="since-n">{g.landed.length}</span> landed
+                  </span>
+                  <span className="muted small">
+                    {g.goal.progress.done}/{g.goal.progress.total - g.goal.progress.dropped} done
+                  </span>
+                  {pace && (
+                    <span className={`small${pace.late ? " goal-late" : " muted"}`} title={pace.title}>
+                      {pace.text}
+                    </span>
+                  )}
+                </div>
+                {g.landed.length > 0 && <div className="by-goal-keys">{g.landed.map((l) => token(l.key, l.title))}</div>}
+                {g.risks.length > 0 && <GoalRisks risks={g.risks} onOpenIssue={ctx.onOpenIssue} />}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {report.other_landed.length > 0 && (
+        <p className="by-goal-other small">
+          <span className="muted">Outside any goal, {report.other_landed.length} landed:</span> {report.other_landed.map((l) => token(l.key, l.title))}
+        </p>
+      )}
+      {triaged && (
+        <p className="by-goal-triaged small" title={report.triaged.map((q) => `${q.issue_key ?? ""} ${q.question} → ${q.answer}`.trim()).join("\n")}>
+          {triaged}
+        </p>
+      )}
+      {needed && (
+        <div className="by-goal-needed">
+          <p className="small">{needed}</p>
+          <ol className="by-goal-needs">
+            {shownNeeded.map((n, i) => (
+              <li key={`${n.ts}-${i}`} className={n.open ? "by-goal-open" : undefined}>
+                <span className="feed-time">{clock(n.ts)}</span>
+                <span className="by-goal-need-kind">{n.kind === "asked" ? "asked" : "approval"}</span>
+                {n.issue_key && (
+                  <button className="link mono small" onClick={() => ctx.onOpenIssue(n.issue_key!)}>
+                    {n.issue_key}
+                  </button>
+                )}
+                <span className="by-goal-need-what" title={n.summary}>
+                  {n.summary}
+                </span>
+                {n.open && <span className="by-goal-waits">waits</span>}
+              </li>
+            ))}
+          </ol>
+          {report.needed.length > 5 && (
+            <button className="link small since-all" onClick={() => setAllNeeded(!allNeeded)}>
+              {allNeeded ? "Show the latest 5" : `Show all ${report.needed.length}`}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
   );
 }

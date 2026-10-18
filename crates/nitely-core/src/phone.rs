@@ -863,6 +863,17 @@ impl Phone {
             ("GET", "/phone/api/push") | ("POST", "/phone/api/push") => self.push_route(head, body),
             ("POST", "/phone/api/pair") => self.pair(body),
             ("GET", "/phone/api/pair/status") => self.pair_status(head, body),
+            // The morning report (NIT-247): the last day, per goal, and where the person was needed.
+            ("GET", "/phone/api/report") => match self.authorize(head, body) {
+                Ok(_) => match (self.db)() {
+                    Ok(db) => match db.goal_report(None, crate::db::now() - 24 * 3600) {
+                        Ok(r) => (200, Reply::Json(json!(r))),
+                        Err(e) => (500, error(&format!("{e:#}"))),
+                    },
+                    Err(_) => (503, error("The PC could not open Nitely's database; try again.")),
+                },
+                Err((status, why)) => (status, error(why)),
+            },
             ("GET", "/phone/api/hello") => match self.authorize(head, body) {
                 Ok(device) => (200, Reply::Json(json!({ "name": device.name, "id": device.id }))),
                 Err((status, why)) => (status, error(why)),

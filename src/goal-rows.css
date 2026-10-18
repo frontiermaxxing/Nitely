@@ -10,6 +10,13 @@
 .goal-first { font-size: var(--text-sm); white-space: nowrap; }
 .goal-crew { color: var(--fg-2); font-size: var(--text-sm); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .goal-issues { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.goal-risks { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 14px; font-size: var(--text-sm); }
+.goal-risks-label { color: var(--fg-3); font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.04em; }
+.goal-risk { min-width: 0; overflow-wrap: anywhere; }
+.goal-risk > button { white-space: nowrap; }
+.goal-risk-why { color: var(--fg-2); }
+.goal-risk-fail .goal-risk-why { color: var(--fail); }
+.goal-risk-attention .goal-risk-why { color: var(--attention-ink); }
 .goal-focus { animation: goal-focus 2.4s ease-out; }
 @keyframes goal-focus { from { border-color: var(--focus); box-shadow: 0 0 0 2px var(--focus); } }
 @media (prefers-reduced-motion: reduce) { .goal-focus { animation: none; border-color: var(--focus); } }

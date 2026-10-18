@@ -108,6 +108,15 @@ enum Cmd {
         #[command(subcommand)]
         command: GoalCmd,
     },
+    /// What happened over the last hours, per goal: what landed, what is at risk, when each goal
+    /// will be done at its pace, and every place you were needed (as JSON).
+    Report {
+        /// How far back, in hours (default 12).
+        #[arg(long, default_value_t = 12)]
+        hours: i64,
+        #[arg(long)]
+        project: Option<String>,
+    },
     /// Projects: a backlog with its own issue prefix.
     Project {
         #[command(subcommand)]
@@ -978,6 +987,11 @@ fn run(cmd: Cmd) -> Result<()> {
                 eprintln!("could not remove {f}");
             }
             Ok(())
+        }
+        Cmd::Report { hours, project } => {
+            let db = Db::open_default()?;
+            let since = nitely_core::db::now() - hours.max(1) * 3600;
+            print_json(&db.goal_report(project.as_deref(), since)?)
         }
         Cmd::Goal { command } => {
             let db = Db::open_default()?;

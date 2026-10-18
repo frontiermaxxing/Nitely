@@ -2,7 +2,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { crewOnGoal, goalCounts, goalOrder, targetLine } from "./goals.ts";
+import { crewOnGoal, finishLine, goalCounts, goalOrder, neededLine, riskTone, targetLine, triagedLine } from "./goals.ts";
 import type { IssueRecord } from "./types.ts";
 
 const issue = (key: string, state: string, state_type: string): IssueRecord =>
@@ -47,4 +47,46 @@ test("a goal row says who works on it and what landed today, and nothing when ne
   assert.equal(crewOnGoal({ landed_today: 4 }), "4 landed today");
   assert.equal(crewOnGoal({ working: 0, landed_today: 0 }), null);
   assert.equal(crewOnGoal({}), null);
+});
+
+test("a goal's finish at its recent pace, late when it passes the target date", () => {
+  const today = new Date(2026, 9, 18, 9, 0);
+  const at = (days: number) => Math.floor(new Date(2026, 9, 18 + days, 12, 0).getTime() / 1000);
+  assert.equal(finishLine(null, null, today), null, "no pace, no promise");
+  assert.deepEqual(
+    { ...finishLine({ at: at(4), per_day: 1 }, "2026-10-30", today)!, title: "" },
+    { text: "done ~Oct 22 at this pace", late: false, title: "" },
+  );
+  assert.equal(finishLine({ at: at(4), per_day: 1 }, "2026-10-21", today)!.late, true);
+  assert.equal(finishLine({ at: at(4), per_day: 1 }, "2026-10-22", today)!.late, false, "on the target day is not late");
+  assert.equal(finishLine({ at: at(0), per_day: 3 }, null, today)!.text, "done today at this pace");
+  assert.equal(finishLine({ at: at(1), per_day: 3 }, null, today)!.text, "done tomorrow at this pace");
+  assert.match(finishLine({ at: at(9), per_day: 1 / 3 }, null, today)!.title, /one every 3 days/);
+});
+
+test("the times you were needed, in one line", () => {
+  assert.equal(neededLine([]), null);
+  assert.equal(neededLine([{ kind: "asked", open: false }]), "You were needed once: 1 question");
+  assert.equal(
+    neededLine([
+      { kind: "asked", open: true },
+      { kind: "approval", open: false },
+      { kind: "asked", open: false },
+    ]),
+    "You were needed 3 times: 2 questions, 1 approval · 1 still waits",
+  );
+  assert.equal(neededLine([{ kind: "approval", open: true }, { kind: "approval", open: true }]), "You were needed 2 times: 2 approvals · all still wait");
+});
+
+test("a risk is coloured by the one colour rule", () => {
+  assert.equal(riskTone("stuck: the gate failed"), "fail");
+  assert.equal(riskTone("waits on you"), "attention");
+  assert.equal(riskTone("asked you something"), "attention");
+  assert.equal(riskTone("4 review rounds"), "plain");
+});
+
+test("what triage answered so you were not needed", () => {
+  assert.equal(triagedLine(0), null);
+  assert.equal(triagedLine(1), "Triage answered a question without you");
+  assert.equal(triagedLine(4), "Triage answered 4 questions without you");
 });

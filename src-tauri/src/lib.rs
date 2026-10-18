@@ -59,6 +59,12 @@ async fn pulse(since: i64, day_start: i64) -> Result<nitely_core::Pulse, String>
     nitely_core::pulse(&db()?, since, day_start).map_err(err)
 }
 
+/// What happened since `since`, per goal, and every place the person was needed (NIT-247).
+#[tauri::command]
+async fn goal_report(project: Option<String>, since: i64) -> Result<nitely_core::goal_report::Report, String> {
+    db()?.goal_report(project.as_deref(), since).map_err(err)
+}
+
 /// What every agent session did over the last `hours`, for the Activity view.
 #[tauri::command]
 async fn activity(hours: i64) -> Result<nitely_core::activity::Activity, String> {
@@ -883,6 +889,7 @@ pub fn run() {
             set_private_terms,
             project_brief,
             goals,
+            goal_report,
             goal_order,
             goal_workers,
             goal_choices,

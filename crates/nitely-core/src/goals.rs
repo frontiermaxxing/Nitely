@@ -54,6 +54,10 @@ pub struct Progress {
 pub struct GoalDetail {
     pub goal: Goal,
     pub issues: Vec<IssueRecord>,
+    /// Its open issues that may hold it up (NIT-247): what the goal rows draw.
+    pub risks: Vec<crate::goal_report::Risk>,
+    /// When it will be done at its recent pace.
+    pub finish: Option<crate::goal_report::Finish>,
 }
 
 /// What `save_goal` changes; `None` leaves a field as it is. A new goal needs a title and outcome.
@@ -145,8 +149,10 @@ impl Db {
     /// A goal and every issue in it, the open ones in the order `list_issues` gives.
     pub fn goal_detail(&self, id: i64) -> Result<GoalDetail> {
         let goal = self.goal(id)?.with_context(|| format!("no goal {id}"))?;
-        let issues = self.list_issues(Some(&goal.project), true)?.into_iter().filter(|i| i.goal == Some(id)).collect();
-        Ok(GoalDetail { goal, issues })
+        let issues: Vec<IssueRecord> =
+            self.list_issues(Some(&goal.project), true)?.into_iter().filter(|i| i.goal == Some(id)).collect();
+        let (risks, finish) = (crate::goal_report::risks(&issues), self.expected_finish(goal.id, goal.progress.open)?);
+        Ok(GoalDetail { goal, issues, risks, finish })
     }
 
     /// Every active goal with its issues, of one project or of all of them (projects in key order,
@@ -164,8 +170,9 @@ impl Db {
             }
             let issues = self.list_issues(Some(&key), true)?;
             for goal in goals {
-                let mine = issues.iter().filter(|i| i.goal == Some(goal.id)).cloned().collect();
-                out.push(GoalDetail { goal, issues: mine });
+                let mine: Vec<IssueRecord> = issues.iter().filter(|i| i.goal == Some(goal.id)).cloned().collect();
+                let (risks, finish) = (crate::goal_report::risks(&mine), self.expected_finish(goal.id, goal.progress.open)?);
+                out.push(GoalDetail { goal, issues: mine, risks, finish });
             }
         }
         Ok(out)

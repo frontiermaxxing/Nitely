@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "./backend";
-import type { GoalDetail } from "./types";
-import { crewOnGoal, goalCounts, goalOrder, targetLine } from "./goals";
+import type { GoalDetail, GoalRisk } from "./types";
+import { crewOnGoal, finishLine, goalCounts, goalOrder, riskTone, targetLine } from "./goals";
 import { IssueToken, Meter } from "./ui";
 import "./goal-rows.css";
 
@@ -88,7 +88,10 @@ export function GoalRow(props: { detail: GoalDetail; showProject?: boolean; focu
   const c = goalCounts(placed);
   const total = placed.length;
   // Late only while something is left to do.
-  const when = targetLine(goal.target_date, new Date(), c.done === total);
+  const today = new Date();
+  const when = targetLine(goal.target_date, today, c.done === total);
+  const pace = finishLine(props.detail.finish, goal.target_date, today);
+  const risks = props.detail.risks ?? [];
   return (
     <div className={`goal-row${props.focused ? " goal-focus" : ""}`} ref={row} id={`goal-${goal.id}`}>
       <div className="goal-head">
@@ -97,6 +100,11 @@ export function GoalRow(props: { detail: GoalDetail; showProject?: boolean; focu
         </span>
         {props.showProject && <span className="mono goal-project">{goal.project}</span>}
         {when && <span className={`goal-when${when.late ? " goal-late" : ""}`}>{when.text}</span>}
+        {pace && (
+          <span className={`goal-when${pace.late ? " goal-late" : ""}`} title={pace.title}>
+            {pace.text}
+          </span>
+        )}
         <CrewOnGoal goal={goal} />
         {props.onFirst && (
           <button className="link goal-first" onClick={props.onFirst} title="The crew works this project's goals in order, top first">
@@ -118,6 +126,7 @@ export function GoalRow(props: { detail: GoalDetail; showProject?: boolean; focu
           { value: c.queued, color: "var(--line-strong)", label: "queued" },
         ]}
       />
+      {risks.length > 0 && <GoalRisks risks={risks} onOpenIssue={props.onOpenIssue} />}
       {total === 0 ? (
         <p className="muted small">No issues in it yet.</p>
       ) : (
@@ -128,5 +137,22 @@ export function GoalRow(props: { detail: GoalDetail; showProject?: boolean; focu
         </div>
       )}
     </div>
+  );
+}
+
+/** The goal's open issues that may hold it up, each with why: stuck, waiting on you, many review rounds. */
+export function GoalRisks(props: { risks: GoalRisk[]; onOpenIssue: (key: string) => void }) {
+  return (
+    <ul className="goal-risks" aria-label="At risk">
+      <li className="goal-risks-label">At risk</li>
+      {props.risks.map((r) => (
+        <li key={r.key} className={`goal-risk goal-risk-${riskTone(r.why)}`}>
+          <button className="link mono" onClick={() => props.onOpenIssue(r.key)} title={r.title}>
+            {r.key}
+          </button>{" "}
+          <span className="goal-risk-why">{r.why}</span>
+        </li>
+      ))}
+    </ul>
   );
 }
