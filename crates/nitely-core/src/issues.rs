@@ -1757,29 +1757,45 @@ impl Db {
             // back, once nothing else it asked is open, to its asker while that agent is live, and
             // otherwise to Todo, where next_task gives it to the next agent with the answer on its
             // timeline.
-            let moved: Option<String> = tx.query_row("SELECT moved_from FROM ask WHERE id = ?1", [id], |r| r.get(0))?;
+            // Whether an ask put it in the Needs You it is in: one that moved it there, or one asked
+            // since, while it waited. An answer to any question on it (a triage question that went
+            // to the person, say) can then end the wait; a Needs You entered later, for an
+            // approval, is not the ask's to end.
+            let entered: Option<i64> = tx.query_row(
+                "SELECT MAX(ts) FROM event WHERE issue_key = ?1 AND type = 'issue_moved' AND summary LIKE '%→ Needs You%'",
+                [k],
+                |r| r.get(0),
+            )?;
+            // The agent whose question put it there (asked just before it entered; one asked since
+            // only joined the wait) is the one it goes back to.
+            let moved: Option<String> = tx
+                .query_row(
+                    "SELECT asked_by FROM ask WHERE issue_key = ?1 AND moved_from IS NOT NULL AND asked_at BETWEEN ?2 - 60 AND ?2 ORDER BY id DESC LIMIT 1",
+                    params![k, entered.unwrap_or(i64::MIN + 60)],
+                    |r| r.get(0),
+                )
+                .optional()?;
             let state: Option<String> = tx.query_row("SELECT state FROM issue WHERE key = ?1", [k], |r| r.get(0)).optional()?;
             // Any other question on it still open keeps it waiting, whoever asked it.
             let still_asking: i64 =
                 tx.query_row("SELECT COUNT(*) FROM ask WHERE issue_key = ?1 AND answer IS NULL AND closed IS NULL", [k], |r| r.get(0))?;
-            if moved.is_some() && state.as_deref() == Some(NEEDS_HUMAN) && still_asking == 0 {
+            if let Some(asker) = moved.filter(|_| state.as_deref() == Some(NEEDS_HUMAN) && still_asking == 0) {
                 let seen: Option<(String, i64)> =
-                    tx.query_row("SELECT state, last_seen_at FROM session WHERE id = ?1", [&ask.asked_by], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
-                // An asker with no session record (the CLI, a remote agent) cannot be told live or
-                // gone: the work goes on In Progress unclaimed, and next_task offers it again if it
-                // shows no work for the claim TTL (NIT-275).
+                    tx.query_row("SELECT state, last_seen_at FROM session WHERE id = ?1", [&asker], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+                // An asker with no live session record (gone, or one that cannot be told: the CLI,
+                // a remote agent) gets the answer as a notice if it calls again, and the work waits
+                // in Todo for whoever claims it next.
                 let (to, to_type, claim, why) = match seen {
                     Some((s, at)) if s != "ended" && at >= ts - crate::sessions::GONE_AFTER_SECS => {
                         ("In Progress", "started", true, "answered; back to the agent that asked")
                     }
-                    Some(_) => ("Todo", "unstarted", false, "answered; the agent that asked is gone, so it waits for the next"),
-                    None => ("In Progress", "started", false, "answered"),
+                    _ => ("Todo", "unstarted", false, "answered; it waits for the next agent, with the answer on its timeline"),
                 };
                 tx.execute(
                     "UPDATE issue SET state = ?2, state_type = ?3, updated_at = ?4,
                        claimed_by = CASE WHEN ?5 THEN ?6 ELSE NULL END, claimed_at = CASE WHEN ?5 THEN ?7 ELSE NULL END
                      WHERE key = ?1",
-                    params![k, to, to_type, iso(ts), claim, ask.asked_by, ts],
+                    params![k, to, to_type, iso(ts), claim, asker, ts],
                 )?;
                 tx.execute(
                     "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, 'human', ?2, 'issue_moved', ?3)",
@@ -2402,13 +2418,23 @@ mod tests {
         db.answer_ask(two.id, "Half up", &Actor::Human).unwrap();
         assert_eq!(db.issue("NIT-1").unwrap().unwrap().state, "In Progress");
 
-        // An asker with no session record (the CLI's): back In Progress, unclaimed.
-        let cli = Actor::Agent("cli".into());
-        let three = db.create_ask("Which locale?", &[], Some("NIT-1"), None, &cli).unwrap();
-        db.wait_on_ask(&three, &cli).unwrap();
+        // A triage question that went to the person, answered last, ends the wait too.
+        let three = db.create_ask("Which locale?", &[], Some("NIT-1"), None, &agent).unwrap();
+        db.wait_on_ask(&three, &agent).unwrap();
+        let escalated = db.create_ask("Is this still wanted?", &[], Some("NIT-1"), None, &Actor::Agent("nitely:triage".into())).unwrap();
         db.answer_ask(three.id, "en-GB", &Actor::Human).unwrap();
+        assert_eq!(db.issue("NIT-1").unwrap().unwrap().state, "Needs You");
+        db.answer_ask(escalated.id, "Yes", &Actor::Human).unwrap();
+        assert_eq!(db.issue("NIT-1").unwrap().unwrap().state, "In Progress");
+
+        // An asker with no session record (the CLI's): the work waits in Todo for the next agent.
+        let cli = Actor::Agent("cli".into());
+        let four = db.create_ask("Which date format?", &[], Some("NIT-1"), None, &cli).unwrap();
+        db.wait_on_ask(&four, &cli).unwrap();
+        db.answer_ask(four.id, "ISO", &Actor::Human).unwrap();
         let i = db.issue("NIT-1").unwrap().unwrap();
-        assert_eq!((i.state.as_str(), i.claimed_by), ("In Progress", None));
+        assert_eq!((i.state.as_str(), i.claimed_by), ("Todo", None));
+        db.move_issue("NIT-1", "In Progress", None, None, &agent).unwrap();
 
         // An asker that is gone: the issue waits in Todo, and next_task gives it to the next agent.
         let b = db.create_ask("Serif?", &[], Some("NIT-2"), None, &agent).unwrap();
