@@ -2638,6 +2638,7 @@ dependencies = [
  "ctrlc",
  "mdns-sd",
  "nitely-core",
+ "rusqlite",
  "serde",
  "serde_json",
  "ureq",
