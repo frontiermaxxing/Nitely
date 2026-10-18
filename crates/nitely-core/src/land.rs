@@ -1333,6 +1333,28 @@ when_changed = ["billing"]
         for (ask, text) in [(first.id, &two[0].text), (second.id, &two[1].text)] {
             assert_eq!(f.db.ask(ask).unwrap().unwrap().finding.map(|x| x.text).as_ref(), Some(text));
         }
+        // Both reworded in one round: which is which is not plain, so neither takes the other's.
+        let reworded = vec![
+            crate::review::Finding { priority: 1, text: "Loses the final row: src/rows.rs:13, export: it is never written.".into(), carried: false, raised_as: None, now: None },
+            crate::review::Finding { priority: 1, text: "Swallows write errors: src/rows.rs:31, export: the result is ignored.".into(), carried: false, raised_as: None, now: None },
+        ];
+        assert_eq!(f.db.close_superseded_requests(&a, &reworded).unwrap(), 2);
+        // Escalation asks about each blocker the person has no request for, alike or not.
+        f.db.conn
+            .execute(
+                "INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, findings, ts) VALUES (?1, 'p1', 'c', 'fake', 'changes', 'agent', ?2, ?3)",
+                rusqlite::params![a, serde_json::to_string(&two).unwrap(), crate::db::now() + 2],
+            )
+            .unwrap();
+        let kept = f.db.request_acceptance(&a, "1", "The old export did the same.", None, &f.actor).unwrap();
+        f.db.ask_to_decide_findings(&a, "rounds did not converge", &f.actor).unwrap();
+        let open: Vec<_> = f.db.open_asks().unwrap().into_iter().filter(|q| q.issue_key.as_deref() == Some(a.as_str())).collect();
+        assert_eq!(open.len(), 2, "{open:?}");
+        // Deciding one leaves the other blocker's request open.
+        crate::approval::trust_in_tests(Some(crate::approval::public_of(&SECRET)));
+        f.db.accept_finding(kept.id, "the old export did the same", &SECRET).unwrap();
+        let other = open.iter().find(|q| q.id != kept.id).unwrap();
+        assert!(f.db.ask(other.id).unwrap().unwrap().closed.is_none());
         std::fs::remove_dir_all(&f.base).ok();
     }
 

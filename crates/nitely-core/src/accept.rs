@@ -103,8 +103,9 @@ impl Db {
         let open: Vec<Ask> = self.open_asks()?.into_iter().filter(|a| a.issue_key.as_deref().is_some_and(|k| k.eq_ignore_ascii_case(&issue.key))).collect();
         let question = format!("The review rounds are not converging ({why}). Accept this finding as it is if it is a trade-off you decided; send it back and it stays a defect to fix.");
         for f in self.unaccepted_blockers(&issue.key, &review)? {
-            // One request per finding; one already open for it, in any wording, stands.
-            if open.iter().any(|a| a.finding.as_ref().is_some_and(|x| crate::review::same_finding(&x.text, &f.text))) {
+            // One request per finding; one already open for it stands. Superseded requests followed
+            // their findings into this round's words before this runs, so a likeness is another blocker.
+            if open.iter().any(|a| a.finding.as_ref().is_some_and(|x| x.text == f.text)) {
                 continue;
             }
             self.request_acceptance(&issue.key, &f.text, &question, None, actor)?;
@@ -262,34 +263,43 @@ impl Db {
     pub fn close_superseded_requests(&self, key: &str, findings: &[Finding]) -> Result<usize> {
         let mut open = self.open_finding_requests(key)?;
         open.sort_by_key(|a| std::cmp::Reverse(a.id));
-        let mut closed = 0;
-        // The finding of the latest review each request stands for, newest request first.
-        let mut kept: Vec<(usize, i64)> = vec![];
-        // Findings some request holds in their own words: no other request takes them by likeness.
-        let held: Vec<&str> = open.iter().filter_map(|a| a.finding.as_ref()).map(|f| f.text.as_str()).filter(|t| findings.iter().any(|x| x.text == *t)).collect();
-        for a in open.iter() {
-            let f = a.finding.as_ref().expect("filtered");
-            let now = findings.iter().position(|x| x.text == f.text).or_else(|| {
-                findings.iter().position(|x| x.priority <= 1 && !held.contains(&x.text.as_str()) && crate::review::same_finding(&x.text, &f.text))
-            });
-            let why = match now {
-                None => "closed: the latest review no longer has that finding".to_string(),
-                Some(i) => match kept.iter().find(|(k, _)| *k == i) {
-                    Some((_, newer)) => format!("closed: ask #{newer} asks for the same finding"),
-                    None => {
-                        kept.push((i, a.id));
-                        if findings[i].text != f.text {
-                            let reworded = AskedFinding { priority: findings[i].priority, text: findings[i].text.clone() };
-                            self.conn.execute("UPDATE ask SET finding = ?2 WHERE id = ?1", params![a.id, serde_json::to_string(&reworded)?])?;
-                        }
-                        continue;
-                    }
-                },
-            };
-            self.conn.execute("UPDATE ask SET closed = ?2 WHERE id = ?1", params![a.id, why])?;
-            closed += 1;
+        let words = |a: &Ask| a.finding.as_ref().map(|f| f.text.clone()).unwrap_or_default();
+        let mut closing: Vec<(i64, String)> = vec![];
+        // Requests in the same words are one: the newest stands, newest first.
+        let mut first: Vec<(String, i64)> = vec![];
+        let mut left: Vec<&Ask> = vec![];
+        for a in &open {
+            match first.iter().find(|(w, _)| *w == words(a)) {
+                Some((_, newer)) => closing.push((a.id, format!("closed: ask #{newer} asks for the same finding"))),
+                None => {
+                    first.push((words(a), a.id));
+                    left.push(a);
+                }
+            }
         }
-        Ok(closed)
+        // A request whose words the latest review still has stands for that finding. One whose words
+        // are gone follows its finding into the new words only when that is plain: one finding not
+        // held by another request is like it, and no other such request is like that one. Otherwise
+        // a likeness could hand one blocker's decision to another in the same code.
+        let held = |t: &str| left.iter().any(|a| words(a) == t);
+        let free: Vec<&Finding> = findings.iter().filter(|x| x.priority <= 1 && !held(&x.text)).collect();
+        let gone: Vec<&Ask> = left.iter().copied().filter(|a| !findings.iter().any(|x| x.text == words(a))).collect();
+        let like = |a: &Ask| -> Vec<usize> { free.iter().enumerate().filter(|(_, x)| crate::review::same_finding(&x.text, &words(a))).map(|(i, _)| i).collect() };
+        for a in &gone {
+            let mine = like(a);
+            let alone = mine.len() == 1 && !gone.iter().any(|b| b.id != a.id && like(b).contains(&mine[0]));
+            if alone {
+                let x = free[mine[0]];
+                let reworded = AskedFinding { priority: x.priority, text: x.text.clone() };
+                self.conn.execute("UPDATE ask SET finding = ?2 WHERE id = ?1", params![a.id, serde_json::to_string(&reworded)?])?;
+            } else {
+                closing.push((a.id, "closed: the latest review no longer has that finding".to_string()));
+            }
+        }
+        for (id, why) in &closing {
+            self.conn.execute("UPDATE ask SET closed = ?2 WHERE id = ?1", params![id, why])?;
+        }
+        Ok(closing.len())
     }
 
     /// `key`'s open requests to accept a finding.
@@ -313,11 +323,11 @@ impl Db {
         Ok(exact.or_else(like).map(|i| open.swap_remove(i)))
     }
 
-    /// Closes the other open requests for the finding the person just decided in ask `decided`:
-    /// one decision answers them all.
+    /// Closes the other open requests for the finding the person just decided in ask `decided`, in
+    /// its very words: one decision answers them all. One merely like it may be another blocker.
     fn close_decided_alike(&self, key: &str, decided: i64, finding: &str) -> Result<()> {
         for a in self.open_finding_requests(key)? {
-            if a.id != decided && a.finding.as_ref().is_some_and(|f| crate::review::same_finding(&f.text, finding)) {
+            if a.id != decided && a.finding.as_ref().is_some_and(|f| f.text == finding) {
                 self.conn.execute("UPDATE ask SET closed = ?2 WHERE id = ?1", params![a.id, format!("closed: decided in ask #{decided}")])?;
             }
         }
