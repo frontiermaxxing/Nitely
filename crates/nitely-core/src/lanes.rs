@@ -821,8 +821,8 @@ fn run_with(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Act
         Kind::Run => 3,
     };
     db.conn.execute(
-        "INSERT INTO lane_run (project, repo, issue_key, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, priority, pid_started, polled_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'queued', 'local', ?10, ?11, ?12, ?13, ?10)",
+        "INSERT INTO lane_run (project, repo, issue_key, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, priority, pid_started, polled_at, scheduler)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'queued', 'local', ?10, ?11, ?12, ?13, ?10, ?14)",
         params![
             req.project.to_uppercase(),
             root,
@@ -836,7 +836,8 @@ fn run_with(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Act
             now(),
             std::process::id(),
             priority,
-            crate::procs::me().1
+            crate::procs::me().1,
+            SCHEDULER
         ],
     )?;
     let id = db.conn.last_insert_rowid();
@@ -1445,10 +1446,10 @@ fn turns(rows: Vec<QueueRow>, slots: u32, served: &std::collections::HashMap<Str
 #[allow(clippy::type_complexity)]
 fn queue_rows(db: &Db, me: Option<i64>, alive: &mut dyn FnMut(&Requester) -> bool) -> Result<(Vec<QueueRow>, std::collections::HashMap<String, i64>)> {
     let mut stmt = db.conn.prepare(
-        "SELECT id, project, repo, priority, kind, queued_at, state, pid, lane_count, waiting_for IS NOT NULL, issue_key, started_at, pid_started, polled_at
+        "SELECT id, project, repo, priority, kind, queued_at, state, pid, lane_count, waiting_for IS NOT NULL, issue_key, started_at, pid_started, polled_at, scheduler
          FROM lane_run WHERE state IN ('queued', 'running')",
     )?;
-    type Raw = (Waiting, String, Requester, i64, bool, Option<String>, Option<i64>, Option<i64>);
+    type Raw = (Waiting, String, Requester, i64, bool, Option<String>, Option<i64>, Option<i64>, Option<i64>);
     let raw: Vec<Raw> = stmt
         .query_map([], |r| {
             Ok((
@@ -1460,17 +1461,22 @@ fn queue_rows(db: &Db, me: Option<i64>, alive: &mut dyn FnMut(&Requester) -> boo
                 r.get(10)?,
                 r.get(11)?,
                 r.get(13)?,
+                r.get(14)?,
             ))
         })?
         .collect::<rusqlite::Result<_>>()?;
     let now = now();
     let rows = raw
         .into_iter()
-        .map(|(w, state, requester, lane_count, waits_for_checkout, issue, started_at, polled_at)| {
+        .map(|(w, state, requester, lane_count, waits_for_checkout, issue, started_at, polled_at, scheduler)| {
             // A queued request whose requester has stopped looking for its turn (hung, suspended)
             // would never take it: it holds nobody up until it looks again (NIT-270).
             let stopped_looking = state == "queued" && polled_at.is_some_and(|t| now - t > STOPPED_LOOKING_SECS);
-            let is_alive = Some(w.id) == me || (requester.pid.is_none_or(|_| alive(&requester)) && !stopped_looking);
+            // One an older nitely queued orders the queue its own way: the two orders can each put
+            // the other's request first, and then neither goes. It keeps its own place in its own
+            // view, but holds no newer request up (NIT-325).
+            let older = state == "queued" && scheduler.is_none_or(|v| v < SCHEDULER);
+            let is_alive = Some(w.id) == me || (requester.pid.is_none_or(|_| alive(&requester)) && !stopped_looking && !older);
             QueueRow { w, running: state == "running", alive: is_alive, lane_count, waits_for_checkout, issue, started_at }
         })
         .collect();
@@ -1485,6 +1491,12 @@ fn queue_rows(db: &Db, me: Option<i64>, alive: &mut dyn FnMut(&Requester) -> boo
     }
     Ok((rows, served))
 }
+
+/// The scheduler this nitely queues under, recorded on each request. Raised whenever the queue's
+/// order changes (NIT-291 added aging), so a newer waiter can tell a request an older binary waits
+/// for: on 2026-10-18, after an install, an old binary's run and a newer land each put the other
+/// first, and NIT's queue stood still for 18 minutes (NIT-325).
+const SCHEDULER: i64 = 2;
 
 /// How long a queued request's requester may go without looking for its turn before the requests
 /// behind it stop waiting for it. A requester looks every fraction of a second, two seconds at most.
@@ -1655,9 +1667,9 @@ pub fn hold_machine<'a>(db: &'a Db, repo_root: &Path, worktree: &Path, project: 
     let mut slots_now = slots_now();
     let slots = slots_now();
     db.conn.execute(
-        "INSERT INTO lane_run (project, repo, issue_key, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, priority, lane_count, pid_started, polled_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?6, ?8, 'queued', 'worktree', ?9, ?10, ?11, ?12, ?13, ?9)",
-        params![project.to_uppercase(), repo_root.to_string_lossy(), issue, actor.id(), kind.as_str(), head, tree, command, now(), std::process::id(), priority, slots, crate::procs::me().1],
+        "INSERT INTO lane_run (project, repo, issue_key, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, priority, lane_count, pid_started, polled_at, scheduler)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?6, ?8, 'queued', 'worktree', ?9, ?10, ?11, ?12, ?13, ?9, ?14)",
+        params![project.to_uppercase(), repo_root.to_string_lossy(), issue, actor.id(), kind.as_str(), head, tree, command, now(), std::process::id(), priority, slots, crate::procs::me().1, SCHEDULER],
     )?;
     let id = db.conn.last_insert_rowid();
     let mut waits_for_memory = false;
@@ -2444,8 +2456,8 @@ count = 2
         let insert = |lane: i64, state: &str, at: i64, error: Option<&str>| {
             db.conn
                 .execute(
-                    "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, lane, queued_at, error)
-                     VALUES ('APP', ?1, 'claude', 'run', 's', 't', 'b', 'npm test', ?2, ?3, ?4, ?5)",
+                    "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, lane, queued_at, error, scheduler)
+                     VALUES ('APP', ?1, 'claude', 'run', 's', 't', 'b', 'npm test', ?2, ?3, ?4, ?5, 2)",
                     params![root_s, state, lane, at, error],
                 )
                 .unwrap();
@@ -2454,8 +2466,8 @@ count = 2
         // A long build that started before everything below: still in the queue after 600 more.
         db.conn
             .execute(
-                "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, lane, queued_at, pid)
-                 VALUES ('APP', ?1, 'claude', 'gate', 's', 't', 'b', 'cargo test', 'running', 1, 2, ?2)",
+                "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, lane, queued_at, pid, scheduler)
+                 VALUES ('APP', ?1, 'claude', 'gate', 's', 't', 'b', 'cargo test', 'running', 1, 2, ?2, 2)",
                 params![root_s, std::process::id()],
             )
             .unwrap();
@@ -2463,8 +2475,8 @@ count = 2
         for i in 0..80 {
             db.conn
                 .execute(
-                    "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, lane, queued_at)
-                     VALUES ('APP', 'C:/Code/other', 'claude', 'run', 's', 't', 'b', 'npm test', 'done', 1, ?1)",
+                    "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, lane, queued_at, scheduler)
+                     VALUES ('APP', 'C:/Code/other', 'claude', 'run', 's', 't', 'b', 'npm test', 'done', 1, ?1, 2)",
                     params![700 + i],
                 )
                 .unwrap();
@@ -2723,7 +2735,7 @@ commands = []
         // A row left queued by a process that is gone reads as abandoned.
         db.conn
             .execute(
-                "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid) VALUES ('APP', ?1, 'x', 'run', 's', 't', 'b', 'c', 'queued', 'local', 1, 999999)",
+                "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, scheduler) VALUES ('APP', ?1, 'x', 'run', 's', 't', 'b', 'c', 'queued', 'local', 1, 999999, 2)",
                 [root.to_string_lossy()],
             )
             .unwrap();
@@ -2735,8 +2747,8 @@ let id = db.conn.last_insert_rowid();
         // at another time): not the requester, so the request is abandoned too (NIT-270).
         db.conn
             .execute(
-                "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, pid_started)
-                 VALUES ('APP', ?1, 'x', 'run', 's', 't', 'b', 'c', 'queued', 'local', 1, ?2, 'another start')",
+                "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, pid_started, scheduler)
+                 VALUES ('APP', ?1, 'x', 'run', 's', 't', 'b', 'c', 'queued', 'local', 1, ?2, 'another start', 2)",
                 params![root.to_string_lossy(), std::process::id()],
             )
             .unwrap();
@@ -2745,8 +2757,8 @@ let id = db.conn.last_insert_rowid();
         // The same process, started when it says: still waiting.
         db.conn
             .execute(
-                "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, pid_started)
-                 VALUES ('APP', ?1, 'x', 'run', 's', 't', 'b', 'c', 'queued', 'local', 1, ?2, ?3)",
+                "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, pid_started, scheduler)
+                 VALUES ('APP', ?1, 'x', 'run', 's', 't', 'b', 'c', 'queued', 'local', 1, ?2, ?3, 2)",
                 params![root.to_string_lossy(), std::process::id(), crate::procs::me().1],
             )
             .unwrap();
@@ -3261,8 +3273,8 @@ wanted {shown}", ran.output);
         let add = |state: &str, waiting_memory: Option<&str>| -> i64 {
             db.conn
                 .execute(
-                    "INSERT INTO lane_run (project, repo, issue_key, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, started_at, pid, priority, lane_count, waiting_memory)
-                     VALUES ('APP', ?1, 'APP-1', 'x', 'run', 's', 't', 'b', 'c', ?2, 'local', ?3, CASE WHEN ?2 = 'running' THEN ?3 ELSE NULL END, ?4, 3, 1, ?5)",
+                    "INSERT INTO lane_run (project, repo, issue_key, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, started_at, pid, priority, lane_count, waiting_memory, scheduler)
+                     VALUES ('APP', ?1, 'APP-1', 'x', 'run', 's', 't', 'b', 'c', ?2, 'local', ?3, CASE WHEN ?2 = 'running' THEN ?3 ELSE NULL END, ?4, 3, 1, ?5, 2)",
                     params![root.to_string_lossy(), state, now(), me, waiting_memory],
                 )
                 .unwrap();
@@ -3288,8 +3300,8 @@ wanted {shown}", ran.output);
         let row = |project: &str, state: &str, priority: i64, lanes: i64, pid: i64| -> i64 {
             db.conn
                 .execute(
-                    "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, priority, lane_count, started_at)
-                     VALUES (?1, ?2, 'x', 'run', 's', 't', 'b', 'c', ?3, 'local', CAST(strftime('%s', 'now') AS INTEGER), ?4, ?5, ?6, CASE WHEN ?3 = 'queued' THEN NULL ELSE 2 END)",
+                    "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, priority, lane_count, started_at, scheduler)
+                     VALUES (?1, ?2, 'x', 'run', 's', 't', 'b', 'c', ?3, 'local', CAST(strftime('%s', 'now') AS INTEGER), ?4, ?5, ?6, CASE WHEN ?3 = 'queued' THEN NULL ELSE 2 END, 2)",
                     params![project, format!("C:/Code/{project}"), state, pid, priority, lanes],
                 )
                 .unwrap();
@@ -3324,8 +3336,8 @@ wanted {shown}", ran.output);
         let add = |project: &str, state: &str, queued: i64, started: Option<i64>| -> i64 {
             db.conn
                 .execute(
-                    "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, started_at, pid, priority, lane_count)
-                     VALUES (?1, ?2, 'x', 'run', 's', 't', 'b', 'c', ?3, 'local', ?4, ?5, ?6, 3, 1)",
+                    "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, started_at, pid, priority, lane_count, scheduler)
+                     VALUES (?1, ?2, 'x', 'run', 's', 't', 'b', 'c', ?3, 'local', ?4, ?5, ?6, 3, 1, 2)",
                     params![project, format!("C:/Code/{project}"), state, queued, started, me],
                 )
                 .unwrap();
@@ -3722,8 +3734,8 @@ wanted {shown}", ran.output);
         let row = |project: &str, waiting_for: Option<&str>| -> i64 {
             db.conn
                 .execute(
-                    "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, priority, lane_count, waiting_for)
-                     VALUES (?1, ?2, 'x', 'run', 's', 't', 'b', 'c', 'queued', 'local', 1, ?3, 3, 1, ?4)",
+                    "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, priority, lane_count, waiting_for, scheduler)
+                     VALUES (?1, ?2, 'x', 'run', 's', 't', 'b', 'c', 'queued', 'local', 1, ?3, 3, 1, ?4, 2)",
                     params![project, format!("C:/Code/{project}"), me, waiting_for],
                 )
                 .unwrap();
@@ -3785,8 +3797,8 @@ wanted {shown}", ran.output);
         let row = |state: &str| -> i64 {
             db.conn
                 .execute(
-                    "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, lane)
-                     VALUES ('APP', 'C:/Code/my-app', 'x', 'run', 's', 't', 'b', 'c', ?1, 'local', 1, ?2, 1)",
+                    "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, lane, scheduler)
+                     VALUES ('APP', 'C:/Code/my-app', 'x', 'run', 's', 't', 'b', 'c', ?1, 'local', 1, ?2, 1, 2)",
                     params![state, std::process::id()],
                 )
                 .unwrap();
@@ -3819,6 +3831,34 @@ wanted {shown}", ran.output);
 
 
     #[test]
+    fn an_older_schedulers_request_holds_up_no_newer_one() {
+        let base = crate::paths::unique_temp("nitely-lane-older", "");
+        std::fs::create_dir_all(&base).unwrap();
+        let db = Db::open(&base.join("t.db")).unwrap();
+        let me = std::process::id() as i64;
+        let add = |kind: &str, priority: i64, queued_at: i64, scheduler: Option<i64>| -> i64 {
+            db.conn
+                .execute(
+                    "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, priority, lane_count, scheduler)
+                     VALUES ('NIT', 'C:/Code/nitely', 'x', ?1, 's', 't', 'b', 'c', 'queued', 'local', ?2, ?3, ?4, 3, ?5)",
+                    params![kind, queued_at, me, priority, scheduler],
+                )
+                .unwrap();
+            db.conn.last_insert_rowid()
+        };
+        let mut alive = |_: &Requester| true;
+        // As on 2026-10-18: an old binary's run, queued 12 minutes ago (aged level with a land, and
+        // first by id), and a land queued by the new one.
+        let old = add("run", 3, now() - 12 * 60, None);
+        let land = add("land", 1, now() - 10, Some(SCHEDULER));
+        assert!(my_turn(&db, land, 5, &mut alive).unwrap(), "the old binary's run holds the land up no longer");
+        assert!(my_turn(&db, old, 5, &mut alive).unwrap(), "asking, a request is never passed over itself");
+        db.conn.execute("UPDATE lane_run SET scheduler = ?2 WHERE id = ?1", params![old, SCHEDULER]).unwrap();
+        assert!(!my_turn(&db, land, 5, &mut alive).unwrap(), "under one scheduler, the order holds as before");
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
     fn a_queued_request_whose_requester_stopped_looking_holds_nobody_up() {
         let base = crate::paths::unique_temp("nitely-lane-head", "");
         std::fs::create_dir_all(&base).unwrap();
@@ -3827,8 +3867,8 @@ wanted {shown}", ran.output);
         let row = |polled: Option<i64>| -> i64 {
             db.conn
                 .execute(
-                    "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, priority, lane_count, polled_at)
-                     VALUES ('APP', 'C:/Code/my-app', 'x', 'run', 's', 't', 'b', 'c', 'queued', 'local', 1, ?1, 3, 1, ?2)",
+                    "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, priority, lane_count, polled_at, scheduler)
+                     VALUES ('APP', 'C:/Code/my-app', 'x', 'run', 's', 't', 'b', 'c', 'queued', 'local', 1, ?1, 3, 1, ?2, 2)",
                     params![me, polled],
                 )
                 .unwrap();

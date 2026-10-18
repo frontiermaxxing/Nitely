@@ -121,7 +121,10 @@ repo. On a machine with 3 slots or more, a gate or land leaves the last free slo
 `run` that could start, so a minute of clippy never waits out two half-hour gates (NIT-291). Each
 queued request says why it waits (`waiting_why` in `nitely lanes`, on the strip): "waiting: 3 of 3
 machine slots in use (AND-302 gate 24 m, …)", "behind request 41 of the same repo", "all 2 of its
-repo's lanes are busy", the person's checkout, or memory. (The person's own requests do not yet go
+repo's lanes are busy", the person's checkout, or memory. Each request records the scheduler it waits
+under: one an older nitely queued keeps its own place in its own view but holds no newer request
+up, since the two orders can each put the other's request first (on 2026-10-18 NIT's queue stood
+still for 18 minutes after an install that way, NIT-325). (The person's own requests do not yet go
 first.)
 
 **Executors.** Where a request runs, per project in the playbook: a local lane (the default),
