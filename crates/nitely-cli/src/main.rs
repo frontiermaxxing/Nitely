@@ -606,7 +606,21 @@ enum RepoCmd {
     List,
 }
 
+/// Runs nitely on a thread with room: clap's generated parser and the dispatch below take deep
+/// stack frames in a debug build, past the 1 MB Windows gives a process's main thread, and a new
+/// subcommand can tip it over (the binary then dies at start with a stack overflow).
 fn main() {
+    let worker = std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(cli_main)
+        .expect("starting nitely's main thread");
+    if worker.join().is_err() {
+        // The panic has printed itself.
+        std::process::exit(101);
+    }
+}
+
+fn cli_main() {
     let cli = Cli::parse();
     match &cli.command {
         Cmd::Hook { vendor, payload } => {
