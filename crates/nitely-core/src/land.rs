@@ -471,8 +471,10 @@ pub(crate) fn fast_forward_main(root: &Path, to: &str) -> Result<()> {
     let started = std::time::SystemTime::now();
     std::fs::write(&mark, format!("fast-forward pid {} since {}", std::process::id(), crate::issues::iso(now()))).ok();
     let done = git(root, &["merge", "--ff-only", to]);
-    // Our git has ended: a lock it took and did not let go (it was killed) is stale now.
-    if done.is_err() && taken_during(started) {
+    // Our git has ended: a lock it took and did not let go (it was killed) is stale now. Not one
+    // it could not take because another process held it ("File exists"): that one is theirs.
+    let refused_by_lock = done.as_ref().err().is_some_and(|e| format!("{e:#}").contains("index.lock") && format!("{e:#}").contains("File exists"));
+    if done.is_err() && !refused_by_lock && modified(&index_lock).is_some_and(|t| t >= started && t <= started + FF_TAKES) {
         std::fs::remove_file(&index_lock).ok();
     }
     std::fs::remove_file(&mark).ok();
