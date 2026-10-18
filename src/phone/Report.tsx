@@ -123,7 +123,8 @@ export function LastDay(props: { device: Device; open: boolean; version: number 
   // One row per issue, what still waits first.
   const groups = report ? groupNeeded(report.needed) : [];
   return (
-    <details className="ph-report" open={open} onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}>
+    // Its own toggle only: React bubbles the "N more" folds' toggles inside it up to here.
+    <details className="ph-report" open={open} onToggle={(e) => e.target === e.currentTarget && setOpen(e.currentTarget.open)}>
       <summary>
         By goal, {report ? sinceLabel(report.since, report.now) : since === null ? "the last day" : sinceLabel(since, Math.floor(Date.now() / 1000))}
       </summary>
