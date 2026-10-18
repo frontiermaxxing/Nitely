@@ -494,14 +494,15 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
             }
         }
         let mut findings = parse_findings(text);
+        let code = worktree.map(CurrentCode::new);
         // A P0 or P1 that points at no file names no concrete failure: it counts as P2, and keeps
         // the priority it was raised at, which a later round can restore by citing the code (NIT-282).
-        for f in findings.iter_mut().filter(|f| f.priority <= 1 && citations(&f.text).is_empty()) {
+        // A file without an extension (`Makefile`) counts when the branch has it.
+        for f in findings.iter_mut().filter(|f| f.priority <= 1 && !names_a_file(&f.text, code.as_ref())) {
             f.raised_as = Some(f.priority);
             f.priority = 2;
         }
         let statuses = parse_previous(text);
-        let code = worktree.map(CurrentCode::new);
         let previous: Vec<Recheck> = previous
             .map(|prev| {
                 prev.findings
@@ -948,6 +949,18 @@ impl CurrentCode {
             _ => None,
         }
     }
+}
+
+/// Whether a finding names a file: a citation, or, where the branch can be read, the word after its
+/// title (`title: Makefile, target: ...`) being one of its tracked files.
+fn names_a_file(text: &str, code: Option<&CurrentCode>) -> bool {
+    if !citations(text).is_empty() {
+        return true;
+    }
+    let Some(code) = code else { return false };
+    let place = text.split_once(": ").map(|(_, rest)| rest).unwrap_or(text);
+    let word = place.split([',', ':', ' ']).next().unwrap_or("").trim_matches('`');
+    !word.is_empty() && code.resolve(word).is_some()
 }
 
 /// `path/to/file.rs:120` and `file.rs` mentions in a text, with their line when given.
@@ -1669,6 +1682,17 @@ VERDICT 1: findings\nMONEY_OR_RELEASE 1: no\nVERDICT 2: findings\nMONEY_OR_RELEA
         assert_eq!((r.findings[0].priority, r.findings[0].raised_as), (2, Some(1)), "no file, no concrete failure: P2 at most");
         assert_eq!((r.findings[1].priority, r.findings[1].raised_as), (1, None));
         assert_eq!(r.verdict, "changes");
+        // A file without an extension counts when the branch has it.
+        let dir = crate::paths::unique_temp("nitely-rubric", "");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Makefile"), "all:
+").unwrap();
+        let r = rules().parse("codex", "- [P1] Wrong target: Makefile, all: builds nothing
+VERDICT: findings
+MONEY_OR_RELEASE: no
+", 1, None, Some(&dir)).unwrap();
+        assert_eq!((r.findings[0].priority, r.verdict.as_str()), (1, "changes"));
+        std::fs::remove_dir_all(dir).ok();
         // The rubric is in the prompt, and what the change is for comes before the line-level work.
         let mut with = rules();
         with.context = "What the change is for, its issue APP-1 \"Footer\":\nShow the footer.".into();
