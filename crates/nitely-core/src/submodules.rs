@@ -577,7 +577,14 @@ pub fn sync_lane(root: &Path, pb: &Playbook, lane: &Path, commit: &str, keep: &[
         // A sparse submodule: its cone, the directories the snapshot changes in it since the base, and
         // the `keep` folders under it (narrowing the cone would delete what they hold).
         let prefix = format!("{path}/");
-        let kept: Vec<String> = keep.iter().filter_map(|k| k.trim_matches('/').strip_prefix(&prefix).map(str::to_string)).collect();
+        // A name entry (`node_modules`) holds at any depth, in the submodule too; a path entry only
+        // where it lies under the submodule.
+        let names: Vec<&str> = keep.iter().filter_map(|k| crate::lanes::keep_anywhere(k)).collect();
+        let kept: Vec<String> = keep
+            .iter()
+            .filter(|k| crate::lanes::keep_anywhere(k).is_none())
+            .filter_map(|k| k.trim_matches('/').strip_prefix(&prefix).map(str::to_string))
+            .collect();
         let dirs = if s.sparse.is_empty() {
             vec![]
         } else {
@@ -624,6 +631,10 @@ pub fn sync_lane(root: &Path, pb: &Playbook, lane: &Path, commit: &str, keep: &[
         for k in &kept {
             args.push("-e".into());
             args.push(format!("/{k}"));
+        }
+        for name in &names {
+            args.push("-e".into());
+            args.push(format!("{name}/"));
         }
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         git(&at, &args)?;

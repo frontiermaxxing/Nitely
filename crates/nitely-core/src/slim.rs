@@ -87,7 +87,8 @@ pub fn plan_repo(name: &str, repo_root: &Path, recent: &Recent) -> Result<Vec<Ca
             continue;
         }
         let path = PathBuf::from(&wt.path);
-        let dirs: Vec<(String, u64)> = keep.iter().filter(|d| path.join(d).is_dir() && ignored(&path, d)).map(|d| (d.clone(), size(&path.join(d)))).collect();
+        // A name keeps at any depth (every package's node_modules), a path from the root (NIT-268).
+        let dirs: Vec<(String, u64)> = crate::lanes::kept_dirs(&path, &keep).into_iter().filter(|d| ignored(&path, d)).map(|d| (d.clone(), size(&path.join(&d)))).collect();
         if dirs.is_empty() {
             continue;
         }

@@ -24,8 +24,10 @@ use crate::playbook::{self, git, Playbook};
 pub struct LaneRules {
     /// Lanes for this repo on this machine.
     pub count: u32,
-    /// Build directories (repo-relative) a lane keeps between requests; `target` and `node_modules`
-    /// unless the playbook says (the same list `nitely lanes slim` reclaims).
+    /// Build directories a lane keeps between requests; `target` and `node_modules` unless the
+    /// playbook says (the same list `nitely lanes slim` reclaims). A name (`node_modules`) is that
+    /// directory at any depth, a path (`/node_modules`, `web/dist`) only from the repo's root
+    /// (`keep_anywhere`, NIT-268).
     pub keep: Vec<String>,
     /// A command running longer is stopped, with everything it started.
     pub timeout_minutes: u64,
@@ -153,11 +155,20 @@ fn guard_throwaway(root: &Path) {
 #[cfg(not(test))]
 fn guard_throwaway(_: &Path) {}
 
-/// A repo-relative path inside one of the build directories.
+/// A repo-relative path inside one of the build directories: under a path entry, or under a
+/// directory a name entry names at any depth.
 fn in_keep(keep: &[String], path: &str) -> bool {
-    keep.iter().any(|k| {
-        let k = k.trim_matches('/');
-        !k.is_empty() && (path == k || path.starts_with(&format!("{k}/")))
+    keep.iter().any(|k| match keep_anywhere(k) {
+        Some(name) => {
+            // The directories on the path: every part but a file's own name.
+            let parts: Vec<&str> = path.trim_end_matches('/').split('/').collect();
+            let dirs = if path.ends_with('/') { &parts[..] } else { &parts[..parts.len().saturating_sub(1)] };
+            dirs.contains(&name)
+        }
+        None => {
+            let k = k.trim_matches('/');
+            !k.is_empty() && (path == k || path.starts_with(&format!("{k}/")))
+        }
     })
 }
 
@@ -1902,8 +1913,9 @@ fn hygiene(lane: &Path, rules: &LaneRules, record: &Path, log: &Path) {
 
 fn hygiene_with(lane: &Path, rules: &LaneRules, record: &Path, log: &Path, floor: u64) {
     use std::io::Write;
-    let measured = keep_size(lane, &rules.keep);
-    let output = measured.saturating_sub(incremental_size(lane, &rules.keep));
+    let dirs = kept_dirs(lane, &rules.keep);
+    let measured = keep_size(lane, &dirs);
+    let output = measured.saturating_sub(incremental_size(lane, &dirs));
     let (recorded, served) = read_size(record).map_or((0, 0), |(_, b, n)| (b, n));
     let served = served + 1;
     let baseline = if served <= LEARN_REQUESTS { recorded.max(output) } else { recorded };
@@ -1911,29 +1923,36 @@ fn hygiene_with(lane: &Path, rules: &LaneRules, record: &Path, log: &Path, floor
     let mut size = measured;
     let mut said = None;
     if cap > 0 && size > cap.saturating_mul(2) {
-        for d in rules.keep.iter().filter_map(|k| keep_dir(lane, k)) {
-            std::fs::remove_dir_all(&d).ok();
+        for d in &dirs {
+            std::fs::remove_dir_all(lane.join(d)).ok();
         }
-        size = keep_size(lane, &rules.keep);
+        size = keep_size(lane, &dirs);
         said = Some(format!("over twice its size cap ({} of {}): removed its build directories; the next request builds cold", human(measured), human(cap)));
     } else if cap > 0 && size > cap {
-        for d in incremental_dirs(lane, &rules.keep) {
+        for d in incremental_dirs(lane, &dirs) {
             std::fs::remove_dir_all(d).ok();
         }
-        size = keep_size(lane, &rules.keep);
+        size = keep_size(lane, &dirs);
         said = Some(format!("over its size cap ({} of {}): emptied the incremental caches, now {}", human(measured), human(cap), human(size)));
     }
     std::fs::write(record, format!("{size} {baseline} {served}")).ok();
+    // Which build directories the lane keeps, for `nitely lanes` and Settings to show.
+    let still: Vec<&String> = dirs.iter().filter(|d| lane.join(d).is_dir()).collect();
+    std::fs::write(record.with_file_name(KEPT_RECORD), still.iter().map(|d| format!("{d}\n")).collect::<String>()).ok();
     if let (Some(said), Ok(mut f)) = (said, std::fs::OpenOptions::new().append(true).open(log)) {
         writeln!(f, "nitely: lane {said}").ok();
     }
 }
 
-/// The incremental caches in a lane's build directories: each `<keep>/<profile>/incremental`
-/// (cargo's), links neither followed nor counted.
-fn incremental_dirs(lane: &Path, keep: &[String]) -> Vec<PathBuf> {
+/// The file beside the size record that lists the build directories the lane keeps, one path from
+/// the lane's root a line, as of its last request.
+const KEPT_RECORD: &str = "nitely-lane-kept";
+
+/// The incremental caches in a lane's build directories (`kept`, from `kept_dirs`): each
+/// `<dir>/<profile>/incremental` (cargo's), links neither followed nor counted.
+fn incremental_dirs(lane: &Path, kept: &[String]) -> Vec<PathBuf> {
     let mut dirs = vec![];
-    for d in keep.iter().filter_map(|k| keep_dir(lane, k)) {
+    for d in kept.iter().map(|k| lane.join(k)) {
         let Ok(entries) = std::fs::read_dir(&d) else { continue };
         for e in entries.flatten() {
             let incremental = e.path().join("incremental");
@@ -1946,13 +1965,14 @@ fn incremental_dirs(lane: &Path, keep: &[String]) -> Vec<PathBuf> {
 }
 
 /// The bytes in a lane's incremental caches.
-fn incremental_size(lane: &Path, keep: &[String]) -> u64 {
-    incremental_dirs(lane, keep).iter().map(|d| dir_size(d)).sum()
+fn incremental_size(lane: &Path, kept: &[String]) -> u64 {
+    incremental_dirs(lane, kept).iter().map(|d| dir_size(d)).sum()
 }
 
-/// The bytes in a lane's build directories, links (symlinks, junctions) not followed.
-fn keep_size(lane: &Path, keep: &[String]) -> u64 {
-    keep.iter().filter_map(|k| keep_dir(lane, k)).map(|d| dir_size(&d)).sum()
+/// The bytes in a lane's build directories (`kept`, from `kept_dirs`), links (symlinks,
+/// junctions) not followed.
+fn keep_size(lane: &Path, kept: &[String]) -> u64 {
+    kept.iter().map(|d| dir_size(&lane.join(d))).sum()
 }
 
 /// The bytes in `dir`, links (symlinks, junctions) not followed.
@@ -1985,6 +2005,53 @@ fn keep_dir(lane: &Path, keep: &str) -> Option<PathBuf> {
         }
     }
     Some(dir)
+}
+
+/// A `[lanes] keep` entry as a name to match at any depth, when it is one: an entry without a slash
+/// (a trailing one aside) is a directory name, as in a .gitignore, so `node_modules` keeps the
+/// root's and every package's (NIT-268); one with a slash (`/node_modules`, `web/dist`) is that path
+/// from the repo's root.
+pub(crate) fn keep_anywhere(keep: &str) -> Option<&str> {
+    let k = keep.trim().trim_end_matches('/');
+    (!k.is_empty() && !k.contains('/') && !k.contains('\\') && k != "." && k != "..").then_some(k)
+}
+
+/// The directories `keep` names in the checkout at `root`, as paths from it: each path entry that
+/// exists, and every directory a name entry names at any depth. Never through a link, never inside
+/// `.git` or inside a directory already found, and never one git tracks files in (a source folder
+/// that happens to be called `target`).
+pub(crate) fn kept_dirs(root: &Path, keep: &[String]) -> Vec<String> {
+    let names: Vec<&str> = keep.iter().filter_map(|k| keep_anywhere(k)).collect();
+    let mut found: Vec<String> = keep
+        .iter()
+        .filter(|k| keep_anywhere(k).is_none())
+        .filter_map(|k| keep_dir(root, k).filter(|d| d.is_dir()).map(|_| k.trim_matches('/').to_string()))
+        .collect();
+    if !names.is_empty() {
+        let mut stack = vec![String::new()];
+        while let Some(rel) = stack.pop() {
+            let dir = if rel.is_empty() { root.to_path_buf() } else { root.join(&rel) };
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            for e in entries.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                let child = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
+                if name == ".git" || is_link(&e.path()) || !e.file_type().is_ok_and(|t| t.is_dir()) || found.contains(&child) {
+                    continue;
+                }
+                if names.contains(&name.as_str()) {
+                    let tracked = git(root, &["ls-files", "--", &child]).is_ok_and(|t| !t.trim().is_empty());
+                    if !tracked {
+                        found.push(child);
+                    }
+                    continue;
+                }
+                stack.push(child);
+            }
+        }
+    }
+    found.sort();
+    found.dedup();
+    found
 }
 
 /// Whether `path` is a link to somewhere else: a symlink, or on Windows any reparse point (a
@@ -2138,9 +2205,14 @@ fn switch(lane: &Path, commit: &str, keep: &[String]) -> Result<()> {
     let attempt = || -> Result<()> {
         git(lane, &["checkout", "--quiet", "--force", "--detach", commit])?;
         let mut args: Vec<String> = vec!["clean".into(), "-ffdxq".into()];
+        // A name at any depth (`node_modules/`), a path from the root (`/web/dist`), as git's own
+        // ignore patterns read them.
         for k in keep {
             args.push("-e".into());
-            args.push(format!("/{}", k.trim_matches('/')));
+            args.push(match keep_anywhere(k) {
+                Some(name) => format!("{name}/"),
+                None => format!("/{}", k.trim_matches('/')),
+            });
         }
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         git(lane, &args)?;
@@ -2276,6 +2348,10 @@ pub struct LaneState {
     /// under, once it has run one.
     pub size_bytes: Option<u64>,
     pub cap_bytes: Option<u64>,
+    /// The build directories it keeps, as paths from its root, as of its last request: what
+    /// `[lanes] keep` matched (a name at any depth, a path from the root).
+    #[serde(default)]
+    pub kept: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2441,7 +2517,12 @@ fn status_with(db: &Db, repo_root: &Path, pb: &Playbook, project: &str, probe_lo
             Some((size, baseline, _)) => (Some(size), Some(cap_bytes(&rules, baseline, MIN_CAP))),
             None => (None, None),
         };
-        lanes.push(LaneState { lane: n, path: path.to_string_lossy().into_owned(), made, busy, at, size_bytes, cap_bytes });
+        let kept = made
+            .then(|| git_path(&path, KEPT_RECORD).and_then(|r| std::fs::read_to_string(r).ok()))
+            .flatten()
+            .map(|t| t.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect())
+            .unwrap_or_default();
+        lanes.push(LaneState { lane: n, path: path.to_string_lossy().into_owned(), made, busy, at, size_bytes, cap_bytes, kept });
     }
     let recent = db.finished_lane_runs(project, &root, 10)?;
     // Every project's running requests, each read through `lane_run` so one whose process is gone
@@ -2535,6 +2616,56 @@ mod tests {
 
     fn playbook_with(text: &str) -> Playbook {
         Playbook::parse(text).unwrap()
+    }
+
+    /// A monorepo's packages each install their own node_modules: a name in `keep` keeps them all,
+    /// at any depth; a path keeps only that one (NIT-268).
+    #[test]
+    fn a_keep_name_matches_at_any_depth_and_a_path_only_from_the_root() {
+        let base = crate::paths::unique_temp("nitely-keep-depth", "");
+        let root = repo(&base);
+        for pkg in ["pkg-a", "pkg-b/web"] {
+            std::fs::create_dir_all(root.join(pkg)).unwrap();
+            std::fs::write(root.join(pkg).join("package.json"), "{}").unwrap();
+        }
+        // A source folder that happens to share the name: tracked, so never build output.
+        std::fs::create_dir_all(root.join("src/node_modules")).unwrap();
+        std::fs::write(root.join("src/node_modules/vendored.js"), "x").unwrap();
+        let g = |args: &[&str]| assert!(playbook::run_git(Command::new("git").arg("-C").arg(&root).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args)).unwrap().status.success(), "{args:?}");
+        g(&["add", "-f", "."]);
+        g(&["commit", "-q", "-m", "packages"]);
+        let head = git(&root, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        let install = || {
+            for dir in ["node_modules", "pkg-a/node_modules", "pkg-b/web/node_modules"] {
+                std::fs::create_dir_all(root.join(dir)).unwrap();
+                std::fs::write(root.join(dir).join("dep.js"), "y").unwrap();
+            }
+            std::fs::write(root.join("pkg-a/stray.txt"), "left by a request").unwrap();
+        };
+
+        install();
+        let names = vec!["node_modules".to_string()];
+        assert_eq!(kept_dirs(&root, &names), ["node_modules", "pkg-a/node_modules", "pkg-b/web/node_modules"], "every package's, not the tracked src/node_modules");
+        switch(&root, &head, &names).unwrap();
+        for dir in ["node_modules", "pkg-a/node_modules", "pkg-b/web/node_modules"] {
+            assert!(root.join(dir).join("dep.js").exists(), "{dir} kept");
+        }
+        assert!(!root.join("pkg-a/stray.txt").exists() && root.join("src/node_modules/vendored.js").exists());
+
+        // A path from the root keeps only that one.
+        install();
+        let path = vec!["/node_modules".to_string()];
+        assert_eq!(kept_dirs(&root, &path), ["node_modules"]);
+        switch(&root, &head, &path).unwrap();
+        assert!(root.join("node_modules/dep.js").exists());
+        assert!(!root.join("pkg-a/node_modules").exists() && !root.join("pkg-b/web/node_modules").exists());
+
+        // The same meaning for what counts as build output in a person's checkout.
+        assert!(in_keep(&names, "pkg-a/node_modules/dep.js") && in_keep(&names, "pkg-b/web/node_modules/"));
+        assert!(!in_keep(&names, "src/node_modules") && !in_keep(&names, "docs/node_modules.md"), "a file of that name is not the directory");
+        assert!(in_keep(&path, "node_modules/dep.js") && !in_keep(&path, "pkg-a/node_modules/dep.js"));
+        assert_eq!((keep_anywhere("target/"), keep_anywhere("web/dist"), keep_anywhere("/target"), keep_anywhere("..")), (Some("target"), None, None, None));
+        std::fs::remove_dir_all(base).ok();
     }
 
     #[test]
@@ -2789,6 +2920,7 @@ commands = []
         let lanes = status(&db, &root, &pb, "APP").unwrap().unwrap();
         assert_eq!(lanes.lanes.len(), 1);
         assert!(lanes.lanes[0].made && !lanes.lanes[0].busy);
+        assert_eq!(lanes.lanes[0].kept, ["out"], "the build directories it keeps");
         assert!(lanes.queue.is_empty() && lanes.recent.len() == 3);
         assert_eq!(reset(&root, &pb).unwrap().len(), 1);
         std::fs::remove_dir_all(base).ok();

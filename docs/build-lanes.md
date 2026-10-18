@@ -91,7 +91,8 @@ A lane serves a request in four steps, the same whether or not the last one fini
 
 1. `git checkout --force --detach <snapshot>`: only files that differ from what the lane holds are
    written.
-2. `git clean -ffdx` keeping only the playbook's build directories (`target`, `node_modules`, ...):
+2. `git clean -ffdx` keeping only the playbook's build directories (`target`, `node_modules`, ...;
+   a name at any depth, so a monorepo's every `node_modules`, a path only from the root; NIT-268):
    anything else untracked or ignored, which a previous request may have left, goes.
 3. The playbook's setup again when a dependency file differs from the last setup (the fingerprint
    worktrees already keep, `setup_when_changed`).
@@ -382,7 +383,9 @@ sparse = ["crates/nitely-core"]      # optional: cone-mode directories every wor
 
 [lanes]                              # no [lanes]: no lanes, everything works as before
 count = 2                            # lanes for this project on this machine
-keep = ["target", "node_modules"]    # build directories a lane keeps between requests (the default)
+keep = ["target", "node_modules"]    # build directories a lane keeps between requests (the default):
+                                     # a name keeps it at any depth (every package's node_modules),
+                                     # a path ("/node_modules", "web/dist") only from the repo's root
 timeout_minutes = 30                 # a command running longer is stopped with what it started
 heavy = ["^cargo (build|test|clippy)", "^npm (ci|install|test|run build)"]
 executor = "local"                   # "local", "machine:<name>" or "ci" (the gate only)
