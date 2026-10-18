@@ -353,22 +353,25 @@ fn agents(
     let mut named = db.issues_sessions_work_on(&local.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), now())?;
     // An agent whose calls name no session acts under its folder's id (`claude:c:/code/app`), a
     // crew worker always: its hooks report the same agent under its own session id. Where such a
-    // session shares the folder, it is the agent (its state is current) and the folder's record
-    // is not another one; the folder's work is its own when it is the only one there.
+    // session in the folder was seen since the folder's record, it is the agent (its state is the
+    // current one) and the record is not another; the record's work is its own when it is the only
+    // one there. A record newer than every session there (Codex calls without a thread, after an
+    // earlier thread went idle) is the agent at work, and stays.
     let folder_id = |s: &Session| s.id == format!("{}:{}", s.vendor, crate::paths::normalize(&s.cwd));
     let place = |s: &Session| (s.vendor.clone(), crate::paths::normalize(&s.cwd));
-    let mut in_folder: std::collections::HashMap<(String, String), Vec<&str>> = std::collections::HashMap::new();
+    let mut in_folder: std::collections::HashMap<(String, String), Vec<(&str, i64)>> = std::collections::HashMap::new();
     for s in local.iter().filter(|s| !folder_id(s)) {
-        in_folder.entry(place(s)).or_default().push(s.id.as_str());
+        in_folder.entry(place(s)).or_default().push((s.id.as_str(), s.last_seen_at));
     }
-    for s in local.iter().filter(|s| folder_id(s)) {
-        if let (Some([only]), Some(work)) = (in_folder.get(&place(s)).map(Vec::as_slice), named.get(&s.id).cloned()) {
+    let superseded = |s: &Session| folder_id(s) && in_folder.get(&place(s)).is_some_and(|there| there.iter().any(|(_, seen)| *seen >= s.last_seen_at));
+    for s in local.iter().filter(|s| superseded(s)) {
+        if let (Some([(only, _)]), Some(work)) = (in_folder.get(&place(s)).map(Vec::as_slice), named.get(&s.id).cloned()) {
             let mine = named.entry(only.to_string()).or_default();
             mine.0 = mine.0.take().or(work.0);
             mine.1 = mine.1.take().or(work.1);
         }
     }
-    let local: Vec<&Session> = local.into_iter().filter(|s| !folder_id(s) || !in_folder.contains_key(&place(s))).collect();
+    let local: Vec<&Session> = local.iter().copied().filter(|s| !superseded(s)).collect();
     let mut out = Vec::new();
     for s in local {
         let repo = config.repos.iter().zip(views).filter(|(_, v)| is_within(&s.cwd, &v.root) || v.rows.iter().any(|r| is_within(&s.cwd, &r.worktree))).map(|(r, _)| r).next();
@@ -399,8 +402,9 @@ impl Db {
     /// For each of `sessions`, the issue its own events name and its latest report line. The issue
     /// is the one of its latest claim, start_task or hand-in, or of a report or note newer than that
     /// within `REPORT_NAMES_ISSUE_SECS` of `now`: an agent working from the main checkout names its
-    /// issue only in what it does, never in its folder. A submit's outcome is not the agent's act
-    /// (its job writes it, often after the agent moved on), so it names nothing.
+    /// issue only in what it does, never in its folder. What a submit or land writes as it goes (its
+    /// outcome, and the status lines it logs from the worktree, with a `cwd`) is not the agent's
+    /// act: its job runs on after the agent moved on, so it names nothing and is no report.
     pub fn issues_sessions_work_on(&self, sessions: &[&str], now: i64) -> Result<SessionWork> {
         let mut out = SessionWork::new();
         if sessions.is_empty() {
@@ -408,22 +412,28 @@ impl Db {
         }
         let wanted: HashSet<&str> = sessions.iter().copied().collect();
         let mut stmt = self.conn.prepare(
-            "SELECT actor, ts, type, issue_key, summary FROM event
+            "SELECT actor, ts, type, issue_key, summary, cwd IS NOT NULL FROM event
              WHERE ts >= ?1 AND (type IN ('claimed', 'worktree', 'submit_queued', 'status', 'note', 'handoff')) ORDER BY ts, id",
         )?;
         let rows = stmt.query_map([now - SESSION_WINDOW_SECS], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, Option<String>>(3)?, r.get::<_, Option<String>>(4)?))
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, Option<String>>(3)?, r.get::<_, Option<String>>(4)?, r.get::<_, bool>(5)?))
         })?;
         for row in rows {
-            let (actor, ts, kind, issue, summary) = row?;
+            let (actor, ts, kind, issue, summary, has_cwd) = row?;
             if !wanted.contains(actor.as_str()) {
                 continue;
             }
             let entry = out.entry(actor).or_default();
+            let strong = matches!(kind.as_str(), "claimed" | "worktree" | "submit_queued");
+            // A pipeline step's line, logged from the worktree it works in; the agent's own
+            // reports and notes name their issue without one.
+            let pipeline = !strong && has_cwd && issue.is_some();
+            if pipeline {
+                continue;
+            }
             if kind == "status" {
                 entry.1 = summary.or(entry.1.take());
             }
-            let strong = matches!(kind.as_str(), "claimed" | "worktree" | "submit_queued");
             if let Some(key) = issue.filter(|_| strong || ts >= now - REPORT_NAMES_ISSUE_SECS) {
                 entry.0 = Some(key.to_uppercase());
             }
@@ -508,8 +518,10 @@ mod tests {
         event(now - 900, "claude:e", "submit_queued", Some("APP-6"), "Handed in as job 3");
         event(now - 600, "claude:e", "claimed", Some("APP-7"), "Took the issue");
         event(now - 30, "claude:e", "submit", Some("APP-6"), "Review passed; ready to land");
+        // And its job's status line, logged from the worktree as `log_event` does.
+        db.conn.execute("INSERT INTO event (ts, actor, cwd, type, issue_key, summary) VALUES (?1, 'claude:e', 'C:/code/wt/app-6', 'status', 'APP-6', 'Reviewed alone, not in a batch')", [now - 20]).unwrap();
         let named = db.issues_sessions_work_on(&["claude:a", "claude:b", "claude:c", "claude:e"], now).unwrap();
-        assert_eq!(named["claude:e"].0.as_deref(), Some("APP-7"), "a submit's outcome is not where the agent is");
+        assert_eq!(named["claude:e"].0.as_deref(), Some("APP-7"), "a submit's outcome and its job's lines are not where the agent is");
         assert_eq!(named["claude:a"], (Some("APP-1".to_string()), Some("Running the tests".to_string())));
         assert_eq!(named["claude:b"].0.as_deref(), Some("APP-3"));
         assert_eq!(named["claude:c"].0, None);
