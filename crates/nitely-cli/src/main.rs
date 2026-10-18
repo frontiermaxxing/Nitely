@@ -735,10 +735,12 @@ fn run(cmd: Cmd) -> Result<()> {
             if std::env::var_os("NITELY_HOME").is_none() || paths::normalize(&home.to_string_lossy()) == real {
                 bail!("perf-seed seeds only a data folder of its own: set NITELY_HOME to an empty folder");
             }
+            // A new data folder only: one with a config of its own is a profile someone uses.
+            if paths::config_path().exists() {
+                bail!("{} has a config already; perf-seed seeds only a new data folder", home.display());
+            }
             let seeded = nitely_core::perf::seed(&paths::db_path(), &home.join("perf-repos"))?;
-            let mut config = Config::load()?;
-            config.repos = seeded.repos;
-            config.save()?;
+            seeded.save()?;
             println!("seeded {}: {} projects, {} issues, {} worktrees, {} events", home.display(), nitely_core::perf::PROJECTS.len(), nitely_core::perf::ISSUES, nitely_core::perf::WORKTREES, nitely_core::perf::EVENTS);
             Ok(())
         }

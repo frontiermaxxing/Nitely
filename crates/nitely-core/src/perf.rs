@@ -22,15 +22,19 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
     crate::playbook::git(dir, &all)
 }
 
-/// Seeds an empty database at `db_path` with the large board, its repos made under `repos_in`: 4
-/// projects with a repo each, 800 issues in every state, 30 worktrees on issue branches with an
-/// agent session in each, 5,000 events over two weeks, open asks, reviews and blockers. Returns the
-/// config naming the repos.
+/// Seeds a new database at `db_path` with the large board, its repos made in a new folder
+/// `repos_in`: 4 projects with a repo each, 800 issues in every state, 30 worktrees on issue
+/// branches with an agent session in each, 5,000 events over two weeks, open asks, reviews and
+/// blockers. Returns the config naming the repos. It refuses a database that exists and a folder
+/// that does, so it can never change anyone's data: it rewrites every event's time.
 pub fn seed(db_path: &Path, repos_in: &Path) -> Result<Config> {
-    let mut db = Db::open(db_path)?;
-    if db.conn.query_row("SELECT COUNT(*) FROM issue", [], |r| r.get::<_, i64>(0))? > 0 {
-        bail!("{} already has issues; the large board is seeded only into an empty database", db_path.display());
+    if db_path.exists() {
+        bail!("{} exists; the large board is seeded only into a new database", db_path.display());
     }
+    if repos_in.exists() {
+        bail!("{} exists; the large board's repos go only into a new folder", repos_in.display());
+    }
+    let mut db = Db::open(db_path)?;
     std::fs::create_dir_all(repos_in)?;
     let agent = Actor::Agent("claude:seed".into());
     let mut repos = vec![];
@@ -46,6 +50,8 @@ pub fn seed(db_path: &Path, repos_in: &Path) -> Result<Config> {
     }
 
     let states = ["Todo", "Todo", "Backlog", "In Progress", "In Review", "Needs You", "Done", "Done", "Done", "Canceled"];
+    // The nth issue's state: issues go to the projects in turn, so each project gets every state.
+    let state_of = |n: usize| states[(n / PROJECTS.len()) % states.len()];
     let words = ["sidebar", "billing", "export", "login", "search", "sync", "upload", "theme", "cache", "report", "invite", "audit"];
     let mut keys: Vec<String> = vec![];
     for n in 0..ISSUES {
@@ -64,7 +70,7 @@ pub fn seed(db_path: &Path, repos_in: &Path) -> Result<Config> {
             ..Default::default()
         };
         let issue = db.create_issue(&new, &agent)?;
-        match states[n % states.len()] {
+        match state_of(n) {
             "Todo" => {}
             "Done" => drop(db.move_issue(&issue.key, "Done", Some("landed in a seeded run"), None, &agent)?),
             "Canceled" => drop(db.move_issue(&issue.key, "Canceled", None, Some("not needed"), &agent)?),
@@ -78,7 +84,7 @@ pub fn seed(db_path: &Path, repos_in: &Path) -> Result<Config> {
     }
 
     // 30 worktrees on issue branches, spread over the repos, each with an agent session working in it.
-    let open: Vec<&String> = keys.iter().enumerate().filter(|(n, _)| matches!(states[n % states.len()], "In Progress" | "In Review" | "Needs You")).map(|(_, k)| k).collect();
+    let open: Vec<&String> = keys.iter().enumerate().filter(|(n, _)| matches!(state_of(*n), "In Progress" | "In Review" | "Needs You")).map(|(_, k)| k).collect();
     let worktree = |key: &str| repos_in.join(format!("wt-{}", key.to_lowercase()));
     for (w, key) in open.iter().take(WORKTREES).enumerate() {
         let p = PROJECTS.iter().position(|p| key.starts_with(&format!("{p}-"))).unwrap_or(0);
@@ -108,10 +114,10 @@ pub fn seed(db_path: &Path, repos_in: &Path) -> Result<Config> {
     db.conn.execute("UPDATE event SET ts = ?1 - (id * 2654435761 % ?2)", rusqlite::params![now(), two_weeks])?;
 
     // Open asks, and a passing review on what waits for approval.
-    for (n, key) in keys.iter().enumerate().filter(|(n, _)| states[n % states.len()] == "In Progress").take(20) {
+    for (n, key) in keys.iter().enumerate().filter(|(n, _)| state_of(*n) == "In Progress").take(20) {
         db.create_ask(&format!("Should {key} keep the old export format? ({n})"), &["yes".into(), "no".into()], Some(key), None, &agent)?;
     }
-    for key in keys.iter().enumerate().filter(|(n, _)| states[n % states.len()] == "Needs You").map(|(_, k)| k) {
+    for key in keys.iter().enumerate().filter(|(n, _)| state_of(*n) == "Needs You").map(|(_, k)| k) {
         db.conn.execute(
             "INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, reasons, findings, ts) VALUES (?1, 'p', 'c', 'codex', 'pass', 'human', '[\"billing\"]', '[]', ?2)",
             rusqlite::params![key, now() - 600],
@@ -131,12 +137,14 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
-    /// Budgets for a release build on an ordinary machine (CI's runners included), with room for a
-    /// busy one. What each reads is what the app reads on every refresh, or on a click.
+    /// Budgets for a release build, set from CI's Windows runner (2026-10-18: 1.0 s, 185 ms, 24 ms,
+    /// 160 ms, 1.2 ms, against 0.5 s, 12 ms, 18 ms, 142 ms, 1.2 ms on a 32-core desktop) with room
+    /// for a slower run. What each reads is what the app reads on every refresh, or on a click; the
+    /// cached snapshot is most refreshes, git read again only when a repo changed.
     const BUDGETS: [(&str, u64); 6] = [
         ("open the database", 50),
-        ("snapshot, git read again", 1500),
-        ("snapshot, git cached", 300),
+        ("snapshot, git read again", 2500),
+        ("snapshot, git cached", 500),
         ("pulse", 150),
         ("inbox decisions", 300),
         ("issue detail", 50),
@@ -177,18 +185,19 @@ mod tests {
     }
 
     #[test]
-    fn seeding_refuses_a_database_with_issues() {
+    fn seeding_refuses_a_database_or_a_folder_that_exists() {
         let base = crate::paths::unique_temp("nitely-perf-refuse", "");
         std::fs::create_dir_all(&base).unwrap();
+        // A profile with no issues but its own history: the seed would rewrite its events' times.
         let db_path = base.join("nitely.db");
         let mut db = Db::open(&db_path).unwrap();
-        db.create_project("APP", "App").unwrap();
-        let new = NewIssue { project: "APP".into(), title: "Mine".into(), kind: "bug".into(), body: "b".into(), source: "human".into(), evidence: "e".into(), ..Default::default() };
-        db.create_issue(&new, &Actor::Human).unwrap();
-        let err = seed(&db_path, &base.join("repos")).unwrap_err().to_string();
-        assert!(err.contains("already has issues"), "{err}");
-        assert!(!base.join("repos").exists(), "nothing made");
+        db.record(&event(0, &base, "Bash ls".into())).unwrap();
         drop(db);
+        let err = seed(&db_path, &base.join("repos")).unwrap_err().to_string();
+        assert!(err.contains("seeded only into a new database"), "{err}");
+        assert!(!base.join("repos").exists(), "nothing made");
+        let err = seed(&base.join("new.db"), &base).unwrap_err().to_string();
+        assert!(err.contains("only into a new folder") && !base.join("new.db").exists(), "{err}");
         std::fs::remove_dir_all(&base).ok();
     }
 

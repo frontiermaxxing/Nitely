@@ -33,9 +33,9 @@ const REFRESHES = 240;
 test("the app stays within its budgets on a large board", { timeout: 900000 }, async () => {
   const app = await launch({ seed: (home) => console.log(nitely(home, "perf-seed").trim()) });
   const { page } = app;
-  const report = [];
   const check = (what, value, budget, unit) => {
-    report.push(`${what.padEnd(34)} ${String(Math.round(value)).padStart(7)} ${unit}  (budget ${budget} ${unit})`);
+    // Said as it is measured, so a run that fails later still shows what came before.
+    console.log(`${what.padEnd(34)} ${String(Math.round(value)).padStart(7)} ${unit}  (budget ${budget} ${unit})`);
     return value <= budget ? null : `${what}: ${Math.round(value)} ${unit}, budget ${budget} ${unit}`;
   };
   const over = [];
@@ -56,7 +56,9 @@ test("the app stays within its budgets on a large board", { timeout: 900000 }, a
     await page.screenshot(join(SCREENS, "perf-inbox.png"));
 
     // An issue: its panel opened to its details drawn.
-    const key = (await page.invoke("issues", { project: "APP", includeClosed: false })).find((i) => i.state === "In Progress").key;
+    const issues = await page.invoke("issues", { project: "APP", includeClosed: false });
+    const key = issues.find((i) => i.state === "In Progress")?.key;
+    assert.ok(key, `an issue In Progress in APP: ${issues.length} open`);
     t = Date.now();
     await page.open(`#now@${key}`);
     await page.waitFor(`return document.querySelector("aside.panel .panel-title") !== null;`, { timeoutMs: 30000, what: `${key}'s panel` });
@@ -91,11 +93,10 @@ test("the app stays within its budgets on a large board", { timeout: 900000 }, a
     const seconds = (Date.now() - t) / 1000;
     const after = await heap();
     const perHour = ((after - before) / REFRESHES) * REFRESHES_PER_HOUR;
-    report.push(`heap ${before.toFixed(1)} MB -> ${after.toFixed(1)} MB over ${REFRESHES} refreshes (${(seconds / REFRESHES * 1000).toFixed(0)} ms each), ${nodes} DOM nodes`);
+    console.log(`heap ${before.toFixed(1)} MB -> ${after.toFixed(1)} MB over ${REFRESHES} refreshes (${(seconds / REFRESHES * 1000).toFixed(0)} ms each), ${nodes} DOM nodes`);
     over.push(check("heap growth per hour", perHour, BUDGET.heapGrowthPerHourMb, "MB"));
     await page.screenshot(join(SCREENS, "perf-after-refreshes.png"));
 
-    console.log(report.join("\n"));
     const broken = over.filter(Boolean);
     assert.deepEqual(broken, [], `over budget:\n${broken.join("\n")}`);
   } finally {
