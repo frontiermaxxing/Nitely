@@ -445,7 +445,9 @@ export function useDecisionDetails(board: Board | null): Map<string, IssueDetail
     Promise.all(keys.map((key) => invoke<IssueDetail>("issue_detail", { key }).catch(() => null))).then((read) => {
       if (!live) return;
       if (all) fullAt.current = Date.now();
-      seen.current = prints;
+      // A read that failed is tried again with the next board: its fingerprint is not taken as seen.
+      const failed = keys.filter((_, i) => !read[i]);
+      seen.current = new Map([...prints].filter(([key]) => !failed.includes(key)));
       const next = new Map<string, IssueDetail>();
       // What the board still names: read now, or kept from before.
       for (const key of prints.keys()) {

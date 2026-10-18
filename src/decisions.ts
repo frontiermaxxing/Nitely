@@ -65,7 +65,8 @@ export function detailKeys(board: Board): string[] {
 
 /**
  * What the board says of each issue whose details the Inbox reads (`detailKeys`), as one string per
- * key: its record (state, track, owner, updated), its questions and its worktree's state. A key
+ * key: its record (state, track, owner, updated), its questions, its worktree's state and its pull
+ * request (checks). A key
  * whose string is unchanged since the last board needs no new read of its details (NIT-337).
  */
 export function detailFingerprints(board: Board): Map<string, string> {
@@ -76,7 +77,8 @@ export function detailFingerprints(board: Board): Map<string, string> {
     const issue = row?.issue ?? board.needs_me_issues.find((i) => i.key === key) ?? null;
     const asks = board.asks.filter((a) => a.issue_key === key).map((a) => [a.id, a.answer, a.finding?.text ?? null]);
     const state = row?.state ? [row.state.rebase_in_progress, row.state.ahead, row.state.behind, row.state.last_commit_at] : null;
-    out.set(key, JSON.stringify([issue, asks, state, row?.needs_me ?? null, row?.session?.state ?? null]));
+    // Its pull request too: a CI result that changes is what an approval's card shows.
+    out.set(key, JSON.stringify([issue, asks, state, row?.needs_me ?? null, row?.session?.state ?? null, row?.pr ?? null]));
   }
   return out;
 }

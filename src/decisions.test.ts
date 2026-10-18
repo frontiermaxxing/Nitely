@@ -287,4 +287,11 @@ test("NIT-337: only the issues a new board shows changed are read again", () => 
   // A moved issue reads again; one whose details never came back reads again too.
   const moved = detailFingerprints(board([{ ...a, state: "Approved", updated_at: "2026-10-16T11:00:00Z" }, b], [ask(1, "X-2", NOW - 10)]));
   assert.deepEqual(detailsToRead(moved, first, new Set(["X-2"]), false).sort(), ["X-1"]);
+  // A pull request's checks that change (CI failed) read the issue again: its card shows them.
+  const withPr = (checks: string): Board => ({
+    ...board([], []),
+    repos: [{ name: "r", root: "r", integration_branch: "main", project: "X", error: null, unmatched_sessions: [], rows: [{ worktree: "w", branch: "b", is_main: false, issue_key: "X-1", issue: a, needs_me: true, state: null, session: null, vendor: null, error: null, pr: { checks } }] }],
+  } as unknown as Board);
+  const pending = detailFingerprints(withPr("pending"));
+  assert.deepEqual(detailsToRead(detailFingerprints(withPr("failure")), pending, new Set(["X-1"]), false), ["X-1"]);
 });

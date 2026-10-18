@@ -2410,16 +2410,16 @@ fn queue_of(db: &Db, project: &str, root: &str) -> Result<Vec<Run>> {
 }
 
 /// Every connected repo's lane queue with why each request waits, by project: what `overview`
-/// shows of them, without its git and size reads.
+/// shows of them, from the database alone (no playbook read, which can run git in large-repo
+/// mode, and no lane's git or size). A repo without lanes has nothing queued.
 pub fn queues(config: &crate::Config, db: &Db) -> Result<Vec<(String, Vec<Run>)>> {
     let mut out = Vec::new();
     for repo in &config.repos {
         let Some(project) = repo.project.as_deref() else { continue };
-        let Ok(pb) = Playbook::load_with(Path::new(&repo.root), config) else { continue };
-        if pb.lanes.is_none() {
-            continue;
+        let queue = queue_of(db, project, &repo.root)?;
+        if !queue.is_empty() {
+            out.push((project.to_string(), queue));
         }
-        out.push((project.to_string(), queue_of(db, project, &repo.root)?));
     }
     Ok(out)
 }
