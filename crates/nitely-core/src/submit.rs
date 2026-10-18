@@ -153,7 +153,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         let vendor = vendor.unwrap_or_default();
         let previous = previous_round(db, &issue.key, &worktree)?;
         // The same patch passed review last time: that pass carries over (NIT-185).
-        let reused = reused_pass(db, &pb.review, &issue.key, &diff_id(&worktree, &since)?, &vendor, &|r| pb.review.is_installed(r, &worktree))?;
+        let reused = reused_pass(db, &pb.review, &issue.key, &diff_id(&worktree, &since, &out.commit)?, &vendor, &|r| pb.review.is_installed(r, &worktree))?;
         if let Some((_, r)) = &reused {
             let at = r.reused.as_deref().unwrap_or_default();
             db.log_event(actor, Some(&issue.key), Some(&wt), "status", &format!("The same patch passed review at {}: that pass carries over, so it is not reviewed again", &at[..at.len().min(7)]))?;
@@ -227,7 +227,8 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     db.record_review(&out)?;
     let review_id = db.conn.last_insert_rowid();
     if out.review.is_some() {
-        let diff = diff_id(&worktree, &since).ok();
+        // The commit the gate and review ran on, not what HEAD is now: a commit since was not reviewed.
+        let diff = diff_id(&worktree, &since, &out.commit).ok();
         db.conn.execute("UPDATE review SET rules = ?2, diff_id = ?3 WHERE id = ?1", rusqlite::params![review_id, rules_of(&pb.review), diff])?;
     }
     if let Some(shadow) = out.shadow.as_mut() {
@@ -547,8 +548,8 @@ fn reused_pass(
 /// The change's diff exactly, as git's hash of it: what each hunk changes, where, and in what
 /// context. Two changes with one patch-id can differ here (the same edit in another function); a
 /// rebase that touched none of the change's files leaves it as it was. Empty for no diff.
-fn diff_id(worktree: &Path, base: &str) -> Result<String> {
-    let diff = git(worktree, &["diff", "--no-color", "--no-ext-diff", &format!("{base}...HEAD")])?;
+fn diff_id(worktree: &Path, base: &str, head: &str) -> Result<String> {
+    let diff = git(worktree, &["diff", "--no-color", "--no-ext-diff", &format!("{base}...{head}")])?;
     if diff.is_empty() {
         return Ok(String::new());
     }
