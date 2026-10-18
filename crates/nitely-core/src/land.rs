@@ -1270,6 +1270,71 @@ when_changed = ["billing"]
         std::fs::remove_dir_all(&f.base).ok();
     }
 
+    /// A round of review on `key` that asks for changes with one P1 `finding`, `after` seconds on.
+    fn reviewed_with(f: &Fixture, key: &str, finding: &str, after: i64) {
+        let findings = vec![crate::review::Finding { priority: 1, text: finding.into(), carried: false, raised_as: None, now: None }];
+        f.db.conn
+            .execute(
+                "INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, findings, ts) VALUES (?1, 'p1', 'c', 'fake', 'changes', 'agent', ?2, ?3)",
+                rusqlite::params![key, serde_json::to_string(&findings).unwrap(), crate::db::now() + after],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn a_finding_reworded_across_rounds_keeps_one_open_request() {
+        let mut f = fixture();
+        let (a, _) = f.submitted("Lock", "lock.txt", "x");
+        // The same P1 in three rounds' words: the places it cites, in another order, and the code it names.
+        let words = [
+            "Install holds the land lock: `.nitely/playbook.toml:46`, release-install step; `crates/app/src/land.rs:416`, `after_land_outside_lock`: the step never sets `outside_lock = true`.",
+            "Install still holds the land lock: `crates/app/src/land.rs:416`, `after_land_outside_lock`: only steps with `outside_lock = true` take the new path, and `.nitely/playbook.toml:46` leaves it unset.",
+            "The release install runs under the land lock: `crates/app/src/land.rs:420`, `after_land_outside_lock`: nothing sets it for the install step.",
+        ];
+        reviewed_with(&f, &a, words[0], 1);
+        let ask = f.db.request_acceptance(&a, "1", "Only the person changes the playbook.", None, &f.actor).unwrap();
+        for (i, text) in words.iter().enumerate().skip(1) {
+            reviewed_with(&f, &a, text, 1 + i as i64);
+            let latest = f.db.reviews(&a).unwrap().remove(0);
+            assert_eq!(f.db.close_superseded_requests(&a, &latest.findings).unwrap(), 0, "round {i} rewords it: nothing closes");
+            let now = f.db.ask(ask.id).unwrap().unwrap();
+            assert!(now.closed.is_none() && now.answer.is_none(), "{now:?}");
+            assert_eq!(now.finding.map(|f| f.text).as_deref(), Some(*text), "the request shows the newest words");
+        }
+        // Asking again is that same request; the person answers it in the newest words.
+        assert_eq!(f.db.request_acceptance(&a, "1", "Still only the person.", None, &f.actor).unwrap().id, ask.id);
+        assert_eq!(f.db.open_asks().unwrap().iter().filter(|q| q.issue_key.as_deref() == Some(a.as_str())).count(), 1, "one decision in the Inbox");
+        crate::approval::trust_in_tests(Some(crate::approval::public_of(&SECRET)));
+        f.db.accept_finding(ask.id, "the playbook is the person's", &SECRET).unwrap();
+        assert!(f.db.unaccepted_blockers(&a, &f.db.reviews(&a).unwrap()[0]).unwrap().is_empty());
+        std::fs::remove_dir_all(&f.base).ok();
+    }
+
+    #[test]
+    fn two_requests_for_one_finding_become_one_and_the_newest_stands() {
+        let mut f = fixture();
+        let (a, _) = f.submitted("Twice", "twice.txt", "x");
+        let finding = "Drops a row: `src/rows.rs:12`, `export`: the last row is never written.";
+        reviewed_with(&f, &a, finding, 1);
+        // Two requests for it, as an earlier build filed them.
+        let asks: Vec<i64> = (0..2)
+            .map(|i| {
+                let q = f.db.create_ask(&format!("Request {i}"), &[], Some(&a), None, &f.actor).unwrap();
+                let asked = serde_json::json!({ "priority": 1, "text": finding });
+                f.db.conn.execute("UPDATE ask SET finding = ?2 WHERE id = ?1", rusqlite::params![q.id, asked.to_string()]).unwrap();
+                q.id
+            })
+            .collect();
+        let latest = f.db.reviews(&a).unwrap().remove(0);
+        assert_eq!(f.db.close_superseded_requests(&a, &latest.findings).unwrap(), 1);
+        let older = f.db.ask(asks[0]).unwrap().unwrap();
+        assert_eq!(older.closed, Some(format!("closed: ask #{} asks for the same finding", asks[1])));
+        assert!(f.db.ask(asks[1]).unwrap().unwrap().closed.is_none(), "the newest stands");
+        // A round that no longer raises it closes the one left: it was fixed.
+        assert_eq!(f.db.close_superseded_requests(&a, &[]).unwrap(), 1);
+        std::fs::remove_dir_all(&f.base).ok();
+    }
+
     #[test]
     fn a_finding_sent_back_stays_a_defect_to_fix() {
         let mut f = fixture();
@@ -1294,8 +1359,13 @@ when_changed = ["billing"]
 
         // A later round without the finding closes a request still open, and one already in the
         // person's hands can still be sent back.
-        let open = f.db.request_acceptance(&a, "1", "Still how it always worked.", None, &f.actor).unwrap();
-        let moot = f.db.request_acceptance(&a, "1", "Asked twice.", None, &f.actor).unwrap();
+        let moot = f.db.request_acceptance(&a, "1", "Still how it always worked.", None, &f.actor).unwrap();
+        // Asking again for the same finding is the same request, with the newer reasoning (NIT-353).
+        let again = f.db.request_acceptance(&a, "1", "Asked twice.", None, &f.actor).unwrap();
+        assert_eq!((again.id, again.question.as_str()), (moot.id, "Asked twice."));
+        // A request still open for another finding, as an earlier round may leave one.
+        let open = f.db.create_ask("Another one.", &[], Some(&a), None, &f.actor).unwrap();
+        f.db.conn.execute("UPDATE ask SET finding = ?2 WHERE id = ?1", rusqlite::params![open.id, r#"{"priority":1,"text":"Skips a row: rows.txt, g: the first row"}"#]).unwrap();
         f.db.conn
             .execute(
                 "INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, findings, ts) VALUES (?1, 'p9', 'c', 'fake', 'pass', 'agent', '[]', ?2)",

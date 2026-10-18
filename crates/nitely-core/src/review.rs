@@ -993,6 +993,28 @@ pub(crate) fn citations(text: &str) -> Vec<(String, Option<usize>)> {
     out
 }
 
+/// Whether two findings are the same one, perhaps in other words (NIT-353): the same text, or they
+/// cite a file in common and name a piece of code (a backticked name that is not a file) in common,
+/// as a later review round restates a finding it still sees. Two findings in one file about
+/// different code are not the same.
+pub fn same_finding(a: &str, b: &str) -> bool {
+    if a.trim() == b.trim() {
+        return true;
+    }
+    let files = |t: &str| -> std::collections::BTreeSet<String> {
+        citations(t).into_iter().map(|(p, _)| p.replace('\\', "/").trim_start_matches("./").to_lowercase()).collect()
+    };
+    let names = |t: &str| -> std::collections::BTreeSet<String> {
+        quoted(t)
+            .into_iter()
+            .filter(|q| citations(q).is_empty())
+            .map(|q| q.trim().to_lowercase())
+            .filter(|q| q.chars().any(char::is_alphabetic))
+            .collect()
+    };
+    !files(a).is_disjoint(&files(b)) && !names(a).is_disjoint(&names(b))
+}
+
 /// The `backticked` pieces of a text.
 fn quoted(text: &str) -> Vec<String> {
     text.split('`').skip(1).step_by(2).map(str::to_string).collect()
@@ -1220,6 +1242,21 @@ mod tests {
             flags: vec![Flag { name: "MONEY_OR_RELEASE".into(), question: "the change alters billing".into(), reason: "money or release logic".into() }],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_finding_in_other_words_is_the_same_finding_and_other_code_in_its_file_is_not() {
+        // Two rounds' words for one finding (NIT-353): the same places, cited in another order.
+        let first = "Release install remains under the land lock: `.nitely/playbook.toml:46`, release-install step; `crates/nitely-core/src/land.rs:416`, `after_land_outside_lock`: the existing install step never sets `outside_lock = true`.";
+        let again = "Release install still holds the land lock: `crates/nitely-core/src/land.rs:416`, `after_land_outside_lock`: only steps with `outside_lock = true` use the new path, but `.nitely/playbook.toml:46` leaves that unset.";
+        assert!(same_finding(first, again) && same_finding(again, first));
+        assert!(same_finding("Drops a row: rows.txt, f: the last row", " Drops a row: rows.txt, f: the last row"));
+        // The same file, other code: another finding.
+        assert!(!same_finding(again, "Wrong exit code: `crates/nitely-core/src/land.rs:500`, `land_queue`: a failed push reads as landed."));
+        // The same name, another file: another finding.
+        assert!(!same_finding(again, "Lock leaks: `crates/nitely-core/src/lanes.rs:90`, `after_land_outside_lock`: the lock is never dropped."));
+        // No code named at all: only the same words are the same finding.
+        assert!(!same_finding("Drops a row: rows.txt, f: the last row", "Skips a row: rows.txt, g: the first row"));
     }
 
     #[test]

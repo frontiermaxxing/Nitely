@@ -74,6 +74,12 @@ impl Db {
             bail!("the person already accepted that finding for this patch");
         }
         let asked = AskedFinding { priority: found.priority, text: found.text.clone() };
+        // One decision per finding: a request already open for it, in this wording or an earlier
+        // one, stands, with this wording and this reasoning (NIT-353).
+        if let Some(open) = self.open_request_for(&issue.key, &found.text)? {
+            self.conn.execute("UPDATE ask SET finding = ?2, question = ?3 WHERE id = ?1", params![open.id, serde_json::to_string(&asked)?, why])?;
+            return self.ask(open.id)?.context("ask vanished");
+        }
         let ask = self.create_ask(why, &[], Some(&issue.key), cwd, actor)?;
         self.conn.execute("UPDATE ask SET finding = ?2 WHERE id = ?1", params![ask.id, serde_json::to_string(&asked)?])?;
         if issue.origin == "nitely" && issue.state != "Needs You" {
@@ -92,8 +98,8 @@ impl Db {
         let open: Vec<Ask> = self.open_asks()?.into_iter().filter(|a| a.issue_key.as_deref().is_some_and(|k| k.eq_ignore_ascii_case(&issue.key))).collect();
         let question = format!("The review rounds are not converging ({why}). Accept this finding as it is if it is a trade-off you decided; send it back and it stays a defect to fix.");
         for f in self.unaccepted_blockers(&issue.key, &review)? {
-            // One request per finding; one already open for it stands.
-            if open.iter().any(|a| a.finding.as_ref().is_some_and(|x| x.text == f.text)) {
+            // One request per finding; one already open for it, in any wording, stands.
+            if open.iter().any(|a| a.finding.as_ref().is_some_and(|x| crate::review::same_finding(&x.text, &f.text))) {
                 continue;
             }
             self.request_acceptance(&issue.key, &f.text, &question, None, actor)?;
@@ -243,22 +249,67 @@ impl Db {
         Ok((ask, key, finding, review))
     }
 
-    /// Closes `key`'s open requests to accept a finding that its latest review (`findings`) no
-    /// longer holds: a new round fixed it or worded it otherwise, so there is nothing to decide.
+    /// Brings `key`'s open requests to accept a finding up to its latest review (`findings`). A
+    /// request whose finding the round raised again in other words stays open, with the new
+    /// wording, so the person can still answer it (NIT-353). One the round no longer raises at
+    /// all closes: it was fixed, so there is nothing to decide. Two open for one finding become
+    /// one: the newest stands. Returns how many closed.
     pub fn close_superseded_requests(&self, key: &str, findings: &[Finding]) -> Result<usize> {
-        let open: Vec<Ask> = self.open_asks()?.into_iter().filter(|a| a.issue_key.as_deref().is_some_and(|k| k.eq_ignore_ascii_case(key)) && a.finding.is_some()).collect();
+        let mut open = self.open_finding_requests(key)?;
+        open.sort_by_key(|a| std::cmp::Reverse(a.id));
         let mut closed = 0;
+        // The finding of the latest review each request stands for, newest request first.
+        let mut kept: Vec<(usize, i64)> = vec![];
         for a in open {
             let f = a.finding.as_ref().expect("filtered");
-            if !findings.iter().any(|x| x.text == f.text) {
-                self.conn.execute(
-                    "UPDATE ask SET closed = ?2 WHERE id = ?1",
-                    params![a.id, "closed: the latest review no longer has that finding"],
-                )?;
-                closed += 1;
-            }
+            let now = findings
+                .iter()
+                .position(|x| x.text == f.text)
+                .or_else(|| findings.iter().position(|x| x.priority <= 1 && crate::review::same_finding(&x.text, &f.text)));
+            let why = match now {
+                None => "closed: the latest review no longer has that finding".to_string(),
+                Some(i) => match kept.iter().find(|(k, _)| *k == i) {
+                    Some((_, newer)) => format!("closed: ask #{newer} asks for the same finding"),
+                    None => {
+                        kept.push((i, a.id));
+                        if findings[i].text != f.text {
+                            let reworded = AskedFinding { priority: findings[i].priority, text: findings[i].text.clone() };
+                            self.conn.execute("UPDATE ask SET finding = ?2 WHERE id = ?1", params![a.id, serde_json::to_string(&reworded)?])?;
+                        }
+                        continue;
+                    }
+                },
+            };
+            self.conn.execute("UPDATE ask SET closed = ?2 WHERE id = ?1", params![a.id, why])?;
+            closed += 1;
         }
         Ok(closed)
+    }
+
+    /// `key`'s open requests to accept a finding.
+    fn open_finding_requests(&self, key: &str) -> Result<Vec<Ask>> {
+        Ok(self.open_asks()?.into_iter().filter(|a| a.issue_key.as_deref().is_some_and(|k| k.eq_ignore_ascii_case(key)) && a.finding.is_some()).collect())
+    }
+
+    /// The open request to accept `finding` of `key`, in its wording or an earlier one; the newest
+    /// when there are several.
+    fn open_request_for(&self, key: &str, finding: &str) -> Result<Option<Ask>> {
+        let mut open = self.open_finding_requests(key)?;
+        open.sort_by_key(|a| std::cmp::Reverse(a.id));
+        let exact = open.iter().position(|a| a.finding.as_ref().is_some_and(|f| f.text == finding));
+        let like = || open.iter().position(|a| a.finding.as_ref().is_some_and(|f| crate::review::same_finding(&f.text, finding)));
+        Ok(exact.or_else(like).map(|i| open.swap_remove(i)))
+    }
+
+    /// Closes the other open requests for the finding the person just decided in ask `decided`:
+    /// one decision answers them all.
+    fn close_decided_alike(&self, key: &str, decided: i64, finding: &str) -> Result<()> {
+        for a in self.open_finding_requests(key)? {
+            if a.id != decided && a.finding.as_ref().is_some_and(|f| crate::review::same_finding(&f.text, finding)) {
+                self.conn.execute("UPDATE ask SET closed = ?2 WHERE id = ?1", params![a.id, format!("closed: decided in ask #{decided}")])?;
+            }
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -276,6 +327,7 @@ impl Db {
     /// approval); otherwise back to the agent to fix the rest.
     fn after_acceptance(&mut self, _ask: Ask, key: &str, finding: &AskedFinding, reason: &str, from: &str) -> Result<Decided> {
         let answered = self.answer_ask(_ask.id, &format!("Accepted: {reason}"), &Actor::Human)?;
+        self.close_decided_alike(key, _ask.id, &finding.text)?;
         let review = self.reviews(key)?.into_iter().find(|r| !r.reviewer.is_empty()).context("no review")?;
         // The finding the person just accepted is decided by this call, whatever key signed it: under
         // the test harness its throwaway key, which `accepted_for` never trusts. So a harness run
