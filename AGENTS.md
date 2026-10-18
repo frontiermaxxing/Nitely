@@ -83,6 +83,9 @@ What still runs in your worktree, so install for it only when you need it:
   its warning) run `cargo run --release -p nitely-cli -- install` in the main checkout yourself.
 - `nitely lanes slim` reclaims the build output of task worktrees whose work is finished (it asks
   first, and keeps any worktree with uncommitted or unpushed work or recent activity).
+- A land that cannot remove its worktree (your shell or dev server still in it) says so on the
+  issue, and the next land removes it once nothing uses it. `nitely lanes leftovers` lists those
+  worktrees with why each stays; `--remove` removes the ones that go now.
 
 ## Driving the real app
 

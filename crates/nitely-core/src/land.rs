@@ -41,6 +41,9 @@ pub struct Landed {
     /// Processes that kept the worktree from being removed (a dev server, a build, a shell).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub held_by: Vec<crate::procs::Holder>,
+    /// Worktrees earlier lands had to keep, removed by this one now that nothing uses them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tidied: Vec<String>,
     /// The playbook's `[land] after` steps, run in the main checkout once it landed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub after: Vec<playbook::CommandResult>,
@@ -123,6 +126,7 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
             report.warnings.push(format!("the land queue that waited behind this land stopped: {e:#}"));
         }
     }
+    report.tidied = tidy(db, &root, &pb, actor, &mut report.warnings);
     drop(lock);
 
     match result {
@@ -649,7 +653,11 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
     } else if crew_in_it {
         (format!("kept {} whole: the crew worker running in it removes it once it exits", worktree.display()), vec![])
     } else {
-        cleanup(root, pb, &worktree, &branch, temporary, opts.keep)
+        let (message, held) = cleanup(root, pb, &worktree, &branch, temporary, opts.keep);
+        if !temporary && !opts.keep && made_by_layout(root, pb, &worktree) && worktree.exists() {
+            crate::leftovers::note_held(db, actor, key, &worktree, &message)?;
+        }
+        (message, held)
     };
     report.cleanup = Some(cleanup);
     report.held_by = held_by;
@@ -799,13 +807,7 @@ impl Db {
 /// use is kept whole, with the processes named; and when git still stops halfway, what is left is
 /// retried and then said plainly, with how to delete it.
 pub(crate) fn cleanup(root: &Path, pb: &Playbook, worktree: &Path, branch: &str, temporary: bool, keep: bool) -> (String, Vec<crate::procs::Holder>) {
-    let issue = crate::IssueRecord { key: "x".into(), title: "x".into(), ..Default::default() };
-    let layout_dir = pb.worktree_for(root, "x", &issue);
-    // Compared as paths::normalize spells them: git names a worktree by its real path, which may
-    // differ in spelling from the repo's configured root (`/private/var` for `/var` on a Mac, a
-    // long name for an 8.3 one like `RUNNER~1` on Windows), and the worktree is ours all the same.
-    let ours = layout_dir.parent().is_some_and(|d| crate::paths::is_within(&worktree.to_string_lossy(), &d.to_string_lossy()));
-    if !(temporary || (ours && !keep)) {
+    if !(temporary || (made_by_layout(root, pb, worktree) && !keep)) {
         return (format!("kept {} (not made by start_task, or --keep)", worktree.display()), vec![]);
     }
     let path = worktree.to_string_lossy().into_owned();
@@ -841,6 +843,38 @@ pub(crate) fn cleanup(root: &Path, pb: &Playbook, worktree: &Path, branch: &str,
         Err(message) => message,
     };
     (if teardown.is_empty() { message } else { format!("{message}; {}", teardown.join("; ")) }, vec![])
+}
+
+/// Whether `worktree` is under the playbook's worktree folder, where start_task makes them.
+pub(crate) fn made_by_layout(root: &Path, pb: &Playbook, worktree: &Path) -> bool {
+    let issue = crate::IssueRecord { key: "x".into(), title: "x".into(), ..Default::default() };
+    let layout_dir = pb.worktree_for(root, "x", &issue);
+    // Compared as paths::normalize spells them: git names a worktree by its real path, which may
+    // differ in spelling from the repo's configured root (`/private/var` for `/var` on a Mac, a
+    // long name for an 8.3 one like `RUNNER~1` on Windows), and the worktree is ours all the same.
+    layout_dir.parent().is_some_and(|d| crate::paths::is_within(&worktree.to_string_lossy(), &d.to_string_lossy()))
+}
+
+/// Removes the worktrees earlier lands had to keep and nothing uses any more (NIT-340), under the
+/// land lock: what it removed, for the report; what failed, as warnings.
+pub(crate) fn tidy(db: &Db, root: &Path, pb: &Playbook, actor: &Actor, warnings: &mut Vec<String>) -> Vec<String> {
+    match crate::leftovers::leftovers(db, root, pb, true, actor) {
+        Ok(found) => found
+            .into_iter()
+            .filter_map(|l| {
+                let message = l.removed?;
+                if l.worktree.exists() {
+                    warnings.push(format!("{} of {} is still there: {message}", l.worktree.display(), l.issue));
+                    return None;
+                }
+                Some(format!("{} ({}): {message}", l.worktree.display(), l.issue))
+            })
+            .collect(),
+        Err(e) => {
+            warnings.push(format!("worktrees earlier lands kept were not looked at: {e:#}"));
+            vec![]
+        }
+    }
 }
 
 /// Runs the playbook's worktree teardown in the worktree, returning what failed.
@@ -1310,6 +1344,18 @@ when_changed = ["billing"]
         assert!(r.cleanup.as_deref().unwrap().contains("kept"), "{r:?}");
         let listed = crate::paths::normalize(&sh(&f.repo, &["worktree", "list"]));
         assert!(wt.exists() && listed.contains(&crate::paths::normalize(&wt.to_string_lossy())), "kept whole and still registered");
+        // Said on the issue, so a later land tries again (NIT-340).
+        assert!(f.db.timeline(&a).unwrap().iter().any(|t| t.kind == "worktree_held"), "the keep is on the issue");
+        // The server is gone now: listed as going, and the next land removes it with its branch.
+        let pb = Playbook::load(&f.repo).unwrap();
+        let found = crate::leftovers::leftovers(&f.db, &f.repo, &pb, false, &Actor::Human).unwrap();
+        assert!(found.iter().any(|l| l.issue == a && l.stays.is_none()), "{found:?}");
+        let (b, _) = f.submitted("Next", "next.txt", "y");
+        let r = f.land(&b);
+        assert!(r.landed, "{r:?}");
+        assert!(r.tidied.iter().any(|t| t.contains(&a)), "{r:?}");
+        assert!(!wt.exists(), "removed");
+        assert!(f.db.timeline(&a).unwrap().iter().any(|t| t.kind == "worktree_removed"));
         std::fs::remove_dir_all(&f.base).ok();
     }
 

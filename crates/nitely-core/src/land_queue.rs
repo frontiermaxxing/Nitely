@@ -219,6 +219,10 @@ fn land_waiting(db: &mut Db, root: &Path, key: &str, opts: &LandOptions, actor: 
             }
             break_lock = false;
             run_queue(db, root)?;
+            // What it removed is said on those issues; a land that cannot look is no reason to stop.
+            if let Ok(pb) = Playbook::load(root) {
+                land::tidy(db, root, &pb, actor, &mut Vec::new());
+            }
             drop(lock);
             continue;
         }
@@ -667,7 +671,13 @@ fn land_prefix(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stacked: Vec<S
                 (format!("kept {} and {} ({why})", wt.display(), s.branch), vec![])
             }
             Some(wt) if db.crew_worker_in(wt)? => (format!("kept {} whole: the crew worker running in it removes it once it exits", wt.display()), vec![]),
-            Some(wt) => land::cleanup(root, pb, wt, &s.branch, false, s.entry.keep),
+            Some(wt) => {
+                let (message, held) = land::cleanup(root, pb, wt, &s.branch, false, s.entry.keep);
+                if !s.entry.keep && land::made_by_layout(root, pb, wt) && wt.exists() {
+                    crate::leftovers::note_held(db, &actor, &s.entry.issue, wt, &message)?;
+                }
+                (message, held)
+            }
             None if !moved => (format!("kept {}", s.branch), vec![]),
             None => match git(root, &["branch", "-d", &s.branch]) {
                 Ok(_) => ("removed the merged branch".to_string(), vec![]),

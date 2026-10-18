@@ -86,7 +86,7 @@ enum Cmd {
         session: Option<String>,
     },
     /// Build lanes and the disk task worktrees use (docs/build-lanes.md): `status` (the default),
-    /// `reset`, `show <run>`, `slim`.
+    /// `reset`, `show <run>`, `slim`, `leftovers`.
     Lanes {
         #[command(subcommand)]
         command: Option<LanesCmd>,
@@ -411,6 +411,16 @@ enum LanesCmd {
     Show { id: i64 },
     /// Take a queued run out of the queue, when its requester will not come for it.
     Cancel { id: i64 },
+    /// Worktrees of landed, closed issues that a land had to keep (a process still used them): each
+    /// with why it stays. The next land removes the ones nothing keeps; --remove does it now.
+    Leftovers {
+        /// Only this project's repos.
+        #[arg(long)]
+        project: Option<String>,
+        /// Remove the ones nothing keeps, with their merged branches.
+        #[arg(long)]
+        remove: bool,
+    },
     /// Delete the build directories (the playbook's [lanes] keep, else target and node_modules) of
     /// task worktrees whose work is finished: nothing uncommitted, the branch pushed or landed, and
     /// nothing using the folder. Lists them and asks first.
@@ -934,6 +944,33 @@ fn run(cmd: Cmd) -> Result<()> {
         Cmd::Lanes { command: Some(LanesCmd::Reset { project }) } => lanes::reset(project),
         Cmd::Lanes { command: Some(LanesCmd::Show { id }) } => lanes::show(id),
         Cmd::Lanes { command: Some(LanesCmd::Cancel { id }) } => lanes::cancel(id, &me),
+        Cmd::Lanes { command: Some(LanesCmd::Leftovers { project, remove }) } => {
+            let config = Config::load()?;
+            let db = Db::open_default()?;
+            let mut all = Vec::new();
+            for repo in &config.repos {
+                if project.as_deref().is_some_and(|p| !repo.project.as_deref().is_some_and(|rp| rp.eq_ignore_ascii_case(p))) {
+                    continue;
+                }
+                let root = std::path::Path::new(&repo.root);
+                let pb = playbook::Playbook::load(root).unwrap_or_default();
+                all.extend(nitely_core::leftovers::leftovers(&db, root, &pb, remove, &me)?);
+            }
+            if all.is_empty() {
+                println!("No landed issue's worktree is left.");
+            }
+            for l in &all {
+                match (&l.stays, &l.removed) {
+                    (Some(why), _) => println!("  stays  {}  {}: {why}", l.issue, l.worktree.display()),
+                    (None, Some(done)) => println!("  gone   {}  {}: {done}", l.issue, l.worktree.display()),
+                    (None, None) => println!("  goes   {}  {}", l.issue, l.worktree.display()),
+                }
+            }
+            if !remove && all.iter().any(|l| l.stays.is_none()) {
+                println!("The next land removes the ones that go; --remove removes them now.");
+            }
+            Ok(())
+        }
         Cmd::Lanes { command: Some(LanesCmd::Slim { project, yes }) } => {
             use nitely_core::slim::{human, plan, reclaim};
             let config = Config::load()?;

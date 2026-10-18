@@ -354,6 +354,12 @@ Nothing changes until a project's playbook asks for it (`[lanes]`). Per project:
 2. New issues start light. Existing worktrees keep working as full worktrees until they land.
 3. `nitely lanes slim` deletes the build directories (the playbook's `keep` list) of worktrees that
    have none of the agent's work in them, after asking, to reclaim the disk at once.
+4. A worktree land had to keep because a process still used it (the landing agent's own shell, a
+   dev server) is logged on its issue (`worktree_held`). Each later land of the repo removes, under
+   its lock, the landed worktrees of closed issues that nothing keeps any more: not kept with
+   `--keep`, the branch in the integration branch, nothing uncommitted or untracked, no crew worker
+   and no process in it (`worktree_removed` on the issue). `nitely lanes leftovers` lists them with
+   why each stays, and `--remove` removes the ones that go at once (NIT-340).
 
 ### Lane hygiene
 
