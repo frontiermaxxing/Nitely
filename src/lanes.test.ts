@@ -109,3 +109,10 @@ test("the floor and cap fields take GB, empty for the default", () => {
   assert.match(limitsOf("", "0.1") as string, /cap/);
   assert.match(limitsOf("lots", "") as string, /floor/);
 });
+
+test("the cap shown is the one a run is held to when the slots share less than the set cap", () => {
+  const GB = 1024 ** 3;
+  const machine = { memory: null, limits: { total: 64 * GB, floor: 12.8 * GB, cap: 16 * GB, floor_from: "default", cap_from: "default" }, run_cap: 10.24 * GB, below_normal: true };
+  assert.equal(memoryWords(machine).cap, "10.2 GB per run (16.0 GB default, shared by the slots above the floor)");
+  assert.equal(memoryWords({ ...machine, run_cap: 16 * GB }).cap, "16.0 GB per run (default)");
+});

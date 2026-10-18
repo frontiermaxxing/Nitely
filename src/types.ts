@@ -880,6 +880,9 @@ export interface MachineNow {
   /** Nothing new starts below `floor` free; one run and all it starts may hold `cap`. `*_from`:
    * `default`, `settings` or the environment variable that set it. */
   limits: { total: number; floor: number; cap: number; floor_from: string; cap_from: string } | null;
+  /** The cap one run is held to now: the limits' cap, or less when the machine's slots at it would
+   * not fit above the floor. */
+  run_cap?: number | null;
   /** Builds, gates, reviews and crew workers run at below-normal priority. */
   below_normal: boolean;
 }

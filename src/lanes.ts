@@ -88,7 +88,11 @@ export function memoryWords(m: MachineNow | undefined): { free: string | null; f
   return {
     free: m?.memory ? `${bytesWords(m.memory.available)} of ${bytesWords(m.memory.total)} free now` : null,
     floor: l ? (l.floor === 0 ? `off (${from(l.floor_from)})` : `${bytesWords(l.floor)} free (${from(l.floor_from)})`) : null,
-    cap: l ? `${bytesWords(l.cap)} per run (${from(l.cap_from)})` : null,
+    cap: l
+      ? m?.run_cap != null && m.run_cap < l.cap
+        ? `${bytesWords(m.run_cap)} per run (${bytesWords(l.cap)} ${from(l.cap_from)}, shared by the slots above the floor)`
+        : `${bytesWords(l.cap)} per run (${from(l.cap_from)})`
+      : null,
   };
 }
 

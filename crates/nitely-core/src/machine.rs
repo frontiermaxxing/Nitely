@@ -174,12 +174,17 @@ pub fn would_wait() -> Option<String> {
 pub struct Now {
     pub memory: Option<Memory>,
     pub limits: Option<Limits>,
+    /// The cap one run is held to now: the limits' cap, or less when the machine's slots at that
+    /// cap would not fit above the floor (`lanes::cap_for`).
+    pub run_cap: Option<u64>,
     /// Builds, gates, reviews and crew workers run at below-normal priority (nice 10 off Windows).
     pub below_normal: bool,
 }
 
 pub fn now() -> Now {
-    Now { memory: memory(), limits: limits(), below_normal: true }
+    let limits = limits();
+    let run_cap = limits.as_ref().map(|l| crate::lanes::cap_for(l, crate::lanes::machine_budget().slots));
+    Now { memory: memory(), limits, run_cap, below_normal: true }
 }
 
 #[cfg(windows)]

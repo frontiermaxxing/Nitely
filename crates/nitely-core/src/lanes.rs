@@ -736,9 +736,12 @@ pub fn run_in(config: &crate::Config, db: &Db, dir: &str, issue: Option<&str>, c
 /// is written as the request moves (queued, running, done), so another process can follow it with
 /// `Db::lane_run`. `on_event` is called with the run when it is queued and when it starts.
 pub fn run(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Actor, on_event: &mut dyn FnMut(&Run)) -> Result<Run> {
-    let share = share();
-    let command = req.command.replace("{jobs}", &share.jobs.to_string());
-    run_with(db, repo_root, pb, req, actor, on_event, &mut |lane, log, limit, temp| run_logged(&command, lane, log, limit, share, Some(temp)))
+    // The machine's share as it is when the command starts, not when it was queued (NIT-291).
+    run_with(db, repo_root, pb, req, actor, on_event, &mut |lane, log, limit, temp| {
+        let share = share();
+        let command = req.command.replace("{jobs}", &share.jobs.to_string());
+        run_logged(&command, lane, log, limit, share, Some(temp))
+    })
 }
 
 /// What runs in a lane once it holds the request's snapshot: given the lane, the log, the time
@@ -915,9 +918,10 @@ pub fn gate(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Op
     let mut results: Vec<playbook::CommandResult> = Vec::new();
     let mut flaked: Vec<playbook::Flake> = Vec::new();
     let retries = pb.gate.retries;
-    let share = share();
     let req = Request { project: &project, issue, kind, snapshot: &snap, command: &key };
     let run = run_with(db, repo_root, pb, &req, actor, &mut |_| {}, &mut |lane: &Path, log: &Path, limit: Duration, temp: &Path| {
+        // The machine's share as it is when the gate starts, not when it was queued (NIT-291).
+        let share = share();
         let mut peak: Option<u64> = None;
         for (command, skip) in steps {
             if let Some(why) = skip {
@@ -1096,7 +1100,16 @@ pub struct Share {
 
 /// This machine's share for one request.
 pub fn share() -> Share {
-    Share { jobs: machine_budget().jobs, cap: machine::limits().map(|l| l.cap) }
+    let budget = machine_budget();
+    Share { jobs: budget.jobs, cap: machine::limits().map(|l| cap_for(&l, budget.slots)) }
+}
+
+/// One run's memory cap with `slots` running at once: the set (or default) cap, but never more
+/// than the memory above the floor shared by the slots, so every slot at its cap still leaves the
+/// floor free (NIT-291: 5 slots of a 16 GB cap on 64 GB would not).
+pub fn cap_for(limits: &machine::Limits, slots: u32) -> u64 {
+    let room = limits.total.saturating_sub(limits.floor) / u64::from(slots.max(1));
+    limits.cap.min(room.max(machine::GIB / 4))
 }
 
 /// Holds a build command to its share of cores: the build tools that read one get it from the
@@ -2735,6 +2748,17 @@ commands = []
         let set = budget_for(32, Some(&gb(64)), Some((6, "settings")));
         assert_eq!((set.slots, set.jobs, set.from.as_str()), (6, 5, "settings"));
         assert_eq!(budget_for(32, Some(&gb(64)), Some((0, "settings"))).from, "machine", "0 is not a setting");
+    }
+
+    /// Every slot at its cap still leaves the floor free (the NIT-291 review): on 64 GB, 5 slots
+    /// get 10.2 GB each rather than 16.
+    #[test]
+    fn a_runs_cap_fits_the_slots_above_the_floor() {
+        let l = machine::limits_for(64 * machine::GIB, None, None);
+        assert_eq!(cap_for(&l, 5), (64 * machine::GIB - l.floor) / 5);
+        assert_eq!(cap_for(&l, 3), 16 * machine::GIB, "the set cap when the slots fit");
+        assert!(cap_for(&l, 1000) >= machine::GIB / 4, "never below a quarter GB");
+        assert!(5 * cap_for(&l, 5) <= l.total - l.floor);
     }
 
     #[test]
