@@ -135,7 +135,9 @@ pub fn checkout_busy(root: &Path, pb: &Playbook, keep: &[String]) -> Result<Opti
         return Ok(Some(format!("your checkout is on {at}, not {branch}")));
     }
     let status = git(root, &["status", "--porcelain=v1", "-z", "--untracked-files=all"])?;
-    let changed: Vec<&str> = status.split('\0').filter(|e| e.len() > 3).map(|e| &e[3..]).filter(|p| !in_keep(keep, p)).collect();
+    // Only what git does not track can be build output: a changed tracked file counts wherever it
+    // is, even in a folder named like one (`src/target/parser.rs`), or the build would take it in.
+    let changed: Vec<&str> = status.split('\0').filter(|e| e.len() > 3).filter(|e| !(e.starts_with("??") && in_keep(keep, &e[3..]))).map(|e| &e[3..]).collect();
     Ok(match changed.as_slice() {
         [] => None,
         [one] => Some(format!("your checkout has a change: {one}")),
@@ -2038,6 +2040,11 @@ pub(crate) fn kept_dirs(root: &Path, keep: &[String]) -> Vec<String> {
                 if name == ".git" || is_link(&e.path()) || !e.file_type().is_ok_and(|t| t.is_dir()) || found.contains(&child) {
                     continue;
                 }
+                // Another repository inside this one (a nested clone, a worktree, a submodule): its
+                // files are not this repo's to judge, so nothing in it is taken for build output.
+                if e.path().join(".git").exists() {
+                    continue;
+                }
                 if names.contains(&name.as_str()) {
                     let tracked = git(root, &["ls-files", "--", &child]).is_ok_and(|t| !t.trim().is_empty());
                     if !tracked {
@@ -2659,6 +2666,29 @@ mod tests {
         switch(&root, &head, &path).unwrap();
         assert!(root.join("node_modules/dep.js").exists());
         assert!(!root.join("pkg-a/node_modules").exists() && !root.join("pkg-b/web/node_modules").exists());
+
+        // Another repository inside this one is never read for build output: its `target` may be
+        // its own source, and this repo's index cannot say.
+        let nested = root.join("vendor/lib");
+        std::fs::create_dir_all(nested.join("target")).unwrap();
+        std::fs::write(nested.join("target/source.rs"), "theirs").unwrap();
+        assert!(playbook::run_git(Command::new("git").arg("-C").arg(&nested).args(["init", "-q"])).unwrap().status.success());
+        let targets = vec!["target".to_string()];
+        assert!(!kept_dirs(&root, &targets).iter().any(|d| d.starts_with("vendor/")), "{:?}", kept_dirs(&root, &targets));
+        std::fs::remove_dir_all(root.join("vendor")).unwrap();
+
+        // In large-repo mode, a changed tracked file counts even in a folder named like a build
+        // directory; only untracked files there are build output.
+        std::fs::remove_dir_all(root.join("node_modules")).ok();
+        g(&["checkout", "-q", "main"]);
+        let lend = playbook_with("[lanes]\n");
+        assert_eq!(checkout_busy(&root, &lend, &names).unwrap(), None, "clean, but for untracked build output");
+        std::fs::create_dir_all(root.join("pkg-a/node_modules")).unwrap();
+        std::fs::write(root.join("pkg-a/node_modules/dep.js"), "y").unwrap();
+        assert_eq!(checkout_busy(&root, &lend, &names).unwrap(), None, "a package's node_modules is build output");
+        std::fs::write(root.join("src/node_modules/vendored.js"), "changed").unwrap();
+        assert!(checkout_busy(&root, &lend, &names).unwrap().is_some_and(|w| w.contains("src/node_modules/vendored.js")), "a tracked change counts");
+        g(&["checkout", "--", "src/node_modules/vendored.js"]);
 
         // The same meaning for what counts as build output in a person's checkout.
         assert!(in_keep(&names, "pkg-a/node_modules/dep.js") && in_keep(&names, "pkg-b/web/node_modules/"));

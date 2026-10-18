@@ -53,7 +53,11 @@ pub fn keep_dirs(repo_root: &Path) -> Vec<String> {
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|text| text.parse::<toml::Table>().ok())
         .and_then(|t| t.get("lanes")?.get("keep")?.as_array().cloned())
-        .map(|a| a.iter().filter_map(|v| v.as_str()).map(|s| s.trim().trim_end_matches('/').to_string()).filter(|s| plain(s)).collect::<Vec<_>>());
+        .map(|a| a.iter().filter_map(|v| v.as_str()).map(|s| s.trim().trim_end_matches('/').to_string())
+            // A leading slash anchors the entry at the root (`/node_modules`, NIT-268); what follows it
+            // must be plain all the same.
+            .filter(|s| plain(s.strip_prefix('/').unwrap_or(s)))
+            .collect::<Vec<_>>());
     match set {
         Some(dirs) if !dirs.is_empty() => dirs,
         _ => DEFAULT_KEEP.iter().map(|s| s.to_string()).collect(),
@@ -290,7 +294,8 @@ mod tests {
         assert_eq!(plan.iter().map(|c| c.dirs[0].0.as_str()).collect::<Vec<_>>(), ["build"], "target is not a build directory now");
         // Only plain names inside the worktree, and only what git ignores, are ever build output.
         std::fs::write(repo.join(crate::playbook::PLAYBOOK_PATH), "[lanes]\nkeep = [\".\", \"..\", \"/tmp\", \"C:/Code\", \"a\\\\b\", \"src\", \"build\"]\n").unwrap();
-        assert_eq!(keep_dirs(&repo), ["src", "build"]);
+        // A leading slash anchors an entry at the root, inside the worktree all the same.
+        assert_eq!(keep_dirs(&repo), ["/tmp", "src", "build"]);
         std::fs::create_dir_all(landed.join("src")).unwrap();
         std::fs::write(landed.join("src/kept.rs"), "work").unwrap();
         sh(&landed, &["add", "-A"]);
@@ -298,6 +303,15 @@ mod tests {
         sh(&repo, &["merge", "-q", "--ff-only", "claude/nit-1-landed"]);
         let plan = plan_repo("repo", &repo, &Recent::default()).unwrap();
         assert!(plan.iter().all(|c| c.dirs.iter().all(|(d, _)| d == "build")), "src is tracked, so never build output: {plan:#?}");
+
+        // A name reaches every package's build directory; an anchored one only the root's (NIT-268).
+        built(&landed, "pkg/build");
+        let plan = plan_repo("repo", &repo, &Recent::default()).unwrap();
+        let landed_dirs = |plan: &[Candidate]| plan.iter().find(|c| c.worktree == landed).map(|c| c.dirs.iter().map(|(d, _)| d.clone()).collect::<Vec<_>>()).unwrap_or_default();
+        assert_eq!(landed_dirs(&plan), ["build", "pkg/build"], "{plan:#?}");
+        std::fs::write(repo.join(crate::playbook::PLAYBOOK_PATH), "[lanes]\nkeep = [\"/build\"]\n").unwrap();
+        assert_eq!(keep_dirs(&repo), ["/build"], "kept, not dropped for the defaults");
+        assert_eq!(landed_dirs(&plan_repo("repo", &repo, &Recent::default()).unwrap()), ["build"]);
         assert_eq!(human(3 * 4096), "12 KB");
         assert_eq!(human(7_000_000_000), "6.5 GB");
         std::fs::remove_dir_all(base).ok();
