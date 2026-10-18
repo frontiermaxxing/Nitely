@@ -289,23 +289,30 @@ impl Runner for DetachedProcess {
                 cmd.env_remove(name);
             }
         }
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x0800_0000 | 0x0000_0200); // CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            cmd.process_group(0);
-        }
-        let mut child = without_inherited_std(|| cmd.spawn()).with_context(|| format!("starting {} submit-job {}", self.nitely.display(), job.id))?;
+        let mut child = spawn_detached(&mut cmd).with_context(|| format!("starting {} submit-job {}", self.nitely.display(), job.id))?;
         let pid = child.id();
         // Reaped when it ends, so a long-lived caller (an MCP server) keeps no zombie on Unix and a
         // crashed job reads as gone.
         std::thread::spawn(move || child.wait());
         Ok(Some(pid))
     }
+}
+
+/// Starts `cmd` as a process of its own, apart from the caller's: no console window, its own
+/// process group, and none of the caller's standard handles, so it outlives the caller (an MCP
+/// server whose client left) and nobody reading the caller's output waits on it.
+pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000 | 0x0000_0200); // CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    without_inherited_std(|| cmd.spawn())
 }
 
 /// Runs `spawn` with this process's own standard handles kept from the child. Windows hands a new

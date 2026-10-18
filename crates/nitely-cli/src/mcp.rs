@@ -5,8 +5,9 @@
 //!
 //! Each tool call runs on a thread of its own and is answered when it ends, so a long one (a lane
 //! run, a land) never holds up the agent's next calls; a call the client cancels is not answered;
-//! and no call waits past `wait_cap`, below the clients' own timeouts (NIT-308). Work still going
-//! when the client leaves (a land past the cap) finishes before the process exits.
+//! and no call waits past `wait_cap`, below the clients' own timeouts (NIT-308). The calls that can
+//! run longer (a land, a lane run, `submit` with wait) run in a process of their own, which goes on
+//! when the server or its client is gone.
 
 use anyhow::{anyhow, bail, Context, Result};
 use nitely_core::db::NewEvent;
@@ -130,7 +131,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// Work running in this process: tool calls, and what one left running past the cap.
+/// Tool calls running in this process.
 static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 
 /// Counts as work in flight while it lives.
@@ -149,8 +150,8 @@ impl Drop for Busy {
     }
 }
 
-/// Waits until no work is in flight: the client closed its end, and a land or a lane run it left
-/// running past the cap must not die halfway with the process.
+/// Waits until no call is in flight: the client closed its end, and what it asked last (a wait on
+/// a run, a call forwarded to a newer build) still ends and answers before the process exits.
 fn finish_in_flight() {
     while IN_FLIGHT.load(Ordering::SeqCst) > 0 {
         std::thread::sleep(Duration::from_millis(100));
@@ -188,7 +189,10 @@ pub fn serve() -> Result<()> {
         match (msg.get("method").and_then(Value::as_str).unwrap_or(""), msg.get("id")) {
             ("notifications/cancelled", _) => {
                 if let Some(id) = msg.pointer("/params/requestId").map(Value::to_string) {
-                    if lock(&running).contains(&id) {
+                    // Held while it marks the call, so the call cannot end in between and leave
+                    // the mark behind for a later call with its id.
+                    let running = lock(&running);
+                    if running.contains(&id) {
                         lock(&cancelled).insert(id);
                     }
                 }
@@ -201,8 +205,12 @@ pub fn serve() -> Result<()> {
                 std::thread::spawn(move || {
                     let _busy = busy;
                     let reply = handle(&mut server, &msg);
-                    lock(&running).remove(&id);
-                    if !lock(&cancelled).remove(&id) {
+                    let was_cancelled = {
+                        let mut running = lock(&running);
+                        running.remove(&id);
+                        lock(&cancelled).remove(&id)
+                    };
+                    if !was_cancelled {
                         if let Some(reply) = reply {
                             send(&out, &reply);
                         }
@@ -222,20 +230,67 @@ pub fn serve() -> Result<()> {
     Ok(())
 }
 
-/// Runs `work` on a thread of its own and waits for it up to `wait_cap`. Past that, answers with
-/// what `pending` says and leaves the work running in this process, which stays until it ends.
-fn within_cap(work: impl FnOnce() -> Result<Value> + Send + 'static, pending: impl FnOnce() -> Result<Value>) -> Result<Value> {
+/// Runs this tool call in a process of its own (`nitely mcp-detached`), acting for `session`, and
+/// waits for it up to `wait_cap`. That process outlives this server and its client, so a land the
+/// agent stops waiting on, or whose session ends, still finishes. Past the cap, answers with what
+/// `pending` says, given the log the process writes.
+fn run_apart(server: &Server, session: &str, params: &Value, pending: impl FnOnce(&std::path::Path) -> Result<Value>) -> Result<Value> {
+    let jobs = paths::data_dir().join("jobs");
+    std::fs::create_dir_all(&jobs)?;
+    let name = params.get("name").and_then(Value::as_str).unwrap_or("call");
+    let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let stem = format!("mcp-{name}-{}-{stamp}", std::process::id());
+    let (out, log) = (jobs.join(format!("{stem}.json")), jobs.join(format!("{stem}.log")));
+    let file = std::fs::File::create(&log).with_context(|| format!("creating {}", log.display()))?;
+    let mut cmd = Command::new(std::env::current_exe()?);
+    cmd.arg("mcp-detached").stdin(Stdio::piped()).stdout(Stdio::from(file.try_clone()?)).stderr(Stdio::from(file));
+    if std::path::Path::new(&server.cwd).is_dir() {
+        cmd.current_dir(&server.cwd);
+    }
+    let mut child = nitely_core::submit_job::spawn_detached(&mut cmd).context("starting nitely mcp-detached")?;
+    let request = json!({ "vendor": server.vendor, "cwd": server.cwd, "params": params, "session": session, "out": out.to_string_lossy() });
+    if let Some(mut stdin) = child.stdin.take() {
+        writeln!(stdin, "{request}")?;
+    }
     let (tx, rx) = mpsc::channel();
-    let busy = Busy::start();
+    // Reaped when it ends, however long after this call answered.
     std::thread::spawn(move || {
-        let _busy = busy;
-        tx.send(work()).ok();
+        tx.send(child.wait()).ok();
     });
     match rx.recv_timeout(wait_cap()) {
-        Ok(result) => result,
-        Err(mpsc::RecvTimeoutError::Timeout) => pending(),
-        Err(mpsc::RecvTimeoutError::Disconnected) => bail!("the call stopped without an answer"),
+        Err(mpsc::RecvTimeoutError::Timeout) => pending(&log),
+        _ => {
+            let answer: Value = std::fs::read(&out)
+                .ok()
+                .and_then(|b| serde_json::from_slice(&b).ok())
+                .with_context(|| format!("the call's process ended without an answer; its log: {}", log.display()))?;
+            std::fs::remove_file(&out).ok();
+            std::fs::remove_file(&log).ok();
+            match answer.get("error").and_then(Value::as_str) {
+                Some(e) => bail!("{e}"),
+                None => Ok(answer.get("ok").cloned().unwrap_or(Value::Null)),
+            }
+        }
     }
+}
+
+/// `nitely mcp-detached`: the process `run_apart` starts. Runs the call here, as the session the
+/// server resolved, and writes {ok} or {error} to `out`.
+pub fn run_detached() -> Result<()> {
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let request: Value = serde_json::from_str(&input).context("mcp-detached takes {vendor, cwd, params, session, out} on stdin")?;
+    let server = Server { vendor: str_arg(&request, "vendor").unwrap_or("agent").to_string(), cwd: req(&request, "cwd")?.to_string(), exe: None, remote: None };
+    let params = request.get("params").cloned().unwrap_or(json!({}));
+    let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+    let args = params.get("arguments").cloned().unwrap_or(json!({}));
+    let answer = match run_tool_as(&server, name, &args, &params, Some(req(&request, "session")?)) {
+        Ok(v) => json!({ "ok": v }),
+        Err(e) => json!({ "error": format!("{e:#}") }),
+    };
+    println!("{answer}");
+    std::fs::write(req(&request, "out")?, serde_json::to_vec(&answer)?)?;
+    Ok(())
 }
 
 pub(crate) fn handle(server: &mut Server, msg: &Value) -> Option<Value> {
@@ -860,11 +915,20 @@ fn label_note(before: &[(String, usize)], given: &[String]) -> Option<String> {
 
 /// `params` are the call's, whose `_meta` says which session made it (see `Server::session`).
 fn run_tool(server: &Server, name: &str, args: &Value, params: &Value) -> Result<Value> {
+    run_tool_as(server, name, args, params, None)
+}
+
+/// `run_tool`; `detached` is set in the process `run_apart` started: the session the server
+/// resolved for the call, and the long work (a land, a lane run) runs right here.
+fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detached: Option<&str>) -> Result<Value> {
     let config = Config::load()?;
     let mut db = Db::open_default()?;
     let args = &current_args(&db, args)?;
     let named = std::env::var("CLAUDE_CODE_SESSION_ID").ok();
-    let session = &server.claude_session(params, &db, named.as_deref()).unwrap_or_else(|| server.session(params));
+    let session = &match detached {
+        Some(s) => s.to_string(),
+        None => server.claude_session(params, &db, named.as_deref()).unwrap_or_else(|| server.session(params)),
+    };
     let actor = server.actor_for(session);
     if server.remote.is_some() && LOCAL_ONLY.contains(&name) {
         bail!("{name} runs on the machine that holds the repo, so it is not available over the local network; do the work in your own checkout");
@@ -955,25 +1019,25 @@ fn run_tool(server: &Server, name: &str, args: &Value, params: &Value) -> Result
         }
         "run" => {
             let dir = task_dir(&config, &db, args, &server.cwd)?;
-            let (key, command) = (str_arg(args, "key").map(str::to_string), req(args, "command")?.to_string());
-            let (config, by) = (config.clone(), actor.clone());
-            // Its id, once it is queued, for the answer past the cap.
-            let (queued, id) = mpsc::channel();
-            within_cap(
-                move || {
-                    let db = Db::open_default()?;
-                    let run = nitely_core::lanes::run_in(&config, &db, &dir, key.as_deref(), &command, &by, &mut |r| {
-                        queued.send(r.id).ok();
-                    })?;
-                    Ok(json!(run))
-                },
-                || {
-                    let id = id.try_recv().context("the run was not queued yet")?;
-                    let mut run = json!(db.lane_run(id)?.with_context(|| format!("no run {id}"))?);
-                    run["next"] = json!(format!("Still {} after {}s: call run_status with id {id} (and wait_seconds) for the result.", run["state"].as_str().unwrap_or("queued"), wait_cap().as_secs()));
-                    Ok(run)
-                },
-            )?
+            let command = req(args, "command")?;
+            if detached.is_some() {
+                json!(nitely_core::lanes::run_in(&config, &db, &dir, str_arg(args, "key"), command, &actor, &mut |_| {})?)
+            } else {
+                let asked = nitely_core::db::now();
+                run_apart(server, session, params, |log| {
+                    // The run its process queued: this agent's newest of this command since.
+                    let run = db.lane_runs_by(actor.id(), 10)?.into_iter().find(|r| r.command == command && r.queued_at >= asked);
+                    Ok(match run {
+                        Some(r) => {
+                            let next = format!("Still {} after {}s: call run_status with id {} (and wait_seconds) for the result.", r.state, wait_cap().as_secs(), r.id);
+                            let mut v = json!(r);
+                            v["next"] = json!(next);
+                            v
+                        }
+                        None => json!({ "still_running": true, "log": log.to_string_lossy(), "next": format!("Not queued yet after {}s; `nitely lanes` shows it once it is.", wait_cap().as_secs()) }),
+                    })
+                })?
+            }
         }
         "run_status" => match args.get("id").and_then(Value::as_i64) {
             Some(id) => {
@@ -1035,16 +1099,14 @@ fn run_tool(server: &Server, name: &str, args: &Value, params: &Value) -> Result
             let issue = db.issue(key)?.with_context(|| format!("no issue {key}"))?;
             let root = playbook::repo_for_issue(&config, issue.project.as_deref(), &server.cwd)?;
             nitely_core::install::check_current(&config, &root.to_string_lossy(), env!("NITELY_COMMIT"))?;
-            let (config, by, cwd, key) = (config.clone(), actor.clone(), server.cwd.clone(), key.to_string());
-            let waiting = key.clone();
-            within_cap(
-                move || {
-                    let mut db = Db::open_default()?;
-                    let opts = nitely_core::land::LandOptions { dir: &cwd, issue_key: &key, push: true, keep: false, break_lock: false };
-                    Ok(json!(nitely_core::land::land(&mut db, &config, &opts, &by)?))
-                },
-                || Ok(json!({ "still_running": true, "next": format!("The land of {waiting} is still running after {}s; it goes on in this server, which stays until it ends. get_issue {waiting} shows when it landed or why it stopped.", wait_cap().as_secs()) })),
-            )?
+            if detached.is_some() {
+                let opts = nitely_core::land::LandOptions { dir: &server.cwd, issue_key: key, push: true, keep: false, break_lock: false };
+                json!(nitely_core::land::land(&mut db, &config, &opts, &actor)?)
+            } else {
+                run_apart(server, session, params, |log| {
+                    Ok(json!({ "still_running": true, "log": log.to_string_lossy(), "next": format!("The land of {key} is still running after {}s, in a process of its own that goes on without this call. get_issue {key} shows when it landed or why it stopped.", wait_cap().as_secs()) }))
+                })?
+            }
         }
         "get_issue" => {
             let key = req(args, "key")?;

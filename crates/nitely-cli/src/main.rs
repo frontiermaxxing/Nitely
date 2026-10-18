@@ -50,6 +50,10 @@ enum Cmd {
     /// each answered by id when it ends.
     #[command(hide = true)]
     McpCalls,
+    /// Run one MCP tool call (a land, a lane run) for a `nitely mcp` that started this process to
+    /// outlive it: {vendor, cwd, params, session, out} on stdin, the answer written to `out`.
+    #[command(hide = true)]
+    McpDetached,
     /// Put this build (or --from) where agents run `nitely` from, even while agents run the old
     /// one: on Windows the running one is moved aside, and old copies nothing runs are deleted.
     Install {
@@ -610,6 +614,13 @@ fn main() {
             }
             return;
         }
+        Cmd::McpDetached => {
+            if let Err(e) = mcp::run_detached() {
+                eprintln!("nitely mcp-detached: {e:#}");
+                std::process::exit(1);
+            }
+            return;
+        }
         Cmd::Ui { command, args } => {
             // Refused commands exit 2, so the preview can tell them from failures.
             if !ui::READ_ONLY.contains(&command.as_str()) {
@@ -708,7 +719,7 @@ fn run(cmd: Cmd) -> Result<()> {
     // only in the app.
     let me = Actor::Agent("cli".into());
     match cmd {
-        Cmd::Hook { .. } | Cmd::Mcp | Cmd::McpCall | Cmd::McpCalls | Cmd::Ui { .. } => unreachable!(),
+        Cmd::Hook { .. } | Cmd::Mcp | Cmd::McpCall | Cmd::McpCalls | Cmd::McpDetached | Cmd::Ui { .. } => unreachable!(),
         Cmd::Serve { listen, no_advertise } => serve::serve(Some(&listen), !no_advertise),
         Cmd::Tokens { command } => match command {
             TokensCmd::List => print_json(&nitely_core::relay::list_tokens()?),

@@ -145,3 +145,29 @@ fn a_call_still_running_when_the_client_leaves_finishes_before_the_server_exits(
     assert!(left.elapsed() >= Duration::from_secs(2), "it waited for the call: {:?}", left.elapsed());
     std::fs::remove_dir_all(base).ok();
 }
+
+#[test]
+fn a_detached_call_runs_as_the_session_it_was_given_and_writes_its_answer() {
+    let (mcp, _run, base) = setup("nitely-mcp-detached");
+    drop(mcp);
+    let out = base.join("answer.json");
+    let request = json!({ "vendor": "claude", "cwd": base.to_string_lossy(), "params": { "name": "report", "arguments": { "text": "Reported from apart" } }, "session": "claude:s1", "out": out.to_string_lossy() });
+    let mut child = Command::new(env!("CARGO_BIN_EXE_nitely"))
+        .arg("mcp-detached")
+        .current_dir(&base)
+        .env("NITELY_HOME", &base)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    writeln!(child.stdin.take().unwrap(), "{request}").unwrap();
+    assert!(child.wait().unwrap().success());
+    let answer: Value = serde_json::from_slice(&std::fs::read(&out).unwrap()).unwrap();
+    assert!(answer.get("ok").is_some() && answer.get("error").is_none(), "{answer}");
+    let conn = rusqlite::Connection::open(base.join("nitely.db")).unwrap();
+    let seen: i64 = conn.query_row("SELECT COUNT(*) FROM session WHERE id = 'claude:s1'", [], |r| r.get(0)).unwrap();
+    assert_eq!(seen, 1, "it acts as the session the server resolved");
+    drop(conn);
+    std::fs::remove_dir_all(base).ok();
+}
