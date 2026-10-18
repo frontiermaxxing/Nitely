@@ -149,6 +149,28 @@ async fn set_links_service(on: bool) -> Result<nitely_core::link_service::Status
     }
 }
 
+/// A debug build is a console program (main.rs), so each link it was registered for started a
+/// second instance in a console window of its own, only to hand the link over and exit (NIT-259).
+/// It registers nitely:// through conhost's headless mode instead, as the links listener runs at
+/// login: the second instance gets no window, and the first keeps `npm run tauri dev`'s console.
+/// Release builds are GUI programs and keep the plugin's registration.
+fn quiet_dev_links() {
+    #[cfg(all(windows, debug_assertions))]
+    {
+        use std::os::windows::process::CommandExt;
+        let Ok(exe) = std::env::current_exe() else { return };
+        let command = format!("conhost.exe --headless \"{}\" \"%1\"", exe.display());
+        let key = r"HKCU\Software\Classes\nitely\shell\open\command";
+        let done = std::process::Command::new("reg")
+            .args(["add", key, "/ve", "/t", "REG_SZ", "/d", &command, "/f"])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .output();
+        if !done.is_ok_and(|o| o.status.success()) {
+            eprintln!("deep link: could not register nitely:// without a console window");
+        }
+    }
+}
+
 pub(crate) fn focus_main(app: &tauri::AppHandle) {
     use tauri::Manager;
     if let Some(w) = app.get_webview_window("main") {
@@ -779,6 +801,8 @@ pub fn run() {
                 // The harness build must not take over the person's nitely:// links.
             } else if let Err(e) = app.deep_link().register_all() {
                 eprintln!("deep link: {e}");
+            } else {
+                quiet_dev_links();
             }
             let links = app.handle().clone();
             app.deep_link().on_open_url(move |event| {
