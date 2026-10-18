@@ -337,13 +337,16 @@ Nothing changes until a project's playbook asks for it (`[lanes]`). Per project:
 
 ### Lane hygiene
 
-A lane over its size cap (default 2 × its first build; `[lanes] size_cap_gb` sets it) has its
-incremental caches (`target/*/incremental`) emptied between requests. Over twice the cap, its build
-directories are removed and it builds cold once. Nothing a lane holds is anyone's work: a lane can be
-deleted at any moment and rebuilt. As built (NIT-223): the check runs after each request while the
-lane is still held, measures only the `keep` directories, keeps the sizes in the lane's git folder
-(`nitely-lane-size`: after the last request, after the first), and says what it trimmed in the run's
-log. Settings shows each lane's size against its cap.
+A lane over its size cap has its incremental caches (`target/*/incremental`) emptied between
+requests. Over twice the cap, its build directories are removed and it builds cold once. The cap is
+`[lanes] size_cap_gb`, else twice the lane's baseline and at least 4 GB: the largest build output
+(incremental caches aside) over its first 10 requests. So a lane whose first request was small (a
+`cargo check` of one crate) does not wipe the full builds after it (NIT-231). Nothing a lane holds is
+anyone's work: a lane can be deleted at any moment and rebuilt. As built (NIT-223): the check runs
+after each request while the lane is still held, measures only the `keep` directories, keeps the
+sizes in the lane's git folder (`nitely-lane-size`: after the last request, the baseline, the
+requests served), and says what it trimmed in the run's log. Settings shows each lane's size against
+its cap.
 
 What a lane command starts ends with it: on Windows it runs in a job object that kills its whole tree
 when the command ends or the requesting process dies, so a crash leaves nothing running in the lane

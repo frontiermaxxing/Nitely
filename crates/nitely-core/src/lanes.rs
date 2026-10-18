@@ -1444,36 +1444,56 @@ fn serve(repo_root: &Path, pb: &Playbook, rules: &LaneRules, lane: &Path, log: &
 }
 
 /// The file in a lane's git folder that keeps the size of its build directories after its last
-/// request and after its first one: "<bytes> <first bytes>".
+/// request, its baseline, and how many requests it has served: "<bytes> <baseline bytes>
+/// <requests>". A record from before NIT-231 has no count, and its baseline was the first build's
+/// whole size.
 const SIZE_RECORD: &str = "nitely-lane-size";
 
 const GB: f64 = 1024.0 * 1024.0 * 1024.0;
 
-/// A lane's size cap in bytes: the playbook's, else twice its first build.
-fn cap_bytes(rules: &LaneRules, first: u64) -> u64 {
+/// How many requests a lane's baseline learns from: the largest build output among them, so a
+/// small first request (a `cargo check` of one crate) does not set the cap for the full builds
+/// after it (NIT-231).
+const LEARN_REQUESTS: u64 = 10;
+
+/// The smallest cap twice the baseline gives, so a small baseline never wipes a lane's warm build.
+const MIN_CAP: u64 = 4 << 30;
+
+/// A lane's size cap in bytes: the playbook's, else twice its baseline, and never below `floor`.
+fn cap_bytes(rules: &LaneRules, baseline: u64, floor: u64) -> u64 {
     match rules.size_cap_gb {
         Some(gb) if gb > 0.0 => (gb * GB) as u64,
-        _ => first.saturating_mul(2),
+        _ => baseline.saturating_mul(2).max(floor),
     }
 }
 
-/// What a lane's size record says: (size after the last request, size after the first), if any.
-fn read_size(record: &Path) -> Option<(u64, u64)> {
+/// What a lane's size record says: (size after the last request, baseline, requests served), if
+/// any; an old record without a count counts as one request.
+fn read_size(record: &Path) -> Option<(u64, u64, u64)> {
     let text = std::fs::read_to_string(record).ok()?;
     let mut parts = text.split_whitespace().map(|p| p.parse::<u64>().ok());
-    Some((parts.next()??, parts.next()??))
+    let (size, baseline) = (parts.next()??, parts.next()??);
+    Some((size, baseline, parts.next().flatten().unwrap_or(1)))
 }
 
 /// Keeps a lane within its size cap (docs/build-lanes.md, "Lane hygiene"): over the cap, the
 /// incremental caches in its build directories (`*/incremental`, cargo's) are emptied; over twice
-/// the cap, its build directories go and the next request builds cold. Records the size after, and
-/// the first build's size the first time. Nothing it removes is anyone's work. Says what it did in
-/// the log.
+/// the cap, its build directories go and the next request builds cold. The cap is twice the
+/// lane's baseline, at least `MIN_CAP`: the largest build output (incremental caches aside, which
+/// are what grows) over its first `LEARN_REQUESTS` requests. Records the size after, the baseline
+/// and the count. Nothing it removes is anyone's work. Says what it did in the log.
 fn hygiene(lane: &Path, rules: &LaneRules, record: &Path, log: &Path) {
+    hygiene_with(lane, rules, record, log, MIN_CAP)
+}
+
+fn hygiene_with(lane: &Path, rules: &LaneRules, record: &Path, log: &Path, floor: u64) {
     use std::io::Write;
     let measured = keep_size(lane, &rules.keep);
-    let first = read_size(record).map(|(_, f)| f).filter(|f| *f > 0).unwrap_or(measured);
-    let cap = cap_bytes(rules, first);
+    let output = measured.saturating_sub(incremental_size(lane, &rules.keep));
+    let (recorded, served) = read_size(record).map_or((0, 0), |(_, b, n)| (b, n));
+    let served = served + 1;
+    let baseline = if served <= LEARN_REQUESTS { recorded.max(output) } else { recorded };
+    let cap = cap_bytes(rules, baseline, floor);
     let mut size = measured;
     let mut said = None;
     if cap > 0 && size > cap.saturating_mul(2) {
@@ -1483,39 +1503,56 @@ fn hygiene(lane: &Path, rules: &LaneRules, record: &Path, log: &Path) {
         size = keep_size(lane, &rules.keep);
         said = Some(format!("over twice its size cap ({} of {}): removed its build directories; the next request builds cold", human(measured), human(cap)));
     } else if cap > 0 && size > cap {
-        for d in rules.keep.iter().filter_map(|k| keep_dir(lane, k)) {
-            let Ok(entries) = std::fs::read_dir(&d) else { continue };
-            for e in entries.flatten() {
-                let incremental = e.path().join("incremental");
-                if !is_link(&e.path()) && incremental.is_dir() && !is_link(&incremental) {
-                    std::fs::remove_dir_all(incremental).ok();
-                }
-            }
+        for d in incremental_dirs(lane, &rules.keep) {
+            std::fs::remove_dir_all(d).ok();
         }
         size = keep_size(lane, &rules.keep);
         said = Some(format!("over its size cap ({} of {}): emptied the incremental caches, now {}", human(measured), human(cap), human(size)));
     }
-    std::fs::write(record, format!("{size} {first}")).ok();
+    std::fs::write(record, format!("{size} {baseline} {served}")).ok();
     if let (Some(said), Ok(mut f)) = (said, std::fs::OpenOptions::new().append(true).open(log)) {
         writeln!(f, "nitely: lane {said}").ok();
     }
 }
 
+/// The incremental caches in a lane's build directories: each `<keep>/<profile>/incremental`
+/// (cargo's), links neither followed nor counted.
+fn incremental_dirs(lane: &Path, keep: &[String]) -> Vec<PathBuf> {
+    let mut dirs = vec![];
+    for d in keep.iter().filter_map(|k| keep_dir(lane, k)) {
+        let Ok(entries) = std::fs::read_dir(&d) else { continue };
+        for e in entries.flatten() {
+            let incremental = e.path().join("incremental");
+            if !is_link(&e.path()) && incremental.is_dir() && !is_link(&incremental) {
+                dirs.push(incremental);
+            }
+        }
+    }
+    dirs
+}
+
+/// The bytes in a lane's incremental caches.
+fn incremental_size(lane: &Path, keep: &[String]) -> u64 {
+    incremental_dirs(lane, keep).iter().map(|d| dir_size(d)).sum()
+}
+
 /// The bytes in a lane's build directories, links (symlinks, junctions) not followed.
 fn keep_size(lane: &Path, keep: &[String]) -> u64 {
-    fn walk(dir: &Path) -> u64 {
-        let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
-        entries
-            .flatten()
-            .map(|e| match e.file_type() {
-                _ if is_link(&e.path()) => 0,
-                Ok(t) if t.is_dir() => walk(&e.path()),
-                Ok(t) if t.is_file() => e.metadata().map(|m| m.len()).unwrap_or(0),
-                _ => 0,
-            })
-            .sum()
-    }
-    keep.iter().filter_map(|k| keep_dir(lane, k)).map(|d| walk(&d)).sum()
+    keep.iter().filter_map(|k| keep_dir(lane, k)).map(|d| dir_size(&d)).sum()
+}
+
+/// The bytes in `dir`, links (symlinks, junctions) not followed.
+fn dir_size(dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    entries
+        .flatten()
+        .map(|e| match e.file_type() {
+            _ if is_link(&e.path()) => 0,
+            Ok(t) if t.is_dir() => dir_size(&e.path()),
+            Ok(t) if t.is_file() => e.metadata().map(|m| m.len()).unwrap_or(0),
+            _ => 0,
+        })
+        .sum()
 }
 
 /// A `keep` entry as a folder inside `lane`, or None when it is not a plain relative path (`..`,
@@ -1920,7 +1957,7 @@ fn status_with(db: &Db, repo_root: &Path, pb: &Playbook, project: &str, probe_lo
         let at = made.then(|| git(&path, &["rev-parse", "--short", "HEAD"]).ok().map(|s| s.trim().to_string())).flatten();
         let size = made.then(|| git_path(&path, SIZE_RECORD).and_then(|r| read_size(&r))).flatten();
         let (size_bytes, cap_bytes) = match size {
-            Some((size, first)) => (Some(size), Some(cap_bytes(&rules, first))),
+            Some((size, baseline, _)) => (Some(size), Some(cap_bytes(&rules, baseline, MIN_CAP))),
             None => (None, None),
         };
         lanes.push(LaneState { lane: n, path: path.to_string_lossy().into_owned(), made, busy, at, size_bytes, cap_bytes });
@@ -2115,26 +2152,46 @@ commands = []
             std::fs::write(p, vec![0u8; bytes]).unwrap();
         };
         let rules = LaneRules { keep: vec!["target".into()], ..Default::default() };
-        // The first build sets the cap at twice its size: 2 000 bytes.
+        // Without the floor, so a few bytes stand for gigabytes.
+        let hygiene = |lane: &Path, rules: &LaneRules, record: &Path, log: &Path| hygiene_with(lane, rules, record, log, 0);
+        // The first request's build output sets the baseline, its incremental caches aside: a cap
+        // of twice 600 bytes.
         fill("target/debug/app", 600);
         fill("target/debug/incremental/a", 400);
         fill("src/main.rs", 5_000);
         hygiene(&lane, &rules, &record, &log);
-        assert_eq!(read_size(&record), Some((1_000, 1_000)), "only build directories count");
+        assert_eq!(read_size(&record), Some((1_000, 600, 1)), "only build directories count");
 
         // Over the cap: the incremental caches go, the rest stays.
-        fill("target/debug/incremental/b", 1_500);
+        fill("target/debug/incremental/b", 1_000);
         hygiene(&lane, &rules, &record, &log);
         assert!(!lane.join("target/debug/incremental").exists() && lane.join("target/debug/app").exists());
-        assert_eq!(read_size(&record), Some((600, 1_000)));
+        assert_eq!(read_size(&record), Some((600, 600, 2)));
 
-        // Over twice the cap: the build directories go; sources never.
-        fill("target/release/big", 5_000);
+        // A full build after a small first request (NIT-231): within the first requests it raises
+        // the baseline, and the warm build stays.
+        fill("target/debug/deps/everything", 4_000);
+        hygiene(&lane, &rules, &record, &log);
+        assert!(lane.join("target/debug/deps/everything").exists(), "a bigger build is not wiped while the baseline learns");
+        assert_eq!(read_size(&record), Some((4_600, 4_600, 3)));
+
+        // Once it has learned, over twice the cap: the build directories go; sources never.
+        for _ in 3..LEARN_REQUESTS {
+            hygiene(&lane, &rules, &record, &log);
+        }
+        fill("target/release/big", 15_000);
         hygiene(&lane, &rules, &record, &log);
         assert!(!lane.join("target").exists() && lane.join("src/main.rs").exists());
-        assert_eq!(read_size(&record), Some((0, 1_000)), "the first build's size is kept");
+        assert_eq!(read_size(&record), Some((0, 4_600, LEARN_REQUESTS + 1)), "the baseline is kept");
         let said = std::fs::read_to_string(&log).unwrap();
         assert!(said.contains("emptied the incremental caches") && said.contains("builds cold"), "{said}");
+
+        // A record from before NIT-231 (no count) learns on from its first build's size.
+        std::fs::write(&record, "700 666").unwrap();
+        assert_eq!(read_size(&record), Some((700, 666, 1)));
+        // And with the floor, a small baseline never wipes a lane: twice 666 bytes is under it.
+        assert_eq!(cap_bytes(&rules, 666, MIN_CAP), MIN_CAP);
+        assert_eq!(cap_bytes(&rules, 3 << 30, MIN_CAP), 6 << 30);
 
         // Nothing outside the lane is ever touched: not a `keep` that climbs out, not what a link
         // inside a build directory points at.
@@ -2158,8 +2215,8 @@ commands = []
         assert_eq!(keep_dir(&lane, "target/linked/incremental"), None, "through a link");
         assert_eq!(keep_dir(&lane, "target/"), Some(lane.join("target")));
 
-        // The playbook's cap wins over twice the first build.
-        assert_eq!(cap_bytes(&LaneRules { size_cap_gb: Some(1.0), ..Default::default() }, 10), 1 << 30);
+        // The playbook's cap wins over twice the baseline, and over the floor.
+        assert_eq!(cap_bytes(&LaneRules { size_cap_gb: Some(1.0), ..Default::default() }, 10, MIN_CAP), 1 << 30);
         std::fs::remove_dir_all(base).ok();
     }
 
