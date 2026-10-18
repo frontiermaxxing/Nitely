@@ -260,7 +260,7 @@ fn parse(text: &str) -> Result<(String, Option<String>)> {
     let (Some(a), Some(p)) = (field("ANSWER"), field("PERSON")) else {
         bail!("the triage agent did not end with ANSWER and PERSON lines");
     };
-    let after = |l: &str| l.trim().trim_matches('*').split_once(':').map(|(_, v)| v.trim().to_string()).unwrap_or_default();
+    let after = |l: &str| l.trim().trim_matches('*').split_once(':').map(|(_, v)| v.trim().trim_matches('*').trim().to_string()).unwrap_or_default();
     // The answer may run over several lines, up to PERSON.
     let mut answer = after(lines[a]);
     if p > a {
@@ -341,10 +341,10 @@ mod tests {
     }
 
     /// A repo whose triage agent (the playbook's claude reviewer) answers from a script: a question
-    /// about a license is the person's, anything else it answers itself.
+    /// about the SDK's license is the person's, anything else it answers itself.
     fn repo_with_triage() -> (PathBuf, Db, PathBuf, Actor) {
         let base = crate::test_repo::copy("triage", |base| {
-            let script = "prompt=$(cat)\ncase \"$prompt\" in\n  *license*) echo 'Which license is a product decision.'; echo 'ANSWER: Nothing in the repo decides it.'; echo 'PERSON: yes, a product question';;\n  *) echo 'ANSWER: APP-2 holds crates/a.rs on its branch: wait for it to land, then rebase.'; echo 'PERSON: no';;\nesac\n";
+            let script = "prompt=$(cat)\ncase \"$prompt\" in\n  *SDK*) echo 'Which license is a product decision.'; echo 'ANSWER: Nothing in the repo decides it.'; echo 'PERSON: yes, a product question';;\n  *) echo 'ANSWER: APP-2 holds crates/a.rs on its branch: wait for it to land, then rebase.'; echo 'PERSON: no';;\nesac\n";
             let playbook = format!("[review]\nreviewer = {{ \"*\" = \"claude\" }}\ncommands = {{ claude = [\"{}\", \"triage.sh\"] }}\n", crate::playbook::posix_sh());
             crate::test_repo::init(&base.join("repo"), &[("triage.sh", script), (crate::playbook::PLAYBOOK_PATH, &playbook)]);
         });
