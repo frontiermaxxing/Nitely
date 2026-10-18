@@ -447,6 +447,33 @@ pub(crate) fn after_land(root: &Path, pb: &Playbook, report: &mut Landed) {
     }
 }
 
+/// The main checkout's fast-forward to `to`. It writes that checkout's index, so a land killed
+/// mid-way would leave index.lock and every git command there would fail. A file naming this
+/// process goes beside the index first; a later land that finds index.lock with such a file whose
+/// process is gone knows the lock is a killed land's, and removes both (NIT-341). A lock with no
+/// such file (the person's own git, another tool) is left alone, and the error says where it is.
+pub(crate) fn fast_forward_main(root: &Path, to: &str) -> Result<()> {
+    let git_dir = PathBuf::from(git(root, &["rev-parse", "--absolute-git-dir"])?.trim());
+    let (index_lock, mark) = (git_dir.join("index.lock"), git_dir.join("nitely-fast-forward"));
+    if let Ok(text) = std::fs::read_to_string(&mark) {
+        let pid = text.split_whitespace().skip_while(|w| *w != "pid").nth(1).and_then(|p| p.parse::<u32>().ok());
+        if !pid.is_some_and(crate::procs::alive) {
+            std::fs::remove_file(&index_lock).ok();
+            std::fs::remove_file(&mark).ok();
+        }
+    }
+    std::fs::write(&mark, format!("fast-forward pid {} since {}", std::process::id(), crate::issues::iso(now()))).ok();
+    let done = git(root, &["merge", "--ff-only", to]);
+    std::fs::remove_file(&mark).ok();
+    done.map(|_| ()).map_err(|e| {
+        if index_lock.exists() {
+            e.context(format!("{} exists: another git command holds the main checkout's index; if none runs there, remove it", index_lock.display()))
+        } else {
+            e
+        }
+    })
+}
+
 fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor: &Actor, report: &mut Landed) -> Result<()> {
     let base = report.base.clone();
     // A repo with no origin is local: what lands stays in it.
@@ -542,7 +569,7 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
     // The submodules' integration branches first, then the repo's; when the repo's refuses, theirs
     // go back, so neither moves.
     let undo = crate::submodules::fast_forward(&moving)?;
-    if let Err(e) = git(root, &["merge", "--ff-only", &head]) {
+    if let Err(e) = fast_forward_main(root, &head) {
         let stuck = crate::submodules::undo(&undo);
         let back = if moving.is_empty() {
             String::new()
@@ -943,6 +970,33 @@ pub(crate) fn first_line(e: &anyhow::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The main checkout's fast-forward clears an index.lock a killed land left (its mark names a
+    /// process that is gone), and leaves anyone else's, saying where it is (NIT-341).
+    #[test]
+    fn a_killed_lands_index_lock_is_cleared_and_anyone_elses_named() {
+        let base = crate::paths::unique_temp("nitely-ff-lock", "");
+        let repo = base.join("repo");
+        crate::test_repo::init(&repo, &[("a.txt", "one\n")]);
+        git(&repo, &["checkout", "-q", "-b", "next"]).unwrap();
+        std::fs::write(repo.join("a.txt"), "two\n").unwrap();
+        git(&repo, &["commit", "-qam", "two"]).unwrap();
+        let next = git(&repo, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        git(&repo, &["checkout", "-q", "main"]).unwrap();
+        let git_dir = repo.join(".git");
+        let (lock, mark) = (git_dir.join("index.lock"), git_dir.join("nitely-fast-forward"));
+        // Someone else's lock: left alone, and the error names it.
+        std::fs::write(&lock, "").unwrap();
+        let err = format!("{:#}", fast_forward_main(&repo, &next).unwrap_err());
+        assert!(err.contains("index.lock exists"), "{err}");
+        assert!(lock.exists() && !mark.exists());
+        // A killed land's: its mark names a process that is gone, so both go and the land goes on.
+        std::fs::write(&mark, "fast-forward pid 4000000000 since then").unwrap();
+        fast_forward_main(&repo, &next).unwrap();
+        assert!(!lock.exists() && !mark.exists());
+        assert_eq!(git(&repo, &["rev-parse", "HEAD"]).unwrap().trim(), next);
+        std::fs::remove_dir_all(&base).ok();
+    }
 
     /// The lanes keep a lane for a land only while the process that took its lock lives (NIT-332).
     #[test]

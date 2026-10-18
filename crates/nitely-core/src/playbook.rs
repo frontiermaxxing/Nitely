@@ -752,6 +752,7 @@ fn checked(out: std::process::Output, args: &[&str]) -> Result<String> {
 /// nothing (NIT-116). Nothing ran either way, so running it again is safe; any other failure is
 /// git's own answer and is returned as it is.
 pub fn run_git(cmd: &mut Command) -> std::io::Result<std::process::Output> {
+    no_optional_locks(cmd);
     let mut attempt = 0;
     loop {
         attempt += 1;
@@ -854,12 +855,23 @@ pub(crate) fn posix_sh() -> String {
 pub(crate) fn shell_free_command(program: &str) -> Command {
     #[allow(unused_mut)]
     let mut cmd = Command::new(program);
+    if program == "git" {
+        no_optional_locks(&mut cmd);
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
     cmd
+}
+
+/// No lock git takes only to save work for later: `git status` and `git diff` otherwise refresh a
+/// worktree's own index under index.lock, and a Nitely process killed mid-way (a stopped `run` or
+/// `submit`, a board refresh) would leave that lock for the agent's next commit to fail on
+/// (NIT-341). Commands that must write the index still lock it.
+pub(crate) fn no_optional_locks(cmd: &mut Command) {
+    cmd.env("GIT_OPTIONAL_LOCKS", "0");
 }
 
 /// `command` run through the platform shell: cmd on Windows, sh elsewhere.

@@ -598,7 +598,7 @@ fn land_prefix(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stacked: Vec<S
             }
         }
     }
-    git(root, &["merge", "--ff-only", &tip]).with_context(|| land::refused_fast_forward(root))?;
+    land::fast_forward_main(root, &tip).with_context(|| land::refused_fast_forward(root))?;
     let head = git(root, &["rev-parse", "--short", "HEAD"])?.trim().to_string();
     let pushed = push.then(|| git_remote(root, &["push", "origin", &base]));
     // The after steps once for the whole stack, still under the lock.

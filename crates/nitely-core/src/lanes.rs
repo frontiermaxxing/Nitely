@@ -2952,6 +2952,43 @@ commands = []
         assert_eq!(changed_paths(&status), ["src/a.txt", "src/b.txt", "src/c.txt", "src/new file.txt"]);
     }
 
+    /// A snapshot never writes the worktree's own index, not even the refresh `git status` makes
+    /// when it can, so one killed mid-run leaves no index.lock for the agent's next commit (NIT-341).
+    #[test]
+    fn a_snapshot_leaves_the_worktrees_index_alone_even_when_killed() {
+        let base = crate::paths::unique_temp("nitely-snap-index", "");
+        let root = repo(&base);
+        for i in 0..300 {
+            std::fs::write(root.join(format!("src/f{i}.txt")), format!("{i}\n")).unwrap();
+        }
+        git(&root, &["add", "."]).unwrap();
+        git(&root, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "files"]).unwrap();
+        let git_dir = PathBuf::from(git(&root, &["rev-parse", "--absolute-git-dir"]).unwrap().trim());
+        let (index, lock) = (git_dir.join("index"), git_dir.join("index.lock"));
+        // Every tracked file touched, none changed but one: a status that may refresh rewrites the index.
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(30);
+        for i in 0..300 {
+            std::fs::File::options().write(true).open(root.join(format!("src/f{i}.txt"))).unwrap().set_modified(later).unwrap();
+        }
+        std::fs::write(root.join("src/a.txt"), "one, changed\n").unwrap();
+        let before = std::fs::read(&index).unwrap();
+        // Killed at different points of the status a snapshot runs.
+        for wait_ms in [0, 1, 3, 8, 20, 50] {
+            let mut status = playbook::shell_free_command("git");
+            status.arg("-C").arg(&root).args(["status", "--porcelain=v2", "-z", "--untracked-files=all", "--ignore-submodules=all"]);
+            let mut child = status.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(wait_ms));
+            child.kill().ok();
+            child.wait().ok();
+            assert!(!lock.exists(), "killed after {wait_ms} ms, it left index.lock");
+        }
+        let snap = snapshot(&root).unwrap();
+        assert!(snap.made);
+        assert!(!lock.exists());
+        assert_eq!(std::fs::read(&index).unwrap(), before, "the worktree's index is as it was");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     #[test]
     fn a_snapshot_is_head_or_a_commit_of_the_worktree_without_touching_it() {
         let base = crate::paths::unique_temp("nitely-snap", "");
