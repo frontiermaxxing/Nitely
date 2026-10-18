@@ -2478,7 +2478,8 @@ mod tests {
         }
         fn run_submit_job(&self, _nitely: &str, job: &crate::submit_job::Job) -> Result<Option<u32>> {
             self.resubmits.borrow_mut().push(job.id);
-            Ok(Some(9500))
+            // No process to record: a made-up pid would read as a job whose process died.
+            Ok(None)
         }
         /// Runs start_task here and now, as `nitely start` would, unless setups hang.
         fn prepare(&self, prep: &Prepare) -> Result<Box<dyn Process>> {

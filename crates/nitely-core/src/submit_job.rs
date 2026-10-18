@@ -199,7 +199,7 @@ impl Db {
             return self.conn.query_row(&format!("SELECT {COLUMNS} FROM submit_job WHERE id = ?1"), [j.id], row).map_err(Into::into);
         }
         j.state = "failed".into();
-        j.error = Some(why.into());
+        j.error = Some(why);
         j.ended_at = Some(now());
         Ok(j)
     }
