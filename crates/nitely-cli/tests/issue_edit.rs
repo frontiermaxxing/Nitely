@@ -8,7 +8,7 @@ use std::process::Command;
 fn a_bad_priority_leaves_the_whole_edit_undone() {
     let base = nitely_core::paths::unique_temp("nitely-issue-edit", "");
     std::fs::create_dir_all(&base).unwrap();
-    let db = nitely_core::Db::open(&base.join("nitely.db")).unwrap();
+    let mut db = nitely_core::Db::open(&base.join("nitely.db")).unwrap();
     db.create_project("APP", "App").unwrap();
     let issue = db
         .create_issue(&NewIssue { project: "APP".into(), title: "Footer link".into(), kind: "feature".into(), body: "b".into(), evidence: "e".into(), source: "human".into(), allow_similar: true, ..Default::default() }, &Actor::Agent("codex:test".into()))
