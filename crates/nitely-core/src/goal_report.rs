@@ -211,16 +211,20 @@ impl Db {
              WHERE e.ts >= ?1
                AND ((e.actor != 'human' AND e.type = 'issue_moved' AND e.summary LIKE '%→ Needs You%')
                  OR (e.actor != 'human' AND e.type = 'issue_created' AND e.summary LIKE 'Filed as Needs You%')
-                 OR e.type = ?2)
+                 OR e.type = ?2
+                 OR (e.type = 'note' AND e.actor = 'human' AND e.summary LIKE 'Accepted%' AND (instr(e.summary, ?3) > 0 OR instr(e.summary, ?4) > 0)))
              ORDER BY e.ts, e.id",
         )?;
-        let rows = moves.query_map(rusqlite::params![since, crate::accept::AWAITS_APPROVAL], |r| {
+        let rows = moves.query_map(rusqlite::params![since, crate::accept::AWAITS_APPROVAL, crate::accept::WAITS_FOR_APPROVAL, crate::accept::APPROVE_IN_THE_APP], |r| {
             Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, Option<bool>>(5)?))
         })?;
+        let rows: Vec<_> = rows.collect::<rusqlite::Result<_>>()?;
+        // An acceptance that left the change waiting for approval: since NIT-354 its own event;
+        // before, only its note says so, and the note stands in where no event came with it.
+        let awaits: Vec<(Option<String>, i64)> = rows.iter().filter(|r| r.2 == crate::accept::AWAITS_APPROVAL).map(|r| (r.1.clone(), r.0)).collect();
         let mut approvals: Vec<Needed> = Vec::new();
-        for row in rows {
-            let (ts, issue_key, kind, summary, title, waits) = row?;
-            if !of_project(&issue_key) {
+        for (ts, issue_key, kind, summary, title, waits) in rows {
+            if !of_project(&issue_key) || (kind == "note" && awaits.iter().any(|(k, t)| *k == issue_key && (t - ts).abs() <= 5)) {
                 continue;
             }
             // An earlier approval of the same issue was settled once a later request came.
@@ -234,6 +238,8 @@ impl Db {
             }
             let why = if kind == crate::accept::AWAITS_APPROVAL {
                 summary
+            } else if kind == "note" {
+                if summary.contains(crate::accept::APPROVE_IN_THE_APP) { crate::accept::APPROVE_IN_THE_APP } else { crate::accept::WAITS_FOR_APPROVAL }.to_string()
             } else if kind == "issue_created" {
                 first_line(&title)
             } else {
@@ -361,8 +367,16 @@ mod tests {
         let ask = db.create_ask("Retries are out of scope here.", &[], Some(&accepted), None, &agent).unwrap();
         db.conn.execute("UPDATE ask SET finding = '{\"priority\":1,\"text\":\"No retries\"}', answer = 'Accepted: fine', answered_at = ?2 WHERE id = ?1", rusqlite::params![ask.id, now()]).unwrap();
         db.move_issue(&accepted, "Needs You", None, None, &agent).unwrap();
-        let waits = "the review now passes, and the change waits for your approval";
+        let waits = crate::accept::WAITS_FOR_APPROVAL;
+        let note = format!("Accepted [P1] No retries: fine. Then {waits}.");
+        db.add_note(&accepted, &note, "note", &Actor::Human).unwrap();
         db.add_note(&accepted, waits, crate::accept::AWAITS_APPROVAL, &Actor::Human).unwrap();
+        // Accepted before the event existed: its note alone says the change waits.
+        let old = issue(&mut db, "Receipts", None);
+        let ask = db.create_ask("Receipts keep the old layout.", &[], Some(&old), None, &agent).unwrap();
+        db.conn.execute("UPDATE ask SET finding = '{\"priority\":1,\"text\":\"Layout\"}', answer = 'Accepted: fine', answered_at = ?2 WHERE id = ?1", rusqlite::params![ask.id, now()]).unwrap();
+        db.move_issue(&old, "Needs You", None, None, &agent).unwrap();
+        db.add_note(&old, &format!("Accepted [P1] Layout: fine. Then {}.", crate::accept::APPROVE_IN_THE_APP), "note", &Actor::Human).unwrap();
         // The same, then sent back and resubmitted (NIT-354): the approval after the acceptance
         // stays, settled, and the resubmitted one waits.
         let resent = issue(&mut db, "Invoices", None);
@@ -406,6 +420,8 @@ mod tests {
             ("approval", accepted.as_str(), true),
             ("asked", declined.as_str(), false),
             ("approval", declined.as_str(), true),
+            ("asked", old.as_str(), false),
+            ("approval", old.as_str(), true),
             ("asked", resent.as_str(), false),
             ("approval", resent.as_str(), false),
             ("approval", resent.as_str(), true),

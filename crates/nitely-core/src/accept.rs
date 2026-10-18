@@ -342,11 +342,11 @@ impl Db {
         } else if !blocking.is_empty() {
             ("In Progress", format!("{} other P0/P1 finding(s) still to fix", blocking.len()), false)
         } else if review.approver == "human" {
-            ("Needs You", "the review now passes, and the change waits for your approval".to_string(), true)
+            ("Needs You", WAITS_FOR_APPROVAL.to_string(), true)
         } else if !crate::approval::agents_can_verify() {
             // Only the app reads the keys acceptances are checked with (macOS): an agent's land
             // could not see this one, so the change waits for an approval, and the app lands it.
-            ("Needs You", "the review now passes; approve the change in the app, which lands it".to_string(), true)
+            ("Needs You", APPROVE_IN_THE_APP.to_string(), true)
         } else {
             ("In Review", "the review now passes: land it".to_string(), false)
         };
@@ -363,6 +363,11 @@ impl Db {
 
 /// The event kind for a change that waits for the person's approval after they accepted a finding.
 pub const AWAITS_APPROVAL: &str = "awaits_approval";
+
+/// What the acceptance note says when the change then waits for the person's approval; the goal
+/// report reads acceptances from before `AWAITS_APPROVAL` by these.
+pub const WAITS_FOR_APPROVAL: &str = "the review now passes, and the change waits for your approval";
+pub const APPROVE_IN_THE_APP: &str = "the review now passes; approve the change in the app, which lands it";
 
 /// The person's reason, on one line and not empty.
 fn one_line(text: &str) -> Result<String> {
