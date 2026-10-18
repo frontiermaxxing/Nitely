@@ -311,8 +311,16 @@ pub fn run_detached() -> Result<()> {
         Err(e) => json!({ "error": format!("{e:#}") }),
     };
     println!("{answer}");
-    std::fs::write(req(&request, "out")?, serde_json::to_vec(&answer)?)?;
+    write_whole(std::path::Path::new(req(&request, "out")?), &serde_json::to_vec(&answer)?)?;
     Ok(())
+}
+
+/// Writes `path` whole: a new file renamed over it, so whoever reads it meanwhile sees the old
+/// content or the new, never half of it.
+fn write_whole(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let part = path.with_extension("part");
+    std::fs::write(&part, bytes)?;
+    std::fs::rename(&part, path)
 }
 
 pub(crate) fn handle(server: &mut Server, msg: &Value) -> Option<Value> {
@@ -1050,13 +1058,14 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
                     if said != Some(r.id) {
                         said = Some(r.id);
                         if let Some(answer) = ANSWER.get() {
-                            std::fs::write(answer, json!({ "queued": r.id }).to_string()).ok();
+                            write_whole(answer, json!({ "queued": r.id }).to_string().as_bytes()).ok();
                         }
                     }
                 })?)
             } else {
                 run_apart(server, session, params, |log, said| {
-                    let queued = said.as_ref().and_then(|s| s.get("queued")).and_then(Value::as_i64);
+                    // Its id once queued, or from its answer if it ended just as the cap passed.
+                    let queued = said.as_ref().and_then(|s| s.get("queued").or_else(|| s.pointer("/ok/id"))).and_then(Value::as_i64);
                     let run = match queued {
                         Some(id) => db.lane_run(id)?,
                         None => None,
