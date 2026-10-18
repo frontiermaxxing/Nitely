@@ -1377,7 +1377,8 @@ struct QueueRow {
     waits_for_checkout: bool,
     issue: Option<String>,
     started_at: Option<i64>,
-    /// Queued under an older scheduler (NIT-325): passed over, it holds nobody up.
+    /// Queued under an older scheduler (NIT-325) by a requester that still runs: passed over, it
+    /// holds nobody up.
     older: bool,
 }
 
@@ -1553,7 +1554,12 @@ fn queue_rows(db: &Db, me: Option<i64>, alive: &mut dyn FnMut(&Requester) -> boo
             // the other's request first, and then neither goes. It keeps its own place in its own
             // view, but holds no newer request up (NIT-325).
             let older = state == "queued" && scheduler.is_none_or(|v| v < SCHEDULER);
-            let is_alive = Some(w.id) == me || (requester.pid.is_none_or(|_| alive(&requester)) && !stopped_looking && !older);
+            let requester_runs = requester.pid.is_none_or(|_| alive(&requester));
+            let is_alive = Some(w.id) == me || (requester_runs && !stopped_looking && !older);
+            // Older, as `turns` reads it for a land in progress: only while its requester still
+            // runs. A dead older land's row, not settled yet, would otherwise cost the next,
+            // current land the lane kept for it (NIT-342).
+            let older = older && requester_runs;
             QueueRow { w, running: state == "running", alive: is_alive, lane_count, waits_for_checkout, issue, started_at, older }
         })
         .collect();
@@ -3674,6 +3680,36 @@ wanted {shown}", ran.output);
     /// A land an older nitely runs keeps no lane once its gate waits under the older order: in a
     /// one-lane repo the newer gate, which the older order puts first, goes, and the land after it
     /// (NIT-338). Without the older mark the lane is kept, as for any land in progress.
+    /// A dead older land's row, its requester gone, takes nothing from the land after it: the
+    /// current land holding the lock keeps its lane (NIT-342).
+    #[test]
+    fn a_dead_older_lands_row_leaves_the_next_land_its_lane() {
+        let base = crate::paths::unique_temp("nitely-lane-dead-older", "");
+        std::fs::create_dir_all(&base).unwrap();
+        let db = Db::open(&base.join("t.db")).unwrap();
+        let me = std::process::id() as i64;
+        let add = |kind: &str, pid: i64, scheduler: Option<i64>| -> i64 {
+            db.conn
+                .execute(
+                    "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, priority, lane_count, scheduler)
+                     VALUES ('NIT', 'C:/Code/nitely', 'x', ?1, 's', 't', 'b', 'c', 'queued', 'local', ?2, ?3, 2, 1, ?4)",
+                    params![kind, now() - 60, pid, scheduler],
+                )
+                .unwrap();
+            db.conn.last_insert_rowid()
+        };
+        let dead = 999_999;
+        add("land", dead, None);
+        let gate = add("gate", me, Some(SCHEDULER));
+        let mut alive = |r: &Requester| r.pid == Some(me);
+        let (rows, served) = queue_rows(&db, Some(gate), &mut alive).unwrap();
+        assert!(rows.iter().all(|r| !r.older), "a dead requester's row is not an older land in progress: {rows:?}");
+        let landing = std::collections::HashSet::from([crate::paths::normalize("C:/Code/nitely")]);
+        let t = turns(rows, 5, &served, now(), &landing);
+        assert_eq!(t[&gate], Turn::Wait("waiting: a lane of its repo is kept for the land in progress".into()), "{t:?}");
+        std::fs::remove_dir_all(base).ok();
+    }
+
     #[test]
     fn an_older_nitelys_land_keeps_no_lane_from_the_gate_it_waits_behind() {
         let none = std::collections::HashMap::new();
