@@ -210,13 +210,12 @@ fn would_overwrite(root: &Path, to: &str, keep: &[String]) -> Result<Option<Stri
         if !in_keep(keep, p) {
             leaves.push(p.to_string());
         }
-        // Every folder on the way that is not itself build output: a path into a kept directory
-        // deep down (`assets/target/x.rs`) still needs `assets` to be a folder or free.
+        // Every folder on the way, kept ones too: a path into a kept directory deep down
+        // (`assets/target/x.rs`) still needs `assets`, and `assets/target`, to be a folder or free.
+        // A kept folder that is a folder is never flagged below; one that is a file is someone's.
         let mut at = p;
         while let Some((parent, _)) = at.rsplit_once('/') {
-            if !in_keep(keep, &format!("{parent}/")) {
-                parents.insert(parent.to_string());
-            }
+            parents.insert(parent.to_string());
             at = parent;
         }
     }
@@ -1922,15 +1921,7 @@ fn hygiene(lane: &Path, rules: &LaneRules, subs: &[String], record: &Path, log: 
 
 fn hygiene_with(lane: &Path, rules: &LaneRules, subs: &[String], record: &Path, log: &Path, floor: u64) {
     use std::io::Write;
-    // The lane's own, and those its submodules' checkouts hold for a name entry (their caches
-    // count toward the cap as the lane's do).
-    let mut dirs = kept_dirs(lane, &rules.keep);
-    let names: Vec<String> = rules.keep.iter().filter(|k| keep_anywhere(k).is_some()).cloned().collect();
-    for sub in subs.iter().filter(|_| !names.is_empty()) {
-        dirs.extend(kept_dirs(&lane.join(sub), &names).into_iter().map(|d| format!("{}/{d}", sub.trim_matches('/'))));
-    }
-    dirs.sort();
-    dirs.dedup();
+    let dirs = lane_kept(lane, &rules.keep, subs);
     let measured = keep_size(lane, &dirs);
     let output = measured.saturating_sub(incremental_size(lane, &dirs));
     let (recorded, served) = read_size(record).map_or((0, 0), |(_, b, n)| (b, n));
@@ -1959,6 +1950,21 @@ fn hygiene_with(lane: &Path, rules: &LaneRules, subs: &[String], record: &Path, 
     if let (Some(said), Ok(mut f)) = (said, std::fs::OpenOptions::new().append(true).open(log)) {
         writeln!(f, "nitely: lane {said}").ok();
     }
+}
+
+/// A lane's build directories: its own, and those its submodules' checkouts (`subs`, paths from
+/// the lane) hold for a name entry, whose caches count toward the cap as the lane's do.
+fn lane_kept(lane: &Path, keep: &[String], subs: &[String]) -> Vec<String> {
+    let mut dirs = kept_dirs(lane, keep);
+    let names: Vec<String> = keep.iter().filter(|k| keep_anywhere(k).is_some()).cloned().collect();
+    for sub in subs.iter().filter(|_| !names.is_empty()) {
+        // Only a submodule checkout inside the lane: never through a link a snapshot put there.
+        let Some(at) = keep_dir(lane, sub).filter(|d| d.is_dir()) else { continue };
+        dirs.extend(kept_dirs(&at, &names).into_iter().map(|d| format!("{}/{d}", sub.trim_matches('/'))));
+    }
+    dirs.sort();
+    dirs.dedup();
+    dirs
 }
 
 /// The file beside the size record that lists the build directories the lane keeps, one path from
@@ -2064,8 +2070,9 @@ pub(crate) fn kept_dirs(root: &Path, keep: &[String]) -> Vec<String> {
                     let tracked = git(root, &["ls-files", "--", &child]).is_ok_and(|t| !t.trim().is_empty());
                     if !tracked {
                         found.push(child);
+                        continue;
                     }
-                    continue;
+                    // Source that shares the name: not build output, but it may hold some deeper.
                 }
                 stack.push(child);
             }
@@ -2720,6 +2727,36 @@ mod tests {
         std::fs::write(root.join("assets"), "the person's").unwrap();
         assert_eq!(would_overwrite(&root, &adds, &targets).unwrap().as_deref(), Some("assets"));
         std::fs::remove_file(root.join("assets")).unwrap();
+        // And where the kept folder's own name is an ignored file of the person's.
+        std::fs::create_dir_all(root.join("assets")).unwrap();
+        std::fs::write(root.join(".git").join("info").join("exclude"), "assets/target\n").unwrap();
+        std::fs::write(root.join("assets/target"), "the person's").unwrap();
+        assert_eq!(would_overwrite(&root, &adds, &targets).unwrap().as_deref(), Some("assets/target"));
+        std::fs::remove_dir_all(root.join("assets")).unwrap();
+
+        // A tracked folder that shares the name is source, but what it holds deeper is still found.
+        std::fs::create_dir_all(root.join("src/node_modules/inner/node_modules")).unwrap();
+        std::fs::write(root.join("src/node_modules/inner/node_modules/dep.js"), "y").unwrap();
+        assert!(kept_dirs(&root, &names).contains(&"src/node_modules/inner/node_modules".to_string()), "{:?}", kept_dirs(&root, &names));
+        std::fs::remove_dir_all(root.join("src/node_modules/inner")).unwrap();
+
+        // A submodule checkout is read for a name entry's folders, never through a link.
+        std::fs::create_dir_all(root.join("engine/target")).unwrap();
+        std::fs::write(root.join("engine/target/out.o"), "o").unwrap();
+        assert!(lane_kept(&root, &targets, &["engine".into()]).contains(&"engine/target".to_string()));
+        std::fs::remove_dir_all(root.join("engine")).unwrap();
+        let outside = base.join("outside");
+        std::fs::create_dir_all(outside.join("target")).unwrap();
+        #[cfg(windows)]
+        let linked = Command::new("cmd").args(["/C", "mklink", "/J"]).arg(root.join("engine")).arg(&outside).output().unwrap().status.success();
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(&outside, root.join("engine")).is_ok();
+        assert!(linked, "made the link");
+        assert!(!lane_kept(&root, &targets, &["engine".into()]).iter().any(|d| d.starts_with("engine")), "not through a link");
+        #[cfg(windows)]
+        std::fs::remove_dir(root.join("engine")).ok();
+        #[cfg(unix)]
+        std::fs::remove_file(root.join("engine")).ok();
 
         // The same meaning for what counts as build output in a person's checkout.
         assert!(in_keep(&names, "pkg-a/node_modules/dep.js") && in_keep(&names, "pkg-b/web/node_modules/"));
