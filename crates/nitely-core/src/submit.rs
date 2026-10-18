@@ -473,7 +473,13 @@ when it has one): a gap there is a finding like any other, and comes before line
         accepted.truncate(3);
     }
     if !accepted.is_empty() {
-        c.push_str("\nOn other changes, the person accepted these as trade-offs they decided, not defects: do not raise their like at P0 or P1.\n");
+        // Examples to calibrate severity by, never exemptions: each acceptance was the person's call for
+        // that change, for its reason, and a like finding whose reason does not hold here is still a P1.
+        c.push_str(
+            "\nFor calibration: on other changes, the person accepted these findings as trade-offs, for the reasons given. They are \
+not exemptions. Raise a similar finding at P0 or P1 only when its concrete failure applies here and the person's reason \
+does not.\n",
+        );
         for a in accepted {
             c.push_str(&format!("- [P{}] {} (accepted: {})\n", a.priority, a.finding.chars().take(300).collect::<String>(), a.reason));
         }
@@ -1404,6 +1410,7 @@ focus = \"Money first.\"
         assert!(c.contains("The gate passed on this tree: `exit 0`."), "{c}");
         assert!(c.contains("- The empty line is kept on purpose: the footer needs it."), "{c}");
         assert!(c.contains("- [P1] No migration: keys.txt, load (accepted: no outside users yet)"), "{c}");
+        assert!(c.contains("They are not exemptions"), "{c}");
         assert!(!c.contains("forged") && !c.contains("Never log in"), "an unsigned row is no acceptance: {c}");
     }
 }
