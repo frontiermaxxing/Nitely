@@ -1585,9 +1585,19 @@ impl Db {
             return Ok(None);
         }
         let mut told = None;
-        if let Some(holder) = claimed_by.clone().filter(|h| h != agent && !mine.contains(h)) {
-            let session: Option<(String, i64)> =
-                tx.query_row("SELECT state, last_seen_at FROM session WHERE id = ?1", [&holder], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+        let session_of = |id: &str| -> Result<Option<(String, i64)>> {
+            Ok(tx.query_row("SELECT state, last_seen_at FROM session WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?)
+        };
+        let seen_live = |s: &Option<(String, i64)>| s.as_ref().is_some_and(|(state, seen)| state != "ended" && *seen >= ts - crate::sessions::GONE_AFTER_SECS);
+        // An id of `mine` is the caller's own only while no live session goes by it: a crew
+        // worker's reports go under its folder's id, and another session in that folder is not it.
+        let own = |h: &String| -> Result<bool> { Ok(h == agent || (mine.contains(h) && !seen_live(&session_of(h)?))) };
+        let other = match claimed_by.clone() {
+            Some(h) if !own(&h)? => Some(h),
+            _ => None,
+        };
+        if let Some(holder) = other {
+            let session = session_of(&holder)?;
             let fresh = claimed_at.is_some_and(|c| c >= ts - CLAIM_TTL_SECS);
             let live = match &session {
                 Some((state, seen)) => state != "ended" && (*seen >= ts - crate::sessions::GONE_AFTER_SECS || fresh),
@@ -2121,6 +2131,15 @@ mod tests {
         db.conn.execute("INSERT INTO issue (key, origin, title, state, state_type, updated_at) VALUES ('LIN-1', 'linear', 'Mirrored', 'Todo', 'unstarted', '')", []).unwrap();
         db.claim_for_start("LIN-1", "codex:b", &[], false).unwrap();
         assert_eq!(db.issue("LIN-1").unwrap().unwrap().state, "Todo");
+
+        // Another session in a crew worker's folder is not the worker, whose reports keep a live
+        // session under the folder's id: refused, though it shares that id.
+        db.create_issue(&new("A crew worker's"), &Actor::Human).unwrap();
+        db.claim_for_start("NIT-2", "claude:c:/wt/w1", &[], false).unwrap();
+        db.conn
+            .execute("INSERT INTO session (id, vendor, cwd, started_at, last_seen_at, state) VALUES ('claude:c:/wt/w1', 'claude', 'C:/wt/w1', ?1, ?1, 'working')", [now()])
+            .unwrap();
+        assert!(db.claim_for_start("NIT-2", "claude:other", &["claude:c:/wt/w1".into()], false).is_err());
         std::fs::remove_dir_all(dir).ok();
     }
 

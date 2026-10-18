@@ -156,6 +156,9 @@ enum Cmd {
         /// Who the branch is for, e.g. claude or cursor.
         #[arg(long, default_value = "cli")]
         agent: String,
+        /// Take the issue from the agent that holds it, only when you know that agent stopped.
+        #[arg(long)]
+        take_over: bool,
     },
     /// Add paths to the current sparse light worktree (each file's directory, or the directory); a
     /// path in a declared submodule makes or widens that submodule's worktree.
@@ -1276,13 +1279,23 @@ fn run(cmd: Cmd) -> Result<()> {
                 }
             }
         }
-        Cmd::Start { key, agent } => {
+        Cmd::Start { key, agent, take_over } => {
             let config = Config::load()?;
             let db = Db::open_default()?;
             let cwd = cwd()?;
             let issue = db.issue(&key)?.ok_or_else(|| anyhow::anyhow!("no issue {key}"))?;
             let root = playbook::repo_for_issue(&config, issue.project.as_deref(), &cwd)?;
-            let started = playbook::start_task(&db, &root, &issue, &agent, &me)?;
+            // The agent starting it holds it, as from MCP (NIT-274): as its Claude Code session
+            // when the shell names one, else as `<agent>:<folder>`, the id a nitely MCP server in
+            // that folder acts under before its calls name their session.
+            let holder = match std::env::var("CLAUDE_CODE_SESSION_ID").ok().filter(|s| !s.is_empty()) {
+                Some(session) => format!("claude:{session}"),
+                None => format!("{agent}:{}", paths::normalize(&cwd)),
+            };
+            let folder = format!("{agent}:{}", paths::normalize(&cwd));
+            let took = db.claim_for_start(&issue.key, &holder, &[folder], take_over)?;
+            let mut started = playbook::start_task(&db, &root, &issue, &agent, &me)?;
+            started.warnings.extend(took);
             for w in &started.warnings {
                 eprintln!("warning: {w}");
             }
