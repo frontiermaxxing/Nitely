@@ -36,6 +36,9 @@ pub struct Pulse {
     pub happened: Vec<Happening>,
     /// How many of each kind happened since `since`, all of them, not only those in `happened`.
     pub happened_counts: HappenedCounts,
+    /// The issues behind `happened_counts.stuck`, which counts every failed gate, stopped land and
+    /// unfinished review: a busy night retries the same few many times (NIT-356).
+    pub stuck_issues: StuckIssues,
     /// Landed and submitted per hour, oldest first, the last ending with the current hour.
     pub throughput: Vec<Hour>,
     pub landed_today: i64,
@@ -96,6 +99,13 @@ pub struct HappenedCounts {
     pub stuck: i64,
     pub review: i64,
     pub asked: i64,
+}
+
+/// Issues that got stuck since `since`, and how many of them still are.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct StuckIssues {
+    pub got: i64,
+    pub still: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -191,6 +201,11 @@ pub fn pulse(db: &Db, since: i64, day_start: i64) -> Result<Pulse> {
         approvals,
         happened: db.happened_since(since)?,
         happened_counts: db.happened_counts(since)?,
+        stuck_issues: {
+            let got = db.stuck_since(since)?;
+            let still = issues.iter().filter(|i| i.is_open() && i.track.stuck.is_some() && got.contains(&i.key.to_uppercase())).count() as i64;
+            StuckIssues { got: got.len() as i64, still }
+        },
         throughput,
         landed_today,
         report: db.goal_report(None, since)?,
@@ -271,6 +286,15 @@ impl Db {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The issues (upper-cased keys) whose gate failed, land stopped or review did not finish since `since`.
+    fn stuck_since(&self, since: i64) -> Result<std::collections::HashSet<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT upper(issue_key) FROM event WHERE ts >= ?1 AND issue_key IS NOT NULL AND type IN ('gate_failed', 'land_failed', 'review_failed')",
+        )?;
+        let keys = stmt.query_map([since], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<_>>()?;
+        Ok(keys)
     }
 
     /// Every happening since `since` counted by kind, past the list's limit.
@@ -368,6 +392,8 @@ mod tests {
         let kinds: Vec<&str> = p.happened.iter().map(|h| h.kind).collect();
         assert!(kinds.contains(&"filed") && kinds.contains(&"stuck"));
         assert_eq!((p.happened_counts.filed, p.happened_counts.stuck), (2, 1));
+        // The failure is one issue's, which is still stuck (NIT-356).
+        assert_eq!((p.stuck_issues.got, p.stuck_issues.still), (1, 1));
         assert_eq!(p.throughput.len(), HOURS as usize);
         assert_eq!(p.landed_today, 0);
     }

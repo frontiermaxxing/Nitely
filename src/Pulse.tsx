@@ -207,13 +207,21 @@ export function Pulse(props: {
   );
 }
 
+/** "12 got stuck, 1 still is": issues, not their failed runs (NIT-356). */
+function stuckLine(stuck: { got: number; still: number } | undefined, failures: number): string | null {
+  if (!stuck) return failures ? `${failures} ${failures === 1 ? "failure" : "failures"}` : null;
+  if (!stuck.got) return null;
+  const still = stuck.still === 0 ? "none still are" : `${stuck.still} still ${stuck.still === 1 ? "is" : "are"}`;
+  return `${stuck.got} got stuck, ${still}`;
+}
+
 /** "Last here 10:36 · since then 1 landed, 1 question"; on a first visit, "In the last day: 1 landed". */
 function sinceLine(data: PulseData, first: boolean): string {
   const c = data.happened_counts;
   const parts = [
     c.landed && `${c.landed} landed`,
     c.asked && `${c.asked} ${c.asked === 1 ? "question" : "questions"}`,
-    c.stuck && `${c.stuck} stuck`,
+    stuckLine(data.stuck_issues, c.stuck),
   ].filter(Boolean);
   if (first) return parts.length ? `In the last day: ${parts.join(", ")}` : "Nothing in the last day";
   return `Last here ${when(data.since)} · ${parts.length ? `since then ${parts.join(", ")}` : "nothing new since"}`;
@@ -461,14 +469,15 @@ function Chip({ f, ctx }: { f: FlowIssue; ctx: Context }) {
   );
 }
 
+// "stuck" counts failed runs: gates, lands and reviews, each retry once (NIT-356).
 const KIND_LABEL: Record<Happening["kind"], string> = {
   landed: "landed",
   filed: "filed",
-  stuck: "stuck",
+  stuck: "failures",
   review: "review rounds",
   asked: "questions",
 };
-const KIND_ONE: Record<Happening["kind"], string> = { ...KIND_LABEL, review: "review round", asked: "question" };
+const KIND_ONE: Record<Happening["kind"], string> = { ...KIND_LABEL, stuck: "failure", review: "review round", asked: "question" };
 
 function verb(h: Happening): string {
   const s = h.summary ?? "";
