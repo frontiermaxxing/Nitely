@@ -767,10 +767,11 @@ fn forward_once_installed(server: &Server, params: &Value) -> std::result::Resul
     let installed = || nitely_core::install::stamp(exe);
     let deadline = std::time::Instant::now() + install_wait();
     loop {
-        let now_installed = installed();
-        if now_installed.as_ref().is_some_and(|s| s != stamp) {
+        // Only a whole build: one still being copied in cannot start (NIT-348).
+        if crate::newer::replaced(exe, stamp) {
             return forward(server, params).ok_or_else(|| format!("The build installed at {} could not take the call either.", exe.display()));
         }
+        let now_installed = installed();
         if now_installed.is_some() && *lock(&WAITED_IN_VAIN) == now_installed {
             break;
         }
