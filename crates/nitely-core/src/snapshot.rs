@@ -374,13 +374,16 @@ fn agents(
     Ok(out)
 }
 
+/// Per session: the issue its own events name, and its latest report line.
+pub type SessionWork = std::collections::HashMap<String, (Option<String>, Option<String>)>;
+
 impl Db {
     /// For each of `sessions`, the issue its own events name and its latest report line. The issue
     /// is the one of its latest claim, start_task or submit, or of a report or note newer than that
     /// within `REPORT_NAMES_ISSUE_SECS` of `now`: an agent working from the main checkout names its
     /// issue only in what it does, never in its folder.
-    pub fn issues_sessions_work_on(&self, sessions: &[&str], now: i64) -> Result<std::collections::HashMap<String, (Option<String>, Option<String>)>> {
-        let mut out: std::collections::HashMap<String, (Option<String>, Option<String>)> = std::collections::HashMap::new();
+    pub fn issues_sessions_work_on(&self, sessions: &[&str], now: i64) -> Result<SessionWork> {
+        let mut out = SessionWork::new();
         if sessions.is_empty() {
             return Ok(out);
         }
