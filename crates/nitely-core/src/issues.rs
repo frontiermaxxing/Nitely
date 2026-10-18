@@ -631,6 +631,15 @@ pub fn branch_name(vendor: &str, key: &str, title: &str) -> String {
     format!("{vendor}/{}-{slug}", key.to_lowercase())
 }
 
+/// Refuses a priority outside 0 (none) to 4 (low): checked before an edit that also sets one
+/// writes anything, so a bad priority leaves the whole edit undone.
+pub fn check_priority(priority: i64) -> Result<()> {
+    if !(0..=4).contains(&priority) {
+        bail!("priority is 0 (none), 1 (urgent), 2 (high), 3 (medium) or 4 (low)");
+    }
+    Ok(())
+}
+
 impl Db {
     // ----- projects -----
 
@@ -1328,9 +1337,7 @@ impl Db {
     /// change goes on the timeline like a move ("Priority: none → High"). An issue mirrored from
     /// another tracker is changed there. The same priority again changes nothing.
     pub fn set_priority(&mut self, key: &str, priority: i64, actor: &Actor) -> Result<IssueRecord> {
-        if !(0..=4).contains(&priority) {
-            bail!("priority is 0 (none), 1 (urgent), 2 (high), 3 (medium) or 4 (low)");
-        }
+        check_priority(priority)?;
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let (key, origin, old): (String, String, i64) = tx
             .query_row("SELECT key, origin, priority FROM issue WHERE key = ?1 COLLATE NOCASE", [key.trim()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))

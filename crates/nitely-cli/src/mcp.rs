@@ -1230,8 +1230,8 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             {
                 bail!("give a state, title, body, priority, blocked_by, remove_blocked_by, labels, remove_labels, owner or goal");
             }
-            if priority.is_some_and(|p| !(0..=4).contains(&p)) {
-                bail!("priority is 0 (none), 1 (urgent), 2 (high), 3 (medium) or 4 (low)");
+            if let Some(p) = priority {
+                nitely_core::issues::check_priority(p)?;
             }
             // A mirrored issue, or an empty title or body, is refused before anything changes.
             if title.is_some() || body.is_some() {

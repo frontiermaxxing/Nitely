@@ -975,6 +975,10 @@ fn run(cmd: Cmd) -> Result<()> {
                         }
                         _ => body,
                     };
+                    // Before anything is written: a bad priority leaves the title and body as they were.
+                    if let Some(p) = priority {
+                        nitely_core::issues::check_priority(p)?;
+                    }
                     let key = db.current_key(&key)?;
                     let mut issue = db.edit_issue(&key, title.as_deref(), body.as_deref(), &me)?;
                     if let Some(priority) = priority {
