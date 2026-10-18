@@ -113,6 +113,12 @@ pub struct TreeGuard {
     job: win::Job,
 }
 
+// Elsewhere the guard holds nothing, but dropping it ends what it guards on every system alike.
+#[cfg(not(windows))]
+impl Drop for TreeGuard {
+    fn drop(&mut self) {}
+}
+
 impl TreeGuard {
     /// A new, empty guard; None when the system will not make one (the command then runs unguarded).
     pub fn new() -> Option<TreeGuard> {

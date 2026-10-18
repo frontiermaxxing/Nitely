@@ -1982,7 +1982,9 @@ commands = []
         assert_eq!(seen, ["queued", "running"]);
         assert!(first.passed(), "{first:?}");
         assert_eq!(first.lane, Some(1));
-        assert!(Path::new(first.log.as_deref().unwrap()).starts_with(base.join("lanes")), "the log sits beside the database: {:?}", first.log);
+        // Canonical both sides: on macOS the temp folder is /var/..., which resolves to /private/var/...
+        let log = std::fs::canonicalize(first.log.as_deref().unwrap()).unwrap();
+        assert!(log.starts_with(std::fs::canonicalize(&base).unwrap().join("lanes")), "the log sits beside the database: {:?}", first.log);
         assert!(first.output.contains("a.txt") && first.output.contains("b.txt"), "{}", first.output);
         let lane = lane_path(&root, &pb, 1);
         assert!(lane.join("out/done.txt").exists() && lane.join("scratch.txt").exists());
