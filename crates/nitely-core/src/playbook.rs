@@ -37,6 +37,9 @@ pub struct Playbook {
     /// Build lanes (docs/build-lanes.md); none unless the playbook has a `[lanes]` table.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lanes: Option<crate::lanes::LaneRules>,
+    /// Submodules whose branch lands with the repo's (`[[submodules]]`, docs/playbooks.md).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub submodules: Vec<crate::submodules::SubmoduleRules>,
     /// Keys this nitely does not know, which it ignored: a typo, or a key a newer nitely reads.
     /// Refusing them would break every older nitely still running the day a playbook starts
     /// using a new key (NIT-50), so they are reported instead (see `unknown_warnings`).
@@ -1117,6 +1120,9 @@ pub fn start_task(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, 
         git(repo_root, &["worktree", "add", "-b", &branch, &worktree_str, &from])?;
     }
     db.log_event(actor, Some(&issue.key), Some(&worktree_str), "worktree", &format!("Started {branch} from {from_words}"))?;
+    for line in crate::submodules::start(repo_root, &playbook, &worktree, &branch)? {
+        db.log_event(actor, Some(&issue.key), Some(&worktree_str), "worktree", &format!("Started the submodule branch {line}"))?;
+    }
 
     let mut setup = Vec::new();
     for command in &playbook.worktree.setup {
@@ -1152,8 +1158,19 @@ pub fn start_task(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, 
 fn start_light(db: &Db, repo_root: &Path, playbook: &Playbook, issue: &IssueRecord, branch: String, worktree: PathBuf, base: &str, start: &str, exists: bool, actor: &Actor) -> Result<Started> {
     let worktree_str = worktree.to_string_lossy().into_owned();
     let from = if exists { format!("refs/heads/{branch}") } else { start.to_string() };
-    let sparse = crate::light::sparse_dirs(playbook, repo_root, &from, &format!("{}\n{}", issue.title, issue.body));
+    let mut sparse = crate::light::sparse_dirs(playbook, repo_root, &from, &format!("{}\n{}", issue.title, issue.body));
+    // A sparse worktree still has the submodules that land with it.
+    if !sparse.is_empty() {
+        for s in &playbook.submodules {
+            if !sparse.iter().any(|d| d == s.path()) {
+                sparse.push(s.path().to_string());
+            }
+        }
+    }
     crate::light::add(repo_root, &worktree, &branch, start, exists, &sparse)?;
+    for line in crate::submodules::start(repo_root, playbook, &worktree, &branch)? {
+        db.log_event(actor, Some(&issue.key), Some(&worktree_str), "worktree", &format!("Started the submodule branch {line}"))?;
+    }
     let shape = if sparse.is_empty() { "light".to_string() } else { format!("light, sparse: {}", sparse.join(", ")) };
     let from_words = if start == base { base.to_string() } else { format!("{base} at {}", &start[..start.len().min(9)]) };
     db.log_event(actor, Some(&issue.key), Some(&worktree_str), "worktree", &format!("Started {branch} from {from_words} ({shape})"))?;

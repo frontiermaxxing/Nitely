@@ -177,6 +177,9 @@ pub fn lands_alone(db: &Db, pb: &Playbook, key: &str) -> Result<Option<String>> 
     if lanes.large_repo {
         return Ok(Some("large-repo mode lands each change alone".into()));
     }
+    if !pb.submodules.is_empty() {
+        return Ok(Some("a repo whose submodules land with it lands each change alone".into()));
+    }
     let Some(review) = db.reviews(key)?.into_iter().next() else {
         return Ok(Some("it has no review yet".into()));
     };

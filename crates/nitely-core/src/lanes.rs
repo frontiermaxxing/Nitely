@@ -1431,6 +1431,7 @@ fn serve(repo_root: &Path, pb: &Playbook, rules: &LaneRules, lane: &Path, log: &
         switch(lane, &req.snapshot.commit, &rules.keep)?;
         switched
     };
+    crate::submodules::sync_lane(repo_root, pb, lane, &req.snapshot.commit, &rules.keep)?;
     let setup_ran = ensure_setup(repo_root, pb, lane, base, log, limit)?;
     let Ended { code: exit_code, timed_out, peak } = exec(lane, log, limit)?;
     let output = std::fs::read_to_string(log).map(|t| playbook::tail(&t)).unwrap_or_default();

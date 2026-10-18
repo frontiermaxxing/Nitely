@@ -128,6 +128,8 @@ whether to file all of them or only priorities 1 to 3.
     billing, release and deploy, auth, data migrations, secrets handling);
   - `review.flags`: yes/no questions for risks path rules cannot see;
   - `approval.blocked_paths`: paths that change some other way (generated, vendored, a submodule);
+  - `[[submodules]]`: a submodule whose own commits tasks make, which then lands with the repo
+    (docs/playbooks.md, "Submodules that land with the repo") instead of being blocked;
   - `approval.always_human = false`, when the playbook has `always_human = true`: Nitely starts a
     new repo that way so nothing lands unseen until rules exist, and the approved rules replace it.
 

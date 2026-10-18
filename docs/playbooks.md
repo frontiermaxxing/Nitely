@@ -29,6 +29,43 @@ changes. [docs/playbooks/example.toml](playbooks/example.toml) is a worked examp
 playbook for a made-up monorepo: per-OS branches, worktree setup and teardown, gate steps that skip
 what a change cannot affect, review flags, and paths that wait for you.
 
+## Submodules that land with the repo
+
+A repo whose code lives partly in a git submodule (an engine, a vendored fork with your own commits on
+it) can have a task change both, and land both together. Declare the submodule:
+
+```toml
+[[submodules]]
+path = "engine"     # the submodule's folder in this repo
+branch = "main"     # the submodule's integration branch; the repo's own name when left out
+remote = "origin"   # where the submodule's branch is pushed; left out, it stays on this machine
+```
+
+Leave `remote` out for a submodule with no remote of its own (its only remote is an upstream you
+never push to): its integration branch then lives only in the repo's own copy of the submodule.
+
+- **start_task** cuts the task branch in the submodule too, from its integration branch, as a
+  worktree of the repo's own copy of the submodule at `<worktree>/engine`. Commit there, then commit
+  the moved pointer in the task worktree (`git add engine`), like any other change.
+- **submit** refuses a submodule with uncommitted changes or commits the pointer does not name (the
+  reviewer would not see them), and the reviewer reads the submodule's code in the diff
+  (`git diff --submodule=diff`), not a one-line pointer change. The review's patch covers the
+  submodule's code, so a rebase that leaves it the same keeps the review.
+- **land** rebases the submodule's branch onto its integration branch, rebases the task branch onto
+  the repo's, points it at the rebased submodule commit, runs the gate, and then fast-forwards the
+  submodule's integration branch and the repo's. All or nothing: if the second fast-forward fails,
+  the first is undone, and neither branch moves. With `remote`, the submodule's branch is pushed
+  before the repo's, and a failed submodule push keeps the repo's push back, so the pushed repo never
+  points at a commit its remote cannot fetch. A change that moves a submodule lands alone, never in a
+  batch.
+- **gate steps** can run only when the submodule moved (`when_changed = ["^engine$"]`). In a build
+  lane the submodule is checked out at the commit the snapshot points at, and `[lanes] keep` entries
+  under its folder (`"engine/out"`) keep its build output between requests.
+
+Each commit of the task branch keeps the pointer it was made with; the last one points at the
+rebased submodule commit. Uncommitted submodule changes are not part of a `run` snapshot: commit
+them in the submodule first.
+
 
 ## Private terms
 

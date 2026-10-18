@@ -676,7 +676,7 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
 
     /// Runs `reviewer` in `worktree` and parses its reply.
     pub fn run(&self, reviewer: &str, worktree: &Path, base: &str, previous: Option<&PreviousRound>) -> Result<Review> {
-        let reply = self.run_prompt(reviewer, worktree, &self.prompt(base, previous))?;
+        let reply = self.run_prompt(reviewer, worktree, &with_submodule_code(self.prompt(base, previous), worktree, base))?;
         let mut review =
             self.parse(reviewer, &reply.text, reply.seconds, previous, Some(worktree)).map_err(|e| if reply.only_a_login_message { reply.signed_out(self) } else { e })?;
         review.tokens = reply.tokens;
@@ -1138,6 +1138,18 @@ fn install_hint(reviewer: &str, rules: &ReviewRules) -> String {
         "claude" => "Claude Code (the `claude` CLI)".to_string(),
         "codex" => "Codex (the `codex` CLI)".to_string(),
         _ => format!("{reviewer} (`{program}`)"),
+    }
+}
+
+/// A prompt whose change moves a submodule asks for its diff with the submodule's code in it
+/// (`git diff --submodule=diff`), so the reviewer reads the code, not a one-line pointer change.
+fn with_submodule_code(prompt: String, worktree: &Path, base: &str) -> String {
+    let moves = crate::playbook::git(worktree, &["diff", "--raw", "--no-renames", &format!("{base}...HEAD")])
+        .is_ok_and(|raw| raw.lines().any(|l| l.split_whitespace().take(2).any(|mode| mode.trim_start_matches(':') == "160000")));
+    if moves {
+        prompt.replace("`git diff ", "`git diff --submodule=diff ")
+    } else {
+        prompt
     }
 }
 

@@ -365,9 +365,13 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
     check_worktree(&worktree, &branch)?;
 
     let before = rev(root, &base)?;
+    // Submodules that land with the repo: their work must be what the branch points at, then each
+    // is rebased onto its own integration branch first (docs/playbooks.md).
+    crate::submodules::check_pointers(pb, &worktree)?;
+    let moving = crate::submodules::rebase(root, pb, &worktree, &base)?;
     if git(root, &["merge-base", "--is-ancestor", &base, &branch]).is_err() {
         db.log_event(actor, Some(key), Some(&wt), "status", &format!("Rebasing {branch} onto {base}"))?;
-        if let Err(e) = git(&worktree, &["rebase", &base]) {
+        if let Err(e) = crate::submodules::rebase_repo(&worktree, &base, &moving) {
             report.conflicts = git(&worktree, &["diff", "--name-only", "--diff-filter=U"])?.lines().map(str::to_string).collect();
             if report.conflicts.is_empty() {
                 git(&worktree, &["rebase", "--abort"]).ok();
@@ -381,6 +385,7 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
         }
     }
 
+    crate::submodules::point(&worktree, &moving)?;
     let head = rev(root, &branch)?;
     report.approval = Some(check_approval(db, pb, key, &worktree, &base, &branch)?);
     let project = db.issue(key)?.and_then(|i| i.project);
@@ -401,6 +406,9 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
     if rev(root, &branch)? != head {
         bail!("{branch} gained commits during the gate, after its review was checked; submit again");
     }
+    if let Some(why) = crate::submodules::unchanged(&worktree, &moving)? {
+        bail!("{why}");
+    }
 
     if push {
         // The pull request should show the commits that land, not the ones from before the rebase.
@@ -414,12 +422,39 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
     if held.is_some() && git(root, &["branch", "--show-current"])?.trim() != base {
         bail!("the main checkout left {base} during the gate; land again once it is back on {base}");
     }
-    git(root, &["merge", "--ff-only", &head]).context("the main checkout refused the fast-forward (do uncommitted edits there overlap the change?)")?;
+    // The submodules' integration branches first, then the repo's; when the repo's refuses, theirs
+    // go back, so neither moves.
+    let undo = crate::submodules::fast_forward(&moving)?;
+    if let Err(e) = git(root, &["merge", "--ff-only", &head]) {
+        let stuck = crate::submodules::undo(&undo);
+        let back = if moving.is_empty() {
+            String::new()
+        } else if stuck.is_empty() {
+            "; the submodules' branches were put back, so nothing moved".to_string()
+        } else {
+            format!("; {}", stuck.join("; "))
+        };
+        return Err(e).context(format!("the main checkout refused the fast-forward (do uncommitted edits there overlap the change?){back}"));
+    }
     drop(held);
     report.landed = true;
     report.landed_from = Some(before.clone());
     report.head = Some(git(root, &["rev-parse", "--short", "HEAD"])?.trim().to_string());
 
+    // A submodule's branch is pushed before the repo that points into it; when it cannot be, the
+    // repo stays unpushed too, so its remote never points at a commit nobody can fetch.
+    let push = if push && !moving.is_empty() {
+        match crate::submodules::push(&moving) {
+            Ok(()) => true,
+            Err(e) => {
+                report.pushed = Some(false);
+                report.warnings.push(format!("{base} landed locally but was not pushed: {}", first_line(&e)));
+                false
+            }
+        }
+    } else {
+        push
+    };
     if push {
         match git_remote(root, &["push", "origin", &base]) {
             Ok(_) => {
@@ -618,10 +653,16 @@ pub(crate) fn cleanup(root: &Path, pb: &Playbook, worktree: &Path, branch: &str,
         return (message, held);
     }
     let teardown = teardown(root, pb, worktree);
-    let removed = match git(root, &["worktree", "remove", &path]) {
-        Ok(_) => Ok(()),
-        Err(e) => finish_removal(root, worktree, &e),
+    let removed = match crate::submodules::remove_worktrees(root, pb, worktree) {
+        Err(kept) => Err(kept),
+        Ok(()) => match git(root, &["worktree", "remove", &path]) {
+            Ok(_) => Ok(()),
+            Err(e) => finish_removal(root, worktree, &e),
+        },
     };
+    if removed.is_ok() && !temporary {
+        crate::submodules::delete_branches(root, pb, branch);
+    }
     let message = match removed {
         Ok(()) if temporary => "removed the temporary worktree".into(),
         Ok(()) => match git(root, &["branch", "-d", branch]) {
@@ -1328,6 +1369,141 @@ when_changed = ["billing"]
         let opts = LandOptions { dir: &dir, issue_key: &a, push: false, keep: true, break_lock: false };
         let err = land(&mut f.db, &crate::Config::default(), &opts, &f.actor).unwrap_err().to_string();
         assert!(err.contains("another land holds"), "{err}");
+        std::fs::remove_dir_all(&f.base).ok();
+    }
+
+    /// A repo whose `engine` folder is a submodule with no remote of its own (its only remote, an
+    /// upstream, is gone), declared to land with the repo.
+    fn submodule_fixture() -> Fixture {
+        let base = crate::paths::unique_temp("nitely-land-sub", "");
+        let upstream = base.join("engine-upstream");
+        crate::test_repo::init(&upstream, &[("core.c", "int core;\n")]);
+        let repo = base.join("repo");
+        let playbook = PLAYBOOK.replace("{sh}", &playbook::posix_sh()) + "[[submodules]]\npath = \"engine\"\n";
+        crate::test_repo::init(&repo, &[(playbook::PLAYBOOK_PATH, &playbook), ("shared.txt", "one\n")]);
+        sh(&repo, &["-c", "protocol.file.allow=always", "submodule", "add", "-q", &upstream.to_string_lossy(), "engine"]);
+        sh(&repo, &["commit", "-q", "-m", "the engine"]);
+        sh(&repo.join("engine"), &["remote", "remove", "origin"]);
+        fixture_from(base)
+    }
+
+    impl Fixture {
+        fn engine(&self) -> PathBuf {
+            self.repo.join("engine")
+        }
+
+        /// Starts an issue whose change edits both the repo and its engine, committed in both.
+        fn spanning(&mut self, title: &str) -> (String, PathBuf) {
+            let issue = self
+                .db
+                .create_issue(
+                    &NewIssue { project: "NIT".into(), title: title.into(), kind: "feature".into(), body: "b".into(), evidence: "none yet".into(), source: "human".into(), allow_similar: true, ..Default::default() },
+                    &self.actor,
+                )
+                .unwrap();
+            let started = playbook::start_task(&self.db, &self.repo, &issue, "claude", &self.actor).unwrap();
+            let wt = PathBuf::from(&started.worktree);
+            assert!(wt.join("engine/.git").is_file(), "the engine is a worktree of the repo's copy");
+            assert_eq!(sh(&wt.join("engine"), &["branch", "--show-current"]), started.branch, "the same task branch in the engine");
+            std::fs::write(wt.join("engine/core.c"), "int core;\nint faster;\n").unwrap();
+            sh(&wt.join("engine"), &["commit", "-q", "-am", "engine: faster"]);
+            std::fs::write(wt.join("shared.txt"), "one\nuses faster\n").unwrap();
+            sh(&wt, &["add", "shared.txt", "engine"]);
+            sh(&wt, &["commit", "-q", "-m", title]);
+            self.submit(&wt);
+            (issue.key, wt)
+        }
+
+        /// Another change lands meanwhile, moving the engine's main and the repo's pointer in step.
+        fn land_elsewhere(&self) {
+            std::fs::write(self.engine().join("other.c"), "int other;\n").unwrap();
+            sh(&self.engine(), &["add", "other.c"]);
+            sh(&self.engine(), &["commit", "-q", "-m", "engine: other"]);
+            std::fs::write(self.repo.join("other.txt"), "x\n").unwrap();
+            sh(&self.repo, &["add", "other.txt", "engine"]);
+            sh(&self.repo, &["commit", "-q", "-m", "other"]);
+        }
+    }
+
+    #[test]
+    fn a_change_that_spans_a_submodule_lands_both_branches_together() {
+        let mut f = submodule_fixture();
+        let (key, wt) = f.spanning("Faster engine");
+        f.land_elsewhere();
+
+        let landed = f.land(&key);
+        assert!(landed.landed, "{landed:?}");
+        // The engine's main has both changes, its checkout too; the repo points at its tip.
+        let engine_main = sh(&f.engine(), &["rev-parse", "main"]);
+        assert_eq!(sh(&f.engine(), &["log", "--format=%s", "-2", "main"]), "engine: faster\nengine: other");
+        assert_eq!(std::fs::read_to_string(f.engine().join("core.c")).unwrap().replace('\r', ""), "int core;\nint faster;\n");
+        assert!(sh(&f.repo, &["ls-tree", "HEAD", "engine"]).contains(&engine_main), "the repo points at the engine's new main");
+        assert_eq!(std::fs::read_to_string(f.repo.join("shared.txt")).unwrap().replace('\r', ""), "one\nuses faster\n");
+        assert!(sh(&f.repo, &["status", "--porcelain"]).is_empty(), "the main checkout is clean, its engine where it points");
+        // The rebase kept the review: the engine's code is the same, only its commit ids moved.
+        assert!(landed.approval.unwrap_or_default().contains("review passed"));
+        // Both task worktrees and branches are gone.
+        assert!(!wt.exists(), "{:?}", landed.cleanup);
+        assert!(sh(&f.engine(), &["branch", "--list", &landed.branch]).is_empty());
+        assert!(!sh(&f.engine(), &["worktree", "list"]).contains("wt"));
+        std::fs::remove_dir_all(&f.base).ok();
+    }
+
+    #[test]
+    fn when_the_repo_cannot_move_the_submodule_does_not_either() {
+        let mut f = submodule_fixture();
+        let (key, wt) = f.spanning("Faster engine");
+        let (repo_before, engine_before) = (sh(&f.repo, &["rev-parse", "main"]), sh(&f.engine(), &["rev-parse", "main"]));
+        // An edit in the main checkout that the change overlaps: the repo's fast-forward fails,
+        // after the engine's went through.
+        std::fs::write(f.repo.join("shared.txt"), "one\nmine, not committed\n").unwrap();
+
+        let stopped = f.land(&key);
+        assert!(!stopped.landed);
+        let error = stopped.error.unwrap_or_default();
+        assert!(error.contains("refused the fast-forward") && error.contains("put back, so nothing moved"), "{error}");
+        assert_eq!(sh(&f.repo, &["rev-parse", "main"]), repo_before);
+        assert_eq!(sh(&f.engine(), &["rev-parse", "main"]), engine_before, "the engine's main went back");
+        assert_eq!(std::fs::read_to_string(f.engine().join("core.c")).unwrap().replace('\r', ""), "int core;\n", "and its files with it");
+        assert!(wt.join("engine/.git").exists(), "the task's worktrees stay for another try");
+
+        // With the edit gone, the same land goes through.
+        std::fs::write(f.repo.join("shared.txt"), "one\n").unwrap();
+        assert!(f.land(&key).landed);
+        assert_eq!(sh(&f.engine(), &["log", "--format=%s", "-1", "main"]), "engine: faster");
+        std::fs::remove_dir_all(&f.base).ok();
+    }
+
+    #[test]
+    fn a_change_that_leaves_the_submodule_alone_lands_as_any_other() {
+        let mut f = submodule_fixture();
+        let (key, wt) = f.submitted("Words only", "words.txt", "w
+");
+        assert!(wt.join("engine/.git").is_file());
+        // Another land moves the pointer meanwhile: this change still does not move the engine.
+        f.land_elsewhere();
+        let engine_main = sh(&f.engine(), &["rev-parse", "main"]);
+        let landed = f.land(&key);
+        assert!(landed.landed, "{landed:?}");
+        assert_eq!(sh(&f.engine(), &["rev-parse", "main"]), engine_main, "the engine's main stays where the other land put it");
+        assert!(sh(&f.repo, &["ls-tree", "HEAD", "engine"]).contains(&engine_main));
+        assert!(!wt.exists(), "{:?}", landed.cleanup);
+        std::fs::remove_dir_all(&f.base).ok();
+    }
+
+    #[test]
+    fn submit_refuses_submodule_work_the_branch_does_not_point_at() {
+        let mut f = submodule_fixture();
+        let (_, wt) = f.spanning("Faster engine");
+        std::fs::write(wt.join("engine/core.c"), "int core;\nint faster;\nint more;\n").unwrap();
+        sh(&wt.join("engine"), &["commit", "-q", "-am", "engine: more"]);
+        let dir = wt.to_string_lossy().into_owned();
+        let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: false };
+        let err = submit(&mut f.db, &crate::Config::default(), &opts, &f.actor).unwrap_err().to_string();
+        assert!(err.contains("does not point at") && err.contains("git add engine"), "{err}");
+        std::fs::write(wt.join("engine/core.c"), "int core;\n").unwrap();
+        let err = submit(&mut f.db, &crate::Config::default(), &opts, &f.actor).unwrap_err().to_string();
+        assert!(err.contains("uncommitted changes"), "{err}");
         std::fs::remove_dir_all(&f.base).ok();
     }
 }

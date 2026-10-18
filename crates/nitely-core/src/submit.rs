@@ -97,6 +97,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     if !dirty.trim().is_empty() {
         bail!("{} has uncommitted changes; commit them first:\n{}", worktree.display(), dirty.trim_end());
     }
+    crate::submodules::check_pointers(&pb, &worktree)?;
     let wt = worktree.to_string_lossy().into_owned();
     let no_origin = !opts.local_only && !playbook::has_origin(&worktree);
     let local_only = opts.local_only || no_origin;
@@ -342,7 +343,12 @@ fn in_a_batch(
     let choice = pb.review.choose(vendor, &|r| pb.review.is_installed(r, worktree))?;
     let lines = crate::review_batch::changed_lines(worktree, since)?;
     let large_repo = pb.lanes.as_ref().is_some_and(|l| l.large_repo);
-    if let Some(why) = crate::review_batch::why_alone(db, &pb.review, vendor, &choice, reasons, files, lines, previous, large_repo, &issue.key)? {
+    let moves_submodule = pb.submodules.iter().find(|s| files.iter().any(|f| f == s.path())).map(|s| format!("it moves the submodule {}, whose code is reviewed with it", s.path()));
+    let why_alone = match moves_submodule {
+        Some(why) => Some(why),
+        None => crate::review_batch::why_alone(db, &pb.review, vendor, &choice, reasons, files, lines, previous, large_repo, &issue.key)?,
+    };
+    if let Some(why) = why_alone {
         db.log_event(actor, Some(&issue.key), Some(&wt), "status", &format!("Reviewed alone, not in a batch: {why}"))?;
         return Ok((None, vec![]));
     }
@@ -548,8 +554,13 @@ pub fn patch_id(worktree: &Path, base: &str) -> Result<String> {
 }
 
 /// The patch-id of what `head` changes since it left `base` (`base...head`), as `patch_id`.
+///
+/// A submodule's move counts by the code it changes (`--submodule=diff`), not by the commit ids it
+/// points at, so a rebase of the submodule that leaves its code the same keeps the patch. The
+/// `Submodule <path> <a>..<b>:` header lines go: patch-id would start a new patch at each.
 pub fn patch_id_range(worktree: &Path, base: &str, head: &str) -> Result<String> {
-    let diff = git(worktree, &["diff", "-U0", &format!("{base}...{head}")])?;
+    let diff = git(worktree, &["diff", "-U0", "--submodule=diff", &format!("{base}...{head}")])?;
+    let diff: String = diff.split_inclusive('\n').filter(|l| !l.starts_with("Submodule ")).collect();
     if diff.is_empty() {
         return Ok("empty".into());
     }
