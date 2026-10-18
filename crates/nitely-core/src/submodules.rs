@@ -85,11 +85,17 @@ pub fn start(root: &Path, pb: &Playbook, worktree: &Path, branch: &str, text: &s
         let exists = git(&repo, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_ok();
         let from = start_point(pb, s, worktree, &repo, branch, exists)?;
         let prefix = format!("{}/", s.path());
-        let named: Vec<String> =
-            crate::overlap::paths_in(text).iter().filter_map(|p| p.trim_start_matches("./").strip_prefix(&prefix).map(str::to_string)).filter_map(|p| crate::light::dir_of(&repo, &from, &p)).collect();
+        // The paths the issue names in it that exist there: a file at its root counts too (it needs
+        // no directory of its own, cone mode always has those).
+        let named: Vec<String> = crate::overlap::paths_in(text)
+            .iter()
+            .filter_map(|p| p.trim_start_matches("./").strip_prefix(&prefix).map(|p| p.trim_matches('/').to_string()))
+            .filter(|p| !p.is_empty() && git(&repo, &["cat-file", "-e", &format!("{from}:{p}")]).is_ok())
+            .collect();
+        let dirs: Vec<String> = named.iter().filter_map(|p| crate::light::dir_of(&repo, &from, p)).collect();
         let needed = s.checkout == Checkout::EveryTask || exists || !named.is_empty() || moves(pb, worktree, s.path())?;
         if needed {
-            done.push(make(pb, s, worktree, &repo, branch, exists, &from, &named)?);
+            done.push(make(pb, s, worktree, &repo, branch, exists, &from, Some(&dirs))?);
         }
     }
     Ok(done)
@@ -123,12 +129,13 @@ fn cone(s: &SubmoduleRules, more: &[String]) -> Vec<String> {
     crate::light::dedupe(dirs)
 }
 
-/// Makes the task's worktree of the submodule, sparse over its cone plus `named`.
+/// Makes the task's worktree of the submodule: sparse over its cone plus `named`, or whole when
+/// `named` is None (a task that asked for all of it).
 #[allow(clippy::too_many_arguments)]
-fn make(pb: &Playbook, s: &SubmoduleRules, worktree: &Path, repo: &Path, branch: &str, exists: bool, from: &str, named: &[String]) -> Result<String> {
+fn make(pb: &Playbook, s: &SubmoduleRules, worktree: &Path, repo: &Path, branch: &str, exists: bool, from: &str, named: Option<&[String]>) -> Result<String> {
     let at = worktree.join(s.path());
     let at_s = at.to_string_lossy().into_owned();
-    let dirs = cone(s, named);
+    let dirs = named.map(|n| cone(s, n)).unwrap_or_default();
     let mut args = vec!["worktree", "add"];
     if !dirs.is_empty() {
         args.push("--no-checkout");
@@ -187,6 +194,8 @@ pub fn widen(root: &Path, pb: &Playbook, worktree: &Path, paths: &[String]) -> R
         let at = worktree.join(s.path());
         let rev = if checked_out(&at) { "HEAD".to_string() } else { start_point(pb, s, worktree, &repo, &branch, git(&repo, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_ok())? };
         let look_in = if checked_out(&at) { at.clone() } else { repo.clone() };
+        // The submodule itself (`widen engine`): all of it.
+        let whole = rels.iter().any(|r| r.is_empty());
         let mut dirs = Vec::new();
         let mut missing = Vec::new();
         for rel in rels.iter().filter(|r| !r.is_empty()) {
@@ -204,13 +213,19 @@ pub fn widen(root: &Path, pb: &Playbook, worktree: &Path, paths: &[String]) -> R
                 bail!("the submodule {} is not checked out in {}; run `git submodule update --init {}` there first", s.path(), root.display(), s.path());
             }
             let exists = git(&repo, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_ok();
-            said.push(format!("Made the submodule's worktree: {}.", make(pb, s, worktree, &repo, &branch, exists, &rev, &dirs)?));
+            let named = if whole { None } else { Some(dirs.as_slice()) };
+            said.push(format!("Made the submodule's worktree: {}.", make(pb, s, worktree, &repo, &branch, exists, &rev, named)?));
             continue;
         }
         let Some(before) = crate::light::sparse_set(&at) else {
             said.push(format!("The submodule {} is whole here: every path in it is already here.", s.path()));
             continue;
         };
+        if whole {
+            git(&at, &["sparse-checkout", "disable"]).with_context(|| format!("making the submodule {} whole", s.path()))?;
+            said.push(format!("The submodule {} is whole now.", s.path()));
+            continue;
+        }
         let added: Vec<String> = crate::light::dedupe(dirs).into_iter().filter(|d| !before.iter().any(|b| d == b || d.starts_with(&format!("{b}/")))).collect();
         if added.is_empty() {
             said.push(format!("The submodule {} already has them.", s.path()));
@@ -559,19 +574,24 @@ pub fn sync_lane(root: &Path, pb: &Playbook, lane: &Path, commit: &str, keep: &[
         if !checked_out(&repo) {
             continue;
         }
-        // A sparse submodule: its cone plus the directories the snapshot changes in it since the base.
+        // A sparse submodule: its cone, the directories the snapshot changes in it since the base, and
+        // the `keep` folders under it (narrowing the cone would delete what they hold).
+        let prefix = format!("{path}/");
+        let kept: Vec<String> = keep.iter().filter_map(|k| k.trim_matches('/').strip_prefix(&prefix).map(str::to_string)).collect();
         let dirs = if s.sparse.is_empty() {
             vec![]
         } else {
-            let changed: Vec<String> = match pointer(lane, pb.integration_branch(), path)? {
-                Some(base) if base != at_commit => git(&repo, &["diff", "--name-only", "--no-renames", &base, &at_commit])
+            // NUL-separated: `--name-only` quotes unusual names otherwise.
+            let mut more: Vec<String> = match pointer(lane, pb.integration_branch(), path)? {
+                Some(base) if base != at_commit => git(&repo, &["diff", "-z", "--name-only", "--no-renames", &base, &at_commit])
                     .unwrap_or_default()
-                    .lines()
+                    .split('\0')
                     .filter_map(|f| f.rsplit_once('/').map(|(d, _)| d.to_string()))
                     .collect(),
                 _ => vec![],
             };
-            cone(s, &changed)
+            more.extend(kept.iter().cloned());
+            cone(s, &more)
         };
         let at = lane.join(path);
         if !checked_out(&at) {
@@ -601,8 +621,7 @@ pub fn sync_lane(root: &Path, pb: &Playbook, lane: &Path, commit: &str, keep: &[
         }
         git(&at, &["checkout", "--quiet", "--force", "--detach", &at_commit])?;
         let mut args: Vec<String> = vec!["clean".into(), "-ffdxq".into()];
-        let prefix = format!("{path}/");
-        for k in keep.iter().filter_map(|k| k.trim_matches('/').strip_prefix(&prefix)) {
+        for k in &kept {
             args.push("-e".into());
             args.push(format!("/{k}"));
         }
@@ -660,6 +679,16 @@ mod tests {
         assert!(said[0].contains("sparse: core, extra"), "{said:?}");
         assert!(has(&wt2, "extra/c.c") && !has(&wt2, "ui/b.c"));
 
+        // A file at its root counts as needing it.
+        let wt4 = base.join("wt4");
+        sh(&repo, &["worktree", "add", "-q", "-b", "task4", &wt4.to_string_lossy(), "main"]);
+        assert_eq!(start(&repo, &pb, &wt4, "task4", "Update engine/README").unwrap().len(), 1);
+        assert!(has(&wt4, "README") && has(&wt4, "core/a.c") && !has(&wt4, "ui/b.c"));
+        // Widening the submodule itself makes it whole.
+        let w = crate::light::widen(&wt4, &["engine".to_string()]).unwrap();
+        assert!(w.note.contains("whole now"), "{}", w.note);
+        assert!(has(&wt4, "ui/b.c") && has(&wt4, "extra/c.c"));
+
         // `every_task`: always, still sparse.
         let every: Playbook = toml::from_str("[[submodules]]\npath = \"engine\"\nsparse = [\"core\"]\ncheckout = \"every_task\"\n").unwrap();
         let wt3 = base.join("wt3");
@@ -679,7 +708,8 @@ mod tests {
         let has = |f: &str| lane.join("engine").join(f).exists();
         let first = sh(&repo, &["rev-parse", "HEAD"]);
         sh(&repo, &["worktree", "add", "-q", "--detach", &lane.to_string_lossy(), &first]);
-        sync_lane(&repo, &pb, &lane, &first, &[]).unwrap();
+        let keep = vec!["engine/build/out".to_string()];
+        sync_lane(&repo, &pb, &lane, &first, &keep).unwrap();
         assert!(has("core/a.c") && has("README") && !has("ui/b.c") && !has("extra/c.c"));
 
         // A snapshot that changes the engine's extra/: the lane has extra too, and still not ui.
@@ -689,14 +719,17 @@ mod tests {
         sh(&repo, &["commit", "-q", "-am", "point at extra"]);
         let second = sh(&repo, &["rev-parse", "HEAD"]);
         sh(&lane, &["checkout", "-q", "--force", "--detach", &second]);
-        sync_lane(&repo, &pb, &lane, &second, &[]).unwrap();
+        sync_lane(&repo, &pb, &lane, &second, &keep).unwrap();
         assert_eq!(std::fs::read_to_string(lane.join("engine/extra/c.c")).unwrap().replace('\r', ""), "c2\n");
         assert!(has("core/a.c") && !has("ui/b.c"));
+        std::fs::create_dir_all(lane.join("engine/build/out")).unwrap();
+        std::fs::write(lane.join("engine/build/out/c.o"), "built").unwrap();
 
-        // Back at the base's pointer: only the cone again.
+        // Back at the base's pointer: only the cone again, and the kept build output stays.
         sh(&lane, &["checkout", "-q", "--force", "--detach", &first]);
-        sync_lane(&repo, &pb, &lane, &first, &[]).unwrap();
+        sync_lane(&repo, &pb, &lane, &first, &keep).unwrap();
         assert!(has("core/a.c") && !has("extra/c.c") && !has("ui/b.c"));
+        assert!(has("build/out/c.o"), "kept build output survives the narrowing");
         std::fs::remove_dir_all(&base).ok();
     }
 
