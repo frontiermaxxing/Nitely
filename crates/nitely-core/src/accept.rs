@@ -76,12 +76,17 @@ impl Db {
         let asked = AskedFinding { priority: found.priority, text: found.text.clone() };
         // One decision per finding: a request already open for it, in this wording or an earlier
         // one, stands, with this wording and this reasoning (NIT-353).
-        if let Some(open) = self.open_request_for(&issue.key, &found.text)? {
-            self.conn.execute("UPDATE ask SET finding = ?2, question = ?3 WHERE id = ?1", params![open.id, serde_json::to_string(&asked)?, why])?;
-            return self.ask(open.id)?.context("ask vanished");
-        }
-        let ask = self.create_ask(why, &[], Some(&issue.key), cwd, actor)?;
-        self.conn.execute("UPDATE ask SET finding = ?2 WHERE id = ?1", params![ask.id, serde_json::to_string(&asked)?])?;
+        let ask = match self.open_request_for(&issue.key, &found.text)? {
+            Some(open) => {
+                self.conn.execute("UPDATE ask SET finding = ?2, question = ?3 WHERE id = ?1", params![open.id, serde_json::to_string(&asked)?, why])?;
+                open
+            }
+            None => {
+                let ask = self.create_ask(why, &[], Some(&issue.key), cwd, actor)?;
+                self.conn.execute("UPDATE ask SET finding = ?2 WHERE id = ?1", params![ask.id, serde_json::to_string(&asked)?])?;
+                ask
+            }
+        };
         if issue.origin == "nitely" && issue.state != "Needs You" {
             self.move_issue(&issue.key, "Needs You", None, None, actor)?;
         }

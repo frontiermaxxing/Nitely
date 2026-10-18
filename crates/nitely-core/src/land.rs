@@ -1301,8 +1301,10 @@ when_changed = ["billing"]
             assert!(now.closed.is_none() && now.answer.is_none(), "{now:?}");
             assert_eq!(now.finding.map(|f| f.text).as_deref(), Some(*text), "the request shows the newest words");
         }
-        // Asking again is that same request; the person answers it in the newest words.
+        // Asking again is that same request, and the issue waits for the person again, as asking does.
+        f.db.move_issue(&a, "In Progress", None, None, &f.actor).unwrap();
         assert_eq!(f.db.request_acceptance(&a, "1", "Still only the person.", None, &f.actor).unwrap().id, ask.id);
+        assert_eq!(f.db.issue(&a).unwrap().unwrap().state, "Needs You");
         assert_eq!(f.db.open_asks().unwrap().iter().filter(|q| q.issue_key.as_deref() == Some(a.as_str())).count(), 1, "one decision in the Inbox");
         crate::approval::trust_in_tests(Some(crate::approval::public_of(&SECRET)));
         f.db.accept_finding(ask.id, "the playbook is the person's", &SECRET).unwrap();
