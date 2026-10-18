@@ -247,6 +247,9 @@ struct PreparedBatch<'a> {
     order: Vec<usize>,
 }
 
+/// Priorities by number, as the timeline names them: 0 is none.
+const PRIORITY_NAMES: [&str; 5] = ["none", "Urgent", "High", "Medium", "Low"];
+
 /// The most issues one `file_issues` call (or `nitely issue create-many`) files (NIT-235). An agent
 /// writing a hundred items in one call works for a long time with nothing on the board; batches of
 /// ten show up as it goes. A goal plan is not held to it: the person approves it as one decision.
@@ -1320,6 +1323,35 @@ impl Db {
     /// title that says the wrong thing. What it said before goes on its timeline as an
     /// `issue_edited` event, so nothing is lost. An issue mirrored from another tracker is changed
     /// there. Unchanged text changes nothing and writes no event.
+    /// Sets an issue's priority, 0 (none) to 4 (low), as a triage after filing does (NIT-264): a
+    /// board imported from another tracker with no priorities, or work whose urgency changed. The
+    /// change goes on the timeline like a move ("Priority: none → High"). An issue mirrored from
+    /// another tracker is changed there. The same priority again changes nothing.
+    pub fn set_priority(&mut self, key: &str, priority: i64, actor: &Actor) -> Result<IssueRecord> {
+        if !(0..=4).contains(&priority) {
+            bail!("priority is 0 (none), 1 (urgent), 2 (high), 3 (medium) or 4 (low)");
+        }
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (key, origin, old): (String, String, i64) = tx
+            .query_row("SELECT key, origin, priority FROM issue WHERE key = ?1 COLLATE NOCASE", [key.trim()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .optional()?
+            .with_context(|| format!("no issue {key}"))?;
+        if origin != "nitely" {
+            bail!("{key} is mirrored from {origin}; change it there");
+        }
+        if old != priority {
+            let name = |p: i64| PRIORITY_NAMES.get(p as usize).copied().unwrap_or("none");
+            let ts = now();
+            tx.execute("UPDATE issue SET priority = ?2, updated_at = ?3 WHERE key = ?1", params![key, priority, iso(ts)])?;
+            tx.execute(
+                "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, ?2, ?3, 'priority_changed', ?4)",
+                params![ts, actor.id(), key, format!("Priority: {} → {}", name(old), name(priority))],
+            )?;
+        }
+        tx.commit()?;
+        self.issue(&key)?.with_context(|| format!("no issue {key}"))
+    }
+
     pub fn edit_issue(&mut self, key: &str, title: Option<&str>, body: Option<&str>, actor: &Actor) -> Result<IssueRecord> {
         let title = title.map(str::trim);
         let body = body.map(str::trim);
@@ -1701,6 +1733,26 @@ mod tests {
         let timeline = db.timeline("NIT-1").unwrap();
         assert_eq!((timeline[0].actor.as_str(), timeline[0].place.as_deref()), (session.id(), Some(r"C:\Code\my-app")));
         assert_eq!((timeline[1].actor.as_str(), timeline[1].place.as_deref()), ("claude:c:/code/my-app", None), "an older folder id says its folder itself");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_priority_set_after_filing_goes_on_the_timeline() {
+        let (mut db, dir) = db();
+        db.create_project("NIT", "Nitely").unwrap();
+        let agent = Actor::Agent("claude:x".into());
+        db.create_issue(&NewIssue { priority: 0, ..new("Imported with no priority") }, &agent).unwrap();
+        assert_eq!(db.set_priority("nit-1", 2, &agent).unwrap().priority, 2);
+        let last = db.timeline("NIT-1").unwrap().pop().unwrap();
+        assert_eq!((last.kind.as_str(), last.summary.as_deref()), ("priority_changed", Some("Priority: none → High")));
+        let events = db.timeline("NIT-1").unwrap().len();
+        db.set_priority("NIT-1", 2, &agent).unwrap();
+        assert_eq!(db.timeline("NIT-1").unwrap().len(), events, "the same priority: no event");
+        db.set_priority("NIT-1", 0, &agent).unwrap();
+        assert_eq!(db.timeline("NIT-1").unwrap().pop().unwrap().summary.as_deref(), Some("Priority: High → none"));
+        assert!(db.set_priority("NIT-1", 5, &agent).is_err() && db.set_priority("NIT-1", -1, &agent).is_err());
+        db.conn.execute("INSERT INTO issue (key, origin, title, state, state_type, updated_at) VALUES ('LIN-1', 'linear', 'Mirrored', 'Todo', 'unstarted', '')", []).unwrap();
+        assert!(db.set_priority("LIN-1", 1, &agent).unwrap_err().to_string().contains("mirrored from linear"));
         std::fs::remove_dir_all(dir).ok();
     }
 

@@ -18,6 +18,7 @@ const KIND_LABEL: Record<string, string> = {
   issue_created: "filed",
   issue_moved: "moved",
   issue_edited: "edited",
+  priority_changed: "priority",
   claimed: "claimed",
   status: "status",
   note: "note",

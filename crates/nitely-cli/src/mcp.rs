@@ -595,13 +595,14 @@ fn tools() -> Value {
         },
         {
             "name": "update_issue",
-            "description": "Move an issue, rewrite its title or body (what it said before stays on its timeline; an issue mirrored from another tracker is changed there), change what blocks it, or make it the human's own work (owner human: next_task skips it, and an open issue goes to Needs You; only the human hands it back). Done needs evidence (what ran and what it showed), and is refused while a submitted change is not landed or a question on the issue is open; Canceled and Duplicate need a reason. Approved is set only by the human; move to Needs You and ask instead. An issue with an open blocker waits: next_task skips it until every blocker is Done or Canceled.",
+            "description": "Move an issue, set its priority, rewrite its title or body (what it said before stays on its timeline; an issue mirrored from another tracker is changed there), change what blocks it, or make it the human's own work (owner human: next_task skips it, and an open issue goes to Needs You; only the human hands it back). Done needs evidence (what ran and what it showed), and is refused while a submitted change is not landed or a question on the issue is open; Canceled and Duplicate need a reason. Approved is set only by the human; move to Needs You and ask instead. An issue with an open blocker waits: next_task skips it until every blocker is Done or Canceled.",
             "inputSchema": { "type": "object", "required": ["key"], "properties": {
                 "key": { "type": "string" },
                 "state": { "type": "string", "enum": states },
                 "evidence": { "type": "string" },
                 "reason": { "type": "string" },
                 "title": { "type": "string", "description": "A new title; the old one stays on the timeline." },
+                "priority": { "type": "integer", "minimum": 0, "maximum": 4, "description": "1 urgent, 2 high, 3 medium, 4 low, 0 none; the change goes on the timeline." },
                 "body": { "type": "string", "description": "A new body, whole: it replaces the old one, which stays on the timeline." },
                 "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Issues to add as blockers of this one." },
                 "remove_blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Blockers to remove." },
@@ -1215,6 +1216,7 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             let (add_labels, remove_labels) = (keys_arg(args, "labels"), keys_arg(args, "remove_labels"));
             let goal = args.get("goal").and_then(Value::as_i64);
             let (title, body) = (args.get("title").and_then(Value::as_str), args.get("body").and_then(Value::as_str));
+            let priority = args.get("priority").and_then(Value::as_i64);
             if str_arg(args, "state").is_none()
                 && add.is_empty()
                 && remove.is_empty()
@@ -1224,8 +1226,12 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
                 && goal.is_none()
                 && title.is_none()
                 && body.is_none()
+                && priority.is_none()
             {
-                bail!("give a state, title, body, blocked_by, remove_blocked_by, labels, remove_labels, owner or goal");
+                bail!("give a state, title, body, priority, blocked_by, remove_blocked_by, labels, remove_labels, owner or goal");
+            }
+            if priority.is_some_and(|p| !(0..=4).contains(&p)) {
+                bail!("priority is 0 (none), 1 (urgent), 2 (high), 3 (medium) or 4 (low)");
             }
             // A mirrored issue, or an empty title or body, is refused before anything changes.
             if title.is_some() || body.is_some() {
@@ -1255,6 +1261,9 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             // After the blockers, which can still refuse: a refused call changes no text.
             if title.is_some() || body.is_some() {
                 db.edit_issue(key, title, body, &actor)?;
+            }
+            if let Some(priority) = priority {
+                db.set_priority(key, priority, &actor)?;
             }
             let mut note = None;
             if !add_labels.is_empty() || !remove_labels.is_empty() {
