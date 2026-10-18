@@ -2079,7 +2079,10 @@ commands = []
         let lane = lane_path(&root, &pb, 1);
         let sleeper = if cfg!(windows) { "ping -n 60 127.0.0.1 >NUL" } else { "sleep 60" };
         let mut left = playbook::shell_command(sleeper);
-        left.current_dir(&lane);
+        // Outside the lane, so only the recorded pid, command and start time can stop it: anything
+        // working inside the lane is stopped whatever the record says (`holders`, which on Linux
+        // reads every process's folder).
+        left.current_dir(&base);
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
