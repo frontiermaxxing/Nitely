@@ -10,7 +10,9 @@ Nitely tracks its own build. Its backlog is the **NIT** project in Nitely, reach
    `npm ci`, no build output, about 7 MB; `.nitely/playbook.toml`, `[worktree] mode = "light"`).
    Work only in that worktree, never on `main`. To read code as it is on `main`, use the reference
    tree `start_task` names (`../Nitely-worktrees/.nitely-lanes/Nitely/ref`): read-only, never edit
-   or build there. A worktree made before NIT went light stays full until it lands.
+   or build there. A worktree made before NIT went light stays full until it lands. `start_task`
+   also claims the issue for you, for an issue you were given by name too, and refuses one another
+   agent holds while it is still working on it.
 2. Use `report` for what you are doing at each step; it shows live on Andrew's board.
 3. Anything you find but will not fix now goes in with `file_issue` (kind, body, evidence). It refuses
    likely duplicates and lists them.

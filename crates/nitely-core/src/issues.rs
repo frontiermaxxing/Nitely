@@ -36,6 +36,9 @@ pub const NEEDS_HUMAN: &str = "Needs You";
 /// A claim older than this with no update is free for another agent to take.
 const CLAIM_TTL_SECS: i64 = 6 * 3600;
 
+/// What `claim_for_start` reads of an issue: key, state, claim holder and time, origin, owner.
+type StartRow = (String, String, Option<String>, Option<i64>, String, String);
+
 /// A Todo or In Progress issue `next_task` may take: key, priority, number, whether it plans a goal
 /// (0) or not (1), its goal's place, and the goal's target date.
 type Candidate = (String, i64, i64, i64, i64, Option<String>);
@@ -1560,6 +1563,62 @@ impl Db {
         Ok(())
     }
 
+    /// What starting an issue's task does to it (NIT-274): `agent` holds it, as `next_task`'s claim
+    /// does, and one not started yet moves to In Progress, so a second agent asking `next_task` is
+    /// not handed work in progress. Agents are mostly given issues by name, and before this only
+    /// `next_task` claimed. A claim of `agent`'s own (or of `mine`, the ids it acted under before)
+    /// is renewed. Another agent's claim is refused while that agent is live: its session open and
+    /// seen within `GONE_AFTER_SECS`, or its claim renewed within the claim TTL; one whose session
+    /// ended, or that went quiet past both, is taken over, and so is any with `take_over`. Returns
+    /// what the caller should be told: a claim it took over.
+    pub fn claim_for_start(&self, key: &str, agent: &str, mine: &[String], take_over: bool) -> Result<Option<String>> {
+        let ts = now();
+        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let (key, state, claimed_by, claimed_at, origin, owner): StartRow = tx
+            .query_row("SELECT key, state, claimed_by, claimed_at, origin, owner FROM issue WHERE key = ?1 COLLATE NOCASE", [key], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+            })
+            .optional()?
+            .with_context(|| format!("no issue {key}"))?;
+        // A mirrored issue's state is its tracker's, and the human's own work is not an agent's.
+        if origin != "nitely" || owner == "human" {
+            return Ok(None);
+        }
+        let mut told = None;
+        if let Some(holder) = claimed_by.clone().filter(|h| h != agent && !mine.contains(h)) {
+            let session: Option<(String, i64)> =
+                tx.query_row("SELECT state, last_seen_at FROM session WHERE id = ?1", [&holder], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            let fresh = claimed_at.is_some_and(|c| c >= ts - CLAIM_TTL_SECS);
+            let live = match &session {
+                Some((state, seen)) => state != "ended" && (*seen >= ts - crate::sessions::GONE_AFTER_SECS || fresh),
+                None => fresh,
+            };
+            if live && !take_over {
+                bail!(
+                    "{key} is claimed by {holder}, which is still on it; take other work (next_task), or start it with take_over only if you know that agent stopped"
+                );
+            }
+            let why = if live { "take_over" } else if session.is_some_and(|(s, _)| s == "ended") { "its session ended" } else { "it went quiet" };
+            told = Some(format!("took over {key} from {holder} ({why})"));
+            tx.execute(
+                "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, ?2, ?3, 'claimed', ?4)",
+                params![ts, agent, key, format!("Took the issue over from {holder} ({why})")],
+            )?;
+        } else if claimed_by.is_none() {
+            tx.execute("INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, ?2, ?3, 'claimed', 'Took the issue')", params![ts, agent, key])?;
+        }
+        tx.execute("UPDATE issue SET claimed_by = ?2, claimed_at = ?3 WHERE key = ?1", params![key, agent, ts])?;
+        if state == "Todo" || state == "Backlog" {
+            tx.execute("UPDATE issue SET state = 'In Progress', state_type = 'started', updated_at = ?2 WHERE key = ?1", params![key, iso(ts)])?;
+            tx.execute(
+                "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, ?2, ?3, 'issue_moved', ?4)",
+                params![ts, agent, key, format!("{state} → In Progress")],
+            )?;
+        }
+        tx.commit()?;
+        Ok(told)
+    }
+
     /// Fills each issue's track: open issues from their timelines, read in one query; closed ones
     /// from their state, which is all a list shows of them.
     fn fill_tracks(&self, issues: &mut [IssueRecord]) -> Result<()> {
@@ -2023,6 +2082,45 @@ mod tests {
         assert_eq!(first.claimed_by.as_deref(), Some("claude:a"));
         assert_eq!(db.next_task("NIT", "codex:b").unwrap().unwrap().key, "NIT-1");
         assert!(db.next_task("NIT", "cursor:c").unwrap().is_none());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// start_task's claim (NIT-274): the agent starting an issue holds it and moves it to In
+    /// Progress, so next_task passes it over. Another agent's start is refused while the holder is
+    /// live, and takes it over once the holder's session ended or with take_over.
+    #[test]
+    fn starting_an_issue_claims_it_and_refuses_another_live_agent() {
+        let (mut db, dir) = db();
+        db.create_project("NIT", "Nitely").unwrap();
+        db.create_issue(&new("Given by name"), &Actor::Human).unwrap();
+        assert_eq!(db.claim_for_start("NIT-1", "claude:c:/code/app", &[], false).unwrap(), None);
+        let i = db.issue("NIT-1").unwrap().unwrap();
+        assert_eq!((i.state.as_str(), i.claimed_by.as_deref()), ("In Progress", Some("claude:c:/code/app")));
+        assert!(db.next_task("NIT", "codex:b").unwrap().is_none(), "not handed to another agent");
+
+        // The same agent, now acting as its session, holds what it claimed under its folder's id.
+        db.conn
+            .execute("INSERT INTO session (id, vendor, cwd, started_at, last_seen_at, state) VALUES ('claude:s', 'claude', 'C:/code/app', ?1, ?1, 'working')", [now()])
+            .unwrap();
+        assert_eq!(db.claim_for_start("NIT-1", "claude:s", &["claude:c:/code/app".into()], false).unwrap(), None);
+        assert_eq!(db.issue("NIT-1").unwrap().unwrap().claimed_by.as_deref(), Some("claude:s"));
+
+        // Another agent, while that session is live: refused.
+        let err = db.claim_for_start("NIT-1", "codex:b", &[], false).unwrap_err().to_string();
+        assert!(err.contains("claimed by claude:s") && err.contains("take_over"), "{err}");
+        // Once the session ended, taken over and said so.
+        db.conn.execute("UPDATE session SET state = 'ended'", []).unwrap();
+        let took = db.claim_for_start("NIT-1", "codex:b", &[], false).unwrap().unwrap();
+        assert!(took.contains("from claude:s (its session ended)"), "{took}");
+        assert_eq!(db.issue("NIT-1").unwrap().unwrap().claimed_by.as_deref(), Some("codex:b"));
+
+        // A holder with no session record counts as live while its claim is fresh; take_over takes it.
+        assert!(db.claim_for_start("NIT-1", "cursor:c", &[], false).is_err());
+        assert!(db.claim_for_start("NIT-1", "cursor:c", &[], true).unwrap().unwrap().contains("take_over"));
+        // A mirrored issue is left to its tracker.
+        db.conn.execute("INSERT INTO issue (key, origin, title, state, state_type, updated_at) VALUES ('LIN-1', 'linear', 'Mirrored', 'Todo', 'unstarted', '')", []).unwrap();
+        db.claim_for_start("LIN-1", "codex:b", &[], false).unwrap();
+        assert_eq!(db.issue("LIN-1").unwrap().unwrap().state, "Todo");
         std::fs::remove_dir_all(dir).ok();
     }
 

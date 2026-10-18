@@ -444,9 +444,10 @@ fn tools() -> Value {
         },
         {
             "name": "start_task",
-            "description": "Create the issue's branch and worktree from the integration branch, following the repo's playbook (.nitely/playbook.toml), and run its setup commands. Safe to call again: it returns the existing worktree. Work only inside the returned worktree.",
+            "description": "Create the issue's branch and worktree from the integration branch, following the repo's playbook (.nitely/playbook.toml), and run its setup commands. Safe to call again: it returns the existing worktree. Work only inside the returned worktree. You hold the issue from then on, as next_task's claim does, and one in Todo moves to In Progress; an issue another agent holds while it still works on it is refused.",
             "inputSchema": { "type": "object", "required": ["key"], "properties": {
-                "key": { "type": "string", "description": "e.g. NIT-12" }
+                "key": { "type": "string", "description": "e.g. NIT-12" },
+                "take_over": { "type": "boolean", "description": "Take the issue from the agent that holds it, only when you know that agent stopped." }
             } }
         },
         {
@@ -1128,7 +1129,15 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             let key = req(args, "key")?;
             let issue = db.issue(key)?.with_context(|| format!("no issue {key}"))?;
             let root = playbook::repo_for_issue(&config, issue.project.as_deref(), &server.cwd)?;
-            json!(playbook::start_task(&db, &root, &issue, &server.vendor, &actor)?)
+            // The agent starting it holds it, so next_task does not hand it to another (NIT-274).
+            let take_over = args.get("take_over").and_then(Value::as_bool).unwrap_or(false);
+            let took = match &actor {
+                Actor::Agent(id) => db.claim_for_start(&issue.key, id, &[server.agent()], take_over)?,
+                Actor::Human => None,
+            };
+            let mut started = playbook::start_task(&db, &root, &issue, &server.vendor, &actor)?;
+            started.warnings.extend(took);
+            json!(started)
         }
         "widen" => {
             let dir = task_dir(&config, &db, args, &server.cwd)?;
