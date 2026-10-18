@@ -562,9 +562,24 @@ impl Run {
 }
 
 const COLUMNS: &str = "id, project, repo, issue_key, requested_by, kind, snapshot, tree, base, command, state, lane, executor, \
-queued_at, started_at, ended_at, exit_code, timed_out, setup_ran, files_switched, log_path, output, error, waiting_for, waiting_memory, peak_memory, pid";
+queued_at, started_at, ended_at, exit_code, timed_out, setup_ran, files_switched, log_path, output, error, waiting_for, waiting_memory, peak_memory, pid, \
+pid_started";
 
-fn row(r: &rusqlite::Row) -> rusqlite::Result<(Run, Option<i64>)> {
+/// The process that asked for a run (NIT-270): its pid and when it started.
+#[derive(Debug, Clone, Default)]
+struct Requester {
+    pid: Option<i64>,
+    started: Option<String>,
+}
+
+impl Requester {
+    /// Its process has ended: the pid is gone, or now names a process that started at another time.
+    fn gone(&self) -> bool {
+        self.pid.is_some_and(|p| !requester_alive(p as u32, self.started.as_deref()))
+    }
+}
+
+fn row(r: &rusqlite::Row) -> rusqlite::Result<(Run, Requester)> {
     Ok((
         Run {
             id: r.get(0)?,
@@ -595,7 +610,7 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<(Run, Option<i64>)> {
             peak_memory: r.get(25)?,
             waiting_why: None,
         },
-        r.get(26)?,
+        Requester { pid: r.get(26)?, started: r.get(27)? },
     ))
 }
 
@@ -603,7 +618,7 @@ impl Db {
     /// One run by id. A queued or running run whose process is gone reads as abandoned.
     pub fn lane_run(&self, id: i64) -> Result<Option<Run>> {
         let found = self.conn.query_row(&format!("SELECT {COLUMNS} FROM lane_run WHERE id = ?1"), [id], row).optional()?;
-        Ok(found.map(|(run, pid)| settle(self, run, pid)))
+        Ok(found.map(|(run, requester)| settle(self, run, requester)))
     }
 
     /// A project's runs, newest first; queued and running ones whose process is gone are marked
@@ -611,7 +626,7 @@ impl Db {
     pub fn lane_runs(&self, project: &str, limit: usize) -> Result<Vec<Run>> {
         let mut stmt = self.conn.prepare(&format!("SELECT {COLUMNS} FROM lane_run WHERE project = ?1 COLLATE NOCASE ORDER BY id DESC LIMIT ?2"))?;
         let rows = stmt.query_map(params![project, limit as i64], row)?.collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows.into_iter().map(|(run, pid)| settle(self, run, pid)).collect())
+        Ok(rows.into_iter().map(|(run, requester)| settle(self, run, requester)).collect())
     }
 
     /// The runs one actor asked for, newest first.
@@ -626,7 +641,7 @@ impl Db {
         Ok(rows
             .into_iter()
             .filter(|(r, _)| crate::paths::normalize(&r.repo) == mine)
-            .map(|(run, pid)| settle(self, run, pid))
+            .map(|(run, requester)| settle(self, run, requester))
             .filter(|r| r.state == "queued" || r.state == "running")
             .collect())
     }
@@ -652,39 +667,74 @@ impl Db {
     pub fn lane_runs_by(&self, by: &str, limit: usize) -> Result<Vec<Run>> {
         let mut stmt = self.conn.prepare(&format!("SELECT {COLUMNS} FROM lane_run WHERE requested_by = ?1 ORDER BY id DESC LIMIT ?2"))?;
         let rows = stmt.query_map(params![by, limit as i64], row)?.collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows.into_iter().map(|(run, pid)| settle(self, run, pid)).collect())
+        Ok(rows.into_iter().map(|(run, requester)| settle(self, run, requester)).collect())
     }
 }
 
-/// A queued or running run outlives the process serving it only by a crash: it is abandoned.
-fn settle(db: &Db, mut run: Run, pid: Option<i64>) -> Run {
+/// Takes a queued run out of the queue (`nitely lanes cancel`): for a request whose requester will
+/// not come for it, so the ones behind it go on. A running one is ended by stopping what asked for
+/// it, which the refusal names.
+pub fn cancel(db: &Db, id: i64, actor: &Actor) -> Result<Run> {
+    let run = db.lane_run(id)?.with_context(|| format!("no run {id}"))?;
+    match run.state.as_str() {
+        "queued" => {
+            let why = format!("cancelled by {} while it was queued", actor.id());
+            db.conn.execute(
+                "UPDATE lane_run SET state = 'abandoned', ended_at = ?2, error = ?3 WHERE id = ?1 AND state = 'queued'",
+                params![id, now(), why],
+            )?;
+            db.lane_run(id)?.context("the run's record went missing")
+        }
+        "running" => {
+            let pid: Option<i64> = db.conn.query_row("SELECT pid FROM lane_run WHERE id = ?1", [id], |r| r.get(0))?;
+            bail!(
+                "run {id} is running{}; stop what asked for it ({}) and it ends as abandoned",
+                run.lane.map(|n| format!(" in lane {n}")).unwrap_or_default(),
+                pid.map(|p| format!("process {p}")).unwrap_or_else(|| "its process".into())
+            )
+        }
+        _ => Ok(run),
+    }
+}
+
+/// A queued or running run outlives the process serving it only by a crash: it is abandoned, and
+/// says so.
+fn settle(db: &Db, mut run: Run, requester: Requester) -> Run {
     let open = run.state == "queued" || run.state == "running";
-    if open && pid.is_some_and(|p| p as u32 != std::process::id() && !requester_alive(p as u32)) {
+    if open && requester.gone() {
+        let why = if run.state == "queued" { "its requester exited while it was queued" } else { "its requester exited while it ran" };
         db.conn
-            .execute("UPDATE lane_run SET state = 'abandoned', ended_at = COALESCE(ended_at, ?2) WHERE id = ?1 AND state IN ('queued', 'running')", params![run.id, now()])
+            .execute(
+                "UPDATE lane_run SET state = 'abandoned', ended_at = COALESCE(ended_at, ?2), error = COALESCE(error, ?3) WHERE id = ?1 AND state IN ('queued', 'running')",
+                params![run.id, now(), why],
+            )
             .ok();
         run.state = "abandoned".into();
+        run.error.get_or_insert(why.to_string());
     }
     run
 }
 
 /// Whether a requester's process runs, as `settle` asks it: the app reads every lane's queue on each
-/// refresh, so an answer is kept for two seconds (NIT-289). Tests ask the system every time.
-fn requester_alive(pid: u32) -> bool {
+/// refresh, so an answer is kept for two seconds (NIT-289). Tests ask the system every time. A
+/// process at that number that started at another time is not the requester (NIT-270).
+fn requester_alive(pid: u32, started: Option<&str>) -> bool {
     if cfg!(test) {
-        return crate::crew::pid_alive(pid);
+        return crate::procs::still_runs(pid, started);
     }
-    static SEEN: std::sync::Mutex<Option<std::collections::HashMap<u32, (bool, Instant)>>> = std::sync::Mutex::new(None);
+    type Seen = std::collections::HashMap<(u32, Option<String>), (bool, Instant)>;
+    static SEEN: std::sync::Mutex<Option<Seen>> = std::sync::Mutex::new(None);
     let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
     let seen = seen.get_or_insert_with(Default::default);
-    if let Some((alive, at)) = seen.get(&pid) {
+    let key = (pid, started.map(str::to_string));
+    if let Some((alive, at)) = seen.get(&key) {
         if at.elapsed() < Duration::from_secs(2) {
             return *alive;
         }
     }
-    let alive = crate::crew::pid_alive(pid);
+    let alive = crate::procs::still_runs(pid, started);
     seen.retain(|_, (_, at)| at.elapsed() < Duration::from_secs(60));
-    seen.insert(pid, (alive, Instant::now()));
+    seen.insert(key, (alive, Instant::now()));
     alive
 }
 
@@ -771,9 +821,23 @@ fn run_with(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Act
         Kind::Run => 3,
     };
     db.conn.execute(
-        "INSERT INTO lane_run (project, repo, issue_key, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, priority)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'queued', 'local', ?10, ?11, ?12)",
-        params![req.project.to_uppercase(), root, req.issue, actor.id(), req.kind.as_str(), req.snapshot.commit, req.snapshot.tree, req.snapshot.base, req.command, now(), std::process::id(), priority],
+        "INSERT INTO lane_run (project, repo, issue_key, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, priority, pid_started, polled_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'queued', 'local', ?10, ?11, ?12, ?13, ?10)",
+        params![
+            req.project.to_uppercase(),
+            root,
+            req.issue,
+            actor.id(),
+            req.kind.as_str(),
+            req.snapshot.commit,
+            req.snapshot.tree,
+            req.snapshot.base,
+            req.command,
+            now(),
+            std::process::id(),
+            priority,
+            crate::procs::me().1
+        ],
     )?;
     let id = db.conn.last_insert_rowid();
     // A made snapshot exists only as an object: a ref keeps git's gc from taking it while it waits.
@@ -792,10 +856,13 @@ fn run_with(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Act
         let logs = logs_dir(db, req.project);
         std::fs::create_dir_all(&logs)?;
         let log = logs.join(format!("{id}.log"));
-        db.conn.execute(
-            "UPDATE lane_run SET state = 'running', lane = ?2, started_at = ?3, log_path = ?4 WHERE id = ?1",
+        let started = db.conn.execute(
+            "UPDATE lane_run SET state = 'running', lane = ?2, started_at = ?3, log_path = ?4 WHERE id = ?1 AND state = 'queued'",
             params![id, n, now(), log.to_string_lossy()],
         )?;
+        if started == 0 {
+            bail!("run {id} was taken out of the queue before it started");
+        }
         Ok((n, lock, slot, log))
     })();
     let (n, _lock, _slot, log) = match started {
@@ -1343,27 +1410,34 @@ fn turns(rows: Vec<QueueRow>, slots: u32, served: &std::collections::HashMap<Str
 /// The queue as `turns` reads it, with each requester's liveness from `alive` (the asking
 /// request's own counts as alive), and when each project last had a turn.
 #[allow(clippy::type_complexity)]
-fn queue_rows(db: &Db, me: Option<i64>, alive: &mut dyn FnMut(i64) -> bool) -> Result<(Vec<QueueRow>, std::collections::HashMap<String, i64>)> {
+fn queue_rows(db: &Db, me: Option<i64>, alive: &mut dyn FnMut(&Requester) -> bool) -> Result<(Vec<QueueRow>, std::collections::HashMap<String, i64>)> {
     let mut stmt = db.conn.prepare(
-        "SELECT id, project, repo, priority, kind, queued_at, state, pid, lane_count, waiting_for IS NOT NULL, issue_key, started_at FROM lane_run WHERE state IN ('queued', 'running')",
+        "SELECT id, project, repo, priority, kind, queued_at, state, pid, lane_count, waiting_for IS NOT NULL, issue_key, started_at, pid_started, polled_at
+         FROM lane_run WHERE state IN ('queued', 'running')",
     )?;
-    let raw: Vec<(Waiting, String, Option<i64>, i64, bool, Option<String>, Option<i64>)> = stmt
+    type Raw = (Waiting, String, Requester, i64, bool, Option<String>, Option<i64>, Option<i64>);
+    let raw: Vec<Raw> = stmt
         .query_map([], |r| {
             Ok((
                 Waiting { id: r.get(0)?, project: r.get(1)?, repo: r.get(2)?, priority: r.get(3)?, kind: r.get(4)?, queued_at: r.get(5)? },
                 r.get(6)?,
-                r.get(7)?,
+                Requester { pid: r.get(7)?, started: r.get(12)? },
                 r.get(8)?,
                 r.get(9)?,
                 r.get(10)?,
                 r.get(11)?,
+                r.get(13)?,
             ))
         })?
         .collect::<rusqlite::Result<_>>()?;
+    let now = now();
     let rows = raw
         .into_iter()
-        .map(|(w, state, pid, lane_count, waits_for_checkout, issue, started_at)| {
-            let is_alive = Some(w.id) == me || pid.is_none_or(&mut *alive);
+        .map(|(w, state, requester, lane_count, waits_for_checkout, issue, started_at, polled_at)| {
+            // A queued request whose requester has stopped looking for its turn (hung, suspended)
+            // would never take it: it holds nobody up until it looks again (NIT-270).
+            let stopped_looking = state == "queued" && polled_at.is_some_and(|t| now - t > STOPPED_LOOKING_SECS);
+            let is_alive = Some(w.id) == me || (requester.pid.is_none_or(|_| alive(&requester)) && !stopped_looking);
             QueueRow { w, running: state == "running", alive: is_alive, lane_count, waits_for_checkout, issue, started_at }
         })
         .collect();
@@ -1379,9 +1453,21 @@ fn queue_rows(db: &Db, me: Option<i64>, alive: &mut dyn FnMut(i64) -> bool) -> R
     Ok((rows, served))
 }
 
+/// How long a queued request's requester may go without looking for its turn before the requests
+/// behind it stop waiting for it. A requester looks every fraction of a second, two seconds at most.
+const STOPPED_LOOKING_SECS: i64 = 60;
+
 /// Whether request `id` may try for a slot and a lane now (`turns`). Not queued (any more):
 /// nothing to wait for.
-fn my_turn(db: &Db, id: i64, slots: u32, alive: &mut dyn FnMut(i64) -> bool) -> Result<bool> {
+fn my_turn(db: &Db, id: i64, slots: u32, alive: &mut dyn FnMut(&Requester) -> bool) -> Result<bool> {
+    // A request taken out of the queue (`nitely lanes cancel`, or abandoned) does not run, however
+    // long its requester goes on looking.
+    let (state, error): (String, Option<String>) = db.conn.query_row("SELECT state, error FROM lane_run WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    if state != "queued" {
+        bail!("run {id} was taken out of the queue ({})", error.unwrap_or(state));
+    }
+    // Looking is what keeps a queued request's place (NIT-270).
+    db.conn.execute("UPDATE lane_run SET polled_at = ?2 WHERE id = ?1", params![id, now()])?;
     let (rows, served) = queue_rows(db, Some(id), alive)?;
     Ok(!matches!(turns(rows, slots, &served, now()).get(&id), Some(Turn::Wait(_))))
 }
@@ -1389,7 +1475,7 @@ fn my_turn(db: &Db, id: i64, slots: u32, alive: &mut dyn FnMut(i64) -> bool) -> 
 /// Why each queued request waits, for `nitely lanes` and the app (NIT-291): the machine's slots,
 /// its own repo's queue or lanes, the person's checkout, or memory. Reads only.
 fn waiting_reasons(db: &Db) -> Result<std::collections::HashMap<i64, String>> {
-    let (rows, served) = queue_rows(db, None, &mut |pid| requester_alive(pid as u32))?;
+    let (rows, served) = queue_rows(db, None, &mut |r: &Requester| !r.gone())?;
     Ok(turns(rows, machine_budget().slots, &served, now())
         .into_iter()
         .filter_map(|(id, t)| match t {
@@ -1415,21 +1501,8 @@ fn take_turn(
     limits: &mut dyn FnMut() -> Option<machine::Limits>,
 ) -> Result<(u32, LaneLock, SlotLock)> {
     db.conn.execute("UPDATE lane_run SET lane_count = ?2 WHERE id = ?1", params![id, rules.lanes()])?;
-    // Whether a requester's process still runs, asked again every few seconds at most.
-    let mut known: std::collections::HashMap<i64, (bool, Instant)> = std::collections::HashMap::new();
-    let mut alive = |pid: i64| -> bool {
-        if pid as u32 == std::process::id() {
-            return true;
-        }
-        match known.get(&pid) {
-            Some((is, at)) if at.elapsed() < Duration::from_secs(5) => *is,
-            _ => {
-                let is = crate::crew::pid_alive(pid as u32);
-                known.insert(pid, (is, Instant::now()));
-                is
-            }
-        }
-    };
+    // Whether a requester's process still runs (asked through settle's short cache).
+    let mut alive = |r: &Requester| !r.gone();
     let mut busy_since = None;
     let mut waits_for_memory = false;
     'turn: loop {
@@ -1535,14 +1608,14 @@ pub fn hold_machine<'a>(db: &'a Db, repo_root: &Path, worktree: &Path, project: 
     let mut slots_now = slots_now();
     let slots = slots_now();
     db.conn.execute(
-        "INSERT INTO lane_run (project, repo, issue_key, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, priority, lane_count)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?6, ?8, 'queued', 'worktree', ?9, ?10, ?11, ?12)",
-        params![project.to_uppercase(), repo_root.to_string_lossy(), issue, actor.id(), kind.as_str(), head, tree, command, now(), std::process::id(), priority, slots],
+        "INSERT INTO lane_run (project, repo, issue_key, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, priority, lane_count, pid_started, polled_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?6, ?8, 'queued', 'worktree', ?9, ?10, ?11, ?12, ?13, ?9)",
+        params![project.to_uppercase(), repo_root.to_string_lossy(), issue, actor.id(), kind.as_str(), head, tree, command, now(), std::process::id(), priority, slots, crate::procs::me().1],
     )?;
     let id = db.conn.last_insert_rowid();
     let mut waits_for_memory = false;
     let taken = (|| -> Result<SlotLock> {
-        let mut alive = |pid: i64| pid as u32 == std::process::id() || crate::crew::pid_alive(pid as u32);
+        let mut alive = |r: &Requester| !r.gone();
         loop {
             let slots = slots_now();
             if my_turn(db, id, slots, &mut alive)? {
@@ -1567,13 +1640,18 @@ pub fn hold_machine<'a>(db: &'a Db, repo_root: &Path, worktree: &Path, project: 
         Ok(slot) => slot,
         Err(e) => {
             db.conn
-                .execute("UPDATE lane_run SET state = 'lane_error', ended_at = ?2, error = ?3 WHERE id = ?1", params![id, now(), format!("{e:#}")])
+                .execute(
+                    "UPDATE lane_run SET state = 'lane_error', ended_at = ?2, error = ?3 WHERE id = ?1 AND state IN ('queued', 'running')",
+                    params![id, now(), format!("{e:#}")],
+                )
                 .ok();
             return Err(e);
         }
     };
     let clear = if waits_for_memory { ", waiting_memory = NULL" } else { "" };
-    db.conn.execute(&format!("UPDATE lane_run SET state = 'running', started_at = ?2{clear} WHERE id = ?1"), params![id, now()])?;
+    if db.conn.execute(&format!("UPDATE lane_run SET state = 'running', started_at = ?2{clear} WHERE id = ?1 AND state = 'queued'"), params![id, now()])? == 0 {
+        bail!("run {id} was taken out of the queue before it started");
+    }
     Ok(MachineTurn { db, id, _slot: slot, finished: false })
 }
 
@@ -2158,13 +2236,13 @@ impl Db {
         ))?;
         let mut rows = stmt.query(params![project, lane as i64])?;
         while let Some(r) = rows.next()? {
-            let (run, pid) = row(r)?;
+            let (run, requester) = row(r)?;
             if crate::paths::normalize(&run.repo) != mine {
                 continue;
             }
             // A run whose process died counts as finished (abandoned), even where that cannot be
             // written back (the read-only preview); one still going is not the lane's last.
-            let run = settle(self, run, pid);
+            let run = settle(self, run, requester);
             if run.state != "queued" && run.state != "running" {
                 return Ok(Some(run));
             }
@@ -2596,8 +2674,32 @@ commands = []
                 [root.to_string_lossy()],
             )
             .unwrap();
-        let id = db.conn.last_insert_rowid();
-        assert_eq!(db.lane_run(id).unwrap().unwrap().state, "abandoned");
+let id = db.conn.last_insert_rowid();
+        let gone = db.lane_run(id).unwrap().unwrap();
+        assert_eq!((gone.state.as_str(), gone.error.as_deref()), ("abandoned", Some("its requester exited while it was queued")));
+
+        // The OS gave a dead requester's number to another process (here this one, which started
+        // at another time): not the requester, so the request is abandoned too (NIT-270).
+        db.conn
+            .execute(
+                "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, pid_started)
+                 VALUES ('APP', ?1, 'x', 'run', 's', 't', 'b', 'c', 'queued', 'local', 1, ?2, 'another start')",
+                params![root.to_string_lossy(), std::process::id()],
+            )
+            .unwrap();
+        let reused = db.conn.last_insert_rowid();
+        assert_eq!(db.lane_run(reused).unwrap().unwrap().state, "abandoned");
+        // The same process, started when it says: still waiting.
+        db.conn
+            .execute(
+                "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, pid_started)
+                 VALUES ('APP', ?1, 'x', 'run', 's', 't', 'b', 'c', 'queued', 'local', 1, ?2, ?3)",
+                params![root.to_string_lossy(), std::process::id(), crate::procs::me().1],
+            )
+            .unwrap();
+        let mine = db.conn.last_insert_rowid();
+        assert_eq!(db.lane_run(mine).unwrap().unwrap().state, "queued");
+
         std::fs::remove_dir_all(base).ok();
     }
 
@@ -3074,7 +3176,7 @@ wanted {shown}", ran.output);
                 .unwrap();
             db.conn.last_insert_rowid()
         };
-        let mut alive = |pid: i64| pid == me;
+        let mut alive = |r: &Requester| r.pid == Some(me);
         // B's one lane is busy; A's request behind B's waiting one still goes, with a slot free.
         row("B", "running", 3, 1, me);
         let b_waits = row("B", "queued", 3, 1, me);
@@ -3092,7 +3194,7 @@ wanted {shown}", ran.output);
         assert!(!my_turn(&db, a, 2, &mut alive).unwrap(), "the land request takes the one free slot first");
         row("D", "running", 3, 1, 999_999);
         assert!(my_turn(&db, a, 3, &mut alive).unwrap(), "a dead requester's running row holds no slot");
-        let mut all_alive = |_: i64| true;
+        let mut all_alive = |_: &Requester| true;
         assert!(!my_turn(&db, a, 3, &mut all_alive).unwrap(), "while it lives, it does");
         std::fs::remove_dir_all(base).ok();
 
@@ -3114,7 +3216,7 @@ wanted {shown}", ran.output);
         add("A", "done", 9, Some(10));
         let a2 = add("A", "queued", 11, None);
         let b1 = add("B", "queued", 12, None);
-        let mut alive = |pid: i64| pid == me;
+        let mut alive = |r: &Requester| r.pid == Some(me);
         assert!(my_turn(&db, b1, 1, &mut alive).unwrap(), "B was never served; A was, last");
         assert!(!my_turn(&db, a2, 1, &mut alive).unwrap());
         std::fs::remove_dir_all(base).ok();
@@ -3508,7 +3610,7 @@ wanted {shown}", ran.output);
                 .unwrap();
             db.conn.last_insert_rowid()
         };
-        let mut alive = |_: i64| true;
+        let mut alive = |_: &Requester| true;
         let big = row("BIG", None);
         let big2 = row("BIG", None);
         let small = row("SML", None);
@@ -3553,6 +3655,75 @@ wanted {shown}", ran.output);
         let ended = run_logged(sleeper, &base, &log, Duration::from_secs(1), NO_CAP, None).unwrap();
         assert!(ended.timed_out && ended.code.is_none());
         assert!(started.elapsed() < Duration::from_secs(20), "stopped, not waited out");
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn a_queued_run_can_be_cancelled_and_a_running_one_says_how_to_end_it() {
+        let base = crate::paths::unique_temp("nitely-lane-cancel", "");
+        std::fs::create_dir_all(&base).unwrap();
+        let db = Db::open(&base.join("t.db")).unwrap();
+        let row = |state: &str| -> i64 {
+            db.conn
+                .execute(
+                    "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, lane)
+                     VALUES ('APP', 'C:/Code/my-app', 'x', 'run', 's', 't', 'b', 'c', ?1, 'local', 1, ?2, 1)",
+                    params![state, std::process::id()],
+                )
+                .unwrap();
+            db.conn.last_insert_rowid()
+        };
+        let (queued, running) = (row("queued"), row("running"));
+        let cancelled = cancel(&db, queued, &Actor::Human).unwrap();
+        assert_eq!((cancelled.state.as_str(), cancelled.error.as_deref()), ("abandoned", Some("cancelled by human while it was queued")));
+        // Its requester, still looking for its turn, is told and does not run it.
+        let mut alive = |_: &Requester| true;
+        let told = my_turn(&db, queued, 3, &mut alive).unwrap_err().to_string();
+        assert!(told.contains("was taken out of the queue (cancelled by human while it was queued)"), "{told}");
+        let refused = cancel(&db, running, &Actor::Human).unwrap_err().to_string();
+        assert!(refused.contains("is running in lane 1") && refused.contains(&format!("process {}", std::process::id())), "{refused}");
+        std::fs::remove_dir_all(base).ok();
+    }
+
+
+    #[test]
+    fn a_reused_process_number_is_not_the_process_that_had_it() {
+        let (pid, started) = crate::procs::me();
+        assert!(crate::procs::still_runs(pid, started.as_deref()));
+        assert!(crate::procs::still_runs(pid, None), "nothing recorded to compare: the pid decides");
+        if started.is_some() {
+            assert!(!crate::procs::still_runs(pid, Some("another start")));
+        }
+        assert!(!crate::procs::still_runs(999_999, None));
+        assert!(!crate::procs::still_runs(999_999, Some("whenever")));
+    }
+
+
+    #[test]
+    fn a_queued_request_whose_requester_stopped_looking_holds_nobody_up() {
+        let base = crate::paths::unique_temp("nitely-lane-head", "");
+        std::fs::create_dir_all(&base).unwrap();
+        let db = Db::open(&base.join("t.db")).unwrap();
+        let me = std::process::id() as i64;
+        let row = |polled: Option<i64>| -> i64 {
+            db.conn
+                .execute(
+                    "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, priority, lane_count, polled_at)
+                     VALUES ('APP', 'C:/Code/my-app', 'x', 'run', 's', 't', 'b', 'c', 'queued', 'local', 1, ?1, 3, 1, ?2)",
+                    params![me, polled],
+                )
+                .unwrap();
+            db.conn.last_insert_rowid()
+        };
+        let mut alive = |_: &Requester| true;
+        // Its requester lives but last looked two minutes ago (hung, or suspended): the request
+        // behind it goes.
+        let head = row(Some(now() - 120));
+        let behind = row(Some(now()));
+        assert!(my_turn(&db, behind, 2, &mut alive).unwrap());
+        // Looking again puts it back at the head, and the one behind waits.
+        assert!(my_turn(&db, head, 2, &mut alive).unwrap());
+        assert!(!my_turn(&db, behind, 2, &mut alive).unwrap());
         std::fs::remove_dir_all(base).ok();
     }
 }

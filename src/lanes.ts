@@ -43,6 +43,26 @@ export function waiting(p: ProjectLanes): number {
   return p.queue.filter((r) => r.state === "queued").length;
 }
 
+/** How long a request may wait before the strip says so: past this, a requester may have stopped
+ * coming for it (NIT-270), and `nitely lanes cancel` takes it out. */
+export const LONG_WAIT_SECONDS = 10 * 60;
+
+/** "3 waiting", or "3 waiting, longest 14m" once the oldest has waited long, and a line per request
+ * for its tooltip: why it waits, and how to cancel one that has waited long. */
+export function queueWords(p: ProjectLanes, now: number): { label: string; long: boolean; lines: string[] } {
+  const queued = p.queue.filter((r) => r.state === "queued");
+  const longest = Math.max(0, ...queued.map((r) => now - r.queued_at));
+  const long = longest >= LONG_WAIT_SECONDS;
+  const lines = queued.map((r) => {
+    const waited = now - r.queued_at;
+    const reason = r.waiting_why ?? r.waiting_memory;
+    const why = reason ? ` (${reason})` : "";
+    const cancel = waited >= LONG_WAIT_SECONDS ? `, waited ${forHowLong(waited)}: \`nitely lanes cancel ${r.id}\` takes it out` : "";
+    return `${r.issue ?? "no issue"}: ${r.command}${why}${cancel}`;
+  });
+  return { label: `${queued.length} waiting${long ? `, longest ${forHowLong(longest)}` : ""}`, long, lines };
+}
+
 /** "8.3 GB", "640 MB". */
 export function bytesWords(bytes: number): string {
   const gb = bytes / 1024 ** 3;
