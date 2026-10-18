@@ -1377,6 +1377,8 @@ struct QueueRow {
     waits_for_checkout: bool,
     issue: Option<String>,
     started_at: Option<i64>,
+    /// Queued under an older scheduler (NIT-325): passed over, it holds nobody up.
+    older: bool,
 }
 
 /// Where a queued request stands.
@@ -1427,7 +1429,12 @@ fn turns(rows: Vec<QueueRow>, slots: u32, served: &std::collections::HashMap<Str
     }
     let free_lanes = |repo: &str| lanes_by_repo.get(repo).copied().unwrap_or(1) - running_by_repo.get(repo).copied().unwrap_or(0);
     let land_running: HashSet<String> = running.iter().filter(|r| r.w.kind == "land").map(|r| repo_of(&r.w)).collect();
-    let keeps_for_land = |repo: &str| landing.contains(repo) && !land_running.contains(repo);
+    // A land an older nitely runs, whose gate already waits in the queue under the older order:
+    // the queue passes over that gate (NIT-325), so a lane kept for it would only stand empty. Its
+    // own order may put a newer gate first, and the gate waiting for the kept lane while the land
+    // waits for the gate would hold them both for good (NIT-338). Its lane is not kept.
+    let older_land: HashSet<String> = rows.iter().filter(|r| r.older && !r.running && r.w.kind == "land").map(|r| repo_of(&r.w)).collect();
+    let keeps_for_land = |repo: &str| landing.contains(repo) && !land_running.contains(repo) && !older_land.contains(repo);
     let kept_slots = landing.iter().filter(|r| keeps_for_land(r)).count() as i64;
     // The lanes a request of `kind` may take: all of them for a land, one fewer for the rest
     // while the repo's land is coming.
@@ -1547,7 +1554,7 @@ fn queue_rows(db: &Db, me: Option<i64>, alive: &mut dyn FnMut(&Requester) -> boo
             // view, but holds no newer request up (NIT-325).
             let older = state == "queued" && scheduler.is_none_or(|v| v < SCHEDULER);
             let is_alive = Some(w.id) == me || (requester.pid.is_none_or(|_| alive(&requester)) && !stopped_looking && !older);
-            QueueRow { w, running: state == "running", alive: is_alive, lane_count, waits_for_checkout, issue, started_at }
+            QueueRow { w, running: state == "running", alive: is_alive, lane_count, waits_for_checkout, issue, started_at, older }
         })
         .collect();
     // When each project last had a turn (a request of it started), so the one served longest ago
@@ -3541,7 +3548,7 @@ wanted {shown}", ran.output);
     }
 
     fn queued(w: Waiting) -> QueueRow {
-        QueueRow { w, running: false, alive: true, lane_count: 1, waits_for_checkout: false, issue: None, started_at: None }
+        QueueRow { w, running: false, alive: true, lane_count: 1, waits_for_checkout: false, issue: None, started_at: None, older: false }
     }
 
     fn running(w: Waiting, issue: &str, started_at: i64) -> QueueRow {
@@ -3662,6 +3669,24 @@ wanted {shown}", ran.output);
         assert_eq!(t[&4], Turn::Wait("waiting: a lane of its repo is kept for the land in progress".into()), "{t:?}");
         let t = turns(full, 5, &none, now, &Default::default());
         assert!(matches!(t[&4], Turn::LanesBusy(_)), "{t:?}");
+    }
+
+    /// A land an older nitely runs keeps no lane once its gate waits under the older order: in a
+    /// one-lane repo the newer gate, which the older order puts first, goes, and the land after it
+    /// (NIT-338). Without the older mark the lane is kept, as for any land in progress.
+    #[test]
+    fn an_older_nitelys_land_keeps_no_lane_from_the_gate_it_waits_behind() {
+        let none = std::collections::HashMap::new();
+        let now = 10_000;
+        let landing = std::collections::HashSet::from([crate::paths::normalize("C:/Code/NIT")]);
+        let gate = queued(waiting(1, "NIT", "gate", now - 5 * 60 - 10));
+        // The older binary's land: passed over, as queue_rows marks it (not alive, older).
+        let old_land = QueueRow { alive: false, older: true, ..queued(waiting(2, "NIT", "land", now - 60)) };
+        let t = turns(vec![gate.clone(), old_land], 5, &none, now, &landing);
+        assert_eq!(t[&1], Turn::Go, "the gate goes, and the older land after it: {t:?}");
+        // A current land's gate still gets the lane kept for it.
+        let t = turns(vec![gate], 5, &none, now, &landing);
+        assert_eq!(t[&1], Turn::Wait("waiting: a lane of its repo is kept for the land in progress".into()), "{t:?}");
     }
 
     /// `nitely lanes` and the app show why each queued request waits.
