@@ -1293,7 +1293,9 @@ fn run(cmd: Cmd) -> Result<()> {
                 None => format!("{agent}:{}", paths::normalize(&cwd)),
             };
             let folder = format!("{agent}:{}", paths::normalize(&cwd));
-            let took = db.claim_for_start(&issue.key, &holder, &[folder], take_over)?;
+            // Loose: crew's supervisor starts its workers through here after claiming for them, and an
+            // agent's `issue next` may have claimed under another spelling of it.
+            let took = db.claim_for_start(&issue.key, &holder, &[folder], take_over, true)?;
             let mut started = playbook::start_task(&db, &root, &issue, &agent, &me)?;
             started.warnings.extend(took);
             for w in &started.warnings {
