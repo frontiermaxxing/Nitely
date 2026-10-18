@@ -7,7 +7,9 @@ import { exampleRepoPath } from "./AddProject";
 import { LanesStrip } from "./LanesStrip";
 import { BatchesStrip, useBatches } from "./BatchesStrip";
 import { batchStation, landQueueLength } from "./batches";
-import type { BatchesOverview } from "./types";
+import { WaitingStrip, useWaits } from "./WaitingStrip";
+import { behindSummary, waitLine, waitOf } from "./waits";
+import type { BatchesOverview, Waits } from "./types";
 import {
   AgentMark,
   EmptyState,
@@ -41,6 +43,7 @@ export function Now(props: {
   const [showMain, setShowMain] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const batches = useBatches(props.version);
+  const waits = useWaits(props.version);
 
   const syncNow = async () => {
     setSyncing(true);
@@ -61,6 +64,7 @@ export function Now(props: {
       </div>
       <LanesStrip version={props.version} now={now} onOpenIssue={props.onOpenIssue} landQueue={landQueueLength(batches)} />
       <BatchesStrip batches={batches} now={now} onOpenIssue={props.onOpenIssue} />
+      <WaitingStrip waits={waits} now={now} onOpenIssue={props.onOpenIssue} />
       {board.repos.length === 0 && (
         <EmptyState title="No repos yet.">
           <p>Add one from the sidebar, or from a terminal:</p>
@@ -80,7 +84,7 @@ export function Now(props: {
             ) : (
               <div className="now-cards">
                 {rows.map((row) => (
-                  <Card key={row.worktree} row={row} integration={repo.integration_branch} batches={batches} now={now} onOpenIssue={props.onOpenIssue} />
+                  <Card key={row.worktree} row={row} integration={repo.integration_branch} batches={batches} waits={waits} now={now} onOpenIssue={props.onOpenIssue} />
                 ))}
               </div>
             )}
@@ -100,7 +104,7 @@ export function Now(props: {
 }
 
 /** A worktree as a card: who is in it, on what, how far it got, and its last three things. */
-function Card(props: { row: TaskRow; integration: string; batches: BatchesOverview | null; now: number; onOpenIssue: (key: string) => void }) {
+function Card(props: { row: TaskRow; integration: string; batches: BatchesOverview | null; waits: Waits | null; now: number; onOpenIssue: (key: string) => void }) {
   const { row, now } = props;
   const s = row.session;
   const live = livenessOf(s, now);
@@ -115,6 +119,8 @@ function Card(props: { row: TaskRow; integration: string; batches: BatchesOvervi
   if (s) log.push({ t: ago(now, s.started_at).replace(" ago", ""), text: `Session started${row.branch ? ` on ${row.branch}` : ""}` });
   // A batch holding the issue says so: "in a review batch with NIT-4", "landing, 2nd in the queue".
   const inBatch = row.issue ? batchStation(row.issue.key, props.batches) : null;
+  // A request of the issue that waits says what for (NIT-322).
+  const waiting = row.issue ? waitOf(row.issue.key, props.waits) : null;
   const state = st?.rebase_in_progress
     ? { text: "Rebase stopped", color: "var(--fail)" }
     : track
@@ -161,6 +167,11 @@ function Card(props: { row: TaskRow; integration: string; batches: BatchesOvervi
         )}
         {row.error && <span className="error small">{row.error}</span>}
       </div>
+      {waiting && (
+        <p className="now-card-wait" title={behindSummary(waiting, now) ?? undefined}>
+          {waitLine(waiting)}
+        </p>
+      )}
       {log.length > 0 && (
         <div className="now-card-log">
           {log.slice(0, 3).map((l, i) => (

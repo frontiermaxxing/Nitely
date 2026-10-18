@@ -7,6 +7,7 @@ import { HOME_LABEL, agentLabel, agentTitle, ago } from "./util";
 import { GoalRows } from "./GoalRows";
 import { LanesStrip } from "./LanesStrip";
 import { useBatches } from "./BatchesStrip";
+import { WaitingStrip, useWaits } from "./WaitingStrip";
 import { landQueueLength } from "./batches";
 import {
   AgentMark,
@@ -119,6 +120,7 @@ export function Pulse(props: {
   const [data, setData] = useState<PulseData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const batches = useBatches(props.version);
+  const waits = useWaits(props.version);
   // When the data last seen on screen was read; "last seen" never moves past it. A refresh while
   // the window is hidden counts only once the window shows again.
   const shown = useRef<number | null>(null);
@@ -183,6 +185,7 @@ export function Pulse(props: {
           )}
           <RightNow data={data} board={props.board} ctx={ctx} />
           <LanesStrip version={props.version} now={now} onOpenIssue={props.onOpenIssue} landQueue={landQueueLength(batches)} />
+          <WaitingStrip waits={waits} now={now} onOpenIssue={props.onOpenIssue} />
           <GoalRows heading version={props.version} onOpenIssue={props.onOpenIssue} />
           {data.projects.length > 0 && (
             <section>

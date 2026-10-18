@@ -13,6 +13,7 @@ import type {
   LaneRun,
   LanesOverview,
   BatchesOverview,
+  Waits,
   IssueBatches,
   LandRun,
   ReviewBatch,
@@ -872,6 +873,26 @@ function issueBatches(key: string): IssueBatches | undefined {
     "ORB-263": { reviews: [inBatch(done, { state: "done", verdict: "changes", blocking: 1, sent_back: { why: "own", with: [] } })], lands: [] },
   };
   return map[key];
+}
+
+// ----- What waiting requests wait for (NIT-322); `?waits=none` shows none -----
+
+function waitsOverview(): Waits {
+  if (new URLSearchParams(location.search).get("waits") === "none") return { waiting: [] };
+  const run = (id: number, issue: string, kind: string, mins: number) => ({ what: `run ${id}: ${issue} ${kind}`, issue, since: NOW - mins * MIN });
+  return {
+    waiting: [
+      {
+        kind: "run", issue: "NIT-45", project: "NIT", since: NOW - 14 * MIN, place: 2, why: "3 of 3 build slots in use",
+        behind: [run(41, "NIT-31", "gate", 2), run(36, "HAR-14", "gate", 24), run(38, "ORB-271", "gate", 19)],
+      },
+      { kind: "gate", issue: "NIT-44", project: "NIT", since: NOW - 9 * MIN, place: 1, why: "waiting for memory: 3.1 GB free, a gate needs 6 GB", behind: [] },
+      { kind: "land_queue", issue: "ORB-260", project: "ORB", since: NOW - 6 * MIN, place: 1, why: "1st in the land queue, behind a land holding the lock", behind: [{ what: "ORB-265 (land), holding the land lock", issue: "ORB-265", since: NOW - 7 * MIN }] },
+      { kind: "submit", issue: "NIT-30", project: "NIT", since: NOW - 4 * MIN, place: null, why: "waits for the issue's previous submit", behind: [{ what: "submit job 31", issue: "NIT-30", since: NOW - 11 * MIN }] },
+      { kind: "land_queue", issue: "NIT-53", project: "NIT", since: NOW - 2 * MIN, place: 4, why: "4th in the land queue, behind the run landing now", behind: [{ what: "land queue run 7: NIT-29, NIT-52, NIT-54", issue: null, since: NOW - 6 * MIN }] },
+      { kind: "review", issue: "NIT-21", project: "NIT", since: NOW - 40, place: 1, why: "waits for a review batch by codex (1 other change waiting)", behind: [{ what: "review batch 12: NIT-30, NIT-50, NIT-51", issue: null, since: NOW - 3 * MIN }] },
+    ],
+  };
 }
 
 // Its gate ran in a lane before: the timeline names the run, and Open log asks the app for it.
@@ -2015,6 +2036,8 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return lanesOverview().machine;
       case "batches_overview":
         return batchesOverview();
+      case "waits_overview":
+        return waitsOverview();
       case "open_lane_log":
         throw "The preview has no logs to open; the app opens them.";
       case "set_project_brief":

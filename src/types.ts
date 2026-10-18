@@ -428,6 +428,33 @@ export interface LandRun {
   step: string | null;
 }
 
+/** Something a waiting request waits behind (waits.rs `Behind`). */
+export interface WaitBehind {
+  /** "run 412: NIT-290 gate", "submit job 31", "NIT-288 (land), holding the land lock". */
+  what: string;
+  issue: string | null;
+  /** Since when it holds what the request waits for. */
+  since: number | null;
+}
+
+/** A request waiting now, why, and behind what (waits.rs `Waiting`, NIT-322). */
+export interface Waiting {
+  /** run | gate | land | submit | review | land_queue */
+  kind: string;
+  issue: string | null;
+  project: string | null;
+  since: number;
+  why: string;
+  /** Its place in its queue, 1 for the next. */
+  place: number | null;
+  behind: WaitBehind[];
+}
+
+/** Every request waiting now, longest waiting first (src-tauri `waits_overview`). */
+export interface Waits {
+  waiting: Waiting[];
+}
+
 /** The batches going now, for the board (batches.rs `Overview`). */
 export interface BatchesOverview {
   reviewing: ReviewBatch[];

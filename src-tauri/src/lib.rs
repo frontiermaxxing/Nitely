@@ -688,6 +688,12 @@ async fn set_machine_limits(floor_gb: Option<f64>, cap_gb: Option<f64>) -> Resul
     Ok(nitely_core::machine::now())
 }
 
+/// Every request waiting now, why, and what it waits behind (NIT-322).
+#[tauri::command]
+async fn waits_overview() -> Result<nitely_core::waits::Waits, String> {
+    nitely_core::waits::overview(&Config::load().map_err(err)?, &db()?).map_err(err)
+}
+
 /// Review batches and land queues going now, for the board (docs/batching.md, NIT-218).
 #[tauri::command]
 async fn batches_overview() -> Result<nitely_core::batches::Overview, String> {
@@ -880,6 +886,7 @@ pub fn run() {
             lanes_overview,
             set_machine_limits,
             batches_overview,
+            waits_overview,
             open_lane_log,
             issues,
             issue_detail,

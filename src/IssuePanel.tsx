@@ -7,6 +7,8 @@ import { agentLabel, agentTitle, ago, openExternal, PRIORITY } from "./util";
 import { IssueJourney, WhoHadIt } from "./IssueJourney";
 import { issueDecision, type Move } from "./decisions";
 import { batchEvents, issueBatchStation, type BatchEvent } from "./batches";
+import { useWaits } from "./WaitingStrip";
+import { behindSummary, waitLine, waitOf } from "./waits";
 import { GoalPlanDecision } from "./GoalPlanDecision";
 import { PlaybookChangeDecision } from "./PlaybookChangeDecision";
 import { MirrorFact } from "./Mirror";
@@ -156,6 +158,8 @@ export function IssuePanel(props: {
   const [detail, setDetail] = useState<IssueDetail | null>(null);
   // The goals of the issue's project, closed ones too: its goal, and where it can move.
   const [goals, setGoals] = useState<Goal[] | null>(null);
+  // What a request of the issue waits for, if one does (NIT-322).
+  const waits = useWaits(props.version);
   const project = detail?.issue.project ?? null;
   useEffect(() => {
     if (!project) return;
@@ -319,6 +323,12 @@ export function IssuePanel(props: {
                 </div>
               )}
               {issueBatchStation(issue.key, detail.batches) && <p className="panel-batch small">{capital(issueBatchStation(issue.key, detail.batches)!)}</p>}
+              {waitOf(issue.key, waits) && (
+                <p className="panel-wait">
+                  {waitLine(waitOf(issue.key, waits)!)}
+                  {behindSummary(waitOf(issue.key, waits)!, props.now) && <span className="muted">, {behindSummary(waitOf(issue.key, waits)!, props.now)}</span>}
+                </p>
+              )}
               <WhoHadIt detail={detail} now={props.now} />
               <IssueJourney key={issue.key} detail={detail} now={props.now} />
               <SpendLine key={`spend-${issue.key}`} detail={detail} now={props.now} />

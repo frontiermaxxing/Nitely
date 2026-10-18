@@ -1,0 +1,23 @@
+/* What every waiting request waits for (NIT-322): Now and Overview's list, and a card's line. */
+.wait-rows { list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.wait-row {
+  display: grid; grid-template-columns: 76px 72px minmax(0, 1fr) auto; align-items: baseline; gap: 2px 12px;
+  padding: 8px 14px; font-size: var(--text-sm);
+}
+.wait-row + .wait-row { border-top: 1px solid var(--line); }
+.wait-kind { color: var(--fg-3); font-size: var(--text-xs); letter-spacing: 0.02em; }
+.wait-key { font-size: var(--text-xs); justify-self: start; }
+.wait-why { color: var(--fg); min-width: 0; }
+.wait-age { color: var(--fg-3); font-size: var(--text-xs); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.wait-behind { grid-column: 3 / -1; color: var(--fg-3); font-size: var(--text-xs); overflow-wrap: anywhere; }
+.wait-behind .link { font-size: inherit; color: var(--fg-2); }
+/* On an issue's card and panel: what it waits for, under its station. */
+.now-card-wait, .panel-wait { margin: 0; color: var(--fg-2); font-size: var(--text-xs); overflow-wrap: anywhere; }
+.panel-wait { margin: -14px 0 20px; font-size: var(--text-sm); }
+
+@media (max-width: 560px) {
+  .wait-row { grid-template-columns: max-content minmax(0, 1fr) auto; }
+  .wait-kind { grid-column: 1; }
+  .wait-age { grid-column: 3; grid-row: 1; }
+  .wait-why, .wait-behind { grid-column: 1 / -1; }
+}
