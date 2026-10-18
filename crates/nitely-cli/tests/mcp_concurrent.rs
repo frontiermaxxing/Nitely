@@ -10,14 +10,15 @@ use std::time::{Duration, Instant};
 
 struct Mcp {
     child: Child,
-    stdin: ChildStdin,
+    stdin: Option<ChildStdin>,
     replies: mpsc::Receiver<Value>,
 }
 
 impl Mcp {
     fn send(&mut self, message: Value) {
-        writeln!(self.stdin, "{message}").unwrap();
-        self.stdin.flush().unwrap();
+        let stdin = self.stdin.as_mut().unwrap();
+        writeln!(stdin, "{message}").unwrap();
+        stdin.flush().unwrap();
     }
 
     fn call(&mut self, id: i64, name: &str, arguments: Value) {
@@ -75,7 +76,7 @@ fn setup(name: &str) -> (Mcp, i64, std::path::PathBuf) {
             }
         }
     });
-    let mut mcp = Mcp { child, stdin, replies };
+    let mut mcp = Mcp { child, stdin: Some(stdin), replies };
     mcp.send(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18", "clientInfo": { "name": "claude-code" } } }));
     assert_eq!(mcp.next(Duration::from_secs(20)).unwrap()["id"], 1);
     mcp.send(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
@@ -117,5 +118,30 @@ fn a_cancelled_call_is_not_answered_and_frees_the_server() {
     mcp.call(6, "list_issues", json!({ "project": "APP" }));
     assert_eq!(mcp.next(Duration::from_secs(20)).unwrap()["id"], 6);
     drop(mcp);
+    std::fs::remove_dir_all(base).ok();
+}
+
+#[test]
+fn a_cancel_for_a_call_not_running_does_not_silence_a_later_one() {
+    let (mut mcp, _run, base) = setup("nitely-mcp-stale-cancel");
+    mcp.send(json!({ "jsonrpc": "2.0", "method": "notifications/cancelled", "params": { "requestId": 7 } }));
+    mcp.call(7, "list_issues", json!({ "project": "APP" }));
+    assert_eq!(mcp.next(Duration::from_secs(20)).unwrap()["id"], 7, "the id was free again");
+    drop(mcp);
+    std::fs::remove_dir_all(base).ok();
+}
+
+#[test]
+fn a_call_still_running_when_the_client_leaves_finishes_before_the_server_exits() {
+    let (mut mcp, run, base) = setup("nitely-mcp-leave");
+    mcp.call(8, "run_status", json!({ "id": run, "wait_seconds": 600 }));
+    std::thread::sleep(Duration::from_millis(500));
+    let left = Instant::now();
+    mcp.stdin.take();
+    let answered = mcp.next(Duration::from_secs(20)).expect("the call still ends and answers");
+    assert_eq!(answered["id"], 8);
+    let status = mcp.child.wait().unwrap();
+    assert!(status.success(), "{status:?}");
+    assert!(left.elapsed() >= Duration::from_secs(2), "it waited for the call: {:?}", left.elapsed());
     std::fs::remove_dir_all(base).ok();
 }

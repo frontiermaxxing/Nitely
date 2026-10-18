@@ -5,7 +5,8 @@
 //!
 //! Each tool call runs on a thread of its own and is answered when it ends, so a long one (a lane
 //! run, a land) never holds up the agent's next calls; a call the client cancels is not answered;
-//! and no call waits past `wait_cap`, below the clients' own timeouts (NIT-308).
+//! and no call waits past `wait_cap`, below the clients' own timeouts (NIT-308). Work still going
+//! when the client leaves (a land past the cap) finishes before the process exits.
 
 use anyhow::{anyhow, bail, Context, Result};
 use nitely_core::db::NewEvent;
@@ -17,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 
@@ -129,6 +130,33 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
+/// Work running in this process: tool calls, and what one left running past the cap.
+static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+/// Counts as work in flight while it lives.
+struct Busy;
+
+impl Busy {
+    fn start() -> Busy {
+        IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
+        Busy
+    }
+}
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Waits until no work is in flight: the client closed its end, and a land or a lane run it left
+/// running past the cap must not die halfway with the process.
+fn finish_in_flight() {
+    while IN_FLIGHT.load(Ordering::SeqCst) > 0 {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// Writes one message as a whole line: replies from several threads never interleave.
 fn send(out: &Mutex<std::io::Stdout>, message: &Value) {
     let mut out = lock(out);
@@ -140,7 +168,9 @@ pub fn serve() -> Result<()> {
     let exe = std::env::current_exe().ok().and_then(|p| nitely_core::install::stamp(&p).map(|s| (p, s)));
     let server = Mutex::new(Server { vendor: "agent".into(), cwd: std::env::current_dir()?.to_string_lossy().into_owned(), exe, remote: None });
     let out = Arc::new(Mutex::new(std::io::stdout()));
-    // Calls the client cancelled while they ran: their answers are not sent.
+    // Tool calls still running, and those of them the client cancelled: a cancelled one is not
+    // answered. Both forget a call when it ends, so an id the client uses again is a new call.
+    let running: Arc<Mutex<HashSet<String>>> = Arc::default();
     let cancelled: Arc<Mutex<HashSet<String>>> = Arc::default();
     let stdin = std::io::stdin();
     for line in stdin.lock().lines() {
@@ -157,15 +187,21 @@ pub fn serve() -> Result<()> {
         };
         match (msg.get("method").and_then(Value::as_str).unwrap_or(""), msg.get("id")) {
             ("notifications/cancelled", _) => {
-                if let Some(id) = msg.pointer("/params/requestId") {
-                    lock(&cancelled).insert(id.to_string());
+                if let Some(id) = msg.pointer("/params/requestId").map(Value::to_string) {
+                    if lock(&running).contains(&id) {
+                        lock(&cancelled).insert(id);
+                    }
                 }
             }
             // A tool call runs on its own thread: a long one holds up nothing after it.
             ("tools/call", Some(id)) => {
-                let (mut server, out, cancelled, id) = (lock(&server).clone(), Arc::clone(&out), Arc::clone(&cancelled), id.to_string());
+                let (mut server, out, running, cancelled, id) = (lock(&server).clone(), Arc::clone(&out), Arc::clone(&running), Arc::clone(&cancelled), id.to_string());
+                lock(&running).insert(id.clone());
+                let busy = Busy::start();
                 std::thread::spawn(move || {
+                    let _busy = busy;
                     let reply = handle(&mut server, &msg);
+                    lock(&running).remove(&id);
                     if !lock(&cancelled).remove(&id) {
                         if let Some(reply) = reply {
                             send(&out, &reply);
@@ -182,14 +218,17 @@ pub fn serve() -> Result<()> {
             }
         }
     }
+    finish_in_flight();
     Ok(())
 }
 
 /// Runs `work` on a thread of its own and waits for it up to `wait_cap`. Past that, answers with
-/// what `pending` says and leaves the work running in this process, to finish on its own.
+/// what `pending` says and leaves the work running in this process, which stays until it ends.
 fn within_cap(work: impl FnOnce() -> Result<Value> + Send + 'static, pending: impl FnOnce() -> Result<Value>) -> Result<Value> {
     let (tx, rx) = mpsc::channel();
+    let busy = Busy::start();
     std::thread::spawn(move || {
+        let _busy = busy;
         tx.send(work()).ok();
     });
     match rx.recv_timeout(wait_cap()) {
@@ -340,7 +379,7 @@ fn tools() -> Value {
             "inputSchema": { "type": "object", "properties": {
                 "key": { "type": "string", "description": "The issue; defaults to the one your branch names." },
                 "worktree": { "type": "string", "description": "Defaults to the worktree you are in." },
-                "wait": { "type": "boolean", "description": "Block until the gate and review finish and return the full result, as submit did before." }
+                "wait": { "type": "boolean", "description": "Wait for the gate and review (up to 5 minutes) and return the full result; past that, the job goes on and submit_status gives its result." }
             } }
         },
         {
@@ -674,19 +713,23 @@ fn forward_once(server: &Server, params: &Value, exe: &std::path::Path) -> Optio
 
 /// `nitely mcp-calls`: the calls an older `nitely mcp` forwards to this build, one JSON object
 /// per line on stdin ({id, vendor, cwd, params}). Each runs on a thread of its own and is answered
-/// as {id, result} when it ends; the process ends when the server that started it does.
+/// as {id, result} when it ends. When the server that started it closes its end (it exited, or a
+/// newer build replaced this one), what is still running finishes first, then the process ends.
 pub fn serve_calls() -> Result<()> {
     let out = Arc::new(Mutex::new(std::io::stdout()));
     for line in std::io::stdin().lock().lines() {
         let line = line?;
         let Ok(request) = serde_json::from_str::<Value>(&line) else { continue };
         let out = Arc::clone(&out);
+        let busy = Busy::start();
         std::thread::spawn(move || {
+            let _busy = busy;
             let server = Server { vendor: str_arg(&request, "vendor").unwrap_or("agent").to_string(), cwd: str_arg(&request, "cwd").unwrap_or(".").to_string(), exe: None, remote: None };
             let result = call_tool(&server, request.get("params").unwrap_or(&json!({})));
             send(&out, &json!({ "id": request.get("id"), "result": result }));
         });
     }
+    finish_in_flight();
     Ok(())
 }
 
@@ -954,20 +997,26 @@ fn run_tool(server: &Server, name: &str, args: &Value, params: &Value) -> Result
         "submit" => {
             let dir = task_dir(&config, &db, args, &server.cwd)?;
             nitely_core::install::check_current(&config, &dir, env!("NITELY_COMMIT"))?;
+            let opts = nitely_core::submit::SubmitOptions { dir: &dir, issue_key: str_arg(args, "key"), skip_review: false, local_only: false, batch: false };
+            let runner = nitely_core::submit_job::DetachedProcess { nitely: std::env::current_exe()? };
+            let job = nitely_core::submit_job::submit_async(&mut db, &config, &opts, &actor, &runner)?;
             if args.get("wait").and_then(Value::as_bool).unwrap_or(false) {
-                let (config, by, key) = (config.clone(), actor.clone(), str_arg(args, "key").map(str::to_string));
-                within_cap(
-                    move || {
-                        let mut db = Db::open_default()?;
-                        let opts = nitely_core::submit::SubmitOptions { dir: &dir, issue_key: key.as_deref(), skip_review: false, local_only: false, batch: false };
-                        Ok(json!(nitely_core::submit::submit(&mut db, &config, &opts, &by)?))
-                    },
-                    || Ok(json!({ "still_running": true, "next": format!("The submit is still running after {}s; it goes on here. Call submit_status with the issue key for its result.", wait_cap().as_secs()) })),
-                )?
+                // The job runs in a process of its own, so it outlives this call and this server;
+                // waiting on it here is only waiting.
+                let job = nitely_core::submit_job::wait(&db, job.id, wait_cap())?;
+                match (&job.result, job.finished()) {
+                    (Some(result), true) => {
+                        job_json(&db, &job, &actor)?;
+                        result.clone()
+                    }
+                    (_, true) => job_json(&db, &job, &actor)?,
+                    (_, false) => {
+                        let mut v = job_json(&db, &job, &actor)?;
+                        v["next"] = json!(format!("Still {} after {}s: call submit_status with id {} (and wait_seconds) for the result.", job.state, wait_cap().as_secs(), job.id));
+                        v
+                    }
+                }
             } else {
-                let opts = nitely_core::submit::SubmitOptions { dir: &dir, issue_key: str_arg(args, "key"), skip_review: false, local_only: false, batch: false };
-                let runner = nitely_core::submit_job::DetachedProcess { nitely: std::env::current_exe()? };
-                let job = nitely_core::submit_job::submit_async(&mut db, &config, &opts, &actor, &runner)?;
                 job_json(&db, &job, &actor)?
             }
         }
@@ -994,7 +1043,7 @@ fn run_tool(server: &Server, name: &str, args: &Value, params: &Value) -> Result
                     let opts = nitely_core::land::LandOptions { dir: &cwd, issue_key: &key, push: true, keep: false, break_lock: false };
                     Ok(json!(nitely_core::land::land(&mut db, &config, &opts, &by)?))
                 },
-                || Ok(json!({ "still_running": true, "next": format!("The land of {waiting} is still running after {}s; it goes on here. get_issue {waiting} shows when it landed or why it stopped.", wait_cap().as_secs()) })),
+                || Ok(json!({ "still_running": true, "next": format!("The land of {waiting} is still running after {}s; it goes on in this server, which stays until it ends. get_issue {waiting} shows when it landed or why it stopped.", wait_cap().as_secs()) })),
             )?
         }
         "get_issue" => {
