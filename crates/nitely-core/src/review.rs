@@ -29,6 +29,10 @@ pub struct ReviewRules {
     pub flags: Vec<Flag>,
     /// Extra instructions for the reviewer, e.g. what matters most in this codebase.
     pub focus: String,
+    /// What this change is for, given by submit, not the playbook: its issue, the gate's result,
+    /// the author's notes since the last round, what the person accepted elsewhere (NIT-282).
+    #[serde(skip)]
+    pub context: String,
     pub timeout_minutes: u64,
     /// A review by the author's own vendor (because no other reviewer is installed, or the
     /// `reviewer` map says so) sends the change to a human instead of approving it.
@@ -87,6 +91,7 @@ impl Default for ReviewRules {
             ]),
             flags: vec![],
             focus: String::new(),
+            context: String::new(),
             timeout_minutes: 20,
             require_cross_vendor: false,
             batch: BatchMode::Off,
@@ -200,7 +205,10 @@ impl Review {
 
 /// How severities are judged, word for word in a single and a batched review, so batching does not
 /// change what a P1 is.
-const SEVERITIES: &str = "using P0 for data loss or security, P1 for a definite bug in normal use, P2 for an edge case, P3 for a minor issue.";
+const SEVERITIES: &str = "using P0 for data loss or security, P1 for a definite bug in normal use, P2 for an edge case, P3 for a minor issue. \
+A P0 or P1 must name a concrete failure: the inputs or state that lead to a wrong result, data loss, a leak or a crash, and the \
+file and line that cause it. A risk with no such failure (\"what if\", a missing guard nothing reaches) is P2 at most, however \
+serious it sounds.";
 
 /// What an answer about a previous finding must hold, after its format (NIT-214).
 const PREVIOUS_RULES: &str = "where file, line and code are from the current branch, the code is at that line, and <how> says in a few words how \
@@ -406,6 +414,9 @@ regressions. Skip style. Do not edit anything.\n",
                 c = prev.commit
             ),
         };
+        if !self.context.trim().is_empty() {
+            p.push_str(&format!("\n{}\n", self.context.trim()));
+        }
         if let Some(prev) = previous.filter(|p| !p.findings.is_empty()) {
             p.push_str("\nFirst, check each finding of that review against the current code:\n");
             for (i, f) in prev.findings.iter().enumerate() {
@@ -483,6 +494,12 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
             }
         }
         let mut findings = parse_findings(text);
+        // A P0 or P1 that points at no file names no concrete failure: it counts as P2, and keeps
+        // the priority it was raised at, which a later round can restore by citing the code (NIT-282).
+        for f in findings.iter_mut().filter(|f| f.priority <= 1 && citations(&f.text).is_empty()) {
+            f.raised_as = Some(f.priority);
+            f.priority = 2;
+        }
         let statuses = parse_previous(text);
         let code = worktree.map(CurrentCode::new);
         let previous: Vec<Recheck> = previous
@@ -1642,5 +1659,22 @@ VERDICT 1: findings\nMONEY_OR_RELEASE 1: no\nVERDICT 2: findings\nMONEY_OR_RELEA
         // Rebased after a review that asked for changes: the whole change, as before.
         let p = rules().prompt("origin/main", Some(&previous(false)));
         assert!(p.contains("so review the whole change again") && !p.contains("range-diff"), "{p}");
+    }
+
+    #[test]
+    fn a_p1_that_points_at_no_code_counts_as_p2_and_the_change_s_purpose_comes_first() {
+        let text = "- [P1] Could break someday: if the config ever grows, loading may slow down\n\
+- [P1] Drops a row: src/a.rs, f: the last row of every page\nVERDICT: findings\nMONEY_OR_RELEASE: no\n";
+        let r = rules().parse("codex", text, 1, None, None).unwrap();
+        assert_eq!((r.findings[0].priority, r.findings[0].raised_as), (2, Some(1)), "no file, no concrete failure: P2 at most");
+        assert_eq!((r.findings[1].priority, r.findings[1].raised_as), (1, None));
+        assert_eq!(r.verdict, "changes");
+        // The rubric is in the prompt, and what the change is for comes before the line-level work.
+        let mut with = rules();
+        with.context = "What the change is for, its issue APP-1 \"Footer\":\nShow the footer.".into();
+        let p = with.prompt("main", None);
+        assert!(p.contains("must name a concrete failure") && p.contains("is P2 at most"), "{p}");
+        let (purpose, findings) = (p.find("What the change is for").unwrap(), p.find("Report each defect").unwrap());
+        assert!(purpose < findings, "{p}");
     }
 }

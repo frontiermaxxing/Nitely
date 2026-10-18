@@ -159,6 +159,9 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
             let at = r.reused.as_deref().unwrap_or_default();
             db.log_event(actor, Some(&issue.key), Some(&wt), "status", &format!("The same patch passed review at {}: that pass carries over, so it is not reviewed again", &at[..at.len().min(7)]))?;
         }
+        // The single review knows what the change is for (NIT-282).
+        let mut rules = pb.review.clone();
+        rules.context = review_context(db, &issue, &out.gate)?;
         // From a batch: the review, or what its review found for this change that its single review
         // must carry (an interaction with another change).
         let (batched, extra) = if reused.is_some() {
@@ -176,7 +179,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
             let reviewer = choice.reviewer.clone();
             let started = format!("Review by {reviewer}{} started", noted(&choice.note));
             db.log_event(actor, Some(&issue.key), Some(&wt), "review_started", &started)?;
-            match pb.review.run(&reviewer, &worktree, &since, previous.as_ref()) {
+            match rules.run(&reviewer, &worktree, &since, previous.as_ref()) {
                 Ok(r) => break (choice, r),
                 Err(e) => match e.downcast::<crate::review::CouldNotRun>() {
                     Ok(out) => {
@@ -416,6 +419,59 @@ fn shadow_of(
         review_id: 0,
         rules: pb.review.clone(),
     }))
+}
+
+/// What a single review is told about the change beyond its diff (NIT-282): the issue it is for,
+/// so it checks the change does what was asked first; the gate's result; the author's notes since
+/// the last round, which may answer its findings; and findings the person accepted as trade-offs on
+/// other changes, as examples of what is not a P0/P1 here.
+pub(crate) fn review_context(db: &Db, issue: &IssueRecord, gate: &GateResult) -> Result<String> {
+    let mut c = String::new();
+    let body: String = issue.body.chars().take(2500).collect();
+    c.push_str(&format!(
+        "What the change is for, its issue {} \"{}\":\n{}\n\nFirst check that the change does what the issue asks (its \"done when\", \
+when it has one): a gap there is a finding like any other, and comes before line-level problems.\n",
+        issue.key,
+        issue.title,
+        body.trim()
+    ));
+    let gate: Vec<String> = gate.results.iter().filter(|r| !r.skipped || r.ok).map(|r| format!("`{}`", r.command)).collect();
+    if !gate.is_empty() {
+        c.push_str(&format!("\nThe gate passed: {}. Do not report what it already checks.\n", gate.join(", ")));
+    }
+    let last = db.reviews(&issue.key)?.into_iter().find(|r| !r.reviewer.is_empty()).map(|r| r.ts);
+    if let Some(since) = last {
+        let notes: Vec<String> = db
+            .conn
+            .prepare(
+                "SELECT summary FROM event WHERE issue_key = ?1 COLLATE NOCASE AND type IN ('note', 'handoff') AND ts >= ?2 AND actor != 'human'
+                 AND summary IS NOT NULL ORDER BY id DESC LIMIT 5",
+            )?
+            .query_map(rusqlite::params![issue.key, since], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        if !notes.is_empty() {
+            c.push_str("\nThe author's notes since that review, which may answer its findings:\n");
+            for n in notes.iter().rev() {
+                c.push_str(&format!("- {}\n", n.chars().take(600).collect::<String>().replace('\n', " ")));
+            }
+        }
+    }
+    let prefix = issue.key.split('-').next().unwrap_or("");
+    let accepted: Vec<(i64, String, String)> = db
+        .conn
+        .prepare(
+            "SELECT priority, finding, reason FROM accepted_finding WHERE issue_key LIKE ?1 || '-%' AND issue_key != ?2 COLLATE NOCASE AND priority <= 1
+             ORDER BY id DESC LIMIT 3",
+        )?
+        .query_map(rusqlite::params![prefix, issue.key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    if !accepted.is_empty() {
+        c.push_str("\nOn other changes, the person accepted these as trade-offs they decided, not defects: do not raise their like at P0 or P1.\n");
+        for (priority, finding, reason) in accepted {
+            c.push_str(&format!("- [P{priority}] {} (accepted: {reason})\n", finding.chars().take(300).collect::<String>()));
+        }
+    }
+    Ok(c)
 }
 
 /// How many review rounds in a row may ask for changes before the issue goes to a person.
@@ -1311,5 +1367,27 @@ focus = \"Money first.\"
         let in_b = f.submit(&wt, true).unwrap();
         assert_eq!(in_b.patch_id, in_a.patch_id);
         assert!(in_b.review.as_ref().is_some_and(|r| r.reused.is_none()), "another change gets its own review: {in_b:?}");
+    }
+
+    #[test]
+    fn a_review_is_told_what_the_change_is_for_what_the_author_said_and_what_was_accepted_elsewhere() {
+        let mut f = fixture();
+        let (issue, wt) = f.committed("Footer links", "footer.txt");
+        let first = f.submit(&wt, true).unwrap();
+        // Since that round: the author's note, and a finding the person accepted on another issue.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        f.db.add_note(&issue.key, "The empty line is kept on purpose: the footer needs it.", "note", &f.actor).unwrap();
+        f.db.conn
+            .execute(
+                "INSERT INTO accepted_finding (issue_key, patch_id, priority, finding, reason, ts, signature) VALUES ('NIT-99', 'p', 1, 'No migration: keys.txt, load', 'no outside users yet', 1, 's')",
+                [],
+            )
+            .unwrap();
+        let issue = f.db.issue(&issue.key).unwrap().unwrap();
+        let c = review_context(&f.db, &issue, &first.gate).unwrap();
+        assert!(c.contains(&format!("its issue {} \"Footer links\"", issue.key)) && c.contains("does what the issue asks"), "{c}");
+        assert!(c.contains("The gate passed: `exit 0`."), "{c}");
+        assert!(c.contains("- The empty line is kept on purpose: the footer needs it."), "{c}");
+        assert!(c.contains("- [P1] No migration: keys.txt, load (accepted: no outside users yet)"), "{c}");
     }
 }
