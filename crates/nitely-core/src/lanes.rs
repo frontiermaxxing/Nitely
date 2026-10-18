@@ -1148,7 +1148,9 @@ fn gate_inner(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: 
     if let Some(why) = &run.error {
         // The setup's own output too, so the caller sees why it failed.
         let output = if run.output.trim().is_empty() { why.clone() } else { format!("{why}\n{}", run.output) };
-        results.push(playbook::CommandResult { command: format!("lane {}", run.lane.unwrap_or(0)), ok: false, seconds: 0, output, skipped: false, timed_out: false });
+        // Setup that ran past the lane's limit stopped the gate before any of it ran (NIT-310).
+        let timed_out = why.starts_with(SETUP_TIMED_OUT);
+        results.push(playbook::CommandResult { command: format!("lane {}", run.lane.unwrap_or(0)), ok: false, seconds: 0, output, skipped: false, timed_out });
     }
     Ok(GateRun { yolo_skipped, commit: short, passed: run.passed() && !yolo_skipped, results, flaked, run: Some(run.id), warnings })
 }
@@ -2668,6 +2670,9 @@ fn create_lane(repo_root: &Path, lane: &Path, commit: &str) -> Result<()> {
     Ok(())
 }
 
+/// How a lane's setup that ran past the lane's time limit begins its error.
+const SETUP_TIMED_OUT: &str = "setup ran past";
+
 /// Runs the playbook's setup in `lane` when it has never passed there, or a dependency file differs
 /// from the last time it passed; each command bounded by `limit`. The record of a passed setup is
 /// written only after every command passed, so a setup that failed or was stopped runs again next
@@ -2698,7 +2703,7 @@ fn ensure_setup(repo_root: &Path, pb: &Playbook, lane: &Path, base: &str, log: &
             let ended = run_logged(&command, lane, log, limit, share, Some(temp))?;
             match (ended.code, ended.timed_out) {
                 (Some(0), _) => break,
-                (_, true) => bail!("setup ran past {} minutes in the lane and was stopped: {command}", limit.as_secs() / 60),
+                (_, true) => bail!("{SETUP_TIMED_OUT} {} minutes in the lane and was stopped: {command}", limit.as_secs() / 60),
                 (code, false) if tries >= pb.gate.retries => {
                     bail!("setup failed in the lane (exit {}): {command}", code.map_or("none".to_string(), |c| c.to_string()))
                 }

@@ -307,6 +307,11 @@ pub fn after_auto_land(db: &mut Db, key: &str, landed: &Result<Landed>, actor: &
         Ok(r) => {
             let why = r.error.clone().unwrap_or_else(|| "it did not land".into());
             db.add_note(key, &format!("The automatic land stopped: {}", why.lines().next().unwrap_or("")), "land", actor)?;
+            // A gate that ran past the lane's time limit says nothing about the change: the issue
+            // stays where it is, and nobody is sent to fix code that did not fail (NIT-310).
+            if r.gate.as_ref().is_some_and(|g| g.timed_out().is_some()) {
+                return Ok((state(db)?, format!("Nitely tried to land it and stopped: {why}\nNothing in the change is to fix: land it again.")));
+            }
             let issue = db.issue(key)?.with_context(|| format!("no issue {key}"))?;
             // Sent back to Needs You for an unsigned approval: the person approves it again.
             if issue.origin == "nitely" && issue.state != "In Progress" && !why.contains(crate::approval::UNSIGNED) {
@@ -1197,6 +1202,28 @@ mod tests {
     }
     use crate::issues::NewIssue;
     use crate::submit::{submit, SubmitOptions};
+
+    #[test]
+    fn an_automatic_land_whose_gate_ran_past_the_lane_limit_leaves_the_issue_where_it_is() {
+        let mut f = fixture();
+        let new = NewIssue { project: "NIT".into(), title: "Timed out".into(), kind: "bug".into(), body: "b".into(), evidence: "e".into(), source: "human".into(), allow_similar: true, ..Default::default() };
+        let issue = f.db.create_issue(&new, &f.actor).unwrap();
+        f.db.move_issue(&issue.key, "In Review", None, None, &f.actor).unwrap();
+        let step = |timed_out: bool| playbook::CommandResult { command: "cargo test".into(), ok: false, seconds: 1800, output: String::new(), skipped: false, timed_out };
+        let stopped = |timed_out: bool| -> Result<Landed> {
+            let gate = GateResult { passed: false, commit: "abc1234".into(), results: vec![step(timed_out)], warnings: vec![], flaked: vec![], lane_run: None };
+            Ok(Landed { issue: issue.key.clone(), error: Some("the gate stopped".into()), gate: Some(gate), ..Default::default() })
+        };
+        let (state, next) = after_auto_land(&mut f.db, &issue.key, &stopped(true), &f.actor).unwrap();
+        assert_eq!(state, "In Review");
+        assert!(next.contains("Nothing in the change is to fix") && !next.contains("Fix it"), "{next}");
+        // A gate that failed sends it back, as before.
+        let (state, next) = after_auto_land(&mut f.db, &issue.key, &stopped(false), &f.actor).unwrap();
+        assert_eq!(state, "In Progress");
+        assert!(next.contains("Fix it, commit, and submit again"), "{next}");
+        drop(f.db);
+        std::fs::remove_dir_all(&f.base).ok();
+    }
 
     struct Fixture {
         base: PathBuf,
