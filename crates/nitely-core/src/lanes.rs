@@ -2038,6 +2038,12 @@ fn run_logged(command: &str, dir: &Path, log: &Path, limit: Duration, share: Sha
     // Its temporary files in the request's own folder, and git's templates empty (NIT-289).
     if let Some(temp) = temp {
         cmd.env("TMP", temp).env("TEMP", temp).env("TMPDIR", temp).env("GIT_TEMPLATE_DIR", temp.join(GIT_TEMPLATE));
+        // A Nitely data folder of the request's own: a branch's nitely run here never opens, nor
+        // upgrades, the person's database (NIT-330). NITELY_LANE_REAL_HOME=1 on the requester's
+        // side keeps theirs (a command meant to read the real one, with an installed nitely).
+        if std::env::var_os("NITELY_LANE_REAL_HOME").is_none() {
+            cmd.env("NITELY_HOME", temp.join("nitely-home"));
+        }
     }
     #[cfg(unix)]
     {
@@ -3000,9 +3006,9 @@ let id = db.conn.last_insert_rowid();
         let snap = snapshot(&root).unwrap();
         let actor = Actor::Agent("claude:test".into());
         let leave = if cfg!(windows) {
-            r#"echo temp=%TEMP% tmp=%TMP% && echo left> "%TEMP%\left.txt" && git init -q "%TEMP%\made" && dir /b "%TEMP%\made\.git""#
+            r#"echo home=%NITELY_HOME% && echo temp=%TEMP% tmp=%TMP% && echo left> "%TEMP%\left.txt" && git init -q "%TEMP%\made" && dir /b "%TEMP%\made\.git""#
         } else {
-            r#"echo temp=$TEMP tmp=$TMPDIR && echo left > "$TMPDIR/left.txt" && git init -q "$TMPDIR/made" && ls "$TMPDIR/made/.git""#
+            r#"echo home=$NITELY_HOME && echo temp=$TEMP tmp=$TMPDIR && echo left > "$TMPDIR/left.txt" && git init -q "$TMPDIR/made" && ls "$TMPDIR/made/.git""#
         };
         let req = Request { project: "APP", issue: None, kind: Kind::Run, snapshot: &snap, command: leave };
         let ran = run(&db, &root, &pb, &req, &actor, &mut |_| {}).unwrap();
@@ -3013,6 +3019,9 @@ let id = db.conn.last_insert_rowid();
         assert!(ran.output.contains(&format!("temp={shown}")) && ran.output.contains(&format!("tmp={shown}")), "{}
 wanted {shown}", ran.output);
         assert!(!ran.output.contains("hooks"), "no hook samples: {}", ran.output);
+        // A Nitely data folder of its own, never the person's (NIT-330).
+        let home = temp.join("nitely-home").to_string_lossy().into_owned();
+        assert!(ran.output.contains(&format!("home={home}")), "{}\nwanted home={home}", ran.output);
         assert!(temp.join("left.txt").exists());
         let next = Request { project: "APP", issue: None, kind: Kind::Run, snapshot: &snap, command: "echo next" };
         assert!(run(&db, &root, &pb, &next, &actor, &mut |_| {}).unwrap().passed());

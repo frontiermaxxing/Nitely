@@ -518,6 +518,36 @@ fn upgraded_by_path(db: &Path) -> std::path::PathBuf {
     db.with_file_name(name)
 }
 
+/// Why this build must not upgrade the database at `db` (NIT-330), or None when it may: `db` is the
+/// person's own (`real_db`), and this program `exe` is a cargo build's output (a `target/<profile>`
+/// folder holding `.fingerprint`), not the installed nitely or a release. Such a build, a branch's
+/// run by hand in a lane or a worktree, would apply its own migrations, and then every installed
+/// nitely refuses the database until someone reverts it. `allowed` (NITELY_UPGRADE_REAL_DATA) lets
+/// it anyway; `pending` is the first migration it would run.
+fn may_not_upgrade(db: &Path, real_db: &Path, exe: Option<&Path>, pending: Option<&str>, allowed: bool) -> Option<String> {
+    if allowed {
+        return None;
+    }
+    let same = |a: &Path, b: &Path| match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => crate::paths::normalize(&a.to_string_lossy()) == crate::paths::normalize(&b.to_string_lossy()),
+    };
+    if !same(db, real_db) {
+        return None;
+    }
+    let exe = exe?;
+    let dir = exe.parent()?;
+    let profile = if dir.file_name().is_some_and(|n| n == "deps") { dir.parent()? } else { dir };
+    if !profile.join(".fingerprint").is_dir() {
+        return None;
+    }
+    let what = pending.map(|m| format!(" (migration {m})")).unwrap_or_default();
+    Some(format!(
+        "{} is a build that is not installed, so it does not upgrade your own Nitely database{what}: every installed nitely would refuse it afterwards. Run it with NITELY_HOME set to a scratch folder (`nitely run` does), or install it (`nitely install`); NITELY_UPGRADE_REAL_DATA=1 lets it upgrade anyway",
+        exe.display()
+    ))
+}
+
 /// What an older build says when it meets a database a newer one upgraded (an update from a newer
 /// channel to an older one): it does not open it, so it can never write in a form the newer build
 /// misreads. `what` says what it does not know.
@@ -552,6 +582,14 @@ impl Db {
             Standing::Current => {}
             Standing::Newer(what) => anyhow::bail!("{}", newer_database(path, &what)),
             Standing::Behind => {
+                // Only an installed nitely upgrades the person's own database: a branch's build, run
+                // by hand in a lane or a worktree, would lock every installed one out of it (NIT-330).
+                let pending = migrations.iter().map(|(m, _)| *m).find(|m| !applied_migrations(&conn).unwrap_or_default().iter().any(|a| a == m));
+                let exe = std::env::current_exe().ok();
+                let allowed = std::env::var_os("NITELY_UPGRADE_REAL_DATA").is_some();
+                if let Some(why) = may_not_upgrade(path, &crate::paths::real_data_dir().join("nitely.db"), exe.as_deref(), pending, allowed) {
+                    anyhow::bail!("{why}");
+                }
                 // WAL (persistent) so the app reads while hooks write; busy_timeout so parallel hooks wait.
                 use_wal(&conn).context("switching the database to WAL")?;
                 upgrade(&conn, migrations).context("upgrading the database")?;
@@ -784,6 +822,29 @@ impl Db {
 
 #[cfg(test)]
 mod tests {
+    /// A cargo build that is not installed never upgrades the person's own database; anywhere
+    /// else, and for an installed nitely, it does (NIT-330).
+    #[test]
+    fn a_build_that_is_not_installed_does_not_upgrade_the_real_database() {
+        use super::may_not_upgrade;
+        let base = crate::paths::unique_temp("nitely-real-db", "");
+        let real = base.join("Nitely").join("nitely.db");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::write(&real, b"").unwrap();
+        let profile = base.join("target").join("debug");
+        std::fs::create_dir_all(profile.join(".fingerprint")).unwrap();
+        std::fs::create_dir_all(profile.join("deps")).unwrap();
+        let built = profile.join("nitely.exe");
+        let why = may_not_upgrade(&real, &real, Some(&built), Some("20261018-triage"), false).unwrap();
+        assert!(why.contains("is a build that is not installed") && why.contains("migration 20261018-triage") && why.contains("NITELY_HOME"), "{why}");
+        assert!(may_not_upgrade(&real, &real, Some(&profile.join("deps").join("nitely_core-1.exe")), None, false).is_some(), "a test binary in deps too");
+        assert_eq!(may_not_upgrade(&base.join("scratch.db"), &real, Some(&built), None, false), None, "any other database");
+        let installed = base.join("bin").join("nitely.exe");
+        assert_eq!(may_not_upgrade(&real, &real, Some(&installed), None, false), None, "the installed nitely");
+        assert_eq!(may_not_upgrade(&real, &real, Some(&built), None, true), None, "NITELY_UPGRADE_REAL_DATA");
+        std::fs::remove_dir_all(base).ok();
+    }
+
     use super::*;
 
     #[test]

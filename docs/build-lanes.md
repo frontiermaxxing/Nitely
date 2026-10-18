@@ -300,6 +300,11 @@ priority. So Nitely holds what it starts to the machine:
   with executor `worktree`: the scheduler orders them with the rest and "builds N of M" counts them.
 - A command a review or a crew worker runs through `nitely run` leaves the review's or worker's job
   for one of its own, so only the lane's cap counts for it.
+- A lane command gets a Nitely data folder of the request's own (`NITELY_HOME` in its temporary
+  folder; `NITELY_LANE_REAL_HOME=1` on the requester's side keeps theirs), and a build that is not
+  installed (a cargo `target/<profile>` program) refuses to upgrade the person's own database, so a
+  branch's nitely run by hand never applies its migrations there and locks every installed nitely
+  out (NIT-330; `NITELY_UPGRADE_REAL_DATA=1` lets it).
 
 ### What each OS gets
 
