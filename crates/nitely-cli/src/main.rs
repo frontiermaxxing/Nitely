@@ -491,6 +491,15 @@ enum IssueCmd {
         #[arg(long)]
         label: Option<String>,
     },
+    /// Rewrite an issue's title or body (--body - reads it from stdin). What it said before stays on
+    /// its timeline; an issue mirrored from another tracker is changed there.
+    Edit {
+        key: String,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        body: Option<String>,
+    },
     /// Add or remove labels on an issue.
     Label {
         key: String,
@@ -903,6 +912,21 @@ fn run(cmd: Cmd) -> Result<()> {
                         .collect();
                     nitely_core::issues::check_batch_size(batch.len())?;
                     print_json(&db.create_issues(&batch, &me)?)
+                }
+                IssueCmd::Edit { key, title, body } => {
+                    if title.is_none() && body.is_none() {
+                        bail!("give --title, --body or both");
+                    }
+                    let body = match body.as_deref() {
+                        Some("-") => {
+                            let mut text = String::new();
+                            std::io::stdin().read_to_string(&mut text)?;
+                            Some(text)
+                        }
+                        _ => body,
+                    };
+                    let key = db.current_key(&key)?;
+                    print_json(&db.edit_issue(&key, title.as_deref(), body.as_deref(), &me)?)
                 }
                 IssueCmd::Label { key, add, remove } => {
                     let key = db.current_key(&key)?;

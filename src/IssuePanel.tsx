@@ -17,6 +17,7 @@ import "./issue.css";
 const KIND_LABEL: Record<string, string> = {
   issue_created: "filed",
   issue_moved: "moved",
+  issue_edited: "edited",
   claimed: "claimed",
   status: "status",
   note: "note",

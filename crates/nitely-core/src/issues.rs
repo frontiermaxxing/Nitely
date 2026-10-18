@@ -1316,6 +1316,49 @@ impl Db {
     /// claim and puts it in Needs You, unless it waits in Backlog; handing an open one back puts it
     /// in Todo for the next agent, unless it waits in Backlog. A state it changes is logged as a
     /// move, so its track follows.
+    /// Rewrites an issue's title, body or both (NIT-210): a plan's placeholder after its design, a
+    /// title that says the wrong thing. What it said before goes on its timeline as an
+    /// `issue_edited` event, so nothing is lost. An issue mirrored from another tracker is changed
+    /// there. Unchanged text changes nothing and writes no event.
+    pub fn edit_issue(&mut self, key: &str, title: Option<&str>, body: Option<&str>, actor: &Actor) -> Result<IssueRecord> {
+        let issue = self.issue(key)?.with_context(|| format!("no issue {key}"))?;
+        if issue.origin != "nitely" {
+            bail!("{} is mirrored from {}; change it there", issue.key, issue.origin);
+        }
+        let title = title.map(str::trim);
+        let body = body.map(str::trim);
+        if title.is_some_and(str::is_empty) {
+            bail!("an issue needs a title");
+        }
+        if body.is_some_and(str::is_empty) {
+            bail!("an issue needs a body: what is wrong or wanted, and why");
+        }
+        let title = title.filter(|t| *t != issue.title);
+        let body = body.filter(|b| *b != issue.body);
+        if title.is_none() && body.is_none() {
+            return Ok(issue);
+        }
+        let mut was = Vec::new();
+        if title.is_some() {
+            was.push(format!("Title was: {}", issue.title));
+        }
+        if body.is_some() {
+            was.push(format!("Body was:\n{}", issue.body));
+        }
+        let ts = now();
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE issue SET title = COALESCE(?2, title), body = COALESCE(?3, body), updated_at = ?4 WHERE key = ?1",
+            params![issue.key, title, body, iso(ts)],
+        )?;
+        tx.execute(
+            "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, ?2, ?3, 'issue_edited', ?4)",
+            params![ts, actor.id(), issue.key, was.join("\n\n")],
+        )?;
+        tx.commit()?;
+        self.issue(&issue.key)?.with_context(|| format!("no issue {}", issue.key))
+    }
+
     pub fn set_owner(&mut self, key: &str, owner: &str, actor: &Actor) -> Result<IssueRecord> {
         let issue = self.issue(key)?.with_context(|| format!("no issue {key}"))?;
         if issue.origin != "nitely" {
@@ -1652,6 +1695,34 @@ mod tests {
         let timeline = db.timeline("NIT-1").unwrap();
         assert_eq!((timeline[0].actor.as_str(), timeline[0].place.as_deref()), (session.id(), Some(r"C:\Code\my-app")));
         assert_eq!((timeline[1].actor.as_str(), timeline[1].place.as_deref()), ("claude:c:/code/my-app", None), "an older folder id says its folder itself");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn an_edit_keeps_what_the_issue_said_before() {
+        let (mut db, dir) = db();
+        db.create_project("NIT", "Nitely").unwrap();
+        let agent = Actor::Agent("claude:x".into());
+        db.create_issue(&new("Slice 2: placeholder"), &agent).unwrap();
+        let edited = db.edit_issue("nit-1", Some("Slice 2: the export dialog"), Some("Export the list as CSV."), &agent).unwrap();
+        assert_eq!((edited.title.as_str(), edited.body.as_str()), ("Slice 2: the export dialog", "Export the list as CSV."));
+        let last = db.timeline("NIT-1").unwrap().pop().unwrap();
+        assert_eq!(last.kind, "issue_edited");
+        assert_eq!(last.summary.as_deref(), Some("Title was: Slice 2: placeholder\n\nBody was:\nwhy"));
+
+        // Only what changed is kept; the same text again changes nothing.
+        db.edit_issue("NIT-1", None, Some("Export the list as CSV or JSON."), &agent).unwrap();
+        assert_eq!(db.timeline("NIT-1").unwrap().pop().unwrap().summary.as_deref(), Some("Body was:\nExport the list as CSV."));
+        let events = db.timeline("NIT-1").unwrap().len();
+        db.edit_issue("NIT-1", Some("Slice 2: the export dialog "), None, &agent).unwrap();
+        assert_eq!(db.timeline("NIT-1").unwrap().len(), events, "unchanged: no event");
+
+        assert!(db.edit_issue("NIT-1", Some("  "), None, &agent).is_err(), "no empty title");
+        assert!(db.edit_issue("NIT-1", None, Some(""), &agent).is_err(), "no empty body");
+        assert!(db.edit_issue("NIT-9", Some("x"), None, &agent).is_err());
+        db.conn.execute("INSERT INTO issue (key, origin, title, state, state_type, updated_at) VALUES ('LIN-1', 'linear', 'Mirrored', 'Todo', 'unstarted', '')", []).unwrap();
+        let err = db.edit_issue("LIN-1", Some("Mine now"), None, &agent).unwrap_err().to_string();
+        assert!(err.contains("mirrored from linear"), "{err}");
         std::fs::remove_dir_all(dir).ok();
     }
 

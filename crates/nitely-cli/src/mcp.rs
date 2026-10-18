@@ -431,12 +431,14 @@ fn tools() -> Value {
         },
         {
             "name": "update_issue",
-            "description": "Move an issue, change what blocks it, or make it the human's own work (owner human: next_task skips it, and an open issue goes to Needs You; only the human hands it back). Done needs evidence (what ran and what it showed), and is refused while a submitted change is not landed or a question on the issue is open; Canceled and Duplicate need a reason. Approved is set only by the human; move to Needs You and ask instead. An issue with an open blocker waits: next_task skips it until every blocker is Done or Canceled.",
+            "description": "Move an issue, rewrite its title or body (what it said before stays on its timeline; an issue mirrored from another tracker is changed there), change what blocks it, or make it the human's own work (owner human: next_task skips it, and an open issue goes to Needs You; only the human hands it back). Done needs evidence (what ran and what it showed), and is refused while a submitted change is not landed or a question on the issue is open; Canceled and Duplicate need a reason. Approved is set only by the human; move to Needs You and ask instead. An issue with an open blocker waits: next_task skips it until every blocker is Done or Canceled.",
             "inputSchema": { "type": "object", "required": ["key"], "properties": {
                 "key": { "type": "string" },
                 "state": { "type": "string", "enum": states },
                 "evidence": { "type": "string" },
                 "reason": { "type": "string" },
+                "title": { "type": "string", "description": "A new title; the old one stays on the timeline." },
+                "body": { "type": "string", "description": "A new body, whole: it replaces the old one, which stays on the timeline." },
                 "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Issues to add as blockers of this one." },
                 "remove_blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Blockers to remove." },
                 "owner": { "type": "string", "enum": ["human"], "description": "human makes it the human's own work." },
@@ -911,8 +913,28 @@ fn run_tool(server: &Server, name: &str, args: &Value, params: &Value) -> Result
             let owner = str_arg(args, "owner");
             let (add_labels, remove_labels) = (keys_arg(args, "labels"), keys_arg(args, "remove_labels"));
             let goal = args.get("goal").and_then(Value::as_i64);
-            if str_arg(args, "state").is_none() && add.is_empty() && remove.is_empty() && owner.is_none() && add_labels.is_empty() && remove_labels.is_empty() && goal.is_none() {
-                bail!("give a state, blocked_by, remove_blocked_by, labels, remove_labels, owner or goal");
+            let (title, body) = (args.get("title").and_then(Value::as_str), args.get("body").and_then(Value::as_str));
+            if str_arg(args, "state").is_none()
+                && add.is_empty()
+                && remove.is_empty()
+                && owner.is_none()
+                && add_labels.is_empty()
+                && remove_labels.is_empty()
+                && goal.is_none()
+                && title.is_none()
+                && body.is_none()
+            {
+                bail!("give a state, title, body, blocked_by, remove_blocked_by, labels, remove_labels, owner or goal");
+            }
+            // A mirrored issue, or an empty title or body, is refused before anything changes.
+            if title.is_some() || body.is_some() {
+                let issue = db.issue(key)?.with_context(|| format!("no issue {key}"))?;
+                if issue.origin != "nitely" {
+                    bail!("{} is mirrored from {}; change it there", issue.key, issue.origin);
+                }
+                if title.is_some_and(|t| t.trim().is_empty()) || body.is_some_and(|b| b.trim().is_empty()) {
+                    bail!("a title or body cannot be empty");
+                }
             }
             // Refuse bad labels and a goal the issue cannot join before anything changes.
             if let Some(goal) = goal {
@@ -927,6 +949,9 @@ fn run_tool(server: &Server, name: &str, args: &Value, params: &Value) -> Result
             if let Some(state) = str_arg(args, "state") {
                 db.check_move(key, state, str_arg(args, "evidence"), str_arg(args, "reason"), &actor)?;
                 db.check_open_asks(key, state)?;
+            }
+            if title.is_some() || body.is_some() {
+                db.edit_issue(key, title, body, &actor)?;
             }
             db.change_blockers(key, &add, &remove, &actor)?;
             let mut note = None;
