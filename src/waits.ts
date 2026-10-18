@@ -11,6 +11,8 @@ export const WAIT_KIND: Record<string, string> = {
   submit: "Submit",
   review: "Review",
   land_queue: "Land",
+  land_refused: "Land",
+  landing: "Landing",
 };
 
 /** "40 s", "6 m", "1 h 4 m": how long since `since`, short. */
@@ -49,5 +51,7 @@ export function waitOf(key: string, waits: Waits | null): Waiting | null {
  */
 export function waitLine(w: Waiting): string {
   const kind = WAIT_KIND[w.kind] ?? w.kind;
+  // The land holding the lock is not waiting: it is what others wait for.
+  if (w.kind === "landing") return `Landing now: other lands of this repo wait for it`;
   return /^wait/i.test(w.why) ? `${kind}: ${w.why}` : `${kind} waiting: ${w.why}`;
 }

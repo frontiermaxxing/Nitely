@@ -78,7 +78,18 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
     let base = pb.integration_branch().to_string();
     let mut report = Landed { issue: issue.key.clone(), base: base.clone(), ..Default::default() };
 
-    let lock = Lock::take(&lock_path(&root)?, &issue.key, opts.break_lock)?;
+    let lock = match Lock::take(&lock_path(&root)?, &issue.key, opts.break_lock) {
+        Ok(lock) => lock,
+        Err(e) => {
+            // Refused because another land holds the lock: said on the issue, so the app can show
+            // what this land waits behind until its agent lands again (NIT-335).
+            let why = format!("{e:#}");
+            if why.starts_with("another land holds") {
+                db.log_event(actor, Some(&issue.key), Some(&root.to_string_lossy()), "land_refused", &format!("Land refused: {}", why.lines().next().unwrap_or("")))?;
+            }
+            return Err(e);
+        }
+    };
     let result = run(db, &root, &pb, &issue.key, opts, actor, &mut report);
     // Still under the lock, so the next land cannot change the main checkout mid-build; and, in
     // large-repo mode, with the checkout held from build requests.
@@ -1409,6 +1420,9 @@ when_changed = ["billing"]
         let opts = LandOptions { dir: &dir, issue_key: &a, push: false, keep: true, break_lock: false };
         let err = land(&mut f.db, &crate::Config::default(), &opts, &f.actor).unwrap_err().to_string();
         assert!(err.contains("another land holds"), "{err}");
+        // Said on the issue, with the repo, so the app shows what the land waits behind (NIT-335).
+        let refused = f.db.timeline(&a).unwrap().into_iter().rev().find(|t| t.kind == "land_refused").expect("a land_refused event");
+        assert!(refused.summary.as_deref().is_some_and(|s| s.contains("NIT-9 pid 1")), "{refused:?}");
         std::fs::remove_dir_all(&f.base).ok();
     }
 

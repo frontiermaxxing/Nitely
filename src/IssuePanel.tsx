@@ -36,6 +36,7 @@ const KIND_LABEL: Record<string, string> = {
   submit: "submitted",
   landed: "landed",
   land_failed: "land stopped",
+  land_refused: "land waits",
   crew_started: "crew started",
   crew_ended: "crew ended",
   lane_run: "build lane",

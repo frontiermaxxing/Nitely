@@ -155,6 +155,79 @@ fn land_lock(repo: &str) -> Option<(String, Option<i64>)> {
     Some((holder, since))
 }
 
+/// The land holding the lock of `repo`, if one does and its process runs: a land of one change
+/// (a queue run has its own row on the board), what it lands and since when, with its gate's run.
+fn landing_now(db: &Db, repo: &str) -> Result<Option<Waiting>> {
+    let Some((holder, since)) = land_lock(repo) else { return Ok(None) };
+    if holder.ends_with("(land queue)") || !crate::batches::land_running(repo) {
+        return Ok(None);
+    }
+    let key = holder.split_whitespace().next().map(str::to_string);
+    let gate: Option<(i64, Option<u32>, i64)> = match &key {
+        Some(k) => db
+            .conn
+            .query_row(
+                "SELECT id, lane, COALESCE(started_at, queued_at) FROM lane_run WHERE issue_key = ?1 COLLATE NOCASE AND kind = 'land' AND state IN ('queued', 'running') ORDER BY id DESC LIMIT 1",
+                [k],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .ok(),
+        None => None,
+    };
+    let behind = gate
+        .map(|(id, lane, at)| {
+            let lane = lane.map(|l| format!(" in lane {l}")).unwrap_or_default();
+            vec![Behind { what: format!("run {id}: its gate{lane}"), issue: key.clone(), since: Some(at) }]
+        })
+        .unwrap_or_default();
+    Ok(Some(Waiting {
+        kind: "landing".into(),
+        project: key.as_deref().and_then(project_of),
+        issue: key,
+        since: since.unwrap_or_else(crate::db::now),
+        why: "landing now: it holds the land lock, so other lands of this repo wait".into(),
+        place: None,
+        behind,
+    }))
+}
+
+/// Lands refused because another land held the lock (a `land_refused` event, NIT-335), whose issue
+/// has not landed or been handed in again since and still waits to land. Each waits behind the
+/// land holding the lock now, or says the lock is free again and its agent can land it.
+fn refused_waits(db: &Db) -> Result<Vec<Waiting>> {
+    let since = crate::db::now() - REFUSED_FOR_SECS;
+    let rows: Vec<(String, i64, Option<String>)> = db
+        .conn
+        .prepare(
+            "SELECT e.issue_key, e.ts, e.cwd FROM event e
+             WHERE e.type = 'land_refused' AND e.ts >= ?1
+               AND e.id = (SELECT MAX(id) FROM event x WHERE x.issue_key = e.issue_key COLLATE NOCASE AND x.type IN ('land_refused', 'landed', 'land_failed', 'submit'))
+             ORDER BY e.id",
+        )?
+        .query_map([since], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut out = Vec::new();
+    for (key, at, repo) in rows {
+        if !db.issue(&key)?.is_some_and(|i| i.state == "In Review" || i.state == "Approved") {
+            continue;
+        }
+        let holder = repo.as_deref().and_then(|r| land_lock(r).filter(|_| crate::batches::land_running(r)));
+        let (why, behind) = match holder {
+            Some((holder, since)) if !holder.split_whitespace().next().is_some_and(|k| k.eq_ignore_ascii_case(&key)) => (
+                "its land was refused: another land holds the lock; its agent lands again once it is free".to_string(),
+                vec![Behind { what: format!("{holder}, holding the land lock"), issue: holder.split_whitespace().next().map(str::to_string), since }],
+            ),
+            Some(_) => continue,
+            None => ("its land was refused while another land held the lock; the lock is free now: land it again".to_string(), vec![]),
+        };
+        out.push(Waiting { kind: "land_refused".into(), project: project_of(&key), issue: Some(key), since: at, why, place: None, behind });
+    }
+    Ok(out)
+}
+
+/// How long a refused land counts as waiting: its agent was told to land again.
+const REFUSED_FOR_SECS: i64 = 2 * 3600;
+
 /// Submit jobs not started: each waits for its issue's previous submit to finish.
 fn submit_waits(db: &Db) -> Result<Vec<Waiting>> {
     // A job whose process is gone waits for nothing: the next submit settles it.
@@ -284,11 +357,15 @@ fn land_waits(db: &Db) -> Result<Vec<Waiting>> {
 
 /// Every request waiting now: the lane runs (`lane_waits`), submits, review batches and land
 /// queues; longest waiting first.
-pub fn waits(db: &Db, lane_runs: Vec<Waiting>) -> Result<Waits> {
+pub fn waits(db: &Db, lane_runs: Vec<Waiting>, repos: &[String]) -> Result<Waits> {
     let mut waiting = lane_runs;
     waiting.extend(submit_waits(db)?);
     waiting.extend(review_waits(db)?);
     waiting.extend(land_waits(db)?);
+    waiting.extend(refused_waits(db)?);
+    for repo in repos {
+        waiting.extend(landing_now(db, repo)?);
+    }
     waiting.sort_by_key(|w| w.since);
     Ok(Waits { waiting })
 }
@@ -296,7 +373,8 @@ pub fn waits(db: &Db, lane_runs: Vec<Waiting>) -> Result<Waits> {
 /// `waits` for the app: the lanes overview read here too.
 pub fn overview(config: &crate::Config, db: &Db) -> Result<Waits> {
     let lanes = lanes::overview(config, db)?;
-    waits(db, lane_waits(&lanes))
+    let repos: Vec<String> = config.repos.iter().map(|r| r.root.clone()).collect();
+    waits(db, lane_waits(&lanes), &repos)
 }
 
 #[cfg(test)]
@@ -368,6 +446,49 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_land_waits_behind_the_land_holding_the_lock_and_that_land_has_its_row() {
+        use crate::issues::{Actor, NewIssue};
+        let dir = crate::paths::unique_temp("nitely-waits-refused", "");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut db = Db::open(&dir.join("t.db")).unwrap();
+        db.create_project("APP", "Acme").unwrap();
+        let actor = Actor::Agent("claude:s".into());
+        let new = |title: &str| NewIssue { project: "APP".into(), title: title.into(), kind: "feature".into(), body: "b".into(), evidence: "e".into(), source: "human".into(), allow_similar: true, ..Default::default() };
+        let landing = db.create_issue(&new("Landing"), &actor).unwrap().key;
+        let refused = db.create_issue(&new("Refused"), &actor).unwrap().key;
+        db.conn.execute("UPDATE issue SET state = 'In Review', state_type = 'started' WHERE key = ?1", [&refused]).unwrap();
+        let root = dir.join("my-app");
+        crate::test_repo::init(&root, &[("a.txt", "a")]);
+        let repo = root.to_string_lossy().into_owned();
+        let lock = crate::land::lock_path(&root).unwrap();
+        std::fs::write(&lock, format!("{landing} pid {} since now\n", std::process::id())).unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO lane_run (project, repo, issue_key, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, started_at, pid, priority, lane, lane_count) VALUES ('APP', ?1, ?2, 'claude:s', 'land', 's', 't', 'b', 'gate', 'running', 'local', 100, 101, ?3, 0, 1, 1)",
+                rusqlite::params![repo, landing, std::process::id()],
+            )
+            .unwrap();
+        db.log_event(&actor, Some(&refused), Some(&repo), "land_refused", "Land refused: another land holds the lock").unwrap();
+        let w = waits(&db, vec![], &[repo.clone()]).unwrap();
+        let by = |key: &str| w.waiting.iter().find(|x| x.issue.as_deref() == Some(key)).unwrap_or_else(|| panic!("{key} in {w:?}")).clone();
+        let row = by(&landing);
+        assert_eq!(row.kind, "landing");
+        assert!(row.behind[0].what.starts_with("run ") && row.behind[0].what.ends_with("its gate in lane 1"), "{:?}", row.behind);
+        let waits_for = by(&refused);
+        assert_eq!(waits_for.kind, "land_refused");
+        assert_eq!(waits_for.behind[0].issue.as_deref(), Some(landing.as_str()), "behind the land holding the lock");
+        // The lock is free: it says the agent can land again.
+        std::fs::remove_file(&lock).unwrap();
+        let w = waits(&db, vec![], &[repo.clone()]).unwrap();
+        assert!(w.waiting.iter().any(|x| x.issue.as_deref() == Some(refused.as_str()) && x.why.ends_with("the lock is free now: land it again")), "{w:?}");
+        assert!(w.waiting.iter().all(|x| x.kind != "landing"), "nobody lands now");
+        // Handed in again since: nothing to wait for from that refusal.
+        db.log_event(&actor, Some(&refused), Some(&repo), "submit", "Review passed").unwrap();
+        assert!(waits(&db, vec![], &[repo]).unwrap().waiting.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn ordinals() {
         assert_eq!([1, 2, 3, 4, 11, 12, 13, 21, 22].map(ordinal), ["1st", "2nd", "3rd", "4th", "11th", "12th", "13th", "21st", "22nd"]);
     }
@@ -405,7 +526,7 @@ mod tests {
                  (1, '{repo}', 'APP-5', 'claude:s', 'running', 135, 7),
                  (2, '{repo}', 'APP-7', 'claude:s', 'queued', 150, NULL);"#
         ));
-        let w = waits(&db, vec![]).unwrap();
+        let w = waits(&db, vec![], &[]).unwrap();
         let by = |key: &str| w.waiting.iter().find(|x| x.issue.as_deref() == Some(key)).unwrap_or_else(|| panic!("{key} in {w:?}"));
         assert_eq!(w.waiting.iter().map(|x| x.since).collect::<Vec<_>>(), [90, 96, 120, 130, 150], "longest waiting first");
         let second = by("APP-1");
@@ -427,18 +548,18 @@ mod tests {
         // The run is over (nothing unended): the queue holding the lock is its own window.
         exec("UPDATE land_run SET ended_at = 160 WHERE id = 7");
         let why = |w: &Waits| w.waiting.iter().find(|x| x.issue.as_deref() == Some("APP-7")).unwrap().why.clone();
-        assert_eq!(why(&waits(&db, vec![]).unwrap()), "2nd in the land queue, waiting for more changes to land with");
+        assert_eq!(why(&waits(&db, vec![], &[]).unwrap()), "2nd in the land queue, waiting for more changes to land with");
         // A land of one change holds it: behind that land.
         hold("APP-20");
-        let w = waits(&db, vec![]).unwrap();
+        let w = waits(&db, vec![], &[]).unwrap();
         let land = w.waiting.iter().find(|x| x.issue.as_deref() == Some("APP-7")).unwrap();
         assert_eq!((land.why.as_str(), land.behind[0].what.as_str()), ("2nd in the land queue, behind a land holding the lock", "APP-20, holding the land lock"));
         // A crashed run left unended, and another land holds the lock now: the run is not landing.
         exec("UPDATE land_run SET ended_at = NULL WHERE id = 7");
-        assert_eq!(why(&waits(&db, vec![]).unwrap()), "2nd in the land queue, behind a land holding the lock");
+        assert_eq!(why(&waits(&db, vec![], &[]).unwrap()), "2nd in the land queue, behind a land holding the lock");
         // The crash left its lock too, its process gone: stuck until a land breaks it, and it says so.
         std::fs::write(&lock, "APP-5 (land queue) pid 4000000000 since then\n").unwrap();
-        let w = waits(&db, vec![]).unwrap();
+        let w = waits(&db, vec![], &[]).unwrap();
         let land = w.waiting.iter().find(|x| x.issue.as_deref() == Some("APP-7")).unwrap();
         assert_eq!(land.why, "2nd in the land queue, behind a stale land lock: land again with break_lock");
         assert_eq!(land.behind.iter().map(|b| b.what.as_str()).collect::<Vec<_>>(), ["APP-5 (land queue), a land lock whose process is gone"], "not the dead run");
