@@ -1656,10 +1656,22 @@ when_changed = ["billing"]
         let branch = sh(&merged, &["rev-parse", "--abbrev-ref", "HEAD"]).trim().to_string();
         sh(&f.repo, &["merge", "-q", "--ff-only", &branch]);
         f.db.move_issue(&c, "Canceled", None, Some("merged by hand"), &f.actor).unwrap();
-        // What a land that git stopped halfway leaves: a folder git no longer lists.
+        // What a land that git stopped halfway leaves: a folder git no longer lists, its .git file
+        // naming this repo's record of it, now gone.
         let stray = merged.parent().unwrap().join("nit-stray-left-behind");
         std::fs::create_dir_all(stray.join("target")).unwrap();
+        let record = f.repo.join(".git").join("worktrees").join("nit-stray-left-behind");
+        std::fs::write(stray.join(".git"), format!("gitdir: {}\n", record.display())).unwrap();
         f.db.log_event(&f.actor, Some(&c), Some(&stray.to_string_lossy()), "worktree_held", "Worktree kept after landing").unwrap();
+        // One that says nothing of where it came from, and a clone made where one was removed:
+        // both are a person's to look at.
+        let unknown = merged.parent().unwrap().join("nit-stray-unknown");
+        std::fs::create_dir_all(unknown.join("target")).unwrap();
+        f.db.log_event(&f.actor, Some(&c), Some(&unknown.to_string_lossy()), "worktree_held", "Worktree kept after landing").unwrap();
+        let clone = merged.parent().unwrap().join("nit-stray-reused");
+        f.db.log_event(&f.actor, Some(&c), Some(&clone.to_string_lossy()), "worktree_held", "Worktree kept after landing").unwrap();
+        f.db.log_event(&f.actor, Some(&c), Some(&clone.to_string_lossy()), "worktree_removed", "Removed").unwrap();
+        crate::test_repo::init(&clone, &[("work.txt", "mine")]);
 
         let pb = Playbook::load(&f.repo).unwrap();
         let found = crate::leftovers::leftovers(&f.db, &f.repo, &pb, false, &Actor::Human).unwrap();
@@ -1667,12 +1679,15 @@ when_changed = ["billing"]
         assert!(of(&kept).and_then(|l| l.stays).is_some_and(|s| s.contains("on purpose")), "{found:?}");
         assert!(of(&merged).is_some_and(|l| l.stays.is_none()), "{found:?}");
         assert!(of(&stray).is_some_and(|l| l.stays.is_none()), "{found:?}");
+        assert!(of(&unknown).and_then(|l| l.stays).is_some_and(|s| s.contains("by hand")), "{found:?}");
+        assert!(of(&clone).is_none(), "removed since it was kept: not a leftover {found:?}");
 
         let (b, _) = f.submitted("Next", "next.txt", "z");
         let r = f.land(&b);
         assert!(r.landed, "{r:?}");
         assert!(kept.exists(), "--keep holds at the next land too");
         assert!(!merged.exists() && !stray.exists(), "{r:?}");
+        assert!(unknown.exists() && clone.join("work.txt").exists(), "{r:?}");
         assert_eq!(r.tidied.len(), 2, "{r:?}");
         std::fs::remove_dir_all(&f.base).ok();
     }

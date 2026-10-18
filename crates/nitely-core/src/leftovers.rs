@@ -78,7 +78,7 @@ pub fn leftovers(db: &Db, root: &Path, pb: &Playbook, remove: bool, actor: &Acto
             continue;
         }
         let branch = crate::land::branch_of(root, &key).map(|(b, _)| b).unwrap_or_default();
-        let stays = kept_on_purpose(&db.timeline(&key)?);
+        let stays = kept_on_purpose(&db.timeline(&key)?).or_else(|| not_ours(root, &path));
         found.push(Leftover { issue: key, worktree: path, branch, stays, removed: None, registered: false });
     }
     // Listing processes is the costly part (NIT-289): once, for the ones nothing else keeps.
@@ -107,6 +107,9 @@ pub fn leftovers(db: &Db, root: &Path, pb: &Playbook, remove: bool, actor: &Acto
             };
             if !l.worktree.exists() {
                 db.log_event(actor, Some(&l.issue), Some(&l.worktree.to_string_lossy()), "worktree_removed", &format!("Removed the worktree a land left: {message}"))?;
+            } else if l.registered && !crate::git::list_worktrees(&root.to_string_lossy())?.iter().any(|w| crate::paths::normalize(&w.path) == crate::paths::normalize(&l.worktree.to_string_lossy())) {
+                // Git stopped halfway: what is left is found again from where this says it is.
+                note_held(db, actor, &l.issue, &l.worktree, &message)?;
             }
             l.removed = Some(message);
         }
@@ -122,11 +125,42 @@ fn kept_on_purpose(timeline: &[TimelineEntry]) -> Option<String> {
     timeline[from..].iter().rev().find(|t| t.kind == "land_kept").map(|t| format!("a land kept it on purpose: {}", t.summary.as_deref().unwrap_or("--keep")))
 }
 
-/// Where lands said they kept a worktree, per issue.
+/// Where lands said they kept a worktree, per issue: only a place whose last word is that keep,
+/// not a removal since (a folder made there afterwards is someone else's).
 fn held_places(db: &Db) -> Result<Vec<(String, String)>> {
-    let mut stmt = db.conn.prepare("SELECT DISTINCT upper(issue_key), cwd FROM event WHERE type = 'worktree_held' AND issue_key IS NOT NULL AND cwd IS NOT NULL")?;
-    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?.collect::<rusqlite::Result<_>>()?;
-    Ok(rows)
+    let mut stmt = db.conn.prepare(
+        "SELECT upper(issue_key), cwd, type FROM event WHERE type IN ('worktree_held', 'worktree_removed') AND issue_key IS NOT NULL AND cwd IS NOT NULL ORDER BY id",
+    )?;
+    let rows: Vec<(String, String, String)> = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<_>>()?;
+    let mut last: Vec<(String, String, bool)> = Vec::new();
+    for (key, place, kind) in rows {
+        let at = crate::paths::normalize(&place);
+        last.retain(|(_, p, _)| crate::paths::normalize(p) != at);
+        last.push((key, place, kind == "worktree_held"));
+    }
+    Ok(last.into_iter().filter(|(_, _, held)| *held).map(|(k, p, _)| (k, p)).collect())
+}
+
+/// Why a folder git no longer lists may not be what is left of this repo's worktree: only one whose
+/// `.git` file still names this repo's record of a worktree that is gone is deleted without a person.
+fn not_ours(root: &Path, folder: &Path) -> Option<String> {
+    let dot_git = folder.join(".git");
+    let by_hand = "delete it by hand once you have looked at it";
+    if dot_git.is_dir() {
+        return Some(format!("it is a repository of its own now; {by_hand}"));
+    }
+    let Ok(text) = std::fs::read_to_string(&dot_git) else {
+        return Some(format!("git no longer lists it and nothing left in it says it was this worktree; {by_hand}"));
+    };
+    let gitdir = text.lines().find_map(|l| l.strip_prefix("gitdir:")).map(str::trim).unwrap_or("");
+    let records = root.join(".git").join("worktrees");
+    if gitdir.is_empty() || !crate::paths::is_within(gitdir, &records.to_string_lossy()) {
+        return Some(format!("its .git names another repository; {by_hand}"));
+    }
+    if Path::new(gitdir).exists() {
+        return Some(format!("git still has a record of it at {gitdir}"));
+    }
+    None
 }
 
 /// Deletes a folder git no longer lists, then its branch when that is merged.
