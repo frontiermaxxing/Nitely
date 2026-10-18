@@ -476,7 +476,9 @@ function NavItem(props: {
 
 /** Each agent session in the project's repos that is working (teal) or waiting on you (amber). */
 function liveStates(board: Board, projectKey: string, now: number): ("working" | "waiting")[] {
-  const states = reposOf(board, projectKey).flatMap((r) => r.rows.map((x) => livenessOf(x.session, now)));
+  // One per session: several agents often run from one main checkout (NIT-273).
+  const repos = new Set(reposOf(board, projectKey).map((r) => r.name));
+  const states = (board.agents ?? []).filter((a) => a.repo !== null && repos.has(a.repo)).map((a) => livenessOf(a.session, now));
   return [...states.filter((s) => s === "waiting"), ...states.filter((s) => s === "working")] as ("working" | "waiting")[];
 }
 

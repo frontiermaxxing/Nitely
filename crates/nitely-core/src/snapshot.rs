@@ -1,5 +1,7 @@
 //! The "Now" view's data: every worktree of every configured repo, joined with the latest agent
-//! session working inside it.
+//! session working inside it, and every agent session on its own (`agents`), with the issue its own
+//! work names. Several sessions often share a folder (every agent a coordinator starts runs from the
+//! main checkout), so a folder is not an agent (NIT-273).
 
 use anyhow::Result;
 use serde::Serialize;
@@ -17,6 +19,30 @@ use crate::paths::is_within;
 
 /// Sessions not seen for this long are left off the board.
 const SESSION_WINDOW_SECS: i64 = 24 * 3600;
+
+/// How long a session's report or note keeps naming the issue it works on, when it has claimed,
+/// started or submitted nothing since.
+const REPORT_NAMES_ISSUE_SECS: i64 = 30 * 60;
+
+/// One agent session, wherever it runs: the Overview's "Right now", Now's agents and the counts of
+/// what is moving are made of these, one per session.
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentRow {
+    pub session: Session,
+    /// The repo it runs in, and that repo's project, when it is one of the configured repos.
+    pub repo: Option<String>,
+    pub project: Option<String>,
+    /// The task worktree it runs in, when it runs in one rather than in a main checkout.
+    pub worktree: Option<String>,
+    /// The issue it works on: the one its latest claim, start_task or submit named, or its latest
+    /// report or note while recent, else its worktree's issue.
+    pub issue_key: Option<String>,
+    pub issue: Option<IssueRecord>,
+    /// Its latest report line, which says what it is doing better than its last tool call.
+    pub report: Option<String>,
+    /// It waits on the human, or its issue does.
+    pub needs_me: bool,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TaskRow {
@@ -47,6 +73,8 @@ pub struct Board {
     /// Agents on other machines reaching this one through `nitely serve` (cwd `remote:<token>`),
     /// which no repo here can place.
     pub remote_sessions: Vec<Session>,
+    /// Every agent session seen in the window on this machine, one row each, newest first.
+    pub agents: Vec<AgentRow>,
 }
 
 /// A local branch with no worktree: left over after a land, parked, or made by hand.
@@ -308,7 +336,78 @@ fn build(config: &Config, db: &Db, git_state: &GitState) -> Result<Board> {
         .collect();
 
     let remote_sessions = sessions.iter().filter(|s| s.cwd.starts_with("remote:")).cloned().collect();
-    Ok(Board { repos: views, needs_me_issues, asks: db.open_asks()?, sync: db.sync_statuses()?, remote_sessions })
+    let agents = agents(db, config, &sessions, &views, &issues, &aliases)?;
+    Ok(Board { repos: views, needs_me_issues, asks: db.open_asks()?, sync: db.sync_statuses()?, remote_sessions, agents })
+}
+
+/// One row per local session: where it runs, and the issue its own events name.
+fn agents(
+    db: &Db,
+    config: &Config,
+    sessions: &[Session],
+    views: &[RepoView],
+    issues: &[IssueRecord],
+    aliases: &std::collections::HashMap<String, String>,
+) -> Result<Vec<AgentRow>> {
+    let local: Vec<&Session> = sessions.iter().filter(|s| !s.cwd.starts_with("remote:")).collect();
+    let named = db.issues_sessions_work_on(&local.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), now())?;
+    let mut out = Vec::new();
+    for s in local {
+        let repo = config.repos.iter().zip(views).filter(|(_, v)| is_within(&s.cwd, &v.root) || v.rows.iter().any(|r| is_within(&s.cwd, &r.worktree))).map(|(r, _)| r).next();
+        // The task worktree it runs in: the deepest one holding its folder, a main checkout aside.
+        let row = views.iter().flat_map(|v| v.rows.iter()).filter(|r| !r.is_main && is_within(&s.cwd, &r.worktree)).max_by_key(|r| r.worktree.len());
+        let (from_events, report) = named.get(&s.id).cloned().unwrap_or_default();
+        let issue_key = from_events.map(|k| crate::projects::current_key(aliases, &k)).or_else(|| row.and_then(|r| r.issue_key.clone()));
+        let issue = issue_key.as_ref().and_then(|k| issues.iter().find(|i| i.key.eq_ignore_ascii_case(k)).cloned());
+        let needs_me = s.state == "waiting" || issue.as_ref().is_some_and(|i| i.needs_human());
+        out.push(AgentRow {
+            session: s.clone(),
+            repo: repo.map(|r| r.name.clone()),
+            project: repo.and_then(|r| r.project.clone()),
+            worktree: row.map(|r| r.worktree.clone()),
+            issue_key,
+            issue,
+            report,
+            needs_me,
+        });
+    }
+    Ok(out)
+}
+
+impl Db {
+    /// For each of `sessions`, the issue its own events name and its latest report line. The issue
+    /// is the one of its latest claim, start_task or submit, or of a report or note newer than that
+    /// within `REPORT_NAMES_ISSUE_SECS` of `now`: an agent working from the main checkout names its
+    /// issue only in what it does, never in its folder.
+    pub fn issues_sessions_work_on(&self, sessions: &[&str], now: i64) -> Result<std::collections::HashMap<String, (Option<String>, Option<String>)>> {
+        let mut out: std::collections::HashMap<String, (Option<String>, Option<String>)> = std::collections::HashMap::new();
+        if sessions.is_empty() {
+            return Ok(out);
+        }
+        let wanted: HashSet<&str> = sessions.iter().copied().collect();
+        let mut stmt = self.conn.prepare(
+            "SELECT actor, ts, type, issue_key, summary FROM event
+             WHERE ts >= ?1 AND (type IN ('claimed', 'worktree', 'submit', 'status', 'note', 'handoff')) ORDER BY ts, id",
+        )?;
+        let rows = stmt.query_map([now - SESSION_WINDOW_SECS], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, Option<String>>(3)?, r.get::<_, Option<String>>(4)?))
+        })?;
+        for row in rows {
+            let (actor, ts, kind, issue, summary) = row?;
+            if !wanted.contains(actor.as_str()) {
+                continue;
+            }
+            let entry = out.entry(actor).or_default();
+            if kind == "status" {
+                entry.1 = summary.or(entry.1.take());
+            }
+            let strong = matches!(kind.as_str(), "claimed" | "worktree" | "submit");
+            if let Some(key) = issue.filter(|_| strong || ts >= now - REPORT_NAMES_ISSUE_SECS) {
+                entry.0 = Some(key.to_uppercase());
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// Branches no worktree has checked out. A repo whose branches cannot be listed shows none rather
@@ -363,6 +462,34 @@ fn pr_for(prs: &[PrRecord], slug: Option<&str>, branch: &str) -> Option<PrRecord
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_session_works_on_the_issue_its_own_events_name() {
+        let dir = crate::paths::unique_temp("nitely-agents", "");
+        let db = Db::open(&dir.join("t.db")).unwrap();
+        let now = 1_800_000_000;
+        let event = |ts: i64, actor: &str, kind: &str, issue: Option<&str>, summary: &str| {
+            db.conn.execute("INSERT INTO event (ts, actor, type, issue_key, summary) VALUES (?1, ?2, ?3, ?4, ?5)", rusqlite::params![ts, actor, kind, issue, summary]).unwrap();
+        };
+        // Three sessions in one folder, each on its own issue.
+        event(now - 3600, "claude:a", "claimed", Some("APP-1"), "Took the issue");
+        event(now - 600, "claude:a", "status", Some("APP-1"), "Writing the export");
+        event(now - 300, "claude:a", "status", None, "Running the tests");
+        // Started one long ago, then reports on another now: the newer names it.
+        event(now - 7200, "claude:b", "worktree", Some("APP-2"), "Started claude/app-2-x from main");
+        event(now - 120, "claude:b", "note", Some("APP-3"), "Picked up APP-3 too");
+        // Only a report from hours ago: it names nothing any more.
+        event(now - 7200, "claude:c", "status", Some("APP-4"), "Looking around");
+        // Another session's claim is not this one's.
+        event(now - 60, "claude:d", "claimed", Some("APP-5"), "Took the issue");
+        let named = db.issues_sessions_work_on(&["claude:a", "claude:b", "claude:c"], now).unwrap();
+        assert_eq!(named["claude:a"], (Some("APP-1".to_string()), Some("Running the tests".to_string())));
+        assert_eq!(named["claude:b"].0.as_deref(), Some("APP-3"));
+        assert_eq!(named["claude:c"].0, None);
+        assert!(!named.contains_key("claude:d"));
+        drop(db);
+        std::fs::remove_dir_all(dir).ok();
+    }
 
     #[test]
     fn par_map_keeps_order_and_runs_everything() {

@@ -287,6 +287,23 @@ export interface Board {
   sync: SyncStatus[];
   /** Agents on other machines on the local network, reaching this one through `nitely serve`. */
   remote_sessions: Session[];
+  /** Every agent session on this machine, one each, newest first (snapshot.rs AgentRow). */
+  agents: AgentRow[];
+}
+
+/** One agent session, wherever it runs: several often share a folder, so a folder is not an agent. */
+export interface AgentRow {
+  session: Session;
+  repo: string | null;
+  project: string | null;
+  /** The task worktree it runs in; null in a main checkout. */
+  worktree: string | null;
+  /** What its own claims, start_task, submit and recent reports name, else its worktree's issue. */
+  issue_key: string | null;
+  issue: IssueRecord | null;
+  /** Its latest report line. */
+  report: string | null;
+  needs_me: boolean;
 }
 
 export interface Ask {

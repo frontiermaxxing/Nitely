@@ -33,7 +33,7 @@ function issue(key: string, state: string, priority = 3): IssueRecord {
 }
 
 function board(needsMe: IssueRecord[], asks: Ask[] = []): Board {
-  return { repos: [], needs_me_issues: needsMe, asks, sync: [], remote_sessions: [] };
+  return { repos: [], needs_me_issues: needsMe, asks, sync: [], remote_sessions: [], agents: [] };
 }
 
 function detail(i: IssueRecord): IssueDetail {
@@ -254,4 +254,14 @@ test("NIT-236: the Inbox filters by project, its counts add up, and grouped appr
   assert.deepEqual([nextProject(counts, null, 1), nextProject(counts, "APP", 1), nextProject(counts, "WEB", 1), nextProject(counts, null, -1)], ["APP", "WEB", null, "WEB"]);
   assert.equal(nextProject(counts, "GONE", 1), "APP", "a project with nothing left cycles from All");
   assert.deepEqual([keyProject("nit-12"), keyProject("feature/x"), keyProject(null)], ["NIT", null, null]);
+});
+
+test("NIT-273: each session waiting at its prompt is its own decision, however many share a folder", () => {
+  const session = (id: string, state: "waiting" | "working") => ({ id, vendor: "claude", cwd: "C:/code/app", started_at: NOW - 600, last_seen_at: NOW - 60, last_activity: null, state });
+  const agent = (id: string, key: string, state: "waiting" | "working") => ({ session: session(id, state), repo: "app", project: "X", worktree: null, issue_key: key, issue: issue(key, "In Progress"), report: null, needs_me: state === "waiting" });
+  // Three from one main checkout: two wait at their prompt, one of them on a question it asked.
+  const asked = { ...ask(9, "X-3", NOW - 60), asked_by: "claude:c3" };
+  const b: Board = { ...board([], [asked]), agents: [agent("claude:c1", "X-1", "waiting"), agent("claude:c2", "X-2", "working"), agent("claude:c3", "X-3", "waiting")] } as unknown as Board;
+  const ds = decisionsOf(b, new Map(), NOW);
+  assert.deepEqual(ds.map((d) => [d.kind, d.issue?.key ?? d.ask?.issue_key]).sort(), [["ask", "X-3"], ["input", "X-1"]]);
 });

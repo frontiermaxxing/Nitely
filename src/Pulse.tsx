@@ -218,14 +218,21 @@ function sinceLine(data: PulseData, first: boolean): string {
 /** The four answers, before any detail. */
 const DECISION_ORDER: DecisionKind[] = ["ask", "approve", "conflict", "input", "land"];
 
-/** Every session that is open, with the issue it works on when there is one. */
-function openSessions(board: Board | null, now: number): { s: Session; key: string | null }[] {
-  const rows = board?.repos.flatMap((r) => r.rows) ?? [];
+/** An open session and what it works on: one per session, however many share a folder (NIT-273). */
+interface OpenSession {
+  s: Session;
+  key: string | null;
+  issue: IssueRecord | null;
+  report: string | null;
+  repo: string | null;
+}
+
+/** Every session that is open, with the issue its own work names when there is one. */
+function openSessions(board: Board | null, now: number): OpenSession[] {
   return [
-    ...rows.filter((r) => r.session).map((r) => ({ s: r.session!, key: r.issue_key })),
-    ...(board?.repos.flatMap((r) => r.unmatched_sessions) ?? []).map((s) => ({ s, key: null })),
+    ...(board?.agents ?? []).map((a) => ({ s: a.session, key: a.issue_key, issue: a.issue, report: a.report, repo: a.repo })),
     // Agents on other machines reach the backlog through nitely serve, not a worktree here.
-    ...(board?.remote_sessions ?? []).map((s) => ({ s, key: null })),
+    ...(board?.remote_sessions ?? []).map((s) => ({ s, key: null, issue: null, report: null, repo: null })),
   ].filter(({ s }) => livenessOf(s, now) !== "ended");
 }
 
@@ -274,8 +281,8 @@ function Glance({ data, board, decisions, ctx, onGo }: { data: PulseData; board:
           <span className="readout-label">{working.length === 1 ? "agent moving" : "agents moving"}</span>
         </span>
         <span className="readout-sub readout-marks">
-          {working.map(({ s, key }) => (
-            <AgentMark key={s.id} vendor={s.vendor} size={18} title={`${agentLabel(s.vendor)}${key ? ` on ${key}` : ""}: ${s.last_activity ?? "working"}`} />
+          {working.map(({ s, key, report }) => (
+            <AgentMark key={s.id} vendor={s.vendor} size={18} title={`${agentLabel(s.id)}${key ? ` on ${key}` : ""}: ${report ?? s.last_activity ?? "working"}`} />
           ))}
           {working.length === 0 && <span>{sessions.length ? "All quiet" : "No agent sessions open"}</span>}
           {waiting.length > 0 && <span className="readout-aside">{waiting.length} waiting on you</span>}
@@ -319,12 +326,6 @@ const LIVE_ORDER = { working: 0, waiting: 1, idle: 2, stale: 3, ended: 4 } as co
 function RightNow({ data, board, ctx }: { data: PulseData; board: Board | null; ctx: Context }) {
   const issues = new Map<string, IssueRecord>();
   for (const p of data.projects) for (const f of [...p.issues, ...p.done_today]) issues.set(f.issue.key, f.issue);
-  for (const r of board?.repos.flatMap((x) => x.rows) ?? []) if (r.issue && !issues.has(r.issue.key)) issues.set(r.issue.key, r.issue);
-  const repoOf = new Map<string, string>();
-  for (const repo of board?.repos ?? []) {
-    for (const r of repo.rows) if (r.session) repoOf.set(r.session.id, repo.name);
-    for (const s of repo.unmatched_sessions) repoOf.set(s.id, repo.name);
-  }
   const rank = (s: Session) => LIVE_ORDER[livenessOf(s, ctx.now) ?? "ended"];
   const sessions = openSessions(board, ctx.now).sort((a, b) => rank(a.s) - rank(b.s) || b.s.last_seen_at - a.s.last_seen_at);
   return (
@@ -336,11 +337,10 @@ function RightNow({ data, board, ctx }: { data: PulseData; board: Board | null; 
         <p className="muted small">No agent has a session open. Work they pick up shows here as it starts.</p>
       ) : (
         <div className="now-list">
-          {sessions.map(({ s, key }) => {
-            const issue = key ? issues.get(key) : undefined;
+          {sessions.map(({ s, key, issue: own, report, repo: where }) => {
+            const issue = (key ? issues.get(key) : undefined) ?? own ?? undefined;
             const live = livenessOf(s, ctx.now);
             const waiting = live === "waiting";
-            const where = repoOf.get(s.id);
             return (
               <button
                 key={s.id}
@@ -348,19 +348,19 @@ function RightNow({ data, board, ctx }: { data: PulseData; board: Board | null; 
                 // A mirrored issue's token is a link to its tracker: that click is the link's alone.
                 onClick={(e) => key && !(e.target as Element).closest("a") && ctx.onOpenIssue(key)}
                 disabled={!key}
-                title={[agentLabel(s.vendor), s.crew ? "started by the crew" : null, livenessLabel(s, ctx.now), s.last_activity].filter(Boolean).join(" · ")}
+                title={[agentTitle(s.id), s.crew ? "started by the crew" : null, livenessLabel(s, ctx.now), s.last_activity].filter(Boolean).join(" · ")}
               >
                 <span className="now-who">
                   <AgentMark vendor={s.vendor} state={live} />
                   <span className="now-who-name">
-                    {agentLabel(s.vendor)}
+                    {agentLabel(s.id)}
                     {s.crew && <span className="muted"> · crew</span>}
                     {where && <span className="muted"> · {where.toLowerCase()}</span>}
                   </span>
                 </span>
                 <span className="now-issue">{issue ? <IssueToken issue={issue} title /> : <span className="muted">{key ?? "No issue"}</span>}</span>
                 <span className="now-track">{issue && <StationTrack track={trackOf(issue)} />}</span>
-                <span className={`now-step${waiting ? " attention-ink" : ""}`}>{waiting ? livenessLabel(s, ctx.now) : (s.last_activity ?? livenessLabel(s, ctx.now))}</span>
+                <span className={`now-step${waiting ? " attention-ink" : ""}`}>{waiting ? livenessLabel(s, ctx.now) : (report ?? s.last_activity ?? livenessLabel(s, ctx.now))}</span>
                 <span className="now-age">{ago(ctx.now, waiting ? s.last_seen_at : s.started_at).replace(" ago", "")}</span>
               </button>
             );

@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { invoke } from "./backend";
 import type { View } from "./App";
-import type { Board, SyncStatus, TaskRow } from "./types";
-import { ago } from "./util";
+import type { AgentRow, Board, SyncStatus, TaskRow } from "./types";
+import { agentLabel, agentTitle, ago } from "./util";
 import { exampleRepoPath } from "./AddProject";
 import { LanesStrip } from "./LanesStrip";
 import { BatchesStrip, useBatches } from "./BatchesStrip";
@@ -84,11 +84,7 @@ export function Now(props: {
                 ))}
               </div>
             )}
-            {repo.unmatched_sessions.length > 0 && (
-              <p className="muted small">
-                {repo.unmatched_sessions.length} agent session{repo.unmatched_sessions.length === 1 ? "" : "s"} in this repo outside any worktree.
-              </p>
-            )}
+            <Outside agents={outsideWorktrees(board, repo.name, now)} now={now} onOpenIssue={props.onOpenIssue} />
           </section>
         );
       })}
@@ -181,12 +177,74 @@ function Card(props: { row: TaskRow; integration: string; batches: BatchesOvervi
 
 const VENDOR_NAME: Record<string, string> = { ...VENDOR_LABEL, claude: "Claude Code" };
 
+/** The repo's open sessions that run outside a task worktree (in its main checkout), newest first. */
+function outsideWorktrees(board: Board, repo: string, now: number): AgentRow[] {
+  return (board.agents ?? []).filter((a) => a.repo === repo && !a.worktree && livenessOf(a.session, now) !== "ended");
+}
+
+/**
+ * Agents working from the repo's main checkout, one card each: a coordinator's lanes all run there
+ * and work in worktrees by path, so each says the issue its own work names (NIT-273).
+ */
+function Outside({ agents, now, onOpenIssue }: { agents: AgentRow[]; now: number; onOpenIssue: (key: string) => void }) {
+  if (agents.length === 0) return null;
+  return (
+    <>
+      <h3 className="now-sub">
+        In the main checkout <span className="head-note">{agents.length} session{agents.length === 1 ? "" : "s"}</span>
+      </h3>
+      <div className="now-cards">
+        {agents.map((a) => {
+          const s = a.session;
+          const live = livenessOf(s, now);
+          const quiet = !live || live === "stale" || live === "idle";
+          const track = a.issue ? trackOf(a.issue) : null;
+          return (
+            <div key={s.id} className={`now-card${a.needs_me || live === "waiting" ? " needs-me" : ""}${quiet && !a.needs_me ? " quiet" : ""}`} title={agentTitle(s.id, s.cwd)}>
+              <div className="now-card-top">
+                <AgentMark vendor={s.vendor} state={live} size={20} />
+                <span className="now-card-agent">
+                  {agentLabel(s.id)}
+                  {s.crew && <span className="muted"> · crew</span>}
+                </span>
+                <span className="now-card-age">{live === "working" ? ago(now, s.started_at).replace(" ago", "") : livenessLabel(s, now)}</span>
+              </div>
+              {a.issue ? (
+                <button className="now-card-issue" onClick={(e) => !(e.target as Element).closest("a") && onOpenIssue(a.issue!.key)}>
+                  <IssueToken issue={a.issue} title />
+                </button>
+              ) : (
+                <span className="now-card-issue mono muted">{a.issue_key ?? "No issue"}</span>
+              )}
+              {track && (
+                <div className="now-card-state">
+                  <StationTrack track={track} />
+                  <span className="now-card-station" style={{ color: track.closed ? "var(--fg-3)" : stationColor(track.station, !!track.stuck) }}>
+                    {track.stuck ?? STATION_LABEL[track.station]}
+                  </span>
+                </div>
+              )}
+              <div className="now-card-log">
+                <div className={`now-log first${live === "waiting" ? " now-log-attention" : ""}`}>
+                  <span className="now-log-t">{live === "working" ? "now" : ago(now, s.last_seen_at).replace(" ago", "")}</span>
+                  <span className="now-log-text">{a.report ?? s.last_activity ?? livenessLabel(s, now)}</span>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </>
+  );
+}
+
 /**
  * The agents moving now: in this machine's worktrees and on other machines (through `nitely
  * serve`). Now's header and the sidebar's Now count both say it, so the two always agree.
  */
 export function movingCounts(board: Board, now: number): { here: number; elsewhere: number; total: number } {
-  const here = board.repos.flatMap((r) => r.rows).filter((r) => livenessOf(r.session, now) === "working").length;
+  // Sessions, not folders: several agents often work from one main checkout (NIT-273).
+  const here = (board.agents ?? []).filter((a) => livenessOf(a.session, now) === "working").length;
   const elsewhere = board.remote_sessions.filter((s) => livenessOf(s, now) === "working").length;
   return { here, elsewhere, total: here + elsewhere };
 }
@@ -198,7 +256,7 @@ export const movingTitle = (m: { here: number; elsewhere: number }) =>
 /** The page in one line: how many agents move, wait on you, or sit idle. */
 function Glance({ board, needs, now, onInbox }: { board: Board; needs: number; now: number; onInbox: () => void }) {
   const rows = board.repos.flatMap((r) => r.rows);
-  const count = (l: string) => rows.filter((r) => livenessOf(r.session, now) === l).length;
+  const count = (l: string) => (board.agents ?? []).filter((a) => livenessOf(a.session, now) === l).length;
   const moving = movingCounts(board, now);
   const idle = count("idle") + count("stale");
   if (rows.length === 0 && moving.total === 0) return null;

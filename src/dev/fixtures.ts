@@ -32,6 +32,7 @@ import type {
   Applied,
   Ask,
   Board,
+  AgentRow,
   BranchRow,
   BranchState,
   ConnectPlan,
@@ -882,7 +883,7 @@ world.timelines.get("NIT-31")?.push(
 
 function session(spec: IssueSpec, live: Live): Session {
   return {
-    id: `${spec.vendor}-${spec.key.toLowerCase()}`,
+    id: `${spec.vendor}:${fakeSession(spec.key)}`,
     vendor: spec.vendor ?? "claude",
     cwd: worktreeOf(spec),
     started_at: NOW - spec.from * HOUR + 10 * MIN,
@@ -1194,8 +1195,31 @@ function snapshot(): Board {
       unmatched_sessions: unmatched,
     };
   });
+  // One row per session, as snapshot.rs makes them: the sessions in task worktrees, and three that
+  // run from the Nitely main checkout on issues of their own (a coordinator's lanes do).
+  const agents: AgentRow[] = repos.flatMap((r) =>
+    r.rows
+      .filter((row) => row.session && !row.is_main)
+      .map((row) => ({ session: row.session!, repo: r.name, project: r.project, worktree: row.worktree, issue_key: row.issue_key, issue: row.issue, report: row.session!.last_activity, needs_me: row.needs_me })),
+  );
+  const nitely = repos.find((r) => r.project === "NIT");
+  const started = world.issues.filter((i) => i.project === "NIT" && i.state_type === "started" && !agents.some((a) => a.issue_key === i.key));
+  if (nitely) {
+    const lanes: [string, number, string, Session["state"]][] = [
+      ["5f1c9a2e-0d4b-4c7e-9b1a-3e6d2f8a7b11", 0, "Wiring the per-session rows into Now", "working"],
+      ["9b7e4d10-6a2c-4f3e-8d5b-1c0a9e7f6d22", 1, "Waiting for the lane to free up", "working"],
+      ["c3a8f6e2-7b1d-4e9a-a2c5-8f4b0d6e3a33", 2, "Asked whether to keep the old layout", "waiting"],
+    ];
+    for (const [id, n, report, state] of lanes) {
+      const issue = started[n] ?? null;
+      const session: Session = { id: `claude:${id}`, vendor: "claude", cwd: nitely.root, started_at: NOW - (n + 1) * 40 * 60, last_seen_at: NOW - 30 - n * 60, last_activity: "Bash: cargo test", state };
+      agents.push({ session, repo: nitely.name, project: "NIT", worktree: null, issue_key: issue?.key ?? null, issue, report, needs_me: state === "waiting" });
+    }
+  }
+  agents.sort((a, b) => b.session.last_seen_at - a.session.last_seen_at);
   return {
     repos,
+    agents,
     // Only those without a worktree row, as in nitely-core: the others are flagged on their row.
     needs_me_issues: world.issues.filter((i) => (i.state === "Needs You" || isOwnWork(i)) && !repos.some((r) => r.rows.some((row) => row.issue_key === i.key))),
     asks: world.asks.filter((a) => a.answer === null),
@@ -1716,7 +1740,7 @@ function laneOf(spec: IssueSpec): ActivityLane | null {
   }
   marks.sort((a, b) => a.ts - b.ts);
   return {
-    session_id: `${spec.vendor}-${spec.key.toLowerCase()}`,
+    session_id: `${spec.vendor}:${fakeSession(spec.key)}`,
     vendor: spec.vendor,
     cwd: worktreeOf(spec),
     project: repoOf(spec.key).project,

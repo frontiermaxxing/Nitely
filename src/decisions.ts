@@ -127,14 +127,19 @@ export function decisionsOf(board: Board, details: Map<string, IssueDetail>, now
     out.push({ id: `${own ? "own" : "approve"}-${i.key}`, kind: own ? "own" : "approve", issue: i, row: at?.row ?? null, repo: at?.repo ?? null, ask: null, since: waitingSince(i, details.get(i.key)), urgency: urgencyOf(i) });
   }
   for (const { repo, row } of rows) {
-    if (!row.needs_me) continue;
-    const conflict = !!row.state?.rebase_in_progress;
-    // A row flagged only because its issue waits for approval is the approval above.
-    if (!conflict && row.session?.state !== "waiting") continue;
+    if (!row.needs_me || !row.state?.rebase_in_progress) continue;
     const issue = row.issue ?? issueOf(row.issue_key);
     // A conflict waits from when its rebase stopped; a branch's last commit can be days older.
-    const since = conflict ? (row.state?.rebase_started_at ?? row.state?.last_commit_at ?? row.session?.last_seen_at ?? now) : (row.session?.last_seen_at ?? now);
-    out.push({ id: `${conflict ? "conflict" : "input"}-${row.worktree}`, kind: conflict ? "conflict" : "input", issue, row, repo, ask: null, since, urgency: urgencyOf(issue) });
+    const since = row.state?.rebase_started_at ?? row.state?.last_commit_at ?? row.session?.last_seen_at ?? now;
+    out.push({ id: `conflict-${row.worktree}`, kind: "conflict", issue, row, repo, ask: null, since, urgency: urgencyOf(issue) });
+  }
+  // An agent waiting at its own prompt, one per session wherever it runs (NIT-273). One waiting on
+  // a question it asked is that question, above.
+  for (const a of board.agents ?? []) {
+    if (a.session.state !== "waiting" || board.asks.some((q) => q.asked_by === a.session.id)) continue;
+    const row = a.worktree ? (rows.find((r) => r.row.worktree === a.worktree)?.row ?? null) : null;
+    const issue = a.issue ?? issueOf(a.issue_key);
+    out.push({ id: `input-${a.session.id}`, kind: "input", issue, row, repo: a.repo, ask: null, since: a.session.last_seen_at, urgency: urgencyOf(issue) });
   }
   // A land that stopped, with no agent working on it any more, is the human's to unstick.
   for (const { repo, row } of rows) {

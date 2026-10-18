@@ -576,17 +576,31 @@ pub type OpenDb = Arc<dyn Fn() -> Result<crate::Db> + Send + Sync>;
 /// issue's key, or its folder when it has none.
 pub type InWorktrees = Arc<dyn Fn(&crate::Db) -> Vec<String> + Send + Sync>;
 
-/// The board's worktrees that wait on the person: a rebase stopped there, or the agent in it is
-/// waiting for input. The desktop Inbox shows each as a decision. Named by issue key, so one
-/// issue the server already counts (a stopped land with an agent waiting in it) counts once.
+/// What on the board waits on the person: a worktree whose rebase stopped, or an agent session
+/// waiting at its own prompt (not on a question it asked, which the phone counts as the question).
+/// The desktop Inbox shows each as a decision. Named by issue key, so one issue the server already
+/// counts (a stopped land with an agent waiting in it) counts once.
 pub fn waiting_in_worktrees(board: &crate::Board) -> Vec<String> {
-    board
+    // A stopped rebase is a worktree's; a session waiting is a session's, wherever it runs, so
+    // several in one folder each count (NIT-273).
+    let rebases = board
         .repos
         .iter()
         .flat_map(|r| r.rows.iter())
-        .filter(|row| row.needs_me && (row.state.as_ref().is_some_and(|s| s.rebase_in_progress) || row.session.as_ref().is_some_and(|s| s.state == "waiting")))
-        .map(|row| row.issue_key.as_ref().map(|k| k.to_uppercase()).unwrap_or_else(|| format!("worktree:{}", row.worktree)))
-        .collect()
+        .filter(|row| row.needs_me && row.state.as_ref().is_some_and(|s| s.rebase_in_progress))
+        .map(|row| row.issue_key.as_ref().map(|k| k.to_uppercase()).unwrap_or_else(|| format!("worktree:{}", row.worktree)));
+    let waiting = board
+        .agents
+        .iter()
+        .filter(|a| a.session.state == "waiting" && !board.asks.iter().any(|q| q.asked_by == a.session.id))
+        .map(|a| a.issue_key.as_ref().map(|k| k.to_uppercase()).unwrap_or_else(|| format!("session:{}", a.session.id)));
+    let mut out: Vec<String> = Vec::new();
+    for key in rebases.chain(waiting) {
+        if !out.contains(&key) {
+            out.push(key);
+        }
+    }
+    out
 }
 
 #[derive(Default)]
