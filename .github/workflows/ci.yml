@@ -24,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest]
+        os: [windows-latest, macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
@@ -34,6 +34,14 @@ jobs:
       # The runner's TEMP is an 8.3 short path (C:\Users\RUNNER~1\...), which the tests run under
       # on purpose: paths::normalize spells short names out (NIT-104).
       - uses: actions/checkout@v5
+
+      # Tauri's Linux prerequisites, for the app crate (nitely-app) that `cargo test --workspace`
+      # builds, plus D-Bus for the keychain (keyring's Secret Service). No Linux bundle is built yet.
+      - name: Linux prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev pkg-config
 
       # rustup installs the toolchain rust-toolchain.toml pins, with clippy.
       - name: Rust toolchain
