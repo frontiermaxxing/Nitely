@@ -119,7 +119,11 @@ project served longest ago first, so one project's backlog never holds up the re
 oldest. A request starts when no request of its own repo is ahead of it and there is a free slot
 after the requests ahead of it that could start; a repo whose lanes are all busy holds up no other
 repo. On a machine with 3 slots or more, a gate or land leaves the last free slot to an agent's
-`run` that could start, so a minute of clippy never waits out two half-hour gates (NIT-291). Each
+`run` that could start, so a minute of clippy never waits out two half-hour gates (NIT-291). A quick
+run (a `run` whose command's last runs took under two minutes at the median, or, with none,
+one that names a test filter) may take a free lane ahead of its repo's queued gates, one lane per
+repo at most and never ahead of a waiting land or in a one-lane repo, so gates are never starved;
+one that runs past three times its usual time is just a run (NIT-347). Each
 queued request says why it waits (`waiting_why` in `nitely lanes`, on the strip): "waiting: 3 of 3
 machine slots in use (AND-302 gate 24 m, …)", "behind request 41 of the same repo", "all 2 of its
 repo's lanes are busy", the person's checkout, or memory. Each request records the scheduler it waits

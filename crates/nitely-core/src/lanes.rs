@@ -1380,6 +1380,68 @@ struct QueueRow {
     /// Queued under an older scheduler (NIT-325) by a requester that still runs: passed over, it
     /// holds nobody up.
     older: bool,
+    /// A quick run (NIT-347): the run's command usually takes this many seconds, under
+    /// `QUICK_SECS`, or it has no history and names a test filter.
+    quick: Option<i64>,
+}
+
+/// A `run` whose command's recent median is under this, or which names a test filter, is quick
+/// (NIT-347): it may take a free lane ahead of its repo's queued gates.
+const QUICK_SECS: i64 = 120;
+
+/// How many seconds the `run` `command` in `repo` usually takes, when it is quick: the median of
+/// its last five finished runs, under `QUICK_SECS`; with none, `QUICK_SECS` when the command names
+/// a test filter (`names_test_filter`). None for a run that is not quick.
+fn quick_class(db: &Db, repo: &str, command: &str) -> Result<Option<i64>> {
+    let mut stmt = db.conn.prepare(
+        "SELECT ended_at - started_at FROM lane_run WHERE repo = ?1 AND command = ?2 AND kind = 'run' AND state = 'done'
+         AND started_at IS NOT NULL AND ended_at IS NOT NULL ORDER BY id DESC LIMIT 5",
+    )?;
+    let mut took: Vec<i64> = stmt.query_map(params![repo, command], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    if took.is_empty() {
+        return Ok(names_test_filter(command).then_some(QUICK_SECS));
+    }
+    took.sort_unstable();
+    let median = took[took.len() / 2].max(1);
+    Ok((median < QUICK_SECS).then_some(median))
+}
+
+/// Whether `command` runs only some tests: `cargo test` with a test name or `--test <target>`
+/// (`cargo test -p nitely-core waits`, `cargo test --test install`, `cargo test -- lanes::`),
+/// `node --test <file>`, a `--test-name-pattern`, or `pytest` with `-k` or `file::test`.
+fn names_test_filter(command: &str) -> bool {
+    let words: Vec<&str> = command.split_whitespace().collect();
+    let ends = |t: &str| matches!(t, "&&" | "||" | ";" | "|");
+    for (i, w) in words.iter().enumerate() {
+        if *w == "test" && i > 0 && words[i - 1] == "cargo" {
+            let with_value = ["-p", "--package", "--features", "-F", "-j", "--jobs", "--target", "--profile", "--manifest-path", "--target-dir", "--color", "--message-format"];
+            let mut j = i + 1;
+            while j < words.len() && !ends(words[j]) {
+                let t = words[j];
+                if t == "--" {
+                    return words[j + 1..].iter().take_while(|t| !ends(t)).any(|t| !t.starts_with('-'));
+                }
+                if t == "--test" || t.starts_with("--test=") {
+                    return true;
+                }
+                if with_value.contains(&t) {
+                    j += 2;
+                    continue;
+                }
+                if !t.starts_with('-') {
+                    return true;
+                }
+                j += 1;
+            }
+        }
+        if *w == "--test" && i > 0 && words[i - 1].ends_with("node") && words.get(i + 1).is_some_and(|f| !f.starts_with('-') && !ends(f)) {
+            return true;
+        }
+        if w.starts_with("--test-name-pattern") || (w.ends_with("pytest") && words[i + 1..].iter().take_while(|t| !ends(t)).any(|t| *t == "-k" || t.contains("::"))) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Where a queued request stands.
@@ -1387,6 +1449,8 @@ struct QueueRow {
 enum Turn {
     /// It may try for a slot and a lane now.
     Go,
+    /// A quick run that may try now, ahead of its repo's queue (NIT-347), and the words for it.
+    QuickGo(String),
     /// It may try, but every lane of its repo is busy, so its lane's lock will decide.
     LanesBusy(String),
     /// Not yet, and why, in words.
@@ -1457,6 +1521,37 @@ fn turns(rows: Vec<QueueRow>, slots: u32, served: &std::collections::HashMap<Str
         let repo = repo_of(w);
         behind_land(w, &repo).is_none() && firsts.insert(repo.clone()) && w.kind == "run" && can_start(&repo, &w.kind)
     });
+    // Each repo's quick run (NIT-347): its first queued quick run behind another request of its
+    // repo may take a free lane ahead of them, in a repo of two lanes or more, while no quick run
+    // of the repo holds a lane (one running past three times its usual time is just a run), and
+    // never ahead of a waiting land. So one lane at most goes to quick runs, and the rest of the
+    // repo's lanes stay the queue's: gates are never starved, and aging holds for all.
+    let quick_of: HashMap<i64, i64> = rows.iter().filter(|r| r.alive && !r.running).filter_map(|r| r.quick.map(|m| (r.w.id, m))).collect();
+    let quick_holds: HashSet<String> =
+        running.iter().filter(|r| r.quick.is_some_and(|m| now - r.started_at.unwrap_or(now) <= 3 * m)).map(|r| repo_of(&r.w)).collect();
+    let mut quick_pick: HashMap<String, (i64, usize)> = HashMap::new();
+    {
+        let mut before: HashMap<String, usize> = HashMap::new();
+        for w in ordered.iter() {
+            let repo = repo_of(w);
+            if behind_land(w, &repo).is_some() || land_waiting.contains_key(&repo) {
+                continue;
+            }
+            let n = before.entry(repo.clone()).or_default();
+            let eligible = *n > 0
+                && w.kind == "run"
+                && quick_of.contains_key(&w.id)
+                && !quick_pick.contains_key(&repo)
+                && lanes_by_repo.get(&repo).copied().unwrap_or(1) >= 2
+                && !quick_holds.contains(&repo)
+                && !held_by_checkout.contains(&repo);
+            if eligible {
+                quick_pick.insert(repo.clone(), (w.id, *n));
+            }
+            *n += 1;
+        }
+    }
+    let run_could_start = run_could_start || quick_pick.keys().any(|repo| can_start(repo, "run"));
     let reserve = i64::from(slots >= 3 && run_could_start);
     let busy = || {
         let mut list: Vec<&&QueueRow> = running.iter().collect();
@@ -1471,6 +1566,9 @@ fn turns(rows: Vec<QueueRow>, slots: u32, served: &std::collections::HashMap<Str
     };
     let mut first_of_repo: HashMap<String, i64> = HashMap::new();
     let mut ahead: Vec<i64> = Vec::new();
+    // Lanes of each repo given to a request this pass, so a quick run and its repo's first never
+    // both count the same lane.
+    let mut taken: HashMap<String, i64> = HashMap::new();
     let mut out = HashMap::new();
     for w in ordered {
         let repo = repo_of(&w);
@@ -1478,11 +1576,21 @@ fn turns(rows: Vec<QueueRow>, slots: u32, served: &std::collections::HashMap<Str
             out.insert(w.id, Turn::Wait(format!("waiting: behind request {land} of the same repo")));
             continue;
         }
-        if let Some(first) = first_of_repo.get(&repo) {
-            out.insert(w.id, Turn::Wait(format!("waiting: behind request {first} of the same repo")));
-            continue;
+        let quick = quick_pick.get(&repo).copied().filter(|(id, _)| *id == w.id);
+        if quick.is_none() {
+            if let Some(first) = first_of_repo.get(&repo) {
+                out.insert(w.id, Turn::Wait(format!("waiting: behind request {first} of the same repo")));
+                continue;
+            }
+            first_of_repo.insert(repo.clone(), w.id);
+            // The repo's last free lane goes to its quick run first (NIT-347).
+            if let Some((q, _)) = quick_pick.get(&repo) {
+                if lanes_for(&repo, &w.kind) - taken.get(&repo).copied().unwrap_or(0) <= 1 {
+                    out.insert(w.id, Turn::Wait(format!("waiting: its repo's free lane goes to quick run {q} first")));
+                    continue;
+                }
+            }
         }
-        first_of_repo.insert(repo.clone(), w.id);
         // A land takes any free slot; a run leaves one for a land that is coming; a gate leaves one
         // for each, a run that could start and a land.
         let (for_run, for_land) = match w.kind.as_str() {
@@ -1492,8 +1600,11 @@ fn turns(rows: Vec<QueueRow>, slots: u32, served: &std::collections::HashMap<Str
         };
         let usable = free_slots - for_run - for_land;
         let turn = if (ahead.len() as i64) < usable {
-            if lanes_for(&repo, &w.kind) > 0 {
-                Turn::Go
+            if lanes_for(&repo, &w.kind) - taken.get(&repo).copied().unwrap_or(0) > 0 {
+                match quick {
+                    Some((_, n)) => Turn::QuickGo(format!("quick run: ahead of {n} {} of its repo", if n == 1 { "request" } else { "requests" })),
+                    None => Turn::Go,
+                }
             } else if w.kind != "land" && keeps_for_land(&repo) {
                 // Not "lanes busy", which lets it race for the next lane to free: that one is the
                 // land's.
@@ -1511,8 +1622,15 @@ fn turns(rows: Vec<QueueRow>, slots: u32, served: &std::collections::HashMap<Str
             let ids = ahead.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
             Turn::Wait(format!("waiting: the free machine slots go to requests ahead ({ids})"))
         };
-        if turn == Turn::Go && can_start(&repo, &w.kind) {
+        let turn = match (quick, turn) {
+            // A quick run that may not go yet still says what it is.
+            (Some((_, n)), Turn::Wait(why)) => Turn::Wait(format!("quick run, ahead of {n} of its repo, {why}")),
+            (Some((_, n)), Turn::LanesBusy(why)) => Turn::LanesBusy(format!("quick run, ahead of {n} of its repo, {why}")),
+            (_, turn) => turn,
+        };
+        if matches!(turn, Turn::Go | Turn::QuickGo(_)) && can_start(&repo, &w.kind) {
             ahead.push(w.id);
+            *taken.entry(repo.clone()).or_default() += 1;
         }
         out.insert(w.id, turn);
     }
@@ -1524,10 +1642,10 @@ fn turns(rows: Vec<QueueRow>, slots: u32, served: &std::collections::HashMap<Str
 #[allow(clippy::type_complexity)]
 fn queue_rows(db: &Db, me: Option<i64>, alive: &mut dyn FnMut(&Requester) -> bool) -> Result<(Vec<QueueRow>, std::collections::HashMap<String, i64>)> {
     let mut stmt = db.conn.prepare(
-        "SELECT id, project, repo, priority, kind, queued_at, state, pid, lane_count, waiting_for IS NOT NULL, issue_key, started_at, pid_started, polled_at, scheduler
+        "SELECT id, project, repo, priority, kind, queued_at, state, pid, lane_count, waiting_for IS NOT NULL, issue_key, started_at, pid_started, polled_at, scheduler, command
          FROM lane_run WHERE state IN ('queued', 'running')",
     )?;
-    type Raw = (Waiting, String, Requester, i64, bool, Option<String>, Option<i64>, Option<i64>, Option<i64>);
+    type Raw = (Waiting, String, Requester, i64, bool, Option<String>, Option<i64>, Option<i64>, Option<i64>, String);
     let raw: Vec<Raw> = stmt
         .query_map([], |r| {
             Ok((
@@ -1540,13 +1658,23 @@ fn queue_rows(db: &Db, me: Option<i64>, alive: &mut dyn FnMut(&Requester) -> boo
                 r.get(11)?,
                 r.get(13)?,
                 r.get(14)?,
+                r.get(15)?,
             ))
         })?
         .collect::<rusqlite::Result<_>>()?;
     let now = now();
+    // Each run's quick class, once per command (NIT-347).
+    let mut classes: std::collections::HashMap<(String, String), Option<i64>> = std::collections::HashMap::new();
+    for (w, .., command) in &raw {
+        if w.kind == "run" && !classes.contains_key(&(w.repo.clone(), command.clone())) {
+            let class = quick_class(db, &w.repo, command)?;
+            classes.insert((w.repo.clone(), command.clone()), class);
+        }
+    }
     let rows = raw
         .into_iter()
-        .map(|(w, state, requester, lane_count, waits_for_checkout, issue, started_at, polled_at, scheduler)| {
+        .map(|(w, state, requester, lane_count, waits_for_checkout, issue, started_at, polled_at, scheduler, command)| {
+            let quick = if w.kind == "run" { classes.get(&(w.repo.clone(), command)).copied().flatten() } else { None };
             // A queued request whose requester has stopped looking for its turn (hung, suspended)
             // would never take it: it holds nobody up until it looks again (NIT-270).
             let stopped_looking = state == "queued" && polled_at.is_some_and(|t| now - t > STOPPED_LOOKING_SECS);
@@ -1560,7 +1688,7 @@ fn queue_rows(db: &Db, me: Option<i64>, alive: &mut dyn FnMut(&Requester) -> boo
             // runs. A dead older land's row, not settled yet, would otherwise cost the next,
             // current land the lane kept for it (NIT-342).
             let older = older && requester_runs;
-            QueueRow { w, running: state == "running", alive: is_alive, lane_count, waits_for_checkout, issue, started_at, older }
+            QueueRow { w, running: state == "running", alive: is_alive, lane_count, waits_for_checkout, issue, started_at, older, quick }
         })
         .collect();
     // When each project last had a turn (a request of it started), so the one served longest ago
@@ -1622,7 +1750,7 @@ fn waiting_reasons(db: &Db) -> Result<std::collections::HashMap<i64, String>> {
         .into_iter()
         .filter_map(|(id, t)| match t {
             Turn::Go => None,
-            Turn::LanesBusy(why) | Turn::Wait(why) => Some((id, why)),
+            Turn::QuickGo(why) | Turn::LanesBusy(why) | Turn::Wait(why) => Some((id, why)),
         })
         .collect())
 }
@@ -3591,7 +3719,7 @@ wanted {shown}", ran.output);
     }
 
     fn queued(w: Waiting) -> QueueRow {
-        QueueRow { w, running: false, alive: true, lane_count: 1, waits_for_checkout: false, issue: None, started_at: None, older: false }
+        QueueRow { w, running: false, alive: true, lane_count: 1, waits_for_checkout: false, issue: None, started_at: None, older: false, quick: None }
     }
 
     fn running(w: Waiting, issue: &str, started_at: i64) -> QueueRow {
@@ -3745,6 +3873,118 @@ wanted {shown}", ran.output);
         let t = turns(rows, 5, &served, now(), &landing);
         assert_eq!(t[&gate], Turn::Wait("waiting: a lane of its repo is kept for the land in progress".into()), "{t:?}");
         std::fs::remove_dir_all(base).ok();
+    }
+
+    /// What names a test filter, so a run with no history still counts as quick (NIT-347).
+    #[test]
+    fn a_run_that_names_a_test_filter_is_quick() {
+        for quick in [
+            "cargo test -p nitely-core waits",
+            "cargo test -p nitely-core -- lanes::tests",
+            "cargo test --test install_and_forward",
+            "cargo clippy -- -D warnings && cargo test -p nitely-core machine::",
+            "node --test dist/lanes.test.js",
+            "node --test --test-name-pattern=chips",
+            "pytest -k quick_lane",
+            "pytest tests/test_lanes.py::test_one",
+        ] {
+            assert!(names_test_filter(quick), "{quick}");
+        }
+        for whole in ["cargo test --workspace", "cargo test -p nitely-core", "cargo test -p nitely-core -- --nocapture", "npm test", "cargo clippy --workspace -- -D warnings", "node --test"] {
+            assert!(!names_test_filter(whole), "{whole}");
+        }
+    }
+
+    /// A run is quick when its command's last runs took under two minutes at the median, or, with
+    /// none, when it names a test filter.
+    #[test]
+    fn a_runs_quick_class_comes_from_its_last_runs() {
+        let base = crate::paths::unique_temp("nitely-lane-quick", "");
+        std::fs::create_dir_all(&base).unwrap();
+        let db = Db::open(&base.join("t.db")).unwrap();
+        let ran = |command: &str, seconds: i64| {
+            db.conn
+                .execute(
+                    "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, started_at, ended_at)
+                     VALUES ('NIT', 'C:/Code/nitely', 'x', 'run', 's', 't', 'b', ?1, 'done', 'local', 100, 100, ?2)",
+                    params![command, 100 + seconds],
+                )
+                .unwrap();
+        };
+        for seconds in [20, 45, 30] {
+            ran("cargo clippy -p nitely-core", seconds);
+        }
+        for seconds in [400, 380, 20] {
+            ran("cargo test --workspace", seconds);
+        }
+        assert_eq!(quick_class(&db, "C:/Code/nitely", "cargo clippy -p nitely-core").unwrap(), Some(30), "the median of its last runs");
+        assert_eq!(quick_class(&db, "C:/Code/nitely", "cargo test --workspace").unwrap(), None, "usually long");
+        assert_eq!(quick_class(&db, "C:/Code/nitely", "cargo test -p nitely-core waits").unwrap(), Some(QUICK_SECS), "no history, a test filter");
+        assert_eq!(quick_class(&db, "C:/Code/nitely", "cargo build --release").unwrap(), None, "no history, no filter");
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// A quick run takes a free lane ahead of its repo's queued gates, and says so; its repo's
+    /// first leaves it that lane (NIT-347).
+    #[test]
+    fn a_quick_run_goes_ahead_of_a_gate_backlog() {
+        let none = std::collections::HashMap::new();
+        let now = 10_000;
+        let nit = |w: Waiting| QueueRow { lane_count: 3, ..queued(w) };
+        let nit_running = |w: Waiting, issue: &str| QueueRow { lane_count: 3, ..running(w, issue, now - 60) };
+        let quick = |w: Waiting| QueueRow { quick: Some(30), ..nit(w) };
+        let rows = vec![
+            nit_running(waiting(1, "NIT", "gate", now - 900), "NIT-1"),
+            nit_running(waiting(2, "NIT", "gate", now - 800), "NIT-2"),
+            nit(waiting(10, "NIT", "gate", now - 200)),
+            nit(waiting(11, "NIT", "gate", now - 150)),
+            quick(waiting(12, "NIT", "run", now - 20)),
+        ];
+        let t = turns(rows.clone(), 5, &none, now, &Default::default());
+        assert_eq!(t[&12], Turn::QuickGo("quick run: ahead of 2 requests of its repo".into()), "{t:?}");
+        assert_eq!(t[&10], Turn::Wait("waiting: its repo's free lane goes to quick run 12 first".into()));
+        assert_eq!(t[&11], Turn::Wait("waiting: behind request 10 of the same repo".into()));
+        // The same run, not quick: it waits its turn.
+        let mut slow = rows.clone();
+        slow[4] = nit(waiting(12, "NIT", "run", now - 20));
+        let t = turns(slow, 5, &none, now, &Default::default());
+        assert_eq!((&t[&10], &t[&12]), (&Turn::Go, &Turn::Wait("waiting: behind request 10 of the same repo".into())), "{t:?}");
+        // Never ahead of a waiting land.
+        let mut landing = rows.clone();
+        landing.push(nit(waiting(13, "NIT", "land", now - 5)));
+        let t = turns(landing, 5, &none, now, &Default::default());
+        assert_eq!(t[&13], Turn::Go, "{t:?}");
+        assert!(matches!(&t[&12], Turn::Wait(why) if why.contains("behind request 13")), "{t:?}");
+        // Never in a one-lane repo, where the one lane is the queue's.
+        let one_lane: Vec<QueueRow> = rows.iter().cloned().map(|r| QueueRow { lane_count: 1, ..r }).filter(|r| !r.running).collect();
+        let t = turns(one_lane, 5, &none, now, &Default::default());
+        assert_eq!(t[&10], Turn::Go, "{t:?}");
+    }
+
+    /// A stream of quick runs never starves a gate: one lane at most goes to them, and while a
+    /// quick run holds it the repo's first takes the next free lane. One that runs past three
+    /// times its usual time is just a run, and frees the quick lane for the next (NIT-347).
+    #[test]
+    fn quick_runs_take_one_lane_at_most_and_never_starve_a_gate() {
+        let none = std::collections::HashMap::new();
+        let now = 10_000;
+        let nit = |w: Waiting| QueueRow { lane_count: 3, ..queued(w) };
+        let quick_running = |w: Waiting, started: i64| QueueRow { lane_count: 3, quick: Some(30), ..running(w, "NIT-5", started) };
+        let rows = vec![
+            QueueRow { lane_count: 3, ..running(waiting(1, "NIT", "gate", now - 900), "NIT-1", now - 300) },
+            quick_running(waiting(2, "NIT", "run", now - 40), now - 20),
+            nit(waiting(10, "NIT", "gate", now - 200)),
+            QueueRow { quick: Some(30), ..nit(waiting(12, "NIT", "run", now - 10)) },
+        ];
+        let t = turns(rows.clone(), 5, &none, now, &Default::default());
+        assert_eq!(t[&10], Turn::Go, "a quick run already holds a lane: the gate takes the free one: {t:?}");
+        assert_eq!(t[&12], Turn::Wait("waiting: behind request 10 of the same repo".into()));
+        // The running quick run is past three times its usual 30 s: just a run now.
+        let mut overran = rows.clone();
+        overran[1] = quick_running(waiting(2, "NIT", "run", now - 200), now - 100);
+        let t = turns(overran, 5, &none, now, &Default::default());
+        assert!(matches!(t[&12], Turn::QuickGo(_)), "{t:?}");
+        assert!(matches!(&t[&10], Turn::Wait(why) if why.contains("quick run 12")), "{t:?}");
     }
 
     #[test]
