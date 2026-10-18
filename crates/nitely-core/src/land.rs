@@ -151,7 +151,9 @@ pub const AUTO_LANDER: &str = "nitely:auto-land";
 /// review passes, and after a human approves it (`land_approved`).
 pub fn land_now(db: &mut Db, config: &crate::Config, key: &str, dir: &str, push: bool, actor: &Actor) -> Result<Landed> {
     let opts = LandOptions { dir, issue_key: key, push, keep: false, break_lock: false };
-    db.log_event(actor, Some(key), None, "status", "Landing it automatically, as the playbook says")?;
+    // Nitely's line, not the agent's: the agent may be on another issue by now, and a status line
+    // under its id would say it is back on this one (NIT-273).
+    db.log_event(&Actor::Agent(AUTO_LANDER.into()), Some(key), None, "status", "Landing it automatically, as the playbook says")?;
     land(db, config, &opts, actor)
 }
 
@@ -1151,6 +1153,8 @@ when_changed = ["billing"]
         let (a, wt_a) = f.submitted("Sidebar polish", "sidebar.txt", "x");
         assert_eq!(state(&f, &a), "Done");
         assert!(!wt_a.exists() && f.repo.join("sidebar.txt").exists());
+        let said = f.db.timeline(&a).unwrap().into_iter().find(|e| e.summary.as_deref() == Some("Landing it automatically, as the playbook says")).unwrap();
+        assert_eq!(said.actor, AUTO_LANDER, "Nitely's line, not the agent's: it does not put the agent back on the issue");
 
         // One that needs a human waits, and lands as soon as they approve it.
         let (b, _) = f.submitted("Billing fix", "billing.txt", "x");
