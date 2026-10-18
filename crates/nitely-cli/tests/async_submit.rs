@@ -7,31 +7,52 @@ use serde_json::{json, Value};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
 
 fn git(dir: &Path, args: &[&str]) {
     let o = playbook::run_git(Command::new("git").arg("-C").arg(dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args)).unwrap();
     assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
 }
 
-/// A repo whose gate passes and whose reviewer passes everything after two seconds, a Nitely home,
-/// and an issue with a commit in its worktree.
+/// A repo whose gate passes and whose reviewer passes everything once the test releases it (writes
+/// `release`), a Nitely home, and an issue with a commit in its worktree. Held so, a submit that
+/// returned at all did not wait for the review, however slow the machine (NIT-267).
 struct Setup {
     base: PathBuf,
     home: PathBuf,
+    release: PathBuf,
     worktree: PathBuf,
     key: String,
     db: nitely_core::Db,
+}
+
+/// The fake reviewer: it reads its prompt, then answers once `release` exists (giving up after two
+/// minutes, so a test that never releases it fails instead of hanging).
+fn reviewer(release: &Path) -> String {
+    let release = serde_json::to_string(&release.to_string_lossy()).unwrap();
+    [
+        "const fs = require('fs');",
+        &format!("const release = {release};"),
+        "const until = Date.now() + 120000;",
+        "process.stdin.resume();",
+        "process.stdin.on('end', function wait() {",
+        "  if (fs.existsSync(release)) console.log('Fine.\\nVERDICT: clean');",
+        "  else if (Date.now() > until) process.exit(1);",
+        "  else setTimeout(wait, 50);",
+        "});",
+        "",
+    ]
+    .join("\n")
 }
 
 fn setup(name: &str) -> Setup {
     let base = nitely_core::paths::unique_temp(name, "");
     let home = base.join("home");
     let repo = base.join("repo");
+    let release = base.join("release");
     std::fs::create_dir_all(repo.join(".nitely")).unwrap();
     std::fs::create_dir_all(&home).unwrap();
     git(&repo, &["init", "-q", "-b", "main"]);
-    std::fs::write(repo.join("review.js"), "process.stdin.resume();\nprocess.stdin.on('end', () => setTimeout(() => console.log('Fine.\\nVERDICT: clean'), 2000));\n").unwrap();
+    std::fs::write(repo.join("review.js"), reviewer(&release)).unwrap();
     std::fs::write(
         repo.join(playbook::PLAYBOOK_PATH),
         "[worktree]\ndir = \"../wt/{key}\"\n[gate]\ncommands = [\"exit 0\"]\n[review]\nreviewer = { \"*\" = \"claude\" }\ncommands = { claude = [\"node\", \"review.js\"] }\n",
@@ -51,7 +72,20 @@ fn setup(name: &str) -> Setup {
     std::fs::write(worktree.join("footer.txt"), "x").unwrap();
     git(&worktree, &["add", "."]);
     git(&worktree, &["commit", "-q", "-m", "footer"]);
-    Setup { base, home, worktree, key: issue.key, db }
+    Setup { base, home, release, worktree, key: issue.key, db }
+}
+
+impl Setup {
+    /// The job is handed in and not done: its review is still held.
+    fn still_reviewing(&self, id: &str) {
+        let job = nitely(self, &["submit-status", id]);
+        assert!(matches!(job["state"].as_str(), Some("queued" | "running")), "the job waits for the held review: {job}");
+    }
+
+    /// Lets the reviewer answer.
+    fn release_review(&self) {
+        std::fs::write(&self.release, "").unwrap();
+    }
 }
 
 fn nitely(s: &Setup, args: &[&str]) -> Value {
@@ -82,11 +116,12 @@ fn tool(s: &Setup, name: &str, arguments: Value) -> Value {
 #[test]
 fn submit_returns_at_once_and_the_background_job_finishes_it() {
     let s = setup("nitely-async-submit");
-    let asked = Instant::now();
+    // Returned while the review is held, so it did not wait for it.
     let job = nitely(&s, &["submit", "--local"]);
-    assert!(asked.elapsed() < Duration::from_secs(2), "submit waited for the review: {:?}", asked.elapsed());
     assert!(matches!(job["state"].as_str(), Some("queued" | "running")), "{job}");
     let id = job["id"].as_i64().unwrap().to_string();
+    s.still_reviewing(&id);
+    s.release_review();
 
     let done = nitely(&s, &["submit-status", &id, "--wait", "120"]);
     assert_eq!(done["state"], "done", "{done}");
@@ -98,11 +133,11 @@ fn submit_returns_at_once_and_the_background_job_finishes_it() {
 #[test]
 fn an_agent_hands_in_over_mcp_and_hears_the_result_on_its_next_call() {
     let s = setup("nitely-async-submit-mcp");
-    let asked = Instant::now();
     let job = tool(&s, "submit", json!({}));
-    assert!(asked.elapsed() < Duration::from_secs(2), "submit waited for the review: {:?}", asked.elapsed());
     assert!(job["next"].as_str().unwrap().contains("Handed in"), "{job}");
     let id = job["id"].as_i64().unwrap();
+    s.still_reviewing(&id.to_string());
+    s.release_review();
 
     // Someone else waiting for it (here the CLI) does not use up the agent's notice.
     let done = nitely(&s, &["submit-status", &id.to_string(), "--wait", "120"]);
