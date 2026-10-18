@@ -262,11 +262,13 @@ fn land_waits(db: &Db) -> Result<Vec<Waiting>> {
             .prepare("SELECT id FROM land_run WHERE repo = ?1 AND ended_at IS NULL ORDER BY id")?
             .query_map(params![repo], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
-        // A run whose process died stays unended in its row until the next run: only one whose land
-        // still holds the lock is landing now (batches.rs reads it the same way).
-        let landing = crate::batches::land_running(repo);
+        // A run whose process died stays unended in its row until the next run: a run is landing
+        // now only while the queue itself holds the lock and its process runs.
+        let lock = land_lock(repo);
+        let lock_alive = crate::batches::land_running(repo);
+        let queue_holds = lock_alive && lock.as_ref().is_some_and(|(holder, _)| holder.ends_with("(land queue)"));
         let mut behind = Vec::new();
-        for run in runs.into_iter().filter(|_| landing) {
+        for run in runs.into_iter().filter(|_| queue_holds) {
             if let Some(r) = db.land_run(run)? {
                 behind.push(Behind { what: format!("land queue run {}: {}", r.id, r.issues.join(", ")), issue: None, since: Some(r.started_at) });
             }
@@ -275,7 +277,12 @@ fn land_waits(db: &Db) -> Result<Vec<Waiting>> {
         let why = if !behind.is_empty() {
             format!("{} in the land queue, behind the run landing now", ordinal(place))
         } else {
-            match land_lock(repo).filter(|_| landing) {
+            match lock {
+                // Left by a land whose process is gone: no land takes it until one breaks it.
+                Some((holder, since)) if !lock_alive => {
+                    behind.push(Behind { what: format!("{holder}, a land lock whose process is gone"), issue: holder.split_whitespace().next().map(str::to_string), since });
+                    format!("{} in the land queue, behind a stale land lock: land again with break_lock", ordinal(place))
+                }
                 // The queue holds the lock itself while it waits for its window: that is the wait.
                 Some((holder, _)) if holder.ends_with("(land queue)") => window(),
                 Some((holder, since)) => {
@@ -445,10 +452,15 @@ mod tests {
         let w = waits(&db, vec![]).unwrap();
         let land = w.waiting.iter().find(|x| x.issue.as_deref() == Some("APP-7")).unwrap();
         assert_eq!((land.why.as_str(), land.behind[0].what.as_str()), ("2nd in the land queue, behind a land holding the lock", "APP-20, holding the land lock"));
-        // A crashed run left unended, its lock's process gone: it holds nothing back.
+        // A crashed run left unended, and another land holds the lock now: the run is not landing.
         exec("UPDATE land_run SET ended_at = NULL WHERE id = 7");
+        assert_eq!(why(&waits(&db, vec![]).unwrap()), "2nd in the land queue, behind a land holding the lock");
+        // The crash left its lock too, its process gone: stuck until a land breaks it, and it says so.
         std::fs::write(&lock, "APP-5 (land queue) pid 4000000000 since then\n").unwrap();
-        assert_eq!(why(&waits(&db, vec![]).unwrap()), "2nd in the land queue, waiting for more changes to land with");
+        let w = waits(&db, vec![]).unwrap();
+        let land = w.waiting.iter().find(|x| x.issue.as_deref() == Some("APP-7")).unwrap();
+        assert_eq!(land.why, "2nd in the land queue, behind a stale land lock: land again with break_lock");
+        assert_eq!(land.behind.iter().map(|b| b.what.as_str()).collect::<Vec<_>>(), ["APP-5 (land queue), a land lock whose process is gone"], "not the dead run");
         std::fs::remove_dir_all(&dir).ok();
     }
 }
