@@ -134,6 +134,10 @@ pub struct PreviousRound {
     /// Findings the person accepted as they are (NIT-191), with their reasons: the reviewer does not
     /// raise them again. They are not in `findings`.
     pub accepted: Vec<(Finding, String)>,
+    /// That review passed and the branch was rebased or rewritten since: the commit its change sat
+    /// on, so the reviewer can compare the change with the one that passed (`git range-diff`)
+    /// instead of reading the whole branch again (NIT-185).
+    pub passed_on: Option<String>,
 }
 
 /// A previous round's finding and what this round says about it: `fixed`; `open`, with current code
@@ -174,6 +178,10 @@ pub struct Review {
     /// batch's tokens shared evenly between its changes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokens: Option<u64>,
+    /// Not run again: the same patch passed review at this commit, and that pass carries over
+    /// (NIT-185).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reused: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -382,6 +390,15 @@ its callers, and look for correctness bugs and regressions. Skip style. Do not e
 correctness bugs and regressions. Skip style. Do not edit anything.\n",
                 c = prev.commit
             ),
+            Some(prev) if prev.passed_on.is_some() => format!(
+                "This change passed review at commit {c}, and the branch has been rebased or rewritten since. Run `git range-diff \
+{o}..{c} {base}..HEAD` to see how the change differs from the one that passed (`git diff {base}...HEAD` is the whole \
+change). Review those differences and the code they reach, and look for correctness bugs and regressions, including \
+ones the new base brings to the change. Skip style. Do not edit anything. The rest already passed review: raise \
+something new there only if it is P0 or P1, and then say in the finding why that review missed it.\n",
+                c = prev.commit,
+                o = prev.passed_on.as_deref().unwrap_or_default()
+            ),
             Some(prev) => format!(
                 "This branch was reviewed before, at commit {c}, and has been rebased since, so review the whole change \
 again. Run `git diff {base}...HEAD`, read the changed code and its callers, and look for correctness bugs and \
@@ -517,7 +534,7 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
             .unwrap_or("")
             .to_string();
         let verdict = if findings.iter().any(|f| f.priority <= 1) { "changes" } else { "pass" };
-        Ok(Review { reviewer: reviewer.into(), verdict: verdict.into(), findings, flagged, summary, seconds, previous, note: String::new(), batch: None, tokens: None })
+        Ok(Review { reviewer: reviewer.into(), verdict: verdict.into(), findings, flagged, summary, seconds, previous, note: String::new(), batch: None, tokens: None, reused: None })
     }
 
     /// The instructions for several changes reviewed in one call (docs/batching.md): one section
@@ -1175,6 +1192,7 @@ mod tests {
     fn previous(in_history: bool) -> PreviousRound {
         let f = |priority, text: &str| Finding { priority, text: text.into(), carried: false, raised_as: None, now: None };
         PreviousRound {
+            passed_on: None,
             commit: "abc1234".into(),
             findings: vec![f(1, "Drops the last row: src/a.rs, f"), f(2, "Empty name: src/b.rs, g"), f(2, "Slow loop: src/c.rs, h")],
             in_history,
@@ -1199,6 +1217,7 @@ mod tests {
         // A clean previous round leaves no checklist, but old code still only takes P0 or P1.
         // Findings the person accepted are told apart, not checked again.
         let accepted = PreviousRound {
+            passed_on: None,
             findings: vec![],
             accepted: vec![(Finding { priority: 1, text: "No migration: src/k.rs, load".into(), carried: false, raised_as: None, now: None }, "no outside users yet".into())],
             ..previous(true)
@@ -1206,7 +1225,7 @@ mod tests {
         let p = rules().prompt("main", Some(&accepted));
         assert!(p.contains("accepted these findings") && p.contains("- [P1] No migration: src/k.rs, load (accepted: no outside users yet)"), "{p}");
         assert!(!p.contains("PREVIOUS <n>"), "{p}");
-        let clean = PreviousRound { findings: vec![], ..previous(true) };
+        let clean = PreviousRound { passed_on: None, findings: vec![], ..previous(true) };
         let p = rules().prompt("main", Some(&clean));
         assert!(!p.contains("PREVIOUS") && p.contains("only if it is P0 or P1"), "{p}");
     }
@@ -1265,6 +1284,7 @@ mod tests {
         git(&["add", "."]);
         let f = |priority, text: &str| Finding { priority, text: text.into(), carried: false, raised_as: None, now: None };
         let prev = PreviousRound {
+            passed_on: None,
             commit: "abc1234".into(),
             findings: vec![
                 f(1, "Returns to Todo after a failed apply: crates/nitely-core/src/proposals.rs:488, apply"),
@@ -1293,7 +1313,7 @@ mod tests {
         let carried = r.findings.iter().find(|f| f.carried).unwrap();
         assert_eq!(carried.text, "Apply is not atomic: src/proposals.rs, apply");
         assert_eq!(carried.now.as_deref(), Some("proposals.rs:2 `let closed = true;` is set before the write"));
-        let again = PreviousRound { commit: "abc9999".into(), findings: r.findings.clone(), in_history: true, accepted: vec![] };
+        let again = PreviousRound { passed_on: None, commit: "abc9999".into(), findings: r.findings.clone(), in_history: true, accepted: vec![] };
         assert!(rules().prompt("main", Some(&again)).contains("Last round said it was still open: proposals.rs:2"));
 
         // Code that is in the file but not at the cited line, or a citation with no reason, is not
@@ -1317,7 +1337,7 @@ PREVIOUS 3: open proposals.rs:2 `true` still closes before the write");
         // by an absolute path), it blocks again at P1, without the unconfirmed mark.
         let first = review("PREVIOUS 1: open\nPREVIOUS 2: fixed\nPREVIOUS 3: fixed");
         assert_eq!((first.findings[0].priority, first.findings[0].raised_as), (2, Some(1)));
-        let next = PreviousRound { commit: "def5678".into(), findings: first.findings.clone(), in_history: true, accepted: vec![] };
+        let next = PreviousRound { passed_on: None, commit: "def5678".into(), findings: first.findings.clone(), in_history: true, accepted: vec![] };
         let absolute = dir.join("src").join("proposals.rs");
         let text = format!("PREVIOUS 1: open {}:2 `let closed = true;` still closes before the write\nVERDICT: clean\nMONEY_OR_RELEASE: no", absolute.display());
         let r = rules().parse("codex", &text, 1, Some(&next), Some(&dir)).unwrap();
@@ -1351,6 +1371,7 @@ PREVIOUS 3: open proposals.rs:2 `true` still closes before the write");
         git(&["add", "."]);
         let f = |priority, text: &str| Finding { priority, text: text.into(), carried: true, raised_as: None, now: None };
         let prev = PreviousRound {
+            passed_on: None,
             commit: "4567a11".into(),
             findings: vec![
                 f(2, "Stale PID recovery can kill unrelated processes: crates/nitely-core/src/lanes.rs:518, `stop_leftovers`: after a requester crashes and its child exits, Windows can reuse the recorded PID. Checking only `pid_alive` then calling `stop_tree` forcibly terminates the unrelated process and its descendants without verifying their identity."),
@@ -1551,6 +1572,7 @@ PREVIOUS 2: open crates/nitely-cli/src/lanes.rs:139 `out.push_str(&\"\\\\\".repe
             previous,
         };
         let earlier = PreviousRound {
+            passed_on: None,
             commit: "c0".into(),
             findings: vec![f(2, "Edge: shared.rs:2, the empty line")],
             in_history: true,
@@ -1604,5 +1626,16 @@ VERDICT 1: findings\nMONEY_OR_RELEASE 1: no\nVERDICT 2: findings\nMONEY_OR_RELEA
         assert_eq!(tokens_used("codex\nok\ntokens used\n4,755\nok\n"), Some(4755));
         assert_eq!(tokens_used("[2026-10-17T21:42:00] tokens used: 12345\n"), Some(12345));
         assert_eq!(tokens_used("Fine.\nVERDICT: clean\n"), None);
+    }
+
+    #[test]
+    fn a_rebased_pass_is_reviewed_from_how_it_differs() {
+        let prev = PreviousRound { passed_on: Some("aaa1111".into()), findings: vec![], ..previous(false) };
+        let p = rules().prompt("origin/main", Some(&prev));
+        assert!(p.contains("passed review at commit abc1234") && p.contains("`git range-diff aaa1111..abc1234 origin/main..HEAD`"), "{p}");
+        assert!(p.contains("raise something new there only if it is P0 or P1"), "{p}");
+        // Rebased after a review that asked for changes: the whole change, as before.
+        let p = rules().prompt("origin/main", Some(&previous(false)));
+        assert!(p.contains("so review the whole change again") && !p.contains("range-diff"), "{p}");
     }
 }

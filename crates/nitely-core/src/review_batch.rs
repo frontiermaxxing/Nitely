@@ -879,6 +879,7 @@ mod tests {
             note: String::new(),
             batch: None,
             tokens: None,
+            reused: None,
         };
         let mut r = review("fixed");
         hold_interactions(&q.db, &wt, &mut r).unwrap();

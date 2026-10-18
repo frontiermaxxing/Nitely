@@ -5,6 +5,7 @@
 
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
+use rusqlite::OptionalExtension;
 use std::path::Path;
 
 use crate::db::{now, Db};
@@ -151,9 +152,17 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         let (vendor, _) = crate::git::parse_branch(&branch);
         let vendor = vendor.unwrap_or_default();
         let previous = previous_round(db, &issue.key, &worktree)?;
+        // The same patch passed review last time: that pass carries over (NIT-185).
+        let reused = reused_pass(db, &pb.review, &issue.key, &out.patch_id, &vendor, &|r| pb.review.is_installed(r, &worktree))?;
+        if let Some((_, r)) = &reused {
+            let at = r.reused.as_deref().unwrap_or_default();
+            db.log_event(actor, Some(&issue.key), Some(&wt), "status", &format!("The same patch passed review at {}: that pass carries over, so it is not reviewed again", &at[..at.len().min(7)]))?;
+        }
         // From a batch: the review, or what its review found for this change that its single review
         // must carry (an interaction with another change).
-        let (batched, extra) = if opts.batch && matches!(pb.review.batch, crate::review::BatchMode::Small | crate::review::BatchMode::All) {
+        let (batched, extra) = if reused.is_some() {
+            (reused, vec![])
+        } else if opts.batch && matches!(pb.review.batch, crate::review::BatchMode::Small | crate::review::BatchMode::All) {
             in_a_batch(db, &pb, &issue, &root, &worktree, &branch, &since, &files, &vendor, &out.reasons, previous.as_ref(), actor)?
         } else {
             (None, vec![])
@@ -184,7 +193,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         crate::review_batch::hold_interactions(db, &worktree, &mut review)?;
         let reviewer = choice.reviewer.clone();
         review.note = choice.note.clone();
-        if opts.batch && pb.review.batch == crate::review::BatchMode::Shadow {
+        if opts.batch && pb.review.batch == crate::review::BatchMode::Shadow && review.reused.is_none() {
             out.shadow = shadow_of(db, &pb, &issue, &root, &worktree, &branch, &since, &files, &vendor, &choice, &out.reasons, previous.as_ref())?;
         }
         out.reasons.extend(pb.review.independence_reason(&reviewer, &vendor, &choice.note));
@@ -216,8 +225,12 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         _ => None,
     };
     db.record_review(&out)?;
+    let review_id = db.conn.last_insert_rowid();
+    if out.review.is_some() {
+        db.conn.execute("UPDATE review SET rules = ?2 WHERE id = ?1", rusqlite::params![review_id, rules_of(&pb.review)])?;
+    }
     if let Some(shadow) = out.shadow.as_mut() {
-        shadow.review_id = db.conn.last_insert_rowid();
+        shadow.review_id = review_id;
     }
     // A request to accept a finding this round no longer raised has nothing left to decide.
     if let Some(r) = &out.review {
@@ -251,9 +264,10 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         _ if no_origin => "Not pushed: the repo has no origin remote, so the change stays in it.".into(),
         _ => "Not pushed (local only).".into(),
     };
-    let by = |r: &Review| match r.batched_with() {
-        Some(with) => format!("{}{}, in a batch with {with},", r.reviewer, noted(&r.note)),
-        None => format!("{}{}", r.reviewer, noted(&r.note)),
+    let by = |r: &Review| match (r.batched_with(), &r.reused) {
+        (Some(with), _) => format!("{}{}, in a batch with {with},", r.reviewer, noted(&r.note)),
+        (None, Some(at)) => format!("{}{} of this same patch at {}", r.reviewer, noted(&r.note), &at[..at.len().min(7)]),
+        (None, None) => format!("{}{}", r.reviewer, noted(&r.note)),
     };
     let outcome = match (&out.review, out.approver.as_str()) {
         (Some(r), _) if accepted_only => format!("Review by {} asked for changes only in findings you accepted, so it passes", by(r)),
@@ -469,7 +483,68 @@ pub(crate) fn previous_round_at(db: &Db, key: &str, dir: &Path, head: &str, befo
         }
     }
     let findings = last.findings.into_iter().filter(|f| !told.iter().any(|(t, _)| t.text == f.text)).collect();
-    Ok(Some(PreviousRound { commit: last.commit_sha, findings, in_history, accepted: told }))
+    // A pass whose branch was rebased since: where its change began, for a range-diff against it.
+    let passed_on = if !in_history && last.verdict == "pass" { git(dir, &["merge-base", &last.commit_sha, head]).ok().map(|o| o.trim().to_string()) } else { None };
+    Ok(Some(PreviousRound { commit: last.commit_sha, findings, in_history, accepted: told, passed_on }))
+}
+
+/// The last review's pass, carried over when it reviewed this very patch: nothing in the change is
+/// new to review. It keeps that review's reviewer, note, findings and flags, and says where it is
+/// from. Only the latest review counts, so a pass followed by a review that asked for changes is not
+/// carried over to a later return to the same patch. It must have run under the same review rules
+/// (a flag added since was never asked) and by the reviewer that would be chosen now.
+fn reused_pass(
+    db: &Db,
+    rules: &crate::review::ReviewRules,
+    key: &str,
+    patch_id: &str,
+    vendor: &str,
+    installed: &dyn Fn(&str) -> bool,
+) -> Result<Option<(crate::review::Choice, Review)>> {
+    if matches!(patch_id, "empty" | "unknown" | "") {
+        return Ok(None);
+    }
+    let last = db
+        .conn
+        .query_row(
+            "SELECT reviewer, verdict, patch_id, commit_sha, findings, flagged, note, rules FROM review
+             WHERE issue_key = ?1 COLLATE NOCASE AND reviewer != '' ORDER BY ts DESC, id DESC LIMIT 1",
+            [key],
+            |r| {
+                Ok((
+                    (r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?),
+                    (r.get::<_, String>(4)?, r.get::<_, String>(5)?, r.get::<_, String>(6)?, r.get::<_, Option<String>>(7)?),
+                ))
+            },
+        )
+        .optional()?;
+    let Some(((reviewer, verdict, last_patch, commit), (findings, flagged, note, ran_under))) = last else { return Ok(None) };
+    if verdict != "pass" || last_patch != patch_id || ran_under.as_deref() != Some(rules_of(rules).as_str()) {
+        return Ok(None);
+    }
+    if rules.choose(vendor, installed).ok().map(|c| c.reviewer).as_deref() != Some(reviewer.as_str()) {
+        return Ok(None);
+    }
+    let review = Review {
+        reviewer: reviewer.clone(),
+        verdict,
+        findings: serde_json::from_str(&findings).unwrap_or_default(),
+        flagged: serde_json::from_str(&flagged).unwrap_or_default(),
+        summary: String::new(),
+        seconds: 0,
+        previous: vec![],
+        note: note.clone(),
+        batch: None,
+        tokens: None,
+        reused: Some(commit),
+    };
+    let choice = crate::review::Choice { independent: rules.is_independent(&reviewer, vendor), reviewer, note };
+    Ok(Some((choice, review)))
+}
+
+/// The review rules as recorded with a review, to tell whether they changed since.
+fn rules_of(rules: &crate::review::ReviewRules) -> String {
+    serde_json::to_string(rules).unwrap_or_default()
 }
 
 /// " (same vendor: codex not installed)" after a reviewer's name, or nothing.
@@ -515,7 +590,10 @@ pub fn describe(issue: &IssueRecord, s: &Submitted, land_by: crate::playbook::La
         Some(r) => {
             let result = if r.verdict == "pass" { "no P0 or P1 findings" } else { "changes requested" };
             let batched = r.batched_with().map(|with| format!(", in one review call with {with}")).unwrap_or_default();
-            lines.push(format!("**Review** by {}{} ({}s{batched}): {result}.", r.reviewer, noted(&r.note), r.seconds));
+            match &r.reused {
+                Some(at) => lines.push(format!("**Review** by {}{}: {result}, carried over: this same patch passed review at `{at}`.", r.reviewer, noted(&r.note))),
+                None => lines.push(format!("**Review** by {}{} ({}s{batched}): {result}.", r.reviewer, noted(&r.note), r.seconds)),
+            }
             if !r.summary.is_empty() {
                 lines.push(format!("> {}", r.summary));
             }
@@ -721,6 +799,7 @@ mod tests {
             note: String::new(),
             batch: None,
             tokens: None,
+            reused: None,
         };
         // Round 2 carrying a P1 once is still a round that may converge.
         let first = record(vec![f(1, "Drops the last row: a.rs", false)]);
@@ -1145,5 +1224,43 @@ reason = "money logic"
         assert_ne!(next.commit, shadow.commit);
         assert_eq!(shadow.commit, first.commit);
         assert!(shadow.in_history && shadow.findings.len() == 1 && !shadow.findings[0].carried, "{shadow:?}");
+    }
+
+    #[test]
+    fn a_patch_that_passed_is_not_reviewed_again_and_a_rewritten_one_starts_from_the_pass() {
+        let mut f = fixture();
+        let (issue, wt) = f.committed("Reused", "reused.txt");
+        let first = f.submit(&wt, true).unwrap();
+        assert!(first.review.as_ref().is_some_and(|r| r.verdict == "pass" && r.reused.is_none()), "{first:?}");
+        // Handed in again unchanged (a land that stopped, say): the pass carries over, no reviewer runs.
+        let again = f.submit(&wt, true).unwrap();
+        let review = again.review.as_ref().unwrap();
+        assert_eq!((review.verdict.as_str(), review.reused.as_deref(), again.state.as_str()), ("pass", Some(first.commit.as_str()), "In Review"));
+        assert_eq!((review.reviewer.as_str(), review.note.as_str()), ("claude", "same vendor: codex not installed"));
+        assert_eq!(f.db.reviews(&issue.key).unwrap()[0].patch_id, first.patch_id, "land finds a review of this patch");
+        let started: i64 = f.db.conn.query_row("SELECT COUNT(*) FROM event WHERE issue_key = ?1 AND type = 'review_started'", [&issue.key], |r| r.get(0)).unwrap();
+        assert_eq!(started, 1);
+        let said: Vec<String> = f.db.timeline(&issue.key).unwrap().into_iter().filter_map(|t| t.summary).collect();
+        assert!(said.iter().any(|s| s.contains("The same patch passed review at") && s.contains("carries over")), "{said:?}");
+        assert!(describe(&issue, &again, Default::default()).contains("carried over: this same patch passed review at"));
+
+        // The review rules changed since (here a focus): the pass was not judged by them, so it is reviewed.
+        let pb_path = f.repo.join(playbook::PLAYBOOK_PATH);
+        let pb = std::fs::read_to_string(&pb_path).unwrap();
+        std::fs::write(&pb_path, pb.replacen("[review]
+", "[review]
+focus = \"Money first.\"
+", 1)).unwrap();
+        assert!(f.submit(&wt, true).unwrap().review.unwrap().reused.is_none());
+
+        // Rewritten with a different patch: reviewed, starting from how it differs from what passed.
+        let base = sh(&wt, &["rev-parse", "HEAD~1"]);
+        std::fs::write(wt.join("reused.txt"), "y").unwrap();
+        sh(&wt, &["commit", "-q", "-a", "--amend", "-m", "Reused, rewritten"]);
+        let previous = previous_round(&f.db, &issue.key, &wt).unwrap().unwrap();
+        assert!(!previous.in_history);
+        assert_eq!(previous.passed_on.as_deref(), Some(base.trim()));
+        let rewritten = f.submit(&wt, true).unwrap();
+        assert!(rewritten.review.as_ref().is_some_and(|r| r.reused.is_none()), "{rewritten:?}");
     }
 }

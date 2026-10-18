@@ -393,6 +393,7 @@ mod tests {
             note: String::new(),
             batch: None,
             tokens: None,
+            reused: None,
         };
         assert_eq!(review_sent_back(&review), None);
         review.verdict = "changes".into();
