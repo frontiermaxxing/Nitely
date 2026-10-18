@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { signedPost, unreachable } from "./api";
 import type { Device } from "./keys";
 import type { GoalReport } from "../types";
-import { finishLine, neededLine, riskTone, triagedLine } from "../goals";
+import { byProject, finishLine, groupKind, groupNeeded, neededLine, riskTone, triagedLine, type NeededGroup } from "../goals";
+import type { ReportLanded } from "../types";
 
 /** When the person last read the report on this phone. Storage can be missing or refuse. */
 const SEEN_KEY = "nitely.phone.reportSeen";
@@ -22,6 +23,42 @@ function writeSeen(ts: number) {
   } catch {
     // Without storage the next visit covers the last day.
   }
+}
+
+/** Rows shown before the rest fold under "N more": a night's report fits a few screens (NIT-355). */
+const SHOWN = 3;
+const NEEDS_SHOWN = 5;
+
+/** Landed issues, newest first: the first SHOWN, the rest folded. */
+function Landed({ landed, suffix }: { landed: ReportLanded[]; suffix?: string }) {
+  const newest = [...landed].sort((a, b) => b.ts - a.ts);
+  const row = (l: ReportLanded) => (
+    <li key={l.key}>
+      <span className="ph-issue-key">{l.key}</span> {l.title}
+      {suffix}
+    </li>
+  );
+  return (
+    <>
+      <ul className="ph-report-list">{newest.slice(0, SHOWN).map(row)}</ul>
+      {newest.length > SHOWN && (
+        <details className="ph-report-more">
+          <summary>{newest.length - SHOWN} more</summary>
+          <ul className="ph-report-list">{newest.slice(SHOWN).map(row)}</ul>
+        </details>
+      )}
+    </>
+  );
+}
+
+function NeedRow({ n }: { n: NeededGroup }) {
+  const several = n.asked + n.approvals > 1;
+  return (
+    <li className={n.open ? "ph-report-open" : undefined}>
+      <span className="ph-quiet">{clock(n.ts)}</span> {n.issue_key && <span className="ph-issue-key">{n.issue_key}</span>}
+      {n.open > 0 && <span className="ph-report-waits"> {several && n.open < n.asked + n.approvals ? `${n.open} wait` : "waits"} ·</span>} {several ? `${groupKind(n)}, the last:` : n.asked ? "asked:" : "approval:"} {n.summary}
+    </li>
+  );
 }
 
 const clock = (ts: number) => new Date(ts * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
@@ -83,6 +120,8 @@ export function LastDay(props: { device: Device; open: boolean; version: number 
   const today = new Date();
   const needed = report ? neededLine(report.needed) : null;
   const triaged = report ? triagedLine(report.triaged?.length ?? 0) : null;
+  // One row per issue, what still waits first.
+  const groups = report ? groupNeeded(report.needed) : [];
   return (
     <details className="ph-report" open={open} onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}>
       <summary>
@@ -102,15 +141,7 @@ export function LastDay(props: { device: Device; open: boolean; version: number 
                   <strong>{g.landed.length}</strong> landed · {g.goal.progress.done}/{g.goal.progress.total - g.goal.progress.dropped} done
                   {pace && <span className={pace.late ? " ph-report-late" : undefined}> · {pace.text}</span>}
                 </p>
-                {g.landed.length > 0 && (
-                  <ul className="ph-report-list">
-                    {g.landed.map((l) => (
-                      <li key={l.key}>
-                        <span className="ph-issue-key">{l.key}</span> {l.title}
-                      </li>
-                    ))}
-                  </ul>
-                )}
+                {/* What is at risk first: it is what the morning is for. */}
                 {g.risks.length > 0 && (
                   <ul className="ph-report-list">
                     {g.risks.map((r) => (
@@ -120,31 +151,39 @@ export function LastDay(props: { device: Device; open: boolean; version: number 
                     ))}
                   </ul>
                 )}
+                {g.landed.length > 0 && <Landed landed={g.landed} />}
               </div>
             );
           })}
           {report.other_landed.length > 0 && (
             <div className="ph-report-goal">
               <div className="ph-report-title">Outside any goal</div>
-              <ul className="ph-report-list">
-                {report.other_landed.map((l) => (
-                  <li key={l.key}>
-                    <span className="ph-issue-key">{l.key}</span> {l.title} landed
-                  </li>
-                ))}
-              </ul>
+              <p>
+                <strong>{report.other_landed.length}</strong> landed
+                {byProject(report.other_landed).length > 1 && ` · ${byProject(report.other_landed).map((p) => `${p.project} ${p.count}`).join(" · ")}`}
+              </p>
+              <Landed landed={report.other_landed} />
             </div>
           )}
           <p className="ph-report-needed">{needed ?? "You were not needed."}</p>
-          {report.needed.length > 0 && (
-            <ul className="ph-report-list ph-report-needs">
-              {report.needed.map((n, i) => (
-                <li key={`${n.ts}-${i}`} className={n.open ? "ph-report-open" : undefined}>
-                  <span className="ph-quiet">{clock(n.ts)}</span> {n.issue_key && <span className="ph-issue-key">{n.issue_key}</span>} {n.kind === "asked" ? "asked:" : "approval:"} {n.summary}
-                  {n.open && <span className="ph-report-waits"> · waits</span>}
-                </li>
-              ))}
-            </ul>
+          {groups.length > 0 && (
+            <>
+              <ul className="ph-report-list ph-report-needs">
+                {groups.slice(0, NEEDS_SHOWN).map((n, i) => (
+                  <NeedRow key={`${n.issue_key ?? ""}-${n.ts}-${i}`} n={n} />
+                ))}
+              </ul>
+              {groups.length > NEEDS_SHOWN && (
+                <details className="ph-report-more">
+                  <summary>{groups.length - NEEDS_SHOWN} more issues</summary>
+                  <ul className="ph-report-list ph-report-needs">
+                    {groups.slice(NEEDS_SHOWN).map((n, i) => (
+                      <NeedRow key={`${n.issue_key ?? ""}-${n.ts}-${i}`} n={n} />
+                    ))}
+                  </ul>
+                </details>
+              )}
+            </>
           )}
           {triaged && <p>{triaged}.</p>}
         </>

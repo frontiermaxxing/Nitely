@@ -62,15 +62,72 @@ export function riskTone(why: string): "fail" | "attention" | "plain" {
   return "plain";
 }
 
-/** "You were needed 3 times: 2 questions, 1 approval · 1 still waits", or null when never. */
-export function neededLine(needed: { kind: "asked" | "approval"; open: boolean }[]): string | null {
+/**
+ * "You were needed 3 times: 2 questions, 1 approval · 1 still waits", or null when never; "… 9
+ * times on 4 issues: …" when some issue needed you more than once.
+ */
+export function neededLine(needed: { kind: "asked" | "approval"; open: boolean; issue_key?: string | null }[]): string | null {
   if (needed.length === 0) return null;
   const asked = needed.filter((n) => n.kind === "asked").length;
   const approvals = needed.length - asked;
   const parts = [asked ? `${asked} question${asked === 1 ? "" : "s"}` : null, approvals ? `${approvals} approval${approvals === 1 ? "" : "s"}` : null].filter(Boolean);
   const open = needed.filter((n) => n.open).length;
   const times = needed.length === 1 ? "once" : `${needed.length} times`;
-  return `You were needed ${times}: ${parts.join(", ")}${open ? ` · ${open === needed.length && open > 1 ? "all" : open} still wait${open === 1 ? "s" : ""}` : ""}`;
+  const issues = groupNeeded(needed.map((n, i) => ({ ts: i, summary: "", issue_key: n.issue_key ?? null, ...n }))).length;
+  const on = issues < needed.length ? ` on ${issues} issue${issues === 1 ? "" : "s"}` : "";
+  return `You were needed ${times}${on}: ${parts.join(", ")}${open ? ` · ${open === needed.length && open > 1 ? "all" : open} still wait${open === 1 ? "s" : ""}` : ""}`;
+}
+
+/** The places one issue needed you, as one row of the report. */
+export interface NeededGroup {
+  issue_key: string | null;
+  /** The newest of them, which the row shows. */
+  ts: number;
+  summary: string;
+  asked: number;
+  approvals: number;
+  /** How many still wait on you. */
+  open: number;
+}
+
+/**
+ * The report's needed entries, one row per issue (NIT-355): an issue whose review stopped
+ * converging asks once per finding, and a night of those reads as a column of the same line.
+ * What still waits comes first, then the newest. An entry with no issue stands alone.
+ */
+export function groupNeeded(needed: { ts: number; kind: "asked" | "approval"; issue_key: string | null; summary: string; open: boolean }[]): NeededGroup[] {
+  const groups = new Map<string, NeededGroup>();
+  needed.forEach((n, i) => {
+    const id = n.issue_key ? n.issue_key.toUpperCase() : `#${i}`;
+    const g = groups.get(id) ?? { issue_key: n.issue_key, ts: 0, summary: "", asked: 0, approvals: 0, open: 0 };
+    if (n.kind === "asked") g.asked++;
+    else g.approvals++;
+    if (n.open) g.open++;
+    // The row says what the newest one was about; one still waiting wins over an older settled one.
+    if (n.ts >= g.ts) {
+      g.ts = n.ts;
+      g.summary = n.summary;
+    }
+    groups.set(id, g);
+  });
+  return [...groups.values()].sort((a, b) => Number(b.open > 0) - Number(a.open > 0) || b.ts - a.ts);
+}
+
+/** "asked", "approval", or "3 questions, 1 approval" for a row that stands for several. */
+export function groupKind(g: NeededGroup): string {
+  if (g.asked + g.approvals === 1) return g.asked ? "asked" : "approval";
+  const part = (n: number, one: string) => (n ? `${n} ${one}${n === 1 ? "" : "s"}` : null);
+  return [part(g.asked, "question"), part(g.approvals, "approval")].filter(Boolean).join(", ");
+}
+
+/** Landed issues counted by project, the most first: "NIT 40 · AND 26 · GR 9". */
+export function byProject(landed: { key: string }[]): { project: string; count: number }[] {
+  const counts = new Map<string, number>();
+  for (const l of landed) {
+    const project = l.key.includes("-") ? l.key.slice(0, l.key.lastIndexOf("-")) : l.key;
+    counts.set(project, (counts.get(project) ?? 0) + 1);
+  }
+  return [...counts.entries()].map(([project, count]) => ({ project, count })).sort((a, b) => b.count - a.count || a.project.localeCompare(b.project));
 }
 
 /** "Triage answered 4 questions without you", or null when none. */

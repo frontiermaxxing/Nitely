@@ -2,7 +2,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { crewOnGoal, finishLine, goalCounts, goalOrder, neededLine, riskTone, targetLine, triagedLine } from "./goals.ts";
+import { byProject, crewOnGoal, finishLine, goalCounts, goalOrder, groupKind, groupNeeded, neededLine, riskTone, targetLine, triagedLine } from "./goals.ts";
 import type { IssueRecord } from "./types.ts";
 
 const issue = (key: string, state: string, state_type: string): IssueRecord =>
@@ -80,6 +80,49 @@ test("the times you were needed, in one line", () => {
     "You were needed 3 times: 2 questions, 1 approval · 1 still waits",
   );
   assert.equal(neededLine([{ kind: "approval", open: true }, { kind: "approval", open: true }]), "You were needed 2 times: 2 approvals · all still wait");
+});
+
+test("an issue that needed you several times is one row, and what still waits comes first", () => {
+  const need = (ts: number, issue_key: string | null, kind: "asked" | "approval", open: boolean, summary = `${issue_key} at ${ts}`) => ({ ts, issue_key, kind, open, summary });
+  const groups = groupNeeded([
+    need(1, "APP-1", "asked", false),
+    need(2, "APP-2", "asked", true, "first finding"),
+    need(2, "app-2", "asked", true, "second finding"),
+    need(3, "APP-3", "approval", false),
+    need(4, null, "asked", false),
+    need(5, null, "asked", false),
+    need(6, "APP-2", "approval", false, "the change"),
+  ]);
+  assert.deepEqual(
+    groups.map((g) => [g.issue_key, g.asked, g.approvals, g.open, g.summary]),
+    [
+      ["APP-2", 2, 1, 2, "the change"],
+      [null, 1, 0, 0, "null at 5"],
+      [null, 1, 0, 0, "null at 4"],
+      ["APP-3", 0, 1, 0, "APP-3 at 3"],
+      ["APP-1", 1, 0, 0, "APP-1 at 1"],
+    ],
+  );
+  assert.equal(groupKind(groups[0]), "2 questions, 1 approval");
+  assert.equal(groupKind(groups[3]), "approval");
+  assert.equal(groupKind(groups[4]), "asked");
+  assert.equal(
+    neededLine([
+      { kind: "asked", open: true, issue_key: "APP-2" },
+      { kind: "asked", open: true, issue_key: "APP-2" },
+      { kind: "approval", open: false, issue_key: "APP-3" },
+    ]),
+    "You were needed 3 times on 2 issues: 2 questions, 1 approval · 2 still wait",
+  );
+});
+
+test("what landed outside any goal is counted by project, the most first", () => {
+  assert.deepEqual(byProject([{ key: "APP-1" }, { key: "WEB-2" }, { key: "APP-3" }, { key: "MY-APP-4" }]), [
+    { project: "APP", count: 2 },
+    { project: "MY-APP", count: 1 },
+    { project: "WEB", count: 1 },
+  ]);
+  assert.deepEqual(byProject([]), []);
 });
 
 test("a risk is coloured by the one colour rule", () => {

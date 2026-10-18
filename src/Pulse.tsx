@@ -5,7 +5,7 @@ import { KIND_LABEL as DECISION_LABEL, type Decision, type DecisionKind } from "
 import type { Board, FlowIssue, GoalReport, Happening, IssueRecord, ProjectFlow, Pulse as PulseData, Session, TaskRow } from "./types";
 import { HOME_LABEL, agentLabel, agentTitle, ago } from "./util";
 import { GoalRisks, GoalRows } from "./GoalRows";
-import { finishLine, neededLine, triagedLine } from "./goals";
+import { byProject, finishLine, groupKind, groupNeeded, neededLine, triagedLine } from "./goals";
 import { LanesStrip } from "./LanesStrip";
 import { useBatches } from "./BatchesStrip";
 import { WaitingStrip, useWaits } from "./WaitingStrip";
@@ -584,6 +584,7 @@ function Since({ data, ctx, first }: { data: PulseData; ctx: Context; first: boo
  */
 function ByGoal({ report, issues, ctx }: { report: GoalReport; issues: Map<string, IssueRecord>; ctx: Context }) {
   const [allNeeded, setAllNeeded] = useState(false);
+  const [allOther, setAllOther] = useState(false);
   const today = new Date(ctx.now * 1000);
   const needed = neededLine(report.needed);
   const triaged = triagedLine(report.triaged?.length ?? 0);
@@ -598,7 +599,9 @@ function ByGoal({ report, issues, ctx }: { report: GoalReport; issues: Map<strin
     );
   };
   if (report.goals.length === 0 && report.other_landed.length === 0 && !needed && !triaged) return null;
-  const shownNeeded = allNeeded ? report.needed : report.needed.slice(-5);
+  // One row per issue, what still waits first (NIT-355).
+  const groups = groupNeeded(report.needed);
+  const shownNeeded = allNeeded ? groups : groups.slice(0, 5);
   return (
     <div className="by-goal">
       {report.goals.length > 0 && (
@@ -632,7 +635,12 @@ function ByGoal({ report, issues, ctx }: { report: GoalReport; issues: Map<strin
       )}
       {report.other_landed.length > 0 && (
         <p className="by-goal-other small">
-          <span className="muted">Outside any goal, {report.other_landed.length} landed:</span> {report.other_landed.map((l) => token(l.key, l.title))}
+          <span className="muted">Outside any goal, {report.other_landed.length} landed</span>
+          <span>{byProject(report.other_landed).map((p) => `${p.project} ${p.count}`).join(" · ")}</span>
+          <button className="link small" onClick={() => setAllOther(!allOther)} aria-expanded={allOther}>
+            {allOther ? "Hide them" : "Show them"}
+          </button>
+          {allOther && <span className="by-goal-keys">{report.other_landed.map((l) => token(l.key, l.title))}</span>}
         </p>
       )}
       {triaged && (
@@ -645,9 +653,9 @@ function ByGoal({ report, issues, ctx }: { report: GoalReport; issues: Map<strin
           <p className="small">{needed}</p>
           <ol className="by-goal-needs">
             {shownNeeded.map((n, i) => (
-              <li key={`${n.ts}-${i}`} className={n.open ? "by-goal-open" : undefined}>
+              <li key={`${n.issue_key ?? ""}-${n.ts}-${i}`} className={n.open ? "by-goal-open" : undefined}>
                 <span className="feed-time">{clock(n.ts)}</span>
-                <span className="by-goal-need-kind">{n.kind === "asked" ? "asked" : "approval"}</span>
+                <span className="by-goal-need-kind">{groupKind(n)}</span>
                 {n.issue_key && (
                   <button className="link mono small" onClick={() => ctx.onOpenIssue(n.issue_key!)}>
                     {n.issue_key}
@@ -656,13 +664,13 @@ function ByGoal({ report, issues, ctx }: { report: GoalReport; issues: Map<strin
                 <span className="by-goal-need-what" title={n.summary}>
                   {n.summary}
                 </span>
-                {n.open && <span className="by-goal-waits">waits</span>}
+                {n.open > 0 && <span className="by-goal-waits">{n.asked + n.approvals > 1 && n.open < n.asked + n.approvals ? `${n.open} wait` : "waits"}</span>}
               </li>
             ))}
           </ol>
-          {report.needed.length > 5 && (
+          {groups.length > 5 && (
             <button className="link small since-all" onClick={() => setAllNeeded(!allNeeded)}>
-              {allNeeded ? "Show the latest 5" : `Show all ${report.needed.length}`}
+              {allNeeded ? "Show the first 5" : `Show all ${groups.length} issues`}
             </button>
           )}
         </div>

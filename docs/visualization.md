@@ -330,9 +330,15 @@ It is the reference for a whole view built from these parts. It answers, in orde
    boxes become rows.
 5. **Since you were last here:** first the same span by goal (NIT-247): a card per active goal
    with what of it landed (tokens), its done count, its finish at this pace and what is at risk;
-   what landed outside any goal; what triage answered without you; and "You were needed 9 times:
-   4 questions, 5 approvals · 8 still wait" in attention ink over every one of them (time, kind,
-   issue, what, "waits" while open; the latest five, then "Show all"). Then counts that filter a
+   what landed outside any goal, counted by project with its tokens behind "Show them"; what
+   triage answered without you; and "You were needed 9 times on 4 issues: 4 questions, 5 approvals
+   · 8 still wait" in attention ink over one row per issue (NIT-355: a review that stops converging
+   asks once per finding): time of its newest, how many and of what kind, issue, what the newest
+   was about, and how many still wait; those that wait first, five of them, then "Show all". Below
+   560px what it was about goes under the row, two lines at most. The phone's report is the same
+   span read in a few screens: per goal what is at risk, then its three newest landings and "N
+   more" folded; outside any goal its count by project and three newest; the needed rows as here,
+   three lines each. Then counts that filter a
    feed (landed, filed, stuck, review rounds, questions) and landed and submitted per hour over 24
    hours. The last-seen time is saved when you leave the Overview (`localStorage`), not while you
    read it.
