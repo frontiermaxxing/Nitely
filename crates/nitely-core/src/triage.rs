@@ -202,7 +202,11 @@ fn look(db: &Db, config: &crate::Config, q: &Question) -> Result<(String, Option
     let rules = crate::playbook::Playbook::load(&root)?.review;
     let vendor = q.asked_by.split(':').next().unwrap_or("");
     let choice = rules.choose(vendor, &|r| rules.is_installed(r, &dir))?;
-    let project = issue.as_ref().and_then(|i| i.project.clone());
+    // Without an issue, the project of the repo it was asked in: the work in flight is still known.
+    let project = match &issue {
+        Some(i) => i.project.clone(),
+        None => crate::config::resolve_project(config, db, None, &place).ok(),
+    };
     let reply = rules.run_prompt(&choice.reviewer, &dir, &prompt(db, config, q, issue.as_ref(), project.as_deref())?)?;
     parse(&reply.text)
 }

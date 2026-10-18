@@ -252,7 +252,14 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
                     out.reasons.push(reason);
                 }
             }
-            let blocking: Vec<String> = fresh.findings.iter().filter(|f| f.priority <= 1).map(|f| format!("[P{}] {}", f.priority, f.text)).collect();
+            // What the person accepted as it is blocks nothing, whichever review says it again.
+            let accepted = db.accepted_for(&issue.key, &out.patch_id)?;
+            let blocking: Vec<String> = fresh
+                .findings
+                .iter()
+                .filter(|f| f.priority <= 1 && !accepted.iter().any(|a| a.finding == f.text))
+                .map(|f| format!("[P{}] {}", f.priority, f.text))
+                .collect();
             if blocking.is_empty() {
                 verdict = "pass".into();
                 stalled = None;
