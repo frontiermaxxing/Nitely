@@ -486,6 +486,39 @@ mod tests {
     }
 
     #[test]
+    fn a_submodule_change_keeps_its_patch_when_the_lines_around_it_change() {
+        let base = crate::paths::unique_temp("nitely-sub-context", "");
+        let upstream = base.join("engine-upstream");
+        crate::test_repo::init(&upstream, &[("core.c", "a\nb\nc\nd\ne\n")]);
+        let repo = base.join("repo");
+        crate::test_repo::init(&repo, &[("app.txt", "app\n")]);
+        sh(&repo, &["-c", "protocol.file.allow=always", "submodule", "add", "-q", &upstream.to_string_lossy(), "engine"]);
+        sh(&repo, &["commit", "-q", "-m", "the engine"]);
+        let engine = repo.join("engine");
+        // The same change (c to C) on top of whatever the engine's main is.
+        let change = |branch: &str| {
+            sh(&engine, &["checkout", "-q", "-B", branch, "main"]);
+            let text = std::fs::read_to_string(engine.join("core.c")).unwrap().replace("\nc", "\nC");
+            std::fs::write(engine.join("core.c"), text).unwrap();
+            sh(&engine, &["commit", "-q", "-am", "c"]);
+            sh(&repo, &["checkout", "-q", "-B", branch, "main"]);
+            sh(&repo, &["add", "engine"]);
+            sh(&repo, &["commit", "-q", "-m", "c"]);
+            crate::submit::patch_id_range(&repo, "main", "HEAD").unwrap()
+        };
+        let first = change("one");
+        // Another land changes a line two above, in step.
+        sh(&engine, &["checkout", "-q", "main"]);
+        std::fs::write(engine.join("core.c"), "A\nb\nc\nd\ne\n").unwrap();
+        sh(&engine, &["commit", "-q", "-am", "a"]);
+        sh(&repo, &["checkout", "-q", "main"]);
+        sh(&repo, &["add", "engine"]);
+        sh(&repo, &["commit", "-q", "-m", "a"]);
+        assert_eq!(change("two"), first, "the lines around the change are not part of it");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
     fn a_pointer_whose_code_cannot_be_shown_still_changes_the_patch() {
         let base = crate::paths::unique_temp("nitely-sub-patch", "");
         let repo = base.join("repo");

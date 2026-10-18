@@ -561,7 +561,8 @@ pub fn patch_id(worktree: &Path, base: &str) -> Result<String> {
 /// patch at each). When git cannot show a move's code (`(commits not present)`, a new submodule),
 /// every pointer the change moves counts by its full commit ids, so a pointer never changes unseen.
 pub fn patch_id_range(worktree: &Path, base: &str, head: &str) -> Result<String> {
-    let diff = git(worktree, &["diff", "-U0", "--submodule=diff", &format!("{base}...{head}")])?;
+    // `-U0` does not reach the submodule's own diff, a git process of its own; config does.
+    let diff = git(worktree, &["-c", "diff.context=0", "diff", "-U0", "--submodule=diff", &format!("{base}...{head}")])?;
     let mut unseen = false;
     let diff: String = diff
         .split_inclusive('\n')
