@@ -181,39 +181,45 @@ impl Db {
     /// Every place the person was needed since `since`: asks filed (questions, and findings to
     /// accept), changes that went to Needs You for their approval, and approvals filed straight
     /// into Needs You (goal plans, playbook proposals). A finding to accept moves its issue to
-    /// Needs You too; while the finding is open that move is the same request, and once it is
-    /// decided an issue still in Needs You waits for the person's approval of the change. Only an
-    /// issue's latest approval can still wait.
+    /// Needs You too; that move is the same request as its ask. Accepting it can leave the change
+    /// waiting for the person's approval, which `accept` records as its own event. Only an issue's
+    /// latest approval can still wait.
     fn needed_since(&self, project: Option<&str>, since: i64) -> Result<Vec<Needed>> {
         let of_project = |key: &Option<String>| of_project(project, key);
         let mut out = Vec::new();
-        // Findings to accept, by issue, when, and whether still open: their move to Needs You is
-        // the same request.
-        let mut findings: Vec<(String, i64, bool)> = Vec::new();
-        let mut asks = self.conn.prepare("SELECT asked_at, issue_key, question, finding IS NOT NULL, answer IS NULL AND closed IS NULL FROM ask WHERE asked_at >= ?1")?;
-        for row in asks.query_map([since], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, String>(2)?, r.get::<_, bool>(3)?, r.get::<_, bool>(4)?)))? {
+        // Findings to accept, by issue and when: their move to Needs You is the same request.
+        let mut findings: Vec<(String, i64)> = Vec::new();
+        let mut asks = self.conn.prepare("SELECT asked_at, issue_key, question, finding, answer IS NULL AND closed IS NULL FROM ask WHERE asked_at >= ?1")?;
+        for row in asks.query_map([since], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, String>(2)?, r.get::<_, Option<String>>(3)?, r.get::<_, bool>(4)?)))? {
             let (ts, issue_key, question, finding, open) = row?;
-            if finding {
-                findings.extend(issue_key.clone().map(|k| (k, ts, open)));
+            if finding.is_some() {
+                findings.extend(issue_key.clone().map(|k| (k, ts)));
             }
             if of_project(&issue_key) {
-                let summary = if finding { format!("accept a finding? {}", first_line(&question)) } else { first_line(&question) };
+                // Asks about several findings of one review share their question: the finding
+                // tells them apart.
+                let summary = match finding.as_deref().map(serde_json::from_str::<crate::accept::AskedFinding>) {
+                    Some(Ok(f)) => format!("accept a finding? [P{}] {}", f.priority, first_line(&f.text)),
+                    Some(Err(_)) => format!("accept a finding? {}", first_line(&question)),
+                    None => first_line(&question),
+                };
                 out.push(Needed { ts, kind: "asked", issue_key, summary, open });
             }
         }
         let mut moves = self.conn.prepare(
             "SELECT e.ts, e.issue_key, e.type, COALESCE(e.summary, ''), COALESCE(i.title, ''), i.state = 'Needs You' FROM event e LEFT JOIN issue i ON i.key = e.issue_key
-             WHERE e.actor != 'human' AND e.ts >= ?1
-               AND ((e.type = 'issue_moved' AND e.summary LIKE '%→ Needs You%') OR (e.type = 'issue_created' AND e.summary LIKE 'Filed as Needs You%'))
+             WHERE e.ts >= ?1
+               AND ((e.actor != 'human' AND e.type = 'issue_moved' AND e.summary LIKE '%→ Needs You%')
+                 OR (e.actor != 'human' AND e.type = 'issue_created' AND e.summary LIKE 'Filed as Needs You%')
+                 OR e.type = ?2)
              ORDER BY e.ts, e.id",
         )?;
-        let rows = moves.query_map([since], |r| {
+        let rows = moves.query_map(rusqlite::params![since, crate::accept::AWAITS_APPROVAL], |r| {
             Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, Option<bool>>(5)?))
         })?;
-        let rows: Vec<_> = rows.collect::<rusqlite::Result<_>>()?;
-        let keys: Vec<Option<String>> = rows.iter().map(|r| r.1.clone()).collect();
         let mut approvals: Vec<Needed> = Vec::new();
-        for (n, (ts, issue_key, kind, summary, title, waits)) in rows.into_iter().enumerate() {
+        for row in rows {
+            let (ts, issue_key, kind, summary, title, waits) = row?;
             if !of_project(&issue_key) {
                 continue;
             }
@@ -223,16 +229,11 @@ impl Db {
             }
             // request_acceptance moves with no reason, right after its ask; a submit's move says why.
             let bare = kind == "issue_moved" && !summary.contains(": ");
-            let accepting: Vec<bool> =
-                if bare { findings.iter().filter(|(fk, fts, _)| issue_key.as_ref() == Some(fk) && (fts - ts).abs() <= 10).map(|f| f.2).collect() } else { Vec::new() };
-            let why = if !accepting.is_empty() {
-                // Its ask says it; once decided, an issue still in Needs You waits for approval.
-                // Only while nothing came after it: a later request is what waits now.
-                let later = keys[n + 1..].contains(&issue_key);
-                if accepting.iter().any(|open| *open) || waits != Some(true) || later {
-                    continue;
-                }
-                "waits for your approval after the finding you decided".to_string()
+            if bare && findings.iter().any(|(fk, fts)| issue_key.as_ref() == Some(fk) && (fts - ts).abs() <= 10) {
+                continue;
+            }
+            let why = if kind == crate::accept::AWAITS_APPROVAL {
+                summary
             } else if kind == "issue_created" {
                 first_line(&title)
             } else {
@@ -358,8 +359,19 @@ mod tests {
         db.move_issue(&accepted, "Needs You", None, Some("release process"), &agent).unwrap();
         db.move_issue(&accepted, "In Progress", None, None, &agent).unwrap();
         let ask = db.create_ask("Retries are out of scope here.", &[], Some(&accepted), None, &agent).unwrap();
-        db.conn.execute("UPDATE ask SET finding = '{\"priority\":1,\"text\":\"No retries\"}', answer = 'accept', answered_at = ?2 WHERE id = ?1", rusqlite::params![ask.id, now()]).unwrap();
+        db.conn.execute("UPDATE ask SET finding = '{\"priority\":1,\"text\":\"No retries\"}', answer = 'Accepted: fine', answered_at = ?2 WHERE id = ?1", rusqlite::params![ask.id, now()]).unwrap();
         db.move_issue(&accepted, "Needs You", None, None, &agent).unwrap();
+        let waits = "the review now passes, and the change waits for your approval";
+        db.add_note(&accepted, waits, crate::accept::AWAITS_APPROVAL, &Actor::Human).unwrap();
+        // The same, then sent back and resubmitted (NIT-354): the approval after the acceptance
+        // stays, settled, and the resubmitted one waits.
+        let resent = issue(&mut db, "Invoices", None);
+        let ask = db.create_ask("Rounding is per line on purpose.", &[], Some(&resent), None, &agent).unwrap();
+        db.conn.execute("UPDATE ask SET finding = '{\"priority\":1,\"text\":\"Rounding\"}', answer = 'Accepted: on purpose', answered_at = ?2 WHERE id = ?1", rusqlite::params![ask.id, now()]).unwrap();
+        db.move_issue(&resent, "Needs You", None, None, &agent).unwrap();
+        db.add_note(&resent, waits, crate::accept::AWAITS_APPROVAL, &Actor::Human).unwrap();
+        db.move_issue(&resent, "In Progress", None, Some("the totals are off"), &Actor::Human).unwrap();
+        db.move_issue(&resent, "Needs You", None, Some("approve the corrected totals"), &agent).unwrap();
         // A finding the person declined, fixed, and back for approval: one approval, the later one.
         let declined = issue(&mut db, "Exports", None);
         let ask = db.create_ask("The old format is gone.", &[], Some(&declined), None, &agent).unwrap();
@@ -394,10 +406,17 @@ mod tests {
             ("approval", accepted.as_str(), true),
             ("asked", declined.as_str(), false),
             ("approval", declined.as_str(), true),
+            ("asked", resent.as_str(), false),
+            ("approval", resent.as_str(), false),
+            ("approval", resent.as_str(), true),
             ("approval", plan.as_str(), true),
         ];
         want.sort();
         assert_eq!(needed, want, "{:?}", r.needed);
         assert!(r.needed.iter().any(|n| n.issue_key.as_deref() == Some(plan.as_str()) && n.summary == "Plan: ship it"), "{:?}", r.needed);
+        let resent_why: Vec<&str> = r.needed.iter().filter(|n| n.issue_key.as_deref() == Some(resent.as_str()) && n.kind == "approval").map(|n| n.summary.as_str()).collect();
+        assert_eq!(resent_why, [waits, "approve the corrected totals"]);
+        let asked: Vec<&str> = r.needed.iter().filter(|n| n.issue_key.as_deref() == Some(finding.as_str()) && n.kind == "asked").map(|n| n.summary.as_str()).collect();
+        assert_eq!(asked, ["accept a finding? [P1] No migration"], "the finding, not the shared question");
     }
 }

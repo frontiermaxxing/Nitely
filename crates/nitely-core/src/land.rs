@@ -1230,6 +1230,9 @@ when_changed = ["billing"]
         let goes_on = if crate::approval::agents_can_verify() { "In Review" } else { "Needs You" };
         assert_eq!((decided.state.as_str(), decided.ask.answer.as_deref()), (goes_on, Some("Accepted: no outside users yet")));
         assert!(f.db.accept_finding(ask.id, "again", &SECRET).is_err(), "decided once");
+        // Waiting for an approval is said as such, for the goal report (NIT-354).
+        let awaits = f.db.timeline(&a).unwrap().iter().filter(|e| e.kind == crate::accept::AWAITS_APPROVAL).count();
+        assert_eq!(awaits, usize::from(goes_on == "Needs You"));
         // Submitted again unchanged: the reviewer still says it, and it passes on the acceptance.
         f.submit(&wt);
         let note = f.db.timeline(&a).unwrap().into_iter().rev().find(|e| e.kind == "submit").unwrap().summary.unwrap_or_default();

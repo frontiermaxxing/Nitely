@@ -43,6 +43,7 @@ const KIND_LABEL: Record<string, string> = {
   review_batch: "review batch",
   shadow_batch: "shadow batch",
   land_queue: "land queue",
+  awaits_approval: "waits for approval",
 };
 
 /** One event of the issue's timeline. */
