@@ -76,7 +76,7 @@ impl Db {
         let asked = AskedFinding { priority: found.priority, text: found.text.clone() };
         // One decision per finding: a request already open for it, in this wording or an earlier
         // one, stands, with this wording and this reasoning (NIT-353).
-        let ask = match self.open_request_for(&issue.key, &found.text)? {
+        let ask = match self.open_request_for(&issue.key, &found.text, &review.findings)? {
             Some(open) => {
                 self.conn.execute("UPDATE ask SET finding = ?2, question = ?3 WHERE id = ?1", params![open.id, serde_json::to_string(&asked)?, why])?;
                 open
@@ -265,12 +265,13 @@ impl Db {
         let mut closed = 0;
         // The finding of the latest review each request stands for, newest request first.
         let mut kept: Vec<(usize, i64)> = vec![];
-        for a in open {
+        // Findings some request holds in their own words: no other request takes them by likeness.
+        let held: Vec<&str> = open.iter().filter_map(|a| a.finding.as_ref()).map(|f| f.text.as_str()).filter(|t| findings.iter().any(|x| x.text == *t)).collect();
+        for a in open.iter() {
             let f = a.finding.as_ref().expect("filtered");
-            let now = findings
-                .iter()
-                .position(|x| x.text == f.text)
-                .or_else(|| findings.iter().position(|x| x.priority <= 1 && crate::review::same_finding(&x.text, &f.text)));
+            let now = findings.iter().position(|x| x.text == f.text).or_else(|| {
+                findings.iter().position(|x| x.priority <= 1 && !held.contains(&x.text.as_str()) && crate::review::same_finding(&x.text, &f.text))
+            });
             let why = match now {
                 None => "closed: the latest review no longer has that finding".to_string(),
                 Some(i) => match kept.iter().find(|(k, _)| *k == i) {
@@ -297,12 +298,18 @@ impl Db {
     }
 
     /// The open request to accept `finding` of `key`, in its wording or an earlier one; the newest
-    /// when there are several.
-    fn open_request_for(&self, key: &str, finding: &str) -> Result<Option<Ask>> {
+    /// when there are several. A request whose own words are still a finding of the latest review
+    /// (`latest`) is that finding's, however alike the two look: two blockers in one function are
+    /// two decisions.
+    fn open_request_for(&self, key: &str, finding: &str, latest: &[Finding]) -> Result<Option<Ask>> {
         let mut open = self.open_finding_requests(key)?;
         open.sort_by_key(|a| std::cmp::Reverse(a.id));
         let exact = open.iter().position(|a| a.finding.as_ref().is_some_and(|f| f.text == finding));
-        let like = || open.iter().position(|a| a.finding.as_ref().is_some_and(|f| crate::review::same_finding(&f.text, finding)));
+        let like = || {
+            open.iter().position(|a| {
+                a.finding.as_ref().is_some_and(|f| !latest.iter().any(|x| x.text == f.text) && crate::review::same_finding(&f.text, finding))
+            })
+        };
         Ok(exact.or_else(like).map(|i| open.swap_remove(i)))
     }
 

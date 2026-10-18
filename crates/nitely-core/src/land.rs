@@ -1313,6 +1313,30 @@ when_changed = ["billing"]
     }
 
     #[test]
+    fn two_blockers_in_one_function_are_two_requests() {
+        let mut f = fixture();
+        let (a, _) = f.submitted("Rows", "rows.txt", "x");
+        let two = vec![
+            crate::review::Finding { priority: 1, text: "Drops the last row: src/rows.rs:12, export: the loop stops early.".into(), carried: false, raised_as: None, now: None },
+            crate::review::Finding { priority: 1, text: "Ignores write failures: src/rows.rs:30, export: an error is dropped.".into(), carried: false, raised_as: None, now: None },
+        ];
+        f.db.conn
+            .execute(
+                "INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, findings, ts) VALUES (?1, 'p1', 'c', 'fake', 'changes', 'agent', ?2, ?3)",
+                rusqlite::params![a, serde_json::to_string(&two).unwrap(), crate::db::now() + 1],
+            )
+            .unwrap();
+        let first = f.db.request_acceptance(&a, "1", "The old export did the same.", None, &f.actor).unwrap();
+        let second = f.db.request_acceptance(&a, "2", "Writes are retried upstream.", None, &f.actor).unwrap();
+        assert_ne!(first.id, second.id, "two blockers in one function are two decisions");
+        assert_eq!(f.db.close_superseded_requests(&a, &two).unwrap(), 0);
+        for (ask, text) in [(first.id, &two[0].text), (second.id, &two[1].text)] {
+            assert_eq!(f.db.ask(ask).unwrap().unwrap().finding.map(|x| x.text).as_ref(), Some(text));
+        }
+        std::fs::remove_dir_all(&f.base).ok();
+    }
+
+    #[test]
     fn two_requests_for_one_finding_become_one_and_the_newest_stands() {
         let mut f = fixture();
         let (a, _) = f.submitted("Twice", "twice.txt", "x");

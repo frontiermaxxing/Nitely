@@ -507,6 +507,16 @@ when it has one): a gap there is a finding like any other, and comes before line
             }
         }
     }
+    // Findings the person is deciding now: a round that still sees one says it in the same words,
+    // so the request stays attached to it (NIT-353). Only a finding's words, which a review wrote,
+    // never the asking agent's reasoning, and nothing about its weight.
+    let deciding: Vec<crate::accept::AskedFinding> = db.open_asks()?.into_iter().filter(|a| a.issue_key.as_deref().is_some_and(|k| k.eq_ignore_ascii_case(&issue.key))).filter_map(|a| a.finding).collect();
+    if !deciding.is_empty() {
+        c.push_str("\nThe person is deciding these findings of an earlier round. If one still holds, report it in exactly these words, so their decision stays attached to it; report it only if it still holds:\n");
+        for f in &deciding {
+            c.push_str(&format!("- [P{}] {}\n", f.priority, f.text.chars().take(600).collect::<String>().replace('\n', " ")));
+        }
+    }
     // Only what the person signed: a row an agent wrote itself must never steer the reviewer.
     let prefix = issue.key.split('-').next().unwrap_or("");
     let mut accepted: Vec<crate::accept::Accepted> = vec![];
@@ -1477,6 +1487,12 @@ focus = \"Money first.\"
         assert!(c.contains("- [P1] No migration: keys.txt, load (accepted: no outside users yet)"), "{c}");
         assert!(c.contains("They are not exemptions"), "{c}");
         assert!(!c.contains("forged") && !c.contains("Never log in"), "an unsigned row is no acceptance: {c}");
+        // A finding the person is deciding: the round is told its words, to say it the same way (NIT-353).
+        let asked = f.db.create_ask("The agent's reasoning.", &[], Some(&issue.key), None, &f.actor).unwrap();
+        f.db.conn.execute("UPDATE ask SET finding = ?2 WHERE id = ?1", rusqlite::params![asked.id, r#"{"priority":1,"text":"Drops a row: rows.txt, export: the last row"}"#]).unwrap();
+        let c = review_context(&f.db, &issue, &first.gate).unwrap();
+        assert!(c.contains("report it in exactly these words") && c.contains("- [P1] Drops a row: rows.txt, export: the last row"), "{c}");
+        assert!(!c.contains("The agent's reasoning."), "{c}");
     }
 
     #[test]
