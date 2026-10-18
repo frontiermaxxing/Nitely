@@ -403,7 +403,7 @@ fn upgrade(conn: &Connection, migrations: &[(&str, &str)]) -> Result<()> {
         // Looked at again under the lock: another process may have upgraded it meanwhile.
         match standing(conn, migrations)? {
             Standing::Current => return Ok(()),
-            Standing::Newer(what) => anyhow::bail!("a newer Nitely upgraded this database meanwhile ({what})"),
+            Standing::Newer(what) => return Err(NewerDatabase(format!("a newer Nitely upgraded this database meanwhile ({what})")).into()),
             Standing::Behind => {}
         }
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -588,6 +588,19 @@ pub fn refused_by_this_build(path: &Path) -> Result<Option<String>> {
     })
 }
 
+/// The error when a newer Nitely upgraded the database past this build: an older `nitely mcp`
+/// that meets it waits for the newer build to be installed and forwards to it (NIT-327).
+#[derive(Debug)]
+pub struct NewerDatabase(pub String);
+
+impl std::fmt::Display for NewerDatabase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NewerDatabase {}
+
 impl Db {
     pub fn open(path: &Path) -> Result<Db> {
         Db::open_with(path, MIGRATIONS)
@@ -605,7 +618,7 @@ impl Db {
         // refresh, open the database again, and loop.
         match standing(&conn, migrations)? {
             Standing::Current => {}
-            Standing::Newer(what) => anyhow::bail!("{}", newer_database(path, &what)),
+            Standing::Newer(what) => return Err(NewerDatabase(newer_database(path, &what)).into()),
             Standing::Behind => {
                 // Only an installed nitely upgrades the person's own database: a branch's build, run
                 // by hand in a lane or a worktree, would lock every installed one out of it (NIT-330).

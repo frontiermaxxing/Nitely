@@ -710,8 +710,54 @@ fn call_tool(server: &Server, params: &Value) -> Value {
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
     match run_tool(server, name, &args, params) {
         Ok(v) => json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&v).unwrap_or_default() }] }),
+        // This server is older than the database: the newer build that upgraded it is usually
+        // being installed this moment, so the call goes there once it is (NIT-327).
+        Err(e) if e.chain().any(|c| c.is::<nitely_core::db::NewerDatabase>()) => match forward_once_installed(server, params) {
+            Ok(forwarded) => forwarded,
+            Err(why) => json!({ "content": [{ "type": "text", "text": format!("{e:#}. {why}") }], "isError": true }),
+        },
         Err(e) => json!({ "content": [{ "type": "text", "text": format!("{e:#}") }], "isError": true }),
     }
+}
+
+/// How long a server older than the database waits for a newer build to be installed at its path
+/// before it refuses: an install upgrades the database a moment before it puts the new build in
+/// place. `NITELY_MCP_INSTALL_WAIT` (seconds) sets it, for tests.
+fn install_wait() -> Duration {
+    let secs = std::env::var("NITELY_MCP_INSTALL_WAIT").ok().and_then(|s| s.parse().ok()).unwrap_or(90);
+    Duration::from_secs(secs).min(wait_cap())
+}
+
+/// The installed build this server last waited for in vain: it does not wait again for the same
+/// one, so with nothing newer coming each call refuses at once rather than after `install_wait`.
+static WAITED_IN_VAIN: Mutex<Option<(u64, SystemTime)>> = Mutex::new(None);
+
+/// The call forwarded to a newer build at this server's path, waiting `install_wait` for one to
+/// appear; why not, when none does or it cannot take the call.
+fn forward_once_installed(server: &Server, params: &Value) -> std::result::Result<Value, String> {
+    let Some((exe, stamp)) = server.exe.as_ref() else {
+        return Err("Install the newer version.".into());
+    };
+    let installed = || nitely_core::install::stamp(exe);
+    let deadline = std::time::Instant::now() + install_wait();
+    loop {
+        let now_installed = installed();
+        if now_installed.as_ref().is_some_and(|s| s != stamp) {
+            return forward(server, params).ok_or_else(|| format!("The build installed at {} could not take the call either.", exe.display()));
+        }
+        if now_installed.is_some() && *lock(&WAITED_IN_VAIN) == now_installed {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            *lock(&WAITED_IN_VAIN) = now_installed;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    Err(format!(
+        "This MCP server runs the build installed at {}, which is older than the database, and nothing newer is installed there: install the newer version and the next call goes to it.",
+        exe.display()
+    ))
 }
 
 /// When the nitely this server started from has been replaced by a new build since (`nitely
