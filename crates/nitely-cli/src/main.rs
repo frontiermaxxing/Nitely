@@ -806,6 +806,14 @@ fn run(cmd: Cmd) -> Result<()> {
                 }
             };
             let to = to.or_else(|| nitely_core::install::default_target(&from)).ok_or_else(|| anyhow::anyhow!("no home folder; pass --to"))?;
+            // Tests set NITELY_INSTALL_WITHIN to their own folder: an install that would land
+            // anywhere else (the person's ~/.cargo/bin, when the test's PATH finds no copy) is
+            // refused, so no test can replace the nitely agents run.
+            if let Some(within) = std::env::var_os("NITELY_INSTALL_WITHIN") {
+                if !paths::is_within(&to.to_string_lossy(), &std::path::Path::new(&within).to_string_lossy()) {
+                    bail!("not installing to {}: NITELY_INSTALL_WITHIN allows only {}", to.display(), std::path::Path::new(&within).display());
+                }
+            }
             // Never put in place a build that cannot open the person's database: every hook, MCP
             // call and `nitely run` would get its refusal. The app's installer runs this after an
             // update, and a nightly once replaced a newer dev build that way (NIT-239). Only this

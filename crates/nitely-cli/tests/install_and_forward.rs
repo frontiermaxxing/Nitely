@@ -64,6 +64,7 @@ fn a_running_mcp_server_forwards_to_a_newly_installed_build() {
         .arg("--to")
         .arg(&installed)
         .env("NITELY_HOME", dir.join("home"))
+        .env("NITELY_INSTALL_WITHIN", &dir)
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
@@ -94,7 +95,7 @@ fn install_without_a_target_skips_its_own_folders_on_path() {
     std::fs::write(&installed, b"an old nitely").unwrap();
     let path = std::env::join_paths([release.join("deps"), release.clone(), dir.join("bin")]).unwrap();
     // A data folder of its own: install reads the database it would serve, never the person's.
-    let out = Command::new(release.join(exe)).arg("install").env("PATH", path).env("NITELY_HOME", dir.join("home")).output().unwrap();
+    let out = Command::new(release.join(exe)).arg("install").env("PATH", path).env("NITELY_HOME", dir.join("home")).env("NITELY_INSTALL_WITHIN", &dir).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let report: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(report["replaced"], true, "{report}");
@@ -111,7 +112,7 @@ fn install_from_a_file_beside_the_installed_one_replaces_it() {
     std::fs::write(&installed, b"an old nitely").unwrap();
     let new_build = dir.join("bin").join(if cfg!(windows) { "nitely-new.exe" } else { "nitely-new" });
     link_or_copy(built, &new_build);
-    let out = Command::new(built).args(["install", "--from"]).arg(&new_build).env("PATH", dir.join("bin")).env("NITELY_HOME", dir.join("home")).output().unwrap();
+    let out = Command::new(built).args(["install", "--from"]).arg(&new_build).env("PATH", dir.join("bin")).env("NITELY_HOME", dir.join("home")).env("NITELY_INSTALL_WITHIN", &dir).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(std::fs::read(&installed).unwrap(), std::fs::read(built).unwrap());
     std::fs::remove_dir_all(&dir).ok();
@@ -133,9 +134,13 @@ fn install_refuses_a_build_that_could_not_open_the_database() {
     let db = rusqlite::Connection::open(home.join("nitely.db")).unwrap();
     db.execute("INSERT INTO schema_migration (name, applied_at, applied_by) VALUES ('20991231-later', 0, '9.9.0')", []).unwrap();
     drop(db);
-    let out = Command::new(built).args(["install", "--to"]).arg(&installed).env("NITELY_HOME", &home).output().unwrap();
+    let out = Command::new(built).args(["install", "--to"]).arg(&installed).env("NITELY_HOME", &home).env("NITELY_INSTALL_WITHIN", &dir).output().unwrap();
     let said = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success() && said.contains("could not open your database") && said.contains("20991231-later"), "{said}");
     assert_eq!(std::fs::read(&installed).unwrap(), b"the newer nitely", "the nitely in place stays");
+
+    // And no test installs outside its own folder, whatever PATH finds.
+    let out = Command::new(built).args(["install", "--to"]).arg(std::env::temp_dir().join("elsewhere").join(exe)).env("NITELY_HOME", dir.join("empty")).env("NITELY_INSTALL_WITHIN", &dir).output().unwrap();
+    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("NITELY_INSTALL_WITHIN allows only"), "{}", String::from_utf8_lossy(&out.stderr));
     std::fs::remove_dir_all(&dir).ok();
 }
