@@ -232,9 +232,14 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     // what it no longer finds was carried stale, and what it still finds is what the person decides.
     if let (Some(why), Some(r)) = (stalled.clone(), out.review.clone()) {
         db.log_event(actor, Some(&issue.key), Some(&wt), "status", "The review rounds are not converging: a fresh review, without the earlier rounds, looks before it goes to the person")?;
-        // Fresh of the rounds, not of what the change is for (NIT-282).
+        // Fresh of the rounds, not of what the change is for (NIT-282) or of what the person
+        // accepted on it: told those, it does not raise them again in other words (NIT-331).
         let mut rules = pb.review.clone();
         rules.context = review_context(db, &issue, &out.gate)?;
+        let accepted = told_accepted(db, &issue.key)?;
+        if !accepted.is_empty() {
+            rules.context.push_str(&format!("\n{}", crate::review::accepted_told(&accepted)));
+        }
         if let Ok(mut fresh) = rules.run(&r.reviewer, &worktree, &since, None) {
             fresh.note = if r.note.is_empty() { FRESH.to_string() } else { format!("{}; {FRESH}", r.note) };
             // An interaction with another change in a review batch is no reviewer's opinion: only its
@@ -591,7 +596,16 @@ pub(crate) fn previous_round_at(db: &Db, key: &str, dir: &Path, head: &str, befo
         return Ok(None);
     };
     let in_history = git(dir, &["merge-base", "--is-ancestor", &last.commit_sha, head]).is_ok();
-    // Only acceptances that verify count: a row an agent wrote itself must not silence a finding.
+    let told = told_accepted(db, key)?;
+    let findings = last.findings.into_iter().filter(|f| !told.iter().any(|(t, _)| t.text == f.text)).collect();
+    // A pass whose branch was rebased since: where its change began, for a range-diff against it.
+    let passed_on = if !in_history && last.verdict == "pass" { git(dir, &["merge-base", &last.commit_sha, head]).ok().map(|o| o.trim().to_string()) } else { None };
+    Ok(Some(PreviousRound { commit: last.commit_sha, findings, in_history, accepted: told, passed_on }))
+}
+
+/// The findings the person accepted on issue `key`, each once, with its reason, for a review to be
+/// told. Only acceptances that verify count: a row an agent wrote itself must not silence a finding.
+fn told_accepted(db: &Db, key: &str) -> Result<Vec<(Finding, String)>> {
     let accepted: Vec<crate::accept::Accepted> = match crate::approval::trusted_key() {
         Ok(public) => db.signed_acceptances(key, &public)?,
         Err(_) => vec![],
@@ -602,10 +616,7 @@ pub(crate) fn previous_round_at(db: &Db, key: &str, dir: &Path, head: &str, befo
             told.push((Finding { priority: a.priority, text: a.finding.clone(), carried: false, raised_as: None, now: None }, a.reason.clone()));
         }
     }
-    let findings = last.findings.into_iter().filter(|f| !told.iter().any(|(t, _)| t.text == f.text)).collect();
-    // A pass whose branch was rebased since: where its change began, for a range-diff against it.
-    let passed_on = if !in_history && last.verdict == "pass" { git(dir, &["merge-base", &last.commit_sha, head]).ok().map(|o| o.trim().to_string()) } else { None };
-    Ok(Some(PreviousRound { commit: last.commit_sha, findings, in_history, accepted: told, passed_on }))
+    Ok(told)
 }
 
 /// The last review's pass, carried over when it reviewed this very patch: nothing in the change is
@@ -997,12 +1008,16 @@ case "$prompt" in
   *"PREVIOUS <n>"*) case "$files" in
        *stuck*) echo "PREVIOUS 1: open stuck.txt:1 \`let stuck = 1;\` is still never read"; echo "VERDICT: clean";;
        *stale*) echo "PREVIOUS 1: open stale.txt:1 \`let stale = 1;\` is still never read"; echo "VERDICT: clean";;
+       *worded*) echo "PREVIOUS 1: open worded.txt:1 \`let worded = 1;\` is still never read"; echo "VERDICT: clean";;
        *) echo "PREVIOUS 1: open edge.txt:1 \`let edge = 2;\` still skips the empty line"; echo "VERDICT: clean";;
      esac;;
   *) case "$files" in
        *edge*) echo "- [P2] Edge case: edge.txt, the empty line"; echo "VERDICT: findings";;
        *stuck*) echo "- [P1] Stuck: stuck.txt, the x is never read"; echo "VERDICT: findings";;
        *stale*) if [ -f ../stale-seen ]; then echo "Fine."; echo "VERDICT: clean"; else touch ../stale-seen; echo "- [P1] Stale: stale.txt, the x is never read"; echo "VERDICT: findings"; fi;;
+       *worded*) if [ ! -f ../worded-seen ]; then touch ../worded-seen; echo "- [P1] No migration: worded.txt, load"; echo "- [P1] Worded: worded.txt, the x is never read"; echo "VERDICT: findings"
+                 else case "$prompt" in *"(accepted: no outside users yet)"*) echo "Fine."; echo "VERDICT: clean";;
+                   *) echo "- [P1] Old keys are dropped: worded.txt, load reads only the new format"; echo "VERDICT: findings";; esac; fi;;
        *) echo "Fine."; echo "VERDICT: clean";;
      esac;;
 esac
@@ -1480,5 +1495,35 @@ focus = \"Money first.\"
         assert!(f.db.open_asks().unwrap().iter().all(|a| a.issue_key.as_deref() != Some(issue.key.as_str())), "nothing for the person");
         let said: Vec<String> = f.db.timeline(&issue.key).unwrap().into_iter().filter_map(|t| t.summary).collect();
         assert!(said.iter().any(|s| s.contains("a fresh review, without the earlier rounds, looks")), "{said:?}");
+    }
+
+    #[test]
+    fn the_fresh_review_is_told_what_the_person_accepted_so_a_reworded_repeat_does_not_reach_them() {
+        let mut f = fixture();
+        // Round one raises two P1s; the person accepts one, and the rounds after carry the other as
+        // open. The fresh review no longer finds the open one, and would say the accepted one again
+        // in other words unless it is told the person accepted it (NIT-331).
+        let (issue, wt) = f.started("Worded again");
+        std::fs::write(wt.join("worded.txt"), "let worded = 1;").unwrap();
+        sh(&wt, &["add", "."]);
+        sh(&wt, &["commit", "-q", "-m", "worded"]);
+        let first = f.submit(&wt, true).unwrap();
+        assert_eq!(first.state, "In Progress");
+        let secret = [7u8; 32];
+        crate::approval::trust_in_tests(Some(crate::approval::public_of(&secret)));
+        let (finding, reason) = ("No migration: worded.txt, load", "no outside users yet");
+        let signature = crate::approval::sign(&secret, &crate::accept::message(&issue.key, &first.patch_id, finding, reason, 5));
+        f.db.conn
+            .execute(
+                "INSERT INTO accepted_finding (issue_key, patch_id, priority, finding, reason, ts, signature) VALUES (?1, ?2, 1, ?3, ?4, 5, ?5)",
+                rusqlite::params![issue.key, first.patch_id, finding, reason, signature],
+            )
+            .unwrap();
+        let states: Vec<String> = (0..2).map(|_| f.submit(&wt, true).unwrap().state).collect();
+        assert_eq!(states, ["In Progress", "In Review"]);
+        let last = &f.db.reviews(&issue.key).unwrap()[0];
+        assert!(last.note.ends_with("fresh, without the earlier rounds") && last.verdict == "pass", "{last:?}");
+        assert!(last.findings.is_empty(), "the accepted finding is not raised again: {:?}", last.findings);
+        assert!(f.db.open_asks().unwrap().iter().all(|a| a.issue_key.as_deref() != Some(issue.key.as_str())), "nothing for the person");
     }
 }

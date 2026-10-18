@@ -223,6 +223,15 @@ const ACCEPTED_INTRO: &str = "The person who owns this change accepted these fin
 defect left to fix. Do not raise them again, or anything that only restates them, unless the code they cite has changed \
 since in a way that makes them worse:\n";
 
+/// The findings the person accepted, as a review is told them: not to be raised again.
+pub(crate) fn accepted_told(accepted: &[(Finding, String)]) -> String {
+    let mut p = ACCEPTED_INTRO.to_string();
+    for (f, reason) in accepted {
+        p.push_str(&format!("- [P{}] {} (accepted: {reason})\n", f.priority, f.text));
+    }
+    p
+}
+
 /// One change in a batched review.
 #[derive(Debug, Clone)]
 pub struct BatchChange {
@@ -430,10 +439,7 @@ regressions. Skip style. Do not edit anything.\n",
         }
         if let Some(prev) = previous.filter(|p| !p.accepted.is_empty()) {
             p.push('\n');
-            p.push_str(ACCEPTED_INTRO);
-            for (f, reason) in &prev.accepted {
-                p.push_str(&format!("- [P{}] {} (accepted: {reason})\n", f.priority, f.text));
-            }
+            p.push_str(&accepted_told(&prev.accepted));
         }
         if let Some(prev) = previous.filter(|p| p.in_history) {
             p.push_str(&format!(
