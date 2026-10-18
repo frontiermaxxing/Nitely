@@ -98,20 +98,25 @@ function Chip(props: { chip: LaneChip; now: number; onOpenIssue: (key: string) =
 
 /** The machine's memory floor and run cap (NIT-266): what is free now, and a field for each. */
 function MachineLimits(props: { machine: MachineNow | undefined; slots: LanesOverview["slots"]; onSaved: () => void }) {
-  const l = props.machine?.limits;
+  // Its own copy, refilled from what a save returns: the strip's next read may still be the old one.
+  const [machine, setMachine] = useState(props.machine);
+  const l = machine?.limits;
   const gb = (bytes: number | undefined) => (bytes == null ? "" : (bytes / 1024 ** 3).toFixed(1));
   const setting = (from: string | undefined, bytes: number | undefined) => (from === "settings" && bytes != null ? String(+(bytes / 1024 ** 3).toFixed(2)) : "");
   const [floor, setFloor] = useState(setting(l?.floor_from, l?.floor));
   const [cap, setCap] = useState(setting(l?.cap_from, l?.cap));
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
-  const words = memoryWords(props.machine);
+  const words = memoryWords(machine);
   const parsed = limitsOf(floor, cap);
   const save = async () => {
     if (typeof parsed === "string") return;
     setBusy(true);
     try {
-      await invoke("set_machine_limits", parsed);
+      const now = await invoke<MachineNow>("set_machine_limits", parsed);
+      setMachine(now);
+      setFloor(setting(now.limits?.floor_from, now.limits?.floor));
+      setCap(setting(now.limits?.cap_from, now.limits?.cap));
       setNote("Saved. Requests waiting now use it from their next look.");
       props.onSaved();
     } catch (e) {
@@ -169,7 +174,7 @@ export function LanesSettings(props: { version: number }) {
   const [saved, setSaved] = useState(0);
   const lanes = useLanes(props.version + saved);
   if (!lanes) return null;
-  const machine = <MachineLimits key={saved} machine={lanes.machine} slots={lanes.slots} onSaved={() => setSaved((n) => n + 1)} />;
+  const machine = <MachineLimits machine={lanes.machine} slots={lanes.slots} onSaved={() => setSaved((n) => n + 1)} />;
   if (lanes.projects.length === 0) {
     return (
       <>

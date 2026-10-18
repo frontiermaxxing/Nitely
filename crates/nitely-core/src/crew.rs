@@ -180,8 +180,13 @@ pub trait Agents {
     /// Lands an issue a worker handed in and left (`nitely land <key>`), in a process of its own:
     /// a land runs the gate and may wait in the land queue, which must not hold the supervisor up.
     fn land(&self, job: &LandJob) -> Result<Box<dyn Process>>;
-    /// Why no new worker may start now because the machine is short of memory (NIT-266), or None
-    /// when one may.
+    /// Why no new worker should be begun (its worktree set up) because the machine is short of
+    /// memory (NIT-266), or None when one may. Only looks.
+    fn memory_wait(&self) -> Option<String> {
+        None
+    }
+    /// The same, right before a worker launches: None lets it go and counts as a start, so the next
+    /// request to ask lets it grow first.
     fn memory_turn(&self) -> Option<String> {
         None
     }
@@ -611,7 +616,7 @@ impl Supervisor {
             if let Some(why) = self.over_budget(rules, &moment) {
                 return Ok(why);
             }
-            if let Some(why) = self.agents.memory_turn() {
+            if let Some(why) = self.agents.memory_wait() {
                 return Ok(why);
             }
             let installed: Vec<String> = rules
@@ -753,6 +758,12 @@ impl Supervisor {
                 i += 1;
                 continue;
             };
+            // Set up and ready, a worker still launches only while the machine has memory for it
+            // (NIT-266); until then it waits here, its setup done, and is looked at again next tick.
+            if start && matches!(exited, Ok(0)) && self.agents.memory_turn().is_some() {
+                i += 1;
+                continue;
+            }
             let p = self.preparing.remove(i);
             let started = match exited {
                 Ok(0) if !start => {
@@ -1929,21 +1940,26 @@ impl Agents for SystemAgents {
         if let Some(g) = &guard {
             g.adopt(&child);
         }
+        let cap = share.cap;
         let mut stdin = child.stdin.take().context("no stdin")?;
         let brief = launch.brief.clone();
         std::thread::spawn(move || {
             use std::io::Write;
             stdin.write_all(brief.as_bytes()).ok();
         });
-        Ok(Box::new(SystemProcess(child)))
+        Ok(Box::new(Capped { process: SystemProcess(child), guard, log: launch.log.clone(), cap }))
     }
 
     fn adopt(&self, pid: u32) -> Option<Box<dyn Process>> {
         pid_alive(pid).then(|| Box::new(Adopted(pid)) as Box<dyn Process>)
     }
 
-    fn memory_turn(&self) -> Option<String> {
+    fn memory_wait(&self) -> Option<String> {
         crate::machine::would_wait()
+    }
+
+    fn memory_turn(&self) -> Option<String> {
+        crate::machine::admit_here_once()
     }
 
     fn prepare(&self, prep: &Prepare) -> Result<Box<dyn Process>> {
@@ -2117,6 +2133,46 @@ impl Process for SystemProcess {
     }
 }
 
+/// A crew worker held to a run's memory cap (NIT-266). On Windows its job holds the cap whatever
+/// happens to this supervisor; looking at it here (each `exited`) is what stops one that went over,
+/// and off Windows it is the only thing that holds it.
+struct Capped {
+    process: SystemProcess,
+    guard: Option<crate::procs::TreeGuard>,
+    log: PathBuf,
+    cap: Option<u64>,
+}
+
+impl Process for Capped {
+    fn pid(&self) -> u32 {
+        self.process.pid()
+    }
+
+    fn exited(&mut self) -> Result<Option<i32>> {
+        if let Some(code) = self.process.exited()? {
+            return Ok(Some(code));
+        }
+        if self.guard.as_ref().is_some_and(|g| g.over_memory()) {
+            let cap = self.cap.map(crate::machine::gb).unwrap_or_default();
+            if let Ok(mut log) = std::fs::OpenOptions::new().append(true).open(&self.log) {
+                use std::io::Write;
+                writeln!(log, "
+out of memory: the worker and what it started went over the {cap} memory cap a run has (Settings > Build lanes) and were stopped").ok();
+            }
+            self.stop();
+            return Ok(Some(-1));
+        }
+        Ok(None)
+    }
+
+    fn stop(&mut self) {
+        if let Some(g) = &self.guard {
+            g.stop();
+        }
+        self.process.stop();
+    }
+}
+
 /// `program` on PATH (with the Windows executable extensions).
 fn on_path(program: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
@@ -2207,6 +2263,9 @@ mod tests {
         /// Issues whose land was started, in order; what each land does to the issue.
         lands: Rc<RefCell<Vec<String>>>,
         land_does: Option<&'static str>,
+        /// The machine is short of memory: for beginning a worker, and for launching one.
+        short_to_begin: Rc<std::cell::Cell<bool>>,
+        short_to_launch: Rc<std::cell::Cell<bool>>,
     }
 
     struct FakeProcess {
@@ -2230,6 +2289,12 @@ mod tests {
     impl Agents for Fake {
         fn resolve(&self, program: &str) -> Option<String> {
             self.installed.contains(&program).then(|| format!("/bin/{program}"))
+        }
+        fn memory_wait(&self) -> Option<String> {
+            self.short_to_begin.get().then(|| "waiting for memory: 5.0 GB free, new work starts above 12.8 GB".into())
+        }
+        fn memory_turn(&self) -> Option<String> {
+            self.short_to_launch.get().then(|| "waiting for memory: the last run to start is still growing".into())
         }
         fn start(&self, launch: &Launch) -> Result<Box<dyn Process>> {
             if let Some(why) = self.fail_start {
@@ -2370,6 +2435,34 @@ mod tests {
         let status = status(&f.db, "NIT", &Playbook::load(&f.repo).unwrap(), &NOON, 0).unwrap();
         assert_eq!((status.running.len(), status.started_today, status.cap), (2, 4, 2));
         assert!(status.supervised);
+    }
+
+    /// No worker is begun while the machine is short of memory, and one whose setup finished
+    /// launches only once the machine has memory for it (NIT-266).
+    #[test]
+    fn workers_wait_for_memory_to_begin_and_to_launch() {
+        let mut f = fixture(&format!("{GATE}[crew]
+workers = 1
+"));
+        let fake = Fake { installed: vec!["claude"], ..Default::default() };
+        let mut sup = supervisor(&f, &fake);
+        fake.short_to_begin.set(true);
+        let tick = sup.tick(&mut f.db, false).unwrap();
+        assert!(tick.status.starts_with("waiting for memory"), "{tick:?}");
+        assert!(fake.prepares.borrow().is_empty(), "no worktree set up");
+
+        // Memory to begin, but not yet to launch: the setup runs, the worker waits ready.
+        fake.short_to_begin.set(false);
+        fake.short_to_launch.set(true);
+        let tick = sup.tick(&mut f.db, false).unwrap();
+        assert_eq!(*fake.prepares.borrow(), ["NIT-1"]);
+        assert!(tick.started.is_empty() && fake.launches.borrow().is_empty(), "{tick:?}");
+        assert!(sup.tick(&mut f.db, false).unwrap().started.is_empty(), "still waiting");
+
+        fake.short_to_launch.set(false);
+        let tick = sup.tick(&mut f.db, false).unwrap();
+        assert_eq!(tick.started.iter().map(|w| w.issue.as_str()).collect::<Vec<_>>(), ["NIT-1"], "{tick:?}");
+        assert_eq!(fake.prepares.borrow().len(), 1, "set up once");
     }
 
     /// A submit job for `key` that its worker queued, as `submit` (without wait) records one.

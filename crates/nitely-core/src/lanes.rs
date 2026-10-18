@@ -760,7 +760,7 @@ fn run_with(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Act
     // Until it runs, a failure here (a lock that cannot be opened, a log folder that cannot be made)
     // closes the request's row: a queued row left behind would hold up the requests after it.
     let started = (|| -> Result<_> {
-        let (n, lock, slot) = take_turn(db, id, repo_root, pb, &rules, machine_budget().slots, &mut read_memory, memory_limits().as_ref())?;
+        let (n, lock, slot) = take_turn(db, id, repo_root, pb, &rules, machine_budget().slots, &mut read_memory, &mut memory_limits)?;
         let logs = logs_dir(db, req.project);
         std::fs::create_dir_all(&logs)?;
         let log = logs.join(format!("{id}.log"));
@@ -1091,7 +1091,8 @@ fn read_memory() -> Option<machine::Memory> {
 
 #[cfg(test)]
 fn memory_limits() -> Option<machine::Limits> {
-    tests::FAKE_MEMORY.with(|f| f.borrow().is_some()).then(|| machine::limits_for(64 * machine::GIB, None, None))
+    let floor = tests::FAKE_FLOOR.with(|f| f.get()).map(|gb| (gb, "settings"));
+    tests::FAKE_MEMORY.with(|f| f.borrow().is_some()).then(|| machine::limits_for(64 * machine::GIB, floor, None))
 }
 
 /// A machine slot's lock: an OS file lock beside the database, so a process that dies frees it.
@@ -1203,8 +1204,9 @@ fn my_turn(db: &Db, id: i64, slots: u32, alive: &mut dyn FnMut(i64) -> bool) -> 
 }
 
 /// Waits for request `id`'s turn, then holds a machine slot and one of the repo's lanes, and starts
-/// only once the machine's memory admits it (`machine::admit_once` with `limits`, reading `memory`):
-/// until then it lets both go again and says why it waits (`waiting_memory`).
+/// only once the machine's memory admits it (`machine::admit_once` with `limits`, read again on
+/// every look so a change in Settings counts at once, reading `memory`): until then it lets both go
+/// again and says why it waits (`waiting_memory`).
 #[allow(clippy::too_many_arguments)]
 fn take_turn(
     db: &Db,
@@ -1214,7 +1216,7 @@ fn take_turn(
     rules: &LaneRules,
     slots: u32,
     memory: &mut dyn FnMut() -> Option<machine::Memory>,
-    limits: Option<&machine::Limits>,
+    limits: &mut dyn FnMut() -> Option<machine::Limits>,
 ) -> Result<(u32, LaneLock, SlotLock)> {
     db.conn.execute("UPDATE lane_run SET lane_count = ?2 WHERE id = ?1", params![id, rules.lanes()])?;
     // Whether a requester's process still runs, asked again every few seconds at most.
@@ -1259,7 +1261,7 @@ fn take_turn(
                             }
                             db.conn.execute("UPDATE lane_run SET waiting_for = NULL WHERE id = ?1", [id])?;
                         }
-                        if let Some(why) = machine::admit_once(&state_dir(db), limits, memory)? {
+                        if let Some(why) = machine::admit_once(&state_dir(db), limits().as_ref(), memory)? {
                             // Held while it waits, the slot and lane would keep the rest waiting too.
                             drop(lock);
                             drop(slot);
@@ -1339,14 +1341,14 @@ pub fn hold_machine<'a>(db: &'a Db, repo_root: &Path, worktree: &Path, project: 
         params![project.to_uppercase(), repo_root.to_string_lossy(), issue, actor.id(), kind.as_str(), head, tree, command, now(), std::process::id(), priority, slots],
     )?;
     let id = db.conn.last_insert_rowid();
-    let limits = memory_limits();
     let mut waits_for_memory = false;
     let taken = (|| -> Result<SlotLock> {
         let mut alive = |pid: i64| pid as u32 == std::process::id() || crate::crew::pid_alive(pid as u32);
         loop {
             if my_turn(db, id, slots, &mut alive)? {
                 if let Some(slot) = (1..=slots.max(1)).find_map(|k| try_slot(db, k).ok().flatten()) {
-                    match machine::admit_once(&state_dir(db), limits.as_ref(), &mut read_memory)? {
+                    // The limits read again on every look, so a change in Settings counts at once.
+                    match machine::admit_once(&state_dir(db), memory_limits().as_ref(), &mut read_memory)? {
                         None => return Ok(slot),
                         Some(why) => {
                             drop(slot);
@@ -1989,6 +1991,8 @@ mod tests {
     thread_local! {
         /// The machine's memory as this test's requests read it; none set, they never wait.
         pub(super) static FAKE_MEMORY: std::cell::RefCell<Option<Readings>> = const { std::cell::RefCell::new(None) };
+        /// The floor as Settings would set it, in GB.
+        pub(super) static FAKE_FLOOR: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
     }
 
     const NO_CAP: Share = Share { jobs: 1, cap: None };
@@ -2465,6 +2469,35 @@ commands = []
         assert_eq!(seen.len(), 3, "{seen:?}");
         assert!(seen[1].as_deref().is_some_and(|w| w.starts_with("waiting for memory: 5.0 GB free")), "{seen:?}");
         assert_eq!(ran.waiting_memory, None, "cleared once it started");
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// A floor lowered while a request waits lets it go at its next look, without a restart.
+    #[test]
+    fn a_floor_lowered_while_a_request_waits_lets_it_go() {
+        let base = crate::paths::unique_temp("nitely-lane-floor", "");
+        let root = repo(&base);
+        let db = Db::open(&base.join("t.db")).unwrap();
+        let pb = playbook_with("[lanes]
+");
+        let snap = snapshot(&root).unwrap();
+        let mut looks = 0;
+        let next: Readings = Box::new(move || {
+            looks += 1;
+            if looks == 2 {
+                // The person sets the floor to 0 in Settings while it waits.
+                FAKE_FLOOR.with(|f| f.set(Some(0.0)));
+            }
+            Some(machine::Memory { total: 64 * machine::GIB, available: 2 * machine::GIB })
+        });
+        FAKE_MEMORY.with(|f| *f.borrow_mut() = Some(next));
+        let req = Request { project: "APP", issue: None, kind: Kind::Run, snapshot: &snap, command: "echo built" };
+        let started = Instant::now();
+        let ran = run(&db, &root, &pb, &req, &Actor::Agent("claude:test".into()), &mut |_| {});
+        FAKE_MEMORY.with(|f| *f.borrow_mut() = None);
+        FAKE_FLOOR.with(|f| f.set(None));
+        assert!(ran.unwrap().passed());
+        assert!(started.elapsed() < Duration::from_secs(30), "went at its next look");
         std::fs::remove_dir_all(base).ok();
     }
 

@@ -118,11 +118,12 @@ pub fn admit_once(dir: &Path, limits: Option<&Limits>, read: &mut dyn FnMut() ->
 }
 
 /// Waits until a run may start (`admit_once`), telling `waiting` why while it waits and None once it
-/// may go. The machine's memory is read every two seconds.
-pub fn admit(dir: &Path, limits: Option<&Limits>, read: &mut dyn FnMut() -> Option<Memory>, waiting: &mut dyn FnMut(Option<&str>)) -> Result<()> {
+/// may go. The machine's memory is read every two seconds, and its limits with it (`limits`), so a
+/// floor lowered in Settings lets what waits go at its next look.
+pub fn admit(dir: &Path, limits: &mut dyn FnMut() -> Option<Limits>, read: &mut dyn FnMut() -> Option<Memory>, waiting: &mut dyn FnMut(Option<&str>)) -> Result<()> {
     let mut said = false;
     loop {
-        match admit_once(dir, limits, read)? {
+        match admit_once(dir, limits().as_ref(), read)? {
             None => {
                 if said {
                     waiting(None);
@@ -146,8 +147,17 @@ pub fn admit_here(waiting: &mut dyn FnMut(Option<&str>)) -> Result<()> {
     if cfg!(test) {
         return Ok(());
     }
-    let limits = limits();
-    admit(&crate::paths::data_dir().join("lanes"), limits.as_ref(), &mut memory, waiting)
+    admit(&crate::paths::data_dir().join("lanes"), &mut limits, &mut memory, waiting)
+}
+
+/// `admit_once` for a process with no queue row (a crew worker about to launch): the machine's own
+/// memory and limits, the shared record in Nitely's data folder. Why it must wait, or None once it
+/// may go (recorded as a start).
+pub fn admit_here_once() -> Option<String> {
+    if cfg!(test) {
+        return None;
+    }
+    admit_once(&crate::paths::data_dir().join("lanes"), limits().as_ref(), &mut memory).unwrap_or(None)
 }
 
 /// Why a new run would wait now, without waiting or recording anything (what the crew shows).
@@ -296,7 +306,7 @@ mod tests {
         let l = limits_for(64 * GIB, None, None);
         let mut readings = vec![mem(64, 5.0), mem(64, 9.0), mem(64, 30.0)].into_iter();
         let mut said: Vec<Option<String>> = Vec::new();
-        admit(&dir, Some(&l), &mut || readings.next().flatten(), &mut |w| said.push(w.map(str::to_string))).unwrap();
+        admit(&dir, &mut || Some(l.clone()), &mut || readings.next().flatten(), &mut |w| said.push(w.map(str::to_string))).unwrap();
         assert_eq!(said.len(), 3, "{said:?}");
         assert!(said[0].as_deref().unwrap().starts_with("waiting for memory: 5.0 GB free"));
         assert_eq!(said[2], None, "and says so once it may go");
