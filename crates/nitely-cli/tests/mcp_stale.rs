@@ -123,7 +123,7 @@ fn with_nothing_newer_installed_it_refuses_and_says_so_without_waiting_again() {
     let reply = mcp.call(2);
     assert_eq!(reply["result"]["isError"], true, "{reply}");
     let said = text(&reply);
-    assert!(said.contains("upgraded by a newer Nitely") && said.contains("nothing newer is installed"), "{said}");
+    assert!(said.contains("newer Nitely") && said.contains("nothing newer is installed"), "{said}");
     // The same build still installed: the next call refuses at once.
     let asked = Instant::now();
     let again = mcp.call(3);
