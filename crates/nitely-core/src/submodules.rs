@@ -245,6 +245,20 @@ fn pointer(dir: &Path, commit: &str, path: &str) -> Result<Option<String>> {
     Ok(line.split_whitespace().nth(2).filter(|_| line.starts_with("160000")).map(str::to_string))
 }
 
+/// Whether the branch checked out in `worktree` moved the submodule at `path` itself: its pointer
+/// `pointed` is neither the integration branch's nor the one where the branch left it.
+fn moved_by_branch(worktree: &Path, base: &str, path: &str, pointed: &str) -> bool {
+    let fork = git(worktree, &["merge-base", "HEAD", base]).map(|s| s.trim().to_string());
+    let at_base = pointer(worktree, base, path).ok().flatten();
+    let at_fork = fork.ok().and_then(|f| pointer(worktree, &f, path).ok().flatten());
+    at_base.as_deref() != Some(pointed) && at_fork.as_deref() != Some(pointed)
+}
+
+/// Whether `older` is `newer` or an ancestor of it, in the repository at `dir`.
+fn is_ancestor(dir: &Path, older: &str, newer: &str) -> bool {
+    git(dir, &["merge-base", "--is-ancestor", older, newer]).is_ok()
+}
+
 /// Refuses a task's submodule whose work the repo's commit does not name: uncommitted changes, or
 /// a checkout at another commit than the pointer at HEAD (the review would not see it).
 pub fn check_pointers(pb: &Playbook, worktree: &Path) -> Result<()> {
@@ -258,7 +272,23 @@ pub fn check_pointers(pb: &Playbook, worktree: &Path) -> Result<()> {
             bail!("the submodule {} has uncommitted changes; commit them there, then `git add {}` and commit here:\n{}", s.path(), s.path(), dirty.trim_end());
         }
         let head = git(&at, &["rev-parse", "HEAD"])?.trim().to_string();
-        if pointer(worktree, "HEAD", s.path())?.as_deref() != Some(head.as_str()) {
+        let pointed = pointer(worktree, "HEAD", s.path())?;
+        if pointed.as_deref() != Some(head.as_str()) {
+            // A checkout behind a pointer the branch did not move (one the integration branch
+            // moved, which a rebase brought in) is stale, not new work: `git add` would commit the
+            // old pointer and take the integration branch's bump back (NIT-343).
+            if let Some(p) = pointed.as_deref().filter(|p| !moved_by_branch(worktree, pb.integration_branch(), s.path(), p) && is_ancestor(&at, &head, p)) {
+                let short = &p[..p.len().min(12)];
+                let on_branch = git(&at, &["symbolic-ref", "-q", "HEAD"]).is_ok();
+                let fix = if on_branch { format!("git -C {} merge --ff-only {short}", s.path()) } else { format!("git -C {} checkout --detach {short}", s.path()) };
+                bail!(
+                    "the submodule {} is checked out at {}, behind {short}, where this branch points it as {} does; the branch did not change it, so bring the checkout up to it (`{fix}`) and submit again. Do not `git add {}`: that would point it back at the older commit",
+                    s.path(),
+                    &head[..head.len().min(12)],
+                    pb.integration_branch(),
+                    s.path()
+                );
+            }
             bail!(
                 "the submodule {} is at {}, which this branch's last commit does not point at; `git add {}` and commit, so the change (and its review) includes it",
                 s.path(),

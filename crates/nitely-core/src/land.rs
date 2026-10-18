@@ -1902,4 +1902,26 @@ when_changed = ["billing"]
         assert!(err.contains("uncommitted changes"), "{err}");
         std::fs::remove_dir_all(&f.base).ok();
     }
+
+    /// A rebase onto an integration branch that moved the submodule leaves the task's checkout
+    /// behind the pointer it brought in: submit says to bring the checkout up to it, not to
+    /// `git add` the older commit back (NIT-343).
+    #[test]
+    fn submit_says_to_update_a_submodule_checkout_a_rebase_left_behind() {
+        let mut f = submodule_fixture();
+        let (_, wt) = f.submitted("Words only", "words.txt", "w\n");
+        f.land_elsewhere();
+        sh(&wt, &["rebase", "-q", "main"]);
+        let dir = wt.to_string_lossy().into_owned();
+        let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: false };
+        let err = submit(&mut f.db, &crate::Config::default(), &opts, &f.actor).unwrap_err().to_string();
+        let main = sh(&f.engine(), &["rev-parse", "main"]);
+        let fix = format!("git -C engine merge --ff-only {}", &main[..12]);
+        assert!(err.contains("the branch did not change it") && err.contains(&fix) && err.contains("Do not `git add engine`"), "{err}");
+        sh(&wt.join("engine"), &["merge", "-q", "--ff-only", &main]);
+        if let Err(e) = submit(&mut f.db, &crate::Config::default(), &opts, &f.actor) {
+            assert!(!e.to_string().contains("submodule engine"), "{e:#}");
+        }
+        std::fs::remove_dir_all(&f.base).ok();
+    }
 }
