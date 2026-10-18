@@ -344,8 +344,9 @@ It is the reference for a whole view built from these parts. It answers, in orde
    read it.
 
 Its data is one `pulse` command (`crates/nitely-core/src/pulse.rs`), which reads only the database;
-its `report` is `goal_report` (`crates/nitely-core/src/goal_report.rs`), which `nitely report
---hours 12` prints and the phone reads too.
+its `report` is `goal_report` (`crates/nitely-core/src/goal_report.rs`), which the phone reads too
+and `nitely report --hours 12` prints as text shaped like the phone's (`report_text.rs`, NIT-358;
+`--all` folds nothing, `--json` is the report as it is).
 Git state (rebase conflicts) and live sessions come from the snapshot the app already holds. The
 goal rows read the `goals` command.
 

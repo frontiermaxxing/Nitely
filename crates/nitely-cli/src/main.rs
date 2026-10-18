@@ -108,14 +108,20 @@ enum Cmd {
         #[command(subcommand)]
         command: GoalCmd,
     },
-    /// What happened over the last hours, per goal: what landed, what is at risk, when each goal
-    /// will be done at its pace, and every place you were needed (as JSON).
+    /// What happened over the last hours, per goal: what is at risk, what landed, when each goal
+    /// will be done at its pace, and every place you were needed, one line per issue.
     Report {
         /// How far back, in hours (default 12).
         #[arg(long, default_value_t = 12)]
         hours: i64,
         #[arg(long)]
         project: Option<String>,
+        /// Every landing and every issue that needed you, none folded into "+N more".
+        #[arg(long)]
+        all: bool,
+        /// The whole report as JSON, for scripts and agents.
+        #[arg(long)]
+        json: bool,
     },
     /// Projects: a backlog with its own issue prefix.
     Project {
@@ -1026,10 +1032,15 @@ fn run(cmd: Cmd) -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Report { hours, project } => {
+        Cmd::Report { hours, project, all, json } => {
             let db = Db::open_default()?;
             let since = nitely_core::db::now() - hours.max(1) * 3600;
-            print_json(&db.goal_report(project.as_deref(), since)?)
+            let report = db.goal_report(project.as_deref(), since)?;
+            if json {
+                return print_json(&report);
+            }
+            print!("{}", nitely_core::report_text::local(&report, all));
+            Ok(())
         }
         Cmd::Goal { command } => {
             let db = Db::open_default()?;
