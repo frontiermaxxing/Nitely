@@ -796,7 +796,7 @@ fn run(cmd: Cmd) -> Result<()> {
                     // Under `cargo run` (a land's after step), this build's stamp must be its
                     // checkout's commit, or every submit would refuse what it installs (NIT-320).
                     if let Ok(dir) = std::env::var("CARGO_MANIFEST_DIR") {
-                        let head = std::process::Command::new("git").args(["-C", &dir, "rev-parse", "HEAD"]).output().ok().filter(|o| o.status.success());
+                        let head = nitely_core::playbook::run_git(std::process::Command::new("git").args(["-C", &dir, "rev-parse", "HEAD"])).ok().filter(|o| o.status.success());
                         let head = head.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
                         if let Some(why) = nitely_core::install::stamp_mismatch(env!("NITELY_COMMIT"), &head) {
                             anyhow::bail!(why);
