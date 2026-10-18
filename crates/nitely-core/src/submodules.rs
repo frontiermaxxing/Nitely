@@ -125,7 +125,6 @@ pub struct Moving {
     pub path: String,
     pub repo: PathBuf,
     pub branch: String,
-    pub remote: Option<String>,
     pub before: String,
     pub head: String,
 }
@@ -167,7 +166,7 @@ pub fn rebase(root: &Path, pb: &Playbook, worktree: &Path, base: &str) -> Result
             }
         }
         let head = git(&at, &["rev-parse", "HEAD"])?.trim().to_string();
-        moving.push(Moving { path: path.to_string(), repo, branch, remote: s.remote.clone().filter(|r| !r.trim().is_empty()), before, head });
+        moving.push(Moving { path: path.to_string(), repo, branch, before, head });
     }
     Ok(moving)
 }
@@ -235,6 +234,8 @@ pub struct Undo {
     head: String,
     /// The checkout that has the branch, when one does: put back with `reset --keep` there.
     checkout: Option<PathBuf>,
+    /// The repo's own copy, detached at the old tip and moved along with the branch.
+    followed: bool,
 }
 
 /// The checkout of `repo` that has `branch`, if any.
@@ -273,7 +274,20 @@ pub fn fast_forward(moving: &[Moving]) -> Result<Vec<Undo>> {
             undo(&done);
             return Err(e);
         }
-        done.push(Undo { repo: m.repo.clone(), branch: m.branch.clone(), before: m.before.clone(), head: m.head.clone(), checkout });
+        // The usual state after `git submodule update`: the repo's copy detached at the commit the
+        // repo pointed at. It follows, or the main checkout would build the old code.
+        let detached = checkout.is_none() && git(&m.repo, &["symbolic-ref", "-q", "HEAD"]).is_err();
+        let followed = detached && git(&m.repo, &["rev-parse", "HEAD"]).is_ok_and(|h| h.trim() == m.before);
+        let mut u = Undo { repo: m.repo.clone(), branch: m.branch.clone(), before: m.before.clone(), head: m.head.clone(), checkout, followed: false };
+        if followed {
+            if let Err(e) = git(&m.repo, &["checkout", "-q", "--detach", &m.head]) {
+                done.push(u);
+                undo(&done);
+                return Err(e).with_context(|| format!("moving the submodule {}'s checkout to the new {}", m.path, m.branch));
+            }
+            u.followed = true;
+        }
+        done.push(u);
     }
     Ok(done)
 }
@@ -282,6 +296,11 @@ pub fn fast_forward(moving: &[Moving]) -> Result<Vec<Undo>> {
 pub fn undo(done: &[Undo]) -> Vec<String> {
     let mut failed = Vec::new();
     for u in done.iter().rev() {
+        if u.followed {
+            if let Err(e) = git(&u.repo, &["checkout", "-q", "--detach", &u.before]) {
+                failed.push(format!("the submodule checkout {} could not be put back ({})", u.repo.display(), crate::land::first_line(&e)));
+            }
+        }
         let back = match &u.checkout {
             Some(dir) => git(dir, &["reset", "-q", "--keep", &u.before]).map(|_| ()),
             None => git(&u.repo, &["update-ref", &format!("refs/heads/{}", u.branch), &u.before, &u.head]).map(|_| ()),
@@ -293,12 +312,46 @@ pub fn undo(done: &[Undo]) -> Vec<String> {
     failed
 }
 
-/// Pushes each moving submodule that has a remote. Err names the first that failed.
-pub fn push(moving: &[Moving]) -> Result<()> {
-    for m in moving {
-        if let Some(remote) = &m.remote {
-            git_remote(&m.repo, &["push", remote, &m.branch]).with_context(|| format!("pushing the submodule {}'s {} to {remote}", m.path, m.branch))?;
+/// Pushes each declared submodule's integration branch that has a remote: every one, not only those
+/// this land moved, so one a failed push left behind goes out before any repo commit pointing
+/// into it. Err names the first that failed.
+pub fn push(root: &Path, pb: &Playbook) -> Result<()> {
+    for s in &pb.submodules {
+        let Some(remote) = s.remote.as_deref().filter(|r| !r.trim().is_empty()) else { continue };
+        let repo = s.repo(root);
+        if checked_out(&repo) {
+            git_remote(&repo, &["push", remote, s.branch(pb)]).with_context(|| format!("pushing the submodule {}'s {} to {remote}", s.path(), s.branch(pb)))?;
         }
+    }
+    Ok(())
+}
+
+/// Pushes the task branch of each declared submodule that has a remote, from the task's worktree,
+/// so a pull request's pointer resolves on the remote.
+pub fn push_task(pb: &Playbook, worktree: &Path, branch: &str) -> Result<()> {
+    for s in &pb.submodules {
+        let Some(remote) = s.remote.as_deref().filter(|r| !r.trim().is_empty()) else { continue };
+        let at = worktree.join(s.path());
+        if checked_out(&at) {
+            git_remote(&at, &["push", "--force", remote, &format!("HEAD:refs/heads/{branch}")]).with_context(|| format!("pushing the submodule {}'s {branch} to {remote}", s.path()))?;
+        }
+    }
+    Ok(())
+}
+
+/// After the rebase: each declared submodule the branch leaves alone, checked out in the task's
+/// worktree where the rebased branch points it (another land may have moved it), so the gate
+/// builds what lands.
+pub fn follow(pb: &Playbook, worktree: &Path, moving: &[Moving]) -> Result<()> {
+    for s in pb.submodules.iter().filter(|s| !moving.iter().any(|m| m.path == s.path())) {
+        let at = worktree.join(s.path());
+        let Some(to) = pointer(worktree, "HEAD", s.path())? else { continue };
+        if !checked_out(&at) || git(&at, &["rev-parse", "HEAD"])?.trim() == to {
+            continue;
+        }
+        // The task's branch there has nothing of its own (the branch does not move it), so it
+        // can follow.
+        git(&at, &["reset", "-q", "--keep", &to]).with_context(|| format!("moving the submodule {} to where the rebased branch points it", s.path()))?;
     }
     Ok(())
 }
@@ -328,6 +381,25 @@ pub fn delete_branches(root: &Path, pb: &Playbook, branch: &str) {
             git(&repo, &["branch", "-d", branch]).ok();
         }
     }
+}
+
+/// Large-repo mode builds in the person's own checkout, whose submodules stay as they are: a
+/// snapshot that points one elsewhere would be built against the wrong code, so it is refused.
+pub fn check_large(root: &Path, pb: &Playbook, commit: &str) -> Result<()> {
+    for s in &pb.submodules {
+        let Some(want) = pointer(root, commit, s.path())? else { continue };
+        let repo = s.repo(root);
+        let have = git(&repo, &["rev-parse", "HEAD"]).map(|h| h.trim().to_string()).unwrap_or_default();
+        if have != want {
+            bail!(
+                "this snapshot points the submodule {} at {}, but your checkout has it at {}; large-repo mode builds in your checkout and leaves its submodules alone, so it cannot build this one (land it to move both, or run it without large_repo)",
+                s.path(),
+                &want[..want.len().min(12)],
+                if have.is_empty() { "nothing".to_string() } else { have[..have.len().min(12)].to_string() }
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Puts each declared submodule of a build lane at the commit `commit` points it at: a detached
@@ -400,6 +472,25 @@ mod tests {
         // Where the commit points (its kept build output is untracked content, which status counts).
         assert!(sh(&lane, &["ls-tree", &second, "engine"]).contains(&sh(&lane.join("engine"), &["rev-parse", "HEAD"])));
         assert!(sh(&lane, &["status", "--porcelain", "--ignore-submodules=untracked"]).is_empty(), "the lane is clean");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn a_pointer_whose_code_cannot_be_shown_still_changes_the_patch() {
+        let base = crate::paths::unique_temp("nitely-sub-patch", "");
+        let repo = base.join("repo");
+        crate::test_repo::init(&repo, &[("app.txt", "app\n")]);
+        let id = |sha: &str, branch: &str| {
+            sh(&repo, &["checkout", "-q", "-B", branch, "main"]);
+            sh(&repo, &["update-index", "--add", "--cacheinfo", &format!("160000,{sha},engine")]);
+            sh(&repo, &["commit", "-q", "-m", "point"]);
+            crate::submit::patch_id_range(&repo, "main", "HEAD").unwrap()
+        };
+        // Commits nobody here has: git can only say the pointer moved.
+        let (a, b) = (id(&"a".repeat(40), "one"), id(&"b".repeat(40), "two"));
+        assert_ne!(a, "empty");
+        assert_ne!(a, b, "another pointer is another patch");
+        assert_eq!(a, id(&"a".repeat(40), "three"), "the same pointer, the same patch");
         std::fs::remove_dir_all(&base).ok();
     }
 }

@@ -1086,6 +1086,10 @@ pub fn start_task(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, 
     let worktree_str = worktree.to_string_lossy().into_owned();
 
     if worktree.join(".git").exists() {
+        // A start that failed at the submodules (one not checked out yet) finishes them now.
+        for line in crate::submodules::start(repo_root, &playbook, &worktree, &branch)? {
+            db.log_event(actor, Some(&issue.key), Some(&worktree_str), "worktree", &format!("Started the submodule branch {line}"))?;
+        }
         let light = crate::light::is_light(&worktree);
         let reference = Some(crate::light::reference_path(&playbook, repo_root)).filter(|r| light && r.join(".git").exists());
         return Ok(Started {

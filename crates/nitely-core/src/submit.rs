@@ -233,7 +233,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         body = format!("{closes}\n\n{body}");
     }
     if !local_only {
-        match push(&worktree, &branch) {
+        match push(&pb, &worktree, &branch) {
             Ok(()) => out.pushed = true,
             Err(e) => out.pr_error = Some(format!("push failed: {e:#}")),
         }
@@ -557,13 +557,38 @@ pub fn patch_id(worktree: &Path, base: &str) -> Result<String> {
 ///
 /// A submodule's move counts by the code it changes (`--submodule=diff`), not by the commit ids it
 /// points at, so a rebase of the submodule that leaves its code the same keeps the patch. The
-/// `Submodule <path> <a>..<b>:` header lines go: patch-id would start a new patch at each.
+/// `Submodule <path> <a>..<b>:` header lines that its diff follows go (patch-id would start a new
+/// patch at each). A move whose code git cannot show (`(commits not present)`, a new submodule)
+/// counts by its header, commit ids and all, so a pointer never changes unseen.
 pub fn patch_id_range(worktree: &Path, base: &str, head: &str) -> Result<String> {
     let diff = git(worktree, &["diff", "-U0", "--submodule=diff", &format!("{base}...{head}")])?;
-    let diff: String = diff.split_inclusive('\n').filter(|l| !l.starts_with("Submodule ")).collect();
-    if diff.is_empty() {
+    let mut pointers = String::new();
+    let diff: String = diff
+        .split_inclusive('\n')
+        .filter(|l| {
+            if !l.starts_with("Submodule ") {
+                return true;
+            }
+            if !l.trim_end().ends_with(':') {
+                pointers.push_str(l);
+            }
+            false
+        })
+        .collect();
+    if diff.is_empty() && pointers.is_empty() {
         return Ok("empty".into());
     }
+    let id = if diff.is_empty() { String::new() } else { patch_id_of(worktree, diff)? };
+    if pointers.is_empty() {
+        return Ok(id);
+    }
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(format!("{id}\n{pointers}").as_bytes());
+    Ok(digest.iter().take(20).map(|b| format!("{b:02x}")).collect())
+}
+
+/// `git patch-id --verbatim` of `diff`: its first id.
+fn patch_id_of(worktree: &Path, diff: String) -> Result<String> {
     use std::io::Write;
     let mut child = playbook::shell_free_command("git")
         .arg("-C")
@@ -587,7 +612,9 @@ fn rebase_in_progress(worktree: &Path) -> bool {
 
 /// Pushes the branch. `--force-with-lease` lets a rebased branch replace its own old head but
 /// refuses when the remote moved to something this checkout has not seen.
-fn push(worktree: &Path, branch: &str) -> Result<()> {
+fn push(pb: &Playbook, worktree: &Path, branch: &str) -> Result<()> {
+    // A submodule with a remote first: the pull request's commits point into it.
+    crate::submodules::push_task(pb, worktree, branch)?;
     git_remote(worktree, &["push", "--force-with-lease", "-u", "origin", &format!("HEAD:refs/heads/{branch}")]).map(|_| ())
 }
 

@@ -1410,6 +1410,7 @@ fn serve(repo_root: &Path, pb: &Playbook, rules: &LaneRules, lane: &Path, log: &
         // The person's checkout: no forced checkout, no clean, nothing else stopped; and back on
         // its branch afterwards, whatever came of the command.
         stop_recorded(lane);
+        crate::submodules::check_large(lane, pb, &req.snapshot.commit)?;
         let switched = git(lane, &["diff", "--name-only", "HEAD", &req.snapshot.commit]).map(|o| o.lines().count() as i64).unwrap_or(0);
         switch_large(lane, base, &req.snapshot.commit, &rules.keep)?;
         let ran = (|| -> Result<(bool, Ended)> {

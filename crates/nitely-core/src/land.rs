@@ -386,6 +386,7 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
     }
 
     crate::submodules::point(&worktree, &moving)?;
+    crate::submodules::follow(pb, &worktree, &moving)?;
     let head = rev(root, &branch)?;
     report.approval = Some(check_approval(db, pb, key, &worktree, &base, &branch)?);
     let project = db.issue(key)?.and_then(|i| i.project);
@@ -443,8 +444,8 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
 
     // A submodule's branch is pushed before the repo that points into it; when it cannot be, the
     // repo stays unpushed too, so its remote never points at a commit nobody can fetch.
-    let push = if push && !moving.is_empty() {
-        match crate::submodules::push(&moving) {
+    let push = if push && !pb.submodules.is_empty() {
+        match crate::submodules::push(root, pb) {
             Ok(()) => true,
             Err(e) => {
                 report.pushed = Some(false);
@@ -1453,6 +1454,9 @@ when_changed = ["billing"]
     fn when_the_repo_cannot_move_the_submodule_does_not_either() {
         let mut f = submodule_fixture();
         let (key, wt) = f.spanning("Faster engine");
+        // The engine's copy detached at main, as `git submodule update` leaves it: main moves by
+        // itself there, and the checkout follows it.
+        sh(&f.engine(), &["checkout", "-q", "--detach", "main"]);
         let (repo_before, engine_before) = (sh(&f.repo, &["rev-parse", "main"]), sh(&f.engine(), &["rev-parse", "main"]));
         // An edit in the main checkout that the change overlaps: the repo's fast-forward fails,
         // after the engine's went through.
@@ -1464,6 +1468,7 @@ when_changed = ["billing"]
         assert!(error.contains("refused the fast-forward") && error.contains("put back, so nothing moved"), "{error}");
         assert_eq!(sh(&f.repo, &["rev-parse", "main"]), repo_before);
         assert_eq!(sh(&f.engine(), &["rev-parse", "main"]), engine_before, "the engine's main went back");
+        assert_eq!(sh(&f.engine(), &["rev-parse", "HEAD"]), engine_before, "its detached checkout too");
         assert_eq!(std::fs::read_to_string(f.engine().join("core.c")).unwrap().replace('\r', ""), "int core;\n", "and its files with it");
         assert!(wt.join("engine/.git").exists(), "the task's worktrees stay for another try");
 
@@ -1471,6 +1476,8 @@ when_changed = ["billing"]
         std::fs::write(f.repo.join("shared.txt"), "one\n").unwrap();
         assert!(f.land(&key).landed);
         assert_eq!(sh(&f.engine(), &["log", "--format=%s", "-1", "main"]), "engine: faster");
+        assert_eq!(sh(&f.engine(), &["rev-parse", "HEAD"]), sh(&f.engine(), &["rev-parse", "main"]), "the checkout followed main");
+        assert_eq!(std::fs::read_to_string(f.engine().join("core.c")).unwrap().replace('\r', ""), "int core;\nint faster;\n");
         std::fs::remove_dir_all(&f.base).ok();
     }
 

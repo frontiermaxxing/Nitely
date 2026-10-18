@@ -50,17 +50,24 @@ never push to): its integration branch then lives only in the repo's own copy of
 - **submit** refuses a submodule with uncommitted changes or commits the pointer does not name (the
   reviewer would not see them), and the reviewer reads the submodule's code in the diff
   (`git diff --submodule=diff`), not a one-line pointer change. The review's patch covers the
-  submodule's code, so a rebase that leaves it the same keeps the review.
+  submodule's code, so a rebase that leaves it the same keeps the review; a pointer whose code git
+  cannot show counts by its commit ids. With `remote`, the submodule's task branch is pushed with
+  the repo's, so the pull request's pointer resolves.
 - **land** rebases the submodule's branch onto its integration branch, rebases the task branch onto
   the repo's, points it at the rebased submodule commit, runs the gate, and then fast-forwards the
   submodule's integration branch and the repo's. All or nothing: if the second fast-forward fails,
-  the first is undone, and neither branch moves. With `remote`, the submodule's branch is pushed
-  before the repo's, and a failed submodule push keeps the repo's push back, so the pushed repo never
-  points at a commit its remote cannot fetch. A change that moves a submodule lands alone, never in a
-  batch.
+  the first is undone, and neither branch moves. The repo's own copy of the submodule follows: a
+  checkout that has the branch moves with it, and one detached at the old tip (as
+  `git submodule update` leaves it) moves to the new one. With `remote`, every declared submodule's
+  branch is pushed before the repo's, on every land, and a failed submodule push keeps the repo's
+  push back, so the pushed repo never points at a commit its remote cannot fetch. A submodule the
+  change leaves alone is moved in the task's worktree to where the rebased branch points it, so the
+  gate builds what lands. A repo with declared submodules lands each change alone, never in a batch.
 - **gate steps** can run only when the submodule moved (`when_changed = ["^engine$"]`). In a build
   lane the submodule is checked out at the commit the snapshot points at, and `[lanes] keep` entries
-  under its folder (`"engine/out"`) keep its build output between requests.
+  under its folder (`"engine/out"`) keep its build output between requests. Large-repo mode builds
+  in your checkout and leaves its submodules alone, so it refuses a snapshot that points one
+  elsewhere.
 
 Each commit of the task branch keeps the pointer it was made with; the last one points at the
 rebased submodule commit. Uncommitted submodule changes are not part of a `run` snapshot: commit
