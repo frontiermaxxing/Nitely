@@ -126,10 +126,11 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
         { ref: "greet", title: "Add a greeting", kind: "feature", body: "Say hello.", evidence: "harness setup", priority: 2, state: "Todo" },
         { ref: "bye", title: "Add a farewell", kind: "feature", body: "Say goodbye.", evidence: "harness setup", priority: 3, state: "Backlog" },
         { ref: "default", title: "Choose the default greeting", kind: "feature", body: "Pick which greeting is the default.", evidence: "harness setup", priority: 3, state: "Backlog" },
+        { ref: "welcome", title: "Add a welcome page", kind: "feature", body: "Welcome people.", evidence: "harness setup", priority: 3, state: "Backlog" },
       ],
     });
-    const { greet: A, bye: B, default: C } = filed.keys;
-    assert.ok(A && B && C, `three issues filed: ${JSON.stringify(filed)}`);
+    const { greet: A, bye: B, default: C, welcome: D } = filed.keys;
+    assert.ok(A && B && C && D, `four issues filed: ${JSON.stringify(filed)}`);
     await agent.call("mark_setup_complete", { sha: git(repo, "rev-parse", "HEAD") });
     assert.ok((await agent.call("get_project", {})).setup, "setup is marked done");
     await agent.call("update_issue", { key: setupKey, state: "Done", evidence: "Brief written, first issues filed, setup marked complete." });
@@ -141,27 +142,28 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
 
     // 3. The crew: the app keeps a supervisor for a playbook with workers (this build's own nitely,
     // under the harness), which starts the fake claude worker on ${A}. It submits without
-    // waiting; the gate runs in the build lane and the review runs alone (batching is off).
+    // waiting; the gate runs in the build lane and the review runs alone (batching is off). Once
+    // it passes, the supervisor lands it: a crew's change needs nobody.
     await until(`a crew worker on ${A}`, async () => (await kinds(A)).includes("crew_started"));
-    await until(`${A} reviewed and in review`, async () => (await state(A)) === "In Review", 240000);
-    const one = await detail(A);
-    for (const k of ["crew_started", "claimed", "worktree", "status", "submit", "lane_run", "gate_passed", "review_started", "handoff"]) {
-      assert.ok(one.timeline.some((t) => t.kind === k), `${A}'s timeline has ${k}: ${one.timeline.map((t) => t.kind).join(", ")}`);
-    }
-    assert.equal(one.issue.track.station, "review");
-    assert.equal(one.reviews[0].verdict, "pass");
-    assert.equal(one.reviews[0].batch_id ?? null, null, "reviewed alone: the playbook batches nothing yet");
+    await until(`${A} reviewed`, async () => ["In Review", "Done"].includes(await state(A)), 240000);
     await page.open(`#now@${A}`);
     await page.waitFor(`return document.querySelector(".panel")?.textContent.includes("Add a greeting");`, { what: `${A}'s panel` });
     await shot("3-crew-reviewed");
+    await until(`the crew to land ${A}`, async () => (await state(A)) === "Done", 240000);
+    const one = await detail(A);
+    for (const k of ["crew_started", "claimed", "worktree", "status", "submit", "lane_run", "gate_passed", "review_started", "handoff", "landed"]) {
+      assert.ok(one.timeline.some((t) => t.kind === k), `${A}'s timeline has ${k}: ${one.timeline.map((t) => t.kind).join(", ")}`);
+    }
+    assert.equal(one.issue.track.station, "done");
+    assert.equal(one.reviews[0].verdict, "pass");
+    assert.equal(one.reviews[0].batch_id ?? null, null, "reviewed alone: the playbook batches nothing yet");
     await page.open("#now");
-    // No more workers: the rest is the agent's here.
-    nitely(home, "crew", "pause", "--project", "APP");
 
-    // 4. Batched review: the playbook now reviews small changes together. The agent makes two
-    // changes and submits both; one touches risky.txt, which the reviewer finds a P1 in.
-    writeFileSync(join(repo, ".nitely", "playbook.toml"), playbook({ batch: "small", workers: 1 }));
-    git(repo, "commit", "-q", "-am", "Review small changes together");
+    // 4. Batched review: the crew goes off (the rest is the agent's here) and the playbook now
+    // reviews small changes together. The agent makes three changes and submits them; one touches
+    // risky.txt, which the reviewer finds a P1 in.
+    writeFileSync(join(repo, ".nitely", "playbook.toml"), playbook({ batch: "small", workers: 0 }));
+    git(repo, "commit", "-q", "-am", "Crew off; review small changes together");
     const change = async (key, files) => {
       await agent.call("update_issue", { key, state: "In Progress" });
       const started = await agent.call("start_task", { key });
@@ -172,19 +174,21 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
     };
     const two = await change(B, { "farewell.txt": "Goodbye\n" });
     const three = await change(C, { "risky.txt": "Hello, stranger\n" });
+    const four = await change(D, { "welcome.txt": "Welcome\n" });
     const inWorktree = async (worktree) => connect(nitelyExe, { cwd: worktree, env });
-    for (const [key, wt] of [[B, two], [C, three]]) {
+    for (const [key, wt] of [[B, two], [C, three], [D, four]]) {
       const there = await inWorktree(wt);
       await there.call("submit", { key });
       await there.close();
     }
     // While its reviewer runs, the batch is one row on the board, each issue's station says so.
-    await page.waitFor(`return [...document.querySelectorAll(".batch-row")].some((r) => r.textContent.includes("Review batch · 2 changes"));`, { timeoutMs: 120000, what: "the review batch on the board" });
+    await page.waitFor(`return [...document.querySelectorAll(".batch-row")].some((r) => r.textContent.includes("Review batch · 3 changes"));`, { timeoutMs: 120000, what: "the review batch on the board" });
     await shot("4-review-batch");
-    await until("both batched reviews", async () => (await state(B)) === "In Review" && (await detail(C)).reviews.length > 0);
-    const [d2, d3] = [await detail(B), await detail(C)];
-    assert.ok(d2.reviews[0].batch_id && d2.reviews[0].batch_id === d3.reviews[0].batch_id, "one batch reviewed both");
+    await until("the batched reviews", async () => (await state(B)) === "In Review" && (await state(D)) === "In Review" && (await detail(C)).reviews.length > 0);
+    const [d2, d3, d4] = [await detail(B), await detail(C), await detail(D)];
+    assert.ok(d2.reviews[0].batch_id && d2.reviews[0].batch_id === d3.reviews[0].batch_id && d3.reviews[0].batch_id === d4.reviews[0].batch_id, "one batch reviewed all three");
     assert.equal(d2.reviews[0].verdict, "pass");
+    assert.equal(d4.reviews[0].verdict, "pass");
     assert.equal(d3.reviews[0].verdict, "changes", "its own P1, from the same batch");
     assert.match(d3.reviews[0].findings[0].text, /Risky default/);
     assert.ok(d2.timeline.some((t) => t.kind === "review_started" && (t.summary ?? "").includes(`in a batch with ${C}`)), "the timeline says which batch");
@@ -213,7 +217,7 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
     assert.equal(accepted.issue.track.station, "review");
     assert.ok(accepted.timeline.some((t) => t.kind === "note" && /Accepted .*Risky default/.test(t.summary ?? "")), "the Accept is on its timeline");
 
-    // 7. The land queue: ${A} and ${B} land together, stacked and gated once in the lane; the
+    // 7. The land queue: ${B} and ${D} land together, stacked and gated once in the lane; the
     // board shows the run while it waits for more.
     const land = (key) => {
       const child = spawn(nitelyExe, ["land", key], { cwd: repo, env, stdio: ["ignore", "pipe", "pipe"] });
@@ -224,23 +228,23 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
       lands.push(child);
       return done;
     };
-    const both = Promise.all([land(A), sleep(2000).then(() => land(B))]);
+    const both = Promise.all([land(B), sleep(2000).then(() => land(D))]);
     await page.open("#now");
     await page.waitFor(`return document.body.textContent.includes("in the land queue");`, { timeoutMs: 60000, what: "the land queue's length by the lanes" });
     await shot("7-land-queue");
     for (const r of await both) assert.equal(r.code, 0, `${r.key} landed:\n${r.out}`);
-    const l1 = (await detail(A)).batches.lands[0];
+    const l1 = (await detail(B)).batches.lands[0];
     assert.equal(l1.state, "landed", JSON.stringify(l1));
-    assert.deepEqual([...l1.run.landed].sort(), [A, B], "one queue run landed both");
+    assert.deepEqual([...l1.run.landed].sort(), [B, D].sort(), "one queue run landed both");
     assert.equal(l1.run.gates, 1, "on one gate");
-    for (const key of [A, B]) assert.equal(await state(key), "Done");
+    for (const key of [B, D]) assert.equal(await state(key), "Done");
 
     // 8. What landed is on main; every track says where it ended.
     const files = git(repo, "ls-files");
-    for (const f of [`${A.toLowerCase()}.txt`, "farewell.txt"]) assert.ok(files.includes(f), `${f} is on main`);
+    for (const f of [`${A.toLowerCase()}.txt`, "farewell.txt", "welcome.txt"]) assert.ok(files.includes(f), `${f} is on main`);
     assert.ok(!files.includes("risky.txt"), "the accepted change waits to be landed");
-    const tracks = await Promise.all([A, B, C].map(async (k) => (await detail(k)).issue.track.station));
-    assert.deepEqual(tracks, ["done", "done", "review"]);
+    const tracks = await Promise.all([A, B, C, D].map(async (k) => (await detail(k)).issue.track.station));
+    assert.deepEqual(tracks, ["done", "done", "review", "done"]);
 
     // Nothing waits on the person now.
     await page.open("#inbox");
