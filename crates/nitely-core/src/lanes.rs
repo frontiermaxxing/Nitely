@@ -996,6 +996,23 @@ fn lock_path(repo_root: &Path, pb: &Playbook, n: u32) -> PathBuf {
     dir(repo_root, pb).join(format!("lane-{n}.lock"))
 }
 
+/// `try_lock`, waiting up to `wait` for a lock that is only held for a moment. On Linux and macOS
+/// the lock is an `flock` on an open file, and a process spawned while it was held keeps a copy of
+/// the file until it starts its program (close-on-exec): so for a moment after the lock is let go,
+/// it can still look held, the more so while many processes start (NIT-260).
+fn lock_waiting(repo_root: &Path, pb: &Playbook, n: u32, wait: Duration) -> Result<Option<LaneLock>> {
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(lock) = try_lock(repo_root, pb, n)? {
+            return Ok(Some(lock));
+        }
+        if started.elapsed() >= wait {
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn try_lock(repo_root: &Path, pb: &Playbook, n: u32) -> Result<Option<LaneLock>> {
     let path = lock_path(repo_root, pb, n);
     std::fs::create_dir_all(path.parent().unwrap())?;
@@ -2045,13 +2062,16 @@ fn status_with(db: &Db, repo_root: &Path, pb: &Playbook, project: &str, probe_lo
 
 /// Puts every lane that is free back to a clean checkout of what it holds; its build output stays.
 /// Returns what it did per lane, in words.
+/// How long `reset` waits for a lane's lock before it calls the lane busy.
+const RESET_WAIT: Duration = Duration::from_secs(2);
+
 pub fn reset(repo_root: &Path, pb: &Playbook) -> Result<Vec<String>> {
     let Some(rules) = pb.lanes.clone() else { bail!("{} has no [lanes] in its playbook", repo_root.display()) };
     let mut said = Vec::new();
     if rules.large_repo {
         // The person's checkout is never cleaned: only put back on its branch when a request that
         // died left it detached.
-        let Some(_lock) = try_lock(repo_root, pb, 1)? else {
+        let Some(_lock) = lock_waiting(repo_root, pb, 1, RESET_WAIT)? else {
             return Ok(vec!["your checkout: busy with a request, left alone".into()]);
         };
         said.push(recover_large(repo_root, &rules.keep).unwrap_or_else(|| "your checkout: nothing to do (it is never cleaned)".into()));
@@ -2063,7 +2083,7 @@ pub fn reset(repo_root: &Path, pb: &Playbook) -> Result<Vec<String>> {
             said.push(format!("lane {n}: not made yet"));
             continue;
         }
-        let Some(_lock) = try_lock(repo_root, pb, n)? else {
+        let Some(_lock) = lock_waiting(repo_root, pb, n, RESET_WAIT)? else {
             said.push(format!("lane {n}: busy with a request, left alone"));
             continue;
         };
@@ -2363,6 +2383,27 @@ commands = []
         assert!(lanes.lanes[0].made && !lanes.lanes[0].busy);
         assert!(lanes.queue.is_empty() && lanes.recent.len() == 3);
         assert_eq!(reset(&root, &pb).unwrap().len(), 1);
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn a_lock_held_for_a_moment_is_waited_out_and_one_held_on_is_busy() {
+        let base = crate::paths::unique_temp("nitely-lane-wait", "");
+        let root = repo(&base);
+        let pb = playbook_with("[lanes]\n");
+        // Let go while it waits: it gets the lock.
+        let held = try_lock(&root, &pb, 1).unwrap().unwrap();
+        let letting_go = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(held);
+        });
+        assert!(lock_waiting(&root, &pb, 1, Duration::from_secs(5)).unwrap().is_some(), "waited out");
+        letting_go.join().unwrap();
+        // Held throughout: busy, after the wait.
+        let _held = try_lock(&root, &pb, 1).unwrap().unwrap();
+        let started = std::time::Instant::now();
+        assert!(lock_waiting(&root, &pb, 1, Duration::from_millis(150)).unwrap().is_none());
+        assert!(started.elapsed() >= Duration::from_millis(150));
         std::fs::remove_dir_all(base).ok();
     }
 
