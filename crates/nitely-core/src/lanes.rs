@@ -1521,11 +1521,37 @@ fn quick_class(db: &Db, repo: &str, command: &str) -> Result<Option<i64>> {
 }
 
 /// Whether `command` runs only some tests: `cargo test` with a test name or `--test <target>`
-/// (`cargo test -p nitely-core waits`, `cargo test --test install`, `cargo test -- lanes::`),
-/// `node --test <file>`, a `--test-name-pattern`, or `pytest` with `-k` or `file::test`.
+/// (`cargo test -p nitely-core waits`, `cargo test --test install`, `cargo test -- lanes::`), a
+/// file after `--test` of node or tsx (`node --test dist/a.test.js`, `npx tsx --test test/a.test.ts`,
+/// `node --import tsx --test test/a.test.ts`, NIT-359), `vitest` or `jest` with a file or `-t`, a
+/// file after `npm test --`, a `--test-name-pattern`, or `pytest` with `-k` or `file::test`.
 fn names_test_filter(command: &str) -> bool {
     let words: Vec<&str> = command.split_whitespace().collect();
     let ends = |t: &str| matches!(t, "&&" | "||" | ";" | "|");
+    // A program as a command names it: `node`, `C:\tools\node.exe`, `./node_modules/.bin/tsx.cmd`.
+    let program = |t: &str| {
+        let name = t.rsplit(['/', '\\']).next().unwrap_or(t);
+        name.strip_suffix(".exe").or_else(|| name.strip_suffix(".cmd")).unwrap_or(name).to_string()
+    };
+    // The words of `words[from..]` up to the end of its command.
+    let segment = |from: usize| words.get(from..).unwrap_or_default().iter().take_while(|t| !ends(t)).copied().collect::<Vec<&str>>();
+    // Whether `args` name a file or test, past the values of the flags that take one.
+    let names_one = |args: &[&str], with_value: &[&str]| {
+        let mut j = 0;
+        while j < args.len() {
+            let t = args[j];
+            if with_value.contains(&t) {
+                j += 2;
+                continue;
+            }
+            if !t.starts_with('-') {
+                return true;
+            }
+            j += 1;
+        }
+        false
+    };
+    let node_value = ["--import", "--require", "-r", "--loader", "--test-reporter", "--test-reporter-destination", "--test-concurrency", "--test-timeout", "--test-shard"];
     for (i, w) in words.iter().enumerate() {
         if *w == "test" && i > 0 && words[i - 1] == "cargo" {
             let with_value = ["-p", "--package", "--features", "-F", "-j", "--jobs", "--target", "--profile", "--manifest-path", "--target-dir", "--color", "--message-format"];
@@ -1548,8 +1574,29 @@ fn names_test_filter(command: &str) -> bool {
                 j += 1;
             }
         }
-        if *w == "--test" && i > 0 && words[i - 1].ends_with("node") && words.get(i + 1).is_some_and(|f| !f.starts_with('-') && !ends(f)) {
-            return true;
+        // `--test` of node or tsx in the same command, with a file after it.
+        if *w == "--test" {
+            let start = words[..i].iter().rposition(|t| ends(t)).map_or(0, |e| e + 1);
+            if words[start..i].iter().any(|t| matches!(program(t).as_str(), "node" | "tsx")) && names_one(&segment(i + 1), &node_value) {
+                return true;
+            }
+        }
+        // vitest or jest with a file, or `-t` a test's name.
+        if matches!(program(w).as_str(), "vitest" | "jest") {
+            let args: Vec<&str> = segment(i + 1).into_iter().filter(|t| !matches!(*t, "run" | "watch" | "dev")).collect();
+            if args.iter().any(|t| matches!(*t, "-t" | "--testNamePattern") || t.starts_with("--testNamePattern=")) || names_one(&args, &["--config", "-c", "--project", "--reporter", "--pool", "--root", "-r"]) {
+                return true;
+            }
+        }
+        // `npm test -- <file>`, `npm run test -- <file>`.
+        if program(w) == "npm" {
+            let args = segment(i + 1);
+            let is_test = matches!(args.first(), Some(&"test") | Some(&"t")) || (args.first() == Some(&"run") && args.get(1) == Some(&"test"));
+            if let (true, Some(dash)) = (is_test, args.iter().position(|t| *t == "--")) {
+                if names_one(&args[dash + 1..], &[]) {
+                    return true;
+                }
+            }
         }
         if w.starts_with("--test-name-pattern") || (w.ends_with("pytest") && words[i + 1..].iter().take_while(|t| !ends(t)).any(|t| *t == "-k" || t.contains("::"))) {
             return true;
@@ -4265,12 +4312,36 @@ wanted {shown}", ran.output);
             "cargo clippy -- -D warnings && cargo test -p nitely-core machine::",
             "node --test dist/lanes.test.js",
             "node --test --test-name-pattern=chips",
+            "cd app && npx tsx --test test/tabScope.test.ts",
+            "tsx --test test/one.test.ts",
+            "node_modules\\.bin\\tsx.cmd --test test/one.test.ts",
+            "node --import tsx --test test/one.test.ts",
+            "node --test --test-reporter dot dist/lanes.test.js",
+            "npx vitest run src/lanes.test.ts",
+            "npx vitest -t chips",
+            "npx jest src/lanes.test.ts",
+            "npm test -- src/lanes.test.ts",
+            "npm run test -- src/lanes.test.ts",
             "pytest -k quick_lane",
             "pytest tests/test_lanes.py::test_one",
         ] {
             assert!(names_test_filter(quick), "{quick}");
         }
-        for whole in ["cargo test --workspace", "cargo test -p nitely-core", "cargo test -p nitely-core -- --nocapture", "npm test", "cargo clippy --workspace -- -D warnings", "node --test"] {
+        for whole in [
+            "cargo test --workspace",
+            "cargo test -p nitely-core",
+            "cargo test -p nitely-core -- --nocapture",
+            "npm test",
+            "npm test -- --coverage",
+            "cargo clippy --workspace -- -D warnings",
+            "node --test",
+            "npx tsx --test",
+            "tsx --test --test-reporter dot",
+            "node --import tsx --test",
+            "npx vitest run",
+            "npx jest",
+            "node build.js && echo --test done",
+        ] {
             assert!(!names_test_filter(whole), "{whole}");
         }
     }
