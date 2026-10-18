@@ -1686,14 +1686,24 @@ fn ensure_setup(repo_root: &Path, pb: &Playbook, lane: &Path, base: &str, log: &
     Ok(true)
 }
 
-/// The temporary folder for the request a lane serves, emptied before each one: beside the lane in
-/// the lanes folder (`<lane>.tmp`), so the test repos, databases and copied programs a build makes
-/// there are covered by whatever covers the lanes (a Defender exclusion, a Dev Drive), never land
-/// in the person's own temp folder, and go with the request (NIT-289). Outside the lane's checkout,
-/// so nothing in it is inside a repo. Best effort: a folder that cannot be emptied is used as it is.
-fn lane_temp(repo_root: &Path, pb: &Playbook, lane: &Path) -> PathBuf {
+/// Where the request a lane serves keeps its temporary files: `.nitely-tmp/<repo>-<lane>` in the
+/// folder that holds the lanes, so the test repos, databases and copied programs a build makes
+/// there are covered by whatever covers the lanes (a Defender exclusion, a Dev Drive) and never land
+/// in the person's own temp folder (NIT-289). Not inside `.nitely-lanes`, where every path counts
+/// as a lane's (`light::is_lane_path`), and not inside the lane's checkout, so nothing there is
+/// inside a repo.
+fn lane_temp_path(repo_root: &Path, pb: &Playbook, lane: &Path) -> PathBuf {
+    let lanes = dir(repo_root, pb);
+    let repo = lanes.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let name = lane.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "lane".into());
-    let temp = dir(repo_root, pb).join(format!("{name}.tmp"));
+    let holder = lanes.parent().and_then(Path::parent).map(Path::to_path_buf).unwrap_or_else(|| lanes.clone());
+    holder.join(".nitely-tmp").join(format!("{repo}-{name}"))
+}
+
+/// `lane_temp_path`, emptied for the request about to run there. Best effort: a folder that cannot
+/// be emptied is used as it is.
+fn lane_temp(repo_root: &Path, pb: &Playbook, lane: &Path) -> PathBuf {
+    let temp = lane_temp_path(repo_root, pb, lane);
     std::fs::remove_dir_all(&temp).ok();
     std::fs::create_dir_all(temp.join(GIT_TEMPLATE)).ok();
     temp
@@ -2653,7 +2663,7 @@ commands = []
         std::fs::remove_dir_all(base).ok();
     }
 
-    /// A lane command's temporary files go to the request's own folder beside the lane, emptied for
+    /// A lane command's temporary files go to the request's own folder beside the lanes, emptied for
     /// the next request, and `git init` there makes no hook samples (NIT-289).
     #[test]
     fn a_lane_command_keeps_its_temporary_files_beside_the_lane() {
@@ -2672,7 +2682,8 @@ commands = []
         let req = Request { project: "APP", issue: None, kind: Kind::Run, snapshot: &snap, command: leave };
         let ran = run(&db, &root, &pb, &req, &actor, &mut |_| {}).unwrap();
         assert!(ran.passed(), "{}", ran.output);
-        let temp = dir(&root, &pb).join("lane-1.tmp");
+        let temp = lane_temp_path(&root, &pb, &lane_path(&root, &pb, 1));
+        assert!(!crate::light::is_lane_path(&temp.to_string_lossy()), "{temp:?} is no lane");
         let shown = temp.to_string_lossy().into_owned();
         assert!(ran.output.contains(&format!("temp={shown}")) && ran.output.contains(&format!("tmp={shown}")), "{}
 wanted {shown}", ran.output);
@@ -2990,13 +3001,21 @@ wanted {shown}", ran.output);
         std::fs::remove_dir_all(base).ok();
     }
 
+    /// Writes the repo's own ignore list, `info/exclude`, whose folder a repo made without a
+    /// template (as in a lane, NIT-289) does not have.
+    fn exclude(root: &Path, text: &str) {
+        let path = git_path(root, "info/exclude").unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
     #[test]
     fn an_ignored_file_where_the_commit_needs_a_folder_is_refused() {
         let base = crate::paths::unique_temp("nitely-large-parent", "");
         let (root, agent, pb) = large(&base, "");
         let db = Db::open(&base.join("t.db")).unwrap();
         // `cache` is ignored here only, and the person has a file by that name.
-        std::fs::write(git_path(&root, "info/exclude").unwrap(), "cache\n").unwrap();
+        exclude(&root, "cache\n");
         std::fs::write(root.join("cache"), "the person's\n").unwrap();
         std::fs::create_dir_all(agent.join("cache")).unwrap();
         std::fs::write(agent.join("cache/x.txt"), "x\n").unwrap();
@@ -3106,7 +3125,7 @@ wanted {shown}", ran.output);
         let base = crate::paths::unique_temp("nitely-large-ownrules", "");
         let (root, agent, pb) = large(&base, "");
         let keep = pb.lanes.clone().unwrap().keep;
-        std::fs::write(git_path(&root, "info/exclude").unwrap(), ".nitely/\n").unwrap();
+        exclude(&root, ".nitely/\n");
         std::fs::create_dir_all(root.join(".nitely")).unwrap();
         std::fs::write(root.join(playbook::PLAYBOOK_PATH), "[gate]\ncommands = [\"theirs\"]\n").unwrap();
         let work = git(&agent, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
