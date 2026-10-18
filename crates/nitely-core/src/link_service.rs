@@ -53,7 +53,7 @@ pub struct Registration {
 pub enum Os {
     Windows,
     Mac,
-    /// Linux; `true` with systemd's user manager.
+    /// Linux; `true` with systemd's user manager running for this user.
     Linux(bool),
 }
 
@@ -64,7 +64,9 @@ impl Os {
         } else if cfg!(target_os = "macos") {
             Os::Mac
         } else {
-            Os::Linux(Command::new("systemctl").args(["--user", "--version"]).output().is_ok_and(|o| o.status.success()))
+            // A user manager that answers, not just a systemctl binary: without one, `systemctl
+            // --user enable` fails where an XDG autostart entry works (NIT-249).
+            Os::Linux(Command::new("systemctl").args(["--user", "show-environment"]).output().is_ok_and(|o| o.status.success()))
         }
     }
 }
@@ -103,8 +105,11 @@ pub fn registration(nitely: &Path, home: &Path, os: Os) -> Registration {
         }
         Os::Linux(true) => {
             let unit = home.join(".config").join("systemd").join("user").join(UNIT);
+            // Started with the graphical session, not at boot: the app it opens needs the session's
+            // display, which a unit started before login never has (NIT-249).
             let text = format!(
-                "[Unit]\nDescription=Nitely issue links (http://127.0.0.1:{}/i/KEY)\n\n[Service]\nExecStart=\"{exe}\" links serve\nRestart=on-failure\n\n[Install]\nWantedBy=default.target\n",
+                "[Unit]\nDescription=Nitely issue links (http://127.0.0.1:{}/i/KEY)\nPartOf=graphical-session.target\nAfter=graphical-session.target\n\n\
+[Service]\nExecStart=\"{exe}\" links serve\nRestart=on-failure\n\n[Install]\nWantedBy=graphical-session.target\n",
                 links::PORT
             );
             Registration {
@@ -133,8 +138,13 @@ fn xml(s: &str) -> String {
 
 /// Runs a helper (reg, launchctl, systemctl) with no window, even from the app.
 fn quiet(words: &[String]) -> Result<String> {
+    quiet_with(words, &[])
+}
+
+/// `quiet`, with `env` added to the helper's environment.
+fn quiet_with(words: &[String], env: &[(String, String)]) -> Result<String> {
     let mut cmd = Command::new(&words[0]);
-    cmd.args(&words[1..]);
+    cmd.args(&words[1..]).envs(env.iter().map(|(k, v)| (k, v)));
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -328,14 +338,34 @@ fn forget_cached() {
 /// Opens `nitely://issue/KEY` the way the OS opens any link: in the running app, or by starting it.
 pub fn open_in_app(key: &str) {
     let url = crate::issues::issue_link(key);
-    let words = match Os::current() {
+    let os = Os::current();
+    let words = match os {
         Os::Windows => sv(&["rundll32", "url.dll,FileProtocolHandler", &url]),
         Os::Mac => sv(&["open", &url]),
         Os::Linux(_) => sv(&["xdg-open", &url]),
     };
-    if let Err(e) = quiet(&words) {
+    // A listener started without the session's display (by a user manager that had not got it
+    // yet) borrows it from the user manager, which the session gives it at login.
+    let no_display = std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none();
+    let env = match os {
+        Os::Linux(true) if no_display => quiet(&sv(&["systemctl", "--user", "show-environment"])).map(|out| session_env(&out)).unwrap_or_default(),
+        _ => vec![],
+    };
+    if let Err(e) = quiet_with(&words, &env) {
         eprintln!("issue links: could not open {url}: {e:#}");
     }
+}
+
+/// From `systemctl --user show-environment`, what a program needs to open a window in the
+/// person's graphical session.
+fn session_env(shown: &str) -> Vec<(String, String)> {
+    const WANTED: &[&str] = &["DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "XDG_CURRENT_DESKTOP", "XDG_SESSION_TYPE"];
+    shown
+        .lines()
+        .filter_map(|l| l.split_once('='))
+        .filter(|(k, _)| WANTED.contains(k))
+        .map(|(k, v)| (k.to_string(), v.trim_matches(|c| c == '"' || c == '\'').to_string()))
+        .collect()
 }
 
 /// `nitely links serve`: answers issue links on the port while it is registered, each one opening
@@ -432,8 +462,25 @@ mod tests {
         let l = registration(nitely, home, Os::Linux(true));
         assert!(PathBuf::from(&l.place) == home.join(".config").join("systemd").join("user").join("nitely-links.service") && l.files[0].1.contains("ExecStart=\"/usr/local/bin/nitely\" links serve"));
         assert!(l.on.iter().any(|c| c.join(" ") == "systemctl --user enable --now nitely-links.service"));
+        // With the graphical session, never before it: the app it opens needs the display.
+        let unit = &l.files[0].1;
+        assert!(unit.contains("PartOf=graphical-session.target") && unit.contains("After=graphical-session.target") && unit.contains("WantedBy=graphical-session.target"), "{unit}");
+        assert!(!unit.contains("default.target"));
         let x = registration(nitely, home, Os::Linux(false));
         assert!(PathBuf::from(&x.place) == home.join(".config").join("autostart").join("nitely-links.desktop") && x.files[0].1.contains("Exec=\"/usr/local/bin/nitely\" links serve"));
+    }
+
+    #[test]
+    fn a_listener_without_the_display_borrows_the_sessions() {
+        let shown = "HOME=/home/you\nDISPLAY=:0\nWAYLAND_DISPLAY=wayland-0\nXDG_RUNTIME_DIR=/run/user/1000\nDBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus\nPATH=/usr/bin\nXAUTHORITY='/run/user/1000/.mutter-Xwaylandauth'\n";
+        let env = session_env(shown);
+        let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
+        assert_eq!(get("DISPLAY"), Some(":0"));
+        assert_eq!(get("WAYLAND_DISPLAY"), Some("wayland-0"));
+        assert_eq!(get("DBUS_SESSION_BUS_ADDRESS"), Some("unix:path=/run/user/1000/bus"), "a value with = in it is kept whole");
+        assert_eq!(get("XAUTHORITY"), Some("/run/user/1000/.mutter-Xwaylandauth"), "quotes come off");
+        assert_eq!(get("PATH"), None, "only what opening a window needs");
+        assert!(session_env("").is_empty());
     }
 
     #[test]
