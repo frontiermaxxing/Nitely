@@ -1759,23 +1759,28 @@ impl Db {
             // timeline.
             let moved: Option<String> = tx.query_row("SELECT moved_from FROM ask WHERE id = ?1", [id], |r| r.get(0))?;
             let state: Option<String> = tx.query_row("SELECT state FROM issue WHERE key = ?1", [k], |r| r.get(0)).optional()?;
-            let still_asking: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM ask WHERE issue_key = ?1 AND answer IS NULL AND closed IS NULL AND moved_from IS NOT NULL",
-                [k],
-                |r| r.get(0),
-            )?;
+            // Any other question on it still open keeps it waiting, whoever asked it.
+            let still_asking: i64 =
+                tx.query_row("SELECT COUNT(*) FROM ask WHERE issue_key = ?1 AND answer IS NULL AND closed IS NULL", [k], |r| r.get(0))?;
             if moved.is_some() && state.as_deref() == Some(NEEDS_HUMAN) && still_asking == 0 {
                 let seen: Option<(String, i64)> =
                     tx.query_row("SELECT state, last_seen_at FROM session WHERE id = ?1", [&ask.asked_by], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
-                let live = seen.is_some_and(|(s, at)| s != "ended" && at >= ts - crate::sessions::GONE_AFTER_SECS);
-                let (to, to_type) = if live { ("In Progress", "started") } else { ("Todo", "unstarted") };
+                // An asker with no session record (the CLI, a remote agent) cannot be told live or
+                // gone: the work goes on In Progress unclaimed, and next_task offers it again if it
+                // shows no work for the claim TTL (NIT-275).
+                let (to, to_type, claim, why) = match seen {
+                    Some((s, at)) if s != "ended" && at >= ts - crate::sessions::GONE_AFTER_SECS => {
+                        ("In Progress", "started", true, "answered; back to the agent that asked")
+                    }
+                    Some(_) => ("Todo", "unstarted", false, "answered; the agent that asked is gone, so it waits for the next"),
+                    None => ("In Progress", "started", false, "answered"),
+                };
                 tx.execute(
                     "UPDATE issue SET state = ?2, state_type = ?3, updated_at = ?4,
                        claimed_by = CASE WHEN ?5 THEN ?6 ELSE NULL END, claimed_at = CASE WHEN ?5 THEN ?7 ELSE NULL END
                      WHERE key = ?1",
-                    params![k, to, to_type, iso(ts), live, ask.asked_by, ts],
+                    params![k, to, to_type, iso(ts), claim, ask.asked_by, ts],
                 )?;
-                let why = if live { "answered; back to the agent that asked" } else { "answered; the agent that asked is gone, so it waits for the next" };
                 tx.execute(
                     "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, 'human', ?2, 'issue_moved', ?3)",
                     params![ts, k, format!("{NEEDS_HUMAN} → {to}: {why}")],
@@ -1791,7 +1796,20 @@ impl Db {
     pub fn wait_on_ask(&mut self, ask: &Ask, actor: &Actor) -> Result<()> {
         let Some(key) = &ask.issue_key else { return Ok(()) };
         let Some(issue) = self.issue(key)? else { return Ok(()) };
-        if issue.origin != "nitely" || issue.state != "In Progress" || ask.finding.is_some() {
+        if issue.origin != "nitely" || ask.finding.is_some() {
+            return Ok(());
+        }
+        // Another question while it already waits on an earlier one: whichever is answered last
+        // puts it back.
+        if issue.state == NEEDS_HUMAN {
+            self.conn.execute(
+                "UPDATE ask SET moved_from = (SELECT moved_from FROM ask WHERE issue_key = ?2 AND id != ?1 AND answer IS NULL AND closed IS NULL AND moved_from IS NOT NULL LIMIT 1)
+                 WHERE id = ?1",
+                params![ask.id, key],
+            )?;
+            return Ok(());
+        }
+        if issue.state != "In Progress" {
             return Ok(());
         }
         self.move_issue(key, NEEDS_HUMAN, None, Some(&format!("waiting for the answer to ask {}", ask.id)), actor)?;
@@ -2373,6 +2391,24 @@ mod tests {
         assert_eq!(told.iter().map(Ask::outcome).collect::<Vec<_>>(), [format!("NIT-1: the person answered ask {} (\"EUR or USD?\"): EUR", a.id)]);
         db.mark_answers_delivered(&[a.id]).unwrap();
         assert!(db.undelivered_answers(&["claude:s"]).unwrap().is_empty(), "told once");
+
+        // Two questions: the first answer leaves it waiting on the second.
+        let one = db.create_ask("Which symbol?", &[], Some("NIT-1"), None, &agent).unwrap();
+        db.wait_on_ask(&one, &agent).unwrap();
+        let two = db.create_ask("Which rounding?", &[], Some("NIT-1"), None, &agent).unwrap();
+        db.wait_on_ask(&two, &agent).unwrap();
+        db.answer_ask(one.id, "€", &Actor::Human).unwrap();
+        assert_eq!(db.issue("NIT-1").unwrap().unwrap().state, "Needs You", "still waiting on the second");
+        db.answer_ask(two.id, "Half up", &Actor::Human).unwrap();
+        assert_eq!(db.issue("NIT-1").unwrap().unwrap().state, "In Progress");
+
+        // An asker with no session record (the CLI's): back In Progress, unclaimed.
+        let cli = Actor::Agent("cli".into());
+        let three = db.create_ask("Which locale?", &[], Some("NIT-1"), None, &cli).unwrap();
+        db.wait_on_ask(&three, &cli).unwrap();
+        db.answer_ask(three.id, "en-GB", &Actor::Human).unwrap();
+        let i = db.issue("NIT-1").unwrap().unwrap();
+        assert_eq!((i.state.as_str(), i.claimed_by), ("In Progress", None));
 
         // An asker that is gone: the issue waits in Todo, and next_task gives it to the next agent.
         let b = db.create_ask("Serif?", &[], Some("NIT-2"), None, &agent).unwrap();

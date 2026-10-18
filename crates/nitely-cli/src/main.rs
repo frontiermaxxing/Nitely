@@ -1241,7 +1241,12 @@ fn run(cmd: Cmd) -> Result<()> {
             let mut db = Db::open_default()?;
             let ask = match (&finding, &issue) {
                 (Some(finding), Some(issue)) => db.request_acceptance(issue, finding, &question, Some(&cwd()?), &me)?,
-                _ => db.create_ask(&question, &options, issue.as_deref(), Some(&cwd()?), &me)?,
+                _ => {
+                    let ask = db.create_ask(&question, &options, issue.as_deref(), Some(&cwd()?), &me)?;
+                    // As from MCP: its issue waits in Needs You for the answer (NIT-277).
+                    db.wait_on_ask(&ask, &me)?;
+                    ask
+                }
             };
             if !wait {
                 return print_json(&ask);

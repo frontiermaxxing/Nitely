@@ -1522,7 +1522,10 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             notices.extend(answered.iter().map(|q| json!(q.outcome())));
             out["notices"] = json!(notices);
         }
-        // The person's answers to this agent's asks (NIT-277), told once.
+    }
+    // The person's answers to this agent's asks (NIT-277), told once, to a remote agent too: its
+    // asks are its own.
+    if out.is_object() {
         let me = server.agent();
         let answers = db.undelivered_answers(&[actor.id(), me.as_str()])?;
         if !answers.is_empty() {
