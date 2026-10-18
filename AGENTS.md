@@ -137,4 +137,5 @@ once came just before a hard freeze (NIT-188), so:
 - `docs/vision.md` is the end state and build order; `docs/design.md` is milestone 1; `docs/visualization.md` is
   the visual language every view follows; `docs/crew.md` is how Nitely runs agent workers itself;
   `docs/build-lanes.md` is the design, with measurements, for many agents per machine (light
-  worktrees, builds in shared warm lanes)
+  worktrees, builds in shared warm lanes); `docs/coordinator.md` is what a coordinator chat did and where each of
+  its jobs lives in Nitely (goal 4: Nitely runs the team)
