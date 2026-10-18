@@ -69,7 +69,10 @@ Branches off the track:
   arc over the same stretch.
 - **Stuck:** the last gate failed, the last land stopped, the review did not finish, or the
   submit could not push the branch, and nothing has passed since (a later submit or a move
-  clears a stopped review; a failed push holds until the next submit or a person moves it). The current
+  clears a stopped review; a failed push holds until the next submit or a person moves it). An In
+  Progress issue that no live claim holds is stuck too ("No activity for 7 h") once nothing has
+  happened on it and no session has worked in its worktree for six hours, and `next_task` offers
+  it again. The current
   station turns `--st-stuck` and the line onward breaks into dashes. A stuck worktree that waits
   on the human (a rebase conflict, an agent waiting for input) is the attention color instead,
   because it needs them.

@@ -36,6 +36,54 @@ pub const NEEDS_HUMAN: &str = "Needs You";
 /// A claim older than this with no update is free for another agent to take.
 const CLAIM_TTL_SECS: i64 = 6 * 3600;
 
+/// A Todo or In Progress issue `next_task` may take: key, priority, number, whether it plans a goal
+/// (0) or not (1), its goal's place, and the goal's target date.
+type Candidate = (String, i64, i64, i64, i64, Option<String>);
+
+/// Sessions seen within the claim TTL of `now`, as (folder, last seen): the only ones that can
+/// keep an issue from going idle.
+fn recent_sessions(conn: &rusqlite::Connection, now: i64) -> Result<Vec<(String, i64)>> {
+    let mut stmt = conn.prepare("SELECT cwd, last_seen_at FROM session WHERE last_seen_at >= ?1")?;
+    let rows = stmt.query_map([now - CLAIM_TTL_SECS], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// When an In Progress issue that no live claim holds last showed any work, if that is longer ago
+/// than the claim TTL: its newest event, or the newest of `sessions` in a worktree started for it.
+/// Most work starts with start_task and holds no claim, so a missing claim alone says nothing; one
+/// that also shows no work was left, and would otherwise read as work in progress forever, never
+/// offered again (NIT-275). Some(0) when it never showed any.
+fn idle_since(conn: &rusqlite::Connection, key: &str, sessions: &[(String, i64)], now: i64) -> Result<Option<i64>> {
+    let row: Option<(String, String, String, Option<i64>)> = conn
+        .query_row("SELECT state, origin, owner, claimed_at FROM issue WHERE key = ?1 COLLATE NOCASE", [key], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })
+        .optional()?;
+    let Some((state, origin, owner, claimed_at)) = row else { return Ok(None) };
+    let since = now - CLAIM_TTL_SECS;
+    if state != "In Progress" || origin != "nitely" || owner == "human" || claimed_at.is_some_and(|c| c >= since) {
+        return Ok(None);
+    }
+    let last: Option<i64> = conn.query_row("SELECT MAX(ts) FROM event WHERE issue_key = ?1 COLLATE NOCASE", [key], |r| r.get(0))?;
+    if last.is_some_and(|t| t >= since) {
+        return Ok(None);
+    }
+    let mut stmt = conn.prepare("SELECT DISTINCT cwd FROM event WHERE issue_key = ?1 COLLATE NOCASE AND type = 'worktree' AND cwd IS NOT NULL")?;
+    let worktrees: Vec<String> = stmt.query_map([key], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    let seen = sessions.iter().filter(|(cwd, _)| worktrees.iter().any(|w| crate::paths::is_within(cwd, w))).map(|(_, at)| *at).max();
+    let last = last.unwrap_or(0).max(seen.unwrap_or(0));
+    Ok((last < since).then_some(last))
+}
+
+/// What the track says of an issue `idle_since` found left.
+fn idle_stuck(last: i64, now: i64) -> String {
+    if last == 0 {
+        "No activity".to_string()
+    } else {
+        format!("No activity for {} h", (now - last) / 3600)
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct IssueRecord {
     pub key: String,
@@ -942,6 +990,12 @@ impl Db {
                 Deps::load(&self.conn)?.fill(&mut i);
                 let changes = self.change_reviews()?.get(&i.key.to_uppercase()).copied().unwrap_or(0);
                 i.track = track_of(&i, &self.timeline(&i.key)?, changes);
+                if i.track.stuck.is_none() && i.state == "In Progress" {
+                    let ts = now();
+                    if let Some(last) = idle_since(&self.conn, &i.key, &recent_sessions(&self.conn, ts)?, ts)? {
+                        i.track.stuck = Some(idle_stuck(last, ts));
+                    }
+                }
                 Some(i)
             }
             None => None,
@@ -1233,17 +1287,29 @@ impl Db {
         // Each candidate with whether it plans a goal (0: a whole goal waits on it, so it goes
         // ahead of other work of its urgency), its goal's place: 0 for an active goal with a target
         // date, 1 for one without, 2 for no active goal; then the target date.
-        let candidates: Vec<(String, i64, i64, i64, i64, Option<String>)> = {
+        // An In Progress issue comes back only when no live claim holds it and it shows no work
+        // (`idle_since`).
+        let candidates: Vec<Candidate> = {
             let mut stmt = tx.prepare(
                 "SELECT i.key, i.priority, i.number,
                         CASE WHEN i.labels LIKE '%\"planning\"%' THEN 0 ELSE 1 END,
-                        CASE WHEN g.id IS NULL THEN 2 WHEN g.target_date IS NULL THEN 1 ELSE 0 END, g.target_date
+                        CASE WHEN g.id IS NULL THEN 2 WHEN g.target_date IS NULL THEN 1 ELSE 0 END, g.target_date, i.state
                  FROM issue i LEFT JOIN goal g ON g.id = i.goal AND g.state = 'active'
                  WHERE i.project = ?1 COLLATE NOCASE AND i.origin = 'nitely' AND i.owner != 'human'
-                   AND (i.state = 'Todo' OR (i.state = 'In Progress' AND i.claimed_at < ?2))",
+                   AND (i.state = 'Todo' OR (i.state = 'In Progress' AND (i.claimed_at IS NULL OR i.claimed_at < ?2)))",
             )?;
-            let rows = stmt.query_map(params![project, ts - CLAIM_TTL_SECS], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?;
-            rows.collect::<rusqlite::Result<_>>()?
+            let rows = stmt.query_map(params![project, ts - CLAIM_TTL_SECS], |r| {
+                Ok(((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?), r.get::<_, String>(6)?))
+            })?;
+            let rows: Vec<(Candidate, String)> = rows.collect::<rusqlite::Result<_>>()?;
+            let sessions = recent_sessions(&tx, ts)?;
+            let mut kept = Vec::new();
+            for (c, state) in rows {
+                if state == "Todo" || idle_since(&tx, &c.0, &sessions, ts)?.is_some() {
+                    kept.push(c);
+                }
+            }
+            kept
         };
         let deps = Deps::load(&tx)?;
         let mut ready: Vec<_> = candidates
@@ -1508,10 +1574,20 @@ impl Db {
             }
         }
         let changes = self.change_reviews()?;
+        let ts = now();
+        let mut sessions = None;
         for i in issues.iter_mut() {
             let key = i.key.to_uppercase();
             let timeline = if i.is_open() { timelines.get(&key).map(Vec::as_slice).unwrap_or(&[]) } else { &[] };
             i.track = track_of(i, timeline, changes.get(&key).copied().unwrap_or(0));
+            if i.track.stuck.is_none() && i.state == "In Progress" {
+                if sessions.is_none() {
+                    sessions = Some(recent_sessions(&self.conn, ts)?);
+                }
+                if let Some(last) = idle_since(&self.conn, &i.key, sessions.as_deref().unwrap_or_default(), ts)? {
+                    i.track.stuck = Some(idle_stuck(last, ts));
+                }
+            }
         }
         Ok(())
     }
@@ -1833,6 +1909,46 @@ mod tests {
         assert_eq!(first.claimed_by.as_deref(), Some("claude:a"));
         assert_eq!(db.next_task("NIT", "codex:b").unwrap().unwrap().key, "NIT-1");
         assert!(db.next_task("NIT", "cursor:c").unwrap().is_none());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Work started with start_task holds no claim. An In Progress issue that no live claim holds
+    /// is offered again, and shows stuck, only once nothing has happened on it and no session has
+    /// worked in its worktree for the claim TTL (NIT-275).
+    #[test]
+    fn an_unclaimed_in_progress_issue_comes_back_only_once_it_shows_no_work() {
+        let (mut db, dir) = db();
+        db.create_project("NIT", "Nitely").unwrap();
+        let agent = Actor::Agent("claude:a".into());
+        db.create_issue(&new("Started by hand"), &agent).unwrap();
+        db.move_issue("NIT-1", "In Progress", None, None, &agent).unwrap();
+        assert!(db.next_task("NIT", "claude:b").unwrap().is_none(), "just started");
+        assert_eq!(db.issue("NIT-1").unwrap().unwrap().track.stuck, None);
+
+        // Everything on it is 7 h old, but a session in a worktree started for it was seen an
+        // hour ago: still worked.
+        let old = now() - 7 * 3600;
+        db.conn.execute("UPDATE event SET ts = ?1 WHERE issue_key = 'NIT-1'", [old]).unwrap();
+        db.conn
+            .execute("INSERT INTO event (ts, actor, cwd, issue_key, type, summary) VALUES (?1, 'claude:a', 'C:/wt/nit-1', 'NIT-1', 'worktree', 'Started')", [old])
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO session (id, vendor, cwd, started_at, last_seen_at, state) VALUES ('claude:s', 'claude', 'C:/wt/nit-1/src', ?1, ?2, 'working')",
+                params![old, now() - 3600],
+            )
+            .unwrap();
+        assert!(db.next_task("NIT", "claude:b").unwrap().is_none(), "a session works in its worktree");
+        assert_eq!(db.issue("NIT-1").unwrap().unwrap().track.stuck, None);
+
+        // The session went quiet then too: the work was left.
+        db.conn.execute("UPDATE session SET last_seen_at = ?1", [old]).unwrap();
+        assert_eq!(db.list_issues(Some("NIT"), false).unwrap()[0].track.stuck.as_deref(), Some("No activity for 7 h"));
+        assert_eq!(db.issue("NIT-1").unwrap().unwrap().track.stuck.as_deref(), Some("No activity for 7 h"));
+        let again = db.next_task("NIT", "claude:b").unwrap().unwrap();
+        assert_eq!((again.key.as_str(), again.claimed_by.as_deref()), ("NIT-1", Some("claude:b")));
+        assert_eq!(again.track.stuck, None, "claimed now");
+        assert!(db.next_task("NIT", "claude:c").unwrap().is_none());
         std::fs::remove_dir_all(dir).ok();
     }
 
