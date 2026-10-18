@@ -1321,10 +1321,6 @@ impl Db {
     /// `issue_edited` event, so nothing is lost. An issue mirrored from another tracker is changed
     /// there. Unchanged text changes nothing and writes no event.
     pub fn edit_issue(&mut self, key: &str, title: Option<&str>, body: Option<&str>, actor: &Actor) -> Result<IssueRecord> {
-        let issue = self.issue(key)?.with_context(|| format!("no issue {key}"))?;
-        if issue.origin != "nitely" {
-            bail!("{} is mirrored from {}; change it there", issue.key, issue.origin);
-        }
         let title = title.map(str::trim);
         let body = body.map(str::trim);
         if title.is_some_and(str::is_empty) {
@@ -1333,30 +1329,40 @@ impl Db {
         if body.is_some_and(str::is_empty) {
             bail!("an issue needs a body: what is wrong or wanted, and why");
         }
-        let title = title.filter(|t| *t != issue.title);
-        let body = body.filter(|b| *b != issue.body);
-        if title.is_none() && body.is_none() {
-            return Ok(issue);
+        // The text it had is read under the write lock: two edits at once each keep the text the
+        // other replaced, and none is lost.
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (key, origin, old_title, old_body): (String, String, String, String) = tx
+            .query_row("SELECT key, origin, title, COALESCE(body, '') FROM issue WHERE key = ?1 COLLATE NOCASE", [key.trim()], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
+            .optional()?
+            .with_context(|| format!("no issue {key}"))?;
+        if origin != "nitely" {
+            bail!("{key} is mirrored from {origin}; change it there");
         }
-        let mut was = Vec::new();
-        if title.is_some() {
-            was.push(format!("Title was: {}", issue.title));
+        let title = title.filter(|t| *t != old_title);
+        let body = body.filter(|b| *b != old_body);
+        if title.is_some() || body.is_some() {
+            let mut was = Vec::new();
+            if title.is_some() {
+                was.push(format!("Title was: {old_title}"));
+            }
+            if body.is_some() {
+                was.push(format!("Body was:\n{old_body}"));
+            }
+            let ts = now();
+            tx.execute(
+                "UPDATE issue SET title = COALESCE(?2, title), body = COALESCE(?3, body), updated_at = ?4 WHERE key = ?1",
+                params![key, title, body, iso(ts)],
+            )?;
+            tx.execute(
+                "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, ?2, ?3, 'issue_edited', ?4)",
+                params![ts, actor.id(), key, was.join("\n\n")],
+            )?;
         }
-        if body.is_some() {
-            was.push(format!("Body was:\n{}", issue.body));
-        }
-        let ts = now();
-        let tx = self.conn.transaction()?;
-        tx.execute(
-            "UPDATE issue SET title = COALESCE(?2, title), body = COALESCE(?3, body), updated_at = ?4 WHERE key = ?1",
-            params![issue.key, title, body, iso(ts)],
-        )?;
-        tx.execute(
-            "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, ?2, ?3, 'issue_edited', ?4)",
-            params![ts, actor.id(), issue.key, was.join("\n\n")],
-        )?;
         tx.commit()?;
-        self.issue(&issue.key)?.with_context(|| format!("no issue {}", issue.key))
+        self.issue(&key)?.with_context(|| format!("no issue {key}"))
     }
 
     pub fn set_owner(&mut self, key: &str, owner: &str, actor: &Actor) -> Result<IssueRecord> {
@@ -1716,6 +1722,14 @@ mod tests {
         let events = db.timeline("NIT-1").unwrap().len();
         db.edit_issue("NIT-1", Some("Slice 2: the export dialog "), None, &agent).unwrap();
         assert_eq!(db.timeline("NIT-1").unwrap().len(), events, "unchanged: no event");
+
+        // Two writers on the same database: each edit keeps the text the one before it replaced.
+        let mut other = Db::open(&dir.join("t.db")).unwrap();
+        other.edit_issue("NIT-1", Some("Slice 2: export"), None, &agent).unwrap();
+        db.edit_issue("NIT-1", Some("Slice 2: export as CSV"), None, &agent).unwrap();
+        let titles: Vec<String> = db.timeline("NIT-1").unwrap().iter().rev().take(2).filter_map(|t| t.summary.clone()).collect();
+        assert_eq!(titles, ["Title was: Slice 2: export", "Title was: Slice 2: the export dialog"]);
+        drop(other);
 
         assert!(db.edit_issue("NIT-1", Some("  "), None, &agent).is_err(), "no empty title");
         assert!(db.edit_issue("NIT-1", None, Some(""), &agent).is_err(), "no empty body");

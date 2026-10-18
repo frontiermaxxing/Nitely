@@ -950,10 +950,11 @@ fn run_tool(server: &Server, name: &str, args: &Value, params: &Value) -> Result
                 db.check_move(key, state, str_arg(args, "evidence"), str_arg(args, "reason"), &actor)?;
                 db.check_open_asks(key, state)?;
             }
+            db.change_blockers(key, &add, &remove, &actor)?;
+            // After the blockers, which can still refuse: a refused call changes no text.
             if title.is_some() || body.is_some() {
                 db.edit_issue(key, title, body, &actor)?;
             }
-            db.change_blockers(key, &add, &remove, &actor)?;
             let mut note = None;
             if !add_labels.is_empty() || !remove_labels.is_empty() {
                 let project = db.issue(key)?.and_then(|i| i.project).unwrap_or_default();
