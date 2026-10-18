@@ -209,6 +209,8 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
     await page.waitFor(`return document.querySelector(".dd-outcome.done")?.textContent;`, { what: "the Accept's outcome" });
     const answer = await agent.call("get_answer", { id: asked.id });
     assert.match(JSON.stringify(answer), /Accepted: Hello, stranger is the default we want/);
+    // The agent reads the answer and goes on, as a real one does.
+    await agent.call("report", { key: C, text: "The person accepted the finding; the change can land." });
 
     // 6. Accepted, the finding no longer holds the change back: it is in review again, to land.
     // (Landing it is left out: nothing the harness app's throwaway key signed may land, NIT-157.)
@@ -252,6 +254,11 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
     await shot("8-done");
   } catch (e) {
     await shot("failed").catch(() => {});
+    // Where every issue stood, and what it did last.
+    for (const key of ["APP-1", "APP-2", "APP-3", "APP-4", "APP-5"]) {
+      const d = await detail(key).catch(() => null);
+      if (d) console.error(`${key} ${d.issue.state} (${d.issue.track.station}): ${d.timeline.slice(-6).map((t) => `${t.kind}: ${t.summary ?? ""}`).join(" | ")}`);
+    }
     console.error(app.log());
     console.error(`--- the crew's logs ---\n${crewLogs(home)}`);
     throw e;
