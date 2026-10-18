@@ -250,11 +250,41 @@ pub fn session_note(pb: &Playbook, repo_root: &Path, worktree: &Path) -> Option<
 /// How a light worktree builds and tests, for its session and the crew's brief.
 pub const RUN_LINE: &str = "Build and test through `run` (MCP; `nitely run -- <command>` from a shell): it builds a snapshot of this worktree, committed or not, in a warm build lane that keeps its build output, and returns the exit code and the end of the output (`run_status` waits on a long one). Do not build or test here: it would install and compile everything again, for this worktree alone.";
 
-/// The commands of a shell line's first line, each trimmed: split at `&&`, `||`, `;` and `|`. Only
-/// the first line: what follows can be a heredoc's text (a prompt, a file), which is not a command
-/// and is never read or kept.
+/// The commands of a shell line's first line, each trimmed: split at `&&`, `||`, `;` and `|` outside
+/// quotes, so a quoted argument (`nitely run --shell "cargo test && cargo clippy"`) stays part of
+/// its command (NIT-238). Only the first line: what follows can be a heredoc's text (a prompt, a
+/// file), which is not a command and is never read or kept.
 fn commands_of(line: &str) -> Vec<String> {
-    line.lines().next().unwrap_or("").split([';', '|', '&']).map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).collect()
+    let mut commands = vec![];
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for c in line.lines().next().unwrap_or("").chars() {
+        match (quote, c) {
+            _ if escaped => escaped = false,
+            // A backslash escapes the next character in double quotes and unquoted (sh); in single
+            // quotes it is a character like any other.
+            (Some('"') | None, '\\') => escaped = true,
+            (None, '"' | '\'') => quote = Some(c),
+            (Some(q), _) if c == q => quote = None,
+            (None, ';' | '|' | '&') => {
+                commands.push(std::mem::take(&mut current));
+                continue;
+            }
+            _ => {}
+        }
+        current.push(c);
+    }
+    commands.push(current);
+    commands.into_iter().map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).collect()
+}
+
+/// Whether a command is `nitely run`, which already sends its command to a lane.
+fn is_lane_run(command: &str) -> bool {
+    let mut words = command.split_whitespace();
+    let program = words.next().unwrap_or("").trim_matches(['"', '\'']).replace('\\', "/");
+    let name = program.rsplit('/').next().unwrap_or("").to_lowercase();
+    matches!(name.as_str(), "nitely" | "nitely.exe" | "nitely.cmd") && words.next() == Some("run")
 }
 
 /// The folder a shell line works in: the folder of a leading `cd <dir>`, else `cwd`.
@@ -274,7 +304,7 @@ fn folder_of(line: &str, cwd: &Path) -> PathBuf {
 pub fn heavy_in(pb: &Playbook, line: &str) -> Option<String> {
     let rules = pb.lanes.as_ref()?;
     let patterns: Vec<regex::Regex> = rules.heavy.iter().filter_map(|h| regex::Regex::new(h).ok()).collect();
-    commands_of(line).into_iter().find(|c| patterns.iter().any(|p| p.is_match(c)))
+    commands_of(line).into_iter().filter(|c| !is_lane_run(c)).find(|c| patterns.iter().any(|p| p.is_match(c)))
 }
 
 /// A reminder for an agent about to build or test in a light worktree: the heavy command, the
@@ -419,6 +449,13 @@ mod tests {
         assert!(nudge(&config, &at, "cargo fmt && git diff").is_none(), "not a build");
         assert!(nudge(&config, &at, "npm testing-library").is_none(), "a word, not the command");
         assert!(nudge(&config, &at, "cat > notes.md <<'EOF'\ncargo test is what we run\nEOF").is_none(), "a heredoc's text is not a command");
+        // `nitely run` is the lane form the nudge asks for, in either spelling (NIT-238).
+        assert!(nudge(&config, &at, "nitely run --shell \"cargo test -p nitely-core && cargo clippy --workspace\"").is_none(), "a quoted lane command");
+        assert!(nudge(&config, &at, "nitely run -- cargo test -p core").is_none(), "words after --");
+        assert!(nudge(&config, &at, "C:/Users/sam/.cargo/bin/nitely.exe run -- npm run build").is_none(), "by its path");
+        // What runs here after it still counts.
+        assert_eq!(nudge(&config, &at, "nitely run -- cargo test && cargo clippy --workspace").map(|n| n.command).as_deref(), Some("cargo clippy --workspace"));
+        assert_eq!(commands_of(r#"echo "a;b" && echo 'c|d' ; echo e\&f"#), [r#"echo "a;b""#, "echo 'c|d'", r"echo e\&f"]);
         // From the main checkout, a line that goes into the worktree first.
         let main = repo.to_string_lossy().into_owned();
         assert!(nudge(&config, &main, &format!("cd {} && npm run build", wt.display())).is_some());
@@ -433,6 +470,10 @@ mod tests {
         let pb = Playbook::parse("[lanes]\nheavy = [\"^make\\\\b\"]\n").unwrap();
         assert_eq!(heavy_in(&pb, "cd x; make all").as_deref(), Some("make all"));
         assert!(heavy_in(&pb, "cargo test").is_none());
+        // Even a pattern that is not anchored leaves `nitely run` alone.
+        let pb = Playbook::parse("[lanes]\nheavy = [\"cargo test\"]\n").unwrap();
+        assert!(heavy_in(&pb, "nitely run -- cargo test").is_none());
+        assert_eq!(heavy_in(&pb, "time cargo test").as_deref(), Some("time cargo test"));
         std::fs::remove_dir_all(base).ok();
     }
 
