@@ -654,13 +654,33 @@ impl Db {
 /// A queued or running run outlives the process serving it only by a crash: it is abandoned.
 fn settle(db: &Db, mut run: Run, pid: Option<i64>) -> Run {
     let open = run.state == "queued" || run.state == "running";
-    if open && pid.is_some_and(|p| p as u32 != std::process::id() && !crate::crew::pid_alive(p as u32)) {
+    if open && pid.is_some_and(|p| p as u32 != std::process::id() && !requester_alive(p as u32)) {
         db.conn
             .execute("UPDATE lane_run SET state = 'abandoned', ended_at = COALESCE(ended_at, ?2) WHERE id = ?1 AND state IN ('queued', 'running')", params![run.id, now()])
             .ok();
         run.state = "abandoned".into();
     }
     run
+}
+
+/// Whether a requester's process runs, as `settle` asks it: the app reads every lane's queue on each
+/// refresh, so an answer is kept for two seconds (NIT-289). Tests ask the system every time.
+fn requester_alive(pid: u32) -> bool {
+    if cfg!(test) {
+        return crate::crew::pid_alive(pid);
+    }
+    static SEEN: std::sync::Mutex<Option<std::collections::HashMap<u32, (bool, Instant)>>> = std::sync::Mutex::new(None);
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    let seen = seen.get_or_insert_with(Default::default);
+    if let Some((alive, at)) = seen.get(&pid) {
+        if at.elapsed() < Duration::from_secs(2) {
+            return *alive;
+        }
+    }
+    let alive = crate::crew::pid_alive(pid);
+    seen.retain(|_, (_, at)| at.elapsed() < Duration::from_secs(60));
+    seen.insert(pid, (alive, Instant::now()));
+    alive
 }
 
 /// The folder for what lanes keep outside the repo (run logs): `lanes` beside the database the runs
@@ -713,12 +733,12 @@ pub fn run_in(config: &crate::Config, db: &Db, dir: &str, issue: Option<&str>, c
 pub fn run(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Actor, on_event: &mut dyn FnMut(&Run)) -> Result<Run> {
     let share = share();
     let command = req.command.replace("{jobs}", &share.jobs.to_string());
-    run_with(db, repo_root, pb, req, actor, on_event, &mut |lane, log, limit| run_logged(&command, lane, log, limit, share))
+    run_with(db, repo_root, pb, req, actor, on_event, &mut |lane, log, limit, temp| run_logged(&command, lane, log, limit, share, Some(temp)))
 }
 
-/// What runs in a lane once it holds the request's snapshot: given the lane, the log and the time
-/// limit, it returns how the command ended.
-type Exec<'a> = dyn FnMut(&Path, &Path, Duration) -> Result<Ended> + 'a;
+/// What runs in a lane once it holds the request's snapshot: given the lane, the log, the time
+/// limit and the request's temporary folder (`lane_temp`), it returns how the command ended.
+type Exec<'a> = dyn FnMut(&Path, &Path, Duration, &Path) -> Result<Ended> + 'a;
 
 /// How a lane command ended.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -892,7 +912,7 @@ pub fn gate(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Op
     let retries = pb.gate.retries;
     let share = share();
     let req = Request { project: &project, issue, kind, snapshot: &snap, command: &key };
-    let run = run_with(db, repo_root, pb, &req, actor, &mut |_| {}, &mut |lane: &Path, log: &Path, limit: Duration| {
+    let run = run_with(db, repo_root, pb, &req, actor, &mut |_| {}, &mut |lane: &Path, log: &Path, limit: Duration, temp: &Path| {
         let mut peak: Option<u64> = None;
         for (command, skip) in steps {
             if let Some(why) = skip {
@@ -904,7 +924,7 @@ pub fn gate(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Op
             let mut failures: Vec<String> = Vec::new();
             loop {
                 let from = std::fs::metadata(log).map(|m| m.len()).unwrap_or(0);
-                let ended = run_logged(&command, lane, log, limit, share)?;
+                let ended = run_logged(&command, lane, log, limit, share, Some(temp))?;
                 let (code, timed_out) = (ended.code, ended.timed_out);
                 peak = peak.max(ended.peak);
                 let output = log_since(log, from);
@@ -1414,8 +1434,10 @@ fn serve(repo_root: &Path, pb: &Playbook, rules: &LaneRules, lane: &Path, log: &
         let switched = git(lane, &["diff", "--name-only", "HEAD", &req.snapshot.commit]).map(|o| o.lines().count() as i64).unwrap_or(0);
         switch_large(lane, base, &req.snapshot.commit, &rules.keep)?;
         let ran = (|| -> Result<(bool, Ended)> {
-            let setup_ran = ensure_setup(repo_root, pb, lane, base, log, limit)?;
-            Ok((setup_ran, exec(lane, log, limit)?))
+            // After what a dead request left running was stopped, so its files can go.
+            let temp = lane_temp(repo_root, pb, lane);
+            let setup_ran = ensure_setup(repo_root, pb, lane, base, log, limit, &temp)?;
+            Ok((setup_ran, exec(lane, log, limit, &temp)?))
         })();
         let back = return_large(lane, base);
         let (setup_ran, ended) = ran?;
@@ -1433,8 +1455,10 @@ fn serve(repo_root: &Path, pb: &Playbook, rules: &LaneRules, lane: &Path, log: &
         switched
     };
     crate::submodules::sync_lane(repo_root, pb, lane, &req.snapshot.commit, &rules.keep)?;
-    let setup_ran = ensure_setup(repo_root, pb, lane, base, log, limit)?;
-    let Ended { code: exit_code, timed_out, peak } = exec(lane, log, limit)?;
+    // After what a dead request left running was stopped, so its files can go.
+    let temp = lane_temp(repo_root, pb, lane);
+    let setup_ran = ensure_setup(repo_root, pb, lane, base, log, limit, &temp)?;
+    let Ended { code: exit_code, timed_out, peak } = exec(lane, log, limit, &temp)?;
     let output = std::fs::read_to_string(log).map(|t| playbook::tail(&t)).unwrap_or_default();
     // Between requests, still holding the lane: best effort, it never fails the request.
     if let Some(record) = git_path(lane, SIZE_RECORD) {
@@ -1611,7 +1635,8 @@ fn create_lane(repo_root: &Path, lane: &Path, commit: &str) -> Result<()> {
 /// from the last time it passed; each command bounded by `limit`. The record of a passed setup is
 /// written only after every command passed, so a setup that failed or was stopped runs again next
 /// time. Returns whether setup ran.
-fn ensure_setup(repo_root: &Path, pb: &Playbook, lane: &Path, base: &str, log: &Path, limit: Duration) -> Result<bool> {
+#[allow(clippy::too_many_arguments)]
+fn ensure_setup(repo_root: &Path, pb: &Playbook, lane: &Path, base: &str, log: &Path, limit: Duration, temp: &Path) -> Result<bool> {
     if pb.worktree.setup.is_empty() {
         return Ok(false);
     }
@@ -1634,7 +1659,7 @@ fn ensure_setup(repo_root: &Path, pb: &Playbook, lane: &Path, base: &str, log: &
         // once, on a busy machine, then passes is not the change's fault.
         let mut tries = 0;
         loop {
-            let ended = run_logged(&command, lane, log, limit, share)?;
+            let ended = run_logged(&command, lane, log, limit, share, Some(temp))?;
             match (ended.code, ended.timed_out) {
                 (Some(0), _) => break,
                 (_, true) => bail!("setup ran past {} minutes in the lane and was stopped: {command}", limit.as_secs() / 60),
@@ -1660,6 +1685,23 @@ fn ensure_setup(repo_root: &Path, pb: &Playbook, lane: &Path, base: &str, log: &
     std::fs::write(&record, format!("{now}\n{}", made.join("\n"))).with_context(|| format!("writing {}", record.display()))?;
     Ok(true)
 }
+
+/// The temporary folder for the request a lane serves, emptied before each one: beside the lane in
+/// the lanes folder (`<lane>.tmp`), so the test repos, databases and copied programs a build makes
+/// there are covered by whatever covers the lanes (a Defender exclusion, a Dev Drive), never land
+/// in the person's own temp folder, and go with the request (NIT-289). Outside the lane's checkout,
+/// so nothing in it is inside a repo. Best effort: a folder that cannot be emptied is used as it is.
+fn lane_temp(repo_root: &Path, pb: &Playbook, lane: &Path) -> PathBuf {
+    let name = lane.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "lane".into());
+    let temp = dir(repo_root, pb).join(format!("{name}.tmp"));
+    std::fs::remove_dir_all(&temp).ok();
+    std::fs::create_dir_all(temp.join(GIT_TEMPLATE)).ok();
+    temp
+}
+
+/// The empty folder in a request's temporary folder that `git init` and `git clone` take their
+/// template from there (`GIT_TEMPLATE_DIR`), so a test's repos get no hook samples to scan.
+const GIT_TEMPLATE: &str = "git-template";
 
 /// A file in `dir`'s own git folder (per worktree), named `name`.
 fn git_path(dir: &Path, name: &str) -> Option<PathBuf> {
@@ -1715,7 +1757,7 @@ fn switch(lane: &Path, commit: &str, keep: &[String]) -> Result<()> {
 /// after `limit`, held to the machine's `share` for one request: its cores, its memory cap and a
 /// priority below the person's own apps (NIT-266). A run over its cap is stopped and fails as out
 /// of memory in the lane, a lane problem rather than the command's. Returns how it ended.
-fn run_logged(command: &str, dir: &Path, log: &Path, limit: Duration, share: Share) -> Result<Ended> {
+fn run_logged(command: &str, dir: &Path, log: &Path, limit: Duration, share: Share, temp: Option<&Path>) -> Result<Ended> {
     use std::io::Write;
     let command = node_tests_share(command, share.jobs);
     let command = command.as_str();
@@ -1725,6 +1767,10 @@ fn run_logged(command: &str, dir: &Path, log: &Path, limit: Duration, share: Sha
     cmd.current_dir(dir).stdin(std::process::Stdio::null()).stdout(file.try_clone()?).stderr(file.try_clone()?);
     // The machine's share for one request (NIT-199), for the build tools that read it.
     share_env(&mut cmd, share.jobs);
+    // Its temporary files in the request's own folder, and git's templates empty (NIT-289).
+    if let Some(temp) = temp {
+        cmd.env("TMP", temp).env("TEMP", temp).env("TMPDIR", temp).env("GIT_TEMPLATE_DIR", temp.join(GIT_TEMPLATE));
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -2128,7 +2174,7 @@ commands = []
         let log = base.join("run.log");
         // A marker no other process carries: an address only this test pings.
         let marker = "ping -n 40 127.0.0.97";
-        let ended = run_logged(&format!("start \"\" /B {marker} >NUL & exit /b 0"), &base, &log, Duration::from_secs(30), NO_CAP).unwrap();
+        let ended = run_logged(&format!("start \"\" /B {marker} >NUL & exit /b 0"), &base, &log, Duration::from_secs(30), NO_CAP, None).unwrap();
         assert_eq!((ended.code, ended.timed_out), (Some(0), false));
         let left = (0..25).all(|_| {
             std::thread::sleep(Duration::from_millis(200));
@@ -2574,12 +2620,12 @@ commands = []
         let hog = "node -e \"const b = Buffer.alloc(800 * 1024 * 1024, 1); setTimeout(() => console.log(b.length), 15000)\"";
         let started = Instant::now();
         let cap = Share { jobs: 1, cap: Some(300 << 20) };
-        let err = run_logged(hog, &base, &log, Duration::from_secs(60), cap).unwrap_err();
+        let err = run_logged(hog, &base, &log, Duration::from_secs(60), cap, None).unwrap_err();
         assert!(format!("{err:#}").starts_with("out of memory in the lane"), "{err:#}");
         assert!(started.elapsed() < Duration::from_secs(14), "stopped at its cap, not waited out");
         assert!(std::fs::read_to_string(&log).unwrap().contains("out of memory in the lane"));
         // Under its cap, a run ends as usual, with its peak where the system tells it.
-        let fine = run_logged("node -e \"console.log(1)\"", &base, &log, Duration::from_secs(60), Share { jobs: 1, cap: Some(2 << 30) }).unwrap();
+        let fine = run_logged("node -e \"console.log(1)\"", &base, &log, Duration::from_secs(60), Share { jobs: 1, cap: Some(2 << 30) }, None).unwrap();
         assert_eq!(fine.code, Some(0));
         if cfg!(windows) {
             assert!(fine.peak.is_some_and(|p| p > 1 << 20 && p < 2 << 30), "{fine:?}");
@@ -2599,11 +2645,42 @@ commands = []
         } else {
             "sh -c 'ps -o nice= -p $$'"
         };
-        let ended = run_logged(ask, &base, &log, Duration::from_secs(60), NO_CAP).unwrap();
+        let ended = run_logged(ask, &base, &log, Duration::from_secs(60), NO_CAP, None).unwrap();
         assert_eq!(ended.code, Some(0));
         let said = std::fs::read_to_string(&log).unwrap();
         let want = if cfg!(windows) { "BelowNormal" } else { "10" };
         assert!(said.lines().any(|l| l.trim() == want), "{said}");
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// A lane command's temporary files go to the request's own folder beside the lane, emptied for
+    /// the next request, and `git init` there makes no hook samples (NIT-289).
+    #[test]
+    fn a_lane_command_keeps_its_temporary_files_beside_the_lane() {
+        let base = crate::paths::unique_temp("nitely-lane-temp", "");
+        let root = repo(&base);
+        let db = Db::open(&base.join("t.db")).unwrap();
+        let pb = playbook_with("[lanes]
+");
+        let snap = snapshot(&root).unwrap();
+        let actor = Actor::Agent("claude:test".into());
+        let leave = if cfg!(windows) {
+            "echo temp=%TEMP% tmp=%TMP% && echo left> %TEMP%\left.txt && git init -q %TEMP%\made && dir /b %TEMP%\made\.git"
+        } else {
+            "echo temp=$TEMP tmp=$TMPDIR && echo left > $TMPDIR/left.txt && git init -q $TMPDIR/made && ls $TMPDIR/made/.git"
+        };
+        let req = Request { project: "APP", issue: None, kind: Kind::Run, snapshot: &snap, command: leave };
+        let ran = run(&db, &root, &pb, &req, &actor, &mut |_| {}).unwrap();
+        assert!(ran.passed(), "{}", ran.output);
+        let temp = dir(&root, &pb).join("lane-1.tmp");
+        let shown = temp.to_string_lossy().into_owned();
+        assert!(ran.output.contains(&format!("temp={shown}")) && ran.output.contains(&format!("tmp={shown}")), "{}
+wanted {shown}", ran.output);
+        assert!(!ran.output.contains("hooks"), "no hook samples: {}", ran.output);
+        assert!(temp.join("left.txt").exists());
+        let next = Request { project: "APP", issue: None, kind: Kind::Run, snapshot: &snap, command: "echo next" };
+        assert!(run(&db, &root, &pb, &next, &actor, &mut |_| {}).unwrap().passed());
+        assert!(!temp.join("left.txt").exists(), "emptied for the next request");
         std::fs::remove_dir_all(base).ok();
     }
 
@@ -3131,7 +3208,7 @@ commands = []
         let log = base.join("run.log");
         let sleeper = if cfg!(windows) { "ping -n 30 127.0.0.1 >NUL" } else { "sleep 30" };
         let started = Instant::now();
-        let ended = run_logged(sleeper, &base, &log, Duration::from_secs(1), NO_CAP).unwrap();
+        let ended = run_logged(sleeper, &base, &log, Duration::from_secs(1), NO_CAP, None).unwrap();
         assert!(ended.timed_out && ended.code.is_none());
         assert!(started.elapsed() < Duration::from_secs(20), "stopped, not waited out");
         std::fs::remove_dir_all(base).ok();

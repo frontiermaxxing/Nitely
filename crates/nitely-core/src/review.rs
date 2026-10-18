@@ -1095,14 +1095,19 @@ pub(crate) fn resolve_program(program: &str) -> String {
             return script.to_string_lossy().into_owned();
         }
         if program == "codex" {
-            let out = shell_free_command("powershell")
-                .args(["-NoProfile", "-Command", "(Get-AppxPackage -Name 'OpenAI.Codex*' | Select-Object -First 1).InstallLocation"])
-                .output();
-            if let Ok(out) = out {
-                let exe = Path::new(String::from_utf8_lossy(&out.stdout).trim()).join("app").join("resources").join("codex.exe");
-                if exe.exists() {
-                    return exe.to_string_lossy().into_owned();
-                }
+            // Asked of PowerShell once per process: the crew resolves its agents on every tick, and
+            // a PowerShell start each time is a second of CPU (NIT-289). A Store update moves the
+            // folder, so a found path is checked again on each use.
+            static STORE_CODEX: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+            let mut found = STORE_CODEX.lock().unwrap_or_else(|e| e.into_inner());
+            if found.as_deref().is_none_or(|exe| !Path::new(exe).exists()) {
+                let out = shell_free_command("powershell")
+                    .args(["-NoProfile", "-Command", "(Get-AppxPackage -Name 'OpenAI.Codex*' | Select-Object -First 1).InstallLocation"])
+                    .output();
+                *found = out.ok().map(|out| Path::new(String::from_utf8_lossy(&out.stdout).trim()).join("app").join("resources").join("codex.exe")).filter(|exe| exe.exists()).map(|exe| exe.to_string_lossy().into_owned());
+            }
+            if let Some(exe) = found.clone() {
+                return exe;
             }
         }
     }

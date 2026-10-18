@@ -2087,16 +2087,9 @@ impl Process for Adopted {
     }
 }
 
+/// Whether process `pid` is running (`procs::alive`: the system's own answer, no process started).
 pub(crate) fn pid_alive(pid: u32) -> bool {
-    #[cfg(windows)]
-    {
-        let out = playbook::shell_free_command("tasklist").args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"]).output();
-        out.is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(&format!("\"{pid}\"")))
-    }
-    #[cfg(unix)]
-    {
-        std::process::Command::new("kill").args(["-0", &pid.to_string()]).output().is_ok_and(|o| o.status.success())
-    }
+    crate::procs::alive(pid)
 }
 
 struct SystemProcess(std::process::Child);

@@ -73,7 +73,9 @@ pub(crate) fn git(dir: &Path, args: &[&str]) -> String {
 /// commit when there are none.
 pub(crate) fn init(dir: &Path, files: &[(&str, &str)]) {
     std::fs::create_dir_all(dir).unwrap();
-    git(dir, &["init", "-q", "-b", "main"]);
+    // No template: every `git init` would write a dozen hook samples for the virus scanner to read
+    // (NIT-289).
+    git(dir, &["init", "-q", "-b", "main", "--template="]);
     // Written straight into the config, not with `git config`: one process fewer for each.
     let config = dir.join(".git").join("config");
     let mut text = std::fs::read_to_string(&config).unwrap();

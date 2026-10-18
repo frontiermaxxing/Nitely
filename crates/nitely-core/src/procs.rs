@@ -87,6 +87,30 @@ pub fn running_with(text: &str) -> bool {
     list().iter().any(|p| p.command_line.as_deref().is_some_and(|c| c.contains(text)))
 }
 
+/// Whether process `pid` is running, asked of the system directly: no process is started and no
+/// WMI query made, so it is cheap enough to ask as often as a queue looks (NIT-289; it ran
+/// `tasklist`, and the queue's polling kept the WMI host busy). A process this user may not look
+/// into (another user's, or a protected one) still counts as running.
+pub fn alive(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        win::alive(pid)
+    }
+    #[cfg(unix)]
+    {
+        extern "C" {
+            fn kill(pid: i32, sig: i32) -> i32;
+        }
+        let Ok(pid) = i32::try_from(pid) else { return false };
+        if pid <= 0 {
+            return false;
+        }
+        // SAFETY: signal 0 sends nothing; it only asks whether the process exists.
+        let r = unsafe { kill(pid, 0) };
+        r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(1) // EPERM: it exists
+    }
+}
+
 /// When process `pid` started, as a string only to compare: the same pid with another start time is
 /// another process that got the number since. None when it is not running or cannot be read.
 pub fn started(pid: u32) -> Option<String> {
@@ -591,6 +615,33 @@ mod win {
         port: Handle,
     }
 
+    /// Whether `pid` is running: a handle to it that has not been signalled (a process's handle is
+    /// signalled once it exits), or one this user may not open, which exists all the same.
+    pub fn alive(pid: u32) -> bool {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn WaitForSingleObject(handle: Handle, millis: u32) -> u32;
+            fn GetLastError() -> u32;
+        }
+        const SYNCHRONIZE: u32 = 0x0010_0000;
+        const WAIT_TIMEOUT: u32 = 0x102;
+        const ERROR_ACCESS_DENIED: u32 = 5;
+        if pid == 0 {
+            return false;
+        }
+        // SAFETY: a plain call; the handle is closed below.
+        let process = unsafe { OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if process.is_null() {
+            // SAFETY: a plain call, right after the one that failed.
+            return unsafe { GetLastError() } == ERROR_ACCESS_DENIED;
+        }
+        // SAFETY: the handle just opened, waited on for no time, then closed once.
+        let running = unsafe { WaitForSingleObject(process, 0) } == WAIT_TIMEOUT;
+        // SAFETY: as above.
+        unsafe { CloseHandle(process) };
+        running
+    }
+
     /// When `pid` started (its creation FILETIME), or None.
     pub fn started(pid: u32) -> Option<String> {
         // SAFETY: a plain call; the handle is closed below.
@@ -909,6 +960,29 @@ fn parse_lsof(text: &str) -> HashMap<u32, String> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// Liveness from the system itself (NIT-289): this process is running, a child runs until it
+    /// exits, and a pid no process has is not.
+    #[test]
+    fn a_process_is_alive_until_it_exits() {
+        assert!(alive(std::process::id()));
+        let mut child = if cfg!(windows) {
+            crate::playbook::shell_free_command("cmd").args(["/C", "ping -n 30 127.0.0.1 >nul"]).spawn().unwrap()
+        } else {
+            std::process::Command::new("sleep").arg("30").spawn().unwrap()
+        };
+        assert!(alive(child.id()));
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(!alive(child.id()), "a process that exited (and was waited for) is gone");
+        assert!(!alive(0));
+        assert!(!alive(u32::MAX - 2), "no such pid");
+        if cfg!(windows) {
+            assert!(alive(4), "the System process, which this user may not open, still runs");
+        } else {
+            assert!(alive(1), "init, another user's, still runs");
+        }
+    }
 
     /// What a contained command starts runs below normal too, CPU and I/O alike: the job holds the
     /// priority class, and the low I/O priority given to the command passes to its children

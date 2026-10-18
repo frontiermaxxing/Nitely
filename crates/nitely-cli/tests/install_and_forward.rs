@@ -12,6 +12,14 @@ fn temp() -> PathBuf {
     dir
 }
 
+/// `built` at `to` as a hard link, so no new copy of the program is written for the virus scanner
+/// to read in full (NIT-289); a copy where links cannot be made. Only for files nothing writes into.
+fn link_or_copy(built: &Path, to: &Path) {
+    if std::fs::hard_link(built, to).is_err() {
+        std::fs::copy(built, to).unwrap();
+    }
+}
+
 fn call(stdin: &mut impl Write, stdout: &mut impl BufRead, id: u64, method: &str, params: Value) -> Value {
     writeln!(stdin, "{}", json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })).unwrap();
     stdin.flush().unwrap();
@@ -80,8 +88,8 @@ fn install_without_a_target_skips_its_own_folders_on_path() {
     let built = Path::new(env!("CARGO_BIN_EXE_nitely"));
     let release = dir.join("target").join("release");
     std::fs::create_dir_all(release.join("deps")).unwrap();
-    std::fs::copy(built, release.join(exe)).unwrap();
-    std::fs::copy(built, release.join("deps").join(exe)).unwrap();
+    link_or_copy(built, &release.join(exe));
+    link_or_copy(built, &release.join("deps").join(exe));
     let installed = dir.join("bin").join(exe);
     std::fs::write(&installed, b"an old nitely").unwrap();
     let path = std::env::join_paths([release.join("deps"), release.clone(), dir.join("bin")]).unwrap();
@@ -101,7 +109,7 @@ fn install_from_a_file_beside_the_installed_one_replaces_it() {
     let installed = dir.join("bin").join(exe);
     std::fs::write(&installed, b"an old nitely").unwrap();
     let new_build = dir.join("bin").join(if cfg!(windows) { "nitely-new.exe" } else { "nitely-new" });
-    std::fs::copy(built, &new_build).unwrap();
+    link_or_copy(built, &new_build);
     let out = Command::new(built).args(["install", "--from"]).arg(&new_build).env("PATH", dir.join("bin")).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(std::fs::read(&installed).unwrap(), std::fs::read(built).unwrap());
