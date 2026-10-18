@@ -14,14 +14,22 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
 }
 
-/// A repo whose gate passes and whose reviewer passes everything after two seconds, a Nitely home,
-/// and an issue with a commit in its worktree.
+/// A repo whose gate passes and whose reviewer passes everything once the test releases it, a
+/// Nitely home, and an issue with a commit in its worktree.
 struct Setup {
     base: PathBuf,
     home: PathBuf,
     worktree: PathBuf,
     key: String,
     db: nitely_core::Db,
+    /// The file whose existence lets the reviewer answer. Until then the review cannot finish, so a
+    /// submit that answered meanwhile did not wait for it, however busy the machine is (NIT-272).
+    release: PathBuf,
+}
+
+/// Lets the reviewer answer.
+fn release(s: &Setup) {
+    std::fs::write(&s.release, "").unwrap();
 }
 
 fn setup(name: &str) -> Setup {
@@ -31,7 +39,14 @@ fn setup(name: &str) -> Setup {
     std::fs::create_dir_all(repo.join(".nitely")).unwrap();
     std::fs::create_dir_all(&home).unwrap();
     git(&repo, &["init", "-q", "-b", "main"]);
-    std::fs::write(repo.join("review.js"), "process.stdin.resume();\nprocess.stdin.on('end', () => setTimeout(() => console.log('Fine.\\nVERDICT: clean'), 2000));\n").unwrap();
+    // The reviewer answers once the test releases it, or after a minute: a submit that waited for
+    // the review would take that minute.
+    let release = base.join("release");
+    let script = format!(
+        "const fs = require('fs');\nconst release = {};\nconst start = Date.now();\nprocess.stdin.resume();\nprocess.stdin.on('end', () => {{\n  const t = setInterval(() => {{\n    if (fs.existsSync(release) || Date.now() - start > 60000) {{ clearInterval(t); console.log('Fine.\\nVERDICT: clean'); }}\n  }}, 50);\n}});\n",
+        serde_json::to_string(&release.to_string_lossy()).unwrap()
+    );
+    std::fs::write(repo.join("review.js"), script).unwrap();
     std::fs::write(
         repo.join(playbook::PLAYBOOK_PATH),
         "[worktree]\ndir = \"../wt/{key}\"\n[gate]\ncommands = [\"exit 0\"]\n[review]\nreviewer = { \"*\" = \"claude\" }\ncommands = { claude = [\"node\", \"review.js\"] }\n",
@@ -51,7 +66,7 @@ fn setup(name: &str) -> Setup {
     std::fs::write(worktree.join("footer.txt"), "x").unwrap();
     git(&worktree, &["add", "."]);
     git(&worktree, &["commit", "-q", "-m", "footer"]);
-    Setup { base, home, worktree, key: issue.key, db }
+    Setup { base, home, worktree, key: issue.key, db, release }
 }
 
 fn nitely(s: &Setup, args: &[&str]) -> Value {
@@ -84,9 +99,11 @@ fn submit_returns_at_once_and_the_background_job_finishes_it() {
     let s = setup("nitely-async-submit");
     let asked = Instant::now();
     let job = nitely(&s, &["submit", "--local"]);
-    assert!(asked.elapsed() < Duration::from_secs(2), "submit waited for the review: {:?}", asked.elapsed());
+    // The review is held until released below, so an answer now did not wait for it.
+    assert!(asked.elapsed() < Duration::from_secs(30), "submit waited for the review: {:?}", asked.elapsed());
     assert!(matches!(job["state"].as_str(), Some("queued" | "running")), "{job}");
     let id = job["id"].as_i64().unwrap().to_string();
+    release(&s);
 
     let done = nitely(&s, &["submit-status", &id, "--wait", "120"]);
     assert_eq!(done["state"], "done", "{done}");
@@ -100,9 +117,12 @@ fn an_agent_hands_in_over_mcp_and_hears_the_result_on_its_next_call() {
     let s = setup("nitely-async-submit-mcp");
     let asked = Instant::now();
     let job = tool(&s, "submit", json!({}));
-    assert!(asked.elapsed() < Duration::from_secs(2), "submit waited for the review: {:?}", asked.elapsed());
+    // The review is held until released below, so an answer now did not wait for it.
+    assert!(asked.elapsed() < Duration::from_secs(30), "submit waited for the review: {:?}", asked.elapsed());
     assert!(job["next"].as_str().unwrap().contains("Handed in"), "{job}");
+    assert!(matches!(job["state"].as_str(), Some("queued" | "running")), "{job}");
     let id = job["id"].as_i64().unwrap();
+    release(&s);
 
     // Someone else waiting for it (here the CLI) does not use up the agent's notice.
     let done = nitely(&s, &["submit-status", &id.to_string(), "--wait", "120"]);
