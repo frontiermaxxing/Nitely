@@ -62,6 +62,10 @@ test("a goal's finish at its recent pace, late when it passes the target date", 
   assert.equal(finishLine({ at: at(0), per_day: 3 }, null, today)!.text, "done today at this pace");
   assert.equal(finishLine({ at: at(1), per_day: 3 }, null, today)!.text, "done tomorrow at this pace");
   assert.match(finishLine({ at: at(9), per_day: 1 / 3 }, null, today)!.title, /one every 3 days/);
+  // The day after a spring-forward night is tomorrow, though only 23 hours away (in a zone that
+  // changes clocks; elsewhere the same).
+  const march = new Date(2026, 2, 8, 9, 0);
+  assert.equal(finishLine({ at: Math.floor(new Date(2026, 2, 9, 0, 30).getTime() / 1000), per_day: 1 }, null, march)!.text, "done tomorrow at this pace");
 });
 
 test("the times you were needed, in one line", () => {

@@ -52,6 +52,8 @@ export function Inbox(props: { device: Device; onGone: (why: string) => void }) 
   const [shown, setShown] = useState<Shown>({ id: null, index: 0 });
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
+  // Bumped on every load, so the report under the decisions reads again with them.
+  const [loads, setLoads] = useState(0);
 
   const load = useCallback(async () => {
     try {
@@ -60,6 +62,7 @@ export function Inbox(props: { device: Device; onGone: (why: string) => void }) 
       if (r.status !== 200) return setError(r.body.error ?? `The PC answered ${r.status}.`);
       setError(null);
       setData(r.body);
+      setLoads((n) => n + 1);
     } catch (e) {
       setError(unreachable(e));
     }
@@ -175,7 +178,7 @@ export function Inbox(props: { device: Device; onGone: (why: string) => void }) 
           <Decision key={current.id} decision={current} device={device} onDecided={decided} onError={setError} />
         </>
       )}
-      {data && <LastDay device={device} open={list.length === 0} />}
+      {data && <LastDay device={device} open={list.length === 0} version={loads} />}
     </section>
   );
 }

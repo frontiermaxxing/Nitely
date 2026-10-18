@@ -863,22 +863,12 @@ impl Phone {
             ("GET", "/phone/api/push") | ("POST", "/phone/api/push") => self.push_route(head, body),
             ("POST", "/phone/api/pair") => self.pair(body),
             ("GET", "/phone/api/pair/status") => self.pair_status(head, body),
-            // The morning report (NIT-247): the last day, per goal, and where the person was needed.
-            ("GET", "/phone/api/report") => match self.authorize(head, body) {
-                Ok(_) => match (self.db)() {
-                    Ok(db) => match db.goal_report(None, crate::db::now() - 24 * 3600) {
-                        Ok(r) => (200, Reply::Json(json!(r))),
-                        Err(e) => (500, error(&format!("{e:#}"))),
-                    },
-                    Err(_) => (503, error("The PC could not open Nitely's database; try again.")),
-                },
-                Err((status, why)) => (status, error(why)),
-            },
             ("GET", "/phone/api/hello") => match self.authorize(head, body) {
                 Ok(device) => (200, Reply::Json(json!({ "name": device.name, "id": device.id }))),
                 Err((status, why)) => (status, error(why)),
             },
             ("GET", "/phone/api/decisions")
+            | ("POST", "/phone/api/report")
             | ("POST", "/phone/api/approve")
             | ("POST", "/phone/api/answer")
             | ("POST", "/phone/api/sendback")
@@ -900,6 +890,7 @@ impl Phone {
                         v["at_pc"] = json!(waiting.len());
                         v
                     }),
+                    "/phone/api/report" => report(&db, body),
                     "/phone/api/approve" => approve(&mut db, &device, body),
                     "/phone/api/answer" => answer(&db, &device, body),
                     "/phone/api/accept" => accept(&mut db, &device, body),
@@ -1229,6 +1220,23 @@ fn approve(db: &mut crate::Db, device: &Device, body: &[u8]) -> std::result::Res
     db.record_phone_approval(&issue.key, &req.what.patch, at, &device.id, req.time, &req.signature)?;
     db.add_note(&issue.key, &format!("Approved from the phone “{}”.", device.name), "note", &crate::Actor::Human)?;
     Ok(json!({ "ok": true, "state": "Approved" }))
+}
+
+/// Furthest back the phone's report reads.
+const REPORT_MAX_SECS: i64 = 14 * 24 * 3600;
+
+/// The report since the phone last looked (NIT-247): `{"since": unix seconds}`, or the last day
+/// without one. Per active goal, what landed, what is at risk, when it will be done, and every
+/// place the person was needed. Read-only.
+fn report(db: &crate::Db, body: &[u8]) -> std::result::Result<Value, Refused> {
+    #[derive(Deserialize)]
+    struct Since {
+        since: Option<i64>,
+    }
+    let req: Since = if body.is_empty() { Since { since: None } } else { serde_json::from_slice(body).map_err(|_| refuse(400, "Send since, in unix seconds."))? };
+    let t = now();
+    let since = req.since.unwrap_or(t - 24 * 3600).clamp(t - REPORT_MAX_SECS, t);
+    db.goal_report(None, since).map(|r| json!(r)).map_err(|e| refuse(500, format!("{e:#}")))
 }
 
 fn answer(db: &crate::Db, device: &Device, body: &[u8]) -> std::result::Result<Value, Refused> {
@@ -1607,6 +1615,15 @@ mod tests {
         assert_eq!(p.get_with(&base, "/phone/api/decisions", now(), "aaaaaaaaaaaaaaaa").1["at_pc"], 3, "and the person's own work");
         db.move_issue(&own, "Canceled", None, Some("done elsewhere"), &Actor::Human).unwrap();
         assert_eq!((&d["decisions"][1]["patch_id"], &d["decisions"][2]["patch_id"]), (&json!("p1"), &json!("p2")));
+
+        // The report since the phone last looked: both approvals and the question; never further
+        // back than two weeks.
+        let (status, r) = p.post(&base, "/phone/api/report", json!({ "since": now() - 3600 }));
+        assert_eq!(status, 200, "{r}");
+        let needed: Vec<(&str, &str)> = r["needed"].as_array().unwrap().iter().map(|n| (n["kind"].as_str().unwrap(), n["issue_key"].as_str().unwrap())).collect();
+        assert!(needed.contains(&("approval", a.as_str())) && needed.contains(&("approval", b.as_str())) && needed.contains(&("asked", a.as_str())), "{r}");
+        let (_, old) = p.post(&base, "/phone/api/report", json!({ "since": 0 }));
+        assert!(old["since"].as_i64().unwrap() >= now() - REPORT_MAX_SECS - 5, "{}", old["since"]);
 
         // An answer, signed over what it says.
         let t = now();

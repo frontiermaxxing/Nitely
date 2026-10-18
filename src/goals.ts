@@ -90,7 +90,8 @@ export function finishLine(finish: { at: number; per_day: number } | null | unde
   if (!finish) return null;
   const at = new Date(finish.at * 1000);
   const start = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-  const days = Math.floor((new Date(at.getFullYear(), at.getMonth(), at.getDate()).getTime() - start.getTime()) / 86400000);
+  // Rounded: across a daylight-saving change a calendar day is 23 or 25 hours.
+  const days = Math.round((new Date(at.getFullYear(), at.getMonth(), at.getDate()).getTime() - start.getTime()) / 86400000);
   const label = days <= 0 ? "today" : days === 1 ? "tomorrow" : `~${shortDate(at, today)}`;
   let late = false;
   if (target) {

@@ -10,9 +10,10 @@ that never leaves the phone, and `land` checks that signature as it checks the a
 ## What the phone can do, and what not
 
 - **Can:** see the decisions waiting on the person (asks and approvals), answer an ask, approve a
-  change, send a change back to the agents with a reason. Read the last day by goal (what landed,
-  what is at risk, when each goal will be done, where the person was needed), folded under the
-  decisions (`/phone/api/report`, NIT-247).
+  change, send a change back to the agents with a reason. Read what happened since they last read
+  it on the phone (the last day the first time, two weeks at most), by goal: what landed, what is
+  at risk, when each goal will be done, and every place they were needed. It is folded under the
+  decisions and reads again with them (signed `POST /phone/api/report` with `since`, NIT-247).
 - **Cannot:** anything else. No issue edits, no filing, no settings, no rules, no code, no other
   view of the backlog. The server the phone talks to has no other routes.
 - Other kinds of decision in the desktop Inbox (your own work, a stopped land, a conflict) show on

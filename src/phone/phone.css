@@ -112,7 +112,10 @@ body { font-family: var(--font); font-size: 16px; line-height: 1.5; -webkit-text
 .ph-report-goal p { margin: 2px 0 6px !important; font-size: 15px; }
 .ph-report-title { font-weight: var(--weight-medium); color: var(--fg); font-size: 17px; overflow-wrap: anywhere; }
 .ph-report-late { color: var(--fail); }
-.ph-report-risks { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; font-size: 15px; color: var(--fg-2); }
+.ph-report-list { list-style: none; margin: 0 0 6px; padding: 0; display: grid; gap: 4px; font-size: 15px; color: var(--fg-2); overflow-wrap: anywhere; }
 .ph-risk-fail { color: var(--fail); }
 .ph-risk-attention { color: var(--attention-ink); }
 .ph-report-needed { margin-top: 10px !important; color: var(--attention-ink) !important; font-weight: var(--weight-medium); }
+.ph-report-needs li { color: var(--fg-3); }
+.ph-report-needs .ph-report-open { color: var(--fg); }
+.ph-report-waits { color: var(--attention-ink); }

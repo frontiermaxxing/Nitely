@@ -179,29 +179,54 @@ impl Db {
     }
 
     /// Every place the person was needed since `since`: asks filed (questions, and findings to
-    /// accept), and changes that went to Needs You for their approval.
+    /// accept), changes that went to Needs You for their approval, and approvals filed straight
+    /// into Needs You (goal plans, playbook proposals). A finding to accept moves its issue to
+    /// Needs You too; that move is the same request, not a second one. Only an issue's latest
+    /// approval can still wait.
     fn needed_since(&self, project: Option<&str>, since: i64) -> Result<Vec<Needed>> {
         let of_project = |key: &Option<String>| of_project(project, key);
         let mut out = Vec::new();
+        // Findings to accept, by issue and when: their move to Needs You is the same request.
+        let mut findings: Vec<(String, i64)> = Vec::new();
         let mut asks = self.conn.prepare("SELECT asked_at, issue_key, question, finding IS NOT NULL, answer IS NULL AND closed IS NULL FROM ask WHERE asked_at >= ?1")?;
         for row in asks.query_map([since], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, String>(2)?, r.get::<_, bool>(3)?, r.get::<_, bool>(4)?)))? {
             let (ts, issue_key, question, finding, open) = row?;
+            if finding {
+                findings.extend(issue_key.clone().map(|k| (k, ts)));
+            }
             if of_project(&issue_key) {
                 let summary = if finding { format!("accept a finding? {}", first_line(&question)) } else { first_line(&question) };
                 out.push(Needed { ts, kind: "asked", issue_key, summary, open });
             }
         }
         let mut moves = self.conn.prepare(
-            "SELECT e.ts, e.issue_key, COALESCE(e.summary, ''), i.state = 'Needs You' FROM event e LEFT JOIN issue i ON i.key = e.issue_key
-             WHERE e.type = 'issue_moved' AND e.actor != 'human' AND e.summary LIKE '%→ Needs You%' AND e.ts >= ?1",
+            "SELECT e.ts, e.issue_key, e.type, COALESCE(e.summary, ''), COALESCE(i.title, ''), i.state = 'Needs You' FROM event e LEFT JOIN issue i ON i.key = e.issue_key
+             WHERE e.actor != 'human' AND e.ts >= ?1
+               AND ((e.type = 'issue_moved' AND e.summary LIKE '%→ Needs You%') OR (e.type = 'issue_created' AND e.summary LIKE 'Filed as Needs You%'))
+             ORDER BY e.ts, e.id",
         )?;
-        for row in moves.query_map([since], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, String>(2)?, r.get::<_, Option<bool>>(3)?)))? {
-            let (ts, issue_key, summary, open) = row?;
-            if of_project(&issue_key) {
-                let why = summary.split_once(": ").map(|(_, w)| w.to_string()).unwrap_or_else(|| "waited for your approval".to_string());
-                out.push(Needed { ts, kind: "approval", issue_key, summary: why, open: open.unwrap_or(false) });
+        let rows = moves.query_map([since], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, Option<bool>>(5)?))
+        })?;
+        let mut approvals: Vec<Needed> = Vec::new();
+        for row in rows {
+            let (ts, issue_key, kind, summary, title, waits) = row?;
+            let accepting = issue_key.as_ref().is_some_and(|k| findings.iter().any(|(fk, fts)| fk == k && (fts - ts).abs() <= 10));
+            if accepting || !of_project(&issue_key) {
+                continue;
             }
+            let why = if kind == "issue_created" {
+                first_line(&title)
+            } else {
+                summary.split_once(": ").map(|(_, w)| w.to_string()).unwrap_or_else(|| "waited for your approval".to_string())
+            };
+            // An earlier approval of the same issue was settled once a later one came.
+            for earlier in approvals.iter_mut().filter(|n| n.issue_key == issue_key) {
+                earlier.open = false;
+            }
+            approvals.push(Needed { ts, kind: "approval", issue_key, summary: why, open: waits.unwrap_or(false) });
         }
+        out.extend(approvals);
         out.sort_by(|a, b| (a.ts, &a.issue_key).cmp(&(b.ts, &b.issue_key)));
         Ok(out)
     }
@@ -297,5 +322,43 @@ mod tests {
         let other = db.save_goal("NIT", None, &GoalChange { title: Some("Quiet".into()), outcome: Some("o".into()), ..Default::default() }, &Actor::Human).unwrap().id;
         assert_eq!(db.expected_finish(other, 2).unwrap(), None);
         assert_eq!(db.expected_finish(goal, 0).unwrap(), None, "nothing left");
+    }
+
+    #[test]
+    fn each_request_of_the_person_counts_once_and_only_the_latest_still_waits() {
+        let mut db = db();
+        let agent = Actor::Agent("claude:x".into());
+        // Sent to the person twice: the first approval was settled when the second came.
+        let twice = issue(&mut db, "Billing", None);
+        db.move_issue(&twice, "Needs You", None, Some("billing needs your approval"), &agent).unwrap();
+        db.move_issue(&twice, "In Progress", None, None, &agent).unwrap();
+        db.move_issue(&twice, "Needs You", None, Some("billing again"), &agent).unwrap();
+        // A finding to accept: its ask and its move to Needs You are one request.
+        let finding = issue(&mut db, "Settings", None);
+        let ask = db.create_ask("No migration is needed: nobody uses it yet.", &[], Some(&finding), None, &agent).unwrap();
+        db.conn.execute("UPDATE ask SET finding = '{\"priority\":1,\"text\":\"No migration\"}' WHERE id = ?1", [ask.id]).unwrap();
+        db.move_issue(&finding, "Needs You", None, None, &agent).unwrap();
+        // Filed straight into Needs You, as a goal plan or a playbook proposal is.
+        let new = NewIssue {
+            project: "NIT".into(),
+            title: "Plan: ship it".into(),
+            kind: "feature".into(),
+            body: "b".into(),
+            evidence: "e".into(),
+            source: "claude".into(),
+            allow_similar: true,
+            state: Some("Needs You".into()),
+            owner: Some("human".into()),
+            ..Default::default()
+        };
+        let plan = db.create_issue(&new, &agent).unwrap().key;
+
+        let r = db.goal_report(None, now() - 60).unwrap();
+        let mut needed: Vec<(&str, &str, bool)> = r.needed.iter().map(|n| (n.kind, n.issue_key.as_deref().unwrap(), n.open)).collect();
+        needed.sort();
+        let mut want = vec![("approval", twice.as_str(), false), ("approval", twice.as_str(), true), ("asked", finding.as_str(), true), ("approval", plan.as_str(), true)];
+        want.sort();
+        assert_eq!(needed, want, "{:?}", r.needed);
+        assert!(r.needed.iter().any(|n| n.issue_key.as_deref() == Some(plan.as_str()) && n.summary == "Plan: ship it"), "{:?}", r.needed);
     }
 }
