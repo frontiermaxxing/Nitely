@@ -123,7 +123,8 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         issue: issue.key.clone(),
         branch: branch.clone(),
         base: base.clone(),
-        patch_id: patch_id(&worktree, &since)?,
+        // Of the commit the gate ran on, as the review and its reuse are: one made meanwhile is not covered.
+        patch_id: patch_id_range(&worktree, &since, &gate.commit)?,
         commit: gate.commit.clone(),
         files: files.len(),
         gate,
