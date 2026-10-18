@@ -1155,6 +1155,8 @@ when_changed = ["billing"]
         assert!(!wt_a.exists() && f.repo.join("sidebar.txt").exists());
         let said = f.db.timeline(&a).unwrap().into_iter().find(|e| e.summary.as_deref() == Some("Landing it automatically, as the playbook says")).unwrap();
         assert_eq!(said.actor, AUTO_LANDER, "Nitely's line, not the agent's: it does not put the agent back on the issue");
+        let landed = f.db.timeline(&a).unwrap().into_iter().find(|e| e.kind == "landed").unwrap();
+        assert_eq!(landed.actor, AUTO_LANDER, "submit's automatic land is Nitely's, as an approved one is");
 
         // One that needs a human waits, and lands as soon as they approve it.
         let (b, _) = f.submitted("Billing fix", "billing.txt", "x");

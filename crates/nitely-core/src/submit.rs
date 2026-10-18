@@ -328,8 +328,11 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     let app_lands = state == "Approved" && !crate::approval::agents_can_verify();
     if by_nitely && matches!(state, "In Review" | "Approved") && !app_lands {
         let root_dir = root.to_string_lossy().into_owned();
-        let landed = crate::land::land_now(db, config, &issue.key, &root_dir, !local_only, actor);
-        let (state, next) = crate::land::after_auto_land(db, &issue.key, &landed, actor)?;
+        // Nitely lands it, as it does an approved change: what the land and its queue log is
+        // Nitely's, not the agent's, who may be on another issue by the time it runs (NIT-273).
+        let lander = Actor::Agent(crate::land::AUTO_LANDER.into());
+        let landed = crate::land::land_now(db, config, &issue.key, &root_dir, !local_only, &lander);
+        let (state, next) = crate::land::after_auto_land(db, &issue.key, &landed, &lander)?;
         out.state = state;
         out.next = next;
         out.land = landed.ok();
