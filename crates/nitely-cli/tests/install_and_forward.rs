@@ -93,7 +93,8 @@ fn install_without_a_target_skips_its_own_folders_on_path() {
     let installed = dir.join("bin").join(exe);
     std::fs::write(&installed, b"an old nitely").unwrap();
     let path = std::env::join_paths([release.join("deps"), release.clone(), dir.join("bin")]).unwrap();
-    let out = Command::new(release.join(exe)).arg("install").env("PATH", path).output().unwrap();
+    // A data folder of its own: install reads the database it would serve, never the person's.
+    let out = Command::new(release.join(exe)).arg("install").env("PATH", path).env("NITELY_HOME", dir.join("home")).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let report: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(report["replaced"], true, "{report}");
@@ -110,8 +111,31 @@ fn install_from_a_file_beside_the_installed_one_replaces_it() {
     std::fs::write(&installed, b"an old nitely").unwrap();
     let new_build = dir.join("bin").join(if cfg!(windows) { "nitely-new.exe" } else { "nitely-new" });
     link_or_copy(built, &new_build);
-    let out = Command::new(built).args(["install", "--from"]).arg(&new_build).env("PATH", dir.join("bin")).output().unwrap();
+    let out = Command::new(built).args(["install", "--from"]).arg(&new_build).env("PATH", dir.join("bin")).env("NITELY_HOME", dir.join("home")).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(std::fs::read(&installed).unwrap(), std::fs::read(built).unwrap());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// An install of a build that could not open the person's database (one a build with a migration
+/// it lacks upgraded) is refused, and the nitely in place stays (NIT-239).
+#[test]
+fn install_refuses_a_build_that_could_not_open_the_database() {
+    let dir = temp();
+    let exe = if cfg!(windows) { "nitely.exe" } else { "nitely" };
+    let built = Path::new(env!("CARGO_BIN_EXE_nitely"));
+    let installed = dir.join("bin").join(exe);
+    std::fs::write(&installed, b"the newer nitely").unwrap();
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    // The database as a newer build left it: one migration more than this build has.
+    drop(nitely_core::Db::open(&home.join("nitely.db")).unwrap());
+    let db = rusqlite::Connection::open(home.join("nitely.db")).unwrap();
+    db.execute("INSERT INTO schema_migration (name, applied_at, applied_by) VALUES ('20991231-later', 0, '9.9.0')", []).unwrap();
+    drop(db);
+    let out = Command::new(built).args(["install", "--to"]).arg(&installed).env("NITELY_HOME", &home).output().unwrap();
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success() && said.contains("could not open your database") && said.contains("20991231-later"), "{said}");
+    assert_eq!(std::fs::read(&installed).unwrap(), b"the newer nitely", "the nitely in place stays");
     std::fs::remove_dir_all(&dir).ok();
 }

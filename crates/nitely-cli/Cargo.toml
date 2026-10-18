@@ -22,4 +22,5 @@ ureq = { version = "3", features = ["json"] }
 
 
 [dev-dependencies]
+# Tests write a database as a newer build would leave it (install_and_forward.rs).
 rusqlite.workspace = true
