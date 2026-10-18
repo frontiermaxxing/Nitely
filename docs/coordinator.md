@@ -79,9 +79,12 @@ Andrew", and once it read the code to confirm a finding was stale (lanes.rs:78 o
    notes and the project brief. A second attempt keeps the first one's vendor and worktree, as it
    does today. Lanes were never what made the work fast. Parallel workers that do not collide did.
 2. **Order comes from the approved goal.** The supervisor works active goals in the order the person
-   ranked them, and within a goal, the plan's order. Blockers are respected and the collision check
-   applies. Each goal has a worker budget. A goal with nothing ready yields its slots to the next.
-   Work outside any goal runs only when no goal has ready work.
+   ranked them (a rank on the goal, set on the goal view; oldest first until they set one), and
+   within a goal, the plan's order, which is the order its issues were filed. Blockers are respected
+   and the collision check applies. Each goal has a worker budget. A goal with nothing ready yields
+   its slots to the next. Work outside any goal runs only when no goal has ready work, except
+   priority 1 (exploitable, data loss, a broken release), which goes first wherever it is, as
+   `next_task` already ranks it.
 3. **The plan names files.** Every planned issue says which files it touches, in its body, where
    `next_task`'s overlap check already reads paths. That is how two workers stay apart before
    either has a branch. It replaces "lanes by area".
