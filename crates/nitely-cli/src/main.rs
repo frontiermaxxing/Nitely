@@ -757,6 +757,24 @@ fn print_agent_changes(agents: &[nitely_core::connect::AgentPlan]) {
     }
 }
 
+/// Asks the build at `from` whether it opens the database (`check-database`): (its exit code, what
+/// it said), or None when it could not run. It runs as a copy, made executable, by its full path,
+/// so a file just written without execute permission runs, and a bare name never finds another
+/// nitely on PATH.
+fn ask_build(from: &std::path::Path) -> Option<(Option<i32>, String)> {
+    let probe = paths::unique_temp("nitely-probe", if cfg!(windows) { ".exe" } else { "" });
+    std::fs::copy(from, &probe).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o755)).ok()?;
+    }
+    let out = std::process::Command::new(&probe).arg("check-database").output();
+    std::fs::remove_file(&probe).ok();
+    let out = out.ok()?;
+    Some((out.status.code(), String::from_utf8_lossy(&out.stderr).trim().to_string()))
+}
+
 fn run(cmd: Cmd) -> Result<()> {
     // Agents run the CLI too, so it never acts as the human: approving and answering asks happen
     // only in the app.
@@ -838,10 +856,9 @@ fn run(cmd: Cmd) -> Result<()> {
             let refused = if itself {
                 nitely_core::db::refused_by_this_build(&paths::db_path())?
             } else {
-                let asked = std::process::Command::new(&from).arg("check-database").output();
-                match asked.as_ref().map(|o| (o.status.code(), String::from_utf8_lossy(&o.stderr).trim().to_string())) {
-                    Ok((Some(0), _)) => None,
-                    Ok((Some(3), why)) => Some(why),
+                match ask_build(&from) {
+                    Some((Some(0), _)) => None,
+                    Some((Some(3), why)) => Some(why),
                     _ if force => None,
                     _ => bail!(
                         "not installing {}: it cannot say whether it opens your database (a build older than this check, or not a nitely). Install it with --force to replace {} anyway",
