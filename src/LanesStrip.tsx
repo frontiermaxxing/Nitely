@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "./backend";
-import { capWords, chipName, chipWords, laneChips, limitsOf, machineWords, memoryWords, sizeWords, waiting, type LaneChip } from "./lanes";
+import { capWords, chipName, chipWords, laneChips, limitsOf, machineWords, memoryWords, queueWords, sizeWords, waiting, type LaneChip } from "./lanes";
 import type { LanesOverview, MachineNow } from "./types";
 import { StateDot } from "./ui";
 import "./styles/lanes.css";
@@ -49,20 +49,15 @@ export function LanesStrip(props: { version: number; now: number; onOpenIssue: (
       <div className="lanes-chips">
         {lanes.projects.map((p) => {
           const queued = waiting(p);
+          const words = queueWords(p, props.now);
           return (
             <div key={`${p.project}-${p.repo}`} className="lanes-project">
               {laneChips(p).map((c) => (
                 <Chip key={c.lane} chip={c} now={props.now} onOpenIssue={props.onOpenIssue} />
               ))}
               {queued > 0 && (
-                <span
-                  className="lanes-queue"
-                  title={p.queue
-                    .filter((r) => r.state === "queued")
-                    .map((r) => `${r.issue ?? "no issue"}: ${r.command}${(r.waiting_why ?? r.waiting_memory) ? ` (${r.waiting_why ?? r.waiting_memory})` : ""}`)
-                    .join("\n")}
-                >
-                  {queued} waiting
+                <span className={`lanes-queue${words.long ? " long" : ""}`} title={words.lines.join("\n")}>
+                  {words.label}
                 </span>
               )}
             </div>

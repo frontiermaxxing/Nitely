@@ -2,7 +2,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { bytesWords, capWords, chipName, chipWords, forHowLong, laneChips, laneRunId, limitsOf, machineWords, memoryWords, sizeWords, waiting } from "./lanes.ts";
+import { bytesWords, capWords, chipName, chipWords, forHowLong, laneChips, laneRunId, limitsOf, machineWords, memoryWords, queueWords, sizeWords, waiting } from "./lanes.ts";
 import type { LaneRun, ProjectLanes } from "./types.ts";
 
 const run = (id: number, state: string, lane: number | null, more: Partial<LaneRun> = {}): LaneRun =>
@@ -115,4 +115,14 @@ test("the cap shown is the one a run is held to when the slots share less than t
   const machine = { memory: null, limits: { total: 64 * GB, floor: 12.8 * GB, cap: 16 * GB, floor_from: "default", cap_from: "default" }, run_cap: 10.24 * GB, below_normal: true };
   assert.equal(memoryWords(machine).cap, "10.2 GB per run (16.0 GB default, shared by the slots above the floor)");
   assert.equal(memoryWords({ ...machine, run_cap: 16 * GB }).cap, "16.0 GB per run (default)");
+});
+
+test("a queue says how long its oldest request has waited once that is long, and how to cancel it", () => {
+  const p = project([run(9, "running", 1), run(10, "queued", null, { queued_at: 1000, waiting_why: "waiting: behind request 9 of the same repo" }), run(11, "queued", null, { queued_at: 1500 })], []);
+  assert.equal(queueWords(p, 1100).label, "2 waiting");
+  const late = queueWords(p, 1000 + 14 * 60);
+  assert.equal(late.label, "2 waiting, longest 14m");
+  assert.ok(late.long);
+  assert.match(late.lines[0], /\(waiting: behind request 9 of the same repo\), waited 14m: `nitely lanes cancel 10` takes it out/);
+  assert.doesNotMatch(late.lines[1], /cancel/);
 });

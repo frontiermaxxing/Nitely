@@ -58,6 +58,12 @@ pub fn show(id: i64) -> Result<()> {
     Ok(())
 }
 
+/// `nitely lanes cancel <run>`: a queued run out of the queue.
+pub fn cancel(id: i64, me: &Actor) -> Result<()> {
+    let db = Db::open_default()?;
+    print_json(&nitely_core::lanes::cancel(&db, id, me)?)
+}
+
 /// `nitely run -- <command>`: the current worktree as a snapshot, in a lane, its output followed as
 /// it comes. Exits with the command's own exit code.
 pub fn run(issue: Option<String>, shell: Option<String>, command: Vec<String>, me: &Actor) -> Result<()> {
