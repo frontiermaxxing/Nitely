@@ -556,8 +556,13 @@ browser tab says "Opened NIT-14 in Nitely". It only ever opens a view: GET and H
 and nothing else, no token, no state changed, and a Host other than 127.0.0.1 or localhost gets no
 answer. Chats, GitHub and most apps open web links where they drop custom schemes. The app also
 registers the older `nitely://issue/NIT-14` form (Tauri's deep-link plugin; the installer at
-install time, and every run of the app for the current user on Windows and Linux): the OS opens that
-one even when the app is closed, which the web form cannot, and the web form's page offers it.
+install time, and every run of the app for the current user on Windows and Linux), and the web
+form's page offers it. So that web links open while the app is closed too, the first connect
+registers a small listener at login (`nitely links serve`, crates/nitely-core/src/link_service.rs;
+docs/setup.md, "Issue links"): it owns the port, hands each link to the app through
+`nitely://issue/KEY`, which focuses the running app or starts it, and says "Opening NIT-14 in
+Nitely…". While it is registered the app leaves the port to it and starts it when it is not
+answering; turned off in Settings, the app answers links itself again.
 Inside the app, either form in an agent's text opens the panel (`issueKeyOf` in `src/markdown.ts`).
 
 A new view joins j/k by adding its item selector to `ITEMS` in `src/Palette.tsx`; the items must be

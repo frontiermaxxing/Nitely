@@ -40,6 +40,26 @@ project's brief (the project page's Brief view). Nothing is committed or run aga
 Manual setup still works (`nitely project create`, `nitely repo add`, `nitely issue import`).
 Approving and answering asks happen only in the app, never through the CLI or MCP.
 
+## Issue links
+
+Agents link issues as `http://127.0.0.1:7423/i/APP-14`, which opens the issue in Nitely from a chat,
+a pull request or a browser. The first connect also sets up a small listener that starts when you
+log in, with no window, so those links open even when Nitely is closed: it owns 127.0.0.1:7423, hands
+each link to the app when it runs, and starts the app with the link when it does not. It only ever
+opens a view, answers loopback only, and needs no admin rights, because it is one of your own login
+items:
+
+- Windows: the `NitelyLinks` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
+  (`conhost.exe --headless "<nitely>" links serve`)
+- macOS: `~/Library/LaunchAgents/net.nitely.links.plist`
+- Linux: the systemd user unit `nitely-links.service`, or `~/.config/autostart/nitely-links.desktop`
+  without systemd
+
+Settings, Issue links turns it off and on again, as do `nitely links uninstall` and
+`nitely links install`; `nitely links status` says whether it is on and who answers links now.
+Off, the app answers links itself while it runs. Agent setup lists it beside the agents. The test
+harness and agents with a stand-in home never register it.
+
 ## Faster builds on Windows (optional)
 
 Nothing here is needed: Nitely works without it, and it never changes these settings itself. It is

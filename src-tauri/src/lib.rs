@@ -92,6 +92,63 @@ fn open_issue(app: &tauri::AppHandle, key: String) {
     focus_main(app);
 }
 
+/// Who answers issue links on 127.0.0.1:7423 (NIT-229). When the listener that starts at login is
+/// registered, it owns the port and hands each link here through nitely://; the app only makes sure
+/// it runs. When it is not, the app answers them itself, and lets the port go as soon as the
+/// listener is registered.
+fn answer_links(app: tauri::AppHandle) {
+    use nitely_core::{link_service, links};
+    let mut told = false;
+    loop {
+        let nitely = nitely_core::connect::nitely_command_path();
+        let registered = nitely.as_deref().is_some_and(link_service::registered);
+        if registered {
+            if links::probe() != Some(links::Role::Service) {
+                if let Some(n) = &nitely {
+                    link_service::start(n).ok();
+                }
+            }
+        } else {
+            match links::bind() {
+                Ok(listener) => {
+                    told = false;
+                    let open = app.clone();
+                    let keep = nitely.clone();
+                    links::serve(listener, links::Role::App, move |key| open_issue(&open, key), move || !keep.as_deref().is_some_and(link_service::registered));
+                    continue;
+                }
+                Err(e) if !told && links::probe().is_none() => {
+                    eprintln!("issue links: {e:#}");
+                    told = true;
+                }
+                Err(_) => {}
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(30));
+    }
+}
+
+/// The listener for issue links at login: whether it is on, and who answers links now (Settings).
+#[tauri::command]
+async fn links_service() -> Result<nitely_core::link_service::Status, String> {
+    let nitely = nitely_core::connect::nitely_command_path().ok_or("the nitely command is neither on PATH nor beside this app")?;
+    Ok(nitely_core::link_service::status(&Config::load().map_err(err)?, &nitely))
+}
+
+/// Turns the listener for issue links at login on or off (Settings).
+#[tauri::command]
+async fn set_links_service(on: bool) -> Result<nitely_core::link_service::Status, String> {
+    if harness::on() {
+        return Err("the test harness never registers anything at login".into());
+    }
+    let nitely = nitely_core::connect::nitely_command_path().ok_or("the nitely command is neither on PATH nor beside this app")?;
+    if on {
+        nitely_core::link_service::install(&nitely).map_err(err)
+    } else {
+        nitely_core::link_service::uninstall(&nitely).map_err(err)
+    }
+}
+
 pub(crate) fn focus_main(app: &tauri::AppHandle) {
     use tauri::Manager;
     if let Some(w) = app.get_webview_window("main") {
@@ -720,7 +777,7 @@ pub fn run() {
             // harness, whose app must not answer the person's links.
             if !harness::on() {
                 let links = app.handle().clone();
-                std::thread::spawn(move || nitely_core::links::listen(move |key| open_issue(&links, key), |e| eprintln!("issue links: {e:#}")));
+                std::thread::spawn(move || answer_links(links));
             }
             let handle = app.handle().clone();
             std::thread::spawn(move || watch(handle));
@@ -749,6 +806,8 @@ pub fn run() {
             notify::set_badge,
             snapshot,
             opened_link,
+            links_service,
+            set_links_service,
             pulse,
             activity,
             sync_now,

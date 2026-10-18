@@ -70,6 +70,12 @@ enum Cmd {
         #[command(subcommand)]
         command: Option<LanesCmd>,
     },
+    /// Issue links (http://127.0.0.1:7423/i/KEY): the small listener that starts at login and opens
+    /// them in the app, starting it when it is closed (docs/setup.md, "Issue links").
+    Links {
+        #[command(subcommand)]
+        command: LinksCmd,
+    },
     /// Review batches (docs/batching.md): `compare` sets the shadow batches of `[review] batch =
     /// "shadow"` against the single reviews that decided the same changes.
     Batches {
@@ -332,6 +338,18 @@ enum BatchesCmd {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum LinksCmd {
+    /// Whether the listener is registered at login and who answers links now.
+    Status,
+    /// Register the listener at login (no admin rights: your own login items) and start it now.
+    Install,
+    /// Take it off at login; the running one stops within a minute and the app answers links again.
+    Uninstall,
+    /// Run the listener (what login starts): answers links on 127.0.0.1:7423 and opens the app.
+    Serve,
 }
 
 #[derive(Subcommand)]
@@ -717,6 +735,29 @@ fn run(cmd: Cmd) -> Result<()> {
             for line in nitely_core::review_compare::Report::of(&pairs).lines() {
                 println!("{line}");
             }
+            Ok(())
+        }
+        Cmd::Links { command } => {
+            let me_exe = std::env::current_exe()?;
+            let s = match command {
+                LinksCmd::Serve => return nitely_core::link_service::serve(&me_exe),
+                LinksCmd::Status => nitely_core::link_service::status(&Config::load()?, &me_exe),
+                LinksCmd::Install => nitely_core::link_service::install(&me_exe)?,
+                LinksCmd::Uninstall => nitely_core::link_service::uninstall(&me_exe)?,
+            };
+            let state = if !s.allowed {
+                "never registered here (test harness, or a stand-in agents' home)".to_string()
+            } else if s.off {
+                "off (turned off; `nitely links install` turns it on)".to_string()
+            } else if s.current {
+                format!("on at login: {}", s.place)
+            } else if s.registered {
+                format!("registered with another nitely at {} (`nitely links install` points it here)", s.place)
+            } else {
+                "not registered (`nitely links install`)".to_string()
+            };
+            println!("Issue links at login: {state}");
+            println!("Answering on 127.0.0.1:{}: {}", s.port, s.answering.unwrap_or("nothing (links open only while something answers)"));
             Ok(())
         }
         Cmd::Lanes { command: None } => lanes::status(None),

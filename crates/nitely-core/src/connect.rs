@@ -151,7 +151,7 @@ pub fn plan(db: &Db, config: &Config, path: &str, key: Option<&str>, name: Optio
         warnings.push(format!("{UNRESOLVED}; new agent entries will run `nitely`, and entries that point at another install are left as they are"));
     }
     let nitely = resolved.clone().unwrap_or_else(|| "nitely".into());
-    let agents = agent_plans(&nitely, resolved.is_some());
+    let agents = with_links(agent_plans(&nitely, resolved.is_some()), config, resolved.as_deref());
     for a in &agents {
         if let Some(e) = &a.error {
             warnings.push(format!("{} is skipped: {e}", a.agent));
@@ -295,7 +295,32 @@ pub fn agent_setup(config: &Config) -> Vec<AgentPlan> {
     if config.repos.is_empty() {
         return Vec::new();
     }
-    setup_for(nitely_command())
+    let nitely = nitely_command();
+    with_links(setup_for(nitely.clone()), config, nitely.as_deref())
+}
+
+/// The agents' plans and, beside them, the listener for issue links at login (link_service.rs):
+/// it is what makes every agent's links open, so it is set up with them, unless the person turned
+/// it off or Nitely cannot find its own command.
+fn with_links(mut plans: Vec<AgentPlan>, config: &Config, nitely: Option<&str>) -> Vec<AgentPlan> {
+    if let Some(change) = nitely.and_then(|n| crate::link_service::setup_change(config, n)) {
+        plans.push(AgentPlan { agent: "Issue links".into(), found: true, changes: vec![change], error: None });
+    }
+    plans
+}
+
+/// The full path of the nitely command connect writes (`nitely` on PATH, or a path).
+pub fn resolve_nitely(nitely: &str) -> Option<PathBuf> {
+    let p = Path::new(nitely);
+    if p.components().count() > 1 {
+        return Some(p.to_path_buf()).filter(|p| p.exists());
+    }
+    which(nitely)
+}
+
+/// The nitely command agents run, when Nitely can find it (on PATH, or beside this program).
+pub fn nitely_command_path() -> Option<PathBuf> {
+    nitely_command().and_then(|n| resolve_nitely(&n))
 }
 
 fn setup_for(nitely: Option<String>) -> Vec<AgentPlan> {

@@ -2083,6 +2083,11 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return phoneFixture.phoneRevoke(args);
       case "agent_setup_apply":
         return { done: [], failed: [] };
+      case "links_service":
+        return linksStatus();
+      case "set_links_service":
+        linksOn = Boolean(args.on);
+        return linksStatus();
       case "network":
         return { tokens: MACHINES, urls: ["http://192.168.1.68:7421/mcp"], port: 7421 };
       case "network_add": {
@@ -2106,4 +2111,19 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
   })();
   // Callers own what they get back, as they would a fresh copy from Tauri.
   return structuredClone(result) as T;
+}
+
+// The listener for issue links at login (Settings, Issue links): on until turned off.
+let linksOn = true;
+function linksStatus() {
+  return {
+    allowed: true,
+    off: !linksOn,
+    registered: linksOn,
+    current: linksOn,
+    answering: linksOn ? "service" : "app",
+    place: "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\NitelyLinks",
+    command: 'conhost.exe --headless "C:\\Users\\you\\.cargo\\bin\\nitely.exe" links serve',
+    port: 7423,
+  };
 }

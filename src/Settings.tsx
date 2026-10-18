@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import type { View } from "./App";
 import { CrewSettings } from "./CrewSettings";
 import { LanesSettings } from "./LanesStrip";
+import { LinksSettings } from "./LinksSettings";
 import { Network } from "./Network";
 import { NotifySettingsPanel } from "./Notifications";
 import { PhoneSetup } from "./PhoneSetup";
@@ -17,6 +18,7 @@ export const SETTINGS_SECTIONS = [
   { id: "reviews", label: "Review defaults" },
   { id: "crew", label: "Crew" },
   { id: "lanes", label: "Build lanes" },
+  { id: "links", label: "Issue links" },
   { id: "phone", label: "Phone" },
   { id: "machines", label: "Other machines" },
 ] as const;
@@ -103,6 +105,10 @@ export function Settings(props: {
 
       <Section id="lanes" label="Build lanes" why="Where builds and tests run: a few warm checkouts per project that keep their build output, so agents' worktrees hold source only.">
         <LanesSettings version={props.version} />
+      </Section>
+
+      <Section id="links" label="Issue links" why="The links agents write to issues, in chats, pull requests and notes, open the issue here.">
+        <LinksSettings version={props.version} />
       </Section>
 
       <Section id="phone" label="Phone" why="Answer the agents' questions and approve their changes from your phone. A paired phone can do that and nothing else, and every approval it gives is signed with a key that never leaves it.">

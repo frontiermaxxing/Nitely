@@ -28,6 +28,10 @@ pub struct Config {
     /// None works it out from the machine's cores and memory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_slots: Option<u32>,
+    /// The listener for issue links that starts at login (link_service.rs, NIT-229): None is on
+    /// (once a repo is connected), `false` when the person turned it off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub links_service: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

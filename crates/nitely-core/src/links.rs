@@ -4,18 +4,39 @@
 //! the app on that issue. It only opens a view, never changes anything, so it needs no token.
 //!
 //! The port is fixed, so a link pasted into a chat or a pull request today still opens the issue
-//! next month: links never name another port. When something else holds it, the app says so and
-//! takes it as soon as it is free (`listen`).
+//! next month: links never name another port.
+//!
+//! Two processes can answer: the app while it runs, and `nitely links serve`, a small listener
+//! started at login (link_service.rs) that forwards a link to the app, starting it first when it is
+//! closed. When the listener is registered the app leaves the port to it; otherwise the app takes it.
 
 use anyhow::{Context, Result};
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The loopback port issue links use: beside the relay's 7421 and the phone's 7422.
 pub const PORT: u16 = 7423;
 /// The path an issue's key follows.
 pub const PATH: &str = "/i/";
+/// What a listener answers on `/health`, followed by its role: how one finds another.
+const HEALTH: &str = "nitely-links";
+
+/// Which process answers: the app itself, or the listener started at login.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    App,
+    Service,
+}
+
+impl Role {
+    fn name(self) -> &'static str {
+        match self {
+            Role::App => "app",
+            Role::Service => "service",
+        }
+    }
+}
 
 /// The web link to an issue: `http://127.0.0.1:7423/i/NIT-12`.
 pub fn issue_url(key: &str) -> String {
@@ -58,40 +79,59 @@ pub fn bind() -> Result<TcpListener> {
     TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, PORT))).with_context(|| format!("127.0.0.1:{PORT} is taken, so issue links cannot open the app until it is free"))
 }
 
-/// Answers issue links for the life of the process: takes `PORT`, and while something else holds
-/// it, says so once through `taken` and tries again every 30 seconds.
-pub fn listen(open: impl Fn(String) + Send + Sync + 'static, taken: impl Fn(&anyhow::Error)) {
-    let mut told = false;
+/// Who answers on `PORT` now: `Some(Role)` for a Nitely listener, None when nothing does (or
+/// something that is not Nitely holds it).
+pub fn probe() -> Option<Role> {
+    probe_port(PORT)
+}
+
+fn probe_port(port: u16) -> Option<Role> {
+    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    let mut s = TcpStream::connect_timeout(&addr, Duration::from_millis(500)).ok()?;
+    s.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
+    write!(s, "GET /health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n").ok()?;
+    let mut reply = String::new();
+    s.read_to_string(&mut reply).ok()?;
+    let body = reply.split("\r\n\r\n").nth(1)?.trim();
+    match body.strip_prefix(HEALTH)?.trim() {
+        "app" => Some(Role::App),
+        "service" => Some(Role::Service),
+        _ => None,
+    }
+}
+
+/// Answers issue links on `listener` as `role` while `keep` says so (asked about once a second),
+/// calling `open` with each key a link names. One short-lived thread per request.
+pub fn serve(listener: TcpListener, role: Role, open: impl Fn(String) + Send + Sync + 'static, keep: impl Fn() -> bool) {
+    let open = std::sync::Arc::new(open);
+    let port = listener.local_addr().map(|a| a.port()).unwrap_or(PORT);
+    if listener.set_nonblocking(true).is_err() {
+        return;
+    }
+    let mut asked = Instant::now();
     loop {
-        match bind() {
-            Ok(listener) => return serve(listener, open),
-            Err(e) => {
-                if !told {
-                    taken(&e);
-                    told = true;
-                }
-                std::thread::sleep(Duration::from_secs(30));
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream.set_nonblocking(false).ok();
+                let open = open.clone();
+                std::thread::spawn(move || {
+                    answer(stream, port, role, |k| open(k)).ok();
+                });
             }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(50)),
+            Err(_) => std::thread::sleep(Duration::from_millis(200)),
+        }
+        if asked.elapsed() >= Duration::from_secs(1) {
+            if !keep() {
+                return;
+            }
+            asked = Instant::now();
         }
     }
 }
 
-/// Answers issue links on `listener` until the process ends, calling `open` with each key a link
-/// names. One short-lived thread per request.
-pub fn serve(listener: TcpListener, open: impl Fn(String) + Send + Sync + 'static) {
-    let open = std::sync::Arc::new(open);
-    let port = listener.local_addr().map(|a| a.port()).unwrap_or(PORT);
-    for stream in listener.incoming().flatten() {
-        let open = open.clone();
-        std::thread::spawn(move || {
-            answer(stream, port, |k| open(k)).ok();
-        });
-    }
-}
-
-/// Reads one request and answers it: a page saying the issue opened, after `open` was called with
-/// its key; 404 for anything else. Only GET and HEAD, only for a loopback host name.
-fn answer(mut stream: TcpStream, port: u16, open: impl Fn(String)) -> Result<()> {
+/// Reads one request and answers it (`respond`). Only GET and HEAD, only for a loopback host name.
+fn answer(mut stream: TcpStream, port: u16, role: Role, open: impl Fn(String)) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(3)))?;
     let mut buf = Vec::new();
     let mut chunk = [0u8; 1024];
@@ -103,18 +143,20 @@ fn answer(mut stream: TcpStream, port: u16, open: impl Fn(String)) -> Result<()>
         buf.extend_from_slice(&chunk[..n]);
     }
     let head = String::from_utf8_lossy(&buf);
-    let (status, page) = respond(&head, port, open);
+    let (status, page) = respond(&head, port, role, open);
     let body = if head.starts_with("HEAD ") { String::new() } else { page };
+    let kind = if body.starts_with(HEALTH) { "text/plain" } else { "text/html" };
     write!(
         stream,
-        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status}\r\nContent-Type: {kind}; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )?;
     Ok(())
 }
 
-/// The status line and page for a request's head; calls `open` for an issue link.
-fn respond(head: &str, port: u16, open: impl Fn(String)) -> (&'static str, String) {
+/// The status line and page for a request's head; calls `open` for an issue link. `/health` says
+/// which role answers, for `probe`.
+fn respond(head: &str, port: u16, role: Role, open: impl Fn(String)) -> (&'static str, String) {
     let mut lines = head.lines();
     let mut first = lines.next().unwrap_or("").split_whitespace();
     let (method, target) = (first.next().unwrap_or(""), first.next().unwrap_or(""));
@@ -128,6 +170,9 @@ fn respond(head: &str, port: u16, open: impl Fn(String)) -> (&'static str, Strin
     if !loopback {
         return ("421 Misdirected Request", page("Nitely", "Issue links answer on 127.0.0.1 only."));
     }
+    if target == "/health" {
+        return ("200 OK", format!("{HEALTH} {}", role.name()));
+    }
     let Some(key) = target.strip_prefix(PATH).map(|k| k.split(['?', '#']).next().unwrap_or("").trim_end_matches('/')).and_then(valid_key) else {
         return ("404 Not Found", page("Nitely", "This is not an issue link. They look like /i/NIT-12."));
     };
@@ -135,12 +180,13 @@ fn respond(head: &str, port: u16, open: impl Fn(String)) -> (&'static str, Strin
         open(key.clone());
     }
     let app = crate::issues::issue_link(&key);
+    let done = match role {
+        Role::App => format!("Opened <b>{key}</b> in Nitely. You can close this tab."),
+        Role::Service => format!("Opening <b>{key}</b> in Nitely… You can close this tab."),
+    };
     (
         "200 OK",
-        page(
-            &format!("{key} · Nitely"),
-            &format!("Opened <b>{key}</b> in Nitely. You can close this tab. <span class=\"m\">Nothing came up? Open it with <a href=\"{app}\">the app's own link</a>.</span>"),
-        ),
+        page(&format!("{key} · Nitely"), &format!("{done} <span class=\"m\">Nothing came up? Open it with <a href=\"{app}\">the app's own link</a>.</span>")),
     )
 }
 
@@ -171,7 +217,7 @@ mod tests {
     #[test]
     fn answers_an_issue_link_by_opening_it_and_nothing_else() {
         let opened = std::cell::RefCell::new(Vec::new());
-        let ask = |head: &str| respond(head, 7423, |k| opened.borrow_mut().push(k));
+        let ask = |head: &str| respond(head, 7423, Role::App, |k| opened.borrow_mut().push(k));
         let (status, page) = ask("GET /i/nit-228 HTTP/1.1\r\nHost: 127.0.0.1:7423\r\n\r\n");
         assert_eq!(status, "200 OK");
         assert!(page.contains("Opened <b>NIT-228</b>") && page.contains("nitely://issue/NIT-228"), "{page}");
@@ -185,6 +231,11 @@ mod tests {
         assert_eq!(ask("GET /i/<script> HTTP/1.1\r\nHost: 127.0.0.1:7423\r\n\r\n").0, "404 Not Found");
         assert_eq!(ask("GET /favicon.ico HTTP/1.1\r\nHost: 127.0.0.1:7423\r\n\r\n").0, "404 Not Found");
         assert_eq!(opened.borrow().len(), 2);
+        // The listener started at login says it is opening the app, which may take a moment.
+        let (_, page) = respond("GET /i/NIT-7 HTTP/1.1\r\nHost: 127.0.0.1:7423\r\n\r\n", 7423, Role::Service, |_| {});
+        assert!(page.contains("Opening <b>NIT-7</b>"), "{page}");
+        assert_eq!(respond("GET /health HTTP/1.1\r\nHost: 127.0.0.1:7423\r\n\r\n", 7423, Role::Service, |_| {}).1, "nitely-links service");
+        assert_eq!(opened.borrow().len(), 2, "health opens nothing");
     }
 
     #[test]
@@ -194,12 +245,19 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let (tx, rx) = std::sync::mpsc::channel();
         let tx = Mutex::new(tx);
-        std::thread::spawn(move || serve(listener, move |k| tx.lock().unwrap().send(k).unwrap()));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopping = stop.clone();
+        let served = std::thread::spawn(move || serve(listener, Role::App, move |k| tx.lock().unwrap().send(k).unwrap(), move || !stopping.load(std::sync::atomic::Ordering::SeqCst)));
+        assert_eq!(probe_port(port), Some(Role::App), "a listener finds another by its health");
         let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
         write!(s, "GET /i/APP-3 HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").unwrap();
         let mut reply = String::new();
         s.read_to_string(&mut reply).unwrap();
         assert!(reply.starts_with("HTTP/1.1 200 OK") && reply.contains("Opened <b>APP-3</b>"), "{reply}");
         assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), "APP-3");
+        // Asked to stop (the listener at login took over), it lets the port go.
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        served.join().unwrap();
+        assert!(TcpListener::bind(("127.0.0.1", port)).is_ok(), "the port is free again");
     }
 }
