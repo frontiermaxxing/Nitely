@@ -402,6 +402,32 @@ fn claim(db: &Db, repo: &str, reviewer: &str, shadow: bool, taken: Vec<Queued>) 
     Ok(Some((batch, claimed)))
 }
 
+/// Scratch clones a batch made, removed when it is done, however it ends.
+struct Scratch(std::cell::RefCell<Vec<PathBuf>>);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        for dir in self.0.borrow().iter() {
+            std::fs::remove_dir_all(dir).ok();
+        }
+    }
+}
+
+/// A clone of `repo` checked out at `head`, sharing the repo's objects (nothing is copied but the
+/// files): a change's own files after its worktree is gone.
+fn checkout_at(repo: &Path, head: &str) -> Result<PathBuf> {
+    let dir = crate::paths::unique_temp("nitely-batch-change", "");
+    let clone = crate::playbook::run_git(std::process::Command::new("git").args(["clone", "--quiet", "--shared", "--no-checkout"]).arg(repo).arg(&dir))?;
+    if !clone.status.success() {
+        bail!("could not clone {}: {}", repo.display(), String::from_utf8_lossy(&clone.stderr).trim());
+    }
+    if let Err(e) = crate::playbook::git(&dir, &["checkout", "--quiet", "--detach", head]) {
+        std::fs::remove_dir_all(&dir).ok();
+        return Err(e);
+    }
+    Ok(dir)
+}
+
 /// A file name for a queue's lock.
 fn lock_name(repo: &str, reviewer: &str) -> String {
     use std::hash::{Hash, Hasher};
@@ -421,12 +447,20 @@ fn run_batch(db: &Db, rules: &ReviewRules, batch: i64, rows: &[Queued], shadow: 
         let started = format!("Review by {}{note} started in a batch with {}", r.reviewer, with.join(", "));
         db.log_event(&actor_of(r), Some(&r.issue), Some(&r.worktree), "review_started", &started)?;
     }
+    // A worktree already cleaned up (a shadow change Nitely landed meanwhile): a scratch clone of the
+    // repo at the change's head stands in for it, so what its findings cite is read as the change
+    // has it; the repo itself only when even that cannot be made. Removed when the batch is done.
+    let scratch = Scratch(std::cell::RefCell::new(vec![]));
     let changes: Vec<BatchChange> = rows
         .iter()
         .map(|r| {
-            // A worktree already cleaned up (a shadow change Nitely landed meanwhile): the repo has
-            // every branch's commits.
-            let worktree = Some(PathBuf::from(&r.worktree)).filter(|w| w.is_dir()).unwrap_or_else(|| PathBuf::from(&r.repo));
+            let worktree = Some(PathBuf::from(&r.worktree)).filter(|w| w.is_dir()).unwrap_or_else(|| match checkout_at(Path::new(&r.repo), &r.head) {
+                Ok(dir) => {
+                    scratch.0.borrow_mut().push(dir.clone());
+                    dir
+                }
+                Err(_) => PathBuf::from(&r.repo),
+            });
             let previous = crate::submit::previous_round_at(db, &r.issue, &worktree, &r.head, r.review_id).ok().flatten();
             BatchChange {
                 key: r.issue.clone(),
@@ -868,5 +902,25 @@ mod tests {
         let mut r = review("fixed");
         hold_interactions(&q.db, &wt, &mut r).unwrap();
         assert_eq!((r.verdict.as_str(), r.findings.len()), ("pass", 0));
+    }
+
+    #[test]
+    fn a_change_whose_worktree_is_gone_is_read_at_its_own_commit() {
+        let q = Queue::new();
+        let repo = q.base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| crate::playbook::git(&repo, args).unwrap().trim().to_string();
+        git(&["init", "-q"]);
+        std::fs::write(repo.join("a.txt"), "the change's line\n").unwrap();
+        git(&["add", "."]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "change"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("a.txt"), "moved on since\n").unwrap();
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-am", "later"]);
+        let dir = checkout_at(&repo, &head).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap().lines().next(), Some("the change's line"));
+        drop(Scratch(std::cell::RefCell::new(vec![dir.clone()])));
+        assert!(!dir.exists(), "removed when the batch is done");
+        assert!(checkout_at(&repo, "0000000000000000000000000000000000000000").is_err());
     }
 }
