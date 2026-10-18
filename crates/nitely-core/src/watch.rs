@@ -62,6 +62,15 @@ pub fn repos_fingerprint(config: &Config) -> u64 {
     h.finish()
 }
 
+/// `repos_fingerprint` for one repo: what moves when its refs, HEADs or worktree list change.
+pub fn repo_fingerprint(root: &Path) -> u64 {
+    let mut h = DefaultHasher::new();
+    for path in git_paths(root) {
+        stamp(&path, &mut h);
+    }
+    h.finish()
+}
+
 fn files_fingerprint() -> u64 {
     match Config::load() {
         Ok(config) => repos_fingerprint(&config),

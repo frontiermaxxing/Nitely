@@ -136,6 +136,35 @@ pub fn branch_state(worktree: &str, integration_branch: &str) -> Result<BranchSt
 
 /// The worktree's git dir without running git: `.git` is the dir itself in a main checkout, and a
 /// file holding `gitdir: <path>` in a linked worktree.
+/// What moves when a worktree's HEAD or index does (a checkout, a commit, a `git add`, a rebase):
+/// the times of its gitdir, its HEAD and its index. Edits not yet added move none of them. None
+/// when it has no gitdir to read.
+pub fn worktree_fingerprint(worktree: &str) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let dir = git_dir_of(worktree)?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for path in [dir.clone(), dir.join("HEAD"), dir.join("index")] {
+        let meta = std::fs::metadata(&path).ok();
+        meta.as_ref().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos()).hash(&mut h);
+        meta.map(|m| m.len()).hash(&mut h);
+    }
+    Some(h.finish())
+}
+
+/// What moves when `branch` of the repo at `root` does: the times of its loose ref and of
+/// packed-refs (where git keeps refs it packed).
+pub fn ref_fingerprint(root: &str, branch: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let git = std::path::Path::new(root).join(".git");
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for path in [git.join("refs").join("heads").join(branch), git.join("packed-refs")] {
+        let meta = std::fs::metadata(&path).ok();
+        meta.as_ref().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos()).hash(&mut h);
+        meta.map(|m| m.len()).hash(&mut h);
+    }
+    h.finish()
+}
+
 pub fn git_dir_of(worktree: &str) -> Option<std::path::PathBuf> {
     let dot_git = std::path::Path::new(worktree).join(".git");
     if dot_git.is_dir() {
@@ -152,9 +181,18 @@ pub fn git_dir_of(worktree: &str) -> Option<std::path::PathBuf> {
 /// rebase check reads the git dir. Without counts for the branch (a detached HEAD, an older git),
 /// it asks git for them as `branch_state` does.
 pub fn worktree_state(worktree: &str, integration_branch: &str, branch: Option<&BranchRef>) -> Result<BranchState> {
+    worktree_state_with(worktree, integration_branch, branch, None)
+}
+
+/// `worktree_state`, with its count of uncommitted files given when an earlier read is still
+/// current (`worktree_fingerprint` did not move): then it runs no git at all (NIT-339).
+pub fn worktree_state_with(worktree: &str, integration_branch: &str, branch: Option<&BranchRef>, dirty: Option<u32>) -> Result<BranchState> {
     let counted = branch.and_then(|b| Some((b.ahead?, b.behind?, b)));
     let Some((ahead, behind, b)) = counted else { return branch_state(worktree, integration_branch) };
-    let dirty_files = dirty_files(worktree)?;
+    let dirty_files = match dirty {
+        Some(n) => n,
+        None => dirty_files(worktree)?,
+    };
     let (rebase_in_progress, rebase_started_at) = match git_dir_of(worktree) {
         Some(dir) => rebase_in(&dir),
         None => {

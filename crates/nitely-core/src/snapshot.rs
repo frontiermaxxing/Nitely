@@ -114,6 +114,10 @@ pub struct GitState {
     /// `watch::repos_fingerprint` when it was read, and when.
     fingerprint: u64,
     read_at: Instant,
+    /// What this read read again rather than reused (`read_git_from`): repos listed, worktrees
+    /// counted.
+    pub relisted: usize,
+    pub recounted: usize,
 }
 
 struct RepoGit {
@@ -124,7 +128,35 @@ struct RepoGit {
     /// Per worktree, in the order of `worktrees`.
     states: Vec<Result<BranchState, String>>,
     slug: Option<String>,
+    /// `watch::repo_fingerprint` when its worktrees and branches were read, and when.
+    fingerprint: u64,
+    listed_at: Instant,
+    /// Per worktree, in the order of `worktrees`: when its uncommitted files were counted.
+    counted: Vec<Counted>,
 }
+
+/// A worktree's count of uncommitted files, `git status`'s one git process, and what its HEAD and
+/// index were (`git::worktree_fingerprint`) when it was counted.
+#[derive(Clone)]
+struct Counted {
+    fingerprint: Option<u64>,
+    at: Instant,
+    dirty: Option<u32>,
+    /// The whole state, for a worktree whose branch the repo's one `for-each-ref` does not count
+    /// (a detached HEAD: build lanes, a land stack): four git processes to read again. It stands
+    /// while its own HEAD and index and the integration branch (`integration`) do not move.
+    state: Option<BranchState>,
+    integration: u64,
+}
+
+/// How long a repo's worktree list and branches stand while its refs and worktrees do not move.
+const REPO_FRESH: Duration = Duration::from_secs(300);
+/// How long a worktree's count of uncommitted files stands while its HEAD and index do not move:
+/// edits move neither, so it is short where a session worked lately and long elsewhere.
+const ACTIVE_FRESH: Duration = Duration::from_secs(20);
+const IDLE_FRESH: Duration = Duration::from_secs(300);
+/// A worktree is active when a session was seen in it this recently.
+const ACTIVE_WINDOW_SECS: i64 = 600;
 
 /// Git processes run side by side at most; more only queue up in the OS.
 const GIT_LANES: usize = 8;
@@ -148,35 +180,90 @@ fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> 
 /// Reads git for every repo: per repo its worktrees, branches and remote (in parallel), then one
 /// `git status` per worktree (in parallel across all repos).
 pub fn read_git(config: &Config) -> GitState {
+    read_git_from(config, None, &|_| true)
+}
+
+/// One repo's worktrees, branches and remote, as read: what `read_git_from` reuses while the
+/// repo's refs and worktrees do not move.
+type Listed = (Result<Vec<git::Worktree>, String>, Vec<git::BranchRef>, Option<String>, u64, Instant);
+
+/// `read_git`, reading again only what moved since `before` (NIT-339): a repo's worktree list and
+/// branches when its refs or worktrees moved (or after REPO_FRESH), and a worktree's uncommitted
+/// files when its HEAD or index moved, or after ACTIVE_FRESH where `active` (a session worked in
+/// it lately) and IDLE_FRESH elsewhere. Its counts against the integration branch and its last
+/// commit come from the repo's branches, so they are as current as the refs.
+pub fn read_git_from(config: &Config, before: Option<&GitState>, active: &(dyn Fn(&str) -> bool + Sync)) -> GitState {
     let fingerprint = crate::watch::repos_fingerprint(config);
-    let heads = par_map(&config.repos, |repo: &RepoConfig| {
+    let earlier = |root: &str| before.and_then(|b| b.repos.iter().find(|r| r.root == root));
+    let heads: Vec<Listed> = par_map(&config.repos, |repo: &RepoConfig| {
+        let fp = crate::watch::repo_fingerprint(std::path::Path::new(&repo.root));
+        if let Some(e) = earlier(&repo.root).filter(|e| e.fingerprint == fp && e.listed_at.elapsed() < REPO_FRESH) {
+            return (e.worktrees.clone(), e.branches.clone(), e.slug.clone(), fp, e.listed_at);
+        }
         let worktrees = git::list_worktrees(&repo.root).map_err(|e| e.to_string());
         let branches = git::list_branches(&repo.root, &repo.integration_branch).unwrap_or_default();
         let slug = git::bitbucket_slug(&repo.root).or_else(|| git::github_slug(&repo.root));
-        (worktrees, branches, slug)
+        (worktrees, branches, slug, fp, Instant::now())
     });
-    let jobs: Vec<(usize, &git::Worktree, &RepoConfig, &[git::BranchRef])> = heads
+    // A repo whose worktrees and branches were reused: its refs did not move.
+    let still: Vec<bool> = heads.iter().zip(&config.repos).map(|(h, repo)| earlier(&repo.root).is_some_and(|e| e.listed_at == h.4)).collect();
+    let integration: Vec<u64> = config.repos.iter().map(|r| git::ref_fingerprint(&r.root, &r.integration_branch)).collect();
+    let jobs: Vec<(&git::Worktree, &RepoConfig, &[git::BranchRef], u64)> = heads
         .iter()
         .enumerate()
-        .flat_map(|(r, (worktrees, branches, _))| {
+        .flat_map(|(r, (worktrees, branches, ..))| {
             let repo = &config.repos[r];
-            worktrees.iter().flatten().map(move |wt| (r, wt, repo, branches.as_slice()))
+            let integration = integration[r];
+            worktrees.iter().flatten().map(move |wt| (wt, repo, branches.as_slice(), integration))
         })
         .collect();
-    let mut states = par_map(&jobs, |(_, wt, repo, branches)| {
+    let read = par_map(&jobs, |(wt, repo, branches, integration)| {
         let line = wt.branch.as_deref().and_then(|b| branches.iter().find(|x| x.name == b));
-        git::worktree_state(&wt.path, &repo.integration_branch, line).map_err(|e| e.to_string())
-    })
-    .into_iter();
+        let counted_by_repo = line.is_some_and(|b| b.ahead.is_some() && b.behind.is_some());
+        let fp = git::worktree_fingerprint(&wt.path);
+        let fresh = if active(&wt.path) { ACTIVE_FRESH } else { IDLE_FRESH };
+        let last = earlier(&repo.root).and_then(|e| {
+            let i = e.worktrees.as_ref().ok()?.iter().position(|w| w.path == wt.path)?;
+            e.counted.get(i).cloned()
+        });
+        let reuse = last.filter(|c| fp.is_some() && c.fingerprint == fp && c.dirty.is_some() && c.at.elapsed() < fresh);
+        // Not counted by the repo's branches: its counts against the integration branch are its
+        // own reads, current while neither it nor the repo's refs moved.
+        if !counted_by_repo {
+            if let Some(c) = reuse.as_ref().filter(|c| c.integration == *integration && c.state.is_some()).cloned() {
+                return (Ok(c.state.clone().expect("filtered")), c, false);
+            }
+        }
+        let state = git::worktree_state_with(&wt.path, &repo.integration_branch, line, reuse.as_ref().and_then(|c| c.dirty)).map_err(|e| e.to_string());
+        let counted = match reuse.filter(|_| counted_by_repo) {
+            Some(c) => (c, false),
+            // Taken again after the count: `git status` may rewrite the index as it reads it.
+            None => (
+                Counted {
+                    fingerprint: git::worktree_fingerprint(&wt.path),
+                    at: Instant::now(),
+                    dirty: state.as_ref().ok().map(|s| s.dirty_files),
+                    state: state.as_ref().ok().filter(|_| !counted_by_repo).cloned(),
+                    integration: *integration,
+                },
+                true,
+            ),
+        };
+        (state, counted.0, counted.1)
+    });
+    let relisted = still.iter().filter(|s| !**s).count();
+    let recounted = read.iter().filter(|r| r.2).count();
+    let mut read = read.into_iter();
     let repos = heads
         .into_iter()
         .zip(&config.repos)
-        .map(|((worktrees, branches, slug), repo)| {
+        .map(|((worktrees, branches, slug, fingerprint, listed_at), repo)| {
             let n = worktrees.as_ref().map_or(0, Vec::len);
-            RepoGit { root: repo.root.clone(), states: states.by_ref().take(n).collect(), worktrees, branches, slug }
+            let (states, counted): (Vec<_>, Vec<_>) = read.by_ref().take(n).map(|(s, c, _)| (s, c)).unzip();
+            RepoGit { root: repo.root.clone(), states, worktrees, branches, slug, fingerprint, listed_at, counted }
         })
         .collect();
-    GitState { repos, fingerprint, read_at: Instant::now() }
+    GitState { repos, fingerprint, read_at: Instant::now(), relisted, recounted }
 }
 
 /// Git state reused across snapshots: while no ref, HEAD, worktree list or the config moved, and
@@ -191,9 +278,10 @@ impl GitCache {
         GitCache(Mutex::new(None))
     }
 
-    /// The cached state when it is still current for `config`, else a fresh read. The lock is
-    /// held while reading, so refreshes that arrive together share one read.
-    pub fn get(&self, config: &Config) -> Arc<GitState> {
+    /// The cached state when it is still current for `config`, else a read of what moved since
+    /// (`read_git_from`; `active` says where a session worked lately). The lock is held while
+    /// reading, so refreshes that arrive together share one read.
+    pub fn get(&self, config: &Config, active: &(dyn Fn(&str) -> bool + Sync)) -> Arc<GitState> {
         let mut cached = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let same_repos = |s: &GitState| s.repos.iter().map(|r| &r.root).eq(config.repos.iter().map(|r| &r.root));
         if let Some(state) = cached.as_ref() {
@@ -201,7 +289,7 @@ impl GitCache {
                 return state.clone();
             }
         }
-        let state = Arc::new(read_git(config));
+        let state = Arc::new(read_git_from(config, cached.as_deref(), active));
         *cached = Some(state.clone());
         state
     }
@@ -217,9 +305,12 @@ pub fn snapshot(config: &Config, db: &Db) -> Result<Board> {
     build(config, db, &read_git(config))
 }
 
-/// A snapshot that reuses `cache`'s git state while the repos have not changed.
+/// A snapshot that reuses `cache`'s git state while the repos have not changed, and reads again
+/// only the worktrees that moved when they have.
 pub fn snapshot_cached(config: &Config, db: &Db, cache: &GitCache) -> Result<Board> {
-    build(config, db, &cache.get(config))
+    let lately: Vec<String> = db.sessions_since(now() - ACTIVE_WINDOW_SECS)?.into_iter().map(|s| s.cwd).collect();
+    let active = |worktree: &str| lately.iter().any(|cwd| crate::paths::is_within(cwd, worktree));
+    build(config, db, &cache.get(config, &active))
 }
 
 fn build(config: &Config, db: &Db, git_state: &GitState) -> Result<Board> {
@@ -494,6 +585,44 @@ fn pr_for(prs: &[PrRecord], slug: Option<&str>, branch: &str) -> Option<PrRecord
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_read_after_one_counts_again_only_the_worktrees_that_moved() {
+        use crate::test_repo::git as sh;
+        let dir = crate::paths::unique_temp("nitely-incremental", "");
+        let root = dir.join("app");
+        crate::test_repo::init(&root, &[("a.txt", "a")]);
+        let wt = dir.join("wt");
+        sh(&root, &["worktree", "add", "-q", "-b", "claude/app-1-x", &wt.to_string_lossy(), "main"]);
+        let config = Config {
+            repos: vec![RepoConfig { name: "app".into(), root: root.to_string_lossy().into_owned(), integration_branch: "main".into(), project: Some("APP".into()) }],
+            ..Default::default()
+        };
+        let wt_path = wt.to_string_lossy().replace('\\', "/");
+        let of = |s: &GitState| -> BranchState {
+            let r = &s.repos[0];
+            let i = r.worktrees.as_ref().unwrap().iter().position(|w| w.path.replace('\\', "/").eq_ignore_ascii_case(&wt_path)).expect("the worktree is listed");
+            r.states[i].clone().unwrap()
+        };
+        let idle = |_: &str| false;
+        let first = read_git_from(&config, None, &idle);
+        assert_eq!(of(&first).dirty_files, 0);
+        // An edit not added moves neither HEAD nor index: an idle worktree's count stands.
+        std::fs::write(wt.join("b.txt"), "b").unwrap();
+        let second = read_git_from(&config, Some(&first), &idle);
+        assert_eq!(of(&second).dirty_files, 0, "counted before and nothing moved: not counted again");
+        // Without an earlier read, everything is read, and the edit shows.
+        assert_eq!(of(&read_git(&config)).dirty_files, 1);
+        // Added: the index moved, so it is counted again.
+        sh(&wt, &["add", "."]);
+        let third = read_git_from(&config, Some(&second), &idle);
+        assert_eq!(of(&third).dirty_files, 1);
+        // Committed: the branch moved, so its count against main comes with the repo's branches.
+        sh(&wt, &["commit", "-q", "-m", "b"]);
+        let fourth = read_git_from(&config, Some(&third), &idle);
+        assert_eq!((of(&fourth).ahead, of(&fourth).dirty_files), (1, 0));
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn each_session_works_on_the_issue_its_own_events_name() {
