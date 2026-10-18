@@ -1,0 +1,48 @@
+# Performance budgets on a large seeded board (NIT-255): the backend's reads (snapshot, pulse, the
+# Inbox's decisions, an issue's detail) in a release build, as the app ships them. The app's own
+# start-up and memory budgets run with the other end-to-end tests (app.yml, perf.e2e.mjs). Apart
+# from ci.yml, which runs exactly the playbook's gate.
+
+name: Performance budgets
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: perf-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  budgets:
+    name: Budgets (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: perf
+
+      # The seeded repos commit with an identity of their own; this is for git's own checks.
+      - name: Git identity
+        run: |
+          git config --global user.name "Nitely CI"
+          git config --global user.email "ci@example.com"
+
+      - name: Budgets on a large board, in release
+        run: cargo test --release -p nitely-core perf -- --ignored --nocapture

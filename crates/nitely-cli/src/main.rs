@@ -54,6 +54,11 @@ enum Cmd {
     /// outlive it: {vendor, cwd, params, session, out} on stdin, the answer written to `out`.
     #[command(hide = true)]
     McpDetached,
+    /// Seed an empty data folder with the large sample board (4 projects, 800 issues, 30
+    /// worktrees, 5,000 events) for the app's performance checks (scripts/harness/perf.e2e.mjs).
+    /// Only a folder of its own, given as NITELY_HOME, never the person's.
+    #[command(hide = true)]
+    PerfSeed,
     /// Put this build (or --from) where agents run `nitely` from, even while agents run the old
     /// one: on Windows the running one is moved aside, and old copies nothing runs are deleted.
     Install {
@@ -724,6 +729,19 @@ fn run(cmd: Cmd) -> Result<()> {
     let me = Actor::Agent("cli".into());
     match cmd {
         Cmd::Hook { .. } | Cmd::Mcp | Cmd::McpCall | Cmd::McpCalls | Cmd::McpDetached | Cmd::Ui { .. } => unreachable!(),
+        Cmd::PerfSeed => {
+            let home = paths::data_dir();
+            let real = paths::normalize(&paths::real_data_dir().to_string_lossy());
+            if std::env::var_os("NITELY_HOME").is_none() || paths::normalize(&home.to_string_lossy()) == real {
+                bail!("perf-seed seeds only a data folder of its own: set NITELY_HOME to an empty folder");
+            }
+            let seeded = nitely_core::perf::seed(&paths::db_path(), &home.join("perf-repos"))?;
+            let mut config = Config::load()?;
+            config.repos = seeded.repos;
+            config.save()?;
+            println!("seeded {}: {} projects, {} issues, {} worktrees, {} events", home.display(), nitely_core::perf::PROJECTS.len(), nitely_core::perf::ISSUES, nitely_core::perf::WORKTREES, nitely_core::perf::EVENTS);
+            Ok(())
+        }
         Cmd::Serve { listen, no_advertise } => serve::serve(Some(&listen), !no_advertise),
         Cmd::Tokens { command } => match command {
             TokensCmd::List => print_json(&nitely_core::relay::list_tokens()?),

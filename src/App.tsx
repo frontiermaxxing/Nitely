@@ -32,6 +32,10 @@ const OPEN_ISSUE_EVENT = "nitely://open-issue";
 /** Sent with a decision's id when its notification is clicked (src-tauri/src/notify.rs). */
 const OPEN_DECISION_EVENT = "nitely://open-decision";
 const REFRESH_GAP_MS = 1000;
+/** For the app's performance checks (scripts/harness/perf.e2e.mjs): a mark when the first board
+ * is drawn, and an event each time a board is drawn. Neither is kept, so neither grows. */
+const FIRST_BOARD_MARK = "nitely:first-board";
+const BOARD_DRAWN_EVENT = "nitely:board-drawn";
 
 export type View =
   | { kind: "pulse" }
@@ -98,6 +102,11 @@ function withInboxProject(view: View): View {
 
 export function App() {
   const [board, setBoard] = useState<Board | null>(null);
+  useEffect(() => {
+    if (!board) return;
+    if (performance.getEntriesByName(FIRST_BOARD_MARK).length === 0) performance.mark(FIRST_BOARD_MARK);
+    window.dispatchEvent(new Event(BOARD_DRAWN_EVENT));
+  }, [board]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [view, setViewState] = useState<View>(() => withInboxProject(fromHash(location.hash).view));
   const setView = useCallback((v: View) => setViewState(withInboxProject(v)), []);

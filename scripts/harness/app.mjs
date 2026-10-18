@@ -202,6 +202,8 @@ async function start({ seed, env, keepHome, unlock }) {
     // A port file left by the last run would name a port nobody listens on now.
     const portFile = webviewDir() && join(webviewDir(), "DevToolsActivePort");
     if (portFile) rmSync(portFile, { force: true });
+    // When the process was started, for start-up times (perf.e2e.mjs), in the page's clock.
+    app.startedAt = Date.now();
     const child = spawn(exe("nitely-app"), [], {
       // Not in its data folder, which close() removes.
       cwd: ROOT,
