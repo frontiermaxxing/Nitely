@@ -376,6 +376,8 @@ enum LanesCmd {
     },
     /// One run's record, then its log.
     Show { id: i64 },
+    /// Take a queued run out of the queue, when its requester will not come for it.
+    Cancel { id: i64 },
     /// Delete the build directories (the playbook's [lanes] keep, else target and node_modules) of
     /// task worktrees whose work is finished: nothing uncommitted, the branch pushed or landed, and
     /// nothing using the folder. Lists them and asks first.
@@ -800,6 +802,7 @@ fn run(cmd: Cmd) -> Result<()> {
         Cmd::Lanes { command: Some(LanesCmd::Status { project }) } => lanes::status(project),
         Cmd::Lanes { command: Some(LanesCmd::Reset { project }) } => lanes::reset(project),
         Cmd::Lanes { command: Some(LanesCmd::Show { id }) } => lanes::show(id),
+        Cmd::Lanes { command: Some(LanesCmd::Cancel { id }) } => lanes::cancel(id, &me),
         Cmd::Lanes { command: Some(LanesCmd::Slim { project, yes }) } => {
             use nitely_core::slim::{human, plan, reclaim};
             let config = Config::load()?;

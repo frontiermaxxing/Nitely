@@ -127,6 +127,27 @@ pub fn started(pid: u32) -> Option<String> {
     }
 }
 
+/// This process as a requester records itself (NIT-270): its pid and when it started.
+pub fn me() -> (u32, Option<String>) {
+    static ME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    (std::process::id(), ME.get_or_init(|| started(std::process::id())).clone())
+}
+
+/// Whether the process recorded as `pid`, started at `started`, still runs. A process at that
+/// number that started at another time is another one: the OS gave the number out again after
+/// the recorded one ended. When the start time cannot be read (another user's process), the pid
+/// alone decides.
+pub fn still_runs(pid: u32, started: Option<&str>) -> bool {
+    if pid == std::process::id() {
+        return started.is_none_or(|s| me().1.as_deref().is_none_or(|mine| mine == s));
+    }
+    match (started, self::started(pid)) {
+        (Some(was), Some(now)) => was == now,
+        (_, Some(_)) => true,
+        (_, None) => alive(pid),
+    }
+}
+
 /// How a guarded tree runs (NIT-266).
 #[derive(Debug, Clone, Copy)]
 pub struct Contain {
