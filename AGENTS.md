@@ -14,8 +14,10 @@ Nitely tracks its own build. Its backlog is the **NIT** project in Nitely, reach
 2. Use `report` for what you are doing at each step; it shows live on Andrew's board.
 3. Anything you find but will not fix now goes in with `file_issue` (kind, body, evidence). It refuses
    likely duplicates and lists them.
-4. When only Andrew can decide, use `ask`, move the issue to Needs You, and keep working on whatever
-   does not depend on the answer. Never set Approved; only Andrew can. A question about the board or
+4. When only Andrew can decide, use `ask` with the issue's key, and keep working on whatever does not
+   depend on the answer. `ask` moves the issue to Needs You, and his answer moves it back to you (to
+   Todo if you have stopped) and reaches you as a notice on your next nitely call. Never set
+   Approved; only Andrew can. A question about the board or
    the code (who holds a file, whether an issue is done, whether a finding is stale, resubmit or
    wait) goes to `triage`: a triage agent answers it from the board and the repo, as a note on the
    issue, and only one that turns out to be Andrew's reaches his Inbox.

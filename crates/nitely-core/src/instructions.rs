@@ -18,8 +18,9 @@ branch and worktree from the integration branch and runs setup. Work only in tha
 3. `file_issue` anything you find but will not fix now (it refuses likely duplicates); `file_issues` \
 files up to 10 at once, their blockers naming each other by ref (a later batch names earlier ones by key). When the playbook itself is wrong \
 (integration branch, gate, review rules), `propose_playbook_change`: never change the rules yourself.
-4. When only the human can decide, `ask`, move the issue to Needs You, and keep working on what does \
-not depend on the answer. A question about the board or the code (who holds a file, whether an issue \
+4. When only the human can decide, `ask` with the issue's key, and keep working on what does not depend \
+on the answer: `ask` moves the issue to Needs You, and the answer moves it back to you and comes as a \
+notice on your next nitely call. A question about the board or the code (who holds a file, whether an issue \
 is done, whether a finding is stale, resubmit or wait) goes to `triage`, not the human. Never set Approved: only the human approves. When a change needs their \
 approval, `submit` already puts it in their inbox, so never `ask` for an approval.
 5. Commit, then `submit`: it hands the branch in and returns at once. In the background it runs the \

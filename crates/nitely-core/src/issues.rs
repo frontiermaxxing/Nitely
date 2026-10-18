@@ -210,6 +210,14 @@ pub struct Ask {
     pub finding: Option<crate::accept::AskedFinding>,
 }
 
+impl Ask {
+    /// The line that tells the agent that asked its answer, on its next nitely call (NIT-277).
+    pub fn outcome(&self) -> String {
+        let about = self.issue_key.as_deref().map(|k| format!("{k}: ")).unwrap_or_default();
+        format!("{about}the person answered ask {} (\"{}\"): {}", self.id, self.question, self.answer.as_deref().unwrap_or(""))
+    }
+}
+
 /// An agent as a person reads it: its vendor ("Codex"), not its id ("codex:c:/users/.../demo").
 pub(crate) fn agent_name(id: &str) -> String {
     match id.split(':').next().unwrap_or(id) {
@@ -1735,17 +1743,89 @@ impl Db {
             bail!("ask {id} needs no answer any more: it {why}");
         }
         let ts = now();
-        self.conn.execute(
+        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        tx.execute(
             "UPDATE ask SET answer = ?2, answered_at = ?3 WHERE id = ?1",
             params![id, answer.trim(), ts],
         )?;
         if let Some(k) = &ask.issue_key {
-            self.conn.execute(
+            tx.execute(
                 "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, 'human', ?2, 'answer', ?3)",
                 params![ts, k, answer.trim()],
             )?;
+            // The work that waited on it goes on (NIT-277): an issue `ask` put in Needs You goes
+            // back, once nothing else it asked is open, to its asker while that agent is live, and
+            // otherwise to Todo, where next_task gives it to the next agent with the answer on its
+            // timeline.
+            let moved: Option<String> = tx.query_row("SELECT moved_from FROM ask WHERE id = ?1", [id], |r| r.get(0))?;
+            let state: Option<String> = tx.query_row("SELECT state FROM issue WHERE key = ?1", [k], |r| r.get(0)).optional()?;
+            let still_asking: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM ask WHERE issue_key = ?1 AND answer IS NULL AND closed IS NULL AND moved_from IS NOT NULL",
+                [k],
+                |r| r.get(0),
+            )?;
+            if moved.is_some() && state.as_deref() == Some(NEEDS_HUMAN) && still_asking == 0 {
+                let seen: Option<(String, i64)> =
+                    tx.query_row("SELECT state, last_seen_at FROM session WHERE id = ?1", [&ask.asked_by], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+                let live = seen.is_some_and(|(s, at)| s != "ended" && at >= ts - crate::sessions::GONE_AFTER_SECS);
+                let (to, to_type) = if live { ("In Progress", "started") } else { ("Todo", "unstarted") };
+                tx.execute(
+                    "UPDATE issue SET state = ?2, state_type = ?3, updated_at = ?4,
+                       claimed_by = CASE WHEN ?5 THEN ?6 ELSE NULL END, claimed_at = CASE WHEN ?5 THEN ?7 ELSE NULL END
+                     WHERE key = ?1",
+                    params![k, to, to_type, iso(ts), live, ask.asked_by, ts],
+                )?;
+                let why = if live { "answered; back to the agent that asked" } else { "answered; the agent that asked is gone, so it waits for the next" };
+                tx.execute(
+                    "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, 'human', ?2, 'issue_moved', ?3)",
+                    params![ts, k, format!("{NEEDS_HUMAN} → {to}: {why}")],
+                )?;
+            }
         }
+        tx.commit()?;
         self.ask(id)?.context("ask vanished")
+    }
+
+    /// What `ask` does to the issue it is about (NIT-277): one In Progress waits in Needs You for
+    /// the answer, and the ask notes where it was, so the answer can put it back (`answer_ask`).
+    pub fn wait_on_ask(&mut self, ask: &Ask, actor: &Actor) -> Result<()> {
+        let Some(key) = &ask.issue_key else { return Ok(()) };
+        let Some(issue) = self.issue(key)? else { return Ok(()) };
+        if issue.origin != "nitely" || issue.state != "In Progress" || ask.finding.is_some() {
+            return Ok(());
+        }
+        self.move_issue(key, NEEDS_HUMAN, None, Some(&format!("waiting for the answer to ask {}", ask.id)), actor)?;
+        self.conn.execute("UPDATE ask SET moved_from = 'In Progress' WHERE id = ?1", [ask.id])?;
+        Ok(())
+    }
+
+    /// Answers to asks of `askers` (an agent's ids) not told to it yet, oldest first: each comes to
+    /// the agent once, as a notice on its next nitely call (NIT-277).
+    pub fn undelivered_answers(&self, askers: &[&str]) -> Result<Vec<Ask>> {
+        let mut out = Vec::new();
+        for asker in askers {
+            let mut stmt = self.conn.prepare(&format!(
+                "SELECT {ASK_COLUMNS} FROM ask a LEFT JOIN issue i ON i.key = a.issue_key COLLATE NOCASE
+                 WHERE a.asked_by = ?1 AND a.answer IS NOT NULL AND a.delivered_at IS NULL ORDER BY a.answered_at"
+            ))?;
+            let rows = stmt.query_map([asker], ask_from_row)?;
+            for a in rows {
+                let a = a?;
+                if !out.iter().any(|o: &Ask| o.id == a.id) {
+                    out.push(a);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Notes that these asks' answers reached the agents that asked.
+    pub fn mark_answers_delivered(&self, ids: &[i64]) -> Result<()> {
+        let ts = now();
+        for id in ids {
+            self.conn.execute("UPDATE ask SET delivered_at = ?2 WHERE id = ?1 AND delivered_at IS NULL", params![id, ts])?;
+        }
+        Ok(())
     }
 }
 
@@ -2262,6 +2342,53 @@ mod tests {
         assert!(db.answer_ask(ask.id, "yes", &agent).is_err());
         assert_eq!(db.answer_ask(ask.id, "yes", &Actor::Human).unwrap().answer.as_deref(), Some("yes"));
         assert!(db.open_asks().unwrap().is_empty());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// An ask puts its In Progress issue in Needs You, and the answer puts it back: to the agent
+    /// that asked while its session is live, else to Todo for the next agent. The asker is told
+    /// the answer once (NIT-277).
+    #[test]
+    fn an_answer_returns_the_issue_and_reaches_the_agent_that_asked() {
+        let (mut db, dir) = db();
+        db.create_project("NIT", "Nitely").unwrap();
+        let agent = Actor::Agent("claude:s".into());
+        db.conn
+            .execute("INSERT INTO session (id, vendor, cwd, started_at, last_seen_at, state) VALUES ('claude:s', 'claude', 'C:/code/app', ?1, ?1, 'working')", [now()])
+            .unwrap();
+        for title in ["Pick a currency", "Pick a font", "Billing copy"] {
+            db.create_issue(&new(title), &agent).unwrap();
+        }
+        db.move_issue("NIT-1", "In Progress", None, None, &agent).unwrap();
+        db.move_issue("NIT-2", "In Progress", None, None, &agent).unwrap();
+
+        let a = db.create_ask("EUR or USD?", &[], Some("NIT-1"), None, &agent).unwrap();
+        db.wait_on_ask(&a, &agent).unwrap();
+        assert_eq!(db.issue("NIT-1").unwrap().unwrap().state, "Needs You");
+        assert!(db.undelivered_answers(&["claude:s"]).unwrap().is_empty(), "nothing to tell yet");
+        db.answer_ask(a.id, "EUR", &Actor::Human).unwrap();
+        let i = db.issue("NIT-1").unwrap().unwrap();
+        assert_eq!((i.state.as_str(), i.claimed_by.as_deref()), ("In Progress", Some("claude:s")), "back to the live asker");
+        let told = db.undelivered_answers(&["claude:s", "claude:c:/code/app"]).unwrap();
+        assert_eq!(told.iter().map(Ask::outcome).collect::<Vec<_>>(), [format!("NIT-1: the person answered ask {} (\"EUR or USD?\"): EUR", a.id)]);
+        db.mark_answers_delivered(&[a.id]).unwrap();
+        assert!(db.undelivered_answers(&["claude:s"]).unwrap().is_empty(), "told once");
+
+        // An asker that is gone: the issue waits in Todo, and next_task gives it to the next agent.
+        let b = db.create_ask("Serif?", &[], Some("NIT-2"), None, &agent).unwrap();
+        db.wait_on_ask(&b, &agent).unwrap();
+        db.conn.execute("UPDATE session SET state = 'ended'", []).unwrap();
+        db.answer_ask(b.id, "No", &Actor::Human).unwrap();
+        let i = db.issue("NIT-2").unwrap().unwrap();
+        assert_eq!((i.state.as_str(), i.claimed_by), ("Todo", None));
+        assert_eq!(db.next_task("NIT", "codex:b").unwrap().unwrap().key, "NIT-2");
+
+        // An issue in Needs You for another reason (an approval, say) stays there.
+        db.move_issue("NIT-3", "Needs You", None, None, &agent).unwrap();
+        let c = db.create_ask("Which wording?", &[], Some("NIT-3"), None, &agent).unwrap();
+        db.wait_on_ask(&c, &agent).unwrap();
+        db.answer_ask(c.id, "The short one", &Actor::Human).unwrap();
+        assert_eq!(db.issue("NIT-3").unwrap().unwrap().state, "Needs You");
         std::fs::remove_dir_all(dir).ok();
     }
 

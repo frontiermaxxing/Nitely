@@ -689,7 +689,7 @@ fn tools() -> Value {
         },
         {
             "name": "ask",
-            "description": "Ask the human something only they can decide: a product question (scope, wording, what to build), something irreversible or outside this machine (credentials, accounts, licenses, signing, money), or a task only they can do. It goes to their inbox. Returns an id; check it with get_answer. Keep working on whatever does not depend on the answer. Never ask for an approval: when a change needs one, submit already puts it in their inbox. A question about the board or the code (who holds a file, whether an issue is done, whether a finding is stale, resubmit or wait) goes to triage instead.",
+            "description": "Ask the human something only they can decide: a product question (scope, wording, what to build), something irreversible or outside this machine (credentials, accounts, licenses, signing, money), or a task only they can do. It goes to their inbox. Returns an id. With key, an In Progress issue waits in Needs You until they answer, and the answer moves it back to you (or to Todo for the next agent, if you are gone by then); the answer also comes as a notice on your next nitely call, or from get_answer. Keep working on whatever does not depend on the answer. Never ask for an approval: when a change needs one, submit already puts it in their inbox. A question about the board or the code (who holds a file, whether an issue is done, whether a finding is stale, resubmit or wait) goes to triage instead.",
             "inputSchema": { "type": "object", "required": ["question"], "properties": {
                 "question": { "type": "string" },
                 "options": { "type": "array", "items": { "type": "string" } },
@@ -1456,6 +1456,8 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
                 .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
                 .unwrap_or_default();
             let ask = db.create_ask(req(args, "question")?, &options, str_arg(args, "key"), Some(&server.place()), &actor)?;
+            // Its issue waits in Needs You for the answer, which puts it back (NIT-277).
+            db.wait_on_ask(&ask, &actor)?;
             // Show the agent as waiting on the board until it moves on.
             db.record(&NewEvent {
                 session_id: session.to_string(),
@@ -1482,6 +1484,10 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
         "get_answer" => {
             let id = args.get("id").and_then(Value::as_i64).ok_or_else(|| anyhow!("missing id"))?;
             let ask = db.ask(id)?.with_context(|| format!("no ask {id}"))?;
+            // Read by its asker here, so it is not told again as a notice.
+            if ask.answer.is_some() && [actor.id(), server.agent().as_str()].contains(&ask.asked_by.as_str()) {
+                db.mark_answers_delivered(&[ask.id])?;
+            }
             match &ask.closed {
                 // Its issue closed first: nothing to wait for.
                 Some(why) => json!({ "id": ask.id, "question": ask.question, "answer": null, "closed": why }),
@@ -1514,6 +1520,15 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             db.mark_triage_delivered(&answered.iter().map(|q| q.id).collect::<Vec<_>>())?;
             let mut notices = out.get("notices").and_then(Value::as_array).cloned().unwrap_or_default();
             notices.extend(answered.iter().map(|q| json!(q.outcome())));
+            out["notices"] = json!(notices);
+        }
+        // The person's answers to this agent's asks (NIT-277), told once.
+        let me = server.agent();
+        let answers = db.undelivered_answers(&[actor.id(), me.as_str()])?;
+        if !answers.is_empty() {
+            db.mark_answers_delivered(&answers.iter().map(|a| a.id).collect::<Vec<_>>())?;
+            let mut notices = out.get("notices").and_then(Value::as_array).cloned().unwrap_or_default();
+            notices.extend(answers.iter().map(|a| json!(a.outcome())));
             out["notices"] = json!(notices);
         }
     }
