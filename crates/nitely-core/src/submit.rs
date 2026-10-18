@@ -237,6 +237,16 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         rules.context = review_context(db, &issue, &out.gate)?;
         if let Ok(mut fresh) = rules.run(&r.reviewer, &worktree, &since, None) {
             fresh.note = if r.note.is_empty() { FRESH.to_string() } else { format!("{}; {FRESH}", r.note) };
+            // An interaction with another change in a review batch is no reviewer's opinion: only its
+            // landing under this branch ends it, so the fresh review keeps it.
+            for f in r.findings.iter().filter(|f| crate::review_batch::is_interaction(&f.text)) {
+                if !fresh.findings.iter().any(|x| x.text == f.text) {
+                    fresh.findings.push(f.clone());
+                }
+            }
+            if fresh.findings.iter().any(|f| f.priority <= 1) {
+                fresh.verdict = "changes".into();
+            }
             for reason in pb.review.flag_reasons(&fresh) {
                 if !out.reasons.contains(&reason) {
                     out.reasons.push(reason);

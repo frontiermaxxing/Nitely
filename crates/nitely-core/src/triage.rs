@@ -192,8 +192,13 @@ fn look(db: &Db, config: &crate::Config, q: &Question) -> Result<(String, Option
         Some(i) => crate::playbook::repo_for_issue(config, i.project.as_deref(), &place)?,
         None => crate::playbook::repo_root(config, &place).context("triage needs the issue the question is about, or a place in a repo to look")?,
     };
-    // Read where the agent works when that is a worktree of the repo, so its branch is there.
-    let dir = Some(PathBuf::from(&place)).filter(|p| p.is_dir()).unwrap_or_else(|| root.clone());
+    // Read the issue's own worktree, where its branch is; without one, the repository (never the
+    // folder the agent's tools started in, which may be another branch or main). A question about
+    // no issue is read where it was asked.
+    let dir = match &issue {
+        Some(i) => crate::playbook::issue_worktree(&root, &i.key).ok().flatten().filter(|w| w.is_dir()).unwrap_or_else(|| root.clone()),
+        None => Some(PathBuf::from(&place)).filter(|p| p.is_dir()).unwrap_or_else(|| root.clone()),
+    };
     let rules = crate::playbook::Playbook::load(&root)?.review;
     let vendor = q.asked_by.split(':').next().unwrap_or("");
     let choice = rules.choose(vendor, &|r| rules.is_installed(r, &dir))?;

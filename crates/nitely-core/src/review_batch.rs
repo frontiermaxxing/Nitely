@@ -555,6 +555,12 @@ fn first_line(text: &str) -> String {
 /// How the finding an interaction gives the second change starts: `Interacts with NIT-4, reviewed
 /// in the same batch:`.
 const INTERACTS: &str = "Interacts with ";
+
+/// Whether a finding is the one an interaction in a review batch gave a change: it stays until the
+/// other change has landed under it, whatever a later review says (`hold_interactions`).
+pub(crate) fn is_interaction(text: &str) -> bool {
+    text.starts_with(INTERACTS) && text.contains(SAME_BATCH)
+}
 const SAME_BATCH: &str = ", reviewed in the same batch:";
 
 /// The change an interaction finding names (`Interacts with NIT-4, reviewed in the same batch: ...`).
