@@ -120,6 +120,21 @@ pub fn check_current(config: &crate::Config, dir: &str, built_at: &str) -> Resul
     }
 }
 
+/// Why a build must not be installed: it says it was built from `built_at`, but the checkout it was
+/// built in (`cargo run`) is at `checkout_head`, so its stamp is stale and submit and land would
+/// refuse it as older than the code it holds (NIT-320). None when they agree or either is unknown.
+pub fn stamp_mismatch(built_at: &str, checkout_head: &str) -> Option<String> {
+    let (built, head) = (built_at.trim(), checkout_head.trim());
+    if built.is_empty() || head.is_empty() || built == head {
+        return None;
+    }
+    Some(format!(
+        "this build says it was built from {}, but the checkout it was built in is at {}: its build stamp is stale, and submit and land would refuse it as older than main. Touch crates/nitely-cli/build.rs and run the same command again",
+        &built[..built.len().min(7)],
+        &head[..head.len().min(7)]
+    ))
+}
+
 /// Copies `from` to `to`, moving a running `to` aside first where the platform needs that.
 pub fn install(from: &Path, to: &Path) -> Result<Installed> {
     if !from.is_file() {
@@ -207,6 +222,16 @@ pub fn stamp(path: &Path) -> Option<(u64, std::time::SystemTime)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A build whose stamp is not its checkout's commit is refused, with how to fix it (NIT-320).
+    #[test]
+    fn a_stale_stamp_is_caught_before_it_is_installed() {
+        let why = stamp_mismatch("c6b2fe4a64d4", "36c259dd2eae\n").unwrap();
+        assert!(why.contains("built from c6b2fe4") && why.contains("is at 36c259d") && why.contains("build.rs"), "{why}");
+        assert_eq!(stamp_mismatch("36c259d", "36c259d\n"), None);
+        assert_eq!(stamp_mismatch("", "36c259d"), None, "no stamp: nothing to compare");
+        assert_eq!(stamp_mismatch("36c259d", ""), None, "no checkout: nothing to compare");
+    }
 
     #[test]
     fn a_first_install_goes_to_a_folder_on_path() {
