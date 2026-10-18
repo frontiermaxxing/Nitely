@@ -1592,9 +1592,10 @@ impl Db {
         // An id of `mine` is the caller's own only while no live session goes by it: a crew
         // worker's reports go under its folder's id, and another session in that folder is not it.
         let own = |h: &String| -> Result<bool> { Ok(h == agent || (mine.contains(h) && !seen_live(&session_of(h)?))) };
-        let other = match claimed_by.clone() {
-            Some(h) if !own(&h)? => Some(h),
-            _ => None,
+        let (other, own_claim) = match claimed_by.clone() {
+            Some(h) if !own(&h)? => (Some(h), None),
+            Some(h) => (None, Some(h)),
+            None => (None, None),
         };
         if let Some(holder) = other {
             let session = session_of(&holder)?;
@@ -1617,7 +1618,9 @@ impl Db {
         } else if claimed_by.is_none() {
             tx.execute("INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, ?2, ?3, 'claimed', 'Took the issue')", params![ts, agent, key])?;
         }
-        tx.execute("UPDATE issue SET claimed_by = ?2, claimed_at = ?3 WHERE key = ?1", params![key, agent, ts])?;
+        // A claim of the caller's own is renewed under the id it has: the crew renews its worker's
+        // by that id, whoever starts its worktree.
+        tx.execute("UPDATE issue SET claimed_by = COALESCE(?4, ?2), claimed_at = ?3 WHERE key = ?1", params![key, agent, ts, own_claim])?;
         if state == "Todo" || state == "Backlog" {
             tx.execute("UPDATE issue SET state = 'In Progress', state_type = 'started', updated_at = ?2 WHERE key = ?1", params![key, iso(ts)])?;
             tx.execute(
@@ -2113,7 +2116,8 @@ mod tests {
             .execute("INSERT INTO session (id, vendor, cwd, started_at, last_seen_at, state) VALUES ('claude:s', 'claude', 'C:/code/app', ?1, ?1, 'working')", [now()])
             .unwrap();
         assert_eq!(db.claim_for_start("NIT-1", "claude:s", &["claude:c:/code/app".into()], false).unwrap(), None);
-        assert_eq!(db.issue("NIT-1").unwrap().unwrap().claimed_by.as_deref(), Some("claude:s"));
+        assert_eq!(db.issue("NIT-1").unwrap().unwrap().claimed_by.as_deref(), Some("claude:c:/code/app"), "renewed under its id");
+        db.conn.execute("UPDATE issue SET claimed_by = 'claude:s' WHERE key = 'NIT-1'", []).unwrap();
 
         // Another agent, while that session is live: refused.
         let err = db.claim_for_start("NIT-1", "codex:b", &[], false).unwrap_err().to_string();
@@ -2147,7 +2151,8 @@ mod tests {
         db.conn.execute("UPDATE issue SET claimed_by = 'claude:c:/wt/w2', claimed_at = ?1 WHERE key = 'NIT-3'", [now()]).unwrap();
         assert!(db.claim_for_start("NIT-3", "claude:c:/code/app", &[], false).is_err(), "not someone else's");
         db.claim_for_start("NIT-3", "claude:c:/code/app", &["claude:c:/wt/w2".into(), "claude".into()], false).unwrap();
-        assert_eq!(db.issue("NIT-3").unwrap().unwrap().state, "In Progress");
+        let i = db.issue("NIT-3").unwrap().unwrap();
+        assert_eq!((i.state.as_str(), i.claimed_by.as_deref()), ("In Progress", Some("claude:c:/wt/w2")), "the worker's claim stays the worker's");
         std::fs::remove_dir_all(dir).ok();
     }
 
