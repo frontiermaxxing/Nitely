@@ -1,7 +1,7 @@
 // What waits on the human, as decisions: built from the board and, where the board alone cannot
 // tell (why an approval waits, whether a land stopped), from issue details. The Inbox draws them.
 
-import type { Ask, Board, IssueDetail, IssueRecord, TaskRow } from "./types";
+import type { Ask, Board, IssueDetail, IssueRecord, Session, TaskRow } from "./types";
 // Straight from the modules rather than ./ui, so node:test can load this file without the CSS.
 import { VENDOR_LABEL, livenessOf, vendorOf } from "./ui/agents.ts";
 import { trackOf, type Track } from "./ui/lifecycle.ts";
@@ -15,6 +15,10 @@ export interface Decision {
   issue: IssueRecord | null;
   /** The issue's worktree row, when one is checked out. */
   row: TaskRow | null;
+  /** The agent session it is about, when not the row's: a waiting agent, wherever it runs. */
+  session?: Session | null;
+  /** Where that agent works, when no task row says (a main checkout). */
+  folder?: string | null;
   repo: string | null;
   ask: Ask | null;
   /** When it started waiting on the human. */
@@ -25,6 +29,16 @@ export interface Decision {
   group?: Decision[];
   /** The project it belongs to (`projectOf`), for the Inbox's project filter. */
   project?: string | null;
+}
+
+/** The agent session a decision is about: its own (a waiting agent), else its row's. */
+export function sessionOf(d: Decision): Session | null {
+  return d.session ?? d.row?.session ?? null;
+}
+
+/** The folder a decision's agent works in: its row's worktree, else the agent's own folder. */
+export function folderOf(d: Decision): string | null {
+  return d.row?.worktree ?? d.folder ?? null;
 }
 
 export const KIND_LABEL: Record<DecisionKind, string> = {
@@ -139,7 +153,7 @@ export function decisionsOf(board: Board, details: Map<string, IssueDetail>, now
     if (a.session.state !== "waiting" || board.asks.some((q) => q.asked_by === a.session.id)) continue;
     const row = a.worktree ? (rows.find((r) => r.row.worktree === a.worktree)?.row ?? null) : null;
     const issue = a.issue ?? issueOf(a.issue_key);
-    out.push({ id: `input-${a.session.id}`, kind: "input", issue, row, repo: a.repo, ask: null, since: a.session.last_seen_at, urgency: urgencyOf(issue) });
+    out.push({ id: `input-${a.session.id}`, kind: "input", issue, row, session: a.session, folder: a.worktree ?? a.session.cwd, repo: a.repo, ask: null, since: a.session.last_seen_at, urgency: urgencyOf(issue) });
   }
   // A land that stopped, with no agent working on it any more, is the human's to unstick.
   for (const { repo, row } of rows) {

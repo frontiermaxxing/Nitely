@@ -3,7 +3,7 @@
 // This file decides what is new and what to say; useNotifications (src/App.tsx) batches it and
 // src-tauri/src/notify.rs shows it.
 
-import { projectOf, type Decision } from "./decisions.ts";
+import { projectOf, sessionOf, type Decision } from "./decisions.ts";
 import type { IssueDetail } from "./types";
 import { VENDOR_LABEL, vendorOf } from "./ui/agents.ts";
 
@@ -78,7 +78,7 @@ export function lineOf(d: Decision, kind: NotifyKind): string {
     case "land":
       return d.kind === "conflict" ? `${key}: the rebase stopped on a conflict` : `${key}: the land stopped`;
     case "waiting":
-      return `${VENDOR_LABEL[vendorOf(d.row?.session?.vendor ?? d.row?.vendor ?? null)]} waits for input on ${key}`;
+      return `${VENDOR_LABEL[vendorOf(sessionOf(d)?.vendor ?? d.row?.vendor ?? null)]} waits for input on ${key}`;
   }
 }
 

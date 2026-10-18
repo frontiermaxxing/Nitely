@@ -10,11 +10,13 @@ import {
   decisionsOf,
   detailKeys,
   firstLine,
+  folderOf,
   groupApprovals,
   inProject,
   nextProject,
   outcomeOf,
   projectCounts,
+  sessionOf,
   shownDecisions,
   trackAfter,
   type Decision,
@@ -454,7 +456,7 @@ function planOf(detail: IssueDetail | undefined) {
 /** What last happened, in one line under a decision in the list: good is teal, bad is red. */
 function eventOf(d: Decision, detail: IssueDetail | undefined, place?: { n: number; of: number }): { text: string; tone: "good" | "bad" | null; agent: string | null } {
   const who = (vendor: string | null) => VENDOR_LABEL[vendorOf(vendor)];
-  const agent = d.row?.session?.vendor ?? d.row?.vendor ?? null;
+  const agent = sessionOf(d)?.vendor ?? d.row?.vendor ?? null;
   switch (d.kind) {
     case "ask":
       // The place first: a narrow list cuts the end of the line.
@@ -594,8 +596,8 @@ function DecisionDetail(props: {
   // A goal and its issues an agent drafted: decided in GoalPlanDecision.
   const plan = d.kind === "approve" ? planOf(detail) : null;
   const pending = proposal?.status === "pending" || !!plan;
-  const agent = d.kind === "ask" ? d.ask!.asked_by : (d.row?.session?.vendor ?? d.row?.vendor ?? proposal?.created_by ?? plan?.created_by ?? null);
-  const live = livenessOf(d.row?.session, now);
+  const agent = d.kind === "ask" ? d.ask!.asked_by : (sessionOf(d)?.vendor ?? d.row?.vendor ?? proposal?.created_by ?? plan?.created_by ?? null);
+  const live = livenessOf(sessionOf(d), now);
 
   const move = (state: "Approved" | "Todo") =>
     props.onAct(state === "Approved" ? "approve" : "todo", () => invoke("move_issue", { key: issue!.key, state, evidence: null, reason: null }));
@@ -686,7 +688,7 @@ function DecisionDetail(props: {
           ) : (
             <Body decision={d} detail={detail} integration={props.integration} now={now} />
           )}
-          {(d.kind === "conflict" || d.kind === "input" || d.kind === "land") && d.row && <p className="decision-path mono">{d.row.worktree}</p>}
+          {(d.kind === "conflict" || d.kind === "input" || d.kind === "land") && folderOf(d) && <p className="decision-path mono">{folderOf(d)}</p>}
         </div>
       </div>
       <div className="dd-actions">
@@ -721,10 +723,10 @@ function DecisionDetail(props: {
           </div>
         )}
         {d.kind === "approve" && issue && issue.origin !== "nitely" && <span className="muted small">In {originName(issue.origin)}. Act on it there.</span>}
-        {!resolved && (d.kind === "conflict" || d.kind === "input" || d.kind === "land") && d.row && (
+        {!resolved && (d.kind === "conflict" || d.kind === "input" || d.kind === "land") && folderOf(d) && (
           <div className="actions">
-            <button className="btn primary" onClick={() => reveal(d.row!.worktree)}>
-              Open the worktree
+            <button className="btn primary" onClick={() => reveal(folderOf(d)!)}>
+              {d.row ? "Open the worktree" : "Open the folder"}
             </button>
             {d.kind === "land" && issue && (
               <button className="btn" disabled={busy} onClick={() => move("Todo")}>
@@ -883,8 +885,9 @@ const capital = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 function Body(props: { decision: Decision; detail?: IssueDetail; integration: string | null; now: number }) {
   const { decision: d, detail } = props;
   const row = d.row;
-  const agent = row?.session?.vendor ?? row?.vendor ?? null;
-  const live = livenessOf(row?.session, props.now);
+  const session = sessionOf(d);
+  const agent = session?.vendor ?? row?.vendor ?? null;
+  const live = livenessOf(session, props.now);
   const who = (vendor: string | null) => VENDOR_LABEL[vendorOf(vendor)];
 
   switch (d.kind) {
@@ -965,7 +968,7 @@ function Body(props: { decision: Decision; detail?: IssueDetail; integration: st
         </>
       );
     case "input": {
-      const activity = (row?.session?.last_activity ?? "").replace(/^Waiting for input:\s*/i, "");
+      const activity = (session?.last_activity ?? "").replace(/^Waiting for input:\s*/i, "");
       return (
         <>
           <p className="decision-matter">{activity ? capital(activity) : "The agent waits for input."}</p>

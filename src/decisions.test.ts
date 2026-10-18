@@ -2,7 +2,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { APPROVALS, askPlaces, decisionsOf, groupApprovals, inProject, issueDecision, keyProject, nextProject, projectCounts, projectOf, firstLine, outcomeOf, shownDecisions, trackAfter, type Decision, type Resolved } from "./decisions.ts";
+import { APPROVALS, askPlaces, decisionsOf, folderOf, sessionOf, groupApprovals, inProject, issueDecision, keyProject, nextProject, projectCounts, projectOf, firstLine, outcomeOf, shownDecisions, trackAfter, type Decision, type Resolved } from "./decisions.ts";
 import type { Ask, Board, IssueDetail, IssueRecord } from "./types.ts";
 import type { Track } from "./ui/lifecycle.ts";
 
@@ -264,4 +264,8 @@ test("NIT-273: each session waiting at its prompt is its own decision, however m
   const b: Board = { ...board([], [asked]), agents: [agent("claude:c1", "X-1", "waiting"), agent("claude:c2", "X-2", "working"), agent("claude:c3", "X-3", "waiting")] } as unknown as Board;
   const ds = decisionsOf(b, new Map(), NOW);
   assert.deepEqual(ds.map((d) => [d.kind, d.issue?.key ?? d.ask?.issue_key]).sort(), [["ask", "X-3"], ["input", "X-1"]]);
+  // With no task row, the decision still names its own session and folder.
+  const input = ds.find((d) => d.kind === "input")!;
+  assert.equal(sessionOf(input)?.id, "claude:c1");
+  assert.equal(folderOf(input), "C:/code/app");
 });
