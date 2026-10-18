@@ -154,6 +154,7 @@ async fn set_links_service(on: bool) -> Result<nitely_core::link_service::Status
 /// It registers nitely:// through conhost's headless mode instead, as the links listener runs at
 /// login: the second instance gets no window, and the first keeps `npm run tauri dev`'s console.
 /// Release builds are GUI programs and keep the plugin's registration.
+#[cfg(any(windows, target_os = "linux"))]
 fn quiet_dev_links() {
     #[cfg(all(windows, debug_assertions))]
     {
