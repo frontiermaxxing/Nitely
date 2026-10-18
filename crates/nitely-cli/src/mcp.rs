@@ -233,10 +233,12 @@ pub fn serve() -> Result<()> {
 /// Runs this tool call in a process of its own (`nitely mcp-detached`), acting for `session`, and
 /// waits for it up to `wait_cap`. That process outlives this server and its client, so a land the
 /// agent stops waiting on, or whose session ends, still finishes. Past the cap, answers with what
-/// `pending` says, given the log the process writes.
-fn run_apart(server: &Server, session: &str, params: &Value, pending: impl FnOnce(&std::path::Path) -> Result<Value>) -> Result<Value> {
+/// `pending` says, given the log the process writes and what it has said so far (`{queued}`, a
+/// lane run's id once it is queued).
+fn run_apart(server: &Server, session: &str, params: &Value, pending: impl FnOnce(&std::path::Path, Option<Value>) -> Result<Value>) -> Result<Value> {
     let jobs = paths::data_dir().join("jobs");
     std::fs::create_dir_all(&jobs)?;
+    sweep_apart(&jobs);
     let name = params.get("name").and_then(Value::as_str).unwrap_or("call");
     let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     let stem = format!("mcp-{name}-{}-{stamp}", std::process::id());
@@ -257,13 +259,12 @@ fn run_apart(server: &Server, session: &str, params: &Value, pending: impl FnOnc
     std::thread::spawn(move || {
         tx.send(child.wait()).ok();
     });
+    let said = || std::fs::read(&out).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok());
     match rx.recv_timeout(wait_cap()) {
-        Err(mpsc::RecvTimeoutError::Timeout) => pending(&log),
+        Err(mpsc::RecvTimeoutError::Timeout) => pending(&log, said()),
         _ => {
-            let answer: Value = std::fs::read(&out)
-                .ok()
-                .and_then(|b| serde_json::from_slice(&b).ok())
-                .with_context(|| format!("the call's process ended without an answer; its log: {}", log.display()))?;
+            let answer = said().filter(|a| a.get("ok").is_some() || a.get("error").is_some());
+            let answer = answer.with_context(|| format!("the call's process ended without an answer; its log: {}", log.display()))?;
             std::fs::remove_file(&out).ok();
             std::fs::remove_file(&log).ok();
             match answer.get("error").and_then(Value::as_str) {
@@ -273,6 +274,26 @@ fn run_apart(server: &Server, session: &str, params: &Value, pending: impl FnOnc
         }
     }
 }
+
+/// How long a past-cap call's answer and log stay in `jobs/` for whoever wants to read them.
+const APART_KEPT_SECS: u64 = 24 * 60 * 60;
+
+/// Removes the answers and logs of calls that ran past the cap, once they are a day old: nobody
+/// waited for those when they ended, so nothing else removes them.
+fn sweep_apart(jobs: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(jobs) else { return };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let old = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age.as_secs() > APART_KEPT_SECS);
+        if name.starts_with("mcp-") && (name.ends_with(".json") || name.ends_with(".log")) && old {
+            std::fs::remove_file(e.path()).ok();
+        }
+    }
+}
+
+/// In the process `run_apart` started: where its answer goes, and so where a lane run's id goes
+/// once it is queued, for the server's answer past the cap.
+static ANSWER: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
 /// `nitely mcp-detached`: the process `run_apart` starts. Runs the call here, as the session the
 /// server resolved, and writes {ok} or {error} to `out`.
@@ -284,6 +305,7 @@ pub fn run_detached() -> Result<()> {
     let params = request.get("params").cloned().unwrap_or(json!({}));
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
+    ANSWER.set(PathBuf::from(req(&request, "out")?)).ok();
     let answer = match run_tool_as(&server, name, &args, &params, Some(req(&request, "session")?)) {
         Ok(v) => json!({ "ok": v }),
         Err(e) => json!({ "error": format!("{e:#}") }),
@@ -1022,12 +1044,23 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             let dir = task_dir(&config, &db, args, &server.cwd)?;
             let command = req(args, "command")?;
             if detached.is_some() {
-                json!(nitely_core::lanes::run_in(&config, &db, &dir, str_arg(args, "key"), command, &actor, &mut |_| {})?)
+                // Its id as soon as it is queued, where the server looks past the cap.
+                let mut said = None;
+                json!(nitely_core::lanes::run_in(&config, &db, &dir, str_arg(args, "key"), command, &actor, &mut |r| {
+                    if said != Some(r.id) {
+                        said = Some(r.id);
+                        if let Some(answer) = ANSWER.get() {
+                            std::fs::write(answer, json!({ "queued": r.id }).to_string()).ok();
+                        }
+                    }
+                })?)
             } else {
-                let asked = nitely_core::db::now();
-                run_apart(server, session, params, |log| {
-                    // The run its process queued: this agent's newest of this command since.
-                    let run = db.lane_runs_by(actor.id(), 10)?.into_iter().find(|r| r.command == command && r.queued_at >= asked);
+                run_apart(server, session, params, |log, said| {
+                    let queued = said.as_ref().and_then(|s| s.get("queued")).and_then(Value::as_i64);
+                    let run = match queued {
+                        Some(id) => db.lane_run(id)?,
+                        None => None,
+                    };
                     Ok(match run {
                         Some(r) => {
                             let next = format!("Still {} after {}s: call run_status with id {} (and wait_seconds) for the result.", r.state, wait_cap().as_secs(), r.id);
@@ -1104,7 +1137,7 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
                 let opts = nitely_core::land::LandOptions { dir: &server.cwd, issue_key: key, push: true, keep: false, break_lock: false };
                 json!(nitely_core::land::land(&mut db, &config, &opts, &actor)?)
             } else {
-                run_apart(server, session, params, |log| {
+                run_apart(server, session, params, |log, _| {
                     Ok(json!({ "still_running": true, "log": log.to_string_lossy(), "next": format!("The land of {key} is still running after {}s, in a process of its own that goes on without this call. get_issue {key} shows when it landed or why it stopped.", wait_cap().as_secs()) }))
                 })?
             }
@@ -1383,6 +1416,24 @@ fn job_json(db: &Db, job: &nitely_core::submit_job::Job, actor: &nitely_core::is
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sweep_removes_only_day_old_answers_and_logs_of_calls_apart() {
+        let jobs = paths::unique_temp("nitely-apart-sweep", "");
+        std::fs::create_dir_all(&jobs).unwrap();
+        let day_ago = SystemTime::now() - Duration::from_secs(APART_KEPT_SECS + 60);
+        for (name, old) in [("mcp-land-1-1.json", true), ("mcp-land-1-1.log", true), ("mcp-run-1-2.log", false), ("12.log", true)] {
+            let f = std::fs::File::create(jobs.join(name)).unwrap();
+            if old {
+                f.set_modified(day_ago).unwrap();
+            }
+        }
+        sweep_apart(&jobs);
+        let mut left: Vec<String> = std::fs::read_dir(&jobs).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        left.sort();
+        assert_eq!(left, ["12.log", "mcp-run-1-2.log"], "a submit job's log and a recent call's stay");
+        std::fs::remove_dir_all(jobs).ok();
+    }
 
     #[test]
     fn a_new_label_names_the_ones_in_use() {
