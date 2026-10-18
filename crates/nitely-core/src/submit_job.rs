@@ -189,7 +189,7 @@ impl Db {
         if process_runs(pid) && !reused() {
             return Ok(j);
         }
-        let why = "its process ended before it finished (the machine restarted, or it was stopped); submit again";
+        let why = format!("{ABANDONED} (the machine restarted, or it was stopped); submit again");
         let failed = self.conn.execute(
             "UPDATE submit_job SET state = 'failed', ended_at = ?2, error = ?3 WHERE id = ?1 AND state IN ('queued', 'running')",
             params![j.id, now(), why],
@@ -218,6 +218,9 @@ fn runs_job(command_line: &str, job: &Job) -> bool {
         c.contains("nitely")
     }
 }
+
+/// How a job whose process died says so, which a crew supervisor reads to run it again.
+pub const ABANDONED: &str = "its process ended before it finished";
 
 /// Whether a process runs: asked of the OS directly, since a job's status is read often and a
 /// wrong "gone" fails a job that is about to finish.

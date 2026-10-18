@@ -90,6 +90,46 @@ pub fn gb(bytes: u64) -> String {
     format!("{:.1} GB", bytes as f64 / GIB as f64)
 }
 
+/// Bytes free to this user on the volume holding `path` (its nearest existing ancestor): what the
+/// crew reads before it sets up another worktree (NIT-246).
+pub fn free_disk_bytes(path: &Path) -> Option<u64> {
+    let mut at = path;
+    while !at.exists() {
+        at = at.parent()?;
+    }
+    free_disk(at)
+}
+
+#[cfg(windows)]
+fn free_disk(path: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetDiskFreeSpaceExW(dir: *const u16, free_to_caller: *mut u64, total: *mut u64, total_free: *mut u64) -> i32;
+    }
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let (mut free, mut total, mut total_free) = (0u64, 0u64, 0u64);
+    // SAFETY: a null-terminated path and three out-values that live through the call.
+    let ok = unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut free, &mut total, &mut total_free) };
+    (ok != 0).then_some(free)
+}
+
+#[cfg(unix)]
+fn free_disk(path: &Path) -> Option<u64> {
+    // POSIX df: "Filesystem 1024-blocks Used Available Capacity Mounted-on", one line per volume.
+    let out = std::process::Command::new("df").arg("-Pk").arg(path).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let kb: u64 = text.lines().nth(1)?.split_whitespace().nth(3)?.parse().ok()?;
+    Some(kb * 1024)
+}
+
+/// Why no new worktree should be set up now: less than `min_gb` free where worktrees go. None when
+/// there is room, when `min_gb` is 0, or when it cannot be read.
+pub fn disk_short(worktrees: &Path, min_gb: u64) -> Option<String> {
+    let free = free_disk_bytes(worktrees).filter(|f| min_gb > 0 && *f < min_gb * GIB)?;
+    Some(format!("disk low: {} free where worktrees go (crew.min_free_disk_gb is {min_gb} GB)", gb(free)))
+}
+
 /// The file in `dir` that says when the machine last let a run start.
 fn last_start_file(dir: &Path) -> std::path::PathBuf {
     dir.join("last-start")
@@ -327,5 +367,13 @@ mod tests {
             assert!(m.total >= GIB && m.available <= m.total, "{m:?}");
         }
         assert!(cfg!(not(any(windows, target_os = "linux", target_os = "macos"))) || memory().is_some());
+    }
+
+    #[test]
+    fn reads_free_disk_where_worktrees_will_go_and_says_when_short() {
+        let here = std::env::temp_dir();
+        assert!(free_disk_bytes(&here.join("not-made-yet").join("deeper")).is_some_and(|b| b > 0), "read on the nearest folder that exists");
+        assert_eq!(disk_short(&here, 0), None, "0 is off");
+        assert!(disk_short(&here, 1 << 30).unwrap().starts_with("disk low:"), "no volume has a billion GB free");
     }
 }

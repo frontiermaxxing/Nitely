@@ -25,6 +25,8 @@ quiet_hours = "01:00-07:00"   # local time; no new worker starts inside it (runn
 timeout_minutes = 180         # a worker running longer is stopped (never while it lands)
 setup_timeout_minutes = 30    # a worktree setup running longer is stopped; its issue goes to a person
 attempts = 3                  # failed workers on one issue before it goes to a human
+idle_minutes = 30             # a worker with no output and no report this long is stopped as hung (0: off)
+min_free_disk_gb = 10         # no new worker while less is free where worktrees go (0: off)
 
 [crew.commands]               # optional: replaces the default command for an agent
 codex = ["codex", "exec", "--sandbox", "danger-full-access", "..."]
@@ -281,6 +283,23 @@ When a worker exits, the supervisor reads its issue:
   approved change) and came back to In Progress with nobody's claim. A land that now needs a
   person's approval moves the issue to Needs You. One that found the land lock held, or is still waiting
   in the land queue, is tried again a minute later.
+- **Hung workers (NIT-246).** A worker whose log has not grown and who has called no nitely tool
+  (a report, a note, a submit) for `idle_minutes` is stopped with everything it started and settled
+  as `failed`, never while it lands. Its handoff says "no output and no report ... hung", and the
+  issue goes to the next worker, counting toward `attempts`.
+- **After a restart (NIT-246).** A supervisor treats every start as a possible crash. A worker gone
+  while nobody watched is settled as before, and its handoff now says what its worktree holds: a
+  rebase in progress, or how many uncommitted files, kept as they are for the next worker. A
+  submit a worker handed in whose job process died (its gate or review cut short) runs again once,
+  for that worker, while the branch is still at the commit handed in; a second death at the same
+  commit goes to a new worker. A land lock whose process is gone is removed, with a line on the
+  issue it named, so lands do not wait for a person to break it. Lane locks are OS locks and go with
+  their process; lane runs and queued lands of dead processes are settled by the lanes and the land
+  queue themselves.
+- **The machine first (NIT-246).** No new worker starts while less than `min_free_disk_gb` is free
+  where worktrees go; the status says so ("disk low: 7.2 GB free where worktrees go"). Running
+  workers carry on. Memory is the machine's admission (NIT-266): a worker waits for its memory turn
+  before it launches, like a build.
 - **Retry cap.** When an issue reaches `attempts` (3) `failed` workers, it moves to Needs You with an
   ask instead of back to Todo: "The crew tried {key} three times without submitting. Last: {reason}.
   Logs: {paths}." with options "Try again" and "I'll take it". Answering "Try again" puts it back

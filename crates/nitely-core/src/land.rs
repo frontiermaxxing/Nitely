@@ -311,6 +311,22 @@ fn approval_repo(config: &crate::Config, issue: &IssueRecord, dir: &str) -> Resu
     })
 }
 
+/// Removes the repo's land lock when the process that took it is gone (the machine restarted
+/// mid-land): its file says `<holder> pid <pid> since <time>`. Returns the holder it named. A lock
+/// whose process still runs, or whose pid cannot be read, is left alone.
+pub fn clear_dead_lock(root: &Path) -> Option<String> {
+    let path = lock_path(root).ok()?;
+    let text = std::fs::read_to_string(&path).ok()?;
+    let mut words = text.split_whitespace();
+    let holder = words.next()?.to_string();
+    let pid: u32 = words.skip_while(|w| *w != "pid").nth(1)?.parse().ok()?;
+    if pid == std::process::id() || crate::crew::pid_alive(pid) {
+        return None;
+    }
+    std::fs::remove_file(&path).ok()?;
+    Some(holder)
+}
+
 /// How long the repo's land lock has been held, in seconds; None when no land holds it.
 fn lock_age(root: &Path) -> Option<u64> {
     let common = git(root, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).ok()?;

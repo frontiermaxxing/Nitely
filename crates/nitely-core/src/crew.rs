@@ -5,6 +5,7 @@
 //! tests run the supervisor with a fake agent.
 
 use anyhow::{bail, Context, Result};
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -46,6 +47,12 @@ pub struct CrewRules {
     /// Files nearly every change touches (registries, shared types): holding one counts for a
     /// quarter when `next_task` keeps new work out of files in flight (overlap.rs).
     pub shared_files: Vec<String>,
+    /// A worker with no output in its log and no report for this long is stopped as hung, and its
+    /// issue handed on; 0 is off.
+    pub idle_minutes: u64,
+    /// No new worker starts while less than this is free where worktrees go (GB); 0 is off. Memory
+    /// is the machine's own admission (NIT-266, machine.rs).
+    pub min_free_disk_gb: u64,
     /// Replaces the default command for an agent. `{worktree}`, `{repo}`, `{git_dir}`,
     /// `{mcp_config}`, `{nitely}` and `{nitely_env}` are filled in; the brief goes on stdin.
     pub commands: BTreeMap<String, Vec<String>>,
@@ -63,6 +70,8 @@ impl Default for CrewRules {
             setup_timeout_minutes: 30,
             attempts: 3,
             shared_files: vec![],
+            idle_minutes: 30,
+            min_free_disk_gb: 10,
             commands: BTreeMap::new(),
         }
     }
@@ -190,6 +199,9 @@ pub trait Agents {
     fn memory_turn(&self) -> Option<String> {
         None
     }
+    /// Runs a submit job again (`nitely submit-job <id>`) whose process died before it finished, as
+    /// submit starts one; returns its process id.
+    fn run_submit_job(&self, nitely: &str, job: &crate::submit_job::Job) -> Result<Option<u32>>;
 }
 
 /// What `Agents::land` needs: `nitely land <issue>` in the repo, output to `log`.
@@ -321,6 +333,8 @@ enum End {
     TimedOut,
     /// Its process was gone when a new supervisor looked (no exit code).
     Gone,
+    /// Stopped by the supervisor after `idle_minutes` with no output and no report: hung.
+    Silent,
 }
 
 enum Start {
@@ -529,6 +543,13 @@ impl Supervisor {
             self.adopted = true;
         }
         self.reap(db, &rules, &mut tick)?;
+        // A land that died with the machine left its lock: nothing would land again until a person
+        // broke it.
+        if let Some(holder) = crate::land::clear_dead_lock(&self.repo_root) {
+            // The holder is the issue the land was for, when it names one.
+            let key = db.issue(&holder)?.map(|i| i.key);
+            db.log_event(&self.actor(), key.as_deref(), None, "status", &format!("Removed the land lock {holder} left: the land that took it is gone"))?;
+        }
         self.finish_cleanups(db, &rules)?;
         self.finish_landings(db)?;
         if playbook.is_ok() {
@@ -593,6 +614,11 @@ impl Supervisor {
         }
         if self.running() >= rules.workers as usize {
             return Ok(Some("working".into()));
+        }
+        // A disk filling up is worse than an idle slot (memory waits in the machine's admission).
+        let worktrees = playbook.worktrees_folder(&self.repo_root).unwrap_or_else(|| self.repo_root.clone());
+        if let Some(why) = crate::machine::disk_short(&worktrees, rules.min_free_disk_gb) {
+            return Ok(Some(format!("{why}; no new worker starts")));
         }
         Ok(None)
     }
@@ -928,6 +954,7 @@ impl Supervisor {
     /// they are landing.
     fn reap(&mut self, db: &mut Db, rules: &CrewRules, tick: &mut Tick) -> Result<()> {
         let deadline = rules.timeout_minutes.max(1) as i64 * 60;
+        let idle = rules.idle_minutes as i64 * 60;
         let ts = (self.clock)().ts;
         let mut i = 0;
         while i < self.running.len() {
@@ -936,6 +963,10 @@ impl Supervisor {
                 Ok(None) if ts - self.running[i].started_at > deadline && !self.landing(&self.running[i].issue) => {
                     self.running[i].process.stop();
                     Some(End::TimedOut)
+                }
+                Ok(None) if idle > 0 && ts - self.last_sign(db, &self.running[i])? > idle && !self.landing(&self.running[i].issue) => {
+                    self.running[i].process.stop();
+                    Some(End::Silent)
                 }
                 Ok(None) => None,
                 Err(_) => Some(End::Exited(-1)),
@@ -950,6 +981,14 @@ impl Supervisor {
             }
         }
         Ok(())
+    }
+
+    /// When a running worker last showed it is alive: its log last grew, or it last called a nitely
+    /// tool (a report, a note, a submit), or it started.
+    fn last_sign(&self, db: &Db, w: &Running) -> Result<i64> {
+        let logged = std::fs::metadata(&w.log).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64);
+        let called: Option<i64> = db.conn.query_row("SELECT MAX(ts) FROM event WHERE actor = ?1", [&w.agent_id], |r| r.get(0))?;
+        Ok([Some(w.started_at), logged, called].into_iter().flatten().max().unwrap_or(w.started_at))
     }
 
     /// Records how a worker ended, read from its issue's state, and deals with a worker that ended
@@ -986,6 +1025,7 @@ impl Supervisor {
             End::Exited(c) => format!("exit code {c} after {} min", elapsed / 60),
             End::TimedOut => format!("stopped after {} min (crew.timeout_minutes)", elapsed / 60),
             End::Gone => format!("gone while no supervisor watched, after at most {} min", elapsed / 60),
+            End::Silent => format!("stopped after {} min with no output and no report (crew.idle_minutes): hung", rules.idle_minutes),
         };
         let reason = format!("{how}, issue {state}");
         db.crew_worker_ended(w.id, code, outcome, &reason)?;
@@ -1017,9 +1057,10 @@ impl Supervisor {
             let last = timeline.iter().rev().find(|t| t.actor == w.agent_id && t.kind == "status").and_then(|t| t.summary.clone());
             let last = last.map_or("it made no report".to_string(), |s| format!("its last report: \"{s}\""));
             let note = format!(
-                "A crew worker ({}) stopped without handing this issue on ({how}); {last}. Whatever it committed is on its branch in {}. Its log: {}",
+                "A crew worker ({}) stopped without handing this issue on ({how}); {last}. Whatever it committed is on its branch in {}.{} Its log: {}",
                 w.agent,
                 w.worktree.display(),
+                worktree_state(&w.worktree),
                 w.log.display()
             );
             db.add_note(&w.issue, &note, "handoff", &self.actor())?;
@@ -1148,6 +1189,12 @@ impl Supervisor {
             let land_stopped = job.ended_at.is_some_and(|end| {
                 db.timeline(&issue.key).map(|t| t.iter().any(|e| e.kind == "land_failed" && e.ts >= end)).unwrap_or(false)
             });
+            // A submit whose process died with the machine (its gate or review cut short) runs again
+            // as it was handed in, once, while the branch is still at what was handed in.
+            let interrupted = job.state == "failed" && job.error.as_deref().is_some_and(|e| e.contains(crate::submit_job::ABANDONED));
+            if issue.state == "In Progress" && interrupted && unclaimed && self.resubmit(db, &issue.key, &worker, &job)? {
+                continue;
+            }
             match issue.state.as_str() {
                 "In Progress" if job.finished() && (job.needs_the_submitter() || land_stopped) && unclaimed => {
                     db.mark_submit_jobs_delivered(&[job.id])?;
@@ -1173,6 +1220,40 @@ impl Supervisor {
             }
         }
         Ok(())
+    }
+
+    /// Hands `job`'s change in again for the worker that handed it in, when its branch is still at
+    /// the commit handed in and it was not handed in again already for that commit. Returns
+    /// whether it did.
+    fn resubmit(&mut self, db: &mut Db, key: &str, worker: &CrewWorker, job: &crate::submit_job::Job) -> Result<bool> {
+        let head = playbook::git(Path::new(&job.worktree), &["rev-parse", "HEAD"]).map(|h| h.trim().to_string()).unwrap_or_default();
+        if head != job.head {
+            return Ok(false);
+        }
+        let tries: i64 = db.conn.query_row(
+            "SELECT COUNT(*) FROM submit_job WHERE issue_key = ?1 COLLATE NOCASE AND head = ?2 AND state = 'failed' AND error LIKE '%' || ?3 || '%'",
+            params![key, job.head, crate::submit_job::ABANDONED],
+            |r| r.get(0),
+        )?;
+        if tries > 1 {
+            return Ok(false);
+        }
+        let opts = crate::submit::SubmitOptions { dir: &job.worktree, issue_key: Some(key), skip_review: job.skip_review, local_only: job.local_only, batch: true };
+        let again = crate::submit_job::enqueue(db, &opts, &Actor::Agent(worker.agent_id.clone()))?;
+        db.mark_submit_jobs_delivered(&[job.id])?;
+        match self.agents.run_submit_job(&self.nitely, &again) {
+            Ok(Some(pid)) => {
+                db.conn.execute("UPDATE submit_job SET pid = ?2 WHERE id = ?1 AND state = 'queued' AND pid IS NULL", params![again.id, pid])?;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                db.conn.execute("UPDATE submit_job SET state = 'failed', ended_at = ?2, error = ?3 WHERE id = ?1", params![again.id, crate::db::now(), format!("could not start it again: {e:#}")])?;
+                return Ok(false);
+            }
+        }
+        let short = &job.head[..job.head.len().min(7)];
+        db.add_note(key, &format!("Its submit (job {}) stopped when its process died (the machine restarted, or it was stopped). Handed {short} in again as job {}, for the {} worker that handed it in.", job.id, again.id, worker.agent), "note", &self.actor())?;
+        Ok(true)
     }
 
     /// Starts `nitely land` for `key` in a process of its own.
@@ -1367,6 +1448,25 @@ fn current_branch(worktree: &Path) -> Option<String> {
     let paths = playbook::git(worktree, &["rev-parse", "--path-format=absolute", "--git-path", "rebase-merge/head-name", "--git-path", "rebase-apply/head-name"]).ok()?;
     let rebasing = paths.lines().find_map(|p| std::fs::read_to_string(p.trim()).ok()).map(|h| h.trim().trim_start_matches("refs/heads/").to_string());
     Some(rebasing.filter(|b| !b.is_empty()).unwrap_or(on))
+}
+
+/// What a worker left in its worktree that the next one must see first: a rebase in progress, or
+/// uncommitted changes. Empty when neither (or the worktree is gone).
+fn worktree_state(worktree: &Path) -> String {
+    if !worktree.join(".git").exists() {
+        return String::new();
+    }
+    let mut said = String::new();
+    let rebasing = playbook::git(worktree, &["rev-parse", "--path-format=absolute", "--git-path", "rebase-merge", "--git-path", "rebase-apply"])
+        .is_ok_and(|paths| paths.lines().any(|p| !p.trim().is_empty() && Path::new(p.trim()).exists()));
+    if rebasing {
+        said.push_str(" A rebase is in progress there: finish it (git rebase --continue) or abort it first.");
+    }
+    let changed = playbook::git(worktree, &["status", "--porcelain"]).map(|s| s.lines().count()).unwrap_or(0);
+    if changed > 0 {
+        said.push_str(&format!(" It has {changed} uncommitted file{} there, kept as they are: look at them before anything else.", if changed == 1 { "" } else { "s" }));
+    }
+    said
 }
 
 /// The end of a setup log, for the note on the issue.
@@ -2050,6 +2150,12 @@ impl Agents for SystemAgents {
         }
         Ok(Box::new(SystemProcess(cmd.spawn().with_context(|| format!("starting {} land {}", job.nitely, job.issue))?)))
     }
+
+    fn run_submit_job(&self, nitely: &str, job: &crate::submit_job::Job) -> Result<Option<u32>> {
+        use crate::submit_job::Runner;
+        let program = self.resolve(nitely).unwrap_or_else(|| nitely.to_string());
+        crate::submit_job::DetachedProcess { nitely: PathBuf::from(program) }.start(job)
+    }
 }
 
 /// A setup known to have ended, with this exit code.
@@ -2296,6 +2402,8 @@ mod tests {
         /// The machine is short of memory: for beginning a worker, and for launching one.
         short_to_begin: Rc<std::cell::Cell<bool>>,
         short_to_launch: Rc<std::cell::Cell<bool>>,
+        /// Submit jobs started again.
+        resubmits: Rc<RefCell<Vec<i64>>>,
     }
 
     struct FakeProcess {
@@ -2367,6 +2475,10 @@ mod tests {
             }
             self.exits.borrow_mut().insert(pid, 0);
             Ok(Box::new(FakeProcess { pid, exits: self.exits.clone(), stopped: self.stopped.clone() }))
+        }
+        fn run_submit_job(&self, _nitely: &str, job: &crate::submit_job::Job) -> Result<Option<u32>> {
+            self.resubmits.borrow_mut().push(job.id);
+            Ok(Some(9500))
         }
         /// Runs start_task here and now, as `nitely start` would, unless setups hang.
         fn prepare(&self, prep: &Prepare) -> Result<Box<dyn Process>> {
@@ -2658,6 +2770,104 @@ workers = 1
                 assert!(note.contains("The land stopped: the rebase stopped on conflicts in a.txt"), "{note}");
             }
         }
+    }
+
+    /// A clock the test moves: real time ahead, so the events a test writes (at real now) are older.
+    fn moving_clock(sup: Supervisor) -> (Supervisor, Rc<std::cell::Cell<i64>>) {
+        let at = Rc::new(std::cell::Cell::new(crate::db::now() + 10_000));
+        let clock = at.clone();
+        let sup = sup.with_clock(move || Moment { ts: clock.get(), minute_of_day: 12 * 60, day_start: clock.get() - 12 * 3600 });
+        (sup, at)
+    }
+
+    #[test]
+    fn a_worker_silent_past_idle_minutes_is_stopped_as_hung_and_its_issue_handed_on() {
+        let mut f = fixture(&format!("{GATE}[crew]\nworkers = 1\nidle_minutes = 20\n"));
+        let fake = Fake { installed: vec!["claude"], ..Default::default() };
+        let (mut sup, at) = moving_clock(supervisor(&f, &fake));
+        sup.tick(&mut f.db, false).unwrap();
+        // Quiet for 19 minutes: still working.
+        at.set(at.get() + 19 * 60);
+        assert!(sup.tick(&mut f.db, false).unwrap().ended.is_empty());
+        at.set(at.get() + 2 * 60);
+        let tick = sup.tick(&mut f.db, false).unwrap();
+        assert_eq!(tick.ended[0].outcome, "failed", "{tick:?}");
+        assert!(fake.stopped.borrow().contains(&1001), "stopped with what it started");
+        let note = f.db.timeline("NIT-1").unwrap().into_iter().rev().find(|t| t.kind == "handoff").unwrap().summary.unwrap_or_default();
+        assert!(note.contains("no output and no report") && note.contains("hung"), "{note}");
+        assert_eq!(tick.started.iter().map(|w| w.issue.as_str()).collect::<Vec<_>>(), ["NIT-1"], "handed to a new worker at once");
+    }
+
+    #[test]
+    fn after_a_restart_the_handoff_says_what_the_worktree_holds() {
+        let mut f = fixture(&format!("{GATE}[crew]\nworkers = 1\n"));
+        let fake = Fake { installed: vec!["claude"], ..Default::default() };
+        let mut sup = supervisor(&f, &fake);
+        sup.tick(&mut f.db, false).unwrap();
+        let wt = fake.launches.borrow()[0].cwd.clone();
+        std::fs::write(wt.join("half-done.txt"), "x").unwrap();
+        drop(sup);
+        // The machine restarts: the worker is gone, and a new supervisor looks.
+        fake.exits.borrow_mut().insert(1001, -1);
+        let mut sup = supervisor(&f, &fake);
+        let tick = sup.tick(&mut f.db, false).unwrap();
+        assert_eq!(tick.ended[0].outcome, "failed", "{tick:?}");
+        let note = f.db.timeline("NIT-1").unwrap().into_iter().rev().find(|t| t.kind == "handoff").unwrap().summary.unwrap_or_default();
+        assert!(note.contains("1 uncommitted file there"), "{note}");
+        assert!(wt.join("half-done.txt").exists(), "kept as it is");
+    }
+
+    #[test]
+    fn a_submit_cut_short_by_a_restart_runs_again_once_while_the_branch_is_unchanged() {
+        let mut f = fixture(&format!("{GATE}[crew]\nworkers = 1\n"));
+        let fake = Fake { installed: vec!["claude"], ..Default::default() };
+        let mut sup = supervisor(&f, &fake);
+        sup.tick(&mut f.db, false).unwrap();
+        let wt = fake.launches.borrow()[0].cwd.clone();
+        let by = f.db.issue("NIT-1").unwrap().unwrap().claimed_by.unwrap();
+        let head = playbook::git(&wt, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        let branch = playbook::git(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap().trim().to_string();
+        let died = |f: &Fixture| {
+            f.db.conn
+                .execute(
+                    "INSERT INTO submit_job (issue_key, worktree, branch, head, requested_by, skip_review, local_only, state, queued_at, ended_at, error)
+                     VALUES ('NIT-1', ?1, ?2, ?3, ?4, 0, 0, 'failed', ?5, ?5, ?6)",
+                    rusqlite::params![wt.to_string_lossy(), branch, head, by, NOON.ts + 1, format!("{} (the machine restarted, or it was stopped); submit again", crate::submit_job::ABANDONED)],
+                )
+                .unwrap();
+        };
+        died(&f);
+        fake.exits.borrow_mut().insert(1001, 0);
+        let tick = sup.tick(&mut f.db, false).unwrap();
+        assert_eq!(tick.ended[0].outcome, "submitted", "it had handed in: {tick:?}");
+        let again = f.db.latest_submit_job("NIT-1").unwrap().unwrap();
+        assert_eq!((again.state.as_str(), again.requested_by.as_str(), again.head.as_str()), ("queued", by.as_str(), head.as_str()));
+        assert_eq!(*fake.resubmits.borrow(), [again.id]);
+        assert_eq!(f.db.issue("NIT-1").unwrap().unwrap().state, "In Progress", "still the worker's, waiting on the submit");
+
+        // It dies again at the same commit: no third try, a new worker takes it.
+        f.db.conn.execute("DELETE FROM submit_job WHERE id = ?1", [again.id]).unwrap();
+        died(&f);
+        sup.tick(&mut f.db, false).unwrap();
+        assert_eq!(fake.resubmits.borrow().len(), 1);
+        assert_eq!(f.db.issue("NIT-1").unwrap().unwrap().state, "Todo");
+    }
+
+    #[test]
+    fn a_land_lock_left_by_a_land_that_died_is_removed_and_the_machine_guard_holds_new_workers() {
+        let mut f = fixture(&format!("{GATE}[crew]\nworkers = 1\nmin_free_disk_gb = 100000000\n"));
+        let lock = crate::land::lock_path(&f.repo).unwrap();
+        std::fs::write(&lock, "NIT-2 pid 999999 since 2026-10-16T23:27:00Z\n").unwrap();
+        let fake = Fake { installed: vec!["claude"], ..Default::default() };
+        let mut sup = supervisor(&f, &fake);
+        let tick = sup.tick(&mut f.db, false).unwrap();
+        assert!(!lock.exists(), "nothing would land again until a person broke it");
+        assert!(f.db.timeline("NIT-2").unwrap().iter().any(|t| t.summary.as_deref().is_some_and(|s| s.contains("Removed the land lock"))));
+        assert!(tick.started.is_empty() && tick.status.starts_with("disk low:"), "{tick:?}");
+        // A live land's lock stays.
+        std::fs::write(&lock, format!("NIT-2 pid {} since now\n", std::process::id())).unwrap();
+        assert_eq!(crate::land::clear_dead_lock(&f.repo), None);
+        assert!(lock.exists());
     }
 
     #[test]
