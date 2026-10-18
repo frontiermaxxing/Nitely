@@ -1980,7 +1980,13 @@ function setProjectBrief(args: Record<string, unknown>): ProjectBrief {
 
 /** The preview's stand-in for Tauri's `invoke`: same command names and argument names. */
 export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown>): Promise<T> {
-  await delay(cmd === "sync_now" ? 700 : 40);
+  // Each command the page sends, counted, for measuring how much a view reads (NIT-337):
+  // `nitelyDev.calls` in the console. `?snapshotMs=3800` makes a snapshot take as long as a busy
+  // machine's.
+  const calls = ((window as unknown as { nitelyCalls?: Record<string, number> }).nitelyCalls ??= {});
+  calls[cmd] = (calls[cmd] ?? 0) + 1;
+  const snapshotMs = Number(new URLSearchParams(location.search).get("snapshotMs") ?? 0);
+  await delay(cmd === "sync_now" ? 700 : cmd === "snapshot" && snapshotMs > 0 ? snapshotMs : 40);
   const result: unknown = (() => {
     switch (cmd) {
       case "snapshot":

@@ -2,7 +2,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { APPROVALS, askPlaces, decisionsOf, folderOf, sessionOf, groupApprovals, inProject, issueDecision, keyProject, nextProject, projectCounts, projectOf, firstLine, outcomeOf, shownDecisions, trackAfter, type Decision, type Resolved } from "./decisions.ts";
+import { APPROVALS, askPlaces, decisionsOf, detailFingerprints, detailsToRead, folderOf, sessionOf, groupApprovals, inProject, issueDecision, keyProject, nextProject, projectCounts, projectOf, firstLine, outcomeOf, shownDecisions, trackAfter, type Decision, type Resolved } from "./decisions.ts";
 import type { Ask, Board, IssueDetail, IssueRecord } from "./types.ts";
 import type { Track } from "./ui/lifecycle.ts";
 
@@ -268,4 +268,23 @@ test("NIT-273: each session waiting at its prompt is its own decision, however m
   const input = ds.find((d) => d.kind === "input")!;
   assert.equal(sessionOf(input)?.id, "claude:c1");
   assert.equal(folderOf(input), "C:/code/app");
+});
+
+test("NIT-337: only the issues a new board shows changed are read again", () => {
+  const a = issue("X-1", "Needs You");
+  const b = issue("X-2", "Needs You");
+  const first = detailFingerprints(board([a, b], [ask(1, "X-2", NOW - 10)]));
+  assert.deepEqual([...first.keys()].sort(), ["X-1", "X-2"]);
+  // Nothing read yet: all of them.
+  assert.deepEqual(detailsToRead(first, new Map(), new Set(), false).sort(), ["X-1", "X-2"]);
+  // The same board again: nothing.
+  const same = detailFingerprints(board([a, b], [ask(1, "X-2", NOW - 10)]));
+  assert.deepEqual(detailsToRead(same, first, new Set(["X-1", "X-2"]), false), []);
+  // X-2's question answered, X-1 unchanged: X-2 alone; and every one when it is time for all.
+  const answered = detailFingerprints(board([a, b], [{ ...ask(1, "X-2", NOW - 10), answer: "A" }]));
+  assert.deepEqual(detailsToRead(answered, first, new Set(["X-1", "X-2"]), false), ["X-2"]);
+  assert.deepEqual(detailsToRead(answered, first, new Set(["X-1", "X-2"]), true).sort(), ["X-1", "X-2"]);
+  // A moved issue reads again; one whose details never came back reads again too.
+  const moved = detailFingerprints(board([{ ...a, state: "Approved", updated_at: "2026-10-16T11:00:00Z" }, b], [ask(1, "X-2", NOW - 10)]));
+  assert.deepEqual(detailsToRead(moved, first, new Set(["X-2"]), false).sort(), ["X-1"]);
 });

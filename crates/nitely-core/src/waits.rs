@@ -80,9 +80,10 @@ pub struct RepoQueue<'a> {
     pub queue: &'a [Run],
 }
 
-/// Why each queued lane run waits, from the lanes overview.
-pub fn lane_waits(o: &lanes::Overview) -> Vec<Waiting> {
-    let repos: Vec<RepoQueue> = o.projects.iter().map(|p| RepoQueue { project: &p.lanes.project, queue: &p.lanes.queue }).collect();
+/// Why each queued lane run waits, from every repo's lane queue (`lanes::queues`, which reads the
+/// database only: the app asks this on every board refresh, NIT-337).
+pub fn lane_waits(queues: &[(String, Vec<Run>)]) -> Vec<Waiting> {
+    let repos: Vec<RepoQueue> = queues.iter().map(|(project, queue)| RepoQueue { project, queue }).collect();
     lane_waits_of(&repos)
 }
 
@@ -382,9 +383,9 @@ pub fn waits(db: &Db, lane_runs: Vec<Waiting>, repos: &[String]) -> Result<Waits
 
 /// `waits` for the app: the lanes overview read here too.
 pub fn overview(config: &crate::Config, db: &Db) -> Result<Waits> {
-    let lanes = lanes::overview(config, db)?;
+    let queues = lanes::queues(config, db)?;
     let repos: Vec<String> = config.repos.iter().map(|r| r.root.clone()).collect();
-    waits(db, lane_waits(&lanes), &repos)
+    waits(db, lane_waits(&queues), &repos)
 }
 
 #[cfg(test)]

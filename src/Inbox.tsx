@@ -8,7 +8,8 @@ import {
   APPROVALS,
   askPlaces,
   decisionsOf,
-  detailKeys,
+  detailFingerprints,
+  detailsToRead,
   firstLine,
   folderOf,
   groupApprovals,
@@ -430,13 +431,28 @@ const GROUP_LABEL: Record<DecisionKind, string> = {
  */
 export function useDecisionDetails(board: Board | null): Map<string, IssueDetail> {
   const [details, setDetails] = useState<Map<string, IssueDetail>>(new Map());
+  // Only the issues the new board shows changed are read again, and every one each minute: a board
+  // comes every few seconds while agents work, with 20 to 40 issues to read (NIT-337).
+  const seen = useRef<Map<string, string>>(new Map());
+  const fullAt = useRef(0);
+  const have = useRef<Map<string, IssueDetail>>(new Map());
   useEffect(() => {
     if (!board) return;
     let live = true;
-    Promise.all(detailKeys(board).map((key) => invoke<IssueDetail>("issue_detail", { key }).catch(() => null))).then((all) => {
+    const prints = detailFingerprints(board);
+    const all = Date.now() - fullAt.current > DETAILS_FULL_MS;
+    const keys = detailsToRead(prints, seen.current, new Set(have.current.keys()), all);
+    Promise.all(keys.map((key) => invoke<IssueDetail>("issue_detail", { key }).catch(() => null))).then((read) => {
       if (!live) return;
+      if (all) fullAt.current = Date.now();
+      seen.current = prints;
       const next = new Map<string, IssueDetail>();
-      for (const d of all) if (d) next.set(d.issue.key, d);
+      // What the board still names: read now, or kept from before.
+      for (const key of prints.keys()) {
+        const d = read.find((x) => x && x.issue.key === key) ?? have.current.get(key);
+        if (d) next.set(key, d);
+      }
+      have.current = next;
       setDetails(next);
     });
     return () => {
@@ -445,6 +461,9 @@ export function useDecisionDetails(board: Board | null): Map<string, IssueDetail
   }, [board]);
   return details;
 }
+
+/** How often every decision's details are read again, changed on the board or not. */
+const DETAILS_FULL_MS = 60000;
 
 /**
  * The playbook change an issue's decision is about: pending, or just applied or rejected (the card

@@ -63,6 +63,32 @@ export function detailKeys(board: Board): string[] {
   return [...keys].sort();
 }
 
+/**
+ * What the board says of each issue whose details the Inbox reads (`detailKeys`), as one string per
+ * key: its record (state, track, owner, updated), its questions and its worktree's state. A key
+ * whose string is unchanged since the last board needs no new read of its details (NIT-337).
+ */
+export function detailFingerprints(board: Board): Map<string, string> {
+  const rows = board.repos.flatMap((r) => r.rows);
+  const out = new Map<string, string>();
+  for (const key of detailKeys(board)) {
+    const row = rows.find((r) => r.issue_key === key || r.issue?.key === key);
+    const issue = row?.issue ?? board.needs_me_issues.find((i) => i.key === key) ?? null;
+    const asks = board.asks.filter((a) => a.issue_key === key).map((a) => [a.id, a.answer, a.finding?.text ?? null]);
+    const state = row?.state ? [row.state.rebase_in_progress, row.state.ahead, row.state.behind, row.state.last_commit_at] : null;
+    out.set(key, JSON.stringify([issue, asks, state, row?.needs_me ?? null, row?.session?.state ?? null]));
+  }
+  return out;
+}
+
+/**
+ * The keys whose details to read again: new ones, ones whose fingerprint changed, ones not read
+ * yet, and every one when `all` (the hook does that now and then, so nothing stays stale forever).
+ */
+export function detailsToRead(now: Map<string, string>, before: Map<string, string>, have: Set<string>, all: boolean): string[] {
+  return [...now.keys()].filter((k) => all || !have.has(k) || before.get(k) !== now.get(k));
+}
+
 /** The state that waits on a person (nitely-core's NEEDS_HUMAN). */
 const NEEDS_HUMAN = "Needs You";
 export const needsHuman = (i: IssueRecord) => i.state === NEEDS_HUMAN;

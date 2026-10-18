@@ -5,6 +5,7 @@ import type { AgentPlan, Board, Project } from "./types";
 import { AgentSetup, pendingChanges, setupErrors } from "./Agents";
 import { Inbox, storeInboxProject, storedInboxProject, useDecisionDetails } from "./Inbox";
 import { decisionsOf, projectCounts, projectOf, type Decision } from "./decisions";
+import { waitLeft } from "./refresh";
 import { Settings, isSettingsSection, type SettingsSection } from "./Settings";
 import { Now, movingCounts, movingTitle } from "./Now";
 import { Pulse } from "./Pulse";
@@ -31,7 +32,6 @@ const CHANGED_EVENT = "nitely://changed";
 const OPEN_ISSUE_EVENT = "nitely://open-issue";
 /** Sent with a decision's id when its notification is clicked (src-tauri/src/notify.rs). */
 const OPEN_DECISION_EVENT = "nitely://open-decision";
-const REFRESH_GAP_MS = 1000;
 /** For the app's performance checks (scripts/harness/perf.e2e.mjs): a mark when the first board
  * is drawn, and an event each time a board is drawn. Neither is kept, so neither grows. */
 const FIRST_BOARD_MARK = "nitely:first-board";
@@ -123,10 +123,15 @@ export function App() {
   const [version, setVersion] = useState(0);
 
   // One refresh at a time: a snapshot runs git in every worktree and can take seconds, so changes
-  // that arrive meanwhile queue a single follow-up refresh, at most one per REFRESH_GAP_MS, instead
-  // of piling up in parallel while agents are busy.
+  // that arrive meanwhile queue a single follow-up refresh, paced by what the last one cost
+  // (refresh.ts), instead of piling up in parallel while agents are busy.
   const running = useRef(false);
   const again = useRef(false);
+  // Views read their own data again (`version`) once per board refresh after a change from
+  // outside the app, not once per change: the database changes several times a minute (NIT-337).
+  const bump = useRef(false);
+  const lastEnd = useRef<number | null>(null);
+  const lastMs = useRef(0);
   const refresh = useCallback(async () => {
     if (running.current) {
       again.current = true;
@@ -134,8 +139,12 @@ export function App() {
     }
     running.current = true;
     for (let first = true; first || again.current; first = false) {
-      if (!first) await new Promise((r) => setTimeout(r, REFRESH_GAP_MS));
+      // Waits out the pace; a window coming back into view reads at once (within a quarter second).
+      while (waitLeft(Date.now(), lastEnd.current, lastMs.current, document.hidden) > 0) {
+        await new Promise((r) => setTimeout(r, 250));
+      }
       again.current = false;
+      const started = Date.now();
       try {
         const [b, p] = await Promise.all([invoke<Board>("snapshot"), invoke<Project[]>("projects")]);
         setBoard(b);
@@ -144,13 +153,25 @@ export function App() {
       } catch (e) {
         setError(String(e));
       }
+      lastEnd.current = Date.now();
+      lastMs.current = lastEnd.current - started;
+      if (bump.current) {
+        bump.current = false;
+        setVersion((v) => v + 1);
+      }
       setNow(nowSecs());
     }
     running.current = false;
   }, []);
 
+  // A change made in the app: every view reads again now, and the board too.
   const changed = useCallback(() => {
     setVersion((v) => v + 1);
+    refresh();
+  }, [refresh]);
+  // A change from outside (an agent, a hook, a land): the board first, then the views, once.
+  const changedOutside = useCallback(() => {
+    bump.current = true;
     refresh();
   }, [refresh]);
 
@@ -192,13 +213,13 @@ export function App() {
 
   useEffect(() => {
     refresh();
-    const id = setInterval(changed, FALLBACK_MS);
-    const unlisten = listen(CHANGED_EVENT, changed);
+    const id = setInterval(changedOutside, FALLBACK_MS);
+    const unlisten = listen(CHANGED_EVENT, changedOutside);
     return () => {
       clearInterval(id);
       unlisten.then((stop) => stop());
     };
-  }, [refresh, changed]);
+  }, [refresh, changedOutside]);
 
   // A nitely://issue/KEY link opens that issue's panel: one that started the app is waiting in the
   // backend (opened_link), later ones arrive as events while the app runs.

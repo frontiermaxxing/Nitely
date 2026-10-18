@@ -2393,13 +2393,11 @@ pub fn status(db: &Db, repo_root: &Path, pb: &Playbook, project: &str) -> Result
     status_with(db, repo_root, pb, project, true)
 }
 
-/// `status`; with `probe_locks`, a lane is busy when its lock is held (which opens the lock file),
-/// otherwise when a running request names it.
-fn status_with(db: &Db, repo_root: &Path, pb: &Playbook, project: &str, probe_locks: bool) -> Result<Option<Lanes>> {
-    let Some(rules) = pb.lanes.clone() else { return Ok(None) };
-    let root = repo_root.to_string_lossy();
+/// A repo's waiting and running requests, oldest first, each queued one with why it waits: from
+/// the database alone, no git (the app's Waiting list reads it, NIT-337).
+fn queue_of(db: &Db, project: &str, root: &str) -> Result<Vec<Run>> {
     // The queue by this repo directly: a long build stays in it whatever finished since (NIT-223).
-    let mut queue = db.open_lane_runs(project, &root)?;
+    let mut queue = db.open_lane_runs(project, root)?;
     // Why each waits: the person's checkout or memory where it said so, else where it stands in
     // the machine's queue (NIT-291).
     if queue.iter().any(|r| r.state == "queued") {
@@ -2408,6 +2406,30 @@ fn status_with(db: &Db, repo_root: &Path, pb: &Playbook, project: &str, probe_lo
             r.waiting_why = r.waiting_for.clone().map(|w| format!("waiting: {w}")).or_else(|| r.waiting_memory.clone()).or_else(|| reasons.remove(&r.id));
         }
     }
+    Ok(queue)
+}
+
+/// Every connected repo's lane queue with why each request waits, by project: what `overview`
+/// shows of them, without its git and size reads.
+pub fn queues(config: &crate::Config, db: &Db) -> Result<Vec<(String, Vec<Run>)>> {
+    let mut out = Vec::new();
+    for repo in &config.repos {
+        let Some(project) = repo.project.as_deref() else { continue };
+        let Ok(pb) = Playbook::load_with(Path::new(&repo.root), config) else { continue };
+        if pb.lanes.is_none() {
+            continue;
+        }
+        out.push((project.to_string(), queue_of(db, project, &repo.root)?));
+    }
+    Ok(out)
+}
+
+/// `status`; with `probe_locks`, a lane is busy when its lock is held (which opens the lock file),
+/// otherwise when a running request names it.
+fn status_with(db: &Db, repo_root: &Path, pb: &Playbook, project: &str, probe_locks: bool) -> Result<Option<Lanes>> {
+    let Some(rules) = pb.lanes.clone() else { return Ok(None) };
+    let root = repo_root.to_string_lossy();
+    let queue = queue_of(db, project, &root)?;
     let mut lanes = Vec::new();
     for n in 1..=rules.lanes() {
         let path = lane_path(repo_root, pb, n);
