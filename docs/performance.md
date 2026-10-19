@@ -181,3 +181,45 @@ accessible processes (181 denied) took 17.7 ms; the 10,000-process synthetic att
 took 47 ms. These are measured debug-build results on that machine, not guaranteed latency;
 older Windows uses the slower Toolhelp fallback. The combined budget test enforces under 1%
 of one core, under 32 MiB additional sampled resident usage, and the stated I/O transfer budgets.
+
+## Reading an incident
+
+The CLI, MCP `performance` tool and app share a bounded, cached query. Reads do not start a
+collector or run Windows log/process scans. Before expensive work, agents should read `now`,
+check freshness and the current admission policy, then use the normal build lane. The reported
+limits are current configuration evaluated with the cached physical total, not permission to
+start work and not the policy that applied to every historical point.
+
+```
+nitely performance now
+nitely performance history --before-last-restart --limit 200
+nitely performance episodes --project APP
+nitely performance history --from-ms 1800000000000 --to-ms 1800003600000
+nitely performance export --before-last-restart --output incident.json
+```
+
+MCP takes the same `view` (`now`, `history`, `episodes`), `from_ms`, `to_ms`, `limit`, `project`
+and `before_last_restart` fields. Ranges are inclusive UTC Unix milliseconds, at most 31 days;
+responses contain at most 2,000 chart buckets and events, 200 gaps/sessions and 100 recent
+pressure episodes. Output identifies truncation. History compaction preserves maxima and
+minimum available RAM rather than hiding spikes in averages. Export writes compact JSON to a
+new file only and never overwrites an existing report. Project filtering applies to workload
+attribution and events; machine counters continue to describe the whole PC.
+
+`before_last_restart` requires an observed change of known boot identity. Its ten-minute
+window ends at the previous boot's last retained sample, not an assumed shutdown time.
+Unknown boot identity and unexplained collection gaps never manufacture a restart. Freshness
+describes the latest recorder sample, independently of the historical window. Pause, stale
+data, missing counters, clock changes and collection gaps remain explicit.
+
+Sustained pressure episodes require at least 15 seconds of consecutive detailed observations
+without a collection gap: CPU at least 90%, available physical RAM at most 10%, or system
+commit at least 90% of its limit. These thresholds describe observations, not diagnoses.
+Minute peaks cannot establish sustained pressure and are never treated as if they could.
+Inferred causes are separate; simultaneous jobs and pressure alone do not establish causation.
+
+Lane start/end, memory wait/resume and observed lane memory-limit failures are retained in the
+separate performance database, without command arguments, paths or error text. Events are
+best-effort and bounded by summary retention plus a 20,000-row cap; telemetry failure cannot
+block a build. A forced termination can leave an unmatched start. Clear removes these events
+with the samples, and pause suppresses new events. Existing jobs have no invented backfill.

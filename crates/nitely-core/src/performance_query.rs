@@ -106,6 +106,11 @@ pub fn query_at(dir: &Path, request: &Query, now: i64) -> Result<Report> {
             let mut minutes = store.minutes(from, to, 43200)?;
             minutes.reverse();
             for pair in minutes.windows(2) { if let Some(gap) = sample_gap(&pair[0].last, &pair[1].last, 90_000) { gaps.push(gap); } }
+            for minute in &minutes {
+                if minute.last.monotonic_ms.saturating_sub(minute.first_monotonic_ms) > u64::from(minute.samples.saturating_sub(1)) * performance::CADENCE_MS + 10_000 {
+                    gaps.push(Gap { from_ms: minute.first_wall_ms, to_ms: minute.last.wall_ms, kind: "incomplete_minute".into() });
+                }
+            }
             points = minutes.into_iter().map(point_of_minute).collect();
             if request.view == View::Episodes { raw_samples = store.samples(from, to, 17280)?; raw_samples.reverse(); }
         } else {
@@ -203,22 +208,24 @@ fn pressure(metrics: &Metrics) -> Vec<String> {
 }
 fn episodes(samples: &[Sample]) -> Vec<Episode> {
     let mut out = Vec::new();
-    let mut start = None;
-    let mut reasons = std::collections::BTreeSet::new();
-    let flush = |out: &mut Vec<Episode>, start: Option<usize>, end: usize, reasons: &std::collections::BTreeSet<String>| {
-        if let Some(start) = start.filter(|&start| end > start && samples[end].monotonic_ms.saturating_sub(samples[start].monotonic_ms) >= 15_000) {
-            out.push(Episode { from_ms: samples[start].wall_ms, to_ms: samples[end].wall_ms, observations: end-start+1, observed: reasons.iter().cloned().collect(), inferred_causes: vec![] });
+    let mut active = std::collections::BTreeMap::<String, usize>::new();
+    let flush = |out: &mut Vec<Episode>, start: usize, end: usize, reason: String| {
+        if end > start && samples[end].monotonic_ms.saturating_sub(samples[start].monotonic_ms) >= 15_000 {
+            out.push(Episode { from_ms: samples[start].wall_ms, to_ms: samples[end].wall_ms, observations: end-start+1, observed: vec![reason], inferred_causes: vec![] });
         }
     };
     for (index, sample) in samples.iter().enumerate() {
         let observed = pressure(&sample.metrics);
-        if observed.is_empty() || index > 0 && sample_gap(&samples[index-1], sample, 15_000).is_some() {
-            if index > 0 { flush(&mut out, start.take(), index-1, &reasons); }
-            reasons.clear();
+        let gap = index > 0 && sample_gap(&samples[index-1], sample, 15_000).is_some();
+        let ended: Vec<String> = active.keys().filter(|reason| gap || !observed.contains(reason)).cloned().collect();
+        for reason in ended {
+            let start = active.remove(&reason).unwrap();
+            if index > 0 { flush(&mut out, start, index-1, reason); }
         }
-        if !observed.is_empty() { start.get_or_insert(index); reasons.extend(observed); }
+        for reason in observed { active.entry(reason).or_insert(index); }
     }
-    if !samples.is_empty() { flush(&mut out, start, samples.len()-1, &reasons); }
+    if !samples.is_empty() { for (reason, start) in active { flush(&mut out, start, samples.len()-1, reason); } }
+    out.sort_by_key(|e| e.to_ms);
     out.into_iter().rev().take(100).collect()
 }
 
@@ -285,6 +292,10 @@ mod tests {
         assert_eq!(report.episodes[0].observations, 4);
         assert!(report.episodes[0].inferred_causes.is_empty());
         assert!(report.points.is_empty(), "episode query stays compact");
+        let mut alternating: Vec<Sample> = (0..8).map(|n| Sample { wall_ms: NOW+n*5000, monotonic_ms: (n*5000) as u64, boot: Some("boot".into()), session: "s".into(), metrics: Metrics { cpu_percent: Some(if n%2 == 0 {95.0} else {10.0}), physical_total_bytes: Some(100), physical_available_bytes: Some(if n%2 == 0 {50} else {5}), ..Default::default() }, collection_ms: 1 }).collect();
+        assert!(episodes(&alternating).is_empty(), "alternating short pressures cannot establish a sustained metric");
+        for sample in &mut alternating { sample.metrics.cpu_percent = Some(95.0); }
+        assert_eq!(episodes(&alternating).len(), 1);
     }
     #[test]
     fn history_compaction_preserves_spikes_and_current_reads_stay_small() {
