@@ -367,7 +367,7 @@ mod tests {
         // The same recovery applies if the supervisor crashed before recording a setup pid.
         db.conn.execute("UPDATE issue SET claimed_at = ?2 WHERE key = ?1", params![running, old]).unwrap();
         db.conn.execute("UPDATE event SET ts = ?2 WHERE issue_key = ?1", params![running, old]).unwrap();
-        db.conn.execute("UPDATE crew_worker SET pid = NULL, phase = 'setup' WHERE issue_key = ?1", [&running]).unwrap();
+        db.conn.execute("UPDATE crew_worker SET pid = NULL, phase = 'setup', ended_at = NULL WHERE issue_key = ?1", [&running]).unwrap();
         assert_eq!(take(&mut db), Some(running));
     }
 

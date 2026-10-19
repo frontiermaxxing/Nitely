@@ -1348,6 +1348,23 @@ impl Db {
         let Some(key) = key else {
             return Ok(None);
         };
+        // A supervisor may have crashed before closing its worker row. Retire abandoned rows in
+        // the same transaction as the new claim, so a restart cannot resume the old setup (or
+        // settle an old worker) over the new owner. Leave sessions alone: the replacement may
+        // already be working in the same worktree.
+        let abandoned = {
+            let mut stmt = tx.prepare("SELECT id, pid FROM crew_worker WHERE issue_key = ?1 AND ended_at IS NULL")?;
+            let rows = stmt.query_map([&key], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<u32>>(1)?)))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (id, pid) in abandoned {
+            if !pid.is_some_and(crate::procs::alive) {
+                tx.execute(
+                    "UPDATE crew_worker SET ended_at = ?2, outcome = 'stopped', reason = 'the issue was reclaimed by another agent' WHERE id = ?1 AND ended_at IS NULL",
+                    params![id, ts],
+                )?;
+            }
+        }
         tx.execute(
             "UPDATE issue SET state = 'In Progress', state_type = 'started', claimed_by = ?2,
                claimed_at = ?3, updated_at = ?4 WHERE key = ?1",

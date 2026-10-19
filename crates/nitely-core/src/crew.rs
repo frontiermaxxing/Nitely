@@ -821,6 +821,13 @@ impl Supervisor {
         let now = (self.clock)().ts;
         let mut i = 0;
         while i < self.preparing.len() {
+            let p = &self.preparing[i];
+            if !db.crew_resume_setup(p.id, &p.issue.key, &p.agent_id)? {
+                // Another allocator owns it now. Do not launch, move its issue, or end sessions
+                // in the shared worktree on behalf of this obsolete setup.
+                self.preparing.remove(i).process.stop();
+                continue;
+            }
             let exited = match self.preparing[i].process.exited() {
                 // A setup taken over from an earlier supervisor has no exit code: its record says.
                 Ok(Some(code)) if code < 0 => {
@@ -975,6 +982,9 @@ impl Supervisor {
                 // its worktree says how it went (`nitely start` would not set up an existing worktree
                 // again); with no worktree yet, start it again.
                 let Some(issue) = db.issue(&w.issue_key)? else { continue };
+                if !db.crew_resume_setup(w.id, &w.issue_key, &w.agent_id)? {
+                    continue;
+                }
                 let worktree = Path::new(&w.worktree);
                 let process = match w.pid.and_then(|pid| self.agents.adopt(pid)) {
                     Some(p) => p,
@@ -1072,6 +1082,16 @@ impl Supervisor {
     /// without handing its issue on (docs/crew.md, Guardrails): a handoff note when it left none,
     /// and the issue back to Todo, or to a person after `attempts` failures.
     fn settle(&mut self, db: &mut Db, rules: &CrewRules, w: &Running, end: End) -> Result<String> {
+        use rusqlite::OptionalExtension;
+        let settled: Option<String> = db.conn.query_row(
+            "SELECT COALESCE(outcome, 'stopped') FROM crew_worker WHERE id = ?1 AND ended_at IS NOT NULL",
+            [w.id], |r| r.get(0),
+        ).optional()?;
+        if let Some(outcome) = settled {
+            // Reclamation can retire a crashed worker before its original supervisor observes
+            // the exit. Do not then end the replacement's sessions or change its issue.
+            return Ok(outcome);
+        }
         let issue = db.issue(&w.issue)?;
         let state = issue.as_ref().map(|i| i.state.clone()).unwrap_or_default();
         let still_mine = issue.as_ref().is_some_and(|i| i.claimed_by.as_deref() == Some(w.agent_id.as_str()));
@@ -2055,6 +2075,24 @@ impl Db {
     fn crew_worker_pid(&self, id: i64, pid: u32) -> Result<()> {
         self.conn.execute("UPDATE crew_worker SET pid = ?2 WHERE id = ?1", rusqlite::params![id, pid])?;
         Ok(())
+    }
+
+    /// Resuming setup and automatic reclamation compete for the same issue claim. Renew only
+    /// while this unclosed setup still owns it; a new claimant closes the row atomically too.
+    /// This also protects a supervisor that read the setup before another agent reclaimed it.
+    fn crew_resume_setup(&self, id: i64, key: &str, agent_id: &str) -> Result<bool> {
+        let renewed = self.conn.execute(
+            "UPDATE issue SET claimed_at = ?4 WHERE key = ?2 AND state = 'In Progress' AND claimed_by = ?3
+             AND EXISTS (SELECT 1 FROM crew_worker WHERE id = ?1 AND issue_key = ?2 AND agent_id = ?3 AND phase = 'setup' AND ended_at IS NULL)",
+            params![id, key, agent_id, now()],
+        )?;
+        if renewed == 0 {
+            self.conn.execute(
+                "UPDATE crew_worker SET ended_at = ?2, outcome = 'stopped', reason = 'the setup no longer owns the issue' WHERE id = ?1 AND ended_at IS NULL",
+                params![id, now()],
+            )?;
+        }
+        Ok(renewed > 0)
     }
 
     fn crew_worker_ended(&self, id: i64, code: Option<i32>, outcome: &str, reason: &str) -> Result<()> {
@@ -3454,6 +3492,55 @@ workers = 1
         let tick = supervisor(&f, &fake).tick(&mut f.db, false).unwrap();
         assert!(!fake.prepares.borrow().contains(&"NIT-1".to_string()) && !tick.started.iter().any(|w| w.issue == "NIT-1"), "not set up again: {tick:?}");
         assert_eq!(f.db.issue("NIT-1").unwrap().unwrap().state, "Needs You");
+    }
+
+    #[test]
+    fn focus_reclamation_retires_crashed_workers_before_a_supervisor_can_resume_them() {
+        // An interrupted setup and an interrupted worker must both be retired by reclamation.
+        for phase in ["setup", "work"] {
+            let mut f = fixture(&format!("{GATE}[crew]\nworkers = 1\n"));
+            let goal = f.db.save_goal("NIT", None, &crate::goals::GoalChange {
+                title: Some("Focused feature".into()), outcome: Some("Ship it".into()), workers: Some(1), ..Default::default()
+            }, &Actor::Human).unwrap().id;
+            f.db.set_issue_goal("NIT-1", Some(goal), &Actor::Human).unwrap();
+            f.db.set_project_focus("NIT", Some(goal), false, &Actor::Human).unwrap();
+            let fake = Fake { installed: vec!["claude"], ..Default::default() };
+            // Setup succeeds, but the old supervisor waits for memory before launching the agent.
+            fake.short_to_launch.set(phase == "setup");
+            let mut old = supervisor(&f, &fake);
+            old.tick(&mut f.db, false).unwrap();
+            let worker = f.db.crew_running("NIT").unwrap().remove(0);
+            assert!(playbook::setup_passed(Path::new(&worker.worktree)));
+            let launches_before = fake.launches.borrow().len();
+            assert_eq!(launches_before, usize::from(phase == "work"));
+            if phase == "work" {
+                fake.exits.borrow_mut().insert(worker.pid.unwrap(), -1);
+            }
+            let stale = now() - 7 * 3600;
+            f.db.conn.execute("UPDATE crew_worker SET phase = ?2, pid = 0 WHERE id = ?1", params![worker.id, phase]).unwrap();
+            f.db.conn.execute("UPDATE issue SET claimed_at = ?1 WHERE key = 'NIT-1'", [stale]).unwrap();
+            f.db.conn.execute("UPDATE event SET ts = ?1 WHERE issue_key = 'NIT-1'", [stale]).unwrap();
+
+            let external = "codex:external";
+            let claimed = f.db.next_task("NIT", external).unwrap().unwrap();
+            assert_eq!(claimed.key, "NIT-1");
+            assert!(f.db.crew_running("NIT").unwrap().is_empty(), "reclaim retires the {phase} row atomically");
+            // A replacement session in that same folder must not be ended by the old worker's
+            // cleanup when either the original or a restarted supervisor sees the stale setup.
+            f.db.conn.execute(
+                "INSERT INTO session (id, vendor, cwd, started_at, last_seen_at, state) VALUES (?1, 'codex', ?2, ?3, ?3, 'working')",
+                params![external, worker.worktree, now()],
+            ).unwrap();
+            fake.short_to_launch.set(false);
+            old.tick(&mut f.db, false).unwrap();
+            let mut restarted = supervisor(&f, &fake);
+            restarted.tick(&mut f.db, false).unwrap();
+            assert_eq!(fake.launches.borrow().len(), launches_before, "neither supervisor launches a duplicate from the {phase} row");
+            assert_eq!(fake.prepares.borrow().len(), 1, "the reclaimed worktree is not set up again");
+            let issue = f.db.issue("NIT-1").unwrap().unwrap();
+            assert_eq!((issue.state.as_str(), issue.claimed_by.as_deref()), ("In Progress", Some(external)));
+            assert_eq!(f.db.session(external).unwrap().unwrap().state, "working");
+        }
     }
 
     #[test]
