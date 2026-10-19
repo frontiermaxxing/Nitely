@@ -1370,8 +1370,12 @@ fn reserve_cap(db: &Db, id: i64, limits: Option<&machine::Limits>, slots: u32) -
 /// what the slots set aside by design, the memory free now decides alone. Either way it then sets
 /// its own aside (`reserve_cap`), and it is stopped at its cap.
 fn admit_run(db: &Db, id: i64, limits: Option<&machine::Limits>, slots: u32, quick_slot: bool, memory: &mut dyn FnMut() -> Option<machine::Memory>) -> Result<Option<String>> {
+    // What must be free above the floor now: its command's expected peak, or with no history the
+    // least a run sets aside. Its whole cap there would hold a new command back for good on a
+    // machine whose own programs leave less than the floor and a cap free, with nothing building
+    // (NIT-372); what it sets aside, which the next runs count, stays its whole cap.
     let need = match limits {
-        Some(l) => expected_peak_of(db, id, cap_for(l, slots))?,
+        Some(l) => known_peak_of(db, id, cap_for(l, slots))?.unwrap_or(MIN_RESERVED),
         None => 0,
     };
     machine::admit_once_with(
@@ -1393,12 +1397,17 @@ const MIN_RESERVED: u64 = 2 * machine::GIB;
 /// What request `id` is expected to take at its peak (NIT-363), from the peaks its command's last
 /// runs in its repo reached (`expected_peak`).
 fn expected_peak_of(db: &Db, id: i64, cap: u64) -> Result<u64> {
+    Ok(known_peak_of(db, id, cap)?.unwrap_or(cap))
+}
+
+/// `expected_peak_of` when request `id`'s command has history in its repo; None when it has none.
+fn known_peak_of(db: &Db, id: i64, cap: u64) -> Result<Option<u64>> {
     let (repo, command): (String, String) = db.conn.query_row("SELECT repo, command FROM lane_run WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?)))?;
     let mut stmt = db.conn.prepare(
         "SELECT peak_memory FROM lane_run WHERE repo = ?1 AND command = ?2 AND id != ?3 AND state = 'done' AND peak_memory IS NOT NULL ORDER BY id DESC LIMIT ?4",
     )?;
     let peaks: Vec<i64> = stmt.query_map(params![repo, command, id, PEAK_HISTORY], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
-    Ok(expected_peak(&peaks, cap))
+    Ok((!peaks.is_empty()).then(|| expected_peak(&peaks, cap)))
 }
 
 /// The p90 of `peaks` plus a quarter, at least `MIN_RESERVED`, never more than `cap`; `cap` when
@@ -3888,6 +3897,34 @@ let id = db.conn.last_insert_rowid();
         std::fs::remove_file(base.join("lanes").join("last-start")).ok();
         let why = admit_run(&db, quick, Some(&l), 5, true, &mut free(14)).unwrap().unwrap();
         assert!(why.contains("expected to take 2.0 GB above the"), "14 GB free is under the floor plus its 2 GB: {why}");
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// A command with no history starts with nothing running though the machine's own programs
+    /// leave less than the floor and a whole cap free (NIT-372): it needs the least a run sets
+    /// aside free above the floor, and still sets its whole cap aside for the next runs to count.
+    #[test]
+    fn a_new_command_starts_on_a_machine_short_of_a_whole_cap() {
+        let base = crate::paths::unique_temp("nitely-lane-new-command", "");
+        std::fs::create_dir_all(&base).unwrap();
+        let db = Db::open(&base.join("t.db")).unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, priority, lane_count)
+                 VALUES ('APP', 'C:/Code/app', 'x', 'run', 's', 't', 'b', 'cargo test -p app new', 'queued', 'local', 1, ?1, 3, 3)",
+                [std::process::id() as i64],
+            )
+            .unwrap();
+        let id = db.conn.last_insert_rowid();
+        let l = machine::limits_for(64 * machine::GIB, None, None); // 12.8 GB floor, 10.2 GB a slot
+        let free = |gb: u64| move || Some(machine::Memory { total: 64 * machine::GIB, available: gb * machine::GIB });
+        assert_eq!(admit_run(&db, id, Some(&l), 5, false, &mut free(22)).unwrap(), None, "22 GB free, under 12.8 + 10.2, nothing running");
+        let run = db.lane_run(id).unwrap().unwrap();
+        assert_eq!(run.memory_reserved, Some(cap_for(&l, 5) as i64), "its whole cap set aside");
+        db.conn.execute("UPDATE lane_run SET memory_cap = NULL, memory_reserved = NULL WHERE id = ?1", [id]).unwrap();
+        std::fs::remove_file(base.join("lanes").join("last-start")).ok();
+        let why = admit_run(&db, id, Some(&l), 5, false, &mut free(14)).unwrap().unwrap();
+        assert!(why.contains("expected to take 2.0 GB above the"), "the least a run sets aside: {why}");
         std::fs::remove_dir_all(base).ok();
     }
 
