@@ -1543,6 +1543,14 @@ fn names_test_filter(command: &str) -> bool {
         let mut j = 0;
         while j < args.len() {
             let t = args[j];
+            // One that takes several: every word up to the next option or `--` (NIT-369).
+            if JS_RUNNER_MULTI_VALUE_FLAGS.contains(&t) {
+                j += 1;
+                while j < args.len() && !args[j].starts_with('-') {
+                    j += 1;
+                }
+                continue;
+            }
             if with_value.contains(&t) {
                 j += 2;
                 continue;
@@ -1611,11 +1619,14 @@ fn names_test_filter(command: &str) -> bool {
 /// The options of vitest and jest (and so of `npm test -- …`, which hands them on) that take a
 /// value as the next word: `--maxWorkers 2` and `--outputFile results.json` filter nothing.
 const JS_RUNNER_VALUE_FLAGS: &[&str] = &[
-    "--config", "-c", "--project", "--projects", "--selectProjects", "--reporter", "--reporters", "--outputFile", "--maxWorkers", "-w",
-    "--minWorkers", "--pool", "--root", "-r", "--rootDir", "--roots", "--dir", "--shard", "--seed", "--testTimeout", "--hookTimeout",
-    "--environment", "--testEnvironment", "--coverageDirectory", "--coverageProvider", "--testPathIgnorePatterns", "--mode", "--retry",
-    "--testSequencer", "--workerIdleMemoryLimit",
+    "--config", "-c", "--project", "--reporter", "--outputFile", "--maxWorkers", "-w", "--minWorkers", "--pool", "--root", "-r", "--rootDir",
+    "--dir", "--shard", "--seed", "--testTimeout", "--hookTimeout", "--environment", "--testEnvironment", "--coverageDirectory",
+    "--coverageProvider", "--mode", "--retry", "--testSequencer", "--workerIdleMemoryLimit",
 ];
+
+/// Jest's options that take several values, every word up to the next option or `--`:
+/// `--projects app lib` filters nothing (NIT-369).
+const JS_RUNNER_MULTI_VALUE_FLAGS: &[&str] = &["--projects", "--roots", "--selectProjects", "--testPathIgnorePatterns", "--reporters"];
 
 /// Where a queued request stands.
 #[derive(Debug, Clone, PartialEq)]
@@ -4341,6 +4352,8 @@ wanted {shown}", ran.output);
             "npx jest --watch src/lanes.test.ts",
             "npx vitest run --maxWorkers 2 src/lanes.test.ts",
             "npx jest --runInBand lanes",
+            "npx jest --projects app -- lanes",
+            "npx jest --projects app lib --runInBand src/lanes.test.ts",
             "pytest -k quick_lane",
             "pytest tests/test_lanes.py::test_one",
         ] {
@@ -4364,6 +4377,9 @@ wanted {shown}", ran.output);
             "npm test -- --maxWorkers 2",
             "npx vitest run --reporter json --outputFile results.json",
             "npm test -- --outputFile=results.json --maxWorkers 2",
+            "npx jest --projects app lib",
+            "npx jest --selectProjects app lib --reporters default summary",
+            "npm test -- --testPathIgnorePatterns e2e slow",
             "node --test --test-concurrency 2",
             "node build.js && echo --test done",
         ] {
