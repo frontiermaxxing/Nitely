@@ -27,13 +27,13 @@ const usage = (cpu: number, commit: number): PerformanceUsage => ({
   process_write_bytes: 1024 ** 2,
   processes: 4,
 });
-function attribution(at: number, mode: string): AttributionSample {
+function attribution(at: number, mode: string, boot = "preview-boot"): AttributionSample {
   const partial = mode === "partial";
   return {
     wall_ms: at,
     monotonic_ms: at,
-    session: "preview",
-    boot: "preview-boot",
+    session: boot === "preview-boot" ? "preview" : "preview-before-restart",
+    boot,
     interval_ms: 5000,
     collection_ms: 8,
     resolution: "sample",
@@ -69,8 +69,8 @@ function attribution(at: number, mode: string): AttributionSample {
       { id: "app", kind: "app", context: { project: null, issue: null, run_id: null, job_id: null, worker_id: null, lane: null }, usage: usage(2.4, 0.2) },
     ],
     top_other: [
-      { basename: "browser.exe", identity: { boot: "preview-boot", pid: 415, started: "preview-process" }, usage: usage(6.1, 2.4) },
-      { basename: "editor.exe", identity: { boot: "preview-boot", pid: 620, started: "preview-editor" }, usage: usage(3, 1.6) },
+      { basename: "browser.exe", identity: { boot, pid: 415, started: "preview-process" }, usage: usage(6.1, 2.4) },
+      { basename: "editor.exe", identity: { boot, pid: 620, started: "preview-editor" }, usage: usage(3, 1.6) },
     ],
   };
 }
@@ -82,6 +82,7 @@ export function performanceFixture(args: Record<string, unknown>): PerformanceRe
   const at = pausedAt ?? (mode === "stale" ? now - 180_000 : now - 1000);
   const to = query.before_last_restart ? now - 600_000 : (query.to_ms ?? now);
   const from = query.before_last_restart ? to - 600_000 : (query.from_ms ?? to - 3_600_000);
+  const rangeBoot = query.before_last_restart ? "preview-previous-boot" : "preview-boot";
   const noData = cleared || mode === "empty";
   const metrics = (cpu: number): PerformanceMetrics => ({
     ...emptyMetrics(),
@@ -130,6 +131,7 @@ export function performanceFixture(args: Record<string, unknown>): PerformanceRe
     from_ms: from,
     to_ms: to,
     range_anchor: query.before_last_restart ? "last_recorded_sample_of_previous_boot" : "requested_wall_time",
+    range_boot: query.before_last_restart ? rangeBoot : null,
     project: null,
     status: !settings.enabled ? "paused" : mode === "stale" ? "stale" : noData ? "unavailable" : "fresh",
     age_ms: noData ? null : now - at,
@@ -143,16 +145,16 @@ export function performanceFixture(args: Record<string, unknown>): PerformanceRe
       mode === "pressure" && !noData
         ? [
             {
-              from_ms: Math.floor((now - 120_000) / 300_000) * 300_000,
-              to_ms: at,
+              from_ms: query.before_last_restart ? from : Math.floor((now - 120_000) / 300_000) * 300_000,
+              to_ms: query.before_last_restart ? to : at,
               observations: 24,
               observed: ["CPU at least 90%", "available physical memory at most 10%"],
               inferred_causes: [],
             },
           ]
         : [],
-    events: noData ? [] : [{ wall_ms: to - 30_000, kind: "waiting_for_memory", project: "NIT", issue: "NIT-4", run: 42, memory_cap_bytes: 12 * GiB }],
-    sessions: noData ? [] : [{ session: "preview", boot: "preview-boot", started_ms: from, stopped_ms: null }],
+    events: noData ? [] : [{ wall_ms: to - 30_000, boot: rangeBoot, kind: "waiting_for_memory", project: "NIT", issue: "NIT-4", run: 42, memory_cap_bytes: 12 * GiB }],
+    sessions: noData ? [] : [{ session: query.before_last_restart ? "preview-before-restart" : "preview", boot: rangeBoot, started_ms: from, stopped_ms: query.before_last_restart ? to : null }],
     coverage: {
       gaps,
       bounded: false,
@@ -173,7 +175,7 @@ export function performanceFixture(args: Record<string, unknown>): PerformanceRe
     },
     units: {},
     attribution_latest: noData ? null : attribution(at, mode),
-    attribution: noData ? [] : [attribution(to - 15_000, mode), attribution(to - 60_000, mode)],
+    attribution: noData ? [] : [attribution(to - 15_000, mode, rangeBoot), attribution(to - 60_000, mode, rangeBoot)],
     attribution_age_ms: noData ? null : now - at,
     related_issues: { "NIT-4": "http://127.0.0.1:7423/i/NIT-4" },
     workloads: noData
@@ -183,7 +185,7 @@ export function performanceFixture(args: Record<string, unknown>): PerformanceRe
             id: "short-build",
             kind: "build",
             context: { project: "NIT", issue: "NIT-4", run_id: 41, job_id: null, worker_id: null, lane: 1 },
-            root: { boot: "preview-boot", pid: 100, started: "preview" },
+            root: { boot: rangeBoot, pid: 100, started: "preview" },
             start_ms: to - 120_000,
             end_ms: to - 119_000,
             end_observed: false,

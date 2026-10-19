@@ -114,6 +114,7 @@ export interface PerformanceReport {
   from_ms: number;
   to_ms: number;
   range_anchor: string;
+  range_boot?: string | null;
   project: string | null;
   status: string;
   age_ms: number | null;
@@ -122,7 +123,7 @@ export interface PerformanceReport {
   admission_limits: { total: number; floor: number; cap: number; floor_from: string; cap_from: string } | null;
   points: PerformancePoint[];
   episodes: PerformanceEpisode[];
-  events: { wall_ms: number; kind: string; project: string; issue: string | null; run: number; memory_cap_bytes: number | null }[];
+  events: { wall_ms: number; boot?: string | null; kind: string; project: string; issue: string | null; run: number; memory_cap_bytes: number | null }[];
   sessions: { session: string; boot: string | null; started_ms: number; stopped_ms: number | null }[];
   coverage: {
     gaps: PerformanceGap[];
