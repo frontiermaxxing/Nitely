@@ -144,6 +144,11 @@ fn held_places(db: &Db) -> Result<Vec<(String, String)>> {
 /// Why a folder git no longer lists may not be what is left of this repo's worktree: only one whose
 /// `.git` file still names this repo's record of a worktree that is gone is deleted without a person.
 fn not_ours(root: &Path, folder: &Path) -> Option<String> {
+    // Nothing in it is anyone's work, whoever made it (NIT-370); remove_folder deletes it only while
+    // it is still empty.
+    if std::fs::read_dir(folder).is_ok_and(|mut entries| entries.next().is_none()) {
+        return None;
+    }
     let dot_git = folder.join(".git");
     let by_hand = "delete it by hand once you have looked at it";
     if dot_git.is_dir() {
@@ -165,7 +170,10 @@ fn not_ours(root: &Path, folder: &Path) -> Option<String> {
 
 /// Deletes a folder git no longer lists, then its branch when that is merged.
 fn remove_folder(root: &Path, folder: &Path, branch: &str) -> String {
-    if let Err(e) = std::fs::remove_dir_all(folder) {
+    // Without its .git file it went for being empty (not_ours): remove_dir refuses a folder that
+    // has gained anything since.
+    let removed = if folder.join(".git").exists() { std::fs::remove_dir_all(folder) } else { std::fs::remove_dir(folder) };
+    if let Err(e) = removed {
         return format!("could not delete the rest of the folder: {e}");
     }
     playbook::git(root, &["worktree", "prune"]).ok();

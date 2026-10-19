@@ -1770,6 +1770,10 @@ when_changed = ["billing"]
         let unknown = merged.parent().unwrap().join("nit-stray-unknown");
         std::fs::create_dir_all(unknown.join("target")).unwrap();
         f.db.log_event(&f.actor, Some(&c), Some(&unknown.to_string_lossy()), "worktree_held", "Worktree kept after landing").unwrap();
+        // An empty one is nobody's work, wherever it came from (NIT-370).
+        let empty = merged.parent().unwrap().join("nit-stray-empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        f.db.log_event(&f.actor, Some(&c), Some(&empty.to_string_lossy()), "worktree_held", "Worktree kept after landing").unwrap();
         let clone = merged.parent().unwrap().join("nit-stray-reused");
         f.db.log_event(&f.actor, Some(&c), Some(&clone.to_string_lossy()), "worktree_held", "Worktree kept after landing").unwrap();
         f.db.log_event(&f.actor, Some(&c), Some(&clone.to_string_lossy()), "worktree_removed", "Removed").unwrap();
@@ -1782,15 +1786,16 @@ when_changed = ["billing"]
         assert!(of(&merged).is_some_and(|l| l.stays.is_none()), "{found:?}");
         assert!(of(&stray).is_some_and(|l| l.stays.is_none()), "{found:?}");
         assert!(of(&unknown).and_then(|l| l.stays).is_some_and(|s| s.contains("by hand")), "{found:?}");
+        assert!(of(&empty).is_some_and(|l| l.stays.is_none()), "{found:?}");
         assert!(of(&clone).is_none(), "removed since it was kept: not a leftover {found:?}");
 
         let (b, _) = f.submitted("Next", "next.txt", "z");
         let r = f.land(&b);
         assert!(r.landed, "{r:?}");
         assert!(kept.exists(), "--keep holds at the next land too");
-        assert!(!merged.exists() && !stray.exists(), "{r:?}");
+        assert!(!merged.exists() && !stray.exists() && !empty.exists(), "{r:?}");
         assert!(unknown.exists() && clone.join("work.txt").exists(), "{r:?}");
-        assert_eq!(r.tidied.len(), 2, "{r:?}");
+        assert_eq!(r.tidied.len(), 3, "{r:?}");
         std::fs::remove_dir_all(&f.base).ok();
     }
 

@@ -376,7 +376,9 @@ Nothing changes until a project's playbook asks for it (`[lanes]`). Per project:
    its lock, the worktrees of closed issues (Done, Duplicate, Canceled; landed or not) that nothing
    keeps any more: no land kept it on purpose (`--keep`, `land_kept`), the branch is in the
    integration branch, nothing uncommitted or untracked, no crew worker and no process in it. A
-   folder git no longer lists, which a land could not finish deleting, goes the same way. Each
+   folder git no longer lists, which a land could not finish deleting, goes the same way while its
+   `.git` file still names this repo's record of it, or while it is empty (NIT-370); any other is
+   listed for a person. Each
    removal is `worktree_removed` on the issue. `nitely lanes leftovers` lists them with
    why each stays, and `--remove` removes the ones that go at once (NIT-340).
 
