@@ -28,6 +28,9 @@ pub struct Leftover {
     /// it (`land::finish_removal`).
     #[serde(skip)]
     registered: bool,
+    /// Empty when it was looked at, so removed only while it still is (NIT-370).
+    #[serde(skip)]
+    empty: bool,
 }
 
 /// Said on the issue when land kept a worktree it meant to remove, with why (`cleanup`, the first
@@ -65,7 +68,7 @@ pub fn leftovers(db: &Db, root: &Path, pb: &Playbook, remove: bool, actor: &Acto
             None if db.crew_worker_in(&path)? => Some("a crew worker still runs in it".to_string()),
             None => why_it_stays(&path, &branch, base),
         };
-        found.push(Leftover { issue: key, worktree: path, branch, stays, removed: None, registered: true });
+        found.push(Leftover { issue: key, worktree: path, branch, stays, removed: None, registered: true, empty: false });
     }
     // Folders git no longer lists, but a land that kept them said where they are.
     let listed = |p: &str| registered.iter().any(|w| crate::paths::normalize(&w.path) == crate::paths::normalize(p));
@@ -78,8 +81,10 @@ pub fn leftovers(db: &Db, root: &Path, pb: &Playbook, remove: bool, actor: &Acto
             continue;
         }
         let branch = crate::land::branch_of(root, &key).map(|(b, _)| b).unwrap_or_default();
-        let stays = kept_on_purpose(&db.timeline(&key)?).or_else(|| not_ours(root, &path));
-        found.push(Leftover { issue: key, worktree: path, branch, stays, removed: None, registered: false });
+        // An empty one is nobody's work, whoever made it (NIT-370).
+        let empty = std::fs::read_dir(&path).is_ok_and(|mut entries| entries.next().is_none());
+        let stays = kept_on_purpose(&db.timeline(&key)?).or_else(|| if empty { None } else { not_ours(root, &path) });
+        found.push(Leftover { issue: key, worktree: path, branch, stays, removed: None, registered: false, empty });
     }
     // Listing processes is the costly part (NIT-289): once, for the ones nothing else keeps.
     let free: Vec<usize> = (0..found.len()).filter(|&i| found[i].stays.is_none()).collect();
@@ -103,7 +108,7 @@ pub fn leftovers(db: &Db, root: &Path, pb: &Playbook, remove: bool, actor: &Acto
             let message = if l.registered {
                 crate::land::cleanup(root, pb, &l.worktree, &l.branch, false, false).0
             } else {
-                remove_folder(root, &l.worktree, &l.branch)
+                remove_folder(root, &l.worktree, &l.branch, l.empty)
             };
             if !l.worktree.exists() {
                 db.log_event(actor, Some(&l.issue), Some(&l.worktree.to_string_lossy()), "worktree_removed", &format!("Removed the worktree a land left: {message}"))?;
@@ -144,11 +149,6 @@ fn held_places(db: &Db) -> Result<Vec<(String, String)>> {
 /// Why a folder git no longer lists may not be what is left of this repo's worktree: only one whose
 /// `.git` file still names this repo's record of a worktree that is gone is deleted without a person.
 fn not_ours(root: &Path, folder: &Path) -> Option<String> {
-    // Nothing in it is anyone's work, whoever made it (NIT-370); remove_folder deletes it only while
-    // it is still empty.
-    if std::fs::read_dir(folder).is_ok_and(|mut entries| entries.next().is_none()) {
-        return None;
-    }
     let dot_git = folder.join(".git");
     let by_hand = "delete it by hand once you have looked at it";
     if dot_git.is_dir() {
@@ -168,11 +168,10 @@ fn not_ours(root: &Path, folder: &Path) -> Option<String> {
     None
 }
 
-/// Deletes a folder git no longer lists, then its branch when that is merged.
-fn remove_folder(root: &Path, folder: &Path, branch: &str) -> String {
-    // Without its .git file it went for being empty (not_ours): remove_dir refuses a folder that
-    // has gained anything since.
-    let removed = if folder.join(".git").exists() { std::fs::remove_dir_all(folder) } else { std::fs::remove_dir(folder) };
+/// Deletes a folder git no longer lists, then its branch when that is merged. One that went for
+/// being `empty` goes by remove_dir, which refuses a folder that has gained anything since.
+fn remove_folder(root: &Path, folder: &Path, branch: &str, empty: bool) -> String {
+    let removed = if empty { std::fs::remove_dir(folder) } else { std::fs::remove_dir_all(folder) };
     if let Err(e) = removed {
         return format!("could not delete the rest of the folder: {e}");
     }
@@ -206,6 +205,17 @@ mod tests {
 
     fn entry(kind: &str) -> TimelineEntry {
         TimelineEntry { ts: 0, actor: "human".into(), kind: kind.into(), summary: Some(kind.into()), place: None }
+    }
+
+    #[test]
+    fn a_folder_found_empty_that_filled_since_stays() {
+        let dir = crate::paths::unique_temp("nitely-leftover-empty", "");
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(dir.join("work.txt"), "mine").unwrap();
+        let said = remove_folder(&dir, &dir, "", true);
+        assert!(said.starts_with("could not delete"), "{said}");
+        assert!(dir.join("work.txt").exists() && dir.join(".git").exists());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
