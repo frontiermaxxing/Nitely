@@ -1839,15 +1839,16 @@ impl Db {
             // You entered since, for an approval, is not the ask's to end. It goes back to the agent
             // whose question began the wait.
             let entry = latest_needs_you_entry(&tx, k)?;
-            // A review that needs the person, recorded since the wait began, is an approval waiting
-            // in the same Needs You (submit moves it there without leaving it first): the answer
-            // does not end that.
+            // A review that needs the person's approval, recorded since the wait began, is an
+            // approval waiting in the same Needs You (submit moves it there without leaving it
+            // first): the answer does not end that. One that asked for changes sends the work back
+            // to its agent, so it does not count.
             let moved: Option<String> = match entry {
                 Some(e) => tx
                     .query_row(
                         "SELECT a.asked_by FROM ask a JOIN event w ON w.id = ?2
                          WHERE a.issue_key = ?1 AND a.wait_event = ?2 AND a.moved_from IS NOT NULL
-                           AND NOT EXISTS (SELECT 1 FROM review r WHERE r.issue_key = ?1 COLLATE NOCASE AND r.approver = 'human' AND r.ts >= w.ts)
+                           AND NOT EXISTS (SELECT 1 FROM review r WHERE r.issue_key = ?1 COLLATE NOCASE AND r.approver = 'human' AND r.verdict != 'changes' AND r.ts >= w.ts)
                          ORDER BY a.id LIMIT 1",
                         params![k, e],
                         |r| r.get(0),
@@ -2665,6 +2666,21 @@ mod tests {
             .unwrap();
         db.answer_ask(d.id, "Plain", &Actor::Human).unwrap();
         assert_eq!(db.issue("NIT-2").unwrap().unwrap().state, "Needs You", "the approval still waits");
+
+        // A review that asked for changes during the wait is the agent's to act on: the answer
+        // still puts the work back.
+        db.create_issue(&new("Footer copy"), &agent).unwrap();
+        db.move_issue("NIT-3", "In Progress", None, None, &agent).unwrap();
+        let e = db.create_ask("Which year?", &[], Some("NIT-3"), None, &agent).unwrap();
+        db.wait_on_ask(&e, &agent).unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, ts) VALUES ('NIT-3', 'p', 'c', 'codex', 'changes', 'human', ?1)",
+                [now()],
+            )
+            .unwrap();
+        db.answer_ask(e.id, "This one", &Actor::Human).unwrap();
+        assert_eq!(db.issue("NIT-3").unwrap().unwrap().state, "In Progress");
         std::fs::remove_dir_all(dir).ok();
     }
 
