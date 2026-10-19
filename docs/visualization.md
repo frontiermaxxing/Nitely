@@ -653,6 +653,7 @@ and inside Tauri nothing changes.
   With its own profile the command returns before the file is written, so wait for the file.
   Headless Edge will not go narrower than about 500px; check 375px in the Browser pane's mobile
   viewport (`resize_window` preset `mobile`) instead.
+
 ### Automated PR review
 
 Each repository's Project Settings > Rules card has an **Automated PR review** switch,
@@ -667,3 +668,24 @@ are unaffected. Evidence says **Review disabled for this project**, never that a
 New and queued reviewer launches reread the policy, including while waiting for memory. An already
 running reviewer finishes and its actual result remains. Turning review back on prevents an older
 unreviewed submission from landing until it is submitted for review.
+
+## Performance
+
+Performance is machine-wide, reached from the sidebar and command palette. The first row answers
+whether collection is current, paused, stale or unavailable; the six readings distinguish physical
+RAM, commit, paging and disk activity. Null counters stay unavailable, and zero stays zero.
+
+The history line stops at collection gaps and missing counters. Shaded gaps are unrecorded time,
+not zero usage. Minute peaks and minima are available in the detail table and are never drawn as
+sustained pressure. The previous-boot window ends at its last recorded sample, not an assumed
+shutdown time. A sustained-pressure notice stays quiet after dismissal until pressure clears.
+
+Workload tables keep sampled CPU, private commit, overlapping working sets and process I/O separate.
+The residual CPU is explicitly an estimate, and coverage reports inaccessible or partial processes.
+Issue links open the issue panel; run links open its log. History includes a bounded selection of
+recorded attribution samples. Current readings refresh from cache every five seconds, history at
+most once a minute, and hidden pages stop polling. Opening the page never starts a sampler.
+
+Recorder controls are human-facing, disabled in live preview. Clearing requires paused collection
+and an explicit confirmation. Admission settings link to Build lanes rather than duplicating its
+editor. Preview states: `?performance=idle|pressure|restart|partial|stale|empty#performance`.

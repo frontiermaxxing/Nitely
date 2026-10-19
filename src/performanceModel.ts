@@ -1,0 +1,83 @@
+/** Cached recorder DTOs. Null means unavailable, never zero. All timestamps are UTC ms. */
+export interface PerformanceMetrics {
+  cpu_percent: number | null;
+  physical_total_bytes: number | null; physical_available_bytes: number | null;
+  commit_bytes: number | null; commit_limit_bytes: number | null;
+  kernel_paged_bytes: number | null; kernel_nonpaged_bytes: number | null;
+  pages_input_per_sec: number | null; pages_output_per_sec: number | null;
+  disk_read_bytes_per_sec: number | null; disk_write_bytes_per_sec: number | null;
+  disk_latency_seconds: number | null; disk_queue: number | null;
+}
+export interface PerformanceSettings { enabled: boolean; detailed_hours: number; summary_days: number }
+export interface PerformanceSample { wall_ms: number; monotonic_ms: number; boot: string | null; session: string; metrics: PerformanceMetrics; collection_ms: number }
+export interface PerformancePoint { from_ms: number; to_ms: number; values: PerformanceMetrics; peaks: PerformanceMetrics; min_available_bytes: number | null; observations: number; resolution: string; contains_gap: boolean }
+export interface PerformanceGap { from_ms: number; to_ms: number; kind: string }
+export interface PerformanceEpisode { from_ms: number; to_ms: number; observations: number; observed: string[]; inferred_causes: string[] }
+export interface PerformanceUsage {
+  cpu_percent: number | null; private_commit_bytes: number | null; working_set_sum_bytes: number | null;
+  process_read_bytes: number | null; process_write_bytes: number | null; processes: number;
+}
+export interface WorkloadContext { project: string | null; issue: string | null; run_id: number | null; job_id: number | null; worker_id: number | null; lane: number | null }
+export interface WorkloadUsage { id: string; kind: string; context: WorkloadContext; usage: PerformanceUsage }
+export interface AttributionSample {
+  wall_ms: number; monotonic_ms: number; session: string; boot: string | null; interval_ms: number | null; collection_ms: number;
+  resolution: string; observations: number;
+  coverage: { enumerated: number; measured: number; denied: number; missing_identity: number; partial_metrics: number; truncated: boolean; first_sample: boolean; supported: boolean; short_lived_partial: boolean };
+  nitely: PerformanceUsage; related: PerformanceUsage; other: PerformanceUsage; unattributed_cpu_percent: number | null;
+  workloads: WorkloadUsage[];
+  top_other: { basename: string; identity: { boot: string; pid: number; started: string }; usage: PerformanceUsage }[];
+}
+export interface PerformanceReport {
+  as_of_ms: number; from_ms: number; to_ms: number; range_anchor: string; project: string | null; status: string; age_ms: number | null;
+  latest: PerformanceSample | null; settings: PerformanceSettings;
+  admission_limits: { total: number; floor: number; cap: number; floor_from: string; cap_from: string } | null;
+  points: PerformancePoint[]; episodes: PerformanceEpisode[];
+  events: { wall_ms: number; kind: string; project: string; issue: string | null; run: number; memory_cap_bytes: number | null }[];
+  sessions: { session: string; boot: string | null; started_ms: number; stopped_ms: number | null }[];
+  coverage: { gaps: PerformanceGap[]; bounded: boolean; gaps_truncated: boolean; sessions_truncated: boolean; events_truncated: boolean; source_points: number; returned_points: number; resolution: string; notes: string[] };
+  units: Record<string, unknown>;
+  // Added by the attribution recorder; older histories have no attribution.
+  attribution_latest?: AttributionSample | null; attribution?: AttributionSample[];
+}
+export type PerformanceRange = "15m" | "1h" | "6h" | "24h" | "7d" | "restart";
+export function performanceQuery(range: PerformanceRange, now: number) {
+  return range === "restart" ? { view: "history", before_last_restart: true, limit: 400 } : {
+    view: "history", from_ms: now - ({ "15m": 900_000, "1h": 3_600_000, "6h": 21_600_000, "24h": 86_400_000, "7d": 604_800_000 }[range]), to_ms: now, limit: 400,
+  };
+}
+export const numberText = (n: number | null | undefined, suffix = "", digits = 1) => n == null || !Number.isFinite(n) ? "Unavailable" : `${n.toLocaleString(undefined, { maximumFractionDigits: digits })}${suffix}`;
+export function byteText(n: number | null | undefined): string {
+  if (n == null || !Number.isFinite(n)) return "Unavailable";
+  const unit = n >= 1024 ** 3 ? 3 : n >= 1024 ** 2 ? 2 : n >= 1024 ? 1 : 0;
+  return `${numberText(n / 1024 ** unit)} ${["B", "KiB", "MiB", "GiB"][unit]}`;
+}
+export const timestamp = (ms: number) => new Date(ms).toLocaleString();
+export function freshness(report: PerformanceReport, now: number): string {
+  if (!report.settings.enabled) return "Collection paused";
+  if (!report.latest) return "No samples yet";
+  const age = now - report.latest.wall_ms;
+  if (age < -2000) return "Clock changed · sample time is ahead";
+  if (age > 15_000) return `Stale · last sample ${Math.max(1, Math.floor(age / 1000))}s ago`;
+  return "Recording · updated within 15s";
+}
+export type ChartMetric = "cpu_percent" | "physical_available_bytes" | "commit_bytes";
+/** Break at missing counters, collector gaps and mixed buckets. Never imply continuous evidence. */
+export function chartSegments(points: PerformancePoint[], gaps: PerformanceGap[], metric: ChartMetric): PerformancePoint[][] {
+  const result: PerformancePoint[][] = []; let segment: PerformancePoint[] = [];
+  for (const point of points) {
+    const prior = segment.at(-1);
+    if (point.contains_gap || point.values[metric] == null || (prior && gaps.some(g => g.from_ms < point.from_ms && g.to_ms > prior.to_ms))) {
+      if (segment.length) result.push(segment); segment = [];
+    }
+    if (!point.contains_gap && point.values[metric] != null) segment.push(point);
+  }
+  if (segment.length) result.push(segment);
+  return result;
+}
+export function sortedWorkloads(rows: WorkloadUsage[], key: "cpu_percent" | "private_commit_bytes" | "process_read_bytes"): WorkloadUsage[] {
+  return [...rows].sort((a, b) => (b.usage[key] ?? -1) - (a.usage[key] ?? -1) || a.id.localeCompare(b.id));
+}
+export function currentPressure(report: PerformanceReport, now: number): PerformanceEpisode | undefined {
+  if (!report.settings.enabled || !report.latest || now - report.latest.wall_ms > 15_000 || now < report.latest.wall_ms - 2000) return undefined;
+  return report.episodes.find(e => e.to_ms >= report.latest!.wall_ms - 15_000 && e.to_ms - e.from_ms >= 15_000);
+}

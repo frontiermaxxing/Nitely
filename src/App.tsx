@@ -10,6 +10,7 @@ import { Settings, isSettingsSection, type SettingsSection } from "./Settings";
 import { Now, movingCounts, movingTitle } from "./Now";
 import { Pulse } from "./Pulse";
 import { Activity } from "./Activity";
+import { Performance } from "./Performance";
 import { ProjectPage, isProjectTab, type ProjectTab } from "./Project";
 import type { GoalFocus } from "./GoalRows";
 import { IssuePanel } from "./IssuePanel";
@@ -43,6 +44,7 @@ export type View =
   | { kind: "inbox"; project?: string | null }
   | { kind: "now" }
   | { kind: "activity" }
+  | { kind: "performance" }
   | { kind: "project"; key: string; tab?: ProjectTab; goal?: GoalFocus }
   | { kind: "add" }
   | { kind: "agents" }
@@ -61,7 +63,7 @@ function fromHash(hash: string): { view: View; issue: string | null } {
   const [route, issue] = raw.split("@");
   const [path, query = ""] = route.split("?");
   const [kind, key, tab] = path.split("/");
-  const plain = ["pulse", "inbox", "now", "activity", "add", "agents"].concat(isPreview ? ["kit"] : []);
+  const plain = ["pulse", "inbox", "now", "activity", "performance", "add", "agents"].concat(isPreview ? ["kit"] : []);
   // The home view was called Pulse, and Phone and Other machines were views of their own before
   // Settings held them: old links still land on them.
   const named = kind === "overview" ? "pulse" : kind;
@@ -298,6 +300,7 @@ export function App() {
         <NavItem active={view.kind === "inbox"} onClick={() => setView({ kind: "inbox" })} label="Inbox" count={inboxCount} tone="attention" />
         <NavItem active={view.kind === "now"} onClick={() => setView({ kind: "now" })} label="Now" count={moving.total} tone="live" title={movingTitle(moving)} />
         <NavItem active={view.kind === "activity"} onClick={() => setView({ kind: "activity" })} label="Activity" />
+        <NavItem active={view.kind === "performance"} onClick={() => setView({ kind: "performance" })} label="Performance" />
         <div className="nav-heading">Projects</div>
         {projects.map((p) => (
           <div key={p.key} className="nav-project-row">
@@ -407,6 +410,7 @@ export function App() {
         )}
         {view.kind === "now" && board && <Now board={board} version={version} needs={inboxCount} now={now} onOpenIssue={setOpenIssue} onChanged={changed} onGo={setView} />}
         {view.kind === "activity" && <Activity now={now} version={version} projects={projects} onOpenIssue={setOpenIssue} />}
+        {view.kind === "performance" && <Performance version={version} onOpenIssue={setOpenIssue} onSettings={() => setView({ kind: "settings", section: "lanes" })} />}
         {view.kind === "settings" && (
           <Settings
             asked={view}

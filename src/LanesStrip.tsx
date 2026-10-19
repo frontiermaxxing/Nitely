@@ -103,6 +103,8 @@ function MachineLimits(props: { machine: MachineNow | undefined; slots: LanesOve
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
   const words = memoryWords(machine);
+  // Live availability follows each read; edits and saved limits keep their local state.
+  const free = memoryWords(props.machine).free;
   const parsed = limitsOf(floor, cap);
   const save = async () => {
     if (typeof parsed === "string") return;
@@ -132,7 +134,7 @@ function MachineLimits(props: { machine: MachineNow | undefined; slots: LanesOve
             Up to {props.slots.total} builds run at once ({props.slots.used} now).
           </>
         )}
-        {words.free && <> {words.free}.</>}
+        {free && <> {free}.</>}
       </p>
       <div className="crew-grid">
         <label className="crew-field" htmlFor="machine-floor">

@@ -9,6 +9,7 @@
 
 import * as phoneFixture from "./phone";
 import * as rulesFixture from "./rules";
+import { performanceFixture, configurePerformance, clearPerformance } from "./performance";
 import type {
   LaneRun,
   LanesOverview,
@@ -2191,6 +2192,12 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         throw "The preview has no logs to open; the app opens them.";
       case "lanes_overview":
         return lanesOverview();
+      case "performance_query":
+        return performanceFixture(args);
+      case "set_performance_settings":
+        return configurePerformance(args);
+      case "clear_performance_history":
+        return clearPerformance();
       case "set_machine_limits":
         return lanesOverview().machine;
       case "batches_overview":
