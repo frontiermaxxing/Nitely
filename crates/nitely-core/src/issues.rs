@@ -1592,9 +1592,13 @@ impl Db {
         // An id of `mine` is the caller's own only while no live session goes by it: a crew
         // worker's reports go under its folder's id, and another session in that folder is not it.
         let own = |h: &String| -> Result<bool> { Ok(h == agent || (mine.contains(h) && !seen_live(&session_of(h)?))) };
+        // A claim of the caller's own under `<vendor>:<path>` (the crew's, for its worker) keeps its
+        // id, which the holder's reports renew. One under a bare vendor id (`nitely issue next
+        // --agent claude`) moves to the caller's: nothing would renew it, and it would lapse while
+        // the agent still works (NIT-367).
         let (other, own_claim) = match claimed_by.clone() {
             Some(h) if !own(&h)? => (Some(h), None),
-            Some(h) => (None, Some(h)),
+            Some(h) => (None, Some(h).filter(|h| h.contains(':'))),
             None => (None, None),
         };
         if let Some(holder) = other {
@@ -2153,6 +2157,13 @@ mod tests {
         db.claim_for_start("NIT-3", "claude:c:/code/app", &["claude:c:/wt/w2".into(), "claude".into()], false).unwrap();
         let i = db.issue("NIT-3").unwrap().unwrap();
         assert_eq!((i.state.as_str(), i.claimed_by.as_deref()), ("In Progress", Some("claude:c:/wt/w2")), "the worker's claim stays the worker's");
+
+        // A claim under a bare vendor id (`issue next --agent claude`) moves to the starter's id,
+        // which its reports renew (NIT-367).
+        db.create_issue(&new("Taken with issue next"), &Actor::Human).unwrap();
+        db.conn.execute("UPDATE issue SET claimed_by = 'claude', claimed_at = ?1, state = 'In Progress', state_type = 'started' WHERE key = 'NIT-4'", [now()]).unwrap();
+        db.claim_for_start("NIT-4", "claude:c:/code/app", &["claude".into()], false).unwrap();
+        assert_eq!(db.issue("NIT-4").unwrap().unwrap().claimed_by.as_deref(), Some("claude:c:/code/app"));
         std::fs::remove_dir_all(dir).ok();
     }
 

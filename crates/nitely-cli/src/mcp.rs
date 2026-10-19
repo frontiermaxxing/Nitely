@@ -1132,7 +1132,8 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             // The agent starting it holds it, so next_task does not hand it to another (NIT-274).
             let take_over = args.get("take_over").and_then(Value::as_bool).unwrap_or(false);
             let took = match &actor {
-                Actor::Agent(id) => db.claim_for_start(&issue.key, id, &[server.agent()], take_over)?,
+                // Its own claims also go by its vendor alone: what `nitely issue next --agent` claims as.
+                Actor::Agent(id) => db.claim_for_start(&issue.key, id, &[server.agent(), server.vendor.clone()], take_over)?,
                 Actor::Human => None,
             };
             let mut started = playbook::start_task(&db, &root, &issue, &server.vendor, &actor)?;
