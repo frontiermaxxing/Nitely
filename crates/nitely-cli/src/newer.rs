@@ -78,7 +78,7 @@ pub fn hand_over_or_return() {
         return;
     };
     let code = child.wait().ok().and_then(|s| s.code()).unwrap_or(1);
-    std::process::exit(code);
+    crate::exit(code);
 }
 
 /// `hand_over_or_return` for a command that read `input` from its stdin: the newer build gets the

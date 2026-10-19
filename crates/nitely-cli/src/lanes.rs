@@ -95,16 +95,16 @@ pub fn run(issue: Option<String>, shell: Option<String>, command: Vec<String>, m
     match (&run.error, run.exit_code, run.timed_out) {
         (Some(e), _, _) => {
             eprintln!("run {}: the lane could not run it: {e}", run.id);
-            std::process::exit(2);
+            crate::exit(2);
         }
         (None, _, true) => {
             eprintln!("run {}: stopped, past the lane's timeout", run.id);
-            std::process::exit(124);
+            crate::exit(124);
         }
         (None, code, _) => {
             let code = code.unwrap_or(1);
             eprintln!("run {}: exit {code}", run.id);
-            std::process::exit(code);
+            crate::exit(code);
         }
     }
 }

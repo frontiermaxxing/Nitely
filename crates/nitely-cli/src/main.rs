@@ -652,6 +652,22 @@ enum RepoCmd {
     List,
 }
 
+// Intentional exits can occur deep in command dispatch. Keep the recorder reachable there so
+// its thread is joined and its durable stop marker is written before process::exit skips Drop.
+static PERFORMANCE_RECORDING: std::sync::Mutex<Option<nitely_core::performance::Recording>> = std::sync::Mutex::new(None);
+struct PerformanceRecording;
+impl Drop for PerformanceRecording {
+    fn drop(&mut self) { stop_recording(); }
+}
+fn stop_recording() {
+    let recording = PERFORMANCE_RECORDING.lock().unwrap_or_else(|e| e.into_inner()).take();
+    drop(recording);
+}
+fn exit(code: i32) -> ! {
+    stop_recording();
+    std::process::exit(code)
+}
+
 /// Runs nitely on a thread with room: clap's generated parser and the dispatch below take deep
 /// stack frames in a debug build, past the 1 MB Windows gives a process's main thread, and a new
 /// subcommand can tip it over (the binary then dies at start with a stack overflow).
@@ -663,14 +679,15 @@ fn main() {
         .expect("starting nitely's main thread");
     if worker.join().is_err() {
         // The panic has printed itself.
-        std::process::exit(101);
+        exit(101);
     }
 }
 
 fn cli_main() {
     let cli = Cli::parse();
     // Only long-lived clients participate. Read-only/UI/hook calls never start recording.
-    let _recording = matches!(&cli.command, Cmd::Mcp | Cmd::McpCalls | Cmd::McpDetached | Cmd::Crew { command: crew::CrewCmd::Run { .. } }
+    let _recording = PerformanceRecording;
+    *PERFORMANCE_RECORDING.lock().unwrap_or_else(|e| e.into_inner()) = matches!(&cli.command, Cmd::Mcp | Cmd::McpCalls | Cmd::McpDetached | Cmd::Crew { command: crew::CrewCmd::Run { .. } }
         | Cmd::Links { command: LinksCmd::Serve } | Cmd::Run { .. } | Cmd::Gate { .. } | Cmd::Submit { .. }
         | Cmd::SubmitJob { .. } | Cmd::TriageJob { .. } | Cmd::Land { .. } | Cmd::Serve { .. })
         .then(|| nitely_core::performance::background(nitely_core::performance::directory()));
@@ -684,28 +701,28 @@ fn cli_main() {
         Cmd::Mcp => {
             if let Err(e) = mcp::serve() {
                 eprintln!("nitely mcp: {e:#}");
-                std::process::exit(1);
+                exit(1);
             }
             return;
         }
         Cmd::McpCall => {
             if let Err(e) = mcp::call_once() {
                 eprintln!("nitely mcp-call: {e:#}");
-                std::process::exit(1);
+                exit(1);
             }
             return;
         }
         Cmd::McpCalls => {
             if let Err(e) = mcp::serve_calls() {
                 eprintln!("nitely mcp-calls: {e:#}");
-                std::process::exit(1);
+                exit(1);
             }
             return;
         }
         Cmd::McpDetached => {
             if let Err(e) = mcp::run_detached() {
                 eprintln!("nitely mcp-detached: {e:#}");
-                std::process::exit(1);
+                exit(1);
             }
             return;
         }
@@ -713,7 +730,7 @@ fn cli_main() {
             // Refused commands exit 2, so the preview can tell them from failures.
             if !ui::READ_ONLY.contains(&command.as_str()) {
                 eprintln!("{}", ui::refusal(command));
-                std::process::exit(2);
+                exit(2);
             }
             let result = serde_json::from_str(args.as_deref().unwrap_or("{}"))
                 .map_err(anyhow::Error::from)
@@ -722,7 +739,7 @@ fn cli_main() {
                 Ok(v) => println!("{v}"),
                 Err(e) => {
                     eprintln!("{e:#}");
-                    std::process::exit(1);
+                    exit(1);
                 }
             }
             return;
@@ -731,7 +748,7 @@ fn cli_main() {
     }
     if let Err(e) = run(cli.command) {
         eprintln!("nitely: {e:#}");
-        std::process::exit(1);
+        exit(1);
     }
 }
 
@@ -863,7 +880,7 @@ fn run(cmd: Cmd) -> Result<()> {
         Cmd::CheckDatabase => match nitely_core::db::refused_by_this_build(&paths::db_path())? {
             Some(why) => {
                 eprintln!("{why}");
-                std::process::exit(3);
+                exit(3);
             }
             None => Ok(()),
         },
@@ -1330,7 +1347,7 @@ fn run(cmd: Cmd) -> Result<()> {
             }
             println!("{}", started.worktree);
             if started.setup.iter().any(|r| !r.ok) {
-                std::process::exit(1);
+                exit(1);
             }
             Ok(())
         }
@@ -1362,7 +1379,7 @@ fn run(cmd: Cmd) -> Result<()> {
             }
             println!("gate {} at {}", if gate.passed { "passed" } else { "failed" }, gate.commit);
             if !gate.passed {
-                std::process::exit(1);
+                exit(1);
             }
             Ok(())
         }
@@ -1389,7 +1406,7 @@ fn run(cmd: Cmd) -> Result<()> {
             print_json(&s)?;
             eprintln!("{}", s.next);
             if !s.gate.passed || s.review.as_ref().is_some_and(|r| r.verdict != "pass") {
-                std::process::exit(1);
+                exit(1);
             }
             Ok(())
         }
@@ -1455,7 +1472,7 @@ fn run(cmd: Cmd) -> Result<()> {
             print_json(&r)?;
             if let Some(e) = &r.error {
                 eprintln!("land stopped: {e}");
-                std::process::exit(1);
+                exit(1);
             }
             Ok(())
         }
@@ -1498,7 +1515,7 @@ fn run(cmd: Cmd) -> Result<()> {
             if pending == 0 {
                 if agents.iter().any(|a| a.error.is_some()) {
                     eprintln!("\nfix the errors above, then run again");
-                    std::process::exit(1);
+                    exit(1);
                 }
                 println!("\nevery agent's setup is up to date");
                 return Ok(());
@@ -1516,7 +1533,7 @@ fn run(cmd: Cmd) -> Result<()> {
                 println!("FAILED  {f}");
             }
             if !failed.is_empty() {
-                std::process::exit(1);
+                exit(1);
             }
             Ok(())
         }
@@ -1544,7 +1561,7 @@ fn run(cmd: Cmd) -> Result<()> {
                 println!("FAILED  {f}");
             }
             if !applied.failed.is_empty() {
-                std::process::exit(1);
+                exit(1);
             }
             Ok(())
         }
@@ -1617,7 +1634,7 @@ dry run: would create {} issue(s) ({} to {}) and {} comment(s) in {} {}; run aga
                 eprintln!("no credentials file at {}", nitely_core::credentials::path().display());
             }
             if !report.errors.is_empty() {
-                std::process::exit(1);
+                exit(1);
             }
             Ok(())
         }

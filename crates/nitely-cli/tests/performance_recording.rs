@@ -22,9 +22,12 @@ impl Recorder {
         }
     }
     fn wait_for_clean_exit(&mut self) {
+        self.wait_for_exit_code(0);
+    }
+    fn wait_for_exit_code(&mut self, code: i32) {
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
-            if let Some(status) = self.child.try_wait().unwrap() { assert!(status.success()); break; }
+            if let Some(status) = self.child.try_wait().unwrap() { assert_eq!(status.code(), Some(code)); break; }
             assert!(Instant::now() < deadline, "recorder did not shut down");
             std::thread::sleep(Duration::from_millis(25));
         }
@@ -68,4 +71,44 @@ fn performance_record_ctrl_c_stops_cleanly() {
     recorder.wait_for_sample();
     assert!(Command::new("kill").args(["-INT", &recorder.child.id().to_string()]).status().unwrap().success());
     recorder.wait_for_clean_exit();
+}
+
+fn command_exit(args: &[&str], child_code: i32, expected_code: i32) {
+    let home = nitely_core::paths::unique_temp("performance-command-exit", "");
+    let repo = home.join("repo");
+    std::fs::create_dir_all(repo.join(".nitely")).unwrap();
+    std::fs::write(repo.join(".nitely/playbook.toml"), "[lanes]\ncount = 1\n[gate]\ncommands = [\"node release.js\"]\n").unwrap();
+    // Hold the command until a persisted sample proves this CLI owns a recording session. This
+    // avoids assuming a fast command happens to give the background collector time to start.
+    std::fs::write(repo.join("release.js"), format!(
+        "const fs = require('fs'); const until = Date.now() + 30000;\n(function wait() {{ if (fs.existsSync(process.env.NITELY_TEST_RECORDING_RELEASE)) process.exit({child_code}); else if (Date.now() > until) process.exit(99); else setTimeout(wait, 25); }})();\n"
+    )).unwrap();
+    for args in [&["init", "-q", "-b", "main"][..], &["add", "."], &["commit", "-qm", "fixture"]] {
+        let output = nitely_core::playbook::run_git(Command::new("git").current_dir(&repo)
+            .args(["-c", "user.name=Test", "-c", "user.email=test@example.test"]).args(args)).unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    }
+    let child = Command::new(env!("CARGO_BIN_EXE_nitely")).args(args).current_dir(&repo)
+        .env("NITELY_HOME", &home).env("NITELY_MEMORY_FLOOR_GB", "0")
+        .env("NITELY_TEST_RECORDING_RELEASE", home.join("release"))
+        .stdin(Stdio::null()).stdout(Stdio::null()).spawn().unwrap();
+    let mut recorder = Recorder { child, home };
+    recorder.wait_for_sample();
+    std::fs::write(recorder.home.join("release"), "").unwrap();
+    recorder.wait_for_exit_code(expected_code);
+}
+
+#[test]
+fn successful_lane_run_records_clean_exit() {
+    command_exit(&["run", "--shell", "node release.js"], 0, 0);
+}
+
+#[test]
+fn failed_lane_run_records_clean_exit_and_preserves_status() {
+    command_exit(&["run", "--shell", "node release.js"], 7, 7);
+}
+
+#[test]
+fn failed_gate_records_clean_exit_and_preserves_status() {
+    command_exit(&["gate"], 7, 1);
 }
