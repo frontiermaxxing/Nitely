@@ -496,6 +496,7 @@ fn run_batch(db: &Db, rules: &ReviewRules, batch: i64, rows: &[Queued], shadow: 
     };
     let reply = match reply {
         Ok(reply) => reply,
+        Err(e) if e.is::<crate::review::Disabled>() => return fail(crate::review::DISABLED_NOTE.into()),
         Err(e) => return fail(format!("its batch's reviewer did not finish: {}", first_line(&format!("{e:#}")))),
     };
     let parsed = rules.parse_batch(reviewer, &reply.text, reply.seconds, &changes);
