@@ -436,6 +436,8 @@ mod tests {
     #[test]
     #[ignore = "manual bounded native collection and retention-size measurement"]
     fn recorder_budget_measurement() {
+        #[cfg(windows)]
+        let resident_before = native::resident_bytes();
         let temp = Temp::new();
         let mut collector = Collector::new();
         let mut store = Store::open(&temp.0).unwrap();
@@ -468,5 +470,11 @@ mod tests {
         eprintln!("12 native collections+writes at full retention: {elapsed:?}; sample JSON {detail} bytes; minute JSON {minute} bytes; database {disk} bytes; max retained payload {} bytes", detail * 17280 + minute * 43200);
         assert!(elapsed < Duration::from_millis(600), "recorder work must stay below 1% of one core at a five-second cadence");
         assert!(detail * 17280 + minute * 43200 < MAX_DATABASE_BYTES as usize);
+        #[cfg(windows)]
+        if let (Some(before), Some(after)) = (resident_before, native::resident_bytes()) {
+            let additional = after.saturating_sub(before);
+            eprintln!("additional process resident memory, including full-store fixture: {additional} bytes");
+            assert!(additional < 32 * 1024 * 1024, "recorder resident budget");
+        }
     }
 }

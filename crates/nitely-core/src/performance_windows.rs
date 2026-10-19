@@ -87,3 +87,17 @@ fn boot_id() -> Option<String> {
     let status = unsafe { NtQuerySystemInformation(90, buffer.as_mut_ptr().cast(), std::mem::size_of_val(&buffer) as u32, &mut returned) };
     (status >= 0 && returned >= 16).then(|| format!("{:016x}{:016x}", buffer[0], buffer[1]))
 }
+
+#[cfg(test)]
+pub fn resident_bytes() -> Option<u64> {
+    #[repr(C)]
+    #[derive(Default)]
+    struct Memory { size: u32, faults: u32, peak: usize, resident: usize, peak_paged: usize, paged: usize, peak_nonpaged: usize, nonpaged: usize, committed: usize, peak_committed: usize, private: usize }
+    #[link(name = "kernel32")]
+    extern "system" { fn GetCurrentProcess() -> Handle; }
+    #[link(name = "psapi")]
+    extern "system" { fn GetProcessMemoryInfo(process: Handle, counters: *mut Memory, size: u32) -> i32; }
+    let mut memory = Memory { size: std::mem::size_of::<Memory>() as u32, ..Memory::default() };
+    // SAFETY: current-process pseudo handle; exact PROCESS_MEMORY_COUNTERS_EX layout and size.
+    (unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut memory, std::mem::size_of::<Memory>() as u32) } != 0).then_some(memory.resident as u64)
+}

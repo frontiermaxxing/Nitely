@@ -68,5 +68,10 @@ It fills maximum retention and measures native reads plus durable writes/pruning
 does not start a native application window. The database size and timings are reported rather
 than inferred from the whole Rust build's peak memory.
 
+On the development Windows machine, a full default-retention fixture occupied 70,279,168 bytes.
+Twelve collections plus FULL-synchronous writes/pruning took 353 ms (about 29 ms each, under
+0.6% of one core's five-second interval using wall time as a conservative bound). Actual
+overhead depends on storage and system load; these are measurements, not promised latency.
+
 Windows API references: [PDH formatted values](https://learn.microsoft.com/en-us/windows/win32/api/pdh/nf-pdh-pdhgetformattedcountervalue)
 and [memory performance information](https://learn.microsoft.com/en-us/windows/win32/memory/memory-performance-information).
