@@ -97,7 +97,7 @@ pub fn query_at(dir: &Path, request: &Query, now: i64) -> Result<Report> {
     let latest = store.as_ref().map(|s| s.samples(i64::MIN, i64::MAX, 1)).transpose()?.unwrap_or_default().into_iter().next();
     let age = latest.as_ref().map(|s| now.saturating_sub(s.wall_ms));
     let status = if !settings.enabled { "paused" } else { match age { None => "unavailable", Some(a) if a < -2000 => "clock_changed", Some(a) if a <= 15_000 => "fresh", _ => "stale" } };
-    let use_minutes = to - from > 7_200_000 || latest.as_ref().is_some_and(|s| to < s.wall_ms.saturating_sub(i64::from(settings.detailed_hours) * 3_600_000));
+    let use_minutes = to - from > 7_200_000 || latest.as_ref().is_some_and(|s| from < s.wall_ms.saturating_sub(i64::from(settings.detailed_hours) * 3_600_000));
     let mut raw_samples = Vec::new();
     let mut points = Vec::new();
     let mut gaps = Vec::new();
@@ -306,6 +306,20 @@ mod tests {
         assert!(report.coverage.bounded);
         assert!(report.points.iter().any(|p| p.peaks.cpu_percent == Some(99.0)));
         assert!(fixture.query(Query::default()).points.is_empty());
+    }
+    #[test]
+    fn a_window_straddling_detail_expiry_uses_retained_minutes() {
+        let fixture = Fixture::new();
+        fixture.sample(NOW, Some("boot"), "s", Some(10.0));
+        for at in [NOW-88_200_000, NOW-84_600_000] {
+            let last = Sample { wall_ms: at, monotonic_ms: at as u64, boot: Some("boot".into()), session: "s".into(), metrics: Metrics { cpu_percent: Some(95.0), ..Default::default() }, collection_ms: 1 };
+            let minute = Minute { first_wall_ms: at, first_monotonic_ms: at as u64, peaks: last.metrics.clone(), last, samples: 1, min_available_bytes: None };
+            fixture.store.db.execute("INSERT INTO minutes(wall_ms,json) VALUES(?1,?2)", rusqlite::params![at,serde_json::to_string(&minute).unwrap()]).unwrap();
+        }
+        let report = fixture.query(Query { view: View::History, from_ms: Some(NOW-88_200_000), to_ms: Some(NOW-84_600_000), ..Default::default() });
+        assert_eq!(report.coverage.resolution, "minute");
+        assert_eq!(report.points.len(), 2);
+        assert_eq!(report.points[0].from_ms, NOW-88_200_000);
     }
     #[test]
     fn freshness_and_clock_changes_are_explicit_and_project_does_not_change_totals() {

@@ -182,6 +182,7 @@ impl Store {
         let summaries = i64::from(settings.summary_days) * 1440;
         tx.execute("DELETE FROM samples WHERE wall_ms < ?1", [sample.wall_ms.saturating_sub(i64::from(settings.detailed_hours) * 3_600_000)])?;
         tx.execute("DELETE FROM minutes WHERE wall_ms < ?1", [sample.wall_ms.saturating_sub(i64::from(settings.summary_days) * 86_400_000)])?;
+        tx.execute("DELETE FROM performance_event WHERE wall_ms < ?1", [sample.wall_ms.saturating_sub(i64::from(settings.summary_days) * 86_400_000)])?;
         // IDs grow while rows remain; gaps can only retain fewer rows. Indexed cutoffs avoid
         // scanning 60,000 retained JSON records on every five-second sample.
         tx.execute("DELETE FROM samples WHERE id <= (SELECT max(id) FROM samples)-?1", [detailed - 1])?;
@@ -219,9 +220,12 @@ impl Store {
         Ok(rows)
     }
     fn clear(&self) -> Result<()> {
+        let tx = rusqlite::Transaction::new_unchecked(&self.db, rusqlite::TransactionBehavior::Immediate)?;
         if !self.current_version()? { bail!("use the newer Nitely to clear performance history"); }
         if self.settings()?.enabled { bail!("pause performance recording before deleting history"); }
-        self.db.execute_batch("BEGIN IMMEDIATE; DELETE FROM samples; DELETE FROM minutes; DELETE FROM sessions; DELETE FROM attribution; DELETE FROM attribution_minutes; DELETE FROM workloads; DELETE FROM performance_event; COMMIT; VACUUM;")?;
+        tx.execute_batch("DELETE FROM samples; DELETE FROM minutes; DELETE FROM sessions; DELETE FROM attribution; DELETE FROM attribution_minutes; DELETE FROM workloads; DELETE FROM performance_event;")?;
+        tx.commit()?;
+        self.db.execute_batch("VACUUM;")?;
         Ok(())
     }
     pub(crate) fn current_version(&self) -> Result<bool> { Ok(self.db.query_row("SELECT version FROM recorder_version WHERE id=1", [], |r| r.get::<_, i64>(0))? == RECORDER_VERSION) }

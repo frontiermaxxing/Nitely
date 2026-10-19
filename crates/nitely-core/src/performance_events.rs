@@ -27,10 +27,18 @@ pub fn record(dir: &Path, event: &Event) -> Result<()> {
     let valid = |text: &str| !text.is_empty() && text.len() <= 80 && text.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
     if !valid(&event.project) || event.issue.as_ref().is_some_and(|s| !valid(s)) || event.run < 1 { bail!("invalid performance event identity"); }
     let mut store = Store::open(dir)?;
-    if !store.current_version()? || !store.settings()?.enabled { return Ok(()); }
-    let days = store.settings()?.summary_days;
+    record_in_store(&mut store, event)
+}
+fn record_in_store(store: &mut Store, event: &Event) -> Result<()> {
     let kind = serde_json::to_string(&event.kind)?;
-    let tx = store.db.transaction()?;
+    let tx = store.db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    // Serialize the enabled/version check with pause+clear; an event which waited for a writer
+    // must not recreate history after the person paused and deleted it.
+    let version: i64 = tx.query_row("SELECT version FROM recorder_version WHERE id=1", [], |r| r.get(0))?;
+    let settings: Option<String> = tx.query_row("SELECT json FROM settings WHERE id=1", [], |r| r.get(0)).optional()?;
+    let settings: performance::Settings = settings.map(|s| serde_json::from_str(&s)).transpose()?.unwrap_or_default();
+    if version > performance::RECORDER_VERSION || !settings.enabled { return Ok(()); }
+    let days = settings.summary_days;
     let prior: Option<String> = tx.query_row("SELECT kind FROM performance_event WHERE run=?1 ORDER BY id DESC LIMIT 1", [event.run], |r| r.get(0)).optional()?;
     if prior.as_deref() == Some(&kind) { return Ok(()); }
     tx.execute("DELETE FROM performance_event WHERE wall_ms<?1 OR id<=(SELECT max(id) FROM performance_event)-19999", [event.wall_ms.saturating_sub(i64::from(days)*86_400_000)])?;
@@ -104,6 +112,26 @@ mod tests {
         let store = Store::read(&dir).unwrap().unwrap();
         assert!(read(&store, 0, i64::MAX, None, 100).unwrap().0.is_empty());
         drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn a_waiting_event_cannot_repopulate_paused_deleted_history() {
+        let dir = crate::paths::unique_temp("performance-event-pause-race", "");
+        let mut writer = Store::open(&dir).unwrap();
+        let mut person = Store::open(&dir).unwrap();
+        let tx = person.db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
+        tx.execute("INSERT INTO settings VALUES(1,?1)", [serde_json::to_string(&performance::Settings { enabled: false, ..Default::default() }).unwrap()]).unwrap();
+        tx.execute("DELETE FROM performance_event", []).unwrap();
+        let (ready, wait) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            ready.send(()).unwrap();
+            record_in_store(&mut writer, &Event { wall_ms: performance::wall_ms(), kind: Kind::Started, project: "APP".into(), issue: None, run: 1, memory_cap_bytes: None }).unwrap();
+        });
+        wait.recv().unwrap();
+        tx.commit().unwrap();
+        thread.join().unwrap();
+        assert!(read(&person, 0, i64::MAX, None, 100).unwrap().0.is_empty());
+        drop(person);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
