@@ -119,11 +119,30 @@ impl Store {
         Ok(Self { db })
     }
     /// Queries never initialize a store, collect a sample, or contend for recorder ownership.
+    /// A crashed writer's hot journal is recovered before returning a read-only connection.
     pub fn read(dir: &Path) -> Result<Option<Self>> {
         let path = dir.join("history.sqlite");
         if !path.exists() { return Ok(None); }
-        let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        db.busy_timeout(Duration::from_millis(250))?;
+        let open_read = || -> rusqlite::Result<Connection> {
+            let db = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            db.busy_timeout(Duration::from_millis(250))?;
+            // Opening alone is lazy: this read detects recovery before any query escapes.
+            db.query_row("PRAGMA schema_version", [], |r| r.get::<_, i64>(0))?;
+            Ok(db)
+        };
+        let db = match open_read() {
+            Ok(db) => db,
+            Err(e) if e.sqlite_error().is_some_and(|e| e.extended_code == rusqlite::ffi::SQLITE_READONLY_ROLLBACK) => {
+                // No CREATE flag, schema initialization, or version announcement. SQLite
+                // restores the last committed pages under its own recovery lock.
+                let recovery = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+                recovery.busy_timeout(Duration::from_millis(250))?;
+                recovery.query_row("PRAGMA schema_version", [], |r| r.get::<_, i64>(0))?;
+                drop(recovery);
+                open_read()?
+            }
+            Err(e) => return Err(e.into()),
+        };
         Ok(Some(Self { db }))
     }
     pub fn settings(&self) -> Result<Settings> {
@@ -345,6 +364,41 @@ mod tests {
         assert_eq!(store.samples(0, 10, 1).unwrap()[0].wall_ms, 1);
     }
     #[test]
+    fn hot_journal_child() {
+        let Some(dir) = std::env::var_os("NITELY_TEST_HOT_JOURNAL_DIR") else { return; };
+        let db = Connection::open(PathBuf::from(dir).join("history.sqlite")).unwrap();
+        db.execute_batch("PRAGMA cache_size=1; BEGIN IMMEDIATE;").unwrap();
+        db.execute("UPDATE samples SET json=?1", ["x".repeat(7000)]).unwrap();
+        // Deliberately bypass destructors after dirty pages spill, like process termination.
+        std::process::exit(0);
+    }
+    #[test]
+    fn read_recovers_a_hot_journal_without_starting_or_upgrading_the_recorder() {
+        let temp = Temp::new();
+        let mut store = Store::open(&temp.0).unwrap();
+        let json = serde_json::to_string(&sample(1)).unwrap();
+        let tx = store.db.transaction().unwrap();
+        for _ in 0..64 { tx.execute("INSERT INTO samples(wall_ms,json) VALUES(1,?1)", [&json]).unwrap(); }
+        tx.commit().unwrap();
+        store.configure(&Settings { enabled: false, ..Default::default() }).unwrap();
+        store.db.execute("UPDATE recorder_version SET version=?1", [RECORDER_VERSION + 1]).unwrap();
+        drop(store);
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "performance::tests::hot_journal_child", "--nocapture"])
+            .env("NITELY_TEST_HOT_JOURNAL_DIR", &temp.0).output().unwrap();
+        assert!(child.status.success(), "{}", String::from_utf8_lossy(&child.stderr));
+        let readonly = Connection::open_with_flags(temp.0.join("history.sqlite"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let error = readonly.query_row("PRAGMA schema_version", [], |r| r.get::<_, i64>(0)).unwrap_err();
+        assert_eq!(error.sqlite_error().unwrap().extended_code, rusqlite::ffi::SQLITE_READONLY_ROLLBACK, "fixture must require recovery");
+        drop(readonly);
+        let recovered = Store::read(&temp.0).unwrap().unwrap();
+        assert_eq!(recovered.samples(0, 10, 100).unwrap().len(), 64);
+        assert!(!recovered.settings().unwrap().enabled);
+        assert!(!recovered.current_version().unwrap(), "reading must not announce a recorder version");
+        assert!(recovered.sessions().unwrap().is_empty());
+        assert!(recovered.db.execute("DELETE FROM samples", []).is_err(), "returned connection remains read-only");
+    }
+    #[test]
     fn full_store_rejects_whole_write_without_losing_history() {
         let temp = Temp::new();
         let mut store = Store::open(&temp.0).unwrap();
@@ -434,8 +488,47 @@ mod tests {
         assert!(store.sessions().unwrap().is_empty(), "contender never collected while old owner held lock");
     }
     #[test]
-    #[ignore = "manual bounded native collection and retention-size measurement"]
+    #[ignore = "manual bounded native collection, process I/O and retention-size measurement"]
     fn recorder_budget_measurement() {
+        #[cfg(windows)]
+        #[repr(C)]
+        #[derive(Default)]
+        struct IoCounters {
+            read_operations: u64,
+            write_operations: u64,
+            other_operations: u64,
+            read_bytes: u64,
+            write_bytes: u64,
+            other_bytes: u64,
+        }
+        #[cfg(windows)]
+        fn process_io() -> IoCounters {
+            #[link(name = "kernel32")]
+            extern "system" {
+                fn GetCurrentProcess() -> *mut std::ffi::c_void;
+                fn GetProcessIoCounters(process: *mut std::ffi::c_void, counters: *mut IoCounters) -> i32;
+            }
+            let mut counters = IoCounters::default();
+            // SAFETY: the current-process pseudo-handle is valid, and the writable buffer has
+            // the six consecutive ULONGLONG fields of Windows IO_COUNTERS in C layout.
+            let ok = unsafe { GetProcessIoCounters(GetCurrentProcess(), &mut counters) };
+            assert_ne!(ok, 0, "process I/O counters: {}", std::io::Error::last_os_error());
+            counters
+        }
+        #[cfg(windows)]
+        fn process_cpu_ticks() -> u64 {
+            #[link(name = "kernel32")]
+            extern "system" {
+                fn GetCurrentProcess() -> *mut std::ffi::c_void;
+                fn GetProcessTimes(process: *mut std::ffi::c_void, creation: *mut u64, exit: *mut u64, kernel: *mut u64, user: *mut u64) -> i32;
+            }
+            let (mut creation, mut exit, mut kernel, mut user) = (0u64, 0u64, 0u64, 0u64);
+            // SAFETY: current-process pseudo-handle and four writable, aligned FILETIME-sized
+            // buffers; Windows returns accumulated kernel/user CPU time in 100ns units.
+            let ok = unsafe { GetProcessTimes(GetCurrentProcess(), &mut creation, &mut exit, &mut kernel, &mut user) };
+            assert_ne!(ok, 0, "process CPU counters: {}", std::io::Error::last_os_error());
+            kernel.checked_add(user).unwrap()
+        }
         #[cfg(windows)]
         let resident_before = native::resident_bytes();
         let temp = Temp::new();
@@ -457,18 +550,51 @@ mod tests {
             }
             tx.commit().unwrap();
         }
+        assert_eq!(store.db.query_row("PRAGMA synchronous", [], |r| r.get::<_, i64>(0)).unwrap(), 2, "benchmark FULL durability, not buffered commits");
+        // Exclude fixture construction; include native counter collection, retention scans,
+        // rollback journals and database writes for twelve independently durable cycles.
+        #[cfg(windows)]
+        let cpu_before = process_cpu_ticks();
+        #[cfg(windows)]
+        let io_before = process_io();
         let start = Instant::now();
         for _ in 0..12 {
             let sample = collector.sample();
             store.append(&sample, &Minute::new(&sample), None, &Settings::default()).unwrap();
         }
         let elapsed = start.elapsed();
+        #[cfg(windows)]
+        let io_after = process_io();
+        #[cfg(windows)]
+        let cpu = Duration::from_nanos(process_cpu_ticks().checked_sub(cpu_before).unwrap().checked_mul(100).unwrap());
         let sample = collector.sample();
         let detail = serde_json::to_string(&sample).unwrap().len();
         let minute = serde_json::to_string(&Minute::new(&sample)).unwrap().len();
         let disk = std::fs::metadata(temp.0.join("history.sqlite")).unwrap().len();
         eprintln!("12 native collections+writes at full retention: {elapsed:?}; sample JSON {detail} bytes; minute JSON {minute} bytes; database {disk} bytes; max retained payload {} bytes", detail * 17280 + minute * 43200);
-        assert!(elapsed < Duration::from_millis(600), "recorder work must stay below 1% of one core at a five-second cadence");
+        #[cfg(windows)]
+        {
+            eprintln!("12-cycle process CPU: {cpu:?}; elapsed wall time: {elapsed:?}");
+            let read = io_after.read_bytes.checked_sub(io_before.read_bytes).unwrap();
+            let written = io_after.write_bytes.checked_sub(io_before.write_bytes).unwrap();
+            let other = io_after.other_bytes.checked_sub(io_before.other_bytes).unwrap();
+            let reads = io_after.read_operations.checked_sub(io_before.read_operations).unwrap();
+            let writes = io_after.write_operations.checked_sub(io_before.write_operations).unwrap();
+            let others = io_after.other_operations.checked_sub(io_before.other_operations).unwrap();
+            eprintln!("12-cycle process I/O: read {read} bytes/{reads} operations; written {written} bytes/{writes} operations; other {other} bytes/{others} operations (one minute at the five-second cadence)");
+            // At normal cadence these allow at most 205 KiB/s reads and 51 KiB/s writes,
+            // with room for FULL-sync journal amplification. These are process transfer
+            // volumes, not physical-disk traffic, flush counts or storage latency.
+            assert!(written > 0 && writes > 0, "measure actual durable database writes");
+            assert!(read <= 12 * 1024 * 1024, "recorder process-read budget: {read} bytes per twelve cycles");
+            assert!(written <= 3 * 1024 * 1024, "recorder process-write budget: {written} bytes per twelve cycles");
+            assert!(cpu < Duration::from_millis(600), "recorder CPU must stay below 1% of one core over twelve five-second intervals: {cpu:?}");
+        }
+        #[cfg(not(windows))]
+        eprintln!("process CPU and I/O budgets unavailable on this platform; measured on Windows only");
+        // FULL-sync storage waits and scheduling delays are elapsed time, not process CPU.
+        // Keep them visible and require throughput to fit the twelve actual sample intervals.
+        assert!(elapsed < Duration::from_secs(60), "twelve collection/commit cycles must fit twelve five-second sampling intervals: {elapsed:?}");
         assert!(detail * 17280 + minute * 43200 < MAX_DATABASE_BYTES as usize);
         #[cfg(windows)]
         if let (Some(before), Some(after)) = (resident_before, native::resident_bytes()) {

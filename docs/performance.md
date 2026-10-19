@@ -59,19 +59,43 @@ requires pause and ownership of the recorder lock; if it is stopping, retry afte
 It removes samples, summaries and sessions, retains settings, and compacts the database.
 The same `NITELY_HOME` isolation used by the harness applies to telemetry; test recordings
 stay in the throwaway harness data folder and no collector is detached from the harness app.
+Queries return a read-only connection and never initialize the store or start recording;
+only after `SQLITE_READONLY_ROLLBACK` do they briefly open the existing database writable
+so SQLite can recover its hot journal, without schema/version changes, making post-crash
+history available before a recorder starts.
 
 The collection budget is under 1% of one CPU core averaged over the five-second cadence,
 under 32 MiB additional resident memory for the recorder, and under 256 MiB total retained
-disk including an in-flight rollback journal. Run the ignored, bounded measurement in a build
-lane: `cargo test -p nitely-core performance::tests::recorder_budget_measurement -- --ignored --nocapture`.
-It fills maximum retention and measures native reads plus durable writes/pruning. This test
-does not start a native application window. The database size and timings are reported rather
+disk including an in-flight rollback journal. On Windows, twelve collection/commit cycles
+must read no more than 12 MiB and write no more than 3 MiB of process I/O: at the normal
+five-second cadence, at most 205 KiB/s reads and 51 KiB/s writes. The write allowance includes
+FULL-synchronous rollback-journal and database write amplification, not just sample payloads.
+Run the ignored, bounded measurement alone in a build lane:
+`cargo test -p nitely-core performance::tests::recorder_budget_measurement -- --ignored --exact --nocapture --test-threads=1`.
+It fills maximum retention, then measures twelve native reads plus durable writes/pruning;
+fixture construction, logging and cleanup are outside the process-I/O counter interval.
+The test asserts SQLite FULL synchronous mode, nonzero actual writes and both transfer
+budgets. Windows `GetProcessIoCounters` measures this process's transfer bytes and operation
+counts; these are not physical disk traffic, flush counts or storage latency. Other I/O
+operations are reported separately. Non-Windows process-I/O measurements are unavailable.
+The Windows CPU assertion uses `GetProcessTimes` kernel plus user time: less than 600 ms
+across twelve cycles is less than 1% of one core over their normal sixty-second sampling
+window. Elapsed wall time is reported separately and must fit that sixty-second window;
+FULL-sync storage waits and scheduling delays are not mislabeled as CPU consumption.
+This test does not start a native application window. The database size and timings are reported rather
 than inferred from the whole Rust build's peak memory.
 
 On the development Windows machine, a full default-retention fixture occupied 70,279,168 bytes.
-Twelve collections plus FULL-synchronous writes/pruning took 353 ms (about 29 ms each, under
-0.6% of one core's five-second interval using wall time as a conservative bound). Actual
+The I/O benchmark measured 82,112 bytes read across 44 operations and 1,129,680 bytes written
+across 570 operations for twelve FULL-synchronous collection/commit cycles; other operations
+transferred 26,784 bytes across 288 operations. That is about 18.4 KiB/s of process writes at
+normal cadence, within the 51 KiB/s allowance. The cycles used 31.25 ms of process CPU
+(about 0.052% of one core over the normal sixty-second sampling window) and took 172 ms
+of elapsed wall time, with 10,665,984 bytes of additional resident memory including the
+full-store fixture. An earlier run took 4.19 seconds of wall time with the same I/O volumes;
+wall-time variation alone does not establish CPU consumption. Actual
 overhead depends on storage and system load; these are measurements, not promised latency.
 
-Windows API references: [PDH formatted values](https://learn.microsoft.com/en-us/windows/win32/api/pdh/nf-pdh-pdhgetformattedcountervalue)
-and [memory performance information](https://learn.microsoft.com/en-us/windows/win32/memory/memory-performance-information).
+Windows API references: [PDH formatted values](https://learn.microsoft.com/en-us/windows/win32/api/pdh/nf-pdh-pdhgetformattedcountervalue),
+[memory performance information](https://learn.microsoft.com/en-us/windows/win32/memory/memory-performance-information),
+and [process I/O accounting](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getprocessiocounters).
