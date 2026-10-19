@@ -350,6 +350,35 @@ mod tests {
         assert_eq!(report.points[0].from_ms, NOW-88_200_000);
     }
     #[test]
+    fn restart_queries_keep_exited_workload_context_and_filter_projects_without_changing_totals() {
+        use crate::performance_attribution::{Context, Coverage, Identity, Usage, WorkloadUsage};
+        let mut fixture = Fixture::new();
+        fixture.store.start_session("old", Some("boot-a"), NOW-700_000).unwrap();
+        fixture.sample(NOW-60_000, Some("boot-a"), "old", Some(95.0));
+        fixture.store.start_session("new", Some("boot-b"), NOW-20_000).unwrap();
+        fixture.sample(NOW-10_000, Some("boot-b"), "new", Some(10.0));
+        let mut usages = vec![];
+        for (pid, project) in [(1,"APP"),(2,"DEMO")] {
+            let context = Context { project: Some(project.into()), issue: Some(format!("{project}-1")), run_id: Some(pid.into()), ..Default::default() };
+            let workload = Workload { id: format!("job-{pid}"), kind: "build".into(), context: context.clone(), root: Identity { boot: "boot-a".into(), pid, started: "1".into() }, start_ms: NOW-600_000, end_ms: Some(NOW-30_000), end_observed: false, job_accounting: None };
+            fixture.store.db.execute("INSERT INTO workloads(id,json,ended) VALUES(?1,?2,?3)", rusqlite::params![workload.id,serde_json::to_string(&workload).unwrap(),workload.end_ms]).unwrap();
+            usages.push(WorkloadUsage { id: workload.id, context, kind: "build".into(), usage: Usage { cpu_percent: Some(20.0), ..Default::default() } });
+        }
+        let mut attributed = AttributionSample { wall_ms: NOW-60_000, monotonic_ms: 600_000, session: "old".into(), boot: Some("boot-a".into()), interval_ms: Some(5000), collection_ms: 1, coverage: Coverage { supported: true, ..Default::default() }, resolution: "sample".into(), observations: 1, nitely: Usage { cpu_percent: Some(40.0), ..Default::default() }, related: Usage::default(), other: Usage::default(), unattributed_cpu_percent: Some(55.0), workloads: usages, top_other: vec![] };
+        fixture.store.append_attribution(&mut attributed, true).unwrap();
+        let query = |project: &str| Query { view: View::History, before_last_restart: true, project: Some(project.into()), ..Default::default() };
+        let app = fixture.query(query("APP")); let demo = fixture.query(query("DEMO"));
+        assert_eq!(app.workloads.len(), 1);
+        assert_eq!(app.workloads[0].end_ms, Some(NOW-30_000));
+        assert_eq!(app.attribution[0].workloads.len(), 1);
+        assert_eq!(app.attribution[0].workloads[0].context.project.as_deref(), Some("APP"));
+        assert_eq!(app.attribution[0].nitely.cpu_percent, demo.attribution[0].nitely.cpu_percent);
+        assert_eq!(app.latest.unwrap().metrics, demo.latest.unwrap().metrics);
+        assert_eq!(app.related_issues["APP-1"], crate::links::issue_url("APP-1"));
+        assert!(!app.related_issues.contains_key("DEMO-1"));
+        assert_eq!(app.attribution_age_ms, Some(60_000));
+    }
+    #[test]
     fn freshness_and_clock_changes_are_explicit_and_project_does_not_change_totals() {
         let fixture = Fixture::new();
         fixture.sample(NOW-30_000, Some("boot"), "s", Some(20.0));
