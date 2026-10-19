@@ -141,7 +141,7 @@ mod tests {
 
     #[test]
     fn writes_are_refused_before_anything_runs() {
-        for command in ["move_issue", "answer_ask", "set_blocker", "create_project", "connect_plan", "connect_apply", "agent_setup_apply", "sync_now", "approve", "set_project_focus", ""] {
+        for command in ["move_issue", "answer_ask", "set_blocker", "create_project", "connect_plan", "connect_apply", "agent_setup_apply", "sync_now", "approve", "set_project_focus", "reviewer_settings_save", ""] {
             let e = run(command, &json!({ "key": "NIT-1", "state": "Approved", "id": 1, "answer": "yes" })).unwrap_err();
             assert!(e.to_string().contains("read-only"), "{command}: {e}");
         }

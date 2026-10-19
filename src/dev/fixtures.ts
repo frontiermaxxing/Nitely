@@ -2262,6 +2262,10 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return rulesFixture.rulesCheck(args);
       case "rules_save":
         return rulesFixture.rulesSave(args);
+      case "reviewer_settings_preview":
+        return rulesFixture.reviewerPreview(args);
+      case "reviewer_settings_save":
+        return rulesFixture.reviewerSave(args);
       case "rules_branches":
         return rulesFixture.rulesBranches(args);
       case "rules_dry_run":

@@ -847,6 +847,7 @@ export interface RulesView {
   source: "repo" | "stored" | "none";
   path: string;
   editable: boolean;
+  reviewer_editable: boolean;
   read_only: string | null;
   integration: string;
   always_human: boolean;
@@ -860,6 +861,18 @@ export interface RulesView {
   reviewers: ReviewerInfo[];
   /** How it batches reviews and lands; set in the playbook (rules.rs `Batching`). */
   batching?: Batching;
+}
+
+export interface ReviewerPreview {
+  before: string;
+  after: string;
+  diff: string;
+  destination: string;
+}
+
+export interface ReviewerSaved {
+  view: RulesView;
+  done: string;
 }
 
 /** The playbook's `[review] batch` and `[land] batch` settings (docs/batching.md). */

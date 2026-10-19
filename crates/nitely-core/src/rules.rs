@@ -2,7 +2,8 @@
 //! review must come from another vendor, who lands a reviewed change, and what sends a change to a
 //! human. Two levels: app-wide defaults kept in Nitely's config (`RuleDefaults`), which fill what
 //! a project's playbook leaves unset, and the project's own playbook. A repo that commits its own
-//! `.nitely/playbook.toml` is shown read-only: that file wins, and the app never writes past it.
+//! `.nitely/playbook.toml` keeps its approval rules read-only; reviewer routing can be previewed
+//! and committed by the person, using the same protected commit path as Crew settings.
 //!
 //! Only a human changes these: the app's commands call `save_rules` and `save_defaults`; the CLI
 //! and the MCP tools never do, so an agent cannot loosen its own approval rules. A save that
@@ -107,6 +108,7 @@ pub struct RulesView {
     pub source: String,
     pub path: String,
     pub editable: bool,
+    pub reviewer_editable: bool,
     /// Why it cannot be edited here, when it cannot.
     pub read_only: Option<String>,
     pub integration: String,
@@ -231,9 +233,10 @@ fn view(config: &crate::Config, repo: &crate::RepoConfig) -> Result<RulesView> {
         source: source.into(),
         path: target.path.to_string_lossy().into_owned(),
         editable: !target.in_repo,
+        reviewer_editable: true,
         read_only: target.in_repo.then(|| {
             format!(
-                "{} commits its own {}, and that file wins. Change it on a branch like any other file, or have an agent propose the change for you to approve.",
+                "{} commits its own {}. You can change reviewer routing below. Other rules are set in that file; an agent can propose those changes for you to approve.",
                 repo.name,
                 crate::playbook::PLAYBOOK_PATH
             )
@@ -418,6 +421,111 @@ pub fn save_rules(config: &crate::Config, repo_name: &str, edit: &RulesEdit, con
     view(config, repo(config, repo_name)?)
 }
 
+/// Narrow human edit: it cannot change approval rules or reviewer commands.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewerEdit {
+    pub reviewer: Option<BTreeMap<String, String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewerPreview {
+    pub before: String,
+    pub after: String,
+    pub diff: String,
+    pub destination: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReviewerSaved {
+    pub view: RulesView,
+    pub done: String,
+}
+
+fn edited_reviewer(text: &str, edit: &ReviewerEdit) -> Result<String> {
+    use toml_edit::{value, Item, Table};
+    let pb = Playbook::parse(text)?;
+    if let Some(map) = &edit.reviewer {
+        for reviewer in map.values() {
+            if !pb.review.commands.contains_key(reviewer) {
+                bail!("no reviewer command named {reviewer}");
+            }
+        }
+    }
+    let mut doc: toml_edit::DocumentMut = text.parse()?;
+    if !doc.contains_key("review") {
+        doc.insert("review", Item::Table(Table::new()));
+    }
+    let review = doc["review"].as_table_like_mut().context("review is not a table")?;
+    if let Some(map) = &edit.reviewer {
+        let mut table = toml_edit::InlineTable::new();
+        for (author, reviewer) in map {
+            table.insert(author, reviewer.as_str().into());
+        }
+        review.insert("reviewer", value(table));
+    } else {
+        review.remove("reviewer");
+    }
+    if review.is_empty() {
+        doc.remove("review");
+    }
+    let out = doc.to_string();
+    Playbook::parse(&out)?;
+    Ok(out)
+}
+
+/// The exact file change the person will review before saving; no mutation.
+pub fn preview_reviewer(config: &crate::Config, repo_name: &str, edit: &ReviewerEdit) -> Result<ReviewerPreview> {
+    let repo = repo(config, repo_name)?;
+    let target = Target::of(&repo.name, Path::new(&repo.root));
+    let before = read(&target.path)?.replace("\r\n", "\n");
+    let after = edited_reviewer(&before, edit)?;
+    let destination = if target.in_repo {
+        format!("Commit to {} on {}; pushed with the next land.", target.path.display(), Playbook::parse(&before)?.integration_branch())
+    } else {
+        format!("Save to {}.", target.path.display())
+    };
+    Ok(ReviewerPreview { diff: crate::proposals::diff_text(&crate::proposals::diff(&before, &after)), before, after, destination })
+}
+
+/// Human app command only. Recomputes the diff, refuses stale previews, and serializes with land.
+pub fn save_reviewer(config: &crate::Config, db: &crate::Db, repo_name: &str, edit: &ReviewerEdit, preview: &ReviewerPreview) -> Result<ReviewerSaved> {
+    let repo = repo(config, repo_name)?;
+    let root = Path::new(&repo.root);
+    let target = Target::of(&repo.name, root);
+    let _lock = crate::land::Lock::try_take(&crate::land::lock_path(root)?, "reviewer settings", false)?
+        .context("another land or settings save is running; try again after it finishes")?;
+    let current = preview_reviewer(config, repo_name, edit)?;
+    if current.before != preview.before || current.after != preview.after || current.destination != preview.destination {
+        bail!("the playbook changed since this preview; review the new change before saving");
+    }
+    if current.before == current.after {
+        return Ok(ReviewerSaved { view: view(config, repo)?, done: "Reviewer routing is already saved.".into() });
+    }
+    let done = if target.in_repo {
+        let branch = Playbook::parse(&current.before)?.integration_branch().to_string();
+        let on = git(root, &["branch", "--show-current"])?;
+        if on.trim() != branch {
+            bail!("{} is on {}; switch it to {branch} before saving reviewer routing", root.display(), if on.trim().is_empty() { "a detached HEAD" } else { on.trim() });
+        }
+        let commit = crate::proposals::commit_playbook_edit(root, &branch, &|at_tip| {
+            if at_tip.replace("\r\n", "\n") != current.before {
+                bail!("the committed playbook differs from this preview; reload and review the change again");
+            }
+            Ok(current.after.clone())
+        }, "Review: update reviewer routing\n\nSet in the Nitely app.")?;
+        format!("Committed {} on {branch}; pushed with the next land. The next review uses this routing.", &commit[..9])
+    } else {
+        if let Some(dir) = target.path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(&target.path, &current.after)?;
+        format!("Saved to {}. The next review uses this routing.", target.path.display())
+    };
+    db.log_event(&crate::Actor::Human, None, Some(&repo.root), "reviewer_settings_changed", &format!("Reviewer routing for {}: {done}", repo.name))?;
+    Ok(ReviewerSaved { view: view(config, repo)?, done })
+}
+
 /// The app-wide defaults as the Agents view shows them: what is set, what Nitely uses when
 /// nothing is, and the reviewers Nitely knows how to run here.
 #[derive(Debug, Clone, Serialize)]
@@ -583,5 +691,75 @@ mod tests {
         let flag = |q: &str| Flag { name: "MONEY".into(), question: q.into(), reason: String::new() };
         let twice = RulesEdit { flags: vec![flag("billing"), flag("payouts")], ..Default::default() };
         assert!(check_edit(&twice).unwrap_err().to_string().contains("two questions"));
+    }
+
+    #[test]
+    fn reviewer_edits_only_change_routing_and_can_restore_inheritance() {
+        let text = "# policy\n[gate]\ncommands = [\"npm test\"]\n[approval]\nalways_human = true\n[review]\nrequire_cross_vendor = true\n[review.commands]\ncustom = [\"review-tool\"]\n";
+        let edit = ReviewerEdit { reviewer: Some(BTreeMap::from([("*".into(), "custom".into()), ("codex".into(), "custom".into())])) };
+        let after = edited_reviewer(text, &edit).unwrap();
+        let pb = Playbook::parse(&after).unwrap();
+        assert!(pb.approval.always_human && pb.review.require_cross_vendor);
+        assert_eq!(pb.gate.commands, ["npm test"]);
+        assert!(after.contains("# policy") && after.contains("review-tool"));
+        let inherited = edited_reviewer(&after, &ReviewerEdit { reviewer: None }).unwrap();
+        let defaults = RuleDefaults { reviewer: Some(BTreeMap::from([("*".into(), "codex".into())])), ..Default::default() };
+        assert_eq!(effective(&inherited, &defaults).unwrap().review.reviewer["*"], "codex");
+        assert!(!sets(&inherited).reviewer);
+        let bad = ReviewerEdit { reviewer: Some(BTreeMap::from([("*".into(), "missing".into())])) };
+        assert!(edited_reviewer(text, &bad).unwrap_err().to_string().contains("no reviewer command"));
+        assert!(serde_json::from_value::<ReviewerEdit>(serde_json::json!({"reviewer":null,"always_human":false})).is_err());
+    }
+
+    #[test]
+    fn committed_reviewer_save_requires_exact_preview_clean_playbook_and_land_lock() {
+        let root = crate::paths::unique_temp("nitely-reviewer-settings", "");
+        std::fs::create_dir_all(root.join(".nitely")).unwrap();
+        let command = |args: &[&str]| {
+            let out = crate::playbook::run_git(std::process::Command::new("git").arg("-C").arg(&root).args(args)).unwrap();
+            assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        command(&["init", "-q", "-b", "main"]);
+        command(&["config", "user.name", "Test"]);
+        command(&["config", "user.email", "test@example.invalid"]);
+        let path = root.join(crate::playbook::PLAYBOOK_PATH);
+        let text = "[gate]\ncommands = [\"npm test\"]\n[approval]\nalways_human = true\n";
+        std::fs::write(&path, text).unwrap();
+        command(&["add", "."]);
+        command(&["commit", "-qm", "initial"]);
+        let db = crate::Db::open(&root.join("test.db")).unwrap();
+        let mut config = crate::Config::default();
+        config.repos.push(crate::RepoConfig { name: "sample".into(), root: root.to_string_lossy().into(), project: Some("APP".into()), integration_branch: "main".into() });
+        let edit = ReviewerEdit { reviewer: Some(BTreeMap::from([("*".into(), "codex".into())])) };
+        let preview = preview_reviewer(&config, "sample", &edit).unwrap();
+        let held = crate::land::Lock::try_take(&crate::land::lock_path(&root).unwrap(), "other", false).unwrap().unwrap();
+        assert!(save_reviewer(&config, &db, "sample", &edit, &preview).unwrap_err().to_string().contains("another land"));
+        drop(held);
+        std::fs::write(&path, format!("{text}# local edit\n")).unwrap();
+        assert!(save_reviewer(&config, &db, "sample", &edit, &preview).unwrap_err().to_string().contains("changed since"));
+        let dirty_preview = preview_reviewer(&config, "sample", &edit).unwrap();
+        assert!(save_reviewer(&config, &db, "sample", &edit, &dirty_preview).unwrap_err().to_string().contains("committed playbook differs"));
+        std::fs::write(&path, text).unwrap();
+        command(&["checkout", "-qb", "topic"]);
+        assert!(save_reviewer(&config, &db, "sample", &edit, &preview).unwrap_err().to_string().contains("switch it to main"));
+        command(&["checkout", "-q", "main"]);
+        std::fs::write(root.join("unrelated.txt"), "keep staged").unwrap();
+        command(&["add", "unrelated.txt"]);
+        let saved = save_reviewer(&config, &db, "sample", &edit, &preview).unwrap();
+        assert!(saved.done.starts_with("Committed"));
+        assert!(saved.view.always_human && saved.view.reviewer_editable && !saved.view.editable);
+        assert_eq!(saved.view.reviewer.from, "project");
+        assert_eq!(command(&["diff", "--cached", "--name-only"]), "unrelated.txt");
+        assert_eq!(command(&["show", "--format=", "--name-only", "HEAD"]), ".nitely/playbook.toml");
+        assert!(save_reviewer(&config, &db, "sample", &edit, &preview).unwrap_err().to_string().contains("changed since"));
+        let inherit = ReviewerEdit { reviewer: None };
+        config.rule_defaults.reviewer = Some(BTreeMap::from([("*".into(), "codex".into())]));
+        let preview = preview_reviewer(&config, "sample", &inherit).unwrap();
+        let saved = save_reviewer(&config, &db, "sample", &inherit, &preview).unwrap();
+        assert_eq!(saved.view.reviewer.from, "app");
+        assert_eq!(saved.view.reviewer.value["*"], "codex");
+        drop(db);
+        std::fs::remove_dir_all(root).ok();
     }
 }

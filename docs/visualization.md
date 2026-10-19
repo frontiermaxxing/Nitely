@@ -526,6 +526,13 @@ settings", "Crew settings", …). Old `#phone` and `#network` links land on thei
 project's own settings (its name, key, private terms and mirror) stay on its Settings tab, and its
 review and landing rules on its Rules tab, which says what it inherits from Settings.
 
+Reviewer routing remains editable when a project commits its playbook. The Review card shows
+the effective source beside the routing, offers a return to the inherited default, and previews
+the exact file diff before the person commits it. The preview names the destination and integration
+branch; the save result says that it is pushed with the next land. A stale preview or dirty
+playbook is refused rather than overwriting another edit. Other committed approval and landing
+rules keep their existing proposal flow.
+
 Every setting is a card (`.settings-card`, src/styles.css): its name as the heading, a line of why
 in `--fg-2` (`.settings-why`), then the controls, the button that saves them last. Stacked cards sit
 14px apart. A section's title (`.settings-section-title`) names it once, so a card that is the whole

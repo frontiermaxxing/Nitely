@@ -112,6 +112,20 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
     await page.waitFor(`return document.body.textContent.includes("my-app");`, { what: "the repo on Now" });
     await shot("1-connected");
 
+    // Human reviewer settings go through the native commands and commit only the previewed file.
+    const reviewerViews = await page.invoke("rules", { project: "APP" });
+    const reviewerRepo = reviewerViews[0].repo;
+    assert.equal(reviewerViews[0].reviewer_editable, true);
+    assert.equal(reviewerViews[0].editable, false, "other committed rules remain protected");
+    const reviewerEdit = { reviewer: { "*": "fake", codex: "fake" } };
+    const reviewerPreview = await page.invoke("reviewer_settings_preview", { repo: reviewerRepo, edit: reviewerEdit });
+    assert.match(reviewerPreview.diff, /codex/);
+    const reviewerSaved = await page.invoke("reviewer_settings_save", { repo: reviewerRepo, edit: reviewerEdit, preview: reviewerPreview });
+    assert.equal(reviewerSaved.view.reviewer.from, "project");
+    assert.equal(reviewerSaved.view.reviewer.value.codex, "fake");
+    assert.equal(git(repo, "show", "--format=", "--name-only", "HEAD"), ".nitely/playbook.toml");
+    await assert.rejects(page.invoke("reviewer_settings_save", { repo: reviewerRepo, edit: reviewerEdit, preview: reviewerPreview }), /changed since/);
+
     // 2. Setup, as the setup sweep does it: connect filed the setup issue, the agent takes it, writes
     // a brief, files the first issues and marks setup done. Only the first new issue is Todo: the
     // crew takes it; the agent here takes the others itself.

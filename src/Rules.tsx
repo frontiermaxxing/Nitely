@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "./backend";
-import type { Batching, DefaultsView, DryRun, LandBy, PathRule, ReviewerInfo, ReviewFlag, RuleDefaults, RuleField, RulesEdit, RulesView } from "./types";
+import type { Batching, DefaultsView, DryRun, LandBy, PathRule, ReviewerInfo, ReviewerPreview, ReviewerSaved, ReviewFlag, RuleDefaults, RuleField, RulesEdit, RulesView } from "./types";
 import { EmptyState, Loading, VENDOR_LABEL, vendorOf } from "./ui";
 import "./rules.css";
 
@@ -215,6 +215,52 @@ function BatchingCard({ batching: b }: { batching: Batching }) {
   );
 }
 
+/** Human review of the exact committed-playbook edit before saving. */
+function CommittedReviewer({ view: v, onSaved }: { view: RulesView; onSaved: (v: RulesView) => void }) {
+  const original = v.reviewer.from === "project" ? v.reviewer.value : null;
+  const [reviewer, setReviewer] = useState<Record<string, string> | null>(original);
+  const [preview, setPreview] = useState<ReviewerPreview | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+  useEffect(() => { setReviewer(original); setPreview(null); }, [v]);
+  const changed = JSON.stringify(reviewer) !== JSON.stringify(original);
+  const patch = (next: Record<string, string> | null) => { setReviewer(next); setPreview(null); setNote(null); setError(null); };
+  const act = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const edit = { reviewer };
+      if (!preview) {
+        setPreview(await invoke<ReviewerPreview>("reviewer_settings_preview", { repo: v.repo, edit }));
+      } else {
+        const saved = await invoke<ReviewerSaved>("reviewer_settings_save", { repo: v.repo, edit, preview });
+        setNote(saved.done);
+        setPreview(null);
+        onSaved(saved.view);
+      }
+    } catch (e) { setError(String(e)); setPreview(null); }
+    setBusy(false);
+  };
+  return <div className="rules-field">
+    <div className="rules-field-head"><h3>Who reviews whose work</h3><From from={reviewer ? "project" : v.reviewer.inherited_from} /></div>
+    <ReviewerMap map={reviewer ?? v.reviewer.inherited} reviewers={v.reviewers} disabled={busy || !v.reviewer_editable} onChange={patch} />
+    <p className="settings-why small">When the named reviewer is unavailable, another installed vendor reviews, then the author's vendor in a fresh read-only session.</p>
+    <p className="settings-why small">Saving commits reviewer routing to this project's playbook on <strong>{v.integration}</strong>. It is pushed with the next land.</p>
+    {reviewer && <button className="btn btn-quiet" disabled={busy} onClick={() => patch(null)}>Use the default</button>}
+    {preview && <div className="rules-review-preview" role="region" aria-label="Reviewer routing change">
+      <p>{preview.destination}</p>
+      <pre>{preview.diff}</pre>
+    </div>}
+    {changed && <div className="settings-row">
+      <button className="btn primary" disabled={busy} onClick={act}>{preview ? "Commit reviewer change" : "Preview reviewer change"}</button>
+      <button className="btn" disabled={busy} onClick={() => patch(original)}>Discard changes</button>
+    </div>}
+    {note && <p className="muted small" role="status">{note}</p>}
+    {error && <p className="error small" role="alert">{error}</p>}
+  </div>;
+}
+
 /** One repo's rules: what waits for you, who reviews, who lands, and a dry run. */
 function RepoRules(props: { view: RulesView; onSaved: (v: RulesView) => void }) {
   const v = props.view;
@@ -288,7 +334,7 @@ function RepoRules(props: { view: RulesView; onSaved: (v: RulesView) => void }) 
 
       <section className="settings-card">
         <h2>Review</h2>
-        <div className="rules-field">
+        {v.source === "repo" ? <CommittedReviewer view={v} onSaved={props.onSaved} /> : <div className="rules-field">
           <div className="rules-field-head">
             <h3>Who reviews whose work</h3>
             <From from={draft.reviewer ? "project" : v.reviewer.inherited_from} />
@@ -300,7 +346,7 @@ function RepoRules(props: { view: RulesView; onSaved: (v: RulesView) => void }) 
               Use the default
             </button>
           )}
-        </div>
+        </div>}
         <div className="rules-field">
           <div className="rules-field-head">
             <h3>A review by the author's own vendor</h3>

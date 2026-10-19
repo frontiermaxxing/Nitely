@@ -131,6 +131,17 @@ fn external_agents_follow_the_persons_focus_and_cannot_change_it() {
 }
 
 #[test]
+fn agents_cannot_invoke_the_human_reviewer_settings_save() {
+    let (mut mcp, _run, base) = setup("nitely-mcp-reviewer-settings");
+    mcp.call(2, "reviewer_settings_save", json!({ "repo": "sample", "edit": { "reviewer": { "*": "codex" } }, "preview": {}, "actor": "human" }));
+    let reply = mcp.next(Duration::from_secs(20)).unwrap();
+    assert_eq!(reply["result"]["isError"], true, "{reply}");
+    assert!(reply.to_string().contains("unknown tool reviewer_settings_save"), "{reply}");
+    drop(mcp);
+    std::fs::remove_dir_all(base).ok();
+}
+
+#[test]
 fn a_long_call_holds_up_none_after_it_and_ends_at_the_cap() {
     let (mut mcp, run, base) = setup("nitely-mcp-concurrent");
     let asked = Instant::now();

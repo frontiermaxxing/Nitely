@@ -2,7 +2,7 @@
 // playbook (read-only), one whose playbook Nitely keeps (editable, with rules that send changes to
 // a person), and one with no playbook yet. Saves change the data until reload; the loosening check
 // follows crates/nitely-core/src/rules.rs.
-import type { Batching, DefaultsView, DryRun, LandBy, RuleDefaults, RuleField, RulesEdit, RulesView } from "../types";
+import type { Batching, DefaultsView, DryRun, LandBy, ReviewerPreview, ReviewerSaved, RuleDefaults, RuleField, RulesEdit, RulesView } from "../types";
 
 const BUILT_IN_REVIEWER: Record<string, string> = { "*": "claude", claude: "codex", codex: "claude" };
 const REVIEWERS = [
@@ -69,9 +69,10 @@ function view(s: Stored): RulesView {
     source: s.source,
     path: s.path,
     editable: s.source !== "repo",
+    reviewer_editable: true,
     read_only:
       s.source === "repo"
-        ? `${s.repo} commits its own .nitely/playbook.toml, and that file wins. Change it on a branch like any other file, or have an agent propose the change for you to approve.`
+        ? `${s.repo} commits its own .nitely/playbook.toml. You can change reviewer routing below. Other rules are set in that file; an agent can propose those changes for you to approve.`
         : null,
     integration: s.integration,
     always_human: e.always_human,
@@ -149,6 +150,24 @@ export function rulesSave(args: Record<string, unknown>): RulesView {
   s.edit = structuredClone(edit);
   if (s.source === "none") s.source = "stored";
   return view(s);
+}
+
+export function reviewerPreview(args: Record<string, unknown>): ReviewerPreview {
+  const s = stored(args.repo);
+  const edit = args.edit as Pick<RulesEdit, "reviewer">;
+  const line = (map: Record<string, string> | null) => map ? `reviewer = { ${Object.entries(map).map(([k, v]) => `${JSON.stringify(k)} = ${JSON.stringify(v)}`).join(", ")} }\n` : "";
+  const before = line(s.edit.reviewer);
+  const after = line(edit.reviewer);
+  return { before, after, diff: `${before ? `- ${before}` : ""}${after ? `+ ${after}` : ""}`, destination: `Commit to ${s.path} on ${s.integration}; pushed with the next land.` };
+}
+
+export function reviewerSave(args: Record<string, unknown>): ReviewerSaved {
+  const s = stored(args.repo);
+  const expected = args.preview as ReviewerPreview;
+  const current = reviewerPreview(args);
+  if (expected.before !== current.before || expected.after !== current.after) throw "The playbook changed; preview again.";
+  s.edit.reviewer = structuredClone((args.edit as Pick<RulesEdit, "reviewer">).reviewer);
+  return { view: view(s), done: `Committed reviewer routing on ${s.integration}; pushed with the next land. The next review uses this routing.` };
 }
 
 export function rulesBranches(args: Record<string, unknown>): string[] {

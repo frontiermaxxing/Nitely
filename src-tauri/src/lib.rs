@@ -549,6 +549,17 @@ async fn rules_save(repo: String, edit: rules::RulesEdit, confirm: bool) -> Resu
 }
 
 #[tauri::command]
+async fn reviewer_settings_preview(repo: String, edit: rules::ReviewerEdit) -> Result<rules::ReviewerPreview, String> {
+    rules::preview_reviewer(&Config::load().map_err(err)?, &repo, &edit).map_err(err)
+}
+
+/// Human-only settings surface; deliberately absent from CLI, MCP and browser live writes.
+#[tauri::command]
+async fn reviewer_settings_save(repo: String, edit: rules::ReviewerEdit, preview: rules::ReviewerPreview) -> Result<rules::ReviewerSaved, String> {
+    rules::save_reviewer(&Config::load().map_err(err)?, &db()?, &repo, &edit, &preview).map_err(err)
+}
+
+#[tauri::command]
 async fn rules_branches(repo: String) -> Result<Vec<String>, String> {
     rules::recent_branches(&Config::load().map_err(err)?, &repo).map_err(err)
 }
@@ -951,6 +962,8 @@ pub fn run() {
             rules,
             rules_check,
             rules_save,
+            reviewer_settings_preview,
+            reviewer_settings_save,
             rules_branches,
             rules_dry_run,
             rule_defaults,
