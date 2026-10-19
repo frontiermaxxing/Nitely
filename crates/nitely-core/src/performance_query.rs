@@ -131,7 +131,7 @@ pub fn query_at(dir: &Path, request: &Query, now: i64) -> Result<Report> {
             points = raw_samples.iter().map(|s| Point { from_ms: s.wall_ms, to_ms: s.wall_ms, values: s.metrics.clone(), peaks: s.metrics.clone(), min_available_bytes: s.metrics.physical_available_bytes, observations: 1, resolution: "sample".into(), contains_gap: false }).collect();
         }
     }
-    if points.first().is_none_or(|p| p.from_ms > from + if use_minutes { 90_000 } else { 15_000 }) {
+    if points.first().is_none_or(|p| p.from_ms > from.saturating_add(if use_minutes { 90_000 } else { 15_000 })) {
         gaps.push(Gap { from_ms: from, to_ms: points.first().map_or(to, |p| p.from_ms), kind: "no_retained_samples".into() });
     }
     if let Some(last) = points.last().filter(|p| to - p.to_ms > if use_minutes { 90_000 } else { 15_000 }) { gaps.push(Gap { from_ms: last.to_ms, to_ms: to, kind: "no_retained_samples".into() }); }
