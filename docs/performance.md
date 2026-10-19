@@ -157,3 +157,13 @@ full-retention CPU, memory and storage measurement. The combined test excludes c
 fills retained storage before timing twelve native collection/write cycles. CPU is measured using
 Windows process CPU time, separately from wall-clock I/O waiting; memory is additional sampled
 resident usage during the collection/write cycles.
+
+
+On the development Windows machine, the combined machine/attribution full-retention fixture
+occupied 230,072,320 bytes. Twelve native collection and durable write cycles took 742 ms wall
+time and 250 ms process CPU, equivalent to 0.42% of one core over twelve five-second intervals.
+Additional sampled resident usage was 2,879,488 bytes. A native process snapshot covering 855
+accessible processes (181 denied) took 17.7 ms; the 10,000-process synthetic attribution fixture
+took 47 ms. These are measured debug-build results on that machine, not guaranteed latency;
+older Windows uses the slower Toolhelp fallback. The combined budget test enforces under 1%
+of one core and under 32 MiB additional sampled resident usage.

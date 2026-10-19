@@ -880,7 +880,7 @@ mod tests {
         assert_eq!(latest.workloads.len(), 1);
         assert_eq!(latest.nitely.processes, 2);
         assert_eq!(latest.other.processes, 1);
-        assert_eq!(read.workloads(&[roots[0].id.clone()]).unwrap()[0].end_ms, Some(6000));
+        assert_eq!(read.workloads(std::slice::from_ref(&roots[0].id)).unwrap()[0].end_ms, Some(6000));
         assert_eq!(read.recent_workloads(0, 7000, 100, Some("APP")).unwrap().len(), 1);
         assert!(read.db.execute("DELETE FROM attribution", []).is_err());
         assert!(read.attribution(0, 10, 1001, None).is_err());
@@ -944,13 +944,13 @@ mod tests {
         let mut store = Store::open(&dir.0).unwrap();
         let mut workload = root(1, 10, "worker", "APP");
         save_workload(&dir.0, &workload).unwrap();
-        let mut sample = Sampler::default().attribute(&machine(5000), snapshot(vec![process(1, 0, 10, 0)]), &[workload.clone()]);
+        let mut sample = Sampler::default().attribute(&machine(5000), snapshot(vec![process(1, 0, 10, 0)]), std::slice::from_ref(&workload));
         store.append_attribution(&mut sample, true).unwrap();
         workload.end_ms = Some(crate::performance::wall_ms() - 31 * 86400000);
         save_workload(&dir.0, &workload).unwrap();
         store.db.execute("DELETE FROM attribution", []).unwrap();
         save_workload(&dir.0, &root(2, 20, "build", "APP")).unwrap();
-        assert_eq!(store.workloads(&[workload.id.clone()]).unwrap().len(), 1);
+        assert_eq!(store.workloads(std::slice::from_ref(&workload.id)).unwrap().len(), 1);
         assert_eq!(store.attribution_latest(None).unwrap().unwrap().workloads[0].context.project.as_deref(), Some("APP"));
         store.db.execute("DELETE FROM attribution_minutes", []).unwrap();
         save_workload(&dir.0, &root(3, 30, "build", "APP")).unwrap();
@@ -966,10 +966,10 @@ mod tests {
         store.configure(&crate::performance::Settings { enabled: false, ..Default::default() }).unwrap();
         crate::performance::clear_history(&dir.0).unwrap();
         save_workload(&dir.0, &workload).unwrap();
-        assert!(store.workloads(&[workload.id.clone()]).unwrap().is_empty());
+        assert!(store.workloads(std::slice::from_ref(&workload.id)).unwrap().is_empty());
         store.configure(&crate::performance::Settings::default()).unwrap();
         Tracked { dir: dir.0.clone(), workload: workload.clone() }.finish(None);
-        assert!(store.workloads(&[workload.id.clone()]).unwrap().is_empty(), "late finish must not restore cleared metadata");
+        assert!(store.workloads(std::slice::from_ref(&workload.id)).unwrap().is_empty(), "late finish must not restore cleared metadata");
         store.db.execute("UPDATE recorder_version SET version=version+1", []).unwrap();
         save_workload(&dir.0, &workload).unwrap();
         assert!(store.workloads(&[workload.id]).unwrap().is_empty());
