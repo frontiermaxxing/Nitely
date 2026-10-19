@@ -31,6 +31,10 @@ batch_max = 3
 [crew]
 shared_files = ["src/App.tsx", "src/types.ts", "src/dev/fixtures.ts", "src-tauri/src/lib.rs", "crates/nitely-cli/src/mcp.rs"]
 
+[land]
+batch = "waiting"
+batch_max = 5
+
 # land fast-forwards the main checkout but runs no setup there. When a change adds a dependency,
 # install it there too, so `npm run tauri dev` keeps working (NIT-81). `npm install` rather than
 # `npm ci`: it leaves node_modules in place, so a running dev server keeps going, and a failure is
