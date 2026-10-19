@@ -156,8 +156,10 @@ impl Store {
         let summaries = i64::from(settings.summary_days) * 1440;
         tx.execute("DELETE FROM samples WHERE wall_ms < ?1", [sample.wall_ms.saturating_sub(i64::from(settings.detailed_hours) * 3_600_000)])?;
         tx.execute("DELETE FROM minutes WHERE wall_ms < ?1", [sample.wall_ms.saturating_sub(i64::from(settings.summary_days) * 86_400_000)])?;
-        tx.execute("DELETE FROM samples WHERE id NOT IN (SELECT id FROM samples ORDER BY id DESC LIMIT ?1)", [detailed - 1])?;
-        tx.execute("DELETE FROM minutes WHERE id NOT IN (SELECT id FROM minutes ORDER BY id DESC LIMIT ?1)", [summaries - 1])?;
+        // IDs grow while rows remain; gaps can only retain fewer rows. Indexed cutoffs avoid
+        // scanning 60,000 retained JSON records on every five-second sample.
+        tx.execute("DELETE FROM samples WHERE id <= (SELECT max(id) FROM samples)-?1", [detailed - 1])?;
+        tx.execute("DELETE FROM minutes WHERE id <= (SELECT max(id) FROM minutes)-?1", [summaries - 1])?;
         tx.execute("INSERT INTO samples(wall_ms,json) VALUES(?1,?2)", params![sample.wall_ms, serde_json::to_string(sample)?])?;
         let json = serde_json::to_string(minute)?;
         let id = if let Some(id) = minute_id {
@@ -179,9 +181,10 @@ impl Store {
     fn read_json<T: serde::de::DeserializeOwned>(&self, sql: &str, from: i64, to: i64, limit: usize) -> Result<Vec<T>> {
         if from > to || limit == 0 || limit > 43200 { bail!("invalid history range or limit (1–43200)"); }
         let mut stmt = self.db.prepare(sql)?;
-        let rows = stmt.query_map(params![from, to, limit as i64], |r| r.get::<_, String>(0))?;
+        // A corrupt tail record must not hide the last complete sample. Overscan is bounded.
+        let rows = stmt.query_map(params![from, to, (limit + 64) as i64], |r| r.get::<_, String>(0))?;
         let mut out = Vec::new();
-        for row in rows { if let Ok(value) = serde_json::from_str(&row?) { out.push(value); } }
+        for row in rows { if let Ok(value) = serde_json::from_str(&row?) { out.push(value); if out.len() == limit { break; } } }
         Ok(out)
     }
     pub fn sessions(&self) -> Result<Vec<Session>> {
@@ -339,6 +342,7 @@ mod tests {
         assert_eq!(samples.len(), 1);
         assert_eq!(samples[0].wall_ms, 1);
         assert_eq!(samples[0].metrics.cpu_percent, None);
+        assert_eq!(store.samples(0, 10, 1).unwrap()[0].wall_ms, 1);
     }
     #[test]
     fn full_store_rejects_whole_write_without_losing_history() {
@@ -412,6 +416,22 @@ mod tests {
         assert!(old.clear().is_err());
         assert!(record(&temp.0, &AtomicBool::new(false)).is_ok());
         assert!(old.sessions().unwrap().is_empty());
+    }
+    #[test]
+    fn a_busy_database_does_not_lose_the_new_collectors_version_announcement() {
+        let temp = Temp::new();
+        let store = Store::open(&temp.0).unwrap();
+        store.db.execute("UPDATE recorder_version SET version=0", []).unwrap();
+        let _old_owner = acquire(&temp.0).unwrap().unwrap();
+        store.db.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let recording = background(temp.0.clone());
+        std::thread::sleep(Duration::from_millis(400));
+        store.db.execute_batch("COMMIT").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(7);
+        while !store.current_version().unwrap() && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(20)); }
+        assert!(store.current_version().unwrap(), "retry announcement before trying the old owner's lock");
+        drop(recording);
+        assert!(store.sessions().unwrap().is_empty(), "contender never collected while old owner held lock");
     }
     #[test]
     #[ignore = "manual bounded native collection and retention-size measurement"]
