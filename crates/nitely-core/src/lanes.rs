@@ -1363,6 +1363,27 @@ fn reserve_cap(db: &Db, id: i64, limits: Option<&machine::Limits>, slots: u32) -
     Ok(())
 }
 
+/// Whether request `id` may start now, as memory admission sees it (`machine::admit_once_with`,
+/// under the machine's admission lock), or why not. Its expected peak must be free above the
+/// floor now (NIT-363), and, on a machine slot, what the running runs have set aside and its own
+/// must fit above the floor (`caps_fit`). On the quick slot (`quick_slot`, NIT-347), which is past
+/// what the slots set aside by design, the memory free now decides alone. Either way it then sets
+/// its own aside (`reserve_cap`), and it is stopped at its cap.
+fn admit_run(db: &Db, id: i64, limits: Option<&machine::Limits>, slots: u32, quick_slot: bool, memory: &mut dyn FnMut() -> Option<machine::Memory>) -> Result<Option<String>> {
+    let need = match limits {
+        Some(l) => expected_peak_of(db, id, cap_for(l, slots))?,
+        None => 0,
+    };
+    machine::admit_once_with(
+        &state_dir(db),
+        limits,
+        need,
+        memory,
+        &mut || if quick_slot { Ok(None) } else { caps_fit(db, id, limits, slots) },
+        &mut || reserve_cap(db, id, limits, slots),
+    )
+}
+
 /// How many of a command's last finished runs in its repo its expected peak is read from.
 const PEAK_HISTORY: i64 = 20;
 
@@ -2009,13 +2030,7 @@ fn take_turn(
                             db.conn.execute("UPDATE lane_run SET waiting_for = NULL WHERE id = ?1", [id])?;
                         }
                         let limits = limits();
-                        let why = machine::admit_once_with(
-                            &state_dir(db),
-                            limits.as_ref(),
-                            memory,
-                            &mut || caps_fit(db, id, limits.as_ref(), slots),
-                            &mut || reserve_cap(db, id, limits.as_ref(), slots),
-                        )?;
+                        let why = admit_run(db, id, limits.as_ref(), slots, quick_slot, memory)?;
                         if let Some(why) = why {
                             // Held while it waits, the slot and lane would keep the rest waiting too.
                             drop(lock);
@@ -2117,13 +2132,7 @@ pub fn hold_machine<'a>(db: &'a Db, repo_root: &Path, worktree: &Path, project: 
                 if let Some(slot) = (1..=slots.max(1)).find_map(|k| try_slot(db, k).ok().flatten()) {
                     // The limits read again on every look, so a change in Settings counts at once.
                     let limits = memory_limits();
-                    let why = machine::admit_once_with(
-                        &state_dir(db),
-                        limits.as_ref(),
-                        &mut read_memory,
-                        &mut || caps_fit(db, id, limits.as_ref(), slots),
-                        &mut || reserve_cap(db, id, limits.as_ref(), slots),
-                    )?;
+                    let why = admit_run(db, id, limits.as_ref(), slots, false, &mut read_memory)?;
                     match why {
                         None => return Ok(slot),
                         Some(why) => {
@@ -3766,6 +3775,49 @@ let id = db.conn.last_insert_rowid();
         std::fs::remove_dir_all(base).ok();
     }
 
+    /// The review's case (NIT-363): five running runs with no history set their whole caps aside,
+    /// which fill the room above the floor. A run on a machine slot waits; a quick run on the quick
+    /// slot starts while its expected peak is free above the floor, and waits once it is not.
+    #[test]
+    fn the_quick_slot_goes_by_the_memory_free_above_the_floor() {
+        let base = crate::paths::unique_temp("nitely-lane-quick-slot", "");
+        std::fs::create_dir_all(&base).unwrap();
+        let db = Db::open(&base.join("t.db")).unwrap();
+        let me = std::process::id() as i64;
+        let gib = machine::GIB as i64;
+        let add = |state: &str, command: &str, peak: Option<i64>| -> i64 {
+            db.conn
+                .execute(
+                    "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, priority, lane_count, peak_memory)
+                     VALUES ('APP', 'C:/Code/app', 'x', 'gate', 's', 't', 'b', ?1, ?2, 'local', 1, ?3, 2, 3, ?4)",
+                    params![command, state, me, peak],
+                )
+                .unwrap();
+            db.conn.last_insert_rowid()
+        };
+        let l = machine::limits_for(64 * machine::GIB, None, None); // 12.8 GB floor, 10.2 GB a slot
+        for n in 0..5 {
+            let id = add("queued", &format!("cargo build -p new-{n}"), None);
+            reserve_cap(&db, id, Some(&l), 5).unwrap();
+            db.conn.execute("UPDATE lane_run SET state = 'running' WHERE id = ?1", [id]).unwrap();
+        }
+        for _ in 0..3 {
+            add("done", "cargo test -p app waits", Some(gib));
+        }
+        let quick = add("queued", "cargo test -p app waits", None);
+        let free = |gb: u64| move || Some(machine::Memory { total: 64 * machine::GIB, available: gb * machine::GIB });
+        let why = admit_run(&db, quick, Some(&l), 5, false, &mut free(30)).unwrap().unwrap();
+        assert!(why.contains("set aside"), "on a machine slot, the caps set aside fill the room: {why}");
+        // Its last peaks were 1 GB: 2 GB expected. 30 GB free is plenty above the 12.8 GB floor.
+        assert_eq!(admit_run(&db, quick, Some(&l), 5, true, &mut free(30)).unwrap(), None);
+        assert_eq!(db.lane_run(quick).unwrap().unwrap().memory_reserved, Some(2 * gib), "and it sets its own aside");
+        db.conn.execute("UPDATE lane_run SET memory_cap = NULL, memory_reserved = NULL WHERE id = ?1", [quick]).unwrap();
+        std::fs::remove_file(base.join("lanes").join("last-start")).ok();
+        let why = admit_run(&db, quick, Some(&l), 5, true, &mut free(14)).unwrap().unwrap();
+        assert!(why.contains("expected to take 2.0 GB above the"), "14 GB free is under the floor plus its 2 GB: {why}");
+        std::fs::remove_dir_all(base).ok();
+    }
+
     /// Checked and reserved under the one lock: the second request to ask sees the first's cap.
     #[test]
     fn admission_checks_and_reserves_under_one_lock() {
@@ -3777,6 +3829,7 @@ let id = db.conn.last_insert_rowid();
             machine::admit_once_with(
                 &dir,
                 Some(&l),
+                0,
                 &mut || plenty(),
                 &mut || Ok((reserved.get() + 30 * machine::GIB > 51 * machine::GIB).then(|| "no room".to_string())),
                 &mut || {

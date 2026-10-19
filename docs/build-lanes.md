@@ -314,8 +314,10 @@ priority. So Nitely holds what it starts to the machine:
   reached in its last 20 runs in its repo, plus a quarter, at least 2 GB, and its full cap for a
   command with no history. A new run starts only while what is set aside for the running runs and
   its own fit above the floor (NIT-323). Setting the caps aside instead left the machine's quick slot
-  standing empty with 5 runs going, though real peaks were well under the caps (NIT-363). The floor
-  check of the memory free now still comes first, and each run is still stopped at its cap.
+  standing empty with 5 runs going, though real peaks were well under the caps (NIT-363). A run also
+  starts only while its own expected peak is free above the floor now, so taking it never brings the
+  machine under the floor; on the quick slot, which is past what the slots set aside by design, that
+  check of the memory free now decides alone. Each run is still stopped at its cap.
 - **Priority.** All of them run at below-normal CPU priority with low I/O and memory priority on
   Windows (the job holds the priority of everything in it; what a command starts inherits the I/O
   priority), and at nice 10 elsewhere. Below normal costs nothing on an idle machine.
