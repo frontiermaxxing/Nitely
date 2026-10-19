@@ -474,14 +474,24 @@ pub fn serve() -> Result<()> {
     }
 }
 
-/// The listener's lock in `dir`, or None while another listener holds it. An OS file lock, so a
-/// listener that dies lets go of it.
-fn only_one(dir: &Path) -> Result<Option<std::fs::File>> {
+struct ListenerLock(std::fs::File);
+
+impl Drop for ListenerLock {
+    fn drop(&mut self) {
+        // A concurrent Unix fork can inherit the descriptor until exec. Closing only our copy
+        // then leaves the lock held briefly; release it when the listener's ownership ends.
+        let _ = self.0.unlock();
+    }
+}
+
+/// The listener's lock in `dir`, or None while another listener holds it. Explicitly released
+/// when the listener exits normally; the OS also releases it once all handles close after a crash.
+fn only_one(dir: &Path) -> Result<Option<ListenerLock>> {
     std::fs::create_dir_all(dir)?;
     let path = dir.join("links-serve.lock");
     let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&path).with_context(|| format!("opening {}", path.display()))?;
     match file.try_lock() {
-        Ok(()) => Ok(Some(file)),
+        Ok(()) => Ok(Some(ListenerLock(file))),
         Err(std::fs::TryLockError::WouldBlock) => Ok(None),
         Err(std::fs::TryLockError::Error(e)) => Err(e).with_context(|| format!("locking {}", path.display())),
     }
@@ -570,6 +580,24 @@ mod tests {
         assert!(only_one(&dir).unwrap().is_none(), "a second one finds it held and leaves");
         drop(first);
         assert!(only_one(&dir).unwrap().is_some(), "free again once the first is gone");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn listener_exit_releases_lock_while_a_duplicate_descriptor_survives() {
+        let dir = crate::paths::unique_temp("nitely-links-lock-duplicate", "");
+        let first = only_one(&dir).unwrap().unwrap();
+        // dup and fork share the open file description on Unix. Keep a duplicate alive to model
+        // another test's child between fork and exec, without relying on subprocess timing.
+        let duplicate = first.0.try_clone().unwrap();
+        assert!(only_one(&dir).unwrap().is_none(), "the owner still excludes another listener");
+        drop(first);
+        let next = only_one(&dir).unwrap().expect("owner drop releases even with a surviving descriptor");
+        drop(duplicate);
+        assert!(only_one(&dir).unwrap().is_none(), "closing the old descriptor cannot release the new owner's lock");
+        drop(next);
+        assert!(only_one(&dir).unwrap().is_some(), "the next owner releases its lock too");
         std::fs::remove_dir_all(&dir).ok();
     }
 
