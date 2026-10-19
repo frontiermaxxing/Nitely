@@ -44,5 +44,7 @@ jobs:
           git config --global user.name "Nitely CI"
           git config --global user.email "ci@example.com"
 
-      - name: Budgets on a large board, in release
-        run: cargo test --release -p nitely-core perf -- --ignored --nocapture
+      # Resource counters cover the entire test process; concurrent benchmarks contaminate
+      # each other's CPU, memory and I/O measurements.
+      - name: Performance budgets, in release
+        run: cargo test --release -p nitely-core perf -- --ignored --nocapture --test-threads=1
