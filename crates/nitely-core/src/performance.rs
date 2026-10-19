@@ -447,6 +447,10 @@ mod tests {
         assert_eq!(store.samples(0, i64::MAX, 1000).unwrap().len(), 720);
         save(&mut store, 4_000_000, &Settings { detailed_hours: 1, ..Settings::default() }).unwrap();
         assert_eq!(store.samples(0, i64::MAX, 1000).unwrap().len(), 1);
+        store.db.execute("INSERT INTO performance_event(wall_ms,project,run,kind,json) VALUES(1,'APP',1,'started','{}')", []).unwrap();
+        save(&mut store, 86_400_002, &Settings { summary_days: 1, ..Default::default() }).unwrap();
+        let events: i64 = store.db.query_row("SELECT count(*) FROM performance_event", [], |r| r.get(0)).unwrap();
+        assert_eq!(events, 0, "periodic sampling expires events even without a new workload transition");
     }
     #[test]
     fn stop_and_resume_preserve_sessions_and_clear_requires_pause() {

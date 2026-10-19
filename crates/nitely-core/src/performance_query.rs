@@ -1,5 +1,6 @@
 //! Bounded cached machine-history queries shared by the app, CLI and MCP.
 use crate::performance::{self, Metrics, Minute, Sample, Session, Settings, Store};
+use crate::performance_attribution::{AttributionSample, Workload};
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -49,6 +50,10 @@ pub struct Coverage {
     pub gaps_truncated: bool,
     pub sessions_truncated: bool,
     pub events_truncated: bool,
+    pub attribution_truncated: bool,
+    pub workloads_truncated: bool,
+    pub attribution_retained_bounds_ms: Option<(i64, i64)>,
+    pub attribution_first_returned_ms: Option<i64>,
     pub source_points: usize,
     pub returned_points: usize,
     pub resolution: String,
@@ -70,6 +75,11 @@ pub struct Report {
     pub points: Vec<Point>,
     pub episodes: Vec<Episode>,
     pub events: Vec<crate::performance_events::Event>,
+    pub attribution_latest: Option<AttributionSample>,
+    pub attribution_age_ms: Option<i64>,
+    pub attribution: Vec<AttributionSample>,
+    pub workloads: Vec<Workload>,
+    pub related_issues: std::collections::BTreeMap<String, String>,
     pub sessions: Vec<Session>,
     pub coverage: Coverage,
     pub units: serde_json::Value,
@@ -138,9 +148,27 @@ pub fn query_at(dir: &Path, request: &Query, now: i64) -> Result<Report> {
     let gaps_truncated = gaps.len() > 200;
     let admission_limits = latest.as_ref().and_then(|s| s.metrics.physical_total_bytes).map(crate::machine::limits_for_recorded_total);
     let (events, events_truncated) = store.as_ref().map(|s| crate::performance_events::read(s, from, to, request.project.as_deref(), request.limit)).transpose()?.unwrap_or_default();
+    let attribution_latest = store.as_ref().map(|s| s.attribution_latest(request.project.as_deref())).transpose()?.flatten();
+    let attribution_age_ms = attribution_latest.as_ref().map(|s| now.saturating_sub(s.wall_ms));
+    let attribution_limit = request.limit.min(200);
+    let mut attribution = if request.view == View::Now { vec![] } else { store.as_ref().map(|s| s.attribution(from, to, attribution_limit+1, request.project.as_deref())).transpose()?.unwrap_or_default() };
+    let attribution_truncated = attribution.len() > attribution_limit;
+    attribution.truncate(attribution_limit);
+    attribution.reverse();
+    let attribution_first_returned_ms = attribution.first().map(|s| s.wall_ms);
+    let attribution_retained_bounds_ms = store.as_ref().map(Store::attribution_bounds).transpose()?.flatten();
+    let mut workloads = store.as_ref().map(|s| s.recent_workloads(from, to, 201, request.project.as_deref())).transpose()?.unwrap_or_default();
+    let workloads_truncated = workloads.len() > 200;
+    workloads.truncate(200);
+    let related_issues = events.iter().filter_map(|e| e.issue.as_ref())
+        .chain(workloads.iter().filter_map(|w| w.context.issue.as_ref()))
+        .chain(attribution.iter().chain(attribution_latest.iter()).flat_map(|s| s.workloads.iter().filter_map(|w| w.context.issue.as_ref())))
+        .map(|key| (key.clone(), crate::links::issue_url(key))).collect();
+    if attribution_truncated { notes.push(format!("Attribution is limited to the latest {attribution_limit} observations in the selected range; earlier machine-chart peaks may have contributors outside this response. Narrow the range to inspect those intervals.")); }
+    notes.push("Process working-set sums can overlap and are not physical RAM. Process I/O includes nondisk activity; minute attribution values are per-metric peaks with interval I/O totals, not simultaneous readings.".into());
     Ok(Report { as_of_ms: now, from_ms: from, to_ms: to, range_anchor: anchor, project: request.project.clone(), status: status.into(), age_ms: age, latest, settings, admission_limits,
-        points, episodes, events, sessions: selected_sessions.into_iter().take(200).collect(),
-        coverage: Coverage { gaps: gaps.into_iter().take(200).collect(), bounded: source_points > request.limit, gaps_truncated, sessions_truncated, events_truncated, source_points, returned_points, resolution: if use_minutes { "minute" } else { "sample" }.into(), notes },
+        points, episodes, events, attribution_latest, attribution_age_ms, attribution, workloads, related_issues, sessions: selected_sessions.into_iter().take(200).collect(),
+        coverage: Coverage { gaps: gaps.into_iter().take(200).collect(), bounded: source_points > request.limit, gaps_truncated, sessions_truncated, events_truncated, attribution_truncated, workloads_truncated, attribution_retained_bounds_ms, attribution_first_returned_ms, source_points, returned_points, resolution: if use_minutes { "minute" } else { "sample" }.into(), notes },
         units: serde_json::json!({ "wall_time": "UTC milliseconds since Unix epoch", "memory": "bytes", "cpu": "percent of machine capacity", "paging": "pages/second", "disk_throughput": "bytes/second", "disk_latency": "seconds/transfer", "disk_queue": "requests", "monotonic": "milliseconds; boot-relative on Windows, collector-relative elsewhere" }) })
 }
 
