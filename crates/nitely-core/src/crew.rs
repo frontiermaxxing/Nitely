@@ -807,7 +807,9 @@ impl Supervisor {
     /// Starts `nitely start` for `issue` and records its pid on the worker's row.
     fn prepare(&self, db: &Db, id: i64, issue: &IssueRecord, agent: &str, log: &Path) -> Result<Box<dyn Process>> {
         let prep = Prepare { nitely: self.nitely.clone(), repo: self.repo_root.clone(), key: issue.key.clone(), vendor: agent.into(), log: log.to_path_buf() };
+        let _telemetry = crate::performance_attribution::Scope::new(db, crate::performance_attribution::Context { project: Some(self.project.clone()), issue: Some(issue.key.clone()), worker_id: Some(id), ..Default::default() });
         let process = self.agents.prepare(&prep).with_context(|| format!("starting `{} start {}`", self.nitely, issue.key))?;
+        crate::performance_attribution::track(process.pid(), "setup");
         db.crew_worker_pid(id, process.pid())?;
         Ok(process)
     }
@@ -942,6 +944,7 @@ impl Supervisor {
             log: log.clone(),
             env,
         };
+        let _telemetry = crate::performance_attribution::Scope::new(db, crate::performance_attribution::Context { project: Some(self.project.clone()), issue: Some(issue.key.clone()), worker_id: Some(id), ..Default::default() });
         let process = match self.agents.start(&launch) {
             Ok(p) => p,
             Err(e) => {
@@ -1226,8 +1229,9 @@ impl Supervisor {
             agent: w.agent.clone(),
             timeout_minutes,
         };
+        let _telemetry = crate::performance_attribution::Scope::new(db, crate::performance_attribution::Context { project: Some(self.project.clone()), issue: Some(w.issue.clone()), ..Default::default() });
         match self.agents.clean_up(&job) {
-            Ok(process) => self.cleaning.push(Cleaning { issue: w.issue.clone(), agent: w.agent.clone(), worktree: w.worktree.clone(), since: ts, process }),
+            Ok(process) => { crate::performance_attribution::track(process.pid(), "setup"); self.cleaning.push(Cleaning { issue: w.issue.clone(), agent: w.agent.clone(), worktree: w.worktree.clone(), since: ts, process }); },
             Err(e) => db.log_event(&self.actor(), Some(&w.issue), None, "crew_cleaned", &format!("Could not start removing {}: {e:#}", w.worktree.display()))?,
         }
         Ok(())
@@ -1379,8 +1383,10 @@ impl Supervisor {
         std::fs::create_dir_all(&logs).with_context(|| format!("creating {}", logs.display()))?;
         let log = logs.join(format!("{ts}-{}-land.log", key.to_lowercase()));
         let job = LandJob { nitely: self.nitely.clone(), repo: self.repo_root.clone(), issue: key.to_string(), log: log.clone() };
+        let _telemetry = crate::performance_attribution::Scope::new(db, crate::performance_attribution::Context { project: Some(self.project.clone()), issue: Some(key.to_string()), ..Default::default() });
         match self.agents.land(&job) {
             Ok(process) => {
+                crate::performance_attribution::track(process.pid(), "land");
                 db.log_event(&self.actor(), Some(key), None, "status", &format!("Landing it for the worker that handed it in, log: {}", log.display()))?;
                 self.landings.push(Landing { issue: key.to_string(), since: ts, log, process });
             }
@@ -2244,7 +2250,8 @@ impl Agents for SystemAgents {
             use std::io::Write;
             stdin.write_all(brief.as_bytes()).ok();
         });
-        Ok(Box::new(Capped { process: SystemProcess(child), guard, log: launch.log.clone(), cap }))
+        let tracked = crate::performance_attribution::track_child(&child, "worker");
+        Ok(Box::new(Capped { process: SystemProcess(child), guard, tracked, log: launch.log.clone(), cap }))
     }
 
     fn adopt(&self, pid: u32) -> Option<Box<dyn Process>> {
@@ -2434,6 +2441,7 @@ impl Process for SystemProcess {
 /// and off Windows it is the only thing that holds it.
 struct Capped {
     process: SystemProcess,
+    tracked: Option<crate::performance_attribution::Tracked>,
     guard: Option<crate::procs::TreeGuard>,
     log: PathBuf,
     cap: Option<u64>,
@@ -2446,6 +2454,7 @@ impl Process for Capped {
 
     fn exited(&mut self) -> Result<Option<i32>> {
         if let Some(code) = self.process.exited()? {
+            if let Some(t) = self.tracked.take() { t.finish(self.guard.as_ref().and_then(|g| g.accounting())); }
             return Ok(Some(code));
         }
         if self.guard.as_ref().is_some_and(|g| g.over_memory()) {
@@ -2466,6 +2475,7 @@ out of memory: the worker and what it started went over the {cap} memory cap a r
             g.stop();
         }
         self.process.stop();
+        if let Some(t) = self.tracked.take() { t.finish(self.guard.as_ref().and_then(|g| g.accounting())); }
     }
 }
 

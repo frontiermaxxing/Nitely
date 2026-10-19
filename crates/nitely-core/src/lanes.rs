@@ -947,6 +947,7 @@ fn run_with(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Act
     let recorded: Option<i64> = db.conn.query_row("SELECT memory_cap FROM lane_run WHERE id = ?1", [id], |r| r.get(0)).optional()?.flatten();
     let now_share = share();
     let run_share = Share { jobs: now_share.jobs, cap: recorded.map(|c| c.max(0) as u64).or(now_share.cap) };
+    let _telemetry = crate::performance_attribution::Scope::new(db, crate::performance_attribution::Context { project: Some(req.project.into()), issue: req.issue.map(str::to_owned), run_id: Some(id), lane: Some(n), ..Default::default() });
     let outcome = serve(repo_root, pb, &rules, &lane, &log, req, run_share, exec);
     let ended = now();
     match outcome {
@@ -2762,6 +2763,7 @@ fn run_logged(command: &str, dir: &Path, log: &Path, limit: Duration, share: Sha
             return Err(e).with_context(|| format!("starting {command}"));
         }
     };
+    let tracked = crate::performance_attribution::track_child(&child, "build");
     if let Some(p) = &pids {
         let started = crate::procs::started(child.id()).unwrap_or_default();
         std::fs::write(p, format!("{} {started}\n{command}", child.id())).ok();
@@ -2789,6 +2791,7 @@ fn run_logged(command: &str, dir: &Path, log: &Path, limit: Duration, share: Sha
         std::fs::remove_file(p).ok();
     }
     let peak = guard.as_ref().and_then(|g| g.peak_memory());
+    if let Some(t) = tracked { t.finish(guard.as_ref().and_then(|g| g.accounting())); }
     // What the command left running ends before the lane is handed on (NIT-371).
     if let Some(g) = guard {
         g.end(Duration::from_secs(10));

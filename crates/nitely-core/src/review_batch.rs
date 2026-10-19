@@ -451,6 +451,10 @@ fn run_batch(db: &Db, rules: &ReviewRules, batch: i64, rows: &[Queued], shadow: 
         fail_batch(db, batch, &format!("{e:#}"))?;
         return Ok(());
     }
+    // One review process serves the batch: do not charge it to its first submitter.
+    let projects: std::collections::HashSet<_> = rows.iter().filter_map(|r| db.issue(&r.issue).ok().flatten().and_then(|i| i.project)).collect();
+    let project = (projects.len() == 1).then(|| projects.into_iter().next()).flatten();
+    let _performance = crate::performance_attribution::Scope::new(db, crate::performance_attribution::Context { project, review_batch_id: Some(batch), ..Default::default() });
     let keys: Vec<String> = rows.iter().map(|r| r.issue.clone()).collect();
     for (i, r) in rows.iter().enumerate().filter(|_| !shadow) {
         let with: Vec<&str> = keys.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, k)| k.as_str()).collect();

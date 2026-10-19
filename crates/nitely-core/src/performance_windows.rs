@@ -78,7 +78,7 @@ impl Counters {
 impl Drop for Counters {
     fn drop(&mut self) { if !self.query.is_null() { unsafe { PdhCloseQuery(self.query); } } }
 }
-fn boot_id() -> Option<String> {
+pub(super) fn boot_id() -> Option<String> {
     // SystemBootEnvironmentInformation (90): GUID followed by firmware type and boot flags.
     // Read only the GUID, stable for this boot and independent of wall clock adjustments.
     let mut buffer = [0u64; 4];

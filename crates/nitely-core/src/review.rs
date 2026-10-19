@@ -806,6 +806,7 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
             None => cmd.spawn(),
         };
         let mut child = spawned.map_err(|e| could_not("did not start", format!("{}: {e}", command[0])))?;
+        let mut tracked = crate::performance_attribution::track_child(&child, "review");
         let mut stdin = child.stdin.take().unwrap();
         let prompt = prompt.to_string();
         let writer = std::thread::spawn(move || stdin.write_all(prompt.as_bytes()));
@@ -831,6 +832,7 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
                 }
                 child.kill().ok();
                 child.wait().ok();
+                if let Some(t) = tracked.take() { t.finish(guard.as_ref().and_then(|g| g.accounting())); }
                 bail!("the {reviewer} review took longer than {} minutes and was stopped", self.timeout_minutes);
             }
             if guard.as_ref().is_some_and(|g| g.over_memory()) {
@@ -839,11 +841,13 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
                 }
                 child.kill().ok();
                 child.wait().ok();
+                if let Some(t) = tracked.take() { t.finish(guard.as_ref().and_then(|g| g.accounting())); }
                 let cap = share.cap.map(crate::machine::gb).unwrap_or_default();
                 return Err(could_not("ran out of memory", format!("it and what it started went over the {cap} memory cap a run has (Settings > Build lanes) and were stopped")));
             }
             std::thread::sleep(Duration::from_millis(250));
         };
+        if let Some(t) = tracked { t.finish(guard.as_ref().and_then(|g| g.accounting())); }
         writer.join().ok();
         let stdout = out_reader.join().ok().and_then(|r| r.ok()).unwrap_or_default();
         let stderr = err_reader.join().ok().and_then(|r| r.ok()).unwrap_or_default();

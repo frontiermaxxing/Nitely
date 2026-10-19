@@ -73,6 +73,7 @@ pub struct LandOptions<'a> {
 
 pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Actor) -> Result<Landed> {
     let issue = db.issue(opts.issue_key)?.with_context(|| format!("no issue {}", opts.issue_key))?;
+    let _telemetry = crate::performance_attribution::Scope::new(db, crate::performance_attribution::Context { project: issue.project.clone(), issue: Some(issue.key.clone()), ..Default::default() });
     let root = playbook::repo_for_issue(config, issue.project.as_deref(), opts.dir)?;
     let pb = Playbook::load(&root)?;
     // With `[land] batch`, a change that may land with others waits in the queue (land_queue.rs).
@@ -426,7 +427,7 @@ pub(crate) fn after_land(root: &Path, pb: &Playbook, report: &mut Landed) {
             report.after.push(playbook::CommandResult { command, ok: true, seconds: 0, output: format!("skipped: {why}"), skipped: true });
             continue;
         }
-        let result = match playbook::run_shell(&command, root) {
+        let result = match playbook::run_shell_kind(&command, root, "install") {
             Ok((ok, output, seconds)) => playbook::CommandResult { command, ok, seconds, output, skipped: false },
             Err(e) => playbook::CommandResult { command, ok: false, seconds: 0, output: format!("{e:#}"), skipped: false },
         };
@@ -907,7 +908,7 @@ fn teardown(root: &Path, pb: &Playbook, worktree: &Path) -> Vec<String> {
     let mut failed = Vec::new();
     for command in &pb.worktree.teardown {
         let command = playbook::expand(command, root, worktree, pb.integration_branch());
-        match playbook::run_shell(&command, worktree) {
+        match playbook::run_shell_kind(&command, worktree, "setup") {
             Ok((true, _, _)) => {}
             Ok((false, output, _)) => failed.push(format!("teardown `{command}` failed: {}", output.trim().lines().last().unwrap_or(""))),
             Err(e) => failed.push(format!("teardown `{command}` did not run: {}", first_line(&e))),

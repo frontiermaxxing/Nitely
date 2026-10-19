@@ -12,9 +12,14 @@ use std::time::{Duration, Instant};
 mod native;
 
 pub const CADENCE_MS: u64 = 5_000;
-pub const MAX_DATABASE_BYTES: u64 = 128 * 1024 * 1024;
+pub const MAX_DATABASE_BYTES: u64 = 256 * 1024 * 1024;
 /// Increment when collection/schema behavior changes. New clients retire older collectors.
-pub const RECORDER_VERSION: i64 = 1;
+pub const RECORDER_VERSION: i64 = 2;
+
+pub(crate) fn boot_id() -> Option<String> {
+    #[cfg(windows)] { native::boot_id() }
+    #[cfg(not(windows))] { None }
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Metrics {
@@ -56,12 +61,12 @@ pub struct Minute {
     pub peaks: Metrics,
 }
 impl Minute {
-    fn new(sample: &Sample) -> Self {
+    pub(crate) fn new(sample: &Sample) -> Self {
         Self { first_wall_ms: sample.wall_ms, first_monotonic_ms: sample.monotonic_ms, last: sample.clone(), samples: 1,
             min_available_bytes: sample.metrics.physical_available_bytes,
             peaks: sample.metrics.clone() }
     }
-    fn add(&mut self, sample: &Sample) {
+    pub(crate) fn add(&mut self, sample: &Sample) {
         self.last = sample.clone();
         self.samples += 1;
         if let Some(v) = sample.metrics.physical_available_bytes { self.min_available_bytes = Some(self.min_available_bytes.map_or(v, |old| old.min(v))); }
@@ -107,7 +112,7 @@ impl Store {
         std::fs::create_dir_all(dir)?;
         let db = Connection::open(dir.join("history.sqlite"))?;
         db.busy_timeout(Duration::from_millis(250))?;
-        db.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA max_page_count=32768;
+        db.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA max_page_count=65536;
             CREATE TABLE IF NOT EXISTS settings(id INTEGER PRIMARY KEY CHECK(id=1), json TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS recorder_version(id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS samples(id INTEGER PRIMARY KEY, wall_ms INTEGER NOT NULL, json TEXT NOT NULL CHECK(length(json)<=8192));
@@ -116,6 +121,7 @@ impl Store {
             CREATE INDEX IF NOT EXISTS samples_time ON samples(wall_ms);
             CREATE INDEX IF NOT EXISTS minutes_time ON minutes(wall_ms);")?;
         db.execute("INSERT INTO recorder_version VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET version=excluded.version WHERE excluded.version>version", [RECORDER_VERSION])?;
+        crate::performance_attribution::schema(&db)?;
         Ok(Self { db })
     }
     /// Queries never initialize a store, collect a sample, or contend for recorder ownership.
@@ -168,7 +174,7 @@ impl Store {
     }
     /// The sample and its minute summary commit together. SQLite recovers an interrupted write;
     /// malformed individual JSON records are skipped by readers without discarding older history.
-    fn append(&mut self, sample: &Sample, minute: &Minute, minute_id: Option<i64>, settings: &Settings) -> Result<i64> {
+    pub(crate) fn append(&mut self, sample: &Sample, minute: &Minute, minute_id: Option<i64>, settings: &Settings) -> Result<i64> {
         let tx = self.db.transaction()?;
         // Count caps are clock-independent; wall time alone cannot make storage unbounded.
         let detailed = i64::from(settings.detailed_hours) * 720;
@@ -214,7 +220,7 @@ impl Store {
     fn clear(&self) -> Result<()> {
         if !self.current_version()? { bail!("use the newer Nitely to clear performance history"); }
         if self.settings()?.enabled { bail!("pause performance recording before deleting history"); }
-        self.db.execute_batch("BEGIN IMMEDIATE; DELETE FROM samples; DELETE FROM minutes; DELETE FROM sessions; COMMIT; VACUUM;")?;
+        self.db.execute_batch("BEGIN IMMEDIATE; DELETE FROM samples; DELETE FROM minutes; DELETE FROM sessions; DELETE FROM attribution; DELETE FROM attribution_minutes; DELETE FROM workloads; COMMIT; VACUUM;")?;
         Ok(())
     }
     fn current_version(&self) -> Result<bool> { Ok(self.db.query_row("SELECT version FROM recorder_version WHERE id=1", [], |r| r.get::<_, i64>(0))? == RECORDER_VERSION) }
@@ -274,7 +280,11 @@ pub fn background(dir: PathBuf) -> Recording {
         let mut announced = false;
         while !stopping.load(Ordering::Relaxed) {
             let result = (|| {
-                if !announced { Store::open(&dir)?; announced = true; }
+                if !announced {
+                    Store::open(&dir)?;
+                    crate::performance_attribution::register(&dir,std::process::id(),"service",Default::default());
+                    announced = true;
+                }
                 record(&dir, &stopping)
             })();
             if let Err(error) = result {
@@ -304,6 +314,7 @@ pub fn record(dir: &Path, stop: &AtomicBool) -> Result<()> {
     let mut store = Store::open(dir)?;
     if !store.current_version()? || !store.settings()?.enabled { return Ok(()); }
     let mut collector = Collector::new();
+    let mut attribution = crate::performance_attribution::Sampler::default();
     let mut minute: Option<Minute> = None;
     let mut minute_id = None;
     let first = collector.sample();
@@ -312,11 +323,15 @@ pub fn record(dir: &Path, stop: &AtomicBool) -> Result<()> {
     while !stop.load(Ordering::Relaxed) {
         let settings = store.settings()?;
         if !store.current_version()? || !settings.enabled { break; }
+        let mut attributed = attribution.collect(&store,&sample)?;
+        sample.collection_ms = sample.collection_ms.saturating_add(attributed.collection_ms);
         if minute.as_ref().is_none_or(|m| sample.monotonic_ms.saturating_sub(m.first_monotonic_ms) >= 60_000
             || (sample.wall_ms - m.last.wall_ms - sample.monotonic_ms.saturating_sub(m.last.monotonic_ms) as i64).unsigned_abs() > 2_000) {
             minute = Some(Minute::new(&sample)); minute_id = None;
         } else { minute.as_mut().unwrap().add(&sample); }
+        let new_minute = minute_id.is_none();
         minute_id = Some(store.append(&sample, minute.as_ref().unwrap(), minute_id, &settings).context("saving performance sample")?);
+        store.append_attribution(&mut attributed,new_minute).context("saving workload attribution")?;
         wait(stop, Duration::from_millis(CADENCE_MS));
         sample = collector.sample();
     }

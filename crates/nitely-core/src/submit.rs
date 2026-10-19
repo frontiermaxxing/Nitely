@@ -128,6 +128,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     }
     let key = opts.issue_key.map(str::to_string).or(branch_key).context("the branch names no issue; pass the issue key")?;
     let issue = db.issue(&key)?.with_context(|| format!("no issue {key}"))?;
+    let _telemetry = crate::performance_attribution::Scope::new(db, crate::performance_attribution::Context { project: issue.project.clone(), issue: Some(key.clone()), ..Default::default() });
     if rebase_in_progress(&worktree) {
         bail!("a rebase is in progress in {}", worktree.display());
     }

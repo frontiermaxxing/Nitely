@@ -14,6 +14,36 @@ pub struct Holder {
     pub name: String,
 }
 
+/// Native counters only. No command line, environment or full executable path is collected.
+#[derive(Debug, Clone)]
+pub struct ProcessMetrics {
+    pub pid: u32, pub parent_pid: u32, pub started: String, pub basename: String,
+    pub cpu_100ns: Option<u64>, pub private_commit_bytes: Option<u64>, pub working_set_bytes: Option<u64>,
+    pub read_bytes: Option<u64>, pub write_bytes: Option<u64>,
+}
+#[derive(Debug, Default)]
+pub struct ProcessSnapshot {
+    pub processes: Vec<ProcessMetrics>, pub denied: u32, pub missing_identity: u32,
+    pub truncated: bool, pub supported: bool, pub cores: u32,
+}
+pub fn metrics() -> ProcessSnapshot {
+    #[cfg(windows)] { win::metrics() }
+    #[cfg(not(windows))] { ProcessSnapshot::default() }
+}
+#[cfg(all(test,windows))]
+pub(crate) fn recorder_cost() -> Option<(u64,u64)> {win::recorder_cost()}
+pub fn child_started(child: &std::process::Child) -> Option<String> {
+    #[cfg(windows)] {
+        use std::os::windows::io::AsRawHandle;
+        win::creation(child.as_raw_handle())
+    }
+    #[cfg(not(windows))] { started(child.id()) }
+}
+/// Inclusive totals from one Windows Job Object. Never add these to sampled process totals:
+/// nested jobs can overlap. They capture short-lived children that polling misses.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Accounting { pub cpu_100ns: u64, pub read_bytes: u64, pub write_bytes: u64, pub processes: u32, pub peak_private_commit_bytes: Option<u64> }
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct Proc {
@@ -205,6 +235,10 @@ impl Drop for TreeGuard {
 }
 
 impl TreeGuard {
+    pub fn accounting(&self) -> Option<Accounting> {
+        #[cfg(windows)] { self.job.accounting() }
+        #[cfg(not(windows))] { None }
+    }
     /// A new, empty guard; None when the system will not make one (the command then runs unguarded).
     pub fn new() -> Option<TreeGuard> {
         TreeGuard::with(Contain::default())
@@ -654,6 +688,8 @@ mod win {
         fn QueryFullProcessImageNameW(process: Handle, flags: u32, name: *mut u16, size: *mut u32) -> i32;
         fn CloseHandle(handle: Handle) -> i32;
         fn GetProcessTimes(process: Handle, creation: *mut u64, exit: *mut u64, kernel: *mut u64, user: *mut u64) -> i32;
+        fn GetProcessIoCounters(process: Handle, counters: *mut [u64;6]) -> i32;
+        fn GetActiveProcessorCount(group: u16) -> u32;
         fn CreateJobObjectW(attributes: *mut c_void, name: *const u16) -> Handle;
         fn SetInformationJobObject(job: Handle, class: u32, info: *mut c_void, length: u32) -> i32;
         fn QueryInformationJobObject(job: Handle, class: u32, info: *mut c_void, length: u32, returned: *mut u32) -> i32;
@@ -662,6 +698,59 @@ mod win {
         fn CreateIoCompletionPort(file: Handle, existing: Handle, key: usize, threads: u32) -> Handle;
         fn GetQueuedCompletionStatus(port: Handle, bytes: *mut u32, key: *mut usize, overlapped: *mut *mut c_void, millis: u32) -> i32;
         fn SetProcessInformation(process: Handle, class: u32, info: *mut c_void, size: u32) -> i32;
+    }
+
+    #[repr(C)]
+    struct MemoryCounters { size:u32, faults:u32, peak_working_set:usize, working_set:usize, peak_paged:usize, paged:usize, peak_nonpaged:usize, nonpaged:usize, pagefile:usize, peak_pagefile:usize, private:usize }
+    #[link(name="psapi")]
+    extern "system" { fn GetProcessMemoryInfo(process:Handle, counters:*mut MemoryCounters, size:u32)->i32; }
+
+    pub fn metrics() -> super::ProcessSnapshot {
+        let mut result=super::ProcessSnapshot {supported:true,cores:unsafe {GetActiveProcessorCount(0xffff)},..Default::default()};
+        // SAFETY: native snapshot handle and correctly sized PROCESSENTRY32W; every handle is closed.
+        let snapshot=unsafe {CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0)};
+        if snapshot==INVALID_HANDLE_VALUE || snapshot.is_null() {result.supported=false;return result;}
+        let mut entry:ProcessEntry32W=unsafe {std::mem::zeroed()};entry.size=std::mem::size_of::<ProcessEntry32W>() as u32;
+        let mut more=unsafe {Process32FirstW(snapshot,&mut entry)}!=0;
+        let mut count=0;
+        while more {
+            count+=1;
+            if count>8192 {result.truncated=true;break;}
+            let process=unsafe {OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,0,entry.process_id)};
+            if process.is_null() {result.denied+=1;}
+            else {
+                let (mut creation,mut exit,mut kernel,mut user)=(0,0,0,0);
+                if unsafe {GetProcessTimes(process,&mut creation,&mut exit,&mut kernel,&mut user)}==0 || exit!=0 {result.missing_identity+=1;}
+                else {
+                    let mut memory:MemoryCounters=unsafe {std::mem::zeroed()};memory.size=std::mem::size_of::<MemoryCounters>() as u32;
+                    let memory_ok=unsafe {GetProcessMemoryInfo(process,&mut memory,memory.size)}!=0;
+                    let mut io=[0;6];let io_ok=unsafe {GetProcessIoCounters(process,&mut io)}!=0;
+                    let len=entry.exe_file.iter().position(|c|*c==0).unwrap_or(entry.exe_file.len());
+                    let name=String::from_utf16_lossy(&entry.exe_file[..len]);
+                    result.processes.push(super::ProcessMetrics {pid:entry.process_id,parent_pid:entry.parent_process_id,started:creation.to_string(),basename:name.rsplit(['\\','/']).next().unwrap_or("").chars().take(80).collect(),cpu_100ns:Some(kernel.saturating_add(user)),private_commit_bytes:memory_ok.then_some(memory.private as u64),working_set_bytes:memory_ok.then_some(memory.working_set as u64),read_bytes:io_ok.then_some(io[3]),write_bytes:io_ok.then_some(io[4])});
+                }
+                unsafe {CloseHandle(process)};
+            }
+            more=unsafe {Process32NextW(snapshot,&mut entry)}!=0;
+        }
+        unsafe {CloseHandle(snapshot)};
+        result
+    }
+    #[cfg(test)]
+    pub fn recorder_cost() -> Option<(u64,u64)> {
+        let handle=unsafe {OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,0,std::process::id())};
+        if handle.is_null() {return None;}
+        let (mut creation,mut exit,mut kernel,mut user)=(0,0,0,0);
+        let cpu_ok=unsafe {GetProcessTimes(handle,&mut creation,&mut exit,&mut kernel,&mut user)}!=0;
+        let mut memory:MemoryCounters=unsafe {std::mem::zeroed()};memory.size=std::mem::size_of::<MemoryCounters>() as u32;
+        let memory_ok=unsafe {GetProcessMemoryInfo(handle,&mut memory,memory.size)}!=0;
+        unsafe {CloseHandle(handle)};
+        (cpu_ok&&memory_ok).then_some((kernel+user,memory.working_set as u64))
+    }
+    pub fn creation(handle: std::os::windows::io::RawHandle) -> Option<String> {
+        let (mut creation,mut exit,mut kernel,mut user)=(0,0,0,0);
+        // SAFETY: the borrowed Child handle remains valid even when a short-lived child exited.
+        (unsafe {GetProcessTimes(handle.cast(),&mut creation,&mut exit,&mut kernel,&mut user)}!=0).then(||creation.to_string())
     }
 
     const JOB_OBJECT_ASSOCIATE_COMPLETION_PORT_INFORMATION: u32 = 7;
@@ -779,6 +868,13 @@ mod win {
     unsafe impl Sync for Job {}
 
     impl Job {
+        pub fn accounting(&self) -> Option<super::Accounting> {
+            #[repr(C)] struct Combined {basic:BasicAccounting,io:[u64;6]}
+            // SAFETY: class8 is JOBOBJECT_BASIC_AND_IO_ACCOUNTING_INFORMATION with this layout.
+            let mut info:Combined=unsafe {std::mem::zeroed()};
+            let ok=unsafe {QueryInformationJobObject(self.job,8,(&mut info as *mut Combined).cast(),std::mem::size_of::<Combined>() as u32,std::ptr::null_mut())}!=0;
+            ok.then(||super::Accounting {cpu_100ns:info.basic.total_user_time.max(0) as u64+info.basic.total_kernel_time.max(0) as u64,read_bytes:info.io[3],write_bytes:info.io[4],processes:info.basic.total_processes,peak_private_commit_bytes:self.peak_memory()})
+        }
         pub fn new(contain: &super::Contain) -> Option<Job> {
             // SAFETY: an unnamed job with default security; the handle is closed in drop.
             let job = unsafe { CreateJobObjectW(std::ptr::null_mut(), std::ptr::null()) };

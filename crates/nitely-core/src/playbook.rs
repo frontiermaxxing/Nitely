@@ -897,7 +897,9 @@ pub(crate) fn shell_command(command: &str) -> Command {
 /// build as a lane command is: its cores, its memory cap, below-normal priority (NIT-266). What it
 /// leaves running (a setup's daemon) keeps running, still held to them. A command over its cap is
 /// stopped, and that is an error, not the command's failure.
-pub(crate) fn run_shell(command: &str, dir: &Path) -> Result<(bool, String, u64)> {
+pub(crate) fn run_shell(command: &str, dir: &Path) -> Result<(bool, String, u64)> { run_shell_kind(command,dir,"build") }
+
+pub(crate) fn run_shell_kind(command: &str, dir: &Path, kind: &str) -> Result<(bool, String, u64)> {
     use std::io::Read;
     let share = crate::lanes::share();
     let command = crate::lanes::node_tests_share(command, share.jobs);
@@ -911,6 +913,7 @@ pub(crate) fn run_shell(command: &str, dir: &Path) -> Result<(bool, String, u64)
         None => cmd.spawn(),
     };
     let mut child = spawned.with_context(|| format!("running {command}"))?;
+    let tracked = crate::performance_attribution::track_child(&child,kind);
     let read = |pipe: Option<Box<dyn Read + Send>>| {
         std::thread::spawn(move || {
             let mut bytes = Vec::new();
@@ -937,6 +940,7 @@ pub(crate) fn run_shell(command: &str, dir: &Path) -> Result<(bool, String, u64)
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     };
+    if let Some(t) = tracked { t.finish(guard.as_ref().and_then(|g|g.accounting())); }
     let mut text = String::from_utf8_lossy(&out.join().unwrap_or_default()).into_owned();
     text.push_str(&String::from_utf8_lossy(&err.join().unwrap_or_default()));
     let Some(status) = status.filter(|_| !over()) else {
@@ -1089,6 +1093,7 @@ pub struct GateResult {
 /// Creates the issue's branch and worktree from the integration branch and runs the setup
 /// commands. Calling it again for the same issue returns the existing worktree.
 pub fn start_task(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, actor: &Actor) -> Result<Started> {
+    let _telemetry = crate::performance_attribution::Scope::new(db,crate::performance_attribution::Context {project:issue.project.clone(),issue:Some(issue.key.clone()),..Default::default()});
     if issue.is_humans() && *actor != Actor::Human {
         bail!("{} is the human's own work (owner: human), so agents do not start it; `ask` the human if an agent should take it", issue.key);
     }
@@ -1143,7 +1148,7 @@ pub fn start_task(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, 
     let mut setup = Vec::new();
     for command in &playbook.worktree.setup {
         let command = &expand(command, repo_root, &worktree, base);
-        let (ok, output, seconds) = run_shell(command, &worktree)?;
+        let (ok, output, seconds) = run_shell_kind(command, &worktree, "setup")?;
         setup.push(CommandResult { command: command.clone(), ok, seconds, output, skipped: false });
         if !ok {
             db.log_event(actor, Some(&issue.key), Some(&worktree_str), "setup_failed", &format!("{command} failed"))?;

@@ -479,10 +479,13 @@ fn run_job(db: &mut Db, config: &crate::Config, id: i64, detached: bool) -> Resu
         // Superseded while it waited for the lock.
         return Ok((db.submit_job(id)?.context("the job's record went missing")?, None));
     }
+    let _telemetry = crate::performance_attribution::Scope::new(db, crate::performance_attribution::Context { project: db.issue(&job.issue)?.and_then(|i| i.project), issue: Some(job.issue.clone()), job_id: Some(id), ..Default::default() });
+    let tracked = detached.then(|| crate::performance_attribution::track(std::process::id(), "submit")).flatten();
     let actor = if job.requested_by == "human" { Actor::Human } else { Actor::Agent(job.requested_by.clone()) };
     // Only a submit in the background may wait for a review batch: nobody waits on it (NIT-216).
     let opts = SubmitOptions { dir: &job.worktree, issue_key: Some(&job.issue), skip_review: job.skip_review, local_only: job.local_only, batch: detached, solution: job.solution.as_ref(), solution_commit: Some(&job.head), solution_patch_id: job.solution_patch_id.as_deref() };
     let outcome = crate::submit::submit(db, config, &opts, &actor);
+    if let Some(t) = tracked { t.finish(None); }
     match &outcome {
         Ok(s) => {
             db.conn.execute(

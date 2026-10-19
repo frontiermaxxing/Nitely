@@ -31,8 +31,8 @@ retain the last observed values, per-metric maxima, minimum available memory and
 maxima are not averages. Sessions never share a summary. Retention uses wall-time expiry plus
 independent row caps (17,280 detailed, 43,200 summaries, 4,096 sessions), so turning the clock
 back cannot grow the store indefinitely. Turning it forward may expire history earlier.
-You can lower retention. The database has a hard 128 MiB page cap; SQLite's temporary rollback
-journal can add at most approximately another database's size (256 MiB combined budget).
+You can lower retention. The database has a hard 256 MiB page cap; SQLite's temporary rollback
+journal can add at most approximately another database's size (512 MiB combined budget).
 Full/corrupt/unwritable storage stops that collection attempt and retries after five seconds;
 it never blocks task execution. One bounded diagnostic is kept in `last-error.txt`. A full
 disk can prevent even the diagnostic; readers must still display stale history as stale.
@@ -56,7 +56,7 @@ nitely performance configure --enabled true
 
 Status/history reads never start a collector. Pause takes effect at the next sample. Clear
 requires pause and ownership of the recorder lock; if it is stopping, retry after five seconds.
-It removes samples, summaries and sessions, retains settings, and compacts the database.
+It removes machine and attribution samples, summaries, sessions and workload metadata, retains settings, and compacts the database.
 The same `NITELY_HOME` isolation used by the harness applies to telemetry; test recordings
 stay in the throwaway harness data folder and no collector is detached from the harness app.
 Queries return a read-only connection and never initialize the store or start recording;
@@ -65,12 +65,12 @@ so SQLite can recover its hot journal, without schema/version changes, making po
 history available before a recorder starts.
 
 The collection budget is under 1% of one CPU core averaged over the five-second cadence,
-under 32 MiB additional resident memory for the recorder, and under 256 MiB total retained
+under 32 MiB additional resident memory for the recorder, and under 512 MiB total retained
 disk including an in-flight rollback journal. On Windows, twelve collection/commit cycles
 must read no more than 12 MiB and write no more than 3 MiB of process I/O: at the normal
 five-second cadence, at most 205 KiB/s reads and 51 KiB/s writes. The write allowance includes
 FULL-synchronous rollback-journal and database write amplification, not just sample payloads.
-Run the ignored, bounded measurement alone in a build lane:
+Run the ignored, bounded machine-only measurement alone in a build lane:
 `cargo test -p nitely-core performance::tests::recorder_budget_measurement -- --ignored --exact --nocapture --test-threads=1`.
 It fills maximum retention, then measures twelve native reads plus durable writes/pruning;
 fixture construction, logging and cleanup are outside the process-I/O counter interval.
@@ -99,3 +99,58 @@ overhead depends on storage and system load; these are measurements, not promise
 Windows API references: [PDH formatted values](https://learn.microsoft.com/en-us/windows/win32/api/pdh/nf-pdh-pdhgetformattedcountervalue),
 [memory performance information](https://learn.microsoft.com/en-us/windows/win32/memory/memory-performance-information),
 and [process I/O accounting](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getprocessiocounters).
+
+## Workload attribution
+
+Windows collection uses native process counters at the same sampling cadence. A workload is
+owned only when Nitely registered its launch, identified by boot GUID, PID and creation time.
+Launch context can include project, issue, lane run, submit job, worker and review batch IDs.
+Setup, Crew workers, reviews, lane builds, detached submits, land and install commands register
+at launch. The app and background clients also register their own service process. Descendants
+inherit the nearest registered root; an explicit nested root wins. Each process contributes once,
+so a build beneath a worker is not added twice. A cached exact identity preserves a known child's
+ownership after its parent exits; a reused parent PID cannot adopt an older child. Batched reviews
+carry the batch ID, not the first issue's identity. Existing externally launched agents are not
+retroactively classified from their executable names. The reserved `related` measurement remains
+unknown until there is evidence for a related-but-unowned classification.
+
+CPU percentages use process CPU deltas divided by elapsed monotonic time and the machine's
+logical processor count. The first observation has no CPU or I/O delta. Private commit and the
+sum of process working sets are distinct: working sets overlap and cannot be subtracted from
+physical RAM to calculate exact other usage. Process read/write bytes are interval deltas, not
+physical disk traffic. `unattributed_cpu_percent` is only a comparison with machine CPU and may
+include access failures, unobserved processes and collection timing skew. Inclusive Windows Job
+Object totals are separate workload metadata; they can capture short-lived descendants but may
+overlap nested jobs and must never be added to the sampled totals.
+
+A sample reports enumeration, measurements, denied access, missing identities, partial metrics,
+first-sample status and truncation. Polling cannot observe all processes that start and exit
+between polls. Missing counters stay null. The largest external contributors include only an
+executable basename and exact process identity; no path, arguments, environment or prompt is
+collected. Non-Windows process attribution reports unsupported. Workload registration is best
+effort, capped at 20 ms of database lock waiting, and cannot prevent a command from launching.
+
+Attribution follows the same 24-hour detailed and 30-day minute retention settings. Detailed rows
+are capped at 17,280 and minute rows at 43,200. Each stored observation is at most 1,792 bytes;
+compact tuples reference a dictionary of at most 8,192 workload records, each at most 2,048 bytes.
+The most significant workloads and external processes fit first; dropped breakdown entries set
+truncation while the aggregate totals remain. Minute rows retain sampled CPU/memory peaks and
+sum observed I/O deltas, with their observation count and `minute_peak` resolution. Workload
+metadata remains while retained observations refer to it. Reaching the dictionary cap makes
+coverage partial; it does not silently evict metadata still explaining historical observations.
+The database cap applies to machine history, attribution, indexes and metadata together.
+
+Queries are read-only, newest insertion first, and capped at 1,000 observations. Project filters
+limit only workload breakdowns and metadata; machine-wide totals and external processes retain
+their machine-wide meaning. `attribution_bounds` exposes the retained range for coverage reporting.
+`recent_workloads` includes registered work that exited entirely between polls. An observed exit
+time is explicitly distinguished from a launcher's recorded completion time. Recording uses two
+bounded transactions per interval: machine sample/minute, then attribution sample/minute. A
+failure between them can leave a machine sample without attribution; consumers must show that gap.
+
+Run `cargo test -p nitely-core performance_attribution::tests -- --include-ignored --nocapture --test-threads=1`
+in a build lane for synthetic identity cases, native process/short-lived Job tests and the combined
+full-retention CPU, memory and storage measurement. The combined test excludes compilation and
+fills retained storage before timing twelve native collection/write cycles. CPU is measured using
+Windows process CPU time, separately from wall-clock I/O waiting; memory is additional sampled
+resident usage during the collection/write cycles.
