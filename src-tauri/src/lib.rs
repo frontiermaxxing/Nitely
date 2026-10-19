@@ -814,9 +814,9 @@ pub fn run() {
     });
 
     std::thread::spawn(keep_crews);
-    // The guard lives until the app exits; closing a view never stops the recorder. Other
-    // long-lived Nitely clients take over its OS lock when this process exits.
-    let _performance_recording = nitely_core::performance::background(nitely_core::performance::directory());
+    // Tauri exits the process without unwinding this stack. The Exit callback must stop and
+    // join the collector explicitly so ordinary quits leave a durable clean-stop marker.
+    let mut performance_recording = Some(nitely_core::performance::background(nitely_core::performance::directory()));
 
     // The app made the keychain entries, so it reads them without the OS asking (macOS).
     nitely_core::approval::keychain_is_silent();
@@ -984,9 +984,10 @@ pub fn run() {
         ])
         .build(context)
         .expect("error while building Nitely")
-        .run(|app, event| {
+        .run(move |app, event| {
             // A downloaded update installs on quit, unless a land is running (then the next quit).
             if let tauri::RunEvent::Exit = event {
+                drop(performance_recording.take());
                 update::install_on_quit(app);
             }
         });

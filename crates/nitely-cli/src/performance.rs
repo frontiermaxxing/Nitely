@@ -17,16 +17,22 @@ pub fn run(command: Command) -> Result<()> {
     let dir = performance::directory();
     match command {
         Command::Record { seconds } => {
+            // The handler only signals; normal stack unwinding joins the collector and saves
+            // its clean-stop marker. Install it before recording can acquire ownership.
+            let (stop, stopped) = std::sync::mpsc::sync_channel(1);
+            ctrlc::set_handler(move || { let _ = stop.try_send(()); })?;
             let _recording = performance::background(dir);
-            if let Some(seconds) = seconds { std::thread::sleep(std::time::Duration::from_secs(seconds)); }
-            else { loop { std::thread::park(); } }
+            if let Some(seconds) = seconds { let _ = stopped.recv_timeout(std::time::Duration::from_secs(seconds)); }
+            else { let _ = stopped.recv(); }
         }
         Command::Status => {
             let store = Store::read(&dir)?;
             let settings = store.as_ref().map(Store::settings).transpose()?.unwrap_or_default();
             let samples = store.as_ref().map(|s| s.samples(i64::MIN, i64::MAX, 1)).transpose()?.unwrap_or_default();
+            let session = store.as_ref().map(Store::sessions).transpose()?.unwrap_or_default().into_iter()
+                .find(|session| samples.first().is_some_and(|sample| sample.session == session.session));
             let error = std::fs::read_to_string(dir.join("last-error.txt")).ok();
-            crate::print_json(&serde_json::json!({ "settings": settings, "latest": samples.first(), "last_error": error, "cadence_ms": performance::CADENCE_MS }))?;
+            crate::print_json(&serde_json::json!({ "settings": settings, "latest": samples.first(), "session": session, "last_error": error, "cadence_ms": performance::CADENCE_MS }))?;
         }
         Command::Configure { enabled, detailed_hours, summary_days } => {
             let store = Store::open(&dir)?;
