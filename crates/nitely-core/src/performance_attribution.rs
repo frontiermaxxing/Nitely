@@ -294,6 +294,19 @@ pub(crate) fn schema(db: &rusqlite::Connection) -> Result<()> {
     Ok(())
 }
 impl Store {
+    fn save_observed_exits(&self, ended: &[(String, String)], wall_ms: i64) -> Result<()> {
+        if ended.is_empty() {
+            return Ok(());
+        }
+        let tx = self.db.unchecked_transaction()?;
+        for (id, json) in ended {
+            // Roots were read before this transaction. A launcher may have finished since then;
+            // its actual end time and Job Object accounting take precedence over our inference.
+            tx.execute("UPDATE workloads SET json=?2,ended=?3 WHERE id=?1 AND ended IS NULL", params![id, json, wall_ms])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
     /// Newest insertion first. Project filters only workload rows, never machine-wide totals.
     /// At most 1,000 samples; reads neither collect nor initialize telemetry.
     pub fn attribution(&self, from: i64, to: i64, limit: usize, project: Option<&str>) -> Result<Vec<AttributionSample>> {
@@ -604,13 +617,7 @@ impl Sampler {
                     ended.push((root.id.clone(), serde_json::to_string(root)?));
                 }
             }
-            if !ended.is_empty() {
-                let tx = store.db.unchecked_transaction()?;
-                for (id, json) in ended {
-                    tx.execute("UPDATE workloads SET json=?2,ended=?3 WHERE id=?1", params![id, json, machine.wall_ms])?;
-                }
-                tx.commit()?;
-            }
+            store.save_observed_exits(&ended, machine.wall_ms)?;
         }
         if !roots.is_empty() {
             self.exit_cursor = (self.exit_cursor + 64) % roots.len();
@@ -885,6 +892,35 @@ mod tests {
         assert!(read.db.execute("DELETE FROM attribution", []).is_err());
         assert!(read.attribution(0, 10, 1001, None).is_err());
         assert_eq!(read.attribution_bounds().unwrap(), Some((5000, 5000)));
+    }
+
+    #[test]
+    fn attribution_explicit_finish_wins_over_stale_observed_exit() {
+        let dir = Temp::new();
+        let store = Store::open(&dir.0).unwrap();
+        for observe_first in [false, true] {
+            let workload = root(if observe_first { 2 } else { 1 }, 10, "build", "APP");
+            save_workload(&dir.0, &workload).unwrap();
+            let mut cached = store.sampling_roots(&HashMap::new()).unwrap().into_iter().find(|w| w.id == workload.id).unwrap();
+            let observed_at = i64::MAX;
+            cached.end_ms = Some(observed_at);
+            cached.end_observed = true;
+            let stale = vec![(cached.id.clone(), serde_json::to_string(&cached).unwrap())];
+            if observe_first {
+                store.save_observed_exits(&stale, observed_at).unwrap();
+                assert!(store.workloads(std::slice::from_ref(&workload.id)).unwrap()[0].end_observed);
+            }
+            // Tracked::finish writes through a second connection after the sampler read its roots.
+            let accounting = crate::procs::Accounting { cpu_100ns: 123, read_bytes: 456, write_bytes: 789, processes: 3, peak_private_commit_bytes: Some(1024) };
+            Tracked { dir: dir.0.clone(), workload: workload.clone() }.finish(Some(accounting));
+            let finished = store.workloads(std::slice::from_ref(&workload.id)).unwrap().remove(0);
+            assert!(finished.end_ms.is_some_and(|at| at < observed_at));
+            assert!(!finished.end_observed);
+            assert_eq!(finished.job_accounting.as_ref().unwrap().write_bytes, 789);
+            store.save_observed_exits(&stale, observed_at).unwrap();
+            let persisted = store.workloads(std::slice::from_ref(&workload.id)).unwrap().remove(0);
+            assert_eq!(serde_json::to_value(&persisted).unwrap(), serde_json::to_value(&finished).unwrap(), "stale observation must preserve all explicit completion metadata");
+        }
     }
 
     #[test]

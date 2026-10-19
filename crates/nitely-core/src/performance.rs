@@ -522,12 +522,12 @@ mod tests {
             #[link(name = "kernel32")]
             extern "system" {
                 fn GetCurrentProcess() -> *mut std::ffi::c_void;
-                fn GetProcessIoCounters(process: *mut std::ffi::c_void, counters: *mut IoCounters) -> i32;
+                fn GetProcessIoCounters(process: *mut std::ffi::c_void, counters: *mut [u64; 6]) -> i32;
             }
             let mut counters = IoCounters::default();
             // SAFETY: the current-process pseudo-handle is valid, and the writable buffer has
             // the six consecutive ULONGLONG fields of Windows IO_COUNTERS in C layout.
-            let ok = unsafe { GetProcessIoCounters(GetCurrentProcess(), &mut counters) };
+            let ok = unsafe { GetProcessIoCounters(GetCurrentProcess(), (&mut counters as *mut IoCounters).cast()) };
             assert_ne!(ok, 0, "process I/O counters: {}", std::io::Error::last_os_error());
             counters
         }
