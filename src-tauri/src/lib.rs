@@ -814,6 +814,9 @@ pub fn run() {
     });
 
     std::thread::spawn(keep_crews);
+    // The guard lives until the app exits; closing a view never stops the recorder. Other
+    // long-lived Nitely clients take over its OS lock when this process exits.
+    let _performance_recording = nitely_core::performance::background(nitely_core::performance::directory());
 
     // The app made the keychain entries, so it reads them without the OS asking (macOS).
     nitely_core::approval::keychain_is_silent();

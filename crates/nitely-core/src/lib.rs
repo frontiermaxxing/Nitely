@@ -39,6 +39,7 @@ pub mod paths;
 /// The large sample board and its performance budgets (NIT-255).
 #[doc(hidden)]
 pub mod perf;
+pub mod performance;
 pub mod phone;
 pub mod playbook;
 pub mod private_terms;

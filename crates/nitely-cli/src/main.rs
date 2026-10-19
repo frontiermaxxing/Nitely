@@ -5,6 +5,7 @@ mod crew;
 mod lanes;
 mod mcp;
 mod newer;
+mod performance;
 mod serve;
 mod ui;
 
@@ -25,6 +26,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Local machine performance recording and retained history.
+    Performance { #[command(subcommand)] command: performance::Command },
     /// Record an agent hook event. Reads the hook's JSON on stdin and always exits 0,
     /// so a Nitely problem never blocks the agent.
     Hook {
@@ -666,6 +669,11 @@ fn main() {
 
 fn cli_main() {
     let cli = Cli::parse();
+    // Only long-lived clients participate. Read-only/UI/hook calls never start recording.
+    let _recording = matches!(&cli.command, Cmd::Mcp | Cmd::McpCalls | Cmd::McpDetached | Cmd::Crew { command: crew::CrewCmd::Run { .. } }
+        | Cmd::Links { command: LinksCmd::Serve } | Cmd::Run { .. } | Cmd::Gate { .. } | Cmd::Submit { .. }
+        | Cmd::SubmitJob { .. } | Cmd::TriageJob { .. } | Cmd::Land { .. } | Cmd::Serve { .. })
+        .then(|| nitely_core::performance::background(nitely_core::performance::directory()));
     match &cli.command {
         Cmd::Hook { vendor, payload } => {
             if let Err(e) = run_hook(vendor, payload.as_deref()) {
@@ -817,6 +825,7 @@ fn run(cmd: Cmd) -> Result<()> {
     // only in the app.
     let me = Actor::Agent("cli".into());
     match cmd {
+        Cmd::Performance { command } => performance::run(command),
         Cmd::Hook { .. } | Cmd::Mcp | Cmd::McpCall | Cmd::McpCalls | Cmd::McpDetached | Cmd::Ui { .. } => unreachable!(),
         Cmd::PerfSeed => {
             let home = paths::data_dir();
