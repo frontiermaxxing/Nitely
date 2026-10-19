@@ -1535,7 +1535,10 @@ fn names_test_filter(command: &str) -> bool {
     };
     // The words of `words[from..]` up to the end of its command.
     let segment = |from: usize| words.get(from..).unwrap_or_default().iter().take_while(|t| !ends(t)).copied().collect::<Vec<&str>>();
-    // Whether `args` name a file or test, past the values of the flags that take one.
+    // Whether `args` name a file or test, past the values of the flags that take one. A word after
+    // a flag the list does not know (`--maxWorkers 2`) may be that flag's value: it names a file
+    // only when it reads as a path (`src/a.test.ts`, `lanes.test.ts`), so a whole-suite run with
+    // an option is never quick (the NIT-359 review).
     let names_one = |args: &[&str], with_value: &[&str]| {
         let mut j = 0;
         while j < args.len() {
@@ -1545,7 +1548,10 @@ fn names_test_filter(command: &str) -> bool {
                 continue;
             }
             if !t.starts_with('-') {
-                return true;
+                let after_flag = j > 0 && args[j - 1].starts_with('-') && !args[j - 1].contains('=');
+                if !after_flag || t.contains(['/', '\\', '.']) {
+                    return true;
+                }
             }
             j += 1;
         }
@@ -4322,6 +4328,9 @@ wanted {shown}", ran.output);
             "npx jest src/lanes.test.ts",
             "npm test -- src/lanes.test.ts",
             "npm run test -- src/lanes.test.ts",
+            "npx vitest lanes",
+            "npx jest --watch src/lanes.test.ts",
+            "npx vitest run --maxWorkers 2 src/lanes.test.ts",
             "pytest -k quick_lane",
             "pytest tests/test_lanes.py::test_one",
         ] {
@@ -4340,6 +4349,10 @@ wanted {shown}", ran.output);
             "node --import tsx --test",
             "npx vitest run",
             "npx jest",
+            "npx vitest run --maxWorkers 2",
+            "npx jest --maxWorkers 2",
+            "npm test -- --maxWorkers 2",
+            "node --test --test-concurrency 2",
             "node build.js && echo --test done",
         ] {
             assert!(!names_test_filter(whole), "{whole}");
