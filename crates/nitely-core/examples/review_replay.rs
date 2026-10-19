@@ -175,7 +175,7 @@ fn main() -> Result<()> {
             })
             .collect();
         let reviewer = &changes[group[0]].reviewer;
-        let reply = match rules.run_prompt(reviewer, &dirs[group[0]], &rules.batch_prompt(&parts)) {
+        let reply = match rules.run_review_prompt(reviewer, &dirs[group[0]], &rules.batch_prompt(&parts)) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("batch {}: did not finish: {e:#}", n + 1);

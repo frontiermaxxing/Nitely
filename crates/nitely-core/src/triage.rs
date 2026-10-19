@@ -363,6 +363,26 @@ mod tests {
     }
 
     #[test]
+    fn disabled_pr_review_still_allows_triage_answers_and_escalation() {
+        let (base, mut db, repo, actor) = repo_with_triage();
+        let file = repo.join(crate::playbook::PLAYBOOK_PATH);
+        let playbook = std::fs::read_to_string(&file).unwrap().replace("[review]\n", "[review]\nenabled = false\n");
+        std::fs::write(&file, playbook).unwrap();
+        let config = crate::Config::default();
+        let place = repo.to_string_lossy().into_owned();
+        let q = ask(&db, "Who holds crates/a.rs?", None, Some(&place), &actor).unwrap();
+        let done = answer(&mut db, &config, q.id).unwrap();
+        assert_eq!(done.state, "answered", "{done:?}");
+        assert!(done.answer.as_deref().unwrap().contains("APP-2 holds crates/a.rs"));
+        assert!(db.open_asks().unwrap().is_empty());
+        let q = ask(&db, "Which license should the SDK use?", None, Some(&place), &actor).unwrap();
+        let done = answer(&mut db, &config, q.id).unwrap();
+        assert_eq!(done.state, "escalated", "{done:?}");
+        assert_eq!(db.open_asks().unwrap().len(), 1);
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
     fn triage_answers_the_routine_and_puts_only_the_persons_in_their_inbox() {
         let (base, mut db, repo, actor) = repo_with_triage();
         let config = crate::Config::default();

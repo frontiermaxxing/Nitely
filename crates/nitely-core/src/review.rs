@@ -754,7 +754,7 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
 
     /// Runs `reviewer` in `worktree` and parses its reply.
     pub fn run(&self, reviewer: &str, worktree: &Path, base: &str, previous: Option<&PreviousRound>) -> Result<Review> {
-        let reply = self.run_prompt(reviewer, worktree, &with_submodule_code(self.prompt(base, previous), worktree, base))?;
+        let reply = self.run_review_prompt(reviewer, worktree, &with_submodule_code(self.prompt(base, previous), worktree, base))?;
         let mut review =
             self.parse(reviewer, &reply.text, reply.seconds, previous, Some(worktree)).map_err(|e| if reply.only_a_login_message { reply.signed_out(self) } else { e })?;
         review.tokens = reply.tokens;
@@ -764,7 +764,16 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
     /// Runs `reviewer` in `worktree` with `prompt` on its stdin, and returns what it wrote. A
     /// reviewer that cannot run is a `CouldNotRun`; one that ran past its timeout, an error.
     pub fn run_prompt(&self, reviewer: &str, worktree: &Path, prompt: &str) -> Result<Reply> {
-        self.require_enabled()?;
+        self.run_prompt_checked(reviewer, worktree, prompt, &mut || Ok(()))
+    }
+
+    /// PR reviews obey the live review switch; other uses of the launcher, such as triage, do not.
+    pub fn run_review_prompt(&self, reviewer: &str, worktree: &Path, prompt: &str) -> Result<Reply> {
+        self.run_prompt_checked(reviewer, worktree, prompt, &mut || self.require_enabled())
+    }
+
+    fn run_prompt_checked(&self, reviewer: &str, worktree: &Path, prompt: &str, check: &mut dyn FnMut() -> Result<()>) -> Result<Reply> {
+        check()?;
         let command = self
             .commands
             .get(reviewer)
@@ -785,8 +794,8 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
         // A review counts against the machine as a build does (NIT-266): it starts only while the
         // machine has memory to spare, and it and what it runs (a reviewer may build and test) are
         // held to a run's cap, its share of cores and below-normal priority.
-        crate::machine::admit_here_checked(&mut || self.require_enabled())?;
-        self.require_enabled()?;
+        crate::machine::admit_here_checked(check)?;
+        check()?;
         // The review's own time starts once it may run.
         let started = Instant::now();
         let share = crate::lanes::share();
@@ -1271,14 +1280,14 @@ mod tests {
         let rules = ReviewRules { policy_root: Some(root.clone()), ..Default::default() };
         rules.require_enabled().unwrap();
         std::fs::write(&file, "[review]\nenabled = false\n").unwrap();
-        assert!(rules.run_prompt("not-installed", &root, "unused").err().unwrap().is::<Disabled>());
+        assert!(rules.run_review_prompt("not-installed", &root, "unused").err().unwrap().is::<Disabled>());
         assert!(ReviewRules::default().require_enabled().is_ok(), "another project's policy is isolated");
         std::fs::write(&file, "[review]\nenabled = true\n").unwrap();
         rules.require_enabled().unwrap();
         let mut running = rules.clone();
         running.commands.insert("fake".into(), vec![crate::playbook::posix_sh(), "-c".into(),
             "cat >/dev/null; printf '[review]\\nenabled = false\\n' > .nitely/playbook.toml; printf 'VERDICT: clean\\n'".into()]);
-        let reply = running.run_prompt("fake", &root, "read this").unwrap();
+        let reply = running.run_review_prompt("fake", &root, "read this").unwrap();
         assert!(reply.text.contains("VERDICT: clean"), "an already-running reviewer keeps its actual result");
         assert!(running.require_enabled().unwrap_err().is::<Disabled>(), "the next launch is disabled");
         std::fs::remove_dir_all(root).unwrap();

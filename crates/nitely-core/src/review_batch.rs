@@ -490,7 +490,7 @@ fn run_batch(db: &Db, rules: &ReviewRules, batch: i64, rows: &[Queued], shadow: 
     let Some(run_in) = changes.iter().map(|c| c.worktree.as_path()).find(|w| w.is_dir()) else {
         return fail("none of its changes' worktrees, nor the repository, is there to run the reviewer in".into());
     };
-    let reply = match rules.run_prompt(reviewer, run_in, &rules.batch_prompt(&changes)) {
+    let reply = match rules.run_review_prompt(reviewer, run_in, &rules.batch_prompt(&changes)) {
         Ok(reply) if reply.only_a_login_message => Err(reply.signed_out(rules)),
         other => other,
     };
