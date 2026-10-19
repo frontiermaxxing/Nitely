@@ -112,6 +112,7 @@ type Step =
   | "changes"
   | "pass"
   | "passhuman"
+  | "disabledhuman"
   | "approve"
   | "land"
   | "landfail"
@@ -373,7 +374,7 @@ const ISSUES: IssueSpec[] = [
   { key: "HAR-9", title: "Price shows twice on small screens", kind: "bug", priority: 3, vendor: "cursor", from: 130, to: 75, story: ["filed", "claim", "work", "gate", "review", "pass", "land"] },
   {
     key: "HAR-8", title: "Live check: checkout on Safari", kind: "live-check", priority: 3, vendor: "cursor",
-    from: 20, to: 1, story: ["filed", "claim", "work", "gate", "review", "passhuman"], branch: { ahead: 1, dirty_files: 0 }, checks: "success",
+    from: 20, to: 1, story: ["filed", "claim", "work", "gate", "disabledhuman"], branch: { ahead: 1, dirty_files: 0 }, checks: "success",
     body: "Pay with a test card on Safari 18 on macOS and iOS; confirm the receipt arrives.",
   },
   { key: "HAR-7", title: "Seasonal pricing rules", kind: "feature", priority: 3, vendor: "cursor", from: 330, to: 140, story: ["filed", "claim", "work", "gate", "review", "changes", "work", "gate", "review", "pass", "land"] },
@@ -512,7 +513,7 @@ function build(): World {
     const steps = spec.story.length;
     const timeline: TimelineEntry[] = [];
     const reviews: ReviewRecord[] = [];
-    const number = spec.story.some((s) => s === "changes" || s === "pass" || s === "passhuman") ? prNumber++ : 0;
+    const number = spec.story.some((s) => s === "changes" || s === "pass" || s === "passhuman" || s === "disabledhuman") ? prNumber++ : 0;
     const url = number ? prUrl(spec, number) : "";
     let state = spec.owner === "human" ? "Needs You" : spec.story.length === 1 && spec.from > 80 ? "Backlog" : "Todo";
     let notes = 0;
@@ -522,11 +523,11 @@ function build(): World {
       timeline.push({ ts, actor, kind: "issue_moved", summary: `${state} → ${to}` });
       state = to;
     };
-    const review = (ts: number, verdict: "pass" | "changes", approver: "agent" | "human") => {
+    const review = (ts: number, verdict: "pass" | "changes" | "disabled", approver: "agent" | "human") => {
       const findings: ReviewRecord["findings"] =
         verdict === "changes"
           ? [FINDINGS[Math.floor(rand() * 2)], FINDINGS[2 + Math.floor(rand() * 2)]]
-          : rand() > 0.5
+          : verdict !== "disabled" && rand() > 0.5
             ? [FINDINGS[4 + Math.floor(rand() * 2)]]
             : [];
       // A second round of changes carries a finding the first round raised and was not fixed.
@@ -538,13 +539,13 @@ function build(): World {
         patch_id: sha(),
         commit_sha: reviewedCommit,
         branch: branchOf(spec),
-        reviewer,
+        reviewer: verdict === "disabled" ? "" : reviewer,
         verdict,
         approver,
         reasons: approver === "human" ? [spec.kind === "live-check" ? "a live check needs a person" : "touches a path the playbook keeps for a human"] : [],
         findings,
         ts,
-        note: reviewNote,
+        note: verdict === "disabled" ? "Review disabled for this project" : reviewNote,
         ...(approver === "human" && spec.key === "ORB-268" ? {
           solution: { title: "Start normally with an empty bookmarks file", summary: "Treat a zero-byte bookmarks file as an empty collection before initializing the window. Existing bookmarks and malformed-file error reporting are preserved." },
           gate: { commit: reviewedCommit, passed: true, results: [{ command: "cargo test -p nitely-core", ok: true }, { command: "npm test", ok: true }] },
@@ -602,6 +603,11 @@ function build(): World {
         case "passhuman":
           review(ts, "pass", "human");
           timeline.push({ ts, actor: agent, kind: "submit", summary: `Review by ${reviewer} passed; waits for a human. Pull request: ${url}` });
+          move(ts + 2, "Needs You");
+          break;
+        case "disabledhuman":
+          review(ts, "disabled", "human");
+          timeline.push({ ts, actor: agent, kind: "submit", summary: `Review disabled for this project; waits for a human. Pull request: ${url}` });
           move(ts + 2, "Needs You");
           break;
         case "approve":

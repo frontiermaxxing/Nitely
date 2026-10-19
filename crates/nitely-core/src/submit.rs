@@ -1238,7 +1238,7 @@ reason = "money logic"
             std::fs::write(f.repo.join(playbook::PLAYBOOK_PATH), &policy).unwrap();
             sh(&f.repo, &["commit", "-qam", "disable review"]);
             let (issue, wt) = f.committed("Unreviewed change", "feature.txt");
-            let s = submit(&mut f.db, &f.config, &SubmitOptions { dir: &wt.to_string_lossy(), issue_key: None, skip_review: false, local_only: false, batch: true }, &f.actor).unwrap();
+            let s = submit(&mut f.db, &f.config, &SubmitOptions { dir: &wt.to_string_lossy(), issue_key: None, skip_review: false, local_only: false, batch: true, solution: None, solution_commit: None, solution_patch_id: None }, &f.actor).unwrap();
             assert!(s.gate.passed && s.pushed && s.review_disabled && s.review.is_none() && s.shadow.is_none(), "{s:?}");
             assert_eq!((s.approver.as_str(), s.state.as_str()), ("agent", "In Review"));
             assert!(s.reasons.is_empty());

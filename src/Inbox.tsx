@@ -32,7 +32,7 @@ import { useWaits } from "./WaitingStrip";
 import { behindSummary, waitLine, waitOf } from "./waits";
 import { ago, openExternal } from "./util";
 import { ApprovalSolution } from "./ApprovalSolution";
-import { APPROVAL_NEXT, approvalPr, approvalSolution } from "./approvalEvidence";
+import { APPROVAL_NEXT, approvalPr, approvalSolution, automatedReviewEvidence } from "./approvalEvidence";
 import {
   AgentMark,
   CountBadge,
@@ -500,8 +500,9 @@ function eventOf(d: Decision, detail: IssueDetail | undefined, place?: { n: numb
       const plan = planOf(detail);
       if (plan) return { text: `${who(plan.created_by)} drafted a goal`, tone: null, agent: plan.created_by };
       const review = detail?.reviews[0];
-      if (!review?.reviewer) return { text: detail ? "No review ran" : "Reading its review", tone: detail ? "bad" : null, agent };
-      const reviewed = journeyOf(detail?.timeline, detail?.reviews).rounds.filter((r) => r.review && r.review.verdict !== "none").length;
+      const automated = automatedReviewEvidence(review);
+      if (!review || !automated.ran) return { text: detail ? automated.text : "Reading its review", tone: detail ? automated.tone : null, agent };
+      const reviewed = journeyOf(detail?.timeline, detail?.reviews).rounds.filter((r) => automatedReviewEvidence(r.review).ran).length;
       const passed = review.verdict !== "changes";
       return {
         text: `${who(review.reviewer)} ${passed ? "passed" : "asked for changes"}${reviewed > 1 ? ` after ${reviewed} rounds` : ""}`,
@@ -856,14 +857,14 @@ function ApprovalsCard(props: {
               <ApprovalSolution evidence={review} issue={issue} findings={review?.findings} showFindings showNext={false} />
               <p className="approvals-why small">
                 {reasons.length > 0 ? `${capital(listReasons(reasons))}.` : "The playbook wants a person to approve this change."}{" "}
-                {review?.reviewer ? (
+                {review && automatedReviewEvidence(review).ran ? (
                   <span className="approvals-review">
                     <AgentMark vendor={review.reviewer} size={14} /> {VENDOR_LABEL[vendorOf(review.reviewer)]}{" "}
                     {review.verdict === "changes" ? <span className="decision-changes">asked for changes</span> : "passed"}
                     <FindingDots findings={review.findings} />
                     {review.findings.length > 0 ? describeFindings(review.findings) : "no findings"}
                   </span>
-                ) : <span>{review?.note || "No automated review ran."}</span>}
+                ) : <span>{automatedReviewEvidence(review).text}</span>}
               </p>
               <p className="small approvals-links">{pr ? <a href={pr.url} onClick={openExternal(pr.url)}>View submitted changes in PR</a> : <span className="muted">No PR verified for this revision.</span>} <button className="link" onClick={() => props.onOpenIssue(issue.key)}>View details</button></p>
               {done ? (
@@ -958,7 +959,7 @@ function Body(props: { decision: Decision; detail?: IssueDetail; integration: st
       const { rounds } = journeyOf(detail?.timeline, detail?.reviews);
       const review = detail?.reviews[0];
       const reasons = review?.reasons ?? [];
-      const reviewed = rounds.filter((r) => r.review && r.review.verdict !== "none").length;
+      const reviewed = rounds.filter((r) => automatedReviewEvidence(r.review).ran).length;
       const pr = approvalPr(review, detail?.prs);
       return (
         <>
@@ -966,7 +967,7 @@ function Body(props: { decision: Decision; detail?: IssueDetail; integration: st
           {pr ? <p><a href={pr.url} onClick={openExternal(pr.url)}>View submitted changes in PR</a></p> : <p className="muted small">No PR verified for this revision. Open issue details for its history.</p>}
           <p className="decision-matter">{reasons.length > 0 ? `${capital(listReasons(reasons))}.` : "The playbook wants a person to approve this change."}</p>
           <p className="decision-why">
-            {review?.reviewer ? (
+            {review && automatedReviewEvidence(review).ran ? (
               <>
                 <AgentMark vendor={review.reviewer} size={14} /> {who(review.reviewer)}'s review{review.note ? ` (${review.note})` : ""}{" "}
                 {review.verdict === "changes" ? <span className="decision-changes">asked for changes</span> : "passed"}
@@ -977,7 +978,7 @@ function Body(props: { decision: Decision; detail?: IssueDetail; integration: st
                 </span>
               </>
             ) : (
-              detail && (review?.note || "No automated review ran.")
+              detail && (automatedReviewEvidence(review).text)
             )}
             {pr?.checks && <ChecksMark checks={pr.checks} />}
           </p>

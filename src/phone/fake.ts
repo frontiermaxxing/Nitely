@@ -48,10 +48,10 @@ let decisions: PhoneDecision[] = [
     kind: "approve",
     id: "approve-SHOP-2",
     since: NOW() - 1800,
-    issue: { key: "SHOP-2", title: "Retry webhook deliveries with backoff", kind: "feature", priority: 2, state: "Needs You", track: track("needs", { todo: NOW() - 20000, started: NOW() - 18000, working: NOW() - 15000, gate: NOW() - 4000, review: NOW() - 3000, "needs": NOW() - 1800 }) as never },
+    issue: { key: "SHOP-2", title: "Retry webhook deliveries with backoff", kind: "feature", priority: 2, state: "Needs You", track: track("needs", { todo: NOW() - 20000, started: NOW() - 18000, working: NOW() - 15000, gate: NOW() - 4000, "needs": NOW() - 1800 }) as never },
     patch_id: "patch-demo-2",
     reasons: ["the change touches the release process"],
-    review: { reviewer: "claude", verdict: "pass", note: "same vendor: codex not installed", findings: [] },
+    review: { reviewer: "", verdict: "disabled", note: "Review disabled for this project", findings: [] },
   },
 ];
 

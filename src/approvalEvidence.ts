@@ -6,6 +6,16 @@ export interface ApprovalEvidence {
   gate?: ApprovalGate | null;
 }
 
+/** An intentional policy opt-out is neutral evidence, not a failed or completed review. */
+export function automatedReviewEvidence(review?: { reviewer?: string; verdict?: string; note?: string | null } | null) {
+  const disabled = review?.verdict === "disabled";
+  return {
+    ran: !!review?.reviewer && review.verdict !== "none" && !disabled,
+    text: review?.note || (disabled ? "Review disabled for this project" : "No automated review ran."),
+    tone: disabled ? null : "bad" as const,
+  };
+}
+
 /** Evidence is shown only for the review revision it accompanies, never from an older round. */
 export function approvalSolution(evidence?: ApprovalEvidence) {
   const solution = evidence?.solution;

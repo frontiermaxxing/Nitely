@@ -1,6 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { approvalPr, approvalSolution } from "./approvalEvidence.ts";
+import { approvalPr, approvalSolution, automatedReviewEvidence } from "./approvalEvidence.ts";
+
+test("disabled review stays neutral and does not inflate reviewed rounds", () => {
+  const disabled = { reviewer: "", verdict: "disabled" };
+  assert.deepEqual(automatedReviewEvidence(disabled), { ran: false, text: "Review disabled for this project", tone: null });
+  assert.equal(automatedReviewEvidence({ ...disabled, reviewer: "codex" }).ran, false);
+  assert.equal(automatedReviewEvidence({ reviewer: "", verdict: "none" }).tone, "bad");
+  const rounds = [disabled, { reviewer: "codex", verdict: "pass" }, { reviewer: "", verdict: "none" }];
+  assert.equal(rounds.filter((review) => automatedReviewEvidence(review).ran).length, 1);
+});
 
 const solution = { title: "Validate export destinations before writing", summary: "Reject paths outside the selected folder before creating the export." };
 const gate = { commit: "reviewed", passed: true, results: [{ command: "npm test", ok: true }] };

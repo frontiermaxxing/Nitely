@@ -1,5 +1,5 @@
 import { ApprovalSolution } from "../ApprovalSolution";
-import { approvalSolution } from "../approvalEvidence";
+import { approvalSolution, automatedReviewEvidence } from "../approvalEvidence";
 import type { ApprovalGate, SolutionSummary } from "../types";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { signedGet, signedPost, unreachable } from "./api";
@@ -310,7 +310,7 @@ function Decision(props: { decision: PhoneDecision; device: Device; onDecided: (
               </ul>
             </>
           )}
-          {d.review?.reviewer ? (
+          {d.review && automatedReviewEvidence(d.review).ran ? (
             <>
               <h2>
                 {who(d.review.reviewer)}'s review {d.review.verdict === "pass" ? "passed" : "asked for changes"}
@@ -328,7 +328,7 @@ function Decision(props: { decision: PhoneDecision; device: Device; onDecided: (
                 </ul>
               )}
             </>
-          ) : <p>{d.review?.note || "No automated review ran."}</p>}
+          ) : <p>{automatedReviewEvidence(d.review).text}</p>}
         </div>
       )}
 
