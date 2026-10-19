@@ -58,3 +58,8 @@ keep = ["target", "node_modules"]
 # Reminded to use `run` instead when run in a light worktree (never blocked). npm ci stays local:
 # the browser preview needs node_modules in the worktree, and it costs 2 s and ~100 MB.
 heavy = ["^cargo (build|test|clippy|check)\\b", "^npm (test|run build)\\b"]
+
+[review.reviewer]
+claude = "codex"
+codex = "codex"
+"*" = "codex"
