@@ -2058,6 +2058,8 @@ fn take_turn(
             // left behind is put back first.
             if rules.large_repo && lent_to_request(repo_root).is_none() {
                 if let Some(why) = checkout_busy(repo_root, pb, &rules.keep)? {
+                    // Waiting for the checkout now, not memory (NIT-368).
+                    forget_memory_wait(db, id, &mut waits_for_memory)?;
                     wait_for_checkout(db, id, &why, &mut busy_since, rules)?;
                     continue 'turn;
                 }
@@ -2083,6 +2085,7 @@ fn take_turn(
                             if let Some(why) = checkout_busy(repo_root, pb, &rules.keep)? {
                                 drop(lock);
                                 drop(slot);
+                                forget_memory_wait(db, id, &mut waits_for_memory)?;
                                 wait_for_checkout(db, id, &why, &mut busy_since, rules)?;
                                 continue 'turn;
                             }
@@ -4773,6 +4776,52 @@ wanted {shown}", ran.output);
         assert_eq!(lanes.lanes.len(), 1);
         assert_eq!(crate::paths::normalize(&lanes.lanes[0].path), crate::paths::normalize(&root.to_string_lossy()));
         assert!(lanes.rules.large_repo);
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// A request that waited on memory and then waits for the person's checkout says only the
+    /// checkout: the strip no longer reads its old memory reason (NIT-368).
+    #[test]
+    fn a_memory_reason_goes_once_a_request_waits_for_the_checkout() {
+        let base = crate::paths::unique_temp("nitely-large-memory", "");
+        let (root, agent, pb) = large(&base, "");
+        let db_path = base.join("t.db");
+        let db = Db::open(&db_path).unwrap();
+        let mem = |free_gb: u64| Some(machine::Memory { total: 64 * machine::GIB, available: free_gb * machine::GIB });
+        // Memory is short at its first look, and the person changes a file in their checkout then.
+        let (r, mut first) = (root.clone(), true);
+        let next: Readings = Box::new(move || {
+            if std::mem::take(&mut first) {
+                std::fs::write(r.join("notes.txt"), "mine\n").unwrap();
+                mem(5)
+            } else {
+                mem(40)
+            }
+        });
+        FAKE_MEMORY.with(|f| *f.borrow_mut() = Some(next));
+        // Once it says it waits for the checkout, what does it say about memory? Then the person
+        // finishes their change.
+        let (r, n) = (root.clone(), db_path.clone());
+        let person = std::thread::spawn(move || {
+            let db = Db::open(&n).unwrap();
+            let started = Instant::now();
+            loop {
+                let row: Option<(Option<String>, Option<String>)> =
+                    db.conn.query_row("SELECT waiting_for, waiting_memory FROM lane_run ORDER BY id DESC LIMIT 1", [], |row| Ok((row.get(0)?, row.get(1)?))).optional().unwrap();
+                if let Some((Some(_), memory)) = row {
+                    std::fs::remove_file(r.join("notes.txt")).unwrap();
+                    return memory;
+                }
+                assert!(started.elapsed() < Duration::from_secs(30), "the request never waited for the checkout");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let snap = snapshot(&agent).unwrap();
+        let req = Request { project: "APP", issue: None, kind: Kind::Run, snapshot: &snap, command: "echo ok" };
+        let ran = run(&db, &root, &pb, &req, &Actor::Agent("claude:test".into()), &mut |_| {});
+        FAKE_MEMORY.with(|f| *f.borrow_mut() = None);
+        assert_eq!(person.join().unwrap(), None, "waiting for the checkout, it no longer says memory");
+        assert!(ran.unwrap().passed());
         std::fs::remove_dir_all(base).ok();
     }
 
