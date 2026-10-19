@@ -174,10 +174,9 @@ pub fn query_at(dir: &Path, request: &Query, now: i64) -> Result<Report> {
 }
 
 fn previous_boot(sessions: &[Session]) -> Option<String> {
-    for pair in sessions.windows(2) {
-        if let (Some(new), Some(old)) = (&pair[0].boot, &pair[1].boot) { if new != old { return Some(old.clone()); } }
-    }
-    None
+    let mut known = sessions.iter().filter_map(|s| s.boot.as_ref());
+    let latest = known.next()?;
+    known.find(|boot| *boot != latest).cloned()
 }
 fn latest_for_boot(store: &Store, boot: &str) -> Result<Option<Sample>> {
     // Bounded retained tables; CASE shields malformed JSON. Read at most one complete record
@@ -291,6 +290,7 @@ mod tests {
         fixture.store.start_session("old", Some("boot-a"), NOW-1_000_000).unwrap();
         fixture.sample(NOW-700_000, Some("boot-a"), "old", Some(95.0));
         fixture.sample(NOW-100_000, Some("boot-a"), "old", Some(96.0));
+        fixture.store.start_session("unknown", None, NOW-50_000).unwrap();
         fixture.store.start_session("new", Some("boot-b"), NOW-20_000).unwrap();
         fixture.sample(NOW-10_000, Some("boot-b"), "new", Some(10.0));
         let report = fixture.query(Query { view: View::History, before_last_restart: true, ..Query::default() });
