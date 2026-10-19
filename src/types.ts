@@ -611,7 +611,21 @@ export interface PlaybookProposal {
   stale: string | null;
 }
 
+export interface SolutionSummary {
+  title: string;
+  summary: string;
+}
+export interface ApprovalGate {
+  commit: string;
+  passed: boolean;
+  results: { command: string; ok: boolean; skipped?: boolean }[];
+  flaked?: { command: string }[];
+  warnings?: string[];
+}
+
 export interface ReviewRecord {
+  solution?: SolutionSummary | null;
+  gate?: ApprovalGate | null;
   issue_key: string;
   patch_id: string;
   commit_sha: string;

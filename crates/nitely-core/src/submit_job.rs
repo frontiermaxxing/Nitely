@@ -30,6 +30,8 @@ pub struct Job {
     pub branch: String,
     /// The commit handed in; the job submits whatever the branch holds when it runs.
     pub head: String,
+    pub solution: Option<crate::submit::SolutionSummary>,
+    pub solution_patch_id: Option<String>,
     pub requested_by: String,
     pub skip_review: bool,
     pub local_only: bool,
@@ -106,7 +108,7 @@ impl Db {
 }
 
 const COLUMNS: &str =
-    "id, issue_key, worktree, branch, head, requested_by, skip_review, local_only, state, queued_at, started_at, ended_at, pid, result, error, delivered_at, detached";
+    "id, issue_key, worktree, branch, head, requested_by, skip_review, local_only, state, queued_at, started_at, ended_at, pid, result, error, delivered_at, detached, solution, solution_patch_id";
 
 fn row(r: &rusqlite::Row) -> rusqlite::Result<Job> {
     let result: Option<String> = r.get(13)?;
@@ -128,6 +130,8 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<Job> {
         error: r.get(14)?,
         delivered_at: r.get(15)?,
         detached: r.get(16)?,
+        solution: r.get::<_, Option<String>>(17)?.and_then(|s| serde_json::from_str(&s).ok()),
+        solution_patch_id: r.get(18)?,
     })
 }
 
@@ -391,6 +395,13 @@ pub fn enqueue(db: &Db, opts: &SubmitOptions, actor: &Actor) -> Result<Job> {
     if !dirty.trim().is_empty() {
         bail!("{} has uncommitted changes; commit them first:\n{}", worktree.display(), dirty.trim_end());
     }
+    let solution_patch = if opts.solution.is_some() {
+        let root = crate::git::main_root(opts.dir).context("the submit has no repository")?;
+        let pb = crate::playbook::Playbook::load(Path::new(&root))?;
+        Some(crate::submit::patch_id_range(&worktree, &crate::playbook::diff_base(&worktree, pb.integration_branch()), &head)?)
+    } else { None };
+    let current_solution = opts.solution.filter(|_| opts.solution_commit.is_none_or(|c| c == head)
+        && opts.solution_patch_id.is_none_or(|p| solution_patch.as_deref() == Some(p)));
     let wt = worktree.to_string_lossy().into_owned();
     db.conn.execute(
         "UPDATE submit_job SET state = 'superseded', ended_at = ?2 WHERE issue_key = ?1 COLLATE NOCASE AND state = 'queued'",
@@ -399,9 +410,9 @@ pub fn enqueue(db: &Db, opts: &SubmitOptions, actor: &Actor) -> Result<Job> {
     // One that already waits for a review batch is replaced too: its job then ends as superseded.
     crate::review_batch::supersede_waiting(db, &issue.key)?;
     db.conn.execute(
-        "INSERT INTO submit_job (issue_key, worktree, branch, head, requested_by, skip_review, local_only, state, queued_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', ?8)",
-        params![issue.key, wt, branch, head, actor.id(), opts.skip_review, opts.local_only, now()],
+        "INSERT INTO submit_job (issue_key, worktree, branch, head, requested_by, skip_review, local_only, state, queued_at, solution, solution_patch_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', ?8, ?9, ?10)",
+        params![issue.key, wt, branch, head, actor.id(), opts.skip_review, opts.local_only, now(), current_solution.map(serde_json::to_string).transpose()?, solution_patch],
     )?;
     let id = db.conn.last_insert_rowid();
     let short = &head[..head.len().min(7)];
@@ -470,7 +481,7 @@ fn run_job(db: &mut Db, config: &crate::Config, id: i64, detached: bool) -> Resu
     }
     let actor = if job.requested_by == "human" { Actor::Human } else { Actor::Agent(job.requested_by.clone()) };
     // Only a submit in the background may wait for a review batch: nobody waits on it (NIT-216).
-    let opts = SubmitOptions { dir: &job.worktree, issue_key: Some(&job.issue), skip_review: job.skip_review, local_only: job.local_only, batch: detached };
+    let opts = SubmitOptions { dir: &job.worktree, issue_key: Some(&job.issue), skip_review: job.skip_review, local_only: job.local_only, batch: detached, solution: job.solution.as_ref(), solution_commit: Some(&job.head), solution_patch_id: job.solution_patch_id.as_deref() };
     let outcome = crate::submit::submit(db, config, &opts, &actor);
     match &outcome {
         Ok(s) => {
@@ -558,12 +569,92 @@ mod tests {
     }
 
     #[test]
+    fn solution_summary_is_bound_to_the_revision_handed_in() {
+        let (base, db_path, config, key, wt) = fixture();
+        let mut db = Db::open(&db_path).unwrap();
+        let actor = Actor::Agent("codex:solution-test".into());
+        let dir = wt.to_string_lossy().into_owned();
+        let solution = crate::submit::SolutionSummary::from_fields(Some("Link the footer to help"), Some("Add a footer link to the help page.")).unwrap().unwrap();
+        let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: false, solution: Some(&solution), solution_commit: None, solution_patch_id: None };
+        let job = enqueue(&db, &opts, &actor).unwrap();
+        assert_eq!(db.submit_job(job.id).unwrap().unwrap().solution.as_ref(), Some(&solution));
+        let done = run_job(&mut db, &config, job.id, false).unwrap().0;
+        assert_eq!(done.result.as_ref().unwrap()["solution"]["title"], solution.title);
+        let first = db.reviews(&key).unwrap().remove(0);
+        assert!(job.head.starts_with(&first.commit_sha));
+        assert_eq!(first.gate.as_ref().unwrap().commit, first.commit_sha);
+        assert_eq!(first.solution.as_ref(), Some(&solution));
+
+        // A queued submit runs the new branch head, but the old explanation cannot follow it.
+        let queued = enqueue(&db, &opts, &actor).unwrap();
+        std::fs::write(wt.join("footer.txt"), "a different implementation").unwrap();
+        crate::test_repo::git(&wt, &["add", "."]);
+        crate::test_repo::git(&wt, &["commit", "-q", "-m", "different footer"]);
+        let done = run_job(&mut db, &config, queued.id, false).unwrap().0;
+        assert!(done.result.as_ref().unwrap()["solution"].is_null());
+        let latest = db.reviews(&key).unwrap().remove(0);
+        assert_ne!(latest.patch_id, first.patch_id);
+        assert_ne!(latest.commit_sha, first.commit_sha);
+        assert!(latest.solution.is_none());
+        assert_eq!(latest.gate.as_ref().unwrap().commit, latest.commit_sha);
+
+        // A fresh synchronous submission can explain this revision. Omitting text on a later
+        // submission stays missing; neither the prior round nor an issue note fills it in.
+        let fresh = crate::submit::submit(&mut db, &config, &opts, &actor).unwrap();
+        assert_eq!(fresh.solution.as_ref(), Some(&solution));
+        let legacy = SubmitOptions { solution: None, ..opts };
+        crate::submit::submit(&mut db, &config, &legacy, &actor).unwrap();
+        assert!(db.reviews(&key).unwrap()[0].solution.is_none());
+        drop(db);
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn solution_summary_does_not_follow_a_changed_patch_at_the_same_head() {
+        let (base, db_path, config, key, wt) = fixture();
+        let mut db = Db::open(&db_path).unwrap();
+        let actor = Actor::Agent("codex:solution-test".into());
+        let first = playbook::git(&wt, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        std::fs::write(wt.join("help.txt"), "Help text").unwrap();
+        crate::test_repo::git(&wt, &["add", "."]);
+        crate::test_repo::git(&wt, &["commit", "-q", "-m", "help text"]);
+        let dir = wt.to_string_lossy().into_owned();
+        let solution = crate::submit::SolutionSummary::from_fields(Some("Add a footer and help text"), Some("Add the footer link and its help page.")).unwrap().unwrap();
+        let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: false, solution: Some(&solution), solution_commit: None, solution_patch_id: None };
+        let queued = enqueue(&db, &opts, &actor).unwrap();
+        // Another land absorbed the first commit: this branch has exactly the same head, but
+        // only the help text remains to approve. Its old description covers too much.
+        crate::test_repo::git(&wt, &["update-ref", "refs/heads/main", &first]);
+        let done = run_job(&mut db, &config, queued.id, false).unwrap().0;
+        let result = done.result.unwrap();
+        assert!(result["solution"].is_null());
+        let review = db.reviews(&key).unwrap().remove(0);
+        assert!(queued.head.starts_with(&review.commit_sha));
+        assert_ne!(queued.solution_patch_id.as_deref(), Some(review.patch_id.as_str()));
+        assert!(review.solution.is_none());
+        drop(db);
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn solution_summary_requires_a_bounded_nonempty_pair() {
+        use crate::submit::SolutionSummary;
+        assert!(SolutionSummary::from_fields(None, None).unwrap().is_none());
+        for (title, summary) in [(Some("x"), None), (None, Some("x")), (Some(" "), Some("x")), (Some("x"), Some(" "))] {
+            assert!(SolutionSummary::from_fields(title, summary).is_err());
+        }
+        assert!(SolutionSummary::from_fields(Some(&"x".repeat(201)), Some("x")).is_err());
+        assert!(SolutionSummary::from_fields(Some("x"), Some(&"x".repeat(8001))).is_err());
+        assert_eq!(SolutionSummary::from_fields(Some(" title "), Some(" text ")).unwrap().unwrap().title, "title");
+    }
+
+    #[test]
     fn a_submit_hands_in_at_once_and_the_job_brings_the_result_back() {
         let (base, db_path, config, key, wt) = fixture();
         let mut db = Db::open(&db_path).unwrap();
         let actor = Actor::Agent("codex:session-1".into());
         let dir = wt.to_string_lossy().into_owned();
-        let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: false };
+        let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: false, solution: None, solution_commit: None, solution_patch_id: None };
 
         // Handed in: queued, nothing ran, the issue still In Progress.
         let runner = Recorded(Default::default());
@@ -606,7 +697,7 @@ mod tests {
         let mut db = Db::open(&db_path).unwrap();
         let actor = Actor::Agent("codex:session-1".into());
         let dir = wt.to_string_lossy().into_owned();
-        let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: false };
+        let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: false, solution: None, solution_commit: None, solution_patch_id: None };
         let job = enqueue(&db, &opts, &actor).unwrap();
         // Running under a process that no longer exists: abandoned, and the submitter is told.
         db.conn.execute("UPDATE submit_job SET state = 'running', pid = 999999, started_at = ?2 WHERE id = ?1", rusqlite::params![job.id, now()]).unwrap();
@@ -654,7 +745,7 @@ mod tests {
         let mut db = Db::open(&db_path).unwrap();
         let actor = Actor::Agent("codex:session-1".into());
         let dir = wt.to_string_lossy().into_owned();
-        let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: false };
+        let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: false, solution: None, solution_commit: None, solution_patch_id: None };
         let job = enqueue(&db, &opts, &actor).unwrap();
         db.conn.execute("UPDATE submit_job SET state = 'failed', error = 'the gate failed', ended_at = ?2 WHERE id = ?1", params![job.id, now()]).unwrap();
         let project = key.split('-').next().unwrap().to_string();
@@ -681,6 +772,8 @@ mod tests {
             issue: "APP-1".into(),
             worktree: String::new(),
             branch: String::new(),
+            solution: None,
+            solution_patch_id: None,
             head: String::new(),
             requested_by: String::new(),
             skip_review: false,

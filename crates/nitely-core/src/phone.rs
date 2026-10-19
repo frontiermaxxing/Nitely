@@ -1171,6 +1171,10 @@ fn decisions(db: &crate::Db) -> std::result::Result<(Value, std::collections::Ha
             "issue": issue_json(&i),
             "patch_id": r.patch_id,
             "reasons": r.reasons,
+            "commit_sha": r.commit_sha,
+            "solution": r.solution,
+            "gate": r.gate,
+            "pr_url": db.prs_for_issue(&i.key)?.first().map(|p| &p.url),
             "review": { "reviewer": r.reviewer, "verdict": r.verdict, "note": r.note, "findings": r.findings },
         }));
     }
@@ -1604,12 +1608,19 @@ mod tests {
         };
         let a = waiting(&mut db, "Billing fix", "p1");
         let b = waiting(&mut db, "Pricing page", "p2");
+        db.conn.execute("UPDATE review SET solution = ?2, gate = ?3 WHERE issue_key = ?1", rusqlite::params![
+            a, r#"{"title":"Check billing session before loading data","summary":"Reject expired sessions before returning the invoice."}"#,
+            r#"{"commit":"c","passed":true,"results":[{"command":"billing tests","ok":true,"seconds":1,"output":"ok"}]}"#
+        ]).unwrap();
         let ask = db.create_ask("Which currency?", &["EUR".into(), "USD".into()], Some(&a), None, &agent).unwrap();
 
         let (status, d) = p.get(&base, "/phone/api/decisions", now());
         assert_eq!(status, 200, "{d}");
         let kinds: Vec<&str> = d["decisions"].as_array().unwrap().iter().map(|x| x["kind"].as_str().unwrap()).collect();
         assert_eq!(kinds, ["ask", "approve", "approve"], "a's open ask shows beside its approval, not instead of it: {d}");
+        assert_eq!(d["decisions"][1]["solution"]["title"], "Check billing session before loading data");
+        assert_eq!(d["decisions"][1]["gate"]["commit"], d["decisions"][1]["commit_sha"]);
+        assert!(d["decisions"][2]["solution"].is_null(), "legacy approval has no invented solution");
         assert_eq!(d["at_pc"], 2, "the worktrees the app sees waiting");
         let own = db.create_issue(&NewIssue { owner: Some("human".into()), ..new("Call the bank") }, &agent).unwrap().key;
         assert_eq!(p.get_with(&base, "/phone/api/decisions", now(), "aaaaaaaaaaaaaaaa").1["at_pc"], 3, "and the person's own work");

@@ -145,3 +145,21 @@ about the change, and an approved playbook change or goal plan answers its issue
 - `src-tauri/src/lib.rs`: creating the key, signing when the person moves an issue to Approved (not
   a playbook proposal, which applies at once), and the key check on start and before every approval.
 - `crates/nitely-core/src/land.rs`: `check_approval` verifies.
+
+## Explaining the submitted change
+
+A submitter can provide `solution_title` and `solution_summary` to MCP `submit`, or
+`--solution-title` and `--solution-summary` to `nitely submit`. Supply both: a concrete outcome
+and a short explanation of what the implementation changes. The title is limited to 200 bytes
+and the summary to 8000 bytes. Do not repeat the problem statement as the solution.
+
+The submit job captures these words with the handed-in commit and patch. If the branch changes
+before the job gates it, or integration absorbs part of its patch, the words are discarded; a fresh submission must explain the new revision. The
+review record keeps the explanation and gate evidence with its existing commit and patch IDs.
+Neither an older round nor a later issue note supplies missing text. Legacy submissions say
+“Solution summary unavailable” and keep their existing approval rules.
+
+Desktop single and grouped approvals and phone approvals lead with the solution, retain the
+original issue as context, and show verification and remaining findings separately. “Approve
+change” authorizes the submitted patch to land under the project’s rules; it does not promise
+that landing has completed. Goal plans and playbook proposals keep their separate decisions.

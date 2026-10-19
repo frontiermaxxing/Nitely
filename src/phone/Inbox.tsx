@@ -1,3 +1,6 @@
+import { ApprovalSolution } from "../ApprovalSolution";
+import { approvalSolution } from "../approvalEvidence";
+import type { ApprovalGate, SolutionSummary } from "../types";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { signedGet, signedPost, unreachable } from "./api";
 import { keyProject, phoneProjects, shownIndex, type Shown } from "./select";
@@ -28,6 +31,10 @@ export interface PhoneDecision {
   issue: PhoneIssue | null;
   ask?: { id: number; question: string; options: string[]; asked_by: string; finding?: { priority: number; text: string } | null };
   patch_id?: string;
+  commit_sha?: string;
+  solution?: SolutionSummary | null;
+  gate?: ApprovalGate | null;
+  pr_url?: string | null;
   reasons?: string[];
   review?: { reviewer: string; verdict: string; note: string; findings: { priority: number; text: string; carried?: boolean }[] };
 }
@@ -201,11 +208,11 @@ function storeProject(project: string | null) {
   }
 }
 
-function IssueHead(props: { issue: PhoneIssue }) {
+function IssueHead(props: { issue: PhoneIssue; title?: string }) {
   return (
     <div className="ph-issue">
       <div className="ph-issue-key">{props.issue.key}</div>
-      <h1 className="ph-issue-title">{props.issue.title}</h1>
+      <h1 className="ph-issue-title">{props.title ?? props.issue.title}</h1>
       {/* The compact track and its words: the full one's labels do not fit a phone's width. */}
       <div className="ph-track">
         <StationTrack track={props.issue.track} size="mini" />
@@ -269,7 +276,7 @@ function Decision(props: { decision: PhoneDecision; device: Device; onDecided: (
   return (
     <article className="ph-decision">
       <div className={`ph-kind ph-kind-${d.kind}`}>{finding ? "Accept this review finding?" : d.kind === "ask" ? `${who(d.ask!.asked_by)} asks` : "Approve this change?"}</div>
-      {d.issue && <IssueHead issue={d.issue} />}
+      {d.issue && <IssueHead issue={d.issue} title={d.kind === "approve" ? approvalSolution(d).title : undefined} />}
 
       {finding && (
         <div className="ph-why">
@@ -289,6 +296,8 @@ function Decision(props: { decision: PhoneDecision; device: Device; onDecided: (
       {finding && <p className="ph-quiet">Accepting signs your decision: it no longer blocks the land, and the next review is told. Sent back, it stays a defect to fix.</p>}
       {d.kind === "approve" && (
         <div className="ph-why">
+          {d.issue && <ApprovalSolution evidence={d} issue={d.issue} />}
+          {d.pr_url && /^https?:\/\//i.test(d.pr_url) ? <p><a href={d.pr_url} target="_blank" rel="noreferrer">View changes in PR</a></p> : <p className="ph-quiet">No pull request linked. Open this issue on your PC for details.</p>}
           {(d.reasons ?? []).length > 0 && (
             <>
               <h2>Why it waits for you</h2>
@@ -301,7 +310,7 @@ function Decision(props: { decision: PhoneDecision; device: Device; onDecided: (
               </ul>
             </>
           )}
-          {d.review && (
+          {d.review?.reviewer ? (
             <>
               <h2>
                 {who(d.review.reviewer)}'s review {d.review.verdict === "pass" ? "passed" : "asked for changes"}
@@ -319,7 +328,7 @@ function Decision(props: { decision: PhoneDecision; device: Device; onDecided: (
                 </ul>
               )}
             </>
-          )}
+          ) : <p>{d.review?.note || "No automated review ran."}</p>}
         </div>
       )}
 
@@ -364,7 +373,7 @@ function Decision(props: { decision: PhoneDecision; device: Device; onDecided: (
         ) : (
           <>
             <button className="ph-btn ph-primary" disabled={busy} onClick={approve}>
-              Approve
+              Approve change
             </button>
             <button className="ph-btn" disabled={busy} onClick={() => setWriting("sendback")}>
               Send back

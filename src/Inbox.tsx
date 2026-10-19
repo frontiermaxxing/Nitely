@@ -30,7 +30,9 @@ import { ChecksMark } from "./Pr";
 import type { Board, IssueDetail, Project, TaskRow, Waiting } from "./types";
 import { useWaits } from "./WaitingStrip";
 import { behindSummary, waitLine, waitOf } from "./waits";
-import { ago } from "./util";
+import { ago, openExternal } from "./util";
+import { ApprovalSolution } from "./ApprovalSolution";
+import { approvalSolution } from "./approvalEvidence";
 import {
   AgentMark,
   CountBadge,
@@ -697,7 +699,7 @@ function DecisionDetail(props: {
       </div>
       {issue ? (
         <button className="dd-title" onClick={() => props.onOpenIssue(issue.key)} title="Open the issue">
-          {issue.title}
+          {d.kind === "approve" && !proposal && !plan && native ? approvalSolution(detail?.reviews[0]).title : issue.title}
         </button>
       ) : (
         <p className="dd-title mono">{d.row?.branch ?? d.repo ?? "No issue"}</p>
@@ -741,7 +743,7 @@ function DecisionDetail(props: {
         {!resolved && !pending && d.kind === "approve" && issue?.origin === "nitely" && (
           <div className="actions">
             <button className="btn primary" disabled={busy} onClick={() => move("Approved")}>
-              Approve
+              Approve change
             </button>
             <button className="btn" disabled={busy} onClick={() => move("Todo")}>
               Send back to Todo
@@ -830,7 +832,7 @@ function ApprovalsCard(props: {
       <p className="dd-title">
         {members.length} changes wait for your approval
       </p>
-      <p className="muted small">Each is its own decision. Approve all approves them one by one, so each change's patch is signed on its own.</p>
+      <p className="muted small">Each approval authorizes that submitted change to land under the project’s rules. Checks or the land queue may still hold it. Approve all signs each patch separately.</p>
       <ol className="approvals-list">
         {members.map((m) => {
           const detail = props.details.get(m.issue!.key);
@@ -846,21 +848,23 @@ function ApprovalsCard(props: {
                   {issue.key}
                 </button>
                 <button className="approvals-title" onClick={() => props.onOpenIssue(issue.key)} title="Open the issue">
-                  {issue.title}
+                  {approvalSolution(review).title}
                 </button>
                 <span className="muted small">{ago(now, m.since).replace(" ago", "")}</span>
               </div>
+              <ApprovalSolution evidence={review} issue={issue} findings={review?.findings} showFindings showNext={false} />
               <p className="approvals-why small">
                 {reasons.length > 0 ? `${capital(listReasons(reasons))}.` : "The playbook wants a person to approve this change."}{" "}
-                {review?.reviewer && (
+                {review?.reviewer ? (
                   <span className="approvals-review">
                     <AgentMark vendor={review.reviewer} size={14} /> {VENDOR_LABEL[vendorOf(review.reviewer)]}{" "}
                     {review.verdict === "changes" ? <span className="decision-changes">asked for changes</span> : "passed"}
                     <FindingDots findings={review.findings} />
                     {review.findings.length > 0 ? describeFindings(review.findings) : "no findings"}
                   </span>
-                )}
+                ) : <span>{review?.note || "No automated review ran."}</span>}
               </p>
+              <p className="small approvals-links">{detail?.prs[0] && <a href={detail.prs[0].url} onClick={openExternal(detail.prs[0].url)}>View changes in PR</a>} <button className="link" onClick={() => props.onOpenIssue(issue.key)}>View details</button></p>
               {done ? (
                 <p className={`dd-outcome${done.done ? " done" : ""}`} role="status">
                   <ResultMark result={done.done ? "pass" : "pending"} size={16} />
@@ -869,7 +873,7 @@ function ApprovalsCard(props: {
               ) : (
                 <div className="actions">
                   <button className="btn primary" disabled={all} onClick={() => move(m, "Approved")}>
-                    Approve
+                    Approve change
                   </button>
                   <button className="btn" disabled={all} onClick={() => move(m, "Todo")}>
                     Send back to Todo
@@ -885,7 +889,7 @@ function ApprovalsCard(props: {
         <div className="dd-actions">
           <div className="actions">
             <button className="btn primary" disabled={all} onClick={approveAll}>
-              {all ? "Approving…" : `Approve all ${waiting.length}`}
+              {all ? "Approving…" : `Approve all ${waiting.length} changes`}
             </button>
           </div>
         </div>
@@ -957,6 +961,8 @@ function Body(props: { decision: Decision; detail?: IssueDetail; integration: st
       const pr = detail?.prs[0];
       return (
         <>
+          {d.issue && <ApprovalSolution evidence={review} issue={d.issue} findings={review?.findings} showFindings />}
+          {pr && <p><a href={pr.url} onClick={openExternal(pr.url)}>View changes in PR</a></p>}
           <p className="decision-matter">{reasons.length > 0 ? `${capital(listReasons(reasons))}.` : "The playbook wants a person to approve this change."}</p>
           <p className="decision-why">
             {review?.reviewer ? (
@@ -970,7 +976,7 @@ function Body(props: { decision: Decision; detail?: IssueDetail; integration: st
                 </span>
               </>
             ) : (
-              detail && "No review ran."
+              detail && (review?.note || "No automated review ran.")
             )}
             {pr?.checks && <ChecksMark checks={pr.checks} />}
           </p>

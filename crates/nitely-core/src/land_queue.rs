@@ -780,7 +780,7 @@ batch = "waiting"
             sh(&wt, &["add", "."]);
             sh(&wt, &["commit", "-q", "-m", title]);
             let dir = wt.to_string_lossy().into_owned();
-            let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: false };
+            let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: false, solution: None, solution_commit: None, solution_patch_id: None };
             let s = submit(&mut self.db, &crate::Config::default(), &opts, &self.actor).unwrap();
             assert_eq!(s.state, "In Review", "{s:?}");
             (issue.key, wt)
@@ -1015,7 +1015,7 @@ batch = "waiting"
         sh(&wt, &["add", "."]);
         sh(&wt, &["commit", "-q", "-m", "billing"]);
         let dir = wt.to_string_lossy().into_owned();
-        let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: false };
+        let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: false, solution: None, solution_commit: None, solution_patch_id: None };
         submit(&mut f.db, &crate::Config::default(), &opts, &f.actor).unwrap();
         assert!(lands_alone(&f.db, &pb, &issue.key).unwrap().unwrap().contains("approval"));
         // The playbook decides the rest.

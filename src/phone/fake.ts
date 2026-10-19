@@ -37,6 +37,10 @@ let decisions: PhoneDecision[] = [
     since: NOW() - 3600,
     issue: { key: "DEMO-1", title: "Round invoice totals to the cent", kind: "feature", priority: 1, state: "Needs You", track: track("needs", { todo: NOW() - 20000, started: NOW() - 18000, working: NOW() - 17000, gate: NOW() - 9000, review: NOW() - 8000, "needs": NOW() - 3600 }) as never },
     patch_id: "patch-demo-1",
+    commit_sha: "a1b2c3d",
+    solution: { title: "Calculate invoice totals in integer cents", summary: "Sum line items in cents and round tax once at the invoice boundary. This avoids fractional-cent drift across multiple items." },
+    gate: { commit: "a1b2c3d", passed: true, results: [{ command: "cargo test billing", ok: true }] },
+    pr_url: "https://github.com/example/acme/pull/1",
     reasons: ["billing and money: src/billing/invoice.rs"],
     review: { reviewer: "codex", verdict: "pass", note: "", findings: [{ priority: 3, text: "Rename `amt` to `amount` in invoice.rs" }] },
   },
@@ -52,6 +56,8 @@ let decisions: PhoneDecision[] = [
 ];
 
 export function installFake() {
+  const theme = new URLSearchParams(location.search).get("theme");
+  if (theme === "light" || theme === "dark") document.documentElement.dataset.theme = theme;
   let askedAt = 0;
   let notifying = false;
   setFake((method, path, body) => {

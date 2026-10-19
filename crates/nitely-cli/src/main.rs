@@ -190,6 +190,12 @@ enum Cmd {
     /// Hand in the current worktree's branch: gate, cross-vendor review, push, pull request. It runs
     /// in the background and returns a job id (`nitely submit-status`); --wait runs it here.
     Submit {
+        /// Concrete outcome title for this submitted revision. Supply with --solution-summary.
+        #[arg(long, requires = "solution_summary")]
+        solution_title: Option<String>,
+        /// What changed, in the submitter’s words, for this submitted revision.
+        #[arg(long, requires = "solution_title")]
+        solution_summary: Option<String>,
         /// The issue; defaults to the one the branch names.
         #[arg(long)]
         issue: Option<String>,
@@ -1347,12 +1353,13 @@ fn run(cmd: Cmd) -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Submit { issue, no_review, local, wait } => {
+        Cmd::Submit { issue, no_review, local, wait, solution_title, solution_summary } => {
             let config = Config::load()?;
             let mut db = Db::open_default()?;
             let cwd = cwd()?;
             nitely_core::install::check_current(&config, &cwd, env!("NITELY_COMMIT"))?;
-            let opts = nitely_core::submit::SubmitOptions { dir: &cwd, issue_key: issue.as_deref(), skip_review: no_review, local_only: local, batch: false };
+            let solution = nitely_core::submit::SolutionSummary::from_fields(solution_title.as_deref(), solution_summary.as_deref())?;
+            let opts = nitely_core::submit::SubmitOptions { dir: &cwd, issue_key: issue.as_deref(), skip_review: no_review, local_only: local, batch: false, solution: solution.as_ref(), solution_commit: None, solution_patch_id: None };
             if !wait {
                 let runner = nitely_core::submit_job::DetachedProcess { nitely: std::env::current_exe()? };
                 let job = nitely_core::submit_job::submit_async(&mut db, &config, &opts, &me, &runner)?;

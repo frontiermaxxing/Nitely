@@ -1315,7 +1315,7 @@ impl Supervisor {
         if tries > 1 {
             return Ok(false);
         }
-        let opts = crate::submit::SubmitOptions { dir: &job.worktree, issue_key: Some(key), skip_review: job.skip_review, local_only: job.local_only, batch: true };
+        let opts = crate::submit::SubmitOptions { dir: &job.worktree, issue_key: Some(key), skip_review: job.skip_review, local_only: job.local_only, batch: true, solution: job.solution.as_ref(), solution_commit: Some(&job.head), solution_patch_id: job.solution_patch_id.as_deref() };
         // One that cannot be handed in as it is (uncommitted changes since) goes to a new worker
         // instead, with its handoff; it never holds up the rest of the pass.
         let Ok(again) = crate::submit_job::enqueue(db, &opts, &Actor::Agent(worker.agent_id.clone())) else {
@@ -1485,7 +1485,7 @@ Work only there; never edit or commit in {repo}.
 2. Do the work. Call report with key {key} at each step, one line.
 3. File anything you find but will not fix with file_issue.
 4. If only the human can decide something, ask it, move {key} to Needs You, leave a handoff note and stop: do not wait for the answer.
-5. Commit, then call submit (without wait): it hands the change in and returns at once. Then leave the handoff note (step 7) and stop. Nitely runs the gate and the review, and lands it when it passes; if it comes back (findings, a failed gate, a land that stopped), a new worker gets it with why.
+5. Commit, then call submit (without wait) with solution_title and solution_summary describing the implemented outcome, behavior, validation and any remaining limits for this revision (not the original problem): it hands the change in and returns at once. Then leave the handoff note (step 7) and stop. Nitely runs the gate and the review, and lands it when it passes; if it comes back (findings, a failed gate, a land that stopped), a new worker gets it with why.
 6. If the issue's latest handoff says its submit or land came back, start from that: fix what it names (on a rebase conflict, resolve it in the worktree and `git rebase --continue`), commit, and submit again.
 7. Before you stop, for any reason, leave a note on {key} with handoff: true: what is done, what is left, what you were unsure about.
 

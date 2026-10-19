@@ -178,7 +178,7 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
     const inWorktree = async (worktree) => connect(nitelyExe, { cwd: worktree, env });
     for (const [key, wt] of [[B, two], [C, three], [D, four]]) {
       const there = await inWorktree(wt);
-      await there.call("submit", { key });
+      await there.call("submit", { key, solution_title: "Add a greeting variant", solution_summary: "Add the requested greeting file while retaining the existing greetings." });
       await there.close();
     }
     // While its reviewer runs, the batch is one row on the board, each issue's station says so.
@@ -187,6 +187,8 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
     await until("the batched reviews", async () => (await state(B)) === "In Review" && (await state(D)) === "In Review" && (await detail(C)).reviews.length > 0);
     const [d2, d3, d4] = [await detail(B), await detail(C), await detail(D)];
     assert.ok(d2.reviews[0].batch_id && d2.reviews[0].batch_id === d3.reviews[0].batch_id && d3.reviews[0].batch_id === d4.reviews[0].batch_id, "one batch reviewed all three");
+    assert.equal(d2.reviews[0].solution.title, "Add a greeting variant");
+    assert.equal(d2.reviews[0].gate.commit, d2.reviews[0].commit_sha);
     assert.equal(d2.reviews[0].verdict, "pass");
     assert.equal(d4.reviews[0].verdict, "pass");
     assert.equal(d3.reviews[0].verdict, "changes", "its own P1, from the same batch");

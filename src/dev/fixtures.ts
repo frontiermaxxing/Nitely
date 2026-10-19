@@ -531,10 +531,11 @@ function build(): World {
       // A second round of changes carries a finding the first round raised and was not fixed.
       const before = reviews.find((r) => r.verdict === "changes");
       if (verdict === "changes" && before) findings.unshift({ ...before.findings[before.findings.length - 1], carried: true, now: "src/sync.rs:88 `retry(0)` still gives up after the first failure" });
+      const reviewedCommit = sha();
       reviews.unshift({
         issue_key: spec.key,
         patch_id: sha(),
-        commit_sha: sha(),
+        commit_sha: reviewedCommit,
         reviewer,
         verdict,
         approver,
@@ -542,6 +543,10 @@ function build(): World {
         findings,
         ts,
         note: reviewNote,
+        ...(approver === "human" && spec.key === "ORB-268" ? {
+          solution: { title: "Start normally with an empty bookmarks file", summary: "Treat a zero-byte bookmarks file as an empty collection before initializing the window. Existing bookmarks and malformed-file error reporting are preserved." },
+          gate: { commit: reviewedCommit, passed: true, results: [{ command: "cargo test -p nitely-core", ok: true }, { command: "npm test", ok: true }] },
+        } : {}),
       });
     };
 

@@ -1,0 +1,14 @@
+.approval-solution { margin: 0; min-width: 0; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.approval-solution h3 { margin: 8px 0 4px; font-size: 12px; font-weight: 650; }
+.approval-solution p { margin: 4px 0; }
+.approval-solution ul { margin: 4px 0; padding-left: 20px; }
+.approval-solution .solution-text { white-space: pre-wrap; }
+.approval-solution .solution-original, .approval-solution .solution-next { color: var(--fg-2); }
+.approval-solution code { white-space: normal; }
+
+.approvals-links { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 0; }
+
+.ph-why .approval-solution { font-size: 15px; }
+.approval-solution .solution-text { color: var(--fg); }
+
+.ph-why a { color: var(--fg); text-underline-offset: 3px; }

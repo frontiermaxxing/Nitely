@@ -1181,7 +1181,7 @@ when_changed = ["billing"]
 
         fn submit(&mut self, wt: &Path) {
             let dir = wt.to_string_lossy().into_owned();
-            let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: false };
+            let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: false, solution: None, solution_commit: None, solution_patch_id: None };
             submit(&mut self.db, &crate::Config::default(), &opts, &self.actor).unwrap();
         }
 
@@ -2001,7 +2001,7 @@ when_changed = ["billing"]
         std::fs::write(wt.join("engine/core.c"), "int core;\nint faster;\nint more;\n").unwrap();
         sh(&wt.join("engine"), &["commit", "-q", "-am", "engine: more"]);
         let dir = wt.to_string_lossy().into_owned();
-        let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: false };
+        let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: false, solution: None, solution_commit: None, solution_patch_id: None };
         let err = submit(&mut f.db, &crate::Config::default(), &opts, &f.actor).unwrap_err().to_string();
         assert!(err.contains("does not point at") && err.contains("git add engine"), "{err}");
         std::fs::write(wt.join("engine/core.c"), "int core;\n").unwrap();
@@ -2025,7 +2025,7 @@ when_changed = ["billing"]
         sh(&f.repo, &["commit", "-q", "-m", "roll the engine back"]);
         sh(&wt, &["rebase", "-q", "main"]);
         let dir = wt.to_string_lossy().into_owned();
-        let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: false };
+        let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: false, solution: None, solution_commit: None, solution_patch_id: None };
         let err = submit(&mut f.db, &crate::Config::default(), &opts, &f.actor).unwrap_err().to_string();
         let fix = format!("git -C engine reset --keep {}", &older[..12]);
         assert!(err.contains("the branch did not change it") && err.contains(&fix) && err.contains("Do not `git add engine`"), "{err}");
@@ -2046,7 +2046,7 @@ when_changed = ["billing"]
         f.land_elsewhere();
         sh(&wt, &["rebase", "-q", "main"]);
         let dir = wt.to_string_lossy().into_owned();
-        let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: false };
+        let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: false, solution: None, solution_commit: None, solution_patch_id: None };
         let err = submit(&mut f.db, &crate::Config::default(), &opts, &f.actor).unwrap_err().to_string();
         let main = sh(&f.engine(), &["rev-parse", "main"]);
         let fix = format!("git -C engine merge --ff-only {}", &main[..12]);

@@ -30,7 +30,11 @@ test("the Inbox approves an issue and answers a question, and the database shows
 
     // The approval: pick it, approve, and see it resolve in place.
     await page.click({ css: ".inbox-row", text: "Ship the export button" });
-    await page.click({ css: ".inbox-detail button", text: "Approve" });
+    const approvalText = await page.waitFor(`return document.querySelector(".inbox-detail .approval-solution")?.textContent;`, { what: "the submitted change explanation" });
+    assert.match(approvalText, /Original issue.*Ship the export button/);
+    assert.match(approvalText, /Verification evidence unavailable/);
+    assert.match(await page.waitFor(`return document.querySelector(".inbox-detail .dd-title")?.textContent;`), /Solution summary unavailable/);
+    await page.click({ css: ".inbox-detail button", text: "Approve change" });
     const outcome = await page.waitFor(`return document.querySelector(".dd-outcome.done")?.textContent;`, { what: "the approval's outcome" });
     assert.match(outcome, /Approved/);
     await page.screenshot(join(SCREENS, "inbox-approved.png"));

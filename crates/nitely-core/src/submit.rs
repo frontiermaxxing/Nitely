@@ -4,7 +4,7 @@
 //! issue, as the repo's playbook says.
 
 use anyhow::{bail, Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use rusqlite::OptionalExtension;
 use std::path::Path;
 
@@ -12,6 +12,24 @@ use crate::db::{now, Db};
 use crate::issues::{Actor, IssueRecord};
 use crate::playbook::{self, git, git_remote, GateResult, Playbook};
 use crate::review::{Finding, PreviousRound, Review};
+
+/// The submitter's explanation, captured with the revision handed in, never guessed from an issue.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SolutionSummary {
+    pub title: String,
+    pub summary: String,
+}
+
+impl SolutionSummary {
+    pub fn from_fields(title: Option<&str>, summary: Option<&str>) -> Result<Option<Self>> {
+        match (title, summary) {
+            (None, None) => Ok(None),
+            (Some(t), Some(s)) if !t.trim().is_empty() && !s.trim().is_empty() && t.len() <= 200 && s.len() <= 8000 =>
+                Ok(Some(Self { title: t.trim().into(), summary: s.trim().into() })),
+            _ => bail!("provide both solution_title (1–200 bytes) and solution_summary (1–8000 bytes)"),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Submitted {
@@ -23,6 +41,7 @@ pub struct Submitted {
     pub commit: String,
     pub files: usize,
     pub gate: GateResult,
+    pub solution: Option<SolutionSummary>,
     /// None when the gate failed (nothing else ran) or the review was skipped.
     pub review: Option<Review>,
     /// `agent` when the review is enough, `human` when it waits for approval.
@@ -61,6 +80,9 @@ pub struct ReviewRecord {
     pub note: String,
     /// The review batch it was reviewed in, with other changes in one reviewer call (NIT-216).
     pub batch_id: Option<i64>,
+    /// These fields describe this record’s commit only. Legacy records have neither.
+    pub solution: Option<SolutionSummary>,
+    pub gate: Option<GateResult>,
 }
 
 pub struct SubmitOptions<'a> {
@@ -75,6 +97,10 @@ pub struct SubmitOptions<'a> {
     /// May wait for a review batch when the playbook batches reviews: only a submit that runs in
     /// the background, where nobody waits on it.
     pub batch: bool,
+    pub solution: Option<&'a SolutionSummary>,
+    /// Async jobs bind the supplied text to the head captured at enqueue.
+    pub solution_commit: Option<&'a str>,
+    pub solution_patch_id: Option<&'a str>,
 }
 
 pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: &Actor) -> Result<Submitted> {
@@ -82,7 +108,14 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     let (_, branch_key) = crate::git::parse_branch(&branch);
     let root = playbook::repo_root(config, opts.dir).with_context(|| format!("{} is not inside a git repo", opts.dir))?;
     let pb = Playbook::load(&root)?;
+    let handed_in = opts.solution_commit.map(str::to_string).unwrap_or(git(&worktree, &["rev-parse", "HEAD"])?.trim().to_string());
     let base = pb.integration_branch().to_string();
+    let explained_patch = if opts.solution.is_some() {
+        Some(match opts.solution_patch_id {
+            Some(patch) => patch.to_string(),
+            None => patch_id_range(&worktree, &playbook::diff_base(&worktree, &base), &handed_in)?,
+        })
+    } else { None };
     if branch.is_empty() {
         bail!("{} has no commit on its branch yet; submit from the worktree start_task made", worktree.display());
     }
@@ -119,14 +152,17 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     pb.approval.check_blocked(&files)?;
     crate::private_terms::check(issue.project.as_deref(), &worktree, &since)?;
     let gate = playbook::run_gate(db, &root, &worktree, Some(&issue.key), actor)?;
+    let submitted_patch = patch_id_range(&worktree, &since, &gate.commit)?;
+    let explained_revision = git(&worktree, &["rev-parse", "--verify", &format!("{}^{{commit}}", gate.commit)])?.trim() == handed_in;
     let mut out = Submitted {
         issue: issue.key.clone(),
         branch: branch.clone(),
         base: base.clone(),
         // Of the commit the gate ran on, as the review and its reuse are: one made meanwhile is not covered.
-        patch_id: patch_id_range(&worktree, &since, &gate.commit)?,
+        patch_id: submitted_patch.clone(),
         commit: gate.commit.clone(),
         files: files.len(),
+        solution: opts.solution.filter(|_| explained_revision && explained_patch.as_ref() == Some(&submitted_patch)).cloned(),
         gate,
         review: None,
         approver: "human".into(),
@@ -737,7 +773,10 @@ pub fn describe(issue: &IssueRecord, s: &Submitted, land_by: crate::playbook::La
     // A link with the app's own scheme; hosts that drop such links still show the key, and the
     // second line keeps the link copyable.
     let named = if issue.url.is_empty() { issue.key.clone() } else { format!("[{}]({})", issue.key, issue.url) };
-    let mut lines = vec![format!("Nitely: **{named}** {}", issue.title)];
+    let mut lines = match &s.solution {
+        Some(solution) => vec![format!("## {}", solution.title), solution.summary.clone(), String::new(), format!("Original issue: **{named}** {}", issue.title)],
+        None => vec![format!("Nitely: **{named}** {}", issue.title), "Solution summary unavailable.".into()],
+    };
     if issue.url.starts_with(&format!("{}://", crate::issues::LINK_SCHEME)) {
         lines.push(format!("Open it in Nitely: `{}`", issue.url));
     }
@@ -886,12 +925,17 @@ impl Db {
             Some(r) => (r.reviewer.as_str(), r.verdict.as_str(), to_json(&r.findings), to_json(&r.flagged), r.note.as_str()),
             None => ("", "none", "[]".to_string(), "[]".to_string(), ""),
         };
+        // Approval cards need the commands and their outcomes, not potentially large console logs.
+        let mut evidence = s.gate.clone();
+        for result in &mut evidence.results {
+            result.output.clear();
+        }
         let batch = s.review.as_ref().and_then(|r| r.batch.as_ref()).map(|b| b.id);
         let (seconds, tokens) = (s.review.as_ref().map(|r| r.seconds as i64), s.review.as_ref().and_then(|r| r.tokens).map(|t| t as i64));
         self.conn.execute(
-            "INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, reasons, findings, flagged, note, ts, batch_id, seconds, tokens)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-            rusqlite::params![s.issue, s.patch_id, s.commit, reviewer, verdict, s.approver, to_json(&s.reasons), findings, flagged, note, now(), batch, seconds, tokens],
+            "INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, reasons, findings, flagged, note, ts, batch_id, seconds, tokens, solution, gate)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            rusqlite::params![s.issue, s.patch_id, s.commit, reviewer, verdict, s.approver, to_json(&s.reasons), findings, flagged, note, now(), batch, seconds, tokens, s.solution.as_ref().map(to_json), to_json(&evidence)],
         )?;
         Ok(())
     }
@@ -904,7 +948,7 @@ impl Db {
     /// `reviews`, only those recorded before the review `before` when given.
     pub fn reviews_before(&self, issue_key: &str, before: Option<i64>) -> Result<Vec<ReviewRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT issue_key, patch_id, commit_sha, reviewer, verdict, approver, reasons, findings, ts, note, batch_id
+            "SELECT issue_key, patch_id, commit_sha, reviewer, verdict, approver, reasons, findings, ts, note, batch_id, solution, gate
              FROM review WHERE issue_key = ?1 COLLATE NOCASE AND (?2 IS NULL OR id < ?2) ORDER BY ts DESC, id DESC",
         )?;
         let rows = stmt.query_map(rusqlite::params![issue_key, before], |r| {
@@ -920,6 +964,8 @@ impl Db {
                 ts: r.get(8)?,
                 note: r.get(9)?,
                 batch_id: r.get(10)?,
+                solution: r.get::<_, Option<String>>(11)?.and_then(|s| serde_json::from_str(&s).ok()),
+                gate: r.get::<_, Option<String>>(12)?.and_then(|s| serde_json::from_str(&s).ok()),
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -953,6 +999,8 @@ mod tests {
             ts: 0,
             note: String::new(),
             batch_id: None,
+            solution: None,
+            gate: None,
         };
         let review = |findings: Vec<Finding>| Review {
             reviewer: "codex".into(),
@@ -1097,7 +1145,7 @@ reason = "money logic"
 
         fn submit(&mut self, wt: &Path, local_only: bool) -> Result<Submitted> {
             let dir = wt.to_string_lossy().into_owned();
-            let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only, batch: false };
+            let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only, batch: false, solution: None, solution_commit: None, solution_patch_id: None };
             submit(&mut self.db, &self.config, &opts, &self.actor)
         }
     }
@@ -1262,7 +1310,7 @@ reason = "money logic"
     fn submit_in_background(db_path: &Path, config: &crate::Config, actor: &Actor, wt: &Path) -> Result<Submitted> {
         let mut db = Db::open(db_path)?;
         let dir = wt.to_string_lossy().into_owned();
-        let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: true };
+        let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: true, solution: None, solution_commit: None, solution_patch_id: None };
         submit(&mut db, config, &opts, actor)
     }
 
