@@ -1535,10 +1535,10 @@ fn names_test_filter(command: &str) -> bool {
     };
     // The words of `words[from..]` up to the end of its command.
     let segment = |from: usize| words.get(from..).unwrap_or_default().iter().take_while(|t| !ends(t)).copied().collect::<Vec<&str>>();
-    // Whether `args` name a file or test, past the values of the flags that take one. A word after
-    // a flag the list does not know (`--maxWorkers 2`) may be that flag's value: it names a file
-    // only when it reads as a path (`src/a.test.ts`, `lanes.test.ts`), so a whole-suite run with
-    // an option is never quick (the NIT-359 review).
+    // Whether `args` name a file or test: a word left once the values of the flags that take one
+    // (`with_value`, the runners' own option lists) are passed over. Any other flag is taken as one
+    // that takes none (`--runInBand lanes` names `lanes`), so a value-taking option a list misses
+    // can make a whole-suite run quick; the lists name the ones in use (the NIT-359 review).
     let names_one = |args: &[&str], with_value: &[&str]| {
         let mut j = 0;
         while j < args.len() {
@@ -1548,10 +1548,7 @@ fn names_test_filter(command: &str) -> bool {
                 continue;
             }
             if !t.starts_with('-') {
-                let after_flag = j > 0 && args[j - 1].starts_with('-') && !args[j - 1].contains('=');
-                if !after_flag || t.contains(['/', '\\', '.']) {
-                    return true;
-                }
+                return true;
             }
             j += 1;
         }
@@ -1590,7 +1587,7 @@ fn names_test_filter(command: &str) -> bool {
         // vitest or jest with a file, or `-t` a test's name.
         if matches!(program(w).as_str(), "vitest" | "jest") {
             let args: Vec<&str> = segment(i + 1).into_iter().filter(|t| !matches!(*t, "run" | "watch" | "dev")).collect();
-            if args.iter().any(|t| matches!(*t, "-t" | "--testNamePattern") || t.starts_with("--testNamePattern=")) || names_one(&args, &["--config", "-c", "--project", "--reporter", "--pool", "--root", "-r"]) {
+            if args.iter().any(|t| matches!(*t, "-t" | "--testNamePattern") || t.starts_with("--testNamePattern=")) || names_one(&args, JS_RUNNER_VALUE_FLAGS) {
                 return true;
             }
         }
@@ -1599,7 +1596,7 @@ fn names_test_filter(command: &str) -> bool {
             let args = segment(i + 1);
             let is_test = matches!(args.first(), Some(&"test") | Some(&"t")) || (args.first() == Some(&"run") && args.get(1) == Some(&"test"));
             if let (true, Some(dash)) = (is_test, args.iter().position(|t| *t == "--")) {
-                if names_one(&args[dash + 1..], &[]) {
+                if names_one(&args[dash + 1..], JS_RUNNER_VALUE_FLAGS) {
                     return true;
                 }
             }
@@ -1610,6 +1607,15 @@ fn names_test_filter(command: &str) -> bool {
     }
     false
 }
+
+/// The options of vitest and jest (and so of `npm test -- …`, which hands them on) that take a
+/// value as the next word: `--maxWorkers 2` and `--outputFile results.json` filter nothing.
+const JS_RUNNER_VALUE_FLAGS: &[&str] = &[
+    "--config", "-c", "--project", "--projects", "--selectProjects", "--reporter", "--reporters", "--outputFile", "--maxWorkers", "-w",
+    "--minWorkers", "--pool", "--root", "-r", "--rootDir", "--roots", "--dir", "--shard", "--seed", "--testTimeout", "--hookTimeout",
+    "--environment", "--testEnvironment", "--coverageDirectory", "--coverageProvider", "--testPathIgnorePatterns", "--mode", "--retry",
+    "--testSequencer", "--workerIdleMemoryLimit",
+];
 
 /// Where a queued request stands.
 #[derive(Debug, Clone, PartialEq)]
@@ -4331,6 +4337,7 @@ wanted {shown}", ran.output);
             "npx vitest lanes",
             "npx jest --watch src/lanes.test.ts",
             "npx vitest run --maxWorkers 2 src/lanes.test.ts",
+            "npx jest --runInBand lanes",
             "pytest -k quick_lane",
             "pytest tests/test_lanes.py::test_one",
         ] {
@@ -4352,6 +4359,8 @@ wanted {shown}", ran.output);
             "npx vitest run --maxWorkers 2",
             "npx jest --maxWorkers 2",
             "npm test -- --maxWorkers 2",
+            "npx vitest run --reporter json --outputFile results.json",
+            "npm test -- --outputFile=results.json --maxWorkers 2",
             "node --test --test-concurrency 2",
             "node build.js && echo --test done",
         ] {
