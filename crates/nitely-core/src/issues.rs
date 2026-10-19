@@ -1839,9 +1839,19 @@ impl Db {
             // You entered since, for an approval, is not the ask's to end. It goes back to the agent
             // whose question began the wait.
             let entry = latest_needs_you_entry(&tx, k)?;
+            // A review that needs the person, recorded since the wait began, is an approval waiting
+            // in the same Needs You (submit moves it there without leaving it first): the answer
+            // does not end that.
             let moved: Option<String> = match entry {
                 Some(e) => tx
-                    .query_row("SELECT asked_by FROM ask WHERE issue_key = ?1 AND wait_event = ?2 AND moved_from IS NOT NULL ORDER BY id LIMIT 1", params![k, e], |r| r.get(0))
+                    .query_row(
+                        "SELECT a.asked_by FROM ask a JOIN event w ON w.id = ?2
+                         WHERE a.issue_key = ?1 AND a.wait_event = ?2 AND a.moved_from IS NOT NULL
+                           AND NOT EXISTS (SELECT 1 FROM review r WHERE r.issue_key = ?1 COLLATE NOCASE AND r.approver = 'human' AND r.ts >= w.ts)
+                         ORDER BY a.id LIMIT 1",
+                        params![k, e],
+                        |r| r.get(0),
+                    )
                     .optional()?,
                 None => None,
             };
@@ -2640,6 +2650,21 @@ mod tests {
         db.wait_on_ask(&c, &agent).unwrap();
         db.answer_ask(c.id, "Half up", &Actor::Human).unwrap();
         assert_eq!(db.issue("NIT-1").unwrap().unwrap().state, "Needs You", "the approval still waits");
+
+        // A submit's approval arriving while an ask waits (Needs You to Needs You, after a review
+        // that needs the person): the answer leaves the approval waiting.
+        db.create_issue(&new("Billing copy"), &agent).unwrap();
+        db.move_issue("NIT-2", "In Progress", None, None, &agent).unwrap();
+        let d = db.create_ask("Which tone?", &[], Some("NIT-2"), None, &agent).unwrap();
+        db.wait_on_ask(&d, &agent).unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, ts) VALUES ('NIT-2', 'p', 'c', 'codex', 'pass', 'human', ?1)",
+                [now()],
+            )
+            .unwrap();
+        db.answer_ask(d.id, "Plain", &Actor::Human).unwrap();
+        assert_eq!(db.issue("NIT-2").unwrap().unwrap().state, "Needs You", "the approval still waits");
         std::fs::remove_dir_all(dir).ok();
     }
 
