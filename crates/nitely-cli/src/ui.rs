@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 
 /// The commands the live preview may run. Every one only reads.
 pub const READ_ONLY: &[&str] = &[
+    "performance_query",
     "snapshot",
     "projects",
     "project_brief",
@@ -60,6 +61,7 @@ pub fn run(command: &str, args: &Value) -> Result<Value> {
     }
     let db = || Db::open_read_only(&nitely_core::paths::db_path());
     Ok(match command {
+        "performance_query" => json!(nitely_core::performance_query::query(&nitely_core::performance::directory(), &serde_json::from_value(args.get("query").cloned().unwrap_or_else(|| json!({})))?)?),
         "snapshot" => json!(nitely_core::snapshot(&Config::load_read_only()?, &db()?)?),
         "projects" => json!(db()?.projects()?),
         "project_brief" => json!(db()?.project_brief(str_arg(args, "project")?)?),

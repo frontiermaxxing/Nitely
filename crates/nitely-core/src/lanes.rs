@@ -923,6 +923,7 @@ fn run_with(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Act
         if started == 0 {
             bail!("run {id} was taken out of the queue before it started");
         }
+        crate::performance_events::lane(db, id, crate::performance_events::Kind::Started);
         Ok((n, lock, slot, log))
     })();
     let (n, _lock, _slot, log) = match started {
@@ -964,8 +965,12 @@ fn run_with(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Act
                 "UPDATE lane_run SET state = 'lane_error', ended_at = ?2, error = ?3, output = ?4 WHERE id = ?1",
                 params![id, ended, why, output],
             )?;
+            if why.starts_with("out of memory in the lane:") {
+                crate::performance_events::lane(db, id, crate::performance_events::Kind::OutOfMemory);
+            }
         }
     }
+    crate::performance_events::lane(db, id, crate::performance_events::Kind::Ended);
     let done = db.lane_run(id)?.context("the run's record went missing")?;
     let at = if rules.large_repo { "the main checkout".to_string() } else { format!("lane {n}") };
     let said = match (&done.error, done.exit_code, done.timed_out) {
@@ -2123,12 +2128,14 @@ fn take_turn(
                             drop(lock);
                             drop(slot);
                             db.conn.execute("UPDATE lane_run SET waiting_memory = ?2 WHERE id = ?1", params![id, why])?;
+                            if !waits_for_memory { crate::performance_events::lane(db, id, crate::performance_events::Kind::WaitingForMemory); }
                             waits_for_memory = true;
                             std::thread::sleep(Duration::from_secs(2));
                             continue 'turn;
                         }
                         if waits_for_memory {
                             db.conn.execute("UPDATE lane_run SET waiting_memory = NULL WHERE id = ?1", [id])?;
+                            crate::performance_events::lane(db, id, crate::performance_events::Kind::MemoryWaitEnded);
                         }
                         db.conn.execute("UPDATE lane_run SET quick_slot = ?2 WHERE id = ?1", params![id, quick_slot])?;
                         return Ok((n, lock, slot));
@@ -2147,6 +2154,7 @@ fn take_turn(
 fn forget_memory_wait(db: &Db, id: i64, waits_for_memory: &mut bool) -> Result<()> {
     if std::mem::take(waits_for_memory) {
         db.conn.execute("UPDATE lane_run SET waiting_memory = NULL WHERE id = ?1", [id])?;
+        crate::performance_events::lane(db, id, crate::performance_events::Kind::MemoryWaitEnded);
     }
     Ok(())
 }
@@ -2174,6 +2182,7 @@ impl MachineTurn<'_> {
             .execute("UPDATE lane_run SET state = 'done', ended_at = ?2, exit_code = ?3 WHERE id = ?1", params![self.id, now(), if passed { 0 } else { 1 }])
             .ok();
         self.finished = true;
+        crate::performance_events::lane(self.db, self.id, crate::performance_events::Kind::Ended);
     }
 }
 
@@ -2187,6 +2196,7 @@ impl Drop for MachineTurn<'_> {
                     params![self.id, now()],
                 )
                 .ok();
+            crate::performance_events::lane(self.db, self.id, crate::performance_events::Kind::Ended);
         }
     }
 }
@@ -2225,6 +2235,7 @@ pub fn hold_machine<'a>(db: &'a Db, repo_root: &Path, worktree: &Path, project: 
                         Some(why) => {
                             drop(slot);
                             db.conn.execute("UPDATE lane_run SET waiting_memory = ?2 WHERE id = ?1", params![id, why])?;
+                            if !waits_for_memory { crate::performance_events::lane(db, id, crate::performance_events::Kind::WaitingForMemory); }
                             waits_for_memory = true;
                             std::thread::sleep(Duration::from_secs(2));
                             continue;
@@ -2257,6 +2268,8 @@ pub fn hold_machine<'a>(db: &'a Db, repo_root: &Path, worktree: &Path, project: 
     {
         bail!("run {id} was taken out of the queue before it started");
     }
+    if waits_for_memory { crate::performance_events::lane(db, id, crate::performance_events::Kind::MemoryWaitEnded); }
+    crate::performance_events::lane(db, id, crate::performance_events::Kind::Started);
     Ok(MachineTurn { db, id, _slot: slot, finished: false })
 }
 

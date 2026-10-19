@@ -14,7 +14,7 @@ mod native;
 pub const CADENCE_MS: u64 = 5_000;
 pub const MAX_DATABASE_BYTES: u64 = 256 * 1024 * 1024;
 /// Increment when collection/schema behavior changes. New clients retire older collectors.
-pub const RECORDER_VERSION: i64 = 2;
+pub const RECORDER_VERSION: i64 = 3;
 
 pub(crate) fn boot_id() -> Option<String> {
     #[cfg(windows)] { native::boot_id() }
@@ -120,6 +120,7 @@ impl Store {
             CREATE TABLE IF NOT EXISTS sessions(id INTEGER PRIMARY KEY, session TEXT NOT NULL, boot TEXT, started_ms INTEGER NOT NULL, stopped_ms INTEGER);
             CREATE INDEX IF NOT EXISTS samples_time ON samples(wall_ms);
             CREATE INDEX IF NOT EXISTS minutes_time ON minutes(wall_ms);")?;
+        crate::performance_events::schema(&db)?;
         db.execute("INSERT INTO recorder_version VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET version=excluded.version WHERE excluded.version>version", [RECORDER_VERSION])?;
         crate::performance_attribution::schema(&db)?;
         Ok(Self { db })
@@ -220,10 +221,10 @@ impl Store {
     fn clear(&self) -> Result<()> {
         if !self.current_version()? { bail!("use the newer Nitely to clear performance history"); }
         if self.settings()?.enabled { bail!("pause performance recording before deleting history"); }
-        self.db.execute_batch("BEGIN IMMEDIATE; DELETE FROM samples; DELETE FROM minutes; DELETE FROM sessions; DELETE FROM attribution; DELETE FROM attribution_minutes; DELETE FROM workloads; COMMIT; VACUUM;")?;
+        self.db.execute_batch("BEGIN IMMEDIATE; DELETE FROM samples; DELETE FROM minutes; DELETE FROM sessions; DELETE FROM attribution; DELETE FROM attribution_minutes; DELETE FROM workloads; DELETE FROM performance_event; COMMIT; VACUUM;")?;
         Ok(())
     }
-    fn current_version(&self) -> Result<bool> { Ok(self.db.query_row("SELECT version FROM recorder_version WHERE id=1", [], |r| r.get::<_, i64>(0))? == RECORDER_VERSION) }
+    pub(crate) fn current_version(&self) -> Result<bool> { Ok(self.db.query_row("SELECT version FROM recorder_version WHERE id=1", [], |r| r.get::<_, i64>(0))? == RECORDER_VERSION) }
 }
 
 /// Paused deletion is serialized with the recorder, so an in-flight sample cannot repopulate it.

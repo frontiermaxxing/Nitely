@@ -1,9 +1,33 @@
 use anyhow::Result;
-use clap::Subcommand;
+use clap::{Args, Subcommand};
 use nitely_core::performance::{self, Store};
+use nitely_core::performance_query::{self, Query, View};
+
+#[derive(Args)]
+pub struct Range {
+    /// Inclusive UTC Unix milliseconds.
+    #[arg(long)] from_ms: Option<i64>,
+    #[arg(long)] to_ms: Option<i64>,
+    /// Ten minutes ending at the previous boot's last retained sample.
+    #[arg(long)] before_last_restart: bool,
+    #[arg(long, default_value_t = 1000)] limit: usize,
+    /// Filter workload attribution; machine totals remain machine-wide.
+    #[arg(long)] project: Option<String>,
+}
+impl Range {
+    fn query(self, view: View) -> Query { Query { view, from_ms: self.from_ms, to_ms: self.to_ms, before_last_restart: self.before_last_restart, limit: self.limit, project: self.project } }
+}
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Current cached health and recent pressure. Does not start a collector.
+    Now { #[arg(long)] project: Option<String> },
+    /// Bounded retained history, with explicit gaps, units and freshness.
+    History { #[command(flatten)] range: Range },
+    /// Sustained sampled pressure, separated from inferred causes.
+    Episodes { #[command(flatten)] range: Range },
+    /// Compact diagnostic JSON. Writes a new file only; existing files are never overwritten.
+    Export { #[command(flatten)] range: Range, #[arg(long)] output: Option<std::path::PathBuf> },
     /// Keep recording independently of the desktop. With no duration, runs until interrupted.
     Record { #[arg(long)] seconds: Option<u64> },
     /// Read the latest saved sample and recording settings; does not start a collector.
@@ -16,6 +40,19 @@ pub enum Command {
 pub fn run(command: Command) -> Result<()> {
     let dir = performance::directory();
     match command {
+        Command::Now { project } => crate::print_json(&performance_query::query(&dir, &Query { project, ..Query::default() })?)?,
+        Command::History { range } => crate::print_json(&performance_query::query(&dir, &range.query(View::History))?)?,
+        Command::Episodes { range } => crate::print_json(&performance_query::query(&dir, &range.query(View::Episodes))?)?,
+        Command::Export { range, output } => {
+            let report = performance_query::query(&dir, &range.query(View::History))?;
+            if let Some(output) = output {
+                use std::io::Write;
+                let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&output)?;
+                file.write_all(serde_json::to_string(&report)?.as_bytes())?;
+                file.sync_all()?;
+                crate::print_json(&serde_json::json!({"exported": output}))?;
+            } else { println!("{}", serde_json::to_string(&report)?); }
+        }
         Command::Record { seconds } => {
             // The handler only signals; normal stack unwinding joins the collector and saves
             // its clean-stop marker. Install it before recording can acquire ownership.

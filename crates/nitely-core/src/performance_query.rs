@@ -1,0 +1,312 @@
+//! Bounded cached machine-history queries shared by the app, CLI and MCP.
+use crate::performance::{self, Metrics, Minute, Sample, Session, Settings, Store};
+use anyhow::{bail, Result};
+use serde::{Deserialize, Serialize};
+use std::path::Path;
+
+fn default_limit() -> usize { 1000 }
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum View { #[default] Now, History, Episodes }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Query {
+    pub view: View,
+    pub from_ms: Option<i64>,
+    pub to_ms: Option<i64>,
+    pub before_last_restart: bool,
+    pub limit: usize,
+    pub project: Option<String>,
+}
+impl Default for Query {
+    fn default() -> Self { Self { view: View::Now, from_ms: None, to_ms: None, before_last_restart: false, limit: default_limit(), project: None } }
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Point {
+    pub from_ms: i64,
+    pub to_ms: i64,
+    pub values: Metrics,
+    pub peaks: Metrics,
+    pub min_available_bytes: Option<u64>,
+    pub observations: u32,
+    /// `sample`, `minute`, or `bucket`; peaks are never represented as sustained values.
+    pub resolution: String,
+    pub contains_gap: bool,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Gap { pub from_ms: i64, pub to_ms: i64, pub kind: String }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Episode {
+    pub from_ms: i64, pub to_ms: i64, pub observations: usize,
+    pub observed: Vec<String>,
+    /// Always separate from observations. Temporal overlap alone establishes no cause.
+    pub inferred_causes: Vec<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Coverage {
+    pub gaps: Vec<Gap>,
+    pub bounded: bool,
+    pub gaps_truncated: bool,
+    pub sessions_truncated: bool,
+    pub events_truncated: bool,
+    pub source_points: usize,
+    pub returned_points: usize,
+    pub resolution: String,
+    pub notes: Vec<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Report {
+    pub as_of_ms: i64,
+    pub from_ms: i64,
+    pub to_ms: i64,
+    pub range_anchor: String,
+    pub project: Option<String>,
+    pub status: String,
+    pub age_ms: Option<i64>,
+    pub latest: Option<Sample>,
+    pub settings: Settings,
+    /// Current configuration using the cached machine total, not historical policy or permission to start work.
+    pub admission_limits: Option<crate::machine::Limits>,
+    pub points: Vec<Point>,
+    pub episodes: Vec<Episode>,
+    pub events: Vec<crate::performance_events::Event>,
+    pub sessions: Vec<Session>,
+    pub coverage: Coverage,
+    pub units: serde_json::Value,
+}
+
+pub fn query(dir: &Path, request: &Query) -> Result<Report> { query_at(dir, request, performance::wall_ms()) }
+pub fn query_at(dir: &Path, request: &Query, now: i64) -> Result<Report> {
+    if request.limit == 0 || request.limit > 2000 { bail!("performance limit must be 1–2000"); }
+    if request.project.as_ref().is_some_and(|s| s.is_empty() || s.len() > 64 || !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')) { bail!("invalid project key"); }
+    if request.before_last_restart && (request.from_ms.is_some() || request.to_ms.is_some()) { bail!("before_last_restart cannot be combined with an explicit range"); }
+    let mut to = request.to_ms.unwrap_or(now);
+    let mut from = request.from_ms.unwrap_or_else(|| to.saturating_sub(if request.view == View::Now { 300_000 } else { 3_600_000 }));
+    let mut anchor = "requested_wall_time".to_string();
+    let store = Store::read(dir)?;
+    let settings = store.as_ref().map(Store::settings).transpose()?.unwrap_or_default();
+    let sessions = store.as_ref().map(Store::sessions).transpose()?.unwrap_or_default();
+    if request.before_last_restart {
+        let boot = previous_boot(&sessions).ok_or_else(|| anyhow::anyhow!("no recorded boot transition; a collection gap alone does not establish a restart"))?;
+        let previous = latest_for_boot(store.as_ref().unwrap(), &boot)?.ok_or_else(|| anyhow::anyhow!("the previous boot's samples have expired"))?;
+        to = previous.wall_ms;
+        from = to.saturating_sub(600_000);
+        anchor = "last_recorded_sample_of_previous_boot".into();
+    }
+    if from < 0 || to < from || to.saturating_sub(from) > 31 * 86_400_000 { bail!("performance range must be ordered UTC milliseconds spanning at most 31 days"); }
+    let latest = store.as_ref().map(|s| s.samples(i64::MIN, i64::MAX, 1)).transpose()?.unwrap_or_default().into_iter().next();
+    let age = latest.as_ref().map(|s| now.saturating_sub(s.wall_ms));
+    let status = if !settings.enabled { "paused" } else { match age { None => "unavailable", Some(a) if a < -2000 => "clock_changed", Some(a) if a <= 15_000 => "fresh", _ => "stale" } };
+    let use_minutes = to - from > 7_200_000 || latest.as_ref().is_some_and(|s| to < s.wall_ms.saturating_sub(i64::from(settings.detailed_hours) * 3_600_000));
+    let mut raw_samples = Vec::new();
+    let mut points = Vec::new();
+    let mut gaps = Vec::new();
+    if let Some(store) = &store {
+        if use_minutes {
+            let mut minutes = store.minutes(from, to, 43200)?;
+            minutes.reverse();
+            for pair in minutes.windows(2) { if let Some(gap) = sample_gap(&pair[0].last, &pair[1].last, 90_000) { gaps.push(gap); } }
+            points = minutes.into_iter().map(point_of_minute).collect();
+            if request.view == View::Episodes { raw_samples = store.samples(from, to, 17280)?; raw_samples.reverse(); }
+        } else {
+            raw_samples = store.samples(from, to, 17280)?;
+            raw_samples.reverse();
+            for pair in raw_samples.windows(2) { if let Some(gap) = sample_gap(&pair[0], &pair[1], 15_000) { gaps.push(gap); } }
+            points = raw_samples.iter().map(|s| Point { from_ms: s.wall_ms, to_ms: s.wall_ms, values: s.metrics.clone(), peaks: s.metrics.clone(), min_available_bytes: s.metrics.physical_available_bytes, observations: 1, resolution: "sample".into(), contains_gap: false }).collect();
+        }
+    }
+    if points.first().is_none_or(|p| p.from_ms > from + if use_minutes { 90_000 } else { 15_000 }) {
+        gaps.push(Gap { from_ms: from, to_ms: points.first().map_or(to, |p| p.from_ms), kind: "no_retained_samples".into() });
+    }
+    if let Some(last) = points.last().filter(|p| to - p.to_ms > if use_minutes { 90_000 } else { 15_000 }) { gaps.push(Gap { from_ms: last.to_ms, to_ms: to, kind: "no_retained_samples".into() }); }
+    for point in &mut points { point.contains_gap = gaps.iter().any(|g| g.from_ms < point.to_ms && g.to_ms > point.from_ms); }
+    let source_points = points.len();
+    let points = if request.view == View::History { compact(points, request.limit, &gaps) } else { vec![] };
+    let episodes = episodes(&raw_samples);
+    let mut notes = vec!["Machine totals always cover the whole PC; project filters apply only to workload attribution and events.".into(), "Null counters mean unavailable, not zero; overlapping work is not proof of causation.".into()];
+    if use_minutes { notes.push("Minute extrema preserve observed peaks; they do not establish sustained pressure within a minute.".into()); }
+    if request.view == View::Episodes { notes.push("At most 100 recent sustained episodes are returned, covering retained detailed samples only.".into()); }
+    if anchor != "requested_wall_time" { notes.push("This window ends at the last retained sample of the previous boot, not a known shutdown instant.".into()); }
+    let returned_points = points.len();
+    let selected_sessions: Vec<Session> = sessions.into_iter().filter(|s| s.started_ms <= to && s.stopped_ms.is_none_or(|end| end >= from)).collect();
+    let sessions_truncated = selected_sessions.len() > 200;
+    let gaps_truncated = gaps.len() > 200;
+    let admission_limits = latest.as_ref().and_then(|s| s.metrics.physical_total_bytes).map(crate::machine::limits_for_recorded_total);
+    let (events, events_truncated) = store.as_ref().map(|s| crate::performance_events::read(s, from, to, request.project.as_deref(), request.limit)).transpose()?.unwrap_or_default();
+    Ok(Report { as_of_ms: now, from_ms: from, to_ms: to, range_anchor: anchor, project: request.project.clone(), status: status.into(), age_ms: age, latest, settings, admission_limits,
+        points, episodes, events, sessions: selected_sessions.into_iter().take(200).collect(),
+        coverage: Coverage { gaps: gaps.into_iter().take(200).collect(), bounded: source_points > request.limit, gaps_truncated, sessions_truncated, events_truncated, source_points, returned_points, resolution: if use_minutes { "minute" } else { "sample" }.into(), notes },
+        units: serde_json::json!({ "wall_time": "UTC milliseconds since Unix epoch", "memory": "bytes", "cpu": "percent of machine capacity", "paging": "pages/second", "disk_throughput": "bytes/second", "disk_latency": "seconds/transfer", "disk_queue": "requests", "monotonic": "milliseconds; boot-relative on Windows, collector-relative elsewhere" }) })
+}
+
+fn previous_boot(sessions: &[Session]) -> Option<String> {
+    for pair in sessions.windows(2) {
+        if let (Some(new), Some(old)) = (&pair[0].boot, &pair[1].boot) { if new != old { return Some(old.clone()); } }
+    }
+    None
+}
+fn latest_for_boot(store: &Store, boot: &str) -> Result<Option<Sample>> {
+    // Bounded retained tables; CASE shields malformed JSON. Read at most one complete record
+    // from each resolution, without assuming chronological wall time across clock changes.
+    let mut candidates = Vec::new();
+    for (table, path, minute) in [("samples", "$.boot", false), ("minutes", "$.last.boot", true)] {
+        let sql = format!("SELECT json FROM {table} WHERE CASE WHEN json_valid(json) THEN json_extract(json,?1) END=?2 ORDER BY id DESC LIMIT 8");
+        let mut stmt = store.db.prepare(&sql)?;
+        for row in stmt.query_map(rusqlite::params![path, boot], |r| r.get::<_, String>(0))? {
+            let json = row?;
+            let sample = if minute { serde_json::from_str::<Minute>(&json).ok().map(|m| m.last) } else { serde_json::from_str::<Sample>(&json).ok() };
+            if let Some(sample) = sample { candidates.push(sample); break; }
+        }
+    }
+    Ok(candidates.into_iter().max_by_key(|s| s.monotonic_ms))
+}
+fn sample_gap(a: &Sample, b: &Sample, cadence: u64) -> Option<Gap> {
+    let delta = b.monotonic_ms.saturating_sub(a.monotonic_ms);
+    let known_restart = a.boot.is_some() && b.boot.is_some() && a.boot != b.boot;
+    let same_clock = a.boot.is_some() && a.boot == b.boot || a.session == b.session;
+    let kind = if known_restart { "restart" }
+        else if !same_clock { "collector_changed" }
+        else if (b.wall_ms - a.wall_ms - delta as i64).unsigned_abs() > 2000 { "clock_change" }
+        else if delta > cadence { "collection_gap" } else { return None };
+    Some(Gap { from_ms: a.wall_ms.min(b.wall_ms), to_ms: a.wall_ms.max(b.wall_ms), kind: kind.into() })
+}
+fn point_of_minute(m: Minute) -> Point { Point { from_ms: m.first_wall_ms, to_ms: m.last.wall_ms, values: m.last.metrics, peaks: m.peaks, min_available_bytes: m.min_available_bytes, observations: m.samples, resolution: "minute".into(), contains_gap: false } }
+fn max_metrics(into: &mut Metrics, from: &Metrics) {
+    macro_rules! peak { ($($field:ident),*) => { $(if let Some(v) = from.$field { into.$field = Some(into.$field.map_or(v, |old| old.max(v))); })* }; }
+    peak!(cpu_percent, physical_total_bytes, physical_available_bytes, commit_bytes, commit_limit_bytes, kernel_paged_bytes, kernel_nonpaged_bytes,
+        pages_input_per_sec, pages_output_per_sec, disk_read_bytes_per_sec, disk_write_bytes_per_sec, disk_latency_seconds, disk_queue);
+}
+fn compact(points: Vec<Point>, limit: usize, gaps: &[Gap]) -> Vec<Point> {
+    if points.len() <= limit { return points; }
+    points.chunks(points.len().div_ceil(limit)).map(|chunk| {
+        let mut point = chunk.last().unwrap().clone();
+        point.from_ms = chunk.iter().map(|p| p.from_ms).min().unwrap();
+        point.to_ms = chunk.iter().map(|p| p.to_ms).max().unwrap();
+        point.observations = 0;
+        point.resolution = "bucket".into();
+        for item in chunk {
+            max_metrics(&mut point.peaks, &item.peaks);
+            if let Some(v) = item.min_available_bytes { point.min_available_bytes = Some(point.min_available_bytes.map_or(v, |old| old.min(v))); }
+            point.observations += item.observations;
+            point.contains_gap |= item.contains_gap;
+        }
+        point.contains_gap |= gaps.iter().any(|g| g.from_ms <= point.to_ms && g.to_ms >= point.from_ms);
+        point
+    }).collect()
+}
+fn pressure(metrics: &Metrics) -> Vec<String> {
+    let mut out = Vec::new();
+    if metrics.cpu_percent.is_some_and(|v| v >= 90.0) { out.push("CPU at least 90%".into()); }
+    if matches!((metrics.physical_available_bytes, metrics.physical_total_bytes), (Some(a),Some(t)) if t>0 && a as f64/t as f64<=0.1) { out.push("available physical memory at most 10%".into()); }
+    if matches!((metrics.commit_bytes, metrics.commit_limit_bytes), (Some(a),Some(t)) if t>0 && a as f64/t as f64>=0.9) { out.push("system commit at least 90% of limit".into()); }
+    out
+}
+fn episodes(samples: &[Sample]) -> Vec<Episode> {
+    let mut out = Vec::new();
+    let mut start = None;
+    let mut reasons = std::collections::BTreeSet::new();
+    let flush = |out: &mut Vec<Episode>, start: Option<usize>, end: usize, reasons: &std::collections::BTreeSet<String>| {
+        if let Some(start) = start.filter(|&start| end > start && samples[end].monotonic_ms.saturating_sub(samples[start].monotonic_ms) >= 15_000) {
+            out.push(Episode { from_ms: samples[start].wall_ms, to_ms: samples[end].wall_ms, observations: end-start+1, observed: reasons.iter().cloned().collect(), inferred_causes: vec![] });
+        }
+    };
+    for (index, sample) in samples.iter().enumerate() {
+        let observed = pressure(&sample.metrics);
+        if observed.is_empty() || index > 0 && sample_gap(&samples[index-1], sample, 15_000).is_some() {
+            if index > 0 { flush(&mut out, start.take(), index-1, &reasons); }
+            reasons.clear();
+        }
+        if !observed.is_empty() { start.get_or_insert(index); reasons.extend(observed); }
+    }
+    if !samples.is_empty() { flush(&mut out, start, samples.len()-1, &reasons); }
+    out.into_iter().rev().take(100).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    const NOW: i64 = 1_800_000_000_000;
+    struct Fixture { dir: std::path::PathBuf, store: Store }
+    impl Fixture {
+        fn new() -> Self { let dir = crate::paths::unique_temp("performance-query", ""); let store = Store::open(&dir).unwrap(); Self { dir, store } }
+        fn sample(&self, at: i64, boot: Option<&str>, session: &str, cpu: Option<f64>) -> Sample {
+            let sample = Sample { wall_ms: at, monotonic_ms: at.max(0) as u64, boot: boot.map(str::to_string), session: session.into(),
+                metrics: Metrics { cpu_percent: cpu, physical_total_bytes: Some(100), physical_available_bytes: Some(50), ..Metrics::default() }, collection_ms: 1 };
+            self.store.db.execute("INSERT INTO samples(wall_ms,json) VALUES(?1,?2)", rusqlite::params![at, serde_json::to_string(&sample).unwrap()]).unwrap();
+            sample
+        }
+        fn query(&self, query: Query) -> Report { query_at(&self.dir, &query, NOW).unwrap() }
+    }
+    impl Drop for Fixture { fn drop(&mut self) { let db = std::mem::replace(&mut self.store.db, rusqlite::Connection::open_in_memory().unwrap()); drop(db); let _ = std::fs::remove_dir_all(&self.dir); } }
+    #[test]
+    fn reads_do_not_create_a_recorder_or_store_and_validate_bounds() {
+        let dir = crate::paths::unique_temp("performance-read-only", "");
+        let report = query_at(&dir, &Query::default(), NOW).unwrap();
+        assert_eq!(report.status, "unavailable");
+        assert!(!dir.exists());
+        assert!(!report.coverage.gaps.is_empty());
+        for query in [Query { limit: 0, ..Query::default() }, Query { limit: 2001, ..Query::default() }, Query { from_ms: Some(NOW), to_ms: Some(NOW-1), ..Query::default() }, Query { from_ms: Some(0), to_ms: Some(NOW), ..Query::default() }] {
+            assert!(query_at(&dir, &query, NOW).is_err());
+        }
+    }
+    #[test]
+    fn before_restart_finds_previous_boot_after_workers_are_gone() {
+        let fixture = Fixture::new();
+        fixture.store.start_session("old", Some("boot-a"), NOW-1_000_000).unwrap();
+        fixture.sample(NOW-700_000, Some("boot-a"), "old", Some(95.0));
+        fixture.sample(NOW-100_000, Some("boot-a"), "old", Some(96.0));
+        fixture.store.start_session("new", Some("boot-b"), NOW-20_000).unwrap();
+        fixture.sample(NOW-10_000, Some("boot-b"), "new", Some(10.0));
+        let report = fixture.query(Query { view: View::History, before_last_restart: true, ..Query::default() });
+        assert_eq!(report.to_ms, NOW-100_000);
+        assert_eq!(report.from_ms, NOW-700_000);
+        assert_eq!(report.points.len(), 2);
+        assert_eq!(report.range_anchor, "last_recorded_sample_of_previous_boot");
+        assert_eq!(report.latest.unwrap().boot.as_deref(), Some("boot-b"));
+    }
+    #[test]
+    fn an_unknown_boot_or_gap_is_not_reported_as_restart() {
+        let fixture = Fixture::new();
+        fixture.store.start_session("old", None, NOW-100_000).unwrap();
+        fixture.sample(NOW-100_000, None, "old", None);
+        fixture.store.start_session("new", None, NOW-10_000).unwrap();
+        fixture.sample(NOW-10_000, None, "new", None);
+        assert!(query_at(&fixture.dir, &Query { before_last_restart: true, ..Query::default() }, NOW).is_err());
+        let report = fixture.query(Query { view: View::History, ..Query::default() });
+        assert!(report.coverage.gaps.iter().any(|g| g.kind == "collector_changed"));
+        assert!(report.points.iter().all(|p| p.values.cpu_percent.is_none()));
+    }
+    #[test]
+    fn pressure_needs_sustained_samples_and_does_not_bridge_a_gap() {
+        let fixture = Fixture::new();
+        for seconds in [90,85,80,75,30,25] { fixture.sample(NOW-seconds*1000, Some("boot"), "s", Some(95.0)); }
+        let report = fixture.query(Query { view: View::Episodes, ..Query::default() });
+        assert_eq!(report.episodes.len(), 1);
+        assert_eq!(report.episodes[0].observations, 4);
+        assert!(report.episodes[0].inferred_causes.is_empty());
+        assert!(report.points.is_empty(), "episode query stays compact");
+    }
+    #[test]
+    fn history_compaction_preserves_spikes_and_current_reads_stay_small() {
+        let fixture = Fixture::new();
+        for n in 0..100 { fixture.sample(NOW-500_000+n*5000, Some("boot"), "s", Some(if n==51 {99.0} else {10.0})); }
+        let report = fixture.query(Query { view: View::History, from_ms: Some(NOW-500_000), limit: 5, ..Query::default() });
+        assert_eq!(report.points.len(), 5);
+        assert!(report.coverage.bounded);
+        assert!(report.points.iter().any(|p| p.peaks.cpu_percent == Some(99.0)));
+        assert!(fixture.query(Query::default()).points.is_empty());
+    }
+    #[test]
+    fn freshness_and_clock_changes_are_explicit_and_project_does_not_change_totals() {
+        let fixture = Fixture::new();
+        fixture.sample(NOW-30_000, Some("boot"), "s", Some(20.0));
+        assert_eq!(fixture.query(Query::default()).status, "stale");
+        let a = fixture.query(Query { project: Some("APP".into()), ..Query::default() });
+        let b = fixture.query(Query { project: Some("DEMO".into()), ..Query::default() });
+        assert_eq!(a.latest.unwrap().metrics, b.latest.unwrap().metrics);
+        fixture.sample(NOW+60_000, Some("boot"), "s", Some(10.0));
+        assert_eq!(fixture.query(Query::default()).status, "clock_changed");
+        fixture.store.configure(&Settings { enabled: false, ..Settings::default() }).unwrap();
+        assert_eq!(fixture.query(Query::default()).status, "paused");
+    }
+}

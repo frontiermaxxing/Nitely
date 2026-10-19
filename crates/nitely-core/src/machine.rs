@@ -25,7 +25,7 @@ pub fn memory() -> Option<Memory> {
 }
 
 /// What `admit` holds runs to.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq)]
 pub struct Limits {
     pub total: u64,
     /// Nothing new starts while less memory than this is free.
@@ -57,11 +57,16 @@ pub fn limits_for(total: u64, floor_gb: Option<(f64, &str)>, cap_gb: Option<(f64
 /// machine's memory cannot be told.
 pub fn limits() -> Option<Limits> {
     let total = memory()?.total;
+    Some(limits_for_recorded_total(total))
+}
+
+/// Current policy applied to a cached physical total; does not sample the OS or admit work.
+pub fn limits_for_recorded_total(total: u64) -> Limits {
     let env = |name: &str| std::env::var(name).ok().and_then(|v| v.trim().parse::<f64>().ok());
     let config = crate::Config::load_read_only().ok();
     let floor = env("NITELY_MEMORY_FLOOR_GB").map(|g| (g, "NITELY_MEMORY_FLOOR_GB")).or(config.as_ref().and_then(|c| c.memory_floor_gb).map(|g| (g, "settings")));
     let cap = env("NITELY_MEMORY_CAP_GB").map(|g| (g, "NITELY_MEMORY_CAP_GB")).or(config.as_ref().and_then(|c| c.memory_cap_gb).map(|g| (g, "settings")));
-    Some(limits_for(total, floor, cap))
+    limits_for(total, floor, cap)
 }
 
 /// How long a run that just started is given to grow before the next one is let in on what is

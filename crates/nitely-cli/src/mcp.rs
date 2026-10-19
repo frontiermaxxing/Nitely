@@ -436,6 +436,18 @@ fn tools() -> Value {
     let states: Vec<&str> = STATES.iter().map(|(n, _)| *n).filter(|n| *n != "Approved").collect();
     json!([
         {
+            "name": "performance",
+            "description": "Read cached machine health (now), bounded history, or sustained pressure episodes. Never starts a collector. Reports freshness, units, gaps and measured contributors; temporal overlap is not proof of cause. Before expensive work, inspect current health and admission constraints; do not bypass Nitely build lanes. before_last_restart selects ten minutes ending at the previous boot's last retained sample.",
+            "inputSchema": { "type": "object", "additionalProperties": false, "properties": {
+                "view": {"type": "string", "enum": ["now", "history", "episodes"], "default": "now"},
+                "from_ms": {"type": "integer", "description": "Inclusive UTC Unix milliseconds."},
+                "to_ms": {"type": "integer"},
+                "before_last_restart": {"type": "boolean"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 2000, "default": 1000},
+                "project": {"type": "string", "description": "Filters workload attribution; machine totals remain machine-wide."}
+            } }
+        },
+        {
             "name": "next_task",
             "description": "Claim the next ready issue in this repo's project and get it with a suggested branch name. Respects the person's project focus: only that goal and its prerequisites, plus urgent work when interruptions are allowed. Never spills into unrelated work while focus is blocked; returns an explanation when nothing focused is ready. Without focus, priority comes first, then active goals with the nearest target date. Two agents never get the same issue. Open blockers are skipped, and a blocker is as urgent as what it blocks. Already submitted work returned to you still comes back for completion.",
             "inputSchema": { "type": "object", "properties": {
@@ -1080,6 +1092,7 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
         None
     };
     let mut out = match name {
+        "performance" => json!(nitely_core::performance_query::query(&nitely_core::performance::directory(), &serde_json::from_value(args.clone())?)?),
         "next_task" if returned.is_some() => {
             let job = returned.as_ref().unwrap();
             db.mark_submit_jobs_delivered(&[job.id])?;
