@@ -191,7 +191,7 @@ export function rulesDryRun(args: Record<string, unknown>): DryRun {
   const reasons = files.flatMap((f) => e.human.filter((r) => new RegExp(r.pattern).test(f)).map((r) => `${r.reason}: ${f}`));
   if (e.always) reasons.unshift("this playbook sends every change to a human");
   if (e.land === "human") reasons.push("this playbook lands only what a human approved");
-  if (vendor !== "claude" && vendor !== "codex" && e.cross) reasons.push(`${reviewer} review (author's vendor unknown), and this playbook requires a review by another vendor`);
+  if (e.enabled && vendor !== "claude" && vendor !== "codex" && e.cross) reasons.push(`${reviewer} review (author's vendor unknown), and this playbook requires a review by another vendor`);
   if (!e.enabled) {
     reasons.push(...e.flags.map((f) => `Unevaluated reviewer condition ${f.name}: ${f.question} (automated review is disabled)`));
     if (e.cross) reasons.push("Unevaluated cross-vendor review requirement (automated review is disabled)");
