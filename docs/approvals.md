@@ -163,3 +163,9 @@ Desktop single and grouped approvals and phone approvals lead with the solution,
 original issue as context, and show verification and remaining findings separately. “Approve
 change” authorizes the submitted patch to land under the project’s rules; it does not promise
 that landing has completed. Goal plans and playbook proposals keep their separate decisions.
+
+The PR link must match both the submitted branch and reviewed commit. An old PR receiving a new
+comment does not become this approval’s diff. Missing, advanced or ambiguous PR data shows no
+verified PR link; issue details keep the history available. Approving authorizes the patch:
+Nitely or Crew handles landing when configured to do so, otherwise the author agent must call
+`land`. The approval itself does not merge it.

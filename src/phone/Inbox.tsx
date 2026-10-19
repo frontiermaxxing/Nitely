@@ -297,7 +297,7 @@ function Decision(props: { decision: PhoneDecision; device: Device; onDecided: (
       {d.kind === "approve" && (
         <div className="ph-why">
           {d.issue && <ApprovalSolution evidence={d} issue={d.issue} />}
-          {d.pr_url && /^https?:\/\//i.test(d.pr_url) ? <p><a href={d.pr_url} target="_blank" rel="noreferrer">View changes in PR</a></p> : <p className="ph-quiet">No pull request linked. Open this issue on your PC for details.</p>}
+          {d.pr_url && /^https?:\/\//i.test(d.pr_url) ? <p><a href={d.pr_url} target="_blank" rel="noreferrer">View submitted changes in PR</a></p> : <p className="ph-quiet">No PR verified for this revision. Open this issue on your PC for details.</p>}
           {(d.reasons ?? []).length > 0 && (
             <>
               <h2>Why it waits for you</h2>

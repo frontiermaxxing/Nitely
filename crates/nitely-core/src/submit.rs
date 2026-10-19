@@ -70,6 +70,8 @@ pub struct ReviewRecord {
     pub issue_key: String,
     pub patch_id: String,
     pub commit_sha: String,
+    /// The branch handed in. Legacy reviews cannot reliably identify their pull request.
+    pub branch: Option<String>,
     pub reviewer: String,
     pub verdict: String,
     pub approver: String,
@@ -933,9 +935,9 @@ impl Db {
         let batch = s.review.as_ref().and_then(|r| r.batch.as_ref()).map(|b| b.id);
         let (seconds, tokens) = (s.review.as_ref().map(|r| r.seconds as i64), s.review.as_ref().and_then(|r| r.tokens).map(|t| t as i64));
         self.conn.execute(
-            "INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, reasons, findings, flagged, note, ts, batch_id, seconds, tokens, solution, gate)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
-            rusqlite::params![s.issue, s.patch_id, s.commit, reviewer, verdict, s.approver, to_json(&s.reasons), findings, flagged, note, now(), batch, seconds, tokens, s.solution.as_ref().map(to_json), to_json(&evidence)],
+            "INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, reasons, findings, flagged, note, ts, batch_id, seconds, tokens, solution, gate, branch)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            rusqlite::params![s.issue, s.patch_id, s.commit, reviewer, verdict, s.approver, to_json(&s.reasons), findings, flagged, note, now(), batch, seconds, tokens, s.solution.as_ref().map(to_json), to_json(&evidence), s.branch],
         )?;
         Ok(())
     }
@@ -948,7 +950,7 @@ impl Db {
     /// `reviews`, only those recorded before the review `before` when given.
     pub fn reviews_before(&self, issue_key: &str, before: Option<i64>) -> Result<Vec<ReviewRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT issue_key, patch_id, commit_sha, reviewer, verdict, approver, reasons, findings, ts, note, batch_id, solution, gate
+            "SELECT issue_key, patch_id, commit_sha, reviewer, verdict, approver, reasons, findings, ts, note, batch_id, solution, gate, branch
              FROM review WHERE issue_key = ?1 COLLATE NOCASE AND (?2 IS NULL OR id < ?2) ORDER BY ts DESC, id DESC",
         )?;
         let rows = stmt.query_map(rusqlite::params![issue_key, before], |r| {
@@ -956,6 +958,7 @@ impl Db {
                 issue_key: r.get(0)?,
                 patch_id: r.get(1)?,
                 commit_sha: r.get(2)?,
+                branch: r.get(13)?,
                 reviewer: r.get(3)?,
                 verdict: r.get(4)?,
                 approver: r.get(5)?,
@@ -972,6 +975,17 @@ impl Db {
     }
 }
 
+/// Only a uniquely matching branch and revision is a route to this submitted change. A comment
+/// on an older PR must not turn that PR into the approval's diff link.
+pub fn review_pr<'a>(review: &ReviewRecord, prs: &'a [crate::db::PrRecord]) -> Option<&'a crate::db::PrRecord> {
+    let branch = review.branch.as_deref().filter(|b| !b.is_empty())?;
+    let commit = &review.commit_sha;
+    if commit.len() < 7 || !commit.bytes().all(|b| b.is_ascii_hexdigit()) { return None; }
+    let mut matches = prs.iter().filter(|p| p.branch == branch && p.head_sha.starts_with(commit));
+    let first = matches.next()?;
+    if matches.next().is_some() { None } else { Some(first) }
+}
+
 fn to_json<T: Serialize + ?Sized>(v: &T) -> String {
     serde_json::to_string(v).unwrap_or_else(|_| "[]".into())
 }
@@ -984,6 +998,31 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    fn approval_pr_matches_the_submission_not_recent_comments() {
+        let pr = |number: i64, branch: &str, head: &str, updated: &str| crate::db::PrRecord {
+            provider: "github".into(), repo: "example/acme".into(), number, title: "Change".into(),
+            url: format!("https://github.com/example/acme/pull/{number}"), state: "OPEN".into(),
+            branch: branch.into(), head_sha: head.into(), updated_at: updated.into(), comment_count: 0,
+            approved_by: vec![], approved_by_me: false, checks: "success".into(),
+        };
+        let review = ReviewRecord {
+            issue_key: "APP-7".into(), patch_id: "patch".into(), commit_sha: "bbbbbbb".into(), branch: Some("codex/app-7-current".into()),
+            reviewer: "codex".into(), verdict: "pass".into(), approver: "human".into(), reasons: vec![], findings: vec![], ts: 0,
+            note: String::new(), batch_id: None, solution: None, gate: None,
+        };
+        // Same issue, newest update first: the older PR just received a comment.
+        let old = pr(1, "claude/app-7-old", "aaaaaaa111", "2026-10-20");
+        let current = pr(2, "codex/app-7-current", "bbbbbbb222", "2026-10-19");
+        assert_eq!(review_pr(&review, &[old.clone(), current.clone()]).unwrap().number, 2);
+        assert!(review_pr(&review, &[old]).is_none());
+        let advanced = pr(2, "codex/app-7-current", "ccccccc333", "2026-10-21");
+        assert!(review_pr(&review, &[advanced]).is_none(), "the same PR now contains an unreviewed revision");
+        assert!(review_pr(&ReviewRecord { branch: None, ..review.clone() }, std::slice::from_ref(&current)).is_none());
+        assert!(review_pr(&ReviewRecord { commit_sha: String::new(), ..review.clone() }, std::slice::from_ref(&current)).is_none());
+        assert!(review_pr(&review, &[current.clone(), current]).is_none(), "ambiguous identity is unavailable");
+    }
+
+    #[test]
     fn rounds_that_do_not_converge_go_to_a_person() {
         use crate::review::Finding;
         let f = |priority, text: &str, carried| Finding { priority, text: text.into(), carried, raised_as: None, now: None };
@@ -991,6 +1030,7 @@ mod tests {
             issue_key: "NIT-1".into(),
             patch_id: "p".into(),
             commit_sha: "c".into(),
+            branch: None,
             reviewer: "codex".into(),
             verdict: "changes".into(),
             approver: "agent".into(),

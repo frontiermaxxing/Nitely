@@ -32,7 +32,7 @@ import { useWaits } from "./WaitingStrip";
 import { behindSummary, waitLine, waitOf } from "./waits";
 import { ago, openExternal } from "./util";
 import { ApprovalSolution } from "./ApprovalSolution";
-import { approvalSolution } from "./approvalEvidence";
+import { APPROVAL_NEXT, approvalPr, approvalSolution } from "./approvalEvidence";
 import {
   AgentMark,
   CountBadge,
@@ -832,13 +832,14 @@ function ApprovalsCard(props: {
       <p className="dd-title">
         {members.length} changes wait for your approval
       </p>
-      <p className="muted small">Each approval authorizes that submitted change to land under the project’s rules. Checks or the land queue may still hold it. Approve all signs each patch separately.</p>
+      <p className="muted small">{APPROVAL_NEXT} Approve all signs each patch separately.</p>
       <ol className="approvals-list">
         {members.map((m) => {
           const detail = props.details.get(m.issue!.key);
           const issue = detail?.issue ?? m.issue!;
           const done = props.resolved.get(m.id);
           const review = detail?.reviews[0];
+          const pr = approvalPr(review, detail?.prs);
           const reasons = review?.reasons ?? [];
           const error = props.failed.get(m.id);
           return (
@@ -864,7 +865,7 @@ function ApprovalsCard(props: {
                   </span>
                 ) : <span>{review?.note || "No automated review ran."}</span>}
               </p>
-              <p className="small approvals-links">{detail?.prs[0] && <a href={detail.prs[0].url} onClick={openExternal(detail.prs[0].url)}>View changes in PR</a>} <button className="link" onClick={() => props.onOpenIssue(issue.key)}>View details</button></p>
+              <p className="small approvals-links">{pr ? <a href={pr.url} onClick={openExternal(pr.url)}>View submitted changes in PR</a> : <span className="muted">No PR verified for this revision.</span>} <button className="link" onClick={() => props.onOpenIssue(issue.key)}>View details</button></p>
               {done ? (
                 <p className={`dd-outcome${done.done ? " done" : ""}`} role="status">
                   <ResultMark result={done.done ? "pass" : "pending"} size={16} />
@@ -958,11 +959,11 @@ function Body(props: { decision: Decision; detail?: IssueDetail; integration: st
       const review = detail?.reviews[0];
       const reasons = review?.reasons ?? [];
       const reviewed = rounds.filter((r) => r.review && r.review.verdict !== "none").length;
-      const pr = detail?.prs[0];
+      const pr = approvalPr(review, detail?.prs);
       return (
         <>
           {d.issue && <ApprovalSolution evidence={review} issue={d.issue} findings={review?.findings} showFindings />}
-          {pr && <p><a href={pr.url} onClick={openExternal(pr.url)}>View changes in PR</a></p>}
+          {pr ? <p><a href={pr.url} onClick={openExternal(pr.url)}>View submitted changes in PR</a></p> : <p className="muted small">No PR verified for this revision. Open issue details for its history.</p>}
           <p className="decision-matter">{reasons.length > 0 ? `${capital(listReasons(reasons))}.` : "The playbook wants a person to approve this change."}</p>
           <p className="decision-why">
             {review?.reviewer ? (

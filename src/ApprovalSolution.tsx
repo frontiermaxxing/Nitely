@@ -1,4 +1,4 @@
-import { approvalSolution, type ApprovalEvidence } from "./approvalEvidence";
+import { APPROVAL_NEXT, approvalSolution, type ApprovalEvidence } from "./approvalEvidence";
 import "./styles/approval-solution.css";
 
 /** Same explanation on desktop and phone; submitter text is plain text, never HTML. */
@@ -15,6 +15,6 @@ export function ApprovalSolution(props: { evidence?: ApprovalEvidence; issue: { 
       {gate.warnings?.map((w, i) => <p key={i}>{w}</p>)}
     </> : <p>Verification evidence unavailable for this revision.</p>}
     {props.showFindings && !!props.findings?.length && <><h3>Remaining review findings</h3><ul>{props.findings.map((f, i) => <li key={i}>P{f.priority} · {f.text}{f.carried ? " (carried over)" : ""}</li>)}</ul></>}
-    {props.showNext !== false && <p className="solution-next">Approving authorizes this submitted change to land under the project's rules. Landing can still wait for checks or the land queue.</p>}
+    {props.showNext !== false && <p className="solution-next">{APPROVAL_NEXT}</p>}
   </section>;
 }

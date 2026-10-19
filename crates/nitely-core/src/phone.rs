@@ -1174,7 +1174,7 @@ fn decisions(db: &crate::Db) -> std::result::Result<(Value, std::collections::Ha
             "commit_sha": r.commit_sha,
             "solution": r.solution,
             "gate": r.gate,
-            "pr_url": db.prs_for_issue(&i.key)?.first().map(|p| &p.url),
+            "pr_url": crate::submit::review_pr(&r, &db.prs_for_issue(&i.key)?).map(|p| &p.url),
             "review": { "reviewer": r.reviewer, "verdict": r.verdict, "note": r.note, "findings": r.findings },
         }));
     }

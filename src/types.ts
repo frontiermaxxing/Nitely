@@ -624,6 +624,8 @@ export interface ApprovalGate {
 }
 
 export interface ReviewRecord {
+  /** Branch handed in; absent on legacy reviews. */
+  branch?: string | null;
   solution?: SolutionSummary | null;
   gate?: ApprovalGate | null;
   issue_key: string;

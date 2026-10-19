@@ -582,6 +582,7 @@ mod tests {
         assert_eq!(done.result.as_ref().unwrap()["solution"]["title"], solution.title);
         let first = db.reviews(&key).unwrap().remove(0);
         assert!(job.head.starts_with(&first.commit_sha));
+        assert_eq!(first.branch.as_deref(), Some(job.branch.as_str()));
         assert_eq!(first.gate.as_ref().unwrap().commit, first.commit_sha);
         assert_eq!(first.solution.as_ref(), Some(&solution));
 
