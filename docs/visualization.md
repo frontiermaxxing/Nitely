@@ -688,4 +688,4 @@ most once a minute, and hidden pages stop polling. Opening the page never starts
 
 Recorder controls are human-facing, disabled in live preview. Clearing requires paused collection
 and an explicit confirmation. Admission settings link to Build lanes rather than duplicating its
-editor. Preview states: `?performance=idle|pressure|restart|partial|stale|empty#performance`.
+editor. Preview states: `?performance=idle|pressure|restart|partial|stale|empty|error#performance`.

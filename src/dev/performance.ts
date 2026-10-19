@@ -22,6 +22,7 @@ function attribution(at: number, mode: string): AttributionSample {
 }
 export function performanceFixture(args: Record<string, unknown>): PerformanceReport {
   const mode = new URLSearchParams(location.search).get("performance") ?? "idle";
+  if (mode === "error") throw "Performance history is temporarily unavailable (preview).";
   const query = (args.query ?? {}) as { view?: string; from_ms?: number; to_ms?: number; before_last_restart?: boolean };
   const now = Date.now(); const at = pausedAt ?? (mode === "stale" ? now - 180_000 : now - 1000);
   const to = query.before_last_restart ? now - 600_000 : query.to_ms ?? now;
@@ -35,11 +36,13 @@ export function performanceFixture(args: Record<string, unknown>): PerformanceRe
   });
   return { as_of_ms: now, from_ms: from, to_ms: to, range_anchor: query.before_last_restart ? "last_recorded_sample_of_previous_boot" : "requested_wall_time", project: null, status: !settings.enabled ? "paused" : mode === "stale" ? "stale" : noData ? "unavailable" : "fresh", age_ms: noData ? null : now - at,
     latest: noData ? null : { wall_ms: at, monotonic_ms: at, boot: "preview-boot", session: "preview", metrics: metrics(mode === "pressure" ? 97 : 31.7), collection_ms: 8 }, settings: { ...settings }, admission_limits: { total: 32 * GiB, floor: 4 * GiB, cap: 12 * GiB, floor_from: "default", cap_from: "default" },
-    points: query.view === "now" ? [] : points, episodes: mode === "pressure" && !noData ? [{ from_ms: Math.floor((now - 120_000) / 300_000) * 300_000, to_ms: at, observations: 24, observed: ["cpu_above_90_percent", "physical_memory_below_10_percent"], inferred_causes: [] }] : [],
+    points: query.view === "now" ? [] : points, episodes: mode === "pressure" && !noData ? [{ from_ms: Math.floor((now - 120_000) / 300_000) * 300_000, to_ms: at, observations: 24, observed: ["CPU at least 90%", "available physical memory at most 10%"], inferred_causes: [] }] : [],
     events: noData ? [] : [{ wall_ms: to - 30_000, kind: "waiting_for_memory", project: "NIT", issue: "NIT-4", run: 42, memory_cap_bytes: 12 * GiB }],
     sessions: noData ? [] : [{ session: "preview", boot: "preview-boot", started_ms: from, stopped_ms: null }],
-    coverage: { gaps, bounded: false, gaps_truncated: false, sessions_truncated: false, events_truncated: false, source_points: points.length, returned_points: query.view === "now" ? 0 : points.length, resolution: "minute", notes: ["Machine totals cover the whole PC. Null counters mean unavailable, not zero.", "Minute extrema preserve peaks; they do not establish sustained pressure within a minute."] }, units: {},
+    coverage: { gaps, bounded: false, gaps_truncated: false, sessions_truncated: false, events_truncated: false, attribution_truncated: false, workloads_truncated: false, attribution_retained_bounds_ms: noData ? null : [from, at], attribution_first_returned_ms: noData ? null : to - 60_000, source_points: points.length, returned_points: query.view === "now" ? 0 : points.length, resolution: "minute", notes: ["Machine totals cover the whole PC. Null counters mean unavailable, not zero.", "Minute extrema preserve peaks; they do not establish sustained pressure within a minute."] }, units: {},
     attribution_latest: noData ? null : attribution(at, mode), attribution: noData ? [] : [attribution(to - 15_000, mode), attribution(to - 60_000, mode)],
+    attribution_age_ms: noData ? null : now - at, related_issues: { "NIT-4": "http://127.0.0.1:7423/i/NIT-4" },
+    workloads: noData ? [] : [{ id: "short-build", kind: "build", context: { project: "NIT", issue: "NIT-4", run_id: 41, job_id: null, worker_id: null, lane: 1 }, root: { boot: "preview-boot", pid: 100, started: "preview" }, start_ms: to - 120_000, end_ms: to - 119_000, end_observed: false, job_accounting: { cpu_100ns: 7_000_000, read_bytes: 2 * 1024 ** 2, write_bytes: 1024, processes: 3, peak_private_commit_bytes: .4 * GiB } }],
   };
 }
 export function configurePerformance(args: Record<string, unknown>) {

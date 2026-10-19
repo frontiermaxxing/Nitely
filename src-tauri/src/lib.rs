@@ -707,11 +707,10 @@ async fn open_crew_log(app: tauri::AppHandle, path: String) -> Result<(), String
     app.opener().open_path(log.to_string_lossy(), None::<&str>).map_err(|e| e.to_string())
 }
 
-/// The build lanes of every connected repo whose playbook has `[lanes]` (docs/build-lanes.md).
 /// Reads cached recorder data; this command never starts a sampler.
 #[tauri::command]
 async fn performance_query(query: nitely_core::performance_query::Query) -> Result<nitely_core::performance_query::Report, String> {
-    tauri::async_runtime::spawn_blocking(move || nitely_core::performance_query::query(&nitely_core::performance::directory(), &query).map_err(err)).await.map_err(err)?
+    tauri::async_runtime::spawn_blocking(move || nitely_core::performance_query::query(&nitely_core::performance::directory(), &query).map_err(err)).await.map_err(|e| e.to_string())?
 }
 
 /// Human controls from the desktop app, separate from read-only agent query APIs.
@@ -720,14 +719,15 @@ async fn set_performance_settings(settings: nitely_core::performance::Settings) 
     tauri::async_runtime::spawn_blocking(move || {
         let store = nitely_core::performance::Store::open(&nitely_core::performance::directory()).map_err(err)?;
         store.configure(&settings).map_err(err)
-    }).await.map_err(err)?
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
 async fn clear_performance_history() -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(|| nitely_core::performance::clear_history(&nitely_core::performance::directory()).map_err(err)).await.map_err(err)?
+    tauri::async_runtime::spawn_blocking(|| nitely_core::performance::clear_history(&nitely_core::performance::directory()).map_err(err)).await.map_err(|e| e.to_string())?
 }
 
+/// The build lanes of every connected repo whose playbook has `[lanes]` (docs/build-lanes.md).
 #[tauri::command]
 async fn lanes_overview() -> Result<nitely_core::lanes::Overview, String> {
     nitely_core::lanes::overview(&Config::load().map_err(err)?, &db()?).map_err(err)

@@ -17,8 +17,13 @@ export interface PerformanceUsage {
   cpu_percent: number | null; private_commit_bytes: number | null; working_set_sum_bytes: number | null;
   process_read_bytes: number | null; process_write_bytes: number | null; processes: number;
 }
-export interface WorkloadContext { project: string | null; issue: string | null; run_id: number | null; job_id: number | null; worker_id: number | null; lane: number | null }
+export interface WorkloadContext { project: string | null; issue: string | null; run_id: number | null; job_id: number | null; review_batch_id?: number | null; worker_id: number | null; lane: number | null }
 export interface WorkloadUsage { id: string; kind: string; context: WorkloadContext; usage: PerformanceUsage }
+export interface RecordedWorkload {
+  id: string; kind: string; context: WorkloadContext; root: { boot: string; pid: number; started: string };
+  start_ms: number; end_ms: number | null; end_observed: boolean;
+  job_accounting: { cpu_100ns: number; read_bytes: number; write_bytes: number; processes: number; peak_private_commit_bytes: number | null } | null;
+}
 export interface AttributionSample {
   wall_ms: number; monotonic_ms: number; session: string; boot: string | null; interval_ms: number | null; collection_ms: number;
   resolution: string; observations: number;
@@ -34,10 +39,11 @@ export interface PerformanceReport {
   points: PerformancePoint[]; episodes: PerformanceEpisode[];
   events: { wall_ms: number; kind: string; project: string; issue: string | null; run: number; memory_cap_bytes: number | null }[];
   sessions: { session: string; boot: string | null; started_ms: number; stopped_ms: number | null }[];
-  coverage: { gaps: PerformanceGap[]; bounded: boolean; gaps_truncated: boolean; sessions_truncated: boolean; events_truncated: boolean; source_points: number; returned_points: number; resolution: string; notes: string[] };
+  coverage: { gaps: PerformanceGap[]; bounded: boolean; gaps_truncated: boolean; sessions_truncated: boolean; events_truncated: boolean; attribution_truncated: boolean; workloads_truncated: boolean; attribution_retained_bounds_ms: [number, number] | null; attribution_first_returned_ms: number | null; source_points: number; returned_points: number; resolution: string; notes: string[] };
   units: Record<string, unknown>;
   // Added by the attribution recorder; older histories have no attribution.
-  attribution_latest?: AttributionSample | null; attribution?: AttributionSample[];
+  attribution_latest: AttributionSample | null; attribution_age_ms: number | null; attribution: AttributionSample[];
+  workloads: RecordedWorkload[]; related_issues: Record<string, string>;
 }
 export type PerformanceRange = "15m" | "1h" | "6h" | "24h" | "7d" | "restart";
 export function performanceQuery(range: PerformanceRange, now: number) {

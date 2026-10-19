@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import { invoke, isLive } from "./backend";
 import { Loading, EmptyState } from "./ui";
 import { useLanes } from "./LanesStrip";
@@ -15,6 +15,7 @@ export function Performance(props: { version: number; onOpenIssue: (key: string)
   const [history, setHistory] = useState<PerformanceReport | null>(null);
   const [current, setCurrent] = useState<PerformanceReport | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [currentError, setCurrentError] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
   const [now, setNow] = useState(Date.now());
   const [dismissed, setDismissed] = useState(false);
@@ -41,8 +42,8 @@ export function Performance(props: { version: number; onOpenIssue: (key: string)
     const read = async () => {
       if (running) return;
       running = true;
-      try { const report = await invoke<PerformanceReport>("performance_query", { query: { view: "now", limit: 200 } }); if (live) setCurrent(report); }
-      catch (e) { if (live) setError(String(e)); }
+      try { const report = await invoke<PerformanceReport>("performance_query", { query: { view: "now", limit: 200 } }); if (live) { setCurrent(report); setCurrentError(null); } }
+      catch (e) { if (live) setCurrentError(String(e)); }
       running = false;
       if (live) timer = setTimeout(() => { if (!document.hidden) void read(); }, 5000);
     };
@@ -51,7 +52,7 @@ export function Performance(props: { version: number; onOpenIssue: (key: string)
     const clock = setInterval(() => setNow(Date.now()), 1000);
     return () => { live = false; clearTimeout(timer); clearInterval(clock); document.removeEventListener("visibilitychange", visible); };
   }, [props.version, reload]);
-  const data = history ? { ...history, ...(current ? { latest: current.latest, settings: current.settings, status: current.status, admission_limits: current.admission_limits, attribution_latest: current.attribution_latest } : {}) } : current;
+  const data = history ? { ...history, ...(current ? { latest: current.latest, settings: current.settings, status: current.status, admission_limits: current.admission_limits, attribution_latest: current.attribution_latest, attribution_age_ms: current.attribution_age_ms } : {}) } : current;
   const chooseRange = (r: PerformanceRange) => { if (r !== range) { setRange(r); setHistory(null); setError(null); } };
   const metrics = data?.latest?.metrics;
   const pressure = current && currentPressure(current, now);
@@ -60,9 +61,10 @@ export function Performance(props: { version: number; onOpenIssue: (key: string)
     <div className="page-head"><h1>Performance</h1><span className="head-glance">This machine · all projects</span></div>
     <p className="perf-intro">Machine pressure, the work using it, and what happened before a slowdown.</p>
     {error && <p className="error" role="alert">{error} <button className="link" onClick={() => setReload(n => n + 1)}>Try again</button></p>}
+    {currentError && currentError !== error && <p className="error" role="alert">Current readings: {currentError}</p>}
     {!data && !error && <Loading />}
     {data && <>
-      <div className="perf-freshness"><span className={data.settings.enabled && data.latest && now - data.latest.wall_ms <= 15_000 ? "live-ink" : "muted"}>{freshness(data, now)}</span><span className="muted" title={data.latest ? timestamp(data.latest.wall_ms) : undefined}>{data.latest ? `Last sample ${timestamp(data.latest.wall_ms)}` : "Collection may take a few seconds to start."}</span></div>
+      <div className="perf-freshness"><span className={data.settings.enabled && data.latest && now - data.latest.wall_ms >= -2000 && now - data.latest.wall_ms <= 15_000 ? "live-ink" : "muted"}>{freshness(data, now)}</span><span className="muted" title={data.latest ? timestamp(data.latest.wall_ms) : undefined}>{data.latest ? `Last sample ${timestamp(data.latest.wall_ms)}` : "Collection may take a few seconds to start."}</span></div>
       {pressure && !dismissed && <div className="perf-pressure" role="status"><div><strong>Sustained pressure observed</strong><p>{pressure.observed.map(s => s.replaceAll("_", " ")).join(" · ")} since {timestamp(pressure.from_ms)}. Workload overlap can help investigate; it does not establish the cause.</p></div><button className="link" onClick={() => setDismissed(true)}>Dismiss</button></div>}
       <div className="perf-metrics">
         <Metric label="CPU" value={numberText(metrics?.cpu_percent, "%")} detail="Whole machine" />
@@ -76,13 +78,13 @@ export function Performance(props: { version: number; onOpenIssue: (key: string)
     </>}
     <section className="perf-section"><div className="perf-heading"><h2>History</h2><div className="perf-ranges" role="group" aria-label="Performance time range">{RANGES.map(r => <button key={r} aria-pressed={range === r} onClick={() => chooseRange(r)}>{RANGE_LABEL(r)}</button>)}</div></div>
       {!history && !error && <Loading />}
-      {history && <><History data={history} /><p className="muted small">{timestamp(history.from_ms)} – {timestamp(history.to_ms)} · {history.coverage.returned_points} of {history.coverage.source_points} points · {history.coverage.resolution.replaceAll("_", " ")}</p>
+      {history && <><HistoryChart data={history} /><p className="muted small">{timestamp(history.from_ms)} – {timestamp(history.to_ms)} · {history.coverage.returned_points} of {history.coverage.source_points} points · {history.coverage.resolution.replaceAll("_", " ")}</p>
         {range === "restart" && <p className="small">Ends at the last retained sample of the previous boot. The exact shutdown time is unknown.</p>}
         <details className="perf-details"><summary>Collection coverage · {history.coverage.gaps.length} recorded gaps</summary><ul>{history.coverage.gaps.map((g, i) => <li key={i}>{g.kind.replaceAll("_", " ")} · {timestamp(g.from_ms)} – {timestamp(g.to_ms)}</li>)}</ul>{history.coverage.notes.map(n => <p className="muted small" key={n}>{n}</p>)}{(history.coverage.bounded || history.coverage.gaps_truncated || history.coverage.sessions_truncated || history.coverage.events_truncated) && <p>Results are bounded; some detail is omitted. Narrow the time range to inspect it.</p>}</details>
       </>}
     </section>
     {data && <>
-      <Workloads data={data} onOpenIssue={props.onOpenIssue} />
+      <Workloads key={`${range}/${reload}`} data={data} now={now} onOpenIssue={props.onOpenIssue} />
       <section className="perf-section"><h2>Pressure episodes & workload events</h2>
         {!data.episodes.length && <p className="muted">No sustained pressure established in the retained detailed samples for this range.</p>}
         {data.episodes.map(e => <div className="perf-episode" key={e.from_ms}><strong>{e.observed.map(s => s.replaceAll("_", " ")).join(" · ")}</strong><span>{timestamp(e.from_ms)} – {timestamp(e.to_ms)}</span><span className="muted">{e.observations} observations{e.inferred_causes.length ? ` · possible causes: ${e.inferred_causes.join(", ")}` : " · cause not established"}</span></div>)}
@@ -116,16 +118,23 @@ function History({ data }: { data: PerformanceReport }) {
     {!!data.points.length && <details className="perf-details"><summary>Sample values and peaks</summary><div className="perf-table-scroll"><table><thead><tr><th>Through</th><th>Value</th><th>Observed {metric === "physical_available_bytes" ? "minimum" : "peak"}</th><th>Coverage</th></tr></thead><tbody>{data.points.map((p, i) => <tr key={i}><td>{timestamp(p.to_ms)}</td><td>{metric === "cpu_percent" ? numberText(p.values[metric], "%") : byteText(p.values[metric])}</td><td>{metric === "cpu_percent" ? numberText(p.peaks[metric], "%") : byteText(metric === "physical_available_bytes" ? p.min_available_bytes : p.peaks[metric])}</td><td>{p.resolution} · {p.observations} samples{p.contains_gap ? " · contains gap" : ""}</td></tr>)}</tbody></table></div></details>}
   </>;
 }
+const HistoryChart = memo(History);
 
-function Workloads({ data, onOpenIssue }: { data: PerformanceReport; onOpenIssue: (key: string) => void }) {
-  const [selected, setSelected] = useState("latest");
+function Workloads({ data, now, onOpenIssue }: { data: PerformanceReport; now: number; onOpenIssue: (key: string) => void }) {
+  // Keep the chosen observation stable while the bounded live window moves on.
+  const [selectedSample, setSelectedSample] = useState<AttributionSample | null>(null);
   const [sort, setSort] = useState<"cpu_percent" | "private_commit_bytes" | "process_read_bytes">("cpu_percent");
   const [error, setError] = useState<string | null>(null);
   const history = data.attribution ?? [];
-  const sample = selected === "latest" ? data.attribution_latest : history.find(s => `${s.session}/${s.monotonic_ms}` === selected);
-  const context = (c: WorkloadContext) => <>{c.project && <span>{c.project} · </span>}{c.issue && <button className="link" onClick={() => onOpenIssue(c.issue!)}>{c.issue}</button>}{c.run_id != null && <> · <button className="link" onClick={() => invoke("open_lane_log", { id: c.run_id }).catch(e => setError(String(e)))}>run {c.run_id}</button></>}{c.job_id != null && <> · job {c.job_id}</>}{c.worker_id != null && <> · worker {c.worker_id}</>}{c.lane != null && <> · lane {c.lane}</>}</>;
-  return <section className="perf-section"><div className="perf-heading"><h2>Workloads</h2><label>Recorded at <select aria-label="Workload sample" value={selected} onChange={e => setSelected(e.target.value)}><option value="latest">Latest sample</option>{history.map(s => <option key={`${s.session}/${s.monotonic_ms}`} value={`${s.session}/${s.monotonic_ms}`}>{timestamp(s.wall_ms)}{s.resolution === "minute_peak" ? " · minute peaks" : ""}</option>)}</select></label></div>
+  const sampleId = (s: AttributionSample) => `${s.session}/${s.monotonic_ms}`;
+  const choices = selectedSample && !history.some(s => sampleId(s) === sampleId(selectedSample)) ? [selectedSample, ...history] : history;
+  const sample = selectedSample ?? data.attribution_latest;
+  const context = (c: WorkloadContext) => <>{c.project && <span>{c.project} · </span>}{c.issue && <button className="link" onClick={() => onOpenIssue(c.issue!)}>{c.issue}</button>}{c.run_id != null && <> · <button className="link" onClick={() => invoke("open_lane_log", { id: c.run_id }).catch(e => setError(String(e)))}>run {c.run_id}</button></>}{c.job_id != null && <> · job {c.job_id}</>}{c.review_batch_id != null && <> · review batch {c.review_batch_id}</>}{c.worker_id != null && <> · worker {c.worker_id}</>}{c.lane != null && <> · lane {c.lane}</>}</>;
+  return <section className="perf-section"><div className="perf-heading"><h2>Workloads</h2><label>Recorded at <select aria-label="Workload sample" value={selectedSample ? sampleId(selectedSample) : "latest"} onChange={e => setSelectedSample(choices.find(s => sampleId(s) === e.target.value) ?? null)}><option value="latest">Latest sample</option>{choices.map(s => <option key={sampleId(s)} value={sampleId(s)}>{timestamp(s.wall_ms)}{s.resolution === "minute_peak" ? " · minute peaks" : ""}</option>)}</select></label></div>
     {error && <p className="error">{error}</p>}
+    {sample && !selectedSample && (now - sample.wall_ms > 15_000 || now < sample.wall_ms - 2000) && <p className="muted">Attribution is stale or its clock changed. These values are the last recorded observation.</p>}
+    {selectedSample && selectedSample.wall_ms < data.from_ms && <p className="muted small">The selected observation is now outside the rolling history window.</p>}
+    {data.coverage.attribution_truncated && <p className="muted small">Showing the most recent {history.length} attribution observations in this window{data.coverage.attribution_first_returned_ms != null ? `, beginning ${timestamp(data.coverage.attribution_first_returned_ms)}` : ""}. Earlier retained observations are omitted; narrow the time range to inspect them.</p>}
     {!sample || !sample.coverage.supported ? <p className="muted">Process attribution is unavailable for this sample or platform. Machine counters remain separate.</p> : <>
       <p className="small muted">{timestamp(sample.wall_ms)} · {sample.coverage.measured} of {sample.coverage.enumerated} processes measured · {sample.coverage.denied} inaccessible · {sample.coverage.partial_metrics} with partial counters{sample.coverage.truncated ? " · results truncated" : ""}{sample.coverage.first_sample ? " · first sample; interval counters unavailable" : ""}. Short-lived work may be missed between samples.</p>
       <div className="perf-attribution">{([['Nitely', sample.nitely], ['Related work', sample.related], ['Other processes', sample.other]] as const).map(([label, usage]) => <Metric key={label} label={label} value={numberText(usage.cpu_percent, "% CPU")} detail={`${byteText(usage.private_commit_bytes)} private commit`} />)}<Metric label="Unattributed CPU" value={numberText(sample.unattributed_cpu_percent, "%")} detail="Residual estimate; includes sampling skew" /></div>
@@ -134,6 +143,7 @@ function Workloads({ data, onOpenIssue }: { data: PerformanceReport; onOpenIssue
       <div className="perf-table-scroll"><table><thead><tr><th>Workload</th><th>CPU</th><th>Private commit</th><th>Working sets</th><th>Process I/O</th></tr></thead><tbody>{sortedWorkloads(sample.workloads, sort).map(w => <tr key={w.id}><td><strong>{w.kind.replaceAll("_", " ")}</strong><div className="small">{context(w.context)}</div></td><UsageCells usage={w.usage} sample={sample} /></tr>)}{!sample.workloads.length && <tr><td colSpan={5}>No attributed Nitely workloads in this sample.</td></tr>}</tbody></table></div>
       <details className="perf-details"><summary>Top other processes · {sample.top_other.length} shown</summary><div className="perf-table-scroll"><table><thead><tr><th>Executable</th><th>CPU</th><th>Private commit</th><th>Working sets</th><th>Process I/O</th></tr></thead><tbody>{sample.top_other.map(p => <tr key={`${p.identity.boot}/${p.identity.pid}/${p.identity.started}`}><td>{p.basename}<div className="small muted">PID {p.identity.pid}</div></td><UsageCells usage={p.usage} sample={sample} /></tr>)}</tbody></table></div></details>
     </>}
+    <details className="perf-details"><summary>Registered work in this window · {data.workloads.length}{data.coverage.workloads_truncated ? " shown (bounded)" : " records"}</summary><p className="muted small">Launch/exit records include work that finishes between samples. Job totals below include descendants and are separate from sampled process totals; do not add them together. A missing exit time means exit was not recorded.</p><div className="perf-table-scroll"><table><thead><tr><th>Work</th><th>Recorded lifetime</th><th>Job CPU time</th><th>Job peak private commit</th><th>Job process I/O</th></tr></thead><tbody>{data.workloads.map(w => <tr key={w.id}><td>{w.kind.replaceAll("_", " ")}<div className="small">{context(w.context)}</div></td><td>{timestamp(w.start_ms)}<div>{w.end_ms == null ? "Exit not recorded" : `${timestamp(w.end_ms)}${w.end_observed ? " (observed later)" : ""}`}</div></td><td>{w.job_accounting ? numberText(w.job_accounting.cpu_100ns / 10_000_000, " CPU seconds") : "Unavailable"}</td><td>{byteText(w.job_accounting?.peak_private_commit_bytes)}</td><td>{w.job_accounting ? `${byteText(w.job_accounting.read_bytes)} read · ${byteText(w.job_accounting.write_bytes)} written` : "Unavailable"}</td></tr>)}</tbody></table></div></details>
   </section>;
 }
 function UsageCells({ usage: u, sample }: { usage: PerformanceUsage; sample: AttributionSample }) {
