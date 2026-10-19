@@ -122,7 +122,8 @@ pub fn query_at(dir: &Path, request: &Query, now: i64) -> Result<Report> {
                 }
             }
             points = minutes.into_iter().map(point_of_minute).collect();
-            if request.view == View::Episodes { raw_samples = store.samples(from, to, 17280)?; raw_samples.reverse(); }
+            raw_samples = store.samples(from, to, 17280)?;
+            raw_samples.reverse();
         } else {
             raw_samples = store.samples(from, to, 17280)?;
             raw_samples.reverse();
@@ -140,7 +141,7 @@ pub fn query_at(dir: &Path, request: &Query, now: i64) -> Result<Report> {
     let episodes = episodes(&raw_samples);
     let mut notes = vec!["Machine totals always cover the whole PC; project filters apply only to workload attribution and events.".into(), "Null counters mean unavailable, not zero; overlapping work is not proof of causation.".into()];
     if use_minutes { notes.push("Minute extrema preserve observed peaks; they do not establish sustained pressure within a minute.".into()); }
-    if request.view == View::Episodes { notes.push("At most 100 recent sustained episodes are returned, covering retained detailed samples only.".into()); }
+    notes.push("At most 100 recent sustained episodes are returned, covering retained detailed samples only; absence outside detailed retention is not evidence of no pressure.".into());
     if anchor != "requested_wall_time" { notes.push("This window ends at the last retained sample of the previous boot, not a known shutdown instant.".into()); }
     let returned_points = points.len();
     let selected_sessions: Vec<Session> = sessions.into_iter().filter(|s| s.started_ms <= to && s.stopped_ms.is_none_or(|end| end >= from)).collect();
