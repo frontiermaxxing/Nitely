@@ -4,7 +4,7 @@ import type { Batching, DefaultsView, DryRun, LandBy, PathRule, ReviewerInfo, Re
 import { EmptyState, Loading, VENDOR_LABEL, vendorOf } from "./ui";
 import "./rules.css";
 
-/** Who lands a reviewed change, in the words the playbook docs use. */
+/** Who lands a change, in the words the playbook docs use. */
 export const LAND_BY: Record<LandBy, { label: string; why: string }> = {
   author: { label: "The agent that wrote it", why: "A passing review moves it to In Review, and the agent calls land (after you approve, when you must)." },
   auto: { label: "Nitely, as soon as it can", why: "Nitely lands it in the same submit when the review passes and nothing needs you, and as soon as you approve it otherwise." },
@@ -127,6 +127,7 @@ function Tri(props: { value: boolean | null; inherited: boolean; disabled: boole
 function draftOf(v: RulesView): RulesEdit {
   const own = <T,>(f: RuleField<T>) => (f.from === "project" ? f.value : null);
   return {
+    review_enabled: own(v.review_enabled),
     always_human: v.always_human,
     human_paths: v.human_paths,
     blocked_paths: v.blocked_paths,
@@ -140,13 +141,14 @@ function draftOf(v: RulesView): RulesEdit {
 
 /** "Changes wait for you when they touch billing, or ..." for the head of the human card. */
 function waitsSummary(d: RulesEdit, landBy: LandBy, crossVendor: boolean): string {
+  if (d.review_enabled === false && (d.flags.length || crossVendor)) return "Reviewer conditions are unevaluated while review is off, so changes wait for your decision.";
   if (d.always_human || landBy === "human") return "Every change waits for you before it lands.";
   const parts: string[] = [];
   const reasons = [...new Set(d.human_paths.filter((r) => r.pattern.trim()).map((r) => r.reason.trim() || r.pattern.trim()))];
   if (reasons.length) parts.push(`it touches ${reasons.join(", ")}`);
   if (d.flags.length) parts.push(`the reviewer answers yes to ${d.flags.map((f) => f.name || "a question").join(" or ")}`);
   if (crossVendor) parts.push("the reviewer is the author's own vendor");
-  return parts.length ? `A change waits for you when ${parts.join(", or when ")}. Anything else lands once its review passes.` : "Nothing waits for you: a change lands once its review passes.";
+  return parts.length ? `A change waits for you when ${parts.join(", or when ")}. Anything else can land after its required checks.` : "Nothing waits for you: a change can land after its required checks.";
 }
 
 const REVIEW_BATCH: Record<Batching["review"], string> = {
@@ -178,7 +180,7 @@ function windowWords(text: string): string {
  * How the project batches reviews and lands (docs/batching.md): read here, changed in the playbook's
  * `[review]` and `[land]` tables, since a batch changes what a reviewer reads and what one gate covers.
  */
-function BatchingCard({ batching: b }: { batching: Batching }) {
+function BatchingCard({ batching: b, reviewEnabled }: { batching: Batching; reviewEnabled: boolean }) {
   return (
     <section className="settings-card">
       <h2>Batching</h2>
@@ -189,7 +191,7 @@ function BatchingCard({ batching: b }: { batching: Batching }) {
       <dl className="lanes-facts">
         <dt>Reviews</dt>
         <dd>
-          {REVIEW_BATCH[b.review] ?? b.review} <span className="muted mono">batch = "{b.review}"</span>
+          {reviewEnabled ? REVIEW_BATCH[b.review] ?? b.review : "Disabled; configuration retained"} <span className="muted mono">batch = "{b.review}"</span>
           {b.review !== "off" && (
             <div className="muted small">
               Up to {b.review_max} per review call, waiting {windowWords(b.review_window)} for others
@@ -215,22 +217,38 @@ function BatchingCard({ batching: b }: { batching: Batching }) {
   );
 }
 
+function ReviewEnabled(props: { enabled: boolean; from: RuleField<boolean>["from"]; repo: string; flags: ReviewFlag[]; crossVendor: boolean; disabled: boolean; onChange: (enabled: boolean) => void }) {
+  return <div className="rules-field">
+    <div className="rules-field-head"><h3>Automated PR review</h3><From from={props.from} /></div>
+    <label className="rules-check"><input type="checkbox" checked={props.enabled} disabled={props.disabled} onChange={(e) => props.onChange(e.target.checked)} />Run automated review for {props.repo}</label>
+    <p className="settings-why small">Applies to this repository. Build/test gates, PR creation and independent human approval rules still apply. GitHub and Bitbucket branch protections stay in effect. Reviewer settings are kept while off.</p>
+    {!props.enabled && <>
+      <p className="small">Review disabled for this project. New and queued reviews skip the reviewer; a review already running finishes. Turning this back on requires review before an unreviewed change can land.</p>
+      {(props.flags.length > 0 || props.crossVendor) && <div className="small attention-ink"><p>These conditions are unevaluated while review is off, so changes still wait for your decision:</p><ul>
+        {props.flags.map((flag) => <li key={flag.name}>{flag.name}: {flag.question}</li>)}
+        {props.crossVendor && <li>A review by another vendor is required.</li>}
+      </ul></div>}
+    </>}
+  </div>;
+}
+
 /** Human review of the exact committed-playbook edit before saving. */
 function CommittedReviewer({ view: v, onSaved }: { view: RulesView; onSaved: (v: RulesView) => void }) {
   const original = v.reviewer.from === "project" ? v.reviewer.value : null;
   const [reviewer, setReviewer] = useState<Record<string, string> | null>(original);
+  const [enabled, setEnabled] = useState(v.review_enabled.value);
   const [preview, setPreview] = useState<ReviewerPreview | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
-  useEffect(() => { setReviewer(original); setPreview(null); }, [v]);
-  const changed = JSON.stringify(reviewer) !== JSON.stringify(original);
+  useEffect(() => { setReviewer(original); setEnabled(v.review_enabled.value); setPreview(null); }, [v]);
+  const changed = enabled !== v.review_enabled.value || JSON.stringify(reviewer) !== JSON.stringify(original);
   const patch = (next: Record<string, string> | null) => { setReviewer(next); setPreview(null); setNote(null); setError(null); };
   const act = async () => {
     setBusy(true);
     setError(null);
     try {
-      const edit = { reviewer };
+      const edit = { reviewer, enabled: enabled === v.review_enabled.value ? undefined : enabled };
       if (!preview) {
         setPreview(await invoke<ReviewerPreview>("reviewer_settings_preview", { repo: v.repo, edit }));
       } else {
@@ -242,23 +260,25 @@ function CommittedReviewer({ view: v, onSaved }: { view: RulesView; onSaved: (v:
     } catch (e) { setError(String(e)); setPreview(null); }
     setBusy(false);
   };
-  return <div className="rules-field">
+  return <>
+    <ReviewEnabled enabled={enabled} from={enabled === v.review_enabled.value ? v.review_enabled.from : "project"} repo={v.repo} flags={v.flags} crossVendor={v.require_cross_vendor.value} disabled={busy} onChange={(next) => { setEnabled(next); setPreview(null); setNote(null); setError(null); }} />
+    <div className="rules-field">
     <div className="rules-field-head"><h3>Who reviews whose work</h3><From from={reviewer ? "project" : v.reviewer.inherited_from} /></div>
     <ReviewerMap map={reviewer ?? v.reviewer.inherited} reviewers={v.reviewers} disabled={busy || !v.reviewer_editable} onChange={patch} />
     <p className="settings-why small">When the named reviewer is unavailable, another installed vendor reviews, then the author's vendor in a fresh read-only session.</p>
-    <p className="settings-why small">Saving commits reviewer routing to this project's playbook on <strong>{v.integration}</strong>. It is pushed with the next land.</p>
+    <p className="settings-why small">Saving commits review settings for <strong>{v.repo}</strong> to its playbook on <strong>{v.integration}</strong>. It is pushed with the next land.</p>
     {reviewer && <button className="btn btn-quiet" disabled={busy} onClick={() => patch(null)}>Use the default</button>}
-    {preview && <div className="rules-review-preview" role="region" aria-label="Reviewer routing change">
+    {preview && <div className="rules-review-preview" role="region" aria-label="Review settings change">
       <p>{preview.destination}</p>
       <pre>{preview.diff}</pre>
     </div>}
     {changed && <div className="settings-row">
-      <button className="btn primary" disabled={busy} onClick={act}>{preview ? "Commit reviewer change" : "Preview reviewer change"}</button>
-      <button className="btn" disabled={busy} onClick={() => patch(original)}>Discard changes</button>
+      <button className="btn primary" disabled={busy} onClick={act}>{preview ? "Commit review settings" : "Preview review settings"}</button>
+      <button className="btn" disabled={busy} onClick={() => { patch(original); setEnabled(v.review_enabled.value); }}>Discard changes</button>
     </div>}
     {note && <p className="muted small" role="status">{note}</p>}
     {error && <p className="error small" role="alert">{error}</p>}
-  </div>;
+  </div></>;
 }
 
 /** One repo's rules: what waits for you, who reviews, who lands, and a dry run. */
@@ -334,7 +354,9 @@ function RepoRules(props: { view: RulesView; onSaved: (v: RulesView) => void }) 
 
       <section className="settings-card">
         <h2>Review</h2>
-        {v.source === "repo" ? <CommittedReviewer view={v} onSaved={props.onSaved} /> : <div className="rules-field">
+        {v.source === "repo" ? <CommittedReviewer view={v} onSaved={props.onSaved} /> : <>
+          <ReviewEnabled enabled={draft.review_enabled ?? v.review_enabled.inherited} from={draft.review_enabled === null ? v.review_enabled.inherited_from : "project"} repo={v.repo} flags={draft.flags} crossVendor={crossVendor} disabled={busy || ro} onChange={(review_enabled) => patch({ review_enabled })} />
+          <div className="rules-field">
           <div className="rules-field-head">
             <h3>Who reviews whose work</h3>
             <From from={draft.reviewer ? "project" : v.reviewer.inherited_from} />
@@ -346,7 +368,7 @@ function RepoRules(props: { view: RulesView; onSaved: (v: RulesView) => void }) 
               Use the default
             </button>
           )}
-        </div>}
+        </div></>}
         <div className="rules-field">
           <div className="rules-field-head">
             <h3>A review by the author's own vendor</h3>
@@ -383,7 +405,7 @@ function RepoRules(props: { view: RulesView; onSaved: (v: RulesView) => void }) 
 
       <section className="settings-card">
         <div className="rules-field-head">
-          <h2>Who lands a reviewed change</h2>
+          <h2>Who lands a change</h2>
           <From from={draft.land_by !== null ? "project" : v.land_by.inherited_from} />
         </div>
         <select value={draft.land_by ?? "inherit"} disabled={ro} onChange={(e) => patch({ land_by: e.target.value === "inherit" ? null : (e.target.value as LandBy) })}>
@@ -394,10 +416,10 @@ function RepoRules(props: { view: RulesView; onSaved: (v: RulesView) => void }) 
             </option>
           ))}
         </select>
-        <p className="settings-why rules-land-why">{LAND_BY[landBy].why}</p>
+        <p className="settings-why rules-land-why">{draft.review_enabled === false ? (landBy === "author" ? "After the gate and any required approval, the author agent calls land." : "After the gate and any required approval, Nitely lands the change.") : LAND_BY[landBy].why}</p>
       </section>
 
-      {v.batching && <BatchingCard batching={v.batching} />}
+      {v.batching && <BatchingCard batching={v.batching} reviewEnabled={draft.review_enabled ?? v.review_enabled.inherited} />}
 
       {!ro && (
         <div className="rules-save">
@@ -502,7 +524,7 @@ function DryRunCard(props: { repo: string; stale: boolean }) {
               {result.files.length} file{result.files.length === 1 ? "" : "s"} against <span className="mono">{result.base}</span>
             </dd>
             <dt>Reviewer</dt>
-            <dd>{result.reviewer ? `${reviewerName(result.reviewer)}${result.reviewer_note ? ` (${result.reviewer_note})` : ""}` : result.reviewer_error}</dd>
+            <dd>{result.reviewer ? `${reviewerName(result.reviewer)}${result.reviewer_note ? ` (${result.reviewer_note})` : ""}` : result.reviewer_note || result.reviewer_error}</dd>
             <dt>Waits for you</dt>
             <dd>{result.reasons.length ? result.reasons.join("; ") : "No rule sends it to you"}</dd>
             {result.flags.length > 0 && (
@@ -634,7 +656,7 @@ export function RuleDefaultsCard({ titled = true }: { titled?: boolean } = {}) {
         </select>
       </div>
       <div className="rules-field">
-        <h3>Who lands a reviewed change</h3>
+        <h3>Who lands a change</h3>
         <select value={draft.land_by ?? "inherit"} onChange={(e) => patch({ land_by: e.target.value === "inherit" ? undefined : (e.target.value as LandBy) })}>
           <option value="inherit">Nitely's default ({LAND_BY.author.label})</option>
           {(Object.keys(LAND_BY) as LandBy[]).map((b) => (

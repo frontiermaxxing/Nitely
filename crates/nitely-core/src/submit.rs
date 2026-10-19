@@ -44,6 +44,8 @@ pub struct Submitted {
     pub solution: Option<SolutionSummary>,
     /// None when the gate failed (nothing else ran) or the review was skipped.
     pub review: Option<Review>,
+    /// Deliberately disabled by project policy, distinct from an ad-hoc skip.
+    pub review_disabled: bool,
     /// `agent` when the review is enough, `human` when it waits for approval.
     pub approver: String,
     pub reasons: Vec<String>,
@@ -167,6 +169,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         solution: opts.solution.filter(|_| explained_revision && explained_patch.as_ref() == Some(&submitted_patch)).cloned(),
         gate,
         review: None,
+        review_disabled: false,
         approver: "human".into(),
         reasons: vec![],
         approval_stands: false,
@@ -184,66 +187,84 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         return Ok(out);
     }
 
+    // A queued gate may outlive a human settings change. Read the authoritative policy again.
+    let mut pb = Playbook::load(&root)?;
+    pb.review.policy_root = Some(root.clone());
+    pb.approval.check_blocked(&files)?;
     out.reasons = pb.human_reasons(&files)?;
-    if opts.skip_review {
+    if !pb.review.enabled {
+        out.review_disabled = true;
+    } else if opts.skip_review {
         out.reasons.push("no review ran".into());
     } else {
-        let (vendor, _) = crate::git::parse_branch(&branch);
-        let vendor = vendor.unwrap_or_default();
-        let previous = previous_round(db, &issue.key, &worktree)?;
-        // The same patch passed review last time: that pass carries over (NIT-185).
-        let reused = reused_pass(db, &pb.review, &issue.key, &diff_id(&worktree, &since, &out.commit)?, &vendor, &|r| pb.review.is_installed(r, &worktree))?;
-        if let Some((_, r)) = &reused {
-            let at = r.reused.as_deref().unwrap_or_default();
-            db.log_event(actor, Some(&issue.key), Some(&wt), "status", &format!("The same patch passed review at {}: that pass carries over, so it is not reviewed again", &at[..at.len().min(7)]))?;
-        }
-        // The single review knows what the change is for (NIT-282).
-        let mut rules = pb.review.clone();
-        rules.context = review_context(db, &issue, &out.gate)?;
-        // From a batch: the review, or what its review found for this change that its single review
-        // must carry (an interaction with another change).
-        let (batched, extra) = if reused.is_some() {
-            (reused, vec![])
-        } else if opts.batch && matches!(pb.review.batch, crate::review::BatchMode::Small | crate::review::BatchMode::All) {
-            in_a_batch(db, &pb, &issue, &root, &worktree, &branch, &since, &files, &vendor, &out.reasons, previous.as_ref(), actor)?
-        } else {
-            (None, vec![])
-        };
-        // A reviewer that cannot run (not signed in, say) is passed over for the next candidate;
-        // one that ran and did not finish its review stops the submit.
-        let mut failed: Vec<crate::review::CouldNotRun> = vec![];
-        let (choice, mut review) = if let Some(done) = batched { done } else { loop {
-            let choice = pb.review.choose_after(&vendor, &|r| pb.review.is_installed(r, &worktree), &failed)?;
-            let reviewer = choice.reviewer.clone();
-            let started = format!("Review by {reviewer}{} started", noted(&choice.note));
-            db.log_event(actor, Some(&issue.key), Some(&wt), "review_started", &started)?;
-            match rules.run(&reviewer, &worktree, &since, previous.as_ref()) {
-                Ok(r) => break (choice, r),
-                Err(e) => match e.downcast::<crate::review::CouldNotRun>() {
-                    Ok(out) => {
-                        db.log_event(actor, Some(&issue.key), Some(&wt), "review_failed", &format!("Review by {reviewer} could not run ({}); trying another reviewer", out.why))?;
-                        failed.push(out);
-                    }
-                    Err(e) => {
-                        db.log_event(actor, Some(&issue.key), Some(&wt), "review_failed", &format!("Review by {reviewer} did not finish"))?;
-                        return Err(e);
-                    }
-                },
+        let reviewed = (|| -> Result<()> {
+            pb.review.require_enabled()?;
+            let (vendor, _) = crate::git::parse_branch(&branch);
+            let vendor = vendor.unwrap_or_default();
+            let previous = previous_round(db, &issue.key, &worktree)?;
+            // The same patch passed review last time: that pass carries over (NIT-185).
+            let reused = reused_pass(db, &pb.review, &issue.key, &diff_id(&worktree, &since, &out.commit)?, &vendor, &|r| pb.review.is_installed(r, &worktree))?;
+            if let Some((_, r)) = &reused {
+                let at = r.reused.as_deref().unwrap_or_default();
+                db.log_event(actor, Some(&issue.key), Some(&wt), "status", &format!("The same patch passed review at {}: that pass carries over, so it is not reviewed again", &at[..at.len().min(7)]))?;
             }
-        } };
-        review.findings.extend(extra);
-        crate::review_batch::hold_interactions(db, &worktree, &mut review)?;
-        let reviewer = choice.reviewer.clone();
-        review.note = choice.note.clone();
-        if opts.batch && pb.review.batch == crate::review::BatchMode::Shadow && review.reused.is_none() {
-            out.shadow = shadow_of(db, &pb, &issue, &root, &worktree, &branch, &since, &files, &vendor, &choice, &out.reasons, previous.as_ref())?;
+            // The single review knows what the change is for (NIT-282).
+            let mut rules = pb.review.clone();
+            rules.context = review_context(db, &issue, &out.gate)?;
+            // From a batch: the review, or what its review found for this change that its single review
+            // must carry (an interaction with another change).
+            let (batched, extra) = if reused.is_some() {
+                (reused, vec![])
+            } else if opts.batch && matches!(pb.review.batch, crate::review::BatchMode::Small | crate::review::BatchMode::All) {
+                in_a_batch(db, &pb, &issue, &root, &worktree, &branch, &since, &files, &vendor, &out.reasons, previous.as_ref(), actor)?
+            } else {
+                (None, vec![])
+            };
+            // A reviewer that cannot run (not signed in, say) is passed over for the next candidate;
+            // one that ran and did not finish its review stops the submit.
+            let mut failed: Vec<crate::review::CouldNotRun> = vec![];
+            let (choice, mut review) = if let Some(done) = batched { done } else { loop {
+                rules.require_enabled()?;
+                let choice = pb.review.choose_after(&vendor, &|r| pb.review.is_installed(r, &worktree), &failed)?;
+                let reviewer = choice.reviewer.clone();
+                let started = format!("Review by {reviewer}{} started", noted(&choice.note));
+                db.log_event(actor, Some(&issue.key), Some(&wt), "review_started", &started)?;
+                match rules.run(&reviewer, &worktree, &since, previous.as_ref()) {
+                    Ok(r) => break (choice, r),
+                    Err(e) if e.is::<crate::review::Disabled>() => return Err(e),
+                    Err(e) => match e.downcast::<crate::review::CouldNotRun>() {
+                        Ok(out) => {
+                            db.log_event(actor, Some(&issue.key), Some(&wt), "review_failed", &format!("Review by {reviewer} could not run ({}); trying another reviewer", out.why))?;
+                            failed.push(out);
+                        }
+                        Err(e) => {
+                            db.log_event(actor, Some(&issue.key), Some(&wt), "review_failed", &format!("Review by {reviewer} did not finish"))?;
+                            return Err(e);
+                        }
+                    },
+                }
+            } };
+            review.findings.extend(extra);
+            crate::review_batch::hold_interactions(db, &worktree, &mut review)?;
+            let reviewer = choice.reviewer.clone();
+            review.note = choice.note.clone();
+            if opts.batch && pb.review.batch == crate::review::BatchMode::Shadow && review.reused.is_none() {
+                out.shadow = shadow_of(db, &pb, &issue, &root, &worktree, &branch, &since, &files, &vendor, &choice, &out.reasons, previous.as_ref())?;
+            }
+            out.reasons.extend(pb.review.independence_reason(&reviewer, &vendor, &choice.note));
+            out.reasons.extend(pb.review.flag_reasons(&review));
+            out.review = Some(review);
+            Ok(())
+        })();
+        if let Err(e) = reviewed {
+            if e.is::<crate::review::Disabled>() { out.review_disabled = true; } else { return Err(e); }
         }
-        out.reasons.extend(pb.review.independence_reason(&reviewer, &vendor, &choice.note));
-        out.reasons.extend(pb.review.flag_reasons(&review));
-        out.review = Some(review);
+    }
+    if out.review_disabled {
+        out.reasons.extend(Playbook::load(&root)?.review.unevaluated_reasons());
     }
     out.approver = if out.reasons.is_empty() { "agent" } else { "human" }.into();
-    let mut verdict = out.review.as_ref().map_or("none", |r| r.verdict.as_str()).to_string();
+    let mut verdict = out.review.as_ref().map_or(if out.review_disabled { "disabled" } else { "none" }, |r| r.verdict.as_str()).to_string();
     // Findings the person accepted as they are, signed for this very patch, block nothing: the
     // review is recorded as it asked, and goes on as a passing one (land checks the same).
     let accepted_only = match &out.review {
@@ -366,6 +387,8 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         (Some(r), "human") if out.approval_stands => format!("Review by {} passed; the human's approval of this patch stands", by(r)),
         (Some(r), "human") => format!("Review by {} passed; waits for a human", by(r)),
         (Some(r), _) => format!("Review by {} passed; ready to land", by(r)),
+        (None, "human") if out.review_disabled => format!("{}; waits for a human under the remaining approval rules", crate::review::DISABLED_NOTE),
+        (None, _) if out.review_disabled => format!("{}; gate passed and ready to land", crate::review::DISABLED_NOTE),
         (None, _) => "Submitted without a review; waits for a human".to_string(),
     };
     let outcome = match out.review.as_ref().map(|r| rechecked(&r.previous)) {
@@ -398,6 +421,8 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         ("Needs You", "It waits for the human's approval in the Nitely inbox, and Nitely lands it as soon as they approve it; you do not call land. Nitely already asked them, so do not `ask` for this approval yourself. Pick up other work meanwhile.")
     } else if out.approver == "human" {
         ("Needs You", "It waits for the human's approval in the Nitely inbox. Nitely already asked them, so do not `ask` for this approval yourself. Pick up other work meanwhile; once it is Approved, call land.")
+    } else if out.review_disabled {
+        ("In Review", "Review disabled for this project. The gate passed and no human approval is needed. Call land to put it on the integration branch.")
     } else {
         ("In Review", "The review passed and no human approval is needed. Call land to put it on the integration branch.")
     };
@@ -448,6 +473,7 @@ fn in_a_batch(
     actor: &Actor,
 ) -> Result<FromBatch> {
     let wt = worktree.to_string_lossy().into_owned();
+    pb.review.require_enabled()?;
     let choice = pb.review.choose(vendor, &|r| pb.review.is_installed(r, worktree))?;
     let lines = crate::review_batch::changed_lines(worktree, since)?;
     let large_repo = pb.lanes.as_ref().is_some_and(|l| l.large_repo);
@@ -486,6 +512,10 @@ fn shadow_of(
     reasons: &[String],
     previous: Option<&PreviousRound>,
 ) -> Result<Option<crate::review_batch::Shadow>> {
+    if let Err(e) = pb.review.require_enabled() {
+        if e.is::<crate::review::Disabled>() { return Ok(None); }
+        return Err(e);
+    }
     let lines = crate::review_batch::changed_lines(worktree, since)?;
     let large_repo = pb.lanes.as_ref().is_some_and(|l| l.large_repo);
     if crate::review_batch::why_alone(db, &pb.review, vendor, choice, reasons, files, lines, previous, large_repo, &issue.key)?.is_some() {
@@ -787,6 +817,8 @@ pub fn describe(issue: &IssueRecord, s: &Submitted, land_by: crate::playbook::La
         "**Approval:** a human approved this exact patch in Nitely, and this review raised nothing new, so it stands.".to_string()
     } else if s.approver == "human" {
         "**Approval:** waits for a human. Approve it in Nitely's inbox.".to_string()
+    } else if s.review_disabled {
+        "**Approval:** no human approval is required under this repo's remaining rules.".to_string()
     } else {
         "**Approval:** the review is enough under this repo's playbook.".to_string()
     });
@@ -816,6 +848,7 @@ pub fn describe(issue: &IssueRecord, s: &Submitted, land_by: crate::playbook::La
                 format!("- [P{}] {}{carried}", f.priority, f.text)
             }));
         }
+        None if s.review_disabled => lines.push(format!("**Review:** {}.", crate::review::DISABLED_NOTE)),
         None => lines.push("**Review:** none ran.".into()),
     }
     lines.push(String::new());
@@ -826,7 +859,7 @@ pub fn describe(issue: &IssueRecord, s: &Submitted, land_by: crate::playbook::La
     lines.push(format!(
         "`nitely review patch={} verdict={} approver={} reviewer={}`",
         s.patch_id,
-        s.review.as_ref().map_or("none", |r| r.verdict.as_str()),
+        s.review.as_ref().map_or(if s.review_disabled { "disabled" } else { "none" }, |r| r.verdict.as_str()),
         s.approver,
         s.review.as_ref().map_or("none", |r| r.reviewer.as_str())
     ));
@@ -925,6 +958,7 @@ impl Db {
     pub fn record_review(&self, s: &Submitted) -> Result<()> {
         let (reviewer, verdict, findings, flagged, note) = match &s.review {
             Some(r) => (r.reviewer.as_str(), r.verdict.as_str(), to_json(&r.findings), to_json(&r.flagged), r.note.as_str()),
+            None if s.review_disabled => ("", "disabled", "[]".to_string(), "[]".to_string(), crate::review::DISABLED_NOTE),
             None => ("", "none", "[]".to_string(), "[]".to_string(), ""),
         };
         // Approval cards need the commands and their outcomes, not potentially large console logs.
@@ -1194,6 +1228,69 @@ reason = "money logic"
         fn drop(&mut self) {
             std::fs::remove_dir_all(&self.base).ok();
         }
+    }
+
+    #[test]
+    fn disabled_review_keeps_gate_and_landing_without_synthetic_review_or_fallback() {
+        for mode in ["off", "small", "all", "shadow"] {
+            let mut f = fixture();
+            let policy = format!("[worktree]\ndir = \"../wt/{{key}}\"\n[gate]\ncommands = [\"exit 0\"]\n[review]\nenabled = false\nbatch = \"{mode}\"\nreviewer = {{ \"*\" = \"missing\" }}\ncommands = {{ missing = [\"nitely-test-do-not-launch\"] }}\n");
+            std::fs::write(f.repo.join(playbook::PLAYBOOK_PATH), &policy).unwrap();
+            sh(&f.repo, &["commit", "-qam", "disable review"]);
+            let (issue, wt) = f.committed("Unreviewed change", "feature.txt");
+            let s = submit(&mut f.db, &f.config, &SubmitOptions { dir: &wt.to_string_lossy(), issue_key: None, skip_review: false, local_only: false, batch: true }, &f.actor).unwrap();
+            assert!(s.gate.passed && s.pushed && s.review_disabled && s.review.is_none() && s.shadow.is_none(), "{s:?}");
+            assert_eq!((s.approver.as_str(), s.state.as_str()), ("agent", "In Review"));
+            assert!(s.reasons.is_empty());
+            let r = &f.db.reviews(&issue.key).unwrap()[0];
+            assert_eq!((r.verdict.as_str(), r.note.as_str(), r.reviewer.as_str()), ("disabled", crate::review::DISABLED_NOTE, ""));
+            assert!(describe(&issue, &s, Default::default()).contains(crate::review::DISABLED_NOTE));
+            assert_eq!(f.db.conn.query_row("SELECT count(*) FROM review_queue", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+            let pb = Playbook::load(&f.repo).unwrap();
+            assert!(crate::land::check_approval(&f.db, &pb, &issue.key, &wt, "main", &s.branch).unwrap().contains(crate::review::DISABLED_NOTE));
+            let mut enabled = pb.clone();
+            enabled.review.enabled = true;
+            assert!(crate::land::check_approval(&f.db, &enabled, &issue.key, &wt, "main", &s.branch).unwrap_err().to_string().contains("enabled again"));
+            std::fs::write(wt.join("feature.txt"), "changed").unwrap();
+            sh(&wt, &["commit", "-qam", "change after submit"]);
+            assert!(crate::land::check_approval(&f.db, &pb, &issue.key, &wt, "main", &s.branch).unwrap_err().to_string().contains("branch changed"));
+        }
+    }
+
+    #[test]
+    fn disabled_policy_during_a_failed_review_prevents_fallback_launch() {
+        let mut f = fixture();
+        let policy = "[worktree]\ndir = \"../wt/{key}\"\n[gate]\ncommands = [\"exit 0\"]\n[review]\nreviewer = { \"*\" = \"first\" }\ncommands = { first = [\"node\", \"first.js\"], second = [\"node\", \"second.js\"] }\n";
+        let disabled = policy.replace("[review]\n", "[review]\nenabled = false\n");
+        let script = format!("const fs=require('fs'); process.stdin.resume(); process.stdin.on('end',()=>{{fs.writeFileSync({},{}); process.exit(1);}});",
+            serde_json::to_string(&f.repo.join(playbook::PLAYBOOK_PATH).to_string_lossy()).unwrap(), serde_json::to_string(&disabled).unwrap());
+        std::fs::write(f.repo.join(playbook::PLAYBOOK_PATH), policy).unwrap();
+        std::fs::write(f.repo.join("first.js"), script).unwrap();
+        std::fs::write(f.repo.join("second.js"), "require('fs').writeFileSync('fallback-ran', 'bad'); console.log('VERDICT: clean');").unwrap();
+        sh(&f.repo, &["add", "."]);
+        sh(&f.repo, &["commit", "-qm", "fake policy toggle reviewer"]);
+        let (issue, wt) = f.committed("Disable during fallback", "feature.txt");
+        let s = f.submit(&wt, true).unwrap();
+        assert!(s.review_disabled && s.review.is_none());
+        assert!(!wt.join("fallback-ran").exists());
+        assert_eq!(f.db.timeline(&issue.key).unwrap().iter().filter(|t| t.kind == "review_started").count(), 1);
+    }
+
+    #[test]
+    fn disabled_review_leaves_reviewer_conditions_unevaluated_and_other_approvals_intact() {
+        let mut f = fixture();
+        let policy = PLAYBOOK.replace("{sh}", &playbook::posix_sh()).replace("[review]\n", "[review]\nenabled = false\nrequire_cross_vendor = true\n");
+        std::fs::write(f.repo.join(playbook::PLAYBOOK_PATH), format!("{policy}\n[approval]\nalways_human = true\n")).unwrap();
+        sh(&f.repo, &["commit", "-qam", "disable review"]);
+        let (issue, wt) = f.committed("Approval conditions", "feature.txt");
+        let s = f.submit(&wt, true).unwrap();
+        assert!(s.review_disabled && s.review.is_none());
+        assert_eq!(s.state, "Needs You");
+        assert!(s.reasons.iter().any(|r| r.contains("Unevaluated reviewer condition MONEY")), "{:?}", s.reasons);
+        assert!(s.reasons.iter().any(|r| r.contains("Unevaluated cross-vendor")));
+        assert!(s.reasons.len() >= 3, "independent always-human condition remains");
+        let pb = Playbook::load(&f.repo).unwrap();
+        assert!(crate::land::check_approval(&f.db, &pb, &issue.key, &wt, "main", &s.branch).is_err());
     }
 
     #[test]

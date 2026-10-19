@@ -22,7 +22,7 @@ interface Stored {
   edit: RulesEdit;
 }
 
-const EMPTY: RulesEdit = { always_human: false, human_paths: [], blocked_paths: [], flags: [], reviewer: null, require_cross_vendor: null, land_by: null, focus: null };
+const EMPTY: RulesEdit = { review_enabled: null, always_human: false, human_paths: [], blocked_paths: [], flags: [], reviewer: null, require_cross_vendor: null, land_by: null, focus: null };
 
 const STORED: Stored[] = [
   {
@@ -70,9 +70,10 @@ function view(s: Stored): RulesView {
     path: s.path,
     editable: s.source !== "repo",
     reviewer_editable: true,
+    review_enabled: field(e.review_enabled, undefined, true),
     read_only:
       s.source === "repo"
-        ? `${s.repo} commits its own .nitely/playbook.toml. You can change reviewer routing below. Other rules are set in that file; an agent can propose those changes for you to approve.`
+        ? `${s.repo} commits its own .nitely/playbook.toml. You can change review settings below. Other rules are set in that file; an agent can propose those changes for you to approve.`
         : null,
     integration: s.integration,
     always_human: e.always_human,
@@ -102,6 +103,7 @@ const BATCHING: Record<string, Batching> = {
 /** The effective rules an edit makes, for the loosening check. */
 function effective(e: RulesEdit, d: RuleDefaults) {
   return {
+    enabled: e.review_enabled ?? true,
     always: e.always_human,
     human: e.human_paths,
     blocked: e.blocked_paths,
@@ -154,10 +156,11 @@ export function rulesSave(args: Record<string, unknown>): RulesView {
 
 export function reviewerPreview(args: Record<string, unknown>): ReviewerPreview {
   const s = stored(args.repo);
-  const edit = args.edit as Pick<RulesEdit, "reviewer">;
+  const edit = args.edit as Pick<RulesEdit, "reviewer"> & { enabled?: boolean };
   const line = (map: Record<string, string> | null) => map ? `reviewer = { ${Object.entries(map).map(([k, v]) => `${JSON.stringify(k)} = ${JSON.stringify(v)}`).join(", ")} }\n` : "";
-  const before = line(s.edit.reviewer);
-  const after = line(edit.reviewer);
+  const before = (s.edit.review_enabled === null ? "" : `enabled = ${s.edit.review_enabled}\n`) + line(s.edit.reviewer);
+  const enabled = edit.enabled ?? s.edit.review_enabled;
+  const after = (enabled === null ? "" : `enabled = ${enabled}\n`) + line(edit.reviewer);
   return { before, after, diff: `${before ? `- ${before}` : ""}${after ? `+ ${after}` : ""}`, destination: `Commit to ${s.path} on ${s.integration}; pushed with the next land.` };
 }
 
@@ -167,7 +170,9 @@ export function reviewerSave(args: Record<string, unknown>): ReviewerSaved {
   const current = reviewerPreview(args);
   if (expected.before !== current.before || expected.after !== current.after) throw "The playbook changed; preview again.";
   s.edit.reviewer = structuredClone((args.edit as Pick<RulesEdit, "reviewer">).reviewer);
-  return { view: view(s), done: `Committed reviewer routing on ${s.integration}; pushed with the next land. The next review uses this routing.` };
+  const enabled = (args.edit as { enabled?: boolean }).enabled;
+  if (enabled !== undefined) s.edit.review_enabled = enabled;
+  return { view: view(s), done: `Committed review settings on ${s.integration}; pushed with the next land. New review launches use these settings.` };
 }
 
 export function rulesBranches(args: Record<string, unknown>): string[] {
@@ -187,6 +192,10 @@ export function rulesDryRun(args: Record<string, unknown>): DryRun {
   if (e.always) reasons.unshift("this playbook sends every change to a human");
   if (e.land === "human") reasons.push("this playbook lands only what a human approved");
   if (vendor !== "claude" && vendor !== "codex" && e.cross) reasons.push(`${reviewer} review (author's vendor unknown), and this playbook requires a review by another vendor`);
+  if (!e.enabled) {
+    reasons.push(...e.flags.map((f) => `Unevaluated reviewer condition ${f.name}: ${f.question} (automated review is disabled)`));
+    if (e.cross) reasons.push("Unevaluated cross-vendor review requirement (automated review is disabled)");
+  }
   const outcome = reasons.length
     ? e.land === "author"
       ? "Once the review passes it waits for a person in Needs You; after they approve, the agent lands it."
@@ -198,13 +207,13 @@ export function rulesDryRun(args: Record<string, unknown>): DryRun {
     branch,
     base: s.integration,
     files,
-    reviewer,
-    reviewer_note: vendor === "claude" || vendor === "codex" ? "" : "author's vendor unknown",
+    reviewer: e.enabled ? reviewer : null,
+    reviewer_note: !e.enabled ? "Review disabled for this project" : vendor === "claude" || vendor === "codex" ? "" : "author's vendor unknown",
     reviewer_error: null,
     reasons,
     flags: e.flags.map((f) => `${f.name}: ${f.question}`),
     blocked: null,
-    outcome,
+    outcome: e.enabled ? outcome : `Review disabled for this project. ${outcome.replaceAll("the review passes", "the gate passes")}`,
   };
 }
 

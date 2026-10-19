@@ -109,6 +109,8 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
             format!("took over the land lock {before} left: the land that took it is gone")
         });
     }
+    // Settings may have changed between the initial routing decision and taking the land lock.
+    let pb = Playbook::load(&root)?;
     let result = run(db, &root, &pb, &issue.key, opts, actor, &mut report);
     // Still under the lock, so the next land cannot change the main checkout mid-build; and, in
     // large-repo mode, with the checkout held from build requests.
@@ -579,6 +581,7 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
     if let Some(why) = crate::submodules::unchanged(&worktree, &moving)? {
         bail!("{why}");
     }
+    report.approval = Some(check_approval(db, &Playbook::load(root)?, key, &worktree, &base, &branch)?);
 
     if push {
         // The pull request should show the commits that land, not the ones from before the rebase:
@@ -724,8 +727,9 @@ pub(crate) fn check_approval(db: &Db, pb: &Playbook, key: &str, worktree: &Path,
         );
     }
     let mut accepted = String::new();
+    check_disabled_policy(pb, &review)?;
     match review.verdict.as_str() {
-        "pass" | "none" => {}
+        "pass" | "none" | "disabled" => {}
         _ => {
             // Findings the person accepted as they are, signed for this patch, block nothing.
             let open = db.unaccepted_blockers(key, &review)?;
@@ -738,6 +742,10 @@ pub(crate) fn check_approval(db: &Db, pb: &Playbook, key: &str, worktree: &Path,
     let files: Vec<String> = git(worktree, &["diff", "--name-only", "--no-renames", &format!("{base}...HEAD")])?.lines().map(str::to_string).collect();
     pb.approval.check_blocked(&files)?;
     let mut reasons = pb.human_reasons(&files)?;
+    if review.verdict == "disabled" {
+        let unanswered = pb.review.unevaluated_reasons();
+        reasons.extend(unanswered);
+    }
     if review.approver == "human" {
         reasons.extend(review.reasons.iter().cloned());
     }
@@ -750,6 +758,9 @@ pub(crate) fn check_approval(db: &Db, pb: &Playbook, key: &str, worktree: &Path,
     }
     reasons.dedup();
     if reasons.is_empty() {
+        if review.verdict == "disabled" {
+            return Ok(format!("{}; no human approval is required", crate::review::DISABLED_NOTE));
+        }
         return Ok(format!("the {} review passed and no human approval is needed{accepted}", review.reviewer));
     }
     match db.standing_approval(key)? {
@@ -763,6 +774,17 @@ pub(crate) fn check_approval(db: &Db, pb: &Playbook, key: &str, worktree: &Path,
             reasons.join("; ")
         ),
     }
+}
+
+/// Disabled evidence never satisfies a newly required review, including a queued batch's final
+/// check after its gate. New unanswered conditions must first be shown in a fresh submission.
+pub(crate) fn check_disabled_policy(pb: &Playbook, review: &crate::submit::ReviewRecord) -> Result<()> {
+    if review.verdict != "disabled" { return Ok(()) }
+    if pb.review.enabled { bail!("automated review is enabled again; submit this patch for review before landing"); }
+    if pb.review.unevaluated_reasons().iter().any(|r| !review.reasons.contains(r)) {
+        bail!("review-dependent approval conditions changed since submit; submit again so the human sees the unevaluated conditions");
+    }
+    Ok(())
 }
 
 impl Db {

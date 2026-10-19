@@ -653,3 +653,17 @@ and inside Tauri nothing changes.
   With its own profile the command returns before the file is written, so wait for the file.
   Headless Edge will not go narrower than about 500px; check 375px in the Browser pane's mobile
   viewport (`resize_window` preset `mobile`) instead.
+### Automated PR review
+
+Each repository's Project Settings > Rules card has an **Automated PR review** switch,
+enabled by default. In a project with several repositories, each card changes only the named
+repository. Committed playbooks use the exact-diff preview and human commit flow; stored playbooks
+use Save rules. The switch writes `[review] enabled = false` and retains reviewer routing and commands.
+
+While off, gates and PR creation still run, and separate approval and landing rules still apply.
+Reviewer questions and a cross-vendor requirement are shown as **unevaluated** and require a human
+decision; switching review off alone adds no approval requirement. GitHub/Bitbucket branch protections
+are unaffected. Evidence says **Review disabled for this project**, never that a review passed.
+New and queued reviewer launches reread the policy, including while waiting for memory. An already
+running reviewer finishes and its actual result remains. Turning review back on prevents an older
+unreviewed submission from landing until it is submitted for review.

@@ -41,6 +41,7 @@ impl RuleDefaults {
 
 /// The keys a playbook's text sets itself, of those the defaults can fill.
 struct Sets {
+    enabled: bool,
     reviewer: bool,
     require_cross_vendor: bool,
     land_by: bool,
@@ -52,7 +53,7 @@ fn sets(text: &str) -> Sets {
     let has = |table: &str, key: &str| {
         doc.as_ref().and_then(|d| d.get(table)).and_then(|t| t.as_table_like()).is_some_and(|t| t.contains_key(key))
     };
-    Sets { reviewer: has("review", "reviewer"), require_cross_vendor: has("review", "require_cross_vendor"), land_by: has("land", "by"), focus: has("review", "focus") }
+    Sets { enabled: has("review", "enabled"), reviewer: has("review", "reviewer"), require_cross_vendor: has("review", "require_cross_vendor"), land_by: has("land", "by"), focus: has("review", "focus") }
 }
 
 /// Fills what `text` (the playbook `pb` was parsed from) does not set from the app-wide defaults.
@@ -109,6 +110,7 @@ pub struct RulesView {
     pub path: String,
     pub editable: bool,
     pub reviewer_editable: bool,
+    pub review_enabled: Field<bool>,
     /// Why it cannot be edited here, when it cannot.
     pub read_only: Option<String>,
     pub integration: String,
@@ -176,6 +178,7 @@ pub struct RulesEdit {
     pub human_paths: Vec<PathRule>,
     pub blocked_paths: Vec<PathRule>,
     pub flags: Vec<Flag>,
+    pub review_enabled: Option<bool>,
     pub reviewer: Option<BTreeMap<String, String>>,
     pub require_cross_vendor: Option<bool>,
     pub land_by: Option<LandBy>,
@@ -234,9 +237,10 @@ fn view(config: &crate::Config, repo: &crate::RepoConfig) -> Result<RulesView> {
         path: target.path.to_string_lossy().into_owned(),
         editable: !target.in_repo,
         reviewer_editable: true,
+        review_enabled: field(set.enabled, None, pb.review.enabled, true),
         read_only: target.in_repo.then(|| {
             format!(
-                "{} commits its own {}. You can change reviewer routing below. Other rules are set in that file; an agent can propose those changes for you to approve.",
+                "{} commits its own {}. You can change review settings below. Other rules are set in that file; an agent can propose those changes for you to approve.",
                 repo.name,
                 crate::playbook::PLAYBOOK_PATH
             )
@@ -344,6 +348,7 @@ fn edited(text: &str, edit: &RulesEdit) -> Result<String> {
         Item::ArrayOfTables(a)
     });
     set(&mut doc, "review", "flags", flags);
+    if let Some(enabled) = edit.review_enabled { set(&mut doc, "review", "enabled", Some(value(enabled))); }
     let reviewer = edit.reviewer.as_ref().map(|m| {
         let mut t = toml_edit::InlineTable::new();
         for (k, v) in m {
@@ -409,6 +414,9 @@ fn prepare(config: &crate::Config, repo_name: &str, edit: &RulesEdit) -> Result<
 /// Saves `edit` as the playbook Nitely keeps for `repo`. Refused when it loosens what sends
 /// changes to a human and `confirm` is not set. Only the app (a person) calls this.
 pub fn save_rules(config: &crate::Config, repo_name: &str, edit: &RulesEdit, confirm: bool) -> Result<RulesView> {
+    let root = Path::new(&repo(config, repo_name)?.root);
+    let _lock = crate::land::Lock::try_take(&crate::land::lock_path(root)?, "review settings", false)?
+        .context("another land or settings save is running; try again after it finishes")?;
     let (target, text, new_text) = prepare(config, repo_name, edit)?;
     let loose = loosening(&effective(&text, &config.rule_defaults)?, &effective(&new_text, &config.rule_defaults)?);
     if !loose.is_empty() && !confirm {
@@ -425,6 +433,8 @@ pub fn save_rules(config: &crate::Config, repo_name: &str, edit: &RulesEdit, con
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewerEdit {
+    /// Omitted by older clients: retain the existing policy.
+    pub enabled: Option<bool>,
     pub reviewer: Option<BTreeMap<String, String>>,
 }
 
@@ -457,6 +467,7 @@ fn edited_reviewer(text: &str, edit: &ReviewerEdit) -> Result<String> {
         doc.insert("review", Item::Table(Table::new()));
     }
     let review = doc["review"].as_table_like_mut().context("review is not a table")?;
+    if let Some(enabled) = edit.enabled { review.insert("enabled", value(enabled)); }
     if let Some(map) = &edit.reviewer {
         let mut table = toml_edit::InlineTable::new();
         for (author, reviewer) in map {
@@ -500,29 +511,29 @@ pub fn save_reviewer(config: &crate::Config, db: &crate::Db, repo_name: &str, ed
         bail!("the playbook changed since this preview; review the new change before saving");
     }
     if current.before == current.after {
-        return Ok(ReviewerSaved { view: view(config, repo)?, done: "Reviewer routing is already saved.".into() });
+        return Ok(ReviewerSaved { view: view(config, repo)?, done: "Review settings are already saved.".into() });
     }
     let done = if target.in_repo {
         let branch = Playbook::parse(&current.before)?.integration_branch().to_string();
         let on = git(root, &["branch", "--show-current"])?;
         if on.trim() != branch {
-            bail!("{} is on {}; switch it to {branch} before saving reviewer routing", root.display(), if on.trim().is_empty() { "a detached HEAD" } else { on.trim() });
+            bail!("{} is on {}; switch it to {branch} before saving review settings", root.display(), if on.trim().is_empty() { "a detached HEAD" } else { on.trim() });
         }
         let commit = crate::proposals::commit_playbook_edit(root, &branch, &|at_tip| {
             if at_tip.replace("\r\n", "\n") != current.before {
                 bail!("the committed playbook differs from this preview; reload and review the change again");
             }
             Ok(current.after.clone())
-        }, "Review: update reviewer routing\n\nSet in the Nitely app.")?;
-        format!("Committed {} on {branch}; pushed with the next land. The next review uses this routing.", &commit[..9])
+        }, "Review: update reviewer settings\n\nSet in the Nitely app.")?;
+        format!("Committed {} on {branch}; pushed with the next land. New review launches use these settings; running reviewers finish.", &commit[..9])
     } else {
         if let Some(dir) = target.path.parent() {
             std::fs::create_dir_all(dir)?;
         }
         std::fs::write(&target.path, &current.after)?;
-        format!("Saved to {}. The next review uses this routing.", target.path.display())
+        format!("Saved to {}. New review launches use these settings; running reviewers finish.", target.path.display())
     };
-    db.log_event(&crate::Actor::Human, None, Some(&repo.root), "reviewer_settings_changed", &format!("Reviewer routing for {}: {done}", repo.name))?;
+    db.log_event(&crate::Actor::Human, None, Some(&repo.root), "reviewer_settings_changed", &format!("Review settings for {}: {done}", repo.name))?;
     Ok(ReviewerSaved { view: view(config, repo)?, done })
 }
 
@@ -610,16 +621,27 @@ pub fn dry_run(config: &crate::Config, repo_name: &str, branch: &str) -> Result<
     let blocked = pb.approval.check_blocked(&files).err().map(|e| format!("{e:#}"));
     let mut reasons = pb.human_reasons(&files)?;
     let vendor = crate::git::parse_branch(branch).0.unwrap_or_default();
-    let (reviewer, reviewer_note, reviewer_error) = match pb.review.choose(&vendor, &|r| pb.review.is_installed(r, root)) {
+    let (reviewer, reviewer_note, reviewer_error) = if !pb.review.enabled {
+        reasons.extend(pb.review.unevaluated_reasons());
+        (None, crate::review::DISABLED_NOTE.into(), None)
+    } else { match pb.review.choose(&vendor, &|r| pb.review.is_installed(r, root)) {
         Ok(choice) => {
             reasons.extend(pb.review.independence_reason(&choice.reviewer, &vendor, &choice.note));
             (Some(choice.reviewer), choice.note, None)
         }
         Err(e) => (None, String::new(), Some(format!("{e:#}"))),
-    };
+    } };
     let flags = pb.review.flags.iter().map(|f| format!("{}: {}", f.name, f.question)).collect();
     let outcome = if blocked.is_some() {
         "Submit refuses it: it changes a path task branches may not change.".to_string()
+    } else if !pb.review.enabled {
+        let next = match (reasons.is_empty(), pb.land.by) {
+            (false, LandBy::Author) => "Once the gate passes it waits for a person; after approval, the agent lands it.",
+            (false, _) => "Once the gate passes it waits for a person; Nitely lands it after approval.",
+            (true, LandBy::Author) => "Once the gate passes the agent can land it.",
+            (true, _) => "Once the gate passes Nitely lands it.",
+        };
+        format!("{}. {next}", crate::review::DISABLED_NOTE)
     } else if reviewer.is_none() {
         "Submit stops: no reviewer can run on this machine.".to_string()
     } else {
@@ -696,17 +718,17 @@ mod tests {
     #[test]
     fn reviewer_edits_only_change_routing_and_can_restore_inheritance() {
         let text = "# policy\n[gate]\ncommands = [\"npm test\"]\n[approval]\nalways_human = true\n[review]\nrequire_cross_vendor = true\n[review.commands]\ncustom = [\"review-tool\"]\n";
-        let edit = ReviewerEdit { reviewer: Some(BTreeMap::from([("*".into(), "custom".into()), ("codex".into(), "custom".into())])) };
+        let edit = ReviewerEdit { enabled: None, reviewer: Some(BTreeMap::from([("*".into(), "custom".into()), ("codex".into(), "custom".into())])) };
         let after = edited_reviewer(text, &edit).unwrap();
         let pb = Playbook::parse(&after).unwrap();
         assert!(pb.approval.always_human && pb.review.require_cross_vendor);
         assert_eq!(pb.gate.commands, ["npm test"]);
         assert!(after.contains("# policy") && after.contains("review-tool"));
-        let inherited = edited_reviewer(&after, &ReviewerEdit { reviewer: None }).unwrap();
+        let inherited = edited_reviewer(&after, &ReviewerEdit { enabled: None, reviewer: None }).unwrap();
         let defaults = RuleDefaults { reviewer: Some(BTreeMap::from([("*".into(), "codex".into())])), ..Default::default() };
         assert_eq!(effective(&inherited, &defaults).unwrap().review.reviewer["*"], "codex");
         assert!(!sets(&inherited).reviewer);
-        let bad = ReviewerEdit { reviewer: Some(BTreeMap::from([("*".into(), "missing".into())])) };
+        let bad = ReviewerEdit { enabled: None, reviewer: Some(BTreeMap::from([("*".into(), "missing".into())])) };
         assert!(edited_reviewer(text, &bad).unwrap_err().to_string().contains("no reviewer command"));
         assert!(serde_json::from_value::<ReviewerEdit>(serde_json::json!({"reviewer":null,"always_human":false})).is_err());
     }
@@ -731,7 +753,7 @@ mod tests {
         let db = crate::Db::open(&root.join("test.db")).unwrap();
         let mut config = crate::Config::default();
         config.repos.push(crate::RepoConfig { name: "sample".into(), root: root.to_string_lossy().into(), project: Some("APP".into()), integration_branch: "main".into() });
-        let edit = ReviewerEdit { reviewer: Some(BTreeMap::from([("*".into(), "codex".into())])) };
+        let edit = ReviewerEdit { enabled: Some(false), reviewer: Some(BTreeMap::from([("*".into(), "codex".into())])) };
         let preview = preview_reviewer(&config, "sample", &edit).unwrap();
         let held = crate::land::Lock::try_take(&crate::land::lock_path(&root).unwrap(), "other", false).unwrap().unwrap();
         assert!(save_reviewer(&config, &db, "sample", &edit, &preview).unwrap_err().to_string().contains("another land"));
@@ -787,16 +809,22 @@ mod tests {
         let saved = save_reviewer(&config, &db, "sample", &edit, &preview).unwrap();
         assert!(saved.done.starts_with("Committed"));
         assert!(saved.view.always_human && saved.view.reviewer_editable && !saved.view.editable);
+        assert!(!saved.view.review_enabled.value);
+        let dry = dry_run(&config, "sample", "main").unwrap();
+        assert!(dry.reviewer.is_none() && dry.reviewer_error.is_none());
+        assert_eq!(dry.reviewer_note, crate::review::DISABLED_NOTE);
+        assert!(dry.outcome.contains("gate passes"));
         assert_eq!(saved.view.reviewer.from, "project");
         assert_eq!(command(&["diff", "--cached", "--name-only"]), "unrelated.txt");
         assert_eq!(command(&["show", "--format=", "--name-only", "HEAD"]), ".nitely/playbook.toml");
         assert!(save_reviewer(&config, &db, "sample", &edit, &preview).unwrap_err().to_string().contains("changed since"));
-        let inherit = ReviewerEdit { reviewer: None };
+        let inherit = ReviewerEdit { enabled: None, reviewer: None };
         config.rule_defaults.reviewer = Some(BTreeMap::from([("*".into(), "codex".into())]));
         let preview = preview_reviewer(&config, "sample", &inherit).unwrap();
         let saved = save_reviewer(&config, &db, "sample", &inherit, &preview).unwrap();
         assert_eq!(saved.view.reviewer.from, "app");
         assert_eq!(saved.view.reviewer.value["*"], "codex");
+        assert!(!saved.view.review_enabled.value, "an older routing-only client preserves the review policy");
         drop(db);
         std::fs::remove_dir_all(root).ok();
     }

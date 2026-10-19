@@ -16,6 +16,11 @@ use crate::playbook::{shell_free_command, tail};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ReviewRules {
+    /// The person may turn automated review off for this repository. Gates still run.
+    pub enabled: bool,
+    /// Authoritative checkout to reread before new launches; never supplied by a playbook.
+    #[serde(skip)]
+    pub policy_root: Option<std::path::PathBuf>,
     /// Who reviews whose branches: the branch's vendor to the reviewer. `*` covers the rest.
     pub reviewer: BTreeMap<String, String>,
     /// How to run each reviewer. The prompt goes on stdin; an argument `{output}` is replaced with a
@@ -64,6 +69,36 @@ pub enum BatchMode {
     Shadow,
 }
 
+pub const DISABLED_NOTE: &str = "Review disabled for this project";
+
+/// A policy decision, not a failed reviewer: callers must not try another vendor.
+#[derive(Debug)]
+pub struct Disabled;
+impl std::fmt::Display for Disabled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(DISABLED_NOTE) }
+}
+impl std::error::Error for Disabled {}
+
+impl ReviewRules {
+    pub fn require_enabled(&self) -> Result<()> {
+        let enabled = match &self.policy_root {
+            Some(root) => crate::playbook::Playbook::load(root)?.review.enabled,
+            None => self.enabled,
+        };
+        if !enabled { bail!(Disabled); }
+        Ok(())
+    }
+
+    /// Review-dependent rules remain unanswered while review is off. The setting alone adds none.
+    pub fn unevaluated_reasons(&self) -> Vec<String> {
+        let mut reasons: Vec<String> = self.flags.iter().map(|f| format!("Unevaluated reviewer condition {}: {} (automated review is disabled)", f.name, f.question)).collect();
+        if self.require_cross_vendor {
+            reasons.push("Unevaluated cross-vendor review requirement (automated review is disabled)".into());
+        }
+        reasons
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Flag {
     /// An uppercase name, e.g. MONEY_OR_RELEASE; it becomes the reviewer's closing line.
@@ -80,6 +115,8 @@ impl Default for ReviewRules {
         let pairs = |v: &[(&str, &str)]| v.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
         let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         ReviewRules {
+            enabled: true,
+            policy_root: None,
             reviewer: pairs(&[("claude", "codex"), ("codex", "claude"), ("*", "claude")]),
             commands: BTreeMap::from([
                 (
@@ -727,6 +764,7 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
     /// Runs `reviewer` in `worktree` with `prompt` on its stdin, and returns what it wrote. A
     /// reviewer that cannot run is a `CouldNotRun`; one that ran past its timeout, an error.
     pub fn run_prompt(&self, reviewer: &str, worktree: &Path, prompt: &str) -> Result<Reply> {
+        self.require_enabled()?;
         let command = self
             .commands
             .get(reviewer)
@@ -747,7 +785,8 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
         // A review counts against the machine as a build does (NIT-266): it starts only while the
         // machine has memory to spare, and it and what it runs (a reviewer may build and test) are
         // held to a run's cap, its share of cores and below-normal priority.
-        crate::machine::admit_here(&mut |_| {})?;
+        crate::machine::admit_here_checked(&mut || self.require_enabled())?;
+        self.require_enabled()?;
         // The review's own time starts once it may run.
         let started = Instant::now();
         let share = crate::lanes::share();
@@ -1220,6 +1259,29 @@ mod tests {
             flags: vec![Flag { name: "MONEY_OR_RELEASE".into(), question: "the change alters billing".into(), reason: "money or release logic".into() }],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn disabled_policy_is_default_on_and_reloaded_for_new_launches_only() {
+        assert!(crate::playbook::Playbook::parse("").unwrap().review.enabled);
+        let root = crate::paths::unique_temp("nitely-review-policy", "");
+        std::fs::create_dir_all(root.join(".nitely")).unwrap();
+        let file = root.join(crate::playbook::PLAYBOOK_PATH);
+        std::fs::write(&file, "[review]\nenabled = true\n").unwrap();
+        let rules = ReviewRules { policy_root: Some(root.clone()), ..Default::default() };
+        rules.require_enabled().unwrap();
+        std::fs::write(&file, "[review]\nenabled = false\n").unwrap();
+        assert!(rules.run_prompt("not-installed", &root, "unused").err().unwrap().is::<Disabled>());
+        assert!(ReviewRules::default().require_enabled().is_ok(), "another project's policy is isolated");
+        std::fs::write(&file, "[review]\nenabled = true\n").unwrap();
+        rules.require_enabled().unwrap();
+        let mut running = rules.clone();
+        running.commands.insert("fake".into(), vec![crate::playbook::posix_sh(), "-c".into(),
+            "cat >/dev/null; printf '[review]\\nenabled = false\\n' > .nitely/playbook.toml; printf 'VERDICT: clean\\n'".into()]);
+        let reply = running.run_prompt("fake", &root, "read this").unwrap();
+        assert!(reply.text.contains("VERDICT: clean"), "an already-running reviewer keeps its actual result");
+        assert!(running.require_enabled().unwrap_err().is::<Disabled>(), "the next launch is disabled");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

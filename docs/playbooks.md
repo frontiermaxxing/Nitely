@@ -29,6 +29,21 @@ changes. [docs/playbooks/example.toml](playbooks/example.toml) is a worked examp
 playbook for a made-up monorepo: per-OS branches, worktree setup and teardown, gate steps that skip
 what a change cannot affect, review flags, and paths that wait for you.
 
+## Turning automated review off
+
+Project Settings > Rules has an **Automated PR review** switch for each repository. It writes
+`[review] enabled = false`; omitted or `true` keeps review enabled. Routing, commands and batching
+configuration remain in place for when you enable review again. A committed playbook uses the
+human-only preview-and-commit flow; agents continue to propose policy changes for you to decide.
+
+Disabled review is recorded for the submitted patch as `disabled`, with no reviewer result.
+Gates, PR creation, branch protections and independent human approval/landing rules still apply.
+Reviewer flags and a cross-vendor requirement are unevaluated and send the change to you; the
+switch alone does not. This differs from an ad-hoc `--skip-review`, which asks for human approval.
+New launches, including fallback, batch and shadow reviews, reread the effective policy. Waiting
+for memory or a batch can be canceled by disabling review; an already-running reviewer finishes.
+Re-enabling review prevents a previously unreviewed submission from landing until it is reviewed.
+
 ## Submodules that land with the repo
 
 A repo whose code lives partly in a git submodule (an engine, a vendored fork with your own commits on

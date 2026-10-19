@@ -592,6 +592,20 @@ fn land_prefix(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stacked: Vec<S
     }
     // Every change in a queue pushes (one that does not lands alone), so the stack pushes when
     // the repo has a remote.
+    let current = Playbook::load(root)?;
+    let mut refused = false;
+    for s in &stacked {
+        if let Some(review) = db.reviews(&s.entry.issue)?.first() {
+            if let Err(e) = land::check_disabled_policy(&current, review) {
+                send_back(db, run, &s.entry, &format!("{e:#}"), None, &current)?;
+                refused = true;
+            }
+        }
+    }
+    if refused {
+        db.conn.execute("UPDATE land_queue SET state = 'queued', run_id = NULL WHERE run_id = ?1 AND state = 'running'", [run])?;
+        return Ok(());
+    }
     let push = playbook::has_origin(root) && stacked.iter().all(|s| s.entry.push);
     let mut warnings = Vec::new();
     if push {

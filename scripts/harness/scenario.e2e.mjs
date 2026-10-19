@@ -117,10 +117,12 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
     const reviewerRepo = reviewerViews[0].repo;
     assert.equal(reviewerViews[0].reviewer_editable, true);
     assert.equal(reviewerViews[0].editable, false, "other committed rules remain protected");
-    const reviewerEdit = { reviewer: { "*": "fake", codex: "fake" } };
+    const reviewerEdit = { enabled: false, reviewer: { "*": "fake", codex: "fake" } };
     const reviewerPreview = await page.invoke("reviewer_settings_preview", { repo: reviewerRepo, edit: reviewerEdit });
     assert.match(reviewerPreview.diff, /codex/);
     const reviewerSaved = await page.invoke("reviewer_settings_save", { repo: reviewerRepo, edit: reviewerEdit, preview: reviewerPreview });
+    assert.equal(reviewerSaved.view.review_enabled.value, false);
+    assert.equal(reviewerSaved.view.review_enabled.from, "project");
     assert.equal(reviewerSaved.view.reviewer.from, "project");
     assert.equal(reviewerSaved.view.reviewer.value.codex, "fake");
     assert.equal(git(repo, "show", "--format=", "--name-only", "HEAD"), ".nitely/playbook.toml");

@@ -153,6 +153,7 @@ const POLL: Duration = Duration::from_millis(500);
 /// Puts the change in its repository's queue and waits for its review: from a batch, or the word
 /// that it is reviewed alone. Errs with `Superseded` when a newer submit of the issue replaced it.
 pub fn review_in_batch(db: &Db, rules: &ReviewRules, c: &Candidate, actor: &Actor) -> Result<Outcome> {
+    rules.require_enabled()?;
     let window = match Window::parse(&rules.batch_window) {
         Ok(w) => w,
         Err(e) => return Ok(Outcome::Alone(format!("{e:#}"), vec![])),
@@ -205,6 +206,12 @@ pub fn review_in_batch(db: &Db, rules: &ReviewRules, c: &Candidate, actor: &Acto
             "abandoned" => return Ok(Outcome::Alone("it was taken out of the queue as abandoned".into(), vec![])),
             "reviewing" => settle_dead_batch(db, row.batch_id.unwrap_or_default())?,
             _ => {
+                if let Err(e) = rules.require_enabled() {
+                    if e.is::<crate::review::Disabled>() {
+                        db.conn.execute("UPDATE review_queue SET state = 'alone', why = ?2 WHERE id = ?1 AND state = 'waiting'", params![id, crate::review::DISABLED_NOTE])?;
+                    }
+                    return Err(e);
+                }
                 if let Some((batch, rows)) = close_if_due(db, rules, window, &repo, &row.reviewer, false)? {
                     run_batch(db, rules, batch, &rows, false)?;
                     continue;
@@ -440,6 +447,10 @@ fn lock_name(repo: &str, reviewer: &str) -> String {
 /// Each change's timeline says so under its own submitter; a shadow batch, which only measures,
 /// says nothing on the issues.
 fn run_batch(db: &Db, rules: &ReviewRules, batch: i64, rows: &[Queued], shadow: bool) -> Result<()> {
+    if let Err(e) = rules.require_enabled() {
+        fail_batch(db, batch, &format!("{e:#}"))?;
+        return Ok(());
+    }
     let keys: Vec<String> = rows.iter().map(|r| r.issue.clone()).collect();
     for (i, r) in rows.iter().enumerate().filter(|_| !shadow) {
         let with: Vec<&str> = keys.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, k)| k.as_str()).collect();
@@ -633,6 +644,10 @@ pub struct Shadow {
 /// batch is reviewed (this process may be the one that reviews it). Nothing routes on the result:
 /// it is recorded for `nitely batches compare`.
 pub fn shadow(db: &Db, s: &Shadow) -> Result<()> {
+    if let Err(e) = s.rules.require_enabled() {
+        if e.is::<crate::review::Disabled>() { return Ok(()); }
+        return Err(e);
+    }
     let window = Window::parse(&s.rules.batch_window).unwrap_or(Window::After(Duration::from_secs(300)));
     db.conn.execute(
         "INSERT INTO review_queue (issue_key, repo, reviewer, note, title, branch, worktree, base, head, lines, files, pid, actor, state, queued_at, shadow, review_id)
@@ -659,6 +674,13 @@ pub fn shadow(db: &Db, s: &Shadow) -> Result<()> {
         let row = queued(db, id)?.context("the change's place in the shadow queue went missing")?;
         match row.state.as_str() {
             "waiting" => {
+                if let Err(e) = s.rules.require_enabled() {
+                    if e.is::<crate::review::Disabled>() {
+                        db.conn.execute("UPDATE review_queue SET state = 'alone', why = ?2 WHERE id = ?1 AND state = 'waiting'", params![id, crate::review::DISABLED_NOTE])?;
+                        return Ok(());
+                    }
+                    return Err(e);
+                }
                 if let Some((batch, rows)) = close_if_due(db, &s.rules, window, &s.repo, &s.reviewer, true)? {
                     run_batch(db, &s.rules, batch, &rows, true)?;
                     continue;
@@ -742,6 +764,23 @@ mod tests {
         let mut rules = ReviewRules { batch: BatchMode::Small, batch_max: 2, ..Default::default() };
         rules.commands.insert("claude".into(), reviewer.iter().map(|a| a.to_string()).collect());
         rules
+    }
+
+    #[test]
+    fn disabled_policy_prevents_a_claimed_batch_from_launching() {
+        let mut q = Queue::new();
+        let (_, a) = q.waiting("repo-disabled", "One");
+        let (_, b) = q.waiting("repo-disabled", "Two");
+        let mut rules = rules(&["nitely-test-do-not-launch"]);
+        let (batch, rows) = close_if_due(&q.db, &rules, Window::After(Duration::ZERO), "repo-disabled", "claude", false).unwrap().unwrap();
+        rules.enabled = false;
+        run_batch(&q.db, &rules, batch, &rows, false).unwrap();
+        for id in [a, b] {
+            let row = q.row(id);
+            assert_eq!(row.state, "alone");
+            assert_eq!(row.why.as_deref(), Some(crate::review::DISABLED_NOTE));
+            assert!(row.result.is_none());
+        }
     }
 
     #[test]

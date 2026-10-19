@@ -114,6 +114,44 @@ fn tool(s: &Setup, name: &str, arguments: Value) -> Value {
 }
 
 #[test]
+fn disabled_review_async_mcp_submission_still_gates_and_lands() {
+    let s = setup("nitely-disabled-review-async");
+    let repo = s.base.join("repo");
+    let path = repo.join(playbook::PLAYBOOK_PATH);
+    let initial = std::fs::read_to_string(&path).unwrap();
+    let disabled = initial.replace("[review]\n", "[review]\nenabled = false\nbatch = \"all\"\n");
+    std::fs::write(&path, &disabled).unwrap();
+    git(&repo, &["commit", "-qam", "Disable automated review"]);
+    // The task still has the old enabled playbook; authoritative settings win. Its fake reviewer
+    // is never released, so accidentally starting it cannot yield a passing submission.
+    let job = tool(&s, "submit", json!({}));
+    let id = job["id"].as_i64().unwrap().to_string();
+    let done = nitely(&s, &["submit-status", &id, "--wait", "600"]);
+    assert_eq!(done["state"], "done", "{done}");
+    assert_eq!(done["result"]["review_disabled"], true, "{done}");
+    assert_eq!(done["result"]["gate"]["passed"], true);
+    assert!(done["result"]["review"].is_null());
+    assert_eq!(done["result"]["state"], "In Review");
+    assert_eq!(s.db.reviews(&s.key).unwrap()[0].verdict, "disabled");
+
+    std::fs::write(&path, &initial).unwrap();
+    git(&repo, &["commit", "-qam", "Enable automated review"]);
+    let refused_out = Command::new(env!("CARGO_BIN_EXE_nitely")).args(["land", &s.key, "--no-push", "--keep"])
+        .current_dir(&s.worktree).env("NITELY_HOME", &s.home).env("NITELY_MEMORY_FLOOR_GB", "0").output().unwrap();
+    assert!(!refused_out.status.success());
+    let refused: Value = serde_json::from_slice(&refused_out.stdout).unwrap();
+    assert_eq!(refused["landed"], false, "{refused}");
+    assert!(refused.to_string().contains("enabled again"), "{refused}");
+
+    std::fs::write(&path, &disabled).unwrap();
+    git(&repo, &["commit", "-qam", "Disable automated review again"]);
+    let landed = nitely(&s, &["land", &s.key, "--no-push", "--keep"]);
+    assert_eq!(landed["landed"], true, "{landed}");
+    assert_eq!(s.db.issue(&s.key).unwrap().unwrap().state, "Done");
+    std::fs::remove_dir_all(&s.base).ok();
+}
+
+#[test]
 fn submit_returns_at_once_and_the_background_job_finishes_it() {
     let s = setup("nitely-async-submit");
     // Returned while the review is held, so it did not wait for it.

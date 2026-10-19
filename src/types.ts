@@ -642,7 +642,7 @@ export interface ReviewRecord {
   commit_sha: string;
   /** Empty when no review ran. */
   reviewer: string;
-  verdict: "pass" | "changes" | "none";
+  verdict: "pass" | "changes" | "none" | "disabled";
   approver: "agent" | "human";
   reasons: string[];
   /** carried: raised in an earlier round and not fixed since; now: how the reviewer says it is still open. */
@@ -848,6 +848,7 @@ export interface RulesView {
   path: string;
   editable: boolean;
   reviewer_editable: boolean;
+  review_enabled: RuleField<boolean>;
   read_only: string | null;
   integration: string;
   always_human: boolean;
@@ -892,6 +893,7 @@ export interface Batching {
 
 /** A save from the Rules view; a null default-able value inherits again. */
 export interface RulesEdit {
+  review_enabled: boolean | null;
   always_human: boolean;
   human_paths: PathRule[];
   blocked_paths: PathRule[];

@@ -222,6 +222,18 @@ pub fn admit_here(waiting: &mut dyn FnMut(Option<&str>)) -> Result<()> {
     admit(&crate::paths::data_dir().join("lanes"), &mut limits, &mut memory, waiting)
 }
 
+/// A reviewer waiting for memory can stop when the person disables review. Propagate policy and
+/// admission errors; the caller checks once more immediately before spawning the process.
+pub fn admit_here_checked(check: &mut dyn FnMut() -> Result<()>) -> Result<()> {
+    loop {
+        check()?;
+        if cfg!(test) || admit_once(&crate::paths::data_dir().join("lanes"), limits().as_ref(), &mut memory)?.is_none() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
+}
+
 /// `admit_once` for a process with no queue row (a crew worker about to launch): the machine's own
 /// memory and limits, the shared record in Nitely's data folder. Why it must wait, or None once it
 /// may go (recorded as a start).
