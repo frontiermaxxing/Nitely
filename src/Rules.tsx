@@ -549,7 +549,7 @@ export function ProjectRules(props: { projectKey: string }) {
       {views.map((v) => (
         <div key={v.repo}>
           {views.length > 1 && <h2 className="rules-repo">{v.repo}</h2>}
-          <RepoRules view={v} onSaved={(saved) => setViews(views.map((x) => (x.repo === saved.repo ? saved : x)))} />
+          <RepoRules view={v} onSaved={(saved) => setViews((current) => current && current.map((x) => (x.repo === saved.repo ? saved : x)))} />
         </div>
       ))}
     </>
