@@ -450,19 +450,33 @@ pub(crate) fn commit_playbook_edit(root: &Path, branch: &str, edit: &dyn Fn(&str
         with_index(&["update-index", "--add", "--cacheinfo", &format!("100644,{blob},{PLAYBOOK_PATH}")])?;
         let tree = with_index(&["write-tree"])?;
         let commit = git(&["commit-tree", &tree, "-p", &tip, "-m", message])?;
+        let rollback = || -> Result<()> {
+            // A post-checkout hook can fail after restore has written both the file and index.
+            // Recovery must not run that failing hook again. Only this invocation ignores hooks;
+            // the repo's configuration and unrelated staged paths are left alone.
+            let hooks = scratch.join("recovery-hooks");
+            std::fs::create_dir_all(&hooks)?;
+            git(&["-c", &format!("core.hooksPath={}", hooks.display()), "restore", "--source",
+                &format!("refs/heads/{branch}"), "--staged", "--worktree", "--", PLAYBOOK_PATH])?;
+            Ok(())
+        };
         if in_main {
             // Git takes the real index lock before changing either the file or the index. Do this
             // before moving the branch: a leftover index.lock must not leave a committed policy
             // that the checkout (and therefore Nitely) still reads as the old policy.
-            git(&["restore", "--source", &commit, "--staged", "--worktree", "--", PLAYBOOK_PATH])
-                .context("the playbook checkout could not be updated; the integration branch has not changed")?;
+            if let Err(e) = git(&["restore", "--source", &commit, "--staged", "--worktree", "--", PLAYBOOK_PATH]) {
+                if let Err(recovery) = rollback() {
+                    return Err(e).context(format!("the integration branch has not changed; restoring its playbook also failed: {recovery:#}; inspect the playbook before retrying"));
+                }
+                return Err(e).context("the playbook checkout could not be updated; its previous contents were restored and the integration branch has not changed");
+            }
         }
         if let Err(e) = git(&["update-ref", &format!("refs/heads/{branch}"), &commit, &tip]) {
             if in_main {
                 // Catch up with the actual branch if another writer moved it, or put the old
                 // playbook back if the ref write was refused. Never undo a concurrent commit.
                 // Only this path changes; unrelated index entries stay untouched.
-                git(&["restore", "--source", &format!("refs/heads/{branch}"), "--staged", "--worktree", "--", PLAYBOOK_PATH])
+                rollback()
                     .context("the branch moved meanwhile and restoring the previous playbook failed; inspect the playbook before retrying")?;
             }
             return Err(e).context("the branch moved meanwhile; approve again");

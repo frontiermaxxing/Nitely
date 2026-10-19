@@ -765,6 +765,25 @@ mod tests {
         assert_eq!(command(&["diff", "--cached", "--name-only"]), "unrelated.txt", "rollback preserves unrelated staged work");
         assert_eq!(std::fs::read_to_string(&ref_lock).unwrap(), "another ref writer");
         std::fs::remove_file(ref_lock).unwrap();
+        let hooks = root.join(".git/settings-hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        command(&["config", "core.hooksPath", &hooks.to_string_lossy()]);
+        let hook = hooks.join("post-checkout");
+        std::fs::write(&hook, "#!/bin/sh\necho called >> .git/hook-count\ngit diff --cached -- .nitely/playbook.toml > .git/hook-observed\nexit 1\n").unwrap();
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let staged_before_hook = command(&["diff", "--cached", "--binary"]);
+        let failed = save_reviewer(&config, &db, "sample", &edit, &preview).unwrap_err();
+        assert!(format!("{failed:#}").contains("previous contents were restored"), "{failed:#}");
+        assert!(std::fs::read_to_string(root.join(".git/hook-observed")).unwrap().contains("codex"), "the hook failed after restore had changed the real index");
+        assert_eq!(std::fs::read_to_string(root.join(".git/hook-count")).unwrap().lines().count(), 1, "recovery must not rerun the failing hook");
+        assert_eq!(command(&["rev-parse", "HEAD"]), before_tip);
+        assert_eq!(std::fs::read_to_string(&path).unwrap().replace("\r\n", "\n"), text);
+        assert_eq!(command(&["diff", "--cached", "--binary"]), staged_before_hook, "rollback preserves all unrelated staged content");
+        assert_eq!(command(&["config", "core.hooksPath"]), hooks.to_string_lossy());
+        std::fs::remove_file(hook).unwrap();
         let saved = save_reviewer(&config, &db, "sample", &edit, &preview).unwrap();
         assert!(saved.done.starts_with("Committed"));
         assert!(saved.view.always_human && saved.view.reviewer_editable && !saved.view.editable);
