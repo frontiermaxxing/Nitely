@@ -116,23 +116,30 @@ pub(crate) fn filter_candidates(
          ) SELECT key FROM scope",
     )?;
     let scope: HashSet<String> = stmt.query_map([goal], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    let mut stmt = conn.prepare("SELECT issue_key, pid FROM crew_worker WHERE project = ?1 COLLATE NOCASE AND ended_at IS NULL AND pid IS NOT NULL")?;
+    let workers = stmt.query_map([project], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?)))?;
+    let mut live_crew = HashSet::new();
+    for worker in workers {
+        let (key, pid) = worker?;
+        if crate::procs::alive(pid) { live_crew.insert(key); }
+    }
     let mut stmt = conn.prepare(
         "SELECT i.key, i.goal,
-           EXISTS(SELECT 1 FROM crew_worker w WHERE w.issue_key = i.key AND w.ended_at IS NULL),
            (i.state = 'In Progress' AND i.origin = 'nitely' AND i.owner != 'human')
          FROM issue i WHERE i.project = ?1 COLLATE NOCASE AND i.state_type NOT IN ('completed', 'canceled')",
     )?;
-    let rows = stmt.query_map([project], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, bool>(2)?, r.get::<_, bool>(3)?)))?;
+    let rows = stmt.query_map([project], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, bool>(2)?)))?;
     let ts = now();
     let sessions = crate::issues::recent_sessions(conn, ts)?;
     let mut goal_of = HashMap::new();
     let mut working: HashMap<i64, i64> = HashMap::new();
     let mut focused_working = 0;
     for row in rows {
-        let (key, own_goal, crew_busy, in_progress) = row?;
-        // Match the picker's definition of work still in flight: external work can have an old
-        // or absent claim while its events or live session show it is still using a slot.
-        let busy = crew_busy || (in_progress && crate::issues::idle_since(conn, &key, &sessions, ts)?.is_none());
+        let (key, own_goal, in_progress) = row?;
+        // A crashed supervisor can leave unclosed worker rows indefinitely. A live worker process
+        // still holds its slot; otherwise use the picker's claim/activity/session lifetime so
+        // abandoned Crew work can be reclaimed without first restarting its supervisor.
+        let busy = live_crew.contains(&key) || (in_progress && crate::issues::idle_since(conn, &key, &sessions, ts)?.is_none());
         if let Some(id) = own_goal {
             goal_of.insert(key.clone(), id);
             if busy { *working.entry(id).or_default() += 1; }
@@ -144,6 +151,9 @@ pub(crate) fn filter_candidates(
     let full = |id: i64, count: i64| budgets.get(&id).is_some_and(|budget| *budget > 0 && count >= *budget);
     let focus_full = full(goal, focused_working);
     Ok(candidates.into_iter().filter(|(key, rank, _)| {
+        // An old claim can make a live Crew issue look idle to the generic picker. It cannot be
+        // reclaimed merely because the goal has room for an additional worker.
+        if live_crew.contains(key) { return false; }
         // A prerequisite consumes a focus slot as well as its own goal's slot. P1 outside focus
         // may interrupt when allowed, but never bypasses its own goal's capacity.
         let in_scope = scope.contains(key);
@@ -324,6 +334,41 @@ mod tests {
         db.conn.execute("UPDATE session SET last_seen_at = ?1", [old]).unwrap();
         assert_eq!(take(&mut db), Some(running), "fully idle work releases capacity and can be reclaimed");
         assert_eq!(take(&mut db), None, "the reclaimed work occupies the slot again");
+    }
+
+    #[test]
+    fn abandoned_crew_rows_release_capacity_but_live_workers_keep_their_slots() {
+        let mut db = db();
+        let id = goal(&db, "Feature", Some(1));
+        let running = issue(&mut db, "First feature part", 3, Some(id));
+        let second = issue(&mut db, "Second feature part", 4, Some(id));
+        db.set_project_focus("APP", Some(id), false, &Actor::Human).unwrap();
+        assert_eq!(take(&mut db), Some(running.clone()));
+        let old = now() - 7 * 3600;
+        db.conn.execute("UPDATE issue SET claimed_at = ?2 WHERE key = ?1", params![running, old]).unwrap();
+        db.conn.execute("UPDATE event SET ts = ?2 WHERE issue_key = ?1", params![running, old]).unwrap();
+        // No supervisor is running and the claim/activity have expired, but this worker process
+        // is still alive. It must hold its slot even before a replacement supervisor adopts it.
+        db.conn.execute(
+            "INSERT INTO crew_worker (project, issue_key, agent, agent_id, pid, worktree, log_path, started_at)
+             VALUES ('APP', ?1, 'codex', 'codex:worker', ?2, 'C:/Code/worktrees/feature', 'worker.log', ?3)",
+            params![running, std::process::id(), old],
+        ).unwrap();
+        assert_eq!(take(&mut db), None, "a live worker keeps the focus slot despite old activity");
+        db.save_goal("APP", Some(id), &GoalChange { workers: Some(2), ..Default::default() }, &Actor::Human).unwrap();
+        assert_eq!(take(&mut db), Some(second.clone()), "spare capacity starts other work instead of reclaiming a live worker's issue");
+        db.move_issue(&second, "Done", Some("complete"), None, &Actor::Human).unwrap();
+        db.save_goal("APP", Some(id), &GoalChange { workers: Some(1), ..Default::default() }, &Actor::Human).unwrap();
+        // The worker crashes too. Its unclosed row must not permanently fill the budget; a
+        // direct allocator can recover the issue without waiting for the supervisor to restart.
+        db.conn.execute("UPDATE crew_worker SET pid = 0 WHERE issue_key = ?1", [&running]).unwrap();
+        assert_eq!(take(&mut db), Some(running.clone()), "an abandoned row no longer blocks crash recovery");
+        assert_eq!(take(&mut db), None, "the new claim occupies the recovered slot");
+        // The same recovery applies if the supervisor crashed before recording a setup pid.
+        db.conn.execute("UPDATE issue SET claimed_at = ?2 WHERE key = ?1", params![running, old]).unwrap();
+        db.conn.execute("UPDATE event SET ts = ?2 WHERE issue_key = ?1", params![running, old]).unwrap();
+        db.conn.execute("UPDATE crew_worker SET pid = NULL, phase = 'setup' WHERE issue_key = ?1", [&running]).unwrap();
+        assert_eq!(take(&mut db), Some(running));
     }
 
     #[test]
