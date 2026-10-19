@@ -166,6 +166,9 @@ mod tests {
     fn large_board() -> LargeBoard {
         let base = crate::paths::unique_temp("nitely-perf", "");
         std::fs::create_dir_all(&base).unwrap();
+        // CI's Windows TEMP uses 8.3 names. Exercise that spelling on other machines too:
+        // comparing a hook's short cwd with git's long paths must stay within the same budget.
+        let base = PathBuf::from(crate::paths::short_path(&base.to_string_lossy()));
         let db_path = base.join("nitely.db");
         let config = seed(&db_path, &base.join("repos")).unwrap();
         LargeBoard { base, db_path, config }
@@ -211,6 +214,7 @@ mod tests {
         assert_eq!(db.conn.query_row("SELECT COUNT(*) FROM issue", [], |r| r.get::<_, i64>(0)).unwrap(), ISSUES as i64);
 
         let mut measured = vec![];
+        eprintln!("issues alone: {:.1} ms", median(9, || drop(db.issues().unwrap())).as_secs_f64() * 1000.0);
         measured.push(("open the database", median(9, || drop(Db::open(&board.db_path).unwrap()))));
         measured.push(("snapshot, git read again", median(5, || drop(crate::snapshot::snapshot(&board.config, &db).unwrap()))));
         let cache = crate::snapshot::GitCache::new();

@@ -6,7 +6,7 @@
 use anyhow::Result;
 use serde::Serialize;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -15,7 +15,6 @@ use crate::config::{Config, RepoConfig};
 use crate::db::{now, Db, IssueRecord, PrRecord, Session, SyncStatus};
 use crate::issues::Ask;
 use crate::git::{self, BranchState};
-use crate::paths::is_within;
 
 /// Sessions not seen for this long are left off the board.
 const SESSION_WINDOW_SECS: i64 = 24 * 3600;
@@ -316,13 +315,46 @@ pub fn snapshot(config: &Config, db: &Db) -> Result<Board> {
 /// A snapshot that reuses `cache`'s git state while the repos have not changed, and reads again
 /// only the worktrees that moved when they have.
 pub fn snapshot_cached(config: &Config, db: &Db, cache: &GitCache) -> Result<Board> {
-    let lately: Vec<String> = db.sessions_since(now() - ACTIVE_WINDOW_SECS)?.into_iter().map(|s| s.cwd).collect();
-    let active = |worktree: &str| lately.iter().any(|cwd| crate::paths::is_within(cwd, worktree));
+    let lately: Vec<String> = db.sessions_since(now() - ACTIVE_WINDOW_SECS)?.into_iter().map(|s| crate::paths::normalize(&s.cwd)).collect();
+    let active = |worktree: &str| {
+        let worktree = crate::paths::normalize(worktree);
+        lately.iter().any(|cwd| within(cwd, &worktree))
+    };
     build(config, db, &cache.get(config, &active))
+}
+
+/// Already-normalized paths: no filesystem work in the session/worktree comparison loops.
+fn within(child: &str, parent: &str) -> bool {
+    child == parent || child.strip_prefix(parent).is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// One normalization per distinct path for this snapshot. On Windows, expanding a short cwd
+/// such as RUNNER~1 calls the filesystem; doing it for every pair dominates a cached read.
+struct BoardPaths<'a>(HashMap<&'a str, String>);
+
+impl<'a> BoardPaths<'a> {
+    fn new(paths: impl Iterator<Item = &'a str>) -> Self {
+        let mut normalized = HashMap::new();
+        for path in paths {
+            normalized.entry(path).or_insert_with(|| crate::paths::normalize(path));
+        }
+        Self(normalized)
+    }
+
+    fn get(&self, path: &str) -> &str { &self.0[path] }
+
+    fn contains(&self, child: &str, parent: &str) -> bool {
+        within(self.get(child), self.get(parent))
+    }
 }
 
 fn build(config: &Config, db: &Db, git_state: &GitState) -> Result<Board> {
     let sessions = db.sessions_since(now() - SESSION_WINDOW_SECS)?;
+    let paths = BoardPaths::new(
+        sessions.iter().map(|s| s.cwd.as_str())
+            .chain(config.repos.iter().map(|r| r.root.as_str()))
+            .chain(git_state.repos.iter().flat_map(|r| r.worktrees.iter().flatten().map(|w| w.path.as_str()))),
+    );
     let issues = db.issues()?;
     let prs = db.prs()?;
     // Branches cut before a project changed its key still name the old one.
@@ -354,7 +386,7 @@ fn build(config: &Config, db: &Db, git_state: &GitState) -> Result<Board> {
         let mut session_for = vec![None; worktrees.len()];
         for &i in &order {
             for (j, s) in sessions.iter().enumerate() {
-                if !claimed[j] && is_within(&s.cwd, &worktrees[i].path) {
+                if !claimed[j] && paths.contains(&s.cwd, &worktrees[i].path) {
                     claimed[j] = true;
                     // `sessions` is newest first, so the first match is the latest.
                     if session_for[i].is_none() {
@@ -408,7 +440,7 @@ fn build(config: &Config, db: &Db, git_state: &GitState) -> Result<Board> {
         let unmatched_sessions = sessions
             .iter()
             .zip(&claimed)
-            .filter(|(s, c)| !**c && is_within(&s.cwd, &repo.root))
+            .filter(|(s, c)| !**c && paths.contains(&s.cwd, &repo.root))
             .map(|(s, _)| s.clone())
             .collect();
 
@@ -435,7 +467,7 @@ fn build(config: &Config, db: &Db, git_state: &GitState) -> Result<Board> {
         .collect();
 
     let remote_sessions = sessions.iter().filter(|s| s.cwd.starts_with("remote:")).cloned().collect();
-    let agents = agents(db, config, &sessions, &views, &issues, &aliases)?;
+    let agents = agents(db, config, &sessions, &views, &issues, &aliases, &paths)?;
     Ok(Board { repos: views, needs_me_issues, asks: db.open_asks()?, sync: db.sync_statuses()?, remote_sessions, agents })
 }
 
@@ -447,6 +479,7 @@ fn agents(
     views: &[RepoView],
     issues: &[IssueRecord],
     aliases: &std::collections::HashMap<String, String>,
+    paths: &BoardPaths<'_>,
 ) -> Result<Vec<AgentRow>> {
     let local: Vec<&Session> = sessions.iter().filter(|s| !s.cwd.starts_with("remote:")).collect();
     let mut named = db.issues_sessions_work_on(&local.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), now())?;
@@ -456,8 +489,8 @@ fn agents(
     // current one) and the record is not another; the record's work is its own when it is the only
     // one there. A record newer than every session there (Codex calls without a thread, after an
     // earlier thread went idle) is the agent at work, and stays.
-    let folder_id = |s: &Session| s.id == format!("{}:{}", s.vendor, crate::paths::normalize(&s.cwd));
-    let place = |s: &Session| (s.vendor.clone(), crate::paths::normalize(&s.cwd));
+    let folder_id = |s: &Session| s.id == format!("{}:{}", s.vendor, paths.get(&s.cwd));
+    let place = |s: &Session| (s.vendor.clone(), paths.get(&s.cwd).to_string());
     let mut in_folder: std::collections::HashMap<(String, String), Vec<(&str, i64)>> = std::collections::HashMap::new();
     for s in local.iter().filter(|s| !folder_id(s)) {
         in_folder.entry(place(s)).or_default().push((s.id.as_str(), s.last_seen_at));
@@ -473,9 +506,9 @@ fn agents(
     let local: Vec<&Session> = local.iter().copied().filter(|s| !superseded(s)).collect();
     let mut out = Vec::new();
     for s in local {
-        let repo = config.repos.iter().zip(views).filter(|(_, v)| is_within(&s.cwd, &v.root) || v.rows.iter().any(|r| is_within(&s.cwd, &r.worktree))).map(|(r, _)| r).next();
+        let repo = config.repos.iter().zip(views).filter(|(_, v)| paths.contains(&s.cwd, &v.root) || v.rows.iter().any(|r| paths.contains(&s.cwd, &r.worktree))).map(|(r, _)| r).next();
         // The task worktree it runs in: the deepest one holding its folder, a main checkout aside.
-        let row = views.iter().flat_map(|v| v.rows.iter()).filter(|r| !r.is_main && is_within(&s.cwd, &r.worktree)).max_by_key(|r| r.worktree.len());
+        let row = views.iter().flat_map(|v| v.rows.iter()).filter(|r| !r.is_main && paths.contains(&s.cwd, &r.worktree)).max_by_key(|r| r.worktree.len());
         let (from_events, report) = named.get(&s.id).cloned().unwrap_or_default();
         let issue_key = from_events.map(|k| crate::projects::current_key(aliases, &k)).or_else(|| row.and_then(|r| r.issue_key.clone()));
         let issue = issue_key.as_ref().and_then(|k| issues.iter().find(|i| i.key.eq_ignore_ascii_case(k)).cloned());
@@ -593,6 +626,46 @@ fn pr_for(prs: &[PrRecord], slug: Option<&str>, branch: &str) -> Option<PrRecord
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_snapshots_match_short_paths_without_confusing_nested_worktrees_or_siblings() {
+        use crate::test_repo::git as sh;
+        let dir = crate::paths::unique_temp("nitely-snapshot-paths", "");
+        let root = dir.join("app");
+        crate::test_repo::init(&root, &[("a.txt", "a")]);
+        let wt = root.join("tasks/one");
+        sh(&root, &["worktree", "add", "-q", "-b", "claude/app-1-work", &wt.to_string_lossy(), "main"]);
+        let child = wt.join("src");
+        let sibling = root.join("tasks/one-other");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        let mut db = Db::open(&dir.join("t.db")).unwrap();
+        for (id, path) in [("claude:child", &child), ("codex:sibling", &sibling)] {
+            db.record(&crate::db::NewEvent {
+                session_id: id.into(), vendor: id.split(':').next().unwrap().into(),
+                cwd: crate::paths::short_path(&path.to_string_lossy()),
+                kind: "tool".into(), summary: None, state: "working".into(),
+            }).unwrap();
+        }
+        let config = Config {
+            repos: vec![RepoConfig { name: "app".into(), root: crate::paths::short_path(&root.to_string_lossy()), integration_branch: "main".into(), project: Some("APP".into()) }],
+            ..Default::default()
+        };
+        let cache = GitCache::new();
+        for _ in 0..2 {
+            let board = snapshot_cached(&config, &db, &cache).unwrap();
+            let rows = &board.repos[0].rows;
+            assert_eq!(rows.iter().find(|r| !r.is_main).unwrap().session.as_ref().unwrap().id, "claude:child");
+            assert_eq!(rows.iter().find(|r| r.is_main).unwrap().session.as_ref().unwrap().id, "codex:sibling");
+            let child = board.agents.iter().find(|a| a.session.id == "claude:child").unwrap();
+            assert_eq!(child.project.as_deref(), Some("APP"));
+            assert_eq!(child.issue_key.as_deref(), Some("APP-1"));
+            assert_eq!(crate::paths::normalize(child.worktree.as_ref().unwrap()), crate::paths::normalize(&wt.to_string_lossy()));
+            assert!(board.agents.iter().find(|a| a.session.id == "codex:sibling").unwrap().worktree.is_none());
+        }
+        drop(db);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn a_read_after_one_counts_again_only_the_worktrees_that_moved() {

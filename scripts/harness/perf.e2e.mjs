@@ -75,16 +75,16 @@ test("the app stays within its budgets on a large board", { timeout: 900000 }, a
       await page.send("HeapProfiler.collectGarbage");
       return (await page.send("Runtime.getHeapUsage")).usedSize / 1e6;
     };
-    // In batches, so no one call to the page runs past the driver's timeout.
+    // One refresh per driver call. The app deliberately waits at least a second between reads
+    // (and as long as its last read took); a healthy batch of 20 can exceed CDP's 30-second limit.
+    // Keep the same number of real, paced refreshes and bound each one independently.
     const refresh = async (count) => {
       let nodes = 0;
-      for (let done = 0; done < count; done += 20) {
+      for (let done = 0; done < count; done++) {
         nodes = await page.eval(`
-          for (let i = 0; i < ${Math.min(20, count - done)}; i++) {
-            const drawn = new Promise((r) => window.addEventListener("nitely:board-drawn", r, { once: true }));
-            await window.__TAURI_INTERNALS__.invoke("plugin:event|emit", { event: "nitely://changed", payload: null });
-            await drawn;
-          }
+          const drawn = new Promise((r) => window.addEventListener("nitely:board-drawn", r, { once: true }));
+          await window.__TAURI_INTERNALS__.invoke("plugin:event|emit", { event: "nitely://changed", payload: null });
+          await drawn;
           return document.getElementsByTagName("*").length;`);
       }
       return nodes;
