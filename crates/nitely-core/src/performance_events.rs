@@ -42,8 +42,8 @@ pub fn record(dir: &Path, event: &Event) -> Result<()> {
 /// including test/harness homes and lane callers whose child changes NITELY_HOME.
 pub fn lane(db: &crate::Db, run: i64, kind: Kind) {
     let Some(dir) = db.conn.path().filter(|p| !p.is_empty()).and_then(|p| Path::new(p).parent()) else { return };
-    let row = db.conn.query_row("SELECT project,issue_key,memory_cap FROM lane_run WHERE id=?1", [run], |r| Ok((r.get::<_, String>(0)?,r.get::<_, Option<String>>(1)?,r.get::<_, Option<u64>>(2)?)));
-    if let Ok((project, issue, memory_cap_bytes)) = row { let _ = record(&dir.join("performance"), &Event { wall_ms: performance::wall_ms(), kind, project, issue, run, memory_cap_bytes }); }
+    let row = db.conn.query_row("SELECT project,issue_key,memory_cap FROM lane_run WHERE id=?1", [run], |r| Ok((r.get::<_, String>(0)?,r.get::<_, Option<String>>(1)?,r.get::<_, Option<i64>>(2)?)));
+    if let Ok((project, issue, cap)) = row { let _ = record(&dir.join("performance"), &Event { wall_ms: performance::wall_ms(), kind, project, issue, run, memory_cap_bytes: cap.and_then(|v| u64::try_from(v).ok()) }); }
 }
 pub fn read(store: &Store, from: i64, to: i64, project: Option<&str>, limit: usize) -> Result<(Vec<Event>, bool)> {
     if limit == 0 || limit > 2000 { bail!("event limit must be 1–2000"); }
