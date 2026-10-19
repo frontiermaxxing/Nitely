@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { IssueDetail } from "./types";
 import { issueDecision, type IssueDecision } from "./decisions";
+import { automatedReviewEvidence } from "./approvalEvidence";
 import { ChecksMark } from "./Pr";
 import { ago, openExternal } from "./util";
 import { AgentMark, FindingDots, ResultMark, SeverityMark, VENDOR_LABEL, journeyOf, vendorOf, type Round } from "./ui";
@@ -49,6 +50,7 @@ export function IssueJourney(props: { detail: IssueDetail; now: number }) {
         const expandable = !!r.review && (r.review.findings.length > 0 || r.review.reasons.length > 0);
         const isOpen = expandable && open === r.n;
         const findings = r.review?.findings ?? [];
+        const automated = automatedReviewEvidence(r.review);
         const head = (
           <>
             <span className={`journey-node journey-node-${r.outcome}${r.pushFailed ? " journey-node-stuck" : ""}`} />
@@ -61,9 +63,9 @@ export function IssueJourney(props: { detail: IssueDetail; now: number }) {
             </span>
             <span className="journey-review">
               {r.outcome !== "open" && (
-                <span className={`journey-verdict journey-verdict-${r.outcome}`}>{OUTCOME[r.outcome]}</span>
+                <span className={`journey-verdict journey-verdict-${r.outcome}`}>{r.review?.verdict === "disabled" ? "disabled" : OUTCOME[r.outcome]}</span>
               )}
-              {r.review && r.review.verdict !== "none" && <FindingDots findings={findings} />}
+              {automated.ran && <FindingDots findings={findings} />}
               {r.pushFailed && <span className="journey-stuck">push failed</span>}
               {last && waiting && r.waitsForHuman && <span className="attention-ink">waits for you</span>}
             </span>
@@ -90,8 +92,8 @@ export function IssueJourney(props: { detail: IssueDetail; now: number }) {
             {isOpen && r.review && (
               <div className="journey-detail">
                 <p className="journey-by">
-                  {r.review.reviewer ? `${VENDOR_LABEL[vendorOf(r.review.reviewer)]} reviewed` : "No review ran"}
-                  {r.review.note ? ` (${r.review.note})` : ""}{" "}
+                  {automated.ran ? `${VENDOR_LABEL[vendorOf(r.review.reviewer)]} reviewed` : automated.text}
+                  {automated.ran && r.review.note ? ` (${r.review.note})` : ""}{" "}
                   <span className="mono">{r.review.commit_sha.slice(0, 7)}</span>
                   {r.review.approver === "human" ? "; it waits for a person." : "; no person needed."}
                 </p>

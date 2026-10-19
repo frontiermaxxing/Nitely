@@ -112,7 +112,7 @@ export function journeyOf(timeline: TimelineEntry[] = [], reviews: ReviewRecord[
       case "submit": {
         const s = e.summary ?? "";
         const r = openRound(e.ts);
-        r.outcome = s.includes("requested changes") ? "changes" : s.includes("passed") ? "passed" : "unreviewed";
+        r.outcome = s.startsWith("Review disabled for this project") ? "unreviewed" : s.includes("requested changes") ? "changes" : s.includes("passed") ? "passed" : "unreviewed";
         r.reviewer = reviewerOf(s) ?? r.reviewer;
         r.pushFailed = s.includes("push failed");
         r.waitsForHuman = s.includes("waits for a human");

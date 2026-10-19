@@ -2,6 +2,7 @@
 // can load it.
 
 import type { IssueDetail, IssueSpend, ModelTokens, ProjectSpend } from "./types";
+import { automatedReviewEvidence } from "./approvalEvidence.ts";
 
 /** A token count in a few characters, as the backend writes it: 512, 86k, 1.2M. */
 export function shortTokens(n: number): string {
@@ -41,7 +42,7 @@ export function issueSpendLine(detail: IssueDetail, spend: IssueSpend | null, no
     parts.push(`${shortTokens(spend.tokens)} tokens${models(spend.by_model)}`);
     parts.push(`${spend.calls} model call${spend.calls === 1 ? "" : "s"}`);
   }
-  const rounds = detail.reviews.length;
+  const rounds = detail.reviews.filter((review) => automatedReviewEvidence(review).ran).length;
   if (rounds > 0) parts.push(`${rounds} review round${rounds === 1 ? "" : "s"}`);
   return parts.length ? parts.join(" · ") : null;
 }

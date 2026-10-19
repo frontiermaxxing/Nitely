@@ -7,6 +7,16 @@ import type { ReviewRecord, TimelineEntry } from "../types.ts";
 
 const ev = (ts: number, kind: string, summary = ""): TimelineEntry => ({ ts, actor: "claude:test", kind, summary }) as TimelineEntry;
 
+test("a disabled review's passed gate is not mistaken for a passed review before records load", () => {
+  const { rounds } = journeyOf([
+    ev(10, "gate_passed", "Gate passed"),
+    ev(20, "submit", "Review disabled for this project; gate passed and ready to land"),
+  ], []);
+  assert.equal(rounds[0].outcome, "unreviewed");
+  assert.equal(rounds[0].reviewer, null);
+  assert.equal(rounds[0].gates[0].ok, true);
+});
+
 const rec = (ts: number, commit: string, verdict: ReviewRecord["verdict"], approver: ReviewRecord["approver"] = "agent"): ReviewRecord => ({
   issue_key: "NIT-1",
   patch_id: `p-${commit}`,

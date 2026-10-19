@@ -7,7 +7,7 @@ import type { IssueDetail, IssueRecord, IssueSpend, ProjectSpend } from "./types
 
 const issue = { key: "X-1" } as IssueRecord;
 const detail = (timeline: IssueDetail["timeline"], reviews = 0): IssueDetail =>
-  ({ issue, relations: { blocked_by: [], blocks: [] }, timeline, prs: [], reviews: Array.from({ length: reviews }, () => ({})) }) as unknown as IssueDetail;
+  ({ issue, relations: { blocked_by: [], blocks: [] }, timeline, prs: [], reviews: Array.from({ length: reviews }, () => ({ reviewer: "codex", verdict: "pass" })) }) as unknown as IssueDetail;
 const spend = (tokens: number, by: [string, number][]): IssueSpend => ({
   key: "X-1",
   tokens,
@@ -21,6 +21,15 @@ const spend = (tokens: number, by: [string, number][]): IssueSpend => ({
 
 test("token counts read short", () => {
   assert.deepEqual([shortTokens(512), shortTokens(86_400), shortTokens(1_234_567), shortTokens(12_600_000)], ["512", "86k", "1.2M", "13M"]);
+});
+
+test("spend counts completed review attempts but not disabled or skipped submissions", () => {
+  const d = detail([], 3);
+  d.reviews[0].verdict = "disabled";
+  d.reviews[0].reviewer = "";
+  d.reviews[1].verdict = "none";
+  d.reviews[1].reviewer = "";
+  assert.equal(issueSpendLine(d, null, 0), "1 review round");
 });
 
 test("an issue's spend is one line of what is known", () => {
