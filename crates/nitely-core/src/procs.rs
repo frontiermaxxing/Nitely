@@ -51,6 +51,13 @@ pub fn holders_of(dirs: &[&Path]) -> (Vec<Vec<Holder>>, bool) {
         std::thread::sleep(std::time::Duration::from_millis(200));
         procs = list();
     }
+    holders_in(&procs, dirs, me)
+}
+
+/// Prepare spellings once for this process snapshot, not once per directory/process/field pair.
+/// Nothing survives the scan: later calls see new processes and current filesystem identities.
+fn holders_in(procs: &[Proc], dirs: &[&Path], me: u32) -> (Vec<Vec<Holder>>, bool) {
+    if dirs.is_empty() { return (vec![], procs.iter().any(|p| p.process_id == me)); }
     let parents: HashMap<u32, u32> = procs.iter().map(|p| (p.process_id, p.parent_process_id)).collect();
     let mut mine = vec![me];
     while let Some(&parent) = parents.get(mine.last().unwrap()) {
@@ -60,15 +67,23 @@ pub fn holders_of(dirs: &[&Path]) -> (Vec<Vec<Holder>>, bool) {
         mine.push(parent);
     }
     let whole = procs.iter().any(|p| p.process_id == me);
-    let others: Vec<&Proc> = procs.iter().filter(|p| !mine.contains(&p.process_id)).collect();
+    let others: Vec<(&Proc, Vec<String>)> = procs.iter().filter(|p| !mine.contains(&p.process_id)).map(|p| {
+        let mut texts = Vec::new();
+        for text in [&p.executable_path, &p.command_line, &p.cwd].into_iter().flatten() {
+            for spelling in text_spellings(text) {
+                if !texts.contains(&spelling) { texts.push(spelling); }
+            }
+        }
+        (p, texts)
+    }).collect();
     let each = dirs
         .iter()
         .map(|dir| {
-            let dir = dir.to_string_lossy();
+            let spellings = path_spellings(&dir.to_string_lossy());
             others
                 .iter()
-                .filter(|p| [&p.executable_path, &p.command_line, &p.cwd].into_iter().flatten().any(|text| names_path(text, &dir)))
-                .map(|p| Holder { pid: p.process_id, name: p.name.clone().unwrap_or_default() })
+                .filter(|(_, texts)| matches_spellings(texts, &spellings))
+                .map(|(p, _)| Holder { pid: p.process_id, name: p.name.clone().unwrap_or_default() })
                 .collect()
         })
         .collect();
@@ -340,7 +355,16 @@ impl TreeGuard {
 /// Whether `text` names `dir` or a path inside it, in any spelling a process might use:
 /// `C:\x\y`, `C:/x/y`, Git Bash's `/c/x/y`, WSL's `/mnt/c/x/y`; case-insensitive on Windows.
 pub fn names_path(text: &str, dir: &str) -> bool {
-    let texts = [normalize(text), normalize(&spell_out(text))];
+    matches_spellings(&text_spellings(text), &path_spellings(dir))
+}
+
+fn text_spellings(text: &str) -> Vec<String> {
+    let written = normalize(text);
+    let expanded = normalize(&spell_out(text));
+    if written == expanded { vec![written] } else { vec![written, expanded] }
+}
+
+fn path_spellings(dir: &str) -> Vec<String> {
     let mut spellings = Vec::new();
     // Long or 8.3 short (`RUNNER~1`): a process may have been given either (NIT-104).
     for dir in [dir.to_string(), crate::paths::long_path(dir), crate::paths::short_path(dir)] {
@@ -359,6 +383,10 @@ pub fn names_path(text: &str, dir: &str) -> bool {
         let linked: Vec<String> = spellings.iter().filter_map(|s| through_link(s)).collect();
         spellings.extend(linked);
     }
+    spellings
+}
+
+fn matches_spellings(texts: &[String], spellings: &[String]) -> bool {
     // As written, or with its short names spelled out.
     texts.iter().any(|text| {
         spellings.iter().any(|s| {
@@ -1140,6 +1168,67 @@ pub(crate) mod tests {
         let common_short = crate::paths::short_path(&common);
         assert!(names_path(&format!("node {common_short} --watch"), &common), "{common_short}");
         assert!(names_path(&format!(r"node {short}\Common Files --watch"), &common_short));
+    }
+
+    fn fake_process(pid: u32, parent: u32, executable: Option<String>, command: Option<String>, cwd: Option<String>) -> Proc {
+        Proc { process_id: pid, parent_process_id: parent, name: Some("worker".into()), executable_path: executable, command_line: command, cwd }
+    }
+
+    #[test]
+    fn a_prepared_holder_scan_keeps_parents_boundaries_and_missing_list_evidence() {
+        let dir = if cfg!(windows) { "C:/Code/task-2" } else { "/Code/task-2" };
+        let sibling = format!("{dir}-other");
+        let procs = vec![
+            fake_process(10, 9, None, Some(format!("cd {dir}")), None),
+            fake_process(9, 8, None, Some(format!("cd {dir}")), None),
+            fake_process(8, 9, None, Some(format!("cd {dir}")), None),
+            fake_process(11, 10, None, Some(format!("node {dir}/src/worker.js")), None),
+            fake_process(12, 0, None, None, Some(sibling.clone())),
+            fake_process(13, 0, Some(format!("{dir}/bin/helper")), None, None),
+            fake_process(14, 0, None, None, None),
+        ];
+        let dirs = [Path::new(dir), Path::new(&sibling)];
+        let (found, whole) = holders_in(&procs, &dirs, 10);
+        assert!(whole);
+        assert_eq!(found[0].iter().map(|p| p.pid).collect::<Vec<_>>(), vec![11, 13]);
+        assert_eq!(found[1].iter().map(|p| p.pid).collect::<Vec<_>>(), vec![12]);
+        assert!(!holders_in(&procs[3..], &dirs, 10).1, "a list missing this process is never evidence a folder is unused");
+    }
+
+    /// Same process snapshot and matching semantics, with path preparation inside versus outside
+    /// the pairwise loop. No process enumeration, changing machine limits, or timing threshold.
+    #[test]
+    #[ignore = "paired Windows path matching measurement; run explicitly with --nocapture"]
+    fn holder_path_preparation_measurement() {
+        let root = std::env::var("ProgramFiles").unwrap_or_else(|_| "/tmp".into());
+        let short = crate::paths::short_path(&root);
+        let dirs: Vec<String> = (0..8).map(|n| format!("{root}/Common Files/Nitely-measure/task-{n}")).collect();
+        let paths: Vec<&Path> = dirs.iter().map(Path::new).collect();
+        let mut procs = vec![fake_process(10, 0, None, None, None)];
+        for n in 0..96 {
+            let task = n % 9; // One ninth names a sibling that must match none of the eight.
+            procs.push(fake_process(100+n, 0, Some(format!("{root}/node.exe")),
+                Some(format!("node {short}/Common Files/Nitely-measure/task-{task}/worker.js --watch")),
+                Some(format!("{root}/Common Files/Nitely-measure/task-{task}"))));
+        }
+        let mut pairwise_ms = Vec::new();
+        let mut prepared_ms = Vec::new();
+        for _ in 0..3 {
+            let at = std::time::Instant::now();
+            let expected: Vec<Vec<Holder>> = dirs.iter().map(|dir| procs.iter().skip(1)
+                .filter(|p| [&p.executable_path, &p.command_line, &p.cwd].into_iter().flatten().any(|text| names_path(text, dir)))
+                .map(|p| Holder { pid: p.process_id, name: p.name.clone().unwrap_or_default() }).collect()).collect();
+            pairwise_ms.push(at.elapsed().as_secs_f64()*1000.0);
+            let at = std::time::Instant::now();
+            let (actual, whole) = holders_in(&procs, &paths, 10);
+            prepared_ms.push(at.elapsed().as_secs_f64()*1000.0);
+            assert!(whole);
+            assert_eq!(actual, expected);
+            assert_eq!(actual.iter().map(Vec::len).sum::<usize>(), 86);
+        }
+        pairwise_ms.sort_by(f64::total_cmp);
+        prepared_ms.sort_by(f64::total_cmp);
+        println!("holder matching, 8 directories/96 processes/3 fields: pairwise median {:.1} ms; prepared median {:.1} ms; {:.1}x", pairwise_ms[1], prepared_ms[1], pairwise_ms[1]/prepared_ms[1]);
     }
 
     /// `holders(dir)` once it names `pid`, or as it last was after a few seconds.

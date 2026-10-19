@@ -447,3 +447,19 @@ On 2026-10-17, base `56f6f45` of this repo, on an idle NVMe disk, cargo at 8 job
   and run apart. Then one full gate as a single request.
 - (d) `git ls-tree -r -l HEAD` in the large checkout's main repository, which reads objects only;
   cone-mode sets computed from that listing; build output sizes with `du`, which only reads.
+
+### Process-holder path preparation
+
+Cleanup checks which processes hold each worktree before removing it. On Windows, expanding long
+and 8.3 path spellings for every directory/process/field pair repeated native filesystem queries.
+The scan now prepares directory spellings and process fields once, with no cache across scans.
+Parent exclusion, incomplete-list handling, and path component boundaries remain the same.
+
+For [NIT-288](http://127.0.0.1:7423/i/NIT-288), lane 1174 on 2026-10-19 compared both approaches
+on the same synthetic snapshot: eight directories, 96 processes, three fields per process, mixed
+long/short Windows paths. Three debug-profile runs had median matching times of 2312.8 ms with
+per-pair preparation and 94.2 ms with preparation per scan (24.6×), returning identical holders.
+The measurement excludes process enumeration and does not establish the cause of a full-gate
+timeout. Thread caps, process priorities, memory admission and timeouts are unchanged; the earlier
+idle-machine thread/priority matrix remains unmeasured. Reproduce through a build lane with
+`cargo test -p nitely-core procs::tests::holder_path_preparation_measurement -- --ignored --nocapture`.
