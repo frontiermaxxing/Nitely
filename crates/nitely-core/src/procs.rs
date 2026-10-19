@@ -32,6 +32,8 @@ pub fn metrics() -> ProcessSnapshot {
 }
 #[cfg(all(test,windows))]
 pub(crate) fn recorder_cost() -> Option<(u64,u64)> {win::recorder_cost()}
+#[cfg(all(test,windows))]
+pub(crate) fn recorder_io() -> Option<[u64;6]> {win::recorder_io()}
 pub fn child_started(child: &std::process::Child) -> Option<String> {
     #[cfg(windows)] {
         use std::os::windows::io::AsRawHandle;
@@ -804,6 +806,16 @@ mod win {
         assert_eq!(parse_basic_metric_entries(&buffer,512).unwrap().0.len(),1);
         assert!(parse_basic_metric_entries(&buffer,1024).is_none());
         assert!(parse_basic_metric_entries(&buffer,8).is_none());
+    }
+    #[cfg(test)]
+    pub fn recorder_io() -> Option<[u64;6]> {
+        let handle=unsafe {OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,0,std::process::id())};
+        if handle.is_null() {return None;}
+        let mut counters=[0u64;6];
+        // SAFETY: IO_COUNTERS is six consecutive u64 fields; the opened process handle is valid.
+        let ok=unsafe {GetProcessIoCounters(handle,&mut counters)}!=0;
+        unsafe {CloseHandle(handle)};
+        ok.then_some(counters)
     }
     #[cfg(test)]
     pub fn recorder_cost() -> Option<(u64,u64)> {

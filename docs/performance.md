@@ -151,19 +151,27 @@ time is explicitly distinguished from a launcher's recorded completion time. Rec
 bounded transactions per interval: machine sample/minute, then attribution sample/minute. A
 failure between them can leave a machine sample without attribution; consumers must show that gap.
 
-Run `cargo test -p nitely-core attribution -- --include-ignored --nocapture --test-threads=1`
-in a build lane for synthetic identity cases, native process/short-lived Job tests and the combined
-full-retention CPU, memory and storage measurement. The combined test excludes compilation and
-fills retained storage before timing twelve native collection/write cycles. CPU is measured using
-Windows process CPU time, separately from wall-clock I/O waiting; memory is additional sampled
-resident usage during the collection/write cycles.
+Run `cargo test -p nitely-core attribution -- --nocapture --test-threads=1` in a build lane for
+synthetic identity cases and native process/short-lived Job tests. Run the combined full-retention
+budget alone with `cargo test -p nitely-core performance_attribution::tests::attribution_full_retention_budget -- --ignored --exact --nocapture --test-threads=1`.
+It fills retained storage before measuring twelve native collection/write cycles with SQLite FULL
+synchronous durability. CPU is Windows process CPU time, separately from wall-clock I/O waiting;
+memory is additional sampled resident usage. Process I/O includes both machine and attribution
+transactions, journals and pruning, excluding fixture creation, logging and cleanup. The combined
+allowance is the same 12 MiB read/3 MiB written per twelve cycles as the machine-only benchmark;
+it is not an additional allowance. These are process transfer volumes, not physical disk traffic,
+flush counts or storage latency. Process I/O measurement is unavailable outside Windows.
 
 
 On the development Windows machine, the combined machine/attribution full-retention fixture
-occupied 230,072,320 bytes. Twelve native collection and durable write cycles took 742 ms wall
-time and 250 ms process CPU, equivalent to 0.42% of one core over twelve five-second intervals.
-Additional sampled resident usage was 2,879,488 bytes. A native process snapshot covering 855
+occupied 230,072,320 bytes. Twelve native collection and durable write cycles took 946 ms wall
+time and 468.75 ms process CPU, equivalent to 0.78% of one core over twelve five-second intervals.
+Additional sampled resident usage was 3,702,784 bytes. Combined process I/O was 267,728 bytes
+read across 182 operations, 2,074,864 bytes written across 1,051 operations, and 26,880 other
+bytes across 702 operations. At normal cadence this is about 4.4 KiB/s read and 33.8 KiB/s
+written, below the unchanged 205 KiB/s read and 51 KiB/s write budgets.
+An earlier native process snapshot covering 855
 accessible processes (181 denied) took 17.7 ms; the 10,000-process synthetic attribution fixture
 took 47 ms. These are measured debug-build results on that machine, not guaranteed latency;
 older Windows uses the slower Toolhelp fallback. The combined budget test enforces under 1%
-of one core and under 32 MiB additional sampled resident usage.
+of one core, under 32 MiB additional sampled resident usage, and the stated I/O transfer budgets.

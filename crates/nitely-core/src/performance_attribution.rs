@@ -1114,7 +1114,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "bounded full-retention disk fixture; run explicitly in a lane"]
+    #[ignore = "bounded full-retention CPU, memory, storage and process I/O fixture; run alone in a lane"]
     fn attribution_full_retention_budget() {
         let dir = Temp::new();
         let mut store = Store::open(&dir.0).unwrap();
@@ -1189,6 +1189,11 @@ mod tests {
         let mut minute_id = None;
         let mut minute = None;
         let settings = store.settings().unwrap();
+        assert_eq!(store.db.query_row("PRAGMA synchronous", [], |r| r.get::<_, i64>(0)).unwrap(), 2, "measure FULL-synchronous durability");
+        // Exclude fixture creation, logging and cleanup; include both durable transactions,
+        // native sampling and retention pruning. The ABI matches the existing Windows collector.
+        #[cfg(windows)]
+        let io_before = crate::procs::recorder_io().unwrap();
         for _ in 0..12 {
             #[cfg(windows)]
             let t0 = crate::procs::recorder_cost().unwrap().0;
@@ -1220,6 +1225,8 @@ mod tests {
                 peak_rss = peak_rss.max(crate::procs::recorder_cost().unwrap().1);
             }
         }
+        #[cfg(windows)]
+        let io_after = crate::procs::recorder_io().unwrap();
         eprintln!("12 full-retention combined native collections and durable writes: {:?}", at.elapsed());
         #[cfg(windows)]
         {
@@ -1228,6 +1235,14 @@ mod tests {
             let rss = peak_rss.saturating_sub(before.1);
             eprintln!("CPU phase milliseconds: machine/attribution/machine-write/attribution-write {:?}", phases.map(|p| p as f64 / 10000.));
             eprintln!("Combined recorder: {cpu_ms:.1} ms process CPU per 12 five-second intervals; {rss} additional sampled RSS bytes");
+            let io: [u64; 6] = std::array::from_fn(|i| io_after[i].checked_sub(io_before[i]).unwrap());
+            eprintln!("Combined process I/O over12cycles: read {} bytes/{} operations; written {} bytes/{} operations; other {} bytes/{} operations", io[3], io[0], io[4], io[1], io[5], io[2]);
+            // At the normal five-second cadence these are at most 205KiB/s reads and 51KiB/s
+            // writes, including rollback-journal amplification. They are process transfers,
+            // not physical disk traffic, flush counts or storage latency.
+            assert!(io[4] > 0 && io[1] > 0, "measure actual durable writes");
+            assert!(io[3] <= 12 * 1024 * 1024, "combined recorder process-read budget: {} bytes per12cycles", io[3]);
+            assert!(io[4] <= 3 * 1024 * 1024, "combined recorder process-write budget: {} bytes per12cycles", io[4]);
             assert!(cpu_ms < 600., "combined collection should consume under 1% of one core over twelve five-second intervals");
             assert!(rss < 32 * 1024 * 1024, "combined recorder should add under32MiB resident memory");
         }
