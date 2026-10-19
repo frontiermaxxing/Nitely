@@ -277,16 +277,28 @@ pub fn check_pointers(pb: &Playbook, worktree: &Path) -> Result<()> {
             // A checkout behind a pointer the branch did not move (one the integration branch
             // moved, which a rebase brought in) is stale, not new work: `git add` would commit the
             // old pointer and take the integration branch's bump back (NIT-343).
-            if let Some(p) = pointed.as_deref().filter(|p| !moved_by_branch(worktree, pb.integration_branch(), s.path(), p) && is_ancestor(&at, &head, p)) {
+            // Not new work either when the checkout holds nothing the submodule's integration branch
+            // lacks: the integration branch moved the pointer back past it (NIT-357).
+            let landed = |c: &str| is_ancestor(&at, c, s.branch(pb));
+            if let Some(p) = pointed.as_deref().filter(|p| !moved_by_branch(worktree, pb.integration_branch(), s.path(), p) && (is_ancestor(&at, &head, p) || landed(&head))) {
                 let short = &p[..p.len().min(12)];
                 let on_branch = git(&at, &["symbolic-ref", "-q", "HEAD"]).is_ok();
-                let fix = if on_branch { format!("git -C {} merge --ff-only {short}", s.path()) } else { format!("git -C {} checkout --detach {short}", s.path()) };
+                let behind = is_ancestor(&at, &head, p);
+                let fix = match (on_branch, behind) {
+                    (true, true) => format!("git -C {} merge --ff-only {short}", s.path()),
+                    // Its commits are all on the submodule's integration branch, so moving the task
+                    // branch back loses nothing.
+                    (true, false) => format!("git -C {} reset --keep {short}", s.path()),
+                    (false, _) => format!("git -C {} checkout --detach {short}", s.path()),
+                };
+                let at_what = if behind { format!("behind {short}") } else { format!("not at {short}") };
                 bail!(
-                    "the submodule {} is checked out at {}, behind {short}, where this branch points it as {} does; the branch did not change it, so bring the checkout up to it (`{fix}`) and submit again. Do not `git add {}`: that would point it back at the older commit",
+                    "the submodule {} is checked out at {}, {at_what}, where this branch points it as {} does; the branch did not change it, so bring the checkout to it (`{fix}`) and submit again. Do not `git add {}`: that would point it at a commit {} does not",
                     s.path(),
                     &head[..head.len().min(12)],
                     pb.integration_branch(),
-                    s.path()
+                    s.path(),
+                    pb.integration_branch()
                 );
             }
             bail!(

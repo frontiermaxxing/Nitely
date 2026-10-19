@@ -2005,6 +2005,32 @@ when_changed = ["billing"]
         std::fs::remove_dir_all(&f.base).ok();
     }
 
+    /// The integration branch rolls the submodule back to an older commit: a rebased task points at
+    /// it while its checkout stays at the newer one, which is on the submodule's integration branch,
+    /// so no work of the task. Submit says to move the checkout back, not to `git add` it (NIT-357).
+    #[test]
+    fn submit_says_to_move_a_submodule_checkout_back_after_a_rollback() {
+        let mut f = submodule_fixture();
+        f.land_elsewhere();
+        let (_, wt) = f.submitted("Words only", "words.txt", "w
+");
+        let older = sh(&f.engine(), &["rev-parse", "HEAD~1"]);
+        sh(&f.engine(), &["checkout", "-q", &older]);
+        sh(&f.repo, &["add", "engine"]);
+        sh(&f.repo, &["commit", "-q", "-m", "roll the engine back"]);
+        sh(&wt, &["rebase", "-q", "main"]);
+        let dir = wt.to_string_lossy().into_owned();
+        let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: false };
+        let err = submit(&mut f.db, &crate::Config::default(), &opts, &f.actor).unwrap_err().to_string();
+        let fix = format!("git -C engine reset --keep {}", &older[..12]);
+        assert!(err.contains("the branch did not change it") && err.contains(&fix) && err.contains("Do not `git add engine`"), "{err}");
+        sh(&wt.join("engine"), &["reset", "-q", "--keep", &older]);
+        if let Err(e) = submit(&mut f.db, &crate::Config::default(), &opts, &f.actor) {
+            assert!(!e.to_string().contains("submodule engine"), "{e:#}");
+        }
+        std::fs::remove_dir_all(&f.base).ok();
+    }
+
     /// A rebase onto an integration branch that moved the submodule leaves the task's checkout
     /// behind the pointer it brought in: submit says to bring the checkout up to it, not to
     /// `git add` the older commit back (NIT-343).
