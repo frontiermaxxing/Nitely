@@ -304,22 +304,35 @@ impl Store {
         if !exists {
             return Ok(vec![]);
         }
-        let mut stmt = self.db.prepare("SELECT json FROM (SELECT id AS seq,wall_ms,json FROM attribution UNION ALL SELECT seq,wall_ms,json FROM attribution_minutes WHERE seq<COALESCE((SELECT MIN(id) FROM attribution),9223372036854775807)) WHERE wall_ms>=?1 AND wall_ms<=?2 ORDER BY seq DESC LIMIT ?3")?;
+        let mut stmt = self.db.prepare("SELECT json FROM (
+            SELECT * FROM (SELECT id AS seq,json FROM attribution WHERE wall_ms>=?1 AND wall_ms<=?2 ORDER BY id DESC LIMIT ?3)
+            UNION ALL SELECT * FROM (SELECT seq,json FROM attribution_minutes WHERE seq<COALESCE((SELECT MIN(id) FROM attribution),9223372036854775807) AND wall_ms>=?1 AND wall_ms<=?2 ORDER BY seq DESC LIMIT ?3)
+            ) ORDER BY seq DESC LIMIT ?3")?;
         let rows = stmt.query_map(params![from, to, limit as i64], |r| r.get::<_, String>(0))?;
-        let roots: HashMap<_, _> = self.roots()?.into_iter().map(|w| (w.id.clone(), w)).collect();
+        let mut compact = Vec::new();
+        for json in rows {
+            if let Ok(row) = serde_json::from_str::<Compact>(&json?) {
+                compact.push(row);
+            }
+        }
+        let ids: Vec<_> = compact.iter().flat_map(|row| row.j.iter().map(|(id, _)| id.clone())).collect::<HashSet<_>>().into_iter().collect();
+        let mut roots = HashMap::new();
+        for ids in ids.chunks(1000) {
+            for w in self.workloads(ids)? {
+                roots.insert(w.id.clone(), w);
+            }
+        }
         let mut result = Vec::new();
         let mut seen = HashSet::new();
-        for json in rows {
-            if let Ok(compact) = serde_json::from_str::<Compact>(&json?) {
-                let mut sample = compact.expand(&roots);
-                if !seen.insert((sample.session.clone(), sample.monotonic_ms)) {
-                    continue;
-                }
-                if let Some(p) = project {
-                    sample.workloads.retain(|w| w.context.project.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(p)));
-                }
-                result.push(sample);
+        for compact in compact {
+            let mut sample = compact.expand(&roots);
+            if !seen.insert((sample.session.clone(), sample.monotonic_ms)) {
+                continue;
             }
+            if let Some(p) = project {
+                sample.workloads.retain(|w| w.context.project.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(p)));
+            }
+            result.push(sample);
         }
         Ok(result)
     }
@@ -363,19 +376,20 @@ impl Store {
         if !exists {
             return Ok(vec![]);
         }
-        Ok(self
-            .roots()?
-            .into_iter()
-            .filter(|w| {
-                w.start_ms <= to && w.end_ms.is_none_or(|end| end >= from) && project.is_none_or(|p| w.context.project.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(p)))
-            })
-            .take(limit)
-            .collect())
-    }
-    fn roots(&self) -> Result<Vec<Workload>> {
-        let mut stmt = self.db.prepare("SELECT json FROM workloads ORDER BY rowid DESC LIMIT 8192")?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-        Ok(rows.filter_map(|r| r.ok().and_then(|j| serde_json::from_str(&j).ok())).collect())
+        let mut stmt = self.db.prepare("SELECT json FROM workloads WHERE ended IS NULL OR ended>=?1 ORDER BY rowid DESC LIMIT 8192")?;
+        let rows = stmt.query_map([from], |r| r.get::<_, String>(0))?;
+        let mut result = Vec::new();
+        for json in rows {
+            if let Ok(w) = serde_json::from_str::<Workload>(&json?) {
+                if w.start_ms <= to && project.is_none_or(|p| w.context.project.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(p))) {
+                    result.push(w);
+                    if result.len() == limit {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(result)
     }
     fn sampling_roots(&self, owners: &HashMap<Identity, String>) -> Result<Vec<Workload>> {
         let mut stmt = self.db.prepare("SELECT json FROM workloads WHERE ended IS NULL ORDER BY rowid DESC LIMIT 8192")?;
@@ -413,8 +427,8 @@ impl Store {
             params![sample.wall_ms, sample.session, sample.monotonic_ms.min(i64::MAX as u64) as i64, json],
         )?;
         let seq = tx.last_insert_rowid();
-        for w in &summary.workloads {
-            tx.execute("UPDATE workloads SET last_seq=?2 WHERE id=?1", params![w.id, seq])?;
+        for id in summary.workloads.iter().chain(&sample.workloads).map(|w| &w.id).collect::<HashSet<_>>() {
+            tx.execute("UPDATE workloads SET last_seq=?2 WHERE id=?1", params![id, seq])?;
         }
         if minute {
             tx.execute("DELETE FROM attribution_minutes WHERE wall_ms<?1", [sample.wall_ms.saturating_sub(i64::from(settings.summary_days) * 86400000)])?;
@@ -463,15 +477,23 @@ impl Tracked {
     pub fn finish(mut self, accounting: Option<crate::procs::Accounting>) {
         self.workload.end_ms = Some(crate::performance::wall_ms());
         self.workload.job_accounting = accounting;
-        let _ = save_workload(&self.dir, &self.workload);
+        let _ = save_workload_inner(&self.dir, &self.workload, false);
     }
 }
 fn save_workload(dir: &Path, workload: &Workload) -> Result<()> {
+    save_workload_inner(dir, workload, true)
+}
+fn save_workload_inner(dir: &Path, workload: &Workload, create: bool) -> Result<()> {
     // Registration never initializes a store or waits on recorder ownership; launch must proceed.
     let mut db = rusqlite::Connection::open_with_flags(dir.join("history.sqlite"), rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     db.busy_timeout(std::time::Duration::from_millis(20))?;
     db.pragma_update(None, "max_page_count", 65536)?;
-    let settings: Option<String> = db.query_row("SELECT json FROM settings WHERE id=1", [], |r| r.get(0)).optional()?;
+    let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let version: i64 = tx.query_row("SELECT version FROM recorder_version WHERE id=1", [], |r| r.get(0))?;
+    if version != crate::performance::RECORDER_VERSION {
+        return Ok(());
+    }
+    let settings: Option<String> = tx.query_row("SELECT json FROM settings WHERE id=1", [], |r| r.get(0)).optional()?;
     let settings = settings.map(|s| serde_json::from_str::<crate::performance::Settings>(&s)).transpose()?.unwrap_or_default();
     if !settings.enabled {
         return Ok(());
@@ -480,12 +502,14 @@ fn save_workload(dir: &Path, workload: &Workload) -> Result<()> {
     if json.len() > 2048 {
         bail!("workload metadata exceeds its bound");
     }
-    let tx = db.transaction()?;
     tx.execute(
-        "DELETE FROM workloads WHERE ended<?1 AND last_seq < MIN(COALESCE((SELECT MIN(id) FROM attribution),0),COALESCE((SELECT MIN(seq) FROM attribution_minutes),0))",
+        "DELETE FROM workloads WHERE ended<?1 AND last_seq < MIN(COALESCE((SELECT MIN(id) FROM attribution),9223372036854775807),COALESCE((SELECT MIN(seq) FROM attribution_minutes),9223372036854775807))",
         [crate::performance::wall_ms().saturating_sub(i64::from(settings.summary_days) * 86400000)],
     )?;
     let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM workloads WHERE id=?1)", [&workload.id], |r| r.get(0))?;
+    if !create && !exists {
+        return Ok(());
+    }
     let count: i64 = tx.query_row("SELECT COUNT(*) FROM workloads", [], |r| r.get(0))?;
     if !exists && count >= 8192 {
         bail!("workload metadata capacity reached");
@@ -496,6 +520,26 @@ fn save_workload(dir: &Path, workload: &Workload) -> Result<()> {
     )?;
     tx.commit()?;
     Ok(())
+}
+/// Each live client checks only its own dictionary key after clear/resume. This never restores
+/// old samples or completed metadata, and a paused/newer recorder rejects the write atomically.
+pub(crate) fn ensure_service(dir: &Path) {
+    let Some(boot) = crate::performance::boot_id() else {
+        return;
+    };
+    let pid = std::process::id();
+    let Some(started) = crate::procs::started(pid) else {
+        return;
+    };
+    let id = format!("{boot}:{pid}:{started}:service");
+    let exists = (|| -> Result<bool> {
+        let db = rusqlite::Connection::open_with_flags(dir.join("history.sqlite"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        db.busy_timeout(std::time::Duration::from_millis(20))?;
+        Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM workloads WHERE id=?1)", [&id], |r| r.get(0))?)
+    })();
+    if matches!(exists, Ok(false)) {
+        register_started(dir, pid, started, "service", Context::default());
+    }
 }
 pub fn track(pid: u32, kind: &str) -> Option<Tracked> {
     let launch = LAUNCH.with(|s| s.borrow().clone())?;
@@ -535,6 +579,7 @@ pub(crate) struct Sampler {
     previous: HashMap<Identity, crate::procs::ProcessMetrics>,
     owners: HashMap<Identity, String>,
     last: Option<(String, u64)>,
+    exit_cursor: usize,
 }
 impl Sampler {
     pub(crate) fn collect(&mut self, store: &Store, machine: &Sample) -> Result<AttributionSample> {
@@ -543,16 +588,32 @@ impl Sampler {
         let mut roots = store.sampling_roots(&self.owners)?;
         if snapshot.supported {
             let live: HashMap<_, _> = snapshot.processes.iter().map(|p| (p.pid, p.started.as_str())).collect();
-            for root in roots.iter_mut().filter(|w| w.end_ms.is_none()).take(64) {
+            let count = roots.len();
+            let mut ended = Vec::new();
+            for offset in 0..count.min(64) {
+                let root = &mut roots[(self.exit_cursor + offset) % count];
+                if root.end_ms.is_some() {
+                    continue;
+                }
                 let gone = machine.boot.as_ref().is_some_and(|boot| boot != &root.root.boot)
                     || live.get(&root.root.pid).is_some_and(|start| *start != root.root.started)
                     || (!live.contains_key(&root.root.pid) && !crate::procs::alive(root.root.pid));
                 if gone {
                     root.end_ms = Some(machine.wall_ms);
                     root.end_observed = true;
-                    store.db.execute("UPDATE workloads SET json=?2,ended=?3 WHERE id=?1", params![root.id, serde_json::to_string(root)?, machine.wall_ms])?;
+                    ended.push((root.id.clone(), serde_json::to_string(root)?));
                 }
             }
+            if !ended.is_empty() {
+                let tx = store.db.unchecked_transaction()?;
+                for (id, json) in ended {
+                    tx.execute("UPDATE workloads SET json=?2,ended=?3 WHERE id=?1", params![id, json, machine.wall_ms])?;
+                }
+                tx.commit()?;
+            }
+        }
+        if !roots.is_empty() {
+            self.exit_cursor = (self.exit_cursor + 64) % roots.len();
         }
         let mut sample = self.attribute(machine, snapshot, &roots);
         let metadata_count: i64 = store.db.query_row("SELECT COUNT(*) FROM workloads", [], |r| r.get(0))?;
@@ -743,8 +804,9 @@ mod tests {
     #[test]
     fn attribution_keeps_children_after_parent_exit_but_not_reused_parents() {
         let mut s = Sampler::default();
-        let roots = [root(1, 10, "worker", "APP")];
+        let mut roots = [root(1, 10, "worker", "APP")];
         s.attribute(&machine(0), snapshot(vec![process(1, 0, 10, 0), process(2, 1, 20, 0)]), &roots);
+        roots[0].end_ms = Some(500);
         let next = s.attribute(&machine(1000), snapshot(vec![process(2, 1, 20, 10_000_000)]), &roots);
         assert_eq!(next.nitely.processes, 1);
         assert_eq!(next.nitely.cpu_percent, Some(50.));
@@ -826,6 +888,116 @@ mod tests {
     }
 
     #[test]
+    fn attribution_detail_references_remain_even_when_minute_breakdown_is_trimmed() {
+        let dir = Temp::new();
+        let mut store = Store::open(&dir.0).unwrap();
+        let mut roots = Vec::new();
+        for pid in 1..=20 {
+            let mut w = root(pid, 10, "worker", "APP");
+            w.id = format!("work-{pid:02}-{}", "a".repeat(64));
+            save_workload(&dir.0, &w).unwrap();
+            roots.push(w);
+        }
+        let mut first = Sampler::default().attribute(&machine(5000), snapshot(vec![]), &[]);
+        first.workloads = roots[..10]
+            .iter()
+            .map(|w| WorkloadUsage {
+                id: w.id.clone(),
+                context: w.context.clone(),
+                kind: w.kind.clone(),
+                usage: Usage {
+                    cpu_percent: Some(99.),
+                    private_commit_bytes: Some(9999999999),
+                    working_set_sum_bytes: Some(9999999999),
+                    process_read_bytes: Some(9999999999),
+                    process_write_bytes: Some(9999999999),
+                    processes: 99,
+                },
+            })
+            .collect();
+        store.append_attribution(&mut first, true).unwrap();
+        let mut later = first.clone();
+        later.wall_ms = 10000;
+        later.monotonic_ms = 10000;
+        later.workloads = roots[10..]
+            .iter()
+            .map(|w| WorkloadUsage {
+                id: w.id.clone(),
+                context: w.context.clone(),
+                kind: w.kind.clone(),
+                usage: Usage { cpu_percent: Some(1.), ..first.workloads[0].usage.clone() },
+            })
+            .collect();
+        store.append_attribution(&mut later, false).unwrap();
+        let summary: Compact =
+            serde_json::from_str(&store.db.query_row("SELECT json FROM attribution_minutes ORDER BY id DESC LIMIT 1", [], |r| r.get::<_, String>(0)).unwrap()).unwrap();
+        assert!(later.workloads.iter().any(|w| !summary.j.iter().any(|(id, _)| id == &w.id)), "fixture must trim a detailed contributor from minute breakdown");
+        let seq: i64 = store.db.query_row("SELECT MAX(id) FROM attribution", [], |r| r.get(0)).unwrap();
+        for w in later.workloads {
+            assert_eq!(store.db.query_row("SELECT last_seq FROM workloads WHERE id=?1", [w.id], |r| r.get::<_, i64>(0)).unwrap(), seq);
+        }
+    }
+
+    #[test]
+    fn attribution_metadata_survives_minute_references_after_detail_expires() {
+        let dir = Temp::new();
+        let mut store = Store::open(&dir.0).unwrap();
+        let mut workload = root(1, 10, "worker", "APP");
+        save_workload(&dir.0, &workload).unwrap();
+        let mut sample = Sampler::default().attribute(&machine(5000), snapshot(vec![process(1, 0, 10, 0)]), &[workload.clone()]);
+        store.append_attribution(&mut sample, true).unwrap();
+        workload.end_ms = Some(crate::performance::wall_ms() - 31 * 86400000);
+        save_workload(&dir.0, &workload).unwrap();
+        store.db.execute("DELETE FROM attribution", []).unwrap();
+        save_workload(&dir.0, &root(2, 20, "build", "APP")).unwrap();
+        assert_eq!(store.workloads(&[workload.id.clone()]).unwrap().len(), 1);
+        assert_eq!(store.attribution_latest(None).unwrap().unwrap().workloads[0].context.project.as_deref(), Some("APP"));
+        store.db.execute("DELETE FROM attribution_minutes", []).unwrap();
+        save_workload(&dir.0, &root(3, 30, "build", "APP")).unwrap();
+        assert!(store.workloads(&[workload.id]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn attribution_registration_respects_pause_clear_and_newer_generation() {
+        let dir = Temp::new();
+        let store = Store::open(&dir.0).unwrap();
+        let workload = root(1, 10, "worker", "APP");
+        save_workload(&dir.0, &workload).unwrap();
+        store.configure(&crate::performance::Settings { enabled: false, ..Default::default() }).unwrap();
+        crate::performance::clear_history(&dir.0).unwrap();
+        save_workload(&dir.0, &workload).unwrap();
+        assert!(store.workloads(&[workload.id.clone()]).unwrap().is_empty());
+        store.configure(&crate::performance::Settings::default()).unwrap();
+        Tracked { dir: dir.0.clone(), workload: workload.clone() }.finish(None);
+        assert!(store.workloads(&[workload.id.clone()]).unwrap().is_empty(), "late finish must not restore cleared metadata");
+        store.db.execute("UPDATE recorder_version SET version=version+1", []).unwrap();
+        save_workload(&dir.0, &workload).unwrap();
+        assert!(store.workloads(&[workload.id]).unwrap().is_empty());
+    }
+    #[test]
+    #[cfg(windows)]
+    fn attribution_live_service_registers_again_after_clear_and_resume() {
+        let dir = Temp::new();
+        let store = Store::open(&dir.0).unwrap();
+        ensure_service(&dir.0);
+        let first = store.recent_workloads(0, i64::MAX, 10, None).unwrap();
+        assert_eq!(first.len(), 1);
+        ensure_service(&dir.0);
+        assert_eq!(store.recent_workloads(0, i64::MAX, 10, None).unwrap()[0].start_ms, first[0].start_ms);
+        store.configure(&crate::performance::Settings { enabled: false, ..Default::default() }).unwrap();
+        crate::performance::clear_history(&dir.0).unwrap();
+        ensure_service(&dir.0);
+        assert!(store.recent_workloads(0, i64::MAX, 10, None).unwrap().is_empty());
+        store.configure(&crate::performance::Settings::default()).unwrap();
+        ensure_service(&dir.0);
+        let resumed = store.recent_workloads(0, i64::MAX, 10, None).unwrap();
+        assert_eq!(resumed.len(), 1);
+        assert_eq!(resumed[0].id, first[0].id);
+        assert!(resumed[0].start_ms >= first[0].start_ms);
+        assert!(store.attribution_latest(None).unwrap().is_none());
+    }
+
+    #[test]
     fn attribution_scope_cannot_fall_back_from_a_test_database_to_the_real_recorder() {
         let memory = crate::Db { conn: rusqlite::Connection::open_in_memory().unwrap() };
         let scope = Scope::new(&memory, Context::default());
@@ -900,7 +1072,8 @@ mod tests {
         let at = std::time::Instant::now();
         let snapshot = crate::procs::metrics();
         eprintln!("native process snapshot: {:?}, {} processes, {} denied", at.elapsed(), snapshot.processes.len(), snapshot.denied);
-        assert!(snapshot.processes.iter().any(|p| p.pid == std::process::id()));
+        let own = snapshot.processes.iter().find(|p| p.pid == std::process::id()).unwrap();
+        assert!(own.private_commit_bytes.is_some() && own.working_set_bytes.is_some() && own.cpu_100ns.is_some() && own.read_bytes.is_some());
         assert!(snapshot.processes.iter().all(|p| !p.basename.contains(['\\', '/'])));
     }
 
@@ -930,6 +1103,14 @@ mod tests {
         metadata.end_ms = Some(machine.wall_ms - 86400000);
         let mut root_json = serde_json::to_string(&metadata).unwrap();
         root_json.push_str(&" ".repeat(2048 - root_json.len()));
+        let mut active = metadata.clone();
+        active.root = Identity { boot: machine.boot.clone().unwrap_or_default(), pid: std::process::id(), started: crate::procs::started(std::process::id()).unwrap_or_default() };
+        active.id = "current-service".into();
+        active.kind = "service".into();
+        active.context = Context::default();
+        active.end_ms = None;
+        let mut active_json = serde_json::to_string(&active).unwrap();
+        active_json.push_str(&" ".repeat(2048 - active_json.len()));
         let at = std::time::Instant::now();
         let tx = store.db.transaction().unwrap();
         {
@@ -951,9 +1132,10 @@ mod tests {
             }
         }
         {
-            let mut a = tx.prepare("INSERT INTO workloads(id,json,ended) VALUES(?1,?2,1)").unwrap();
-            for i in 0..8192 {
-                a.execute(params![format!("workload-{i:08}"), root_json]).unwrap();
+            let mut a = tx.prepare("INSERT INTO workloads(id,json,ended) VALUES(?1,?2,?3)").unwrap();
+            a.execute(params![active.id, active_json, Option::<i64>::None]).unwrap();
+            for i in 1..8192 {
+                a.execute(params![format!("workload-{i:08}"), root_json, Some(1i64)]).unwrap();
             }
         }
         tx.commit().unwrap();
@@ -965,13 +1147,21 @@ mod tests {
         let before = crate::procs::recorder_cost().unwrap();
         #[cfg(windows)]
         let mut peak_rss = before.1;
+        #[cfg(windows)]
+        let mut phases = [0u64; 4];
         let mut sampler = Sampler::default();
         let mut minute_id = None;
         let mut minute = None;
         let settings = store.settings().unwrap();
         for _ in 0..12 {
+            #[cfg(windows)]
+            let t0 = crate::procs::recorder_cost().unwrap().0;
             let sample = native.sample();
+            #[cfg(windows)]
+            let t1 = crate::procs::recorder_cost().unwrap().0;
             let mut attributed = sampler.collect(&store, &sample).unwrap();
+            #[cfg(windows)]
+            let t2 = crate::procs::recorder_cost().unwrap().0;
             let new_minute = minute_id.is_none();
             if let Some(minute) = minute.as_mut() {
                 crate::performance::Minute::add(minute, &sample);
@@ -979,7 +1169,16 @@ mod tests {
                 minute = Some(crate::performance::Minute::new(&sample));
             }
             minute_id = Some(store.append(&sample, minute.as_ref().unwrap(), minute_id, &settings).unwrap());
+            #[cfg(windows)]
+            let t3 = crate::procs::recorder_cost().unwrap().0;
             store.append_attribution(&mut attributed, new_minute).unwrap();
+            #[cfg(windows)]
+            {
+                let t4 = crate::procs::recorder_cost().unwrap().0;
+                for (sum, diff) in phases.iter_mut().zip([t1 - t0, t2 - t1, t3 - t2, t4 - t3]) {
+                    *sum += diff;
+                }
+            }
             #[cfg(windows)]
             {
                 peak_rss = peak_rss.max(crate::procs::recorder_cost().unwrap().1);
@@ -991,6 +1190,7 @@ mod tests {
             let after = crate::procs::recorder_cost().unwrap();
             let cpu_ms = (after.0 - before.0) as f64 / 10000.;
             let rss = peak_rss.saturating_sub(before.1);
+            eprintln!("CPU phase milliseconds: machine/attribution/machine-write/attribution-write {:?}", phases.map(|p| p as f64 / 10000.));
             eprintln!("Combined recorder: {cpu_ms:.1} ms process CPU per 12 five-second intervals; {rss} additional sampled RSS bytes");
             assert!(cpu_ms < 600., "combined collection should consume under 1% of one core over twelve five-second intervals");
             assert!(rss < 32 * 1024 * 1024, "combined recorder should add under32MiB resident memory");

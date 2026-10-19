@@ -690,6 +690,7 @@ mod win {
         fn GetProcessTimes(process: Handle, creation: *mut u64, exit: *mut u64, kernel: *mut u64, user: *mut u64) -> i32;
         fn GetProcessIoCounters(process: Handle, counters: *mut [u64;6]) -> i32;
         fn GetActiveProcessorCount(group: u16) -> u32;
+        fn GetSystemTimeAsFileTime(time:*mut u64);
         fn CreateJobObjectW(attributes: *mut c_void, name: *const u16) -> Handle;
         fn SetInformationJobObject(job: Handle, class: u32, info: *mut c_void, length: u32) -> i32;
         fn QueryInformationJobObject(job: Handle, class: u32, info: *mut c_void, length: u32, returned: *mut u32) -> i32;
@@ -705,36 +706,104 @@ mod win {
     #[link(name="psapi")]
     extern "system" { fn GetProcessMemoryInfo(process:Handle, counters:*mut MemoryCounters, size:u32)->i32; }
 
+    struct MetricEntry {pid:u32,parent:u32,basename:String}
+    #[repr(C)]
+    struct BasicProcessInfo {next:u32,pid:Handle,parent:Handle,sequence:u64,name:UnicodeString}
+    /// The SDK's SystemBasicProcessInformation avoids Toolhelp's timing-data synchronization on
+    /// Windows 11 26100.4770+. Older Windows falls back to Toolhelp. Only basename/PID/parent are
+    /// read here; creation identity and counters still come from the process handle.
+    /// https://learn.microsoft.com/windows/win32/api/winternl/nf-winternl-ntquerysysteminformation
+    fn basic_metric_entries() -> Option<(Vec<MetricEntry>,bool)> {
+        #[link(name="ntdll")]
+        extern "system" {fn NtQuerySystemInformation(class:u32,info:*mut c_void,size:u32,returned:*mut u32)->i32;}
+        let mut buffer=vec![0u64;16*1024];
+        for _ in 0..3 {
+            let mut returned=0;
+            // SAFETY: aligned owned buffer with an exact byte length; the kernel writes only it.
+            let status=unsafe {NtQuerySystemInformation(252,buffer.as_mut_ptr().cast(),(buffer.len()*8) as u32,&mut returned)};
+            if status as u32==0xc0000004 {
+                let bytes=(returned as usize).saturating_add(65536).max(buffer.len()*16);
+                if bytes>2*1024*1024 {return None;}
+                buffer.resize(bytes.div_ceil(8),0);continue;
+            }
+            if status<0 {return None;}
+            return parse_basic_metric_entries(&buffer,returned as usize);
+        }
+        None
+    }
+    fn parse_basic_metric_entries(buffer:&[u64],used:usize)->Option<(Vec<MetricEntry>,bool)> {
+        if used>buffer.len()*8 {return None;}
+        let start=buffer.as_ptr() as usize;let end=start.checked_add(used)?;
+        let mut offset=0usize;let mut result=Vec::new();
+        loop {
+            if offset.checked_add(std::mem::size_of::<BasicProcessInfo>())?>used {return None;}
+            // SAFETY: header is wholly inside the initialized owned buffer, checked above.
+            let entry=unsafe {(start.checked_add(offset)? as *const BasicProcessInfo).read_unaligned()};
+            let address=entry.name.buffer as usize;let bytes=entry.name.length as usize;
+            if !bytes.is_multiple_of(2) || entry.name.length>entry.name.maximum_length {return None;}
+            let name=if bytes==0 {String::new()} else {
+                if !address.is_multiple_of(2) || address<start || address.checked_add(bytes)?>end {return None;}
+                // SAFETY: UTF-16 range is aligned and entirely inside the same live buffer.
+                String::from_utf16_lossy(unsafe {std::slice::from_raw_parts(entry.name.buffer,bytes/2)})
+            };
+            let pid=u32::try_from(entry.pid as usize).ok()?;let parent=u32::try_from(entry.parent as usize).ok()?;
+            result.push(MetricEntry {pid,parent,basename:name.rsplit(['\\','/']).next().unwrap_or("").chars().take(80).collect()});
+            if entry.next==0 {return Some((result,false));}
+            if result.len()==8192 {return Some((result,true));}
+            if (entry.next as usize)<std::mem::size_of::<BasicProcessInfo>() {return None;}
+            offset=offset.checked_add(entry.next as usize)?;
+        }
+    }
+    fn toolhelp_metric_entries()->Option<(Vec<MetricEntry>,bool)> {
+        // SAFETY: native snapshot handle and correctly sized PROCESSENTRY32W; handle closed below.
+        let snapshot=unsafe {CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0)};
+        if snapshot==INVALID_HANDLE_VALUE || snapshot.is_null() {return None;}
+        let mut entry:ProcessEntry32W=unsafe {std::mem::zeroed()};entry.size=std::mem::size_of::<ProcessEntry32W>() as u32;
+        let mut more=unsafe {Process32FirstW(snapshot,&mut entry)}!=0;let mut result=Vec::new();
+        while more && result.len()<8192 {
+            let len=entry.exe_file.iter().position(|c|*c==0).unwrap_or(entry.exe_file.len());
+            let name=String::from_utf16_lossy(&entry.exe_file[..len]);
+            result.push(MetricEntry {pid:entry.process_id,parent:entry.parent_process_id,basename:name.rsplit(['\\','/']).next().unwrap_or("").chars().take(80).collect()});
+            more=unsafe {Process32NextW(snapshot,&mut entry)}!=0;
+        }
+        unsafe {CloseHandle(snapshot)};
+        Some((result,more))
+    }
     pub fn metrics() -> super::ProcessSnapshot {
         let mut result=super::ProcessSnapshot {supported:true,cores:unsafe {GetActiveProcessorCount(0xffff)},..Default::default()};
-        // SAFETY: native snapshot handle and correctly sized PROCESSENTRY32W; every handle is closed.
-        let snapshot=unsafe {CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0)};
-        if snapshot==INVALID_HANDLE_VALUE || snapshot.is_null() {result.supported=false;return result;}
-        let mut entry:ProcessEntry32W=unsafe {std::mem::zeroed()};entry.size=std::mem::size_of::<ProcessEntry32W>() as u32;
-        let mut more=unsafe {Process32FirstW(snapshot,&mut entry)}!=0;
-        let mut count=0;
-        while more {
-            count+=1;
-            if count>8192 {result.truncated=true;break;}
-            let process=unsafe {OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,0,entry.process_id)};
+        let mut captured=0u64;unsafe {GetSystemTimeAsFileTime(&mut captured)};
+        let Some((entries,truncated))=basic_metric_entries().or_else(toolhelp_metric_entries) else {result.supported=false;return result;};
+        result.truncated=truncated;
+        for entry in entries {
+            let process=unsafe {OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,0,entry.pid)};
             if process.is_null() {result.denied+=1;}
             else {
                 let (mut creation,mut exit,mut kernel,mut user)=(0,0,0,0);
-                if unsafe {GetProcessTimes(process,&mut creation,&mut exit,&mut kernel,&mut user)}==0 || exit!=0 {result.missing_identity+=1;}
+                // A PID reused between enumeration and opening must not inherit stale parent/name data.
+                if unsafe {GetProcessTimes(process,&mut creation,&mut exit,&mut kernel,&mut user)}==0 || exit!=0 || creation>captured {result.missing_identity+=1;}
                 else {
                     let mut memory:MemoryCounters=unsafe {std::mem::zeroed()};memory.size=std::mem::size_of::<MemoryCounters>() as u32;
                     let memory_ok=unsafe {GetProcessMemoryInfo(process,&mut memory,memory.size)}!=0;
                     let mut io=[0;6];let io_ok=unsafe {GetProcessIoCounters(process,&mut io)}!=0;
-                    let len=entry.exe_file.iter().position(|c|*c==0).unwrap_or(entry.exe_file.len());
-                    let name=String::from_utf16_lossy(&entry.exe_file[..len]);
-                    result.processes.push(super::ProcessMetrics {pid:entry.process_id,parent_pid:entry.parent_process_id,started:creation.to_string(),basename:name.rsplit(['\\','/']).next().unwrap_or("").chars().take(80).collect(),cpu_100ns:Some(kernel.saturating_add(user)),private_commit_bytes:memory_ok.then_some(memory.private as u64),working_set_bytes:memory_ok.then_some(memory.working_set as u64),read_bytes:io_ok.then_some(io[3]),write_bytes:io_ok.then_some(io[4])});
+                    result.processes.push(super::ProcessMetrics {pid:entry.pid,parent_pid:entry.parent,started:creation.to_string(),basename:entry.basename,cpu_100ns:Some(kernel.saturating_add(user)),private_commit_bytes:memory_ok.then_some(memory.private as u64),working_set_bytes:memory_ok.then_some(memory.working_set as u64),read_bytes:io_ok.then_some(io[3]),write_bytes:io_ok.then_some(io[4])});
                 }
                 unsafe {CloseHandle(process)};
             }
-            more=unsafe {Process32NextW(snapshot,&mut entry)}!=0;
         }
-        unsafe {CloseHandle(snapshot)};
         result
+    }
+    #[test]
+    fn attribution_native_basic_process_buffer_is_bounded_before_dereferencing_names() {
+        let mut buffer=vec![0u64;64];
+        let mut entry=BasicProcessInfo {next:0,pid:42usize as Handle,parent:std::ptr::null_mut(),sequence:1,name:UnicodeString {length:2,maximum_length:2,buffer:std::ptr::dangling::<u16>()}};
+        // SAFETY: test-owned aligned buffer is larger than the fixed header.
+        unsafe {buffer.as_mut_ptr().cast::<BasicProcessInfo>().write(entry);}
+        assert!(parse_basic_metric_entries(&buffer,512).is_none());
+        entry=BasicProcessInfo {next:0,pid:42usize as Handle,parent:std::ptr::null_mut(),sequence:1,name:UnicodeString {length:0,maximum_length:0,buffer:std::ptr::null_mut()}};
+        unsafe {buffer.as_mut_ptr().cast::<BasicProcessInfo>().write(entry);}
+        assert_eq!(parse_basic_metric_entries(&buffer,512).unwrap().0.len(),1);
+        assert!(parse_basic_metric_entries(&buffer,1024).is_none());
+        assert!(parse_basic_metric_entries(&buffer,8).is_none());
     }
     #[cfg(test)]
     pub fn recorder_cost() -> Option<(u64,u64)> {

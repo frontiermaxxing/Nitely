@@ -282,9 +282,9 @@ pub fn background(dir: PathBuf) -> Recording {
             let result = (|| {
                 if !announced {
                     Store::open(&dir)?;
-                    crate::performance_attribution::register(&dir,std::process::id(),"service",Default::default());
                     announced = true;
                 }
+                crate::performance_attribution::ensure_service(&dir);
                 record(&dir, &stopping)
             })();
             if let Err(error) = result {
@@ -313,6 +313,7 @@ pub fn record(dir: &Path, stop: &AtomicBool) -> Result<()> {
     let Some(_owner) = acquire(dir)? else { return Ok(()) };
     let mut store = Store::open(dir)?;
     if !store.current_version()? || !store.settings()?.enabled { return Ok(()); }
+    crate::performance_attribution::ensure_service(dir);
     let mut collector = Collector::new();
     let mut attribution = crate::performance_attribution::Sampler::default();
     let mut minute: Option<Minute> = None;

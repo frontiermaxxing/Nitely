@@ -102,7 +102,10 @@ and [process I/O accounting](https://learn.microsoft.com/en-us/windows/win32/api
 
 ## Workload attribution
 
-Windows collection uses native process counters at the same sampling cadence. A workload is
+Windows collection uses native process counters at the same sampling cadence. On Windows 11
+26100.4770 or newer, basic native process enumeration avoids synchronizing every process timing
+counter; older Windows uses Toolhelp. Both paths read creation time and metrics through verified
+process handles. The enumeration buffer is capped at 2 MiB and 8,192 process entries. A workload is
 owned only when Nitely registered its launch, identified by boot GUID, PID and creation time.
 Launch context can include project, issue, lane run, submit job, worker and review batch IDs.
 Setup, Crew workers, reviews, lane builds, detached submits, land and install commands register
@@ -148,7 +151,7 @@ time is explicitly distinguished from a launcher's recorded completion time. Rec
 bounded transactions per interval: machine sample/minute, then attribution sample/minute. A
 failure between them can leave a machine sample without attribution; consumers must show that gap.
 
-Run `cargo test -p nitely-core performance_attribution::tests -- --include-ignored --nocapture --test-threads=1`
+Run `cargo test -p nitely-core attribution -- --include-ignored --nocapture --test-threads=1`
 in a build lane for synthetic identity cases, native process/short-lived Job tests and the combined
 full-retention CPU, memory and storage measurement. The combined test excludes compilation and
 fills retained storage before timing twelve native collection/write cycles. CPU is measured using
