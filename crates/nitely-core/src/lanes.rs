@@ -1374,8 +1374,12 @@ fn admit_run(db: &Db, id: i64, limits: Option<&machine::Limits>, slots: u32, qui
     // least a run sets aside. Its whole cap there would hold a new command back for good on a
     // machine whose own programs leave less than the floor and a cap free, with nothing building
     // (NIT-372); what it sets aside, which the next runs count, stays its whole cap.
+    // Never more than its cap: a small machine's cap is under `MIN_RESERVED` (NIT-374).
     let need = match limits {
-        Some(l) => known_peak_of(db, id, cap_for(l, slots))?.unwrap_or(MIN_RESERVED),
+        Some(l) => {
+            let cap = cap_for(l, slots);
+            known_peak_of(db, id, cap)?.unwrap_or(MIN_RESERVED.min(cap))
+        }
         None => 0,
     };
     machine::admit_once_with(
@@ -3928,6 +3932,12 @@ let id = db.conn.last_insert_rowid();
         std::fs::remove_file(base.join("lanes").join("last-start")).ok();
         let why = admit_run(&db, id, Some(&l), 5, false, &mut free(14)).unwrap().unwrap();
         assert!(why.contains("expected to take 2.0 GB above the"), "the least a run sets aside: {why}");
+        // A 4 GB machine: a 2 GB floor and a cap under 2 GB. 3.5 GB free is enough (NIT-374).
+        db.conn.execute("UPDATE lane_run SET memory_cap = NULL, memory_reserved = NULL WHERE id = ?1", [id]).unwrap();
+        std::fs::remove_file(base.join("lanes").join("last-start")).ok();
+        let small = machine::limits_for(4 * machine::GIB, None, None);
+        let mut half = || Some(machine::Memory { total: 4 * machine::GIB, available: 7 * machine::GIB / 2 });
+        assert_eq!(admit_run(&db, id, Some(&small), 5, false, &mut half).unwrap(), None, "no more than its {} cap", machine::gb(cap_for(&small, 5)));
         std::fs::remove_dir_all(base).ok();
     }
 
