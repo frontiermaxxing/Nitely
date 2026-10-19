@@ -676,8 +676,10 @@ whether collection is current, paused, stale or unavailable; the six readings di
 RAM, commit, paging and disk activity. Null counters stay unavailable, and zero stays zero.
 
 The history line stops at collection gaps and missing counters. Shaded gaps are unrecorded time,
-not zero usage. Minute peaks and minima are available in the detail table and are never drawn as
-sustained pressure. The previous-boot window ends at its last recorded sample, not an assumed
+not zero usage. Solid lines show last observed values; dashed lines preserve minute/bucket peaks
+and minimum available RAM, separately labelled as extrema rather than sustained pressure. The
+detail table retains exact values. Kernel paged and nonpaged memory are selectable for history.
+The previous-boot window ends at its last recorded sample, not an assumed
 shutdown time. A sustained-pressure notice stays quiet after dismissal until pressure clears.
 
 Workload tables keep sampled CPU, private commit, overlapping working sets and process I/O separate.

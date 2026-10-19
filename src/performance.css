@@ -1,46 +1,248 @@
-.perf { max-width: 1440px; }
-.perf-intro { color: var(--fg-2); margin: 0 0 24px; }
-.perf-freshness, .perf-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-.perf-freshness { font-size: 12px; margin-bottom: 16px; }
-.perf-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-top: 1px solid var(--line); }
-.perf-metric { padding: 18px 16px 18px 0; display: flex; flex-direction: column; gap: 5px; min-width: 0; }
-.perf-metric strong { font-family: var(--font-mono); font-size: 21px; font-weight: 500; letter-spacing: -.5px; overflow-wrap: anywhere; }
-.perf-section { border-top: 1px solid var(--line); padding: 24px 0; }
-.perf h2 { font-size: 16px; font-weight: 600; margin: 0 0 14px; }
-.perf-heading h2 { margin-bottom: 0; }
-.perf-heading { margin-bottom: 16px; }
-.perf-ranges { display: flex; gap: 4px; flex-wrap: wrap; }
-.perf-ranges button { border: 1px solid transparent; background: transparent; color: var(--fg-2); padding: 5px 9px; border-radius: 4px; cursor: pointer; }
-.perf-ranges button[aria-pressed=true] { background: var(--raised); border-color: var(--line-strong); color: var(--fg); }
-.perf select { background: var(--surface); border: 1px solid var(--line-strong); color: var(--fg); border-radius: 4px; padding: 5px 8px; max-width: 100%; }
-.perf label { font-size: 12px; color: var(--fg-2); display: flex; align-items: center; gap: 9px; }
-.perf-chart-choice { margin-bottom: 12px; }
-.perf-chart { display: block; width: 100%; height: auto; min-height: 120px; }
-.perf-chart text { font-size: 12px; fill: var(--fg-3); }
-.perf-line { fill: none; stroke: var(--live); stroke-width: 1.7; vector-effect: non-scaling-stroke; }
-.perf-point { fill: var(--live); }
-.perf-grid { stroke: var(--line); stroke-width: 1; }
-.perf-gap { fill: var(--fg-3); opacity: .09; }
-.perf-details { margin-top: 14px; font-size: 12px; }
-.perf-details summary { cursor: pointer; color: var(--fg-2); padding: 5px 0; }
-.perf-details li { margin: 8px 0; overflow-wrap: anywhere; }
-.perf-table-scroll { overflow-x: auto; max-height: 400px; }
-.perf table { border-collapse: collapse; width: 100%; text-align: left; font-size: 12px; }
-.perf th { font-weight: 500; color: var(--fg-2); white-space: nowrap; }
-.perf th, .perf td { padding: 10px 12px 10px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
-.perf td:not(:first-child) { font-variant-numeric: tabular-nums; white-space: nowrap; }
-.perf-attribution { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
-.perf-attribution .perf-metric strong { font-size: 18px; }
-.perf-episode { display: flex; flex-direction: column; gap: 5px; padding: 12px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
-.perf-pressure { display: flex; gap: 16px; align-items: start; justify-content: space-between; padding: 14px; border-left: 2px solid var(--attention-ink); background: var(--sunken); margin-bottom: 16px; font-size: 13px; }
-.perf-pressure p { color: var(--fg-2); margin: 5px 0 0; }
-.perf-controls { border: 0; padding: 0; display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
-.perf-confirm { margin-top: 14px; padding: 14px; background: var(--sunken); border: 1px solid var(--line-strong); }
+.perf {
+  max-width: 1440px;
+}
+.perf-intro {
+  color: var(--fg-2);
+  margin: 0 0 24px;
+}
+.perf-freshness,
+.perf-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.perf-freshness {
+  font-size: 12px;
+  margin-bottom: 16px;
+}
+.perf-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border-top: 1px solid var(--line);
+}
+.perf-metric {
+  padding: 18px 16px 18px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.perf-metric strong {
+  font-family: var(--font-mono);
+  font-size: 21px;
+  font-weight: 500;
+  letter-spacing: -0.5px;
+  overflow-wrap: anywhere;
+}
+.perf-section {
+  border-top: 1px solid var(--line);
+  padding: 24px 0;
+}
+.perf h2 {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0 0 14px;
+}
+.perf-heading h2 {
+  margin-bottom: 0;
+}
+.perf-heading {
+  margin-bottom: 16px;
+}
+.perf-ranges {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.perf-ranges button {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--fg-2);
+  padding: 5px 9px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.perf-ranges button[aria-pressed="true"] {
+  background: var(--raised);
+  border-color: var(--line-strong);
+  color: var(--fg);
+}
+.perf select {
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  color: var(--fg);
+  border-radius: 4px;
+  padding: 5px 8px;
+  max-width: 100%;
+}
+.perf label {
+  font-size: 12px;
+  color: var(--fg-2);
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.perf-chart-choice {
+  margin-bottom: 12px;
+}
+.perf-chart {
+  display: block;
+  width: 100%;
+  height: 170px;
+}
+.perf-chart text {
+  font-size: 12px;
+  fill: var(--fg-3);
+}
+.perf-line {
+  fill: none;
+  stroke: var(--live);
+  stroke-width: 1.7;
+  vector-effect: non-scaling-stroke;
+}
+.perf-point {
+  fill: var(--live);
+}
+.perf-extreme {
+  stroke: var(--fg-2);
+  stroke-dasharray: 4 4;
+  stroke-width: 1.4;
+}
+.perf-extreme-point {
+  fill: var(--fg-2);
+}
+.perf-chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  color: var(--fg-2);
+  font-size: 12px;
+  margin-bottom: 10px;
+}
+.perf-chart-legend span::before {
+  content: "";
+  display: inline-block;
+  width: 20px;
+  margin-right: 6px;
+  vertical-align: middle;
+  border-top: 2px solid var(--live);
+}
+.perf-chart-legend .perf-legend-extreme::before {
+  border-top: 2px dashed var(--fg-2);
+}
+.perf-grid {
+  stroke: var(--line);
+  stroke-width: 1;
+}
+.perf-gap {
+  fill: var(--fg-3);
+  opacity: 0.09;
+}
+.perf-details {
+  margin-top: 14px;
+  font-size: 12px;
+}
+.perf-details summary {
+  cursor: pointer;
+  color: var(--fg-2);
+  padding: 5px 0;
+}
+.perf-details li {
+  margin: 8px 0;
+  overflow-wrap: anywhere;
+}
+.perf-table-scroll {
+  overflow-x: auto;
+  max-height: 400px;
+}
+.perf table {
+  border-collapse: collapse;
+  width: 100%;
+  text-align: left;
+  font-size: 12px;
+}
+.perf th {
+  font-weight: 500;
+  color: var(--fg-2);
+  white-space: nowrap;
+}
+.perf th,
+.perf td {
+  padding: 10px 12px 10px 0;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+.perf td:not(:first-child) {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.perf-attribution {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+.perf-attribution .perf-metric strong {
+  font-size: 18px;
+}
+.perf-episode {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+.perf-pressure {
+  display: flex;
+  gap: 16px;
+  align-items: start;
+  justify-content: space-between;
+  padding: 14px;
+  border-left: 2px solid var(--attention-ink);
+  background: var(--sunken);
+  margin-bottom: 16px;
+  font-size: 13px;
+}
+.perf-pressure p {
+  color: var(--fg-2);
+  margin: 5px 0 0;
+}
+.perf-controls {
+  border: 0;
+  padding: 0;
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.perf-confirm {
+  margin-top: 14px;
+  padding: 14px;
+  background: var(--sunken);
+  border: 1px solid var(--line-strong);
+}
 @media (max-width: 700px) {
-  .perf-metrics, .perf-attribution { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .perf-metric strong { font-size: 18px; }
-  .perf-heading { align-items: flex-start; }
-  .perf-heading label { flex-wrap: wrap; }
-  .perf-controls { flex-direction: column; align-items: flex-start; }
-  .perf-freshness { align-items: flex-start; flex-direction: column; gap: 4px; }
+  .perf-metrics,
+  .perf-attribution {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .perf-metric strong {
+    font-size: 18px;
+  }
+  .perf-heading {
+    align-items: flex-start;
+  }
+  .perf-heading label {
+    flex-wrap: wrap;
+  }
+  .perf-controls {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .perf-freshness {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
 }

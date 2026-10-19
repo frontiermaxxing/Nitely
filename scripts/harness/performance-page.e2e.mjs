@@ -7,20 +7,26 @@ import { join } from "node:path";
 import { launch } from "./app.mjs";
 const SCREENS = join("target", "harness", "screens");
 mkdirSync(SCREENS, { recursive: true });
-const sleep = ms => new Promise(r => setTimeout(r, ms));
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 test("Performance history survives an app restart and only clears through paused human controls", { timeout: 180000 }, async () => {
   const app = await launch();
   const query = () => app.page.invoke("performance_query", { query: { view: "history", limit: 100 } });
-  const clickControl = async text => {
-    await app.page.eval(`const button = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === ${JSON.stringify(text)}); button?.scrollIntoView({ block: 'center' });`);
+  const clickControl = async (text) => {
+    await app.page.eval(
+      `const button = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === ${JSON.stringify(text)}); button?.scrollIntoView({ block: 'center' });`,
+    );
     await app.page.click({ css: "button", text });
   };
   try {
     await app.page.open("#performance");
     await app.page.waitFor(`return document.querySelector('[data-testid="performance-page"]') !== null`, { what: "Performance route" });
     let recorded;
-    for (let i = 0; i < 40; i++) { recorded = await query(); if (recorded.latest) break; await sleep(500); }
+    for (let i = 0; i < 40; i++) {
+      recorded = await query();
+      if (recorded.latest) break;
+      await sleep(500);
+    }
     assert.ok(recorded.latest, "the isolated recorder produced a sample");
     assert.ok(recorded.points.length, "history reads the saved sample");
     await app.page.waitFor(`return document.querySelector('.perf-freshness')?.textContent.includes('Recording')`, { what: "recording freshness" });
@@ -33,7 +39,10 @@ test("Performance history survives an app restart and only clears through paused
     await app.page.open("#performance");
     const restored = await query();
     assert.equal(restored.settings.enabled, false, "pause is durable");
-    assert.ok(restored.points.some(p => p.to_ms === recorded.latest.wall_ms), "recorded history survives app/recorder restart");
+    assert.ok(
+      restored.points.some((p) => p.to_ms === recorded.latest.wall_ms),
+      "recorded history survives app/recorder restart",
+    );
     // Restarting the app is not evidence of a machine reboot.
     await assert.rejects(app.page.invoke("performance_query", { query: { view: "history", before_last_restart: true } }), /boot transition/);
     await app.page.waitFor(`return document.querySelector('.perf-freshness')?.textContent.includes('paused')`, { what: "restored paused state" });
@@ -43,11 +52,18 @@ test("Performance history survives an app restart and only clears through paused
     await clickControl("Clear history…");
     await clickControl("Clear recorded history");
     await app.page.waitFor(`return document.body.textContent.includes('Recorded history cleared.')`, { what: "clear completion" });
-    const cleared = await query(); assert.equal(cleared.latest, null); assert.equal(cleared.points.length, 0);
-    await app.page.waitFor(`return document.querySelector('.perf-metrics')?.textContent.includes('Unavailable') && document.body.textContent.includes('Process attribution is unavailable')`, { what: "cleared readings removed from the page" });
+    const cleared = await query();
+    assert.equal(cleared.latest, null);
+    assert.equal(cleared.points.length, 0);
+    await app.page.waitFor(
+      `return document.querySelector('.perf-metrics')?.textContent.includes('Unavailable') && document.body.textContent.includes('Process attribution is unavailable')`,
+      { what: "cleared readings removed from the page" },
+    );
     await app.page.screenshot(join(SCREENS, "performance-paused-empty.png"));
     await clickControl("Resume collection");
     await app.page.waitFor(`return document.body.textContent.includes('Collection enabled. Settings saved.')`, { what: "resume completion" });
     assert.equal((await query()).settings.enabled, true);
-  } finally { await app.close(); }
+  } finally {
+    await app.close();
+  }
 });
