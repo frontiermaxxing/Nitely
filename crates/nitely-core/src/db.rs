@@ -937,6 +937,37 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    /// An ask still waiting from before the wait link (NIT-364), which joined a wait an earlier,
+    /// already answered ask began, is linked on upgrade to the move that began it, so its answer
+    /// puts the issue back.
+    #[test]
+    fn the_upgrade_links_a_waiting_ask_to_the_move_its_wait_began_with() {
+        let dir = crate::paths::unique_temp("nitely-ask-wait", "");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.db");
+        let before: Vec<(&str, &str)> = MIGRATIONS.iter().copied().filter(|(name, _)| *name != "20261018-ask-wait-event").collect();
+        let old = Db::open_with(&path, &before).unwrap();
+        let t = now() - 3600;
+        old.conn.execute("INSERT INTO issue (key, origin, title, state, state_type, updated_at) VALUES ('APP-1', 'nitely', 'Pick a currency', 'Needs You', 'started', '')", []).unwrap();
+        let moved = format!("In Progress {} Needs You: waiting for the answer to ask 1", '\u{2192}');
+        old.conn.execute("INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, 'claude:x', 'APP-1', 'issue_moved', ?2)", rusqlite::params![t, moved]).unwrap();
+        let entry = old.conn.last_insert_rowid();
+        old.conn
+            .execute("INSERT INTO ask (issue_key, asked_by, question, answer, asked_at, answered_at, moved_from) VALUES ('APP-1', 'claude:x', 'EUR or USD?', 'EUR', ?1, ?1, 'In Progress')", [t])
+            .unwrap();
+        old.conn
+            .execute("INSERT INTO ask (issue_key, asked_by, question, asked_at, moved_from) VALUES ('APP-1', 'claude:x', 'Which symbol?', ?1, 'In Progress')", [t + 120])
+            .unwrap();
+        let joined = old.conn.last_insert_rowid();
+        drop(old);
+        let db = Db::open(&path).unwrap();
+        let linked: Option<i64> = db.conn.query_row("SELECT wait_event FROM ask WHERE id = ?1", [joined], |r| r.get(0)).unwrap();
+        assert_eq!(linked, Some(entry));
+        db.answer_ask(joined, "the euro sign", &crate::Actor::Human).unwrap();
+        assert_eq!(db.issue("APP-1").unwrap().unwrap().state, "Todo", "its answer ends the wait");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     /// A dev build of 0.1.0 with a migration a nightly of 0.1.0 does not have (NIT-239): the
     /// nightly refuses by the migration, whatever the versions say, and names both builds.
     #[test]
