@@ -304,6 +304,24 @@ impl TreeGuard {
         }
     }
 
+    /// Ends everything the guard holds and returns once it has ended, or after `wait` (NIT-371):
+    /// closing a job only asks its processes to end, so a lane's next command could otherwise find
+    /// files still held by one that is ending.
+    pub fn end(self, wait: std::time::Duration) {
+        #[cfg(windows)]
+        {
+            self.job.terminate();
+            let started = std::time::Instant::now();
+            while self.job.active_processes().is_some_and(|n| n > 0) && started.elapsed() < wait {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+        // Elsewhere ending is as dropping the guard was: the command's own process has exited, so
+        // its tree is not signalled by a pid that may be in use again.
+        #[cfg(not(windows))]
+        let _ = wait;
+    }
+
     /// Ends everything the guard holds now.
     pub fn stop(&self) {
         #[cfg(windows)]
@@ -656,6 +674,21 @@ mod win {
         peak_job_memory: usize,
     }
 
+    /// JOBOBJECT_BASIC_ACCOUNTING_INFORMATION.
+    #[repr(C)]
+    struct BasicAccounting {
+        total_user_time: i64,
+        total_kernel_time: i64,
+        this_period_user_time: i64,
+        this_period_kernel_time: i64,
+        page_faults: u32,
+        total_processes: u32,
+        active_processes: u32,
+        terminated_processes: u32,
+    }
+
+    const JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION: u32 = 1;
+
     #[repr(C)]
     struct CompletionPort {
         key: *mut c_void,
@@ -807,6 +840,16 @@ mod win {
         pub fn terminate(&self) {
             // SAFETY: the job's open handle.
             unsafe { TerminateJobObject(self.job, 1) };
+        }
+
+        /// How many of the job's processes have not ended yet.
+        pub fn active_processes(&self) -> Option<u32> {
+            // SAFETY: all zeros is a valid BasicAccounting.
+            let mut info: BasicAccounting = unsafe { std::mem::zeroed() };
+            let size = std::mem::size_of::<BasicAccounting>() as u32;
+            // SAFETY: `info` is the struct the class names, of `size` bytes.
+            let ok = unsafe { QueryInformationJobObject(self.job, JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION, (&mut info as *mut BasicAccounting).cast(), size, std::ptr::null_mut()) } != 0;
+            ok.then_some(info.active_processes)
         }
     }
 

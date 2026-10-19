@@ -2785,7 +2785,10 @@ fn run_logged(command: &str, dir: &Path, log: &Path, limit: Duration, share: Sha
         std::fs::remove_file(p).ok();
     }
     let peak = guard.as_ref().and_then(|g| g.peak_memory());
-    drop(guard);
+    // What the command left running ends before the lane is handed on (NIT-371).
+    if let Some(g) = guard {
+        g.end(Duration::from_secs(10));
+    }
     let cap = share.cap.map(machine::gb).unwrap_or_default();
     if out_of_memory {
         let why = format!("out of memory in the lane: `{command}` and what it started went over its {cap} memory cap and were stopped. This is a lane problem, not a test failure; Settings > Build lanes sets the cap");
