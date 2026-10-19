@@ -135,6 +135,13 @@ export function Palette(props: {
       // The Inbox filtered to one project, or to none (NIT-236).
       { id: "inbox-all", label: "Inbox, every project", hint: "view", group: "Go to", run: go({ kind: "inbox", project: null }) },
       ...props.projects.map((p): Item => ({ id: `inbox-${p.key}`, label: `${p.name} inbox`, hint: p.key, group: "Go to", run: go({ kind: "inbox", project: p.key }) })),
+      ...props.projects.map((p): Item => ({
+        id: `focus-${p.key}`,
+        label: `Change current focus in ${p.name}`,
+        hint: p.key,
+        group: "Actions",
+        run: go({ kind: "project", key: p.key, tab: "list" }),
+      })),
       ...props.projects.flatMap((p) =>
         (["list", "board", "branches", "brief", "rules", "settings"] as const).map(
           (tab): Item => ({

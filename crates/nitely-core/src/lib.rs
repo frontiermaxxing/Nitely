@@ -14,6 +14,7 @@ pub mod crew_settings;
 pub mod instructions;
 pub mod credentials;
 pub mod db;
+pub mod focus;
 pub mod git;
 pub mod goal_plans;
 pub mod goal_report;

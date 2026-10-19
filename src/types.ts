@@ -352,6 +352,15 @@ export interface Goal {
   landed_today?: number;
 }
 
+/** Which goal new agent work follows, without changing issue priority. */
+export interface ProjectFocus {
+  project: string;
+  goal: number | null;
+  goal_title: string | null;
+  allow_urgent: boolean;
+  active: boolean;
+}
+
 /** A goal and its issues, open and closed: what a goal row draws. */
 export interface GoalDetail {
   goal: Goal;

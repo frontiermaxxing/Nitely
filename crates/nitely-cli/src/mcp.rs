@@ -437,7 +437,7 @@ fn tools() -> Value {
     json!([
         {
             "name": "next_task",
-            "description": "Claim the most urgent Todo issue in this repo's project and get it with a suggested branch name. Two agents never get the same issue. Issues with an open blocker are skipped, and a blocker is as urgent as what it blocks. Among equally urgent issues, those of an active goal come first, the nearest target date first. Returns null when nothing is ready.",
+            "description": "Claim the next ready issue in this repo's project and get it with a suggested branch name. Respects the person's project focus: only that goal and its prerequisites, plus urgent work when interruptions are allowed. Never spills into unrelated work while focus is blocked; returns an explanation when nothing focused is ready. Without focus, priority comes first, then active goals with the nearest target date. Two agents never get the same issue. Open blockers are skipped, and a blocker is as urgent as what it blocks. Already submitted work returned to you still comes back for completion.",
             "inputSchema": { "type": "object", "properties": {
                 "project": { "type": "string", "description": "Project key; defaults to this repo's project." }
             } }
@@ -1118,7 +1118,9 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
                         .filter(|i| i.state == "Todo" && !i.blocked_by.is_empty())
                         .map(|i| format!("{} (blocked by {})", i.key, i.blocked_by.join(", ")))
                         .collect();
-                    let message = if waiting.is_empty() {
+                    let message = if let Some(reason) = db.project_focus_wait_reason(&project)? {
+                        reason
+                    } else if waiting.is_empty() {
                         format!("Nothing in Todo for {project}.")
                     } else {
                         format!("Nothing ready in {project}; waiting on blockers: {}.", waiting.join("; "))
@@ -1310,7 +1312,12 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             };
             json!(db.save_goal(&project, id, &change, &actor)?)
         }
-        "get_project" => json!(db.project_brief(&project(&db)?)?),
+        "get_project" => {
+            let project = project(&db)?;
+            let mut out = json!(db.project_brief(&project)?);
+            out["focus"] = json!(db.project_focus(&project)?);
+            out
+        }
         "set_project_brief" => {
             let revision = args.get("revision").and_then(Value::as_i64).ok_or_else(|| anyhow!("missing revision: pass the one get_project returned"))?;
             let brief = args.get("brief").and_then(Value::as_str).ok_or_else(|| anyhow!("missing brief"))?;

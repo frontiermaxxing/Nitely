@@ -88,6 +88,49 @@ fn text(reply: &Value) -> Value {
 }
 
 #[test]
+fn external_agents_follow_the_persons_focus_and_cannot_change_it() {
+    use nitely_core::goals::GoalChange;
+    use nitely_core::issues::{Actor, NewIssue};
+
+    let (mut mcp, _run, base) = setup("nitely-mcp-focus");
+    let mut db = nitely_core::Db::open(&base.join("nitely.db")).unwrap();
+    let goal = db.save_goal("APP", None, &GoalChange { title: Some("Welcome".into()), outcome: Some("An easy first run".into()), ..Default::default() }, &Actor::Human).unwrap();
+    let urgent = db.create_issue(&NewIssue { project: "APP".into(), title: "Export repair".into(), body: "Repair the export checksum".into(), kind: "bug".into(), evidence: "scenario".into(), source: "human".into(), priority: 1, ..Default::default() }, &Actor::Human).unwrap();
+    db.set_project_focus("APP", Some(goal.id), false, &Actor::Human).unwrap();
+
+    mcp.call(20, "get_project", json!({ "project": "APP" }));
+    assert_eq!(text(&mcp.next(Duration::from_secs(20)).unwrap())["focus"]["goal"], goal.id);
+    mcp.call(21, "next_task", json!({ "project": "APP" }));
+    let empty = text(&mcp.next(Duration::from_secs(20)).unwrap());
+    assert!(empty["issue"].is_null(), "unrelated urgent work waits: {empty}");
+    assert!(empty["message"].as_str().unwrap().to_lowercase().contains("focus"), "{empty}");
+
+    // There is no agent-side focus mutation; the browser preview also refuses the app's write.
+    mcp.call(22, "set_project_focus", json!({ "project": "APP", "goal": null, "allowUrgent": true }));
+    let refused = mcp.next(Duration::from_secs(20)).unwrap();
+    assert_eq!(refused["result"]["isError"], true, "{refused}");
+    assert_eq!(db.project_focus("APP").unwrap().goal, Some(goal.id));
+    let preview = Command::new(env!("CARGO_BIN_EXE_nitely")).args(["ui", "set_project_focus", "{}"])
+        .current_dir(&base).env("NITELY_HOME", &base).output().unwrap();
+    assert!(!preview.status.success());
+    assert!(String::from_utf8_lossy(&preview.stderr).contains("read-only"));
+
+    db.set_project_focus("APP", Some(goal.id), true, &Actor::Human).unwrap();
+    mcp.call(23, "next_task", json!({ "project": "APP" }));
+    let picked = text(&mcp.next(Duration::from_secs(20)).unwrap());
+    assert_eq!(picked["issue"]["key"], urgent.key, "urgent interruption was enabled: {picked}");
+    assert_eq!(db.issue(&urgent.key).unwrap().unwrap().priority, 1, "focus never rewrites priority");
+
+    let later = db.create_issue(&NewIssue { project: "APP".into(), title: "Theme picker".into(), body: "Choose the appearance".into(), kind: "feature".into(), evidence: "scenario".into(), source: "human".into(), priority: 3, ..Default::default() }, &Actor::Human).unwrap();
+    db.set_project_focus("APP", None, true, &Actor::Human).unwrap();
+    mcp.call(24, "next_task", json!({ "project": "APP" }));
+    assert_eq!(text(&mcp.next(Duration::from_secs(20)).unwrap())["issue"]["key"], later.key);
+    drop(db);
+    drop(mcp);
+    std::fs::remove_dir_all(base).ok();
+}
+
+#[test]
 fn a_long_call_holds_up_none_after_it_and_ends_at_the_cap() {
     let (mut mcp, run, base) = setup("nitely-mcp-concurrent");
     let asked = Instant::now();

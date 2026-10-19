@@ -3,11 +3,12 @@ import { invoke } from "./backend";
 import type { GoalDetail, GoalRisk } from "./types";
 import { crewOnGoal, finishLine, goalCounts, goalOrder, riskTone, targetLine } from "./goals";
 import { IssueToken, Meter } from "./ui";
+import { ProjectFocus } from "./ProjectFocus";
 import "./goal-rows.css";
 
 /**
  * The active goals of one project (or of every project, on the Overview), one row each. Renders
- * nothing while there are none, so a project without goals looks as it did.
+ * Overview renders nothing without goals; project views also expose the work focus control.
  */
 /** A goal row to bring into view; `at` tells one request from the next for the same goal. */
 export type GoalFocus = { id: number; at: number };
@@ -37,21 +38,25 @@ export function GoalRows(props: { project?: string; version: number; onOpenIssue
   };
 
   if (error) return <p className="error">{error}</p>;
-  if (!goals || goals.length === 0) return null;
+  if (!goals) return null;
+  if (!props.project && goals.length === 0) return null;
   const rows = (
-    <div className="goal-rows">
-      {goals.map((g, n) => (
-        <GoalRow
-          // A new request for the same goal remounts its row, so the scroll and the outline run again.
-          key={g.goal.id === props.focus?.id ? `${g.goal.id}@${props.focus.at}` : g.goal.id}
-          detail={g}
-          showProject={!props.project}
-          focused={g.goal.id === props.focus?.id}
-          onOpenIssue={props.onOpenIssue}
-          onFirst={props.project && n > 0 ? () => first(g.goal.id) : undefined}
-        />
-      ))}
-    </div>
+    <>
+      {props.project && <ProjectFocus key={props.project} project={props.project} version={props.version} goals={goals} />}
+      <div className="goal-rows">
+        {goals.map((g, n) => (
+          <GoalRow
+            // A new request for the same goal remounts its row, so the scroll and the outline run again.
+            key={g.goal.id === props.focus?.id ? `${g.goal.id}@${props.focus.at}` : g.goal.id}
+            detail={g}
+            showProject={!props.project}
+            focused={g.goal.id === props.focus?.id}
+            onOpenIssue={props.onOpenIssue}
+            onFirst={props.project && n > 0 ? () => first(g.goal.id) : undefined}
+          />
+        ))}
+      </div>
+    </>
   );
   if (!props.heading) return rows;
   return (
@@ -107,8 +112,8 @@ export function GoalRow(props: { detail: GoalDetail; showProject?: boolean; focu
         )}
         <CrewOnGoal goal={goal} />
         {props.onFirst && (
-          <button className="link goal-first" onClick={props.onFirst} title="The crew works this project's goals in order, top first">
-            Work this goal first
+          <button className="link goal-first" onClick={props.onFirst} title="The crew uses this order when no current focus is set">
+            Rank first
           </button>
         )}
         <span className="goal-count" title={`${c.done} of ${total} issues done`}>

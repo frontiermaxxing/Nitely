@@ -48,6 +48,7 @@ import type {
   PrRecord,
   PlaybookProposal,
   Project,
+  ProjectFocus,
   Goal,
   GoalDetail,
   GoalFinish,
@@ -1917,6 +1918,15 @@ const GOALS: { id: number; project: string; title: string; outcome: string; targ
     state: "done",
     keys: ["NIT-22"],
   },
+  {
+    id: 5,
+    project: "HAR",
+    title: "Publish the guest guide",
+    outcome: "Guests can find arrival instructions and the house rules before their stay.",
+    target_date: null,
+    state: "done",
+    keys: [],
+  },
 ];
 
 /** Puts the fixture issues in their goals; the world is built before GOALS is defined. */
@@ -1951,6 +1961,34 @@ function goalRecord(g: (typeof GOALS)[number]): Goal {
 
 /** The person's order of goals (goal_order): rank by goal id. */
 const goalRanks = new Map<number, number>();
+
+// Nitely is concentrating on review automation; Harbor still has a completed focus selected.
+const projectFocuses = new Map<string, { goal: number | null; allow_urgent: boolean }>([
+  ["NIT", { goal: 2, allow_urgent: true }],
+  ["HAR", { goal: 5, allow_urgent: false }],
+]);
+
+function projectFocus(project: string): ProjectFocus {
+  const selected = projectFocuses.get(project);
+  const goal = GOALS.find((g) => g.id === selected?.goal && g.project === project);
+  return {
+    project,
+    goal: selected?.goal ?? null,
+    goal_title: goal?.title ?? null,
+    allow_urgent: selected?.allow_urgent ?? true,
+    active: !!goal && (goal.state ?? "active") === "active",
+  };
+}
+
+function setProjectFocus(args: Record<string, unknown>): ProjectFocus {
+  const project = String(args.project).toUpperCase();
+  const goal = args.goal == null ? null : Number(args.goal);
+  if (goal !== null && !GOALS.some((g) => g.id === goal && g.project === project && (g.state ?? "active") === "active")) {
+    throw new Error("Choose an active goal in this project.");
+  }
+  projectFocuses.set(project, { goal, allow_urgent: Boolean(args.allowUrgent) });
+  return projectFocus(project);
+}
 
 /** As the goals command: the active goals, with their issues, ranked ones first. */
 function goals(args: Record<string, unknown>): GoalDetail[] {
@@ -2104,6 +2142,10 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return startGoal(args);
       case "goals":
         return goals(args);
+      case "project_focus":
+        return projectFocus(String(args.project).toUpperCase());
+      case "set_project_focus":
+        return setProjectFocus(args);
       case "goal_report":
         return goalReport(Number(args.since));
       case "goal_order":

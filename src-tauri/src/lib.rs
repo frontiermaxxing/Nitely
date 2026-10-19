@@ -271,6 +271,18 @@ async fn goal_order(project: String, ids: Vec<i64>) -> Result<Vec<nitely_core::g
     db()?.order_goals(&project, &ids, &ME).map_err(err)
 }
 
+/// The project's current focus, shared by Crew and agents choosing their next task.
+#[tauri::command]
+async fn project_focus(project: String) -> Result<nitely_core::focus::ProjectFocus, String> {
+    db()?.project_focus(&project).map_err(err)
+}
+
+/// Only the person changes the focus; agents read it through get_project and next_task.
+#[tauri::command]
+async fn set_project_focus(project: String, goal: Option<i64>, allow_urgent: bool) -> Result<nitely_core::focus::ProjectFocus, String> {
+    db()?.set_project_focus(&project, goal, allow_urgent, &ME).map_err(err)
+}
+
 /// How many crew workers may work on a goal at once; 0 leaves it to the playbook.
 #[tauri::command]
 async fn goal_workers(id: i64, workers: i64) -> Result<nitely_core::goals::Goal, String> {
@@ -891,6 +903,8 @@ pub fn run() {
             goals,
             goal_report,
             goal_order,
+            project_focus,
+            set_project_focus,
             goal_workers,
             goal_choices,
             set_issue_goal,

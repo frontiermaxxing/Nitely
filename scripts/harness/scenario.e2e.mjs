@@ -136,6 +136,17 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
     await agent.call("update_issue", { key: setupKey, state: "Done", evidence: "Brief written, first issues filed, setup marked complete." });
     assert.equal(await state(setupKey), "Done");
 
+    // Focus is set by the person in the app and read by external agents and Crew alike.
+    // An empty focused goal must not spill into the unrelated urgent issue (or the greeting).
+    const focusedGoal = await agent.call("save_goal", { title: "A welcoming first run", outcome: "New users see a greeting." });
+    const urgent = await agent.call("file_issue", { title: "Repair the export checksum", kind: "bug", body: "The checksum is wrong.", evidence: "harness focus scenario", priority: 1 });
+    await page.invoke("set_project_focus", { project: "APP", goal: focusedGoal.id, allowUrgent: false });
+    assert.equal((await agent.call("get_project", {})).focus.goal, focusedGoal.id);
+    const waitingForFocus = await agent.call("next_task", {});
+    assert.equal(waitingForFocus.issue, null, "focus never spills into other Todo work");
+    assert.match(waitingForFocus.message, /focus/i, "the agent is told why it waits");
+    await page.invoke("set_issue_goal", { key: A, goal: focusedGoal.id });
+
     // The person turns the crew on: one worker.
     writeFileSync(join(repo, ".nitely", "playbook.toml"), playbook({ batch: "off", workers: 1 }));
     git(repo, "commit", "-q", "-am", "Turn the crew on");
@@ -157,6 +168,17 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
     assert.equal(one.issue.track.station, "done");
     assert.equal(one.reviews[0].verdict, "pass");
     assert.equal(one.reviews[0].batch_id ?? null, null, "reviewed alone: the playbook batches nothing yet");
+    assert.equal(await state(urgent.key), "Todo", "Crew respected focus even with an unrelated urgent issue ready");
+    assert.equal((await agent.call("next_task", {})).issue, null, "finished focused work still does not spill over");
+    // Pause Crew before testing the external agent's urgent selection, so it cannot race the claim.
+    await page.invoke("crew_pause", { project: "APP", paused: true });
+    await page.invoke("set_project_focus", { project: "APP", goal: focusedGoal.id, allowUrgent: true });
+    const interrupt = await agent.call("next_task", {});
+    assert.equal(interrupt.issue.key, urgent.key, "the person's urgent-interruption choice is honored by external agents");
+    await agent.call("update_issue", { key: urgent.key, state: "Canceled", reason: "The focus scenario has verified urgent selection." });
+    await page.invoke("set_project_focus", { project: "APP", goal: null, allowUrgent: true });
+    assert.equal((await page.invoke("project_focus", { project: "APP" })).goal, null, "clearing focus restores ordinary selection");
+    await page.invoke("crew_pause", { project: "APP", paused: false });
     await page.open("#now");
 
     // 4. Batched review: the crew goes off (the rest is the agent's here) and the playbook now

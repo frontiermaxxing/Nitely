@@ -1247,6 +1247,10 @@ fn run(cmd: Cmd) -> Result<()> {
                             print_json(&serde_json::json!({ "issue": i, "branch": branch, "why": why }))
                         }
                         None => {
+                            if let Some(reason) = db.project_focus_wait_reason(&project)? {
+                                println!("{reason}");
+                                return Ok(());
+                            }
                             println!("nothing ready in {project}");
                             for i in db.list_issues(Some(&project), false)?.iter().filter(|i| i.state == "Todo" && !i.blocked_by.is_empty()) {
                                 println!("  {} waits on {}", i.key, i.blocked_by.join(", "));

@@ -45,7 +45,7 @@ type Candidate = (String, i64, i64, i64, i64, Option<String>);
 
 /// Sessions seen within the claim TTL of `now`, as (folder, last seen): the only ones that can
 /// keep an issue from going idle.
-fn recent_sessions(conn: &rusqlite::Connection, now: i64) -> Result<Vec<(String, i64)>> {
+pub(crate) fn recent_sessions(conn: &rusqlite::Connection, now: i64) -> Result<Vec<(String, i64)>> {
     let mut stmt = conn.prepare("SELECT cwd, last_seen_at FROM session WHERE last_seen_at >= ?1")?;
     let rows = stmt.query_map([now - CLAIM_TTL_SECS], |r| Ok((r.get(0)?, r.get(1)?)))?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -56,7 +56,7 @@ fn recent_sessions(conn: &rusqlite::Connection, now: i64) -> Result<Vec<(String,
 /// Most work starts with start_task and holds no claim, so a missing claim alone says nothing; one
 /// that also shows no work was left, and would otherwise read as work in progress forever, never
 /// offered again (NIT-275). Some(0) when it never showed any.
-fn idle_since(conn: &rusqlite::Connection, key: &str, sessions: &[(String, i64)], now: i64) -> Result<Option<i64>> {
+pub(crate) fn idle_since(conn: &rusqlite::Connection, key: &str, sessions: &[(String, i64)], now: i64) -> Result<Option<i64>> {
     let row: Option<(String, String, String, Option<i64>)> = conn
         .query_row("SELECT state, origin, owner, claimed_at FROM issue WHERE key = ?1 COLLATE NOCASE", [key], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
@@ -1293,6 +1293,19 @@ impl Db {
         except: &[String],
         choose: impl FnOnce(&[(String, i64, i64)]) -> Option<String>,
     ) -> Result<Option<IssueRecord>> {
+        self.next_task_choosing_with_goal_budget(project, agent, except, 0, choose)
+    }
+
+    /// The shared picker with a playbook's default per-goal worker budget. Explicit goal budgets
+    /// apply even without a playbook; focus and capacity are checked inside the claim transaction.
+    pub(crate) fn next_task_choosing_with_goal_budget(
+        &mut self,
+        project: &str,
+        agent: &str,
+        except: &[String],
+        default_goal_workers: u32,
+        choose: impl FnOnce(&[(String, i64, i64)]) -> Option<String>,
+    ) -> Result<Option<IssueRecord>> {
         let ts = now();
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         // Each candidate with whether it plans a goal (0: a whole goal waits on it, so it goes
@@ -1330,6 +1343,7 @@ impl Db {
             .collect();
         ready.sort();
         let ready: Vec<(String, i64, i64)> = ready.into_iter().map(|((r, _, _, _, number), k)| (k, r, number)).collect();
+        let ready = crate::focus::filter_candidates(&tx, project, ready, default_goal_workers)?;
         let key = choose(&ready).filter(|k| ready.iter().any(|(r, _, _)| r == k));
         let Some(key) = key else {
             return Ok(None);

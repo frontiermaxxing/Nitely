@@ -277,20 +277,22 @@ pub fn next_task_ordered(config: &crate::Config, db: &mut Db, project: &str, age
     // caller sees the first one's claim (its body's paths) as work in flight.
     let _turn = PickLock::take(db);
     let held = held(config, db, project)?;
-    let shared: Vec<String> = config
+    let playbooks: Vec<Playbook> = config
         .repos
         .iter()
         .filter(|r| r.project.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(project)))
         .filter_map(|r| Playbook::load_with(Path::new(&r.root), config).ok())
-        .flat_map(|p| p.crew.shared_files)
         .collect();
+    let shared: Vec<String> = playbooks.iter().flat_map(|p| p.crew.shared_files.iter().cloned()).collect();
+    // A project can span repos; respect the tightest configured default for its shared focus.
+    let default_goal_workers = playbooks.iter().map(|p| p.crew.goal_workers).filter(|n| *n > 0).min().unwrap_or(0);
     let clash: Clash = if held.iter().all(|h| h.files.is_empty()) {
         HashMap::new()
     } else {
         db.list_issues(Some(project), false)?.iter().map(|i| (i.key.clone(), collisions(i, &held, &shared))).collect()
     };
     let mut why = None;
-    let issue = db.next_task_choosing(project, agent, except, |candidates| {
+    let issue = db.next_task_choosing_with_goal_budget(project, agent, except, default_goal_workers, |candidates| {
         let arranged = order.map(|o| o.arrange(candidates));
         let (key, reason) = choose(arranged.as_deref().unwrap_or(candidates), &clash)?;
         why = reason;

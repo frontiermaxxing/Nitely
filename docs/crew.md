@@ -15,6 +15,26 @@ the Crew section of the project's Settings (or "Crew off" in the project header)
 
 ## The playbook's `[crew]` section
 
+### Choosing a current focus
+
+On a project's List or Board, **Project focus** lets you choose one active goal for new work.
+This is separate from issue priority: a high-priority issue keeps that priority while you focus
+on a different feature. The choice applies to Crew, agents calling `next_task`, and
+`nitely issue next`. Only you change it, in the app.
+
+Focused work includes the goal's open issues and the prerequisites they need, even when a
+prerequisite belongs to another goal. **Allow urgent work to interrupt** is on by default;
+turn it off to keep unrelated P1 work waiting too. With focus on, no ready work or no available
+worker capacity means wait, not switch to another goal. Dependencies, claims and worker limits
+still apply. If the focused goal is closed or dropped, new automatic assignments pause until
+you choose another goal or clear focus, including urgent interruptions.
+
+**Clear focus** restores the usual selection rules. Work already underway continues, including
+review feedback returned to its author. Explicitly assigning an issue with `start_task` still
+works: focus controls automatic selection, not permission to work on an issue.
+
+### Crew configuration
+
 ```toml
 [crew]
 workers = 2                   # how many run at once; 0 (the default) is off

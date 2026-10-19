@@ -352,6 +352,14 @@ goal rows read the `goals` command.
 
 ## Goal rows
 
+A project's goal rows begin with **Project focus**: an active-goal picker, an explicit
+**Allow urgent work to interrupt** choice, and **Clear focus**. It directs new automatic work
+from Crew and external agents without changing priorities. Show the saved focus and whether
+urgent work can interrupt it; use attention ink for an inactive focused goal, which waits for
+the person to select another goal or clear focus. Loading and failed reads must not look like
+focus is off. Controls wrap vertically at narrow widths. The Overview's multi-project rows
+remain a progress view; focus is changed in its project.
+
 A goal is an outcome a project works toward (`crates/nitely-core/src/goals.rs`), and a goal row
 (`GoalRow` in `src/GoalRows.tsx`) answers "how close are we to it?" in one card:
 

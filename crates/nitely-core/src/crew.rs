@@ -684,11 +684,11 @@ impl Supervisor {
                 let config = crate::Config::load()?;
                 crate::overlap::next_task_ordered(&config, db, &self.project, self.actor().id(), &skipped, Some(&order))?
             } else {
-                db.next_task_choosing(&self.project, self.actor().id(), &skipped, |c| order.arrange(c).first().map(|(k, _, _)| k.clone()))?
+                db.next_task_choosing_with_goal_budget(&self.project, self.actor().id(), &skipped, rules.goal_workers, |c| order.arrange(c).first().map(|(k, _, _)| k.clone()))?
                     .map(|issue| crate::overlap::Picked { issue, why: None })
             };
             let Some(crate::overlap::Picked { issue, why }) = picked else {
-                return Ok(self.nothing_ready());
+                return Ok(db.project_focus_wait_reason(&self.project)?.unwrap_or_else(|| self.nothing_ready()));
             };
             if let Some(why) = why {
                 db.log_event(&self.actor(), Some(&issue.key), None, "picked", &format!("The crew picked {}: {why}", issue.key))?;
@@ -3048,6 +3048,42 @@ min_free_disk_gb = 100000000
         let mut started: Vec<&str> = tick.started.iter().map(|w| w.issue.as_str()).collect();
         started.sort();
         assert_eq!(started, ["NIT-2", "NIT-3"], "{tick:?}");
+    }
+
+    #[test]
+    fn project_focus_limits_crew_and_external_claims_without_interrupting_workers() {
+        let mut f = fixture(&format!("{GATE}[crew]\nworkers = 4\ngoal_workers = 1\n"));
+        let human = Actor::Human;
+        let goal = f.db.save_goal("NIT", None, &crate::goals::GoalChange {
+            title: Some("Focused feature".into()), outcome: Some("Ship the feature".into()), ..Default::default()
+        }, &human).unwrap().id;
+        f.db.set_issue_goal("NIT-3", Some(goal), &human).unwrap();
+        let extra = f.db.create_issue(&NewIssue {
+            project: "NIT".into(), title: "More feature work".into(), body: "wanted".into(), kind: "feature".into(),
+            source: "human".into(), evidence: "seen".into(), priority: 4, goal: Some(goal), ..Default::default()
+        }, &human).unwrap();
+        f.db.set_project_focus("NIT", Some(goal), false, &human).unwrap();
+        let fake = Fake { installed: vec!["claude"], ..Default::default() };
+        let mut sup = supervisor(&f, &fake);
+        let tick = sup.tick(&mut f.db, false).unwrap();
+        assert_eq!(tick.started.iter().map(|w| w.issue.as_str()).collect::<Vec<_>>(), ["NIT-3"]);
+        assert!(tick.status.contains("Waiting on focus"), "{tick:?}");
+        assert_eq!(f.db.issue(&extra.key).unwrap().unwrap().state, "Todo", "default goal budget still applies");
+        // An external allocator using the same budget also waits on the Crew worker's slot.
+        assert!(f.db.next_task_choosing_with_goal_budget("NIT", "codex:external", &[], 1, |c| c.first().map(|x| x.0.clone())).unwrap().is_none());
+
+        f.db.set_project_focus("NIT", Some(goal), true, &human).unwrap();
+        let tick = sup.tick(&mut f.db, false).unwrap();
+        assert_eq!(tick.started.iter().map(|w| w.issue.as_str()).collect::<Vec<_>>(), ["NIT-1"]);
+        assert_eq!(sup.running(), 2, "changing focus leaves existing workers running");
+        f.db.save_goal("NIT", Some(goal), &crate::goals::GoalChange { state: Some("done".into()), ..Default::default() }, &human).unwrap();
+        let tick = sup.tick(&mut f.db, false).unwrap();
+        assert!(tick.started.is_empty());
+        assert!(tick.status.contains("no longer active"));
+        assert_eq!(sup.running(), 2);
+        f.db.set_project_focus("NIT", None, true, &human).unwrap();
+        let tick = sup.tick(&mut f.db, false).unwrap();
+        assert!(tick.started.iter().any(|w| w.issue == "NIT-2"), "clearing focus restores normal allocation");
     }
 
     #[test]
