@@ -27,8 +27,10 @@ impl Db {
     pub fn end_session(&self, id: &str, at: i64, why: &str) -> Result<bool> {
         // Immediate: it reads, then writes, and a read transaction that another write overtook
         // cannot become a write one; it would fail at once instead of waiting (NIT-346).
-        let tx = rusqlite::Transaction::new_unchecked(&self.conn, rusqlite::TransactionBehavior::Immediate)?;
-        let found: Option<(String, String, String, i64)> = tx
+        // Worker settlement already holds an immediate write transaction so retirement, session
+        // endings, and issue disposition commit together. Otherwise this call owns its lock.
+        let tx = self.conn.is_autocommit().then(|| rusqlite::Transaction::new_unchecked(&self.conn, rusqlite::TransactionBehavior::Immediate)).transpose()?;
+        let found: Option<(String, String, String, i64)> = self.conn
             .query_row("SELECT vendor, cwd, state, last_seen_at FROM session WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
             .optional()?;
         let Some((_vendor, cwd, state, last_seen)) = found else { return Ok(false) };
@@ -36,10 +38,10 @@ impl Db {
             return Ok(false);
         }
         let at = at.max(last_seen);
-        tx.execute("INSERT INTO session_state (session_id, ts, state) VALUES (?1, ?2, 'ended')", params![id, at])?;
-        tx.execute("UPDATE session SET state = 'ended', last_seen_at = ?2, last_activity = ?3 WHERE id = ?1", params![id, at, why])?;
-        tx.execute("INSERT INTO event (ts, actor, cwd, type, summary) VALUES (?1, ?2, ?3, 'session_end', ?4)", params![at, id, cwd, why])?;
-        tx.commit()?;
+        self.conn.execute("INSERT INTO session_state (session_id, ts, state) VALUES (?1, ?2, 'ended')", params![id, at])?;
+        self.conn.execute("UPDATE session SET state = 'ended', last_seen_at = ?2, last_activity = ?3 WHERE id = ?1", params![id, at, why])?;
+        self.conn.execute("INSERT INTO event (ts, actor, cwd, type, summary) VALUES (?1, ?2, ?3, 'session_end', ?4)", params![at, id, cwd, why])?;
+        if let Some(tx) = tx { tx.commit()?; }
         Ok(true)
     }
 

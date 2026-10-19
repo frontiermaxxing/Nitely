@@ -1082,7 +1082,22 @@ impl Supervisor {
     /// without handing its issue on (docs/crew.md, Guardrails): a handoff note when it left none,
     /// and the issue back to Todo, or to a person after `attempts` failures.
     fn settle(&mut self, db: &mut Db, rules: &CrewRules, w: &Running, end: End) -> Result<String> {
+        // Git can be slow; gather only descriptive worktree information before taking the write
+        // lock. All authoritative decisions and database effects happen inside that lock.
+        let inspect: bool = db.conn.query_row("SELECT EXISTS(SELECT 1 FROM issue WHERE key = ?1 AND state IN ('In Progress', 'Todo'))", [&w.issue], |r| r.get(0))?;
+        let worktree = if inspect { worktree_state(&w.worktree) } else { String::new() };
+        let tx = rusqlite::Transaction::new_unchecked(&db.conn, rusqlite::TransactionBehavior::Immediate)?;
+        let (outcome, clean_up) = self.settle_database(db, rules, w, end, &worktree)?;
+        tx.commit()?;
+        if clean_up { self.clean_up_landed(db, w)?; }
+        Ok(outcome)
+    }
+
+    /// Called only under an immediate transaction: reclaim either wins before this read and we
+    /// do nothing, or waits until the entire worker/session/issue/ask disposition has committed.
+    fn settle_database(&mut self, db: &Db, rules: &CrewRules, w: &Running, end: End, worktree: &str) -> Result<(String, bool)> {
         use rusqlite::OptionalExtension;
+        debug_assert!(!db.conn.is_autocommit());
         let settled: Option<String> = db.conn.query_row(
             "SELECT COALESCE(outcome, 'stopped') FROM crew_worker WHERE id = ?1 AND ended_at IS NOT NULL",
             [w.id], |r| r.get(0),
@@ -1090,7 +1105,7 @@ impl Supervisor {
         if let Some(outcome) = settled {
             // Reclamation can retire a crashed worker before its original supervisor observes
             // the exit. Do not then end the replacement's sessions or change its issue.
-            return Ok(outcome);
+            return Ok((outcome, false));
         }
         let issue = db.issue(&w.issue)?;
         let state = issue.as_ref().map(|i| i.state.clone()).unwrap_or_default();
@@ -1136,16 +1151,16 @@ impl Supervisor {
                 self.disabled.insert(w.agent.clone(), format!("exited {n} times right after starting; see {}", w.log.display()));
             }
             if state == "In Progress" {
-                db.move_issue(&w.issue, "Todo", None, Some(&format!("the {} worker exited right after starting", w.agent)), &self.actor())?;
+                db.crew_move_issue(&w.issue, "Todo", &format!("the {} worker exited right after starting", w.agent), &self.actor())?;
             }
-            return Ok(outcome.into());
+            return Ok((outcome.into(), false));
         }
         self.launch_failures.remove(&w.agent);
         if outcome == "landed" {
-            self.clean_up_landed(db, w)?;
+            return Ok((outcome.into(), true));
         }
         if outcome != "failed" {
-            return Ok(outcome.into());
+            return Ok((outcome.into(), false));
         }
 
         // Only this worker's own handoff counts: the supervisor's note on an earlier attempt can
@@ -1157,7 +1172,7 @@ impl Supervisor {
                 "A crew worker ({}) stopped without handing this issue on ({how}); {last}. Whatever it committed is on its branch in {}.{} Its log: {}",
                 w.agent,
                 w.worktree.display(),
-                worktree_state(&w.worktree),
+                worktree,
                 w.log.display()
             );
             db.add_note(&w.issue, &note, "handoff", &self.actor())?;
@@ -1170,12 +1185,12 @@ impl Supervisor {
                 w.issue,
                 logs.join(", ")
             );
-            db.move_issue(&w.issue, "Needs You", None, Some(&format!("the crew tried it {failures} times")), &self.actor())?;
+            db.crew_move_issue(&w.issue, "Needs You", &format!("the crew tried it {failures} times"), &self.actor())?;
             db.create_ask(&question, &[TRY_AGAIN.to_string(), "I'll take it".to_string()], Some(&w.issue), None, &self.actor())?;
         } else if state == "In Progress" {
-            db.move_issue(&w.issue, "Todo", None, Some(&format!("the {} worker stopped without submitting", w.agent)), &self.actor())?;
+            db.crew_move_issue(&w.issue, "Todo", &format!("the {} worker stopped without submitting", w.agent), &self.actor())?;
         }
-        Ok(outcome.into())
+        Ok((outcome.into(), false))
     }
 
     /// Removes the worktree land kept whole while the worker ran in it, as land itself would have:
@@ -1450,10 +1465,14 @@ impl Supervisor {
     pub fn stop_all(&mut self, db: &mut Db) -> Result<Vec<String>> {
         for mut p in std::mem::take(&mut self.preparing) {
             p.process.stop();
+            let tx = rusqlite::Transaction::new_unchecked(&db.conn, rusqlite::TransactionBehavior::Immediate)?;
+            let open: bool = db.conn.query_row("SELECT EXISTS(SELECT 1 FROM crew_worker WHERE id = ?1 AND ended_at IS NULL)", [p.id], |r| r.get(0))?;
+            if !open { continue; }
             db.crew_worker_ended(p.id, None, "stopped", "stopped while setting up its worktree")?;
             if db.issue(&p.issue.key)?.is_some_and(|i| i.state == "In Progress" && i.claimed_by.as_deref() == Some(p.agent_id.as_str())) {
-                db.move_issue(&p.issue.key, "Todo", None, Some("the crew was stopped while setting up its worktree"), &self.actor())?;
+                db.crew_move_issue(&p.issue.key, "Todo", "the crew was stopped while setting up its worktree", &self.actor())?;
             }
+            tx.commit()?;
         }
         let mut landing = Vec::new();
         let mut i = 0;
@@ -1465,13 +1484,17 @@ impl Supervisor {
             }
             let mut w = self.running.remove(i);
             w.process.stop();
+            let tx = rusqlite::Transaction::new_unchecked(&db.conn, rusqlite::TransactionBehavior::Immediate)?;
+            let open: bool = db.conn.query_row("SELECT EXISTS(SELECT 1 FROM crew_worker WHERE id = ?1 AND ended_at IS NULL)", [w.id], |r| r.get(0))?;
+            if !open { continue; }
             db.crew_worker_ended(w.id, None, "stopped", "stopped by the person running the crew")?;
             let still_working = db.issue(&w.issue)?.is_some_and(|i| i.state == "In Progress" && i.claimed_by.as_deref() == Some(w.agent_id.as_str()));
             if still_working {
                 db.add_note(&w.issue, &format!("The crew was stopped while a {} worker had this issue. Its log: {}", w.agent, w.log.display()), "handoff", &self.actor())?;
-                db.move_issue(&w.issue, "Todo", None, Some("the crew was stopped"), &self.actor())?;
+                db.crew_move_issue(&w.issue, "Todo", "the crew was stopped", &self.actor())?;
             }
             db.log_event(&self.actor(), Some(&w.issue), None, "crew_ended", &format!("Crew worker ({}) stopped. Log: {}", w.agent, w.log.display()))?;
+            tx.commit()?;
         }
         Ok(landing)
     }
@@ -2096,17 +2119,43 @@ impl Db {
     }
 
     fn crew_worker_ended(&self, id: i64, code: Option<i32>, outcome: &str, reason: &str) -> Result<()> {
+        let tx = self.conn.is_autocommit().then(|| rusqlite::Transaction::new_unchecked(&self.conn, rusqlite::TransactionBehavior::Immediate)).transpose()?;
         let at = now();
-        self.conn.execute(
-            "UPDATE crew_worker SET ended_at = ?2, exit_code = ?3, outcome = ?4, reason = ?5 WHERE id = ?1",
+        let ended = self.conn.execute(
+            "UPDATE crew_worker SET ended_at = ?2, exit_code = ?3, outcome = ?4, reason = ?5 WHERE id = ?1 AND ended_at IS NULL",
             rusqlite::params![id, at, code, outcome, reason],
         )?;
+        if ended == 0 { return Ok(()); }
         // Its agent sends no session end when it exits (a `codex exec` never does), so its sessions
         // end here: the ones in its worktree since it started, and the one named after its agent id.
         let (worktree, started, agent_id): (String, i64, String) =
             self.conn.query_row("SELECT worktree, started_at, agent_id FROM crew_worker WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         let named = Some(agent_id.as_str()).filter(|a| !a.is_empty());
-        self.end_sessions_in(&worktree, started - 60, named, at, &format!("Ended: its crew worker exited ({outcome})"))?;
+        let replaced: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM crew_worker w JOIN issue i ON i.key = w.issue_key WHERE w.id = ?1 AND i.claimed_by IS NOT NULL AND i.claimed_by != w.agent_id)",
+            [id], |r| r.get(0),
+        )?;
+        if !replaced {
+            self.end_sessions_in(&worktree, started - 60, named, at, &format!("Ended: its crew worker exited ({outcome})"))?;
+        }
+        if let Some(tx) = tx { tx.commit()?; }
+        Ok(())
+    }
+
+    /// The two nonterminal dispositions Crew can choose, within its encompassing transaction.
+    /// Unlike a general move, these never apply a proposal, approve a plan, or close blockers.
+    fn crew_move_issue(&self, key: &str, to: &str, reason: &str, actor: &Actor) -> Result<()> {
+        if self.conn.is_autocommit() || !matches!(to, "Todo" | "Needs You") {
+            bail!("Crew disposition requires a write transaction and Todo or Needs You");
+        }
+        self.check_move(key, to, None, Some(reason), actor)?;
+        let issue = self.issue(key)?.context("issue vanished")?;
+        let ts = now();
+        self.conn.execute(
+            "UPDATE issue SET state = ?2, state_type = ?3, updated_at = ?4, claimed_by = NULL, claimed_at = NULL WHERE key = ?1",
+            params![issue.key, to, if to == "Todo" { "unstarted" } else { "started" }, crate::issues::iso(ts)],
+        )?;
+        self.log_event(actor, Some(&issue.key), None, "issue_moved", &format!("{} → {to}: {reason}", issue.state))?;
         Ok(())
     }
 
@@ -3541,6 +3590,71 @@ workers = 1
             assert_eq!((issue.state.as_str(), issue.claimed_by.as_deref()), ("In Progress", Some(external)));
             assert_eq!(f.db.session(external).unwrap().unwrap().state, "working");
         }
+    }
+
+    #[test]
+    fn focus_reclamation_waits_for_the_whole_settlement_transaction() {
+        use std::sync::{mpsc, Arc, Barrier};
+        use std::time::Duration;
+        let mut f = fixture(&format!("{GATE}[crew]\nworkers = 1\n"));
+        let goal = f.db.save_goal("NIT", None, &crate::goals::GoalChange {
+            title: Some("Focused feature".into()), outcome: Some("Ship it".into()), workers: Some(1), ..Default::default()
+        }, &Actor::Human).unwrap().id;
+        f.db.set_issue_goal("NIT-1", Some(goal), &Actor::Human).unwrap();
+        f.db.set_project_focus("NIT", Some(goal), false, &Actor::Human).unwrap();
+        let fake = Fake { installed: vec!["claude"], ..Default::default() };
+        let mut sup = supervisor(&f, &fake);
+        sup.tick(&mut f.db, false).unwrap();
+        let worker = sup.running.remove(0);
+        let stale = now() - 7 * 3600;
+        f.db.conn.execute("UPDATE issue SET claimed_at = ?1 WHERE key = 'NIT-1'", [stale]).unwrap();
+        f.db.conn.execute("UPDATE event SET ts = ?1 WHERE issue_key = 'NIT-1'", [stale]).unwrap();
+        f.db.conn.execute("UPDATE crew_worker SET pid = 0 WHERE id = ?1", [worker.id]).unwrap();
+        f.db.conn.execute(
+            "INSERT INTO session (id, vendor, cwd, started_at, last_seen_at, state) VALUES ('claude:old', 'claude', ?1, ?2, ?2, 'working')",
+            params![worker.worktree.to_string_lossy(), NOON.ts],
+        ).unwrap();
+        let rules = Playbook::load(&f.repo).unwrap().crew;
+        f.db.conn.execute_batch("CREATE TEMP TRIGGER reject_settlement BEFORE UPDATE OF state ON issue WHEN NEW.state = 'Todo' BEGIN SELECT RAISE(ABORT, 'injected settlement failure'); END").unwrap();
+        assert!(sup.settle(&mut f.db, &rules, &worker, End::Gone).is_err());
+        assert!(f.db.crew_workers_for("NIT-1").unwrap()[0].ended_at.is_none(), "worker retirement rolls back with the issue disposition");
+        assert_eq!(f.db.session("claude:old").unwrap().unwrap().state, "working", "session endings roll back too");
+        f.db.conn.execute_batch("DROP TRIGGER reject_settlement").unwrap();
+        let mut other = Db::open(&f.base.join("t.db")).unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let at_read = barrier.clone();
+        let (blocked_tx, blocked_rx) = mpsc::channel();
+        let worktree = worker.worktree.to_string_lossy().to_string();
+        let claim = std::thread::spawn(move || {
+            barrier.wait();
+            // Probe the actual writer lock, rather than rely on a timed sleep to guess that the
+            // other connection attempted reclamation after settlement read the old owner.
+            other.conn.busy_timeout(Duration::ZERO).unwrap();
+            let locked = other.conn.execute_batch("BEGIN IMMEDIATE").is_err();
+            if !locked { other.conn.execute_batch("ROLLBACK").unwrap(); }
+            blocked_tx.send(locked).unwrap();
+            other.conn.busy_timeout(Duration::from_secs(10)).unwrap();
+            let issue = other.next_task("NIT", "codex:replacement").unwrap().unwrap();
+            other.conn.execute(
+                "INSERT INTO session (id, vendor, cwd, started_at, last_seen_at, state) VALUES ('codex:replacement', 'codex', ?1, ?2, ?2, 'working')",
+                params![worktree, now()],
+            ).unwrap();
+            issue.key
+        });
+        // settle_database calls the clock after reading retirement and ownership, before any
+        // writes. Reclamation must be excluded at this exact point through the final issue move.
+        sup = sup.with_clock(move || {
+            at_read.wait();
+            assert!(blocked_rx.recv_timeout(Duration::from_secs(10)).unwrap(), "settlement owns the immediate write lock after its reads");
+            NOON
+        });
+        assert_eq!(sup.settle(&mut f.db, &rules, &worker, End::Gone).unwrap(), "failed");
+        assert_eq!(claim.join().unwrap(), "NIT-1");
+        let issue = f.db.issue("NIT-1").unwrap().unwrap();
+        assert_eq!((issue.state.as_str(), issue.claimed_by.as_deref()), ("In Progress", Some("codex:replacement")));
+        assert_eq!(f.db.session("claude:old").unwrap().unwrap().state, "ended");
+        assert_eq!(f.db.session("codex:replacement").unwrap().unwrap().state, "working");
+        assert_eq!(f.db.crew_workers_for("NIT-1").unwrap()[0].outcome.as_deref(), Some("failed"));
     }
 
     #[test]
