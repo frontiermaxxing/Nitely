@@ -606,10 +606,10 @@ mod tests {
             repos: vec![RepoConfig { name: "app".into(), root: root.to_string_lossy().into_owned(), integration_branch: "main".into(), project: Some("APP".into()) }],
             ..Default::default()
         };
-        let wt_path = wt.to_string_lossy().replace('\\', "/");
+        let wt_path = crate::paths::normalize(&wt.to_string_lossy());
         let of = |s: &GitState| -> BranchState {
             let r = &s.repos[0];
-            let i = r.worktrees.as_ref().unwrap().iter().position(|w| w.path.replace('\\', "/").eq_ignore_ascii_case(&wt_path)).expect("the worktree is listed");
+            let i = r.worktrees.as_ref().unwrap().iter().position(|w| crate::paths::normalize(&w.path) == wt_path).expect("the worktree is listed");
             r.states[i].clone().unwrap()
         };
         let idle = |_: &str| false;

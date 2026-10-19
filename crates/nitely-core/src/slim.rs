@@ -307,7 +307,7 @@ mod tests {
         // A name reaches every package's build directory; an anchored one only the root's (NIT-268).
         built(&landed, "pkg/build");
         let plan = plan_repo("repo", &repo, &Recent::default()).unwrap();
-        let landed_dirs = |plan: &[Candidate]| plan.iter().find(|c| c.worktree == landed).map(|c| c.dirs.iter().map(|(d, _)| d.clone()).collect::<Vec<_>>()).unwrap_or_default();
+        let landed_dirs = |plan: &[Candidate]| plan.iter().find(|c| crate::paths::normalize(&c.worktree.to_string_lossy()) == crate::paths::normalize(&landed.to_string_lossy())).map(|c| c.dirs.iter().map(|(d, _)| d.clone()).collect::<Vec<_>>()).unwrap_or_default();
         assert_eq!(landed_dirs(&plan), ["build", "pkg/build"], "{plan:#?}");
         std::fs::write(repo.join(crate::playbook::PLAYBOOK_PATH), "[lanes]\nkeep = [\"/build\"]\n").unwrap();
         assert_eq!(keep_dirs(&repo), ["/build"], "kept, not dropped for the defaults");
