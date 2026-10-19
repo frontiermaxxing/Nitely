@@ -124,7 +124,13 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
     assert.equal(reviewerSaved.view.reviewer.from, "project");
     assert.equal(reviewerSaved.view.reviewer.value.codex, "fake");
     assert.equal(git(repo, "show", "--format=", "--name-only", "HEAD"), ".nitely/playbook.toml");
-    await assert.rejects(page.invoke("reviewer_settings_save", { repo: reviewerRepo, edit: reviewerEdit, preview: reviewerPreview }), /changed since/);
+    const staleReviewerSave = await page.eval(`
+      try {
+        await window.__TAURI_INTERNALS__.invoke("reviewer_settings_save", ${JSON.stringify({ repo: reviewerRepo, edit: reviewerEdit, preview: reviewerPreview })});
+        return "unexpected success";
+      } catch (error) { return String(error); }
+    `);
+    assert.match(staleReviewerSave, /changed since/);
 
     // 2. Setup, as the setup sweep does it: connect filed the setup issue, the agent takes it, writes
     // a brief, files the first issues and marks setup done. Only the first new issue is Todo: the

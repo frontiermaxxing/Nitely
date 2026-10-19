@@ -450,17 +450,27 @@ pub(crate) fn commit_playbook_edit(root: &Path, branch: &str, edit: &dyn Fn(&str
         with_index(&["update-index", "--add", "--cacheinfo", &format!("100644,{blob},{PLAYBOOK_PATH}")])?;
         let tree = with_index(&["write-tree"])?;
         let commit = git(&["commit-tree", &tree, "-p", &tip, "-m", message])?;
-        git(&["update-ref", &format!("refs/heads/{branch}"), &commit, &tip]).context("the branch moved meanwhile; approve again")?;
+        if in_main {
+            // Git takes the real index lock before changing either the file or the index. Do this
+            // before moving the branch: a leftover index.lock must not leave a committed policy
+            // that the checkout (and therefore Nitely) still reads as the old policy.
+            git(&["restore", "--source", &commit, "--staged", "--worktree", "--", PLAYBOOK_PATH])
+                .context("the playbook checkout could not be updated; the integration branch has not changed")?;
+        }
+        if let Err(e) = git(&["update-ref", &format!("refs/heads/{branch}"), &commit, &tip]) {
+            if in_main {
+                // Catch up with the actual branch if another writer moved it, or put the old
+                // playbook back if the ref write was refused. Never undo a concurrent commit.
+                // Only this path changes; unrelated index entries stay untouched.
+                git(&["restore", "--source", &format!("refs/heads/{branch}"), "--staged", "--worktree", "--", PLAYBOOK_PATH])
+                    .context("the branch moved meanwhile and restoring the previous playbook failed; inspect the playbook before retrying")?;
+            }
+            return Err(e).context("the branch moved meanwhile; approve again");
+        }
         Ok(commit)
     })();
     std::fs::remove_dir_all(&scratch).ok();
-    let commit = result?;
-    if in_main {
-        // The checkout's index and file catch up with the commit; nothing else in it changes.
-        git(&["reset", "-q", "--", PLAYBOOK_PATH])?;
-        git(&["checkout", "--", PLAYBOOK_PATH])?;
-    }
-    Ok(commit)
+    result
 }
 
 impl Db {
