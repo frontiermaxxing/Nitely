@@ -65,6 +65,7 @@ pub struct Report {
     pub from_ms: i64,
     pub to_ms: i64,
     pub range_anchor: String,
+    pub range_boot: Option<String>,
     pub project: Option<String>,
     pub status: String,
     pub age_ms: Option<i64>,
@@ -93,6 +94,7 @@ pub fn query_at(dir: &Path, request: &Query, now: i64) -> Result<Report> {
     let mut to = request.to_ms.unwrap_or(now);
     let mut from = request.from_ms.unwrap_or_else(|| to.saturating_sub(if request.view == View::Now { 300_000 } else { 3_600_000 }));
     let mut anchor = "requested_wall_time".to_string();
+    let mut selected_boot = None;
     let store = Store::read(dir)?;
     let settings = store.as_ref().map(Store::settings).transpose()?.unwrap_or_default();
     let sessions = store.as_ref().map(Store::sessions).transpose()?.unwrap_or_default();
@@ -102,18 +104,27 @@ pub fn query_at(dir: &Path, request: &Query, now: i64) -> Result<Report> {
         to = previous.wall_ms;
         from = to.saturating_sub(600_000);
         anchor = "last_recorded_sample_of_previous_boot".into();
+        selected_boot = Some(boot);
     }
     if from < 0 || to < from || to.saturating_sub(from) > 31 * 86_400_000 { bail!("performance range must be ordered UTC milliseconds spanning at most 31 days"); }
     let latest = store.as_ref().map(|s| s.samples(i64::MIN, i64::MAX, 1)).transpose()?.unwrap_or_default().into_iter().next();
     let age = latest.as_ref().map(|s| now.saturating_sub(s.wall_ms));
     let status = if !settings.enabled { "paused" } else { match age { None => "unavailable", Some(a) if a < -2000 => "clock_changed", Some(a) if a <= 15_000 => "fresh", _ => "stale" } };
-    let use_minutes = to - from > 7_200_000 || latest.as_ref().is_some_and(|s| from < s.wall_ms.saturating_sub(i64::from(settings.detailed_hours) * 3_600_000));
+    let mut use_minutes = to - from > 7_200_000 || latest.as_ref().is_some_and(|s| from < s.wall_ms.saturating_sub(i64::from(settings.detailed_hours) * 3_600_000));
+    let same_boot = |boot: Option<&str>| selected_boot.as_deref().is_none_or(|selected| boot == Some(selected));
     let mut raw_samples = Vec::new();
     let mut points = Vec::new();
     let mut gaps = Vec::new();
     if let Some(store) = &store {
+        raw_samples = store.samples(from, to, 17280)?;
+        raw_samples.retain(|sample| same_boot(sample.boot.as_deref()));
+        raw_samples.reverse();
+        // Row-cap retention can expire a prior boot even when a backward clock makes its
+        // wall time appear recent. Retained minute history must remain available then.
+        if selected_boot.is_some() && raw_samples.is_empty() { use_minutes = true; }
         if use_minutes {
             let mut minutes = store.minutes(from, to, 43200)?;
+            minutes.retain(|minute| same_boot(minute.last.boot.as_deref()));
             minutes.reverse();
             for pair in minutes.windows(2) { if let Some(gap) = sample_gap(&pair[0].last, &pair[1].last, 90_000) { gaps.push(gap); } }
             for minute in &minutes {
@@ -122,11 +133,7 @@ pub fn query_at(dir: &Path, request: &Query, now: i64) -> Result<Report> {
                 }
             }
             points = minutes.into_iter().map(point_of_minute).collect();
-            raw_samples = store.samples(from, to, 17280)?;
-            raw_samples.reverse();
         } else {
-            raw_samples = store.samples(from, to, 17280)?;
-            raw_samples.reverse();
             for pair in raw_samples.windows(2) { if let Some(gap) = sample_gap(&pair[0], &pair[1], 15_000) { gaps.push(gap); } }
             points = raw_samples.iter().map(|s| Point { from_ms: s.wall_ms, to_ms: s.wall_ms, values: s.metrics.clone(), peaks: s.metrics.clone(), min_available_bytes: s.metrics.physical_available_bytes, observations: 1, resolution: "sample".into(), contains_gap: false }).collect();
         }
@@ -142,23 +149,23 @@ pub fn query_at(dir: &Path, request: &Query, now: i64) -> Result<Report> {
     let mut notes = vec!["Machine totals always cover the whole PC; project filters apply only to workload attribution and events.".into(), "Null counters mean unavailable, not zero; overlapping work is not proof of causation.".into()];
     if use_minutes { notes.push("Minute extrema preserve observed peaks; they do not establish sustained pressure within a minute.".into()); }
     notes.push("At most 100 recent sustained episodes are returned, covering retained detailed samples only; absence outside detailed retention is not evidence of no pressure.".into());
-    if anchor != "requested_wall_time" { notes.push("This window ends at the last retained sample of the previous boot, not a known shutdown instant.".into()); }
+    if selected_boot.is_some() { notes.push("This window contains only the selected previous boot and ends at its last retained sample, not a known shutdown instant. Events without a recorded boot identity are omitted because wall time alone cannot assign them across a clock change. Latest/current fields still describe current recording.".into()); }
     let returned_points = points.len();
-    let selected_sessions: Vec<Session> = sessions.into_iter().filter(|s| s.started_ms <= to && s.stopped_ms.is_none_or(|end| end >= from)).collect();
+    let selected_sessions: Vec<Session> = sessions.into_iter().filter(|s| same_boot(s.boot.as_deref()) && s.started_ms <= to && s.stopped_ms.is_none_or(|end| end >= from)).collect();
     let sessions_truncated = selected_sessions.len() > 200;
     let gaps_truncated = gaps.len() > 200;
     let admission_limits = latest.as_ref().and_then(|s| s.metrics.physical_total_bytes).map(crate::machine::limits_for_recorded_total);
-    let (events, events_truncated) = store.as_ref().map(|s| crate::performance_events::read(s, from, to, request.project.as_deref(), request.limit)).transpose()?.unwrap_or_default();
+    let (events, events_truncated) = store.as_ref().map(|s| crate::performance_events::read_for_boot(s, from, to, request.project.as_deref(), request.limit, selected_boot.as_deref())).transpose()?.unwrap_or_default();
     let attribution_latest = store.as_ref().map(|s| s.attribution_latest(request.project.as_deref())).transpose()?.flatten();
     let attribution_age_ms = attribution_latest.as_ref().map(|s| now.saturating_sub(s.wall_ms));
     let attribution_limit = request.limit.min(200);
-    let mut attribution = if request.view == View::Now { vec![] } else { store.as_ref().map(|s| s.attribution(from, to, attribution_limit+1, request.project.as_deref())).transpose()?.unwrap_or_default() };
+    let mut attribution = if request.view == View::Now { vec![] } else { store.as_ref().map(|s| s.attribution_for_boot(from, to, attribution_limit+1, request.project.as_deref(), selected_boot.as_deref())).transpose()?.unwrap_or_default() };
     let attribution_truncated = attribution.len() > attribution_limit;
     attribution.truncate(attribution_limit);
     attribution.reverse();
     let attribution_first_returned_ms = attribution.first().map(|s| s.wall_ms);
-    let attribution_retained_bounds_ms = store.as_ref().map(Store::attribution_bounds).transpose()?.flatten();
-    let mut workloads = store.as_ref().map(|s| s.recent_workloads(from, to, 201, request.project.as_deref())).transpose()?.unwrap_or_default();
+    let attribution_retained_bounds_ms = store.as_ref().map(|s| s.attribution_bounds_for_boot(selected_boot.as_deref())).transpose()?.flatten();
+    let mut workloads = store.as_ref().map(|s| s.recent_workloads_for_boot(from, to, 201, request.project.as_deref(), selected_boot.as_deref())).transpose()?.unwrap_or_default();
     let workloads_truncated = workloads.len() > 200;
     workloads.truncate(200);
     let related_issues = events.iter().filter_map(|e| e.issue.as_ref())
@@ -167,7 +174,7 @@ pub fn query_at(dir: &Path, request: &Query, now: i64) -> Result<Report> {
         .map(|key| (key.clone(), crate::links::issue_url(key))).collect();
     if attribution_truncated { notes.push(format!("Attribution is limited to the latest {attribution_limit} observations in the selected range; earlier machine-chart peaks may have contributors outside this response. Narrow the range to inspect those intervals.")); }
     notes.push("Process working-set sums can overlap and are not physical RAM. Process I/O includes nondisk activity; minute attribution values are per-metric peaks with interval I/O totals, not simultaneous readings.".into());
-    Ok(Report { as_of_ms: now, from_ms: from, to_ms: to, range_anchor: anchor, project: request.project.clone(), status: status.into(), age_ms: age, latest, settings, admission_limits,
+    Ok(Report { as_of_ms: now, from_ms: from, to_ms: to, range_anchor: anchor, range_boot: selected_boot, project: request.project.clone(), status: status.into(), age_ms: age, latest, settings, admission_limits,
         points, episodes, events, attribution_latest, attribution_age_ms, attribution, workloads, related_issues, sessions: selected_sessions.into_iter().take(200).collect(),
         coverage: Coverage { gaps: gaps.into_iter().take(200).collect(), bounded: source_points > request.limit, gaps_truncated, sessions_truncated, events_truncated, attribution_truncated, workloads_truncated, attribution_retained_bounds_ms, attribution_first_returned_ms, source_points, returned_points, resolution: if use_minutes { "minute" } else { "sample" }.into(), notes },
         units: serde_json::json!({ "wall_time": "UTC milliseconds since Unix epoch", "memory": "bytes", "cpu": "percent of machine capacity", "paging": "pages/second", "disk_throughput": "bytes/second", "disk_latency": "seconds/transfer", "disk_queue": "requests", "monotonic": "milliseconds; boot-relative on Windows, collector-relative elsewhere" }) })
@@ -391,5 +398,48 @@ mod tests {
         assert_eq!(fixture.query(Query::default()).status, "clock_changed");
         fixture.store.configure(&Settings { enabled: false, ..Settings::default() }).unwrap();
         assert_eq!(fixture.query(Query::default()).status, "paused");
+    }
+    #[test]
+    fn before_restart_isolates_boot_identity_when_wall_times_overlap() {
+        use crate::performance_attribution::{Context, Coverage, Identity, Usage};
+        use crate::performance_events::{self, Event, Kind};
+        let mut fixture = Fixture::new();
+        for (boot, session, offset, cpu) in [("a", "old", 90_000, 95.0), ("b", "new", 150_000, 10.0)] {
+            fixture.store.start_session(session, Some(boot), NOW-700_000).unwrap();
+            let mut last = None;
+            for n in 0..4 { last = Some(fixture.sample(NOW-offset+n*5000, Some(boot), session, Some(cpu))); }
+            let last = last.unwrap();
+            let minute = Minute { first_wall_ms: last.wall_ms, first_monotonic_ms: last.monotonic_ms, peaks: last.metrics.clone(), last: last.clone(), samples: 1, min_available_bytes: None };
+            fixture.store.db.execute("INSERT INTO minutes(wall_ms,json) VALUES(?1,?2)", rusqlite::params![last.wall_ms,serde_json::to_string(&minute).unwrap()]).unwrap();
+            let workload = Workload { id: boot.into(), kind: "build".into(), context: Context { project: Some("APP".into()), ..Default::default() }, root: Identity { boot: boot.into(), pid: 1, started: "1".into() }, start_ms: NOW-600_000, end_ms: Some(last.wall_ms), end_observed: false, job_accounting: None };
+            fixture.store.db.execute("INSERT INTO workloads(id,json,ended) VALUES(?1,?2,?3)", rusqlite::params![workload.id,serde_json::to_string(&workload).unwrap(),workload.end_ms]).unwrap();
+            let mut attributed = AttributionSample { wall_ms: last.wall_ms, monotonic_ms: last.monotonic_ms, session: session.into(), boot: Some(boot.into()), interval_ms: Some(5000), collection_ms: 1, coverage: Coverage::default(), resolution: "sample".into(), observations: 1, nitely: Usage { cpu_percent: Some(cpu), ..Default::default() }, related: Usage::default(), other: Usage::default(), unattributed_cpu_percent: None, workloads: vec![], top_other: vec![] };
+            fixture.store.append_attribution(&mut attributed, true).unwrap();
+        }
+        for (run, boot) in [(1, Some("a")), (2, Some("b")), (3, None)] {
+            performance_events::record(&fixture.dir, &Event { wall_ms: NOW-80_000, boot: boot.map(str::to_string), kind: Kind::Started, project: "APP".into(), issue: None, run, memory_cap_bytes: None }).unwrap();
+        }
+        let query = Query { view: View::History, before_last_restart: true, limit: 1, ..Default::default() };
+        let report = fixture.query(query.clone());
+        assert_eq!(report.range_boot.as_deref(), Some("a"));
+        assert_eq!(report.points.len(), 1);
+        assert_eq!(report.points[0].observations, 4);
+        assert_eq!(report.points[0].values.cpu_percent, Some(95.0));
+        assert_eq!(report.episodes.len(), 1);
+        assert_eq!(report.episodes[0].observations, 4);
+        assert_eq!(report.attribution.len(), 1, "boot filtering must precede response limits");
+        assert_eq!(report.attribution[0].boot.as_deref(), Some("a"));
+        assert_eq!(report.workloads.iter().map(|w| w.root.boot.as_str()).collect::<Vec<_>>(), ["a"]);
+        assert_eq!(report.sessions.iter().map(|s| s.boot.as_deref()).collect::<Vec<_>>(), [Some("a")]);
+        assert_eq!(report.events.iter().map(|e| e.run).collect::<Vec<_>>(), [1]);
+        assert!(report.coverage.notes.iter().any(|n| n.contains("Events without a recorded boot identity are omitted")));
+        assert_eq!(report.latest.unwrap().boot.as_deref(), Some("b"));
+        assert_eq!(report.attribution_latest.unwrap().boot.as_deref(), Some("b"));
+        fixture.store.db.execute("DELETE FROM samples WHERE json_extract(json,'$.boot')='a'", []).unwrap();
+        let minute_report = fixture.query(query);
+        assert_eq!(minute_report.coverage.resolution, "minute");
+        assert_eq!(minute_report.points.len(), 1);
+        assert_eq!(minute_report.points[0].values.cpu_percent, Some(95.0));
+        assert!(minute_report.episodes.is_empty(), "minute peaks cannot imply sustained pressure");
     }
 }

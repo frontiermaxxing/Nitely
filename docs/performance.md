@@ -133,6 +133,10 @@ window ends at the previous boot's last retained sample, not an assumed shutdown
 Unknown boot identity and unexplained collection gaps never manufacture a restart. Freshness
 describes the latest recorder sample, independently of the historical window. Pause, stale
 data, missing counters, clock changes and collection gaps remain explicit.
+The restart window is also restricted to the selected boot identity, so overlapping wall times
+after a clock correction cannot mix boots. Events without a recorded boot identity are omitted
+from that window with an explicit coverage note; new Windows events record their boot identity.
+The latest machine and attribution fields intentionally remain current.
 
 Sustained pressure episodes require at least 15 seconds of consecutive detailed observations
 without a collection gap: CPU at least 90%, available physical RAM at most 10%, or system

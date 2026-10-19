@@ -310,6 +310,9 @@ impl Store {
     /// Newest insertion first. Project filters only workload rows, never machine-wide totals.
     /// At most 1,000 samples; reads neither collect nor initialize telemetry.
     pub fn attribution(&self, from: i64, to: i64, limit: usize, project: Option<&str>) -> Result<Vec<AttributionSample>> {
+        self.attribution_for_boot(from, to, limit, project, None)
+    }
+    pub(crate) fn attribution_for_boot(&self, from: i64, to: i64, limit: usize, project: Option<&str>, boot: Option<&str>) -> Result<Vec<AttributionSample>> {
         if from > to || limit == 0 || limit > 1000 {
             bail!("invalid attribution range or limit (1–1000)");
         }
@@ -318,10 +321,10 @@ impl Store {
             return Ok(vec![]);
         }
         let mut stmt = self.db.prepare("SELECT json FROM (
-            SELECT * FROM (SELECT id AS seq,json FROM attribution WHERE wall_ms>=?1 AND wall_ms<=?2 ORDER BY id DESC LIMIT ?3)
-            UNION ALL SELECT * FROM (SELECT seq,json FROM attribution_minutes WHERE seq<COALESCE((SELECT MIN(id) FROM attribution),9223372036854775807) AND wall_ms>=?1 AND wall_ms<=?2 ORDER BY seq DESC LIMIT ?3)
+            SELECT * FROM (SELECT id AS seq,json FROM attribution WHERE wall_ms>=?1 AND wall_ms<=?2 AND (?4 IS NULL OR CASE WHEN json_valid(json) THEN json_extract(json,'$.b') END=?4) ORDER BY id DESC LIMIT ?3)
+            UNION ALL SELECT * FROM (SELECT seq,json FROM attribution_minutes WHERE seq<COALESCE((SELECT MIN(id) FROM attribution),9223372036854775807) AND wall_ms>=?1 AND wall_ms<=?2 AND (?4 IS NULL OR CASE WHEN json_valid(json) THEN json_extract(json,'$.b') END=?4) ORDER BY seq DESC LIMIT ?3)
             ) ORDER BY seq DESC LIMIT ?3")?;
-        let rows = stmt.query_map(params![from, to, limit as i64], |r| r.get::<_, String>(0))?;
+        let rows = stmt.query_map(params![from, to, limit as i64, boot], |r| r.get::<_, String>(0))?;
         let mut compact = Vec::new();
         for json in rows {
             if let Ok(row) = serde_json::from_str::<Compact>(&json?) {
@@ -351,11 +354,14 @@ impl Store {
     }
     /// Oldest/newest retained wall time, including compacted minute history.
     pub fn attribution_bounds(&self) -> Result<Option<(i64, i64)>> {
+        self.attribution_bounds_for_boot(None)
+    }
+    pub(crate) fn attribution_bounds_for_boot(&self, boot: Option<&str>) -> Result<Option<(i64, i64)>> {
         let exists: bool = self.db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='attribution')", [], |r| r.get(0))?;
         if !exists {
             return Ok(None);
         }
-        let (first,last):(Option<i64>,Option<i64>)=self.db.query_row("SELECT MIN(first),MAX(last) FROM (SELECT MIN(wall_ms) AS first,MAX(wall_ms) AS last FROM attribution UNION ALL SELECT MIN(wall_ms),MAX(wall_ms) FROM attribution_minutes)",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
+        let (first,last):(Option<i64>,Option<i64>)=self.db.query_row("SELECT MIN(first),MAX(last) FROM (SELECT MIN(wall_ms) AS first,MAX(wall_ms) AS last FROM attribution WHERE ?1 IS NULL OR CASE WHEN json_valid(json) THEN json_extract(json,'$.b') END=?1 UNION ALL SELECT MIN(wall_ms),MAX(wall_ms) FROM attribution_minutes WHERE ?1 IS NULL OR CASE WHEN json_valid(json) THEN json_extract(json,'$.b') END=?1)",[boot],|r|Ok((r.get(0)?,r.get(1)?)))?;
         Ok(first.zip(last))
     }
     pub fn attribution_latest(&self, project: Option<&str>) -> Result<Option<AttributionSample>> {
@@ -382,6 +388,9 @@ impl Store {
     }
     /// Includes registered work that exited entirely between samples, with its separate Job totals.
     pub fn recent_workloads(&self, from: i64, to: i64, limit: usize, project: Option<&str>) -> Result<Vec<Workload>> {
+        self.recent_workloads_for_boot(from, to, limit, project, None)
+    }
+    pub(crate) fn recent_workloads_for_boot(&self, from: i64, to: i64, limit: usize, project: Option<&str>, boot: Option<&str>) -> Result<Vec<Workload>> {
         if from > to || limit == 0 || limit > 1000 {
             bail!("invalid workload range or limit (1–1000)");
         }
@@ -394,7 +403,7 @@ impl Store {
         let mut result = Vec::new();
         for json in rows {
             if let Ok(w) = serde_json::from_str::<Workload>(&json?) {
-                if w.start_ms <= to && project.is_none_or(|p| w.context.project.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(p))) {
+                if w.start_ms <= to && boot.is_none_or(|b| w.root.boot == b) && project.is_none_or(|p| w.context.project.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(p))) {
                     result.push(w);
                     if result.len() == limit {
                         break;

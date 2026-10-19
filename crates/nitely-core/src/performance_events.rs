@@ -11,6 +11,8 @@ pub enum Kind { Started, Ended, WaitingForMemory, MemoryWaitEnded, OutOfMemory }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
     pub wall_ms: i64,
+    #[serde(default)]
+    pub boot: Option<String>,
     pub kind: Kind,
     pub project: String,
     pub issue: Option<String>,
@@ -51,16 +53,19 @@ fn record_in_store(store: &mut Store, event: &Event) -> Result<()> {
 pub fn lane(db: &crate::Db, run: i64, kind: Kind) {
     let Some(dir) = db.conn.path().filter(|p| !p.is_empty()).and_then(|p| Path::new(p).parent()) else { return };
     let row = db.conn.query_row("SELECT project,issue_key,memory_cap FROM lane_run WHERE id=?1", [run], |r| Ok((r.get::<_, String>(0)?,r.get::<_, Option<String>>(1)?,r.get::<_, Option<i64>>(2)?)));
-    if let Ok((project, issue, cap)) = row { let _ = record(&dir.join("performance"), &Event { wall_ms: performance::wall_ms(), kind, project, issue, run, memory_cap_bytes: cap.and_then(|v| u64::try_from(v).ok()) }); }
+    if let Ok((project, issue, cap)) = row { let _ = record(&dir.join("performance"), &Event { wall_ms: performance::wall_ms(), boot: performance::boot_id(), kind, project, issue, run, memory_cap_bytes: cap.and_then(|v| u64::try_from(v).ok()) }); }
 }
 pub fn read(store: &Store, from: i64, to: i64, project: Option<&str>, limit: usize) -> Result<(Vec<Event>, bool)> {
+    read_for_boot(store, from, to, project, limit, None)
+}
+pub(crate) fn read_for_boot(store: &Store, from: i64, to: i64, project: Option<&str>, limit: usize, boot: Option<&str>) -> Result<(Vec<Event>, bool)> {
     if limit == 0 || limit > 2000 { bail!("event limit must be 1–2000"); }
     let exists: bool = store.db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='performance_event')", [], |r| r.get(0))?;
     if !exists { return Ok((vec![], false)); }
-    let mut stmt = store.db.prepare("SELECT json FROM performance_event WHERE wall_ms>=?1 AND wall_ms<=?2 AND (?3 IS NULL OR project=?3 COLLATE NOCASE) ORDER BY id DESC LIMIT ?4")?;
+    let mut stmt = store.db.prepare("SELECT json FROM performance_event WHERE wall_ms>=?1 AND wall_ms<=?2 AND (?3 IS NULL OR project=?3 COLLATE NOCASE) AND (?5 IS NULL OR CASE WHEN json_valid(json) THEN json_extract(json,'$.boot') END=?5) ORDER BY id DESC LIMIT ?4")?;
     let mut events = Vec::new();
     let mut rows = 0;
-    for row in stmt.query_map(params![from,to,project,(limit+1) as i64], |r| r.get::<_, String>(0))? { rows += 1; if let Ok(event) = serde_json::from_str(&row?) { events.push(event); } }
+    for row in stmt.query_map(params![from,to,project,(limit+1) as i64,boot], |r| r.get::<_, String>(0))? { rows += 1; if let Ok(event) = serde_json::from_str(&row?) { events.push(event); } }
     events.truncate(limit);
     Ok((events, rows > limit))
 }
@@ -99,7 +104,7 @@ mod tests {
     #[test]
     fn pause_clear_and_retention_apply_to_durable_events() {
         let dir = crate::paths::unique_temp("performance-event-retention", "");
-        let event = |at, run| Event { wall_ms: at, kind: Kind::Started, project: "APP".into(), issue: None, run, memory_cap_bytes: None };
+        let event = |at, run| Event { wall_ms: at, boot: None, kind: Kind::Started, project: "APP".into(), issue: None, run, memory_cap_bytes: None };
         record(&dir, &event(1, 1)).unwrap();
         record(&dir, &event(31*86_400_000, 2)).unwrap();
         let store = Store::open(&dir).unwrap();
@@ -116,6 +121,7 @@ mod tests {
     }
     #[test]
     fn a_waiting_event_cannot_repopulate_paused_deleted_history() {
+        thread_local! { static WAITING: std::cell::RefCell<Option<std::sync::mpsc::Sender<()>>> = const { std::cell::RefCell::new(None) }; }
         let dir = crate::paths::unique_temp("performance-event-pause-race", "");
         let mut writer = Store::open(&dir).unwrap();
         let mut person = Store::open(&dir).unwrap();
@@ -124,10 +130,17 @@ mod tests {
         tx.execute("DELETE FROM performance_event", []).unwrap();
         let (ready, wait) = std::sync::mpsc::channel();
         let thread = std::thread::spawn(move || {
-            ready.send(()).unwrap();
-            record_in_store(&mut writer, &Event { wall_ms: performance::wall_ms(), kind: Kind::Started, project: "APP".into(), issue: None, run: 1, memory_cap_bytes: None }).unwrap();
+            WAITING.with(|signal| *signal.borrow_mut() = Some(ready));
+            // Signal only once SQLite actually waits for the person's transaction. This
+            // fixture tolerates scheduling/fsync delay without changing production's timeout.
+            writer.db.busy_handler(Some(|attempt| {
+                WAITING.with(|signal| { if let Some(ready) = signal.borrow_mut().take() { ready.send(()).unwrap(); } });
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                attempt < 1000
+            })).unwrap();
+            record_in_store(&mut writer, &Event { wall_ms: performance::wall_ms(), boot: None, kind: Kind::Started, project: "APP".into(), issue: None, run: 1, memory_cap_bytes: None }).unwrap();
         });
-        wait.recv().unwrap();
+        wait.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
         tx.commit().unwrap();
         thread.join().unwrap();
         assert!(read(&person, 0, i64::MAX, None, 100).unwrap().0.is_empty());
