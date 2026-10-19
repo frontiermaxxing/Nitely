@@ -1833,24 +1833,18 @@ impl Db {
             // back, once nothing else it asked is open, to its asker while that agent is live, and
             // otherwise to Todo, where next_task gives it to the next agent with the answer on its
             // timeline.
-            // Whether an ask put it in the Needs You it is in: one that moved it there, or one asked
-            // since, while it waited. An answer to any question on it (a triage question that went
-            // to the person, say) can then end the wait; a Needs You entered later, for an
-            // approval, is not the ask's to end.
-            let entered: Option<i64> = tx.query_row(
-                "SELECT MAX(ts) FROM event WHERE issue_key = ?1 AND type = 'issue_moved' AND summary LIKE '%→ Needs You%'",
-                [k],
-                |r| r.get(0),
-            )?;
-            // The agent whose question put it there (asked just before it entered; one asked since
-            // only joined the wait) is the one it goes back to.
-            let moved: Option<String> = tx
-                .query_row(
-                    "SELECT asked_by FROM ask WHERE issue_key = ?1 AND moved_from IS NOT NULL AND asked_at BETWEEN ?2 - 60 AND ?2 ORDER BY id DESC LIMIT 1",
-                    params![k, entered.unwrap_or(i64::MIN + 60)],
-                    |r| r.get(0),
-                )
-                .optional()?;
+            // Whether the Needs You it is in is an ask's wait: the move that began that wait, recorded
+            // on its asks, is still the issue's latest entry into Needs You. An answer to any question
+            // in that wait (a triage question that went to the person, say) can then end it; a Needs
+            // You entered since, for an approval, is not the ask's to end. It goes back to the agent
+            // whose question began the wait.
+            let entry = latest_needs_you_entry(&tx, k)?;
+            let moved: Option<String> = match entry {
+                Some(e) => tx
+                    .query_row("SELECT asked_by FROM ask WHERE issue_key = ?1 AND wait_event = ?2 AND moved_from IS NOT NULL ORDER BY id LIMIT 1", params![k, e], |r| r.get(0))
+                    .optional()?,
+                None => None,
+            };
             let state: Option<String> = tx.query_row("SELECT state FROM issue WHERE key = ?1", [k], |r| r.get(0)).optional()?;
             // Any other question on it still open keeps it waiting, whoever asked it.
             let still_asking: i64 =
@@ -1891,21 +1885,25 @@ impl Db {
         if issue.origin != "nitely" || ask.finding.is_some() {
             return Ok(());
         }
-        // Another question while it already waits on an earlier one: whichever is answered last
-        // puts it back.
+        // Another question while it already waits on an ask's answer joins that wait: whichever is
+        // answered last puts it back.
         if issue.state == NEEDS_HUMAN {
-            self.conn.execute(
-                "UPDATE ask SET moved_from = (SELECT moved_from FROM ask WHERE issue_key = ?2 AND id != ?1 AND answer IS NULL AND closed IS NULL AND moved_from IS NOT NULL LIMIT 1)
-                 WHERE id = ?1",
-                params![ask.id, key],
-            )?;
+            if let Some(entry) = latest_needs_you_entry(&self.conn, key)? {
+                self.conn.execute(
+                    "UPDATE ask SET wait_event = ?3,
+                       moved_from = (SELECT moved_from FROM ask WHERE issue_key = ?2 AND wait_event = ?3 AND moved_from IS NOT NULL ORDER BY id LIMIT 1)
+                     WHERE id = ?1 AND EXISTS (SELECT 1 FROM ask WHERE issue_key = ?2 AND wait_event = ?3 AND moved_from IS NOT NULL)",
+                    params![ask.id, key, entry],
+                )?;
+            }
             return Ok(());
         }
         if issue.state != "In Progress" {
             return Ok(());
         }
         self.move_issue(key, NEEDS_HUMAN, None, Some(&format!("waiting for the answer to ask {}", ask.id)), actor)?;
-        self.conn.execute("UPDATE ask SET moved_from = 'In Progress' WHERE id = ?1", [ask.id])?;
+        let entry = latest_needs_you_entry(&self.conn, key)?;
+        self.conn.execute("UPDATE ask SET moved_from = 'In Progress', wait_event = ?2 WHERE id = ?1", params![ask.id, entry])?;
         Ok(())
     }
 
@@ -1937,6 +1935,17 @@ impl Db {
         }
         Ok(())
     }
+}
+
+/// The event of the issue's latest move into Needs You from another state: where its current wait
+/// began. A move from Needs You to Needs You begins none.
+fn latest_needs_you_entry(conn: &rusqlite::Connection, key: &str) -> Result<Option<i64>> {
+    Ok(conn.query_row(
+        "SELECT MAX(id) FROM event WHERE issue_key = ?1 AND type = 'issue_moved'
+           AND (summary LIKE '% → Needs You' OR summary LIKE '% → Needs You:%') AND summary NOT LIKE 'Needs You →%'",
+        [key],
+        |r| r.get(0),
+    )?)
 }
 
 /// An ask's columns, read joined to its issue as `i`. An unanswered ask whose issue closed before
@@ -2592,6 +2601,45 @@ mod tests {
         db.wait_on_ask(&c, &agent).unwrap();
         db.answer_ask(c.id, "The short one", &Actor::Human).unwrap();
         assert_eq!(db.issue("NIT-3").unwrap().unwrap().state, "Needs You");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Which wait an answer ends is the one its ask began, recorded on the ask, not guessed from
+    /// times (NIT-364): a repeated Needs You minutes later does not strand the answered work, and
+    /// an approval wait that begins right after an answer is not ended by a later question's.
+    #[test]
+    fn an_answer_ends_only_the_wait_its_ask_began() {
+        let (mut db, dir) = db();
+        db.create_project("NIT", "Nitely").unwrap();
+        let agent = Actor::Agent("claude:s".into());
+        db.conn
+            .execute("INSERT INTO session (id, vendor, cwd, started_at, last_seen_at, state) VALUES ('claude:s', 'claude', 'C:/code/app', ?1, ?1, 'working')", [now()])
+            .unwrap();
+        db.create_issue(&new("Pick a currency"), &agent).unwrap();
+        db.move_issue("NIT-1", "In Progress", None, None, &agent).unwrap();
+
+        // Asked, then the issue is moved to Needs You again ten minutes later: still the ask's wait.
+        let a = db.create_ask("EUR or USD?", &[], Some("NIT-1"), None, &agent).unwrap();
+        db.wait_on_ask(&a, &agent).unwrap();
+        db.conn.execute("UPDATE ask SET asked_at = asked_at - 600 WHERE id = ?1", [a.id]).unwrap();
+        db.conn.execute("UPDATE event SET ts = ts - 600 WHERE issue_key = 'NIT-1'", []).unwrap();
+        db.conn
+            .execute("INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, 'claude:s', 'NIT-1', 'issue_moved', 'Needs You → Needs You')", [now()])
+            .unwrap();
+        db.answer_ask(a.id, "EUR", &Actor::Human).unwrap();
+        assert_eq!(db.issue("NIT-1").unwrap().unwrap().state, "In Progress", "the repeated move is no new wait");
+
+        // Answered, then a wait for an approval begins at once: a question asked during it does
+        // not end it.
+        let b = db.create_ask("Which symbol?", &[], Some("NIT-1"), None, &agent).unwrap();
+        db.wait_on_ask(&b, &agent).unwrap();
+        db.answer_ask(b.id, "€", &Actor::Human).unwrap();
+        assert_eq!(db.issue("NIT-1").unwrap().unwrap().state, "In Progress");
+        db.move_issue("NIT-1", "Needs You", None, Some("waits for the person's approval"), &agent).unwrap();
+        let c = db.create_ask("Which rounding?", &[], Some("NIT-1"), None, &agent).unwrap();
+        db.wait_on_ask(&c, &agent).unwrap();
+        db.answer_ask(c.id, "Half up", &Actor::Human).unwrap();
+        assert_eq!(db.issue("NIT-1").unwrap().unwrap().state, "Needs You", "the approval still waits");
         std::fs::remove_dir_all(dir).ok();
     }
 
