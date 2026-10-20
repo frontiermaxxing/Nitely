@@ -15,6 +15,7 @@ export { Labels } from "./Labels";
 export { Meter, type MeterPart } from "./Meter";
 export { PrMark } from "./PrMark";
 export { PriorityMark } from "./PriorityMark";
+export { SettingsRow, SettingsSection } from "./SettingsRow";
 export { ResultMark } from "./ResultMark";
 export { FindingDots, SeverityMark } from "./SeverityMark";
 export { Sparkline } from "./Sparkline";

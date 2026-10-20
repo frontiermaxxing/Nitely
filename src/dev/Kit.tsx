@@ -23,6 +23,8 @@ import {
   PriorityMark,
   RemoveButton,
   ResultMark,
+  SettingsRow,
+  SettingsSection,
   SeverityMark,
   SourceTag,
   Sparkline,
@@ -394,6 +396,29 @@ export default function Kit() {
       </section>
 
       <KitSelect />
+
+      <section>
+        <h2>SettingsSection and SettingsRow</h2>
+        <p className="muted small">Label and why, the control, the source. Narrow the window below about 1000px: the control drops under the label.</p>
+        <div className="kit-settings">
+          <SettingsSection title="Review" description="Another vendor's agent reads every change before it lands.">
+            <SettingsRow label="Automated review" why="Build and test gates and approval rules still apply when it is off." source={<SourceTag source="nitely" />}>
+              <span className="kit-control">a switch</span>
+            </SettingsRow>
+            <SettingsRow label="Integration branch" why="Where tasks branch from and land on." htmlFor="kit-branch" source={<SourceTag source="project" onReset={() => {}} />}>
+              <TextField id="kit-branch" mono defaultValue="main" />
+            </SettingsRow>
+            <SettingsRow label="A setting with no source" why="The source column stays, empty, so controls line up.">
+              <span className="kit-control">a select, full width or its natural width</span>
+            </SettingsRow>
+          </SettingsSection>
+          <SettingsSection title="Lanes" description="Warm checkouts that build and test for every worktree.">
+            <SettingsRow label="Lanes" source={<SourceTag source="app" />}>
+              <span className="kit-control">a segmented control</span>
+            </SettingsRow>
+          </SettingsSection>
+        </div>
+      </section>
 
       <section>
         <h2>EmptyState</h2>

@@ -1,0 +1,37 @@
+/* ----- Settings layout: sections with a heading and a hairline, rows of label | control | source
+   (src/ui/SettingsRow.tsx, docs/visualization.md "Settings layout") ----- */
+.setting-group { container-type: inline-size; padding-top: 36px; min-width: 0; }
+.setting-group:first-child { padding-top: 0; }
+.setting-group-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.setting-group-head h2 { margin: 0; font-size: 17px; font-weight: var(--weight-strong); letter-spacing: -0.005em; }
+.setting-group-head p { margin: 0; font-size: 12.5px; color: var(--fg-2); line-height: 1.5; text-wrap: pretty; }
+
+.setting {
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr) 150px;
+  grid-template-areas: "label control source";
+  gap: 8px 24px;
+  align-items: start;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--line);
+}
+.setting-label { grid-area: label; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.setting-name { font-size: 13.5px; font-weight: var(--weight-medium); color: var(--fg); overflow-wrap: anywhere; }
+.setting-why { font-size: 12.5px; color: var(--fg-2); line-height: 1.5; text-wrap: pretty; }
+.setting-control { grid-area: control; min-width: 0; }
+.setting-source { grid-area: source; display: flex; justify-content: flex-end; min-width: 0; }
+.setting-source:empty { display: none; }
+
+/* A section about 760px wide (a 1000px window less the sidebar and the page's padding): the
+   control goes under the label, full width, and the source tag stays on the label's line. */
+@container (max-width: 760px) {
+  .setting {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "label source" "control control";
+    gap: 10px 16px;
+  }
+}
+
+/* The Kit's stand-ins for the controls and source tags these rows will hold (src/dev/Kit.tsx). */
+.kit-settings { display: grid; }
+.kit-control { display: flex; align-items: center; height: 32px; padding: 0 12px; border: 1px dashed var(--line-strong); border-radius: 7px; font-size: var(--text-sm); color: var(--fg-3); }

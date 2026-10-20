@@ -398,6 +398,15 @@ Rows come active goals first, nearer target dates first. A project page shows it
 the List and the Board, under the summary; a project without goals shows none. The Kit (`#kit`)
 draws a row on track, a late one, a reached one and an empty one.
 
+## Settings layout
+
+Settings pages fill the window: no max-width column and no stacked cards.
+- **Sections:** a section is `SettingsSection` (`src/ui/SettingsRow.tsx`). It is a heading (17px) with a one-line description on the same baseline, and a hairline under it. Sections are set apart by 36px and their headings.
+- **Rows:** each setting is a `SettingsRow`, a grid of `320px | 1fr | 150px`. The label and a line of why sit on the left, the control fills the middle (full width or its natural width), and the source tag sits on the right. Every row ends with a hairline.
+- **Narrow:** in a section narrower than about 760px (a window of about 1000px, less the sidebar), the control drops under the label and the source tag stays on the label's line.
+- **Labels:** pass `htmlFor` when the control is a single input, so the label focuses it. Without it, the row is a group labelled by its label.
+- **Kit:** the Kit (`#kit`) draws a section with and without sources.
+
 ## Activity lanes
 
 ![Activity over 12 hours, light](img/activity-light.png)
