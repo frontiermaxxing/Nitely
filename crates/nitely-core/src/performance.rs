@@ -169,7 +169,10 @@ impl Store {
         self.db.execute("DELETE FROM sessions WHERE id NOT IN (SELECT id FROM sessions ORDER BY id DESC LIMIT 4096)", [])?;
         Ok(())
     }
+    /// The marker that tells a clean stop from a crash. The process writing it is exiting while
+    /// its own CLI writes to this database too, so it waits longer for the lock than a sample does.
     pub fn stop_session(&self, session: &str) -> Result<()> {
+        self.db.busy_timeout(Duration::from_secs(5))?;
         self.db.execute("UPDATE sessions SET stopped_ms=?1 WHERE session=?2", params![wall_ms(), session])?;
         Ok(())
     }
@@ -322,16 +325,23 @@ pub fn record(dir: &Path, stop: &AtomicBool) -> Result<()> {
     if !store.current_version()? || !store.settings()?.enabled { return Ok(()); }
     crate::performance_attribution::ensure_service(dir);
     let mut collector = Collector::new();
+    let first = collector.sample();
+    store.start_session(&first.session, first.boot.as_deref(), first.wall_ms)?;
+    // A failed write ends this session as surely as the stop flag does, so either way it is
+    // marked stopped: an open session is how a crash reads.
+    let sampled = sample_until_stopped(&mut store, &mut collector, first, stop);
+    let stopped = store.stop_session(&collector.session);
+    sampled.and(stopped)
+}
+fn sample_until_stopped(store: &mut Store, collector: &mut Collector, first: Sample, stop: &AtomicBool) -> Result<()> {
     let mut attribution = crate::performance_attribution::Sampler::default();
     let mut minute: Option<Minute> = None;
     let mut minute_id = None;
-    let first = collector.sample();
-    store.start_session(&first.session, first.boot.as_deref(), first.wall_ms)?;
     let mut sample = first;
     while !stop.load(Ordering::Relaxed) {
         let settings = store.settings()?;
         if !store.current_version()? || !settings.enabled { break; }
-        let mut attributed = attribution.collect(&store,&sample)?;
+        let mut attributed = attribution.collect(store,&sample)?;
         sample.collection_ms = sample.collection_ms.saturating_add(attributed.collection_ms);
         if minute.as_ref().is_none_or(|m| sample.monotonic_ms.saturating_sub(m.first_monotonic_ms) >= 60_000
             || (sample.wall_ms - m.last.wall_ms - sample.monotonic_ms.saturating_sub(m.last.monotonic_ms) as i64).unsigned_abs() > 2_000) {
@@ -343,7 +353,6 @@ pub fn record(dir: &Path, stop: &AtomicBool) -> Result<()> {
         wait(stop, Duration::from_millis(CADENCE_MS));
         sample = collector.sample();
     }
-    store.stop_session(&collector.session)?;
     Ok(())
 }
 
