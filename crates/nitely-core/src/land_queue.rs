@@ -621,7 +621,14 @@ fn land_prefix(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stacked: Vec<S
     let pushed = push.then(|| git_remote(root, &["push", "origin", &base]));
     // The after steps once for the whole stack, still under the lock.
     let mut after = Landed { base: base.clone(), landed_from: Some(before.to_string()), ..Default::default() };
-    land::after_land(root, pb, &mut after);
+    {
+        // This install serves the actual landed prefix, which may differ from the queued batch.
+        // A shared install belongs to its common project, never an arbitrary member issue or
+        // the issue whose caller happened to drain the queue.
+        let keys: Vec<&str> = stacked.iter().map(|s| s.entry.issue.as_str()).collect();
+        let _telemetry = install_scope(db, &keys);
+        land::after_land(root, pb, &mut after);
+    }
 
     let keys: Vec<String> = stacked.iter().map(|s| s.entry.issue.clone()).collect();
     for s in stacked {
@@ -727,6 +734,13 @@ fn finish(db: &Db, entry: &Entry, state: &str, report: &Landed) -> Result<()> {
         params![entry.id, state, now(), serde_json::to_string(report)?],
     )?;
     Ok(())
+}
+
+fn install_scope(db: &Db, issues: &[&str]) -> crate::performance_attribution::Scope {
+    let projects: Vec<_> = issues.iter().map(|key| db.issue(key).ok().flatten().and_then(|issue| issue.project)).collect();
+    let project = projects.first().cloned().flatten().filter(|p| projects.iter().all(|value| value.as_ref() == Some(p)));
+    let issue = (issues.len() == 1).then(|| issues[0].to_string());
+    crate::performance_attribution::Scope::new(db, crate::performance_attribution::Context { project, issue, ..Default::default() })
 }
 
 #[cfg(test)]
@@ -843,6 +857,44 @@ batch = "waiting"
         fn on_main(&self, file: &str) -> bool {
             self.repo.join(file).exists()
         }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn attribution_queued_installs_use_actual_landed_prefix() {
+        let mut f = fixture();
+        let path = f.repo.join(playbook::PLAYBOOK_PATH);
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, format!("{text}\n[[land.after]]\nrun = \"echo installed fixture\"\n")).unwrap();
+        sh(&f.repo, &["commit", "-qam", "add fixture install"]);
+        let (a, _) = f.submitted("A", &[("a.txt", "a")]);
+        let (b, _) = f.submitted("B", &[("b.txt", "b")]);
+        let (c, _) = f.submitted("C", &[("c.txt", "c")]);
+        let store = crate::performance::Store::open(&f.base.join("performance")).unwrap();
+        // Simulate A's caller draining another issue, then a shared batch. Each after-land
+        // command must get context from what actually landed, not this ambient caller.
+        let caller = crate::performance_attribution::Scope::new(&f.db, crate::performance_attribution::Context {
+            project: Some("NIT".into()), issue: Some(a.clone()), job_id: Some(123), ..Default::default()
+        });
+        f.queue_and_run(&[&b]);
+        f.queue_and_run(&[&a, &c]);
+        drop(caller);
+        assert_eq!(f.entry(&b).state, "landed");
+        assert_eq!(f.entry(&a).state, "landed");
+        assert_eq!(f.entry(&c).state, "landed");
+        let installs: Vec<_> = store.recent_workloads(0, i64::MAX, 100, None).unwrap().into_iter().filter(|w| w.kind == "install").collect();
+        assert_eq!(installs.len(), 2);
+        assert!(installs.iter().any(|w| w.context.issue.as_deref() == Some(b.as_str())));
+        assert!(installs.iter().any(|w| w.context.issue.is_none()), "shared install must not select a member issue");
+        for install in installs {
+            assert_eq!(install.context.project.as_deref(), Some("NIT"));
+            assert!(install.context.job_id.is_none(), "caller A's submit job must not leak");
+            assert!(install.end_ms.is_some());
+            assert!(install.job_accounting.as_ref().unwrap().processes >= 1);
+        }
+        drop(store);
+        drop(f.db);
+        std::fs::remove_dir_all(&f.base).ok();
     }
 
     #[test]

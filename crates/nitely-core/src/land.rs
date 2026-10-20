@@ -73,7 +73,6 @@ pub struct LandOptions<'a> {
 
 pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Actor) -> Result<Landed> {
     let issue = db.issue(opts.issue_key)?.with_context(|| format!("no issue {}", opts.issue_key))?;
-    let _telemetry = crate::performance_attribution::Scope::new(db, crate::performance_attribution::Context { project: issue.project.clone(), issue: Some(issue.key.clone()), ..Default::default() });
     let root = playbook::repo_for_issue(config, issue.project.as_deref(), opts.dir)?;
     let pb = Playbook::load(&root)?;
     // With `[land] batch`, a change that may land with others waits in the queue (land_queue.rs).
@@ -81,6 +80,7 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
     if opts.push && crate::land_queue::lands_alone(db, &pb, &issue.key)?.is_none() {
         return crate::land_queue::land(db, &root, &issue.key, opts, actor);
     }
+    let _telemetry = crate::performance_attribution::Scope::new(db, crate::performance_attribution::Context { project: issue.project.clone(), issue: Some(issue.key.clone()), ..Default::default() });
     let base = pb.integration_branch().to_string();
     let mut report = Landed { issue: issue.key.clone(), base: base.clone(), ..Default::default() };
 
@@ -123,6 +123,7 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
     }
     // Changes that queued while this land held the lock land now, under it: their own lands may
     // have stopped waiting. Not after a land kept local (--no-push): their push would publish it.
+    drop(_telemetry);
     let kept_local = !opts.push && playbook::has_origin(&root);
     if !kept_local && crate::land_queue::has_waiting(db, &root).unwrap_or(false) {
         if let Err(e) = crate::land_queue::run_queue(db, &root) {

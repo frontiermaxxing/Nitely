@@ -1265,6 +1265,9 @@ pub fn run_gate_as(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option
     // Outside lanes too, the gate takes one of the machine's build slots and waits for its memory,
     // so a project without lanes cannot take the whole machine from the rest (NIT-266).
     let project = issue_key.and_then(|k| db.issue(k).ok().flatten()).and_then(|i| i.project).unwrap_or_default();
+    let _telemetry = crate::performance_attribution::Scope::new(db, crate::performance_attribution::Context {
+        project: (!project.is_empty()).then(|| project.clone()), issue: issue_key.map(str::to_string), ..Default::default()
+    });
     let key: Vec<&str> = steps.iter().filter(|(_, skip)| skip.is_none()).map(|(c, _)| c.as_str()).collect();
     let turn = crate::lanes::hold_machine(db, repo_root, worktree, &project, issue_key, kind, &key.join("\n"), actor)?;
     // A sparse worktree lacks files the gate builds (a workspace's other members): without build

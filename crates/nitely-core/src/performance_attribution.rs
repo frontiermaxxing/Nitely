@@ -684,22 +684,29 @@ impl Sampler {
             let mut cursor = identity.clone();
             let mut seen = HashSet::new();
             let mut owner = None;
+            let mut inherited = None;
             while seen.insert(cursor.pid) {
                 if let Some(root) = registered.get(&cursor) {
                     owner = Some(root.id.clone());
                     break;
                 }
+                // A living ancestor whose exact identity was already owned can pass ownership
+                // to a new child even after its registered root exits. Keep searching so an
+                // explicit registration still overrides cached ownership.
+                if inherited.is_none() {
+                    inherited = self.owners.get(&cursor).filter(|id| by_id.get(id.as_str()).is_some_and(|w| w.end_ms.is_none() || w.root != cursor)).cloned();
+                }
                 let Some(parent) = parents.get(&cursor.pid).and_then(|pid| identities.get(pid)) else {
                     break;
                 };
                 // A reused parent PID must not retroactively adopt an older child.
-                if parent.started.parse::<u64>().ok().zip(cursor.started.parse::<u64>().ok()).is_some_and(|(p, c)| p > c) {
+                if !parent.started.parse::<u64>().ok().zip(cursor.started.parse::<u64>().ok()).is_some_and(|(p, c)| p <= c) {
                     break;
                 }
                 cursor = parent.clone();
             }
             if owner.is_none() {
-                owner = self.owners.get(&identity).filter(|id| by_id.get(id.as_str()).is_some_and(|w| w.end_ms.is_none() || w.root != identity)).cloned();
+                owner = inherited;
             }
             if let Some(id) = owner {
                 nitely.add(&usage);
@@ -825,6 +832,27 @@ mod tests {
     }
 
     #[test]
+    fn attribution_new_descendants_inherit_verified_surviving_ancestors() {
+        let mut s = Sampler::default();
+        let mut roots = vec![root(1, 10, "worker", "APP")];
+        s.attribute(&machine(0), snapshot(vec![process(1, 0, 10, 0), process(2, 1, 20, 0)]), &roots);
+        roots[0].end_ms = Some(500);
+        // New descendants appear before their parents in the snapshot, so propagation cannot
+        // depend on enumeration order or on already processing the parent's current sample.
+        let next = s.attribute(&machine(1000), snapshot(vec![process(4, 3, 40, 0), process(3, 2, 30, 0), process(2, 1, 20, 1)]), &roots);
+        assert_eq!((next.nitely.processes, next.other.processes), (3, 0));
+        assert_eq!(next.workloads[0].id, roots[0].id);
+        // An explicit new root supersedes the cached ancestor's old ownership for its descendants.
+        roots.push(root(2, 20, "build", "DEMO"));
+        let next = s.attribute(&machine(2000), snapshot(vec![process(4, 3, 40, 1), process(3, 2, 30, 1), process(2, 1, 20, 2)]), &roots);
+        assert_eq!(next.workloads.len(), 1);
+        assert_eq!(next.workloads[0].id, roots[1].id);
+        // Reusing the surviving ancestor's PID cannot pass its previous ownership to new children.
+        let next = s.attribute(&machine(3000), snapshot(vec![process(5, 2, 60, 0), process(2, 0, 50, 0)]), &roots);
+        assert_eq!((next.nitely.processes, next.other.processes), (0, 2));
+    }
+
+    #[test]
     fn attribution_nested_and_detached_lanes_count_once_across_projects() {
         let mut s = Sampler::default();
         let roots = vec![root(1, 10, "worker", "APP"), root(2, 20, "review", "APP"), root(3, 30, "build", "DEMO")];
@@ -867,6 +895,28 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+    #[cfg(windows)]
+    #[test]
+    fn attribution_standalone_gate_registers_issue_and_job_accounting() {
+        let dir = Temp::new();
+        let repo = dir.0.join("repo");
+        crate::test_repo::init(&repo, &[(crate::playbook::PLAYBOOK_PATH, "[gate]\ncommands = [\"echo standalone gate\"]\n")]);
+        let mut db = crate::Db::open(&dir.0.join("nitely.db")).unwrap();
+        db.create_project("APP", "App").unwrap();
+        let actor = crate::Actor::Agent("codex:test".into());
+        let issue = db.create_issue(&crate::issues::NewIssue { project: "APP".into(), title: "Gate fixture".into(), kind: "feature".into(), body: "Verify standalone gate workload attribution.".into(), evidence: "Controlled gate fixture.".into(), source: "human".into(), ..Default::default() }, &actor).unwrap();
+        let store = Store::open(&dir.0.join("performance")).unwrap();
+        assert!(LAUNCH.with(|launch| launch.borrow().is_none()), "direct gate begins without a caller scope");
+        let result = crate::playbook::run_gate(&db, &repo, &repo, Some(&issue.key), &actor).unwrap();
+        assert!(result.passed);
+        let work = store.recent_workloads(0, i64::MAX, 10, None).unwrap();
+        assert_eq!(work.len(), 1, "standalone command must register independently of the generic service");
+        assert_eq!(work[0].context.project.as_deref(), Some("APP"));
+        assert_eq!(work[0].context.issue.as_deref(), Some(issue.key.as_str()));
+        assert!(work[0].end_ms.is_some() && !work[0].end_observed);
+        assert!(work[0].job_accounting.as_ref().unwrap().processes >= 1);
+        assert!(LAUNCH.with(|launch| launch.borrow().is_none()), "gate restores its caller context");
     }
     #[test]
     fn attribution_history_keeps_context_after_exit_filters_only_workloads_and_is_read_only() {

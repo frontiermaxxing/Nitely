@@ -117,6 +117,12 @@ carry the batch ID, not the first issue's identity. Existing externally launched
 retroactively classified from their executable names. The reserved `related` measurement remains
 unknown until there is evidence for a related-but-unowned classification.
 
+Direct gates without build lanes register their issue/project context too. Queued installs use
+the actual landed prefix: a single issue keeps its identity, while a shared install retains only
+the common project and does not select an arbitrary member issue. A newly observed descendant
+can inherit ownership through a living ancestor whose exact identity was previously owned,
+even after the registered root exits. Explicit registered roots still take precedence.
+
 CPU percentages use process CPU deltas divided by elapsed monotonic time and the machine's
 logical processor count. The first observation has no CPU or I/O delta. Private commit and the
 sum of process working sets are distinct: working sets overlap and cannot be subtracted from
