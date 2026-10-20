@@ -7,6 +7,7 @@ import { nowSecs } from "../util";
 import {
   AgentMark,
   AheadBehind,
+  Button,
   ChecksMark,
   CountBadge,
   EmptyState,
@@ -14,17 +15,21 @@ import {
   EventMark,
   FindingDots,
   IssueToken,
+  Notice,
   Meter,
   PrMark,
   PriorityMark,
+  RemoveButton,
   ResultMark,
   SeverityMark,
+  SourceTag,
   Sparkline,
   STATION_LABEL,
   STATIONS,
   StateDot,
   StationGlyph,
   StationTrack,
+  TextField,
   type Liveness,
   type Station,
   type Track,
@@ -355,6 +360,34 @@ export default function Kit() {
         </div>
       </section>
 
+      <section>
+        <h2>Settings kit: fields, buttons, source tags, notices</h2>
+        <div className="kit-row" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 12 }}>
+          <TextField aria-label="Area" defaultValue="billing and money" />
+          <TextField aria-label="Path pattern" mono defaultValue="^src/billing/" />
+          <TextField aria-label="Path pattern with an error" mono defaultValue="^(deploy|release" error="Unclosed group: add a “)”." />
+          <TextField aria-label="Empty field" placeholder="Placeholder" />
+        </div>
+        <div className="kit-row" style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", marginTop: 12 }}>
+          <Button variant="primary" shortcut="Ctrl S">Save rules</Button>
+          <Button>Discard</Button>
+          <Button variant="quiet">+ Add a path</Button>
+          <Button variant="danger">Loosen and save</Button>
+          <Button variant="primary" disabled>Disabled</Button>
+          <RemoveButton label="Remove ^src/billing/" />
+        </div>
+        <div className="kit-row" style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", marginTop: 12 }}>
+          <SourceTag source="project" onReset={() => {}} />
+          <SourceTag source="app" />
+          <SourceTag source="nitely" />
+          <SourceTag source="playbook" />
+        </div>
+        <div className="kit-row" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 12, marginTop: 12 }}>
+          <Notice tone="danger" lead="YOLO mode.">No automatic tests or reviews.</Notice>
+          <Notice tone="warning" lead="Your agents have an older copy.">2 changes to review.</Notice>
+          <Notice tone="neutral" locked>Read-only here. An agent can propose a change for you to approve.</Notice>
+        </div>
+      </section>
       <section>
         <h2>EmptyState</h2>
         <EmptyState title="Nothing needs you.">Agents show up here when they ask something, wait on your approval, or get stuck.</EmptyState>

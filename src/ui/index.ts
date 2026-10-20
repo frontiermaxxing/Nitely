@@ -1,5 +1,6 @@
 // Nitely's shared visual primitives. docs/visualization.md says when to use each.
 import "./ui.css";
+import "./fields.css";
 
 export { AgentMark } from "./AgentMark";
 export { setAgentIcons } from "./agentIcons";
@@ -24,3 +25,7 @@ export { Ticker, enter, markArrived, reducedMotion, useFlip } from "./motion";
 export * from "./agents";
 export * from "./lifecycle";
 export * from "./rounds";
+export { Button, RemoveButton, type ButtonVariant } from "./Button";
+export { TextField } from "./Field";
+export { Notice } from "./Notice";
+export { SourceTag, type ValueSource } from "./SourceTag";
