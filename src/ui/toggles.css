@@ -44,8 +44,8 @@
   transition: transform var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
 }
 .ui-switch[aria-checked="true"] .ui-switch-track { background: var(--live); }
-.ui-switch[aria-checked="true"] .ui-switch-thumb { transform: translateX(12px); background: var(--surface); }
-.ui-switch:disabled .ui-switch-track { background: var(--sunken); box-shadow: inset 0 0 0 1px var(--line-strong); }
+.ui-switch[aria-checked="true"] .ui-switch-thumb { transform: translateX(12px); background: var(--bg); }
+.ui-switch:disabled .ui-switch-track { background: var(--hover); box-shadow: inset 0 0 0 1px var(--line-strong); }
 .ui-switch:disabled .ui-switch-thumb { background: var(--line-strong); }
 .ui-switch:focus-visible { outline: none; }
 .ui-switch:focus-visible .ui-switch-track { outline: 2px solid var(--focus); outline-offset: 2px; }
@@ -72,13 +72,17 @@
 .ui-check-box:checked:disabled { background-color: var(--line-strong); border-color: var(--line-strong); }
 .ui-check-box:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 :root {
+  /* What the chosen segment and radio card sit on: white on the light page, a step up in dark. */
+  --ui-raise: var(--surface);
   --ui-check-mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 8.2 6.5 11 12.5 5' fill='none' stroke='%23f8f7f4' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
 }
 :root[data-theme="dark"] {
+  --ui-raise: var(--hover);
   --ui-check-mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 8.2 6.5 11 12.5 5' fill='none' stroke='%23141413' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
+    --ui-raise: var(--hover);
     --ui-check-mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 8.2 6.5 11 12.5 5' fill='none' stroke='%23141413' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   }
 }
@@ -117,7 +121,7 @@
 }
 .ui-segment:hover { color: var(--fg); }
 .ui-segment.ui-on {
-  background: var(--surface);
+  background: var(--ui-raise);
   box-shadow: inset 0 0 0 1px var(--line-strong);
   color: var(--fg);
   font-weight: var(--weight-medium);
@@ -149,7 +153,7 @@
   cursor: pointer;
 }
 .ui-radio-card:hover { border-color: var(--line-strong); }
-.ui-radio-card.ui-on { border-color: var(--fg-3); background: var(--surface); }
+.ui-radio-card.ui-on { border-color: var(--fg-3); background: var(--ui-raise); }
 .ui-radio-card.ui-disabled { color: var(--fg-3); cursor: default; }
 .ui-radio-card:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: 2px; }
 .ui-radio {
@@ -163,7 +167,7 @@
   background: transparent;
   cursor: inherit;
 }
-.ui-radio:checked { border-color: var(--fg); background: radial-gradient(circle, var(--fg) 0 3.5px, transparent 4px); }
+.ui-radio:checked { border-color: var(--fg); background: radial-gradient(circle, var(--fg) 0 3.5px, transparent 4.5px); }
 .ui-radio:focus-visible { outline: none; }
 .ui-radio-card-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .ui-radio-card-title { display: flex; gap: 7px; align-items: baseline; font-size: var(--text-md); font-weight: var(--weight-medium); }
