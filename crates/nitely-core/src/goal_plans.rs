@@ -133,6 +133,9 @@ pub struct PlanEdit {
     /// Refs of drafted issues to leave out; blockers naming them are dropped with them.
     #[serde(default)]
     pub drop: Vec<String>,
+    /// Human edits to the action lists, keyed by local ref.
+    #[serde(default)]
+    pub bodies: std::collections::BTreeMap<String, String>,
 }
 
 /// A plan as the Inbox and the issue panel show it.
@@ -256,6 +259,7 @@ impl GoalPlan {
         plan.issues.retain(|i| !dropped(&i.local_ref));
         for i in &mut plan.issues {
             i.blocked_by.retain(|b| !dropped(b));
+            if let Some(body) = edit.bodies.get(&i.local_ref) { i.body = body.trim().to_string(); }
         }
         plan
     }
@@ -408,6 +412,9 @@ impl Db {
     }
 
     fn approve_claimed(&mut self, key: &str, v: &GoalPlanView, edit: &PlanEdit, actor: &Actor) -> Result<PlanApproved> {
+        for (local_ref, body) in &edit.bodies {
+            if !v.plan.issues.iter().any(|i| &i.local_ref == local_ref) || body.trim().is_empty() || body.len() > 50000 { bail!("invalid action-list edit: unknown ref, empty body or more than 50,000 bytes"); }
+        }
         let mut plan = v.plan.edited(edit);
         // Keys stored under a project's old prefix name the same issues under its new one.
         plan.planning_issue = plan.planning_issue.as_deref().map(|k| self.current_key(k)).transpose()?;
@@ -483,8 +490,8 @@ impl Db {
             if filed.skipped.is_empty() { String::new() } else { format!("; {} skipped as duplicates", filed.skipped.len()) },
         );
         self.conn.execute(
-            "UPDATE goal_plan SET status = 'approved', outcome = ?2, goal_id = ?3, decided_by = ?4, decided_at = ?5 WHERE id = ?1",
-            params![v.id, outcome, goal.id, actor.id(), now()],
+            "UPDATE goal_plan SET status = 'approved', outcome = ?2, goal_id = ?3, decided_by = ?4, decided_at = ?5, plan = ?6 WHERE id = ?1",
+            params![v.id, outcome, goal.id, actor.id(), now(), serde_json::to_string(&plan)?],
         )?;
         let goal = self.goal(goal.id)?.context("goal vanished")?;
         let issue = self.finish_plan_issue(key, &outcome, actor)?;

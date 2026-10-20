@@ -39,6 +39,8 @@ pub struct Playbook {
     /// Agent workers Nitely starts itself (docs/crew.md); off unless `workers` is set.
     #[serde(default)]
     pub crew: crate::crew::CrewRules,
+    #[serde(default)]
+    pub schedule: crate::test_sweep::Schedule,
     /// Build lanes (docs/build-lanes.md); none unless the playbook has a `[lanes]` table.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lanes: Option<crate::lanes::LaneRules>,

@@ -23,6 +23,7 @@ export function GoalPlanDecision(props: {
   const [title, setTitle] = useState(p.title);
   const [outcome, setOutcome] = useState(p.outcome);
   const [target, setTarget] = useState(p.target_date ?? "");
+  const [bodies, setBodies] = useState<Record<string, string>>(Object.fromEntries(p.issues.map(i => [i.ref, i.body])));
   const [left, setLeft] = useState<Set<string>>(new Set());
   const [rejecting, setRejecting] = useState(false);
   const [why, setWhy] = useState("");
@@ -37,7 +38,7 @@ export function GoalPlanDecision(props: {
       return n;
     });
   const approve = () => {
-    const edit = { title, outcome, target_date: target, drop: [...left] };
+    const edit = { title, outcome, target_date: target, drop: [...left], bodies: Object.fromEntries(keep.map(i => [i.ref, bodies[i.ref]])) };
     const n = keep.length + p.existing.length;
     props.onAct("apply", () => invoke("approve_goal_plan", { key: props.issueKey, edit }), `Goal created with ${n} issue${n === 1 ? "" : "s"}.`);
   };
@@ -79,6 +80,11 @@ export function GoalPlanDecision(props: {
                 </span>
               )}
             </label>
+            <details className="gp-body">
+              <summary>Review and edit proposed work</summary>
+              {pending ? <textarea rows={8} maxLength={50000} aria-label={`Proposed work: ${i.title}`} value={bodies[i.ref]} onChange={e => setBodies(b => ({ ...b, [i.ref]: e.target.value }))} /> : <pre>{i.body}</pre>}
+              {i.evidence && <p className="decision-why">{i.evidence}</p>}
+            </details>
           </li>
         ))}
       </ul>
@@ -87,7 +93,7 @@ export function GoalPlanDecision(props: {
       {pending && (
         <>
           <div className="actions">
-            <button className="btn primary" disabled={!title.trim() || !outcome.trim() || keep.length + p.existing.length === 0} onClick={approve}>
+            <button className="btn primary" disabled={!title.trim() || !outcome.trim() || keep.some(i => !bodies[i.ref]?.trim()) || keep.length + p.existing.length === 0} onClick={approve}>
               Approve and file {keep.length + p.existing.length}
             </button>
             <button className="btn" onClick={() => setRejecting((r) => !r)} aria-expanded={rejecting}>

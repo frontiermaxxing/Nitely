@@ -51,3 +51,8 @@
 .gp-item-meta { color: var(--fg-3); font-size: var(--text-xs); }
 .gp-item-touches { flex-basis: 100%; color: var(--fg-3); font-size: 11px; overflow-wrap: anywhere; padding-left: 20px; }
 .gp-left .gp-item-title { color: var(--fg-3); text-decoration: line-through; }
+
+.gp-body { margin: 8px 0 4px 26px; min-width: 0; }
+.gp-body summary { cursor: pointer; color: var(--fg-2); }
+.gp-body textarea { width: 100%; box-sizing: border-box; margin-top: 8px; resize: vertical; font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
+.gp-body pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }

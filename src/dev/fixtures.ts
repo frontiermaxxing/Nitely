@@ -1425,7 +1425,7 @@ const PLANS = new Map<string, GoalPlanView>([
         outcome: "A guest moves or cancels their own booking from the confirmation email, within the house rules, and the front desk only hears about it.",
         target_date: null,
         issues: [
-          { ref: "link", title: "Signed manage-booking link in the confirmation email", kind: "feature", body: "b", evidence: "none yet", priority: 2, size: "M", touches: ["src/email/confirmation.ts", "src/bookings/links.ts"] },
+          { ref: "link", title: "Signed manage-booking link in the confirmation email", kind: "feature", body: "Protect the confirmation link contract: a valid signed link opens only its booking; expired or changed tokens fail safely. Reuse the existing booking scenario where practical.", evidence: "The guest flow currently stops at the confirmation email.", priority: 2, size: "M", touches: ["src/email/confirmation.ts", "src/bookings/links.ts"] },
           { ref: "page", title: "Manage-booking page: move to another free date", kind: "feature", body: "b", evidence: "none yet", priority: 2, size: "L", blocked_by: ["link"], touches: ["src/pages/ManageBooking.tsx", "src/bookings/availability.ts"] },
           { ref: "cancel", title: "Cancel within the free-cancellation window", kind: "feature", body: "b", evidence: "none yet", priority: 2, size: "S", blocked_by: ["link"], touches: ["src/bookings/cancel.ts"] },
           { ref: "notify", title: "Tell the front desk about every change", kind: "feature", body: "b", evidence: "none yet", priority: 3, size: "S", blocked_by: ["page", "cancel"], touches: ["src/desk/notify.ts"] },
@@ -1445,8 +1445,9 @@ const PLANS = new Map<string, GoalPlanView>([
 function approveGoalPlan(args: Record<string, unknown>) {
   const plan = PLANS.get(String(args.key));
   if (!plan || plan.status !== "pending") throw `${String(args.key)} carries no pending goal plan`;
-  const edit = (args.edit ?? {}) as { title?: string; drop?: string[] };
+  const edit = (args.edit ?? {}) as { title?: string; drop?: string[]; bodies?: Record<string, string> };
   const kept = plan.plan.issues.filter((i) => !(edit.drop ?? []).includes(i.ref)).length + plan.plan.existing.length;
+  for (const item of plan.plan.issues) { if (edit.bodies?.[item.ref]) item.body = edit.bodies[item.ref]; }
   plan.status = "approved";
   plan.outcome = `Goal "${edit.title || plan.plan.title}" with ${kept} issues`;
   moveIssue({ key: plan.issue_key, state: "Done", evidence: `Approved: ${plan.outcome}.` });

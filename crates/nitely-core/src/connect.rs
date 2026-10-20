@@ -536,6 +536,11 @@ fn claude_plan(nitely: &str, repoint: bool) -> Result<AgentPlan> {
         "a skill with the Nitely workflow",
         format!("---\nname: nitely\ndescription: How to take, report, submit and land work in a repo Nitely tracks. Use it whenever the nitely MCP tools are available or the session says the repo is connected to Nitely.\n---\n\n{WORKFLOW}\n"),
     ));
+    changes.push(Change::file(
+        &dir.join("skills").join("nitely-test-sweep").join("SKILL.md"),
+        "a report-only test hygiene sweep skill",
+        format!("---\nname: nitely-test-sweep\ndescription: Inspect Rust and Node test evidence and propose one editable human decision.\n---\n\n{}", crate::test_sweep::GUIDE),
+    ));
     let setup = dir.join("skills").join("nitely-setup").join("SKILL.md");
     changes.push(Change::file(
         &setup,

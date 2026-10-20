@@ -587,7 +587,10 @@ impl Supervisor {
         };
         tick.status = match status {
             Some(why) => why,
-            None => self.fill(db, playbook.as_ref().unwrap(), &mut tick)?,
+            None => {
+                crate::test_sweep::schedule(db, &self.project, &playbook.as_ref().unwrap().schedule, &self.actor(), crate::db::now())?;
+                self.fill(db, playbook.as_ref().unwrap(), &mut tick)?
+            },
         };
         tick.running = self.running();
         db.crew_heartbeat(&self.project, std::process::id(), &tick.status)?;
@@ -1513,6 +1516,9 @@ impl Supervisor {
 
 /// The brief every worker gets on stdin.
 pub fn brief(issue: &IssueRecord, project: &str, worktree: &Path, branch: &str, repo: &Path, port: Option<u16>) -> String {
+    if issue.labels.iter().any(|l| l == crate::test_sweep::LABEL) {
+        return format!("Read-only test sweep for [{}]({}) in {}. Worktree: {}.\n{}", issue.key, issue.url, project, worktree.display(), crate::test_sweep::GUIDE);
+    }
     if crate::goal_plans::is_planning(issue) {
         return planner_brief(issue, project, worktree, repo);
     }

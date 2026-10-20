@@ -8,6 +8,7 @@ mod newer;
 mod performance;
 mod preview;
 mod release_verification;
+mod test_sweep;
 mod serve;
 mod ui;
 
@@ -39,6 +40,8 @@ enum Cmd {
         #[arg(long)] now: bool,
         #[arg(long)] project: Option<String>
     },
+    /// Collect bounded test hygiene evidence or propose a human decision.
+    TestSweep { #[command(subcommand)] command: test_sweep::Command },
     /// Local machine performance recording and retained history.
     Performance { #[command(subcommand)] command: performance::Command },
     /// Record an agent hook event. Reads the hook's JSON on stdin and always exits 0,
@@ -873,6 +876,7 @@ fn run(cmd: Cmd) -> Result<()> {
         }
         Cmd::Performance { command } => performance::run(command),
         Cmd::Preview { command } => preview::run(command),
+        Cmd::TestSweep { command } => test_sweep::run(command),
         Cmd::Hook { .. } | Cmd::Mcp | Cmd::McpCall | Cmd::McpCalls | Cmd::McpDetached | Cmd::Ui { .. } => unreachable!(),
         Cmd::PerfSeed => {
             let home = paths::data_dir();

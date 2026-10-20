@@ -15,3 +15,23 @@ Keep verification proportional. Use a build lane, reuse already collected eviden
 Known failures are work to resolve, not a permanent success condition. A failure suppressed in a known-failure list must remain visible as a failure or exception, with its owner and reason. If a test is obsolete or duplicates better coverage, propose its removal and explain what still protects the behavior. Do not silently delete failing tests or weaken assertions to make a gate green.
 
 A hygiene sweep should report the suite revision, commands, run count, outcomes, individual timing coverage, and uncertainty. Classify repeated failures, inconsistent outcomes, slow contributors, duplicated cases, and possible implementation coupling. Similarity and mocking are review leads, not proof that a test is worthless. Present one editable decision with precise candidates and evidence; after approval, apply changes on a branch through normal submission and landing. Compare counts and warm-lane timing before and after; never invent savings from an unmeasured deletion.
+
+
+Use `/nitely-test-sweep` in connected Claude projects, `test_sweep_guide` through MCP, or
+`nitely test-sweep guide`. `collect --logs logs.json --output report.json` is report-only:
+logs carry their real revision and distinct run ID. `--execute` explicitly requests a bounded
+lane run (two repetitions, ten minutes by default; at most three and one hour). Node TAP supplies
+per-test timings; `--rust-timings` measures stable Rust test binaries individually and includes
+process startup cost. Neither is an estimate of a test's contribution to a parallel suite.
+`--known-failures names.json` highlights observed failures on an explicit list; it never calls them passing.
+
+Reports retain outcomes, source body hashes, revision, evidence sources, timing coverage and
+truncation. Source extraction is conservative, not a complete test count or an AST proof of
+redundancy. `test-sweep propose` groups the reviewed candidates into editable action lists in
+the Inbox. Inspection alone does not authorize removal. Approving files normal branch tasks;
+changed source evidence must be reassessed before deleting anything. Existing logs avoid a
+new suite run, and an empty report needs only a handoff with its limits.
+
+A running Crew can opt into `[schedule] test_sweep = "nightly"` or `"weekly"` (UTC periods;
+default `"off"`). It creates one report task per period, respects Crew's start/pause limits,
+and avoids another while a sweep or its proposal is open. No schedule approves a proposal.

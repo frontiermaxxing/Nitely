@@ -541,6 +541,11 @@ fn tools() -> Value {
             } }
         },
         {
+            "name": "test_sweep_guide",
+            "description": "Report-only Rust/Node test hygiene sweep, bounded evidence collection and editable human proposal. No automatic test deletion.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
             "name": "setup_guide",
             "description": "The step-by-step first-run sweep that seeds a project's board from its repo: pre-flight checks (integration branch, gate, working tree), sweeping areas, filing issues, proposing review rules, writing the brief. Call it when asked to set up or onboard a project, or when get_project shows setup is null, and follow it.",
             "inputSchema": { "type": "object", "properties": {} }
@@ -1316,6 +1321,7 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             let issues: Vec<_> = db.list_issues(Some(&project), include_closed)?.into_iter().filter(|i| label.as_ref().is_none_or(|l| i.labels.contains(l))).collect();
             json!(issues)
         }
+        "test_sweep_guide" => json!({ "guide": nitely_core::test_sweep::GUIDE }),
         "setup_guide" => json!({ "guide": nitely_core::instructions::SETUP_GUIDE }),
         "goals" => match args.get("id").and_then(Value::as_i64) {
             Some(id) => json!(db.goal_detail(id)?),
