@@ -5,6 +5,12 @@ Design for [NIT-297](http://127.0.0.1:7423/i/NIT-297), based on the implementati
 The current playbook and required CI checks remain authoritative until a human approves a
 specific migration. The Performance delivery keeps its existing validation.
 
+Three choices in it are decided (confirmed 2026-10-20) and implementation treats them as fixed:
+a post-merge failure auto-reverts the culprit bisect isolates; Basic changes (inert, and
+display copy) land with no pre-land review and are audited after landing; and a display-text
+literal can be Basic. What remains for the person is the concrete policy proposal at the end
+of the shadow phase (see [Rollout](#rollout-and-implementation-boundaries)).
+
 An ordinary edit should receive fast, useful checks promptly. More expensive checks should
 follow the behavior and boundaries the edit can affect. A one-line change to approval is
 high risk; a long prose correction need not run every database lifecycle test. Small size
@@ -20,7 +26,7 @@ review-level systems. A sensitive path can raise the minimum even for an inert-l
 
 | Visible level | Default risk mapping | Mechanical eligibility | Required work before landing |
 | --- | --- | --- | --- |
-| Basic | Inert | Only approved prose files, or supported source whose executable syntax is unchanged; no protected paths, generated inputs, directives or executable documentation | Diff/encoding/format checks, applicable document/config validators, and cheap applicable static checks. No behavior suite is implied by a prose-only edit. |
+| Basic | Inert, or display copy | Only approved prose files; supported source whose executable syntax is unchanged (comment-only); or a display-text literal (below). No protected paths, generated inputs, directives or executable documentation | Diff/encoding/format checks, lint and type checks, and applicable document/config validators. No behavior suite, and no pre-land review: an audit sample after landing covers it. |
 | Focused | Contained | One mapped component, at most five changed files and 200 added plus removed lines, complete dependency mapping, no public contract or protected behavior change | Basic checks, component lint/type/build checks, affected unit/component tests and a regression demonstrating changed behavior. |
 | Integration | Standard | Impact is known but crosses mapped components, process/API/UI boundaries, or exceeds Focused size limits | Focused checks for all affected components plus the workflows across their changed boundaries; relevant native and platform checks. |
 | Full | Sensitive or uncertain | Protected behavior, broad impact, incomplete classification or an unknown dependency boundary | Entire configured suite and required OS/native matrix, plus relevant security, migration, recovery or performance checks. |
@@ -31,11 +37,14 @@ Integration's applicable document checks, not an unrelated executable suite. A l
 depth **within the affected domain**; a high label does not invent tests for absent domains.
 Full uncertainty means all domains are affected until proven otherwise.
 
-Every level also requires the project's independent review, blocked-path and human-approval
-rules. Basic does not silently turn review off. A project may explicitly approve no peer
-review for mechanically inert changes as a separate policy. Full does not by itself create
-a new human-approval requirement, and disabling review does not waive tests or approvals.
-An unevaluated reviewer-only condition remains unevaluated under the existing rules.
+Basic lands with **no pre-land review**: a prose, comment-only or display-copy change runs its
+cheap checks and lands. A sample is audited after landing ([NIT-302](http://127.0.0.1:7423/i/NIT-302)),
+and an escape tightens the rule that let it through (see Rollout, step 4). Focused, Integration
+and Full keep the project's independent review. Where a level reviews, the review stays peer
+strength: no weaker model gates a stronger one's work. Every level keeps the blocked-path and
+human-approval rules; skipping review never waives tests or approvals, and Full does not by
+itself create a new human-approval requirement. An unevaluated reviewer-only condition
+remains unevaluated under the existing rules.
 
 ## Classification that agents cannot lower
 
@@ -92,17 +101,23 @@ exclude languages/build steps that inspect raw source or comments. Unknown gramm
 or unsupported languages cannot use this proof. Until the parser/allowlist implementation
 exists, only explicitly approved non-executable prose can qualify for Basic.
 
-Literal-only changes are **Focused at minimum**, not Basic. A parser can establish that only
-a literal changed; it cannot establish that the literal is harmless. Human-maintained rules
-may identify presentation text with no route/key/query/interpolation/HTML/command semantics.
-Changing an identifier, limit, SQL, regular expression, URL or security-related message is
-not covered by a general text exception. Reuse the ordinary component checks and appropriate
-render/accessibility tests. New behavior needs a regression test, but avoid tests that merely
-repeat the implementation or assert a cosmetic spelling with no behavior at stake.
+A **display-text literal is Basic** when two things hold. The parser proves that only the
+literal changed, and a human-owned rule marks its location as display copy: JSX text, i18n and
+message files, and UI label props (`label`, `title`, `placeholder`, `aria-label` and the like).
+A parser can establish that only a literal changed; it cannot establish that the literal is
+harmless, so the location rule carries that half, and it belongs to the person like the
+protected-path map. Interpolation placeholders must survive unchanged.
+
+Any other literal-only change is **Focused at minimum**. Routes, keys, identifiers, SQL,
+limits, regular expressions, URLs, command text, and messages in protected paths are never
+display copy, whatever file they sit in. They reuse the ordinary component checks and
+appropriate render/accessibility tests. New behavior needs a regression test, but avoid tests
+that merely repeat the implementation or assert a cosmetic spelling with no behavior at stake.
 
 ## Selecting checks
 
-Build a versioned test inventory: stable test ID, component, source inputs, reverse consumers,
+Basic selects no behavior tests, so phase 1 needs none of what follows; it is the design for
+Focused and Integration, built after it. Build a versioned test inventory: stable test ID, component, source inputs, reverse consumers,
 fixtures, environment/platform requirements, estimated cost, and suite membership. Record
 where each dependency came from (build graph, static import, approved mapping or measured
 coverage). Runtime coverage may add tests; absence from a coverage run cannot prove a test
@@ -192,13 +207,23 @@ retain the exact verified tree and the range it covers. Use CI where available r
 starting an uncontrolled extra local build. If the backstop is overdue and cannot run, pause
 further reduced-verification landings; the machine's resource admission still takes precedence.
 
-A post-merge failure blocks release/promotion and pauses reduced-verification landings. Record
-the failure, last verified base and candidate range; triage flakiness/infrastructure separately.
-Bisect in isolated worktrees using the failing command first, then confirm the candidate fix
-with required integrated checks. Bisection may reveal interacting changes, not one culprit;
-do not automatically blame the final commit of a failing prefix. Prefer a corrective change
-or an explicit revert reviewed against current main. **Automatic revert is off by default**
-and requires a separate human policy decision, especially for migrations or external effects.
+A post-merge failure blocks release/promotion until it is resolved. Record the failure, last
+verified base and candidate range; triage flakiness/infrastructure separately (a failure that
+does not reproduce on the failing tree is a flake to file, not a culprit to revert). Bisect in
+isolated worktrees using the failing command first.
+
+- **Bisect isolates one culprit: revert it automatically.** This is the default. The revert
+  lands as a normal change, with the integrated checks that confirm the failure is gone, on
+  top of current main. Nitely files an issue for the failure, and reopens the culprit's issue
+  with the failing log, so its author fixes it and lands it again.
+- **Bisect cannot isolate one** (interacting changes, where no single commit fails alone):
+  pause reduced-verification landings and file an issue with the range and the log. Do not
+  blame the final commit of a failing prefix.
+- **Never revert a migration automatically.** A culprit that carries a migration, or other
+  effects outside the repository (a published artifact, an external call), pauses and files
+  instead: undoing it can lose data that the revert's code no longer reads.
+
+Reduced-verification landings resume once main passes the failing check again.
 
 Releases require Full results on the exact release candidate, all required OS/native jobs,
 relevant install/upgrade/migration/recovery checks and the configured release review/approval.
@@ -208,22 +233,31 @@ No unsupported platform or skipped benchmark becomes a fictional pass.
 
 ## Rollout and implementation boundaries
 
-1. **Record declarations and shadow plans.** Keep every current gate/CI check running. Display
-   recommendations and compare selected checks with full-suite results. Store old issues as
-   undeclared, not implicitly Basic. Unsupported/missing policy means legacy Full behavior.
-2. **Inventory and audit.** Start with explicit components, parser proofs and conservative
-   fallback. Inspect all proposed Basic cases in the first 100 such candidates and a stable
-   10% sample of Focused candidates, selected once per issue/policy using a server-owned salted
-   hash. Selection persists across new revisions; changing a declaration cannot reroll it.
-   Full remains mandatory in shadow.
-3. **Approve a narrow pilot.** Present measured coverage, errors and cost to the human through
-   a concrete playbook proposal. Enable prose-only Basic first, then specific Focused components.
-   Preserve a Full audit sample of at least 10% of reduced candidates after activation and all
-   backstops. The policy stores the audit rule so an executor cannot omit it. Retain the
-   existing audit issue's independent peer-review sample as a separately approved audit
-   channel, particularly if Basic review exemptions are later enabled. A test-depth change
-   alone does not override a person's project-wide review setting.
-4. **Broaden from evidence.** Track wrong-low classifications, escapes, missing test mappings,
+Phase 1 ships value in days, with Basic alone; it needs no test inventory, because Basic runs
+no behavior suite and every other level keeps today's gate until affected-test selection exists.
+
+1. **Phase 1: declarations, Basic and the backstop.**
+   [Declarations](http://127.0.0.1:7423/i/NIT-298) on the issue; a minimal
+   [mechanical check](http://127.0.0.1:7423/i/NIT-299) for prose-only, comment-only and
+   display-copy changes; and the [post-merge backstop](http://127.0.0.1:7423/i/NIT-301) with
+   auto-revert. Store old issues as undeclared, not implicitly Basic. Unsupported/missing policy
+   means legacy Full behavior.
+2. **Shadow, briefly.** Compute and show each change's level and plan while every current
+   gate/CI check keeps running, and compare. Shadow lasts **one week or 30 Basic candidates,
+   whichever comes first**. Every Basic candidate in that window is inspected; a wrong-low
+   classification fixes its rule before the proposal.
+3. **One proposal.** The result goes to the person as one concrete playbook proposal: the
+   display-copy locations, the prose and comment rules, the backstop cadence and the audit
+   sample. On approval, Basic lands with no pre-land review. A test-depth change alone does not
+   override a person's project-wide review setting for the other levels.
+4. **Later: Focused and beyond.** The versioned test inventory,
+   [affected-test selection](http://127.0.0.1:7423/i/NIT-300) for Focused components,
+   [audit sampling](http://127.0.0.1:7423/i/NIT-302) after landing (a stable sample selected
+   once per issue/policy using a server-owned salted hash, persisting across revisions, so a
+   changed declaration cannot reroll it; at least 10% of reduced candidates once Focused is on)
+   and the [release gate](http://127.0.0.1:7423/i/NIT-303). Each new lowering rule goes through
+   the same shadow and proposal before it activates.
+5. **Broaden from evidence.** Track wrong-low classifications, escapes, missing test mappings,
    fallback reasons, declaration accuracy by rule/source, queue/run durations, retries,
    CPU/memory/I/O and total developer latency.
    A confirmed escape disables the affected lowering rule and returns that scope to Full until
@@ -321,9 +355,12 @@ while its false-low corpus cases or required backstop behavior remain untested.
 
 ## Decisions before activation
 
+Decided (2026-10-20): auto-revert of an isolated culprit is the default response to a
+post-merge failure (never for a migration); Basic lands with no pre-land review and is audited
+after landing; a display-text literal can be Basic.
+
 The recommended defaults above make implementation reviewable, but do not approve activation.
-The human must approve the first eligible path/component set, pilot thresholds, audit fraction,
-post-merge cadence and overdue-queue behavior as one concrete policy proposal. The proposed
-response to post-merge failure is pause-and-triage; automatic revert remains a separate opt-in
-decision. A decision to exempt Basic work from peer review is also separate from test depth.
-No immediate human response is needed to build shadow planning and collect evidence.
+At the end of the shadow phase the person approves, as one concrete policy proposal, the
+display-copy locations and prose/comment rules, the post-merge cadence and overdue-queue
+behavior, and the audit fraction. No human response is needed to build phase 1 and run it in
+shadow.
