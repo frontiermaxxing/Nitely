@@ -162,7 +162,48 @@ pub(crate) fn on_landed(db:&mut Db,repo:&Path,issue:&crate::issues::IssueRecord,
     let commands:Vec<_>=pb.gate.commands.iter().chain(pb.gate.steps.iter().map(|s|&s.run)).collect();
     let full=!commands.is_empty() && land.gate.as_ref().is_some_and(|g|g.passed && commands.iter().all(|c|g.results.iter().any(|r|r.command==c.as_str() && r.ok && (!r.skipped || r.output.starts_with("skipped: this tree passed it in lane run ")))));
     let base=land.landed_from.as_deref().context("land has no immutable starting revision")?;
-    record_landing(db,repo,issue.project.as_deref().unwrap_or(""),&issue.key,base,head,!full)
+    record_landing(db,repo,issue.project.as_deref().unwrap_or(""),&issue.key,base,head,!full)?;
+    // An after-land step that failed (an install that cannot build) already says this head is
+    // broken: record it, and spend no Full run on it (NIT-457).
+    if let Some(step)=land.after.iter().find(|r|!r.ok && !r.skipped && !r.timed_out) {
+        known_broken(db,repo,head,&format!("the after-land step `{}` failed",step.command),&step.output)?;
+    }
+    Ok(())
+}
+
+/// Records that integration at `head` is known broken, without a Full run: a failed run row (so
+/// the next tick neither runs nor bisects it again) and failed health naming the head. The next
+/// commit that lands is checked at once.
+pub(crate) fn known_broken(db:&Db,repo:&Path,head:&str,why:&str,output:&str)->Result<()> {
+    let id=repo_id(repo)?;
+    let head=git(repo,&["rev-parse",&format!("{head}^{{commit}}")])?.trim().to_string();
+    let Some(h)=health(db,repo)? else {return Ok(());};
+    let already:bool=db.conn.query_row("SELECT EXISTS(SELECT 1 FROM verification_backstop_run WHERE repo=?1 AND head=?2 AND state='failed')",params![id,head],|r|r.get(0))?;
+    if already {return Ok(());}
+    let tail:String={let lines:Vec<&str>=output.lines().collect();lines[lines.len().saturating_sub(30)..].join("\n")};
+    let message=format!("Known broken at {}: {why}. No Full check runs on this head; the next commit that lands is checked at once.\n\nFailing step output (end):\n{tail}\n\n{}",short(&head),range_text(db,repo,h.verified_head.as_deref(),&head));
+    db.conn.execute("INSERT INTO verification_backstop_run(repo,head,base,policy,commands,started_at,ended_at,state,evidence,isolate_failure,isolation_complete) VALUES(?1,?2,?3,'known-broken','[]',?4,?4,'failed',?5,0,1)",params![id,head,h.verified_head,now(),message])?;
+    db.conn.execute("UPDATE verification_health SET status='failed',message=?2 WHERE repo=?1",params![id,format!("Known broken at {}: {why}",short(&head))])?;
+    Ok(())
+}
+
+fn short(rev:&str)->&str {&rev[..rev.len().min(12)]}
+
+/// The commits a failure could have come from, for a recovery issue that cannot name one culprit:
+/// from the last passing Full check, or, with none, from the earliest landing not yet covered.
+fn range_text(db:&Db,repo:&Path,verified:Option<&str>,head:&str)->String {
+    let id=repo_id(repo).unwrap_or_default();
+    let earliest:Option<String>=db.conn.query_row("SELECT base FROM verification_landing WHERE repo=?1 AND covered=0 ORDER BY landed_at,rowid LIMIT 1",[&id],|r|r.get(0)).optional().ok().flatten();
+    let (base,why)=match (verified,earliest) {
+        (Some(v),_)=>(v.to_string(),"since the last passing Full check".to_string()),
+        (None,Some(b))=>(b,"since the first landing recorded; no Full check has passed yet, so there is no passing base to bisect from".to_string()),
+        (None,None)=>return format!("Range: up to {} (no Full check has passed yet and no landing is recorded, so there is no passing base to bisect from).",short(head)),
+    };
+    let log=git(repo,&["log","--oneline","--first-parent",&format!("{base}..{head}")]).unwrap_or_default();
+    let commits:Vec<&str>=log.lines().collect();
+    let shown=commits.iter().take(20).map(|c|format!("- {c}")).collect::<Vec<_>>().join("\n");
+    let more=if commits.len()>20 {format!("\n- … and {} more",commits.len()-20)} else {String::new()};
+    format!("Range: {}..{} ({} commit{}, {why}):\n{shown}{more}",short(&base),short(head),commits.len(),if commits.len()==1 {""} else {"s"})
 }
 
 /// One worker per repository, shared by CLI and desktop; dead process locks recover normally.
@@ -229,7 +270,10 @@ fn tick_inner(db:&mut Db,config:&Config,repo:&Path,project:&str,branch:&str,forc
           return Ok(());
         }
     }
-    if !force && !due(&h,rules,now()) { return Ok(()); }
+    // A commit landed on a head known to fail (its Full check, or an after-land build): check it
+    // at once, whatever the cadence, so the fix clears the pause as soon as it lands (NIT-457).
+    let past_failure=last_failed.as_deref().is_some_and(|f|f!=head) && matches!(h.status.as_str(),"failed"|"paused"|"recovering");
+    if !force && !past_failure && !due(&h,rules,now()) { return Ok(()); }
     let commands:Vec<_>=pb.gate.commands.iter().chain(pb.gate.steps.iter().map(|s|&s.run)).cloned().collect();
     if commands.is_empty() { bail!("the post-merge Full gate is empty"); }
     let id=repo_id(repo)?;
@@ -246,6 +290,7 @@ fn tick_inner(db:&mut Db,config:&Config,repo:&Path,project:&str,branch:&str,forc
             db.conn.execute("UPDATE verification_backstop_run SET state='passed',ended_at=?2,lane_run=?3,evidence=?4 WHERE id=?1",params![run,now(),gate.run,serde_json::to_string(&gate.results)?])?;
             db.conn.execute("UPDATE verification_health SET verified_head=?2,checked_at=?3,status=CASE WHEN observed_head=?2 THEN 'green' ELSE 'pending' END,message='Full gate passed',recovery_issue=NULL WHERE repo=?1",params![id,head,now()])?;
             reconcile(db,repo)?;
+            close_recovered(db,&id,&head,&actor)?;
         }
         result => {
             let message=match &result { Ok(g)=>format!("Full gate failed or flaked: {}",serde_json::to_string(&g.results)?),Err(e)=>format!("Full gate could not complete: {e:#}") };
@@ -253,12 +298,38 @@ fn tick_inner(db:&mut Db,config:&Config,repo:&Path,project:&str,branch:&str,forc
             db.conn.execute("UPDATE verification_backstop_run SET state='failed',ended_at=?2,evidence=?3,isolate_failure=?4 WHERE id=?1",params![run,now(),message,isolate_failure])?;
             db.conn.execute("UPDATE verification_health SET status='failed',message=?2 WHERE repo=?1",params![id,message])?;
             // Infrastructure/flake failures never justify reverting product changes.
-            let culprit=if isolate_failure {
-                h.verified_head.as_deref().and_then(|base|isolate(db,repo,&pb,base,&head,&commands,&actor).ok())
-            } else { None };
+            let isolated=if !isolate_failure {Err("the failure was infrastructure or a flake, not a product change".to_string())} else {
+                match h.verified_head.as_deref() {
+                    Some(base)=>isolate(db,repo,&pb,base,&head,&commands,&actor).map_err(|e|format!("{e:#}")),
+                    None=>Err("no Full check has passed yet, so there is no passing base to bisect from".to_string()),
+                }
+            };
+            let culprit=isolated.as_ref().ok().cloned();
             db.conn.execute("UPDATE verification_backstop_run SET culprit=?2,isolation_complete=1 WHERE id=?1",params![run,culprit])?;
-            recover(db,config,repo,project,&pb,&head,culprit.as_deref(),&message,&actor)?;
+            // Without one culprit, the recovery issue names the failing step and the range instead.
+            let evidence=match &isolated {
+                Ok(_)=>message.clone(),
+                Err(why)=>{
+                    let step=result.as_ref().ok().and_then(|g|g.results.iter().find(|r|!r.ok)).map(|r|format!("Failing step: `{}`.\n",r.command)).unwrap_or_default();
+                    format!("{step}No single culprit: {why}.\n{}\n\n{message}",range_text(db,repo,h.verified_head.as_deref(),&head))
+                }
+            };
+            db.conn.execute("UPDATE verification_backstop_run SET evidence=?2 WHERE id=?1",params![run,evidence])?;
+            recover(db,config,repo,project,&pb,&head,culprit.as_deref(),&evidence,&actor)?;
         }
+    }
+    Ok(())
+}
+
+/// A Full check passed at `head`: recovery issues filed for earlier failing heads are done, since
+/// whatever fixed them has landed. One left open would keep asking for a fix already made.
+fn close_recovered(db:&mut Db,repo_id:&str,head:&str,actor:&Actor)->Result<()> {
+    let open:Vec<(String,String)>=db.conn.prepare("SELECT head,issue_key FROM verification_recovery WHERE repo=?1 AND issue_key IS NOT NULL AND head!=?2")?
+        .query_map(params![repo_id,head],|r|Ok((r.get(0)?,r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+    for (failed,key) in open {
+        if !db.issue(&key)?.is_some_and(|i|i.is_open()) {continue;}
+        db.add_note(&key,&format!("The Full check passed at {}, which is after the failing {}: integration is healthy again, so this recovery is done.",short(head),short(&failed)),"note",actor)?;
+        db.move_issue(&key,"Done",Some(&format!("Full verification passed at {}",short(head))),None,actor)?;
     }
     Ok(())
 }
@@ -562,6 +633,41 @@ mod tests {
             assert!(prepare_inverse(&repo,wt,&culprit,&culprit,"Must not overwrite").is_err());
             assert_eq!(std::fs::read_to_string(wt.join("value.txt"))?,"human work");Ok(())
         }).unwrap();
+    }
+
+    #[test]
+    fn a_head_known_broken_is_not_run_again_and_the_next_landing_is_checked_at_once() {
+        use crate::project_modes::{Backstop, Mode, Options};
+        // The 2026-10-20 case: an after-land install failed to build main, the first Full check
+        // ran anyway, found no culprit, and the fix's landing sat behind the cadence.
+        let root=crate::test_repo::copy("backstop-known-broken",|p|crate::test_repo::init(p,&[(playbook::PLAYBOOK_PATH,"[gate]\ncommands=['echo full-checked']\n"),("value.txt","good")]));
+        let file=crate::paths::unique_temp("backstop-known-broken-db",".sqlite");let mut db=Db::open(&file).unwrap();db.create_project("APP","Example").unwrap();
+        db.set_project_review_mode("APP",Mode::Custom,Options{shared_lanes:Some(false),full_backstop:Some(Backstop{enabled:true,landings:100,delay_seconds:86400}),audit_percent:Some(0),..Default::default()},0,&Actor::Human).unwrap();
+        let config=Config::default();
+        tick(&mut db,&config,&root,"APP","main").unwrap();
+        assert_eq!(health(&db,&root).unwrap().unwrap().status,"green");
+        let before=db.conn.query_row("SELECT COUNT(*) FROM lane_run",[],|r|r.get::<_,i64>(0)).unwrap();
+
+        let base=git(&root,&["rev-parse","HEAD"]).unwrap().trim().to_string();
+        let broken=change(&root,"value.txt","does not build");
+        let issue=db.create_issue(&NewIssue{project:"APP".into(),title:"A change".into(),body:"b".into(),kind:"feature".into(),source:"codex".into(),evidence:"e".into(),..Default::default()},&Actor::Agent("codex:test".into())).unwrap();
+        let failed=playbook::CommandResult{command:"cargo run --release -p app -- install".into(),ok:false,seconds:3,output:"error[E0063]: missing field".into(),skipped:false,timed_out:false};
+        on_landed(&mut db,&root,&issue,&crate::land::Landed{head:Some(broken.clone()),landed_from:Some(base.clone()),after:vec![failed],..Default::default()}).unwrap();
+        let h=health(&db,&root).unwrap().unwrap();
+        assert!(h.status=="failed" && h.message.starts_with(&format!("Known broken at {}",short(&broken))),"{h:?}");
+
+        tick(&mut db,&config,&root,"APP","main").unwrap();
+        assert_eq!(db.conn.query_row("SELECT COUNT(*) FROM lane_run",[],|r|r.get::<_,i64>(0)).unwrap(),before,"no Full run on a head already known broken");
+        let recovery=db.issue(&health(&db,&root).unwrap().unwrap().recovery_issue.expect("a recovery issue")).unwrap().unwrap();
+        assert!(recovery.body.contains("after-land step `cargo run --release -p app -- install` failed") && recovery.body.contains(&format!("Range: {}..{} (1 commit",short(&base),short(&broken))),"{}",recovery.body);
+
+        // The fix lands: checked at once though neither count nor delay is due, and the recovery closes.
+        change(&root,"value.txt","fixed");
+        tick(&mut db,&config,&root,"APP","main").unwrap();
+        assert_eq!(db.conn.query_row("SELECT COUNT(*) FROM lane_run",[],|r|r.get::<_,i64>(0)).unwrap(),before+1);
+        assert_eq!(health(&db,&root).unwrap().unwrap().status,"green");
+        assert_eq!(db.issue(&recovery.key).unwrap().unwrap().state,"Done");
+        drop(db);std::fs::remove_dir_all(root).ok();std::fs::remove_file(file).ok();
     }
 
     #[test]

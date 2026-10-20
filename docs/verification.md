@@ -222,7 +222,13 @@ isolated worktrees using the failing command first.
   with the failing log, so its author fixes it and lands it again.
 - **Bisect cannot isolate one** (interacting changes, where no single commit fails alone):
   pause reduced-verification landings and file an issue with the range and the log. Do not
-  blame the final commit of a failing prefix.
+  blame the final commit of a failing prefix. With no passing Full check yet, there is no base to
+  bisect from: the issue names the failing step and the range since the first landing recorded.
+- **A head already known broken is not run again.** A landing whose after-land step failed (an
+  install that cannot build) records "known broken at <head>", as does a failed Full check, and no
+  Full run is spent on that head. The next commit that lands is checked at once, whatever the
+  cadence, and a Full pass closes the recovery issues filed for earlier heads, so the fix's own
+  landing clears the pause ([NIT-457](http://127.0.0.1:7423/i/NIT-457)).
 - **Never revert a migration automatically.** A culprit that carries a migration, or other
   effects outside the repository (a published artifact, an external call), pauses and files
   instead: undoing it can lose data that the revert's code no longer reads.

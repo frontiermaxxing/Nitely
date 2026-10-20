@@ -749,6 +749,8 @@ fn land_prefix(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stack: &Path, 
             commits: git(root, &["log", "--oneline", &format!("{}..{}", s.from, s.tip)])?.lines().map(str::to_string).collect(),
             approval: Some(s.approval.clone()),
             gate: Some(gate.clone()),
+            // Where this change started, so the post-merge backstop records the landing (NIT-457).
+            landed_from: Some(s.from.clone()),
             after: after.after.clone(),
             warnings: after.warnings.clone(),
             batch: Some(BatchNote {
