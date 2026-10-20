@@ -127,13 +127,22 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
     // have stopped waiting. Not after a land kept local (--no-push): their push would publish it.
     drop(_telemetry);
     let kept_local = !opts.push && playbook::has_origin(&root);
+    let mut queue_ran = false;
     if !kept_local && crate::land_queue::has_waiting(db, &root).unwrap_or(false) {
+        queue_ran = true;
         if let Err(e) = crate::land_queue::run_queue(db, &root) {
             report.warnings.push(format!("the land queue that waited behind this land stopped: {e:#}"));
         }
     }
     report.tidied = tidy(db, &root, &pb, actor, &mut report.warnings);
     drop(lock);
+    // The steps that need no lock, now that the next land may go (NIT-334): whenever the
+    // integration branch may have moved, by this land or the queue it ran.
+    if (result.is_ok() && report.landed) || queue_ran {
+        let ran = after_land_outside_lock(&root, &pb);
+        report.warnings.extend(ran.iter().filter(|r| !r.ok).map(|r| format!("the after-land step `{}` failed; the land stands", r.command)));
+        report.after.extend(ran);
+    }
 
     match result {
         Ok(()) => record_landed(db, &root, &issue, &mut report, actor)?,
@@ -226,10 +235,7 @@ pub(crate) fn record_stopped(db: &mut Db, key: &str, msg: &str, report: &mut Lan
 pub(crate) fn held_by_live_land(root: &Path) -> bool {
     let dot_git = root.join(".git");
     let path = if dot_git.is_dir() { dot_git.join(LOCK_FILE) } else { match lock_path(root) { Ok(p) => p, Err(_) => return false } };
-    let Ok(held) = std::fs::read_to_string(&path) else { return false };
-    // "<holder> pid <pid> since <time>"
-    let mut words = held.split_whitespace().skip_while(|w| *w != "pid");
-    words.nth(1).and_then(|p| p.parse::<u32>().ok()).is_some_and(crate::procs::alive)
+    std::fs::read_to_string(&path).is_ok_and(|held| holder_alive(&held))
 }
 
 /// The repo's land lock file, in its common git dir.
@@ -480,6 +486,11 @@ pub(crate) fn after_land(root: &Path, pb: &Playbook, report: &mut Landed) {
             report.after.push(playbook::CommandResult { command, ok: true, seconds: 0, output: format!("skipped: {why}"), skipped: true, timed_out: false });
             continue;
         }
+        // Run once the lock is released (`after_land_outside_lock`); it covers what it names.
+        if step.outside_lock {
+            covered.push(step);
+            continue;
+        }
         let result = match playbook::run_shell_kind(&command, root, "install") {
             Ok((ok, output, seconds)) => playbook::CommandResult { command, ok, seconds, output, skipped: false, timed_out: false },
             Err(e) => playbook::CommandResult { command, ok: false, seconds: 0, output: format!("{e:#}"), skipped: false, timed_out: false },
@@ -558,6 +569,152 @@ pub(crate) fn fast_forward_main(root: &Path, to: &str) -> Result<()> {
 const FF_TAKES: std::time::Duration = std::time::Duration::from_secs(120);
 /// File times are coarse on some file systems: a lock may read as a little older than the mark.
 const FF_SLACK: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The `[[land.after]]` steps marked `outside_lock`, run once the land lock is released
+/// (NIT-334). They run in a checkout of the integration branch kept for them beside the lanes, so
+/// the next land's fast-forward of the main checkout never changes what they build, and one
+/// land's at a time, under a lock of their own. A land that finishes while another's run leaves a
+/// mark and returns at once; the running one goes round again at the newest commit, so lands
+/// close together build once, not once each. What each round runs follows from what changed since
+/// the steps last ran, whoever landed it (a land queue's changes too).
+pub(crate) fn after_land_outside_lock(root: &Path, pb: &Playbook) -> Vec<playbook::CommandResult> {
+    let steps: Vec<&playbook::GateStep> = pb.land.after.iter().filter(|s| s.outside_lock).collect();
+    if steps.is_empty() {
+        return vec![];
+    }
+    let (Ok(lock), Ok(pending)) = (after_lock_path(root), after_pending_path(root)) else { return vec![] };
+    let mut out = Vec::new();
+    loop {
+        let held = match take_after_lock(&lock) {
+            Some(held) => held,
+            None => {
+                // The mark first, then one more try: the holder looks for marks after it lets go,
+                // so either it sees this one or this land finds the lock free.
+                std::fs::write(&pending, "").ok();
+                match take_after_lock(&lock) {
+                    Some(held) => held,
+                    None => {
+                        out.push(playbook::CommandResult {
+                            command: steps.iter().map(|s| s.run.as_str()).collect::<Vec<_>>().join("; "),
+                            ok: true,
+                            seconds: 0,
+                            output: "another land is running these steps; it runs them again at the newest commit once it is done".into(),
+                            skipped: true,
+                            timed_out: false,
+                        });
+                        return out;
+                    }
+                }
+            }
+        };
+        // Until no land has left a mark: each round builds whatever landed before it started.
+        loop {
+            std::fs::remove_file(&pending).ok();
+            match after_round(root, pb, &steps) {
+                Ok(ran) => out.extend(ran),
+                Err(e) => out.push(playbook::CommandResult { command: "preparing the after-land checkout".into(), ok: false, seconds: 0, output: format!("{e:#}"), skipped: false, timed_out: false }),
+            }
+            if !pending.exists() {
+                break;
+            }
+        }
+        drop(held);
+        // A land that left its mark between the last look and the release.
+        if !pending.exists() {
+            return out;
+        }
+    }
+}
+
+/// One round of the outside-the-lock steps: their checkout moved to the integration branch's
+/// newest commit, and each step that what changed since the last round calls for.
+fn after_round(root: &Path, pb: &Playbook, steps: &[&playbook::GateStep]) -> Result<Vec<playbook::CommandResult>> {
+    let base = pb.integration_branch();
+    let at = git(root, &["rev-parse", base])?.trim().to_string();
+    let tree = after_tree_path(pb, root);
+    let before = if tree.join(".git").exists() { git(&tree, &["rev-parse", "HEAD"]).ok().map(|h| h.trim().to_string()) } else { None };
+    if before.is_none() {
+        git(root, &["worktree", "prune"]).ok();
+        if tree.exists() {
+            std::fs::remove_dir_all(&tree).with_context(|| format!("clearing {}", tree.display()))?;
+        }
+        git(root, &["worktree", "add", "--detach", &tree.to_string_lossy(), &at]).context("creating the after-land checkout")?;
+    } else if before.as_deref() != Some(at.as_str()) {
+        git(&tree, &["checkout", "--force", "--detach", &at]).context("moving the after-land checkout")?;
+        git(&tree, &["clean", "-ffdq"]).ok();
+    }
+    // What changed since the steps last ran; unknown (a new checkout): every step runs.
+    // Every commit's files since then, not the two ends' difference: a change and its revert in
+    // between still count, as the stale-build check counts them; a merge, by what it brought to
+    // the branch (against its first parent).
+    let files: Option<Vec<String>> = before
+        .filter(|b| b != &at)
+        .and_then(|b| git(&tree, &["log", "--name-only", "--no-renames", "-m", "--first-parent", "--format=", &format!("{b}..{at}")]).ok())
+        .map(|o| o.lines().filter(|l| !l.trim().is_empty()).map(str::to_string).collect());
+    let mut out = Vec::new();
+    for step in steps {
+        let command = playbook::expand(&step.run, root, &tree, base);
+        let skip = files.as_deref().and_then(|f| step.skip_reason(f).ok().flatten());
+        if let Some(why) = skip {
+            out.push(playbook::CommandResult { command, ok: true, seconds: 0, output: format!("skipped: {why}"), skipped: true, timed_out: false });
+            continue;
+        }
+        out.push(match playbook::run_shell_kind(&command, &tree, "install") {
+            Ok((ok, output, seconds)) => playbook::CommandResult { command, ok, seconds, output, skipped: false, timed_out: false },
+            Err(e) => playbook::CommandResult { command, ok: false, seconds: 0, output: format!("{e:#}"), skipped: false, timed_out: false },
+        });
+    }
+    Ok(out)
+}
+
+/// The checkout the outside-the-lock steps run in.
+pub(crate) fn after_tree_path(pb: &Playbook, root: &Path) -> PathBuf {
+    crate::light::lanes_dir(pb, root).join("after")
+}
+
+fn after_lock_path(root: &Path) -> Result<PathBuf> {
+    Ok(lock_path(root)?.with_file_name("nitely-after.lock"))
+}
+
+fn after_pending_path(root: &Path) -> Result<PathBuf> {
+    Ok(lock_path(root)?.with_file_name("nitely-after.pending"))
+}
+
+/// Whether a lock file's text ("<holder> pid <pid> since <time>") names a process that still runs.
+fn holder_alive(text: &str) -> bool {
+    let mut words = text.split_whitespace().skip_while(|w| *w != "pid");
+    words.nth(1).and_then(|p| p.parse::<u32>().ok()).is_some_and(crate::procs::alive)
+}
+
+/// The outside-the-lock steps' lock, held: an exclusive lock on a file that stays, which the system
+/// lets go when its holder's process ends however it ends, so a land that died mid-build (the
+/// machine restarted) holds nothing and nothing has to break it. Beside it, while held, a file
+/// naming the holder, which `after_steps_running` reads without touching the lock itself.
+struct AfterHold {
+    _file: std::fs::File,
+    running: PathBuf,
+}
+
+impl Drop for AfterHold {
+    fn drop(&mut self) {
+        std::fs::remove_file(&self.running).ok();
+    }
+}
+
+/// The lock of the outside-the-lock steps, or None while another land holds it.
+fn take_after_lock(path: &Path) -> Option<AfterHold> {
+    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(path).ok()?;
+    file.try_lock().ok()?;
+    let running = path.with_extension("running");
+    std::fs::write(&running, format!("after-land-steps pid {}", std::process::id())).ok();
+    Some(AfterHold { _file: file, running })
+}
+
+/// Whether the outside-the-lock steps of a land are running now for `root` (an install of the
+/// landed build under way): submit and land say so when they find the installed build behind.
+pub fn after_steps_running(root: &Path) -> bool {
+    after_lock_path(root).ok().and_then(|p| std::fs::read_to_string(p.with_extension("running")).ok()).is_some_and(|t| holder_alive(&t))
+}
 
 fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor: &Actor, report: &mut Landed) -> Result<()> {
     let base = report.base.clone();
@@ -1185,6 +1342,74 @@ mod tests {
         fast_forward_main(&repo, &next).unwrap();
         assert!(!lock.exists() && !mark.exists());
         assert_eq!(git(&repo, &["rev-parse", "HEAD"]).unwrap().trim(), next);
+
+    /// The after steps marked `outside_lock` run once the land lock is released, in a checkout of
+    /// the integration branch's newest commit, one land's at a time; a land that finishes while
+    /// they run leaves a mark and the next round builds its commit too (NIT-334).
+    #[test]
+    fn steps_outside_the_lock_build_the_newest_commit_and_fold_lands_that_finish_meanwhile() {
+        let base = crate::paths::unique_temp("nitely-after-outside", "");
+        let repo = base.join("repo");
+        crate::test_repo::init(&repo, &[("a.txt", "one\n")]);
+        let pb = Playbook::parse(concat!(
+            "[worktree]\n",
+            "dir = \"../wt/{key}\"\n",
+            "[[land.after]]\n",
+            "run = \"git rev-parse HEAD >> {main}/../built.txt\"\n",
+            "when_changed = ['^src/', '^a\\.txt$']\n",
+            "outside_lock = true\n",
+        ))
+        .unwrap();
+        let head = |dir: &Path| git(dir, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        let built = || std::fs::read_to_string(base.join("built.txt")).unwrap_or_default().lines().map(str::to_string).collect::<Vec<_>>();
+        let commit = |file: &str, text: &str, message: &str| {
+            std::fs::write(repo.join(file), text).unwrap();
+            git(&repo, &["add", file]).unwrap();
+            git(&repo, &["commit", "-qm", message]).unwrap();
+        };
+        // Under the lock, the step waits for later.
+        let mut report = Landed::default();
+        after_land(&repo, &pb, &mut report);
+        assert!(report.after.is_empty(), "{:?}", report.after);
+        // Then it runs in its own checkout, at the integration branch's commit.
+        let ran = after_land_outside_lock(&repo, &pb);
+        assert!(ran.len() == 1 && ran[0].ok && !ran[0].skipped, "{ran:?}");
+        assert_eq!(built(), [head(&repo)]);
+        assert!(after_tree_path(&pb, &repo).join("a.txt").exists());
+        // Another land's steps are running: this one leaves its mark and returns at once.
+        let lock = after_lock_path(&repo).unwrap();
+        let other = take_after_lock(&lock).expect("free");
+        assert!(after_steps_running(&repo));
+        let ran = after_land_outside_lock(&repo, &pb);
+        assert!(ran.len() == 1 && ran[0].skipped && ran[0].output.contains("another land"), "{ran:?}");
+        assert!(after_pending_path(&repo).unwrap().exists());
+        drop(other);
+        assert!(!after_steps_running(&repo), "let go with its holder");
+        // A change lands: the next run builds that commit, and no mark is left.
+        commit("a.txt", "two\n", "two");
+        let ran = after_land_outside_lock(&repo, &pb);
+        assert!(ran.iter().all(|r| r.ok && !r.skipped), "{ran:?}");
+        assert_eq!(built().last(), Some(&head(&repo)));
+        assert!(!after_pending_path(&repo).unwrap().exists() && !after_steps_running(&repo));
+        // A land that changed nothing the step is for (here: docs) skips it.
+        commit("docs.md", "x\n", "docs");
+        let ran = after_land_outside_lock(&repo, &pb);
+        assert!(ran.len() == 1 && ran[0].skipped && ran[0].output.starts_with("skipped: nothing matching"), "{ran:?}");
+        assert_eq!(built().len(), 2, "not run again");
+        // But one after a change it is for, landed by anyone since it last ran (a land queue's
+        // change, then a docs land that drained it), runs it.
+        commit("a.txt", "three\n", "three");
+        commit("docs.md", "y\n", "docs again");
+        let ran = after_land_outside_lock(&repo, &pb);
+        assert!(ran.iter().all(|r| r.ok && !r.skipped), "{ran:?}");
+        assert_eq!(built().last(), Some(&head(&repo)));
+        // A change and its revert land between two runs: the step still runs, since each commit
+        // counts (the stale-build check counts them too).
+        commit("a.txt", "four\n", "four");
+        commit("a.txt", "three\n", "back to three");
+        let ran = after_land_outside_lock(&repo, &pb);
+        assert!(ran.iter().all(|r| r.ok && !r.skipped), "{ran:?}");
+        assert_eq!(built().last(), Some(&head(&repo)));
         std::fs::remove_dir_all(&base).ok();
     }
 

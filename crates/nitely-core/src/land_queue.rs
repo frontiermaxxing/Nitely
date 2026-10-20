@@ -264,6 +264,12 @@ fn land_waiting(db: &mut Db, root: &Path, key: &str, opts: &LandOptions, actor: 
                 land::tidy(db, root, &pb, actor, &mut Vec::new());
             }
             drop(lock);
+            // The after steps that need no lock, once the next land may go (NIT-334). With no one
+            // land's change to judge by, the ones that what changed since they last ran calls for.
+            let pb = Playbook::load(root)?;
+            for r in land::after_land_outside_lock(root, &pb).iter().filter(|r| !r.ok) {
+                eprintln!("the after-land step `{}` failed; the land stands", r.command);
+            }
             continue;
         }
         if Instant::now() >= deadline {

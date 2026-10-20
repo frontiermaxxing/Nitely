@@ -209,6 +209,8 @@ pub fn check_current(config: &crate::Config, dir: &str, built_at: &str) -> Resul
     let Some(root) = crate::playbook::repo_root(config, dir) else { return Ok(()) };
     let pb = crate::playbook::Playbook::load(&root)?;
     match stale_build(&root, pb.integration_branch(), built_at) {
+        // A land's outside-the-lock steps are installing the landed build this moment (NIT-334).
+        Some(why) if crate::land::after_steps_running(&root) => bail!("{why}. A land is installing the newer build right now: try again in a minute"),
         Some(why) => bail!("{why}"),
         None => Ok(()),
     }

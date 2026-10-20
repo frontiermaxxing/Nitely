@@ -395,6 +395,11 @@ pub struct GateStep {
     pub when_changed: Vec<String>,
     /// Skipped when every changed path matches one of these (e.g. docs-only changes).
     pub unless_only: Vec<String>,
+    /// A `[[land.after]]` step only: run once the land lock is released, in a checkout of the
+    /// integration branch kept for these steps beside the lanes (`{worktree}` names it, `{main}` the
+    /// main checkout), so the next land does not wait for it; lands that finish meanwhile run it
+    /// once more at the newest commit rather than once each (NIT-334).
+    pub outside_lock: bool,
 }
 
 impl GateStep {
@@ -1658,6 +1663,7 @@ mod tests {
             run: "x".into(),
             when_changed: when.iter().map(|s| s.to_string()).collect(),
             unless_only: unless.iter().map(|s| s.to_string()).collect(),
+            outside_lock: false,
         };
         let files = |f: &[&str]| f.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let api = step(&["^api/"], &[]);
