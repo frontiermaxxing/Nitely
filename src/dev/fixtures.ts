@@ -1375,11 +1375,19 @@ function verificationHealth(project: string, now: number): VerificationHealth[] 
     recovery_issue: ["failed", "paused", "recovering"].includes(status) ? (project === "NIT" ? "NIT-29" : project === "HAR" ? "HAR-14" : null) : null }];
 }
 
+const auditReports = new Map<string, VerificationAuditReport>();
 function verificationAudit(project: string): VerificationAuditReport | null {
   if (project !== "NIT" || new URLSearchParams(window.location.search).get("verification") === "off") return null;
+  const saved = auditReports.get(project);
+  if (saved) return saved;
   const common = { landed: 12, audited: 4, confirmed_escape_lands: 1, declared_lands: 12, matching_declarations: 10, audited_escape_rate: 0.25 };
-  return { jobs: [], rules: [{ name: "display-copy", ...common }, { name: "ordinary-comments", landed: 6, audited: 0, confirmed_escape_lands: 0, declared_lands: 6, matching_declarations: 6, audited_escape_rate: null }],
-    declarers: [{ name: "codex:example-session", ...common }], disabled_rules: ["display-copy"], escapes: [], jobs_truncated: false, rules_truncated: false, declarers_truncated: false, disabled_rules_truncated: false, escapes_truncated: false, note: "Sample audit results" };
+  const result: VerificationAuditReport = { jobs: [
+    { id: 1, project, issue_key: "NIT-29", head: "b7c281d".padEnd(40, "0"), state: "findings", rules: ["ordinary-comments"], result: { reviewer: "Independent reviewer", summary: "An executable documentation example may no longer match its contract.", findings: [{ priority: 2, text: "The example uses a removed option. Reproduce the example before confirming an escape." }] }, error: null },
+    { id: 2, project, issue_key: "NIT-29", head: "a632d90".padEnd(40, "0"), state: "failed", rules: ["display-copy"], result: null, error: "Reviewer unavailable. No audit result was recorded." },
+  ], rules: [{ name: "display-copy", ...common }, { name: "ordinary-comments", landed: 6, audited: 1, confirmed_escape_lands: 0, declared_lands: 6, matching_declarations: 6, audited_escape_rate: 0 }],
+    declarers: [{ name: "codex:example-session", ...common, landed: 18, audited: 5, declared_lands: 18, matching_declarations: 16, audited_escape_rate: 0.2 }], disabled_rules: ["display-copy"], escapes: [], jobs_truncated: false, rules_truncated: false, declarers_truncated: false, disabled_rules_truncated: false, escapes_truncated: false, note: "Sample audit results" };
+  auditReports.set(project, result);
+  return result;
 }
 
 const PRIORITY_ORDER = (p: number) => (p === 0 ? 9 : p);
@@ -2206,6 +2214,36 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         const next = { project, enabled: Boolean(args.enabled), revision: before.revision + 1 };
         projectYolo.set(project, next);
         return next;
+      }
+      case "confirm_verification_escape":
+      case "retry_verification_audit": {
+        const report = structuredClone(verificationAudit("NIT")!);
+        const job = report.jobs.find((job) => job.id === Number(args.id));
+        if (!job) throw new Error("Audit not found");
+        if (cmd === "retry_verification_audit") {
+          if (job.state !== "failed") throw new Error("Only failed audits may be retried");
+          job.state = "pending";
+          job.error = null;
+        } else {
+          const rule = String(args.rule);
+          const evidence = String(args.evidence).trim();
+          if (job.state !== "findings" || !job.rules?.includes(rule) || !evidence || evidence.length > 16384) throw new Error("Choose an attributed rule and enter reproduction evidence");
+          if (!report.escapes.some((escape) => escape.audit_id === job.id && escape.rule === rule)) {
+            const alreadyConfirmed = report.escapes.some((escape) => escape.audit_id === job.id);
+            report.escapes.push({ audit_id: job.id, rule, evidence });
+            if (!report.disabled_rules.includes(rule)) report.disabled_rules.push(rule);
+            for (const rate of report.rules.filter((rate) => rate.name === rule)) {
+              rate.confirmed_escape_lands++;
+              rate.audited_escape_rate = rate.confirmed_escape_lands / rate.audited;
+            }
+            if (!alreadyConfirmed) for (const rate of report.declarers) {
+              rate.confirmed_escape_lands++;
+              rate.audited_escape_rate = rate.confirmed_escape_lands / rate.audited;
+            }
+          }
+        }
+        auditReports.set("NIT", report);
+        return report;
       }
       case "set_project_focus":
         return setProjectFocus(args);

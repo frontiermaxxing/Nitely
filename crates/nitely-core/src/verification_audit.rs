@@ -44,6 +44,8 @@ pub struct Sample {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditJob {
+    #[serde(default)]
+    pub rules: Vec<String>,
     pub repo: String,
     pub id: i64,
     pub project: String,
@@ -174,8 +176,10 @@ pub fn landed(db: &mut Db, candidate: &Candidate, base: &str, head: &str, percen
 }
 
 fn job(conn: &rusqlite::Connection, id:i64) -> Result<AuditJob> {
-    let (mut j,json): (AuditJob,Option<String>) = conn.query_row("SELECT id,project,issue_key,base,head,author,selected,state,attempt,lease_until,result,error,repo FROM verification_audit WHERE id=?1",[id],|r| Ok((AuditJob{repo:r.get(12)?,id:r.get(0)?,project:r.get(1)?,issue_key:r.get(2)?,base:r.get(3)?,head:r.get(4)?,author:r.get(5)?,selected:r.get(6)?,state:r.get(7)?,attempt:r.get(8)?,lease_until:r.get(9)?,result:None,error:r.get(11)?},r.get(10)?)))?;
+    let (mut j,json): (AuditJob,Option<String>) = conn.query_row("SELECT id,project,issue_key,base,head,author,selected,state,attempt,lease_until,result,error,repo FROM verification_audit WHERE id=?1",[id],|r| Ok((AuditJob{rules:vec![],repo:r.get(12)?,id:r.get(0)?,project:r.get(1)?,issue_key:r.get(2)?,base:r.get(3)?,head:r.get(4)?,author:r.get(5)?,selected:r.get(6)?,state:r.get(7)?,attempt:r.get(8)?,lease_until:r.get(9)?,result:None,error:r.get(11)?},r.get(10)?)))?;
     j.result=json.map(|s|serde_json::from_str(&s)).transpose()?;
+    j.rules=conn.prepare("SELECT rule FROM verification_audit_rule WHERE audit_id=?1 ORDER BY rule")?
+        .query_map([id],|r|r.get(0))?.collect::<rusqlite::Result<_>>()?;
     Ok(j)
 }
 
@@ -244,6 +248,21 @@ pub fn full_review(job:&AuditJob, checkout:&Path, rules:&ReviewRules) -> Result<
 pub fn confirm_escape(db:&mut Db, audit_id:i64, rule:&str, evidence:&str, actor:&Actor) -> Result<()> {
     if !matches!(actor,Actor::Human) { bail!("only a human confirms an audit finding as an escape"); }
     escape(db,audit_id,rule,"audit",evidence,actor.id())
+}
+
+/// Human desktop decisions return a fresh bounded report for immediate UI feedback.
+pub fn confirm_report(db:&mut Db,id:i64,rule:&str,evidence:&str,actor:&Actor)->Result<Report> {
+    let audit=job(&db.conn,id)?;
+    confirm_escape(db,id,rule,evidence,actor)?;
+    db.add_note(&audit.issue_key,&format!("Confirmed post-merge escape at {} for rule {rule}: {evidence}",audit.head),"verification_escape_confirmed",actor)?;
+    report(db,&audit.project,100)
+}
+pub fn retry_report(db:&Db,id:i64,actor:&Actor)->Result<Report> {
+    if !matches!(actor,Actor::Human) {bail!("only the human retries audits through the desktop decision");}
+    let audit=job(&db.conn,id)?;
+    retry(db,id)?;
+    db.add_note(&audit.issue_key,"Retrying the failed post-merge audit; no verification result is assumed","verification_audit_retry",actor)?;
+    report(db,&audit.project,100)
 }
 
 /// Internal backstop hook, only after reproducible failure + isolated culprit attribution.
@@ -381,7 +400,9 @@ mod tests {
         assert!(finish(&db,&old,&Ok(review(false))).is_err());
         finish(&other,&current,&Err(anyhow::anyhow!("reviewer unavailable"))).unwrap();
         assert!(claim_next(&mut db,"APP",&c.repo).unwrap().is_none());
-        retry(&db,id).unwrap();
+        assert!(retry_report(&db,id,&Actor::Agent("human".into())).is_err());
+        let pending=retry_report(&db,id,&Actor::Human).unwrap();
+        assert_eq!(pending.jobs[0].state,"pending");
         let done=run_next(&mut db,"APP",&c.repo,|j| {assert_eq!(j.head,format!("{:040x}",1));Ok(review(false))}).unwrap().unwrap();
         assert_eq!(done.state,"passed");
         assert!(retry(&db,id).is_err());
@@ -392,9 +413,11 @@ mod tests {
         let (mut db,c)=setup();let id=land(&mut db,&c,1);
         run_next(&mut db,"APP",&c.repo,|_|Ok(review(true))).unwrap();
         assert!(disabled_rules(&db,"APP").unwrap().is_empty());
-        assert!(confirm_escape(&mut db,id,"prose","reproduced",&Actor::Agent("human".into())).is_err());
+        assert_eq!(report(&db,"APP",10).unwrap().jobs[0].rules,vec!["prose"]);
+        assert!(confirm_report(&mut db,id,"prose","reproduced",&Actor::Agent("human".into())).is_err());
         assert!(confirm_escape(&mut db,id,"unrelated","reproduced",&Actor::Human).is_err());
-        confirm_escape(&mut db,id,"prose","reproduced executable example",&Actor::Human).unwrap();
+        let confirmed=confirm_report(&mut db,id,"prose","reproduced executable example",&Actor::Human).unwrap();
+        assert_eq!(confirmed.disabled_rules,vec!["prose"]);
         confirm_escape(&mut db,id,"prose","reproduced executable example",&Actor::Human).unwrap();
         assert_eq!(disabled_rules(&db,"APP").unwrap(),vec!["prose"]);
         let r=report(&db,"APP",10).unwrap();

@@ -7,9 +7,10 @@ determine selection. The salt never appears in the read model. The stored decisi
 survives declaration edits, revised candidates, restarts and project renames.
 The policy fingerprint hashes committed policy contents and the classifier identity,
 not the integration commit, so unrelated ancestor changes do not reroll the sample.
-The current classifier remains shadow-only: this implementation does not activate a
-reduced gate or skip pre-land review. Shadow candidates receive durable sampling
-advice; only an actual reduced landing enters the execution queue.
+The committed project policy controls shadow versus active execution. Shadow
+candidates receive durable sampling advice; only an actual reduced landing enters
+the execution queue. Missing policy retains Full verification. YOLO skips automatic
+verification and does not produce a reduced-verification certificate.
 
 Every actual reduced landing is recorded with its exact base/head, implementation
 vendor, declaration provenance, effective risk and stable lowering-rule identities.
@@ -36,6 +37,15 @@ for the project in Nitely's database. Classification consults this untruncated s
 and returns that scope to Full. No agent edits the live playbook. Re-enabling a scope
 requires a revised rule, regression evidence, shadow evaluation and the separately
 approved policy process; this API offers no agent-accessible reset.
+
+In Overview, expand **Verification audits** for the project's pending findings and
+failed jobs. Each finding shows the exact landed revision and the rules that lowered
+its verification. After reproducing the defect, choose the relevant rule, enter
+reproduction evidence and use **Confirm escape and require Full**. The desktop
+records the human decision in the issue history and immediately refreshes the
+paused-rule list and rates. **Retry audit** explicitly returns a failed job to the
+queue without calling it a pass. Live browser previews are read-only; sample-data
+previews exercise these controls using isolated fixtures.
 
 The read model returns at most 200 jobs, rule groups, declarer/source groups and
 disabled-rule names, with explicit truncation flags. Counts cover all retained

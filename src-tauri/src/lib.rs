@@ -297,6 +297,17 @@ async fn set_project_yolo(project: String, enabled: bool, expected_revision: i64
     db()?.set_project_yolo(&project, enabled, expected_revision, &ME).map_err(err)
 }
 
+/// Audit confirmation only tightens verification; it never approves a patch.
+#[tauri::command]
+async fn confirm_verification_escape(id: i64, rule: String, evidence: String) -> Result<nitely_core::verification_audit::Report, String> {
+    nitely_core::verification_audit::confirm_report(&mut db()?, id, &rule, &evidence, &ME).map_err(err)
+}
+
+#[tauri::command]
+async fn retry_verification_audit(id: i64) -> Result<nitely_core::verification_audit::Report, String> {
+    nitely_core::verification_audit::retry_report(&db()?, id, &ME).map_err(err)
+}
+
 /// Only the person changes the focus; agents read it through get_project and next_task.
 #[tauri::command]
 async fn set_project_focus(project: String, goal: Option<i64>, allow_urgent: bool) -> Result<nitely_core::focus::ProjectFocus, String> {
@@ -966,6 +977,8 @@ pub fn run() {
             project_focus,
             project_yolo,
             set_project_yolo,
+            confirm_verification_escape,
+            retry_verification_audit,
             set_project_focus,
             goal_workers,
             goal_choices,

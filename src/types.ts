@@ -772,12 +772,23 @@ export interface VerificationAuditRate {
   audited_escape_rate: number | null;
 }
 
+export interface VerificationAuditJob {
+  id: number;
+  project: string;
+  issue_key: string;
+  head: string;
+  state: string;
+  rules?: string[];
+  result: { reviewer: string; summary: string; findings: { priority: number; text: string }[] } | null;
+  error: string | null;
+}
+
 export interface VerificationAuditReport {
-  jobs: unknown[];
+  jobs: VerificationAuditJob[];
   rules: VerificationAuditRate[];
   declarers: VerificationAuditRate[];
   disabled_rules: string[];
-  escapes: unknown[];
+  escapes: { audit_id: number; rule: string; evidence: string }[];
   jobs_truncated: boolean;
   rules_truncated: boolean;
   declarers_truncated: boolean;

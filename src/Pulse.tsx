@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "./backend";
+import { VerificationAuditActions } from "./VerificationAuditActions";
 import type { View } from "./App";
 import { KIND_LABEL as DECISION_LABEL, type Decision, type DecisionKind } from "./decisions";
 import type { Board, FlowIssue, GoalReport, Happening, IssueRecord, ProjectFlow, Pulse as PulseData, Session, TaskRow, VerificationAuditRate } from "./types";
@@ -417,7 +418,7 @@ function Flow({ flow, ctx, onBoard }: { flow: ProjectFlow; ctx: Context; onBoard
         </span>
       </div>
       <VerificationHealthRows flow={flow} ctx={ctx} />
-      <VerificationAudits flow={flow} />
+      <VerificationAudits flow={flow} onOpenIssue={ctx.onOpenIssue} />
       <div className="flow-grid">
         {STATIONS.map((s) => {
           const here = at(s);
@@ -472,8 +473,9 @@ function VerificationHealthRows({ flow, ctx }: { flow: ProjectFlow; ctx: Context
   </ul>;
 }
 
-function VerificationAudits({ flow }: { flow: ProjectFlow }) {
-  const report = flow.verification_audits;
+function VerificationAudits({ flow, onOpenIssue }: { flow: ProjectFlow; onOpenIssue: (key: string) => void }) {
+  const [report, setReport] = useState(flow.verification_audits);
+  useEffect(() => setReport(flow.verification_audits), [flow.verification_audits]);
   if (!report || (!report.rules.length && !report.declarers.length && !report.jobs.length && !report.disabled_rules.length)) return null;
   const hasEscapes = [...report.rules, ...report.declarers].some((r) => r.confirmed_escape_lands > 0);
   const limited = report.rules_truncated || report.declarers_truncated || report.disabled_rules_truncated || report.escapes_truncated;
@@ -488,6 +490,7 @@ function VerificationAudits({ flow }: { flow: ProjectFlow }) {
   return <details className="verification-audits">
     <summary><span>Verification audits</span><span className="verification-audit-summary">{report.rules.length}{report.rules_truncated ? "+" : ""} {report.rules.length === 1 ? "rule" : "rules"}{hasEscapes && <span className="stuck-ink"> · confirmed escapes</span>}{report.disabled_rules.length > 0 && ` · ${report.disabled_rules.length}${report.disabled_rules_truncated ? "+" : ""} paused`}</span></summary>
     <p className="verification-audit-note">Unaudited outcomes are unknown. Escape rates cover completed audits only; declaration agreement compares the declared risk with the classifier.</p>
+    <VerificationAuditActions report={report} onChange={setReport} onOpenIssue={onOpenIssue} />
     {report.rules.length > 0 && <><h3>By rule</h3>{rates(report.rules, false)}</>}
     {report.declarers.length > 0 && <><h3>By declarer</h3>{rates(report.declarers, true)}</>}
     {report.disabled_rules.length > 0 && <p className="verification-audit-note">Paused rules: {report.disabled_rules.map((r) => r.slice(0, 160)).join(", ")}. These paths require Full verification.</p>}
