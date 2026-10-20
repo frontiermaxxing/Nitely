@@ -444,7 +444,7 @@ fn tools() -> Value {
                 "to_ms": {"type": "integer"},
                 "before_last_restart": {"type": "boolean"},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 2000, "default": 1000},
-                "project": {"type": "string", "description": "Filters workload attribution; machine totals remain machine-wide."}
+                "project": {"type": "string", "description": "Recorded project key for workload attribution and events; historical keys are not rewritten after a rename. Machine totals remain machine-wide."}
             } }
         },
         {
@@ -1063,7 +1063,8 @@ fn run_tool(server: &Server, name: &str, args: &Value, params: &Value) -> Result
 fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detached: Option<&str>) -> Result<Value> {
     let config = Config::load()?;
     let mut db = Db::open_default()?;
-    let args = &current_args(&db, args)?;
+    // Performance history stores launch-time project identities, independently of board renames.
+    let args = &if name == "performance" { args.clone() } else { current_args(&db, args)? };
     let named = std::env::var("CLAUDE_CODE_SESSION_ID").ok();
     let session = &match detached {
         Some(s) => s.to_string(),

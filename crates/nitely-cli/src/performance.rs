@@ -11,7 +11,7 @@ pub struct Range {
     /// Ten minutes ending at the previous boot's last retained sample.
     #[arg(long)] before_last_restart: bool,
     #[arg(long, default_value_t = 1000)] limit: usize,
-    /// Filter workload attribution; machine totals remain machine-wide.
+    /// Recorded project key for attribution/events, including historical keys before a rename.
     #[arg(long)] project: Option<String>,
 }
 impl Range {

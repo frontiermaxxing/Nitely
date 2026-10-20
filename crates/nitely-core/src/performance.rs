@@ -202,8 +202,10 @@ impl Store {
     pub fn samples(&self, from: i64, to: i64, limit: usize) -> Result<Vec<Sample>> {
         self.read_json("SELECT json FROM samples WHERE wall_ms>=?1 AND wall_ms<=?2 ORDER BY id DESC LIMIT ?3", from, to, limit)
     }
+    /// Whole summaries whose observation intervals overlap the inclusive range. Their extrema
+    /// cannot be clipped to the range; callers must expose the actual interval and this limitation.
     pub fn minutes(&self, from: i64, to: i64, limit: usize) -> Result<Vec<Minute>> {
-        self.read_json("SELECT json FROM minutes WHERE wall_ms>=?1 AND wall_ms<=?2 ORDER BY id DESC LIMIT ?3", from, to, limit)
+        self.read_json("SELECT json FROM minutes WHERE wall_ms>=?1 AND CASE WHEN json_valid(json) THEN json_extract(json,'$.first_wall_ms')<=?2 ELSE 0 END ORDER BY id DESC LIMIT ?3", from, to, limit)
     }
     fn read_json<T: serde::de::DeserializeOwned>(&self, sql: &str, from: i64, to: i64, limit: usize) -> Result<Vec<T>> {
         if from > to || limit == 0 || limit > 43200 { bail!("invalid history range or limit (1–43200)"); }

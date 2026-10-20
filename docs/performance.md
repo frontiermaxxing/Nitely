@@ -142,7 +142,22 @@ Sustained pressure episodes require at least 15 seconds of consecutive detailed 
 without a collection gap: CPU at least 90%, available physical RAM at most 10%, or system
 commit at least 90% of its limit. These thresholds describe observations, not diagnoses.
 Minute peaks cannot establish sustained pressure and are never treated as if they could.
+Each episode includes measured per-counter `peaks`, `min_available_bytes`,
+`min_available_percent` and `max_commit_percent` over that episode's detailed samples.
+Maxima are independent observations, not simultaneous readings; percentage extrema use each
+sample's own capacity/limit. Missing measurements remain null.
 Inferred causes are separate; simultaneous jobs and pressure alone do not establish causation.
+
+Minute history includes every retained summary whose observation interval overlaps the requested
+inclusive range. A boundary summary keeps its actual full interval, last values, extrema and
+observation count; those measurements cannot be clipped to an exact subrange. Such points set
+`overlaps_range_boundary`, preserved through chart compaction. `coverage.boundary_points` counts
+the affected source summaries and a coverage note explains that peaks may lie outside the requested
+range. A boundary summary does not establish that every instant inside it was sampled.
+
+CLI, MCP and app history filters use the recorded project key. Renaming a project does not rewrite
+performance history: query its old key for old workload/event records and its new key for work
+recorded after the rename. Machine totals remain machine-wide with either filter.
 
 Lane start/end, memory wait/resume and observed lane memory-limit failures are retained in the
 separate performance database, without command arguments, paths or error text. Events are

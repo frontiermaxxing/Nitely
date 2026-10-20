@@ -33,6 +33,9 @@ pub struct Point {
     /// `sample`, `minute`, or `bucket`; peaks are never represented as sustained values.
     pub resolution: String,
     pub contains_gap: bool,
+    /// Whole summary interval extends outside the request; extrema/counts cannot be clipped.
+    #[serde(default)]
+    pub overlaps_range_boundary: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Gap { pub from_ms: i64, pub to_ms: i64, pub kind: String }
@@ -40,6 +43,13 @@ pub struct Gap { pub from_ms: i64, pub to_ms: i64, pub kind: String }
 pub struct Episode {
     pub from_ms: i64, pub to_ms: i64, pub observations: usize,
     pub observed: Vec<String>,
+    /// Independent per-metric maxima across this episode's detailed observations, not a
+    /// simultaneous reading. Missing throughout remains null.
+    #[serde(default)]
+    pub peaks: Metrics,
+    pub min_available_bytes: Option<u64>,
+    pub min_available_percent: Option<f64>,
+    pub max_commit_percent: Option<f64>,
     /// Always separate from observations. Temporal overlap alone establishes no cause.
     pub inferred_causes: Vec<String>,
 }
@@ -56,6 +66,9 @@ pub struct Coverage {
     pub attribution_first_returned_ms: Option<i64>,
     pub source_points: usize,
     pub returned_points: usize,
+    /// Number of source minute summaries extending beyond the requested range, before compaction.
+    #[serde(default)]
+    pub boundary_points: usize,
     pub resolution: String,
     pub notes: Vec<String>,
 }
@@ -135,19 +148,24 @@ pub fn query_at(dir: &Path, request: &Query, now: i64) -> Result<Report> {
             points = minutes.into_iter().map(point_of_minute).collect();
         } else {
             for pair in raw_samples.windows(2) { if let Some(gap) = sample_gap(&pair[0], &pair[1], 15_000) { gaps.push(gap); } }
-            points = raw_samples.iter().map(|s| Point { from_ms: s.wall_ms, to_ms: s.wall_ms, values: s.metrics.clone(), peaks: s.metrics.clone(), min_available_bytes: s.metrics.physical_available_bytes, observations: 1, resolution: "sample".into(), contains_gap: false }).collect();
+            points = raw_samples.iter().map(|s| Point { from_ms: s.wall_ms, to_ms: s.wall_ms, values: s.metrics.clone(), peaks: s.metrics.clone(), min_available_bytes: s.metrics.physical_available_bytes, observations: 1, resolution: "sample".into(), contains_gap: false, overlaps_range_boundary: false }).collect();
         }
     }
     if points.first().is_none_or(|p| p.from_ms > from.saturating_add(if use_minutes { 90_000 } else { 15_000 })) {
         gaps.push(Gap { from_ms: from, to_ms: points.first().map_or(to, |p| p.from_ms), kind: "no_retained_samples".into() });
     }
     if let Some(last) = points.last().filter(|p| to - p.to_ms > if use_minutes { 90_000 } else { 15_000 }) { gaps.push(Gap { from_ms: last.to_ms, to_ms: to, kind: "no_retained_samples".into() }); }
-    for point in &mut points { point.contains_gap = gaps.iter().any(|g| g.from_ms < point.to_ms && g.to_ms > point.from_ms); }
+    for point in &mut points {
+        point.contains_gap = gaps.iter().any(|g| g.from_ms < point.to_ms && g.to_ms > point.from_ms);
+        point.overlaps_range_boundary = point.from_ms < from || point.to_ms > to;
+    }
+    let boundary_points = points.iter().filter(|p| p.overlaps_range_boundary).count();
     let source_points = points.len();
     let points = if request.view == View::History { compact(points, request.limit, &gaps) } else { vec![] };
     let episodes = episodes(&raw_samples);
     let mut notes = vec!["Machine totals always cover the whole PC; project filters apply only to workload attribution and events.".into(), "Null counters mean unavailable, not zero; overlapping work is not proof of causation.".into()];
     if use_minutes { notes.push("Minute extrema preserve observed peaks; they do not establish sustained pressure within a minute.".into()); }
+    if boundary_points > 0 { notes.push(format!("{boundary_points} minute summaries overlap a range boundary. Their actual full intervals, last values, extrema and observation counts are returned; peaks may lie outside the requested range and exact subrange values cannot be recovered from these summaries.")); }
     notes.push("At most 100 recent sustained episodes are returned, covering retained detailed samples only; absence outside detailed retention is not evidence of no pressure.".into());
     if selected_boot.is_some() { notes.push("This window contains only the selected previous boot and ends at its last retained sample, not a known shutdown instant. Events without a recorded boot identity are omitted because wall time alone cannot assign them across a clock change. Latest/current fields still describe current recording.".into()); }
     let returned_points = points.len();
@@ -176,7 +194,7 @@ pub fn query_at(dir: &Path, request: &Query, now: i64) -> Result<Report> {
     notes.push("Process working-set sums can overlap and are not physical RAM. Process I/O includes nondisk activity; minute attribution values are per-metric peaks with interval I/O totals, not simultaneous readings.".into());
     Ok(Report { as_of_ms: now, from_ms: from, to_ms: to, range_anchor: anchor, range_boot: selected_boot, project: request.project.clone(), status: status.into(), age_ms: age, latest, settings, admission_limits,
         points, episodes, events, attribution_latest, attribution_age_ms, attribution, workloads, related_issues, sessions: selected_sessions.into_iter().take(200).collect(),
-        coverage: Coverage { gaps: gaps.into_iter().take(200).collect(), bounded: source_points > request.limit, gaps_truncated, sessions_truncated, events_truncated, attribution_truncated, workloads_truncated, attribution_retained_bounds_ms, attribution_first_returned_ms, source_points, returned_points, resolution: if use_minutes { "minute" } else { "sample" }.into(), notes },
+        coverage: Coverage { gaps: gaps.into_iter().take(200).collect(), bounded: source_points > request.limit, gaps_truncated, sessions_truncated, events_truncated, attribution_truncated, workloads_truncated, attribution_retained_bounds_ms, attribution_first_returned_ms, source_points, returned_points, boundary_points, resolution: if use_minutes { "minute" } else { "sample" }.into(), notes },
         units: serde_json::json!({ "wall_time": "UTC milliseconds since Unix epoch", "memory": "bytes", "cpu": "percent of machine capacity", "paging": "pages/second", "disk_throughput": "bytes/second", "disk_latency": "seconds/transfer", "disk_queue": "requests", "monotonic": "milliseconds; boot-relative on Windows, collector-relative elsewhere" }) })
 }
 
@@ -210,7 +228,7 @@ fn sample_gap(a: &Sample, b: &Sample, cadence: u64) -> Option<Gap> {
         else if delta > cadence { "collection_gap" } else { return None };
     Some(Gap { from_ms: a.wall_ms.min(b.wall_ms), to_ms: a.wall_ms.max(b.wall_ms), kind: kind.into() })
 }
-fn point_of_minute(m: Minute) -> Point { Point { from_ms: m.first_wall_ms, to_ms: m.last.wall_ms, values: m.last.metrics, peaks: m.peaks, min_available_bytes: m.min_available_bytes, observations: m.samples, resolution: "minute".into(), contains_gap: false } }
+fn point_of_minute(m: Minute) -> Point { Point { from_ms: m.first_wall_ms, to_ms: m.last.wall_ms, values: m.last.metrics, peaks: m.peaks, min_available_bytes: m.min_available_bytes, observations: m.samples, resolution: "minute".into(), contains_gap: false, overlaps_range_boundary: false } }
 fn max_metrics(into: &mut Metrics, from: &Metrics) {
     macro_rules! peak { ($($field:ident),*) => { $(if let Some(v) = from.$field { into.$field = Some(into.$field.map_or(v, |old| old.max(v))); })* }; }
     peak!(cpu_percent, physical_total_bytes, physical_available_bytes, commit_bytes, commit_limit_bytes, kernel_paged_bytes, kernel_nonpaged_bytes,
@@ -229,6 +247,7 @@ fn compact(points: Vec<Point>, limit: usize, gaps: &[Gap]) -> Vec<Point> {
             if let Some(v) = item.min_available_bytes { point.min_available_bytes = Some(point.min_available_bytes.map_or(v, |old| old.min(v))); }
             point.observations += item.observations;
             point.contains_gap |= item.contains_gap;
+            point.overlaps_range_boundary |= item.overlaps_range_boundary;
         }
         point.contains_gap |= gaps.iter().any(|g| g.from_ms <= point.to_ms && g.to_ms >= point.from_ms);
         point
@@ -246,7 +265,22 @@ fn episodes(samples: &[Sample]) -> Vec<Episode> {
     let mut active = std::collections::BTreeMap::<String, usize>::new();
     let flush = |out: &mut Vec<Episode>, start: usize, end: usize, reason: String| {
         if end > start && samples[end].monotonic_ms.saturating_sub(samples[start].monotonic_ms) >= 15_000 {
-            out.push(Episode { from_ms: samples[start].wall_ms, to_ms: samples[end].wall_ms, observations: end-start+1, observed: vec![reason], inferred_causes: vec![] });
+            let mut peaks = Metrics::default();
+            let mut min_available_bytes: Option<u64> = None;
+            let mut min_available_percent: Option<f64> = None;
+            let mut max_commit_percent: Option<f64> = None;
+            for sample in &samples[start..=end] {
+                let m = &sample.metrics;
+                max_metrics(&mut peaks, m);
+                if let Some(v) = m.physical_available_bytes { min_available_bytes = Some(min_available_bytes.map_or(v, |old| old.min(v))); }
+                if let (Some(a), Some(t)) = (m.physical_available_bytes, m.physical_total_bytes) {
+                    if t > 0 { let v = 100.0*a as f64/t as f64; min_available_percent = Some(min_available_percent.map_or(v, |old| old.min(v))); }
+                }
+                if let (Some(a), Some(t)) = (m.commit_bytes, m.commit_limit_bytes) {
+                    if t > 0 { let v = 100.0*a as f64/t as f64; max_commit_percent = Some(max_commit_percent.map_or(v, |old| old.max(v))); }
+                }
+            }
+            out.push(Episode { from_ms: samples[start].wall_ms, to_ms: samples[end].wall_ms, observations: end-start+1, observed: vec![reason], peaks, min_available_bytes, min_available_percent, max_commit_percent, inferred_causes: vec![] });
         }
     };
     for (index, sample) in samples.iter().enumerate() {
@@ -333,6 +367,69 @@ mod tests {
         for sample in &mut alternating { sample.metrics.cpu_percent = Some(95.0); }
         assert_eq!(episodes(&alternating).len(), 1);
     }
+    #[test]
+    fn completed_episodes_return_measured_extrema_without_chart_points() {
+        let fixture = Fixture::new();
+        for (n, (cpu, available, total, commit, limit)) in [
+            (90.0, Some(10), 100, Some(95), 100), (100.0, Some(4), 200, Some(180), 200),
+            (95.0, None, 100, Some(99), 100), (91.0, Some(8), 100, None, 0),
+            (5.0, Some(100), 100, None, 0),
+        ].into_iter().enumerate() {
+            let mut sample = fixture.sample(NOW-25_000+n as i64*5000, Some("boot"), "s", Some(cpu));
+            sample.metrics.physical_available_bytes = available;
+            sample.metrics.physical_total_bytes = Some(total);
+            sample.metrics.commit_bytes = commit;
+            sample.metrics.commit_limit_bytes = Some(limit);
+            sample.metrics.disk_queue = Some(if n == 1 { 7.0 } else if n == 4 { 99.0 } else { 1.0 });
+            fixture.store.db.execute("UPDATE samples SET json=?1 WHERE wall_ms=?2", rusqlite::params![serde_json::to_string(&sample).unwrap(),sample.wall_ms]).unwrap();
+        }
+        let report = fixture.query(Query { view: View::Episodes, ..Default::default() });
+        assert!(report.points.is_empty());
+        assert_eq!(report.episodes.len(), 1);
+        let episode = &report.episodes[0];
+        assert_eq!((episode.from_ms, episode.to_ms, episode.observations), (NOW-25_000, NOW-10_000, 4));
+        assert_eq!(episode.peaks.cpu_percent, Some(100.0));
+        assert_eq!(episode.peaks.commit_bytes, Some(180));
+        assert_eq!(episode.peaks.disk_queue, Some(7.0), "do not include measurements after the episode");
+        assert_eq!(episode.peaks.kernel_nonpaged_bytes, None, "unavailable stays null");
+        assert_eq!(episode.min_available_bytes, Some(4));
+        assert_eq!(episode.min_available_percent, Some(2.0));
+        assert_eq!(episode.max_commit_percent, Some(99.0), "ratios use simultaneous measurements, not independent maxima");
+        assert!(episode.inferred_causes.is_empty());
+        let json = serde_json::to_value(report).unwrap();
+        assert_eq!(json["episodes"][0]["peaks"]["cpu_percent"], 100.0);
+    }
+
+    #[test]
+    fn minute_history_returns_boundary_intervals_with_explicit_uncertainty() {
+        let fixture = Fixture::new();
+        let from = NOW-10_800_000;
+        let to = NOW;
+        for (first, last, peak) in [(from-60_000, from-1, 1.0), (from-30_000, from+25_000, 95.0), (from+60_000, from+115_000, 20.0), (to-30_000, to+25_000, 100.0), (to+30_000, to+85_000, 1.0)] {
+            let last = Sample { wall_ms: last, monotonic_ms: last as u64, boot: Some("boot".into()), session: "s".into(), metrics: Metrics { cpu_percent: Some(5.0), ..Default::default() }, collection_ms: 1 };
+            let minute = Minute { first_wall_ms: first, first_monotonic_ms: first as u64, last, peaks: Metrics { cpu_percent: Some(peak), ..Default::default() }, min_available_bytes: Some(4), samples: 12 };
+            fixture.store.db.execute("INSERT INTO minutes(wall_ms,json) VALUES(?1,?2)", rusqlite::params![minute.last.wall_ms,serde_json::to_string(&minute).unwrap()]).unwrap();
+        }
+        let query = Query { view: View::History, from_ms: Some(from), to_ms: Some(to), ..Default::default() };
+        let report = fixture.query(query.clone());
+        assert_eq!(report.coverage.resolution, "minute");
+        assert_eq!(report.points.len(), 3);
+        assert_eq!(report.coverage.boundary_points, 2);
+        assert_eq!(report.points.iter().map(|p| p.overlaps_range_boundary).collect::<Vec<_>>(), [true, false, true]);
+        assert_eq!(report.points[0].from_ms, from-30_000, "never clip a summary into false precision");
+        assert_eq!(report.points[2].to_ms, to+25_000);
+        assert_eq!(report.points[2].peaks.cpu_percent, Some(100.0), "retain the possibly in-range peak");
+        assert_eq!(report.points[2].observations, 12, "count describes the whole interval, not a guessed subrange");
+        assert!(report.coverage.notes.iter().any(|n| n.contains("peaks may lie outside the requested range")));
+        assert!(report.episodes.is_empty(), "minute extrema cannot establish sustained pressure");
+        assert_eq!(fixture.store.minutes(from, to, 1).unwrap()[0].last.wall_ms, to+25_000, "overlap filtering precedes the row limit");
+        let compacted = fixture.query(Query { limit: 1, ..query });
+        assert_eq!(compacted.points.len(), 1);
+        assert!(compacted.points[0].overlaps_range_boundary);
+        assert_eq!(compacted.coverage.boundary_points, 2);
+        assert_eq!(compacted.points[0].peaks.cpu_percent, Some(100.0));
+    }
+
     #[test]
     fn history_compaction_preserves_spikes_and_current_reads_stay_small() {
         let fixture = Fixture::new();
