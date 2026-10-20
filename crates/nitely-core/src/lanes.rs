@@ -2348,6 +2348,7 @@ fn serve(repo_root: &Path, pb: &Playbook, rules: &LaneRules, lane: &Path, log: &
     }
     let files_switched = if !lane.join(".git").exists() {
         create_lane(repo_root, lane, &req.snapshot.commit)?;
+        seed_lane_caches(repo_root, pb, rules, lane, log)?;
         git(lane, &["ls-files"]).map(|o| o.lines().count() as i64).unwrap_or(0)
     } else {
         stop_leftovers(lane);
@@ -2599,6 +2600,33 @@ fn human(bytes: u64) -> String {
 }
 
 /// Makes lane `lane` as a worktree at `commit`; `ensure_setup` sets it up.
+fn seed_lane_caches(repo_root: &Path, pb: &Playbook, rules: &LaneRules, lane: &Path, log: &Path) -> Result<()> {
+    if !cfg!(any(target_os = "macos", target_os = "linux")) { return Ok(()); }
+    let subs: Vec<String> = pb.submodules.iter().map(|m| m.path().to_string()).collect();
+    for n in lane_numbers(rules) {
+        let donor = lane_path(repo_root, pb, n);
+        if donor == lane || !donor.join(".git").is_file() { continue; }
+        // Never wait while holding the destination lane lock; busy donors simply mean a cold start.
+        let Ok(Some(_donor_lock)) = try_lock(repo_root, pb, n) else { continue; };
+        if pid_file(&donor).is_some_and(|p| p.exists()) { continue; }
+        let began = Instant::now();
+        let mut cloned = 0;
+        for relative in lane_kept(&donor, &rules.keep, &subs) {
+            if began.elapsed() > Duration::from_secs(30) { break; }
+            // Only untracked cache directories. Source files and both worktrees' Git metadata stay independent.
+            if !git(lane, &["ls-files", "--", &relative]).is_ok_and(|files| files.trim().is_empty()) { continue; }
+            if crate::lane_clone::seed(&donor, lane, &relative)? { cloned += 1; }
+        }
+        use std::io::Write;
+        if let Ok(mut out) = std::fs::OpenOptions::new().create(true).append(true).open(log) {
+            let _ = writeln!(out, "lane cache clone: {cloned} directories from lane {n} in {} ms; unsupported/linked caches start cold; setup is revalidated", began.elapsed().as_millis());
+        }
+        break;
+    }
+    Ok(())
+}
+
+/// Register a distinct Git worktree. Optional cache cloning never copies its index or setup stamp.
 fn create_lane(repo_root: &Path, lane: &Path, commit: &str) -> Result<()> {
     std::fs::create_dir_all(lane.parent().unwrap())?;
     // A folder left by a lane whose registration is gone (a crash during creation) goes first.

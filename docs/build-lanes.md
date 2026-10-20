@@ -187,10 +187,17 @@ As built (NIT-201), `large_repo = true` under `[lanes]`:
 - **Tests** use throwaway repos in the temp folder. Every step that touches the checkout asserts
   that it is in the temp folder when built for tests, so a test cannot reach a real checkout.
 
-**Copy-on-write.** Where the filesystem clones files for free (APFS `clonefile`, btrfs or XFS
-reflink, ReFS block clone), a second lane starts as a clone of the first, build output included.
-Elsewhere it starts cold. Clones are an optimization, never required: this PC's NTFS has none, and
-every number above is without them.
+**Copy-on-write.** On macOS and Linux, a newly registered lane can seed its kept build directories
+from another idle lane using native APFS `clonefile` or Linux `FICLONE` (for example btrfs/XFS).
+It never hard-links cache files or silently copies their bytes when cloning is unsupported.
+Each lane keeps its own source checkout, Git index and setup stamp; normal dependency setup still
+runs, so non-relocatable setup outputs are not assumed valid. A donor's lane lock is held while
+cloning; busy donors are skipped without waiting. Linked/special files, unsupported filesystems
+and the 30-second traversal budget fall back to a cold cache, removing partial copies. Clone
+counts and elapsed time are written to the run log. Windows currently starts cold, including
+ReFS; a ReFS adapter is not implemented. Clones are optional and all measurements above are
+without them. Actual APFS time/physical-space savings still need measurement on a Mac; logical
+file lengths or `du` totals alone do not establish physical blocks shared by reflinks.
 
 ## Decisions
 
