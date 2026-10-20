@@ -4,6 +4,9 @@
 use std::path::Path;
 
 fn main() {
+    // Source installs supply HEAD explicitly, invalidating the generated migration manifest even
+    // when a checkout/ref update preserved file timestamps.
+    println!("cargo:rerun-if-env-changed=NITELY_SOURCE_COMMIT");
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
     println!("cargo:rerun-if-changed={}", dir.display());
     let mut names: Vec<String> = std::fs::read_dir(&dir)
@@ -14,7 +17,7 @@ fn main() {
                 .filter(|n| n.ends_with(".sql"))
                 .collect()
         })
-        .unwrap_or_default();
+        .expect("reading the source migration directory");
     names.sort();
     let mut out = String::from("&[\n");
     for name in &names {

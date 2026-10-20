@@ -11,6 +11,87 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 const OLD_PREFIX: &str = "nitely-old-";
+pub const SOURCE_COMMIT_ENV: &str = "NITELY_SOURCE_COMMIT";
+const INSTALL_LOCK_ENV: &str = "NITELY_INSTALL_LOCK";
+
+/// A source install holds the same lock as land until the checked binary is in place.
+/// An after-land child inherits the exact live holder, without releasing its parent's lock.
+pub struct SourceInstall {
+    _lock: Option<crate::land::Lock>,
+    root: PathBuf,
+    holder: String,
+    pub head: String,
+}
+
+fn lock_pid(holder: &str) -> Option<u32> {
+    holder.split_whitespace().skip_while(|w| *w != "pid").nth(1)?.parse().ok()
+}
+
+/// Only the process owning this checkout's lock can delegate it to an after-land command.
+pub(crate) fn inherit_install_lock(command: &mut std::process::Command, root: &Path) {
+    command.env_remove(INSTALL_LOCK_ENV);
+    if let Ok(holder) = crate::land::lock_path(root).and_then(|p| Ok(std::fs::read_to_string(p)?)) {
+        if lock_pid(&holder) == Some(std::process::id()) {
+            command.env(INSTALL_LOCK_ENV, holder);
+        }
+    }
+}
+
+impl SourceInstall {
+    pub fn begin(root: &Path) -> Result<Self> {
+        Self::with_holder(root, std::env::var(INSTALL_LOCK_ENV).ok().as_deref())
+    }
+
+    fn with_holder(root: &Path, inherited: Option<&str>) -> Result<Self> {
+        let path = crate::land::lock_path(root)?;
+        let current = std::fs::read_to_string(&path).ok();
+        let delegated = inherited.zip(current.as_deref()).is_some_and(|(a, b)| {
+            a == b && lock_pid(b).is_some_and(crate::procs::alive)
+        });
+        let lock = if delegated {
+            None
+        } else {
+            Some(crate::land::Lock::try_take(&path, "source-install", false)?
+                .context("another land or install holds this checkout; wait for it to finish, then run `cargo run --release -p nitely-cli -- install` again")?)
+        };
+        let holder = std::fs::read_to_string(&path)?;
+        let head = crate::playbook::git(root, &["rev-parse", "HEAD"])?.trim().to_string();
+        let out = Self { _lock: lock, root: root.to_path_buf(), holder, head };
+        out.check_source()?;
+        Ok(out)
+    }
+
+    /// Refuse checkout edits and head changes, including those made outside Nitely while building.
+    pub fn check_source(&self) -> Result<()> {
+        let current = std::fs::read_to_string(crate::land::lock_path(&self.root)?)?;
+        anyhow::ensure!(current == self.holder && lock_pid(&current).is_some_and(crate::procs::alive),
+            "source install lost its landing lock; nothing was installed; run install again");
+        anyhow::ensure!(crate::playbook::git(&self.root, &["rev-parse", "HEAD"])?.trim() == self.head,
+            "the checkout moved during the source install; nothing was installed; run install again");
+        let mut args = vec!["status", "--porcelain", "--untracked-files=all", "--"];
+        args.extend(NITELY_CODE);
+        anyhow::ensure!(crate::playbook::git(&self.root, &args)?.trim().is_empty(),
+            "source install requires committed crates, Cargo.toml and Cargo.lock; commit or restore those changes, then run install again");
+        Ok(())
+    }
+
+    pub fn configure_build(&self, command: &mut std::process::Command) {
+        command.current_dir(&self.root).env(INSTALL_LOCK_ENV, &self.holder).env(SOURCE_COMMIT_ENV, &self.head);
+    }
+
+    /// Windows cannot relink the executable running this installer. Keep it alive under an old
+    /// name while Cargo creates the new executable; a later install removes the exited copy.
+    pub fn release_build_executable(&self, executable: &Path) -> Result<Option<PathBuf>> {
+        if !cfg!(windows) {
+            return Ok(None);
+        }
+        let dir = executable.parent().context("the build executable has no folder")?;
+        clean_old(dir);
+        let aside = dir.join(format!("{OLD_PREFIX}bootstrap-{}.exe", std::process::id()));
+        rename_patiently(executable, &aside).context("moving the running build aside before the locked rebuild")?;
+        Ok(Some(aside))
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Installed {
@@ -222,6 +303,40 @@ pub fn stamp(path: &Path) -> Option<(u64, std::time::SystemTime)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_install_serializes_with_land_and_only_delegates_the_exact_holder() {
+        let dir = crate::paths::unique_temp("nitely-source-install", "");
+        std::fs::create_dir_all(dir.join("crates")).unwrap();
+        let git = |args: &[&str]| {
+            crate::playbook::git(&dir, args).unwrap()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["config", "user.email", "test@example.invalid"]);
+        std::fs::write(dir.join("crates/source.rs"), "committed").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "initial"]);
+        let path = crate::land::lock_path(&dir).unwrap();
+        let first = SourceInstall::with_holder(&dir, None).unwrap();
+        assert!(SourceInstall::with_holder(&dir, None).is_err(), "another installer/land cannot overlap");
+        assert!(SourceInstall::with_holder(&dir, Some("different holder")).is_err());
+        {
+            let delegated = SourceInstall::with_holder(&dir, Some(&first.holder)).unwrap();
+            delegated.check_source().unwrap();
+        }
+        assert!(path.exists(), "a child never releases its parent's lock");
+        std::fs::write(dir.join("crates/source.rs"), "dirty").unwrap();
+        assert!(first.check_source().unwrap_err().to_string().contains("requires committed"));
+        git(&["commit", "-qam", "changed outside Nitely"]);
+        assert!(first.check_source().unwrap_err().to_string().contains("checkout moved"));
+        drop(first);
+        assert!(!path.exists());
+        std::fs::write(dir.join("crates/untracked.rs"), "untracked").unwrap();
+        assert!(SourceInstall::with_holder(&dir, None).is_err());
+        assert!(!path.exists(), "failed source validation releases the lock");
+        std::fs::remove_dir_all(dir).ok();
+    }
 
     /// A build whose stamp is not its checkout's commit is refused, with how to fix it (NIT-320).
     #[test]

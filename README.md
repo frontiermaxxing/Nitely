@@ -80,6 +80,11 @@ To build it from source:
 
    `npm run tauri dev` runs the app from source with hot reload instead.
 
+   Source installation requires committed Rust sources and Cargo files. It takes the landing
+   lock and runs Cargo once more with an explicit commit stamp before replacing the installed
+   binary. If another land or install is active, wait for it to finish and rerun the command.
+   The candidate must also support your current database; a refusal keeps the installed copy.
+
 ## Quick start
 
 1. **Connect a repo you already work in.** In the app, choose **+ Add project**, or run:

@@ -895,15 +895,58 @@ fn run(cmd: Cmd) -> Result<()> {
             None => Ok(()),
         },
         Cmd::Install { from, to, force } => {
+            // `cargo run` compiled before install could take the lock. Re-run Cargo once under
+            // that lock with an explicit commit input for both build scripts. The child alone
+            // installs; this parent retains the lock through its exit.
+            let me = std::env::current_exe()?;
+            let cargo_build = me.parent().is_some_and(|p| p.join(".fingerprint").is_dir());
+            let source = if from.is_none() && cargo_build {
+                std::env::var_os("CARGO_MANIFEST_DIR")
+                    .map(std::path::PathBuf::from)
+                    .filter(|dir| dir.join("src/main.rs").is_file() && dir.ends_with("crates/nitely-cli"))
+                    .map(|dir| nitely_core::install::SourceInstall::begin(dir.parent().and_then(|p| p.parent()).context("source checkout has no root")?))
+                    .transpose()?
+            } else {
+                None
+            };
+            if let Some(source) = &source {
+                let rebuilt = std::env::var("NITELY_INSTALL_REBUILT").ok();
+                if rebuilt.as_deref() != Some(source.head.as_str()) {
+                    let mut command = std::process::Command::new("cargo");
+                    command.args(["run", "--locked", "-p", "nitely-cli"]);
+                    if !cfg!(debug_assertions) {
+                        command.arg("--release");
+                    }
+                    command.args(["--", "install"]);
+                    if let Some(to) = &to {
+                        command.arg("--to").arg(to);
+                    }
+                    source.configure_build(&mut command);
+                    command.env("NITELY_INSTALL_REBUILT", &source.head);
+                    let executable = std::env::current_exe()?;
+                    let aside = source.release_build_executable(&executable)?;
+                    let status = command.status().context("rebuilding the source install under its landing lock");
+                    if let Some(aside) = aside {
+                        // Restore a usable target after a failed compile; never overwrite a new
+                        // binary Cargo successfully produced.
+                        if !executable.exists() {
+                            std::fs::rename(aside, &executable).ok();
+                        }
+                    }
+                    let status = status?;
+                    anyhow::ensure!(status.success(), "the locked source install failed; the installed build was kept unless the child reported success; fix the reported error and run install again");
+                    return Ok(());
+                }
+                anyhow::ensure!(option_env!("NITELY_SOURCE_COMMIT") == Some(source.head.as_str()),
+                    "Cargo did not refresh this build's explicit source stamp; nothing was installed; run install again");
+            }
             let from = match from {
                 Some(f) => f,
                 None => {
                     // Under `cargo run` (a land's after step), this build's stamp must be its
                     // checkout's commit, or every submit would refuse what it installs (NIT-320).
-                    if let Ok(dir) = std::env::var("CARGO_MANIFEST_DIR") {
-                        let head = nitely_core::playbook::run_git(std::process::Command::new("git").args(["-C", &dir, "rev-parse", "HEAD"])).ok().filter(|o| o.status.success());
-                        let head = head.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
-                        if let Some(why) = nitely_core::install::stamp_mismatch(env!("NITELY_COMMIT"), &head) {
+                    if let Some(source) = &source {
+                        if let Some(why) = nitely_core::install::stamp_mismatch(env!("NITELY_COMMIT"), &source.head) {
                             anyhow::bail!(why);
                         }
                     }
@@ -924,7 +967,6 @@ fn run(cmd: Cmd) -> Result<()> {
             // update, and a nightly once replaced a newer dev build that way (NIT-239). This build
             // answers for itself; another build is asked (`check-database`), since only it knows
             // its migrations.
-            let me = std::env::current_exe()?;
             let itself = from.canonicalize().ok().zip(me.canonicalize().ok()).is_some_and(|(a, b)| a == b);
             let refused = if itself {
                 nitely_core::db::refused_by_this_build(&paths::db_path())?
@@ -942,6 +984,9 @@ fn run(cmd: Cmd) -> Result<()> {
             };
             if let Some(why) = refused {
                 bail!("not installing {} over {}: it could not open your database ({why}). The nitely there stays", from.display(), to.display());
+            }
+            if let Some(source) = &source {
+                source.check_source()?;
             }
             print_json(&nitely_core::install::install(&from, &to)?)
         }

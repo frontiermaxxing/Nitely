@@ -925,6 +925,9 @@ pub(crate) fn run_shell_kind(command: &str, dir: &Path, kind: &str) -> Result<(b
     let mut cmd = shell_command(&command);
     cmd.current_dir(dir).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     crate::lanes::share_env(&mut cmd, share.jobs);
+    if kind == "install" {
+        crate::install::inherit_install_lock(&mut cmd, dir);
+    }
     let started = Instant::now();
     let guard = crate::procs::TreeGuard::with(crate::procs::Contain { memory_cap: share.cap, low_priority: true, end_with_guard: false });
     let spawned = match &guard {

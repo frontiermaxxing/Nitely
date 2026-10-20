@@ -20,7 +20,10 @@ fn git(args: &[&str]) -> Option<String> {
 }
 
 fn main() {
-    let commit = git(&["rev-parse", "HEAD"]).unwrap_or_default();
+    println!("cargo:rerun-if-env-changed=NITELY_SOURCE_COMMIT");
+    let actual = git(&["rev-parse", "HEAD"]).unwrap_or_default();
+    let commit = std::env::var("NITELY_SOURCE_COMMIT").unwrap_or_else(|_| actual.clone());
+    assert!(commit == actual, "the checkout changed during source install; run install again");
     println!("cargo:rustc-env=NITELY_COMMIT={commit}");
     // The release channel the release workflow builds for (docs/releasing.md); "dev" otherwise.
     let channel = std::env::var("NITELY_CHANNEL").unwrap_or_else(|_| "dev".into());

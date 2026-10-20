@@ -38,7 +38,7 @@ fn a_running_mcp_server_forwards_to_a_newly_installed_build() {
 
     let mut server = Command::new(&installed)
         .arg("mcp")
-        .env("NITELY_HOME", dir.join("home"))
+        .env_remove("CARGO_MANIFEST_DIR").env("NITELY_HOME", dir.join("home"))
         .current_dir(&dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -63,7 +63,7 @@ fn a_running_mcp_server_forwards_to_a_newly_installed_build() {
         .arg(&new_build)
         .arg("--to")
         .arg(&installed)
-        .env("NITELY_HOME", dir.join("home"))
+        .env_remove("CARGO_MANIFEST_DIR").env("NITELY_HOME", dir.join("home"))
         .env("NITELY_INSTALL_WITHIN", &dir)
         .output()
         .unwrap();
@@ -81,6 +81,40 @@ fn a_running_mcp_server_forwards_to_a_newly_installed_build() {
 }
 
 #[test]
+fn source_install_refuses_a_live_land_before_rebuilding_or_replacing_the_target() {
+    let dir = temp();
+    let repo = dir.join("repo");
+    let manifest = repo.join("crates/nitely-cli");
+    std::fs::create_dir_all(manifest.join("src")).unwrap();
+    std::fs::write(manifest.join("src/main.rs"), "fn main() {}").unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.name", "Test"]);
+    git(&["config", "user.email", "test@example.invalid"]);
+    git(&["add", "."]);
+    git(&["commit", "-qm", "initial"]);
+    let lock = repo.join(".git/nitely-land.lock");
+    let holder = format!("APP-1 pid {} since now", std::process::id());
+    std::fs::write(&lock, &holder).unwrap();
+    let target = dir.join("installed");
+    std::fs::write(&target, "keep this").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_nitely"))
+        .args(["install", "--to"]).arg(&target)
+        .env("CARGO_MANIFEST_DIR", &manifest)
+        .env_remove("NITELY_INSTALL_LOCK")
+        .env("NITELY_HOME", dir.join("home"))
+        .env("NITELY_INSTALL_WITHIN", &dir)
+        .output().unwrap();
+    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("another land or install"), "{out:?}");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep this");
+    assert_eq!(std::fs::read_to_string(&lock).unwrap(), holder);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn install_without_a_target_skips_its_own_folders_on_path() {
     // As under `cargo run`, which puts target/release/deps (holding a copy of the build) and
     // target/release first on PATH.
@@ -95,7 +129,7 @@ fn install_without_a_target_skips_its_own_folders_on_path() {
     std::fs::write(&installed, b"an old nitely").unwrap();
     let path = std::env::join_paths([release.join("deps"), release.clone(), dir.join("bin")]).unwrap();
     // A data folder of its own: install reads the database it would serve, never the person's.
-    let out = Command::new(release.join(exe)).arg("install").env("PATH", path).env("NITELY_HOME", dir.join("home")).env("NITELY_INSTALL_WITHIN", &dir).output().unwrap();
+    let out = Command::new(release.join(exe)).arg("install").env("PATH", path).env_remove("CARGO_MANIFEST_DIR").env("NITELY_HOME", dir.join("home")).env("NITELY_INSTALL_WITHIN", &dir).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let report: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(report["replaced"], true, "{report}");
@@ -112,7 +146,7 @@ fn install_from_a_file_beside_the_installed_one_replaces_it() {
     std::fs::write(&installed, b"an old nitely").unwrap();
     let new_build = dir.join("bin").join(if cfg!(windows) { "nitely-new.exe" } else { "nitely-new" });
     link_or_copy(built, &new_build);
-    let out = Command::new(built).args(["install", "--from"]).arg(&new_build).env("PATH", dir.join("bin")).env("NITELY_HOME", dir.join("home")).env("NITELY_INSTALL_WITHIN", &dir).output().unwrap();
+    let out = Command::new(built).args(["install", "--from"]).arg(&new_build).env("PATH", dir.join("bin")).env_remove("CARGO_MANIFEST_DIR").env("NITELY_HOME", dir.join("home")).env("NITELY_INSTALL_WITHIN", &dir).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(std::fs::read(&installed).unwrap(), std::fs::read(built).unwrap());
     std::fs::remove_dir_all(&dir).ok();
@@ -134,7 +168,7 @@ fn install_refuses_a_build_that_could_not_open_the_database() {
     let db = rusqlite::Connection::open(home.join("nitely.db")).unwrap();
     db.execute("INSERT INTO schema_migration (name, applied_at, applied_by) VALUES ('20991231-later', 0, '9.9.0')", []).unwrap();
     drop(db);
-    let out = Command::new(built).args(["install", "--to"]).arg(&installed).env("NITELY_HOME", &home).env("NITELY_INSTALL_WITHIN", &dir).output().unwrap();
+    let out = Command::new(built).args(["install", "--to"]).arg(&installed).env_remove("CARGO_MANIFEST_DIR").env("NITELY_HOME", &home).env("NITELY_INSTALL_WITHIN", &dir).output().unwrap();
     let said = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success() && said.contains("could not open your database") && said.contains("20991231-later"), "{said}");
     assert_eq!(std::fs::read(&installed).unwrap(), b"the newer nitely", "the nitely in place stays");
@@ -143,21 +177,21 @@ fn install_refuses_a_build_that_could_not_open_the_database() {
     // cannot open the database.
     let other = dir.join(if cfg!(windows) { "other.exe" } else { "other" });
     std::fs::copy(built, &other).unwrap();
-    let out = Command::new(built).args(["install", "--from"]).arg(&other).arg("--to").arg(&installed).env("NITELY_HOME", &home).env("NITELY_INSTALL_WITHIN", &dir).output().unwrap();
+    let out = Command::new(built).args(["install", "--from"]).arg(&other).arg("--to").arg(&installed).env_remove("CARGO_MANIFEST_DIR").env("NITELY_HOME", &home).env("NITELY_INSTALL_WITHIN", &dir).output().unwrap();
     let said = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success() && said.contains("20991231-later"), "{said}");
     // One that cannot say (not a nitely, or one older than the check) goes in only with --force.
     let mute = dir.join("mute.bin");
     std::fs::write(&mute, b"not a program").unwrap();
-    let out = Command::new(built).args(["install", "--from"]).arg(&mute).arg("--to").arg(&installed).env("NITELY_HOME", &home).env("NITELY_INSTALL_WITHIN", &dir).output().unwrap();
+    let out = Command::new(built).args(["install", "--from"]).arg(&mute).arg("--to").arg(&installed).env_remove("CARGO_MANIFEST_DIR").env("NITELY_HOME", &home).env("NITELY_INSTALL_WITHIN", &dir).output().unwrap();
     assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("--force"), "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(std::fs::read(&installed).unwrap(), b"the newer nitely");
-    let out = Command::new(built).args(["install", "--force", "--from"]).arg(&mute).arg("--to").arg(&installed).env("NITELY_HOME", &home).env("NITELY_INSTALL_WITHIN", &dir).output().unwrap();
+    let out = Command::new(built).args(["install", "--force", "--from"]).arg(&mute).arg("--to").arg(&installed).env_remove("CARGO_MANIFEST_DIR").env("NITELY_HOME", &home).env("NITELY_INSTALL_WITHIN", &dir).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(std::fs::read(&installed).unwrap(), b"not a program", "--force installs it");
 
     // And no test installs outside its own folder, whatever PATH finds.
-    let out = Command::new(built).args(["install", "--to"]).arg(std::env::temp_dir().join("elsewhere").join(exe)).env("NITELY_HOME", dir.join("empty")).env("NITELY_INSTALL_WITHIN", &dir).output().unwrap();
+    let out = Command::new(built).args(["install", "--to"]).arg(std::env::temp_dir().join("elsewhere").join(exe)).env_remove("CARGO_MANIFEST_DIR").env("NITELY_HOME", dir.join("empty")).env("NITELY_INSTALL_WITHIN", &dir).output().unwrap();
     assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("NITELY_INSTALL_WITHIN allows only"), "{}", String::from_utf8_lossy(&out.stderr));
     std::fs::remove_dir_all(&dir).ok();
 }
