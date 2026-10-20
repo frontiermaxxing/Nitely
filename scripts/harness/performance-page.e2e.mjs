@@ -122,7 +122,17 @@ test("Performance history survives an app restart and only clears through paused
       "recorded history survives app/recorder restart",
     );
     // Restarting the app is not evidence of a machine reboot.
-    await assert.rejects(app.page.invoke("performance_query", { query: { view: "history", before_last_restart: true } }), /boot transition/);
+    // Capture the backend rejection before CDP reduces an uncaught promise to a generic error.
+    const beforeRestart = await app.page.eval(`
+      try {
+        await window.__TAURI_INTERNALS__.invoke("performance_query", { query: { view: "history", before_last_restart: true } });
+        return { rejected: false, message: "" };
+      } catch (error) {
+        return { rejected: true, message: typeof error === "string" ? error : error instanceof Error ? error.message : JSON.stringify(error) };
+      }
+    `);
+    assert.equal(beforeRestart.rejected, true, "an app restart must not establish a machine boot transition");
+    assert.match(beforeRestart.message, /boot transition/);
     await app.page.waitFor(`return document.querySelector('.perf-freshness')?.textContent.includes('paused')`, { what: "restored paused state" });
     await clickControl("Clear history…");
     await clickControl("Cancel");
