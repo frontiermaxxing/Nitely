@@ -1,0 +1,45 @@
+/* The shared select (Select.tsx, NIT-425). Tokens only, so both themes hold. --field is the
+   fields' own background where the kit sets one; until then the surface. */
+
+.select { position: relative; display: inline-block; min-width: 0; max-width: 100%; }
+
+.select-trigger {
+  display: flex; align-items: center; gap: var(--space-2); width: 100%; min-width: 140px; height: 32px;
+  padding: 0 10px 0 var(--space-3); border: 1px solid var(--line-strong); border-radius: var(--radius);
+  background: var(--field, var(--surface)); color: var(--fg); font: inherit; font-size: var(--text-md);
+  text-align: left; cursor: pointer; transition: border-color var(--dur-fast) var(--ease);
+}
+.select-trigger:hover:not(:disabled) { border-color: var(--fg-3); }
+.select-trigger:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.select-trigger[aria-expanded="true"] { border-color: var(--fg-3); }
+.select-trigger:disabled { color: var(--fg-3); cursor: default; background: var(--sunken); }
+.select-value { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.select-placeholder { color: var(--fg-3); }
+.select-chevron { flex: none; color: var(--fg-3); transition: transform var(--dur-fast) var(--ease); }
+.select-trigger[aria-expanded="true"] .select-chevron { transform: rotate(180deg); }
+
+.select-menu {
+  position: absolute; z-index: 50; top: calc(100% + 4px); left: 0; min-width: max(100%, 240px); max-width: min(420px, 90vw);
+  max-height: 320px; overflow-y: auto; margin: 0; padding: var(--space-1); list-style: none;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: var(--shadow-float);
+}
+
+.select-option {
+  display: flex; align-items: flex-start; gap: var(--space-2); padding: 6px var(--space-2);
+  border-radius: var(--radius-sm); color: var(--fg); font-size: var(--text-md); cursor: pointer;
+}
+.select-option.is-active { background: var(--hover); }
+.select-option.is-disabled { color: var(--fg-3); cursor: default; }
+.select-check { flex: none; width: 12px; height: 18px; display: flex; align-items: center; color: var(--fg); }
+.select-text { display: grid; gap: 1px; min-width: 0; }
+.select-label { display: flex; align-items: baseline; gap: var(--space-2); white-space: nowrap; }
+.select-detail { color: var(--fg-3); font-size: var(--text-sm); overflow-wrap: anywhere; }
+.select-default {
+  padding: 0 5px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm);
+  color: var(--fg-3); font-size: var(--text-xs); line-height: 15px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .select-trigger, .select-chevron { transition: none; }
+}

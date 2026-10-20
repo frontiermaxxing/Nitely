@@ -3,6 +3,7 @@
 
 import { GoalRow } from "../GoalRows";
 import { KitToggles } from "./KitToggles";
+import { KitSelect } from "./KitSelect";
 import type { GoalDetail, IssueRecord, MarkKind, PrRecord } from "../types";
 import { nowSecs } from "../util";
 import {
@@ -391,6 +392,9 @@ export default function Kit() {
           <Notice tone="neutral" locked>Read-only here. An agent can propose a change for you to approve.</Notice>
         </div>
       </section>
+
+      <KitSelect />
+
       <section>
         <h2>EmptyState</h2>
         <EmptyState title="Nothing needs you.">Agents show up here when they ask something, wait on your approval, or get stuck.</EmptyState>
