@@ -76,3 +76,9 @@ audit_percent = 10
 
 [verification.backstop]
 enabled = false
+
+[release]
+tag = "v*"
+exclude_tags = ["*-*"]
+stamp_paths = ["Cargo.toml", "Cargo.lock", "package.json", "package-lock.json", "src-tauri/tauri.conf.json"]
+commands = ["node scripts/version.mjs"]
