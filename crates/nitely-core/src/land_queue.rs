@@ -10,10 +10,11 @@
 //! touching a file the failing output names), then halving the stack, so one bad change in k costs
 //! at most 1 + 2⌈log2 k⌉ gates rather than k.
 //!
-//! Each run holds the repo's land lock, so a land of one change alone (one that needs a person's
-//! approval, which is given per change) and a queue run never overlap. A change lands alone, as
+//! Each run holds the repo's land lock, so a land of one change alone and a queue run never
+//! overlap. Human approvals are verified separately for every change before and after the gate.
+//! A change lands alone, as
 //! before, when the playbook batches nothing, the repo has no build lanes, it is in large-repo mode,
-//! or the change needs a person's approval.
+//! or its managed submodule baseline changes.
 
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, OptionalExtension};
@@ -167,7 +168,7 @@ fn repo_key(root: &Path) -> String {
 }
 
 /// Why `key` lands alone even though it could wait in a queue, or None when it goes in the queue.
-pub fn lands_alone(db: &Db, pb: &Playbook, key: &str) -> Result<Option<String>> {
+pub fn lands_alone(db: &Db, root: &Path, pb: &Playbook, key: &str) -> Result<Option<String>> {
     if pb.land.batch == LandBatch::Off {
         return Ok(Some("the playbook lands each change alone".into()));
     }
@@ -178,7 +179,10 @@ pub fn lands_alone(db: &Db, pb: &Playbook, key: &str) -> Result<Option<String>> 
         return Ok(Some("large-repo mode lands each change alone".into()));
     }
     if !pb.submodules.is_empty() {
-        return Ok(Some("a repo whose submodules land with it lands each change alone".into()));
+        let (branch, _) = land::branch_of(root, key)?;
+        if !unchanged_submodules(root, pb, pb.integration_branch(), &branch)? {
+            return Ok(Some("a change with a different managed submodule baseline lands alone".into()));
+        }
     }
     let Some(review) = db.reviews(key)?.into_iter().next() else {
         return Ok(Some("it has no review yet".into()));
@@ -187,9 +191,31 @@ pub fn lands_alone(db: &Db, pb: &Playbook, key: &str) -> Result<Option<String>> 
         return Ok(Some("reduced verification is bound to this individual patch".into()));
     }
     if review.approver == "human" || !review.reasons.is_empty() || db.issue(key)?.is_some_and(|i| i.state == "Approved") {
-        return Ok(Some("it needs a person's approval, which is given and checked per change".into()));
+        let signed = db.standing_approval(key)?.is_some_and(|at| db.check_signed_approval(key, &review.patch_id, at).is_ok());
+        if !signed {
+            return Ok(Some("it still needs a signed approval, checked separately for this change".into()));
+        }
     }
     Ok(None)
+}
+
+/// A batch never updates a managed submodule or adopts a new baseline during rebase. Its original
+/// fork, handed-in commit and integration candidate must all name the same gitlink objects.
+fn unchanged_submodules(root: &Path, pb: &Playbook, onto: &str, head: &str) -> Result<bool> {
+    if pb.submodules.is_empty() {
+        return Ok(true);
+    }
+    let fork = git(root, &["merge-base", onto, head])?;
+    let fork = fork.trim();
+    for s in &pb.submodules {
+        let pointer = |at: &str| git(root, &["ls-tree", at, "--", s.path()]);
+        let original = pointer(fork)?;
+        if !original.starts_with("160000 ") || original != pointer(onto)? || original != pointer(head)? {
+            return Ok(false);
+        }
+    }
+    // A proposed URL or management-policy change belongs on the ordinary single-land path too.
+    Ok(git(root, &["diff", "--name-only", fork, head, "--", ".gitmodules", playbook::PLAYBOOK_PATH])?.trim().is_empty())
 }
 
 /// `land` for a change that waits in the queue: puts it there (or finds it there), runs the queue
@@ -409,7 +435,7 @@ fn gate_and_land(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stack: &Path
     step(db, run, "gating the stack")?;
     let full = gate_prefix(db, root, stack, &stacked, k, gates, true)?;
     if full.passed || full.skipped.is_some() {
-        return land_prefix(db, root, pb, run, stacked, before, &full, *gates);
+        return land_prefix(db, root, pb, run, stack, stacked, before, &full, *gates);
     }
     if k == 1 {
         let only = stacked.into_iter().next().unwrap();
@@ -439,7 +465,7 @@ fn gate_and_land(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stack: &Path
                 let bad = &stacked[suspect];
                 let why = gate_failed(&full, &format!("the stacked gate failed on a file only {} changes, and passed without it", bad.entry.issue));
                 send_back(db, run, &bad.entry, &why, Some(&full), pb)?;
-                return land_prefix(db, root, pb, run, others, before, &without, *gates);
+                return land_prefix(db, root, pb, run, stack, others, before, &without, *gates);
             }
         }
     }
@@ -471,7 +497,7 @@ fn gate_and_land(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stack: &Path
         db.log_event(&s.entry.actor(), Some(&s.entry.issue), None, "status", &format!("Back in the land queue: {} broke the stacked gate before it", bad.entry.issue))?;
     }
     match passing {
-        Some(g) if lo > 0 => land_prefix(db, root, pb, run, stacked, before, &g, *gates),
+        Some(g) if lo > 0 => land_prefix(db, root, pb, run, stack, stacked, before, &g, *gates),
         _ => Ok(()),
     }
 }
@@ -548,11 +574,15 @@ fn checkout(stack: &Path, commit: &str) -> Result<()> {
 fn stack_one(db: &Db, root: &Path, pb: &Playbook, stack: &Path, entry: &Entry, onto: &str, base: &str, below: &[String]) -> std::result::Result<Stacked, String> {
     let key = &entry.issue;
     let inner = || -> Result<Stacked> {
+        anyhow::ensure!(!db.reviews(key)?.first().is_some_and(|r| r.verdict == "light" || r.gate.as_ref().is_some_and(|g| g.plan.is_some())),
+            "reduced verification is bound to this individual patch; it must land alone");
         let (branch, worktree) = land::branch_of(root, key)?;
         if let Some(wt) = &worktree {
             land::check_worktree(wt, &branch)?;
         }
         let head = land::rev(root, &branch)?;
+        anyhow::ensure!(unchanged_submodules(root, pb, onto, &head)?,
+            "the managed submodule baseline changed; this change must land alone");
         checkout(stack, &head)?;
         // Already on top of what is below it, or rebased there as land would.
         let on_top = git(root, &["merge-base", "--is-ancestor", onto, &head]).is_ok();
@@ -577,7 +607,7 @@ fn stack_one(db: &Db, root: &Path, pb: &Playbook, stack: &Path, entry: &Entry, o
 /// Lands the stacked changes: the integration branch fast-forwarded to the last tip and pushed
 /// once, then each change landed as land lands one.
 #[allow(clippy::too_many_arguments)]
-fn land_prefix(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stacked: Vec<Stacked>, before: &str, gate: &GateResult, gates: u32) -> Result<()> {
+fn land_prefix(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stack: &Path, stacked: Vec<Stacked>, before: &str, gate: &GateResult, gates: u32) -> Result<()> {
     let base = pb.integration_branch().to_string();
     step(db, run, "landing")?;
     let tip = stacked.last().expect("something to land").tip.clone();
@@ -604,20 +634,6 @@ fn land_prefix(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stacked: Vec<S
     }
     // Every change in a queue pushes (one that does not lands alone), so the stack pushes when
     // the repo has a remote.
-    let current = Playbook::load(root)?;
-    let mut refused = false;
-    for s in &stacked {
-        if let Some(review) = db.reviews(&s.entry.issue)?.first() {
-            if let Err(e) = land::check_yolo_policy(db, &s.entry.issue, review).and_then(|_| land::check_disabled_policy(&current, review)) {
-                send_back(db, run, &s.entry, &format!("{e:#}"), None, &current)?;
-                refused = true;
-            }
-        }
-    }
-    if refused {
-        db.conn.execute("UPDATE land_queue SET state = 'queued', run_id = NULL WHERE run_id = ?1 AND state = 'running'", [run])?;
-        return Ok(());
-    }
     let push = playbook::has_origin(root) && stacked.iter().all(|s| s.entry.push);
     let mut warnings = Vec::new();
     if push {
@@ -630,10 +646,32 @@ fn land_prefix(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stacked: Vec<S
     }
     let keys: Vec<&str> = stacked.iter().map(|s| s.entry.issue.as_str()).collect();
     crate::project_yolo::check_gate_authority(db, &keys, gate)?;
-    for key in &keys {
-        let review = db.reviews(key)?.into_iter().next().context("submission evidence disappeared")?;
-        land::check_yolo_policy(db, key, &review)?;
+    let current = Playbook::load(root)?;
+    let mut refused = false;
+    for s in &stacked {
+        // Each authorization covers only its own delta, not the combined stack. A revoked
+        // signature, changed review, or newly required human approval cannot ride a green gate.
+        checkout(stack, &s.tip)?;
+        let authorization = (|| -> Result<()> {
+            anyhow::ensure!(!db.reviews(&s.entry.issue)?.first().is_some_and(|r| r.verdict == "light" || r.gate.as_ref().is_some_and(|g| g.plan.is_some())),
+                "reduced verification is bound to this individual patch; it must land alone");
+            anyhow::ensure!(unchanged_submodules(root, &current, &s.from, &s.tip)?,
+                "the managed submodule baseline changed; this change must land alone");
+            anyhow::ensure!(land::rev(root, &s.branch)? == s.head, "the branch changed after the gate; submit again");
+            land::check_approval(db, &current, &s.entry.issue, stack, &s.from, &s.branch)?;
+            Ok(())
+        })();
+        if let Err(e) = authorization {
+            send_back(db, run, &s.entry, &format!("{e:#}"), None, &current)?;
+            refused = true;
+        }
     }
+    checkout(stack, &tip)?;
+    if refused {
+        db.conn.execute("UPDATE land_queue SET state = 'queued', run_id = NULL WHERE run_id = ?1 AND state = 'running'", [run])?;
+        return Ok(());
+    }
+    anyhow::ensure!(land::rev(root, &base)? == before, "{base} moved after the gate; land again");
     land::fast_forward_main(root, &tip).with_context(|| land::refused_fast_forward(root))?;
     let head = git(root, &["rev-parse", "--short", "HEAD"])?.trim().to_string();
     let pushed = push.then(|| git_remote(root, &["push", "origin", &base]));
@@ -875,6 +913,84 @@ batch = "waiting"
         fn on_main(&self, file: &str) -> bool {
             self.repo.join(file).exists()
         }
+
+        fn require_and_sign(&mut self, keys: &[&str]) {
+            let path = self.repo.join(playbook::PLAYBOOK_PATH);
+            std::fs::write(&path, std::fs::read_to_string(&path).unwrap().replace("pattern = \"billing\"", "pattern = \"txt$\"")).unwrap();
+            sh(&self.repo, &["commit", "-qam", "require approval"]);
+            let secret = [42; 32];
+            crate::approval::trust_in_tests(Some(crate::approval::public_of(&secret)));
+            for key in keys {
+                self.db.move_issue(key, "Approved", None, None, &Actor::Human).unwrap();
+                self.db.sign_approval(key, &secret).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn approved_changes_with_an_unchanged_managed_submodule_share_one_gate() {
+        let mut f = fixture();
+        let upstream = f.base.join("engine-upstream");
+        crate::test_repo::init(&upstream, &[("engine.txt", "baseline")]);
+        sh(&f.repo, &["-c", "protocol.file.allow=always", "submodule", "add", "-q", &upstream.to_string_lossy(), "engine"]);
+        let path = f.repo.join(playbook::PLAYBOOK_PATH);
+        let text = format!("{}\n[[submodules]]\npath = \"engine\"\n", std::fs::read_to_string(&path).unwrap());
+        std::fs::write(&path, text).unwrap();
+        sh(&f.repo, &["add", "."]);
+        sh(&f.repo, &["commit", "-qm", "managed engine"]);
+        let pointer = sh(&f.repo, &["ls-tree", "HEAD", "--", "engine"]);
+        let (a, _) = f.submitted("A", &[("a.txt", "a")]);
+        let (b, _) = f.submitted("B", &[("b.txt", "b")]);
+        f.require_and_sign(&[&a, &b]);
+        let pb = Playbook::load(&f.repo).unwrap();
+        assert!(lands_alone(&f.db, &f.repo, &pb, &a).unwrap().is_none());
+        assert!(lands_alone(&f.db, &f.repo, &pb, &b).unwrap().is_none());
+        f.queue_and_run(&[&a, &b]);
+        assert_eq!(f.entry(&a).state, "landed", "{}", f.error(&a));
+        assert_eq!(f.entry(&b).state, "landed", "{}", f.error(&b));
+        assert_eq!(f.runs().len(), 1);
+        assert_eq!(f.runs()[0].gates, 1);
+        assert_eq!(sh(&f.repo, &["ls-tree", "HEAD", "--", "engine"]), pointer);
+        // A real pointer change cannot enter the same path.
+        let before = sh(&f.repo, &["rev-parse", "HEAD"]);
+        std::fs::write(f.repo.join("engine/engine.txt"), "changed").unwrap();
+        sh(&f.repo.join("engine"), &["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qam", "engine change"]);
+        sh(&f.repo, &["add", "engine"]);
+        sh(&f.repo, &["commit", "-qm", "new engine"]);
+        assert!(!unchanged_submodules(&f.repo, &pb, &before, "HEAD").unwrap());
+        assert!(!unchanged_submodules(&f.repo, &pb, "HEAD", &before).unwrap(), "a stale baseline also stays separate");
+        std::fs::remove_dir_all(&f.base).ok();
+    }
+
+    #[test]
+    fn approval_revoked_after_the_combined_gate_prevents_any_fast_forward() {
+        let mut f = fixture();
+        let (a, _) = f.submitted("A", &[("a.txt", "a")]);
+        let (b, _) = f.submitted("B", &[("b.txt", "b")]);
+        f.require_and_sign(&[&a, &b]);
+        let pb = Playbook::load(&f.repo).unwrap();
+        let before = sh(&f.repo, &["rev-parse", "main"]);
+        let stack = stack_worktree(&f.repo, &pb, &before).unwrap();
+        let mut entries = Vec::new();
+        for key in [&a, &b] {
+            enqueue(&f.db, &f.repo, key, &f.opts(), &f.actor).unwrap();
+            entries.push(f.entry(key));
+        }
+        f.db.conn.execute("INSERT INTO land_run (repo, started_at, issues) VALUES (?1, ?2, ?3)", params![repo_key(&f.repo), now(), format!("{a},{b}")]).unwrap();
+        let run = f.db.conn.last_insert_rowid();
+        let first = stack_one(&f.db, &f.repo, &pb, &stack, &entries[0], &before, "main", &[]).unwrap();
+        let second = stack_one(&f.db, &f.repo, &pb, &stack, &entries[1], &first.tip, "main", std::slice::from_ref(&a)).unwrap();
+        let stacked = vec![first, second];
+        let mut gates = 0;
+        let gate = gate_prefix(&f.db, &f.repo, &stack, &stacked, 2, &mut gates, false).unwrap();
+        assert!(gate.passed);
+        f.db.conn.execute("DELETE FROM approval WHERE issue_key = ?1", [&b]).unwrap();
+        land_prefix(&mut f.db, &f.repo, &pb, run, &stack, stacked, &before, &gate, gates).unwrap();
+        assert_eq!(sh(&f.repo, &["rev-parse", "main"]), before);
+        assert_eq!(f.entry(&b).state, "sent_back");
+        assert!(f.error(&b).contains("not signed"), "{}", f.error(&b));
+        assert_eq!(f.entry(&a).state, "queued");
+        std::fs::remove_dir_all(&f.base).ok();
     }
 
     #[test]
@@ -1096,7 +1212,7 @@ batch = "waiting"
         let mut f = fixture();
         let (a, _) = f.submitted("A", &[("a.txt", "a")]);
         let pb = Playbook::load(&f.repo).unwrap();
-        assert_eq!(lands_alone(&f.db, &pb, &a).unwrap(), None);
+        assert_eq!(lands_alone(&f.db, &f.repo, &pb, &a).unwrap(), None);
         // A change a person must approve: its approval is given and checked per change.
         let new = NewIssue {
             project: "NIT".into(),
@@ -1117,7 +1233,7 @@ batch = "waiting"
         let dir = wt.to_string_lossy().into_owned();
         let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: false, solution: None, solution_commit: None, solution_patch_id: None };
         submit(&mut f.db, &crate::Config::default(), &opts, &f.actor).unwrap();
-        assert!(lands_alone(&f.db, &pb, &issue.key).unwrap().unwrap().contains("approval"));
+        assert!(lands_alone(&f.db, &f.repo, &pb, &issue.key).unwrap().unwrap().contains("approval"));
         // The playbook decides the rest.
         for (text, why) in [
             ("[land]\n", "alone"),
@@ -1125,7 +1241,7 @@ batch = "waiting"
             ("[lanes]\nlarge_repo = true\n[land]\nbatch = \"waiting\"\n", "large-repo"),
         ] {
             let pb = Playbook::parse(text).unwrap();
-            assert!(lands_alone(&f.db, &pb, &a).unwrap().unwrap().contains(why), "{text}");
+            assert!(lands_alone(&f.db, &f.repo, &pb, &a).unwrap().unwrap().contains(why), "{text}");
         }
         std::fs::remove_dir_all(&f.base).ok();
     }

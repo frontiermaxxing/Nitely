@@ -77,7 +77,7 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
     let pb = Playbook::load(&root)?;
     // With `[land] batch`, a change that may land with others waits in the queue (land_queue.rs).
     // One that is not to be pushed lands alone: a stack is pushed as one.
-    if opts.push && crate::land_queue::lands_alone(db, &pb, &issue.key)?.is_none() {
+    if opts.push && crate::land_queue::lands_alone(db, &root, &pb, &issue.key)?.is_none() {
         return crate::land_queue::land(db, &root, &issue.key, opts, actor);
     }
     let _telemetry = crate::performance_attribution::Scope::new(db, crate::performance_attribution::Context { project: issue.project.clone(), issue: Some(issue.key.clone()), ..Default::default() });

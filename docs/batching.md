@@ -330,9 +330,12 @@ own, and the app signs each approved patch, as today.
 `crates/nitely-core/src/land_queue.rs`, with `[land] batch = "waiting"` or `"all"`:
 
 - **Who queues.** `land` puts the change in the repo's queue (`land_queue`, one row per change) when
-  the playbook batches, the repo has `[lanes]`, it is not in large-repo mode, and the change needs no
-  person's approval (its review's approver is not "human" and it names no approval reasons). Those
-  land alone, as before, so approvals are given and signed per change. So does a land that is not
+  the playbook batches, the repo has `[lanes]`, it is not in large-repo mode, and any required human
+  approval is already signed for that change. Each signature and reviewed patch is checked before
+  stacking and again after the combined gate, immediately before advancing the integration branch.
+  Managed submodules may be present when every pointer matches the original fork, submitted head
+  and integration baseline. Pointer, submodule URL, or management-policy changes stay separate.
+  Reduced verification plans also land individually. So does a land that is not
   to be pushed (`--no-push`), since a stack is pushed as one. A land of one change alone that finds
   changes queued behind it when it finishes lands them too, still under its lock, unless it was kept
   local (their push would publish it).
@@ -397,8 +400,8 @@ identical patch. Reusing a pass for the same patch and reviewing only the differ
 - **Issue timeline:** the batch's review and its verdict for this change, and for a land, the queue
   run with the gate's log; a change sent back from a batch says why ("its own P1", "the stack's gate
   failed and bisection found it", "conflicts with NIT-x").
-- **Inbox:** changes that need a person's approval never batch, so they arrive one per decision, as
-  today. When several of them wait at once, the Inbox groups them in one card ("3 changes wait for
+- **Inbox:** approval remains one decision per change, even when approved changes later share a
+  landing gate. When several of them wait at once, the Inbox groups them in one card ("3 changes wait for
   your approval"), each with its own Approve and Send back, and an Approve all that signs each patch
   on its own.
 - **Overview:** the land queue's length next to the lanes strip (build-lanes.md).
