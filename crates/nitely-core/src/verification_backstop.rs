@@ -292,7 +292,7 @@ fn execute(db:&Db,repo:&Path,pb:&Playbook,head:&str,commands:&[String],actor:&Ac
             crate::project_modes::check_playbook_authority(db,&[],&pb)?;
             let command=playbook::expand(command,repo,wt,pb.integration_branch());
             let (ok,output,seconds)=playbook::run_shell_kind(&command,wt,"build")?;
-            results.push(playbook::CommandResult{command,ok,output,seconds,skipped:false});
+            results.push(playbook::CommandResult{command,ok,output,seconds,skipped:false,timed_out:false});
             if !ok {passed=false;break;}
         }}
         turn.finish(passed);

@@ -649,6 +649,7 @@ fn receive_new(config: &Config, db: &Db, root: &Path, request: &WireRequest) -> 
                 seconds: 0,
                 output: format!("skipped: {why}"),
                 skipped: true,
+                timed_out: false,
             });
             continue;
         }
@@ -699,6 +700,7 @@ fn receive_new(config: &Config, db: &Db, root: &Path, request: &WireRequest) -> 
                 .max(0) as u64,
             output: row.error.clone().unwrap_or_else(|| row.output.clone()),
             skipped: false,
+            timed_out: row.timed_out,
         });
         if !row.passed() {
             reply.passed = false;
@@ -808,6 +810,7 @@ fn ci(root: &Path, pb: &Playbook, req: &Request, nonce: &str) -> Result<Reply> {
                         seconds: started.elapsed().as_secs(),
                         output: url,
                         skipped: false,
+                        timed_out: false,
                     }],
                     flaked: vec![],
                     remote_run: None,
@@ -1033,6 +1036,7 @@ mod tests {
             seconds: 0,
             output: "".into(),
             skipped: false,
+            timed_out: false,
         });
         assert!(validate_reply(&r, &reply).is_ok());
         reply.passed = false;

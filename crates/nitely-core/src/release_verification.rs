@@ -175,7 +175,7 @@ fn execute_gate(db: &Db, req: &Request<'_>, c: &Candidate) -> Result<Vec<playboo
     for command in &c.identity.commands {
         let command = playbook::expand(command, &c.root, req.worktree, &c.identity.policy);
         let (ok, output, seconds) = playbook::run_shell(&command, req.worktree)?;
-        results.push(playbook::CommandResult { command, ok, output, seconds, skipped: false });
+        results.push(playbook::CommandResult { command, ok, output, seconds, skipped: false, timed_out: false });
         if !ok { turn.finish(false); bail!("release Full gate failed: {}", serde_json::to_string(&results)?); }
     }
     turn.finish(true);

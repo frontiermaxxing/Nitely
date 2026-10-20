@@ -1211,7 +1211,7 @@ mod tests {
         f.db.move_issue(&issue.key, "In Review", None, None, &f.actor).unwrap();
         let step = |timed_out: bool| playbook::CommandResult { command: "cargo test".into(), ok: false, seconds: 1800, output: String::new(), skipped: false, timed_out };
         let stopped = |timed_out: bool| -> Result<Landed> {
-            let gate = GateResult { passed: false, commit: "abc1234".into(), results: vec![step(timed_out)], warnings: vec![], flaked: vec![], lane_run: None };
+            let gate = GateResult { mode_authority: None, plan: None, skipped: None, passed: false, commit: "abc1234".into(), results: vec![step(timed_out)], warnings: vec![], flaked: vec![], lane_run: None };
             Ok(Landed { issue: issue.key.clone(), error: Some("the gate stopped".into()), gate: Some(gate), ..Default::default() })
         };
         let (state, next) = after_auto_land(&mut f.db, &issue.key, &stopped(true), &f.actor).unwrap();

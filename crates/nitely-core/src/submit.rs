@@ -1877,7 +1877,7 @@ focus = \"Money first.\"
     #[test]
     fn a_gate_step_that_ran_past_the_lane_limit_is_not_a_failure_to_fix() {
         let step = |command: &str, timed_out: bool| playbook::CommandResult { command: command.into(), ok: false, seconds: 2700, output: String::new(), skipped: false, timed_out };
-        let gate = |r: playbook::CommandResult| GateResult { passed: false, commit: "abc1234".into(), results: vec![r], warnings: vec![], flaked: vec![], lane_run: Some(250) };
+        let gate = |r: playbook::CommandResult| GateResult { mode_authority: None, plan: None, skipped: None, passed: false, commit: "abc1234".into(), results: vec![r], warnings: vec![], flaked: vec![], lane_run: Some(250) };
         let stopped = after_failed_gate(&gate(step("npm run test:gate", true)));
         assert!(stopped.contains("did not finish") && stopped.contains("`npm run test:gate` ran past the lane's time limit") && !stopped.contains("Fix it"), "{stopped}");
         assert_eq!(after_failed_gate(&gate(step("cargo test", false))), "The gate failed at `cargo test`. Fix it, commit, and submit again.");

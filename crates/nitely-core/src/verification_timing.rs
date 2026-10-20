@@ -90,7 +90,7 @@ mod tests {
         std::fs::write(repo.join("math.rs"),"// clearer\nfn value()->i32 { 1 }").unwrap();
         g(&repo,&["commit","-qam","comment"]);
         let plan=crate::verification::assess(&repo,&base,"HEAD",&issue).unwrap();
-        let result=|command:&str,seconds|CommandResult{command:command.into(),ok:true,seconds,output:"executed".into(),skipped:false};
+        let result=|command:&str,seconds|CommandResult{command:command.into(),ok:true,seconds,output:"executed".into(),skipped:false,timed_out:false};
         let gate=GateResult{mode_authority:None,passed:true,skipped:None,commit:plan.head.clone(),
             results:plan.commands.iter().map(|c|result(c,1)).collect(),plan:Some(plan.clone()),
             warnings:vec![],flaked:vec![],lane_run:Some(1)};
