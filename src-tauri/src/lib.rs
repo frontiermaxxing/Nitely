@@ -291,6 +291,31 @@ async fn project_yolo(project: String) -> Result<nitely_core::project_yolo::Proj
     db()?.project_yolo(&project).map_err(err)
 }
 
+#[tauri::command]
+async fn project_review_mode(project: String) -> Result<nitely_core::project_modes::ProjectReviewMode, String> {
+    db()?.project_review_mode(&project).map_err(err)
+}
+
+#[tauri::command]
+async fn project_review_mode_effective(project: String) -> Result<Vec<nitely_core::project_modes::EffectiveRepository>, String> {
+    nitely_core::project_modes::effective_repositories(&db()?, &Config::load_read_only().map_err(err)?, &project).map_err(err)
+}
+
+#[tauri::command]
+async fn set_project_review_mode(project: String, mode: nitely_core::project_modes::Mode, overrides: nitely_core::project_modes::Options, expected_revision: i64) -> Result<nitely_core::project_modes::ProjectReviewMode, String> {
+    db()?.set_project_review_mode(&project, mode, overrides, expected_revision, &ME).map_err(err)
+}
+
+#[tauri::command]
+async fn periodic_review_status(project: String) -> Result<Vec<nitely_core::periodic_review::RepositoryStatus>, String> {
+    nitely_core::periodic_review::status(&db()?, &project).map_err(err)
+}
+
+#[tauri::command]
+async fn retry_periodic_review(project: String, repo: String, id: i64) -> Result<(), String> {
+    nitely_core::periodic_review::retry(&db()?, &project, &repo, id).map_err(err)
+}
+
 /// Only the app exposes this human setting; CLI and MCP may read it but cannot enable it.
 #[tauri::command]
 async fn set_project_yolo(project: String, enabled: bool, expected_revision: i64) -> Result<nitely_core::project_yolo::ProjectYolo, String> {
@@ -936,6 +961,13 @@ pub fn run() {
                 if let Err(e)=result { eprintln!("verification backstop: {e:#}"); }
                 std::thread::sleep(std::time::Duration::from_secs(60));
             });
+            // Review work has its own durable cursor and queue; a long Full-suite run must
+            // not prevent an opted-in project's periodic review from becoming due.
+            std::thread::spawn(|| loop {
+                let result=Config::load_read_only().and_then(|config| nitely_core::periodic_review::tick_all(&mut Db::open_default()?, &config));
+                if let Err(e)=result { eprintln!("periodic review: {e:#}"); }
+                std::thread::sleep(std::time::Duration::from_secs(60));
+            });
             // A playbook that lands by Nitely lands an approved change without an agent coming back
             // for it. Each round lands what is approved and ready; a land that holds the lock, or an
             // app that was closed, only delays it to a later round. Started here, in the one
@@ -976,6 +1008,11 @@ pub fn run() {
             goal_order,
             project_focus,
             project_yolo,
+            project_review_mode,
+            project_review_mode_effective,
+            set_project_review_mode,
+            periodic_review_status,
+            retry_periodic_review,
             set_project_yolo,
             confirm_verification_escape,
             retry_verification_audit,

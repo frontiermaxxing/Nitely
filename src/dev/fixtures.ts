@@ -9,6 +9,8 @@
 
 import * as phoneFixture from "./phone";
 import * as rulesFixture from "./rules";
+import { reviewMode, saveReviewMode, periodicReviews, retryPeriodic, effectiveModes } from "./reviewModes";
+import type { ModeOptions, ReviewMode } from "../reviewModes";
 import { performanceFixture, configurePerformance, clearPerformance } from "./performance";
 import type {
   LaneRun,
@@ -2220,6 +2222,16 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         const project = String(args.project).toUpperCase();
         return projectYolo.get(project) ?? { project, enabled: false, revision: 0 };
       }
+      case "project_review_mode":
+        return reviewMode(String(args.project).toUpperCase());
+      case "project_review_mode_effective":
+        return effectiveModes(String(args.project).toUpperCase());
+      case "set_project_review_mode":
+        return saveReviewMode(String(args.project).toUpperCase(), args.mode as ReviewMode, args.overrides as ModeOptions, Number(args.expectedRevision));
+      case "periodic_review_status":
+        return periodicReviews(String(args.project).toUpperCase());
+      case "retry_periodic_review":
+        retryPeriodic(String(args.project).toUpperCase(), String(args.repo), Number(args.id)); return null;
       case "set_project_yolo": {
         const project = String(args.project).toUpperCase();
         const before = projectYolo.get(project) ?? { project, enabled: false, revision: 0 };

@@ -229,7 +229,7 @@ export function WhoHadIt(props: { detail: IssueDetail; now: number }) {
       }
       case "gate_skipped":
         if (cells[cells.length - 1]?.lane === "gate") cells.pop();
-        cells.push({ lane: "gate", label: "Skipped (YOLO)", sub: at, tone: "step" });
+        cells.push({ lane: "gate", label: "Skipped", sub: at, tone: "step" });
         break;
       case "submit": {
         submits += 1;

@@ -112,6 +112,33 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
     await page.waitFor(`return document.body.textContent.includes("my-app");`, { what: "the repo on Now" });
     await shot("1-connected");
 
+    // A saved preset crosses the settings UI, native command and durable project policy.
+    // Restore inherited Custom afterwards so the remainder still exercises the repo's rules.
+    const originalMode = await page.invoke("project_review_mode", { project: "APP" });
+    await page.open("#project/APP/settings");
+    await page.waitFor(`return document.querySelector('input[name="mode-APP"][value="fast"]');`);
+    await page.click({ css: 'input[name="mode-APP"][value="fast"]' });
+    await page.click({ css: "button", text: "Save review mode" });
+    await page.waitFor(`return document.querySelector(".review-mode-heading")?.textContent.includes("Current: Fast");`);
+    const fastMode = await page.invoke("project_review_mode", { project: "APP" });
+    assert.equal(fastMode.mode, "fast");
+    const effectiveModes = await page.invoke("project_review_mode_effective", { project: "APP" });
+    assert.equal(effectiveModes[0].options.pre_review, "off");
+    assert.equal(effectiveModes[0].options.periodic.enabled, true);
+    const staleModeSave = await page.eval(`
+      try {
+        await window.__TAURI_INTERNALS__.invoke("set_project_review_mode", ${JSON.stringify({ project: "APP", mode: "yolo", overrides: {}, expectedRevision: originalMode.revision })});
+        return "unexpected success";
+      } catch (error) { return String(error); }
+    `);
+    assert.match(staleModeSave, /changed|stale|revision/i);
+    assert.equal((await page.invoke("project_review_mode", { project: "APP" })).mode, "fast");
+    await shot("review-mode");
+    await page.click({ css: 'input[name="mode-APP"][value="custom"]' });
+    await page.click({ css: "button", text: "Save review mode" });
+    await page.waitFor(`return document.querySelector(".review-mode-heading")?.textContent.includes("Current: Custom");`);
+    assert.deepEqual((await page.invoke("project_review_mode", { project: "APP" })).overrides, originalMode.overrides);
+
     // Human reviewer settings go through the native commands and commit only the previewed file.
     const reviewerViews = await page.invoke("rules", { project: "APP" });
     const reviewerRepo = reviewerViews[0].repo;

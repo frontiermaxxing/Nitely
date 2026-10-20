@@ -3,7 +3,7 @@ import { invoke } from "./backend";
 import type { Project } from "./types";
 import { PrivateTerms } from "./PrivateTerms";
 import { MirrorSettings } from "./Mirror";
-import { ProjectYoloSettings, type ProjectYoloControl } from "./ProjectYolo";
+import { ProjectReviewModeSettings, type ReviewModeControl } from "./ProjectReviewMode";
 
 interface Rekeyed {
   from: string;
@@ -30,7 +30,8 @@ const KEY = /^[A-Z][A-Z0-9]{1,9}$/;
  */
 export function ProjectSettings(props: {
   project: Project;
-  yolo: ProjectYoloControl;
+  reviewMode: ReviewModeControl;
+  version: number;
   /** Issues in the project, open and closed. */
   issueCount: number;
   onChanged: () => void;
@@ -72,7 +73,7 @@ export function ProjectSettings(props: {
 
   return (
     <div className="settings">
-      <ProjectYoloSettings control={props.yolo} />
+      <ProjectReviewModeSettings control={props.reviewMode} version={props.version} />
       <section className="settings-card">
         <h2>Name</h2>
         <form

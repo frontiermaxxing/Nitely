@@ -455,7 +455,7 @@ export function IssuePanel(props: {
                 <>
                   <dt>Gate</dt>
                   <dd className={lastGate.kind === "gate_skipped" ? "muted" : lastGate.kind === "gate_failed" ? "error" : "live-ink"} title={lastGate.summary ?? undefined}>
-                    {lastGate.kind === "gate_skipped" ? "skipped (YOLO)" : lastGate.kind === "gate_failed" ? "failed" : "passed"} {ago(props.now, lastGate.ts)}
+                    {lastGate.kind === "gate_skipped" ? "skipped" : lastGate.kind === "gate_failed" ? "failed" : "passed"} {ago(props.now, lastGate.ts)}
                   </dd>
                 </>
               )}
