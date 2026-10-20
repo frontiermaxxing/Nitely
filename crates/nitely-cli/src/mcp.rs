@@ -521,7 +521,8 @@ fn tools() -> Value {
             "description": "Land a submitted issue on the integration branch: one land at a time, rebase onto the integration branch, check that the review covers exactly this change (and that the human approved it when the playbook says so), run the gate, fast-forward, push, clean up the worktree, and move the issue to Done. A rebase conflict is left in progress for you to resolve. With `[land] batch` in the playbook, a change that arrives while another land runs waits in the repo's land queue and lands together with what else waited (stacked, gated once in a build lane, pushed once); land returns once it landed or was sent back with why. A lock left by a land whose process is gone is taken over on its own; break_lock takes over one whose process still runs, only when you know no land is running.",
             "inputSchema": { "type": "object", "required": ["key"], "properties": {
                 "key": { "type": "string" },
-                "break_lock": { "type": "boolean", "description": "Take over the land lock even though the process that took it still runs (a land that hangs, or another program with its old number)." }
+                "break_lock": { "type": "boolean", "description": "Take over the land lock even though the process that took it still runs (a land that hangs, or another program with its old number)." },
+                "after": { "type": "array", "items": { "type": "string" }, "description": "Issues to wait for: the land returns at once, waits in a job of its own until every one is Done, then rebases, gates and lands by itself, and you hear how on your next nitely call. Left out, it waits for the issue's own open blockers, if any; [] lands now." }
             } }
         },
         {
@@ -1310,7 +1311,31 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             let issue = db.issue(key)?.with_context(|| format!("no issue {key}"))?;
             let root = playbook::repo_for_issue(&config, issue.project.as_deref(), &server.cwd)?;
             nitely_core::install::check_current(&config, &root.to_string_lossy(), env!("NITELY_COMMIT"))?;
-            if detached.is_some() {
+            // Waiting for other issues to land first (NIT-456): the named ones, else the issue's own
+            // open blockers; an empty list lands now. A job of its own waits, then lands.
+            let after = match (detached, args.get("after").and_then(Value::as_array)) {
+                (Some(_), _) => vec![],
+                (None, Some(named)) if named.is_empty() => vec![],
+                (None, named) => {
+                    let named: Vec<String> = named.into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
+                    nitely_core::land_job::waits_for(&db, key, &named)?
+                }
+            };
+            if !after.is_empty() {
+                let job = nitely_core::land_job::enqueue(&db, key, &after, &server.cwd, &actor)?;
+                let log = paths::data_dir().join("jobs").join(format!("land-{}.log", job.id));
+                let pid = nitely_core::submit_job::spawn_nitely(&std::env::current_exe()?, &["land-job".into(), job.id.to_string()], &root, &log)?;
+                nitely_core::land_job::set_pid(&db, job.id, pid)?;
+                let job = db.land_job(job.id)?.context("the land job's record went missing")?;
+                let mut out = json!(job);
+                out["next"] = json!(format!(
+                    "Handed in: it lands by itself once {} {} landed, as a land of yours, and the outcome comes as a notice on your next nitely call. Pick up other work or stop.",
+                    after.join(", "),
+                    if after.len() == 1 { "has" } else { "have" }
+                ));
+                out["log"] = json!(log.to_string_lossy());
+                out
+            } else if detached.is_some() {
                 let break_lock = args.get("break_lock").and_then(Value::as_bool).unwrap_or(false);
                 let opts = nitely_core::land::LandOptions { dir: &server.cwd, issue_key: key, push: true, keep: false, break_lock };
                 json!(nitely_core::land::land(&mut db, &config, &opts, &actor)?)
@@ -1640,6 +1665,14 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
         if !done.is_empty() {
             db.mark_submit_jobs_delivered(&done.iter().map(|j| j.id).collect::<Vec<_>>())?;
             out["notices"] = json!(done.iter().map(|j| j.outcome()).collect::<Vec<_>>());
+        }
+        // Lands that waited for other issues (NIT-456): how each went, told once.
+        let landed = db.undelivered_land_jobs(actor.id())?;
+        if !landed.is_empty() {
+            db.mark_land_jobs_delivered(&landed.iter().map(|j| j.id).collect::<Vec<_>>())?;
+            let mut notices = out.get("notices").and_then(Value::as_array).cloned().unwrap_or_default();
+            notices.extend(landed.iter().map(|j| json!(j.outcome())));
+            out["notices"] = json!(notices);
         }
         // Triage's answers to this agent's questions (NIT-245), told once.
         let answered = db.undelivered_triage(actor.id())?;

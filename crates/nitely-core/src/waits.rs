@@ -15,7 +15,8 @@ use crate::lanes::{self, Run};
 #[derive(Debug, Clone, Serialize)]
 pub struct Waiting {
     /// `run` (an agent's `run`), `gate` (a submit's gate), `land` (a land's gate), `submit` (a
-    /// submit job not started), `review` (a change waiting for a review batch) or `land_queue`.
+    /// submit job not started), `review` (a change waiting for a review batch), `land_queue`, or
+    /// `land_after` (a land waiting for other issues to land, NIT-456).
     pub kind: String,
     pub issue: Option<String>,
     pub project: Option<String>,
@@ -312,6 +313,26 @@ fn review_waits(db: &Db) -> Result<Vec<Waiting>> {
     Ok(out)
 }
 
+/// Lands handed in to wait for other issues (NIT-456): each waits for those still open to land.
+fn land_after_waits(db: &Db) -> Result<Vec<Waiting>> {
+    let mut out = Vec::new();
+    for job in db.waiting_land_jobs()? {
+        if job.state != "waiting" {
+            continue;
+        }
+        let mut behind = Vec::new();
+        for key in &job.after {
+            if db.issue(key)?.is_some_and(|i| i.state != "Done") {
+                behind.push(Behind { what: format!("{key}'s land"), issue: Some(key.clone()), since: None });
+            }
+        }
+        let names: Vec<&str> = behind.iter().filter_map(|b| b.issue.as_deref()).collect();
+        let why = format!("lands by itself once {} {} landed", names.join(", "), if names.len() == 1 { "has" } else { "have" });
+        out.push(Waiting { kind: "land_after".into(), project: project_of(&job.issue), issue: Some(job.issue.clone()), since: job.queued_at, why, place: None, behind });
+    }
+    Ok(out)
+}
+
 /// Changes queued to land: behind a queue run, behind a land holding the lock, or waiting for the
 /// batch window.
 fn land_waits(db: &Db) -> Result<Vec<Waiting>> {
@@ -373,6 +394,7 @@ pub fn waits(db: &Db, lane_runs: Vec<Waiting>, repos: &[String]) -> Result<Waits
     waiting.extend(submit_waits(db)?);
     waiting.extend(review_waits(db)?);
     waiting.extend(land_waits(db)?);
+    waiting.extend(land_after_waits(db)?);
     waiting.extend(refused_waits(db)?);
     for repo in repos {
         waiting.extend(landing_now(db, repo)?);

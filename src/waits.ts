@@ -12,6 +12,7 @@ export const WAIT_KIND: Record<string, string> = {
   review: "Review",
   land_queue: "Land",
   land_refused: "Land",
+  land_after: "Land after",
   landing: "Landing",
 };
 

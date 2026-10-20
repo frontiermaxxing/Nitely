@@ -277,6 +277,13 @@ enum Cmd {
         /// Take over a lock left by a land that died.
         #[arg(long)]
         break_lock: bool,
+        /// Wait for these issues to be Done first, in a job of its own, then land by itself (NIT-456).
+        /// Left out, it waits for the issue's own open blockers, if any.
+        #[arg(long, value_delimiter = ',')]
+        after: Vec<String>,
+        /// Land now, even with open blockers.
+        #[arg(long, conflicts_with = "after")]
+        now: bool,
     },
     /// Your numbers for the Leaderboard: `stats` prints this week's, the last 30 days' and all
     /// time's, the weekly series and your records, as JSON. Read from this machine only.
@@ -284,6 +291,9 @@ enum Cmd {
         #[command(subcommand)]
         command: LeaderboardCmd,
     },
+    /// Run a land that waits for other issues (`land --after`): wait, then land. Started by `land`.
+    #[command(hide = true)]
+    LandJob { id: i64 },
     /// Tokens the agents used, read from their own session files (counts only, never text): an
     /// issue's, or a project's per day over the last days.
     Spend {
@@ -761,7 +771,7 @@ fn cli_main() {
     let _recording = PerformanceRecording;
     *PERFORMANCE_RECORDING.lock().unwrap_or_else(|e| e.into_inner()) = matches!(&cli.command, Cmd::Mcp | Cmd::McpCalls | Cmd::McpDetached | Cmd::Crew { command: crew::CrewCmd::Run { .. } }
         | Cmd::Links { command: LinksCmd::Serve } | Cmd::Run { .. } | Cmd::Gate { .. } | Cmd::Submit { .. }
-        | Cmd::SubmitJob { .. } | Cmd::TriageJob { .. } | Cmd::Land { .. } | Cmd::Serve { .. })
+        | Cmd::SubmitJob { .. } | Cmd::TriageJob { .. } | Cmd::Land { .. } | Cmd::LandJob { .. } | Cmd::Serve { .. })
         .then(|| nitely_core::performance::background(nitely_core::performance::directory()));
     match &cli.command {
         Cmd::Hook { vendor, payload } => {
@@ -1623,6 +1633,32 @@ fn run(cmd: Cmd) -> Result<()> {
             print_json(&job)?;
             Ok(())
         }
+        Cmd::LandJob { id } => {
+            let config = Config::load()?;
+            let mut db = match Db::open_default() {
+                Ok(db) => db,
+                Err(e) if newer::is_newer_database(&e) => {
+                    newer::hand_over_or_return();
+                    return Err(e);
+                }
+                Err(e) => return Err(e),
+            };
+            match nitely_core::land_job::wait_for_blockers(&db, id)? {
+                nitely_core::land_job::Ready::Over(job) => print_json(&job),
+                nitely_core::land_job::Ready::Go(job) => {
+                    // Hours may have passed: a newer nitely installed meanwhile lands it (it finds
+                    // the job landing and goes straight on).
+                    newer::hand_over_or_return();
+                    let issue = db.issue(&job.issue)?.ok_or_else(|| anyhow::anyhow!("no issue {}", job.issue))?;
+                    let root = playbook::repo_for_issue(&config, issue.project.as_deref(), &job.dir)?;
+                    if let Err(e) = nitely_core::install::check_current(&config, &root.to_string_lossy(), env!("NITELY_COMMIT")) {
+                        nitely_core::land_job::fail(&db, id, &format!("{e:#}"))?;
+                        return Err(e);
+                    }
+                    print_json(&nitely_core::land_job::land_now(&mut db, &config, id)?)
+                }
+            }
+        }
         Cmd::SubmitStatus { job, issue, wait } => {
             let db = Db::open_default()?;
             let found = match (job, issue.as_deref()) {
@@ -1639,13 +1675,24 @@ fn run(cmd: Cmd) -> Result<()> {
             eprintln!("{}", found.outcome());
             Ok(())
         }
-        Cmd::Land { key, no_push, keep, break_lock } => {
+        Cmd::Land { key, no_push, keep, break_lock, after, now } => {
             let config = Config::load()?;
             let mut db = Db::open_default()?;
             let cwd = cwd()?;
             let issue = db.issue(&key)?.ok_or_else(|| anyhow::anyhow!("no issue {key}"))?;
             let root = playbook::repo_for_issue(&config, issue.project.as_deref(), &cwd)?;
             nitely_core::install::check_current(&config, &root.to_string_lossy(), env!("NITELY_COMMIT"))?;
+            // Waiting for other issues first: a job of its own waits, then lands (NIT-456).
+            let after = if now || no_push || keep { vec![] } else { nitely_core::land_job::waits_for(&db, &issue.key, &after)? };
+            if !after.is_empty() {
+                let job = nitely_core::land_job::enqueue(&db, &issue.key, &after, &cwd, &me)?;
+                let log = paths::data_dir().join("jobs").join(format!("land-{}.log", job.id));
+                let pid = nitely_core::submit_job::spawn_nitely(&std::env::current_exe()?, &["land-job".into(), job.id.to_string()], &root, &log)?;
+                nitely_core::land_job::set_pid(&db, job.id, pid)?;
+                print_json(&db.land_job(job.id)?)?;
+                eprintln!("{}: lands by itself once {} landed (land job {}; log {}). `nitely land {} --now` lands it now instead.", issue.key, after.join(", "), job.id, log.display(), issue.key);
+                return Ok(());
+            }
             let opts = nitely_core::land::LandOptions { dir: &cwd, issue_key: &key, push: !no_push, keep, break_lock };
             let r = nitely_core::land::land(&mut db, &config, &opts, &me)?;
             print_json(&r)?;

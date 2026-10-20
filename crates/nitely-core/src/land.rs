@@ -2150,6 +2150,66 @@ when_changed = ["billing"]
         std::fs::remove_dir_all(&f.base).ok();
     }
 
+    /// A land handed in after another issue waits until that issue is Done, then lands as `land`
+    /// does; one whose rebase conflicts stops with the conflict said and its issue still open; and
+    /// a blocker closed without landing ends the wait (NIT-456).
+    #[test]
+    fn a_land_after_another_waits_for_it_then_lands_or_stops_cleanly() {
+        std::env::set_var("NITELY_LAND_JOB_POLL_MS", "50");
+        let mut f = fixture();
+        let dir = f.repo.to_string_lossy().into_owned();
+        let path = f.base.join("t.db");
+        let (first, _) = f.submitted("Header", "header.txt", "x");
+        let (second, _) = f.submitted("Footer", "footer.txt", "x");
+        assert_eq!(crate::land_job::waits_for(&f.db, &second, std::slice::from_ref(&first)).unwrap(), [first.clone()]);
+        let job = crate::land_job::enqueue(&f.db, &second, std::slice::from_ref(&first), &dir, &f.actor).unwrap();
+        // Its process: waits, then lands.
+        let id = job.id;
+        let waiter = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                let mut db = Db::open(&path).unwrap();
+                match crate::land_job::wait_for_blockers(&db, id).unwrap() {
+                    crate::land_job::Ready::Go(_) => crate::land_job::land_now(&mut db, &crate::Config::default(), id).unwrap(),
+                    crate::land_job::Ready::Over(j) => j,
+                }
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        assert_eq!(f.db.land_job(id).unwrap().unwrap().state, "waiting");
+        assert_eq!(state(&f, &second), "In Review", "nothing lands before what it waits for");
+        assert!(f.land(&first).landed);
+        let done = waiter.join().unwrap();
+        assert_eq!(done.state, "done", "{done:?}");
+        assert!(done.outcome().contains("landed after"), "{}", done.outcome());
+        assert_eq!(state(&f, &second), "Done");
+        assert_eq!(f.db.undelivered_land_jobs(f.actor.id()).unwrap().len(), 1, "told once, on the agent's next call");
+
+        // Behind a change to the same file: the rebase conflicts, and it stops cleanly.
+        let (third, _) = f.submitted("Menu", "menu.txt", "a");
+        let (fourth, _) = f.submitted("Menu too", "menu.txt", "b");
+        let job = crate::land_job::enqueue(&f.db, &fourth, std::slice::from_ref(&third), &dir, &f.actor).unwrap();
+        assert!(f.land(&third).landed);
+        let mut db = Db::open(&path).unwrap();
+        assert!(matches!(crate::land_job::wait_for_blockers(&db, job.id).unwrap(), crate::land_job::Ready::Go(_)));
+        let stopped = crate::land_job::land_now(&mut db, &crate::Config::default(), job.id).unwrap();
+        assert_eq!(stopped.state, "done");
+        assert!(stopped.outcome().contains("stopped"), "{}", stopped.outcome());
+        assert_ne!(state(&f, &fourth), "Done");
+
+        // What it waits for is closed without landing: the wait ends, and says why.
+        let (fifth, _) = f.submitted("Fifth", "fifth.txt", "x");
+        let (sixth, _) = f.submitted("Sixth", "sixth.txt", "x");
+        let job = crate::land_job::enqueue(&f.db, &sixth, std::slice::from_ref(&fifth), &dir, &f.actor).unwrap();
+        f.db.move_issue(&fifth, "Canceled", None, Some("not needed"), &f.actor).unwrap();
+        match crate::land_job::wait_for_blockers(&db, job.id).unwrap() {
+            crate::land_job::Ready::Over(j) => assert!(j.state == "failed" && j.error.as_deref().unwrap_or("").contains("without landing"), "{j:?}"),
+            crate::land_job::Ready::Go(_) => panic!("it does not land after a canceled issue"),
+        }
+        assert_eq!(state(&f, &sixth), "In Review");
+        std::fs::remove_dir_all(&f.base).ok();
+    }
+
     #[test]
     fn later_lands_leave_a_kept_worktree_and_remove_closed_ones_nothing_keeps() {
         let mut f = fixture();
