@@ -32,109 +32,101 @@ Have the owner approve a playbook proposal before adding this section on integra
 ```toml
 [release]
 tag = "v*"
+exclude_tags = ["*-*"] # Review every beta/nightly/stable change since the previous stable tag.
 stamp_paths = ["Cargo.toml", "Cargo.lock", "package.json", "package-lock.json", "src-tauri/tauri.conf.json"]
-# Add the actual release-only native, installer/upgrade/migration and recovery checks here.
-# Commands must fail if a required remote OS check or artifact check has not passed for this
-# exact stamped tree. Ordinary source-commit CI does not certify the stamped tree.
-commands = []
+# The trusted CI adapter independently requires all OS/native/installer checks before publishing.
+commands = ["node scripts/version.mjs"]
 ```
 
 An empty `commands` list adds nothing to Full. It does **not** claim the current gate covers
 native behavior or every supported platform. Do not activate Nitely's release workflow until
 those release-only checks are configured and the reviewer can authenticate on CI.
 
-## CI integration proposal
+## Opt-in CI integration
 
-The executable adapter is `scripts/release-verify-ci.mjs`. Run the copy from a trusted integration
-checkout outside the candidate directory; it refuses a candidate-owned verifier/adapter/database.
-It invokes the core gate/review/check phases and, on `check`, additionally queries GitHub Actions
-for the latest exact-candidate runs of `ci.yml` (all three OS jobs), `app.yml` (native Windows),
-and `release-candidate.yml` (`Installer and upgrade (windows-latest)`). Skipped, pending, failed,
-old-attempt and source-only checks fail closed. It hashes the downloaded Actions artifact ZIP
-and requires GitHub's digest for `release-candidate-<candidate SHA>` from the passing installer
-attempt. Publish the archive's tested files, never a later rebuild. The REST API's
-[artifact digest](https://docs.github.com/en/rest/actions/artifacts) and
-[attempt-scoped job list](https://docs.github.com/en/rest/actions/workflow-jobs) bind those checks.
+The checked-in `verified-release.yml` is inactive unless the repository variable
+`NITELY_VERIFIED_RELEASES` equals `true`. With it enabled, `release.yml` delegates nightly/tag
+builds to that workflow **on main**, and `promote.yml` delegates before creating a stable tag.
+Without it, existing release behavior remains unchanged. No policy, variable, secret or release
+was changed as part of this implementation.
 
-```sh
-node "$TRUSTED/scripts/release-verify-ci.mjs" gate --verifier "$VERIFIER" \
-  --worktree "$CANDIDATE" --source "$SOURCE" --author-vendor "$AUTHOR"
-# In a separate step with reviewer-only authentication:
-node "$TRUSTED/scripts/release-verify-ci.mjs" review --verifier "$VERIFIER" \
-  --worktree "$CANDIDATE" --source "$SOURCE" --author-vendor "$AUTHOR"
-# Immediately before publication, channel update or promotion:
-node "$TRUSTED/scripts/release-verify-ci.mjs" check --verifier "$VERIFIER" \
-  --worktree "$CANDIDATE" --source "$SOURCE" --author-vendor "$AUTHOR" \
-  --repository "$GITHUB_REPOSITORY" --artifact-archive "$DOWNLOADED_ACTIONS_ZIP"
-```
+The pipeline separates these steps onto fresh Windows runners:
 
-**Unfinished activation dependencies:** `release-candidate.yml` does not yet exist; existing
-`ci.yml` and `app.yml` trigger only on main/PRs and do not run a locally stamped synthetic commit.
-The candidate workflow must run on that exact SHA, exercise installer, upgrade, migration and
-recovery paths, and retain the tested release archive. The existing install check inside
-`release.yml` is not that independent pre-publication job. Configure candidate triggers,
-provision the reviewer secret, approve release policy, and wire the adapter before **both**
-publication and promotion. Until then the helper is usable and tested but the existing release
-workflows are not protected by this new gate; this is not a completed rollout.
+1. Build the verifier from the trusted integration commit. Preserve the original source SHA,
+   stamp the five allowed version files, and commit one child of that source. Push the candidate
+   to the unique temporary branch `nitely-release-candidate/<run>-<attempt>`. This remote ref is
+   necessary so dispatched jobs and their artifacts identify the **stamped candidate SHA**;
+   source tags remain unchanged. Retain source, candidate, policy, channel and version metadata.
+2. Dispatch `ci.yml` (Windows/macOS/Linux Full gates), `app.yml` (native Windows harness), and
+   `release-candidate.yml` at that candidate ref, with its final channel. Separately execute
+   `release-verify gate` using the trusted binary and integration policy. The gate runs fresh,
+   with no reduced-plan, PR-review-off or YOLO exemption and no reviewer credential.
+3. On a new runner, install the approved pinned external Codex reviewer before supplying its
+   credential. Download only the gate database receipt, authenticate through stdin into a
+   throwaway `CODEX_HOME`, and run whole-release peer review. Always remove authentication;
+   only the Nitely receipt database is retained. Candidate build/setup commands never run on
+   this runner or inherit the reviewer key.
+4. On another runner, wait for the latest exact-candidate CI attempts, download the raw installer
+   Actions artifact ZIP, and verify GitHub's artifact SHA-256 against those bytes. The trusted
+   adapter also checks each required job and revalidates the local gate/review receipt. Safely
+   extract a flat, bounded archive; validate its file inventory, checksums and candidate metadata.
+   Publish these tested files without rebuilding or executing candidate binaries. Attest their
+   bytes and identity manifest; this attestation names the trusted publisher workflow, while
+   `candidate.json` and `verification.json` record the source and stamped candidate explicitly.
+5. Re-fetch integration and recheck authorization immediately before tag creation, release
+   publication and each channel update. Integration moving invalidates this attempt. Stable
+   promotion creates its tag only here, after review and all checks. Verified publications share
+   one concurrency group to serialize channel updates. Clean up only this run's temporary ref.
 
-The current release workflow is deliberately not activated by this change: it has neither an
-approved `[release]` policy nor provisioned release-review authentication. Enabling it without
-those prerequisites would break nightly, beta and stable publication. The following is the
-required integration order, including the concrete commands to wire into `release.yml`:
+`scripts/release-verify-ci.mjs` is the fail-closed adapter. It accepts no caller-supplied success
+JSON or check-name list. Its fixed requirements are the three `Gate (<OS>)` jobs in `ci.yml`,
+`Inbox in the real app (windows-latest)` in `app.yml`, and
+`Installer and upgrade (windows-latest)` in `release-candidate.yml`. Pending/failed newer attempts,
+skipped jobs, source-only checks, wrong artifacts and expired artifacts all refuse publication.
+The [artifact digest](https://docs.github.com/en/rest/actions/artifacts) and
+[attempt-scoped job list](https://docs.github.com/en/rest/actions/workflow-jobs) bind the evidence.
 
-1. Obtain a **trusted verifier** built from a reviewed integration commit, or a previously
-   published verifier binary with a pinned SHA-256. Keep it outside the candidate checkout.
-   Never invoke the candidate-built `target/release/nitely.exe` for release authorization.
-   Use a fresh private `NITELY_HOME` outside the checkout, retained across all three phases.
-   Fetch the trusted integration ref and all tags. CI must control this ref, not a dispatch
-   input supplied by the candidate. `refs/remotes/origin/main` is Nitely's integration ref.
-2. Save `SOURCE=$(git rev-parse HEAD)` **before** version stamping. Stamp the five version files
-   and commit those paths locally as one child of SOURCE. Do not push this synthetic commit or
-   move the source tag. Build and install-test this exact candidate with the final channel and
-   signing inputs. Keep generated artifacts outside the checkout, or in explicitly ignored
-   output directories, so untracked source cannot hide in the verification checkout.
-3. Run Full using the trusted verifier. Keep reviewer credentials **absent** from this step,
-   all setup commands, package-manager hooks, builds and artifact checks:
+The installer job builds the stamped CLI and NSIS installer with final channel/signing inputs.
+It downloads a previous published stable/beta installer, checks its published SHA-256, installs
+it, writes a marker into throwaway data, installs the candidate over it, and checks migration
+preserves the marker and SQLite integrity. It then injects an unknown future migration, checks
+that the candidate refuses it, restores the saved database and verifies it opens with the old
+marker intact. This is an upgrade/migration/recovery **smoke test**, not proof of all interruption
+or rollback scenarios. It requires an existing published baseline and fails closed without one.
+No native installer or app harness is run on the developer's PC.
 
-   ```sh
-   "$VERIFIER" release-verify gate --worktree "$CANDIDATE" \
-     --integration-ref refs/remotes/origin/main --source "$SOURCE" --author-vendor "$AUTHOR"
-   ```
+## Activation dependencies and rollout limits
 
-4. Install the integration policy's external reviewer CLI at an approved pinned version outside
-   the candidate. Supply its authentication **only** in a separate review step. For Nitely's
-   current Codex reviewer, provision a dedicated `NITELY_RELEASE_OPENAI_API_KEY` secret and a
-   throwaway `CODEX_HOME`; authenticate with `codex login --with-api-key` through stdin in that
-   step. Remove the throwaway auth directory in an unconditional cleanup step. Do not put a key
-   in arguments, logs, artifacts, the candidate environment, or repository files. A relative
-   reviewer script from the candidate is not a trusted reviewer entry point.
+This is implementation ready for review, **not an activated or end-to-end validated rollout**.
+No real release was dispatched to exercise it. The owner must resolve these prerequisites:
 
-   ```sh
-   "$VERIFIER" release-verify review --worktree "$CANDIDATE" \
-     --integration-ref refs/remotes/origin/main --source "$SOURCE" --author-vendor "$AUTHOR"
-   ```
+- Approve `[release]` policy on integration, including baseline tag selection, the five stamp
+  paths, release-only commands as needed, and reviewer/approval policy. Human approval rules
+  cannot be auto-satisfied. Stable baseline selection must cover the full intended release diff.
+- Provision a dedicated `NITELY_RELEASE_OPENAI_API_KEY` secret. Set
+  `NITELY_RELEASE_CODEX_VERSION` to an approved exact npm version and
+  `NITELY_RELEASE_AUTHOR_VENDOR` to the truthful author policy (`claude`, `codex`, `cursor` or
+  `human`). Mixed/unknown authors and cross-vendor requirements need an owner decision; do not
+  invent an author merely to obtain an automatic pass. The integrated reviewer must be the
+  trusted external Codex CLI, not a candidate-relative wrapper.
+- Ensure the source being released contains the new dispatchable CI/native/installer workflows.
+  Preparation requires their `nitely-exact-release-v1` contract markers and dispatch triggers
+  before pushing a candidate. Old tags (including older betas) predating this integration fail
+  with an explicit unsupported-source error; this implementation does not retrofit their trees.
+  More importantly,
+  GitHub runs a tag's historical copy of `release.yml`: an old copy lacks the opt-in switch and
+  can still use legacy publication. Before claiming global enforcement, retire old in-flight
+  publishers and restrict historical-tag workflow dispatch/rebuilds through repository policy
+  or a separate approved migration. Setting the variable alone cannot rewrite old Git trees.
+- Review a draft/test-channel CI run with provisioned policy/auth, including the actual external
+  reviewer, signed/unsigned installer behavior, artifact transfer and promotion refusal paths.
+  Do not mark rollout complete on local helper tests alone. First-release bootstrap without a
+  prior installer, broad native failure recovery and human release approval remain explicit
+  product/policy decisions outside this initial automation.
 
-5. Immediately before `gh release create`, promotion/tag mutation, or updating channel manifests,
-   re-fetch the integration ref, run the check below, and verify the artifact checksums produced
-   by the tested build. An integration-policy move invalidates the receipt and requires a new
-   gate/review. Keep SOURCE for the nightly `--target` and tagged-source provenance checks;
-   comparing the workflow SHA to the synthetic candidate would incorrectly drop attestations.
-   Publish the returned identity alongside artifact checksums so source and stamped candidate
-   are both explicit. Do not rebuild or alter signed artifacts after verification.
-
-   Use the adapter's `check` command above here. The bare core `release-verify check` validates
-   local receipts; it does not replace the adapter's remote OS/native/artifact checks.
-
-`AUTHOR` must reflect the release's author policy; do not label an unknown author as another
-vendor merely to satisfy cross-vendor review. If policy requires cross-vendor independence and
-the release has mixed or unknown authors, resolve that policy through the owner before enabling
-automation.
-
-Each platform has its own receipt. A Windows receipt is not evidence for Linux or macOS. The
-release orchestrator must make all required platform/native/artifact checks part of its trusted
-release commands, using the exact stamped tree and final build inputs. A command only enforces
-the configured checks; it cannot invent evidence for jobs that did not run.
-
-`promote.yml` currently creates a stable tag before dispatching `release.yml`. Its activation
-must move the verification check ahead of tag creation, or defer that tag mutation until the
-verified candidate's publish job. Merely adding a check after the tag is pushed is insufficient.
+Only after those steps should the owner set `NITELY_VERIFIED_RELEASES=true`. The workflow refuses
+missing prerequisites rather than silently falling back to legacy publication once opted in.
+If a run fails after a tag/release mutation, inspect the retained identity and receipts; reruns do
+not overwrite an existing stable release or silently move its source tag. A policy/head move
+requires a new gate/review attempt. An integration update during a long run may therefore require
+retrying when integration is stable.

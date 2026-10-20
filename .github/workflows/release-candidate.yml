@@ -1,0 +1,101 @@
+# nitely-exact-release-v1: dispatch retains the tested installer at the stamped candidate SHA.
+name: Release candidate
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        required: true
+        description: "Original source SHA"
+      policy:
+        required: true
+        description: "Trusted integration SHA"
+      channel:
+        required: true
+        description: "nightly, beta, stable or test"
+      baseline:
+        required: true
+        description: "Published installer tag to upgrade"
+permissions:
+  contents: read
+jobs:
+  installer:
+    name: Installer and upgrade (windows-latest)
+    if: vars.NITELY_VERIFIED_RELEASES == 'true' && startsWith(github.ref, 'refs/heads/nitely-release-candidate/')
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.policy }}
+          path: trusted
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Verify identity and fetch the published upgrade baseline
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE: ${{ inputs.source }}
+          POLICY: ${{ inputs.policy }}
+          BASELINE: ${{ inputs.baseline }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          if ($env:SOURCE -notmatch '^[a-f0-9]{40}$' -or $env:POLICY -notmatch '^[a-f0-9]{40}$') { throw 'Invalid source or policy identity' }
+          if ($env:CHANNEL -notmatch '^(stable|beta|nightly|test)$') { throw 'Invalid channel' }
+          if ($env:BASELINE -notmatch '^v\d+\.\d+\.\d+(-beta\.\d+)?$') { throw 'Invalid upgrade baseline' }
+          $parent = git -C candidate rev-parse HEAD^
+          if ($parent -ne $env:SOURCE) { throw 'Candidate must directly descend from the source' }
+          git -C candidate merge-base --is-ancestor $env:SOURCE $env:POLICY
+          if ($LASTEXITCODE -ne 0) { throw 'Source is outside integration history' }
+          New-Item -ItemType Directory baseline | Out-Null
+          gh release download $env:BASELINE --repo $env:GITHUB_REPOSITORY --pattern '*-setup.exe' --pattern 'SHA256SUMS.txt' --dir baseline
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build the stamped CLI and installer
+        working-directory: candidate
+        shell: pwsh
+        env:
+          NITELY_CHANNEL: ${{ inputs.channel }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          $env:TEMP = $env:RUNNER_TEMP
+          $env:TMP = $env:RUNNER_TEMP
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --release --locked -p nitely-cli
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force src-tauri/binaries | Out-Null
+          Copy-Item target/release/nitely.exe src-tauri/binaries/nitely-x86_64-pc-windows-msvc.exe
+          $pubkey = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).plugins.updater.pubkey
+          if ($env:TAURI_SIGNING_PRIVATE_KEY -and $pubkey) {
+            $signConfig = Join-Path $env:RUNNER_TEMP 'release-signing.json'
+            '{"bundle":{"createUpdaterArtifacts":true}}' | Set-Content $signConfig -Encoding utf8NoBOM
+            npx tauri build --config src-tauri/tauri.release.json --config $signConfig
+          } else {
+            Write-Warning 'Updater signing is not configured; this release will not update channel manifests.'
+            npx tauri build --config src-tauri/tauri.release.json
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install the previous release, upgrade, migrate and recover throwaway data
+        shell: pwsh
+        env:
+          SOURCE: ${{ inputs.source }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          & trusted/scripts/release-upgrade.ps1 -Candidate candidate -Baseline baseline -Output out -Source $env:SOURCE -Channel $env:CHANNEL
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-candidate-${{ github.sha }}
+          path: out/*
+          if-no-files-found: error
+          retention-days: 7

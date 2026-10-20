@@ -37,7 +37,19 @@ permissions:
   contents: write
 
 jobs:
+  verified:
+    if: vars.NITELY_VERIFIED_RELEASES == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Delegate to trusted integration release verification
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_REF: ${{ inputs.ref || (github.event_name == 'schedule' && 'nightly') || github.ref_name }}
+        run: gh workflow run verified-release.yml --repo "$GITHUB_REPOSITORY" --ref main -f ref="$RELEASE_REF" -f promote=false
   release:
+    if: vars.NITELY_VERIFIED_RELEASES != 'true'
     runs-on: windows-latest
     timeout-minutes: 90
     # id-token and attestations: the provenance attestations (keyless: GitHub's OIDC token, signed

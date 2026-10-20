@@ -1,0 +1,268 @@
+# Inactive until the owner approves release policy and provisions dedicated review authentication.
+# All release authorization code comes from main. Candidate commands and reviewer credentials
+# never share a runner. Publication only handles bytes; it never executes candidate binaries.
+name: Verified release
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "nightly or the existing source tag (beta tag when promoting)"
+        required: true
+      promote:
+        description: "Create the stable tag only after verification"
+        type: boolean
+        default: false
+concurrency:
+  group: verified-release-publisher
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  prepare:
+    if: vars.NITELY_VERIFIED_RELEASES == 'true' && github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      actions: write
+    outputs:
+      candidate: ${{ steps.prepare.outputs.candidate }}
+      source: ${{ steps.prepare.outputs.source }}
+      policy: ${{ steps.prepare.outputs.policy }}
+      branch: ${{ steps.prepare.outputs.branch }}
+      channel: ${{ steps.prepare.outputs.channel }}
+    steps:
+      - name: Check activation prerequisites
+        shell: pwsh
+        env:
+          REVIEW_KEY_PRESENT: ${{ secrets.NITELY_RELEASE_OPENAI_API_KEY != '' }}
+          AUTHOR: ${{ vars.NITELY_RELEASE_AUTHOR_VENDOR }}
+          REVIEWER_VERSION: ${{ vars.NITELY_RELEASE_CODEX_VERSION }}
+        run: |
+          if ($env:REVIEW_KEY_PRESENT -ne 'true') { throw 'Provision NITELY_RELEASE_OPENAI_API_KEY before activation' }
+          if ($env:AUTHOR -notmatch '^(claude|codex|cursor|human)$') { throw 'Approve NITELY_RELEASE_AUTHOR_VENDOR before activation' }
+          if ($env:REVIEWER_VERSION -notmatch '^\d+\.\d+\.\d+$') { throw 'Pin NITELY_RELEASE_CODEX_VERSION before activation' }
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          path: trusted
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Build the trusted verifier
+        working-directory: trusted
+        run: cargo build --release --locked -p nitely-cli
+      - name: Stamp and publish a temporary candidate ref
+        id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_REF: ${{ inputs.ref }}
+          RELEASE_PROMOTE: ${{ inputs.promote }}
+        run: node trusted/scripts/verified-release.mjs prepare candidate candidate.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-verifier
+          path: |
+            trusted/target/release/nitely.exe
+            candidate.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Start checks on the exact stamped commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node trusted/scripts/verified-release.mjs dispatch candidate.json
+  full:
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.policy }}
+          path: trusted
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.candidate }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-verifier
+          path: evidence
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Full release gate without reviewer credentials
+        shell: pwsh
+        env:
+          RELEASE_AUTHOR_VENDOR: ${{ vars.NITELY_RELEASE_AUTHOR_VENDOR }}
+          NITELY_CHANNEL: ${{ needs.prepare.outputs.channel }}
+        run: |
+          $env:TEMP = $env:RUNNER_TEMP
+          $env:TMP = $env:RUNNER_TEMP
+          $env:NITELY_HOME = Join-Path $env:RUNNER_TEMP 'release-db'
+          New-Item -ItemType Directory -Force $env:NITELY_HOME | Out-Null
+          git -C candidate fetch origin main --tags --force
+          git config --global user.name 'Nitely CI'
+          git config --global user.email 'ci@example.com'
+          $verifier = (Resolve-Path evidence/trusted/target/release/nitely.exe).Path
+          node trusted/scripts/release-verify-ci.mjs gate --verifier $verifier --worktree candidate --source '${{ needs.prepare.outputs.source }}' --author-vendor $env:RELEASE_AUTHOR_VENDOR
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-gate-receipt
+          path: ${{ runner.temp }}/release-db/nitely.db
+          if-no-files-found: error
+          retention-days: 7
+  review:
+    needs: [prepare, full]
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.policy }}
+          path: trusted
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.candidate }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-verifier
+          path: evidence
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-gate-receipt
+          path: ${{ runner.temp }}/release-db
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Install pinned external reviewer before supplying authentication
+        shell: pwsh
+        env:
+          REVIEWER_VERSION: ${{ vars.NITELY_RELEASE_CODEX_VERSION }}
+        run: |
+          if ($env:REVIEWER_VERSION -notmatch '^\d+\.\d+\.\d+$') { throw 'Reviewer version must be pinned' }
+          npm install --global "@openai/codex@$env:REVIEWER_VERSION"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C candidate fetch origin main --tags --force
+      - name: Review the whole release using isolated authentication
+        shell: pwsh
+        env:
+          RELEASE_REVIEW_KEY: ${{ secrets.NITELY_RELEASE_OPENAI_API_KEY }}
+          RELEASE_AUTHOR_VENDOR: ${{ vars.NITELY_RELEASE_AUTHOR_VENDOR }}
+        run: |
+          $env:NITELY_HOME = Join-Path $env:RUNNER_TEMP 'release-db'
+          $env:CODEX_HOME = Join-Path $env:RUNNER_TEMP 'release-review-auth'
+          $env:RELEASE_REVIEW_KEY | codex login --with-api-key
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Remove-Item Env:RELEASE_REVIEW_KEY
+          $verifier = (Resolve-Path evidence/trusted/target/release/nitely.exe).Path
+          node trusted/scripts/release-verify-ci.mjs review --verifier $verifier --worktree candidate --source '${{ needs.prepare.outputs.source }}' --author-vendor $env:RELEASE_AUTHOR_VENDOR
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Remove reviewer authentication
+        if: always()
+        shell: pwsh
+        run: |
+          $auth = [IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP 'release-review-auth'))
+          $tempRoot = [IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\') + '\'
+          if (-not $auth.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'Unsafe auth cleanup path' }
+          if (Test-Path -LiteralPath $auth) { Remove-Item -LiteralPath $auth -Recurse -Force }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-reviewed-receipt
+          path: ${{ runner.temp }}/release-db/nitely.db
+          if-no-files-found: error
+          retention-days: 7
+  publish:
+    needs: [prepare, review]
+    runs-on: windows-latest
+    timeout-minutes: 100
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.policy }}
+          path: trusted
+          persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.candidate }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-verifier
+          path: evidence
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-reviewed-receipt
+          path: ${{ runner.temp }}/release-db
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Wait for exact candidate checks and download their archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node trusted/scripts/verified-release.mjs wait evidence/candidate.json candidate.zip
+      - name: Authorize and safely extract the tested archive
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_AUTHOR_VENDOR: ${{ vars.NITELY_RELEASE_AUTHOR_VENDOR }}
+        run: |
+          $env:NITELY_HOME = Join-Path $env:RUNNER_TEMP 'release-db'
+          $verifier = (Resolve-Path evidence/trusted/target/release/nitely.exe).Path
+          git -C candidate fetch origin main --tags --force
+          node trusted/scripts/release-verify-ci.mjs check --verifier $verifier --worktree candidate --source '${{ needs.prepare.outputs.source }}' --author-vendor $env:RELEASE_AUTHOR_VENDOR --repository $env:GITHUB_REPOSITORY --artifact-archive candidate.zip
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python trusted/scripts/release-archive.py candidate.zip out
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Attest the tested bytes and their source/candidate manifest
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: out/*
+      - name: Recheck authorization before publication, promotion and channel updates
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_AUTHOR_VENDOR: ${{ vars.NITELY_RELEASE_AUTHOR_VENDOR }}
+        run: |
+          $env:NITELY_HOME = Join-Path $env:RUNNER_TEMP 'release-db'
+          $verifier = (Resolve-Path evidence/trusted/target/release/nitely.exe).Path
+          node trusted/scripts/verified-release.mjs publish evidence/candidate.json candidate.zip out trusted candidate $verifier
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  cleanup:
+    if: always() && needs.prepare.outputs.branch != ''
+    needs: [prepare, full, review, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Remove only this run's temporary candidate ref
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ needs.prepare.outputs.branch }}
+        run: |
+          expected="nitely-release-candidate/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          [ "$BRANCH" = "$expected" ] || exit 1
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$BRANCH"

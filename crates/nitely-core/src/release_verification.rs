@@ -12,6 +12,9 @@ use crate::{db::now, playbook::{self, git, Playbook}, Actor, Db};
 pub struct Rules {
     /// Tags marking release baselines, e.g. `v*`. The candidate's own tag is excluded.
     pub tag: String,
+    /// Baseline tag patterns to exclude, e.g. `*-*` to include every beta since the last stable.
+    #[serde(default)]
+    pub exclude_tags: Vec<String>,
     /// Extra release checks, in addition to EVERY Full gate command and conditional step.
     #[serde(default)]
     pub commands: Vec<String>,
@@ -86,7 +89,12 @@ fn prepare(db: &Db, req: &Request<'_>) -> Result<Candidate> {
     let parents = git(req.worktree, &["rev-list", "--parents", "-n", "1", &source])?;
     let parent = parents.split_whitespace().nth(1);
     let base = if let Some(parent) = parent {
-        let tag = git(req.worktree, &["describe", "--tags", "--abbrev=0", "--match", &rules.tag, parent]);
+        let mut args = vec!["describe", "--tags", "--abbrev=0", "--match", rules.tag.as_str()];
+        for pattern in &rules.exclude_tags {
+            args.extend(["--exclude", pattern.as_str()]);
+        }
+        args.push(parent);
+        let tag = git(req.worktree, &args);
         match tag {
             Ok(tag) => commit(req.worktree, tag.trim())?,
             Err(_) => playbook::git_with_input(req.worktree, &["hash-object", "-t", "tree", "--stdin", "-w"], "")?.trim().into(),
@@ -372,6 +380,34 @@ claude = ["sh", "-c", "cat >.git/release-prompt; printf 'VERDICT: clean\\n'"]
         assert_eq!(git(&repo, &["cat-file", "-t", &identity.base]).unwrap().trim(), "tree");
         let diff = git(&repo, &["diff", "--name-only", &identity.base, &identity.candidate]).unwrap();
         assert!(diff.lines().any(|line| line == playbook::PLAYBOOK_PATH), "first release includes unchanged foundational files");
+    }
+
+    #[test]
+    fn stable_baseline_keeps_earlier_beta_changes_in_the_release_review() {
+        let (repo, db) = fixture();
+        let stable = commit(&repo, "v1").unwrap();
+        run_git(&repo, &["tag", "v2-beta.1"]);
+        std::fs::write(repo.join("last-beta.txt"), "last beta change").unwrap();
+        run_git(&repo, &["add", "last-beta.txt"]);
+        run_git(&repo, &["commit", "-m", "another beta"]);
+        run_git(&repo, &["tag", "v2-beta.2"]);
+        let mut pb = Playbook::parse(&std::fs::read_to_string(repo.join(playbook::PLAYBOOK_PATH)).unwrap()).unwrap();
+        pb.release.as_mut().unwrap().exclude_tags = vec!["*-*".into()];
+        std::fs::write(repo.join(playbook::PLAYBOOK_PATH), toml::to_string(&pb).unwrap()).unwrap();
+        run_git(&repo, &["commit", "-qam", "stable release policy"]);
+        stamp(&repo);
+        let identity = prepare(&db, &request(&repo)).unwrap().identity;
+        assert_eq!(identity.base, stable);
+        let diff = git(&repo, &["diff", "--name-only", &identity.base, &identity.candidate]).unwrap();
+        assert!(diff.lines().any(|p| p == "app.txt"), "the first beta change must remain in the review");
+        assert!(diff.lines().any(|p| p == "last-beta.txt"), "the later beta change must remain in the review");
+        // Older policies retain their prior baseline semantics; candidate policy cannot opt out.
+        run_git(&repo, &["checkout", "main"]);
+        pb.release.as_mut().unwrap().exclude_tags.clear();
+        std::fs::write(repo.join(playbook::PLAYBOOK_PATH), toml::to_string(&pb).unwrap()).unwrap();
+        run_git(&repo, &["commit", "-qam", "original baseline semantics"]);
+        let identity = prepare(&db, &request(&repo)).unwrap().identity;
+        assert_eq!(identity.base, commit(&repo, "v2-beta.2").unwrap());
     }
 
     #[test]

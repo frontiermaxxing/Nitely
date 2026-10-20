@@ -3,6 +3,12 @@
 Releases are built by CI ([.github/workflows/release.yml](../.github/workflows/release.yml)) and
 published on GitHub Releases. Nobody builds an installer by hand. There are three channels:
 
+The opt-in [exact release verification workflow](release-verification.md) adds a Full gate,
+whole-release peer review, all-platform/native checks and installer upgrade checks on a committed
+version-stamped candidate. It publishes that candidate's tested archive and delays promotion tags
+until verification. It is inactive until owner-approved release policy and dedicated reviewer
+authentication are provisioned; the steps below describe the existing default workflow.
+
 | Channel | Comes from | Version | On GitHub | Who gets it |
 | --- | --- | --- | --- | --- |
 | **stable** | a tag `v0.2.0`, or promoting a beta | `0.2.0` | a release | everyone, by default |

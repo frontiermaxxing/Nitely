@@ -3,9 +3,15 @@
 # crates/nitely-core/src/playbook.rs fails when the two differ. The frontend builds first because
 # the Tauri crate embeds dist/ when it compiles.
 
+# nitely-exact-release-v1: dispatch accepts the final channel on the stamped candidate.
 name: CI
 
 on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "Release candidate channel; dev for ordinary manual checks"
+        default: dev
   pull_request:
     branches: [main]
   push:
@@ -28,6 +34,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
+      NITELY_CHANNEL: ${{ inputs.channel || 'dev' }}
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: 0
     steps:

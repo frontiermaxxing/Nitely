@@ -18,7 +18,19 @@ permissions:
   actions: write
 
 jobs:
+  verified:
+    if: vars.NITELY_VERIFIED_RELEASES == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Verify before creating the stable tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BETA: ${{ inputs.beta }}
+        run: gh workflow run verified-release.yml --repo "$GITHUB_REPOSITORY" --ref main -f ref="$BETA" -f promote=true
   tag:
+    if: vars.NITELY_VERIFIED_RELEASES != 'true'
     runs-on: ubuntu-latest
     outputs:
       stable: ${{ steps.tag.outputs.stable }}
