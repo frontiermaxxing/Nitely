@@ -63,3 +63,16 @@ heavy = ["^cargo (build|test|clippy|check)\\b", "^npm (test|run build)\\b"]
 claude = "codex"
 codex = "codex"
 "*" = "codex"
+
+[verification]
+version = 1
+mode = "shadow"
+prose = ['docs/.*\.md']
+comments = ['src/.*\.(ts|tsx|js|jsx)']
+display_copy = ['src/.*\.tsx']
+protected = ['src/phone/.*', 'src/approval.*']
+basic = ['node node_modules/typescript/bin/tsc --noEmit']
+audit_percent = 10
+
+[verification.backstop]
+enabled = false
