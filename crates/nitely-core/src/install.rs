@@ -313,9 +313,62 @@ pub fn stamp(path: &Path) -> Option<(u64, std::time::SystemTime)> {
     Some((m.len(), m.modified().ok()?))
 }
 
+/// Whether the file at `path` can start as a program here. On Windows a program begins with "MZ";
+/// anything else run under an .exe name (a test's fake build, a half-copied file) makes Windows
+/// show "Unsupported 16-Bit Application" on the desktop until someone clicks it (NIT-459).
+/// Elsewhere the OS decides, and a script with a #! line is a program too.
+pub fn runs_as_a_program(path: &Path) -> bool {
+    if cfg!(windows) {
+        use std::io::Read;
+        let mut head = [0u8; 2];
+        std::fs::File::open(path).and_then(|mut f| f.read_exact(&mut head)).is_ok() && head == *b"MZ"
+    } else {
+        path.is_file()
+    }
+}
+
+/// Runs `f` with Windows' error boxes off, for this process and every program it starts meanwhile
+/// (they inherit the mode): a program that cannot start, or crashes, fails with an error instead
+/// of a modal box on the person's desktop.
+pub fn without_error_boxes<T>(f: impl FnOnce() -> T) -> T {
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn SetErrorMode(mode: u32) -> u32;
+        }
+        const SEM_FAILCRITICALERRORS: u32 = 0x0001;
+        const SEM_NOGPFAULTERRORBOX: u32 = 0x0002;
+        const SEM_NOOPENFILEERRORBOX: u32 = 0x8000;
+        // SAFETY: takes and returns flags only and has no memory effects.
+        let before = unsafe { SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX) };
+        let out = f();
+        unsafe { SetErrorMode(before) };
+        out
+    }
+    #[cfg(not(windows))]
+    f()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A text file named .exe is never started as a program: on Windows that pops a modal "Unsupported
+    /// 16-Bit Application" box on the desktop (NIT-459).
+    #[test]
+    fn a_file_that_is_not_a_program_is_not_one() {
+        let dir = crate::paths::unique_temp("nitely-not-a-program", "");
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("nitely-probe.exe");
+        std::fs::write(&fake, b"not a program").unwrap();
+        if cfg!(windows) {
+            assert!(!runs_as_a_program(&fake));
+        }
+        assert!(!runs_as_a_program(&dir.join("missing.exe")));
+        assert!(runs_as_a_program(&std::env::current_exe().unwrap()), "this test's own build is one");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn an_owned_clean_land_stamps_the_outer_build_but_untrusted_or_dirty_contexts_do_not() {

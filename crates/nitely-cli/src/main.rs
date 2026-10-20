@@ -858,8 +858,12 @@ fn print_agent_changes(agents: &[nitely_core::connect::AgentPlan]) {
 /// Asks the build at `from` whether it opens the database (`check-database`): (its exit code, what
 /// it said), or None when it could not run. It runs as a copy, made executable, by its full path,
 /// so a file just written without execute permission runs, and a bare name never finds another
-/// nitely on PATH.
+/// nitely on PATH. A file that is no program is never started, and Windows' error boxes stay off
+/// while it runs, so nothing waits for a click on the person's desktop (NIT-459).
 fn ask_build(from: &std::path::Path) -> Option<(Option<i32>, String)> {
+    if !nitely_core::install::runs_as_a_program(from) {
+        return None;
+    }
     let probe = paths::unique_temp("nitely-probe", if cfg!(windows) { ".exe" } else { "" });
     std::fs::copy(from, &probe).ok()?;
     #[cfg(unix)]
@@ -867,7 +871,7 @@ fn ask_build(from: &std::path::Path) -> Option<(Option<i32>, String)> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o755)).ok()?;
     }
-    let out = std::process::Command::new(&probe).arg("check-database").output();
+    let out = nitely_core::install::without_error_boxes(|| std::process::Command::new(&probe).arg("check-database").output());
     std::fs::remove_file(&probe).ok();
     let out = out.ok()?;
     Some((out.status.code(), String::from_utf8_lossy(&out.stderr).trim().to_string()))

@@ -202,6 +202,7 @@ fn install_refuses_a_build_that_could_not_open_the_database() {
     let said = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success() && said.contains("20991231-later"), "{said}");
     // One that cannot say (not a nitely, or one older than the check) goes in only with --force.
+    // This one is not even a program, so it is never started (NIT-459).
     let mute = dir.join("mute.bin");
     std::fs::write(&mute, b"not a program").unwrap();
     let out = Command::new(built).args(["install", "--from"]).arg(&mute).arg("--to").arg(&installed).env_remove("CARGO_MANIFEST_DIR").env("NITELY_HOME", &home).env("NITELY_INSTALL_WITHIN", &dir).output().unwrap();
