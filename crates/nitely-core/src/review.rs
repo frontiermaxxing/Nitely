@@ -464,6 +464,8 @@ regressions. Skip style. Do not edit anything.\n",
                 c = prev.commit
             ),
         };
+        p.push_str("\nTesting standard:\n");
+        p.push_str(crate::instructions::TESTING_STANDARD);
         if !self.context.trim().is_empty() {
             p.push_str(&format!("\n{}\n", self.context.trim()));
         }
@@ -614,6 +616,8 @@ change, run its diff, read the changed code and its callers, and look for correc
 Do not edit anything.\n",
             n = changes.len()
         );
+        p.push_str("\nTesting standard:\n");
+        p.push_str(crate::instructions::TESTING_STANDARD);
         for (i, c) in changes.iter().enumerate() {
             let k = i + 1;
             p.push_str(&format!("\n## CHANGE {k}: {} \"{}\"\nbranch {}, base {}, head {}\n", c.key, c.title, c.branch, c.base, c.head));

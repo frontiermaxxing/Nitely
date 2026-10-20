@@ -6,7 +6,7 @@ use crate::config::Config;
 use crate::playbook::Playbook;
 
 /// The workflow every connected agent follows, independent of the repo.
-pub const WORKFLOW: &str = "\
+pub const WORKFLOW: &str = concat!("\
 Nitely tracks this work. Use the `nitely` MCP tools; do not track work anywhere else. `get_project` \
 returns the project's brief, what earlier agents learned about it: read it before exploring the repo, \
 and when you learn something about the project as a whole that the next agent needs, add it with \
@@ -38,7 +38,10 @@ or a broken release; 2 a user-visible bug, a blocker for shipping, or a missing 
 environment switching); 3 correctness or debt that matters but can wait; 4 cleanup and nice-to-haves. \
 State: Todo when an agent can do it now; Backlog for ideas, priority 4 and work waiting on another \
 issue (or Todo with blocked_by naming it); owner human for work only the human can do; product \
-decisions go through `ask`.";
+decisions go through `ask`.", "\n\nTesting standard:\n", include_str!("testing_standard.md"));
+
+/// Shared by connected-agent instructions and both single and batch reviewer prompts.
+pub const TESTING_STANDARD: &str = include_str!("testing_standard.md");
 
 /// The first-run sweep that seeds a new project's board from its repo: the `nitely-setup` skill
 /// `connect` installs for Claude Code, and what the `setup_guide` tool returns to every agent.
