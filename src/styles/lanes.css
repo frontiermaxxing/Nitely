@@ -18,6 +18,15 @@
 .lane-problem-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fail); flex: none; }
 .lanes-queue { color: var(--fg-3); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
 .lanes-queue.long { color: var(--fg-2); }
+.remote-runs { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; flex-basis: 100%; min-width: 0; }
+.remote-runs-label { width: 100%; color: var(--fg-3); font-size: var(--text-xs); }
+.remote-run { min-width: 0; max-width: 100%; }
+.remote-run .lane-name { max-width: 12rem; overflow-wrap: anywhere; flex-shrink: 1; }
+.remote-details-toggle { flex: none; font-size: var(--text-xs); }
+.lane-unknown { border-style: dashed; }
+.remote-run-detail { margin: 6px 0; padding: 10px 12px; max-width: 48rem; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; font-size: var(--text-sm); }
+.remote-run-detail p { margin: 0 0 6px; overflow-wrap: anywhere; }
+.remote-run-detail pre { margin: 6px 0; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 12rem; overflow-y: auto; font: inherit; }
 
 .lanes-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 16px; margin: 8px 0 0; font-size: var(--text-md); }
 .lanes-facts dt { color: var(--fg-3); }
@@ -26,6 +35,10 @@
 
 @media (max-width: 560px) {
   .lane-chip { width: 100%; }
+  .remote-run { width: 100%; }
+  .remote-run .lane-chip { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; border-radius: 12px; }
+  .remote-run .lane-words { grid-column: 2 / -1; grid-row: 2; white-space: normal; overflow-wrap: anywhere; }
+  .remote-run .remote-details-toggle { grid-column: 3; grid-row: 1; }
   .lanes-facts { grid-template-columns: minmax(0, 1fr); gap: 2px; }
   .lanes-facts dd { margin-bottom: 8px; }
 }

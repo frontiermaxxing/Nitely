@@ -2,7 +2,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { bytesWords, capWords, chipName, chipWords, forHowLong, laneChips, laneRunId, limitsOf, machineWords, memoryWords, queueWords, sizeWords, waiting } from "./lanes.ts";
+import { bytesWords, capWords, chipName, chipWords, executorName, forHowLong, laneChips, laneRunId, limitsOf, machineWords, memoryWords, queueWords, remoteRuns, remoteWords, sizeWords, waiting } from "./lanes.ts";
 import type { LaneRun, ProjectLanes } from "./types.ts";
 
 const run = (id: number, state: string, lane: number | null, more: Partial<LaneRun> = {}): LaneRun =>
@@ -22,6 +22,31 @@ const project = (queue: LaneRun[], recent: LaneRun[]): ProjectLanes => ({
   ],
   queue,
   recent,
+});
+
+test("remote requests remain separate from local lanes and keep active work ahead of bounded history", () => {
+  const active = run(20, "running", null, { executor: "machine:builder" });
+  const recent = Array.from({ length: 6 }, (_, i) => run(i + 30, "done", null, { executor: "ci", exit_code: 0, ended_at: 2000 + i }));
+  const p = project([run(1, "running", 1), active], [active, ...recent]);
+  assert.deepEqual(remoteRuns(p).map((r) => r.id), [20, 35, 34, 33]);
+  assert.equal(laneChips(p)[0].run?.id, 1);
+  assert.equal(waiting(p), 0);
+  assert.equal(executorName("machine:builder"), "Machine builder");
+  assert.equal(executorName("ci"), "CI");
+});
+
+test("remote results distinguish failure and unknown outcomes and accept only exact CI check links", () => {
+  const unknown = remoteWords(run(1, "abandoned", null, { executor: "machine:builder", started_at: 1010, ended_at: 1130 }), 9000);
+  assert.equal(unknown.label, "Outcome unknown");
+  assert.equal(unknown.duration, "2m");
+  assert.match(unknown.detail, /may still be running/);
+  assert.equal(remoteWords(run(2, "done", null, { executor: "ci", exit_code: 7 }), 2000).label, "Failed (exit 7)");
+  assert.equal(remoteWords(run(2, "done", null, { executor: "ci", exit_code: 0, timed_out: true }), 2000).label, "Timed out");
+  const url = `https://github.com/example/acme/commit/${"a".repeat(40)}/checks`;
+  const ci = (output: string) => run(3, "done", null, { executor: "ci", exit_code: 0, output: JSON.stringify({ results: [{ command: "CI required checks", output }] }) });
+  assert.equal(remoteWords(ci(url), 2000).checks, url);
+  for (const bad of ["javascript:alert(1)", url.replace("github.com", "github.com.evil.invalid"), `${url}?redirect=bad`]) assert.equal(remoteWords(ci(bad), 2000).checks, null);
+  assert.equal(remoteWords({ ...ci(url), output: '{"results":' }, 2000).checks, null);
 });
 
 test("each lane says what it does: running, idle, not made yet, or unhealthy", () => {

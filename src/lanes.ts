@@ -3,6 +3,55 @@
 
 import type { LaneRun, LanesOverview, MachineNow, ProjectLanes } from "./types";
 
+export function executorName(executor = "local"): string {
+  return executor === "ci" ? "CI" : executor.startsWith("machine:") ? `Machine ${executor.slice(8)}` : "This machine";
+}
+
+const remote = (r: LaneRun) => r.executor === "ci" || r.executor.startsWith("machine:");
+const active = (r: LaneRun) => r.state === "running" || r.state === "queued";
+
+/** Every active remote request, then the three newest completed outcomes; local slots stay separate. */
+export function remoteRuns(p: ProjectLanes): LaneRun[] {
+  const seen = new Set<number>();
+  const rows = [...p.queue, ...p.recent].filter((r) => {
+    if (!remote(r) || seen.has(r.id)) return false;
+    seen.add(r.id);
+    return true;
+  });
+  const running = rows.filter(active).sort((a, b) => a.queued_at - b.queued_at);
+  const recent = rows.filter((r) => !active(r)).sort((a, b) => (b.ended_at ?? b.queued_at) - (a.ended_at ?? a.queued_at)).slice(0, 3);
+  return [...running, ...recent];
+}
+
+export function remoteWords(r: LaneRun, now: number): { state: "running" | "idle" | "unhealthy" | "unknown"; label: string; duration: string; detail: string; checks: string | null } {
+  let state: "running" | "idle" | "unhealthy" | "unknown" = "unknown";
+  let label = "Outcome unknown";
+  if (active(r)) { state = "running"; label = "In progress"; }
+  else if (r.state === "done" && r.exit_code === 0 && !r.timed_out) { state = "idle"; label = "Passed"; }
+  else if (r.timed_out) { state = "unhealthy"; label = "Timed out"; }
+  else if (r.state === "done" && r.exit_code != null) { state = "unhealthy"; label = `Failed (exit ${r.exit_code})`; }
+  else if (r.state === "lane_error") { state = "unhealthy"; label = "Executor error"; }
+  let detail = r.error ?? (active(r) ? "Elapsed time includes queueing on the other machine. Remote resource usage is not measured here."
+    : state === "unknown" ? "The connection ended before a result was recorded. Work may still be running remotely." : "");
+  let checks: string | null = null;
+  // Output is bounded and may be truncated; never render raw protocol JSON or guess a result URL.
+  try {
+    const parsed: unknown = JSON.parse(r.output);
+    if (parsed && typeof parsed === "object" && "results" in parsed && Array.isArray(parsed.results)) {
+      const outputs: string[] = [];
+      for (const result of parsed.results) {
+        if (!result || typeof result !== "object" || typeof result.output !== "string") continue;
+        if (r.executor === "ci" && result.command === "CI required checks"
+          && /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/commit\/[a-fA-F0-9]{40,64}\/checks$/.test(result.output)) checks = result.output;
+        else if (result.output) outputs.push(result.output);
+      }
+      if (!detail) detail = outputs.join("\n\n");
+    }
+  } catch { /* An incomplete result remains incomplete; the recorded state is still available. */ }
+  const end = r.ended_at ?? (active(r) ? now : r.started_at ?? r.queued_at);
+  return { state, label, duration: forHowLong(end - (r.started_at ?? r.queued_at)), detail, checks };
+}
+
 /** One lane as its chip shows it. */
 export interface LaneChip {
   project: string;

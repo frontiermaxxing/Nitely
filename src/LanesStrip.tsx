@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { invoke } from "./backend";
-import { capWords, chipName, chipWords, laneChips, limitsOf, machineWords, memoryWords, queueWords, sizeWords, waiting, type LaneChip } from "./lanes";
-import type { LanesOverview, MachineNow } from "./types";
+import { capWords, chipName, chipWords, executorName, laneChips, limitsOf, machineWords, memoryWords, queueWords, remoteRuns, remoteWords, sizeWords, waiting, type LaneChip } from "./lanes";
+import type { LaneRun, LanesOverview, MachineNow } from "./types";
+import { openExternal } from "./util";
 import { StateDot } from "./ui";
 import "./styles/lanes.css";
 
@@ -50,6 +51,7 @@ export function LanesStrip(props: { version: number; now: number; onOpenIssue: (
         {lanes.projects.map((p) => {
           const queued = waiting(p);
           const words = queueWords(p, props.now);
+          const elsewhere = remoteRuns(p);
           return (
             <div key={`${p.project}-${p.repo}`} className="lanes-project">
               {laneChips(p).map((c) => (
@@ -60,11 +62,43 @@ export function LanesStrip(props: { version: number; now: number; onOpenIssue: (
                   {words.label}
                 </span>
               )}
+              {elsewhere.length > 0 && (
+                <div className="remote-runs" aria-label={`${p.project} remote requests`}>
+                  <span className="remote-runs-label">Other machines &amp; CI</span>
+                  {elsewhere.map((run) => <RemoteRun key={run.id} run={run} now={props.now} onOpenIssue={props.onOpenIssue} />)}
+                </div>
+              )}
             </div>
           );
         })}
       </div>
     </section>
+  );
+}
+
+function RemoteRun(props: { run: LaneRun; now: number; onOpenIssue: (key: string) => void }) {
+  const [expanded, setExpanded] = useState(false);
+  const r = props.run;
+  const words = remoteWords(r, props.now);
+  const caption = `${r.issue ?? `Run ${r.id}`} · ${words.label} · ${words.duration}`;
+  return (
+    <div className="remote-run">
+      <div className={`lane-chip lane-${words.state}`} title={`${r.kind}: ${r.command}`}>
+        {words.state === "unhealthy" ? <span className="lane-problem-dot" role="img" aria-label="Failed" /> : <StateDot state={words.state === "running" ? "working" : "ended"} />}
+        <span className="lane-name mono">{executorName(r.executor)}</span>
+        {r.issue ? <button className="lane-words link" onClick={() => props.onOpenIssue(r.issue!)}>{caption}</button> : <span className="lane-words">{caption}</span>}
+        <button className="link remote-details-toggle" aria-label={`Run ${r.id} details`} aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>Details</button>
+      </div>
+      {expanded && (
+        <div className="remote-run-detail">
+          <p className="mono">{r.command}</p>
+          {words.detail && <pre>{words.detail}</pre>}
+          {words.checks && <a href={words.checks} onClick={openExternal(words.checks)}>View CI checks</a>}
+          {!words.detail && !words.checks && <p className="muted">No additional result was retained.</p>}
+          <p className="muted small">Run {r.id} · {r.kind} · {r.project}</p>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -196,6 +230,8 @@ export function LanesSettings(props: { version: number }) {
             {p.project} <span className="muted mono">{p.repo}</span>
           </h3>
           <dl className="lanes-facts">
+            <dt>Executor</dt>
+            <dd>{executorName(p.rules.executor)}{p.rules.executor === "ci" ? " for gates; ordinary runs use this machine." : p.rules.executor?.startsWith("machine:") ? " — requires permission in this machine’s executor configuration." : ""}</dd>
             <dt>Lanes</dt>
             {p.rules.large_repo ? (
               <dd>

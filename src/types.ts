@@ -1120,7 +1120,7 @@ export interface ProjectLanes {
   repo: string;
   dir: string;
   /** `large_repo`: the person's main checkout is the one lane; `base`: `tip` or `every <n>h`. */
-  rules: { count: number; keep: string[]; timeout_minutes: number; size_cap_gb?: number | null; large_repo?: boolean; base?: string; quick?: boolean };
+  rules: { count: number; keep: string[]; timeout_minutes: number; size_cap_gb?: number | null; large_repo?: boolean; base?: string; quick?: boolean; executor?: string };
   /** `size_bytes` and `cap_bytes`: its build directories after its last request, and the cap
    * hygiene keeps them under; absent until it has run one. */
   lanes: { lane: number; quick?: boolean; path: string; made: boolean; busy: boolean; at: string | null; size_bytes?: number | null; cap_bytes?: number | null; kept?: string[] }[];

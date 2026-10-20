@@ -811,7 +811,20 @@ function lanesOverview(): LanesOverview {
   const GB = 1024 ** 3;
   const machine = { memory: { total: 64 * GB, available: (low ? 6.2 : 38.4) * GB }, limits: { total: 64 * GB, floor: 12.8 * GB, cap: 16 * GB, floor_from: "default", cap_from: "default" }, below_normal: true };
   const waiting_for_memory = low ? "waiting for memory: 6.2 GB free, new work starts above 12.8 GB" : null;
-  return { projects: new URLSearchParams(location.search).has("nolanes") ? [] : BUILD_LANES, slots, machine, waiting_for_memory };
+  const projects = new URLSearchParams(location.search).has("executors") ? BUILD_LANES.map((p, index) => index ? p : {
+    ...p, rules: { ...p.rules, executor: "machine:builder" },
+    queue: [...p.queue,
+      laneRun(101, "NIT", "running", null, { issue: "NIT-30", executor: "machine:builder", kind: "gate", started_at: NOW - 2 * MIN }),
+      laneRun(102, "NIT", "running", null, { issue: "NIT-52", executor: "ci", kind: "land", started_at: NOW - 4 * MIN }),
+    ],
+    recent: [
+      laneRun(103, "NIT", "done", null, { issue: "NIT-29", executor: "machine:builder", exit_code: 7, started_at: NOW - 6 * MIN, ended_at: NOW - 5 * MIN, output: JSON.stringify({ results: [{ output: "Expected the build to pass; one assertion failed." }] }) }),
+      laneRun(104, "NIT", "abandoned", null, { issue: "NIT-53", executor: "machine:builder", started_at: NOW - 9 * MIN, ended_at: NOW - 6 * MIN }),
+      laneRun(105, "NIT", "done", null, { issue: "NIT-31", executor: "ci", exit_code: 0, started_at: NOW - 10 * MIN, ended_at: NOW - 7 * MIN, output: JSON.stringify({ results: [{ command: "CI required checks", output: `https://github.com/example/acme/commit/${"a".repeat(40)}/checks` }] }) }),
+      ...p.recent,
+    ],
+  }) : BUILD_LANES;
+  return { projects: new URLSearchParams(location.search).has("nolanes") ? [] : projects, slots, machine, waiting_for_memory };
 }
 
 // ----- Review batches and the land queue (docs/batching.md); `?batches=none` shows none -----
