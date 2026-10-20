@@ -553,7 +553,8 @@ fn stack_one(db: &Db, root: &Path, pb: &Playbook, stack: &Path, entry: &Entry, o
         checkout(stack, &head)?;
         // Already on top of what is below it, or rebased there as land would.
         let on_top = git(root, &["merge-base", "--is-ancestor", onto, &head]).is_ok();
-        if !on_top && git(stack, &["rebase", "--quiet", onto]).is_err() {
+        if !on_top && git(stack, &["rebase", "--quiet", onto]).is_err()
+            && !crate::test_command_merge::finish_rebase(stack).unwrap_or(false) {
             let conflicts: Vec<String> = git(stack, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default().lines().map(str::to_string).collect();
             git(stack, &["rebase", "--abort"]).ok();
             let with = if below.is_empty() { base.to_string() } else { format!("{base} or with {}, landing just before it", below.join(", ")) };

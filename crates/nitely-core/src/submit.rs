@@ -946,7 +946,7 @@ pub fn patch_id_range(worktree: &Path, base: &str, head: &str) -> Result<String>
 }
 
 /// `git patch-id --verbatim` of `diff`: its first id.
-fn patch_id_of(worktree: &Path, diff: String) -> Result<String> {
+pub(crate) fn patch_id_of(worktree: &Path, diff: String) -> Result<String> {
     use std::io::Write;
     let mut child = playbook::shell_free_command("git")
         .arg("-C")

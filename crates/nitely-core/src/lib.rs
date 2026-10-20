@@ -69,6 +69,7 @@ pub mod pulse;
 pub mod push;
 pub mod watch;
 pub mod submit;
+mod test_command_merge;
 pub mod submit_job;
 pub mod triage;
 pub mod submodules;

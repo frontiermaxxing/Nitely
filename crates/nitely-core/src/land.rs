@@ -545,17 +545,20 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
     let moving = crate::submodules::rebase(root, pb, &worktree, &base)?;
     if git(root, &["merge-base", "--is-ancestor", &base, &branch]).is_err() {
         db.log_event(actor, Some(key), Some(&wt), "status", &format!("Rebasing {branch} onto {base}"))?;
-        if let Err(e) = crate::submodules::rebase_repo(&worktree, &base, &moving) {
-            report.conflicts = git(&worktree, &["diff", "--name-only", "--diff-filter=U"])?.lines().map(str::to_string).collect();
-            if report.conflicts.is_empty() {
-                git(&worktree, &["rebase", "--abort"]).ok();
-                return Err(e).context(format!("rebasing {branch} onto {base}"));
+        let rebased = crate::submodules::rebase_repo(&worktree, &base, &moving);
+        if let Err(e) = rebased {
+            if !crate::test_command_merge::finish_rebase(&worktree).unwrap_or(false) {
+                report.conflicts = git(&worktree, &["diff", "--name-only", "--diff-filter=U"])?.lines().map(str::to_string).collect();
+                if report.conflicts.is_empty() {
+                    git(&worktree, &["rebase", "--abort"]).ok();
+                    return Err(e).context(format!("rebasing {branch} onto {base}"));
+                }
+                bail!(
+                    "the rebase of {branch} onto {base} stopped on conflicts in {}; it is left in progress in {wt}. \
+                     Resolve each file, git add it, git rebase --continue, then submit and land again",
+                    report.conflicts.join(", ")
+                );
             }
-            bail!(
-                "the rebase of {branch} onto {base} stopped on conflicts in {}; it is left in progress in {wt}. \
-                 Resolve each file, git add it, git rebase --continue, then submit and land again",
-                report.conflicts.join(", ")
-            );
         }
     }
 
@@ -725,7 +728,7 @@ pub(crate) fn check_worktree(worktree: &Path, branch: &str) -> Result<()> {
 pub(crate) fn check_approval(db: &Db, pb: &Playbook, key: &str, worktree: &Path, base: &str, branch: &str) -> Result<String> {
     let patch = patch_id(worktree, base)?;
     let review = db.reviews(key)?.into_iter().next().with_context(|| format!("{key} has no review; submit it first"))?;
-    if review.patch_id != patch {
+    if review.patch_id != patch && !crate::test_command_merge::equivalent(worktree, base, &review).unwrap_or(false) {
         bail!(
             "the branch changed since its review (reviewed {}, now {}); submit again",
             short(&review.patch_id),
@@ -774,7 +777,9 @@ pub(crate) fn check_approval(db: &Db, pb: &Playbook, key: &str, worktree: &Path,
     match db.standing_approval(key)? {
         Some(at) => {
             // Only the app can sign, so a database write does not make an approval.
-            db.check_signed_approval(key, &patch, at)?;
+            // A structured test-list reconciliation above proves the same reviewed operation;
+            // its existing signature still names the original patch, never a new unsigned id.
+            db.check_signed_approval(key, &review.patch_id, at)?;
             Ok(format!("approved by a human in Nitely after the review, signed by the app ({})", reasons.join("; ")))
         }
         _ => bail!(
@@ -1742,6 +1747,44 @@ when_changed = ["billing"]
         assert!(r.warnings.iter().any(|w| w.contains("exit 3")), "{r:?}");
         assert!(r.approval.unwrap().contains("approved by a human"));
         assert!(f.repo.join("billing.txt").exists());
+        std::fs::remove_dir_all(&f.base).ok();
+    }
+
+    #[test]
+    fn appended_test_files_keep_only_the_original_signed_approval() {
+        let mut f = fixture();
+        let package = |files: &str| serde_json::json!({"name":"example","scripts":{"test": format!("node --test {files}")}}).to_string();
+        let pb_path = f.repo.join(playbook::PLAYBOOK_PATH);
+        std::fs::write(&pb_path, std::fs::read_to_string(&pb_path).unwrap().replace("pattern = \"billing\"", "pattern = \"package\"")).unwrap();
+        std::fs::write(f.repo.join("package.json"), package("out/a.js")).unwrap();
+        sh(&f.repo, &["add", "."]);
+        sh(&f.repo, &["commit", "-qm", "test command"]);
+        let (key, wt) = f.submitted("Additional test", "package.json", &package("out/a.js out/own.js"));
+        approve(&mut f.db, &key);
+        let reviewed_patch = f.db.reviews(&key).unwrap()[0].patch_id.clone();
+        // A preceding land appended a different file to exactly the same line.
+        std::fs::write(f.repo.join("package.json"), package("out/a.js out/landed.js")).unwrap();
+        sh(&f.repo, &["commit", "-qam", "preceding test"]);
+        f.db.conn.execute("DELETE FROM approval WHERE issue_key = ?1", [&key]).unwrap();
+        let refused = f.land(&key);
+        assert!(!refused.landed && refused.error.as_deref().unwrap().contains("not signed"), "{refused:?}");
+        assert_ne!(patch_id(&wt, "main").unwrap(), reviewed_patch, "the textual patch changed");
+        let pb = Playbook::load(&f.repo).unwrap();
+        let branch = branch_of(&f.repo, &key).unwrap().0;
+        assert!(crate::test_command_merge::equivalent(&wt, "main", &f.db.reviews(&key).unwrap()[0]).unwrap());
+        // Equivalence does not forgive any additional implementation change.
+        std::fs::write(wt.join("unreviewed.txt"), "not reviewed").unwrap();
+        sh(&wt, &["add", "."]);
+        sh(&wt, &["commit", "-qm", "unreviewed change"]);
+        assert!(check_approval(&f.db, &pb, &key, &wt, "main", &branch).unwrap_err().to_string().contains("branch changed"));
+        sh(&wt, &["revert", "--no-edit", "HEAD"]);
+        approve(&mut f.db, &key);
+        let landed = f.land(&key);
+        assert!(landed.landed, "{landed:?}");
+        let result: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(f.repo.join("package.json")).unwrap()).unwrap();
+        assert_eq!(result["scripts"]["test"], "node --test out/a.js out/landed.js out/own.js");
+        assert_eq!(f.db.reviews(&key).unwrap().len(), 1, "no new review or synthetic approval");
+        assert!(landed.gate.unwrap().passed, "the combined integration candidate still runs its gate");
         std::fs::remove_dir_all(&f.base).ok();
     }
 

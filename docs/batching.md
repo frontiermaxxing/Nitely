@@ -457,6 +457,19 @@ The code host's own merge queue (GitHub merge queue, Bitbucket's merge checks) i
 branch protection and CI-run gates, and Nitely's gate runs on the person's machine. A CI executor
 (NIT-200) could later gate a stack there; it would still be Nitely's queue deciding what goes in it.
 
+## Appended test commands
+
+Land can reconcile a conflict confined to `package.json` when both sides only append distinct,
+explicit `.js`, `.mjs`, or `.cjs` file arguments to the same `node --test` command in `scripts.test`.
+An unchanged setup prefix such as `tsc -p tests.json &&` is supported. Other JSON changes, changed
+commands or options, removed files, quoted arguments, overlapping additions and globs remain
+manual conflicts.
+
+After reconciliation, Nitely proves the original reviewed patch added the same test arguments and
+made the same changes outside `package.json`. Any required approval must still have a valid app
+signature for that original review. This creates neither a new approval nor a synthetic review.
+The combined candidate follows the ordinary integration gate policy.
+
 ## Build order
 
 1. **Async submit** ([NIT-212](nitely://issue/NIT-212), landed): submit jobs in processes of their
