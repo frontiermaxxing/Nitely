@@ -381,7 +381,7 @@ mod tests {
 
     fn review(db: &Db, ts: i64, key: &str, verdict: &str) {
         db.conn
-            .execute("INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, ts) VALUES (?1, 'p', 'c', 'codex', ?2, ?3)", params![key, verdict, ts])
+            .execute("INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, ts) VALUES (?1, 'p', 'c', 'codex', ?2, 'agent', ?3)", params![key, verdict, ts])
             .unwrap();
     }
 
