@@ -33,6 +33,8 @@ const KEY_COLUMNS: &[(&str, &str)] = &[
     ("submit_job", "issue_key"),
     ("triage", "issue_key"),
     ("review_queue", "issue_key"),
+    ("periodic_review_landing", "issue_key"),
+    ("periodic_review_finding", "issue_key"),
 ];
 
 /// `key` under its project's current prefix, given `Db::project_aliases`: `OLD-12` → `NEW-12`.
@@ -312,6 +314,9 @@ impl Db {
         tx.execute("UPDATE project_focus SET project = ?2 WHERE project = ?1", params![from, to])?;
         tx.execute("UPDATE test_sweep_schedule SET project = ?2 WHERE project = ?1", params![from, to])?;
         tx.execute("UPDATE project_review_mode SET project = ?2 WHERE project = ?1", params![from, to])?;
+        for table in ["periodic_review_state","periodic_review_landing","periodic_review_job"] {
+            tx.execute(&format!("UPDATE {table} SET project=?2 WHERE project=?1"),params![from,to])?;
+        }
         tx.execute("UPDATE project_yolo SET project = ?2 WHERE project = ?1", params![from, to])?;
         tx.execute("UPDATE goal SET project = ?2 WHERE project = ?1", params![from, to])?;
         tx.execute("UPDATE goal_plan SET project = ?2 WHERE project = ?1", params![from, to])?;
@@ -363,6 +368,10 @@ impl Db {
         tx.execute("DELETE FROM project_focus WHERE project = ?1", [&key])?;
         tx.execute("DELETE FROM test_sweep_schedule WHERE project = ?1", [&key])?;
         tx.execute("DELETE FROM project_review_mode WHERE project = ?1", [&key])?;
+        tx.execute("DELETE FROM periodic_review_finding WHERE job IN (SELECT id FROM periodic_review_job WHERE project=?1)",[&key])?;
+        for table in ["periodic_review_job","periodic_review_landing","periodic_review_state"] {
+            tx.execute(&format!("DELETE FROM {table} WHERE project=?1"),[&key])?;
+        }
         tx.execute("DELETE FROM project_yolo WHERE project = ?1", [&key])?;
         tx.execute("DELETE FROM goal WHERE project = ?1", [&key])?;
         tx.execute("DELETE FROM crew_control WHERE project = ?1", [&key])?;

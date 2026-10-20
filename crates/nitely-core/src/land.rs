@@ -201,6 +201,10 @@ pub(crate) fn record_landed(db: &mut Db, root: &Path, issue: &IssueRecord, repor
             report.unblocked.push(waiting.clone());
         }
     }
+    if let Err(e)=crate::periodic_review::on_landed(db,root,issue,report) {
+        report.warnings.push(format!("periodic review record needs recovery: {e:#}"));
+        db.log_event(actor,Some(&issue.key),None,"periodic_review_record_failed",&format!("{e:#}"))?;
+    }
     Ok(())
 }
 
