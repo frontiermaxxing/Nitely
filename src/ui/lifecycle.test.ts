@@ -30,18 +30,7 @@ interface Case {
 }
 
 // npm runs tests from the repo root; the compiled file lives elsewhere, so the path is from there.
-const { cases } = JSON.parse(readFileSync("crates/nitely-core/src/track_cases.json", "utf8")) as { cases: Case[] };
-
-/** The same prefix as BASE in track.rs. */
-const BASE = [
-  ["issue_created", "Filed as Todo"],
-  ["claimed", "Took the issue"],
-  ["issue_moved", "Todo → In Progress"],
-  ["worktree", "Started x from main"],
-  ["status", "Working"],
-  ["gate_passed", "Gate passed"],
-  ["review_started", "Review by codex started"],
-];
+const { cases, base_events: BASE } = JSON.parse(readFileSync("crates/nitely-core/src/track_cases.json", "utf8")) as { cases: Case[]; base_events: string[][] };
 
 const STATE_TYPE: Record<string, string> = {
   Backlog: "backlog",

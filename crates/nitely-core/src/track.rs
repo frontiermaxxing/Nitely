@@ -257,19 +257,16 @@ mod tests {
             .collect()
     }
 
-    const BASE: &[(&str, &str)] = &[
-        ("issue_created", "Filed as Todo"),
-        ("claimed", "Took the issue"),
-        ("issue_moved", "Todo → In Progress"),
-        ("worktree", "Started x from main"),
-        ("status", "Working"),
-        ("gate_passed", "Gate passed"),
-        ("gate_skipped", "Gate skipped (YOLO)"),
-        ("review_started", "Review by codex started"),
-    ];
+    fn base_events(doc: &serde_json::Value) -> Vec<(String, String)> {
+        doc["base_events"].as_array().unwrap().iter()
+            .map(|e| (e[0].as_str().unwrap().into(), e[1].as_str().unwrap().into()))
+            .collect()
+    }
 
     fn with(extra: &[(&'static str, &'static str)]) -> Vec<TimelineEntry> {
-        let mut all = BASE.to_vec();
+        let doc = serde_json::from_str(include_str!("track_cases.json")).unwrap();
+        let base = base_events(&doc);
+        let mut all: Vec<_> = base.iter().map(|(k, s)| (k.as_str(), s.as_str())).collect();
         all.extend_from_slice(extra);
         tl(&all)
     }
@@ -297,7 +294,9 @@ mod tests {
 
     #[test]
     fn failed_gate_is_stuck_until_it_passes() {
-        let t = track_of(&issue("In Progress"), &tl(&BASE[..5].iter().copied().chain([("gate_failed", "Gate failed")]).collect::<Vec<_>>()), 0);
+        let base = base_events(&serde_json::from_str(include_str!("track_cases.json")).unwrap());
+        let events: Vec<_> = base[..5].iter().map(|(k, s)| (k.as_str(), s.as_str())).chain([("gate_failed", "Gate failed")]).collect();
+        let t = track_of(&issue("In Progress"), &tl(&events), 0);
         assert_eq!((t.station, t.stuck.as_deref()), ("gate", Some("Gate failed")));
         // A resubmit can fail without moving an issue that is In Review.
         let t = track_of(&issue("In Review"), &with(&[("submit", "passed; ready to land"), ("issue_moved", "In Progress → In Review"), ("status", ""), ("gate_failed", "")]), 0);
@@ -371,7 +370,7 @@ mod tests {
             let name = case["name"].as_str().unwrap();
             let mut events: Vec<(String, String, String)> = Vec::new();
             if case["base"].as_bool().unwrap_or(false) {
-                events.extend(BASE.iter().map(|(k, s)| (k.to_string(), s.to_string(), "claude:x".to_string())));
+                events.extend(base_events(&doc).into_iter().map(|(k, s)| (k, s, "claude:x".to_string())));
             }
             for e in case["events"].as_array().unwrap() {
                 let e = e.as_array().unwrap();

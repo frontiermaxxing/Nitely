@@ -878,9 +878,16 @@ mod tests {
         };
 
         let first = agent_plans("nitely", true);
-        assert_eq!(pending_changes(&first), 3, "the hooks and the two skills are new");
         let setup = home.join(".claude").join("skills").join("nitely-setup").join("SKILL.md");
+        let sweep = home.join(".claude").join("skills").join("nitely-test-sweep").join("SKILL.md");
+        let mut expected = [home.join(".claude").join("settings.json"), home.join(".claude").join("skills").join("nitely").join("SKILL.md"), setup.clone(), sweep.clone()]
+            .map(|p| p.to_string_lossy().into_owned()).to_vec();
+        let mut pending = pending_in(&first);
+        expected.sort();
+        pending.sort();
+        assert_eq!(pending, expected, "hooks and all three skills must be installed");
         assert!(apply_agents(&first).1.is_empty());
+        assert!(std::fs::read_to_string(&sweep).unwrap().contains(crate::test_sweep::GUIDE));
         let written = std::fs::read_to_string(&setup).unwrap();
         assert!(written.starts_with("---\nname: nitely-setup\ndescription: \"Set up a project in Nitely: "), "{written}");
         assert_eq!(pending_changes(&agent_plans("nitely", true)), 0);

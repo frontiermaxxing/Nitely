@@ -88,7 +88,7 @@ fn source_install_refuses_a_live_land_before_rebuilding_or_replacing_the_target(
     std::fs::create_dir_all(manifest.join("src")).unwrap();
     std::fs::write(manifest.join("src/main.rs"), "fn main() {}").unwrap();
     let git = |args: &[&str]| {
-        let out = Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap();
+        let out = nitely_core::playbook::run_git(Command::new("git").arg("-C").arg(&repo).args(args)).unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     };
     git(&["init", "-q", "-b", "main"]);
@@ -113,7 +113,7 @@ fn source_install_refuses_a_live_land_before_rebuilding_or_replacing_the_target(
     assert_eq!(std::fs::read_to_string(&lock).unwrap(), holder);
     // Even a legitimate inherited lock cannot authorize a build started at another HEAD, or a
     // caller-supplied marker without the same stamp actually compiled into this executable.
-    let head = Command::new("git").arg("-C").arg(&repo).args(["rev-parse", "HEAD"]).output().unwrap();
+    let head = nitely_core::playbook::run_git(Command::new("git").arg("-C").arg(&repo).args(["rev-parse", "HEAD"])).unwrap();
     assert!(head.status.success());
     let head = String::from_utf8(head.stdout).unwrap().trim().to_string();
     for (marker, expected) in [

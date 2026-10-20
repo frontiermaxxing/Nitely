@@ -1,6 +1,21 @@
 {
   "about": "Lifecycle track cases. Both crates/nitely-core/src/track.rs (Rust tests) and src/ui/lifecycle.test.ts (computeTrack) run every case, so the backend and the browser preview agree. `base` prepends: filed, claimed, moved to In Progress, worktree, a status, gate passed, review started. Events are [kind, summary] or [kind, summary, actor]; the actor defaults to an agent. `expect` checks only the fields it names; `reached` lists stations that must have a time and `skipped` stations that must not. `frontend_pending` marks a rule track.rs has and computeTrack does not yet: the frontend test reports it as a TODO instead of failing, so remove the field when computeTrack catches up.",
+  "base_events": [
+    ["issue_created", "Filed as Todo"],
+    ["claimed", "Took the issue"],
+    ["issue_moved", "Todo → In Progress"],
+    ["worktree", "Started x from main"],
+    ["status", "Working"],
+    ["gate_passed", "Gate passed"],
+    ["review_started", "Review by codex started"]
+  ],
   "cases": [
+    {
+      "name": "YOLO skip clears an earlier gate failure without a review round",
+      "state": "In Review",
+      "events": [["gate_failed", "Gate failed"], ["gate_skipped", "YOLO mode: automatic gate skipped"], ["submit", "YOLO mode: automatic gate and PR review skipped"]],
+      "expect": { "stuck": null, "rounds": 0 }
+    },
     {
       "name": "state alone gives the station",
       "state": "In Review",

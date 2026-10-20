@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 fn git(root: &Path, args: &[&str]) {
-    let out = Command::new("git")
+    let out = nitely_core::playbook::run_git(Command::new("git")
         .arg("-C")
         .arg(root)
         .args([
@@ -13,8 +13,7 @@ fn git(root: &Path, args: &[&str]) {
             "-c",
             "user.email=test@example.invalid",
         ])
-        .args(args)
-        .output()
+        .args(args))
         .unwrap();
     assert!(
         out.status.success(),
