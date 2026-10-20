@@ -187,17 +187,31 @@ As built (NIT-201), `large_repo = true` under `[lanes]`:
 - **Tests** use throwaway repos in the temp folder. Every step that touches the checkout asserts
   that it is in the temp folder when built for tests, so a test cannot reach a real checkout.
 
-**Copy-on-write.** On macOS and Linux, a newly registered lane can seed its kept build directories
-from another idle lane using native APFS `clonefile` or Linux `FICLONE` (for example btrfs/XFS).
-It never hard-links cache files or silently copies their bytes when cloning is unsupported.
+**Copy-on-write.** A newly registered lane can seed its kept build directories from another idle
+lane using native APFS `clonefile`, Linux `FICLONE` (for example btrfs/XFS), or ReFS block cloning.
+It never hard-links cache files or falls back to copying a cache after a clone operation fails.
+The ReFS adapter clones full clusters in requests of at most 1 GiB and copies only the final
+partial cluster (less than 64 KiB, including small files). It requires the same ReFS volume,
+creates a new destination, and denies source writers during the operation. Integrity/sparse
+attribute incompatibilities fail cold. NTFS remains cold, with no volume conversion or setup.
+These boundaries follow [Microsoft's block-cloning requirements](https://learn.microsoft.com/en-us/windows-server/storage/refs/block-cloning).
 Each lane keeps its own source checkout, Git index and setup stamp; normal dependency setup still
 runs, so non-relocatable setup outputs are not assumed valid. A donor's lane lock is held while
 cloning; busy donors are skipped without waiting. Linked/special files, unsupported filesystems
 and the 30-second traversal budget fall back to a cold cache, removing partial copies. Clone
-counts and elapsed time are written to the run log. Windows currently starts cold, including
-ReFS; a ReFS adapter is not implemented. Clones are optional and all measurements above are
+counts and elapsed time are written to the run log. Windows reparse points are excluded, and
+read-only files created during a failed attempt are removed without changing the donor.
+Clones are optional and all measurements above are
 without them. Actual APFS time/physical-space savings still need measurement on a Mac; logical
 file lengths or `du` totals alone do not establish physical blocks shared by reflinks.
+
+Native ReFS acceptance is opt-in on a disposable directory on a real ReFS volume:
+set `NITELY_REFS_TEST_ROOT` in the lane executor's environment, then run the exact ignored
+test `lane_clone_windows::tests::refs_clone_preserves_tail_and_source_after_destination_write`.
+It checks empty, small, aligned and unaligned files and destination-write independence.
+It fails if the supplied volume is not ReFS. The ordinary Windows regression instead checks
+unsupported-volume cold fallback and donor preservation. Local NTFS validation does not establish
+native ReFS correctness or APFS/ReFS time and physical-space savings.
 
 ## Decisions
 

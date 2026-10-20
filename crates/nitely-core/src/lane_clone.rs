@@ -1,4 +1,4 @@
-//! Optional copy-on-write cache seeding. Never hard-link files or fall back to a full byte copy.
+//! Optional copy-on-write cache seeding. Never hard-link or byte-copy a cache after clone failure.
 use anyhow::{bail, Context, Result};
 use std::path::{Component, Path};
 use std::time::{Duration, Instant};
@@ -18,7 +18,7 @@ fn seed_with(source: &Path, lane: &Path, relative: &str, clone: &dyn Fn(&Path, &
         let mut at = root.to_path_buf();
         for part in Path::new(relative).components() {
             at.push(part);
-            if std::fs::symlink_metadata(&at).is_ok_and(|m| m.file_type().is_symlink()) { return Ok(false); }
+            if std::fs::symlink_metadata(&at).is_ok_and(|m| linked(&m)) { return Ok(false); }
         }
     }
     let from = source.join(relative);
@@ -27,14 +27,14 @@ fn seed_with(source: &Path, lane: &Path, relative: &str, clone: &dyn Fn(&Path, &
     let started = Instant::now();
     if copy_tree(&from, &to, started, 0, clone).is_ok() { return Ok(true); }
     // `relative` is validated and `to` did not exist before this attempt. Never remove the donor.
-    if to.exists() { std::fs::remove_dir_all(&to).context("removing incomplete lane cache clone")?; }
+    if to.exists() { remove_partial(&to).context("removing incomplete lane cache clone")?; }
     Ok(false)
 }
 
 fn copy_tree(from: &Path, to: &Path, started: Instant, depth: u32, clone: &dyn Fn(&Path, &Path) -> Result<()>) -> Result<()> {
     if depth > 100 || started.elapsed() > Duration::from_secs(30) { bail!("lane clone budget exhausted"); }
     let metadata = std::fs::symlink_metadata(from)?;
-    if metadata.file_type().is_symlink() { bail!("linked cache needs its normal setup"); }
+    if linked(&metadata) { bail!("linked cache needs its normal setup"); }
     if metadata.is_dir() {
         std::fs::create_dir_all(to)?;
         for entry in std::fs::read_dir(from)? {
@@ -48,7 +48,43 @@ fn copy_tree(from: &Path, to: &Path, started: Instant, depth: u32, clone: &dyn F
     Ok(())
 }
 
+fn linked(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        // Also reject junctions and other reparse points, not just symbolic links.
+        metadata.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    { metadata.file_type().is_symlink() }
+}
+
+/// Only called on a newly created destination owned by this failed seed attempt.
+fn remove_partial(path: &Path) -> std::io::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.is_dir() && !linked(&metadata) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Only our new cache copy: allow its owner to clean up a read-only donor directory.
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(metadata.permissions().mode() | 0o700))?;
+        }
+        for entry in std::fs::read_dir(path)? { remove_partial(&entry?.path())?; }
+    }
+    #[cfg(windows)]
+    if !linked(&metadata) && metadata.permissions().readonly() {
+        let mut permissions = metadata.permissions();
+        // Windows-only DOS read-only flag; this does not widen Unix access permissions.
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        std::fs::set_permissions(path, permissions)?;
+    }
+    if metadata.is_dir() { std::fs::remove_dir(path) } else { std::fs::remove_file(path) }
+}
+
 fn clone_file(from: &Path, to: &Path) -> Result<()> {
+    #[cfg(windows)]
+    { crate::lane_clone_windows::clone_file(from, to) }
     #[cfg(target_os = "macos")]
     {
         use std::{ffi::CString, os::unix::ffi::OsStrExt};
@@ -69,7 +105,7 @@ fn clone_file(from: &Path, to: &Path) -> Result<()> {
         if unsafe { ioctl(target.as_raw_fd(), 0x4004_9409, source.as_raw_fd()) } != 0 { return Err(std::io::Error::last_os_error().into()); }
         Ok(())
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     { let _ = (from, to); bail!("this platform has no lane clone adapter"); }
 }
 
@@ -82,7 +118,13 @@ mod tests {
         let source = root.join("source");let dest = root.join("dest");
         std::fs::create_dir_all(source.join("target")).unwrap();std::fs::create_dir_all(&dest).unwrap();
         std::fs::write(source.join("target/artifact"), "original").unwrap();
-        let fail = |_: &Path, to: &Path| { std::fs::write(to, "partial")?;bail!("unsupported"); };
+        let fail = |_: &Path, to: &Path| {
+            std::fs::write(to, "partial")?;
+            let mut permissions=std::fs::metadata(to)?.permissions();
+            permissions.set_readonly(true);
+            std::fs::set_permissions(to,permissions)?;
+            bail!("unsupported");
+        };
         assert!(!seed_with(&source, &dest, "target", &fail).unwrap());
         assert!(!dest.join("target").exists());
         assert_eq!(std::fs::read_to_string(source.join("target/artifact")).unwrap(), "original");
