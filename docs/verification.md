@@ -178,8 +178,12 @@ current retry policy. A later test-only retry optimization requires an approved 
 and proof that omitted checks already passed at the exact same inputs.
 
 Current lane reuse is repository + complete HEAD tree + ordered commands, restricted to
-successful local `gate`/`land` runs. Ordinary `run` results do not qualify. Preserve that safe
-baseline while introducing richer keys. Reuse on an unchanged tree is different from reusing
+successful local runs that finished without a timeout or error. A `gate`/`land` run qualifies, and
+so does an ordinary `run` whose single command is the gate's exact commands in order joined by
+`&&`, so each ran only after the one before passed ([NIT-455](http://127.0.0.1:7423/i/NIT-455)).
+A run of uncommitted work has a snapshot tree of its own and never matches; commands joined by a
+line break or `;` run on past a failure and never match. The issue records which run answered the
+gate. Preserve that safe baseline while introducing richer keys. Reuse on an unchanged tree is different from reusing
 one component after the tree changes: the latter requires a complete, versioned input closure,
 including reverse contracts, fixtures, generated inputs and environment. Otherwise rerun.
 Do not infer unchanged behavior from an unchanged patch ID alone.
