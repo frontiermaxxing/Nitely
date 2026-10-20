@@ -111,8 +111,8 @@ export function performanceFixture(args: Record<string, unknown>): PerformanceRe
         const time = from + ((to - from) * i) / 79;
         const v = metrics(mode === "pressure" ? 92 + Math.sin(i) * 3 : Math.max(1, 22 + Math.sin(i / 4) * 15 + (i > 40 && i < 50 ? 40 : 0)));
         return {
-          from_ms: time,
-          to_ms: time,
+          from_ms: i === 0 ? time - 30_000 : time,
+          to_ms: i === 79 ? time + 30_000 : time,
           values: v,
           peaks: {
             ...v,
@@ -124,6 +124,7 @@ export function performanceFixture(args: Record<string, unknown>): PerformanceRe
           observations: 12,
           resolution: "minute",
           contains_gap: gaps.some((g) => time > g.from_ms && time < g.to_ms),
+          overlaps_range_boundary: i === 0 || i === 79,
         };
       });
   return {
@@ -150,6 +151,10 @@ export function performanceFixture(args: Record<string, unknown>): PerformanceRe
               observations: 24,
               observed: ["CPU at least 90%", "available physical memory at most 10%"],
               inferred_causes: [],
+              peaks: { ...metrics(99), commit_bytes: 47.52 * GiB, kernel_paged_bytes: 2 * GiB, kernel_nonpaged_bytes: 1.4 * GiB },
+              min_available_bytes: 0.8 * GiB,
+              min_available_percent: 2.5,
+              max_commit_percent: 99,
             },
           ]
         : [],
@@ -167,6 +172,7 @@ export function performanceFixture(args: Record<string, unknown>): PerformanceRe
       attribution_first_returned_ms: noData ? null : to - 60_000,
       source_points: points.length,
       returned_points: query.view === "now" ? 0 : points.length,
+      boundary_points: noData || query.view === "now" ? 0 : 2,
       resolution: "minute",
       notes: [
         "Machine totals cover the whole PC. Null counters mean unavailable, not zero.",

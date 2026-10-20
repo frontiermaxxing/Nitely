@@ -36,6 +36,7 @@ export interface PerformancePoint {
   observations: number;
   resolution: string;
   contains_gap: boolean;
+  overlaps_range_boundary: boolean;
 }
 export interface PerformanceGap {
   from_ms: number;
@@ -48,6 +49,10 @@ export interface PerformanceEpisode {
   observations: number;
   observed: string[];
   inferred_causes: string[];
+  peaks: PerformanceMetrics;
+  min_available_bytes: number | null;
+  min_available_percent: number | null;
+  max_commit_percent: number | null;
 }
 export interface PerformanceUsage {
   cpu_percent: number | null;
@@ -137,6 +142,7 @@ export interface PerformanceReport {
     attribution_first_returned_ms: number | null;
     source_points: number;
     returned_points: number;
+    boundary_points: number;
     resolution: string;
     notes: string[];
   };
@@ -176,6 +182,23 @@ export function freshness(report: PerformanceReport, now: number): string {
   return "Recording · updated within 15s";
 }
 export type ChartMetric = "cpu_percent" | "physical_available_bytes" | "commit_bytes" | "kernel_paged_bytes" | "kernel_nonpaged_bytes";
+/** Keep complete summary intervals visible instead of relocating their extrema into the request. */
+export function chartBounds(points: PerformancePoint[], from: number, to: number): [number, number] {
+  return points.reduce<[number, number]>((bounds, p) => p.overlaps_range_boundary
+    ? [Math.min(bounds[0], p.from_ms), Math.max(bounds[1], p.to_ms)] : bounds, [from, to]);
+}
+/** Each extremum is independent; ratios use the backend's per-sample capacities, not peak ratios. */
+export function episodeExtrema(episode: PerformanceEpisode): string[] {
+  return [
+    `Peak CPU ${numberText(episode.peaks.cpu_percent, "%")}`,
+    `Lowest available RAM ${byteText(episode.min_available_bytes)}`,
+    `Lowest available RAM share ${numberText(episode.min_available_percent, "%")}`,
+    `Peak commit ${byteText(episode.peaks.commit_bytes)}`,
+    `Highest commit share ${numberText(episode.max_commit_percent, "%")}`,
+    `Peak kernel paged ${byteText(episode.peaks.kernel_paged_bytes)}`,
+    `Peak kernel nonpaged ${byteText(episode.peaks.kernel_nonpaged_bytes)}`,
+  ];
+}
 export function chartValue(point: PerformancePoint, metric: ChartMetric, extreme = false): number | null {
   return extreme ? (metric === "physical_available_bytes" ? point.min_available_bytes : point.peaks[metric]) : point.values[metric];
 }

@@ -132,6 +132,11 @@
 .perf-chart-legend .perf-legend-extreme::before {
   border-top: 2px dashed var(--fg-2);
 }
+.perf-chart-legend .perf-legend-boundary::before {
+  height: 8px;
+  border: 1px dotted var(--fg-3);
+  background: color-mix(in srgb, var(--fg-2) 18%, transparent);
+}
 .perf-grid {
   stroke: var(--line);
   stroke-width: 1;
@@ -139,6 +144,14 @@
 .perf-gap {
   fill: var(--fg-3);
   opacity: 0.09;
+}
+.perf-boundary {
+  fill: var(--fg-2);
+  opacity: 0.18;
+}
+.perf-boundary-note {
+  border-left: 2px solid var(--fg-3);
+  padding-left: 10px;
 }
 .perf-details {
   margin-top: 14px;

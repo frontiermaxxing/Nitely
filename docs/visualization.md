@@ -679,6 +679,11 @@ The history line stops at collection gaps and missing counters. Shaded gaps are 
 not zero usage. Solid lines show last observed values; dashed lines preserve minute/bucket peaks
 and minimum available RAM, separately labelled as extrema rather than sustained pressure. The
 detail table retains exact values. Kernel paged and nonpaged memory are selectable for history.
+Full minute intervals crossing selected timestamps keep their original bounds in the chart and
+table; shaded chart edges and an explicit notice identify context outside the selected range.
+Their last values and extrema may lie outside that exact range. Episode summaries show measured
+CPU, available RAM, commit and kernel extrema; percentage extrema use each observation's own
+capacity, independently of byte extrema. Missing values remain unavailable.
 The previous-boot window ends at its last recorded sample, not an assumed
 shutdown time. A sustained-pressure notice stays quiet after dismissal until pressure clears.
 

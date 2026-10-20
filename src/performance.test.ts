@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { byteText, chartSegments, chartValue, currentPressure, freshness, numberText, performanceQuery, sortedWorkloads } from "./performanceModel.ts";
-import type { PerformanceMetrics, PerformancePoint, PerformanceReport, WorkloadUsage } from "./performanceModel.ts";
+import { byteText, chartBounds, chartSegments, chartValue, currentPressure, episodeExtrema, freshness, numberText, performanceQuery, sortedWorkloads } from "./performanceModel.ts";
+import type { PerformanceEpisode, PerformanceMetrics, PerformancePoint, PerformanceReport, WorkloadUsage } from "./performanceModel.ts";
 
 test("missing and zero measurements stay distinct, with binary byte units", () => {
   assert.equal(byteText(null), "Unavailable");
@@ -19,6 +19,7 @@ const point = (at: number, cpu: number | null, gap = false): PerformancePoint =>
   observations: 1,
   resolution: "sample",
   contains_gap: gap,
+  overlaps_range_boundary: false,
 });
 test("history never draws continuity through null counters, gaps or mixed buckets", () => {
   const points = [point(0, 10), point(5, 20), point(10, null), point(15, 40), point(20, 99, true), point(25, 30), point(40, 10)];
@@ -55,6 +56,32 @@ test("charts preserve a short spike and low-RAM minimum separately from last val
 test("restart requests do not fabricate a time and long ranges stay within the query contract", () => {
   assert.deepEqual(performanceQuery("restart", 1000), { view: "history", before_last_restart: true, limit: 400 });
   assert.equal(performanceQuery("7d", 1_000_000_000).from_ms, 395_200_000);
+});
+test("boundary summaries keep full intervals without moving extrema into the selected range", () => {
+  const earlier = { ...point(200, 10), from_ms: 0, overlaps_range_boundary: true };
+  const later = { ...point(400, 20), from_ms: 200, overlaps_range_boundary: true };
+  earlier.peaks.cpu_percent = 99;
+  assert.deepEqual(chartBounds([earlier, later], 100, 300), [0, 400]);
+  assert.equal(earlier.from_ms, 0);
+  assert.equal(later.to_ms, 400);
+  assert.equal(chartValue(earlier, "cpu_percent", true), 99);
+  assert.deepEqual(chartBounds([], 100, 300), [100, 300]);
+});
+test("episode summaries use measured ratios independently and preserve zero versus unavailable", () => {
+  const episode: PerformanceEpisode = {
+    from_ms: 0, to_ms: 20_000, observations: 5, observed: [], inferred_causes: [],
+    peaks: { cpu_percent: 0, commit_bytes: 8 * 1024 ** 3, commit_limit_bytes: 16 * 1024 ** 3, kernel_paged_bytes: null, kernel_nonpaged_bytes: 0 } as PerformanceMetrics,
+    min_available_bytes: null,
+    min_available_percent: 0,
+    max_commit_percent: 90,
+  };
+  const summary = episodeExtrema(episode);
+  assert.ok(summary.includes("Peak CPU 0%"));
+  assert.ok(summary.includes("Lowest available RAM Unavailable"));
+  assert.ok(summary.includes("Lowest available RAM share 0%"));
+  assert.ok(summary.includes("Highest commit share 90%"));
+  assert.ok(summary.includes("Peak kernel paged Unavailable"));
+  assert.ok(summary.includes("Peak kernel nonpaged 0 B"));
 });
 test("stale, paused and changed-clock samples cannot appear fresh or raise current-pressure notices", () => {
   const report = {

@@ -2,7 +2,7 @@ import { memo, useEffect, useRef, useState } from "react";
 import { invoke, isLive } from "./backend";
 import { Loading, EmptyState } from "./ui";
 import { useLanes } from "./LanesStrip";
-import { byteText, chartSegments, chartValue, currentPressure, freshness, numberText, performanceQuery, sortedWorkloads, timestamp } from "./performanceModel";
+import { byteText, chartBounds, chartSegments, chartValue, currentPressure, episodeExtrema, freshness, numberText, performanceQuery, sortedWorkloads, timestamp } from "./performanceModel";
 import type {
   AttributionSample,
   ChartMetric,
@@ -229,6 +229,10 @@ export function Performance(props: { version: number; onOpenIssue: (key: string)
               {history.coverage.resolution.replaceAll("_", " ")}
             </p>
             {range === "restart" && <p className="small">Ends at the last retained sample of the previous boot. The exact shutdown time is unknown.</p>}
+            {history.coverage.boundary_points > 0 && <p className="small perf-boundary-note">
+              {history.coverage.boundary_points} source minute intervals overlap the selected range boundary. Their full intervals are retained;
+              last values and extrema may fall outside the exact selected timestamps. The chart and table preserve their actual bounds.
+            </p>}
             <details className="perf-details">
               <summary>Collection coverage · {history.coverage.gaps.length} recorded gaps</summary>
               <ul>
@@ -265,6 +269,8 @@ export function Performance(props: { version: number; onOpenIssue: (key: string)
                 <span className="muted">
                   {e.observations} observations{e.inferred_causes.length ? ` · possible causes: ${e.inferred_causes.join(", ")}` : " · cause not established"}
                 </span>
+                <p className="small">{episodeExtrema(e).join(" · ")}</p>
+                <span className="muted small">Measured extrema may come from different observations within this episode.</span>
               </div>
             ))}
             <details className="perf-details">
@@ -345,7 +351,8 @@ function History({ data }: { data: PerformanceReport }) {
   const extrema = chartSegments(data.points, data.coverage.gaps, metric, true);
   const values = data.points.flatMap((p) => [chartValue(p, metric), chartValue(p, metric, true)]).filter((v): v is number => v != null);
   const max = metric === "cpu_percent" ? 100 : Math.max(1, ...values);
-  const x = (t: number) => 40 + ((width - 70) * (t - data.from_ms)) / Math.max(1, data.to_ms - data.from_ms);
+  const [plotFrom, plotTo] = chartBounds(data.points, data.from_ms, data.to_ms);
+  const x = (t: number) => 40 + ((width - 70) * (t - plotFrom)) / Math.max(1, plotTo - plotFrom);
   const y = (v: number) => 140 - (120 * v) / max;
   return (
     <div ref={chart}>
@@ -362,6 +369,7 @@ function History({ data }: { data: PerformanceReport }) {
       <div className="perf-chart-legend">
         <span className="perf-legend-last">Last observed values</span>
         <span className="perf-legend-extreme">Observed {metric === "physical_available_bytes" ? "minima" : "peaks"} · not sustained</span>
+        {data.coverage.boundary_points > 0 && <span className="perf-legend-boundary">Outside selected timestamps</span>}
       </div>
       {!values.length ? (
         <EmptyState title="No retained samples in this window.">Try another range or resume collection.</EmptyState>
@@ -374,6 +382,11 @@ function History({ data }: { data: PerformanceReport }) {
         >
           {[20, 80, 140].map((v) => (
             <line key={v} x1="40" x2={width - 30} y1={v} y2={v} className="perf-grid" />
+          ))}
+          {[[plotFrom, data.from_ms], [data.to_ms, plotTo]].filter(([from, to]) => to > from).map(([from, to]) => (
+            <rect key={from} className="perf-boundary" x={x(from)} y="20" width={x(to) - x(from)} height="120">
+              <title>Outside selected range: {timestamp(from)} – {timestamp(to)}. Included in a full summary interval.</title>
+            </rect>
           ))}
           {data.coverage.gaps.map((g, i) => (
             <rect
@@ -405,16 +418,17 @@ function History({ data }: { data: PerformanceReport }) {
             {metric === "cpu_percent" ? "100%" : byteText(max)}
           </text>
           <text x="40" y="160">
-            {new Date(data.from_ms).toLocaleTimeString()}
+            {new Date(plotFrom).toLocaleTimeString()}
           </text>
           <text x={width - 30} y="160" textAnchor="end">
-            {new Date(data.to_ms).toLocaleTimeString()}
+            {new Date(plotTo).toLocaleTimeString()}
           </text>
         </svg>
       )}
       <p className="muted small">
         Blank bands are unrecorded time. Solid lines show last observed values; dashed lines preserve{" "}
         {metric === "physical_available_bytes" ? "minimum available RAM" : "observed peaks"} within each interval. Extrema do not establish sustained pressure.
+        {data.coverage.boundary_points > 0 && " Shaded chart edges lie outside the exact selected range and belong to complete summary intervals."}
       </p>
       {!!data.points.length && (
         <details className="perf-details">
@@ -423,7 +437,7 @@ function History({ data }: { data: PerformanceReport }) {
             <table>
               <thead>
                 <tr>
-                  <th>Through</th>
+                  <th>Actual interval</th>
                   <th>Value</th>
                   <th>Observed {metric === "physical_available_bytes" ? "minimum" : "peak"}</th>
                   <th>Coverage</th>
@@ -432,7 +446,7 @@ function History({ data }: { data: PerformanceReport }) {
               <tbody>
                 {data.points.map((p, i) => (
                   <tr key={i}>
-                    <td>{timestamp(p.to_ms)}</td>
+                    <td>{timestamp(p.from_ms)} – {timestamp(p.to_ms)}</td>
                     <td>{metric === "cpu_percent" ? numberText(p.values[metric], "%") : byteText(p.values[metric])}</td>
                     <td>
                       {metric === "cpu_percent"
@@ -441,6 +455,7 @@ function History({ data }: { data: PerformanceReport }) {
                     </td>
                     <td>
                       {p.resolution} · {p.observations} samples{p.contains_gap ? " · contains gap" : ""}
+                      {p.overlaps_range_boundary && " · full interval overlaps selected range; extrema may be outside it"}
                     </td>
                   </tr>
                 ))}
