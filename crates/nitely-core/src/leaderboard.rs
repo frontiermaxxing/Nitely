@@ -301,7 +301,7 @@ fn asks(db: &Db, counted: &dyn Fn(&str) -> bool) -> Result<Vec<(i64, i64)>> {
     let mut out = Vec::new();
     for row in rows {
         let (key, asked, answered) = row?;
-        if key.as_deref().is_some_and(|k| counted(k)) && answered >= asked {
+        if key.as_deref().is_some_and(counted) && answered >= asked {
             out.push((answered, answered - asked));
         }
     }
