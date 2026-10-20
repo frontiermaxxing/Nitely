@@ -442,6 +442,9 @@ fn validate_reply(request: &WireRequest, reply: &Reply) -> Result<()> {
     if reply.passed && (reply.exit_code != Some(0) || reply.timed_out) {
         bail!("executor pass has no successful exit");
     }
+    if !reply.passed && reply.exit_code == Some(0) {
+        bail!("executor failure has an inconsistent successful exit");
+    }
     if let Some(reason) = &reply.unavailable {
         if reply.passed
             || reply.remote_run.is_some()
@@ -1032,6 +1035,9 @@ mod tests {
             skipped: false,
         });
         assert!(validate_reply(&r, &reply).is_ok());
+        reply.passed = false;
+        assert!(validate_reply(&r, &reply).is_err());
+        reply.passed = true;
         reply.tree = "c".repeat(40);
         assert!(validate_reply(&r, &reply).is_err());
         assert!(!safe_id("../escape"));
