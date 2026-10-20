@@ -504,13 +504,40 @@ mod tests {
         let store = Store::open(&temp.0).unwrap();
         store.db.execute("UPDATE recorder_version SET version=0", []).unwrap();
         let _old_owner = acquire(&temp.0).unwrap().unwrap();
-        store.db.execute_batch("BEGIN IMMEDIATE").unwrap();
-        let recording = background(temp.0.clone());
-        std::thread::sleep(Duration::from_millis(400));
-        store.db.execute_batch("COMMIT").unwrap();
+        // The observer can encounter the announcer's rollback-journal write lock too. Retry
+        // only that transient SQLite condition; schema, I/O and other failures remain errors.
+        let observed_version = || -> Result<Option<bool>> {
+            match store.current_version() {
+                Ok(current) => Ok(Some(current)),
+                Err(error) if matches!(error.downcast_ref::<rusqlite::Error>(),
+                    Some(rusqlite::Error::SqliteFailure(code, _)) if code.code == rusqlite::ErrorCode::DatabaseBusy) => Ok(None),
+                Err(error) => Err(error),
+            }
+        };
+        let blocker = Connection::open(temp.0.join("history.sqlite")).unwrap();
+        blocker.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        assert_eq!(observed_version().unwrap(), None, "exercise a genuinely busy observer, not just an older version");
         let deadline = Instant::now() + Duration::from_secs(7);
-        while !store.current_version().unwrap() && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(20)); }
-        assert!(store.current_version().unwrap(), "retry announcement before trying the old owner's lock");
+        let recording = background(temp.0.clone());
+        let diagnostic = temp.0.join("last-error.txt");
+        let mut first_attempt_blocked = false;
+        while Instant::now() < deadline {
+            match std::fs::read_to_string(&diagnostic) {
+                Ok(text) if text.contains("database is locked") => { first_attempt_blocked = true; break; }
+                Ok(_) => {}, // The bounded diagnostic may still be in the middle of its write.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+                Err(error) => panic!("reading announcement diagnostic: {error}"),
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(first_attempt_blocked, "the first announcement must actually encounter contention");
+        blocker.execute_batch("COMMIT").unwrap();
+        let mut announced = false;
+        while Instant::now() < deadline {
+            if observed_version().unwrap() == Some(true) { announced = true; break; }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(announced, "retry announcement before trying the old owner's lock within the original seven-second bound");
         drop(recording);
         assert!(store.sessions().unwrap().is_empty(), "contender never collected while old owner held lock");
     }
