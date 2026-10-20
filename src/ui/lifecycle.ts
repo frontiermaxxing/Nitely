@@ -154,6 +154,7 @@ export function computeTrack(issue: IssueRecord, timeline?: TimelineEntry[], rev
         if (track.reached.started && stationIndex(current) <= stationIndex("working")) reach("working", e.ts);
         break;
       case "gate_passed":
+      case "gate_skipped":
         gateFailed = false;
         landFailed = false;
         reach("gate", e.ts);

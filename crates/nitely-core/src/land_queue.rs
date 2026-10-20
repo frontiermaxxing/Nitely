@@ -404,8 +404,8 @@ fn gate_and_land(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stack: &Path
     }
     let k = stacked.len();
     step(db, run, "gating the stack")?;
-    let full = gate_prefix(db, root, stack, &stacked, k, gates)?;
-    if full.passed {
+    let full = gate_prefix(db, root, stack, &stacked, k, gates, true)?;
+    if full.passed || full.skipped.is_some() {
         return land_prefix(db, root, pb, run, stacked, before, &full, *gates);
     }
     if k == 1 {
@@ -431,7 +431,7 @@ fn gate_and_land(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stack: &Path
         }
         if restacked {
             step(db, run, &format!("bisecting: gating without {}", stacked[suspect].entry.issue))?;
-            let without = gate_prefix(db, root, stack, &others, others.len(), gates)?;
+            let without = gate_prefix(db, root, stack, &others, others.len(), gates, false)?;
             if without.passed {
                 let bad = &stacked[suspect];
                 let why = gate_failed(&full, &format!("the stacked gate failed on a file only {} changes, and passed without it", bad.entry.issue));
@@ -448,7 +448,7 @@ fn gate_and_land(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stack: &Path
     while hi - lo > 1 {
         let mid = (lo + hi) / 2;
         step(db, run, &format!("bisecting: gating {mid} of {k}"))?;
-        let g = gate_prefix(db, root, stack, &stacked, mid, gates)?;
+        let g = gate_prefix(db, root, stack, &stacked, mid, gates, false)?;
         if g.passed {
             lo = mid;
             passing = Some(g);
@@ -474,11 +474,19 @@ fn gate_and_land(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stack: &Path
 }
 
 /// Gates the first `n` stacked changes: the stack worktree at the n-th tip, as a land request.
-fn gate_prefix(db: &Db, root: &Path, stack: &Path, stacked: &[Stacked], n: usize, gates: &mut u32) -> Result<GateResult> {
+#[allow(clippy::too_many_arguments)]
+fn gate_prefix(db: &Db, root: &Path, stack: &Path, stacked: &[Stacked], n: usize, gates: &mut u32, allow_yolo: bool) -> Result<GateResult> {
     let last = &stacked[n - 1];
     checkout(stack, &last.tip)?;
-    *gates += 1;
-    playbook::run_gate_as(db, root, stack, Some(&last.entry.issue), &last.entry.actor(), crate::lanes::Kind::Land)
+    let keys: Vec<&str> = stacked[..n].iter().map(|s| s.entry.issue.as_str()).collect();
+    // A skipped prefix proves nothing about which change caused the failed full stack.
+    let gate = if allow_yolo {
+        playbook::run_automatic_gate(db, root, stack, &keys, &last.entry.actor(), crate::lanes::Kind::Land)?
+    } else {
+        playbook::run_gate_as(db, root, stack, Some(&last.entry.issue), &last.entry.actor(), crate::lanes::Kind::Land)?
+    };
+    if gate.skipped.is_none() { *gates += 1; }
+    Ok(gate)
 }
 
 /// Why a change goes back after a failed gate, with the failing step's output.
@@ -596,7 +604,7 @@ fn land_prefix(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stacked: Vec<S
     let mut refused = false;
     for s in &stacked {
         if let Some(review) = db.reviews(&s.entry.issue)?.first() {
-            if let Err(e) = land::check_disabled_policy(&current, review) {
+            if let Err(e) = land::check_yolo_policy(db, &s.entry.issue, review).and_then(|_| land::check_disabled_policy(&current, review)) {
                 send_back(db, run, &s.entry, &format!("{e:#}"), None, &current)?;
                 refused = true;
             }
@@ -615,6 +623,12 @@ fn land_prefix(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stacked: Vec<S
                 warnings.push((s.entry.id, format!("the pull request may still show the pre-rebase commits ({})", land::first_line(&e))));
             }
         }
+    }
+    let keys: Vec<&str> = stacked.iter().map(|s| s.entry.issue.as_str()).collect();
+    crate::project_yolo::check_gate_authority(db, &keys, gate)?;
+    for key in &keys {
+        let review = db.reviews(key)?.into_iter().next().context("submission evidence disappeared")?;
+        land::check_yolo_policy(db, key, &review)?;
     }
     land::fast_forward_main(root, &tip).with_context(|| land::refused_fast_forward(root))?;
     let head = git(root, &["rev-parse", "--short", "HEAD"])?.trim().to_string();
@@ -857,6 +871,22 @@ batch = "waiting"
         fn on_main(&self, file: &str) -> bool {
             self.repo.join(file).exists()
         }
+    }
+
+    #[test]
+    fn yolo_batch_lands_without_a_gate_pass_or_cached_success() {
+        let mut f = fixture();
+        f.strict_gate();
+        f.db.set_project_yolo("NIT", true, 0, &Actor::Human).unwrap();
+        let (a, _) = f.submitted("Unchecked first", &[("bad.txt", "fails the configured gate")]);
+        let (b, _) = f.submitted("Unchecked second", &[("second.txt", "second")]);
+        f.queue_and_run(&[&a, &b]);
+        assert!(f.on_main("bad.txt") && f.on_main("second.txt"));
+        assert_eq!(f.runs().last().unwrap().gates, 0);
+        assert_eq!(f.db.issue(&a).unwrap().unwrap().state, "Done");
+        assert_eq!(f.db.issue(&b).unwrap().unwrap().state, "Done");
+        assert!(f.db.timeline(&a).unwrap().iter().any(|e| e.kind == "gate_skipped"));
+        assert!(!f.db.timeline(&a).unwrap().iter().any(|e| e.kind == "gate_passed"));
     }
 
     #[test]

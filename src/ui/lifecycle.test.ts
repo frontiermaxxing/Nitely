@@ -51,6 +51,18 @@ const STATE_TYPE: Record<string, string> = {
   Duplicate: "canceled",
 };
 
+test("a newer YOLO skip clears an earlier gate failure without adding a review round", () => {
+  const issue = { state: "In Review", state_type: "started" } as IssueRecord;
+  const timeline = [
+    { ts: 1, kind: "gate_failed", summary: "Gate failed" },
+    { ts: 2, kind: "gate_skipped", summary: "YOLO mode: automatic gate skipped" },
+    { ts: 3, kind: "submit", summary: "YOLO mode: automatic gate and PR review skipped" },
+  ] as TimelineEntry[];
+  const track = computeTrack(issue, timeline);
+  assert.equal(track.stuck, null);
+  assert.equal(track.rounds, 0);
+});
+
 function issue(state: string, track?: Track): IssueRecord {
   return {
     key: "X-1",

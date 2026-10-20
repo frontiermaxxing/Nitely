@@ -1,4 +1,4 @@
-import type { ApprovalGate, SolutionSummary, PrRecord } from "./types";
+import type { ApprovalGate, SolutionSummary, PrRecord, TimelineEntry } from "./types";
 
 export interface ApprovalEvidence {
   commit_sha?: string;
@@ -8,12 +8,22 @@ export interface ApprovalEvidence {
 
 /** An intentional policy opt-out is neutral evidence, not a failed or completed review. */
 export function automatedReviewEvidence(review?: { reviewer?: string; verdict?: string; note?: string | null } | null) {
-  const disabled = review?.verdict === "disabled";
+  const yolo = review?.verdict === "yolo";
+  const disabled = review?.verdict === "disabled" || yolo;
   return {
     ran: !!review?.reviewer && review.verdict !== "none" && !disabled,
-    text: review?.note || (disabled ? "Review disabled for this project" : "No automated review ran."),
+    text: review?.note || (yolo ? "YOLO mode: automatic gate and PR review skipped" : disabled ? "Review disabled for this project" : "No automated review ran."),
     tone: disabled ? null : "bad" as const,
   };
+}
+
+export function automatedGateEvidence(gate: ApprovalGate) {
+  return { ran: !gate.skipped, text: gate.skipped ? "Gate skipped" : gate.passed ? "Gate passed" : "Gate failed", reason: gate.skipped || null };
+}
+
+/** A newer skip replaces an old failure in the current-status summary, without erasing history. */
+export function latestGateEvent(timeline: TimelineEntry[]) {
+  return [...timeline].reverse().find((e) => e.kind === "gate_passed" || e.kind === "gate_failed" || e.kind === "gate_skipped");
 }
 
 /** Evidence is shown only for the review revision it accompanies, never from an older round. */

@@ -646,6 +646,8 @@ export interface SolutionSummary {
 export interface ApprovalGate {
   commit: string;
   passed: boolean;
+  /** An intentional policy skip is unverified, never a passing gate. */
+  skipped?: string;
   results: { command: string; ok: boolean; skipped?: boolean }[];
   flaked?: { command: string }[];
   warnings?: string[];
@@ -661,7 +663,7 @@ export interface ReviewRecord {
   commit_sha: string;
   /** Empty when no review ran. */
   reviewer: string;
-  verdict: "pass" | "changes" | "none" | "disabled";
+  verdict: "pass" | "changes" | "none" | "disabled" | "yolo";
   approver: "agent" | "human";
   reasons: string[];
   /** carried: raised in an earlier round and not fixed since; now: how the reviewer says it is still open. */
@@ -718,6 +720,7 @@ export interface Applied {
 export interface GateRun {
   ts: number;
   passed: boolean;
+  skipped?: string | null;
   summary: string | null;
 }
 

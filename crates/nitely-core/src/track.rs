@@ -128,6 +128,11 @@ pub fn track_of(issue: &IssueRecord, timeline: &[TimelineEntry], change_reviews:
                     reach(&mut t, &mut w, "working", e.ts);
                 }
             }
+            "gate_skipped" => {
+                gate_failed = false;
+                land_failed = false;
+                reach(&mut t, &mut w, "gate", e.ts);
+            }
             "gate_passed" => {
                 gate_failed = false;
                 land_failed = false;
@@ -259,6 +264,7 @@ mod tests {
         ("worktree", "Started x from main"),
         ("status", "Working"),
         ("gate_passed", "Gate passed"),
+        ("gate_skipped", "Gate skipped (YOLO)"),
         ("review_started", "Review by codex started"),
     ];
 

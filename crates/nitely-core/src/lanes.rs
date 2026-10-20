@@ -846,7 +846,7 @@ pub fn run_in(config: &crate::Config, db: &Db, dir: &str, issue: Option<&str>, c
 pub fn run(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Actor, on_event: &mut dyn FnMut(&Run)) -> Result<Run> {
     // The machine's share as it is when the command starts, not when it was queued (NIT-291), with
     // the cap it was admitted with (NIT-323).
-    run_with(db, repo_root, pb, req, actor, on_event, &mut |lane, log, limit, temp, share| {
+    run_with(db, repo_root, pb, req, actor, on_event, &[], &mut |lane, log, limit, temp, share| {
         let command = req.command.replace("{jobs}", &share.jobs.to_string());
         run_logged(&command, lane, log, limit, share, Some(temp))
     })
@@ -867,7 +867,8 @@ pub struct Ended {
 }
 
 /// `run`, with what happens in the lane given by `exec` (one command, or a gate's commands).
-fn run_with(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Actor, on_event: &mut dyn FnMut(&Run), exec: &mut Exec) -> Result<Run> {
+#[allow(clippy::too_many_arguments)]
+fn run_with(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Actor, on_event: &mut dyn FnMut(&Run), yolo_keys: &[&str], exec: &mut Exec) -> Result<Run> {
     let Some(rules) = pb.lanes.clone() else {
         bail!("{} has no [lanes] in its playbook, so it has no build lanes; run the command in your worktree, or add [lanes] (docs/build-lanes.md)", repo_root.display());
     };
@@ -912,7 +913,7 @@ fn run_with(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Act
     // closes the request's row: a queued row left behind would hold up the requests after it.
     let started = (|| -> Result<_> {
         let quick = matches!(req.kind, Kind::Run) && quick_class(db, &root, req.command)?.is_some();
-        let (n, lock, slot) = take_turn(db, id, repo_root, pb, &rules, quick, &mut slots_now(), &mut read_memory, &mut memory_limits)?;
+        let (n, lock, slot) = take_turn(db, id, repo_root, pb, &rules, quick, &mut slots_now(), &mut read_memory, &mut memory_limits, yolo_keys)?;
         let logs = logs_dir(db, req.project);
         std::fs::create_dir_all(&logs)?;
         let log = logs.join(format!("{id}.log"));
@@ -989,6 +990,7 @@ fn run_with(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Act
 /// A gate that ran in a lane (or was answered from one), for `playbook::run_gate` to record the way
 /// it records a gate in a worktree.
 pub struct GateRun {
+    pub yolo_skipped: bool,
     /// The snapshot's short commit.
     pub commit: String,
     pub results: Vec<playbook::CommandResult>,
@@ -1006,7 +1008,7 @@ pub struct GateRun {
 /// that keeps failing. A tree whose same commands already passed in a lane is answered from that
 /// run's record without running anything.
 #[allow(clippy::too_many_arguments)]
-pub fn gate(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Option<&str>, kind: Kind, steps: &[(String, Option<String>)], actor: &Actor) -> Result<GateRun> {
+pub fn gate(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Option<&str>, kind: Kind, steps: &[(String, Option<String>)], actor: &Actor, yolo_keys: &[&str]) -> Result<GateRun> {
     // What is committed, as land will build it: the branch head, never a commit made for the
     // request, so the gate reports the commit the review sees.
     let top = PathBuf::from(git(worktree, &["rev-parse", "--show-toplevel"])?.trim());
@@ -1050,18 +1052,24 @@ pub fn gate(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Op
         if let Some(key) = issue {
             db.log_event(actor, Some(key), None, "lane_run", &format!("The gate for {short} passed in lane run {id} already; not run again")).ok();
         }
-        return Ok(GateRun { commit: short, results, passed: true, flaked: vec![], run: Some(id), warnings });
+        return Ok(GateRun { yolo_skipped: false, commit: short, results, passed: true, flaked: vec![], run: Some(id), warnings });
     }
 
     let mut results: Vec<playbook::CommandResult> = Vec::new();
     let mut flaked: Vec<playbook::Flake> = Vec::new();
     let retries = pb.gate.retries;
     let req = Request { project: &project, issue, kind, snapshot: &snap, command: &key };
-    let run = run_with(db, repo_root, pb, &req, actor, &mut |_| {}, &mut |lane: &Path, log: &Path, limit: Duration, temp: &Path, share: Share| {
+    let mut yolo_skipped = false;
+    let run = run_with(db, repo_root, pb, &req, actor, &mut |_| {}, yolo_keys, &mut |lane: &Path, log: &Path, limit: Duration, temp: &Path, share: Share| {
         // The machine's share as it is when the gate starts, not when it was queued (NIT-291), with
         // the cap it was admitted with (NIT-323).
         let mut peak: Option<u64> = None;
         for (command, skip) in steps {
+            if crate::project_yolo::all_enabled(db, yolo_keys)? {
+                yolo_skipped = true;
+                // Never an exit-code-zero lane cache entry for unchecked work.
+                return Ok(Ended { code: None, timed_out: false, peak });
+            }
             if let Some(why) = skip {
                 results.push(skipped(why, command));
                 continue;
@@ -1101,13 +1109,21 @@ pub fn gate(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Op
             }
         }
         Ok(Ended { code: Some(0), timed_out: false, peak })
-    })?;
+    });
+    let run = match run {
+        Ok(run) => run,
+        Err(e) if e.is::<crate::project_yolo::SkipGate>() => return Ok(GateRun { yolo_skipped: true, commit: short, passed: false, results: vec![], flaked: vec![], run: None, warnings }),
+        Err(e) => return Err(e),
+    };
+    if yolo_skipped {
+        db.conn.execute("UPDATE lane_run SET state = 'abandoned', exit_code = NULL, error = ?2 WHERE id = ?1", params![run.id, crate::project_yolo::NOTE])?;
+    }
     if let Some(why) = &run.error {
         // The setup's own output too, so the caller sees why it failed.
         let output = if run.output.trim().is_empty() { why.clone() } else { format!("{why}\n{}", run.output) };
         results.push(playbook::CommandResult { command: format!("lane {}", run.lane.unwrap_or(0)), ok: false, seconds: 0, output, skipped: false });
     }
-    Ok(GateRun { commit: short, passed: run.passed(), results, flaked, run: Some(run.id), warnings })
+    Ok(GateRun { yolo_skipped, commit: short, passed: run.passed() && !yolo_skipped, results, flaked, run: Some(run.id), warnings })
 }
 
 /// What `log` gained after byte `from`, its end kept as a command's output is.
@@ -2069,6 +2085,7 @@ fn take_turn(
     slots: &mut dyn FnMut() -> u32,
     memory: &mut dyn FnMut() -> Option<machine::Memory>,
     limits: &mut dyn FnMut() -> Option<machine::Limits>,
+    yolo_keys: &[&str],
 ) -> Result<(u32, LaneLock, SlotLock)> {
     db.conn.execute("UPDATE lane_run SET lane_count = ?2, quick_lane = ?3 WHERE id = ?1", params![id, rules.lanes(), rules.quick_lane()])?;
     // The lanes it may take: the repo's, or for a quick run the scheduler sends there, its quick
@@ -2079,6 +2096,7 @@ fn take_turn(
     let mut busy_since = None;
     let mut waits_for_memory = false;
     'turn: loop {
+        crate::project_yolo::check_queued_gate(db, id, yolo_keys)?;
         // The budget read again on every look, so a change in Settings counts at once (NIT-291).
         let slots = slots();
         if let Some(turn) = my_turn_is(db, id, slots, &mut alive)? {
@@ -2205,6 +2223,11 @@ impl Drop for MachineTurn<'_> {
 /// holds the slot until the turn ends (`MachineTurn`).
 #[allow(clippy::too_many_arguments)]
 pub fn hold_machine<'a>(db: &'a Db, repo_root: &Path, worktree: &Path, project: &str, issue: Option<&str>, kind: Kind, command: &str, actor: &Actor) -> Result<MachineTurn<'a>> {
+    hold_machine_checked(db, repo_root, worktree, project, issue, kind, command, actor, &[])
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn hold_machine_checked<'a>(db: &'a Db, repo_root: &Path, worktree: &Path, project: &str, issue: Option<&str>, kind: Kind, command: &str, actor: &Actor, yolo_keys: &[&str]) -> Result<MachineTurn<'a>> {
     let rev = |what: &str| git(worktree, &["rev-parse", what]).map(|s| s.trim().to_string()).unwrap_or_default();
     let (head, tree) = (rev("HEAD"), rev("HEAD^{tree}"));
     let priority = match kind {
@@ -2224,6 +2247,7 @@ pub fn hold_machine<'a>(db: &'a Db, repo_root: &Path, worktree: &Path, project: 
     let taken = (|| -> Result<SlotLock> {
         let mut alive = |r: &Requester| !r.gone();
         loop {
+            crate::project_yolo::check_queued_gate(db, id, yolo_keys)?;
             let slots = slots_now();
             if my_turn(db, id, slots, &mut alive)? {
                 if let Some(slot) = (1..=slots.max(1)).find_map(|k| try_slot(db, k).ok().flatten()) {

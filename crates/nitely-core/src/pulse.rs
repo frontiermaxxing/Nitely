@@ -77,6 +77,8 @@ pub struct FlowIssue {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct GateRun {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<String>,
     pub ts: i64,
     pub passed: bool,
     pub summary: Option<String>,
@@ -247,7 +249,7 @@ impl Db {
             let f = facts.entry(key).or_default();
             f.last = f.last.max(ts);
             match kind.as_str() {
-                "gate_passed" | "gate_failed" => f.gate = Some(GateRun { ts, passed: kind == "gate_passed", summary }),
+                "gate_passed" | "gate_failed" | "gate_skipped" => f.gate = Some(GateRun { ts, passed: kind == "gate_passed", skipped: (kind == "gate_skipped").then(|| summary.clone().unwrap_or_else(|| crate::project_yolo::NOTE.into())), summary }),
                 "worktree" => {
                     f.worktree = cwd;
                     f.starter.get_or_insert(actor);

@@ -1137,6 +1137,9 @@ pub struct CommandResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GateResult {
     pub passed: bool,
+    /// An intentional bypass is unverified, never a passing gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<String>,
     pub commit: String,
     pub results: Vec<CommandResult>,
     /// Playbook keys this nitely ignored.
@@ -1293,6 +1296,15 @@ pub fn run_gate(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<&s
 /// `run_gate`, saying what the gate is for: in a repo with build lanes (`[lanes]`), the gate runs
 /// there as a request of that kind, land's first, and never builds in the worktree.
 pub fn run_gate_as(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<&str>, actor: &Actor, kind: crate::lanes::Kind) -> Result<GateResult> {
+    run_gate_inner(db, repo_root, worktree, issue_key, actor, kind, &[])
+}
+
+pub(crate) fn run_automatic_gate(db: &Db, repo_root: &Path, worktree: &Path, keys: &[&str], actor: &Actor, kind: crate::lanes::Kind) -> Result<GateResult> {
+    run_gate_inner(db, repo_root, worktree, keys.last().copied(), actor, kind, keys)
+}
+
+fn run_gate_inner(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<&str>, actor: &Actor, kind: crate::lanes::Kind, yolo_keys: &[&str]) -> Result<GateResult> {
+    if crate::project_yolo::all_enabled(db, yolo_keys)? { return crate::project_yolo::skipped_gate(db, worktree, yolo_keys, actor); }
     let playbook = Playbook::load(repo_root)?;
     if playbook.gate.commands.is_empty() && playbook.gate.steps.is_empty() {
         bail!("this repo's playbook has no gate commands; add them under [gate] in {PLAYBOOK_PATH}");
@@ -1315,7 +1327,8 @@ pub fn run_gate_as(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option
     if playbook.lanes.is_some() {
         // In a lane: a full checkout of the worktree's snapshot, set up there. The worktree itself
         // is not built, made whole or set up.
-        let lane = crate::lanes::gate(db, repo_root, &playbook, worktree, issue_key, kind, &steps, actor)?;
+        let lane = crate::lanes::gate(db, repo_root, &playbook, worktree, issue_key, kind, &steps, actor, yolo_keys)?;
+        if lane.yolo_skipped { return crate::project_yolo::skipped_gate(db, worktree, yolo_keys, actor); }
         let mut warnings = playbook.unknown_warnings();
         warnings.extend(lane.warnings);
         let mut gate = record_gate(db, issue_key, worktree, actor, &lane.commit, lane.results, lane.passed, lane.flaked, warnings)?;
@@ -1330,7 +1343,12 @@ pub fn run_gate_as(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option
         project: (!project.is_empty()).then(|| project.clone()), issue: issue_key.map(str::to_string), ..Default::default()
     });
     let key: Vec<&str> = steps.iter().filter(|(_, skip)| skip.is_none()).map(|(c, _)| c.as_str()).collect();
-    let turn = crate::lanes::hold_machine(db, repo_root, worktree, &project, issue_key, kind, &key.join("\n"), actor)?;
+    let turn = match crate::lanes::hold_machine_checked(db, repo_root, worktree, &project, issue_key, kind, &key.join("\n"), actor, yolo_keys) {
+        Ok(turn) => turn,
+        Err(e) if e.is::<crate::project_yolo::SkipGate>() => return crate::project_yolo::skipped_gate(db, worktree, yolo_keys, actor),
+        Err(e) => return Err(e),
+    };
+    if crate::project_yolo::all_enabled(db, yolo_keys)? { return crate::project_yolo::skipped_gate(db, worktree, yolo_keys, actor); }
     // A sparse worktree lacks files the gate builds (a workspace's other members): without build
     // lanes, it becomes whole first, so the gate sees what land will.
     let whole = crate::light::make_whole(worktree)?;
@@ -1343,6 +1361,7 @@ pub fn run_gate_as(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option
         steps.clear();
     }
     for (command, skip) in steps {
+        if crate::project_yolo::all_enabled(db, yolo_keys)? { return crate::project_yolo::skipped_gate(db, worktree, yolo_keys, actor); }
         let command = expand(&command, repo_root, worktree, base);
         if let Some(why) = skip {
             results.push(CommandResult { command, ok: true, seconds: 0, output: format!("skipped: {why}"), skipped: true });
@@ -1374,7 +1393,7 @@ fn record_gate(db: &Db, issue_key: Option<&str>, worktree: &Path, actor: &Actor,
         format!("Gate failed at {commit}: {}", results.last().map(|r| r.command.as_str()).unwrap_or(""))
     };
     db.log_event(actor, issue_key, at.as_deref(), if passed { "gate_passed" } else { "gate_failed" }, &summary)?;
-    Ok(GateResult { passed, commit: commit.to_string(), results, warnings, flaked, lane_run: None })
+    Ok(GateResult { passed, skipped: None, commit: commit.to_string(), results, warnings, flaked, lane_run: None })
 }
 
 /// Fills `{main}` (the main checkout), `{worktree}` and `{base}` in a playbook command.

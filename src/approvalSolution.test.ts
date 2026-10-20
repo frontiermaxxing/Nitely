@@ -1,6 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { approvalPr, approvalSolution, automatedReviewEvidence } from "./approvalEvidence.ts";
+import { approvalPr, approvalSolution, automatedReviewEvidence, automatedGateEvidence, latestGateEvent } from "./approvalEvidence.ts";
+import type { TimelineEntry } from "./types.ts";
+
+test("YOLO remains unverified even if a stale reviewer or passing flag accompanies it", () => {
+  const yolo = { reviewer: "codex", verdict: "yolo" };
+  assert.deepEqual(automatedReviewEvidence(yolo), { ran: false, text: "YOLO mode: automatic gate and PR review skipped", tone: null });
+  assert.deepEqual(automatedGateEvidence({ commit: "head", passed: true, skipped: "YOLO mode", results: [] }), { ran: false, text: "Gate skipped", reason: "YOLO mode" });
+  const timeline = [{ ts: 1, kind: "gate_failed" }, { ts: 2, kind: "gate_skipped" }] as TimelineEntry[];
+  assert.equal(latestGateEvent(timeline)?.kind, "gate_skipped");
+  assert.equal([yolo, { reviewer: "codex", verdict: "pass" }].filter((r) => automatedReviewEvidence(r).ran).length, 1);
+});
 
 test("disabled review stays neutral and does not inflate reviewed rounds", () => {
   const disabled = { reviewer: "", verdict: "disabled" };

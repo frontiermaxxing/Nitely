@@ -1439,7 +1439,7 @@ fn run(cmd: Cmd) -> Result<()> {
             let s = nitely_core::submit::submit(&mut db, &config, &opts, &me)?;
             print_json(&s)?;
             eprintln!("{}", s.next);
-            if !s.gate.passed || s.review.as_ref().is_some_and(|r| r.verdict != "pass") {
+            if (s.gate.skipped.is_none() && !s.gate.passed) || s.review.as_ref().is_some_and(|r| r.verdict != "pass") {
                 exit(1);
             }
             Ok(())

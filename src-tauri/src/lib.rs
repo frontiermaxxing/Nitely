@@ -286,6 +286,17 @@ async fn project_focus(project: String) -> Result<nitely_core::focus::ProjectFoc
     db()?.project_focus(&project).map_err(err)
 }
 
+#[tauri::command]
+async fn project_yolo(project: String) -> Result<nitely_core::project_yolo::ProjectYolo, String> {
+    db()?.project_yolo(&project).map_err(err)
+}
+
+/// Only the app exposes this human setting; CLI and MCP may read it but cannot enable it.
+#[tauri::command]
+async fn set_project_yolo(project: String, enabled: bool, expected_revision: i64) -> Result<nitely_core::project_yolo::ProjectYolo, String> {
+    db()?.set_project_yolo(&project, enabled, expected_revision, &ME).map_err(err)
+}
+
 /// Only the person changes the focus; agents read it through get_project and next_task.
 #[tauri::command]
 async fn set_project_focus(project: String, goal: Option<i64>, allow_urgent: bool) -> Result<nitely_core::focus::ProjectFocus, String> {
@@ -947,6 +958,8 @@ pub fn run() {
             goal_report,
             goal_order,
             project_focus,
+            project_yolo,
+            set_project_yolo,
             set_project_focus,
             goal_workers,
             goal_choices,

@@ -497,6 +497,7 @@ function verb(h: Happening): string {
       return "asked you";
     case "review":
       if (s.includes("requested changes")) return "changes asked";
+      if (s.includes("YOLO mode")) return s.includes("waits for a human") ? "checks skipped, waits for you" : "checks skipped";
       if (s.startsWith("Submitted without a review")) return "submitted unreviewed, waits for you";
       return s.includes("waits for a human") ? "review passed, waits for you" : "review passed";
     case "stuck":

@@ -103,11 +103,11 @@ fn seed(path: &std::path::Path) -> anyhow::Result<()> {
         let key = db.create_issue(&new, &agent)?.key;
         db.move_issue(&key, "In Progress", None, None, &agent)?;
         let review = review::Review { reviewer: "codex".into(), verdict: "pass".into(), findings, flagged: vec![], summary: String::new(), seconds: 80, previous: vec![], note: String::new(), batch: None, tokens: None, reused: None };
-        let gate = playbook::GateResult { passed: true, commit: "abc1234".into(), results: vec![], warnings: vec![], flaked: vec![], lane_run: None };
+        let gate = playbook::GateResult { passed: true, skipped: None, commit: "abc1234".into(), results: vec![], warnings: vec![], flaked: vec![], lane_run: None };
         let s = submit::Submitted {
             solution: Some(submit::SolutionSummary { title: "Validate access before returning account data".into(), summary: "Reject requests without an active session before loading account data.".into() }),
             issue: key.clone(), branch: format!("claude/{}", key.to_lowercase()), base: "main".into(), patch_id: format!("patch-{}", key.to_lowercase()),
-            commit: "abc1234".into(), files: 3, gate, review: Some(review), review_disabled: false, approver: "human".into(), reasons, approval_stands: false,
+            commit: "abc1234".into(), files: 3, gate, review: Some(review), review_disabled: false, yolo: false, approver: "human".into(), reasons, approval_stands: false,
             pushed: true, pr_url: None, pr_error: None, land: None, shadow: None, state: "Needs You".into(), next: String::new(),
         };
         db.record_review(&s)?;

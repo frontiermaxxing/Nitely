@@ -207,8 +207,8 @@ pub fn review_in_batch(db: &Db, rules: &ReviewRules, c: &Candidate, actor: &Acto
             "reviewing" => settle_dead_batch(db, row.batch_id.unwrap_or_default())?,
             _ => {
                 if let Err(e) = rules.require_enabled() {
-                    if e.is::<crate::review::Disabled>() {
-                        db.conn.execute("UPDATE review_queue SET state = 'alone', why = ?2 WHERE id = ?1 AND state = 'waiting'", params![id, crate::review::DISABLED_NOTE])?;
+                    if e.is::<crate::review::Disabled>() || e.is::<crate::project_yolo::SkipReview>() {
+                        db.conn.execute("UPDATE review_queue SET state = 'alone', why = ?2 WHERE id = ?1 AND state = 'waiting'", params![id, format!("{e:#}")])?;
                     }
                     return Err(e);
                 }
@@ -447,6 +447,11 @@ fn lock_name(repo: &str, reviewer: &str) -> String {
 /// Each change's timeline says so under its own submitter; a shadow batch, which only measures,
 /// says nothing on the issues.
 fn run_batch(db: &Db, rules: &ReviewRules, batch: i64, rows: &[Queued], shadow: bool) -> Result<()> {
+    let mut checked_rules = rules.clone();
+    for row in rows {
+        if let Some(guard) = crate::project_yolo::ReviewGuard::for_issue(db, &row.issue)? { checked_rules.yolo_guards.push(guard); }
+    }
+    let rules = &checked_rules;
     if let Err(e) = rules.require_enabled() {
         fail_batch(db, batch, &format!("{e:#}"))?;
         return Ok(());
@@ -500,7 +505,7 @@ fn run_batch(db: &Db, rules: &ReviewRules, batch: i64, rows: &[Queued], shadow: 
     };
     let reply = match reply {
         Ok(reply) => reply,
-        Err(e) if e.is::<crate::review::Disabled>() => return fail(crate::review::DISABLED_NOTE.into()),
+        Err(e) if e.is::<crate::review::Disabled>() || e.is::<crate::project_yolo::SkipReview>() => return fail(format!("{e:#}")),
         Err(e) => return fail(format!("its batch's reviewer did not finish: {}", first_line(&format!("{e:#}")))),
     };
     let parsed = rules.parse_batch(reviewer, &reply.text, reply.seconds, &changes);
@@ -650,7 +655,7 @@ pub struct Shadow {
 /// it is recorded for `nitely batches compare`.
 pub fn shadow(db: &Db, s: &Shadow) -> Result<()> {
     if let Err(e) = s.rules.require_enabled() {
-        if e.is::<crate::review::Disabled>() { return Ok(()); }
+        if e.is::<crate::review::Disabled>() || e.is::<crate::project_yolo::SkipReview>() { return Ok(()); }
         return Err(e);
     }
     let window = Window::parse(&s.rules.batch_window).unwrap_or(Window::After(Duration::from_secs(300)));
@@ -680,8 +685,8 @@ pub fn shadow(db: &Db, s: &Shadow) -> Result<()> {
         match row.state.as_str() {
             "waiting" => {
                 if let Err(e) = s.rules.require_enabled() {
-                    if e.is::<crate::review::Disabled>() {
-                        db.conn.execute("UPDATE review_queue SET state = 'alone', why = ?2 WHERE id = ?1 AND state = 'waiting'", params![id, crate::review::DISABLED_NOTE])?;
+                    if e.is::<crate::review::Disabled>() || e.is::<crate::project_yolo::SkipReview>() {
+                        db.conn.execute("UPDATE review_queue SET state = 'alone', why = ?2 WHERE id = ?1 AND state = 'waiting'", params![id, format!("{e:#}")])?;
                         return Ok(());
                     }
                     return Err(e);

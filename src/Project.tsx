@@ -8,6 +8,7 @@ import { CrewControl } from "./CrewControl";
 import { ProjectBrief } from "./ProjectBrief";
 import { GoalRows, type GoalFocus } from "./GoalRows";
 import { ProjectSettings } from "./ProjectSettings";
+import { useProjectYolo } from "./ProjectYolo";
 import { ProjectRules } from "./Rules";
 import { EmptyState, Loading } from "./ui";
 import "./project.css";
@@ -70,6 +71,7 @@ export function ProjectPage(props: {
   const [showClosed, setShowClosed] = useState(false);
   const [filters, setFilters] = useState<Filters>(NO_FILTER);
   const [error, setError] = useState<string | null>(null);
+  const yolo = useProjectYolo(props.projectKey, props.version, props.onChanged);
 
   // Closed issues are always loaded: the header counts what landed lately and the board shows
   // recent Done ones, even while the list hides them.
@@ -125,12 +127,13 @@ export function ProjectPage(props: {
         )}
         {tab === "board" && issues && <BoardFilters issues={issues} board={props.board} filters={filters} onChange={setFilters} />}
       </div>
+      {yolo.value?.enabled && <p className="settings-hint" role="status"><strong>YOLO mode is on.</strong> Automatic gates and PR reviews are skipped for this project. <button className="link" onClick={() => pick("settings")}>Manage in Settings</button></p>}
       {views && issues && issues.length > 0 && <Summary issues={issues} projectKey={props.projectKey} version={props.version} />}
       {views && <GoalRows project={props.projectKey} version={props.version} focus={props.goal} onOpenIssue={props.onOpenIssue} />}
       {tab !== "brief" && error && <p className="error">{error}</p>}
       {((views && !issues) || (tab === "settings" && !issues) || (tab === "branches" && !props.board)) && !error && <Loading />}
       {tab === "settings" && issues && props.project && (
-        <ProjectSettings project={props.project} issueCount={issues.length} onChanged={props.onChanged} onMoved={props.onMoved} onCrewSettings={props.onCrewSettings} />
+        <ProjectSettings project={props.project} yolo={yolo} issueCount={issues.length} onChanged={props.onChanged} onMoved={props.onMoved} onCrewSettings={props.onCrewSettings} />
       )}
       {views && issues?.length === 0 && (
         <EmptyState title="No issues yet.">

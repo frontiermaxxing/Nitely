@@ -46,6 +46,8 @@ pub struct Submitted {
     pub review: Option<Review>,
     /// Deliberately disabled by project policy, distinct from an ad-hoc skip.
     pub review_disabled: bool,
+    /// Project YOLO bypass; neither a gate nor review pass.
+    pub yolo: bool,
     /// `agent` when the review is enough, `human` when it waits for approval.
     pub approver: String,
     pub reasons: Vec<String>,
@@ -149,6 +151,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         bail!("{branch} has no changes against {base}; commit your work first");
     }
 
+    let checked_head = git(&worktree, &["rev-parse", "HEAD"])?.trim().to_string();
     let files: Vec<String> = git(&worktree, &["diff", "--name-only", "--no-renames", &format!("{since}...HEAD")])?
         .lines()
         .filter(|l| !l.is_empty())
@@ -156,7 +159,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         .collect();
     pb.approval.check_blocked(&files)?;
     crate::private_terms::check(issue.project.as_deref(), &worktree, &since)?;
-    let gate = playbook::run_gate(db, &root, &worktree, Some(&issue.key), actor)?;
+    let gate = playbook::run_automatic_gate(db, &root, &worktree, &[&issue.key], actor, crate::lanes::Kind::Gate)?;
     let submitted_patch = patch_id_range(&worktree, &since, &gate.commit)?;
     let explained_revision = git(&worktree, &["rev-parse", "--verify", &format!("{}^{{commit}}", gate.commit)])?.trim() == handed_in;
     let mut out = Submitted {
@@ -171,6 +174,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         gate,
         review: None,
         review_disabled: false,
+        yolo: false,
         approver: "human".into(),
         reasons: vec![],
         approval_stands: false,
@@ -182,7 +186,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         state: issue.state.clone(),
         next: String::new(),
     };
-    if !out.gate.passed {
+    if !out.gate.passed && out.gate.skipped.is_none() {
         let failed = out.gate.results.last().map(|r| r.command.as_str()).unwrap_or("");
         out.next = format!("The gate failed at `{failed}`. Fix it, commit, and submit again.");
         return Ok(out);
@@ -191,9 +195,13 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     // A queued gate may outlive a human settings change. Read the authoritative policy again.
     let mut pb = Playbook::load(&root)?;
     pb.review.policy_root = Some(root.clone());
+    pb.review.yolo_guards = crate::project_yolo::ReviewGuard::for_issue(db, &issue.key)?.into_iter().collect();
+    crate::project_yolo::check_gate_authority(db, &[&issue.key], &out.gate)?;
     pb.approval.check_blocked(&files)?;
     out.reasons = pb.human_reasons(&files)?;
-    if !pb.review.enabled {
+    if crate::project_yolo::enabled_for_issue(db, &issue.key)? {
+        out.yolo = true;
+    } else if !pb.review.enabled {
         out.review_disabled = true;
     } else if opts.skip_review {
         out.reasons.push("no review ran".into());
@@ -232,7 +240,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
                 db.log_event(actor, Some(&issue.key), Some(&wt), "review_started", &started)?;
                 match rules.run(&reviewer, &worktree, &since, previous.as_ref()) {
                     Ok(r) => break (choice, r),
-                    Err(e) if e.is::<crate::review::Disabled>() => return Err(e),
+                    Err(e) if e.is::<crate::review::Disabled>() || e.is::<crate::project_yolo::SkipReview>() => return Err(e),
                     Err(e) => match e.downcast::<crate::review::CouldNotRun>() {
                         Ok(out) => {
                             db.log_event(actor, Some(&issue.key), Some(&wt), "review_failed", &format!("Review by {reviewer} could not run ({}); trying another reviewer", out.why))?;
@@ -258,14 +266,15 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
             Ok(())
         })();
         if let Err(e) = reviewed {
-            if e.is::<crate::review::Disabled>() { out.review_disabled = true; } else { return Err(e); }
+            if e.is::<crate::project_yolo::SkipReview>() { out.yolo = true; }
+            else if e.is::<crate::review::Disabled>() { out.review_disabled = true; } else { return Err(e); }
         }
     }
-    if out.review_disabled {
+    if out.review_disabled || out.yolo {
         out.reasons.extend(Playbook::load(&root)?.review.unevaluated_reasons());
     }
     out.approver = if out.reasons.is_empty() { "agent" } else { "human" }.into();
-    let mut verdict = out.review.as_ref().map_or(if out.review_disabled { "disabled" } else { "none" }, |r| r.verdict.as_str()).to_string();
+    let mut verdict = out.review.as_ref().map_or(if out.yolo { "yolo" } else if out.review_disabled { "disabled" } else { "none" }, |r| r.verdict.as_str()).to_string();
     // Findings the person accepted as they are, signed for this very patch, block nothing: the
     // review is recorded as it asked, and goes on as a passing one (land checks the same).
     let accepted_only = match &out.review {
@@ -335,6 +344,18 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
             out.approver = if out.reasons.is_empty() { "agent" } else { "human" }.into();
         }
     }
+    if out.yolo || out.gate.skipped.is_some() {
+        let current_head = git(&worktree, &["rev-parse", "HEAD"])?.trim().to_string();
+        if current_head != checked_head || git(&worktree, &["rev-parse", &out.commit])?.trim() != checked_head {
+            bail!("the branch changed during the YOLO submission; submit again so path and approval checks cover this revision");
+        }
+    }
+    // Settings can change while queued reviewers or commands run. Unchecked evidence is usable
+    // only while the person still authorizes that bypass.
+    crate::project_yolo::check_gate_authority(db, &[&issue.key], &out.gate)?;
+    if out.yolo && !crate::project_yolo::enabled_for_issue(db, &issue.key)? {
+        bail!("YOLO mode was disabled during submit; submit again for normal verification");
+    }
     db.record_review(&out)?;
     let review_id = db.conn.last_insert_rowid();
     if out.review.is_some() {
@@ -388,6 +409,8 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         (Some(r), "human") if out.approval_stands => format!("Review by {} passed; the human's approval of this patch stands", by(r)),
         (Some(r), "human") => format!("Review by {} passed; waits for a human", by(r)),
         (Some(r), _) => format!("Review by {} passed; ready to land", by(r)),
+        (None, "human") if out.yolo => format!("{}; waits for a human under the remaining approval rules", crate::project_yolo::NOTE),
+        (None, _) if out.yolo => format!("{}; unverified and ready to land", crate::project_yolo::NOTE),
         (None, "human") if out.review_disabled => format!("{}; waits for a human under the remaining approval rules", crate::review::DISABLED_NOTE),
         (None, _) if out.review_disabled => format!("{}; gate passed and ready to land", crate::review::DISABLED_NOTE),
         (None, _) => "Submitted without a review; waits for a human".to_string(),
@@ -422,6 +445,8 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         ("Needs You", "It waits for the human's approval in the Nitely inbox, and Nitely lands it as soon as they approve it; you do not call land. Nitely already asked them, so do not `ask` for this approval yourself. Pick up other work meanwhile.")
     } else if out.approver == "human" {
         ("Needs You", "It waits for the human's approval in the Nitely inbox. Nitely already asked them, so do not `ask` for this approval yourself. Pick up other work meanwhile; once it is Approved, call land.")
+    } else if out.yolo {
+        ("In Review", "YOLO mode: automatic gate and PR review skipped. This revision is unverified. Call land while YOLO remains enabled.")
     } else if out.review_disabled {
         ("In Review", "Review disabled for this project. The gate passed and no human approval is needed. Call land to put it on the integration branch.")
     } else {
@@ -514,7 +539,7 @@ fn shadow_of(
     previous: Option<&PreviousRound>,
 ) -> Result<Option<crate::review_batch::Shadow>> {
     if let Err(e) = pb.review.require_enabled() {
-        if e.is::<crate::review::Disabled>() { return Ok(None); }
+        if e.is::<crate::review::Disabled>() || e.is::<crate::project_yolo::SkipReview>() { return Ok(None); }
         return Err(e);
     }
     let lines = crate::review_batch::changed_lines(worktree, since)?;
@@ -818,7 +843,7 @@ pub fn describe(issue: &IssueRecord, s: &Submitted, land_by: crate::playbook::La
         "**Approval:** a human approved this exact patch in Nitely, and this review raised nothing new, so it stands.".to_string()
     } else if s.approver == "human" {
         "**Approval:** waits for a human. Approve it in Nitely's inbox.".to_string()
-    } else if s.review_disabled {
+    } else if s.review_disabled || s.yolo {
         "**Approval:** no human approval is required under this repo's remaining rules.".to_string()
     } else {
         "**Approval:** the review is enough under this repo's playbook.".to_string()
@@ -849,18 +874,23 @@ pub fn describe(issue: &IssueRecord, s: &Submitted, land_by: crate::playbook::La
                 format!("- [P{}] {}{carried}", f.priority, f.text)
             }));
         }
+        None if s.yolo => lines.push(format!("**Review:** {}. This revision is unverified.", crate::project_yolo::NOTE)),
         None if s.review_disabled => lines.push(format!("**Review:** {}.", crate::review::DISABLED_NOTE)),
         None => lines.push("**Review:** none ran.".into()),
     }
     lines.push(String::new());
     let gate: Vec<String> = s.gate.results.iter().map(|r| format!("`{}`", r.command)).collect();
-    lines.push(format!("**Gate** passed at `{}`: {}.", s.commit, gate.join(", ")));
+    if let Some(why) = &s.gate.skipped {
+        lines.push(format!("**Gate** skipped at `{}`: {why}. No passing evidence.", s.commit));
+    } else {
+        lines.push(format!("**Gate** {} at `{}`: {}.", if s.gate.passed { "passed" } else { "failed" }, s.commit, gate.join(", ")));
+    }
     lines.push(format!("{} files changed against `{}`.", s.files, s.base));
     lines.push(String::new());
     lines.push(format!(
         "`nitely review patch={} verdict={} approver={} reviewer={}`",
         s.patch_id,
-        s.review.as_ref().map_or(if s.review_disabled { "disabled" } else { "none" }, |r| r.verdict.as_str()),
+        s.review.as_ref().map_or(if s.yolo { "yolo" } else if s.review_disabled { "disabled" } else { "none" }, |r| r.verdict.as_str()),
         s.approver,
         s.review.as_ref().map_or("none", |r| r.reviewer.as_str())
     ));
@@ -959,6 +989,7 @@ impl Db {
     pub fn record_review(&self, s: &Submitted) -> Result<()> {
         let (reviewer, verdict, findings, flagged, note) = match &s.review {
             Some(r) => (r.reviewer.as_str(), r.verdict.as_str(), to_json(&r.findings), to_json(&r.flagged), r.note.as_str()),
+            None if s.yolo => ("", "yolo", "[]".to_string(), "[]".to_string(), crate::project_yolo::NOTE),
             None if s.review_disabled => ("", "disabled", "[]".to_string(), "[]".to_string(), crate::review::DISABLED_NOTE),
             None => ("", "none", "[]".to_string(), "[]".to_string(), ""),
         };
@@ -1229,6 +1260,33 @@ reason = "money logic"
         fn drop(&mut self) {
             std::fs::remove_dir_all(&self.base).ok();
         }
+    }
+
+    #[test]
+    fn yolo_skips_automatic_checks_but_preserves_manual_checks_and_restored_policy() {
+        let mut f = fixture();
+        let policy = "[worktree]\ndir = \"../wt/{key}\"\n[gate]\ncommands = [\"exit 37\"]\n[review]\nreviewer = { \"*\" = \"missing\" }\ncommands = { missing = [\"nitely-test-do-not-launch\"] }\n";
+        std::fs::write(f.repo.join(playbook::PLAYBOOK_PATH), policy).unwrap();
+        sh(&f.repo, &["commit", "-qam", "checks must not launch"]);
+        f.db.set_project_yolo("NIT", true, 0, &Actor::Human).unwrap();
+        let (issue, wt) = f.committed("Unchecked feature", "feature.txt");
+        let s = f.submit(&wt, true).unwrap();
+        assert!(s.yolo && !s.gate.passed && s.gate.skipped.is_some() && s.review.is_none());
+        assert_eq!(s.state, "In Review");
+        assert_eq!(f.db.reviews(&issue.key).unwrap()[0].verdict, "yolo");
+        assert!(!describe(&issue, &s, Default::default()).contains("**Gate** passed"));
+        assert!(!playbook::run_gate(&f.db, &f.repo, &wt, Some(&issue.key), &f.actor).unwrap().passed, "manual checks still execute");
+        let pb = Playbook::load(&f.repo).unwrap();
+        f.db.set_project_yolo("NIT", false, 1, &Actor::Human).unwrap();
+        assert!(crate::land::check_approval(&f.db, &pb, &issue.key, &wt, "main", &s.branch).unwrap_err().to_string().contains("unchecked revision"));
+        f.db.set_project_yolo("NIT", true, 2, &Actor::Human).unwrap();
+        let mut protected = pb.clone();
+        protected.approval.blocked_paths.push(playbook::PathRule { pattern: "feature".into(), reason: "Protected".into() });
+        assert!(crate::land::check_approval(&f.db, &protected, &issue.key, &wt, "main", &s.branch).is_err());
+        let landed = crate::land::land(&mut f.db, &f.config, &crate::land::LandOptions { dir: &wt.to_string_lossy(), issue_key: &issue.key, push: false, keep: true, break_lock: false }, &f.actor).unwrap();
+        assert!(landed.landed, "{landed:?}");
+        assert!(landed.gate.as_ref().is_some_and(|g| !g.passed && g.skipped.is_some()));
+        assert!(f.db.issue(&issue.key).unwrap().unwrap().evidence.contains(crate::project_yolo::NOTE));
     }
 
     #[test]

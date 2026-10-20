@@ -1085,6 +1085,7 @@ function projectSpend(args: Record<string, unknown>): ProjectSpend {
 
 /** The mirror in the preview: Nitely's repo is on GitHub; Orbit's Bitbucket repo has no issue tracker. */
 const mirrorOn = new Map<string, string | null>([["NIT", "open"]]);
+const projectYolo = new Map<string, { project: string; enabled: boolean; revision: number }>();
 const privateIssues = new Set<string>(["NIT-20"]);
 
 function mirrorPreview(project: string): MirrorPreview {
@@ -1291,7 +1292,7 @@ const HAPPENING: Record<string, Happening["kind"]> = {
 function flowIssue(issue: IssueRecord, now: number): FlowIssue {
   const spec = ISSUES.find((s) => s.key === issue.key)!;
   const timeline = world.timelines.get(issue.key) ?? [];
-  const gate = [...timeline].reverse().find((t) => t.kind === "gate_passed" || t.kind === "gate_failed");
+  const gate = [...timeline].reverse().find((t) => t.kind === "gate_passed" || t.kind === "gate_failed" || t.kind === "gate_skipped");
   const s = spec.live ? session(spec, spec.live) : null;
   const last = Math.max(timeline[timeline.length - 1]?.ts ?? 0, s?.last_seen_at ?? 0);
   const track = issue.track!;
@@ -1303,7 +1304,7 @@ function flowIssue(issue: IssueRecord, now: number): FlowIssue {
     session: s,
     pr: world.prs.get(issue.key)?.[0] ?? null,
     review: world.reviews.get(issue.key)?.[0] ?? null,
-    gate: gate ? { ts: gate.ts, passed: gate.kind === "gate_passed", summary: gate.summary } : null,
+    gate: gate ? { ts: gate.ts, passed: gate.kind === "gate_passed", skipped: gate.kind === "gate_skipped" ? gate.summary ?? "YOLO mode" : null, summary: gate.summary } : null,
     worktree: spec.branch ? worktreeOf(spec) : null,
     last_activity: last,
     quiet: open && atAgent && !track.stuck && last > 0 && now - last > QUIET_SECS,
@@ -2168,6 +2169,18 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return goals(args);
       case "project_focus":
         return projectFocus(String(args.project).toUpperCase());
+      case "project_yolo": {
+        const project = String(args.project).toUpperCase();
+        return projectYolo.get(project) ?? { project, enabled: false, revision: 0 };
+      }
+      case "set_project_yolo": {
+        const project = String(args.project).toUpperCase();
+        const before = projectYolo.get(project) ?? { project, enabled: false, revision: 0 };
+        if (args.expectedRevision !== before.revision) throw new Error("Project mode changed. Reload and try again.");
+        const next = { project, enabled: Boolean(args.enabled), revision: before.revision + 1 };
+        projectYolo.set(project, next);
+        return next;
+      }
       case "set_project_focus":
         return setProjectFocus(args);
       case "goal_report":

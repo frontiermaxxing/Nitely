@@ -3,6 +3,7 @@ import type { ReviewRecord, TimelineEntry } from "../types";
 /** One gate run: the playbook's gate commands, passed or failed. */
 export interface GateRun {
   ok: boolean;
+  skipped?: boolean;
   ts: number;
   summary: string | null;
 }
@@ -25,6 +26,7 @@ export interface Round {
   reviewer: string | null;
   /** The review record the closing submit wrote, with the findings. */
   review: ReviewRecord | null;
+  reviewSkipped?: "yolo" | "disabled";
   /** The submit could not push the branch, so nobody can see this round. */
   pushFailed: boolean;
   /** The submit handed the change to the human for approval. */
@@ -89,9 +91,11 @@ export function journeyOf(timeline: TimelineEntry[] = [], reviews: ReviewRecord[
     switch (e.kind) {
       case "gate_passed":
       case "gate_failed":
+      case "gate_skipped":
         {
           const r = openRound(e.ts);
-          r.gates.push({ ok: e.kind === "gate_passed", ts: e.ts, summary: e.summary });
+          r.gates.push({ ok: e.kind === "gate_passed", ...(e.kind === "gate_skipped" ? { skipped: true } : {}), ts: e.ts, summary: e.summary });
+          if (e.kind === "gate_skipped") commitOf.delete(r);
           const commit = e.kind === "gate_passed" ? gateCommitOf(e.summary) : null;
           if (commit) commitOf.set(r, commit);
         }
@@ -112,8 +116,10 @@ export function journeyOf(timeline: TimelineEntry[] = [], reviews: ReviewRecord[
       case "submit": {
         const s = e.summary ?? "";
         const r = openRound(e.ts);
-        r.outcome = s.startsWith("Review disabled for this project") ? "unreviewed" : s.includes("requested changes") ? "changes" : s.includes("passed") ? "passed" : "unreviewed";
-        r.reviewer = reviewerOf(s) ?? r.reviewer;
+        const skipped = s.startsWith("Review disabled for this project") || s.startsWith("YOLO mode:");
+        if (skipped) r.reviewSkipped = s.startsWith("YOLO mode:") ? "yolo" : "disabled";
+        r.outcome = skipped ? "unreviewed" : s.includes("requested changes") ? "changes" : s.includes("passed") ? "passed" : "unreviewed";
+        r.reviewer = skipped ? null : reviewerOf(s) ?? r.reviewer;
         r.pushFailed = s.includes("push failed");
         r.waitsForHuman = s.includes("waits for a human");
         r.end = e.ts;
@@ -145,6 +151,7 @@ export function journeyOf(timeline: TimelineEntry[] = [], reviews: ReviewRecord[
         outcome: outcomeOf(rec),
         reviewer: rec.reviewer || null,
         review: rec,
+        ...(rec.verdict === "yolo" || rec.verdict === "disabled" ? { reviewSkipped: rec.verdict } : {}),
         pushFailed: false,
         waitsForHuman: rec.approver === "human",
       }),
@@ -159,7 +166,7 @@ export function journeyOf(timeline: TimelineEntry[] = [], reviews: ReviewRecord[
   const used = new Set<ReviewRecord>();
   let floor = -Infinity;
   const take = (r: Round, from: number, upTo: number, sameCommitOnly = false): ReviewRecord | null => {
-    const fits = records.filter((rec) => !used.has(rec) && rec.ts >= Math.max(floor, from) && rec.ts <= upTo);
+    const fits = records.filter((rec) => !used.has(rec) && rec.ts >= Math.max(floor, from) && rec.ts <= upTo && (!r.reviewSkipped || rec.verdict === r.reviewSkipped));
     const commit = commitOf.get(r);
     const same = fits.filter((x) => commit && x.commit_sha === commit).pop();
     const rec = same ?? (sameCommitOnly ? null : fits.pop()) ?? null;
@@ -171,6 +178,11 @@ export function journeyOf(timeline: TimelineEntry[] = [], reviews: ReviewRecord[
   };
   for (const r of rounds) {
     if (r.end !== null) r.review = take(r, -Infinity, r.end);
+    if (r.review?.verdict === "yolo" || r.review?.verdict === "disabled") {
+      r.outcome = "unreviewed";
+      r.reviewer = null;
+      r.reviewSkipped = r.review.verdict;
+    }
   }
 
   // A review is running, or its submit stopped after recording it: a record written since the
@@ -184,6 +196,10 @@ export function journeyOf(timeline: TimelineEntry[] = [], reviews: ReviewRecord[
       last.review = rec;
       last.outcome = outcomeOf(rec);
       last.reviewer = rec.reviewer || last.reviewer;
+      if (rec.verdict === "yolo" || rec.verdict === "disabled") {
+        last.reviewSkipped = rec.verdict;
+        last.reviewer = null;
+      }
       last.waitsForHuman = rec.verdict !== "changes" && rec.approver === "human";
       last.end = rec.ts;
     }

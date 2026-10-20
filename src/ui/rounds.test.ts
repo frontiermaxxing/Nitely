@@ -29,6 +29,21 @@ const rec = (ts: number, commit: string, verdict: ReviewRecord["verdict"], appro
   ts,
 });
 
+test("YOLO timeline skips never become passes or reuse an older real review", () => {
+  const { rounds } = journeyOf([
+    ev(10, "gate_failed", "Gate failed"),
+    ev(20, "gate_skipped", "YOLO mode: automatic gate skipped"),
+    ev(21, "submit", "YOLO mode: automatic gate and PR review skipped; earlier checks passed"),
+  ], [rec(9, "old", "pass")]);
+  assert.equal(rounds[0].outcome, "unreviewed");
+  assert.equal(rounds[0].reviewSkipped, "yolo");
+  assert.equal(rounds[0].review, null);
+  assert.equal(rounds[0].reviewer, null);
+  assert.deepEqual(rounds[0].gates.map((g) => [g.ok, !!g.skipped]), [[false, false], [false, true]]);
+  const onlyRecord = journeyOf([], [rec(30, "new", "yolo")]).rounds[0];
+  assert.equal(onlyRecord.outcome, "unreviewed");
+  assert.equal(onlyRecord.reviewSkipped, "yolo");
+});
 test("NIT-41: a submit that stopped after recording its review shows that review", () => {
   const timeline = [ev(10, "gate_passed", "Gate passed at aaa1111"), ev(20, "review_started", "Review by codex started")];
   const { rounds } = journeyOf(timeline, [rec(80, "aaa1111", "changes")]);

@@ -57,13 +57,13 @@ export function IssueJourney(props: { detail: IssueDetail; now: number }) {
             <span className="journey-label">Round {r.n}</span>
             <span className="journey-gates">
               {r.gates.map((g, k) => (
-                <ResultMark key={k} result={g.ok ? "pass" : "fail"} title={g.summary ?? (g.ok ? "Gate passed" : "Gate failed")} />
+                g.skipped ? <span key={k} className="muted" title={g.summary ?? "Gate skipped"}>Skipped</span> : <ResultMark key={k} result={g.ok ? "pass" : "fail"} title={g.summary ?? (g.ok ? "Gate passed" : "Gate failed")} />
               ))}
               {r.gates.length === 0 && <span className="journey-none" />}
             </span>
             <span className="journey-review">
               {r.outcome !== "open" && (
-                <span className={`journey-verdict journey-verdict-${r.outcome}`}>{r.review?.verdict === "disabled" ? "disabled" : OUTCOME[r.outcome]}</span>
+                <span className={`journey-verdict journey-verdict-${r.outcome}`}>{r.reviewSkipped === "yolo" ? "skipped (YOLO)" : r.reviewSkipped === "disabled" ? "disabled" : OUTCOME[r.outcome]}</span>
               )}
               {automated.ran && <FindingDots findings={findings} />}
               {r.pushFailed && <span className="journey-stuck">push failed</span>}
@@ -222,11 +222,15 @@ export function WhoHadIt(props: { detail: IssueDetail; now: number }) {
         // Runs back to back are one cell: "✕ ✓ Pass" reads as failed, then fixed.
         const ok = e.kind === "gate_passed";
         const prev = cells[cells.length - 1];
-        const marks = prev?.lane === "gate" ? `${prev.label.replace(/ (Pass|Failed)$/, "")} ` : "";
+        const marks = prev?.lane === "gate" && prev.tone !== "step" ? `${prev.label.replace(/ (Pass|Failed)$/, "")} ` : "";
         if (prev?.lane === "gate") cells.pop();
         cells.push({ lane: "gate", label: `${marks}${ok ? "✓ Pass" : "✕ Failed"}`, sub: at, tone: ok ? "ok" : "fail" });
         break;
       }
+      case "gate_skipped":
+        if (cells[cells.length - 1]?.lane === "gate") cells.pop();
+        cells.push({ lane: "gate", label: "Skipped (YOLO)", sub: at, tone: "step" });
+        break;
       case "submit": {
         submits += 1;
         cells.push({ lane: authorLane, label: submits === 1 ? "Submitted" : "Fixed", sub: at, tone: "step" });
@@ -278,7 +282,7 @@ export function WhoHadIt(props: { detail: IssueDetail; now: number }) {
       <h2>
         Who had it{" "}
         <span className="head-note">
-          {[author && `${VENDOR_LABEL[vendorOf(author)]} wrote it`, shown.some((c) => c.lane === "gate") && "the gate checked it", reviewerNote && `${name(reviewerNote)} reviewed it`]
+          {[author && `${VENDOR_LABEL[vendorOf(author)]} wrote it`, shown.some((c) => c.lane === "gate" && c.tone !== "step") && "the gate checked it", reviewerNote && `${name(reviewerNote)} reviewed it`]
             .filter(Boolean)
             .join(", ")}
           . Read left to right.

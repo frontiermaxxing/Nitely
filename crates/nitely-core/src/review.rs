@@ -21,6 +21,8 @@ pub struct ReviewRules {
     /// Authoritative checkout to reread before new launches; never supplied by a playbook.
     #[serde(skip)]
     pub policy_root: Option<std::path::PathBuf>,
+    #[serde(skip)]
+    pub yolo_guards: Vec<crate::project_yolo::ReviewGuard>,
     /// Who reviews whose branches: the branch's vendor to the reviewer. `*` covers the rest.
     pub reviewer: BTreeMap<String, String>,
     /// How to run each reviewer. The prompt goes on stdin; an argument `{output}` is replaced with a
@@ -81,6 +83,7 @@ impl std::error::Error for Disabled {}
 
 impl ReviewRules {
     pub fn require_enabled(&self) -> Result<()> {
+        for guard in &self.yolo_guards { guard.require_review()?; }
         let enabled = match &self.policy_root {
             Some(root) => crate::playbook::Playbook::load(root)?.review.enabled,
             None => self.enabled,
@@ -117,6 +120,7 @@ impl Default for ReviewRules {
         ReviewRules {
             enabled: true,
             policy_root: None,
+            yolo_guards: vec![],
             reviewer: pairs(&[("claude", "codex"), ("codex", "claude"), ("*", "claude")]),
             commands: BTreeMap::from([
                 (

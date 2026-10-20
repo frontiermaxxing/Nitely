@@ -6,6 +6,7 @@ import type { Goal, IssueDetail, IssueRecord, IssueSpend, LinkedIssue } from "./
 import { REVIEW_LEVELS } from "./types";
 import { agentLabel, agentTitle, ago, openExternal, PRIORITY } from "./util";
 import { IssueJourney, WhoHadIt } from "./IssueJourney";
+import { latestGateEvent } from "./approvalEvidence";
 import { issueDecision, type Move } from "./decisions";
 import { batchEvents, issueBatchStation, type BatchEvent } from "./batches";
 import { useWaits } from "./WaitingStrip";
@@ -33,6 +34,7 @@ const KIND_LABEL: Record<string, string> = {
   worktree: "started",
   gate_passed: "gate passed",
   gate_failed: "gate failed",
+  gate_skipped: "gate skipped",
   review_started: "review",
   review_failed: "review failed",
   submit: "submitted",
@@ -256,7 +258,7 @@ export function IssuePanel(props: {
   const waitedSince = detail ? [...detail.timeline].reverse().find((e) => e.kind === "submit" || (e.kind === "issue_moved" && /→ Needs You/.test(e.summary ?? ""))) : undefined;
   const review = detail?.reviews[0];
   const pr = detail?.prs[0];
-  const lastGate = detail ? [...detail.timeline].reverse().find((e) => e.kind === "gate_passed" || e.kind === "gate_failed") : undefined;
+  const lastGate = detail ? latestGateEvent(detail.timeline) : undefined;
   const native = issue?.origin === "nitely";
   const goal = issue?.goal != null ? goals?.find((g) => g.id === issue.goal) : undefined;
   // Keys act only while the focus is in this sheet: a approve, t back to Todo, m then t, d or c.
@@ -452,8 +454,8 @@ export function IssuePanel(props: {
               {lastGate && (
                 <>
                   <dt>Gate</dt>
-                  <dd className={lastGate.kind === "gate_failed" ? "error" : "live-ink"} title={lastGate.summary ?? undefined}>
-                    {lastGate.kind === "gate_failed" ? "failed" : "passed"} {ago(props.now, lastGate.ts)}
+                  <dd className={lastGate.kind === "gate_skipped" ? "muted" : lastGate.kind === "gate_failed" ? "error" : "live-ink"} title={lastGate.summary ?? undefined}>
+                    {lastGate.kind === "gate_skipped" ? "skipped (YOLO)" : lastGate.kind === "gate_failed" ? "failed" : "passed"} {ago(props.now, lastGate.ts)}
                   </dd>
                 </>
               )}
