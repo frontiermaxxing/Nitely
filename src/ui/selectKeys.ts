@@ -2,11 +2,17 @@
 // it (selectKeys.test.ts): arrows move over the options a person may pick, Enter or Space picks, Esc
 // closes, and typing jumps to the option whose label starts with what was typed.
 
+import type { ReactNode } from "react";
+
 export interface SelectOption<T extends string = string> {
   value: T;
   label: string;
+  /** A mark before the label, on the trigger too (an agent's vendor mark). */
+  icon?: ReactNode;
   /** A second, quieter line under the label. */
   detail?: string;
+  /** "warn" draws the second line in amber: picking it makes a change wait for you. */
+  tone?: "warn";
   /** Why it cannot be picked ("Not installed on this machine"); set, the option is disabled. */
   disabled?: string;
 }

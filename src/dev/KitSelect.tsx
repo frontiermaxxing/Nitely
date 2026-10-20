@@ -1,13 +1,14 @@
 // The kit page's Select row (NIT-425): a default with its mark, a second line, a disabled option
-// with its reason, a value set over the default, and a disabled trigger.
+// with its reason, vendor marks, an amber second line, a value set over the default, and a disabled
+// trigger.
 
 import { useState } from "react";
-import { Select, type SelectOption } from "../ui";
+import { AgentMark, Select, type SelectOption } from "../ui";
 
 const REVIEWERS: SelectOption[] = [
-  { value: "claude", label: "Claude", detail: "Reviews changes made by Codex and Cursor" },
-  { value: "codex", label: "Codex", detail: "Reviews changes made by Claude" },
-  { value: "cursor", label: "Cursor", disabled: "Not installed on this machine" },
+  { value: "claude", label: "Claude", icon: <AgentMark vendor="claude" size={16} /> },
+  { value: "codex", label: "Codex", icon: <AgentMark vendor="codex" size={16} />, detail: "Same vendor as the author: waits for you", tone: "warn" },
+  { value: "cursor", label: "Cursor", icon: <AgentMark vendor="cursor" size={16} />, disabled: "Not installed on this machine" },
   { value: "none", label: "No review", detail: "Changes land on the gate alone" },
 ];
 

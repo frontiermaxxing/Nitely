@@ -82,9 +82,10 @@ export function Select<T extends string>(props: {
         onClick={() => setMenu(menu.open ? CLOSED : openAt(options, shown))}
         onKeyDown={key}
       >
+        {current?.icon && <span className="select-icon">{current.icon}</span>}
         <span className={`select-value${current ? "" : " select-placeholder"}`}>{current?.label ?? props.placeholder ?? "Choose…"}</span>
         <svg className="select-chevron" viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
-          <path d="M3 4.5 6 7.5 9 4.5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+          <path d="M3 4.5 6 7.5 9 4.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       </button>
       {menu.open && (
@@ -106,19 +107,22 @@ export function Select<T extends string>(props: {
                 onClick={() => !o.disabled && pick(i)}
                 title={o.disabled}
               >
-                <span className="select-check" aria-hidden="true">
-                  {selected && (
-                    <svg viewBox="0 0 12 12" width="12" height="12">
-                      <path d="M2.5 6.2 5 8.6 9.5 3.6" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                    </svg>
-                  )}
-                </span>
+                {o.icon && <span className="select-icon">{o.icon}</span>}
                 <span className="select-text">
                   <span className="select-label">
                     {o.label}
                     {isDefault && <span className="select-default">default</span>}
                   </span>
-                  {(o.disabled || o.detail) && <span className="select-detail">{o.disabled ?? o.detail}</span>}
+                  {(o.disabled || o.detail) && (
+                    <span className={`select-detail${o.tone === "warn" && !o.disabled ? " is-warn" : ""}`}>{o.disabled ?? o.detail}</span>
+                  )}
+                </span>
+                <span className="select-check" aria-hidden="true">
+                  {selected && (
+                    <svg viewBox="0 0 16 16" width="14" height="14">
+                      <path d="M3.5 8.2 6.5 11 12.5 5" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  )}
                 </span>
               </li>
             );

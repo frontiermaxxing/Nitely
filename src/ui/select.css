@@ -7,38 +7,44 @@
   display: flex; align-items: center; gap: var(--space-2); width: 100%; min-width: 140px; height: 32px;
   padding: 0 10px 0 var(--space-3); border: 1px solid var(--line-strong); border-radius: var(--radius);
   background: var(--field, var(--surface)); color: var(--fg); font: inherit; font-size: var(--text-md);
-  text-align: left; cursor: pointer; transition: border-color var(--dur-fast) var(--ease);
+  text-align: left; cursor: pointer; transition: border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
 }
 .select-trigger:hover:not(:disabled) { border-color: var(--fg-3); }
-.select-trigger:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
-.select-trigger[aria-expanded="true"] { border-color: var(--fg-3); }
-.select-trigger:disabled { color: var(--fg-3); cursor: default; background: var(--sunken); }
+/* Focused or open: a darker border and a soft ring, as the kit draws it. */
+.select-trigger:focus-visible, .select-trigger[aria-expanded="true"] {
+  outline: none; border-color: var(--fg-3); box-shadow: 0 0 0 3px var(--hover);
+}
+.select-trigger:focus-visible { box-shadow: 0 0 0 3px var(--hover), 0 0 0 4px var(--focus); }
+.select-trigger:disabled { color: var(--fg-3); cursor: default; background: transparent; border-color: var(--line); }
+.select-trigger:disabled .select-icon { opacity: 0.5; }
 .select-value { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .select-placeholder { color: var(--fg-3); }
 .select-chevron { flex: none; color: var(--fg-3); transition: transform var(--dur-fast) var(--ease); }
+.select-trigger:focus-visible .select-chevron, .select-trigger[aria-expanded="true"] .select-chevron { color: var(--fg-2); }
 .select-trigger[aria-expanded="true"] .select-chevron { transform: rotate(180deg); }
+.select-icon { flex: none; display: flex; align-items: center; }
 
 .select-menu {
-  position: absolute; z-index: 50; top: calc(100% + 4px); left: 0; min-width: max(100%, 240px); max-width: min(420px, 90vw);
+  position: absolute; z-index: 50; top: calc(100% + 4px); left: 0; min-width: max(100%, 270px); max-width: min(420px, 90vw);
   max-height: 320px; overflow-y: auto; margin: 0; padding: var(--space-1); list-style: none;
-  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--surface); border: 1px solid var(--line-strong); border-radius: 9px;
   box-shadow: var(--shadow-float);
 }
 
 .select-option {
-  display: flex; align-items: flex-start; gap: var(--space-2); padding: 6px var(--space-2);
-  border-radius: var(--radius-sm); color: var(--fg); font-size: var(--text-md); cursor: pointer;
+  display: flex; align-items: center; gap: 9px; min-height: 32px; padding: var(--space-1) var(--space-2);
+  border-radius: 6px; color: var(--fg); font-size: var(--text-md); cursor: pointer; box-sizing: border-box;
 }
+.select-option:has(.select-detail) { min-height: 44px; }
 .select-option.is-active { background: var(--hover); }
 .select-option.is-disabled { color: var(--fg-3); cursor: default; }
-.select-check { flex: none; width: 12px; height: 18px; display: flex; align-items: center; color: var(--fg); }
-.select-text { display: grid; gap: 1px; min-width: 0; }
-.select-label { display: flex; align-items: baseline; gap: var(--space-2); white-space: nowrap; }
-.select-detail { color: var(--fg-3); font-size: var(--text-sm); overflow-wrap: anywhere; }
-.select-default {
-  padding: 0 5px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm);
-  color: var(--fg-3); font-size: var(--text-xs); line-height: 15px;
-}
+.select-option.is-disabled .select-icon { opacity: 0.45; filter: grayscale(1); }
+.select-text { flex: 1; display: grid; gap: 2px; min-width: 0; }
+.select-label { display: flex; align-items: baseline; gap: 7px; white-space: nowrap; }
+.select-detail { color: var(--fg-3); font-size: 11.5px; overflow-wrap: anywhere; }
+.select-detail.is-warn { color: var(--attention-ink); }
+.select-default { color: var(--fg-3); font-size: 10.5px; }
+.select-check { flex: none; width: 14px; height: 14px; display: flex; color: var(--fg); }
 
 @media (prefers-reduced-motion: reduce) {
   .select-trigger, .select-chevron { transition: none; }
