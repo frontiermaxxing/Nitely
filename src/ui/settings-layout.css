@@ -1,6 +1,6 @@
 /* ----- Settings layout: sections with a heading and a hairline, rows of label | control | source
    (src/ui/SettingsRow.tsx, docs/visualization.md "Settings layout") ----- */
-.setting-group { container-type: inline-size; padding-top: 36px; min-width: 0; }
+.setting-group { container-type: inline-size; padding-top: 28px; min-width: 0; }
 .setting-group:first-child { padding-top: 0; }
 .setting-group-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
 .setting-group-head h2 { margin: 0; font-size: 17px; font-weight: var(--weight-strong); letter-spacing: -0.005em; }
