@@ -1344,29 +1344,44 @@ reason = "money logic"
 
     #[test]
     fn disabled_review_keeps_gate_and_landing_without_synthetic_review_or_fallback() {
+        // All modes operate on one real change. Each submit still runs the gate and checks
+        // authoritative policy; rebuilding the repository adds no coverage to this matrix.
+        let mut f = fixture();
+        let (issue, wt) = f.committed("Unreviewed change", "feature.txt");
+        let mut branch = String::new();
         for mode in ["off", "small", "all", "shadow"] {
-            let mut f = fixture();
             let policy = format!("[worktree]\ndir = \"../wt/{{key}}\"\n[gate]\ncommands = [\"exit 0\"]\n[review]\nenabled = false\nbatch = \"{mode}\"\nreviewer = {{ \"*\" = \"missing\" }}\ncommands = {{ missing = [\"nitely-test-do-not-launch\"] }}\n");
             std::fs::write(f.repo.join(playbook::PLAYBOOK_PATH), &policy).unwrap();
             sh(&f.repo, &["commit", "-qam", "disable review"]);
-            let (issue, wt) = f.committed("Unreviewed change", "feature.txt");
-            let s = submit(&mut f.db, &f.config, &SubmitOptions { dir: &wt.to_string_lossy(), issue_key: None, skip_review: false, local_only: false, batch: true, solution: None, solution_commit: None, solution_patch_id: None }, &f.actor).unwrap();
-            assert!(s.gate.passed && s.pushed && s.review_disabled && s.review.is_none() && s.shadow.is_none(), "{s:?}");
+            let s = submit(&mut f.db, &f.config, &SubmitOptions { dir: &wt.to_string_lossy(), issue_key: None, skip_review: false, local_only: mode != "shadow", batch: true, solution: None, solution_commit: None, solution_patch_id: None }, &f.actor).unwrap();
+            assert!(s.gate.passed && s.review_disabled && s.review.is_none() && s.shadow.is_none(), "{s:?}");
             assert_eq!((s.approver.as_str(), s.state.as_str()), ("agent", "In Review"));
             assert!(s.reasons.is_empty());
+            assert_eq!(s.pushed, mode == "shadow", "one mode exercises the remote boundary");
             let r = &f.db.reviews(&issue.key).unwrap()[0];
             assert_eq!((r.verdict.as_str(), r.note.as_str(), r.reviewer.as_str()), ("disabled", crate::review::DISABLED_NOTE, ""));
             assert!(describe(&issue, &s, Default::default()).contains(crate::review::DISABLED_NOTE));
             assert_eq!(f.db.conn.query_row("SELECT count(*) FROM review_queue", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
-            let pb = Playbook::load(&f.repo).unwrap();
-            assert!(crate::land::check_approval(&f.db, &pb, &issue.key, &wt, "main", &s.branch).unwrap().contains(crate::review::DISABLED_NOTE));
-            let mut enabled = pb.clone();
-            enabled.review.enabled = true;
-            assert!(crate::land::check_approval(&f.db, &enabled, &issue.key, &wt, "main", &s.branch).unwrap_err().to_string().contains("enabled again"));
-            std::fs::write(wt.join("feature.txt"), "changed").unwrap();
-            sh(&wt, &["commit", "-qam", "change after submit"]);
-            assert!(crate::land::check_approval(&f.db, &pb, &issue.key, &wt, "main", &s.branch).unwrap_err().to_string().contains("branch changed"));
+            assert_eq!(s.gate.results.len(), 1, "the configured gate actually ran for {mode}");
+            branch = s.branch;
         }
+        // Approval/revision enforcement depends on the recorded disabled verdict, not the
+        // batching mode. Exercise it once, followed by a complete real land.
+        let pb = Playbook::load(&f.repo).unwrap();
+        assert!(crate::land::check_approval(&f.db, &pb, &issue.key, &wt, "main", &branch).unwrap().contains(crate::review::DISABLED_NOTE));
+        let mut enabled = pb.clone();
+        enabled.review.enabled = true;
+        assert!(crate::land::check_approval(&f.db, &enabled, &issue.key, &wt, "main", &branch).unwrap_err().to_string().contains("enabled again"));
+        std::fs::write(wt.join("feature.txt"), "changed").unwrap();
+        sh(&wt, &["commit", "-qam", "change after submit"]);
+        assert!(crate::land::check_approval(&f.db, &pb, &issue.key, &wt, "main", &branch).unwrap_err().to_string().contains("branch changed"));
+        sh(&wt, &["reset", "--hard", "HEAD~1"]);
+        let landed = crate::land::land(&mut f.db, &f.config, &crate::land::LandOptions {
+            dir: &wt.to_string_lossy(), issue_key: &issue.key, push: false, keep: true, break_lock: false,
+        }, &f.actor).unwrap();
+        assert!(landed.landed, "{landed:?}");
+        assert_eq!(f.db.issue(&issue.key).unwrap().unwrap().state, "Done");
+        assert!(f.repo.join("feature.txt").exists());
     }
 
     #[test]

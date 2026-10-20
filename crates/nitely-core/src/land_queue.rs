@@ -843,8 +843,7 @@ batch = "waiting"
 "#;
 
     impl Fixture {
-        /// Files an issue, commits `files` on its branch, and submits it (gate and review pass).
-        fn submitted(&mut self, title: &str, files: &[(&str, &str)]) -> (String, PathBuf) {
+        fn committed(&mut self, title: &str, files: &[(&str, &str)]) -> (String, PathBuf) {
             let new = NewIssue {
                 project: "NIT".into(),
                 title: title.into(),
@@ -863,11 +862,32 @@ batch = "waiting"
             }
             sh(&wt, &["add", "."]);
             sh(&wt, &["commit", "-q", "-m", title]);
+            (issue.key, wt)
+        }
+
+        /// Files an issue, commits `files` on its branch, and submits it (gate and review pass).
+        fn submitted(&mut self, title: &str, files: &[(&str, &str)]) -> (String, PathBuf) {
+            let (key, wt) = self.committed(title, files);
             let dir = wt.to_string_lossy().into_owned();
             let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: false, solution: None, solution_commit: None, solution_patch_id: None };
             let s = submit(&mut self.db, &crate::Config::default(), &opts, &self.actor).unwrap();
             assert_eq!(s.state, "In Review", "{s:?}");
-            (issue.key, wt)
+            (key, wt)
+        }
+
+        /// Bisection starts after submission. Seed that boundary with a review of the real
+        /// patch, rather than running an unrelated gate and reviewer for every member.
+        fn reviewed_for_bisection(&mut self, title: &str, files: &[(&str, &str)]) -> String {
+            let (key, wt) = self.committed(title, files);
+            let patch = crate::submit::patch_id(&wt, "main").unwrap();
+            let head = sh(&wt, &["rev-parse", "HEAD"]);
+            let branch = sh(&wt, &["branch", "--show-current"]);
+            self.db.conn.execute(
+                "INSERT INTO review (issue_key, patch_id, commit_sha, branch, reviewer, verdict, approver, findings, ts) VALUES (?1, ?2, ?3, ?4, 'fake', 'pass', 'agent', '[]', ?5)",
+                params![key, patch, head, branch, now()],
+            ).unwrap();
+            self.db.move_issue(&key, "In Review", None, None, &self.actor).unwrap();
+            key
         }
 
         /// The gate from now on: fails when the tree has `bad.txt` (saying so) or `quiet-bad.txt`
@@ -1100,7 +1120,7 @@ batch = "waiting"
             if i == bad {
                 files.push(("quiet-bad.txt", "x"));
             }
-            keys.push(f.submitted(&format!("Change {i}"), &files).0);
+            keys.push(f.reviewed_for_bisection(&format!("Change {i}"), &files));
         }
         f.strict_gate();
         let refs: Vec<&str> = keys.iter().map(String::as_str).collect();
@@ -1108,6 +1128,10 @@ batch = "waiting"
         for (i, k) in keys.iter().enumerate() {
             let want = if i == bad { "sent_back" } else { "landed" };
             assert_eq!(f.entry(k).state, want, "change {i} ({k}): {}", f.error(k));
+            assert_eq!(f.on_main(&format!("f{i}.txt")), i != bad, "only good members reach main");
+            if i != bad {
+                assert_eq!(f.db.issue(k).unwrap().unwrap().state, "Done");
+            }
         }
         assert!(f.error(&keys[bad]).contains("bisecting the stack found"), "{}", f.error(&keys[bad]));
         let gates: u32 = f.runs().iter().map(|r| r.gates).sum();

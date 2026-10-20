@@ -578,7 +578,9 @@ mod tests {
         let actor = Actor::Agent("codex:solution-test".into());
         let dir = wt.to_string_lossy().into_owned();
         let solution = crate::submit::SolutionSummary::from_fields(Some("Link the footer to help"), Some("Add a footer link to the help page.")).unwrap().unwrap();
-        let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: false, solution: Some(&solution), solution_commit: None, solution_patch_id: None };
+        // This scenario exercises real gates and submission recording, not reviewer execution.
+        // An explicitly unreviewed submit also proves that solution text never implies a pass.
+        let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: true, local_only: true, batch: false, solution: Some(&solution), solution_commit: None, solution_patch_id: None };
         let job = enqueue(&db, &opts, &actor).unwrap();
         assert_eq!(db.submit_job(job.id).unwrap().unwrap().solution.as_ref(), Some(&solution));
         let done = run_job(&mut db, &config, job.id, false).unwrap().0;
@@ -588,6 +590,8 @@ mod tests {
         assert_eq!(first.branch.as_deref(), Some(job.branch.as_str()));
         assert_eq!(first.gate.as_ref().unwrap().commit, first.commit_sha);
         assert_eq!(first.solution.as_ref(), Some(&solution));
+        assert_eq!(first.verdict, "none");
+        assert!(first.gate.as_ref().unwrap().passed);
 
         // A queued submit runs the new branch head, but the old explanation cannot follow it.
         let queued = enqueue(&db, &opts, &actor).unwrap();

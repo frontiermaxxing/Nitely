@@ -35,3 +35,55 @@ new suite run, and an empty report needs only a handoff with its limits.
 A running Crew can opt into `[schedule] test_sweep = "nightly"` or `"weekly"` (UTC periods;
 default `"off"`). It creates one report task per period, respects Crew's start/pause limits,
 and avoids another while a sweep or its proposal is open. No schedule approves a proposal.
+
+
+## First Nitely sweep: retain contracts, reduce setup
+
+The first approved cleanup, [NIT-401](http://127.0.0.1:7423/i/NIT-401), follows
+[NIT-306](http://127.0.0.1:7423/i/NIT-306). Historical gate 1306 had flagged three
+scenarios running for over 60 seconds under parallel suite load. That was a lead,
+not an individual timing or proof of a flaky test. No deletion was proposed.
+
+The bisection fixture now starts with explicit reviews of its actual Git patches,
+so it does not run five unrelated submit pipelines before testing the queue. It
+still uses real branches, failing gates, bisection and landing, and checks that
+only the good members' files reach main and their issues become Done. The
+three-member variant shares this fixture too. Other queue integration tests still
+exercise the real submit-to-land boundary.
+
+The disabled-review scenario submits one real change under all four policy modes
+instead of rebuilding four repositories. Every mode still runs its gate and checks
+neutral review evidence and no queued review. One mode exercises the remote push;
+mode-independent approval checks run once, including refusal when review is enabled
+again. A changed patch is refused, then the original patch actually lands. The
+summary scenario keeps its four real submissions and gates, but explicitly skips
+the fake reviewer: it checks revision binding, stale queued text, synchronous text,
+and missing legacy text, and asserts that text does not manufacture a review pass.
+
+Measurement uses three serial `cargo test -p nitely-core --lib <full-test-name> --
+--exact --test-threads=1` commands in warm Windows build lanes. Rust's test elapsed
+time excludes Cargo compilation and lane queue/setup. The baseline is
+`9ab55bd303115fcf286f612a7a23544250bdbad1`, lane run 1338 in lane 1. Run 1342 in the
+same lane measured the final bisection and summary bodies (snapshot `09bd0ae`).
+Run 1344 in lane 2 measured the final disabled-review body (snapshot `7a444fb`).
+
+| Exact Rust test | Before | After |
+| --- | ---: | ---: |
+| `land_queue::tests::a_bad_change_is_bisected_out_of_five` | 59.41s | 38.35s |
+| `submit::tests::disabled_review_keeps_gate_and_landing_without_synthetic_review_or_fallback` | 29.82s | 26.03s |
+| `submit_job::tests::solution_summary_is_bound_to_the_revision_handed_in` | 27.39s | 13.87s |
+| Sum of these observations | 116.62s | 78.25s |
+
+All three pass before and after. The core binary still registers 610 tests; zero
+tests were added, deleted or merged. The three-member bisection variant also
+passes with the shared fixture. The first disabled-review edit took 49.32s; its
+new real land exposed the cost of redundant per-mode remote/approval work, which
+the final edit removes. The final scenario covers more behavior than the original.
+
+The observed reduction is 38.37s (about 33%) for these three serial scenarios,
+not for the whole suite. These are one observation per body version on a shared
+machine; other work and cache state were not controlled, and the final matrix
+measurement used a different warm lane. No new whole-suite test count, warm-suite
+time, or flake rate was measured. Historical gate 1306 had 632 passing Rust tests,
+five ignored Rust tests, and 165 passing Node tests on an older source revision;
+those counts must not be presented as today's suite or mixed into this comparison.
