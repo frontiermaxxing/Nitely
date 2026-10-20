@@ -696,14 +696,16 @@ fn land_prefix(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stack: &Path, 
         // signature, changed review, or newly required human approval cannot ride a green gate.
         checkout(stack, &s.tip)?;
         let authorization = (|| -> Result<()> {
-            anyhow::ensure!(lands_alone(db, root, &current, &s.entry.issue)?.is_none(),
-                "the current project policy requires this change to land individually");
             anyhow::ensure!(!review_requires_individual(db, &s.entry.issue, db.reviews(&s.entry.issue)?.first())?,
                 "reduced verification is bound to this individual patch; it must land alone");
             anyhow::ensure!(unchanged_submodules(root, &current, &s.from, &s.tip)?,
                 "the managed submodule baseline changed; this change must land alone");
             anyhow::ensure!(land::rev(root, &s.branch)? == s.head, "the branch changed after the gate; submit again");
+            // Report the exact revoked/missing approval before the batching eligibility check,
+            // which also rejects unsigned changes but cannot explain their authorization failure.
             land::check_approval(db, &current, &s.entry.issue, stack, &s.from, &s.branch)?;
+            anyhow::ensure!(lands_alone(db, root, &current, &s.entry.issue)?.is_none(),
+                "the current project policy requires this change to land individually");
             Ok(())
         })();
         if let Err(e) = authorization {
@@ -1035,6 +1037,7 @@ batch = "waiting"
         let (b, _) = f.submitted("B", &[("b.txt", "b")]);
         f.require_and_sign(&[&a, &b]);
         let pb = Playbook::load(&f.repo).unwrap();
+        for key in [&a, &b] {assert!(lands_alone(&f.db, &f.repo, &pb, key).unwrap().is_none(), "both signed changes start eligible for the batch");}
         let before = sh(&f.repo, &["rev-parse", "main"]);
         let stack = stack_worktree(&f.repo, &pb, &before).unwrap();
         let mut entries = Vec::new();
@@ -1067,7 +1070,9 @@ batch = "waiting"
         let policy = std::fs::read_to_string(&path).unwrap().replace("commands = [\"exit 0\"]", "commands = [\"echo full-batch\"]");
         std::fs::write(&path, format!("{policy}\n[verification]\nversion=1\nbasic=['echo basic-submit']\n")).unwrap();
         sh(&f.repo, &["commit", "-qam", "separate Basic and Full checks"]);
-        f.db.set_project_review_mode("NIT", Mode::Fast, Options::default(), 0, &Actor::Human).unwrap();
+        // Fast deliberately lands individually; this scenario explicitly opts into batching.
+        let options = Options { test_depth: Some(crate::project_modes::TestDepth::Basic), pre_review: Some(crate::project_modes::PreReview::Off), land_batch: Some(true), shared_lanes: Some(true), ..Default::default() };
+        f.db.set_project_review_mode("NIT", Mode::Custom, options, 0, &Actor::Human).unwrap();
         let (a, _) = f.submitted("First Basic change", &[("first.txt", "one")]);
         let (b, _) = f.submitted("Second Basic change", &[("second.txt", "two")]);
         for key in [&a, &b] {
