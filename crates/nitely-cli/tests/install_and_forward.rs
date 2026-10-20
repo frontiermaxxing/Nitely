@@ -111,6 +111,27 @@ fn source_install_refuses_a_live_land_before_rebuilding_or_replacing_the_target(
     assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("another land or install"), "{out:?}");
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep this");
     assert_eq!(std::fs::read_to_string(&lock).unwrap(), holder);
+    // Even a legitimate inherited lock cannot authorize a build started at another HEAD, or a
+    // caller-supplied marker without the same stamp actually compiled into this executable.
+    let head = Command::new("git").arg("-C").arg(&repo).args(["rev-parse", "HEAD"]).output().unwrap();
+    assert!(head.status.success());
+    let head = String::from_utf8(head.stdout).unwrap().trim().to_string();
+    for (marker, expected) in [
+        ("a-different-source".to_string(), "checkout moved since the locked source build started"),
+        (head, "Cargo did not refresh this build's explicit source stamp"),
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_nitely"))
+            .args(["install", "--to"]).arg(&target)
+            .env("CARGO_MANIFEST_DIR", &manifest)
+            .env("NITELY_INSTALL_LOCK", &holder)
+            .env(nitely_core::install::SOURCE_BUILT_ENV, marker)
+            .env("NITELY_HOME", dir.join("home"))
+            .env("NITELY_INSTALL_WITHIN", &dir)
+            .output().unwrap();
+        assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains(expected), "{out:?}");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep this");
+        assert_eq!(std::fs::read_to_string(&lock).unwrap(), holder);
+    }
     std::fs::remove_dir_all(dir).ok();
 }
 

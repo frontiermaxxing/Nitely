@@ -930,9 +930,9 @@ fn run(cmd: Cmd) -> Result<()> {
             None => Ok(()),
         },
         Cmd::Install { from, to, force } => {
-            // `cargo run` compiled before install could take the lock. Re-run Cargo once under
-            // that lock with an explicit commit input for both build scripts. The child alone
-            // installs; this parent retains the lock through its exit.
+            // A standalone `cargo run` compiled before install could take the lock: rebuild once
+            // with an explicit commit input. Land supplies that input before its outer Cargo
+            // build under the existing lock, so its already-stamped child can install directly.
             let me = std::env::current_exe()?;
             let cargo_build = me.parent().is_some_and(|p| p.join(".fingerprint").is_dir());
             let source = if from.is_none() && cargo_build {
@@ -945,8 +945,11 @@ fn run(cmd: Cmd) -> Result<()> {
                 None
             };
             if let Some(source) = &source {
-                let rebuilt = std::env::var("NITELY_INSTALL_REBUILT").ok();
-                if rebuilt.as_deref() != Some(source.head.as_str()) {
+                let rebuilt = std::env::var(nitely_core::install::SOURCE_BUILT_ENV).ok();
+                if let Some(rebuilt) = &rebuilt {
+                    anyhow::ensure!(rebuilt == &source.head,
+                        "the checkout moved since the locked source build started; nothing was installed; run install again");
+                } else {
                     let mut command = std::process::Command::new("cargo");
                     command.args(["run", "--locked", "-p", "nitely-cli"]);
                     if !cfg!(debug_assertions) {
@@ -957,7 +960,6 @@ fn run(cmd: Cmd) -> Result<()> {
                         command.arg("--to").arg(to);
                     }
                     source.configure_build(&mut command);
-                    command.env("NITELY_INSTALL_REBUILT", &source.head);
                     let executable = std::env::current_exe()?;
                     let aside = source.release_build_executable(&executable)?;
                     let status = command.status().context("rebuilding the source install under its landing lock");

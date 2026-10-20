@@ -82,7 +82,9 @@ To build it from source:
 
    Source installation requires committed Rust sources and Cargo files. It takes the landing
    lock and runs Cargo once more with an explicit commit stamp before replacing the installed
-   binary. If another land or install is active, wait for it to finish and rerun the command.
+   binary. An automatic landing already holds that lock, so it stamps its first Cargo build and
+   installs that build directly after the same identity checks. If another land or install is
+   active, wait for it to finish and rerun the command.
    The candidate must also support your current database; a refusal keeps the installed copy.
 
 ## Quick start

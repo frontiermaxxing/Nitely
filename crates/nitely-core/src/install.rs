@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 const OLD_PREFIX: &str = "nitely-old-";
 pub const SOURCE_COMMIT_ENV: &str = "NITELY_SOURCE_COMMIT";
+pub const SOURCE_BUILT_ENV: &str = "NITELY_INSTALL_REBUILT";
 const INSTALL_LOCK_ENV: &str = "NITELY_INSTALL_LOCK";
 
 /// A source install holds the same lock as land until the checked binary is in place.
@@ -29,10 +30,21 @@ fn lock_pid(holder: &str) -> Option<u32> {
 
 /// Only the process owning this checkout's lock can delegate it to an after-land command.
 pub(crate) fn inherit_install_lock(command: &mut std::process::Command, root: &Path) {
-    command.env_remove(INSTALL_LOCK_ENV);
+    command.env_remove(INSTALL_LOCK_ENV).env_remove(SOURCE_COMMIT_ENV).env_remove(SOURCE_BUILT_ENV);
     if let Ok(holder) = crate::land::lock_path(root).and_then(|p| Ok(std::fs::read_to_string(p)?)) {
         if lock_pid(&holder) == Some(std::process::id()) {
-            command.env(INSTALL_LOCK_ENV, holder);
+            command.env(INSTALL_LOCK_ENV, &holder);
+            // Only Nitely's own source install understands this compile-time contract. Do not
+            // stamp unrelated projects' after-land commands with their checkout's identity.
+            if root.join("crates/nitely-cli/Cargo.toml").is_file()
+                && root.join("crates/nitely-cli/src/main.rs").is_file()
+            {
+                if let Ok(source) = SourceInstall::with_holder(root, Some(&holder)) {
+                    // Land already holds the lock before Cargo starts. Supplying the stamp now
+                    // avoids compiling once without it and then recompiling the same revision.
+                    source.configure_build(command);
+                }
+            }
         }
     }
 }
@@ -76,7 +88,8 @@ impl SourceInstall {
     }
 
     pub fn configure_build(&self, command: &mut std::process::Command) {
-        command.current_dir(&self.root).env(INSTALL_LOCK_ENV, &self.holder).env(SOURCE_COMMIT_ENV, &self.head);
+        command.current_dir(&self.root).env(INSTALL_LOCK_ENV, &self.holder)
+            .env(SOURCE_COMMIT_ENV, &self.head).env(SOURCE_BUILT_ENV, &self.head);
     }
 
     /// Windows cannot relink the executable running this installer. Keep it alive under an old
@@ -303,6 +316,49 @@ pub fn stamp(path: &Path) -> Option<(u64, std::time::SystemTime)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_owned_clean_land_stamps_the_outer_build_but_untrusted_or_dirty_contexts_do_not() {
+        let repo = crate::test_repo::copy("source-install-outer-stamp", |repo| {
+            crate::test_repo::init(repo, &[
+                ("crates/nitely-cli/Cargo.toml", "[package]\nname='nitely-cli'\nversion='0.1.0'\n"),
+                ("crates/nitely-cli/src/main.rs", "fn main() {}"),
+            ]);
+        });
+        let command = || {
+            let mut command = std::process::Command::new("cargo");
+            command.env(INSTALL_LOCK_ENV, "stale").env(SOURCE_COMMIT_ENV, "stale").env(SOURCE_BUILT_ENV, "stale");
+            inherit_install_lock(&mut command, &repo);
+            command
+        };
+        let value = |command: &std::process::Command, key: &str| {
+            command.get_envs().find(|(k, _)| *k == key).and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+        };
+        assert!(value(&command(), SOURCE_BUILT_ENV).is_none(), "standalone installs still bootstrap under their own lock");
+        let source = SourceInstall::with_holder(&repo, None).unwrap();
+        let prepared = command();
+        assert_eq!(value(&prepared, SOURCE_COMMIT_ENV).as_deref(), Some(source.head.as_str()));
+        assert_eq!(value(&prepared, SOURCE_BUILT_ENV).as_deref(), Some(source.head.as_str()));
+        assert_eq!(value(&prepared, INSTALL_LOCK_ENV).as_deref(), Some(source.holder.as_str()));
+        source.check_source().unwrap();
+        let lock = crate::land::lock_path(&repo).unwrap();
+        std::fs::write(&lock, "another land pid 1 since now").unwrap();
+        let unowned = command();
+        assert!(value(&unowned, INSTALL_LOCK_ENV).is_none());
+        assert!(value(&unowned, SOURCE_COMMIT_ENV).is_none());
+        assert!(value(&unowned, SOURCE_BUILT_ENV).is_none());
+        std::fs::write(&lock, &source.holder).unwrap();
+        std::fs::write(repo.join("crates/nitely-cli/src/main.rs"), "dirty").unwrap();
+        assert!(value(&command(), SOURCE_COMMIT_ENV).is_none(), "a dirty build cannot inherit verified provenance");
+        assert!(value(&command(), SOURCE_BUILT_ENV).is_none());
+        crate::test_repo::git(&repo, &["restore", "crates/nitely-cli/src/main.rs"]);
+        // An unrelated repo can inherit the lock, but not Nitely's source-build proof.
+        std::fs::remove_file(repo.join("crates/nitely-cli/Cargo.toml")).unwrap();
+        assert!(value(&command(), SOURCE_BUILT_ENV).is_none());
+        assert_eq!(value(&command(), INSTALL_LOCK_ENV).as_deref(), Some(source.holder.as_str()));
+        drop(source);
+        std::fs::remove_dir_all(repo).ok();
+    }
 
     #[test]
     fn source_install_serializes_with_land_and_only_delegates_the_exact_holder() {
