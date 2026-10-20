@@ -79,12 +79,14 @@ pub fn run(issue: Option<String>, shell: Option<String>, command: Vec<String>, m
     let result = lanes::run_in(&config, &db, &cwd()?, issue.as_deref(), &command, me, &mut |r| match r.state.as_str() {
         "queued" => eprintln!("run {} queued", r.id),
         "running" => {
-            eprintln!("run {} in lane {}", r.id, r.lane.unwrap_or(0));
+            if r.executor == "local" { eprintln!("run {} in lane {}", r.id, r.lane.unwrap_or(0)); }
+            else { eprintln!("run {} on {}",r.id,r.executor); }
             if let Some(log) = r.log.clone() {
                 let stop = stop.clone();
                 follower = Some(std::thread::spawn(move || follow(&log, &stop)));
             }
         }
+        "lane_error" if r.executor != "local" => eprintln!("run {} on {}: {}",r.id,r.executor,r.error.as_deref().unwrap_or("executor unavailable")),
         _ => {}
     });
     stop.store(true, Ordering::SeqCst);
@@ -92,6 +94,7 @@ pub fn run(issue: Option<String>, shell: Option<String>, command: Vec<String>, m
         f.join().ok();
     }
     let run = result?;
+    if run.executor != "local" && !run.output.is_empty() { println!("{}",run.output); }
     match (&run.error, run.exit_code, run.timed_out) {
         (Some(e), _, _) => {
             eprintln!("run {}: the lane could not run it: {e}", run.id);

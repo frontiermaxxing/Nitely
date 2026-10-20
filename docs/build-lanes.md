@@ -269,6 +269,92 @@ repo without `[lanes]` gates in the worktree as before (`playbook::run_gate_as`)
 - Remote executors: a diff that does not apply on the base there, or a base the remote cannot
   fetch, falls back to a local lane.
 
+### Opt-in executors
+
+`[lanes] executor = "local"` remains the default. `"machine:<name>"` sends runs
+and gates to another connected checkout; `"ci"` sends gates to GitHub and keeps
+ordinary `run` commands local. A machine-local `executors.json`, beside
+`config.json`, must separately authorize the project. A repository's playbook
+cannot grant itself permission to publish source or start an arbitrary transport.
+No executor is enabled by installing Nitely. Existing LAN backlog tokens do not
+authorize execution.
+
+On the sender, an example `executors.json` is:
+
+```json
+{
+  "machines": {
+    "builder": {
+      "projects": ["APP"],
+      "project": "APP",
+      "command": ["ssh", "-oBatchMode=yes", "-oConnectTimeout=10",
+        "build-host", "nitely", "executor", "receive", "--project", "APP"]
+    }
+  }
+}
+```
+
+The command is an argv array, launched without a local shell. Configure and
+verify SSH authentication and the remote command yourself first; Nitely does not
+install software, create keys, accept host keys, or modify SSH settings. Use a
+dedicated account or restricted SSH command when appropriate. On the receiver,
+connect exactly one repository to `APP`, configure its ordinary local lane setup
+and limits, and explicitly opt in with `{"receive_projects":["APP"]}`. This
+permission allows received source and commands to execute as that account.
+Protect this configuration as you would the account's shell access.
+
+The request carries the integration merge-base, a binary Git diff, expected tree,
+commands and a unique ID. The receiver fetches that base if needed and applies
+the diff in a temporary index; it never modifies the main checkout's index or
+files. A matching tree is required before execution. Each selected command runs
+in the receiver's ordinary warm lanes, subject to its admission and memory caps;
+remote gates currently acquire a lane separately for each command and retry,
+with up to three configured retries. Skipped commands and flakes remain in the
+reply. Local records identify the executor and do not reserve local build slots
+or memory. Remote evidence never fills the local gate-result cache.
+
+Only an unavailable base or rejected patch permits a reported local fallback.
+Authentication errors, disconnects, malformed replies, mismatched trees and test
+failures do not trigger a second execution locally. The wire request is limited
+to 12 MiB and the response to 4 MiB; command transport waits for the project's
+lane timeout, clamped to 1–120 minutes. Git transport operations have a 60-second
+deadline. This client deadline cannot promise remote cancellation: a receiver
+already running may finish, or remain queued on that machine.
+
+Before execution, the receiver reserves the request ID and content digest in a
+FULL-synchronous SQLite receipt ledger. Repeating that same request returns its
+completed result; an unfinished receipt reports an unknown outcome and never
+re-executes. A changed request cannot reuse an ID. The sender's run record retains
+the request ID while pending or failed. Read a completed result on the receiver
+with `nitely executor result --project APP <request-id>`. The ledger refuses new
+requests at 5,000 entries or 128 MiB (plus the last bounded result). Archive it
+only after diagnosing unfinished requests, and never reuse archived request IDs.
+There is no automatic reconnect or replay.
+
+For CI, set `{"ci_projects":["APP"]}` locally and configure the playbook:
+
+```toml
+[lanes]
+executor = "ci"
+timeout_minutes = 30
+ci_checks = [{ name = "test", app_id = 15368 }]
+```
+
+Use the exact check names and issuing GitHub App IDs for your workflow. Configure
+the workflow to run on `nitely/run/**` push branches; a PR-only workflow will not
+run for these requests. Nitely pushes the exact committed SHA to a unique
+temporary branch, waits for fresh successful checks at that SHA, records a
+checks URL, and deletes its branch using an expected-SHA lease. Missing checks,
+skipped/neutral conclusions, old runs, wrong issuers or branches, and incomplete responses
+with more than 100 check runs cannot pass. An unconfirmed dispatch or cleanup
+reports the exact branch to inspect. CI permission covers source publication;
+remote secrets and workflow policy remain the repository owner's responsibility.
+
+Validation so far covers isolated local receiver execution, binary snapshot
+reconstruction, request replay/refusal, and CI evidence classification. Real SSH
+execution on a second machine and a hosted CI gate require configured hosts and
+workflows; these are not established by the local tests.
+
 ### The base commit
 
 Each project has one base commit that agents' worktrees are cut from, lanes rest at between

@@ -22,6 +22,10 @@ use crate::playbook::{self, git, Playbook};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LaneRules {
+    /// Explicit executor selection; transport permissions live in machine-local executors.json.
+    pub executor: String,
+    /// Exact GitHub check names and app identities required for the CI executor.
+    pub ci_checks: Vec<crate::executor::RequiredCheck>,
     /// Lanes for this repo on this machine.
     pub count: u32,
     /// Build directories a lane keeps between requests; `target` and `node_modules` unless the
@@ -57,6 +61,8 @@ pub const DEFAULT_HEAVY: &[&str] = &["^cargo (build|test|clippy|check|run)\\b", 
 impl Default for LaneRules {
     fn default() -> Self {
         LaneRules {
+            executor: "local".into(),
+            ci_checks: vec![],
             count: 1,
             keep: crate::slim::DEFAULT_KEEP.iter().map(|s| s.to_string()).collect(),
             timeout_minutes: 30,
@@ -844,10 +850,11 @@ pub fn run_in(config: &crate::Config, db: &Db, dir: &str, issue: Option<&str>, c
 /// is written as the request moves (queued, running, done), so another process can follow it with
 /// `Db::lane_run`. `on_event` is called with the run when it is queued and when it starts.
 pub fn run(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Actor, on_event: &mut dyn FnMut(&Run)) -> Result<Run> {
+    if let Some(run) = crate::executor::run(db, repo_root, pb, req, actor, on_event)? { return Ok(run); }
     // The machine's share as it is when the command starts, not when it was queued (NIT-291), with
     // the cap it was admitted with (NIT-323).
     run_with(db, repo_root, pb, req, actor, on_event, &[], &mut |lane, log, limit, temp, share| {
-        let command = req.command.replace("{jobs}", &share.jobs.to_string());
+        let command = playbook::expand(req.command, repo_root, lane, pb.integration_branch()).replace("{jobs}", &share.jobs.to_string());
         run_logged(&command, lane, log, limit, share, Some(temp))
     })
 }
@@ -1029,6 +1036,7 @@ fn gate_inner(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: 
     if snapshot(worktree)?.made {
         warnings.push("the worktree has uncommitted work, which this gate leaves out: it builds what is committed, as land will; `run` builds the worktree as it is".to_string());
     }
+    if let Some(gate) = crate::executor::gate(db, repo_root, pb, &snap, issue, kind, steps, actor, &warnings)? { return Ok(gate); }
     let short = snap.commit[..snap.commit.len().min(7)].to_string();
     let project = issue.and_then(|k| db.issue(k).ok().flatten()).and_then(|i| i.project).unwrap_or_default();
     let base = pb.integration_branch().to_string();
@@ -1362,7 +1370,7 @@ fn caps_fit(db: &Db, id: i64, limits: Option<&machine::Limits>, slots: u32) -> R
     let mine = expected_peak_of(db, id, cap_for(limits, slots))?;
     // The running runs, and the queued ones that reserved (admitted, about to start).
     let mut stmt = db.conn.prepare(
-        "SELECT COALESCE(memory_reserved, memory_cap), pid, pid_started FROM lane_run WHERE id != ?1 AND (state = 'running' OR (state = 'queued' AND memory_cap IS NOT NULL))",
+        "SELECT COALESCE(memory_reserved, memory_cap), pid, pid_started FROM lane_run WHERE id != ?1 AND executor IN ('local', 'worktree') AND (state = 'running' OR (state = 'queued' AND memory_cap IS NOT NULL))",
     )?;
     let rows: Vec<(Option<i64>, Option<i64>, Option<String>)> = stmt.query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<_>>()?;
     // A run an older nitely started recorded no cap: it may hold the full one.
@@ -1441,7 +1449,7 @@ fn expected_peak_of(db: &Db, id: i64, cap: u64) -> Result<u64> {
 fn known_peak_of(db: &Db, id: i64, cap: u64) -> Result<Option<u64>> {
     let (repo, command): (String, String) = db.conn.query_row("SELECT repo, command FROM lane_run WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?)))?;
     let mut stmt = db.conn.prepare(
-        "SELECT peak_memory FROM lane_run WHERE repo = ?1 AND command = ?2 AND id != ?3 AND state = 'done' AND peak_memory IS NOT NULL ORDER BY id DESC LIMIT ?4",
+        "SELECT peak_memory FROM lane_run WHERE repo = ?1 AND command = ?2 AND id != ?3 AND state = 'done' AND executor IN ('local', 'worktree') AND peak_memory IS NOT NULL ORDER BY id DESC LIMIT ?4",
     )?;
     let peaks: Vec<i64> = stmt.query_map(params![repo, command, id, PEAK_HISTORY], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
     Ok((!peaks.is_empty()).then(|| expected_peak(&peaks, cap)))
@@ -1554,7 +1562,7 @@ const QUICK_SECS: i64 = 120;
 /// a test filter (`names_test_filter`). None for a run that is not quick.
 fn quick_class(db: &Db, repo: &str, command: &str) -> Result<Option<i64>> {
     let mut stmt = db.conn.prepare(
-        "SELECT ended_at - started_at FROM lane_run WHERE repo = ?1 AND command = ?2 AND kind = 'run' AND state = 'done'
+        "SELECT ended_at - started_at FROM lane_run WHERE repo = ?1 AND command = ?2 AND kind = 'run' AND state = 'done' AND executor = 'local'
          AND started_at IS NOT NULL AND ended_at IS NOT NULL ORDER BY id DESC LIMIT 5",
     )?;
     let mut took: Vec<i64> = stmt.query_map(params![repo, command], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
@@ -1958,7 +1966,7 @@ fn queue_rows(db: &Db, me: Option<i64>, alive: &mut dyn FnMut(&Requester) -> boo
     let mut stmt = db.conn.prepare(
         "SELECT id, project, repo, priority, kind, queued_at, state, pid, lane_count, waiting_for IS NOT NULL, issue_key, started_at, pid_started, polled_at, scheduler, command,
          lane, quick_lane, quick_slot
-         FROM lane_run WHERE state IN ('queued', 'running')",
+         FROM lane_run WHERE state IN ('queued', 'running') AND executor IN ('local', 'worktree')",
     )?;
     type Raw = (Waiting, String, Requester, i64, bool, Option<String>, Option<i64>, Option<i64>, Option<i64>, String, (Option<i64>, bool, bool));
     let raw: Vec<Raw> = stmt
@@ -3097,7 +3105,7 @@ fn status_with(db: &Db, repo_root: &Path, pb: &Playbook, project: &str, probe_lo
     let recent = db.finished_lane_runs(project, &root, 10)?;
     // Every project's running requests, each read through `lane_run` so one whose process is gone
     // reads as abandoned and is not counted.
-    let running_ids: Vec<i64> = db.conn.prepare("SELECT id FROM lane_run WHERE state = 'running'")?.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    let running_ids: Vec<i64> = db.conn.prepare("SELECT id FROM lane_run WHERE state = 'running' AND executor IN ('local', 'worktree')")?.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
     let mut running_on_machine = 0i64;
     for id in running_ids {
         if db.lane_run(id)?.is_some_and(|r| r.state == "running") {
@@ -5392,4 +5400,18 @@ wanted {shown}", ran.output);
         assert!(!my_turn(&db, behind, 2, &mut alive).unwrap());
         std::fs::remove_dir_all(base).ok();
     }
+    #[test]
+    fn executor_remote_runs_do_not_reserve_local_memory_or_queue_slots() {
+        let base=crate::paths::unique_temp("nitely-executor-admission", "");
+        let db=Db::open(&base.join("t.db")).unwrap();
+        for (executor,state,cap) in [("local","queued",None),("machine:builder","running",Some(100*machine::GIB as i64)),("ci","running",None)] {
+            db.conn.execute("INSERT INTO lane_run(project,repo,requested_by,kind,snapshot,tree,base,command,state,executor,queued_at,pid,priority,lane_count,memory_cap) VALUES ('APP','C:/Code/app','x','gate','s','t','b','c',?1,?2,1,?3,2,1,?4)",params![state,executor,std::process::id(),cap]).unwrap();
+        }
+        let limits=machine::limits_for(64*machine::GIB,None,None);
+        assert_eq!(caps_fit(&db,1,Some(&limits),1).unwrap(),None);
+        let (rows,_)=queue_rows(&db,Some(1),&mut |_|true).unwrap();
+        assert_eq!(rows.len(),1);
+        drop(db);let _=std::fs::remove_dir_all(base);
+    }
+
 }

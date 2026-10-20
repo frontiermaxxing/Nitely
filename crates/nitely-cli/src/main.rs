@@ -2,6 +2,7 @@
 #![recursion_limit = "256"]
 
 mod crew;
+mod executor;
 mod lanes;
 mod mcp;
 mod newer;
@@ -29,6 +30,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Receive one bounded execution request (requires explicit machine-local project permission).
+    Executor { #[command(subcommand)] command: executor::Command },
     /// Run an isolated headless browser with a bounded lifetime, or clean its inactive profile.
     Preview { #[command(subcommand)] command: preview::Command },
     /// Verify the exact release candidate against authoritative release policy.
@@ -884,6 +887,7 @@ fn run(cmd: Cmd) -> Result<()> {
         Cmd::Performance { command } => performance::run(command),
         Cmd::Preview { command } => preview::run(command),
         Cmd::TestSweep { command } => test_sweep::run(command),
+        Cmd::Executor { command } => executor::run(command),
         Cmd::Hook { .. } | Cmd::Mcp | Cmd::McpCall | Cmd::McpCalls | Cmd::McpDetached | Cmd::Ui { .. } => unreachable!(),
         Cmd::PerfSeed => {
             let home = paths::data_dir();
