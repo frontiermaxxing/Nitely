@@ -162,8 +162,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     pb.approval.check_blocked(&files)?;
     crate::private_terms::check(issue.project.as_deref(), &worktree, &since)?;
     let gate = playbook::run_automatic_gate(db, &root, &worktree, &[&issue.key], actor, crate::lanes::Kind::Gate)?;
-    let verification = crate::verification::assess(&worktree, &since, &gate.commit, &issue)?;
-    crate::verification::record(db, &issue, &verification, actor)?;
+    let verification = crate::verification::assess_and_record(db, &worktree, &since, &gate.commit, &issue,actor)?;
     let submitted_patch = patch_id_range(&worktree, &since, &gate.commit)?;
     let explained_revision = git(&worktree, &["rev-parse", "--verify", &format!("{}^{{commit}}", gate.commit)])?.trim() == handed_in;
     let mut out = Submitted {

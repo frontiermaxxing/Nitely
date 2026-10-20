@@ -9,7 +9,7 @@ use crate::{Db, issues::{Actor, IssueRecord}, playbook::{git, Playbook, PLAYBOOK
 const CLASSIFIER: &str = "syntax-v1-ts0271-rust0242-ts0232-js0250";
 const MAX_FILE: usize = 512 * 1024;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Rules {
     /// Only off/shadow are implemented. Unknown modes conservatively recommend Full.
@@ -20,10 +20,26 @@ pub struct Rules {
     pub comments: Vec<String>,
     pub display_copy: Vec<String>,
     pub protected: Vec<String>,
+    pub backstop: crate::verification_backstop::Rules,
+    pub audit_percent: u8,
 }
+impl Default for Rules {
+    fn default()->Self {Self {mode:String::new(),version:0,prose:vec![],comments:vec![],display_copy:vec![],protected:vec![],backstop:Default::default(),audit_percent:10}}
+}
+fn default_audit_percent()->u8 {10}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Plan {
+    #[serde(default="default_audit_percent")]
+    pub audit_percent: u8,
+    #[serde(default)]
+    pub affected: Option<crate::affected_tests::Selection>,
+    #[serde(default)]
+    pub audit_sample: Option<crate::verification_audit::Sample>,
+    #[serde(default)]
+    pub policy_fingerprint: Option<String>,
+    #[serde(default)]
+    pub rule_ids: Vec<String>,
     pub head: String,
     pub tree: String,
     pub base: String,
@@ -75,7 +91,7 @@ fn native_element(node: Node<'_>, source: &str) -> bool {
     let opening = if node.kind() == "jsx_element" { node.child_by_field_name("open_tag") } else { Some(node) };
     opening.and_then(|n| n.child_by_field_name("name"))
         .and_then(|n| n.utf8_text(source.as_bytes()).ok())
-        .is_some_and(|n| matches!(n, "div" | "span" | "p" | "button" | "label" | "input" | "textarea" | "h1" | "h2" | "h3" | "li" | "td" | "th" | "section" | "option"))
+        .is_some_and(|n| matches!(n, "div" | "span" | "p" | "button" | "label" | "input" | "h1" | "h2" | "h3" | "li" | "td" | "th" | "section"))
 }
 
 fn display_node(node: Node<'_>, source: &str) -> bool {
@@ -127,7 +143,7 @@ fn prove(path: &str, old: &str, new: &str, rules: &Rules) -> Result<String> {
         if !matches!(Path::new(path).extension().and_then(|e| e.to_str()), Some("md" | "txt")) { bail!("unsupported prose format"); }
         // Do not silently discard embedded execution or instruction-bearing frontmatter.
         for text in [old, new] {
-            if text.contains([ '<', '>' ]) || text.lines().any(|l| l.contains("```") || l.contains("~~~") || l.starts_with("    ") || l.starts_with('\t') || l.trim() == "---") {
+            if text.contains([ '<', '>' ]) || text.lines().any(|l| l.contains("```") || l.contains("~~~") || l.starts_with("    ") || l.starts_with('\t') || matches!(l.trim(), "---" | "+++")) {
                 bail!("embedded markup, code or frontmatter is not proven prose");
             }
         }
@@ -160,6 +176,7 @@ pub fn assess(repo: &Path, base: &str, head: &str, issue: &IssueRecord) -> Resul
     let base = git(repo, &["rev-parse", "--verify", &format!("{base}^{{commit}}")])?.trim().to_string();
     let head = git(repo, &["rev-parse", "--verify", &format!("{head}^{{commit}}")])?.trim().to_string();
     let mut plan = Plan {
+        affected: None, audit_sample: None, policy_fingerprint: None, rule_ids: vec![], audit_percent:10,
         tree: git(repo, &["rev-parse", &format!("{head}^{{tree}}")])?.trim().into(),
         head, base: base.clone(), policy_commit: base, classifier: CLASSIFIER.into(),
         declared: issue.review_level.clone(), declared_by: issue.review_level_by.clone(), declared_source: issue.review_level_source.clone(),
@@ -169,14 +186,19 @@ pub fn assess(repo: &Path, base: &str, head: &str, issue: &IssueRecord) -> Resul
     };
     let attempted = assess_inner(repo, issue, &mut plan);
     if let Err(error) = attempted { plan.reasons.push(format!("Full fallback: {error:#}")); }
+    // Retain affected-test advice separately: an input map does not overrule a safety floor.
+    plan.affected = Some(crate::affected_tests::select(repo,&plan.base,&plan.head)?);
     Ok(plan)
 }
 
 fn assess_inner(repo: &Path, issue: &IssueRecord, plan: &mut Plan) -> Result<()> {
     let policy = blob(repo, &plan.policy_commit, PLAYBOOK_PATH).context("committed integration policy unavailable")?;
     let pb = Playbook::parse(&policy)?;
+    plan.policy_fingerprint=Some(crate::verification_audit::policy_fingerprint(policy.as_bytes(),CLASSIFIER));
     if pb.unknown.iter().any(|key| key.starts_with("verification")) { bail!("unknown verification policy fields"); }
     let rules = &pb.verification;
+    if !(10..=100).contains(&rules.audit_percent) {bail!("audit_percent must be between 10 and 100");}
+    plan.audit_percent=rules.audit_percent;
     if rules.mode != "shadow" || rules.version != 1 { bail!("verification shadow policy version 1 is not configured"); }
     if !pb.review.flags.is_empty() { bail!("reviewer-only conditions require the existing full review"); }
     let declared = issue.review_level.as_deref().context("undeclared changes retain existing full verification")?;
@@ -201,10 +223,19 @@ fn assess_inner(repo: &Path, issue: &IssueRecord, plan: &mut Plan) -> Result<()>
         if let Some(hit) = pb.approval.protected_hit(&[path.into()])? { bail!("{path}: {hit}"); }
         let proof = prove(path, &blob(repo, &plan.base, path)?, &blob(repo, &plan.head, path)?, rules)
             .with_context(|| path.to_string())?;
+        for (kind,patterns) in [("prose",&rules.prose),("comments",&rules.comments),("display_copy",&rules.display_copy)] {
+            for pattern in patterns {
+                if matches(std::slice::from_ref(pattern),path)? {
+                    let id=format!("{kind}:{pattern}");
+                    if !plan.rule_ids.contains(&id) {plan.rule_ids.push(id);}
+                }
+            }
+        }
         plan.files.push(FileProof { path: path.into(), proof });
     }
     // A declaration can raise the computed floor, never lower it. Unsupported behavioral
     // cases have already fallen back to Full above; affected tests arrive separately.
+    if plan.rule_ids.len()>100 || plan.rule_ids.iter().any(|r|r.len()>256) {bail!("lowering rule identity exceeds audit bounds");}
     plan.effective = declared.into();
     plan.depth = crate::issues::review_depth(declared).into();
     plan.reasons.push("Every changed file has a mechanical Basic proof; declaration supplies any higher minimum.".into());
@@ -212,6 +243,30 @@ fn assess_inner(repo: &Path, issue: &IssueRecord, plan: &mut Plan) -> Result<()>
         plan.reasons.push("Implementer's declaration is a hint; eligibility came from the committed policy and parsed diff.".into());
     }
     Ok(())
+}
+
+pub fn assess_and_record(db:&mut Db,repo:&Path,base:&str,head:&str,issue:&IssueRecord,actor:&Actor)->Result<Plan> {
+    let mut plan=assess(repo,base,head,issue)?;
+    if let Some(project)=&issue.project {
+        let disabled=crate::verification_audit::disabled_rules(db,project)?;
+        if plan.rule_ids.iter().any(|r|disabled.contains(r)) {
+            plan.effective="sensitive".into(); plan.depth="Full".into();
+            plan.reasons.push("A confirmed escape disabled a matching lowering rule.".into());
+        }
+        if matches!(plan.effective.as_str(),"inert"|"contained") {
+            let branch=git(repo,&["rev-parse","--abbrev-ref","HEAD"])?;
+            let (vendor,_)=crate::git::parse_branch(branch.trim());
+            if let Some(candidate)=audit_candidate(repo,issue,&plan,vendor.as_deref().unwrap_or(actor.id()))? {
+                plan.audit_sample=Some(crate::verification_audit::record_candidate(db,&candidate,Some(plan.audit_percent))?);
+            }
+        }
+    }
+    record(db,issue,&plan,actor)?;
+    Ok(plan)
+}
+pub(crate) fn audit_candidate(repo:&Path,issue:&IssueRecord,plan:&Plan,author:&str)->Result<Option<crate::verification_audit::Candidate>> {
+    let (Some(project),Some(policy))=(issue.project.clone(),plan.policy_fingerprint.clone()) else {return Ok(None);};
+    Ok(Some(crate::verification_audit::Candidate {repo:crate::verification_audit::repository_id(repo)?,project,issue_key:issue.key.clone(),policy,author:author.into(),declarer:plan.declared_by.clone(),declaration_source:plan.declared_source.clone(),declared:plan.declared.clone(),effective:plan.effective.clone(),rules:plan.rule_ids.clone()}))
 }
 
 pub fn record(db: &Db, issue: &IssueRecord, plan: &Plan, actor: &Actor) -> Result<()> {
@@ -250,6 +305,11 @@ mod tests {
     #[test]
     fn display_copy_requires_native_location_and_unchanged_behavior() {
         let r = rules();
+        // Option text supplies its form value when no value attribute exists; textarea
+        // children supply initial state. Neither is a display-only proof.
+        for tag in ["option","textarea"] {
+            assert!(prove("src/Page.tsx",&format!("const x=<{tag}>Old</{tag}>"),&format!("const x=<{tag}>New</{tag}>"),&r).is_err());
+        }
         for (a,b) in [("const x=<button>Save</button>", "const x=<button>Save changes</button>"), ("const x=<input placeholder=\"Name\"/>", "const x=<input placeholder=\"Your name\"/>")] {
             assert!(prove("src/Page.tsx", a, b, &r).is_ok(), "{a}");
         }
@@ -301,6 +361,15 @@ mod tests {
         issue.review_level = None;
         assert_eq!(assess(&repo, &base, "HEAD", &issue).unwrap().depth, "Full");
         issue.review_level = Some("inert".into());
+        let sampled=assess_and_record(&mut db,&repo,&base,"HEAD",&issue,&Actor::Agent("codex:test".into())).unwrap();
+        let again=assess_and_record(&mut db,&repo,&base,"HEAD",&issue,&Actor::Agent("codex:test".into())).unwrap();
+        assert_eq!(sampled.audit_sample,again.audit_sample);
+        let candidate=audit_candidate(&repo,&issue,&sampled,"codex").unwrap().unwrap();
+        crate::verification_audit::landed(&mut db,&candidate,&base,&sampled.head,None).unwrap();
+        crate::verification_audit::confirmed_landing_culprit(&mut db,"APP",&candidate.repo,&sampled.head,"isolated reproduction evidence").unwrap();
+        let disabled=assess_and_record(&mut db,&repo,&base,"HEAD",&issue,&Actor::Agent("codex:test".into())).unwrap();
+        assert_eq!(disabled.depth,"Full");
+        assert!(disabled.reasons.iter().any(|r|r.contains("confirmed escape")));
         // The candidate cannot authorize itself by changing its own policy.
         std::fs::write(repo.join(PLAYBOOK_PATH), "[verification]\nversion=1\nmode='shadow'\nprose=['.*']\n").unwrap();
         g(&repo, &["add", PLAYBOOK_PATH]); g(&repo, &["commit", "-m", "policy change"]);

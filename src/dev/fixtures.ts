@@ -59,6 +59,8 @@ import type {
   GoalPlanView,
   ProjectBrief,
   Pulse,
+  VerificationHealth,
+  VerificationAuditReport,
   RepoView,
   ReviewRecord,
   Session,
@@ -1322,6 +1324,8 @@ function pulse(sinceArg: number, dayStart: number): Pulse {
       name: p.name,
       issues: mine.filter((i) => i.state_type !== "completed" && i.state_type !== "canceled").map((i) => flowIssue(i, now)),
       done_today: mine.filter((i) => i.state === "Done" && i.updated_at >= today).map((i) => flowIssue(i, now)),
+      verification_health: verificationHealth(p.key, now),
+      verification_audits: verificationAudit(p.key),
     };
   });
   const events = [...world.timelines.entries()].flatMap(([key, tl]) => tl.map((t) => ({ ...t, key })));
@@ -1355,6 +1359,27 @@ function pulse(sinceArg: number, dayStart: number): Pulse {
     landed_today: events.filter((e) => e.kind === "landed" && e.ts >= dayStart).length,
     report: goalReport(since),
   };
+}
+
+/** Preview only: use ?verification=failed|paused|recovering|pending|green|off for each state. */
+function verificationHealth(project: string, now: number): VerificationHealth[] {
+  if (!["NIT", "ORB", "HAR"].includes(project)) return [];
+  const requested = new URLSearchParams(window.location.search).get("verification");
+  if (requested === "off") return [];
+  const status = requested && ["failed", "paused", "recovering", "pending", "green"].includes(requested)
+    ? requested : project === "NIT" ? "pending" : project === "ORB" ? "green" : "recovering";
+  return [{ repo: `C:/Code/${project.toLowerCase()}/.git`, project, observed_head: "b7c281d".padEnd(40, "0"),
+    verified_head: (status === "green" ? "b7c281d" : "a632d90").padEnd(40, "0"),
+    pending_since: now - 18 * MIN, reduced_count: status === "green" ? 0 : 3,
+    checked_at: now - (status === "green" ? 3 : 24) * MIN, status, message: "Sample verification state",
+    recovery_issue: ["failed", "paused", "recovering"].includes(status) ? (project === "NIT" ? "NIT-29" : project === "HAR" ? "HAR-14" : null) : null }];
+}
+
+function verificationAudit(project: string): VerificationAuditReport | null {
+  if (project !== "NIT" || new URLSearchParams(window.location.search).get("verification") === "off") return null;
+  const common = { landed: 12, audited: 4, confirmed_escape_lands: 1, declared_lands: 12, matching_declarations: 10, audited_escape_rate: 0.25 };
+  return { jobs: [], rules: [{ name: "display-copy", ...common }, { name: "ordinary-comments", landed: 6, audited: 0, confirmed_escape_lands: 0, declared_lands: 6, matching_declarations: 6, audited_escape_rate: null }],
+    declarers: [{ name: "codex:example-session", ...common }], disabled_rules: ["display-copy"], escapes: [], jobs_truncated: false, rules_truncated: false, declarers_truncated: false, disabled_rules_truncated: false, escapes_truncated: false, note: "Sample audit results" };
 }
 
 const PRIORITY_ORDER = (p: number) => (p === 0 ? 9 : p);

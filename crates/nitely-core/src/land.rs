@@ -134,7 +134,7 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
     drop(lock);
 
     match result {
-        Ok(()) => record_landed(db, &issue, &mut report, actor)?,
+        Ok(()) => record_landed(db, &root, &issue, &mut report, actor)?,
         Err(e) => record_stopped(db, &issue.key, &format!("{e:#}"), &mut report, actor)?,
     }
     Ok(report)
@@ -142,7 +142,11 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
 
 /// What a land that went through does to its issue: the landed event, Done with the gate as
 /// evidence, and the issues it unblocked.
-pub(crate) fn record_landed(db: &mut Db, issue: &IssueRecord, report: &mut Landed, actor: &Actor) -> Result<()> {
+pub(crate) fn record_landed(db: &mut Db, root: &Path, issue: &IssueRecord, report: &mut Landed, actor: &Actor) -> Result<()> {
+    if let Err(e)=crate::verification_backstop::on_landed(db,root,issue,report) {
+        report.warnings.push(format!("post-merge verification record needs recovery: {e:#}"));
+        db.log_event(actor,Some(&issue.key),None,"verification_record_failed",&format!("{e:#}"))?;
+    }
     let base = report.base.clone();
     let evidence = format!(
         "Landed on {base} at {}; {} ({}).",

@@ -919,6 +919,12 @@ pub fn run() {
             // The phone server stays off until the person turns it on (docs/phone.md).
             tauri::Manager::manage(app, phone::PhoneApp::new(app.handle().clone()));
             update::start(app.handle());
+            // Durable, opt-in post-merge checks use the same admitted lanes as agent builds.
+            std::thread::spawn(|| loop {
+                let result=Config::load_read_only().and_then(|config| nitely_core::verification_backstop::tick_all(&mut Db::open_default()?, &config));
+                if let Err(e)=result { eprintln!("verification backstop: {e:#}"); }
+                std::thread::sleep(std::time::Duration::from_secs(60));
+            });
             // A playbook that lands by Nitely lands an approved change without an agent coming back
             // for it. Each round lands what is approved and ready; a land that holds the lock, or an
             // app that was closed, only delays it to a later round. Started here, in the one

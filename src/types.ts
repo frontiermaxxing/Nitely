@@ -743,6 +743,46 @@ export interface ProjectFlow {
   name: string;
   issues: FlowIssue[];
   done_today: FlowIssue[];
+  /** Absent on older servers; empty when post-merge verification is disabled. */
+  verification_health?: VerificationHealth[];
+  verification_audits?: VerificationAuditReport | null;
+}
+
+export interface VerificationHealth {
+  repo: string;
+  project: string;
+  observed_head: string;
+  verified_head: string | null;
+  pending_since: number;
+  reduced_count: number;
+  checked_at: number;
+  status: string;
+  message: string;
+  recovery_issue: string | null;
+}
+
+export interface VerificationAuditRate {
+  name: string;
+  landed: number;
+  audited: number;
+  confirmed_escape_lands: number;
+  declared_lands: number;
+  matching_declarations: number;
+  audited_escape_rate: number | null;
+}
+
+export interface VerificationAuditReport {
+  jobs: unknown[];
+  rules: VerificationAuditRate[];
+  declarers: VerificationAuditRate[];
+  disabled_rules: string[];
+  escapes: unknown[];
+  jobs_truncated: boolean;
+  rules_truncated: boolean;
+  declarers_truncated: boolean;
+  disabled_rules_truncated: boolean;
+  escapes_truncated: boolean;
+  note: string;
 }
 
 export interface Happening {

@@ -16,6 +16,7 @@ prose = ['docs/help/.*\.md']
 comments = ['src/components/.*\.(rs|ts|tsx|js|jsx)']
 display_copy = ['src/components/.*\.tsx']
 protected = ['src/components/Payment.*']
+audit_percent = 10
 ```
 
 Patterns match the complete repository-relative path. Rules are read from the immutable
@@ -46,3 +47,10 @@ level remains a higher floor even when the diff itself has a Basic proof.
 
 The post-merge backstop and human-approved activation are separate prerequisites for reducing
 checks. Shadow results alone never authorize skipping review or shipping a release.
+
+Plans also retain a separate [affected-test selection](affected-tests.md), stable audit sample
+and policy-content fingerprint. A selected test map cannot lower a protected-path floor.
+Confirmed audit escapes disable the matching rule in subsequent assessments. The
+[post-merge worker](verification-backstop.md) and [audit worker](verification-audits.md)
+provide the durable safety mechanisms; [release verification](release-verification.md)
+always requires exact candidate evidence.

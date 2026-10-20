@@ -1,0 +1,532 @@
+//! Durable post-merge checks. Nothing enables reduced verification by itself.
+//! Commands and recovery permissions come from the committed integration policy.
+use anyhow::{bail, Context, Result};
+use rusqlite::{params, OptionalExtension};
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use crate::{Db, Config, Actor, NewIssue, db::now, playbook::{self, git, Playbook}};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Rules {
+    pub enabled: bool,
+    pub landings: u32,
+    pub delay_seconds: i64,
+    pub nightly_seconds: i64,
+    pub auto_revert: bool,
+    /// Every reverted path needs an authoritative allow rule. Unknown side effects pause.
+    pub reversible_paths: Vec<String>,
+    pub irreversible_paths: Vec<String>,
+}
+impl Default for Rules {
+    fn default() -> Self { Self { enabled: false, landings: 5, delay_seconds: 1800, nightly_seconds: 86400, auto_revert: true, reversible_paths: vec![], irreversible_paths: vec![] } }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Health {
+    pub repo: String, pub project: String, pub observed_head: String,
+    pub verified_head: Option<String>, pub pending_since: i64, pub reduced_count: u32,
+    pub checked_at: i64, pub status: String, pub message: String, pub recovery_issue: Option<String>,
+}
+const COLUMNS: &str = "repo,project,observed_head,verified_head,pending_since,reduced_count,checked_at,status,message,recovery_issue";
+fn row(r: &rusqlite::Row) -> rusqlite::Result<Health> {
+    Ok(Health { repo:r.get(0)?,project:r.get(1)?,observed_head:r.get(2)?,verified_head:r.get(3)?,pending_since:r.get(4)?,reduced_count:r.get(5)?,checked_at:r.get(6)?,status:r.get(7)?,message:r.get(8)?,recovery_issue:r.get(9)? })
+}
+fn repo_id(repo: &Path) -> Result<String> {
+    crate::verification_audit::repository_id(repo)
+}
+pub fn health_all(db: &Db) -> Result<Vec<Health>> {
+    Ok(db.conn.prepare(&format!("SELECT {COLUMNS} FROM verification_health ORDER BY project,repo"))?.query_map([],row)?.collect::<rusqlite::Result<_>>()?)
+}
+pub fn health(db: &Db, repo: &Path) -> Result<Option<Health>> {
+    Ok(db.conn.query_row(&format!("SELECT {COLUMNS} FROM verification_health WHERE repo=?1"),[repo_id(repo)?],row).optional()?)
+}
+pub fn project_health(db: &Db, project: &str) -> Result<Vec<Health>> {
+    Ok(db.conn.prepare(&format!("SELECT {COLUMNS} FROM verification_health WHERE project=?1 ORDER BY repo"))?.query_map([project],row)?.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Absence is not a Full certificate: release verification must independently run its gate.
+pub fn release_ready(db: &Db, repo: &Path, _head: &str) -> Result<()> {
+    if let Some(h)=health(db,repo)? {
+        let branch=Playbook::load(repo)?.integration_branch().to_string();
+        let current=git(repo,&["rev-parse",&format!("refs/heads/{branch}")])?;
+        optional_policy(db,repo,current.trim())?.context("recorded backstop no longer has its committed policy")?;
+        if current.trim()!=h.observed_head || h.status != "green" || h.verified_head.as_deref()!=Some(&h.observed_head) {
+            bail!("integration backstop is {}: {}; resolve the unverified range before release",h.status,h.message);
+        }
+    }
+    Ok(())
+}
+pub fn reduced_ready(db: &Db, repo: &Path, rules: &Rules, at: i64) -> Result<()> {
+    if !rules.enabled { bail!("the post-merge backstop is not enabled"); }
+    reconcile(db,repo)?;
+    let h=health(db,repo)?.context("the backstop has not established a green baseline")?;
+    let branch=Playbook::load(repo)?.integration_branch().to_string();
+    let current=git(repo,&["rev-parse",&format!("refs/heads/{branch}")])?;
+    if current.trim()!=h.observed_head { bail!("reduced verification paused: integration moved before its landing was accounted for"); }
+    if let Some(verified)=&h.verified_head {
+        if git(repo,&["merge-base","--is-ancestor",verified,current.trim()]).is_err() { bail!("reduced verification paused: integration no longer descends from the verified baseline"); }
+    }
+    if h.verified_head.is_none() || matches!(h.status.as_str(),"failed"|"paused"|"recovering") || due(&h,rules,at) {
+        bail!("reduced verification paused: backstop {} or due",h.status);
+    }
+    Ok(())
+}
+fn due(h:&Health,r:&Rules,at:i64)->bool {
+    if h.observed_head==h.verified_head.as_deref().unwrap_or("") { return false; }
+    h.verified_head.is_none() || h.reduced_count>=r.landings.max(1)
+        || (h.reduced_count>0 && at.saturating_sub(h.pending_since)>=r.delay_seconds.clamp(1,1800))
+        || at.saturating_sub(h.checked_at)>=r.nightly_seconds.clamp(1,86400)
+}
+
+/// Record the exact landed range once. Full gates do not increment the reduced counter.
+pub fn record_landing(db:&Db,repo:&Path,project:&str,issue:&str,base:&str,head:&str,reduced:bool)->Result<()> {
+    let id=repo_id(repo)?;
+    let head=git(repo,&["rev-parse",&format!("{head}^{{commit}}")])?.trim().to_string();
+    let base=git(repo,&["rev-parse",&format!("{base}^{{commit}}")])?.trim().to_string();
+    db.conn.execute("INSERT OR IGNORE INTO verification_landing(repo,head,base,issue_key,reduced,landed_at) VALUES(?1,?2,?3,?4,?5,?6)",params![id,head,base,issue,reduced,now()])?;
+    // Reconcile from durable land rows, so a crash between inserts cannot lose a reduced landing.
+    let pb=Playbook::load(repo)?;
+    let current=git(repo,&["rev-parse",pb.integration_branch()])?;
+    observe(db,repo,project,current.trim())?;
+    reconcile(db,repo)?;
+    Ok(())
+}
+fn reconcile(db:&Db,repo:&Path)->Result<()> {
+    let id=repo_id(repo)?;
+    if let Some(verified)=health(db,repo)?.and_then(|h|h.verified_head) {
+        let rows=db.conn.prepare("SELECT DISTINCT head FROM verification_landing WHERE repo=?1 AND covered=0")?.query_map([&id],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        for head in rows {
+            if git(repo,&["merge-base","--is-ancestor",&head,&verified]).is_ok() {
+                db.conn.execute("UPDATE verification_landing SET covered=1 WHERE repo=?1 AND head=?2",params![id,head])?;
+            }
+        }
+    }
+    db.conn.execute("UPDATE verification_health SET reduced_count=(SELECT COUNT(*) FROM verification_landing l WHERE l.repo=?1 AND l.reduced=1 AND l.covered=0),pending_since=min(pending_since,coalesce((SELECT min(landed_at) FROM verification_landing l WHERE l.repo=?1 AND l.reduced=1 AND l.covered=0),pending_since)) WHERE repo=?1",[id])?;
+    Ok(())
+}
+fn observe(db:&Db,repo:&Path,project:&str,head:&str)->Result<()> {
+    let id=repo_id(repo)?;
+    db.conn.execute("INSERT OR IGNORE INTO verification_health(repo,project,observed_head,pending_since) VALUES(?1,?2,?3,?4)",params![id,project,head,now()])?;
+    // A landing can race a checker. Never replace a newer observation with its ancestor.
+    // CAS retries close the read/check/write window without holding SQLite across Git.
+    for _ in 0..8 {
+        let old=health(db,repo)?.context("branch health disappeared")?;
+        if old.observed_head==head || git(repo,&["merge-base","--is-ancestor",head,&old.observed_head]).is_ok() { return Ok(()); }
+        let rewritten=git(repo,&["merge-base","--is-ancestor",&old.observed_head,head]).is_err();
+        let changed=db.conn.execute("UPDATE verification_health SET pending_since=CASE WHEN verified_head=observed_head THEN ?4 ELSE pending_since END,observed_head=?2,status=CASE WHEN ?5 THEN 'paused' WHEN status='green' THEN 'pending' ELSE status END,message=CASE WHEN ?5 THEN 'Integration history changed; a new Full baseline is required' ELSE message END WHERE repo=?1 AND observed_head=?3",params![id,head,old.observed_head,now(),rewritten])?;
+        if changed==1 { return Ok(()); }
+    }
+    bail!("integration observations kept changing; retry verification")
+}
+fn committed_policy(repo:&Path,head:&str)->Result<(Playbook,String)> {
+    let object=format!("{head}:{}",playbook::PLAYBOOK_PATH);
+    let hash=git(repo,&["rev-parse",&object])?.trim().to_string();
+    let pb=Playbook::parse(&git(repo,&["show",&object])?)?;
+    if pb.unknown.iter().any(|s|s.starts_with("verification")) { bail!("unknown verification policy fields"); }
+    Ok((pb,hash))
+}
+/// Unconfigured projects are quiet. Removing policy after opting in does not erase
+/// pending evidence or turn previously blocked health into permission to proceed.
+fn optional_policy(db:&Db,repo:&Path,head:&str)->Result<Option<(Playbook,String)>> {
+    let id=repo_id(repo)?;
+    let contents=git(repo,&["show",&format!("{head}:{}",playbook::PLAYBOOK_PATH)]).ok();
+    if let Some(contents)=&contents {
+        let document:toml::Value=toml::from_str(contents)?;
+        if document.get("verification").is_some() {return committed_policy(repo,head).map(Some);}
+    }
+    let jobs:bool=db.conn.query_row("SELECT EXISTS(SELECT 1 FROM verification_audit WHERE repo=?1)",[&id],|r|r.get(0))?;
+    if health(db,repo)?.is_some() || jobs {
+        db.conn.execute("UPDATE verification_health SET status='paused',message='Committed verification policy was removed; restore or explicitly resolve recorded verification' WHERE repo=?1",[id])?;
+        bail!("committed verification policy is missing for recorded backstop/audit work");
+    }
+    Ok(None)
+}
+pub(crate) fn on_landed(db:&mut Db,repo:&Path,issue:&crate::issues::IssueRecord,land:&crate::land::Landed)->Result<()> {
+    let Some(head)=&land.head else { return Ok(()); };
+    let Some((pb,_))=optional_policy(db,repo,head)? else {return Ok(());};
+    if !pb.verification.backstop.enabled { return Ok(()); }
+    let commands:Vec<_>=pb.gate.commands.iter().chain(pb.gate.steps.iter().map(|s|&s.run)).collect();
+    let full=!commands.is_empty() && land.gate.as_ref().is_some_and(|g|g.passed && commands.iter().all(|c|g.results.iter().any(|r|r.command==c.as_str() && r.ok && (!r.skipped || r.output.starts_with("skipped: this tree passed it in lane run ")))));
+    let base=land.landed_from.as_deref().context("land has no immutable starting revision")?;
+    record_landing(db,repo,issue.project.as_deref().unwrap_or(""),&issue.key,base,head,!full)
+}
+
+/// One worker per repository, shared by CLI and desktop; dead process locks recover normally.
+pub fn tick_all(db:&mut Db,config:&Config)->Result<()> {
+    tick_all_inner(db,config,false)
+}
+/// Explicit Full check now. Overrides cadence, not enablement, resource admission,
+/// unresolved product failures, normal recovery gates, or human approvals.
+pub fn tick_all_now(db:&mut Db,config:&Config)->Result<()> {
+    tick_all_inner(db,config,true)
+}
+fn tick_all_inner(db:&mut Db,config:&Config,force:bool)->Result<()> {
+    let mut errors=Vec::new();
+    for repo in &config.repos {
+        if let Some(project)=&repo.project {
+            if let Err(e)=tick_inner(db,config,Path::new(&repo.root),project,&repo.integration_branch,force) { errors.push(format!("{}: {e:#}",repo.name)); }
+            if let Err(e)=run_audit(db,Path::new(&repo.root),project,&repo.integration_branch) { errors.push(format!("{} audit: {e:#}",repo.name)); }
+        }
+    }
+    if !errors.is_empty() { bail!("{}",errors.join("; ")); }
+    Ok(())
+}
+fn run_audit(db:&mut Db,repo:&Path,project:&str,branch:&str)->Result<()> {
+    let head=git(repo,&["rev-parse",&format!("refs/heads/{branch}")])?;
+    let Some((mut pb,_))=optional_policy(db,repo,head.trim())? else {return Ok(());};
+    pb.review.policy_root=Some(repo.to_path_buf());
+    crate::verification_audit::run_next(db,project,&repo_id(repo)?,|job|with_checkout(repo,&job.head,|wt|crate::verification_audit::full_review(job,wt,&pb.review)))?;
+    Ok(())
+}
+pub fn tick(db:&mut Db,config:&Config,repo:&Path,project:&str,branch:&str)->Result<()> {
+    tick_inner(db,config,repo,project,branch,false)
+}
+fn tick_inner(db:&mut Db,config:&Config,repo:&Path,project:&str,branch:&str,force:bool)->Result<()> {
+    let lock_path=PathBuf::from(repo_id(repo)?).join("nitely-verification.lock");
+    let Some(_lock)=crate::land::Lock::try_take(&lock_path,"verification",false)? else { return Ok(()); };
+    let head=git(repo,&["rev-parse",&format!("refs/heads/{branch}")])?.trim().to_string();
+    let Some((pb,policy))=optional_policy(db,repo,&head)? else {return Ok(());};
+    let rules=&pb.verification.backstop;
+    if !rules.enabled { return Ok(()); }
+    if pb.lanes.is_none() { bail!("post-merge verification requires memory-admitted build lanes"); }
+    observe(db,repo,project,&head)?;
+    reconcile(db,repo)?;
+    let h=health(db,repo)?.context("missing branch health")?;
+    let last_failed:Option<String>=db.conn.query_row("SELECT head FROM verification_backstop_run WHERE repo=?1 AND state='failed' ORDER BY id DESC LIMIT 1",[repo_id(repo)?],|r|r.get(0)).optional()?;
+    if last_failed.as_deref()==Some(&head) && matches!(h.status.as_str(),"failed"|"paused"|"recovering") {
+        let (run,mut culprit,evidence,complete,isolate_failure,base):(i64,Option<String>,String,bool,bool,Option<String>)=db.conn.query_row("SELECT id,culprit,evidence,isolation_complete,isolate_failure,base FROM verification_backstop_run WHERE repo=?1 AND head=?2 AND state='failed' ORDER BY id DESC LIMIT 1",params![repo_id(repo)?,head],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)))?;
+        if !force || isolate_failure {
+          if h.status=="recovering" || h.recovery_issue.is_none() {
+            if !complete {
+                let commands:Vec<_>=pb.gate.commands.iter().chain(pb.gate.steps.iter().map(|s|&s.run)).cloned().collect();
+                culprit=if isolate_failure {base.as_deref().and_then(|base|isolate(db,repo,&pb,base,&head,&commands,&Actor::Agent("verification-backstop".into())).ok())} else {None};
+                db.conn.execute("UPDATE verification_backstop_run SET culprit=?2,isolation_complete=1 WHERE id=?1",params![run,culprit])?;
+            }
+            recover(db,config,repo,project,&pb,&head,culprit.as_deref(),&evidence,&Actor::Agent("verification-backstop".into()))?;
+          }
+          return Ok(());
+        }
+    }
+    if !force && !due(&h,rules,now()) { return Ok(()); }
+    let commands:Vec<_>=pb.gate.commands.iter().chain(pb.gate.steps.iter().map(|s|&s.run)).cloned().collect();
+    if commands.is_empty() { bail!("the post-merge Full gate is empty"); }
+    let id=repo_id(repo)?;
+    db.conn.execute("UPDATE verification_backstop_run SET state='interrupted',ended_at=?2 WHERE repo=?1 AND state='running'",params![id,now()])?;
+    db.conn.execute("INSERT INTO verification_backstop_run(repo,head,base,policy,commands,started_at,state) VALUES(?1,?2,?3,?4,?5,?6,'running')",params![id,head,h.verified_head,policy,serde_json::to_string(&commands)?,now()])?;
+    let run=db.conn.last_insert_rowid();
+    db.conn.execute("UPDATE verification_health SET status='running',message='Full check queued in a build lane',recovery_issue=NULL WHERE repo=?1",[&id])?;
+    let actor=Actor::Agent("verification-backstop".into());
+    let result=execute(db,repo,&pb,&head,&commands,&actor);
+    match result {
+        Ok(gate) if gate.passed && gate.flaked.is_empty() => {
+            let current=git(repo,&["rev-parse",&format!("refs/heads/{branch}")])?;
+            observe(db,repo,project,current.trim())?;
+            db.conn.execute("UPDATE verification_backstop_run SET state='passed',ended_at=?2,lane_run=?3,evidence=?4 WHERE id=?1",params![run,now(),gate.run,serde_json::to_string(&gate.results)?])?;
+            db.conn.execute("UPDATE verification_health SET verified_head=?2,checked_at=?3,status=CASE WHEN observed_head=?2 THEN 'green' ELSE 'pending' END,message='Full gate passed',recovery_issue=NULL WHERE repo=?1",params![id,head,now()])?;
+            reconcile(db,repo)?;
+        }
+        result => {
+            let message=match &result { Ok(g)=>format!("Full gate failed or flaked: {}",serde_json::to_string(&g.results)?),Err(e)=>format!("Full gate could not complete: {e:#}") };
+            let isolate_failure=result.as_ref().is_ok_and(|g|!g.passed && g.flaked.is_empty());
+            db.conn.execute("UPDATE verification_backstop_run SET state='failed',ended_at=?2,evidence=?3,isolate_failure=?4 WHERE id=?1",params![run,now(),message,isolate_failure])?;
+            db.conn.execute("UPDATE verification_health SET status='failed',message=?2 WHERE repo=?1",params![id,message])?;
+            // Infrastructure/flake failures never justify reverting product changes.
+            let culprit=if isolate_failure {
+                h.verified_head.as_deref().and_then(|base|isolate(db,repo,&pb,base,&head,&commands,&actor).ok())
+            } else { None };
+            db.conn.execute("UPDATE verification_backstop_run SET culprit=?2,isolation_complete=1 WHERE id=?1",params![run,culprit])?;
+            recover(db,config,repo,project,&pb,&head,culprit.as_deref(),&message,&actor)?;
+        }
+    }
+    Ok(())
+}
+
+/// Disposable detached source only. Builds remain in warm, admitted lanes.
+pub(crate) fn with_checkout<T>(repo:&Path,head:&str,f:impl FnOnce(&Path)->Result<T>)->Result<T> {
+    let parent=PathBuf::from(repo_id(repo)?).join("nitely-verification-worktrees");
+    std::fs::create_dir_all(&parent)?;
+    let mut random=[0u8;16]; getrandom::fill(&mut random).map_err(|e|anyhow::anyhow!("verification checkout randomness: {e}"))?;
+    let suffix=random.iter().map(|b|format!("{b:02x}")).collect::<String>();
+    let path=parent.join(format!("{}-{suffix}",std::process::id()));
+    git(repo,&["worktree","add","--detach",&path.to_string_lossy(),head])?;
+    let result=f(&path);
+    // Only this newly-created checkout is removed; never reset a user's worktree.
+    let cleanup=git(repo,&["worktree","remove","--force",&path.to_string_lossy()]);
+    match (result,cleanup) { (Ok(v),Ok(_))=>Ok(v),(Err(e),_)=>Err(e),(Ok(_),Err(e))=>Err(e.context("removing verification checkout")) }
+}
+fn execute(db:&Db,repo:&Path,pb:&Playbook,head:&str,commands:&[String],actor:&Actor)->Result<crate::lanes::GateRun> {
+    with_checkout(repo,head,|wt| {
+        let mut pb=pb.clone();
+        pb.gate.retries=0;
+        let steps=commands.iter().map(|c|(c.clone(),None)).collect::<Vec<_>>();
+        crate::lanes::gate_fresh(db,repo,&pb,wt,None,crate::lanes::Kind::Run,&steps,actor)
+    })
+}
+
+/// Bisect first-parent commits, then independently verify parent, culprit and inverse at tip.
+/// Non-monotonic/interacting changes cannot pass the final isolation checks.
+fn isolate(db:&Db,repo:&Path,pb:&Playbook,base:&str,head:&str,commands:&[String],actor:&Actor)->Result<String> {
+    isolate_with(repo,base,head,&mut |rev|execute(db,repo,pb,rev,commands,actor).map(|g|g.passed && g.flaked.is_empty()))
+}
+fn isolate_with(repo:&Path,base:&str,head:&str,pass:&mut dyn FnMut(&str)->Result<bool>)->Result<String> {
+    git(repo,&["merge-base","--is-ancestor",base,head])?;
+    if !pass(base)? || pass(head)? { bail!("failure is not reproducible from the last green baseline"); }
+    let revs=git(repo,&["rev-list","--first-parent","--reverse",&format!("{base}..{head}")])?;
+    let revs:Vec<_>=revs.lines().collect();
+    if revs.is_empty() || revs.len()>128 { bail!("range is empty or exceeds bounded bisection"); }
+    let (mut lo,mut hi)=(0,revs.len()-1);
+    while lo<hi { let mid=(lo+hi)/2; if pass(revs[mid])? {lo=mid+1;} else {hi=mid;} }
+    let culprit=revs[lo];
+    let parents=git(repo,&["rev-list","--parents","-n","1",culprit])?;
+    let parents:Vec<_>=parents.split_whitespace().collect();
+    if parents.len()!=2 || !pass(parents[1])? || pass(culprit)? { bail!("culprit is not an isolated ordinary commit"); }
+    // Also apply the culprit alone to last green: a dependency on other bad changes pauses.
+    let alone=with_checkout(repo,base,|wt| {
+        git(wt,&["cherry-pick","--no-commit",culprit])?;
+        commit_snapshot(wt,"Verify isolated post-merge culprit")
+    })?;
+    if pass(&alone)? { bail!("failure requires interacting commits"); }
+    let inverse=with_checkout(repo,head,|wt| {
+        git(wt,&["revert","--no-commit",culprit])?;
+        commit_snapshot(wt,"Verify post-merge recovery")
+    })?;
+    if !pass(&inverse)? { bail!("reverting the candidate does not restore Full health"); }
+    Ok(culprit.into())
+}
+fn commit_snapshot(repo:&Path,message:&str)->Result<String> {
+    git(repo,&["-c","user.name=Nitely verification","-c","user.email=verification@localhost","commit","--no-gpg-sign","-m",message])?;
+    Ok(git(repo,&["rev-parse","HEAD"])?.trim().to_string())
+}
+fn reversible(repo:&Path,rules:&Rules,commit:&str)->Result<bool> {
+    let paths=git(repo,&["diff-tree","--no-commit-id","--name-only","-r",commit])?;
+    if paths.trim().is_empty() { return Ok(false); }
+    let allowed=rules.reversible_paths.iter().map(|s|regex::Regex::new(&format!("^(?:{s})$"))).collect::<std::result::Result<Vec<_>,_>>()?;
+    let denied=rules.irreversible_paths.iter().map(|s|regex::Regex::new(&format!("^(?:{s})$"))).collect::<std::result::Result<Vec<_>,_>>()?;
+    Ok(paths.lines().all(|p| {
+        let lower=p.to_ascii_lowercase();
+        !["migration","schema","deploy","release","install","credential","secret","playbook",".nitely/",".github/"].iter().any(|s|lower.contains(s))
+            && allowed.iter().any(|r|r.is_match(p)) && !denied.iter().any(|r|r.is_match(p))
+    }))
+}
+struct RecoveryIntent<'a> {
+    repo:&'a str, project:&'a str, head:&'a str, culprit:Option<&'a str>,
+    can_revert:bool, evidence:&'a str,
+}
+fn recovery_issue(db:&mut Db,intent:&RecoveryIntent<'_>,actor:&Actor)->Result<String> {
+    let mut random=[0u8;32]; getrandom::fill(&mut random).map_err(|e|anyhow::anyhow!("recovery identity randomness: {e}"))?;
+    let token=random.iter().map(|b|format!("{b:02x}")).collect::<String>();
+    db.conn.execute("INSERT OR IGNORE INTO verification_recovery(repo,head,project,token) VALUES(?1,?2,?3,?4)",params![intent.repo,intent.head,intent.project,token])?;
+    let (token,existing):(String,Option<String>)=db.conn.query_row("SELECT token,issue_key FROM verification_recovery WHERE repo=?1 AND head=?2",params![intent.repo,intent.head],|r|Ok((r.get(0)?,r.get(1)?)))?;
+    let key=match existing {
+        Some(key)=>{db.issue(&key)?.context("recorded recovery issue was removed; inspect recovery before retrying")?;key}
+        None=>{
+            let issue=db.create_issue(&NewIssue {project:intent.project.into(),title:format!("Restore Full verification after integration {} failed",&intent.head[..intent.head.len().min(12)]),body:format!("Post-merge Full verification failed. Reduced landings are paused.\n\nIsolated culprit: {}. Automatic inverse permitted: {}.\n\n{}\n\n[verification-recovery:{token}]",intent.culprit.unwrap_or("not proven"),intent.can_revert,intent.evidence),kind:"bug".into(),source:"codex".into(),evidence:intent.evidence.into(),priority:2,review_level:Some("sensitive".into()),allow_similar:true,..Default::default()},actor)?;
+            // The insertion trigger records this key before create_issue commits.
+            let linked:Option<String>=db.conn.query_row("SELECT issue_key FROM verification_recovery WHERE repo=?1 AND head=?2",params![intent.repo,intent.head],|r|r.get(0))?;
+            if linked.as_deref()!=Some(&issue.key) { bail!("recovery issue was not atomically linked"); }
+            issue.key
+        }
+    };
+    db.conn.execute("UPDATE verification_health SET recovery_issue=?2,status=?3 WHERE repo=?1",params![intent.repo,key,if intent.can_revert {"recovering"} else {"paused"}])?;
+    Ok(key)
+}
+
+/// Recover only the exact inverse: a stale light-worktree base can fast-forward,
+/// a fully staged inverse can be committed, and an already committed inverse reused.
+/// Any unrelated edits or extra history stop automatic recovery without discarding work.
+fn prepare_inverse(repo:&Path,wt:&Path,head:&str,culprit:&str,message:&str)->Result<String> {
+    let inverse=with_checkout(repo,head,|temp| {git(temp,&["revert","--no-commit",culprit])?; Ok(git(temp,&["write-tree"])?.trim().to_string())})?;
+    let mut current=git(wt,&["rev-parse","HEAD"])?.trim().to_string();
+    let clean=git(wt,&["status","--porcelain"])?.trim().is_empty();
+    if clean && current!=head && git(wt,&["merge-base","--is-ancestor",&current,head]).is_ok() {
+        git(wt,&["merge","--ff-only",head])?;
+        current=head.into();
+    }
+    if current==head {
+        if clean { git(wt,&["revert","--no-commit",culprit])?; }
+        if !git(wt,&["diff","--name-only"])?.trim().is_empty()
+            || !git(wt,&["ls-files","--others","--exclude-standard"])?.trim().is_empty()
+            || git(wt,&["write-tree"])?.trim()!=inverse { bail!("recovery checkout contains changes beyond the proven staged inverse"); }
+        return commit_snapshot(wt,message);
+    }
+    if !clean || git(wt,&["rev-parse","HEAD^{tree}"])?.trim()!=inverse
+        || git(wt,&["rev-parse","HEAD^"])?.trim()!=head { bail!("recovery checkout is not the single proven inverse on the failed head"); }
+    Ok(current)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn recover(db:&mut Db,config:&Config,repo:&Path,project:&str,pb:&Playbook,head:&str,culprit:Option<&str>,evidence:&str,actor:&Actor)->Result<()> {
+    let id=repo_id(repo)?;
+    let can_revert=pb.verification.backstop.auto_revert && culprit.map(|c|reversible(repo,&pb.verification.backstop,c)).transpose()?.unwrap_or(false);
+    if let Some(culprit)=culprit { crate::verification_audit::confirmed_landing_culprit(db,project,&id,culprit,evidence)?; }
+    let key=recovery_issue(db,&RecoveryIntent{repo:&id,project,head,culprit,can_revert,evidence},actor)?;
+    if !can_revert { return Ok(()); }
+    let culprit=culprit.context("no isolated culprit")?;
+    // If integration moved, a new worker must verify that exact inverse first.
+    if git(repo,&["rev-parse",pb.integration_branch()])?.trim()!=head { return Ok(()); }
+    let issue=db.issue(&key)?.context("recovery issue disappeared")?;
+    if matches!(issue.state.as_str(),"In Review"|"Approved") {
+        crate::land::land(db,config,&crate::land::LandOptions { dir:&repo.to_string_lossy(),issue_key:&key,push:true,keep:false,break_lock:false },actor)?;
+        return Ok(());
+    }
+    if matches!(issue.state.as_str(),"Needs You"|"Done") { return Ok(()); }
+    let started=playbook::start_task(db,repo,&issue,"codex",actor)?;
+    let wt=Path::new(&started.worktree);
+    if let Err(e)=prepare_inverse(repo,wt,head,culprit,&format!("Restore Full verification: [{key}](http://127.0.0.1:7423/i/{key})")) {
+        db.add_note(&key,&format!("Recovery checkout needs inspection before submitting: {e:#}"),"handoff",actor)?;
+        db.conn.execute("UPDATE verification_health SET status='paused',message='Recovery worktree needs inspection' WHERE repo=?1",[&id])?;
+        return Ok(());
+    }
+    db.conn.execute("UPDATE verification_health SET status='recovering',message='Isolated inverse submitted through normal review and approval' WHERE repo=?1",[id])?;
+    let original:Option<String>=db.conn.query_row("SELECT issue_key FROM verification_landing WHERE repo=?1 AND head=?2 ORDER BY landed_at DESC LIMIT 1",params![repo_id(repo)?,culprit],|r|r.get(0)).optional()?;
+    if let Some(original)=original {
+        if db.issue(&original)?.is_some_and(|i|i.state=="Done") { db.move_issue(&original,"Todo",Some("Post-merge Full check isolated this change as a regression"),None,actor)?; }
+        db.add_note(&original,&format!("An isolated regression is being reverted through [{key}](http://127.0.0.1:7423/i/{key})."),"note",actor)?;
+    }
+    let solution=crate::submit::SolutionSummary { title:"Restore the last proven integration behavior".into(),summary:format!("Reverts isolated culprit {culprit}; Full checks failed on it alone and passed with its inverse at {head}. Normal gate, independent review and human approval rules still apply.") };
+    let current=git(wt,&["rev-parse","HEAD"])?.trim().to_string();
+    let submitted:Option<String>=db.conn.query_row("SELECT submitted_head FROM verification_recovery WHERE repo=?1 AND head=?2",params![repo_id(repo)?,head],|r|r.get(0))?;
+    if submitted.as_deref()==Some(&current) {
+        db.conn.execute("UPDATE verification_health SET status='paused',message='Recovery revision needs fixes before another submit' WHERE repo=?1",[repo_id(repo)?])?;
+        return Ok(());
+    }
+    let submitted=crate::submit::submit(db,config,&crate::submit::SubmitOptions { dir:&started.worktree,issue_key:Some(&key),skip_review:false,local_only:false,batch:false,solution:Some(&solution),solution_commit:None,solution_patch_id:None },actor)?;
+    db.conn.execute("UPDATE verification_recovery SET submitted_head=?3 WHERE repo=?1 AND head=?2",params![repo_id(repo)?,head,current])?;
+    if submitted.state=="In Progress" {
+        db.conn.execute("UPDATE verification_health SET status='paused',message='Recovery gate or review needs fixes' WHERE repo=?1",[repo_id(repo)?])?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn fixture()->(Db,PathBuf,String) {
+        let repo=crate::test_repo::copy("verification-backstop-durability",|p|crate::test_repo::init(p,&[("value.txt","good"),("a.txt","0"),("b.txt","0"),(".nitely/playbook.toml","[verification.backstop]\nenabled=true\n")]));
+        let db=Db::open(&crate::paths::unique_temp("nitely-backstop-test",".sqlite")).unwrap();
+        db.create_project("APP","Example").unwrap();
+        let base=git(&repo,&["rev-parse","HEAD"]).unwrap().trim().to_string();
+        observe(&db,&repo,"APP",&base).unwrap();
+        db.conn.execute("UPDATE verification_health SET verified_head=?1,status='green',checked_at=?2",params![base,now()]).unwrap();
+        (db,repo,base)
+    }
+    fn change(repo:&Path,path:&str,value:&str)->String {
+        std::fs::write(repo.join(path),value).unwrap();
+        crate::test_repo::git(repo,&["add",path]);crate::test_repo::git(repo,&["commit","-m","change"]);
+        git(repo,&["rev-parse","HEAD"]).unwrap().trim().to_string()
+    }
+    fn state()->Health { Health { repo:"repo".into(),project:"APP".into(),observed_head:"b".into(),verified_head:Some("a".into()),pending_since:100,reduced_count:1,checked_at:50,status:"pending".into(),message:String::new(),recovery_issue:None } }
+    #[test]
+    fn due_by_count_age_and_changed_nightly_but_never_unchanged() {
+        let r=Rules::default(); let mut h=state();
+        assert!(!due(&h,&r,1899)); assert!(due(&h,&r,1900));
+        h.reduced_count=5; assert!(due(&h,&r,101));
+        h.reduced_count=0; assert!(!due(&h,&r,1900)); assert!(due(&h,&r,86450));
+        h.verified_head=Some("b".into()); assert!(!due(&h,&r,999999));
+        h.verified_head=None; assert!(due(&h,&r,101));
+    }
+
+    #[test]
+    fn observations_never_regress_and_unrecorded_tip_blocks_reduced_landing() {
+        let (db,repo,base)=fixture();
+        let head=change(&repo,"value.txt","bad");
+        let rules=Rules{enabled:true,..Default::default()};
+        assert!(reduced_ready(&db,&repo,&rules,now()).unwrap_err().to_string().contains("integration moved"));
+        assert!(release_ready(&db,&repo,&head).is_err(),"old green health cannot authorize the unrecorded tip");
+        observe(&db,&repo,"APP",&head).unwrap();
+        let other=Db::open(Path::new(db.conn.path().unwrap())).unwrap();
+        observe(&other,&repo,"APP",&base).unwrap();
+        let h=health(&db,&repo).unwrap().unwrap();
+        assert_eq!(h.observed_head,head);assert_eq!(h.status,"pending");
+        assert!(reduced_ready(&db,&repo,&rules,now()).is_ok());
+    }
+
+    #[test]
+    fn ordinary_projects_are_quiet_but_removed_recorded_policy_fails_closed() {
+        let mut db=Db::open(&crate::paths::unique_temp("nitely-backstop-opt-in",".sqlite")).unwrap();
+        db.create_project("APP","Example").unwrap();
+        let repo=crate::test_repo::copy("verification-no-policy",|p|crate::test_repo::init(p,&[("help.txt","help")]));
+        tick(&mut db,&Config::default(),&repo,"APP","main").unwrap();
+        run_audit(&mut db,&repo,"APP","main").unwrap();
+        assert!(health(&db,&repo).unwrap().is_none());
+        let head=git(&repo,&["rev-parse","HEAD"]).unwrap();
+        let issue=db.create_issue(&NewIssue{project:"APP".into(),title:"Ordinary change".into(),body:"No verification policy configured".into(),kind:"feature".into(),source:"codex".into(),evidence:"test".into(),..Default::default()},&Actor::Agent("codex:test".into())).unwrap();
+        let landed=crate::land::Landed{head:Some(head.trim().into()),..Default::default()};
+        on_landed(&mut db,&repo,&issue,&landed).unwrap();
+        assert!(health(&db,&repo).unwrap().is_none(),"ordinary landing does not opt the repo into backstop checks");
+        observe(&db,&repo,"APP",head.trim()).unwrap();
+        assert!(tick(&mut db,&Config::default(),&repo,"APP","main").unwrap_err().to_string().contains("missing"));
+        assert_eq!(health(&db,&repo).unwrap().unwrap().status,"paused");
+        std::fs::create_dir_all(repo.join(".nitely")).unwrap();
+        let head=change(&repo,".nitely/playbook.toml","[gate]\ncommands=['echo checked']\n");
+        assert!(optional_policy(&db,&repo,&head).is_err(),"removing only the verification section also fails closed");
+    }
+
+    #[test]
+    fn reconciliation_recovers_counter_and_original_deadline_after_interrupted_landing() {
+        let (db,repo,base)=fixture();let head=change(&repo,"value.txt","bad");
+        db.conn.execute("INSERT INTO verification_landing(repo,head,base,issue_key,reduced,landed_at) VALUES(?1,?2,?3,'APP-1',1,?4)",params![repo_id(&repo).unwrap(),head,base,now()-1900]).unwrap();
+        observe(&db,&repo,"APP",&head).unwrap();
+        let rules=Rules{enabled:true,..Default::default()};
+        assert!(reduced_ready(&db,&repo,&rules,now()).is_err());
+        let h=health(&db,&repo).unwrap().unwrap();assert_eq!(h.reduced_count,1);assert!(due(&h,&rules,now()));
+        db.conn.execute("UPDATE verification_health SET verified_head=?1",[head]).unwrap();
+        reconcile(&db,&repo).unwrap();assert_eq!(health(&db,&repo).unwrap().unwrap().reduced_count,0);
+    }
+
+    #[test]
+    fn issue_creation_links_ticket_atomically_and_reuses_it_after_restart() {
+        let (mut db,repo,head)=fixture();let id=repo_id(&repo).unwrap();
+        let actor=Actor::Agent("verification-backstop".into());
+        let intent=RecoveryIntent{repo:&id,project:"APP",head:&head,culprit:Some(&head),can_revert:true,evidence:"reproduced failure"};
+        let key=recovery_issue(&mut db,&intent,&actor).unwrap();
+        db.conn.execute("UPDATE verification_health SET recovery_issue=NULL,status='failed'",[]).unwrap();
+        let path=db.conn.path().unwrap().to_owned();drop(db);let mut db=Db::open(Path::new(&path)).unwrap();
+        assert_eq!(recovery_issue(&mut db,&intent,&actor).unwrap(),key);
+        assert_eq!(db.list_issues(Some("APP"),true).unwrap().len(),1);
+        assert_eq!(health(&db,&repo).unwrap().unwrap().status,"recovering");
+        db.rekey_project("APP","NEW").unwrap();
+        let linked:String=db.conn.query_row("SELECT issue_key FROM verification_recovery",[],|r|r.get(0)).unwrap();assert_eq!(linked,"NEW-1");
+        db.remove_project("NEW",true).unwrap();
+        assert!(health_all(&db).unwrap().is_empty());
+    }
+
+    #[test]
+    fn inverse_preparation_resumes_stale_base_staged_changes_and_committed_inverse() {
+        let (_db,repo,base)=fixture();let culprit=change(&repo,"value.txt","bad");
+        with_checkout(&repo,&base,|wt| {
+            let inverse=prepare_inverse(&repo,wt,&culprit,&culprit,"Restore verified behavior")?;
+            assert_eq!(std::fs::read_to_string(wt.join("value.txt"))?,"good");
+            assert_eq!(git(wt,&["rev-parse","HEAD^"])?.trim(),culprit);
+            assert_eq!(prepare_inverse(&repo,wt,&culprit,&culprit,"Resume")?,inverse);
+            Ok(())
+        }).unwrap();
+        with_checkout(&repo,&culprit,|wt| {
+            git(wt,&["revert","--no-commit",&culprit])?;
+            prepare_inverse(&repo,wt,&culprit,&culprit,"Resume staged inverse")?;
+            assert!(git(wt,&["status","--porcelain"])?.trim().is_empty());Ok(())
+        }).unwrap();
+        with_checkout(&repo,&culprit,|wt| {
+            std::fs::write(wt.join("value.txt"),"human work")?;
+            assert!(prepare_inverse(&repo,wt,&culprit,&culprit,"Must not overwrite").is_err());
+            assert_eq!(std::fs::read_to_string(wt.join("value.txt"))?,"human work");Ok(())
+        }).unwrap();
+    }
+
+    #[test]
+    fn isolation_proves_single_culprit_and_rejects_interactions_and_irreversible_paths() {
+        let (_db,repo,base)=fixture();let culprit=change(&repo,"value.txt","bad");
+        let tip=change(&repo,"a.txt","1");
+        let isolated=isolate_with(&repo,&base,&tip,&mut |rev|Ok(git(&repo,&["show",&format!("{rev}:value.txt")])?.trim()=="good")).unwrap();
+        assert_eq!(isolated,culprit);
+        let r=Rules{reversible_paths:vec![".*".into()],..Default::default()};assert!(reversible(&repo,&r,&culprit).unwrap());
+        let migration=change(&repo,"schema.sql","change schema");assert!(!reversible(&repo,&r,&migration).unwrap());
+        let (_db,repo,base)=fixture();change(&repo,"a.txt","1");let tip=change(&repo,"b.txt","1");
+        let result=isolate_with(&repo,&base,&tip,&mut |rev| {
+            let a=git(&repo,&["show",&format!("{rev}:a.txt")])?;let b=git(&repo,&["show",&format!("{rev}:b.txt")])?;
+            Ok(!(a.trim()=="1" && b.trim()=="1"))
+        });
+        assert!(result.unwrap_err().to_string().contains("interacting"));
+    }
+}

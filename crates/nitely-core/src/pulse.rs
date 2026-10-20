@@ -49,6 +49,8 @@ pub struct Pulse {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ProjectFlow {
+    pub verification_health: Vec<crate::verification_backstop::Health>,
+    pub verification_audits: Option<crate::verification_audit::Report>,
     pub key: String,
     pub name: String,
     /// Open issues, most urgent first.
@@ -184,7 +186,10 @@ pub fn pulse(db: &Db, since: i64, day_start: i64) -> Result<Pulse> {
                 done_today.push(flow(i)?);
             }
         }
-        projects.push(ProjectFlow { key: p.key, name: p.name, issues: open, done_today });
+        let verification_health=crate::verification_backstop::project_health(db,&p.key)?;
+        let audits=crate::verification_audit::report(db,&p.key,10)?;
+        let verification_audits=(!audits.jobs.is_empty() || !audits.rules.is_empty()).then_some(audits);
+        projects.push(ProjectFlow { key: p.key, name: p.name, issues: open, done_today, verification_health, verification_audits });
     }
 
     let approvals = issues.iter().filter(|i| i.is_open() && i.needs_human()).cloned().collect();

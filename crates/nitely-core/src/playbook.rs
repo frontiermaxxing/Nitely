@@ -23,6 +23,8 @@ pub struct Playbook {
     #[serde(default)]
     pub verification: crate::verification::Rules,
     #[serde(default)]
+    pub release: Option<crate::release_verification::Rules>,
+    #[serde(default)]
     pub branch: BranchRules,
     #[serde(default)]
     pub worktree: WorktreeRules,

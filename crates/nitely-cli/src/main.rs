@@ -7,6 +7,7 @@ mod mcp;
 mod newer;
 mod performance;
 mod preview;
+mod release_verification;
 mod serve;
 mod ui;
 
@@ -29,6 +30,15 @@ struct Cli {
 enum Cmd {
     /// Run an isolated headless browser with a bounded lifetime, or clean its inactive profile.
     Preview { #[command(subcommand)] command: preview::Command },
+    /// Verify the exact release candidate against authoritative release policy.
+    ReleaseVerify { #[command(flatten)] args: release_verification::Args },
+    /// Run due post-merge checks, or read retained branch health.
+    Verification {
+        #[arg(long, conflicts_with="now")] tick: bool,
+        /// Run an opted-in Full backstop now, including an explicit infrastructure retry.
+        #[arg(long)] now: bool,
+        #[arg(long)] project: Option<String>
+    },
     /// Local machine performance recording and retained history.
     Performance { #[command(subcommand)] command: performance::Command },
     /// Record an agent hook event. Reads the hook's JSON on stdin and always exits 0,
@@ -851,6 +861,16 @@ fn run(cmd: Cmd) -> Result<()> {
     // only in the app.
     let me = Actor::Agent("cli".into());
     match cmd {
+        Cmd::ReleaseVerify { args } => release_verification::run(args),
+        Cmd::Verification { tick, now, project } => {
+            let config = Config::load_read_only()?;
+            let mut db = Db::open_default()?;
+            if tick { nitely_core::verification_backstop::tick_all(&mut db, &config)?; }
+            if now { nitely_core::verification_backstop::tick_all_now(&mut db, &config)?; }
+            let audits=project.as_deref().map(|p|nitely_core::verification_audit::report(&db,p,100)).transpose()?;
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!({"health":nitely_core::verification_backstop::health_all(&db)?,"audits":audits}))?);
+            Ok(())
+        }
         Cmd::Performance { command } => performance::run(command),
         Cmd::Preview { command } => preview::run(command),
         Cmd::Hook { .. } | Cmd::Mcp | Cmd::McpCall | Cmd::McpCalls | Cmd::McpDetached | Cmd::Ui { .. } => unreachable!(),

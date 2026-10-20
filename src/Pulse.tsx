@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "./backend";
 import type { View } from "./App";
 import { KIND_LABEL as DECISION_LABEL, type Decision, type DecisionKind } from "./decisions";
-import type { Board, FlowIssue, GoalReport, Happening, IssueRecord, ProjectFlow, Pulse as PulseData, Session, TaskRow } from "./types";
+import type { Board, FlowIssue, GoalReport, Happening, IssueRecord, ProjectFlow, Pulse as PulseData, Session, TaskRow, VerificationAuditRate } from "./types";
 import { HOME_LABEL, agentLabel, agentTitle, ago } from "./util";
 import { GoalRisks, GoalRows } from "./GoalRows";
 import { byProject, finishLine, groupKind, groupNeeded, neededLine, triagedLine } from "./goals";
@@ -10,6 +10,7 @@ import { LanesStrip } from "./LanesStrip";
 import { useBatches } from "./BatchesStrip";
 import { WaitingStrip, useWaits } from "./WaitingStrip";
 import { landQueueLength } from "./batches";
+import { auditedEscapeRate, verificationPresentation, verificationRepoName, verificationRevision } from "./verificationHealth";
 import {
   AgentMark,
   EmptyState,
@@ -415,6 +416,8 @@ function Flow({ flow, ctx, onBoard }: { flow: ProjectFlow; ctx: Context; onBoard
           {flow.done_today.length > 0 && <> · {flow.done_today.length} done today</>}
         </span>
       </div>
+      <VerificationHealthRows flow={flow} ctx={ctx} />
+      <VerificationAudits flow={flow} />
       <div className="flow-grid">
         {STATIONS.map((s) => {
           const here = at(s);
@@ -440,6 +443,56 @@ function Flow({ flow, ctx, onBoard }: { flow: ProjectFlow; ctx: Context; onBoard
       </div>
     </div>
   );
+}
+
+function VerificationHealthRows({ flow, ctx }: { flow: ProjectFlow; ctx: Context }) {
+  if (!flow.verification_health?.length) return null;
+  return <ul className="verification-health" aria-label={`${flow.name} verification health`}>
+    {flow.verification_health.map((health) => {
+      const presentation = verificationPresentation(health);
+      const current = verificationRevision(health.observed_head);
+      const verified = verificationRevision(health.verified_head);
+      const recovery = health.recovery_issue && /^[a-z][a-z0-9]*-\d+$/i.test(health.recovery_issue) ? health.recovery_issue : null;
+      const issue = recovery ? [...flow.issues, ...flow.done_today].find((f) => f.issue.key === recovery)?.issue : null;
+      return <li className={`verification-health-row is-${presentation.tone}`} key={health.repo}>
+        <div className="verification-health-main">
+          <span className="verification-health-state"><span aria-hidden="true" className="verification-health-mark">{presentation.label === "Verified" ? "✓" : presentation.tone === "failed" ? "×" : presentation.tone === "paused" ? "Ⅱ" : "○"}</span>{presentation.label}</span>
+          {flow.verification_health!.length > 1 && <span className="verification-health-repo">{verificationRepoName(health.repo)}</span>}
+          <span className="verification-health-detail">{presentation.detail}</span>
+          <span className="verification-health-age">{health.checked_at > 0 ? `Last Full pass ${ago(ctx.now, health.checked_at)}` : "No Full pass recorded"}</span>
+        </div>
+        <div className="verification-health-meta">
+          {current && <span>Current <code>{current}</code></span>}
+          {verified && current !== verified && <span>Last verified <code>{verified}</code></span>}
+          {presentation.label === "Verification pending" && health.pending_since > 0 && <span>Pending for {ago(ctx.now, health.pending_since).replace(" ago", "")}</span>}
+          {recovery && <span className="verification-health-recovery">Recovery {issue ? <IssueToken issue={issue} onOpen={ctx.onOpenIssue} /> : <a href={`#overview@${encodeURIComponent(recovery)}`} onClick={(e) => { e.preventDefault(); ctx.onOpenIssue(recovery); }}>{recovery}</a>}</span>}
+        </div>
+      </li>;
+    })}
+  </ul>;
+}
+
+function VerificationAudits({ flow }: { flow: ProjectFlow }) {
+  const report = flow.verification_audits;
+  if (!report || (!report.rules.length && !report.declarers.length && !report.jobs.length && !report.disabled_rules.length)) return null;
+  const hasEscapes = [...report.rules, ...report.declarers].some((r) => r.confirmed_escape_lands > 0);
+  const limited = report.rules_truncated || report.declarers_truncated || report.disabled_rules_truncated || report.escapes_truncated;
+  const rates = (items: VerificationAuditRate[], declarers: boolean) => <ul className="verification-audit-rates">
+    {items.map((rate) => <li key={rate.name}>
+      <strong>{declarers ? agentLabel(rate.name) : rate.name.slice(0, 160)}</strong>
+      <span>{rate.audited} / {rate.landed} audited · {Math.max(0, rate.landed - rate.audited)} unaudited, outcome unknown</span>
+      <span className={rate.confirmed_escape_lands > 0 ? "stuck-ink" : ""}>{rate.confirmed_escape_lands} confirmed {rate.confirmed_escape_lands === 1 ? "escape" : "escapes"} · {auditedEscapeRate(rate)}</span>
+      <span>{rate.declared_lands > 0 ? `${rate.matching_declarations} / ${rate.declared_lands} declarations agree with classified risk` : "No declarations to compare"}</span>
+    </li>)}
+  </ul>;
+  return <details className="verification-audits">
+    <summary><span>Verification audits</span><span className="verification-audit-summary">{report.rules.length}{report.rules_truncated ? "+" : ""} {report.rules.length === 1 ? "rule" : "rules"}{hasEscapes && <span className="stuck-ink"> · confirmed escapes</span>}{report.disabled_rules.length > 0 && ` · ${report.disabled_rules.length}${report.disabled_rules_truncated ? "+" : ""} paused`}</span></summary>
+    <p className="verification-audit-note">Unaudited outcomes are unknown. Escape rates cover completed audits only; declaration agreement compares the declared risk with the classifier.</p>
+    {report.rules.length > 0 && <><h3>By rule</h3>{rates(report.rules, false)}</>}
+    {report.declarers.length > 0 && <><h3>By declarer</h3>{rates(report.declarers, true)}</>}
+    {report.disabled_rules.length > 0 && <p className="verification-audit-note">Paused rules: {report.disabled_rules.map((r) => r.slice(0, 160)).join(", ")}. These paths require Full verification.</p>}
+    {limited && <p className="verification-audit-note">Showing a limited report; counts are per group and may overlap.</p>}
+  </details>;
 }
 
 /** An issue at its station: its glyph and key, and who has it. Hover says the rest. */

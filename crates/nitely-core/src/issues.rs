@@ -239,6 +239,7 @@ pub struct LinkedIssue {
 /// One issue with everything the issue panel shows.
 #[derive(Debug, Clone, Serialize)]
 pub struct IssueDetail {
+    pub verification: Vec<crate::verification::Plan>,
     pub issue: IssueRecord,
     pub relations: Relations,
     pub timeline: Vec<TimelineEntry>,
@@ -1904,6 +1905,7 @@ impl Db {
     pub fn issue_detail(&self, key: &str) -> Result<Option<IssueDetail>> {
         let Some(issue) = self.issue(key)? else { return Ok(None) };
         Ok(Some(IssueDetail {
+            verification: crate::verification::recent(self,&issue.key)?,
             relations: self.relations(&issue.key)?,
             timeline: self.timeline(&issue.key)?,
             prs: self.prs_for_issue(&issue.key)?,

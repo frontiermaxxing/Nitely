@@ -722,7 +722,7 @@ fn land_prefix(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stacked: Vec<S
         report.cleanup = Some(cleanup);
         report.held_by = held_by;
         let issue = db.issue(&s.entry.issue)?.with_context(|| format!("no issue {}", s.entry.issue))?;
-        land::record_landed(db, &issue, &mut report, &actor)?;
+        land::record_landed(db, root, &issue, &mut report, &actor)?;
         finish(db, &s.entry, "landed", &report)?;
         db.conn.execute("UPDATE land_run SET landed = landed || ?2 || ',' WHERE id = ?1", params![run, s.entry.issue])?;
     }

@@ -1009,6 +1009,17 @@ pub struct GateRun {
 /// run's record without running anything.
 #[allow(clippy::too_many_arguments)]
 pub fn gate(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Option<&str>, kind: Kind, steps: &[(String, Option<String>)], actor: &Actor, yolo_keys: &[&str]) -> Result<GateRun> {
+    gate_inner(db, repo_root, pb, worktree, issue, kind, steps, actor, true, yolo_keys)
+}
+
+/// A backstop or reproduction must execute, even when the same tree passed before.
+#[allow(clippy::too_many_arguments)]
+pub fn gate_fresh(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Option<&str>, kind: Kind, steps: &[(String, Option<String>)], actor: &Actor) -> Result<GateRun> {
+    gate_inner(db, repo_root, pb, worktree, issue, kind, steps, actor, false, &[])
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gate_inner(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Option<&str>, kind: Kind, steps: &[(String, Option<String>)], actor: &Actor, reuse: bool, yolo_keys: &[&str]) -> Result<GateRun> {
     // What is committed, as land will build it: the branch head, never a commit made for the
     // request, so the gate reports the commit the review sees.
     let top = PathBuf::from(git(worktree, &["rev-parse", "--show-toplevel"])?.trim());
@@ -1030,7 +1041,7 @@ pub fn gate(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Op
     // One command per line is the key, so a command that holds a line break of its own could
     // stand for two: such a gate is never answered from a record.
     let keyed = !to_run.iter().any(|c| c.contains('\n'));
-    let passed_before: Option<i64> = if !keyed {
+    let passed_before: Option<i64> = if !keyed || !reuse {
         None
     } else {
         db.conn
