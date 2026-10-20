@@ -158,6 +158,7 @@ pub(crate) fn on_landed(
                             "--project".into(),
                             project.into(),
                             "--tick".into(),
+                            "--quiet".into(),
                         ],
                         root,
                         &Path::new(&repo).join("nitely-periodic-review.log"),
@@ -579,7 +580,7 @@ fn apply_findings(
                 let issue=db.create_issue(&NewIssue {
                     project:project.into(),title:crate::issues::headline(&f.text,120),
                     body:format!("Periodic integration review found:\n\n{}\n\nReviewed exact {}..{} in job {}. Source changes: {}.\nConfirm the finding remains applicable on current main before editing; later changes or prior human decisions may affect it.\n\n{}",f.text,j.base,j.head,id,links,marker),
-                    kind:"bug".into(),source:ACTOR.into(),evidence:format!("Fresh {} review of {}..{}",j.reviewer.as_deref().unwrap_or("independent"),j.base,j.head),
+                    kind:"bug".into(),source:match j.reviewer.as_deref() { Some("claude")=>"claude",Some("cursor")=>"cursor",_=>"codex" }.into(),evidence:format!("Fresh {} review of {}..{}",j.reviewer.as_deref().unwrap_or("independent"),j.base,j.head),
                     priority:i64::from(f.priority.saturating_add(1).clamp(1,4)),allow_similar:true,..Default::default()
                 },&actor)?;
                 (issue.key, "filed")
@@ -660,11 +661,12 @@ mod tests {
                 ],
             );
             std::fs::create_dir_all(root.join(".nitely")).unwrap();
-            std::fs::write(
-                root.join(".nitely/playbook.toml"),
-                format!("[review]\n{}", toml::to_string(&review).unwrap()),
-            )
-            .unwrap();
+            let playbook = Playbook { review, ..Default::default() };
+            let text = toml::to_string(&playbook).unwrap();
+            let parsed = Playbook::parse(&text).unwrap();
+            assert_eq!(parsed.review.reviewer_for("periodic"), Some("fake"));
+            assert_eq!(parsed.review.commands.len(), 1);
+            std::fs::write(root.join(".nitely/playbook.toml"), text).unwrap();
             crate::test_repo::git(&root, &["add", "."]);
             crate::test_repo::git(&root, &["commit", "-qm", "review policy"]);
             let mut db = Db::open(&root.parent().unwrap().join(format!(
@@ -705,7 +707,7 @@ mod tests {
                         title: title.into(),
                         body: "Concrete source change".into(),
                         kind: "feature".into(),
-                        source: "test".into(),
+                        source: "codex".into(),
                         evidence: "fixture".into(),
                         allow_similar: true,
                         ..Default::default()

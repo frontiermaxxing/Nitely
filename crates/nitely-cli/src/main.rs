@@ -34,6 +34,7 @@ enum Cmd {
     PeriodicReview {
         #[arg(long)] project: String,
         #[arg(long)] tick: bool,
+        #[arg(long, hide=true)] quiet: bool,
         /// Retry a failed job in the fixed repository identity printed by status.
         #[arg(long, requires="repo", conflicts_with="tick")] retry: Option<i64>,
         #[arg(long, requires="retry")] repo: Option<String>,
@@ -877,7 +878,7 @@ fn run(cmd: Cmd) -> Result<()> {
     // only in the app.
     let me = Actor::Agent("cli".into());
     match cmd {
-        Cmd::PeriodicReview { project, tick, retry, repo } => {
+        Cmd::PeriodicReview { project, tick, quiet, retry, repo } => {
             let mut db=Db::open_default()?;
             if let Some(id)=retry {nitely_core::periodic_review::retry(&db,&project,repo.as_deref().context("retry needs --repo")?,id)?;}
             if tick {
@@ -885,7 +886,7 @@ fn run(cmd: Cmd) -> Result<()> {
                 config.repos.retain(|r|r.project.as_deref().is_some_and(|p|p.eq_ignore_ascii_case(&project)));
                 nitely_core::periodic_review::tick_all(&mut db,&config)?;
             }
-            print_json(&nitely_core::periodic_review::status(&db,&project)?)
+            if quiet { Ok(()) } else { print_json(&nitely_core::periodic_review::status(&db,&project)?) }
         },
         Cmd::ReleaseVerify { args } => release_verification::run(args),
         Cmd::Verification { tick, now, project, issue } => {
