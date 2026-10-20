@@ -6,6 +6,7 @@ mod lanes;
 mod mcp;
 mod newer;
 mod performance;
+mod preview;
 mod serve;
 mod ui;
 
@@ -26,6 +27,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Run an isolated headless browser with a bounded lifetime, or clean its inactive profile.
+    Preview { #[command(subcommand)] command: preview::Command },
     /// Local machine performance recording and retained history.
     Performance { #[command(subcommand)] command: performance::Command },
     /// Record an agent hook event. Reads the hook's JSON on stdin and always exits 0,
@@ -849,6 +852,7 @@ fn run(cmd: Cmd) -> Result<()> {
     let me = Actor::Agent("cli".into());
     match cmd {
         Cmd::Performance { command } => performance::run(command),
+        Cmd::Preview { command } => preview::run(command),
         Cmd::Hook { .. } | Cmd::Mcp | Cmd::McpCall | Cmd::McpCalls | Cmd::McpDetached | Cmd::Ui { .. } => unreachable!(),
         Cmd::PerfSeed => {
             let home = paths::data_dir();

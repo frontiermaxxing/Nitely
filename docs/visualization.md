@@ -647,10 +647,15 @@ and inside Tauri nothing changes.
   - Keep scratch files (screenshot scripts, shots, browser profiles) in a folder named after your
     issue, such as `<scratchpad>/nit-29/`; the scratchpad folder is shared between sessions.
   - Stop your dev server before `land`, or the worktree cannot be removed.
-- **Full-resolution screenshots without the pane:** headless Edge, always with a profile folder of
-  your own, or Edge hands the URL to another agent's running instance and you get its page:
-  `msedge --headless=new --user-data-dir=<your folder>/profiles/<shot> --window-size=1280,900 --virtual-time-budget=5000 --screenshot=<your folder>/out.png "http://localhost:<port>/?theme=dark#now"`.
-  With its own profile the command returns before the file is written, so wait for the file.
+- **Full-resolution screenshots without the pane:** use the managed headless browser launcher:
+  `nitely preview start "http://localhost:<port>/?theme=dark#now" --browser "<path to msedge.exe>" --seconds 60 --browser-arg=--window-size=1280,900 --browser-arg=--virtual-time-budget=5000 --browser-arg=--screenshot=<absolute screenshot path>`.
+  It creates a unique disposable profile, prints its session ID and process identity, and stops
+  its browser tree on exit, failure, Ctrl+C or timeout. Wait for the screenshot and launcher exit.
+  Windows Job Objects also end the tree if the launcher crashes or is forcibly terminated. On
+  Unix a forced SIGKILL cannot run cleanup; use Ctrl+C or the bounded timeout instead.
+  Keep screenshots in your issue's scratch folder. After an interrupted launcher,
+  `nitely preview cleanup <session ID>` removes only its inactive owned profile; it refuses
+  active/uncertain process ownership and never kills a user's browser. Failed cleanup is reported.
   Headless Edge will not go narrower than about 500px; check 375px in the Browser pane's mobile
   viewport (`resize_window` preset `mobile`) instead.
 
