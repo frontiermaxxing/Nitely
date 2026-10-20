@@ -106,6 +106,7 @@ export function ProjectReviewModeSettings({ control, version }: { control: Revie
           <Choice label="Shared build lanes" value={boolValue(options.shared_lanes)} choices={BOOL} onChange={(v) => edit({ shared_lanes: fromBool(v) })} />
         </div>
         <p className="settings-hint">Basic and risk-based checks use the repository’s configured commands. Missing configuration requires the full checks.</p>
+        {options.land_batch && options.test_depth !== "off" && <p className="settings-hint">When changes land together, the combined result runs the full checks.</p>}
       </fieldset>
       <fieldset className="review-mode-options" disabled={control.busy || isLive}>
         <legend>After merging</legend>

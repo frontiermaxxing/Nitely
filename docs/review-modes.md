@@ -13,8 +13,9 @@ and release verification remain separate.
 | Thorough | Full suite | Each change | Off |
 | Custom | Your choice or repository settings | Your choice or repository settings | Your choice |
 
-All presets use shared build lanes. YOLO, Fast and Balanced batch waiting merges;
-Thorough lands each change separately. Balanced additionally enables Full checks on
+All presets use shared build lanes. YOLO and Balanced batch waiting merges;
+Fast and Thorough land each change separately. Fast avoids the Full combined gate
+that batching would require for its Basic changes. Balanced additionally enables Full checks on
 main after five light or unchecked landings or 30 minutes, and audits 10% of eligible
 light changes. The other presets turn those two mechanisms off.
 

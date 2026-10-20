@@ -46,7 +46,7 @@ fn preset(mode:Mode)->Options {
  let periodic=matches!(mode,Mode::Fast|Mode::Balanced);
  Options {test_depth:Some(match mode {Mode::Yolo=>TestDepth::Off,Mode::Fast=>TestDepth::Basic,Mode::Balanced=>TestDepth::Risk,_=>TestDepth::Full}),
  pre_review:Some(match mode {Mode::Yolo|Mode::Fast=>PreReview::Off,Mode::Balanced=>PreReview::Batched,_=>PreReview::Individual}),
- land_batch:Some(mode!=Mode::Thorough),shared_lanes:Some(true),full_backstop:Some(Backstop{enabled:balanced,landings:5,delay_seconds:1800}),
+ land_batch:Some(matches!(mode,Mode::Yolo|Mode::Balanced)),shared_lanes:Some(true),full_backstop:Some(Backstop{enabled:balanced,landings:5,delay_seconds:1800}),
  audit_percent:Some(if balanced {10}else{0}),periodic:Some(Periodic{enabled:periodic,..Default::default()})}
 }
 impl ProjectReviewMode {
@@ -131,10 +131,14 @@ pub fn effective_repositories(db:&Db,config:&crate::Config,project:&str)->Result
  let settings=db.project_review_mode(project)?;
  config.repos.iter().filter(|r|r.project.as_deref().is_some_and(|p|p.eq_ignore_ascii_case(project))).map(|repo| {
   let root=std::path::Path::new(&repo.root);
-  let policy=crate::playbook::git(root,&["show",&format!("refs/heads/{}:{}",repo.integration_branch,crate::playbook::PLAYBOOK_PATH)]);
-  let (pb,mut warnings)=match policy.and_then(|s|Playbook::parse(&s)) {Ok(pb)=>{let w=pb.unknown_warnings();(pb,w)},Err(e)=>(Playbook::default(),vec![format!("Committed repository settings unavailable: {e:#}")])};
+  // Match execution's repository/stored policy and app defaults. Reduced checks separately
+  // require commands from the committed integration policy, never a candidate's additions.
+  let (pb,mut warnings)=match Playbook::load_with(root,config) {Ok(pb)=>{let w=pb.unknown_warnings();(pb,w)},Err(e)=>(Playbook::default(),vec![format!("Repository settings unavailable: {e:#}; displayed defaults are not verified.")])};
   let options=settings.effective_options(&pb);
-  if matches!(options.test_depth,Some(TestDepth::Basic|TestDepth::Risk)) && pb.verification.basic.is_empty() {warnings.push("Basic commands are not configured; automatic verification falls back to Full.".into());}
+  if matches!(options.test_depth,Some(TestDepth::Basic|TestDepth::Risk)) {
+   let committed=crate::playbook::git(root,&["show",&format!("refs/heads/{}:{}",repo.integration_branch,crate::playbook::PLAYBOOK_PATH)]).and_then(|s|Playbook::parse(&s));
+   if committed.as_ref().map_or(true,|p|p.verification.basic.is_empty()) {warnings.push("Basic commands are not configured in committed integration policy; automatic verification falls back to Full.".into());}
+  }
   if options.test_depth==Some(TestDepth::Risk) {warnings.push("Risk-based verification falls back to Full for missing mappings, protected changes or an unhealthy enabled backstop.".into());}
   Ok(EffectiveRepository{repo:repo.name.clone(),options,warnings})
  }).collect()

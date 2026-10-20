@@ -124,6 +124,7 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
     assert.equal(fastMode.mode, "fast");
     const effectiveModes = await page.invoke("project_review_mode_effective", { project: "APP" });
     assert.equal(effectiveModes[0].options.pre_review, "off");
+    assert.equal(effectiveModes[0].options.land_batch, false, "Fast keeps Basic changes out of Full combined gates");
     assert.equal(effectiveModes[0].options.periodic.enabled, true);
     const staleModeSave = await page.eval(`
       try {

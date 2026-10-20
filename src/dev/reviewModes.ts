@@ -6,7 +6,7 @@ const periodic = { enabled: true, every_landings: 5, max_delay_seconds: 1800, re
 const backstop = { enabled: true, landings: 5, delay_seconds: 1800 };
 const presets: ModePreset[] = [
   { mode: "yolo", options: { test_depth: "off", pre_review: "off", land_batch: true, shared_lanes: true, full_backstop: { ...backstop, enabled: false }, audit_percent: 0, periodic: { ...periodic, enabled: false } } },
-  { mode: "fast", options: { test_depth: "basic", pre_review: "off", land_batch: true, shared_lanes: true, full_backstop: { ...backstop, enabled: false }, audit_percent: 0, periodic } },
+  { mode: "fast", options: { test_depth: "basic", pre_review: "off", land_batch: false, shared_lanes: true, full_backstop: { ...backstop, enabled: false }, audit_percent: 0, periodic } },
   { mode: "balanced", options: { test_depth: "risk", pre_review: "batched", land_batch: true, shared_lanes: true, full_backstop: backstop, audit_percent: 10, periodic } },
   { mode: "thorough", options: { test_depth: "full", pre_review: "individual", land_batch: false, shared_lanes: true, full_backstop: { ...backstop, enabled: false }, audit_percent: 0, periodic: { ...periodic, enabled: false } } },
 ];
