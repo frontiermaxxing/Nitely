@@ -1,12 +1,12 @@
-/* The shared select (Select.tsx, NIT-425). Tokens only, so both themes hold. --field is the
-   fields' own background where the kit sets one; until then the surface. */
+/* The shared select (Select.tsx, NIT-425). Tokens only, so both themes hold. Its background and
+   border are the text field's (fields.css), so the two sit together in a row. */
 
 .select { position: relative; display: inline-block; min-width: 0; max-width: 100%; }
 
 .select-trigger {
   display: flex; align-items: center; gap: var(--space-2); width: 100%; min-width: 140px; height: 32px;
   padding: 0 10px 0 var(--space-3); border: 1px solid var(--line-strong); border-radius: var(--radius);
-  background: var(--field, var(--surface)); color: var(--fg); font: inherit; font-size: var(--text-md);
+  background: var(--sunken); color: var(--fg); font: inherit; font-size: var(--text-md);
   text-align: left; cursor: pointer; transition: border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
 }
 .select-trigger:hover:not(:disabled) { border-color: var(--fg-3); }
