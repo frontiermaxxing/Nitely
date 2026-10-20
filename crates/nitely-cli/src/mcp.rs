@@ -1303,6 +1303,7 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
                 "relations": db.relations(&issue.key)?,
                 "timeline": db.timeline(&issue.key)?,
                 "pull_requests": db.prs_for_issue(&issue.key)?,
+                "verification": nitely_core::verification::recent(&db, &issue.key)?,
                 "proposal": db.proposal_for_issue(&issue.key)?
             })
         }

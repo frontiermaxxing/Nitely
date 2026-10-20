@@ -19,6 +19,9 @@ const OUTPUT_TAIL: usize = 4000;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Playbook {
+    /// Mechanical verification recommendations. Shadow never replaces the normal gate/review.
+    #[serde(default)]
+    pub verification: crate::verification::Rules,
     #[serde(default)]
     pub branch: BranchRules,
     #[serde(default)]

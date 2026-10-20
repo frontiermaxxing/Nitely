@@ -64,6 +64,7 @@ pub mod snapshot;
 pub mod track;
 pub mod update;
 pub mod usage;
+pub mod verification;
 pub mod waits;
 pub mod pulse;
 pub mod push;

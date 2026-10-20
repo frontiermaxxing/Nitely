@@ -33,6 +33,8 @@ impl SolutionSummary {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Submitted {
+    /// Shadow advice only; never replaces the gate/review result below.
+    pub verification: Option<crate::verification::Plan>,
     pub issue: String,
     pub branch: String,
     pub base: String,
@@ -160,9 +162,12 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     pb.approval.check_blocked(&files)?;
     crate::private_terms::check(issue.project.as_deref(), &worktree, &since)?;
     let gate = playbook::run_automatic_gate(db, &root, &worktree, &[&issue.key], actor, crate::lanes::Kind::Gate)?;
+    let verification = crate::verification::assess(&worktree, &since, &gate.commit, &issue)?;
+    crate::verification::record(db, &issue, &verification, actor)?;
     let submitted_patch = patch_id_range(&worktree, &since, &gate.commit)?;
     let explained_revision = git(&worktree, &["rev-parse", "--verify", &format!("{}^{{commit}}", gate.commit)])?.trim() == handed_in;
     let mut out = Submitted {
+        verification: Some(verification),
         issue: issue.key.clone(),
         branch: branch.clone(),
         base: base.clone(),

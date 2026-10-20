@@ -24,6 +24,10 @@ getrandom = "0.3"
 if-addrs = "0.13"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+tree-sitter = "=0.27.1"
+tree-sitter-rust = "=0.24.2"
+tree-sitter-typescript = "=0.23.2"
+tree-sitter-javascript = "=0.25.0"
 # The phone server over HTTPS (phone.rs, docs/phone.md); the same rustls and ring ureq uses.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
 rustls-pki-types = { version = "1", features = ["std"] }
