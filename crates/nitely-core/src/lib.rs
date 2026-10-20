@@ -65,6 +65,7 @@ pub mod track;
 pub mod update;
 pub mod usage;
 pub mod verification;
+pub mod verification_timing;
 pub mod verification_backstop;
 pub mod verification_audit;
 pub mod affected_tests;

@@ -1309,6 +1309,10 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
                 "timeline": db.timeline(&issue.key)?,
                 "pull_requests": db.prs_for_issue(&issue.key)?,
                 "verification": nitely_core::verification::recent(&db, &issue.key)?,
+                "verification_timing": if server.remote.is_some() { None } else {
+                    playbook::repo_for_issue(&config,issue.project.as_deref(),&server.cwd).ok()
+                        .map(|root|nitely_core::verification_timing::report(&db,&root,&issue.key)).transpose()?
+                },
                 "verification_health": issue.project.as_deref().map(|p|nitely_core::verification_backstop::project_health(&db,p)).transpose()?,
                 "verification_audits": issue.project.as_deref().map(|p|nitely_core::verification_audit::report(&db,p,10)).transpose()?,
                 "proposal": db.proposal_for_issue(&issue.key)?

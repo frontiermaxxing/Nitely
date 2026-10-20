@@ -135,3 +135,18 @@ V1 bounds inventory at 10,000 tracked files, 512 KiB per input and 16 MiB of uni
 JavaScript source. Exceeding a bound requires Full. No representative speedup is claimed:
 collect selected/full timing on the same candidate during shadow evaluation before
 proposing activation. No extra full gate is launched solely for a performance estimate.
+
+## Measure without rerunning a full suite
+
+`nitely verification --issue APP-123` and MCP `get_issue.verification_timing` compare
+retained reduced-check evidence with the latest Full backstop attempt on that exact commit
+and authoritative policy. They never launch tests. Successful executed local lane results
+must supply all planned commands; cached, skipped, remote and flaky results do not count.
+A newer failed or unfinished Full attempt prevents an older green result from becoming a
+comparison. Reports retain at most the last twenty submission records.
+
+Times are command seconds, excluding queue/setup. Load and cache warmth may differ, so
+these observations are not normalized benchmarks or gate certificates. A sub-second Full
+run has no percentage. An empty report means no matching pair has been measured yet;
+allow the ordinary post-merge backstop to provide one instead of running Full again just
+for a speedup number.

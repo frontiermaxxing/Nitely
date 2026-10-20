@@ -38,7 +38,9 @@ enum Cmd {
         #[arg(long, conflicts_with="now")] tick: bool,
         /// Run an opted-in Full backstop now, including an explicit infrastructure retry.
         #[arg(long)] now: bool,
-        #[arg(long)] project: Option<String>
+        #[arg(long)] project: Option<String>,
+        /// Compare retained reduced and Full checks on the same commit; launches no tests.
+        #[arg(long, conflicts_with_all=["tick","now","project"])] issue: Option<String>
     },
     /// Collect bounded test hygiene evidence or propose a human decision.
     TestSweep { #[command(subcommand)] command: test_sweep::Command },
@@ -865,9 +867,14 @@ fn run(cmd: Cmd) -> Result<()> {
     let me = Actor::Agent("cli".into());
     match cmd {
         Cmd::ReleaseVerify { args } => release_verification::run(args),
-        Cmd::Verification { tick, now, project } => {
+        Cmd::Verification { tick, now, project, issue } => {
             let config = Config::load_read_only()?;
             let mut db = Db::open_default()?;
+            if let Some(key)=issue {
+                let issue=db.issue(&key)?.with_context(||format!("no issue {key}"))?;
+                let root=playbook::repo_for_issue(&config,issue.project.as_deref(),&cwd()?)?;
+                return print_json(&nitely_core::verification_timing::report(&db,&root,&issue.key)?);
+            }
             if tick { nitely_core::verification_backstop::tick_all(&mut db, &config)?; }
             if now { nitely_core::verification_backstop::tick_all_now(&mut db, &config)?; }
             let audits=project.as_deref().map(|p|nitely_core::verification_audit::report(&db,p,100)).transpose()?;
