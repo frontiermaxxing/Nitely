@@ -1029,7 +1029,10 @@ mod tests {
         }
         let db = Db::open_with(&path, &[PLANS]).unwrap();
         assert_eq!(user_version(&db), FORMAT, "a build from before named migrations now refuses it");
-        assert_eq!((db.issue("NIT-1").unwrap().unwrap().title.as_str(), db.issue("NIT-1").unwrap().unwrap().goal), ("Old", Some(3)));
+        // This fixture intentionally applies only synthetic migrations. Read its historical
+        // columns directly; the current issue reader requires every current migration.
+        let kept: (String, Option<i64>) = db.conn.query_row("SELECT title, goal FROM issue WHERE key='NIT-1'", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(kept, ("Old".to_string(), Some(3)));
         drop(db);
         // A later build brings one more: only that one runs (the first would fail run twice).
         let db = Db::open_with(&path, &[PLANS, SIZE]).unwrap();
