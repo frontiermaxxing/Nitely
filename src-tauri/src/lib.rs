@@ -402,6 +402,12 @@ async fn issue_spend(key: String) -> Result<nitely_core::usage::IssueSpend, Stri
     nitely_core::usage::spend_of_issue(&Config::load().map_err(err)?, &db()?, &key).map_err(err)
 }
 
+/// The Leaderboard's numbers over `projects` (empty: every project), read from this machine only.
+#[tauri::command]
+async fn leaderboard_stats(projects: Vec<String>) -> Result<nitely_core::leaderboard::Leaderboard, String> {
+    nitely_core::leaderboard::stats_now(&Config::load().map_err(err)?, &db()?, &projects).map_err(err)
+}
+
 /// A project's tokens per day and by agent and model, and what landed, over `days` days.
 #[tauri::command]
 async fn project_spend(project: String, day_start: i64, days: usize) -> Result<nitely_core::usage::ProjectSpend, String> {
@@ -1027,6 +1033,7 @@ pub fn run() {
             held_files,
             crew_status,
             issue_spend,
+            leaderboard_stats,
             project_spend,
             crew_pause,
             crew_settings,

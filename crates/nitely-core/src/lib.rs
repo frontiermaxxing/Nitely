@@ -25,6 +25,7 @@ pub mod github;
 pub mod hook;
 pub mod install;
 pub mod land;
+pub mod leaderboard;
 pub mod land_queue;
 pub mod lanes;
 mod lane_clone;

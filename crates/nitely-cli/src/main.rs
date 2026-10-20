@@ -278,6 +278,12 @@ enum Cmd {
         #[arg(long)]
         break_lock: bool,
     },
+    /// Your numbers for the Leaderboard: `stats` prints this week's, the last 30 days' and all
+    /// time's, the weekly series and your records, as JSON. Read from this machine only.
+    Leaderboard {
+        #[command(subcommand)]
+        command: LeaderboardCmd,
+    },
     /// Tokens the agents used, read from their own session files (counts only, never text): an
     /// issue's, or a project's per day over the last days.
     Spend {
@@ -441,6 +447,17 @@ enum LinksCmd {
     /// Run the listener (what login starts): answers links on 127.0.0.1:7423 and opens the app, for
     /// as long as it is registered (`nitely links install`).
     Serve,
+}
+
+#[derive(Subcommand)]
+enum LeaderboardCmd {
+    /// Landed, first-pass review rate, lead time, agent hours, tokens, Inbox reply time, the
+    /// steadiest week, the vendor split, review rounds, a 26-week series and records.
+    Stats {
+        /// A project to count (repeat for more); without one, every project.
+        #[arg(long)]
+        project: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1618,6 +1635,11 @@ fn run(cmd: Cmd) -> Result<()> {
                 exit(1);
             }
             Ok(())
+        }
+        Cmd::Leaderboard { command: LeaderboardCmd::Stats { project } } => {
+            let config = Config::load()?;
+            let db = Db::open_default()?;
+            print_json(&nitely_core::leaderboard::stats_now(&config, &db, &project)?)
         }
         Cmd::Spend { issue, project, days } => {
             let config = Config::load()?;
