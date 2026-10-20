@@ -154,9 +154,10 @@ export interface PerformanceReport {
   workloads: RecordedWorkload[];
   related_issues: Record<string, string>;
 }
-export type PerformanceRange = "15m" | "1h" | "6h" | "24h" | "7d" | "restart";
-export function performanceQuery(range: PerformanceRange, now: number) {
-  return range === "restart"
+export interface PerformanceWindow { from_ms: number; to_ms: number; }
+export type PerformanceRange = PerformanceWindow | "15m" | "1h" | "6h" | "24h" | "7d" | "restart";
+export function performanceQuery(range: PerformanceRange, now: number): { view: "history"; from_ms?: number; to_ms?: number; before_last_restart?: boolean; limit: number } {
+  return typeof range === "object" ? { view: "history", ...range, limit: 400 } : range === "restart"
     ? { view: "history", before_last_restart: true, limit: 400 }
     : {
         view: "history",
@@ -164,6 +165,32 @@ export function performanceQuery(range: PerformanceRange, now: number) {
         to_ms: now,
         limit: 400,
       };
+}
+/** Start with ten minutes so five-second attribution fits the unchanged 200-observation cap.
+ * Longer incidents can be stepped through using the adjacent-window controls. */
+export function incidentWindow(episode: Pick<PerformanceEpisode, "from_ms" | "to_ms">): PerformanceWindow {
+  const from_ms = episode.from_ms - 30_000;
+  return { from_ms, to_ms: Math.min(episode.to_ms, from_ms + 600_000) };
+}
+export function shiftWindow(window: PerformanceWindow, direction: -1 | 1): PerformanceWindow {
+  const offset = (window.to_ms - window.from_ms) * direction;
+  return { from_ms: window.from_ms + offset, to_ms: window.to_ms + offset };
+}
+export function earlierAttributionWindow(window: PerformanceWindow, first: number): PerformanceWindow {
+  const to_ms = first - 1;
+  return { from_ms: Math.max(window.from_ms, to_ms - 600_000), to_ms };
+}
+export function localDateTime(ms: number): string {
+  const date = new Date(ms);
+  return new Date(ms - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 19);
+}
+export function parseWindow(from: string, to: string): PerformanceWindow | null {
+  const from_ms = new Date(from).getTime(), to_ms = new Date(to).getTime();
+  return Number.isFinite(from_ms) && Number.isFinite(to_ms) && from_ms < to_ms ? { from_ms, to_ms } : null;
+}
+export function windowAttribution(report: PerformanceReport): AttributionSample | null {
+  return report.attribution.reduce<AttributionSample | null>((last, sample) =>
+    sample.wall_ms >= report.from_ms && sample.wall_ms <= report.to_ms && (!last || sample.wall_ms > last.wall_ms) ? sample : last, null);
 }
 export const numberText = (n: number | null | undefined, suffix = "", digits = 1) =>
   n == null || !Number.isFinite(n) ? "Unavailable" : `${n.toLocaleString(undefined, { maximumFractionDigits: digits })}${suffix}`;

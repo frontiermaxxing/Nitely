@@ -410,7 +410,7 @@ export function App() {
         )}
         {view.kind === "now" && board && <Now board={board} version={version} needs={inboxCount} now={now} onOpenIssue={setOpenIssue} onChanged={changed} onGo={setView} />}
         {view.kind === "activity" && <Activity now={now} version={version} projects={projects} onOpenIssue={setOpenIssue} />}
-        {view.kind === "performance" && <Performance version={version} onOpenIssue={setOpenIssue} onSettings={() => setView({ kind: "settings", section: "lanes" })} />}
+        {view.kind === "performance" && <Performance onOpenIssue={setOpenIssue} onSettings={() => setView({ kind: "settings", section: "lanes" })} />}
         {view.kind === "settings" && (
           <Settings
             asked={view}

@@ -259,3 +259,9 @@
     gap: 4px;
   }
 }
+
+.perf-window { margin-bottom: 20px; }
+.perf-window-actions, .perf-window-form { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 12px; }
+.perf-window input { min-width: 0; max-width: 100%; color: var(--fg); background: var(--surface); border: 1px solid var(--line-strong); border-radius: 4px; padding: 5px 8px; color-scheme: light dark; }
+.perf-inspect { align-self: flex-start; }
+@media (max-width: 700px) { .perf-window-form label { width: 100%; flex-wrap: wrap; } }

@@ -1,12 +1,14 @@
 import { memo, useEffect, useRef, useState } from "react";
 import { invoke, isLive } from "./backend";
 import { Loading, EmptyState } from "./ui";
-import { useLanes } from "./LanesStrip";
-import { byteText, chartBounds, chartSegments, chartValue, currentPressure, episodeExtrema, freshness, numberText, performanceQuery, sortedWorkloads, timestamp } from "./performanceModel";
+import { performanceClock, pollPerformance } from "./performancePolling";
+import type { LanesOverview } from "./types";
+import { byteText, chartBounds, chartSegments, chartValue, currentPressure, episodeExtrema, earlierAttributionWindow, incidentWindow, localDateTime, parseWindow, shiftWindow, windowAttribution, freshness, numberText, performanceQuery, sortedWorkloads, timestamp } from "./performanceModel";
 import type {
   AttributionSample,
   ChartMetric,
   PerformanceRange,
+  PerformanceWindow,
   PerformanceReport,
   PerformanceSettings,
   PerformanceUsage,
@@ -14,11 +16,11 @@ import type {
 } from "./performanceModel";
 import "./performance.css";
 
-const RANGES: PerformanceRange[] = ["15m", "1h", "6h", "24h", "7d", "restart"];
-const RANGE_LABEL = (r: PerformanceRange) => (r === "restart" ? "Before last restart" : r);
+const RANGES: Exclude<PerformanceRange, PerformanceWindow>[] = ["15m", "1h", "6h", "24h", "7d", "restart"];
+const RANGE_LABEL = (r: Exclude<PerformanceRange, PerformanceWindow>) => (r === "restart" ? "Before last restart" : r);
 
 /** Reads the recorder's cache; opening this page never creates another collector. */
-export function Performance(props: { version: number; onOpenIssue: (key: string) => void; onSettings: () => void }) {
+export function Performance(props: { onOpenIssue: (key: string) => void; onSettings: () => void }) {
   const [range, setRange] = useState<PerformanceRange>("1h");
   const [history, setHistory] = useState<PerformanceReport | null>(null);
   const [current, setCurrent] = useState<PerformanceReport | null>(null);
@@ -27,82 +29,38 @@ export function Performance(props: { version: number; onOpenIssue: (key: string)
   const [reload, setReload] = useState(0);
   const [now, setNow] = useState(Date.now());
   const [dismissed, setDismissed] = useState(false);
-  const lanes = useLanes(props.version);
+  const [lanes, setLanes] = useState<LanesOverview | null>(null);
+  const fixed = typeof range === "object" || range === "restart";
+  const rangeKey = typeof range === "object" ? `${range.from_ms}/${range.to_ms}` : range;
   useEffect(() => {
     let live = true;
-    let running = false;
-    let timer: ReturnType<typeof setTimeout>;
-    const read = async () => {
-      if (running) return;
-      running = true;
+    const stop = pollPerformance(async () => {
       try {
         const report = await invoke<PerformanceReport>("performance_query", { query: performanceQuery(range, Date.now()) });
-        if (live) {
-          setHistory(report);
-          setError(null);
-        }
-      } catch (e) {
-        if (live) setError(String(e));
-      }
-      running = false;
-      // Historical queries are bounded but cost more than Now. Fixed restart windows read once.
-      if (live && range !== "restart")
-        timer = setTimeout(() => {
-          if (!document.hidden) void read();
-        }, 60_000);
-    };
-    const visible = () => {
-      if (!document.hidden) {
-        clearTimeout(timer);
-        void read();
-      }
-    };
-    void read();
-    document.addEventListener("visibilitychange", visible);
-    return () => {
-      live = false;
-      clearTimeout(timer);
-      document.removeEventListener("visibilitychange", visible);
-    };
-  }, [range, props.version, reload]);
+        if (live) { setHistory(report); setError(null); }
+      } catch (e) { if (live) setError(String(e)); }
+    }, fixed ? null : 60_000, performanceClock);
+    return () => { live = false; stop(); };
+  }, [range, reload]);
   useEffect(() => {
     let live = true;
-    let running = false;
-    let timer: ReturnType<typeof setTimeout>;
-    const read = async () => {
-      if (running) return;
-      running = true;
+    const stop = pollPerformance(async () => {
       try {
         const report = await invoke<PerformanceReport>("performance_query", { query: { view: "now", limit: 200 } });
-        if (live) {
-          setCurrent(report);
-          setCurrentError(null);
-        }
-      } catch (e) {
-        if (live) setCurrentError(String(e));
-      }
-      running = false;
-      if (live)
-        timer = setTimeout(() => {
-          if (!document.hidden) void read();
-        }, 5000);
-    };
-    const visible = () => {
-      if (!document.hidden) {
-        clearTimeout(timer);
-        void read();
-      }
-    };
-    void read();
-    document.addEventListener("visibilitychange", visible);
-    const clock = setInterval(() => setNow(Date.now()), 1000);
-    return () => {
-      live = false;
-      clearTimeout(timer);
-      clearInterval(clock);
-      document.removeEventListener("visibilitychange", visible);
-    };
-  }, [props.version, reload]);
+        if (live) { setCurrent(report); setCurrentError(null); }
+      } catch (e) { if (live) setCurrentError(String(e)); }
+    }, 5000, performanceClock);
+    const clock = setInterval(() => { if (!document.hidden) setNow(Date.now()); }, 1000);
+    return () => { live = false; stop(); clearInterval(clock); };
+  }, [reload]);
+  useEffect(() => {
+    let live = true;
+    const stop = pollPerformance(async () => {
+      try { const result = await invoke<LanesOverview>("lanes_overview"); if (live) setLanes(result); }
+      catch { if (live) setLanes(null); }
+    }, 30_000, performanceClock);
+    return () => { live = false; stop(); };
+  }, [reload]);
   const data = history
     ? {
         ...history,
@@ -123,6 +81,7 @@ export function Performance(props: { version: number; onOpenIssue: (key: string)
       setRange(r);
       setHistory(null);
       setError(null);
+      requestAnimationFrame(() => document.getElementById("performance-history")?.scrollIntoView({ block: "start" }));
     }
   };
   const metrics = data?.latest?.metrics;
@@ -209,7 +168,7 @@ export function Performance(props: { version: number; onOpenIssue: (key: string)
           </p>
         </>
       )}
-      <section className="perf-section">
+      <section className="perf-section" id="performance-history">
         <div className="perf-heading">
           <h2>History</h2>
           <div className="perf-ranges" role="group" aria-label="Performance time range">
@@ -220,6 +179,8 @@ export function Performance(props: { version: number; onOpenIssue: (key: string)
             ))}
           </div>
         </div>
+        <HistoryWindow key={`${rangeKey}/${history ? "ready" : "loading"}`} window={typeof range === "object" ? range : history ?? { from_ms: now - 3_600_000, to_ms: now }}
+          fixed={fixed} onChoose={chooseRange} onRefresh={() => setReload((n) => n + 1)} />
         {!history && !error && <Loading />}
         {history && (
           <>
@@ -256,12 +217,13 @@ export function Performance(props: { version: number; onOpenIssue: (key: string)
       </section>
       {data && (
         <>
-          <Workloads key={`${range}/${reload}`} data={data} now={now} onOpenIssue={props.onOpenIssue} />
+          {history && <Workloads key={`${rangeKey}/${reload}`} data={data} fixed={fixed} now={now} onOpenIssue={props.onOpenIssue} onWindow={chooseRange} />}
           <section className="perf-section">
             <h2>Pressure episodes & workload events</h2>
-            {!data.episodes.length && <p className="muted">No sustained pressure established in the retained detailed samples for this range.</p>}
-            {data.episodes.map((e) => (
+            {history && !history.episodes.length && <p className="muted">No sustained pressure established in the retained detailed samples for this range.</p>}
+            {history?.episodes.map((e) => (
               <div className="perf-episode" key={e.from_ms}>
+                <button className="link perf-inspect" onClick={() => chooseRange(incidentWindow(e))}>Inspect incident</button>
                 <strong>{e.observed.map((s) => s.replaceAll("_", " ")).join(" · ")}</strong>
                 <span>
                   {timestamp(e.from_ms)} – {timestamp(e.to_ms)}
@@ -274,10 +236,10 @@ export function Performance(props: { version: number; onOpenIssue: (key: string)
               </div>
             ))}
             <details className="perf-details">
-              <summary>{data.events.length} workload events in this window</summary>
-              {data.events.length ? (
+              <summary>{history?.events.length ?? 0} workload events in this window</summary>
+              {history?.events.length ? (
                 <ul>
-                  {data.events.map((e, i) => (
+                  {history.events.map((e, i) => (
                     <li key={i}>
                       {timestamp(e.wall_ms)} · {e.kind.replaceAll("_", " ")} · {e.project} ·{" "}
                       <button className="link" onClick={() => invoke("open_lane_log", { id: e.run }).catch((err) => setError(String(err)))}>
@@ -322,6 +284,29 @@ export function Performance(props: { version: number; onOpenIssue: (key: string)
       )}
     </div>
   );
+}
+
+function HistoryWindow({ window, fixed, onChoose, onRefresh }: {
+  window: PerformanceWindow; fixed: boolean; onChoose: (window: PerformanceWindow) => void; onRefresh: () => void;
+}) {
+  const [from, setFrom] = useState(() => localDateTime(window.from_ms));
+  const [to, setTo] = useState(() => localDateTime(window.to_ms));
+  const [error, setError] = useState(false);
+  return <div className="perf-window">
+    <div className="perf-window-actions">
+      <button className="btn" onClick={() => onChoose(shiftWindow(window, -1))}>Previous window</button>
+      <button className="btn" onClick={() => onChoose(shiftWindow(window, 1))}>Next window</button>
+      <button className="link" onClick={onRefresh}>Refresh readings</button>
+    </div>
+    <form className="perf-window-form" onSubmit={(e) => { e.preventDefault(); const selection = parseWindow(from, to); setError(!selection); if (selection) onChoose(selection); }}>
+      <label>From <input type="datetime-local" step="1" value={from} onChange={(e) => setFrom(e.target.value)} required /></label>
+      <label>To <input type="datetime-local" step="1" value={to} onChange={(e) => setTo(e.target.value)} required /></label>
+      <button className="btn" type="submit">Open time window</button>
+    </form>
+    {error && <p role="alert" className="error">Choose an end time after the start time.</p>}
+    <p className="small muted">Times use your local timezone. Explicit windows include all recorded boots at those wall-clock times. {fixed ? "Fixed window · does not move with time." : "Rolling window · follows current time."}
+      {" "}Inspect an incident to open up to ten minutes from its start; step through longer incidents with Next window. Retention and result limits still apply.</p>
+  </div>;
 }
 
 function Metric({ label, value, detail }: { label: string; value: string; detail: string }) {
@@ -469,7 +454,7 @@ function History({ data }: { data: PerformanceReport }) {
 }
 const HistoryChart = memo(History);
 
-function Workloads({ data, now, onOpenIssue }: { data: PerformanceReport; now: number; onOpenIssue: (key: string) => void }) {
+function Workloads({ data, fixed, now, onOpenIssue, onWindow }: { data: PerformanceReport; fixed: boolean; now: number; onOpenIssue: (key: string) => void; onWindow: (window: PerformanceWindow) => void }) {
   // Keep the chosen observation stable while the bounded live window moves on.
   const [selectedSample, setSelectedSample] = useState<AttributionSample | null>(null);
   const [sort, setSort] = useState<"cpu_percent" | "private_commit_bytes" | "process_read_bytes">("cpu_percent");
@@ -477,7 +462,7 @@ function Workloads({ data, now, onOpenIssue }: { data: PerformanceReport; now: n
   const history = data.attribution ?? [];
   const sampleId = (s: AttributionSample) => `${s.session}/${s.monotonic_ms}`;
   const choices = selectedSample && !history.some((s) => sampleId(s) === sampleId(selectedSample)) ? [selectedSample, ...history] : history;
-  const sample = selectedSample ?? data.attribution_latest;
+  const sample = selectedSample ?? (fixed ? windowAttribution(data) : data.attribution_latest);
   const context = (c: WorkloadContext) => (
     <>
       {c.project && <span>{c.project} · </span>}
@@ -512,7 +497,7 @@ function Workloads({ data, now, onOpenIssue }: { data: PerformanceReport; now: n
             value={selectedSample ? sampleId(selectedSample) : "latest"}
             onChange={(e) => setSelectedSample(choices.find((s) => sampleId(s) === e.target.value) ?? null)}
           >
-            <option value="latest">Latest sample</option>
+            <option value="latest">{fixed ? "Last observation in this window" : "Latest sample"}</option>
             {choices.map((s) => (
               <option key={sampleId(s)} value={sampleId(s)}>
                 {timestamp(s.wall_ms)}
@@ -523,7 +508,8 @@ function Workloads({ data, now, onOpenIssue }: { data: PerformanceReport; now: n
         </label>
       </div>
       {error && <p className="error">{error}</p>}
-      {sample && !selectedSample && (now - sample.wall_ms > 15_000 || now < sample.wall_ms - 2000) && (
+      {fixed && <p className="small muted">Workloads and events use the fixed history window. Current machine readings above remain live.</p>}
+      {sample && !fixed && !selectedSample && (now - sample.wall_ms > 15_000 || now < sample.wall_ms - 2000) && (
         <p className="muted">Attribution is stale or its clock changed. These values are the last recorded observation.</p>
       )}
       {selectedSample && selectedSample.wall_ms < data.from_ms && (
@@ -534,6 +520,8 @@ function Workloads({ data, now, onOpenIssue }: { data: PerformanceReport; now: n
           Showing the most recent {history.length} attribution observations in this window
           {data.coverage.attribution_first_returned_ms != null ? `, beginning ${timestamp(data.coverage.attribution_first_returned_ms)}` : ""}. Earlier retained
           observations are omitted; narrow the time range to inspect them.
+          {data.coverage.attribution_first_returned_ms != null && data.coverage.attribution_first_returned_ms > data.from_ms && <>{" "}<button className="link"
+            onClick={() => onWindow(earlierAttributionWindow(data, data.coverage.attribution_first_returned_ms!))}>Earlier observations</button></>}
         </p>
       )}
       {!sample || !sample.coverage.supported ? (

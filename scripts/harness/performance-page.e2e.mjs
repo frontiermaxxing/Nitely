@@ -31,6 +31,84 @@ test("Performance history survives an app restart and only clears through paused
     assert.ok(recorded.points.length, "history reads the saved sample");
     await app.page.waitFor(`return document.querySelector('.perf-freshness')?.textContent.includes('Recording')`, { what: "recording freshness" });
     await app.page.screenshot(join(SCREENS, "performance-recording.png"));
+    // Board changes must not restart the page's independent cadence. Instrument only this
+    // throwaway page, leaving the real backend response and recorder untouched.
+    await app.page.eval(`
+      window.__perfChecks = { reads: [], snapshots: 0, original: window.__TAURI_INTERNALS__.invoke };
+      window.__TAURI_INTERNALS__.invoke = async (command, args, ...rest) => {
+        if (command === "performance_query") window.__perfChecks.reads.push(args.query);
+        if (command === "snapshot") window.__perfChecks.snapshots++;
+        return window.__perfChecks.original(command, args, ...rest);
+      };
+    `);
+    await clickControl("Refresh readings");
+    await app.page.waitFor(`return window.__perfChecks.reads.some(q => q.view === 'history')`, { what: "explicit refresh" });
+    const histories = () => app.page.eval(`return window.__perfChecks.reads.filter(q => q.view === 'history').length`);
+    const initialHistoryReads = await histories();
+    for (let i = 0; i < 3; i++) {
+      const snapshots = await app.page.eval(`return window.__perfChecks.snapshots`);
+      await app.page.invoke("plugin:event|emit", { event: "nitely://changed", payload: null });
+      await app.page.waitFor(`return window.__perfChecks.snapshots > ${snapshots}`, { what: "board version update" });
+    }
+    assert.equal(await histories(), initialHistoryReads, "board changes do not reread history before its cadence");
+    await app.page.eval(`Object.defineProperty(document, 'hidden', { configurable: true, value: true }); document.dispatchEvent(new Event('visibilitychange'));`);
+    const hiddenReads = await app.page.eval(`return window.__perfChecks.reads.length`);
+    await app.page.invoke("plugin:event|emit", { event: "nitely://changed", payload: null });
+    await sleep(31_000); // Includes App's ordinary 30-second board refresh and several Now deadlines.
+    assert.equal(await app.page.eval(`return window.__perfChecks.reads.length`), hiddenReads, "hidden page does not issue Now or history reads");
+    await app.page.eval(`delete document.hidden; document.dispatchEvent(new Event('visibilitychange'));`);
+    assert.equal(await histories(), initialHistoryReads, "becoming visible early does not bypass history cadence");
+
+    // Deterministic older incident response for the native page wiring. The separate model
+    // regression exercises a full two-hour fixture with the unchanged 200-observation cap.
+    const incidentFrom = recorded.latest.wall_ms - 3_600_000;
+    const incidentTo = incidentFrom + 120_000;
+    await app.page.eval(`
+      window.__perfChecks.incident = { from_ms: ${incidentFrom}, to_ms: ${incidentTo} };
+      window.__TAURI_INTERNALS__.invoke = async (command, args, ...rest) => {
+        if (command === "performance_query") window.__perfChecks.reads.push(args.query);
+        const report = await window.__perfChecks.original(command, args, ...rest);
+        if (command !== "performance_query" || args.query.view !== "history") return report;
+        const incident = window.__perfChecks.incident;
+        report.episodes = [{ ...incident, observations: 25, observed: ["cpu_at_least_90_percent"], inferred_causes: [],
+          peaks: { ...report.latest.metrics, cpu_percent: 99 }, min_available_bytes: null, min_available_percent: null, max_commit_percent: null }];
+        report.attribution = [];
+        if (args.query.from_ms === incident.from_ms - 30000 && args.query.to_ms === incident.to_ms) {
+          const usage = { cpu_percent: 50, private_commit_bytes: 1024, working_set_sum_bytes: 2048, process_read_bytes: 0, process_write_bytes: 0, processes: 1 };
+          report.attribution = [{ wall_ms: incident.to_ms, monotonic_ms: 1000, boot: "fixture-boot", session: "older-incident", interval_ms: 5000, collection_ms: 1,
+            resolution: "sample", observations: 1, coverage: { enumerated: 1, measured: 1, denied: 0, missing_identity: 0, partial_metrics: 0, truncated: false, first_sample: false, supported: true, short_lived_partial: true },
+            nitely: usage, related: usage, other: usage, unattributed_cpu_percent: null, top_other: [],
+            workloads: [{ id: "old-build", kind: "build", context: { project: "APP", issue: "APP-17", run_id: 17 }, usage }] }];
+          report.events = [{ wall_ms: incident.to_ms, kind: "build_finished", project: "APP", issue: "APP-17", run: 17 }];
+        }
+        return report;
+      };
+    `);
+    await clickControl("Refresh readings");
+    await app.page.waitFor(`return document.querySelector('.perf-inspect') !== null`, { what: "older incident" });
+    await clickControl("Inspect incident");
+    await app.page.waitFor(`return document.body.textContent.includes('APP-17') && document.body.textContent.includes('Fixed window')`, { what: "older incident workload detail" });
+    assert.equal(await app.page.eval(`return document.querySelector('[aria-label="Workload sample"]')?.selectedOptions[0].textContent`), "Last observation in this window");
+    const incidentQueries = await app.page.eval(`return window.__perfChecks.reads.filter(q => q.view === 'history')`);
+    assert.equal(incidentQueries.at(-1).from_ms, incidentFrom - 30_000);
+    assert.equal(incidentQueries.at(-1).to_ms, incidentTo);
+    await clickControl("Previous window");
+    await app.page.waitFor(`return document.querySelector('[aria-label="Workload sample"]') !== null && !document.body.textContent.includes('APP-17')`, { what: "old workload is removed outside its window" });
+    // Custom windows use native datetime controls and the exact query bounds, not an end of now.
+    await app.page.eval(`
+      const inputs = document.querySelectorAll('.perf-window-form input');
+      const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      for (const [index, value] of ['2026-10-01T10:00:00', '2026-10-01T10:10:00'].entries()) {
+        set.call(inputs[index], value); inputs[index].dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    `);
+    await clickControl("Open time window");
+    await app.page.waitFor(`return window.__perfChecks.reads.some(q => q.from_ms === new Date('2026-10-01T10:00:00').getTime() && q.to_ms === new Date('2026-10-01T10:10:00').getTime())`, { what: "custom historical range" });
+    await app.page.waitFor(`return document.querySelector('[aria-label="Workload sample"]') !== null && document.querySelector('#performance-history')?.textContent.includes(new Date('2026-10-01T10:00:00').toLocaleString())`, { what: "custom history response rendered" });
+    await app.page.screenshot(join(SCREENS, "performance-fixed-window.png"));
+    await app.page.eval(`window.__TAURI_INTERNALS__.invoke = window.__perfChecks.original; delete window.__perfChecks;`);
+    await clickControl("1h");
+
     assert.equal(await app.page.eval(`return [...document.querySelectorAll('button')].find(b => b.textContent === 'Clear history…')?.disabled`), true);
     await clickControl("Pause collection");
     await app.page.waitFor(`return document.querySelector('.perf-freshness')?.textContent.includes('paused')`, { what: "paused collection" });

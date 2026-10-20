@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { byteText, chartBounds, chartSegments, chartValue, currentPressure, episodeExtrema, freshness, numberText, performanceQuery, sortedWorkloads } from "./performanceModel.ts";
+import { byteText, chartBounds, chartSegments, chartValue, currentPressure, episodeExtrema, earlierAttributionWindow, incidentWindow, parseWindow, shiftWindow, windowAttribution, freshness, numberText, performanceQuery, sortedWorkloads } from "./performanceModel.ts";
+import { performanceFixture } from "./dev/performance.ts";
 import type { PerformanceEpisode, PerformanceMetrics, PerformancePoint, PerformanceReport, WorkloadUsage } from "./performanceModel.ts";
 
 test("missing and zero measurements stay distinct, with binary byte units", () => {
@@ -98,4 +99,41 @@ test("stale, paused and changed-clock samples cannot appear fresh or raise curre
   report.settings.enabled = false;
   assert.match(freshness(report, 101_000), /paused/);
   assert.equal(currentPressure(report, 101_000), undefined);
+});
+
+
+test("an hour-old incident opens fixed retained attribution beyond the 200-observation tail", () => {
+  const now = 1_800_000_000_000;
+  const env = { search: "?performance=incident", now };
+  const broad = performanceFixture({ query: performanceQuery("6h", now) }, env);
+  assert.equal(broad.attribution.length, 200);
+  assert.equal(broad.coverage.attribution_truncated, true);
+  const episode = broad.episodes[0];
+  assert.ok(episode.to_ms < broad.attribution.at(-1)!.wall_ms, "old incident is absent from the recent tail");
+  const window = incidentWindow(episode);
+  const query = performanceQuery(window, now);
+  assert.deepEqual(query, performanceQuery(window, now + 3_600_000), "selected history never follows now");
+  const detail = performanceFixture({ query }, env);
+  assert.equal(detail.coverage.attribution_truncated, false);
+  assert.ok(detail.attribution.some((s) => s.workloads.some((w) => w.id === "incident-build")));
+  assert.ok(windowAttribution(detail)!.wall_ms <= window.to_ms);
+  assert.ok(windowAttribution(detail)!.workloads.some((w) => w.id === "incident-build"), "incident opens on an observation inside the incident, not after it");
+  assert.notEqual(windowAttribution(detail)!.wall_ms, detail.attribution_latest!.wall_ms, "fixed windows never default to current workloads");
+  detail.attribution = [];
+  assert.equal(windowAttribution(detail), null, "missing historical attribution must not fall back to now");
+  assert.ok(detail.events.every((e) => e.wall_ms >= window.from_ms && e.wall_ms <= window.to_ms));
+  const older = earlierAttributionWindow(broad, broad.coverage.attribution_first_returned_ms!);
+  assert.ok(older.to_ms < broad.attribution.at(-1)!.wall_ms);
+  assert.equal(performanceQuery(older, now).limit, 400);
+});
+
+test("custom and adjacent windows reach older retained history and long incidents stay bounded", () => {
+  const window = parseWindow("2026-10-01T10:00:00", "2026-10-01T10:10:00")!;
+  assert.equal(window.to_ms - window.from_ms, 600_000);
+  assert.equal(parseWindow("", "invalid"), null);
+  assert.equal(parseWindow("2026-10-01T10:10", "2026-10-01T10:00"), null);
+  assert.deepEqual(shiftWindow(shiftWindow(window, -1), 1), window);
+  const start = incidentWindow({ from_ms: window.from_ms, to_ms: window.to_ms + 3_600_000 });
+  assert.equal(start.to_ms - start.from_ms, 600_000);
+  assert.equal(shiftWindow(start, 1).from_ms, start.to_ms);
 });

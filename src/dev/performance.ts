@@ -74,14 +74,14 @@ function attribution(at: number, mode: string, boot = "preview-boot"): Attributi
     ],
   };
 }
-export function performanceFixture(args: Record<string, unknown>): PerformanceReport {
-  const mode = new URLSearchParams(location.search).get("performance") ?? "idle";
+export function performanceFixture(args: Record<string, unknown>, env = { search: location.search, now: Date.now() }): PerformanceReport {
+  const mode = new URLSearchParams(env.search).get("performance") ?? "idle";
   if (mode === "error") throw "Performance history is temporarily unavailable (preview).";
   const query = (args.query ?? {}) as { view?: string; from_ms?: number; to_ms?: number; before_last_restart?: boolean };
-  const now = Date.now();
+  const now = env.now;
   const at = pausedAt ?? (mode === "stale" ? now - 180_000 : now - 1000);
   const to = query.before_last_restart ? now - 600_000 : (query.to_ms ?? now);
-  const from = query.before_last_restart ? to - 600_000 : (query.from_ms ?? to - 3_600_000);
+  const from = query.before_last_restart ? to - 600_000 : (query.from_ms ?? to - (query.view === "now" ? 300_000 : 3_600_000));
   const rangeBoot = query.before_last_restart ? "preview-previous-boot" : "preview-boot";
   const noData = cleared || mode === "empty";
   const metrics = (cpu: number): PerformanceMetrics => ({
@@ -127,6 +127,19 @@ export function performanceFixture(args: Record<string, unknown>): PerformanceRe
           overlaps_range_boundary: i === 0 || i === 79,
         };
       });
+  const incidentStart = Math.floor((now - 3_600_000) / 300_000) * 300_000;
+  const incidentEnd = incidentStart + 240_000;
+  const observedAt = mode === "incident"
+    ? Array.from({ length: 1441 }, (_, i) => now - i * 5000).filter((t) => t >= from && t <= to)
+    : [to - 15_000, to - 60_000].filter((t) => t >= from && t <= to);
+  const observations = noData ? [] : observedAt.slice(0, 200).map((t) => {
+    const sample = attribution(t, mode, rangeBoot);
+    if (mode === "incident" && t >= incidentStart && t <= incidentEnd) {
+      sample.workloads[0].id = "incident-build";
+      sample.workloads[0].context.run_id = 17;
+    }
+    return sample;
+  });
   return {
     as_of_ms: now,
     from_ms: from,
@@ -143,11 +156,11 @@ export function performanceFixture(args: Record<string, unknown>): PerformanceRe
     admission_limits: { total: 32 * GiB, floor: 4 * GiB, cap: 12 * GiB, floor_from: "default", cap_from: "default" },
     points: query.view === "now" ? [] : points,
     episodes:
-      mode === "pressure" && !noData
+      (mode === "pressure" || (mode === "incident" && from <= incidentEnd && to >= incidentStart)) && !noData
         ? [
             {
-              from_ms: query.before_last_restart ? from : Math.floor((now - 120_000) / 300_000) * 300_000,
-              to_ms: query.before_last_restart ? to : at,
+              from_ms: mode === "incident" ? Math.max(from, incidentStart) : query.before_last_restart ? from : Math.floor((now - 120_000) / 300_000) * 300_000,
+              to_ms: mode === "incident" ? Math.min(to, incidentEnd) : query.before_last_restart ? to : at,
               observations: 24,
               observed: ["CPU at least 90%", "available physical memory at most 10%"],
               inferred_causes: [],
@@ -166,10 +179,10 @@ export function performanceFixture(args: Record<string, unknown>): PerformanceRe
       gaps_truncated: false,
       sessions_truncated: false,
       events_truncated: false,
-      attribution_truncated: false,
+      attribution_truncated: observedAt.length > 200,
       workloads_truncated: false,
-      attribution_retained_bounds_ms: noData ? null : [from, at],
-      attribution_first_returned_ms: noData ? null : to - 60_000,
+      attribution_retained_bounds_ms: noData ? null : [now - 7_200_000, at],
+      attribution_first_returned_ms: observations.at(-1)?.wall_ms ?? null,
       source_points: points.length,
       returned_points: query.view === "now" ? 0 : points.length,
       boundary_points: noData || query.view === "now" ? 0 : 2,
@@ -181,7 +194,7 @@ export function performanceFixture(args: Record<string, unknown>): PerformanceRe
     },
     units: {},
     attribution_latest: noData ? null : attribution(at, mode),
-    attribution: noData ? [] : [attribution(to - 15_000, mode, rangeBoot), attribution(to - 60_000, mode, rangeBoot)],
+    attribution: observations,
     attribution_age_ms: noData ? null : now - at,
     related_issues: { "NIT-4": "http://127.0.0.1:7423/i/NIT-4" },
     workloads: noData
