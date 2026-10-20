@@ -32,6 +32,6 @@
   }
 }
 
-/* The Kit's stand-ins for the controls and source tags these rows will hold (src/dev/Kit.tsx). */
+/* The Kit's stand-ins for the controls these rows will hold (src/dev/Kit.tsx). */
 .kit-settings { display: grid; }
 .kit-control { display: flex; align-items: center; height: 32px; padding: 0 12px; border: 1px dashed var(--line-strong); border-radius: 7px; font-size: var(--text-sm); color: var(--fg-3); }
