@@ -9,10 +9,101 @@ use anyhow::{bail, Context, Result};
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const MAX_ATTEMPTS: u32 = 3;
 const ACTOR: &str = "nitely:periodic-review";
+
+/// Explicit files keep policy rereads independent of the review checkout. Tests use isolated
+/// files, never the developer's app defaults or stored reviewer commands.
+struct PolicyFiles {
+    config: Option<PathBuf>,
+    data: PathBuf,
+}
+impl Default for PolicyFiles {
+    fn default() -> Self {
+        Self {
+            config: (!cfg!(test)).then(crate::paths::config_path),
+            data: crate::paths::data_dir(),
+        }
+    }
+}
+impl PolicyFiles {
+    fn review(
+        &self,
+        root: &Path,
+        project: &str,
+        branch: &str,
+    ) -> Result<(crate::review::ReviewRules, String)> {
+        let config: Config = match &self.config {
+            Some(path) => serde_json::from_str(
+                &std::fs::read_to_string(path)
+                    .with_context(|| format!("reading periodic authority {}", path.display()))?,
+            )?,
+            None => Config::default(),
+        };
+        let normalized = crate::paths::normalize(&root.to_string_lossy());
+        let connected = config
+            .repos
+            .iter()
+            .rev()
+            .find(|r| crate::paths::normalize(&r.root) == normalized);
+        if self.config.is_some()
+            && !connected.is_some_and(|r| {
+                r.project.as_deref() == Some(project) && r.integration_branch == branch
+            })
+        {
+            bail!("periodic repository registration changed; reload project and integration authority");
+        }
+        // Always read the integration ref, not mutable files in a checkout lent to a build.
+        let reference = format!("refs/heads/{branch}");
+        let object = git(
+            root,
+            &[
+                "ls-tree",
+                "--format=%(objectname)",
+                &reference,
+                "--",
+                crate::playbook::PLAYBOOK_PATH,
+            ],
+        )?;
+        let (source, text) = if !object.trim().is_empty() {
+            (
+                format!("committed:{}", object.trim()),
+                git(
+                    root,
+                    &[
+                        "show",
+                        &format!("{reference}:{}", crate::playbook::PLAYBOOK_PATH),
+                    ],
+                )?,
+            )
+        } else if let Some(repo) = connected {
+            let path = Playbook::stored_path_in(&self.data, &repo.name);
+            match std::fs::read_to_string(&path) {
+                Ok(text) => (format!("stored:{}", path.display()), text),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    ("defaults".into(), String::new())
+                }
+                Err(e) => {
+                    return Err(e)
+                        .with_context(|| format!("reading periodic policy {}", path.display()))
+                }
+            }
+        } else {
+            ("defaults".into(), String::new())
+        };
+        let mut pb = if text.is_empty() {
+            Playbook::default()
+        } else {
+            Playbook::parse(&text)?
+        };
+        // Same explicit-field precedence as Playbook::load_with and the project settings view.
+        crate::rules::apply_defaults(&mut pb, &text, &config.rule_defaults);
+        let authority = serde_json::to_vec(&(source, text, &config.rule_defaults, connected))?;
+        Ok((pb.review, format!("{:x}", Sha256::digest(authority))))
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Finding {
@@ -325,6 +416,25 @@ fn full_review(
     j: &Job,
     checkout: &Path,
 ) -> Result<Review> {
+    full_review_with_policy(
+        db,
+        root,
+        project,
+        branch,
+        j,
+        checkout,
+        &PolicyFiles::default(),
+    )
+}
+fn full_review_with_policy(
+    db: &Db,
+    root: &Path,
+    project: &str,
+    branch: &str,
+    j: &Job,
+    checkout: &Path,
+    files: &PolicyFiles,
+) -> Result<Review> {
     let _performance = crate::performance_attribution::Scope::new(
         db,
         crate::performance_attribution::Context {
@@ -334,22 +444,7 @@ fn full_review(
     );
     let mode = db.project_review_mode(project)?;
     let policy = rules(db, project)?.context("periodic review was disabled")?;
-    let policy_head = git(root, &["rev-parse", &format!("refs/heads/{branch}")])?;
-    let policy_blob = git(
-        root,
-        &[
-            "rev-parse",
-            &format!("{}:{}", policy_head.trim(), crate::playbook::PLAYBOOK_PATH),
-        ],
-    )?;
-    let mut review = Playbook::parse(&git(
-        root,
-        &[
-            "show",
-            &format!("{}:{}", policy_head.trim(), crate::playbook::PLAYBOOK_PATH),
-        ],
-    )?)?
-    .review;
+    let (mut review, policy_fingerprint) = files.review(root, project, branch)?;
     review.timeout_minutes = review.timeout_minutes.clamp(1, 60);
     review.policy_root = None;
     review.yolo_guards.clear();
@@ -372,16 +467,7 @@ fn full_review(
         if latest.revision != mode.revision || rules(db, project)?.is_none() {
             bail!("periodic settings changed before launch; retry against latest human authority");
         }
-        if git(
-            root,
-            &[
-                "rev-parse",
-                &format!("refs/heads/{branch}:{}", crate::playbook::PLAYBOOK_PATH),
-            ],
-        )?
-        .trim()
-            != policy_blob.trim()
-        {
+        if files.review(root, project, branch)?.1 != policy_fingerprint {
             bail!("integration review policy changed before reviewer launch; retry");
         }
         if git(checkout, &["rev-parse", "HEAD"])?.trim() != j.head
@@ -661,7 +747,10 @@ mod tests {
                 ],
             );
             std::fs::create_dir_all(root.join(".nitely")).unwrap();
-            let playbook = Playbook { review, ..Default::default() };
+            let playbook = Playbook {
+                review,
+                ..Default::default()
+            };
             let text = toml::to_string(&playbook).unwrap();
             let parsed = Playbook::parse(&text).unwrap();
             assert_eq!(parsed.review.reviewer_for("periodic"), Some("fake"));
@@ -951,5 +1040,87 @@ mod tests {
         assert_eq!(f.status().jobs[0].findings[0].action, "accepted");
         assert_eq!(f.db.issue(&source).unwrap().unwrap().state, "Done");
         assert_eq!(f.db.list_issues(Some("APP"), true).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn stored_periodic_policy_inherits_defaults_and_binds_live_authority() {
+        let mut f = Fixture::new(1);
+        let committed = std::fs::read_to_string(f.root.join(".nitely/playbook.toml")).unwrap();
+        let mut policy: toml::Value = toml::from_str(&committed).unwrap();
+        let review = policy.get_mut("review").unwrap().as_table_mut().unwrap();
+        review.remove("reviewer");
+        review.remove("focus");
+        crate::test_repo::git(&f.root, &["rm", ".nitely/playbook.toml"]);
+        crate::test_repo::git(&f.root, &["commit", "-qm", "Use stored project policy"]);
+        let (_, head) = f.land("Stored policy source");
+        let repo = identity(&f.root).unwrap();
+        let base = f.status().baseline;
+        f.db.conn.execute("INSERT INTO periodic_review_job(repo,project,base,head,state,attempt,created_at) VALUES(?1,'APP',?2,?3,'running',1,?4)",params![repo,base,head,now()]).unwrap();
+        let id = f.db.conn.last_insert_rowid();
+        let data = f.root.join("isolated-policy");
+        let config_path = data.join("config.json");
+        let stored = Playbook::stored_path_in(&data, "Example");
+        std::fs::create_dir_all(stored.parent().unwrap()).unwrap();
+        std::fs::write(&stored, toml::to_string(&policy).unwrap()).unwrap();
+        let mut config = Config {
+            repos: vec![crate::config::RepoConfig {
+                name: "Example".into(),
+                root: f.root.to_string_lossy().into_owned(),
+                project: Some("APP".into()),
+                integration_branch: "main".into(),
+            }],
+            rule_defaults: crate::rules::RuleDefaults {
+                reviewer: Some(std::collections::BTreeMap::from([(
+                    "*".into(),
+                    "fake".into(),
+                )])),
+                focus: Some("Check stored-policy behavior".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+        let files = PolicyFiles {
+            config: Some(config_path.clone()),
+            data,
+        };
+        let (effective, authority) = files.review(&f.root, "APP", "main").unwrap();
+        assert_eq!(effective.reviewer_for("periodic"), Some("fake"));
+        assert_eq!(effective.commands.len(), 1);
+        assert_eq!(effective.focus, "Check stored-policy behavior");
+        // An uncommitted checkout policy cannot replace stored/integration authority.
+        std::fs::create_dir_all(f.root.join(".nitely")).unwrap();
+        std::fs::write(
+            f.root.join(".nitely/playbook.toml"),
+            "[review]\nenabled=true\n",
+        )
+        .unwrap();
+        assert_eq!(files.review(&f.root, "APP", "main").unwrap().1, authority);
+        let j = job(&f.db, id).unwrap();
+        let result = crate::verification_backstop::with_checkout(&f.root, &head, |checkout| {
+            full_review_with_policy(&f.db, &f.root, "APP", "main", &j, checkout, &files)
+        })
+        .unwrap();
+        assert_eq!(result.reviewer, "fake");
+        record_review(&mut f.db, &repo, &j, &result).unwrap();
+        apply_findings(&mut f.db, &f.root, &repo, "APP", "main", id).unwrap();
+        assert_eq!(f.status().cursor.as_deref(), Some(head.as_str()));
+        // The exact authority reread used by launch admission sees both app and stored edits.
+        config.rule_defaults.focus = Some("New human focus".into());
+        std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+        let changed = files.review(&f.root, "APP", "main").unwrap().1;
+        assert_ne!(changed, authority);
+        std::fs::write(
+            &stored,
+            format!(
+                "{}\n# saved human edit\n",
+                toml::to_string(&policy).unwrap()
+            ),
+        )
+        .unwrap();
+        assert_ne!(files.review(&f.root, "APP", "main").unwrap().1, changed);
+        config.repos[0].project = Some("WEB".into());
+        std::fs::write(config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+        assert!(files.review(&f.root, "APP", "main").is_err());
     }
 }

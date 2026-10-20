@@ -16,10 +16,12 @@ issue count. With the time trigger disabled, those changes wait for the next qua
 
 Each repository is identified by its canonical common Git directory. A process lock prevents two
 workers reviewing it concurrently; a durable job fixes the base and head. The reviewer gets a
-separate detached source checkout at that head, the current committed reviewer configuration,
-and the existing process limits and memory admission. Human mode authority and the committed
-review policy are checked again immediately before launch, including after memory waits. Ordinary
-new landings with the same policy do not invalidate the fixed range.
+separate detached source checkout at that head and the existing process limits and memory admission.
+Reviewer configuration comes from the integration branch's committed playbook, or the connected
+repository's stored playbook when none is committed; app defaults fill unset fields. Uncommitted
+checkout files cannot override that authority. Human mode authority, repository registration,
+policy contents and app defaults are reread immediately before launch, including after memory waits.
+Ordinary new landings with the same policy do not invalidate the fixed range.
 
 A completed structured review is retained before finding actions start. Its result is bounded to
 1 MiB and 50 findings. Interrupted actions resume without rerunning the review. The cursor advances
