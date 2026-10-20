@@ -5,12 +5,18 @@ import assert from "node:assert/strict";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { launch } from "./app.mjs";
+import { installPerformanceProbe } from "./performance-probe.mjs";
 const SCREENS = join("target", "harness", "screens");
 mkdirSync(SCREENS, { recursive: true });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 test("Performance history survives an app restart and only clears through paused human controls", { timeout: 180000 }, async () => {
   const app = await launch();
+  const showPage = async () => {
+    // Emulate renderer focus/visibility without touching the runner's native desktop focus.
+    await app.page.send("Emulation.setFocusEmulationEnabled", { enabled: true });
+    assert.equal(await app.page.eval(`document.dispatchEvent(new Event('visibilitychange')); return document.hidden;`), false, "the Performance test page is visible");
+  };
   const query = () => app.page.invoke("performance_query", { query: { view: "history", limit: 100 } });
   const clickControl = async (text) => {
     await app.page.eval(
@@ -19,6 +25,7 @@ test("Performance history survives an app restart and only clears through paused
     await app.page.click({ css: "button", text });
   };
   try {
+    await showPage();
     await app.page.open("#performance");
     await app.page.waitFor(`return document.querySelector('[data-testid="performance-page"]') !== null`, { what: "Performance route" });
     let recorded;
@@ -33,14 +40,10 @@ test("Performance history survives an app restart and only clears through paused
     await app.page.screenshot(join(SCREENS, "performance-recording.png"));
     // Board changes must not restart the page's independent cadence. Instrument only this
     // throwaway page, leaving the real backend response and recorder untouched.
-    await app.page.eval(`
-      window.__perfChecks = { reads: [], snapshots: 0, original: window.__TAURI_INTERNALS__.invoke };
-      window.__TAURI_INTERNALS__.invoke = async (command, args, ...rest) => {
-        if (command === "performance_query") window.__perfChecks.reads.push(args.query);
-        if (command === "snapshot") window.__perfChecks.snapshots++;
-        return window.__perfChecks.original(command, args, ...rest);
-      };
-    `);
+    await app.page.eval(`(${installPerformanceProbe.toString()})(window);`);
+    // Fail at setup if Tauri changes transport, rather than misdiagnosing a real refresh.
+    await app.page.invoke("performance_query", { query: { view: "now", limit: 200 } });
+    assert.ok(await app.page.eval(`return window.__perfChecks.reads.some(q => q.view === 'now');`), "probe observes an actual native invoke");
     await clickControl("Refresh readings");
     await app.page.waitFor(`return window.__perfChecks.reads.some(q => q.view === 'history')`, { what: "explicit refresh" });
     const histories = () => app.page.eval(`return window.__perfChecks.reads.filter(q => q.view === 'history').length`);
@@ -65,15 +68,13 @@ test("Performance history survives an app restart and only clears through paused
     const incidentTo = incidentFrom + 120_000;
     await app.page.eval(`
       window.__perfChecks.incident = { from_ms: ${incidentFrom}, to_ms: ${incidentTo} };
-      window.__TAURI_INTERNALS__.invoke = async (command, args, ...rest) => {
-        if (command === "performance_query") window.__perfChecks.reads.push(args.query);
-        const report = await window.__perfChecks.original(command, args, ...rest);
-        if (command !== "performance_query" || args.query.view !== "history") return report;
+      window.__perfChecks.transform = (report, query) => {
+        if (query.view !== "history") return report;
         const incident = window.__perfChecks.incident;
-        report.episodes = [{ ...incident, observations: 25, observed: ["cpu_at_least_90_percent"], inferred_causes: [],
-          peaks: { ...report.latest.metrics, cpu_percent: 99 }, min_available_bytes: null, min_available_percent: null, max_commit_percent: null }];
+        report.episodes = report.from_ms <= incident.to_ms && report.to_ms >= incident.from_ms ? [{ ...incident, observations: 25, observed: ["cpu_at_least_90_percent"], inferred_causes: [],
+          peaks: { ...report.latest.metrics, cpu_percent: 99 }, min_available_bytes: null, min_available_percent: null, max_commit_percent: null }] : [];
         report.attribution = [];
-        if (args.query.from_ms === incident.from_ms - 30000 && args.query.to_ms === incident.to_ms) {
+        if (query.from_ms === incident.from_ms - 30000 && query.to_ms === incident.to_ms) {
           const usage = { cpu_percent: 50, private_commit_bytes: 1024, working_set_sum_bytes: 2048, process_read_bytes: 0, process_write_bytes: 0, processes: 1 };
           report.attribution = [{ wall_ms: incident.to_ms, monotonic_ms: 1000, boot: "fixture-boot", session: "older-incident", interval_ms: 5000, collection_ms: 1,
             resolution: "sample", observations: 1, coverage: { enumerated: 1, measured: 1, denied: 0, missing_identity: 0, partial_metrics: 0, truncated: false, first_sample: false, supported: true, short_lived_partial: true },
@@ -106,7 +107,7 @@ test("Performance history survives an app restart and only clears through paused
     await app.page.waitFor(`return window.__perfChecks.reads.some(q => q.from_ms === new Date('2026-10-01T10:00:00').getTime() && q.to_ms === new Date('2026-10-01T10:10:00').getTime())`, { what: "custom historical range" });
     await app.page.waitFor(`return document.querySelector('[aria-label="Workload sample"]') !== null && document.querySelector('#performance-history')?.textContent.includes(new Date('2026-10-01T10:00:00').toLocaleString())`, { what: "custom history response rendered" });
     await app.page.screenshot(join(SCREENS, "performance-fixed-window.png"));
-    await app.page.eval(`window.__TAURI_INTERNALS__.invoke = window.__perfChecks.original; delete window.__perfChecks;`);
+    await app.page.eval(`window.__perfChecks.restore(); delete window.__perfChecks;`);
     await clickControl("1h");
 
     assert.equal(await app.page.eval(`return [...document.querySelectorAll('button')].find(b => b.textContent === 'Clear history…')?.disabled`), true);
@@ -114,6 +115,7 @@ test("Performance history survives an app restart and only clears through paused
     await app.page.waitFor(`return document.querySelector('.perf-freshness')?.textContent.includes('paused')`, { what: "paused collection" });
     assert.equal((await query()).settings.enabled, false);
     await app.restart();
+    await showPage();
     await app.page.open("#performance");
     const restored = await query();
     assert.equal(restored.settings.enabled, false, "pause is durable");
