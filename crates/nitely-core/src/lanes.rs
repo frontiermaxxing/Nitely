@@ -1395,7 +1395,7 @@ fn run_cap() -> Option<u64> {
 fn caps_fit(db: &Db, id: i64, limits: Option<&machine::Limits>, slots: u32) -> Result<Option<String>> {
     let Some(limits) = limits.filter(|l| l.floor > 0) else { return Ok(None) };
     let room = limits.total.saturating_sub(limits.floor);
-    let mine = expected_peak_of(db, id, cap_for(limits, slots))?;
+    let mine = sizing_of(db, id, cap_for(limits, slots))?.reserve;
     // The running runs, and the queued ones that reserved (admitted, about to start).
     let mut stmt = db.conn.prepare(
         "SELECT COALESCE(memory_reserved, memory_cap), pid, pid_started FROM lane_run WHERE id != ?1 AND executor IN ('local', 'worktree') AND (state = 'running' OR (state = 'queued' AND memory_cap IS NOT NULL))",
@@ -1425,7 +1425,7 @@ fn caps_fit(db: &Db, id: i64, limits: Option<&machine::Limits>, slots: u32) -> R
 fn reserve_cap(db: &Db, id: i64, limits: Option<&machine::Limits>, slots: u32) -> Result<()> {
     let cap = limits.map(|l| cap_for(l, slots));
     let reserved = match cap {
-        Some(cap) => Some(expected_peak_of(db, id, cap)? as i64),
+        Some(cap) => Some(sizing_of(db, id, cap)?.reserve as i64),
         None => None,
     };
     db.conn.execute("UPDATE lane_run SET memory_cap = ?2, memory_reserved = ?3 WHERE id = ?1", params![id, cap.map(|c| c as i64), reserved])?;
@@ -1444,21 +1444,98 @@ fn admit_run(db: &Db, id: i64, limits: Option<&machine::Limits>, slots: u32, qui
     // machine whose own programs leave less than the floor and a cap free, with nothing building
     // (NIT-372); what it sets aside, which the next runs count, stays its whole cap.
     // Never more than its cap: a small machine's cap is under `MIN_RESERVED` (NIT-374).
-    let need = match limits {
-        Some(l) => {
-            let cap = cap_for(l, slots);
-            known_peak_of(db, id, cap)?.unwrap_or(MIN_RESERVED.min(cap))
-        }
-        None => 0,
+    let sizing = match limits {
+        Some(l) => sizing_of(db, id, cap_for(l, slots))?,
+        None => Sizing { light: false, reserve: 0, need: 0 },
     };
-    machine::admit_once_with(
+    // A light job (NIT-454) goes by the memory free now alone, like the quick slot, and skips the
+    // ramp wait: what it takes is small and known. Heavy builds keep every rule.
+    let why = machine::admit_once_with(
         &state_dir(db),
         limits,
-        need,
+        sizing.need,
+        !sizing.light,
         memory,
-        &mut || if quick_slot { Ok(None) } else { caps_fit(db, id, limits, slots) },
+        &mut || if quick_slot || sizing.light { Ok(None) } else { caps_fit(db, id, limits, slots) },
         &mut || reserve_cap(db, id, limits, slots),
-    )
+    )?;
+    Ok(why.map(|why| format!("{why} ({})", if sizing.light { "light job" } else { "heavy build" })))
+}
+
+/// What admission takes a run to be (NIT-454): light or heavy, what it sets aside for the next runs
+/// to count, and what must be free above the floor now.
+#[derive(Debug, Clone, PartialEq)]
+struct Sizing {
+    light: bool,
+    reserve: u64,
+    need: u64,
+}
+
+/// A command whose last runs peaked (p90) under this is a light job.
+const LIGHT_PEAK: u64 = 3 * machine::GIB / 2;
+
+/// The least a light job with history sets aside.
+const LIGHT_MIN: u64 = machine::GIB / 2;
+
+/// What a known-light command with no history sets aside (`light_command`).
+const LIGHT_NEW: u64 = machine::GIB;
+
+/// How request `id` is sized, within its `cap`: a command whose last runs peaked (p90) under
+/// `LIGHT_PEAK`, or with no history one `light_command` knows, is a light job and sets aside its
+/// p90 plus a quarter, at least `LIGHT_MIN` (`LIGHT_NEW` with no history). Any other is a heavy
+/// build, as before: its expected peak (`expected_peak`), or with no history its whole cap set
+/// aside and `MIN_RESERVED` needed free (NIT-372).
+fn sizing_of(db: &Db, id: i64, cap: u64) -> Result<Sizing> {
+    let (peaks, command) = peaks_of(db, id)?;
+    let mut sorted: Vec<u64> = peaks.iter().map(|p| (*p).max(0) as u64).collect();
+    sorted.sort_unstable();
+    let p90 = (!sorted.is_empty()).then(|| sorted[((sorted.len() - 1) * 9).div_ceil(10)]);
+    Ok(match p90 {
+        Some(p90) if p90 < LIGHT_PEAK => {
+            let reserve = (p90 + p90 / 4).max(LIGHT_MIN).min(cap);
+            Sizing { light: true, reserve, need: reserve }
+        }
+        Some(_) => {
+            let reserve = expected_peak(&peaks, cap);
+            Sizing { light: false, reserve, need: reserve }
+        }
+        None if light_command(&command) => Sizing { light: true, reserve: LIGHT_NEW.min(cap), need: LIGHT_NEW.min(cap) },
+        None => Sizing { light: false, reserve: cap, need: MIN_RESERVED.min(cap) },
+    })
+}
+
+/// Whether `command` is light with no history to say so (NIT-454): every part of it is a type
+/// check, lint or format (`tsc`, `eslint`, `prettier`, `biome`), an npm script for test, build,
+/// lint or type checks, or a filtered test of a JS or Python runner; `cd`, `echo` and `git` count
+/// for nothing. A Rust build or test never is: one filtered test still compiles the crate.
+fn light_command(command: &str) -> bool {
+    let program = |t: &str| {
+        let name = t.rsplit(['/', '\\']).next().unwrap_or(t);
+        name.strip_suffix(".exe").or_else(|| name.strip_suffix(".cmd")).unwrap_or(name).to_string()
+    };
+    let mut any = false;
+    for part in command.split(['&', '|', ';']).map(str::trim).filter(|p| !p.is_empty()) {
+        let words: Vec<&str> = part.split_whitespace().collect();
+        let words: &[&str] = if words.first().is_some_and(|w| program(w) == "npx") { &words[1..] } else { &words };
+        let Some(first) = words.first() else { continue };
+        let args = &words[1..];
+        let light = match program(first).as_str() {
+            "cd" | "echo" | "git" => continue,
+            "tsc" | "eslint" | "prettier" | "biome" => true,
+            "npm" | "pnpm" | "yarn" => match args {
+                [script, ..] if matches!(*script, "test" | "t" | "lint" | "typecheck") => true,
+                ["run", script, ..] => matches!(*script, "build" | "test" | "lint" | "typecheck" | "check"),
+                _ => false,
+            },
+            "node" | "tsx" | "vitest" | "jest" | "pytest" => names_test_filter(part),
+            _ => false,
+        };
+        if !light {
+            return false;
+        }
+        any = true;
+    }
+    any
 }
 
 /// How many of a command's last finished runs in its repo its expected peak is read from.
@@ -1469,18 +1546,15 @@ const MIN_RESERVED: u64 = 2 * machine::GIB;
 
 /// What request `id` is expected to take at its peak (NIT-363), from the peaks its command's last
 /// runs in its repo reached (`expected_peak`).
-fn expected_peak_of(db: &Db, id: i64, cap: u64) -> Result<u64> {
-    Ok(known_peak_of(db, id, cap)?.unwrap_or(cap))
-}
-
-/// `expected_peak_of` when request `id`'s command has history in its repo; None when it has none.
-fn known_peak_of(db: &Db, id: i64, cap: u64) -> Result<Option<u64>> {
+/// The peaks request `id`'s command reached in its last runs in its repo, newest first, and the
+/// command.
+fn peaks_of(db: &Db, id: i64) -> Result<(Vec<i64>, String)> {
     let (repo, command): (String, String) = db.conn.query_row("SELECT repo, command FROM lane_run WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?)))?;
     let mut stmt = db.conn.prepare(
         "SELECT peak_memory FROM lane_run WHERE repo = ?1 AND command = ?2 AND id != ?3 AND state = 'done' AND executor IN ('local', 'worktree') AND peak_memory IS NOT NULL ORDER BY id DESC LIMIT ?4",
     )?;
     let peaks: Vec<i64> = stmt.query_map(params![repo, command, id, PEAK_HISTORY], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
-    Ok((!peaks.is_empty()).then(|| expected_peak(&peaks, cap)))
+    Ok((peaks, command))
 }
 
 /// The p90 of `peaks` plus a quarter, at least `MIN_RESERVED`, never more than `cap`; `cap` when
@@ -4085,13 +4159,14 @@ let id = db.conn.last_insert_rowid();
             db.conn.execute("UPDATE lane_run SET state = 'running' WHERE id = ?1", [id]).unwrap();
         }
         for _ in 0..3 {
-            add("done", "cargo test -p app waits", Some(gib));
+            add("done", "cargo test -p app waits", Some(gib * 8 / 5));
         }
         let quick = add("queued", "cargo test -p app waits", None);
         let free = |gb: u64| move || Some(machine::Memory { total: 64 * machine::GIB, available: gb * machine::GIB });
         let why = admit_run(&db, quick, Some(&l), 5, false, &mut free(30)).unwrap().unwrap();
         assert!(why.contains("set aside"), "on a machine slot, the caps set aside fill the room: {why}");
-        // Its last peaks were 1 GB: 2 GB expected. 30 GB free is plenty above the 12.8 GB floor.
+        // Its last peaks were 1.6 GB, a heavy build's: 2 GB expected. 30 GB free is plenty above
+        // the 12.8 GB floor.
         assert_eq!(admit_run(&db, quick, Some(&l), 5, true, &mut free(30)).unwrap(), None);
         assert_eq!(db.lane_run(quick).unwrap().unwrap().memory_reserved, Some(2 * gib), "and it sets its own aside");
         db.conn.execute("UPDATE lane_run SET memory_cap = NULL, memory_reserved = NULL WHERE id = ?1", [quick]).unwrap();
@@ -4104,6 +4179,76 @@ let id = db.conn.last_insert_rowid();
     /// A command with no history starts with nothing running though the machine's own programs
     /// leave less than the floor and a whole cap free (NIT-372): it needs the least a run sets
     /// aside free above the floor, and still sets its whole cap aside for the next runs to count.
+    /// Which commands are light with no history (NIT-454).
+    #[test]
+    fn a_light_command_is_a_check_not_a_build() {
+        for light in [
+            "npm test",
+            "npm run build",
+            "npm test && npm run build",
+            "cd app && npx tsc --noEmit",
+            "npx eslint src",
+            "pnpm run lint",
+            "npx tsx --test test/one.test.ts",
+            "node --test dist/lanes.test.js",
+            "pytest -k quick",
+        ] {
+            assert!(light_command(light), "{light}");
+        }
+        for heavy in ["cargo test -p nitely-core waits", "npm test && cargo build", "npm ci", "npx tsx --test", "cd app", "make", "npm run dev"] {
+            assert!(!light_command(heavy), "{heavy}");
+        }
+    }
+
+    /// A busy machine just above the floor, a run just started: a light job starts at once on its
+    /// real peak, and a heavy build still waits (NIT-454).
+    #[test]
+    fn a_light_job_starts_where_a_heavy_build_waits() {
+        let base = crate::paths::unique_temp("nitely-lane-light", "");
+        std::fs::create_dir_all(&base).unwrap();
+        let db = Db::open(&base.join("t.db")).unwrap();
+        let me = std::process::id() as i64;
+        let gib = machine::GIB as i64;
+        let add = |state: &str, command: &str, peak: Option<i64>| -> i64 {
+            db.conn
+                .execute(
+                    "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, priority, lane_count, peak_memory)
+                     VALUES ('APP', 'C:/Code/app', 'x', 'run', 's', 't', 'b', ?1, ?2, 'local', 1, ?3, 3, 3, ?4)",
+                    params![command, state, me, peak],
+                )
+                .unwrap();
+            db.conn.last_insert_rowid()
+        };
+        let l = machine::limits_for(64 * machine::GIB, None, None); // 12.8 GB floor
+        for _ in 0..3 {
+            add("done", "npm test", Some(gib * 3 / 4));
+            add("done", "cargo test --workspace", Some(5 * gib));
+        }
+        // Four heavy builds running, their caps set aside: the room above the floor is spoken for.
+        for n in 0..4 {
+            let id = add("queued", &format!("cargo build -p new-{n}"), None);
+            reserve_cap(&db, id, Some(&l), 5).unwrap();
+            db.conn.execute("UPDATE lane_run SET state = 'running' WHERE id = ?1", [id]).unwrap();
+        }
+        // One started a moment ago: a heavy build would let it grow first.
+        let state = state_dir(&db);
+        std::fs::create_dir_all(&state).unwrap();
+        let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+        std::fs::write(state.join("last-start"), now_ms.to_string()).unwrap();
+        let free = |mb: u64| move || Some(machine::Memory { total: 64 * machine::GIB, available: mb * machine::GIB / 1024 });
+        let heavy = add("queued", "cargo test --workspace", None);
+        let why = admit_run(&db, heavy, Some(&l), 5, false, &mut free(14 * 1024)).unwrap().unwrap();
+        assert!(why.ends_with("(heavy build)"), "{why}");
+        let light = add("queued", "npm test", None);
+        assert_eq!(admit_run(&db, light, Some(&l), 5, false, &mut free(14 * 1024)).unwrap(), None, "14 GB free: 0.9 GB above the floor and the ramp skipped");
+        assert_eq!(db.lane_run(light).unwrap().unwrap().memory_reserved, Some(gib * 15 / 16), "its p90 0.75 GB and a quarter");
+        // A new light command, no history: 1 GB; and under the floor plus that, it waits too, saying so.
+        let fresh = add("queued", "npx tsc --noEmit", None);
+        let why = admit_run(&db, fresh, Some(&l), 5, false, &mut free(13 * 1024)).unwrap().unwrap();
+        assert!(why.contains("expected to take 1.0 GB") && why.ends_with("(light job)"), "{why}");
+        std::fs::remove_dir_all(base).ok();
+    }
+
     #[test]
     fn a_new_command_starts_on_a_machine_short_of_a_whole_cap() {
         let base = crate::paths::unique_temp("nitely-lane-new-command", "");
@@ -4147,6 +4292,7 @@ let id = db.conn.last_insert_rowid();
                 &dir,
                 Some(&l),
                 0,
+                true,
                 &mut || plenty(),
                 &mut || Ok((reserved.get() + 30 * machine::GIB > 51 * machine::GIB).then(|| "no room".to_string())),
                 &mut || {

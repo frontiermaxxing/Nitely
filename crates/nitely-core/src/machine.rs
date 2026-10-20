@@ -77,12 +77,14 @@ pub const RAMP: Duration = Duration::from_secs(20);
 /// below the floor nothing starts, and within a cap's room of it, nothing starts until the run
 /// that started last has had `RAMP` to grow. A machine whose memory cannot be told never waits.
 pub fn admission(now: Option<Memory>, limits: &Limits, since_last_start: Option<Duration>) -> Option<String> {
-    admission_for(now, limits, since_last_start, 0)
+    admission_for(now, limits, since_last_start, 0, true)
 }
 
 /// `admission` for a run expected to take `need` (NIT-363): it starts only while that much is free
 /// above the floor too, so taking what it is expected to never brings the machine under the floor.
-pub fn admission_for(now: Option<Memory>, limits: &Limits, since_last_start: Option<Duration>, need: u64) -> Option<String> {
+/// With `ramp` false (a light job, NIT-454), it does not wait out the last start's `RAMP`: what it
+/// takes is small and known, and the floor check above covers it.
+pub fn admission_for(now: Option<Memory>, limits: &Limits, since_last_start: Option<Duration>, need: u64, ramp: bool) -> Option<String> {
     let now = now?;
     if limits.floor == 0 {
         return None;
@@ -98,7 +100,7 @@ pub fn admission_for(now: Option<Memory>, limits: &Limits, since_last_start: Opt
             gb(limits.floor)
         ));
     }
-    if now.available < limits.floor.saturating_add(limits.cap) && since_last_start.is_some_and(|s| s < RAMP) {
+    if ramp && now.available < limits.floor.saturating_add(limits.cap) && since_last_start.is_some_and(|s| s < RAMP) {
         return Some(format!("waiting for memory: {} free, and the last run to start is still growing", gb(now.available)));
     }
     None
@@ -164,7 +166,7 @@ fn since_last_start(dir: &Path) -> Option<Duration> {
 /// machine), and when it may, records the start, so the next process to ask sees it. Returns why it
 /// must wait, or None once it may go.
 pub fn admit_once(dir: &Path, limits: Option<&Limits>, read: &mut dyn FnMut() -> Option<Memory>) -> Result<Option<String>> {
-    admit_once_with(dir, limits, 0, read, &mut || Ok(None), &mut || Ok(()))
+    admit_once_with(dir, limits, 0, true, read, &mut || Ok(None), &mut || Ok(()))
 }
 
 /// `admit_once`, with the caller's own `check` first and its `commit` once the run may go, all
@@ -174,6 +176,7 @@ pub fn admit_once_with(
     dir: &Path,
     limits: Option<&Limits>,
     need: u64,
+    ramp: bool,
     read: &mut dyn FnMut() -> Option<Memory>,
     check: &mut dyn FnMut() -> Result<Option<String>>,
     commit: &mut dyn FnMut() -> Result<()>,
@@ -185,7 +188,7 @@ pub fn admit_once_with(
     if let Some(why) = check()? {
         return Ok(Some(why));
     }
-    if let Some(why) = admission_for(read(), limits, since_last_start(dir), need) {
+    if let Some(why) = admission_for(read(), limits, since_last_start(dir), need, ramp) {
         return Ok(Some(why));
     }
     commit()?;
@@ -394,9 +397,13 @@ mod tests {
         assert_eq!(admission(mem(64, 0.5), &off, None), None, "a floor of 0 turns the wait off");
         // A run expected to take 4 GB starts only with that much free above the floor (NIT-363).
         let need = 4 * GIB;
-        let why = admission_for(mem(64, 14.0), &l, None, need).unwrap();
+        let why = admission_for(mem(64, 14.0), &l, None, need, true).unwrap();
         assert!(why.contains("expected to take 4.0 GB above the"), "{why}");
-        assert_eq!(admission_for(mem(64, 17.0), &l, None, need), None);
+        assert_eq!(admission_for(mem(64, 17.0), &l, None, need, true), None);
+        // A light job does not wait out the last start's ramp; a heavy one does (NIT-454).
+        let fresh = Some(Duration::from_secs(1));
+        assert!(admission_for(mem(64, 20.0), &l, fresh, GIB, true).is_some_and(|w| w.contains("still growing")));
+        assert_eq!(admission_for(mem(64, 20.0), &l, fresh, GIB, false), None);
     }
 
     #[test]
