@@ -112,7 +112,12 @@ fn observe(db:&Db,repo:&Path,project:&str,head:&str)->Result<()> {
     // CAS retries close the read/check/write window without holding SQLite across Git.
     for _ in 0..8 {
         let old=health(db,repo)?.context("branch health disappeared")?;
-        if old.observed_head==head || git(repo,&["merge-base","--is-ancestor",head,&old.observed_head]).is_ok() { return Ok(()); }
+        if old.observed_head==head { return Ok(()); }
+        if git(repo,&["merge-base","--is-ancestor",head,&old.observed_head]).is_ok() {
+            let branch=Playbook::load(repo)?.integration_branch().to_string();
+            let current=git(repo,&["rev-parse",&format!("refs/heads/{branch}")])?;
+            if current.trim()!=head {return Ok(());}
+        }
         let rewritten=git(repo,&["merge-base","--is-ancestor",&old.observed_head,head]).is_err();
         let changed=db.conn.execute("UPDATE verification_health SET pending_since=CASE WHEN verified_head=observed_head THEN ?4 ELSE pending_since END,observed_head=?2,status=CASE WHEN ?5 THEN 'paused' WHEN status='green' THEN 'pending' ELSE status END,message=CASE WHEN ?5 THEN 'Integration history changed; a new Full baseline is required' ELSE message END WHERE repo=?1 AND observed_head=?3",params![id,head,old.observed_head,now(),rewritten])?;
         if changed==1 { return Ok(()); }
@@ -440,6 +445,20 @@ mod tests {
         let h=health(&db,&repo).unwrap().unwrap();
         assert_eq!(h.observed_head,head);assert_eq!(h.status,"pending");
         assert!(reduced_ready(&db,&repo,&rules,now()).is_ok());
+    }
+
+    #[test]
+    fn authoritative_backward_reset_invalidates_the_old_green_baseline() {
+        let (db,repo,base)=fixture();
+        let head=change(&repo,"value.txt","changed");
+        observe(&db,&repo,"APP",&head).unwrap();
+        db.conn.execute("UPDATE verification_health SET verified_head=?1,status='green'",[&head]).unwrap();
+        crate::test_repo::git(&repo,&["reset","--hard",&base]);
+        observe(&db,&repo,"APP",&base).unwrap();
+        let h=health(&db,&repo).unwrap().unwrap();
+        assert_eq!(h.observed_head,base);
+        assert_eq!(h.status,"paused");
+        assert!(reduced_ready(&db,&repo,&Rules{enabled:true,..Default::default()},now()).is_err());
     }
 
     #[test]

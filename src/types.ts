@@ -644,6 +644,7 @@ export interface SolutionSummary {
   summary: string;
 }
 export interface ApprovalGate {
+  plan?: { depth: string; effective: string; head: string; policy_commit: string; commands: string[]; reasons: string[] } | null;
   commit: string;
   passed: boolean;
   /** An intentional policy skip is unverified, never a passing gate. */
@@ -663,7 +664,7 @@ export interface ReviewRecord {
   commit_sha: string;
   /** Empty when no review ran. */
   reviewer: string;
-  verdict: "pass" | "changes" | "none" | "disabled" | "yolo";
+  verdict: "pass" | "changes" | "none" | "disabled" | "yolo" | "light";
   approver: "agent" | "human";
   reasons: string[];
   /** carried: raised in an earlier round and not fixed since; now: how the reviewer says it is still open. */

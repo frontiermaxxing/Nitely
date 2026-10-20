@@ -183,6 +183,9 @@ pub fn lands_alone(db: &Db, pb: &Playbook, key: &str) -> Result<Option<String>> 
     let Some(review) = db.reviews(key)?.into_iter().next() else {
         return Ok(Some("it has no review yet".into()));
     };
+    if review.verdict=="light" || review.gate.as_ref().is_some_and(|g|g.plan.is_some()) {
+        return Ok(Some("reduced verification is bound to this individual patch".into()));
+    }
     if review.approver == "human" || !review.reasons.is_empty() || db.issue(key)?.is_some_and(|i| i.state == "Approved") {
         return Ok(Some("it needs a person's approval, which is given and checked per change".into()));
     }

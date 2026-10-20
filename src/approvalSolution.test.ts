@@ -3,6 +3,12 @@ import assert from "node:assert/strict";
 import { approvalPr, approvalSolution, automatedReviewEvidence, automatedGateEvidence, latestGateEvent } from "./approvalEvidence.ts";
 import type { TimelineEntry } from "./types.ts";
 
+test("Basic exemption never counts as a completed review or Full gate", () => {
+  assert.deepEqual(automatedReviewEvidence({ reviewer: "", verdict: "light" }), { ran: false, text: "Basic checks: pre-merge review exempt; post-merge audit applies", tone: null });
+  const evidence = automatedGateEvidence({ passed: true, commit: "abc1234", results: [], plan: { depth: "Basic", effective: "inert", head: "abc1234", policy_commit: "def5678", commands: ["lint"], reasons: [] } });
+  assert.equal(evidence.text, "Basic checks passed");
+});
+
 test("YOLO remains unverified even if a stale reviewer or passing flag accompanies it", () => {
   const yolo = { reviewer: "codex", verdict: "yolo" };
   assert.deepEqual(automatedReviewEvidence(yolo), { ran: false, text: "YOLO mode: automatic gate and PR review skipped", tone: null });

@@ -57,7 +57,7 @@ pub(crate) fn all_enabled(db: &Db, keys: &[&str]) -> Result<bool> {
 pub(crate) fn skipped_gate(db: &Db, worktree: &Path, keys: &[&str], actor: &Actor) -> Result<GateResult> {
     let commit = playbook::git(worktree, &["rev-parse", "HEAD"])?.trim().to_string();
     for key in keys { db.log_event(actor, Some(key), Some(&worktree.to_string_lossy()), "gate_skipped", NOTE)?; }
-    Ok(GateResult { passed: false, skipped: Some(NOTE.into()), commit, results: vec![], warnings: vec![], flaked: vec![], lane_run: None })
+    Ok(GateResult { passed: false, plan: None, skipped: Some(NOTE.into()), commit, results: vec![], warnings: vec![], flaked: vec![], lane_run: None })
 }
 
 pub(crate) fn check_gate_authority(db: &Db, keys: &[&str], gate: &GateResult) -> Result<()> {

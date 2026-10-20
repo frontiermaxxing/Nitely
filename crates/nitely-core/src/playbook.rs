@@ -1145,6 +1145,8 @@ pub struct CommandResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GateResult {
     pub passed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<crate::verification::Plan>,
     /// An intentional bypass is unverified, never a passing gate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skipped: Option<String>,
@@ -1308,6 +1310,30 @@ pub fn run_gate_as(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option
 }
 
 pub(crate) fn run_automatic_gate(db: &Db, repo_root: &Path, worktree: &Path, keys: &[&str], actor: &Actor, kind: crate::lanes::Kind) -> Result<GateResult> {
+    if !crate::project_yolo::all_enabled(db,keys)? && keys.len()==1 {
+        if let Some(plan)=crate::verification::execution_plan(db,repo_root,worktree,keys[0])? {
+            let pb=Playbook::load(repo_root)?;
+            if pb.lanes.is_some() {
+                let steps=plan.commands.iter().map(|c|(c.clone(),None)).collect::<Vec<_>>();
+                // Discovery evidence must be present, so reduced gates execute instead of
+                // consuming a cache record that has no per-test discovery output.
+                let lane=crate::lanes::gate_fresh(db,repo_root,&pb,worktree,Some(keys[0]),kind,&steps,actor)?;
+                let mut passed=lane.passed;
+                let mut warnings=lane.warnings;
+                if passed {
+                    if let Err(e)=crate::verification::validate_selected(&plan,&lane.results) {
+                        passed=false;
+                        warnings.push(format!("Selected test evidence incomplete: {e:#}"));
+                    }
+                }
+                let mut gate=record_gate(db,Some(keys[0]),worktree,actor,&lane.commit,lane.results,passed,lane.flaked,warnings)?;
+                gate.lane_run=lane.run;
+                gate.plan=Some(plan);
+                crate::verification::check_gate_authority(db,repo_root,worktree,keys[0],&gate)?;
+                return Ok(gate);
+            }
+        }
+    }
     run_gate_inner(db, repo_root, worktree, keys.last().copied(), actor, kind, keys)
 }
 
@@ -1401,7 +1427,7 @@ fn record_gate(db: &Db, issue_key: Option<&str>, worktree: &Path, actor: &Actor,
         format!("Gate failed at {commit}: {}", results.last().map(|r| r.command.as_str()).unwrap_or(""))
     };
     db.log_event(actor, issue_key, at.as_deref(), if passed { "gate_passed" } else { "gate_failed" }, &summary)?;
-    Ok(GateResult { passed, skipped: None, commit: commit.to_string(), results, warnings, flaked, lane_run: None })
+    Ok(GateResult { passed, plan: None, skipped: None, commit: commit.to_string(), results, warnings, flaked, lane_run: None })
 }
 
 /// Fills `{main}` (the main checkout), `{worktree}` and `{base}` in a playbook command.

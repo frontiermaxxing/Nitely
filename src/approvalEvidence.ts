@@ -9,16 +9,17 @@ export interface ApprovalEvidence {
 /** An intentional policy opt-out is neutral evidence, not a failed or completed review. */
 export function automatedReviewEvidence(review?: { reviewer?: string; verdict?: string; note?: string | null } | null) {
   const yolo = review?.verdict === "yolo";
-  const disabled = review?.verdict === "disabled" || yolo;
+  const light = review?.verdict === "light";
+  const disabled = review?.verdict === "disabled" || yolo || light;
   return {
     ran: !!review?.reviewer && review.verdict !== "none" && !disabled,
-    text: review?.note || (yolo ? "YOLO mode: automatic gate and PR review skipped" : disabled ? "Review disabled for this project" : "No automated review ran."),
+    text: review?.note || (yolo ? "YOLO mode: automatic gate and PR review skipped" : light ? "Basic checks: pre-merge review exempt; post-merge audit applies" : disabled ? "Review disabled for this project" : "No automated review ran."),
     tone: disabled ? null : "bad" as const,
   };
 }
 
 export function automatedGateEvidence(gate: ApprovalGate) {
-  return { ran: !gate.skipped, text: gate.skipped ? "Gate skipped" : gate.passed ? "Gate passed" : "Gate failed", reason: gate.skipped || null };
+  return { ran: !gate.skipped, text: gate.skipped ? "Gate skipped" : gate.passed ? gate.plan ? `${gate.plan.depth} checks passed` : "Gate passed" : "Gate failed", reason: gate.skipped || null };
 }
 
 /** A newer skip replaces an old failure in the current-status summary, without erasing history. */

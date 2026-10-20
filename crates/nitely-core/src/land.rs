@@ -147,6 +147,20 @@ pub(crate) fn record_landed(db: &mut Db, root: &Path, issue: &IssueRecord, repor
         report.warnings.push(format!("post-merge verification record needs recovery: {e:#}"));
         db.log_event(actor,Some(&issue.key),None,"verification_record_failed",&format!("{e:#}"))?;
     }
+    if let Some(plan)=report.gate.as_ref().and_then(|g|g.plan.as_ref()).filter(|p|matches!(p.effective.as_str(),"inert"|"contained")) {
+        let audit=(|| -> Result<()> {
+            let (vendor,_)=crate::git::parse_branch(&report.branch);
+            if let Some(candidate)=crate::verification::audit_candidate(root,issue,plan,vendor.as_deref().unwrap_or(actor.id()))? {
+                let head=rev(root,report.head.as_deref().context("landed head missing")?)?;
+                crate::verification_audit::landed(db,&candidate,&plan.base,&head,Some(plan.audit_percent))?;
+            }
+            Ok(())
+        })();
+        if let Err(e)=audit {
+            report.warnings.push(format!("post-merge audit record needs recovery: {e:#}"));
+            db.log_event(actor,Some(&issue.key),None,"verification_record_failed",&format!("{e:#}"))?;
+        }
+    }
     let base = report.base.clone();
     let evidence = format!(
         "Landed on {base} at {}; {} ({}).",
@@ -592,6 +606,7 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
         bail!("{why}");
     }
     crate::project_yolo::check_gate_authority(db, &[key], report.gate.as_ref().expect("gate recorded"))?;
+    crate::verification::check_gate_authority(db,root,&worktree,key,report.gate.as_ref().expect("gate recorded"))?;
     report.approval = Some(check_approval(db, &Playbook::load(root)?, key, &worktree, &base, &branch)?);
 
     if push {
@@ -612,6 +627,7 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
     // The submodules' integration branches first, then the repo's; when the repo's refuses, theirs
     // go back, so neither moves.
     crate::project_yolo::check_gate_authority(db, &[key], report.gate.as_ref().expect("gate recorded"))?;
+    crate::verification::check_gate_authority(db,root,&worktree,key,report.gate.as_ref().expect("gate recorded"))?;
     check_yolo_policy(db, key, &db.reviews(key)?.into_iter().next().context("submission evidence disappeared")?)?;
     let undo = crate::submodules::fast_forward(&moving)?;
     if let Err(e) = fast_forward_main(root, &head) {
@@ -742,8 +758,16 @@ pub(crate) fn check_approval(db: &Db, pb: &Playbook, key: &str, worktree: &Path,
     let mut accepted = String::new();
     check_yolo_policy(db, key, &review)?;
     check_disabled_policy(pb, &review)?;
+    if review.verdict=="light" && !crate::project_yolo::enabled_for_issue(db,key)? {
+        let root=git(worktree,&["rev-parse","--git-common-dir"])?;
+        let common=std::path::PathBuf::from(root.trim());
+        let common=if common.is_absolute(){common}else{worktree.join(common)};
+        let repo=common.parent().context("missing repository root")?;
+        let plan=crate::verification::execution_plan(db,repo,worktree,key)?.context("Basic review exemption no longer applies; submit for normal review")?;
+        if plan.effective!="inert" {bail!("the change no longer has a Basic proof; submit for normal review");}
+    }
     match review.verdict.as_str() {
-        "pass" | "none" | "disabled" | "yolo" => {}
+        "pass" | "none" | "disabled" | "yolo" | "light" => {}
         _ => {
             // Findings the person accepted as they are, signed for this patch, block nothing.
             let open = db.unaccepted_blockers(key, &review)?;
@@ -756,7 +780,7 @@ pub(crate) fn check_approval(db: &Db, pb: &Playbook, key: &str, worktree: &Path,
     let files: Vec<String> = git(worktree, &["diff", "--name-only", "--no-renames", &format!("{base}...HEAD")])?.lines().map(str::to_string).collect();
     pb.approval.check_blocked(&files)?;
     let mut reasons = pb.human_reasons(&files)?;
-    if matches!(review.verdict.as_str(), "disabled" | "yolo") {
+    if matches!(review.verdict.as_str(), "disabled" | "yolo" | "light") {
         let unanswered = pb.review.unevaluated_reasons();
         reasons.extend(unanswered);
     }
@@ -772,6 +796,7 @@ pub(crate) fn check_approval(db: &Db, pb: &Playbook, key: &str, worktree: &Path,
     }
     reasons.dedup();
     if reasons.is_empty() {
+        if review.verdict=="light" {return Ok("Mechanically proven Basic change; pre-land review exempt under current policy".into());}
         if review.verdict == "yolo" { return Ok(format!("{}; no human approval is required", crate::project_yolo::NOTE)); }
         if review.verdict == "disabled" {
             return Ok(format!("{}; no human approval is required", crate::review::DISABLED_NOTE));
@@ -1339,7 +1364,7 @@ when_changed = ["billing"]
         reviewed_with(&f, &a, blocker, 1);
         let ask = f.db.request_acceptance(&a, "1", "Only the person changes the playbook.", None, &f.actor).unwrap();
         // Later rounds are told its words and say it the same way: it stays one open request.
-        let no_gate = crate::playbook::GateResult { passed: true, skipped: None, commit: "c".into(), results: vec![], warnings: vec![], flaked: vec![], lane_run: None };
+        let no_gate = crate::playbook::GateResult { passed: true, plan: None, skipped: None, commit: "c".into(), results: vec![], warnings: vec![], flaked: vec![], lane_run: None };
         for round in 2..4 {
             reviewed_with(&f, &a, blocker, round);
             let latest = f.db.reviews(&a).unwrap().remove(0);

@@ -1,18 +1,18 @@
-//! Mechanical, revision-bound verification advice. This first rollout is shadow-only:
-//! no result here can skip a gate, reviewer, approval, or release check.
+//! Mechanical, revision-bound verification. Active execution requires committed owner policy
+//! and a healthy post-merge backstop; shadow mode only records advice.
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{path::Path, process::Command};
 use tree_sitter::{Node, Parser};
 use crate::{Db, issues::{Actor, IssueRecord}, playbook::{git, Playbook, PLAYBOOK_PATH}};
 
-const CLASSIFIER: &str = "syntax-v1-ts0271-rust0242-ts0232-js0250";
+const CLASSIFIER: &str = "syntax-v2-ts0271-rust0242-ts0232-js0250";
 const MAX_FILE: usize = 512 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Rules {
-    /// Only off/shadow are implemented. Unknown modes conservatively recommend Full.
+    /// Shadow records advice; active enables proven light paths with a healthy backstop.
     pub mode: String,
     pub version: u32,
     /// Regexes anchored by the classifier against the complete repository-relative path.
@@ -20,16 +20,19 @@ pub struct Rules {
     pub comments: Vec<String>,
     pub display_copy: Vec<String>,
     pub protected: Vec<String>,
+    pub basic: Vec<String>,
     pub backstop: crate::verification_backstop::Rules,
     pub audit_percent: u8,
 }
 impl Default for Rules {
-    fn default()->Self {Self {mode:String::new(),version:0,prose:vec![],comments:vec![],display_copy:vec![],protected:vec![],backstop:Default::default(),audit_percent:10}}
+    fn default()->Self {Self {mode:String::new(),version:0,prose:vec![],comments:vec![],display_copy:vec![],protected:vec![],basic:vec![],backstop:Default::default(),audit_percent:10}}
 }
 fn default_audit_percent()->u8 {10}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Plan {
+    #[serde(default)]
+    pub commands: Vec<String>,
     #[serde(default="default_audit_percent")]
     pub audit_percent: u8,
     #[serde(default)]
@@ -175,10 +178,13 @@ fn blob(repo: &Path, revision: &str, path: &str) -> Result<String> {
 pub fn assess(repo: &Path, base: &str, head: &str, issue: &IssueRecord) -> Result<Plan> {
     let base = git(repo, &["rev-parse", "--verify", &format!("{base}^{{commit}}")])?.trim().to_string();
     let head = git(repo, &["rev-parse", "--verify", &format!("{head}^{{commit}}")])?.trim().to_string();
+    let policy_commit = base;
+    let base = git(repo, &["merge-base", &policy_commit, &head])?.trim().to_string();
     let mut plan = Plan {
+        commands: vec![],
         affected: None, audit_sample: None, policy_fingerprint: None, rule_ids: vec![], audit_percent:10,
         tree: git(repo, &["rev-parse", &format!("{head}^{{tree}}")])?.trim().into(),
-        head, base: base.clone(), policy_commit: base, classifier: CLASSIFIER.into(),
+        head, base, policy_commit, classifier: CLASSIFIER.into(),
         declared: issue.review_level.clone(), declared_by: issue.review_level_by.clone(), declared_source: issue.review_level_source.clone(),
         declared_at: issue.review_level_at,
         effective: "sensitive".into(), depth: "Full".into(), shadow: true, reasons: vec![], files: vec![],
@@ -187,8 +193,44 @@ pub fn assess(repo: &Path, base: &str, head: &str, issue: &IssueRecord) -> Resul
     let attempted = assess_inner(repo, issue, &mut plan);
     if let Err(error) = attempted { plan.reasons.push(format!("Full fallback: {error:#}")); }
     // Retain affected-test advice separately: an input map does not overrule a safety floor.
-    plan.affected = Some(crate::affected_tests::select(repo,&plan.base,&plan.head)?);
+    plan.affected = Some(crate::affected_tests::select_with_policy(repo,&plan.base,&plan.head,&plan.policy_commit)?);
+    if plan.effective == "standard" && issue.review_level.as_deref().is_some_and(|l| matches!(l,"inert"|"contained"))
+        && plan.files.len() <= 5 && plan.affected.as_ref().is_some_and(|s| !s.full && s.components.len() == 1)
+        && changed_lines(repo,&plan.base,&plan.head)? <= 200 {
+        plan.effective = "contained".into();
+        plan.depth = "Focused".into();
+        for component in &plan.affected.as_ref().expect("checked selection").components {
+            plan.rule_ids.push(format!("component:{component}"));
+        }
+        plan.reasons.push("One mapped component within five files and 200 changed lines.".into());
+    }
+    if !plan.shadow && matches!(plan.effective.as_str(),"inert"|"contained"|"standard") {
+        let pb=Playbook::parse(&blob(repo,&plan.policy_commit,PLAYBOOK_PATH)?)?;
+        if plan.effective=="inert" {
+            plan.commands=pb.verification.basic.clone();
+        } else if let Some(selection)=plan.affected.as_ref().filter(|s|!s.full) {
+            plan.commands=pb.verification.basic.clone();
+            for check in &selection.checks {
+                if let Some(d)=&check.discovery {
+                    plan.commands.extend([d.command.clone(),d.ignored_command.clone()]);
+                }
+                plan.commands.push(check.command.clone());
+            }
+        }
+        if plan.commands.is_empty() || pb.verification.basic.is_empty() {
+            plan.commands.clear();
+            plan.enforcement="Full configured gate: applicable checks are not completely configured.".into();
+        } else {
+            plan.commands.insert(0,format!("git diff --check {} {}",plan.base,plan.head));
+            plan.enforcement=if plan.effective=="inert" {"Basic checks; no pre-land review; post-merge audit applies."} else {"Affected checks with independent peer review; post-merge Full backstop applies."}.into();
+        }
+    }
     Ok(plan)
+}
+
+fn changed_lines(repo:&Path,base:&str,head:&str)->Result<usize> {
+    git(repo,&["diff","--numstat","--no-renames",base,head,"--"])?.lines()
+        .try_fold(0usize,|total,line| { let mut cells=line.split('\t'); Ok(total+cells.next().context("missing count")?.parse::<usize>()?+cells.next().context("missing count")?.parse::<usize>()?) })
 }
 
 fn assess_inner(repo: &Path, issue: &IssueRecord, plan: &mut Plan) -> Result<()> {
@@ -199,7 +241,8 @@ fn assess_inner(repo: &Path, issue: &IssueRecord, plan: &mut Plan) -> Result<()>
     let rules = &pb.verification;
     if !(10..=100).contains(&rules.audit_percent) {bail!("audit_percent must be between 10 and 100");}
     plan.audit_percent=rules.audit_percent;
-    if rules.mode != "shadow" || rules.version != 1 { bail!("verification shadow policy version 1 is not configured"); }
+    if !matches!(rules.mode.as_str(),"shadow"|"active") || rules.version != 1 { bail!("verification policy version 1 is not configured"); }
+    plan.shadow = rules.mode != "active";
     if !pb.review.flags.is_empty() { bail!("reviewer-only conditions require the existing full review"); }
     let declared = issue.review_level.as_deref().context("undeclared changes retain existing full verification")?;
     crate::issues::check_review_level(declared)?;
@@ -213,6 +256,7 @@ fn assess_inner(repo: &Path, issue: &IssueRecord, plan: &mut Plan) -> Result<()>
         changes += cells.next().context("missing removed count")?.parse::<usize>()?;
         if changes > 400 { bail!("more than 400 changed lines"); }
     }
+    let mut behavioral = false;
     for pair in parts.chunks_exact(2) {
         let fields: Vec<_> = pair[0].split_whitespace().collect();
         let path = pair[1];
@@ -221,8 +265,18 @@ fn assess_inner(repo: &Path, issue: &IssueRecord, plan: &mut Plan) -> Result<()>
             bail!("{path}: additions, deletions, renames, mode changes and submodules require Full");
         }
         if let Some(hit) = pb.approval.protected_hit(&[path.into()])? { bail!("{path}: {hit}"); }
-        let proof = prove(path, &blob(repo, &plan.base, path)?, &blob(repo, &plan.head, path)?, rules)
-            .with_context(|| path.to_string())?;
+        if built_in_protected(path) || matches(&rules.protected,path)? { bail!("{path}: protected path"); }
+        let old=blob(repo,&plan.base,path)?;
+        let new=blob(repo,&plan.head,path)?;
+        let proof = match prove(path,&old,&new,rules) {
+            Ok(proof)=>proof,
+            Err(error)=>{
+                syntax(path,&old,false,false).with_context(||format!("{path}: {error:#}"))?;
+                syntax(path,&new,false,false).with_context(||format!("{path}: {error:#}"))?;
+                behavioral=true;
+                "Known source behavior changed; Integration minimum unless complete component mapping proves Focused.".into()
+            }
+        };
         for (kind,patterns) in [("prose",&rules.prose),("comments",&rules.comments),("display_copy",&rules.display_copy)] {
             for pattern in patterns {
                 if matches(std::slice::from_ref(pattern),path)? {
@@ -236,9 +290,9 @@ fn assess_inner(repo: &Path, issue: &IssueRecord, plan: &mut Plan) -> Result<()>
     // A declaration can raise the computed floor, never lower it. Unsupported behavioral
     // cases have already fallen back to Full above; affected tests arrive separately.
     if plan.rule_ids.len()>100 || plan.rule_ids.iter().any(|r|r.len()>256) {bail!("lowering rule identity exceeds audit bounds");}
-    plan.effective = declared.into();
-    plan.depth = crate::issues::review_depth(declared).into();
-    plan.reasons.push("Every changed file has a mechanical Basic proof; declaration supplies any higher minimum.".into());
+    plan.effective = if behavioral && declared!="sensitive" {"standard"} else {declared}.into();
+    plan.depth = crate::issues::review_depth(&plan.effective).into();
+    plan.reasons.push(if behavioral {"Known source changed; parsed behavior and dependency impact set the minimum."} else {"Every changed file has a mechanical Basic proof; declaration supplies any higher minimum."}.into());
     if issue.review_level_source.as_deref() == Some("implementer") {
         plan.reasons.push("Implementer's declaration is a hint; eligibility came from the committed policy and parsed diff.".into());
     }
@@ -251,6 +305,7 @@ pub fn assess_and_record(db:&mut Db,repo:&Path,base:&str,head:&str,issue:&IssueR
         let disabled=crate::verification_audit::disabled_rules(db,project)?;
         if plan.rule_ids.iter().any(|r|disabled.contains(r)) {
             plan.effective="sensitive".into(); plan.depth="Full".into();
+            plan.commands.clear();
             plan.reasons.push("A confirmed escape disabled a matching lowering rule.".into());
         }
         if matches!(plan.effective.as_str(),"inert"|"contained") {
@@ -264,6 +319,58 @@ pub fn assess_and_record(db:&mut Db,repo:&Path,base:&str,head:&str,issue:&IssueR
     record(db,issue,&plan,actor)?;
     Ok(plan)
 }
+
+/// Select only from immutable integration policy. No active policy, incomplete coverage,
+/// or an overdue backstop means the caller retains its full configured gate.
+pub(crate) fn execution_plan(db:&Db,root:&Path,worktree:&Path,key:&str)->Result<Option<Plan>> {
+    let issue=db.issue(key)?.context("verification issue disappeared")?;
+    let base=Playbook::load(root)?.integration_branch().to_string();
+    let plan=assess(worktree,&base,"HEAD",&issue)?;
+    if plan.shadow || plan.commands.is_empty() {return Ok(None);}
+    if let Some(project)=issue.project.as_deref() {
+        let disabled=crate::verification_audit::disabled_rules(db,project)?;
+        if plan.rule_ids.iter().any(|r|disabled.contains(r)) {return Ok(None);}
+    }
+    let policy=Playbook::parse(&blob(worktree,&plan.policy_commit,PLAYBOOK_PATH)?)?;
+    if crate::verification_backstop::reduced_ready(db,root,&policy.verification.backstop,crate::db::now()).is_err() {return Ok(None);}
+    Ok(Some(plan))
+}
+
+pub(crate) fn check_gate_authority(db:&Db,root:&Path,worktree:&Path,key:&str,gate:&crate::playbook::GateResult)->Result<()> {
+    if let Some(before)=&gate.plan {
+        let checked_tree=git(worktree,&["rev-parse","--verify",&format!("{}^{{tree}}",gate.commit)])?;
+        if checked_tree.trim()!=before.tree {bail!("reduced gate checked a different tree; submit the committed revision again");}
+        let now=execution_plan(db,root,worktree,key)?.context("reduced verification is no longer authorized; submit again with the current policy")?;
+        if before.head!=now.head || before.policy_commit!=now.policy_commit || before.commands!=now.commands || before.effective!=now.effective {
+            bail!("revision or verification policy changed while checking; submit again");
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_selected(plan:&Plan,results:&[crate::playbook::CommandResult])->Result<()> {
+    if plan.effective=="inert" {return Ok(());}
+    let selection=plan.affected.as_ref().context("affected selection missing")?;
+    for check in &selection.checks {
+        let output=|command:&str|->Result<&str> {
+            results.iter().find(|r|r.command==command && r.ok && !r.skipped)
+                .map(|r|r.output.as_str()).with_context(||format!("missing executed check: {command}"))
+        };
+        if let Some(discovery)=&check.discovery {
+            crate::affected_tests::verify_cargo_discovery(check,output(&discovery.command)?,output(&discovery.ignored_command)?)?;
+            let run=output(&check.command)?;
+            if !run.lines().any(|line|line.starts_with("test result: ok.") && !line.starts_with("test result: ok. 0 passed;")) {
+                bail!("affected Cargo check executed zero passing tests");
+            }
+        } else if check.suite.is_some() {
+            let run=output(&check.command)?;
+            if !run.lines().any(|line|line.trim().strip_prefix("# pass ").and_then(|n|n.parse::<u64>().ok()).is_some_and(|n|n>0)) {
+                bail!("affected Node suite needs TAP evidence of executed tests");
+            }
+        }
+    }
+    Ok(())
+}
 pub(crate) fn audit_candidate(repo:&Path,issue:&IssueRecord,plan:&Plan,author:&str)->Result<Option<crate::verification_audit::Candidate>> {
     let (Some(project),Some(policy))=(issue.project.clone(),plan.policy_fingerprint.clone()) else {return Ok(None);};
     Ok(Some(crate::verification_audit::Candidate {repo:crate::verification_audit::repository_id(repo)?,project,issue_key:issue.key.clone(),policy,author:author.into(),declarer:plan.declared_by.clone(),declaration_source:plan.declared_source.clone(),declared:plan.declared.clone(),effective:plan.effective.clone(),rules:plan.rule_ids.clone()}))
@@ -276,7 +383,7 @@ pub fn record(db: &Db, issue: &IssueRecord, plan: &Plan, actor: &Actor) -> Resul
         rusqlite::params![issue.key, plan.head, plan.policy_commit, plan.classifier, serde_json::to_string(plan)?, crate::db::now()],
     )?;
     if inserted > 0 {
-        db.add_note(&issue.key, &format!("Verification shadow at {}: {}. {} {}", plan.head, plan.depth, plan.reasons.join("; "), plan.enforcement), "verification_plan", actor)?;
+        db.add_note(&issue.key, &format!("Verification {} at {}: {}. {} {}", if plan.shadow {"shadow"} else {"plan"}, plan.head, plan.depth, plan.reasons.join("; "), plan.enforcement), "verification_plan", actor)?;
     }
     Ok(())
 }
@@ -377,4 +484,43 @@ mod tests {
         drop(db);
         std::fs::remove_dir_all(repo).unwrap();
     }
+    #[test]
+    fn active_basic_authority_tracks_integration_policy_and_actual_branch_diff() {
+        use crate::test_repo::git as g;
+        let repo=crate::test_repo::copy("verification-active",|dir| {
+            crate::test_repo::init(dir,&[
+                (PLAYBOOK_PATH,"[verification]\nversion=1\nmode='active'\nbasic=['echo syntax-checked']\ncomments=['src/.*']\n[verification.backstop]\nenabled=true\n"),
+                ("src/math.rs","// old\nfn value()->i32 { 1 }"),
+                ("other.txt","base")]);
+        });
+        let mut db=Db::open(&crate::paths::unique_temp("nitely-active-policy",".sqlite")).unwrap();
+        db.create_project("APP","Example").unwrap();
+        let issue=db.create_issue(&crate::NewIssue{project:"APP".into(),title:"Clarify math comment".into(),body:"Explain the calculation".into(),kind:"feature".into(),source:"codex".into(),evidence:"test".into(),review_level:Some("inert".into()),..Default::default()},&Actor::Human).unwrap();
+        let base=g(&repo,&["rev-parse","HEAD"]).trim().to_string();
+        g(&repo,&["checkout","-b","codex/app-1-comment"]);
+        std::fs::write(repo.join("src/math.rs"),"// clearer\nfn value()->i32 { 1 }").unwrap();
+        g(&repo,&["add","src/math.rs"]);g(&repo,&["commit","-m","comment"]);
+        g(&repo,&["checkout","main"]);
+        std::fs::write(repo.join("other.txt"),"unrelated main work").unwrap();
+        g(&repo,&["add","other.txt"]);g(&repo,&["commit","-m","unrelated"]);
+        let policy=g(&repo,&["rev-parse","HEAD"]).trim().to_string();
+        crate::verification_backstop::on_landed(&mut db,&repo,&issue,&crate::land::Landed{head:Some(policy.clone()),landed_from:Some(base.clone()),..Default::default()}).unwrap();
+        db.conn.execute("UPDATE verification_health SET verified_head=?1,status='green',checked_at=?2",rusqlite::params![policy,crate::db::now()]).unwrap();
+        g(&repo,&["checkout","codex/app-1-comment"]);
+        let plan=execution_plan(&db,&repo,&repo,&issue.key).unwrap().unwrap();
+        assert_eq!(plan.base,base);
+        assert_eq!(plan.policy_commit,policy);
+        assert_eq!(plan.effective,"inert");
+        assert_eq!(plan.files.len(),1,"unrelated main work must not enter the candidate diff");
+        assert_eq!(plan.commands.last().unwrap(),"echo syntax-checked");
+        let gate=crate::playbook::GateResult{passed:true,commit:plan.head.clone(),plan:Some(plan),skipped:None,results:vec![],warnings:vec![],flaked:vec![],lane_run:None};
+        check_gate_authority(&db,&repo,&repo,&issue.key,&gate).unwrap();
+        std::fs::write(repo.join("src/math.rs"),"// clearer\nfn value()->i32 { 2 }").unwrap();
+        g(&repo,&["add","src/math.rs"]);g(&repo,&["commit","-m","behavior"]);
+        let ordinary=assess(&repo,"main","HEAD",&issue).unwrap();
+        assert_eq!(ordinary.depth,"Integration");
+        assert!(ordinary.commands.is_empty(),"missing mapping retains the Full configured gate");
+        assert!(check_gate_authority(&db,&repo,&repo,&issue.key,&gate).is_err(),"an earlier Basic pass cannot authorize changed behavior");
+    }
+
 }

@@ -197,6 +197,10 @@ fn protected(path: &str) -> bool {
 /// The only policy source is the immutable base commit. `full == true` means ignore every
 /// proposed reduced check (checks are cleared). Callers must additionally apply risk floors.
 pub fn select(repo: &Path, base: &str, head: &str) -> Result<Selection> {
+    select_with_policy(repo,base,head,base)
+}
+
+pub fn select_with_policy(repo: &Path, base: &str, head: &str, policy_commit:&str) -> Result<Selection> {
     let base = git(
         repo,
         &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
@@ -223,7 +227,7 @@ pub fn select(repo: &Path, base: &str, head: &str) -> Result<Selection> {
         checks: vec![],
         reasons: vec![],
     };
-    if let Err(e) = select_inner(repo, &mut selection) {
+    if let Err(e) = select_inner(repo, &mut selection, policy_commit) {
         selection.full = true;
         selection.checks.clear();
         selection.reasons.push(format!("Full fallback: {e:#}"));
@@ -352,11 +356,12 @@ fn owner<'a>(policy: &'a Policy, path: &str) -> Option<&'a Component> {
         .find(|c| c.roots.iter().any(|r| under(path, r)))
 }
 
-fn select_inner(repo: &Path, result: &mut Selection) -> Result<()> {
+fn select_inner(repo: &Path, result: &mut Selection, policy_commit:&str) -> Result<()> {
     let before = snapshot(repo, &result.base)?;
     let after = snapshot(repo, &result.head)?;
-    result.policy_blob = before.get(POLICY_PATH).map(|e| e.oid.clone());
-    let policy: Policy = toml::from_str(&read(repo, &before, POLICY_PATH)?)?;
+    let policy_files=snapshot(repo,policy_commit)?;
+    result.policy_blob = policy_files.get(POLICY_PATH).map(|e| e.oid.clone());
+    let policy: Policy = toml::from_str(&read(repo, &policy_files, POLICY_PATH)?)?;
     validate(&policy, &before, &after)?;
     let changed: BTreeSet<_> = before
         .keys()

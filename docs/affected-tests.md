@@ -1,12 +1,12 @@
 # Affected-test selection
 
-[NIT-300](http://127.0.0.1:7423/i/NIT-300) supplies **shadow advice**, not permission to skip
-the existing gate. `affected_tests::select(repo, base, head)` reads only immutable commits.
+[NIT-300](http://127.0.0.1:7423/i/NIT-300) supplies revision-bound test selection. Shadow mode records advice; active
+verification consumes a complete selection only with approved policy and healthy backstop. `affected_tests::select(repo, base, head)` reads only immutable commits.
 The coordinator still applies protected-path, risk, size, platform and integration floors.
-No live project receives a reduced test policy through this implementation.
+A project must explicitly approve activation before it receives reduced checks.
 
 The optional `.nitely/affected-tests.toml` is a human-approved input inventory. Version 1
-rejects unknown fields. Its blob comes from `base`; editing it in the candidate requires Full.
+rejects unknown fields. Its blob comes from authoritative integration (which can be newer than the diff base); editing it in the candidate requires Full.
 Missing policy, overlapping roots, missing inputs, an empty selection or an unsupported
 dependency produces `full = true`, clears the proposed checks and explains the fallback.
 

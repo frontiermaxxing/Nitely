@@ -26,7 +26,7 @@ export interface Round {
   reviewer: string | null;
   /** The review record the closing submit wrote, with the findings. */
   review: ReviewRecord | null;
-  reviewSkipped?: "yolo" | "disabled";
+  reviewSkipped?: "yolo" | "disabled" | "light";
   /** The submit could not push the branch, so nobody can see this round. */
   pushFailed: boolean;
   /** The submit handed the change to the human for approval. */
@@ -116,8 +116,8 @@ export function journeyOf(timeline: TimelineEntry[] = [], reviews: ReviewRecord[
       case "submit": {
         const s = e.summary ?? "";
         const r = openRound(e.ts);
-        const skipped = s.startsWith("Review disabled for this project") || s.startsWith("YOLO mode:");
-        if (skipped) r.reviewSkipped = s.startsWith("YOLO mode:") ? "yolo" : "disabled";
+        const skipped = s.startsWith("Review disabled for this project") || s.startsWith("YOLO mode:") || s.startsWith("Basic checks:");
+        if (skipped) r.reviewSkipped = s.startsWith("YOLO mode:") ? "yolo" : s.startsWith("Basic checks:") ? "light" : "disabled";
         r.outcome = skipped ? "unreviewed" : s.includes("requested changes") ? "changes" : s.includes("passed") ? "passed" : "unreviewed";
         r.reviewer = skipped ? null : reviewerOf(s) ?? r.reviewer;
         r.pushFailed = s.includes("push failed");
@@ -151,7 +151,7 @@ export function journeyOf(timeline: TimelineEntry[] = [], reviews: ReviewRecord[
         outcome: outcomeOf(rec),
         reviewer: rec.reviewer || null,
         review: rec,
-        ...(rec.verdict === "yolo" || rec.verdict === "disabled" ? { reviewSkipped: rec.verdict } : {}),
+        ...(rec.verdict === "yolo" || rec.verdict === "disabled" || rec.verdict === "light" ? { reviewSkipped: rec.verdict } : {}),
         pushFailed: false,
         waitsForHuman: rec.approver === "human",
       }),
@@ -178,7 +178,7 @@ export function journeyOf(timeline: TimelineEntry[] = [], reviews: ReviewRecord[
   };
   for (const r of rounds) {
     if (r.end !== null) r.review = take(r, -Infinity, r.end);
-    if (r.review?.verdict === "yolo" || r.review?.verdict === "disabled") {
+    if (r.review?.verdict === "yolo" || r.review?.verdict === "disabled" || r.review?.verdict === "light") {
       r.outcome = "unreviewed";
       r.reviewer = null;
       r.reviewSkipped = r.review.verdict;
@@ -196,7 +196,7 @@ export function journeyOf(timeline: TimelineEntry[] = [], reviews: ReviewRecord[
       last.review = rec;
       last.outcome = outcomeOf(rec);
       last.reviewer = rec.reviewer || last.reviewer;
-      if (rec.verdict === "yolo" || rec.verdict === "disabled") {
+      if (rec.verdict === "yolo" || rec.verdict === "disabled" || rec.verdict === "light") {
         last.reviewSkipped = rec.verdict;
         last.reviewer = null;
       }

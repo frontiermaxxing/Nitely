@@ -48,6 +48,7 @@ pub struct Submitted {
     pub review: Option<Review>,
     /// Deliberately disabled by project policy, distinct from an ad-hoc skip.
     pub review_disabled: bool,
+    pub review_light: bool,
     /// Project YOLO bypass; neither a gate nor review pass.
     pub yolo: bool,
     /// `agent` when the review is enough, `human` when it waits for approval.
@@ -161,8 +162,16 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         .collect();
     pb.approval.check_blocked(&files)?;
     crate::private_terms::check(issue.project.as_deref(), &worktree, &since)?;
+    let mut verification = crate::verification::assess_and_record(db, &worktree, &base, &checked_head, &issue,actor)?;
     let gate = playbook::run_automatic_gate(db, &root, &worktree, &[&issue.key], actor, crate::lanes::Kind::Gate)?;
-    let verification = crate::verification::assess_and_record(db, &worktree, &since, &gate.commit, &issue,actor)?;
+    if gate.skipped.is_some() {
+        verification.enforcement="YOLO override: automatic verification did not run; classification is advice only.".into();
+        verification.commands.clear();
+    } else if !verification.shadow && gate.plan.is_none() {
+        verification.enforcement="Full configured gate used: reduced checks were unavailable or the post-merge baseline was missing, overdue or unhealthy.".into();
+        verification.commands.clear();
+    }
+    crate::verification::record(db,&issue,&verification,actor)?;
     let submitted_patch = patch_id_range(&worktree, &since, &gate.commit)?;
     let explained_revision = git(&worktree, &["rev-parse", "--verify", &format!("{}^{{commit}}", gate.commit)])?.trim() == handed_in;
     let mut out = Submitted {
@@ -178,6 +187,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         gate,
         review: None,
         review_disabled: false,
+        review_light: false,
         yolo: false,
         approver: "human".into(),
         reasons: vec![],
@@ -205,6 +215,8 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     out.reasons = pb.human_reasons(&files)?;
     if crate::project_yolo::enabled_for_issue(db, &issue.key)? {
         out.yolo = true;
+    } else if out.gate.plan.as_ref().is_some_and(|p|p.effective=="inert") {
+        out.review_light = true;
     } else if !pb.review.enabled {
         out.review_disabled = true;
     } else if opts.skip_review {
@@ -274,11 +286,11 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
             else if e.is::<crate::review::Disabled>() { out.review_disabled = true; } else { return Err(e); }
         }
     }
-    if out.review_disabled || out.yolo {
+    if out.review_disabled || out.yolo || out.review_light {
         out.reasons.extend(Playbook::load(&root)?.review.unevaluated_reasons());
     }
     out.approver = if out.reasons.is_empty() { "agent" } else { "human" }.into();
-    let mut verdict = out.review.as_ref().map_or(if out.yolo { "yolo" } else if out.review_disabled { "disabled" } else { "none" }, |r| r.verdict.as_str()).to_string();
+    let mut verdict = out.review.as_ref().map_or(if out.yolo { "yolo" } else if out.review_light { "light" } else if out.review_disabled { "disabled" } else { "none" }, |r| r.verdict.as_str()).to_string();
     // Findings the person accepted as they are, signed for this very patch, block nothing: the
     // review is recorded as it asked, and goes on as a passing one (land checks the same).
     let accepted_only = match &out.review {
@@ -360,6 +372,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     if out.yolo && !crate::project_yolo::enabled_for_issue(db, &issue.key)? {
         bail!("YOLO mode was disabled during submit; submit again for normal verification");
     }
+    crate::verification::check_gate_authority(db,&root,&worktree,&issue.key,&out.gate)?;
     db.record_review(&out)?;
     let review_id = db.conn.last_insert_rowid();
     if out.review.is_some() {
@@ -413,6 +426,8 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         (Some(r), "human") if out.approval_stands => format!("Review by {} passed; the human's approval of this patch stands", by(r)),
         (Some(r), "human") => format!("Review by {} passed; waits for a human", by(r)),
         (Some(r), _) => format!("Review by {} passed; ready to land", by(r)),
+        (None, "human") if out.review_light => "Basic checks: passed; pre-land review is exempt; waits for a human".into(),
+        (None, _) if out.review_light => "Basic checks: passed; pre-land review is exempt; post-merge audit applies".into(),
         (None, "human") if out.yolo => format!("{}; waits for a human under the remaining approval rules", crate::project_yolo::NOTE),
         (None, _) if out.yolo => format!("{}; unverified and ready to land", crate::project_yolo::NOTE),
         (None, "human") if out.review_disabled => format!("{}; waits for a human under the remaining approval rules", crate::review::DISABLED_NOTE),
@@ -449,6 +464,8 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         ("Needs You", "It waits for the human's approval in the Nitely inbox, and Nitely lands it as soon as they approve it; you do not call land. Nitely already asked them, so do not `ask` for this approval yourself. Pick up other work meanwhile.")
     } else if out.approver == "human" {
         ("Needs You", "It waits for the human's approval in the Nitely inbox. Nitely already asked them, so do not `ask` for this approval yourself. Pick up other work meanwhile; once it is Approved, call land.")
+    } else if out.review_light {
+        ("In Review", "Basic checks passed under the committed verification policy; pre-land review is exempt. Call land; post-merge audit applies.")
     } else if out.yolo {
         ("In Review", "YOLO mode: automatic gate and PR review skipped. This revision is unverified. Call land while YOLO remains enabled.")
     } else if out.review_disabled {
@@ -847,7 +864,7 @@ pub fn describe(issue: &IssueRecord, s: &Submitted, land_by: crate::playbook::La
         "**Approval:** a human approved this exact patch in Nitely, and this review raised nothing new, so it stands.".to_string()
     } else if s.approver == "human" {
         "**Approval:** waits for a human. Approve it in Nitely's inbox.".to_string()
-    } else if s.review_disabled || s.yolo {
+    } else if s.review_disabled || s.yolo || s.review_light {
         "**Approval:** no human approval is required under this repo's remaining rules.".to_string()
     } else {
         "**Approval:** the review is enough under this repo's playbook.".to_string()
@@ -878,6 +895,7 @@ pub fn describe(issue: &IssueRecord, s: &Submitted, land_by: crate::playbook::La
                 format!("- [P{}] {}{carried}", f.priority, f.text)
             }));
         }
+        None if s.review_light => lines.push("**Review:** exempt for mechanically proven Basic change; post-merge audit applies.".into()),
         None if s.yolo => lines.push(format!("**Review:** {}. This revision is unverified.", crate::project_yolo::NOTE)),
         None if s.review_disabled => lines.push(format!("**Review:** {}.", crate::review::DISABLED_NOTE)),
         None => lines.push("**Review:** none ran.".into()),
@@ -887,14 +905,15 @@ pub fn describe(issue: &IssueRecord, s: &Submitted, land_by: crate::playbook::La
     if let Some(why) = &s.gate.skipped {
         lines.push(format!("**Gate** skipped at `{}`: {why}. No passing evidence.", s.commit));
     } else {
-        lines.push(format!("**Gate** {} at `{}`: {}.", if s.gate.passed { "passed" } else { "failed" }, s.commit, gate.join(", ")));
+        lines.push(format!("**{} checks** {} at `{}`: {}.", s.gate.plan.as_ref().map_or("Configured gate",|p|p.depth.as_str()), if s.gate.passed { "passed" } else { "failed" }, s.commit, gate.join(", ")));
+        if s.gate.plan.is_some() { lines.push("The full configured gate did not run for this submission; post-merge verification remains separate.".into()); }
     }
     lines.push(format!("{} files changed against `{}`.", s.files, s.base));
     lines.push(String::new());
     lines.push(format!(
         "`nitely review patch={} verdict={} approver={} reviewer={}`",
         s.patch_id,
-        s.review.as_ref().map_or(if s.yolo { "yolo" } else if s.review_disabled { "disabled" } else { "none" }, |r| r.verdict.as_str()),
+        s.review.as_ref().map_or(if s.yolo { "yolo" } else if s.review_light { "light" } else if s.review_disabled { "disabled" } else { "none" }, |r| r.verdict.as_str()),
         s.approver,
         s.review.as_ref().map_or("none", |r| r.reviewer.as_str())
     ));
@@ -993,6 +1012,7 @@ impl Db {
     pub fn record_review(&self, s: &Submitted) -> Result<()> {
         let (reviewer, verdict, findings, flagged, note) = match &s.review {
             Some(r) => (r.reviewer.as_str(), r.verdict.as_str(), to_json(&r.findings), to_json(&r.flagged), r.note.as_str()),
+            None if s.review_light => ("", "light", "[]".to_string(), "[]".to_string(), "Basic verification: pre-land review exempt; post-merge audit applies"),
             None if s.yolo => ("", "yolo", "[]".to_string(), "[]".to_string(), crate::project_yolo::NOTE),
             None if s.review_disabled => ("", "disabled", "[]".to_string(), "[]".to_string(), crate::review::DISABLED_NOTE),
             None => ("", "none", "[]".to_string(), "[]".to_string(), ""),
@@ -1264,6 +1284,35 @@ reason = "money logic"
         fn drop(&mut self) {
             std::fs::remove_dir_all(&self.base).ok();
         }
+    }
+
+
+    #[test]
+    fn basic_submission_and_land_run_only_basic_checks_and_enqueue_an_audit() {
+        let mut f=fixture();
+        let policy="[worktree]\ndir='../wt/{key}'\n[lanes]\ncount=1\n[gate]\ncommands=['exit 37']\n[review]\nreviewer={ '*'='missing' }\ncommands={ missing=['nitely-test-do-not-launch'] }\n[verification]\nversion=1\nmode='active'\ncomments=['math[.]rs']\nbasic=['echo basic-checked']\naudit_percent=100\n[verification.backstop]\nenabled=true\n";
+        std::fs::write(f.repo.join(playbook::PLAYBOOK_PATH),policy).unwrap();
+        std::fs::write(f.repo.join("math.rs"),"// old\nfn value()->i32 { 1 }").unwrap();
+        sh(&f.repo,&["add","."]);sh(&f.repo,&["commit","-m","approved policy"]);
+        let head=sh(&f.repo,&["rev-parse","HEAD"]).trim().to_string();
+        let (issue,wt)=f.started("Clarify an ordinary source comment");
+        f.db.set_review_level(&issue.key,Some("inert"),Some("Comment-only candidate"),&Actor::Human).unwrap();
+        crate::verification_backstop::record_landing(&f.db,&f.repo,"NIT",&issue.key,&head,&head,false).unwrap();
+        f.db.conn.execute("UPDATE verification_health SET verified_head=?1,status='green',checked_at=?2",rusqlite::params![head,crate::db::now()]).unwrap();
+        std::fs::write(wt.join("math.rs"),"// explained\nfn value()->i32 { 1 }").unwrap();
+        sh(&wt,&["add","math.rs"]);sh(&wt,&["commit","-m","comment"]);
+        let s=f.submit(&wt,true).unwrap();
+        assert!(s.gate.passed && s.review_light && s.review.is_none(),"{s:?}");
+        assert_eq!(s.gate.plan.as_ref().unwrap().depth,"Basic");
+        assert!(s.gate.results.iter().all(|r|r.command!="exit 37"));
+        assert_eq!(f.db.reviews(&issue.key).unwrap()[0].verdict,"light");
+        let report=crate::land::land(&mut f.db,&f.config,&crate::land::LandOptions{dir:&f.repo.to_string_lossy(),issue_key:&issue.key,push:false,keep:true,break_lock:false},&f.actor).unwrap();
+        assert!(report.landed,"{report:?}");
+        assert!(report.warnings.is_empty(),"{report:?}");
+        let (state,base,audited_head):(String,String,String)=f.db.conn.query_row("SELECT state,base,head FROM verification_audit WHERE issue_key=?1",[&issue.key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+        assert_eq!(state,"pending");
+        assert_eq!(base,head);
+        assert_eq!(audited_head,sh(&f.repo,&["rev-parse","main"]).trim());
     }
 
     #[test]
