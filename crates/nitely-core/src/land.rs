@@ -1342,6 +1342,8 @@ mod tests {
         fast_forward_main(&repo, &next).unwrap();
         assert!(!lock.exists() && !mark.exists());
         assert_eq!(git(&repo, &["rev-parse", "HEAD"]).unwrap().trim(), next);
+        std::fs::remove_dir_all(&base).ok();
+    }
 
     /// The after steps marked `outside_lock` run once the land lock is released, in a checkout of
     /// the integration branch's newest commit, one land's at a time; a land that finishes while
