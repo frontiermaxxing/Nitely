@@ -105,7 +105,12 @@ you go). Give each item a `ref`, and turn `depends_on_titles` into `blocked_by` 
 to one call: put blockers in an earlier batch, and in later batches name them by the keys
 `file_issues` returned (`"blocked_by": ["APP-3"]`), so file in dependency order. Give each the area (and platform, if the repo has
 several) as `labels`, e.g. `["api"]` or `["mobile", "ios"]`: one short lowercase word per area, the
-same across the batch, reusing labels the project already has. Human-only items get `owner: "human"`
+same across the batch, reusing labels the project already has. Give each a `review_level` on purpose:
+`inert` for prose, comments or display copy, `contained` for one component, `standard` for a usual
+change, `sensitive` for approval, auth, migrations, landing or release. Leave it off only when you
+cannot tell; an undeclared issue keeps today's full gate. Pass `paths` for the files it will change:
+a path that matches a human or blocked path raises the level to sensitive, and declaring less does
+not lower that. Human-only items get `owner: "human"`
 (they go to the owner's Needs You, and `next_task` never hands them out). Ideas and speculative
 items go in `state: "Backlog"`.
 

@@ -3,6 +3,7 @@ import { invoke } from "./backend";
 import { issueSpendLine } from "./spend";
 import { laneRunId } from "./lanes";
 import type { Goal, IssueDetail, IssueRecord, IssueSpend, LinkedIssue } from "./types";
+import { REVIEW_LEVELS } from "./types";
 import { agentLabel, agentTitle, ago, openExternal, PRIORITY } from "./util";
 import { IssueJourney, WhoHadIt } from "./IssueJourney";
 import { issueDecision, type Move } from "./decisions";
@@ -21,6 +22,7 @@ const KIND_LABEL: Record<string, string> = {
   issue_moved: "moved",
   issue_edited: "edited",
   priority_changed: "priority",
+  review_level_changed: "review level",
   claimed: "claimed",
   status: "status",
   note: "note",
@@ -439,6 +441,7 @@ export function IssuePanel(props: {
                 </>
               )}
               {goals && <GoalFact issue={issue} goals={goals} onChanged={props.onChanged} />}
+              {issue.origin === "nitely" && <ReviewFact issue={issue} onChanged={props.onChanged} />}
               {issue.origin === "nitely" && <MirrorFact issueKey={issue.key} version={props.version} />}
               {issue.source && (
                 <>
@@ -522,6 +525,58 @@ export function IssuePanel(props: {
 }
 
 const capital = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
+function reviewSource(source: string | null | undefined): string {
+  switch (source) {
+    case "author":
+      return "Set at filing";
+    case "planner":
+      return "Set by the planner";
+    case "human":
+      return "Set by you";
+    case "implementer":
+      return "Hint from the agent doing the work. It does not lower the floor.";
+    case "coordinator":
+      return "Raised by an agent";
+    default:
+      return "Undeclared issues keep today's full gate";
+  }
+}
+
+/** The declared review level. The person can set any of them; path rules and agents can only raise it. */
+function ReviewFact(props: { issue: IssueRecord; onChanged: () => void }) {
+  const [error, setError] = useState<string | null>(null);
+  const { issue } = props;
+  const set = (value: string) =>
+    invoke("set_review_level", { key: issue.key, level: value || null }).then(
+      () => (setError(null), props.onChanged()),
+      (e) => setError(String(e)),
+    );
+  const hint = issue.review_level_source === "implementer" ? "hint" : null;
+  return (
+    <>
+      <dt>Review</dt>
+      <dd>
+        <select
+          className="panel-goal"
+          value={issue.review_level ?? ""}
+          onChange={(e) => set(e.target.value)}
+          aria-label="How much verification this change needs"
+          title={reviewSource(issue.review_level_source)}
+        >
+          <option value="">Undeclared</option>
+          {REVIEW_LEVELS.map((l) => (
+            <option key={l.id} value={l.id}>
+              {l.label}
+            </option>
+          ))}
+        </select>
+        {hint && <span className="muted small">{hint}</span>}
+        {error && <span className="error small">{error}</span>}
+      </dd>
+    </>
+  );
+}
 
 /**
  * The goal the issue serves. For a native issue a picker: another active goal of its project, or

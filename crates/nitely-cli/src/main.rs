@@ -547,6 +547,9 @@ enum IssueCmd {
         /// An active goal of the project to file it into.
         #[arg(long)]
         goal: Option<i64>,
+        /// inert, contained, standard or sensitive. Omitted is undeclared.
+        #[arg(long)]
+        review_level: Option<String>,
     },
     /// File up to 10 issues at once from a JSON list (a file, or - for stdin). Each item has a `ref`
     /// and file_issue's fields; its blocked_by may name refs of the same list. Prints each ref's key.
@@ -576,6 +579,9 @@ enum IssueCmd {
         /// 1 urgent, 2 high, 3 medium, 4 low, 0 none; the change goes on the timeline.
         #[arg(long)]
         priority: Option<i64>,
+        /// inert, contained, standard, sensitive, or undeclared to clear it. An agent can only raise it.
+        #[arg(long)]
+        review_level: Option<String>,
     },
     /// Add or remove labels on an issue.
     Label {
@@ -1121,10 +1127,28 @@ fn run(cmd: Cmd) -> Result<()> {
             let config = Config::load()?;
             let mut db = Db::open_default()?;
             match command {
-                IssueCmd::Create { title, kind, source, evidence, body, priority, project, state, owner, labels, allow_similar, blocked_by, goal } => {
+                IssueCmd::Create { title, kind, source, evidence, body, priority, project, state, owner, labels, allow_similar, blocked_by, goal, review_level } => {
                     let project = resolve_project(&config, &db, project.as_deref(), &cwd()?)?;
+                    let (review_level, review_note) = nitely_core::issues::resolve_review_level(review_level.as_deref(), None)?;
                     let issue = db.create_issue(
-                        &NewIssue { project, title, body, kind, source, evidence, priority, allow_similar, state, owner, blocked_by, labels, goal },
+                        &NewIssue {
+                            project,
+                            title,
+                            body,
+                            kind,
+                            source,
+                            evidence,
+                            priority,
+                            allow_similar,
+                            state,
+                            owner,
+                            blocked_by,
+                            labels,
+                            goal,
+                            review_level,
+                            review_note,
+                            review_source: Some("human".into()),
+                        },
                         &me,
                     )?;
                     print_json(&issue)
@@ -1157,15 +1181,18 @@ fn run(cmd: Cmd) -> Result<()> {
                                 blocked_by: strings(item, "blocked_by"),
                                 labels: strings(item, "labels"),
                                 goal: item.get("goal").and_then(|g| g.as_i64()).filter(|g| *g > 0),
+                                review_level: opt(item, "review_level"),
+                                review_source: Some("human".into()),
+                                ..Default::default()
                             },
                         })
                         .collect();
                     nitely_core::issues::check_batch_size(batch.len())?;
                     print_json(&db.create_issues(&batch, &me)?)
                 }
-                IssueCmd::Edit { key, title, body, priority } => {
-                    if title.is_none() && body.is_none() && priority.is_none() {
-                        bail!("give --title, --body, --priority or more than one");
+                IssueCmd::Edit { key, title, body, priority, review_level } => {
+                    if title.is_none() && body.is_none() && priority.is_none() && review_level.is_none() {
+                        bail!("give --title, --body, --priority, --review-level or more than one");
                     }
                     let body = match body.as_deref() {
                         Some("-") => {
@@ -1183,6 +1210,9 @@ fn run(cmd: Cmd) -> Result<()> {
                     let mut issue = db.edit_issue(&key, title.as_deref(), body.as_deref(), &me)?;
                     if let Some(priority) = priority {
                         issue = db.set_priority(&key, priority, &me)?;
+                    }
+                    if let Some(level) = review_level {
+                        issue = db.set_review_level(&key, Some(&level), None, &Actor::Human)?;
                     }
                     print_json(&issue)
                 }
@@ -1253,6 +1283,7 @@ fn run(cmd: Cmd) -> Result<()> {
                                 .and_then(|a| a.as_array())
                                 .map(|a| a.iter().filter_map(|x| x.as_str()).map(str::to_string).collect())
                                 .unwrap_or_default(),
+                            ..Default::default()
                         };
                         match db.create_issue(&new, &me) {
                             Ok(i) => println!("{:<9} {}", i.key, i.title),

@@ -573,8 +573,9 @@ fn tools() -> Value {
                     "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Refs of this plan or existing issue keys." },
                     "owner": { "type": "string", "enum": OWNERS },
                     "state": { "type": "string", "enum": ["Todo", "Backlog", "Needs You"] },
-                    "touches": { "type": "array", "items": { "type": "string" }, "description": "The files it will change (src/App.tsx), so parallel workers stay apart. Required except for a live check or the person's own task." },
-                    "size": { "type": "string", "enum": ["S", "M", "L"], "description": "S: an hour or two, M: a day, L: more." }
+                    "touches": { "type": "array", "items": { "type": "string" }, "description": "The files it will change (src/App.tsx), so parallel workers stay apart. Required except for a live check or the person's own task. A human or blocked path among them raises review_level to sensitive." },
+                    "size": { "type": "string", "enum": ["S", "M", "L"], "description": "S: an hour or two, M: a day, L: more." },
+                    "review_level": { "type": "string", "enum": ["inert", "contained", "standard", "sensitive"], "description": "How much verification the change needs. Set it on purpose. Path rules can only raise it." }
                 } } },
                 "existing": { "type": "array", "items": { "type": "string" }, "description": "Open issues of the project that belong in the goal." },
                 "planning_issue": { "type": "string" },
@@ -642,7 +643,9 @@ fn tools() -> Value {
                 "allow_similar": { "type": "boolean" },
                 "goal": { "type": "integer", "description": "An active goal of the project to file it into (the goals tool lists them)." },
                 "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Issues that must close before this one can start, e.g. [\"NIT-9\"]." },
-                "labels": { "type": "array", "items": { "type": "string" }, "description": "Areas and platforms, e.g. [\"ios\", \"billing\"]: reuse the project's labels (list_issues shows them); kind and priority have their own fields." }
+                "labels": { "type": "array", "items": { "type": "string" }, "description": "Areas and platforms, e.g. [\"ios\", \"billing\"]: reuse the project's labels (list_issues shows them); kind and priority have their own fields." },
+                "review_level": { "type": "string", "enum": ["inert", "contained", "standard", "sensitive"], "description": "How much verification the change needs: inert (prose, comments or display copy), contained (one component), standard (the usual change), sensitive (approval, auth, migrations, landing, release). Leave it off only when you cannot tell: undeclared gets today's full gate. A path in paths that matches a human or blocked path raises this to sensitive; you cannot lower that." },
+                "paths": { "type": "array", "items": { "type": "string" }, "description": "Files this change will touch, so a human or blocked path can raise review_level. Not stored on the issue." }
             } }
         },
         {
@@ -662,7 +665,9 @@ fn tools() -> Value {
                     "allow_similar": { "type": "boolean" },
                     "goal": { "type": "integer", "description": "An active goal of the project to file it into (the goals tool lists them)." },
                     "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Refs of this batch or existing issue keys." },
-                    "labels": { "type": "array", "items": { "type": "string" }, "description": "Areas and platforms; reuse the project's labels." }
+                    "labels": { "type": "array", "items": { "type": "string" }, "description": "Areas and platforms; reuse the project's labels." },
+                    "review_level": { "type": "string", "enum": ["inert", "contained", "standard", "sensitive"], "description": "How much verification the change needs. A path in paths that matches a human or blocked path raises it to sensitive." },
+                    "paths": { "type": "array", "items": { "type": "string" }, "description": "Files this change will touch. Used only to raise review_level." }
                 } } }
             } }
         },
@@ -682,7 +687,9 @@ fn tools() -> Value {
                 "owner": { "type": "string", "enum": ["human"], "description": "human makes it the human's own work." },
                 "goal": { "type": "integer", "description": "Put it in this active goal of its project; 0 takes it out of its goal." },
                 "labels": { "type": "array", "items": { "type": "string" }, "description": "Labels to add (areas and platforms)." },
-                "remove_labels": { "type": "array", "items": { "type": "string" }, "description": "Labels to remove." }
+                "remove_labels": { "type": "array", "items": { "type": "string" }, "description": "Labels to remove." },
+                "review_level": { "type": "string", "enum": ["inert", "contained", "standard", "sensitive", "undeclared"], "description": "Set the declared review level, or undeclared to clear it. An agent can only raise it. The person, in the app, can set any level. An agent that holds the issue records a hint, not a floor." },
+                "paths": { "type": "array", "items": { "type": "string" }, "description": "Files the change will touch. A human or blocked path raises the level to sensitive before it is stored." }
             } }
         },
         {
@@ -1030,7 +1037,20 @@ fn new_issue(args: &Value, project: &str, vendor: &str) -> Result<NewIssue> {
         goal: args.get("goal").and_then(Value::as_i64).filter(|g| *g > 0),
         blocked_by: keys_arg(args, "blocked_by"),
         labels: keys_arg(args, "labels"),
+        ..Default::default()
     })
+}
+
+/// Applies `review_level` and `paths` from a filing or update call. An empty pair leaves the
+/// issue's declaration alone (`None` for both results).
+fn declared_review(place: &str, args: &Value) -> Result<Option<(Option<String>, Option<String>)>> {
+    let declared = str_arg(args, "review_level");
+    let paths = keys_arg(args, "paths");
+    if declared.is_none() && paths.is_empty() {
+        return Ok(None);
+    }
+    let (level, note) = playbook::review_declaration(std::path::Path::new(place), declared, &paths)?;
+    Ok(Some((level, note)))
 }
 
 /// When a call brings labels the project has not used before, a note naming the labels it already
@@ -1299,7 +1319,7 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             None => json!(db.goals(&project(&db)?, args.get("include_closed").and_then(Value::as_bool).unwrap_or(false))?),
         },
         "propose_goal" => {
-            let plan = nitely_core::goal_plans::GoalPlan {
+            let mut plan = nitely_core::goal_plans::GoalPlan {
                 sentence: req(args, "sentence")?.into(),
                 title: req(args, "title")?.into(),
                 outcome: req(args, "outcome")?.into(),
@@ -1308,6 +1328,16 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
                 existing: keys_arg(args, "existing"),
                 planning_issue: None,
             };
+            let repo = PathBuf::from(server.place());
+            for item in &mut plan.issues {
+                if item.review_level.is_none() && item.touches.is_empty() {
+                    continue;
+                }
+                let (level, note) = playbook::review_declaration(&repo, item.review_level.as_deref(), &item.touches)
+                    .with_context(|| format!("item {}", item.local_ref))?;
+                item.review_level = level;
+                item.review_note = note;
+            }
             json!(db.propose_goal(&project(&db)?, &plan, str_arg(args, "planning_issue"), &actor)?)
         }
         "save_goal" => {
@@ -1353,7 +1383,14 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
         }
         "file_issue" => {
             let project = project(&db)?;
-            let new = new_issue(args, &project, &server.vendor)?;
+            let mut new = new_issue(args, &project, &server.vendor)?;
+            if let Some((level, note)) = declared_review(&server.place(), args)? {
+                new.review_level = level;
+                new.review_note = note;
+                if new.review_level.is_some() {
+                    new.review_source = Some("author".into());
+                }
+            }
             let before = db.project_labels(&project)?;
             let mut out = json!(db.create_issue(&new, &actor)?);
             if let Some(note) = label_note(&before, &new.labels) {
@@ -1369,7 +1406,14 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
                 .iter()
                 .enumerate()
                 .map(|(n, item)| {
-                    let issue = new_issue(item, &project, &server.vendor).with_context(|| format!("item {}", n + 1))?;
+                    let mut issue = new_issue(item, &project, &server.vendor).with_context(|| format!("item {}", n + 1))?;
+                    if let Some((level, note)) = declared_review(&server.place(), item).with_context(|| format!("item {}", n + 1))? {
+                        issue.review_level = level;
+                        issue.review_note = note;
+                        if issue.review_level.is_some() {
+                            issue.review_source = Some("author".into());
+                        }
+                    }
                     Ok(BatchItem { local_ref: str_arg(item, "ref").unwrap_or_default().to_string(), issue, not_duplicates: vec![] })
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -1389,6 +1433,7 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             let goal = args.get("goal").and_then(Value::as_i64);
             let (title, body) = (args.get("title").and_then(Value::as_str), args.get("body").and_then(Value::as_str));
             let priority = args.get("priority").and_then(Value::as_i64);
+            let review = declared_review(&server.place(), args)?;
             if str_arg(args, "state").is_none()
                 && add.is_empty()
                 && remove.is_empty()
@@ -1399,8 +1444,9 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
                 && title.is_none()
                 && body.is_none()
                 && priority.is_none()
+                && review.is_none()
             {
-                bail!("give a state, title, body, priority, blocked_by, remove_blocked_by, labels, remove_labels, owner or goal");
+                bail!("give a state, title, body, priority, review_level, blocked_by, remove_blocked_by, labels, remove_labels, owner or goal");
             }
             if let Some(p) = priority {
                 nitely_core::issues::check_priority(p)?;
@@ -1436,6 +1482,12 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             }
             if let Some(priority) = priority {
                 db.set_priority(key, priority, &actor)?;
+            }
+            if let Some((level, note)) = review {
+                let asked = str_arg(args, "review_level").is_some();
+                if level.is_some() || asked {
+                    db.set_review_level(key, level.as_deref(), note.as_deref(), &actor)?;
+                }
             }
             let mut note = None;
             if !add_labels.is_empty() || !remove_labels.is_empty() {

@@ -265,6 +265,15 @@ async fn set_issue_goal(key: String, goal: Option<i64>) -> Result<IssueRecord, S
     db.set_issue_goal(&key, goal, &ME).map_err(err)
 }
 
+/// Sets the issue's declared review level, or clears it (`level` empty). Only the person uses this.
+#[tauri::command]
+async fn set_review_level(key: String, level: Option<String>) -> Result<IssueRecord, String> {
+    let mut db = db()?;
+    let key = db.current_key(&key).map_err(err)?;
+    let level = level.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    db.set_review_level(&key, level, None, &ME).map_err(err)
+}
+
 /// The person's order of a project's active goals (`ids` first): what Crew works first.
 #[tauri::command]
 async fn goal_order(project: String, ids: Vec<i64>) -> Result<Vec<nitely_core::goals::Goal>, String> {
@@ -942,6 +951,7 @@ pub fn run() {
             goal_workers,
             goal_choices,
             set_issue_goal,
+            set_review_level,
             approve_goal_plan,
             start_goal,
             set_project_brief,

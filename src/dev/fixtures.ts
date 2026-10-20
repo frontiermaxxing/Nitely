@@ -2107,6 +2107,23 @@ function setIssueGoal(args: Record<string, unknown>): IssueRecord {
   return issue;
 }
 
+const REVIEW_LEVELS = ["inert", "contained", "standard", "sensitive"];
+
+/** As nitely-core's set_review_level for the person: any level, or none. */
+function setReviewLevel(args: Record<string, unknown>): IssueRecord {
+  const issue = world.issues.find((i) => i.key === String(args.key).toUpperCase());
+  if (!issue) throw `no issue ${String(args.key)}`;
+  if (issue.origin !== "nitely") throw `${issue.key} is mirrored from ${issue.origin}; change it there`;
+  const raw = args.level == null ? "" : String(args.level).trim();
+  const level = raw === "" || raw === "undeclared" ? null : raw;
+  if (level && !REVIEW_LEVELS.includes(level)) throw `review level is one of ${REVIEW_LEVELS.join(", ")}, not ${level}`;
+  issue.review_level = level;
+  issue.review_level_by = level ? "human" : null;
+  issue.review_level_source = level ? "human" : null;
+  issue.review_level_at = level ? Math.floor(Date.now() / 1000) : null;
+  return issue;
+}
+
 function projectBrief(key: string): ProjectBrief {
   const p = world.projects.find((x) => x.key === key.toUpperCase());
   if (!p) throw `no project ${key}`;
@@ -2161,6 +2178,8 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return goalChoices(args);
       case "set_issue_goal":
         return setIssueGoal(args);
+      case "set_review_level":
+        return setReviewLevel(args);
       case "project_brief":
         return projectBrief(String(args.project));
       case "mirror_preview":

@@ -16,6 +16,63 @@ pub const SOURCES: &[&str] = &["claude", "codex", "cursor", "human"];
 /// Who does an issue's work: agents, or only the human (buy hardware, sign a contract, rotate a
 /// credential in a console). `next_task` never hands out the human's own work.
 pub const OWNERS: &[&str] = &["agent", "human"];
+/// How much verification a change is expected to need, least to most. The app shows these as
+/// Basic, Focused, Integration and Full. None stored means undeclared: today's gate, never Basic.
+pub const REVIEW_LEVELS: &[&str] = &["inert", "contained", "standard", "sensitive"];
+/// Who set a review level. An implementer's declaration on an issue it holds is only a hint.
+pub const REVIEW_SOURCES: &[&str] = &["author", "planner", "coordinator", "human", "implementer"];
+
+/// Where `level` sits, least to most. None when it is not a review level.
+pub fn review_rank(level: &str) -> Option<usize> {
+    REVIEW_LEVELS.iter().position(|l| *l == level)
+}
+
+/// The name the app shows for a stored level.
+pub fn review_depth(level: &str) -> &'static str {
+    match level {
+        "inert" => "Basic",
+        "contained" => "Focused",
+        "standard" => "Integration",
+        "sensitive" => "Full",
+        _ => "Undeclared",
+    }
+}
+
+pub fn check_review_level(level: &str) -> Result<()> {
+    if review_rank(level).is_none() {
+        bail!("review level is one of {}, not {level}", REVIEW_LEVELS.join(", "));
+    }
+    Ok(())
+}
+
+/// The level to store. `protected` is why a path rule applies (a human or blocked path); that
+/// raises the declaration to sensitive. The note is set when that raise wins.
+pub fn resolve_review_level(declared: Option<&str>, protected: Option<&str>) -> Result<(Option<String>, Option<String>)> {
+    let declared = declared.map(str::trim).filter(|s| !s.is_empty() && *s != "undeclared");
+    if let Some(d) = declared {
+        check_review_level(d)?;
+    }
+    let Some(why) = protected.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok((declared.map(str::to_string), None));
+    };
+    let at_top = declared.is_some_and(|d| review_rank(d) == review_rank("sensitive"));
+    let stored = if at_top { declared.unwrap() } else { "sensitive" };
+    let note = if at_top { None } else { Some(match declared {
+        Some(d) => format!("{d} raised: {why}"),
+        None => format!("undeclared raised: {why}"),
+    }) };
+    Ok((Some(stored.to_string()), note))
+}
+
+fn review_change_summary(from: Option<&str>, to: Option<&str>, source: &str, note: Option<&str>) -> String {
+    let name = |l: Option<&str>| match l {
+        None | Some("") => "undeclared".to_string(),
+        Some(l) => format!("{} ({l})", review_depth(l)),
+    };
+    let hint = if source == "implementer" { ", a hint" } else { "" };
+    let raised = note.map(|n| format!("; {n}")).unwrap_or_default();
+    format!("Review level: {} → {} ({source}{hint}){raised}", name(from), name(to))
+}
 
 /// Native workflow states: (display name, Linear-style type).
 pub const STATES: &[(&str, &str)] = &[
@@ -115,6 +172,18 @@ pub struct IssueRecord {
     pub owner: String,
     /// The goal it belongs to (`goals.rs`), if any.
     pub goal: Option<i64>,
+    /// Declared review level: inert, contained, standard or sensitive. None is undeclared.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_level: Option<String>,
+    /// Who declared `review_level` (`Actor::id`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_level_by: Option<String>,
+    /// author, planner, coordinator, human, or implementer (a hint).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_level_source: Option<String>,
+    /// When `review_level` was last set, unix seconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_level_at: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
     /// Open issues that must close before this one can start. `next_task` skips it until then.
@@ -294,6 +363,12 @@ pub struct NewIssue {
     pub labels: Vec<String>,
     /// An active goal of the same project to file it into.
     pub goal: Option<i64>,
+    /// inert, contained, standard or sensitive. None is undeclared.
+    pub review_level: Option<String>,
+    /// author, planner, coordinator, human or implementer. author when a level is set and this is empty.
+    pub review_source: Option<String>,
+    /// Set when a path rule raised `review_level`. Goes on the timeline, not its own column.
+    pub review_note: Option<String>,
 }
 
 /// A batch that passed its checks: each item's ref and checked issue, its blockers split into items
@@ -401,6 +476,9 @@ struct CheckedIssue {
     goal: Option<i64>,
     state: &'static str,
     state_type: &'static str,
+    review_level: Option<String>,
+    review_source: String,
+    review_note: Option<String>,
 }
 
 impl CheckedIssue {
@@ -419,8 +497,9 @@ fn insert_issue(tx: &rusqlite::Connection, c: &CheckedIssue, blockers: &[String]
     let key = format!("{}-{number}", c.project);
     tx.execute(
         "INSERT INTO issue (key, origin, project, number, title, body, state, state_type, kind, source,
-           priority, evidence, created_at, updated_at, owner, labels, goal)
-         VALUES (?1, 'nitely', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, ?13, ?14, ?15)",
+           priority, evidence, created_at, updated_at, owner, labels, goal,
+           review_level, review_level_by, review_level_source, review_level_at)
+         VALUES (?1, 'nitely', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         params![
             key,
             c.project,
@@ -436,7 +515,11 @@ fn insert_issue(tx: &rusqlite::Connection, c: &CheckedIssue, blockers: &[String]
             iso(ts),
             c.owner,
             serde_json::to_string(&c.labels)?,
-            c.goal
+            c.goal,
+            c.review_level,
+            c.review_level.as_ref().map(|_| actor.id()),
+            c.review_level.as_ref().map(|_| c.review_source.as_str()),
+            c.review_level.as_ref().map(|_| ts),
         ],
     )?;
     let filed = if c.owner == "human" { format!("Filed as {}, the human's own work", c.state) } else { format!("Filed as {}", c.state) };
@@ -451,11 +534,18 @@ fn insert_issue(tx: &rusqlite::Connection, c: &CheckedIssue, blockers: &[String]
             params![ts, actor.id(), key, format!("Blocked by {blocker}")],
         )?;
     }
+    if let Some(level) = &c.review_level {
+        tx.execute(
+            "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, ?2, ?3, 'review_level_changed', ?4)",
+            params![ts, actor.id(), key, review_change_summary(None, Some(level), &c.review_source, c.review_note.as_deref())],
+        )?;
+    }
     Ok(key)
 }
 
 const ISSUE_COLUMNS: &str = "key, origin, project, title, body, url, state, state_type, kind, source,
-    priority, labels, evidence, claimed_by, created_at, updated_at, owner, goal";
+    priority, labels, evidence, claimed_by, created_at, updated_at, owner, goal,
+    review_level, review_level_by, review_level_source, review_level_at";
 
 /// The scheme the app registers, so a link to an issue opens it in Nitely.
 pub const LINK_SCHEME: &str = "nitely";
@@ -503,6 +593,10 @@ fn issue_from_row(r: &Row) -> rusqlite::Result<IssueRecord> {
         updated_at: r.get(15)?,
         owner: r.get(16)?,
         goal: r.get(17)?,
+        review_level: r.get(18)?,
+        review_level_by: r.get(19)?,
+        review_level_source: r.get(20)?,
+        review_level_at: r.get(21)?,
         ..Default::default()
     })
 }
@@ -936,6 +1030,22 @@ impl Db {
         if let Some(goal) = new.goal {
             self.goal_for(Some(&project.key), goal)?;
         }
+        let review_level = match new.review_level.as_deref().map(str::trim).filter(|s| !s.is_empty() && *s != "undeclared") {
+            None => None,
+            Some(level) => {
+                check_review_level(level)?;
+                Some(level.to_string())
+            }
+        };
+        let review_source = if review_level.is_none() {
+            String::new()
+        } else {
+            let source = new.review_source.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or("author");
+            if !REVIEW_SOURCES.contains(&source) {
+                bail!("review source must be one of {}", REVIEW_SOURCES.join(", "));
+            }
+            source.to_string()
+        };
         Ok(CheckedIssue {
             project: project.key,
             title: title.to_string(),
@@ -949,6 +1059,9 @@ impl Db {
             goal: new.goal,
             state,
             state_type,
+            review_level,
+            review_source,
+            review_note: new.review_note.clone(),
         })
     }
 
@@ -1463,6 +1576,57 @@ impl Db {
             tx.execute(
                 "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, ?2, ?3, 'priority_changed', ?4)",
                 params![ts, actor.id(), key, format!("Priority: {} → {}", name(old), name(priority))],
+            )?;
+        }
+        tx.commit()?;
+        self.issue(&key)?.with_context(|| format!("no issue {key}"))
+    }
+
+    /// Sets the declared review level, or clears it (`level` None or "undeclared"). An agent can
+    /// only raise it. The person can set any level or clear it. An agent that holds the issue
+    /// (its claim) is the implementer: the stored source is `implementer`, a hint. Anyone else
+    /// acting as an agent is a coordinator.
+    pub fn set_review_level(&mut self, key: &str, level: Option<&str>, note: Option<&str>, actor: &Actor) -> Result<IssueRecord> {
+        let level = level.map(str::trim).filter(|s| !s.is_empty() && *s != "undeclared");
+        if let Some(l) = level {
+            check_review_level(l)?;
+        }
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let row: Option<(String, String, Option<String>, Option<String>)> = tx
+            .query_row(
+                "SELECT key, origin, review_level, claimed_by FROM issue WHERE key = ?1 COLLATE NOCASE",
+                [key.trim()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        let (key, origin, old, claimed_by) = row.with_context(|| format!("no issue {}", key.trim()))?;
+        if origin != "nitely" {
+            bail!("{key} is mirrored from {origin}; change it there");
+        }
+        let source = match actor {
+            Actor::Human => "human",
+            Actor::Agent(id) if claimed_by.as_deref() == Some(id.as_str()) => "implementer",
+            Actor::Agent(_) => "coordinator",
+        };
+        if !matches!(actor, Actor::Human) {
+            if level.is_none() {
+                bail!("only the person clears a review level");
+            }
+            if let (Some(old_level), Some(new_level)) = (old.as_deref(), level) {
+                if review_rank(new_level).unwrap_or(0) < review_rank(old_level).unwrap_or(0) {
+                    bail!("a review level can only be raised from {old_level}; the person sets a lower one");
+                }
+            }
+        }
+        if old.as_deref() != level {
+            let ts = now();
+            tx.execute(
+                "UPDATE issue SET review_level = ?2, review_level_by = ?3, review_level_source = ?4, review_level_at = ?5, updated_at = ?6 WHERE key = ?1",
+                params![key, level, actor.id(), if level.is_some() { Some(source) } else { None::<&str> }, ts, iso(ts)],
+            )?;
+            tx.execute(
+                "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, ?2, ?3, 'review_level_changed', ?4)",
+                params![ts, actor.id(), key, review_change_summary(old.as_deref(), level, source, note)],
             )?;
         }
         tx.commit()?;
@@ -2081,6 +2245,46 @@ mod tests {
         assert!(db.set_priority("NIT-1", 5, &agent).is_err() && db.set_priority("NIT-1", -1, &agent).is_err());
         db.conn.execute("INSERT INTO issue (key, origin, title, state, state_type, updated_at) VALUES ('LIN-1', 'linear', 'Mirrored', 'Todo', 'unstarted', '')", []).unwrap();
         assert!(db.set_priority("LIN-1", 1, &agent).unwrap_err().to_string().contains("mirrored from linear"));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_review_level_is_declared_at_filing_and_only_the_person_lowers_it() {
+        let (mut db, dir) = db();
+        db.create_project("NIT", "Nitely").unwrap();
+        let agent = Actor::Agent("claude:x".into());
+        let filed = db
+            .create_issue(&NewIssue { review_level: Some("inert".into()), ..new("Fix the empty-state sentence") }, &agent)
+            .unwrap();
+        assert_eq!(filed.review_level.as_deref(), Some("inert"));
+        assert_eq!(filed.review_level_source.as_deref(), Some("author"));
+        assert_eq!(filed.review_level_by.as_deref(), Some("claude:x"));
+        let declared = db.timeline("NIT-1").unwrap().pop().unwrap();
+        assert_eq!(declared.kind, "review_level_changed");
+        assert_eq!(declared.summary.as_deref(), Some("Review level: undeclared → Basic (inert) (author)"));
+        let (level, note) = resolve_review_level(Some("inert"), Some("billing (src/pay.ts)")).unwrap();
+        assert_eq!(level.as_deref(), Some("sensitive"));
+        assert_eq!(note.as_deref(), Some("inert raised: billing (src/pay.ts)"));
+        assert!(resolve_review_level(Some("nope"), None).is_err());
+        db.conn.execute("UPDATE issue SET claimed_by = 'claude:x' WHERE key = 'NIT-1'", []).unwrap();
+        let hint = db.set_review_level("NIT-1", Some("contained"), None, &agent).unwrap();
+        assert_eq!(hint.review_level_source.as_deref(), Some("implementer"));
+        assert!(db.timeline("NIT-1").unwrap().pop().unwrap().summary.unwrap().contains("a hint"));
+        let err = db.set_review_level("NIT-1", Some("inert"), None, &agent).unwrap_err().to_string();
+        assert!(err.contains("only be raised"), "{err}");
+        assert!(db.set_review_level("NIT-1", None, None, &agent).is_err());
+        let other = Actor::Agent("codex:y".into());
+        let raised = db.set_review_level("NIT-1", Some("standard"), None, &other).unwrap();
+        assert_eq!((raised.review_level.as_deref(), raised.review_level_source.as_deref()), (Some("standard"), Some("coordinator")));
+        let cleared = db.set_review_level("NIT-1", None, None, &Actor::Human).unwrap();
+        assert_eq!(cleared.review_level, None);
+        let again = db.set_review_level("nit-1", Some("sensitive"), None, &Actor::Human).unwrap();
+        assert_eq!(again.review_level.as_deref(), Some("sensitive"));
+        let events = db.timeline("NIT-1").unwrap().len();
+        db.set_review_level("NIT-1", Some("sensitive"), None, &Actor::Human).unwrap();
+        assert_eq!(db.timeline("NIT-1").unwrap().len(), events, "the same level: no event");
+        db.conn.execute("INSERT INTO issue (key, origin, title, state, state_type, updated_at) VALUES ('LIN-1', 'linear', 'Mirrored', 'Todo', 'unstarted', '')", []).unwrap();
+        assert!(db.set_review_level("LIN-1", Some("inert"), None, &Actor::Human).unwrap_err().to_string().contains("mirrored"));
         std::fs::remove_dir_all(dir).ok();
     }
 

@@ -483,6 +483,22 @@ impl ApprovalRules {
         }
         Ok(reasons)
     }
+
+    /// Why a changed path raises the review level to sensitive, when one matches a human or
+    /// blocked path. None when none do. Path rules only raise.
+    pub fn protected_hit(&self, paths: &[String]) -> Result<Option<String>> {
+        let mut hits = Vec::new();
+        for rule in self.human_paths.iter().chain(&self.blocked_paths) {
+            let re = regex::Regex::new(&rule.pattern).with_context(|| format!("approval pattern {}", rule.pattern))?;
+            for path in paths {
+                let path = path.replace('\\', "/");
+                if re.is_match(&path) {
+                    hits.push(format!("{} ({path})", rule.reason));
+                }
+            }
+        }
+        Ok((!hits.is_empty()).then(|| hits.join("; ")))
+    }
 }
 
 impl Default for BranchRules {
@@ -1002,6 +1018,17 @@ pub fn repo_for_issue(config: &crate::Config, project: Option<&str>, dir: &str) 
         }
     }
     root_here().with_context(|| format!("{dir} is not inside a git repo, and no repo is linked to {project}"))
+}
+
+/// The review level to store for a declaration, raised to sensitive when `paths` hit a human or
+/// blocked path in `repo`'s playbook. An empty path list leaves the declaration as given.
+/// `undeclared` and an empty declaration are no declaration.
+pub fn review_declaration(repo: &Path, declared: Option<&str>, paths: &[String]) -> Result<(Option<String>, Option<String>)> {
+    if paths.is_empty() {
+        return crate::issues::resolve_review_level(declared, None);
+    }
+    let hit = Playbook::load(repo)?.approval.protected_hit(paths)?;
+    crate::issues::resolve_review_level(declared, hit.as_deref())
 }
 
 /// The worktree of `root` whose branch names the issue; None when there is none.
@@ -1656,5 +1683,17 @@ mod tests {
         for run in runs.iter().filter(|r| r.starts_with("cargo ") || r.starts_with("npm ")) {
             assert!(*run == "npm ci" || pb.gate.commands.iter().any(|c| c == run), "the CI workflow runs {run:?}, which the gate does not");
         }
+    }
+
+    #[test]
+    fn a_protected_path_is_named_and_any_other_path_is_not() {
+        let rules = ApprovalRules {
+            human_paths: vec![PathRule { pattern: "^src/billing/".into(), reason: "money".into() }],
+            blocked_paths: vec![PathRule { pattern: "^migrations/".into(), reason: "schema".into() }],
+            ..Default::default()
+        };
+        assert_eq!(rules.protected_hit(&["src/billing/pay.ts".into()]).unwrap().as_deref(), Some("money (src/billing/pay.ts)"));
+        assert_eq!(rules.protected_hit(&["docs/readme.md".into()]).unwrap(), None);
+        assert!(rules.protected_hit(&["migrations/001.sql".into()]).unwrap().unwrap().contains("schema"));
     }
 }

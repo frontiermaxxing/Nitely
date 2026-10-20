@@ -2,6 +2,7 @@ import { useState } from "react";
 import { invoke } from "./backend";
 import type { Move } from "./decisions";
 import type { GoalPlanView } from "./types";
+import { reviewLevelLabel } from "./types";
 import { VENDOR_LABEL, vendorOf } from "./ui";
 import "./goal-rows.css";
 
@@ -70,7 +71,7 @@ export function GoalPlanDecision(props: {
               <span className="mono gp-ref">{i.ref}</span>
               <span className="gp-item-title">{i.title}</span>
               <span className="gp-item-meta">
-                {[i.kind, i.priority ? `P${i.priority}` : null, i.size ?? null, i.blocked_by?.length ? `after ${i.blocked_by.join(", ")}` : null].filter(Boolean).join(" · ")}
+                {[i.kind, i.priority ? `P${i.priority}` : null, i.size ?? null, i.review_level ? reviewLevelLabel(i.review_level) : null, i.blocked_by?.length ? `after ${i.blocked_by.join(", ")}` : null].filter(Boolean).join(" · ")}
               </span>
               {i.touches && i.touches.length > 0 && (
                 <span className="gp-item-touches mono" title="The files it will change">

@@ -39,6 +39,12 @@ pub struct PlanItem {
     /// S, M or L: an hour or two, a day, more than a day of one agent's work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<String>,
+    /// inert, contained, standard or sensitive. None is undeclared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_level: Option<String>,
+    /// Set when a path rule raised `review_level`. Recorded when the issue is filed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_note: Option<String>,
 }
 
 /// The label of a "Plan a goal" issue: `next_task` and Crew take it ahead of other work of the same
@@ -76,6 +82,11 @@ impl PlanItem {
         let not_files: Vec<&str> = self.touches.iter().map(|t| t.trim()).filter(|t| prose(t)).collect();
         if !not_files.is_empty() {
             return Some(format!("{r}: touches names files by their path in the repo (src/App.tsx, Dockerfile), not {}", not_files.join(", ")));
+        }
+        if let Some(level) = self.review_level.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            if crate::issues::review_rank(level).is_none() {
+                return Some(format!("{r}: review_level is inert, contained, standard or sensitive, not {level}"));
+            }
         }
         None
     }
@@ -190,6 +201,9 @@ fn batch(plan: &GoalPlan, project: &str, goal: Option<i64>, source: &str, own: &
                 blocked_by: i.blocked_by.clone(),
                 labels: i.labels.clone(),
                 goal,
+                review_level: i.review_level.clone(),
+                review_source: i.review_level.as_ref().map(|_| "planner".to_string()),
+                review_note: i.review_note.clone(),
             },
         })
         .collect()
@@ -212,8 +226,9 @@ fn describe(plan: &GoalPlan, who: &str) -> String {
         let blockers = if i.blocked_by.is_empty() { String::new() } else { format!(" (after {})", i.blocked_by.join(", ")) };
         let p = if i.priority > 0 { format!(", P{}", i.priority) } else { String::new() };
         let size = i.size.as_deref().map(|s| format!(", {s}")).unwrap_or_default();
+        let level = i.review_level.as_deref().map(|l| format!(", {} ({l})", crate::issues::review_depth(l))).unwrap_or_default();
         let touches = if i.touches.is_empty() { String::new() } else { format!("; touches {}", i.touches.join(", ")) };
-        out.push_str(&format!("- `{}` {} [{}{p}{size}]{blockers}{touches}\n", i.local_ref, i.title.trim(), i.kind));
+        out.push_str(&format!("- `{}` {} [{}{p}{size}{level}]{blockers}{touches}\n", i.local_ref, i.title.trim(), i.kind));
     }
     if !plan.existing.is_empty() {
         out.push_str(&format!("\nExisting issues it would gather: {}\n", plan.existing.join(", ")));
@@ -255,7 +270,7 @@ pub const PLANNER: &str = "Draft it with `propose_goal`, passing this issue as p
 
 1. Read the project's brief (`get_project`), then the code the goal is about, enough to name the files each step changes.
 2. The goal: a short title, and a one-paragraph outcome that says what is true once it is reached and how anyone can tell. A target date only if the person gave one.
-3. The issues, in the order to work them (Crew starts them in this order, as blockers and free workers allow). Each one is a change one agent can land on its own, with evidence and blockers, a size (S: an hour or two, M: a day, L: more; split an L when you can), and `touches`: the files it will change. Two issues that touch the same files cannot run at once, so split by file where the work allows, and say so with blockers where it does not.
+3. The issues, in the order to work them (Crew starts them in this order, as blockers and free workers allow). Each one is a change one agent can land on its own, with evidence and blockers, a size (S: an hour or two, M: a day, L: more; split an L when you can), and `touches`: the files it will change. Two issues that touch the same files cannot run at once, so split by file where the work allows, and say so with blockers where it does not. Each one also declares a `review_level`: inert (prose, comments or display copy), contained (one component), standard (the usual change) or sensitive (approval, auth, migrations, landing, release). Leave it off only when you cannot tell. Path rules can only raise it.
 4. Existing open issues of the project that belong in the goal (`list_issues`): pass them as existing rather than filing them again.
 5. Keep the person's part to what only they can do (a decision, an account, a live check on their desktop), and say it plainly in that issue.
 
@@ -344,6 +359,7 @@ impl Db {
                 labels: vec!["goal".into()],
                 blocked_by: vec![],
                 goal: None,
+                ..Default::default()
             },
             actor,
         )?;
@@ -742,6 +758,9 @@ mod tests {
         p.issues[1].size = Some("XL".into());
         assert!(db.propose_goal("NIT", &p, None, &agent()).unwrap_err().to_string().contains("S, M or L"));
         p.issues[1].size = Some("L".into());
+        p.issues[1].review_level = Some("nope".into());
+        assert!(db.propose_goal("NIT", &p, None, &agent()).unwrap_err().to_string().contains("review_level"));
+        p.issues[1].review_level = Some("sensitive".into());
         // A live check and the person's own task change no files.
         let mut check = item("live", "Install it on a clean PC", &["sign"]);
         check.kind = "live-check".into();
@@ -751,6 +770,7 @@ mod tests {
         db.move_issue(&proposed.issue.key, "Approved", None, None, &Actor::Human).unwrap();
         let sign = db.list_issues(Some("NIT"), true).unwrap().into_iter().find(|i| i.title == "Sign the Windows installer").unwrap();
         assert!(sign.body.ends_with("Touches: `src-tauri/tauri.conf.json`, `scripts/sign.ps1`, `Dockerfile`, `docs/Release Notes.md`\nSize: L"), "{}", sign.body);
+        assert_eq!((sign.review_level.as_deref(), sign.review_level_source.as_deref()), (Some("sensitive"), Some("planner")));
         assert_eq!(
             crate::overlap::touches_in(&sign.body),
             ["src-tauri/tauri.conf.json", "scripts/sign.ps1", "Dockerfile", "docs/Release Notes.md"],

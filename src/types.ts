@@ -225,6 +225,13 @@ export interface IssueRecord {
   owner?: "agent" | "human" | string;
   /** The goal it belongs to, if any (crates/nitely-core/src/goals.rs). */
   goal?: number | null;
+  /** Declared review level: inert, contained, standard or sensitive. Absent is undeclared. */
+  review_level?: string | null;
+  /** Who declared it. */
+  review_level_by?: string | null;
+  /** author, planner, coordinator, human, or implementer (a hint). */
+  review_level_source?: string | null;
+  review_level_at?: number | null;
   created_at: string;
   updated_at: string;
   /** Open issues that must close before this one can start; next_task skips it until then. */
@@ -568,7 +575,17 @@ export interface IssueBatches {
   }[];
 }
 
-/** One issue of a goal plan, as the agent drafted it. */
+export const REVIEW_LEVELS: { id: string; label: string }[] = [
+  { id: "inert", label: "Basic" },
+  { id: "contained", label: "Focused" },
+  { id: "standard", label: "Integration" },
+  { id: "sensitive", label: "Full" },
+];
+
+export function reviewLevelLabel(level: string | null | undefined): string {
+  return REVIEW_LEVELS.find((l) => l.id === level)?.label ?? "Undeclared";
+}
+
 export interface PlanItem {
   ref: string;
   title: string;
@@ -584,6 +601,8 @@ export interface PlanItem {
   touches?: string[];
   /** S, M or L. */
   size?: string;
+  /** inert, contained, standard or sensitive. */
+  review_level?: string;
 }
 
 /** A goal and its issues an agent drafted from the person's sentence, decided once in the Inbox. */
