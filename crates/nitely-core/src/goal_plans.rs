@@ -39,7 +39,7 @@ pub struct PlanItem {
     /// S, M or L: an hour or two, a day, more than a day of one agent's work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<String>,
-    /// inert, contained, standard or sensitive. None is undeclared.
+    /// inert, contained, standard or sensitive. Omitted new issues default to standard when filed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_level: Option<String>,
     /// Set when a path rule raised `review_level`. Recorded when the issue is filed.

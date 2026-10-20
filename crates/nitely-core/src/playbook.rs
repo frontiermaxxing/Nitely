@@ -531,16 +531,16 @@ impl Playbook {
     /// What it leaves unset of the review and landing rules comes from the app-wide defaults
     /// (`rules::RuleDefaults`).
     pub fn load(repo_root: &Path) -> Result<Playbook> {
-        Playbook::load_from(repo_root, crate::Config::load().ok().as_ref())
+        Playbook::load_from(repo_root, crate::Config::load().ok().as_ref(), false)
     }
 
     /// `load` with a config the caller already read, so nothing more is read and nothing written
     /// (`Config::load` may tidy files): for read-only callers like the live preview.
     pub fn load_with(repo_root: &Path, config: &crate::Config) -> Result<Playbook> {
-        Playbook::load_from(repo_root, Some(config))
+        Playbook::load_from(repo_root, Some(config), false)
     }
 
-    fn load_from(repo_root: &Path, config: Option<&crate::Config>) -> Result<Playbook> {
+    fn load_from(repo_root: &Path, config: Option<&crate::Config>, require_policy: bool) -> Result<Playbook> {
         // Tests build their own playbooks; the defaults of whoever runs them must not leak in.
         let none = crate::rules::RuleDefaults::default();
         let defaults = if cfg!(test) { &none } else { config.map(|c| &c.rule_defaults).unwrap_or(&none) };
@@ -589,6 +589,9 @@ impl Playbook {
             bail!("{}: build requests kept taking and giving back the main checkout while its playbook was read; try again", repo_root.display());
         };
         let (Some(path), Some(text)) = (path, text) else {
+            if require_policy {
+                bail!("target project policy is unavailable in {}", repo_root.display());
+            }
             let mut pb = Playbook::default();
             crate::rules::apply_defaults(&mut pb, "", defaults);
             return Ok(pb);
@@ -1028,6 +1031,37 @@ pub fn review_declaration(repo: &Path, declared: Option<&str>, paths: &[String])
         return crate::issues::resolve_review_level(declared, None);
     }
     let hit = Playbook::load(repo)?.approval.protected_hit(paths)?;
+    crate::issues::resolve_review_level(declared, hit.as_deref())
+}
+
+/// Resolve path protection using the target project's authoritative repository, never a remote
+/// session label or an unrelated caller's checkout. A remote caller supplies no local directory.
+/// Unknown, unavailable or ambiguous policy cannot silently turn protected work into a low level.
+pub fn project_review_declaration(
+    config: &crate::Config,
+    project: Option<&str>,
+    dir: Option<&str>,
+    declared: Option<&str>,
+    paths: &[String],
+) -> Result<(Option<String>, Option<String>)> {
+    if paths.is_empty() {
+        return crate::issues::resolve_review_level(declared, None);
+    }
+    let project = project.context("path-based review needs a target project")?;
+    let linked: Vec<_> = config.repos.iter().filter(|r| r.project.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(project))).collect();
+    let root = match linked.as_slice() {
+        [] => bail!("no repository policy is connected to {project}; connect its repository before declaring paths"),
+        [one] => PathBuf::from(&one.root),
+        _ => repo_for_issue(config, Some(project), dir.context("several repositories are linked to the target project; remote path policy is ambiguous")?)?,
+    };
+    if !root.is_dir() {
+        bail!("target project repository is unavailable: {}", root.display());
+    }
+    let pb = Playbook::load_from(&root, Some(config), true)?;
+    if !pb.unknown.is_empty() {
+        bail!("target project policy has unknown fields: {}", pb.unknown.join(", "));
+    }
+    let hit = pb.approval.protected_hit(paths)?;
     crate::issues::resolve_review_level(declared, hit.as_deref())
 }
 
@@ -1649,6 +1683,37 @@ mod tests {
         assert!(out.status.success(), "{out:?}");
         same(issue_worktree(Path::new(&app), "NIT-3").unwrap().unwrap(), &worktree.to_string_lossy());
         assert!(issue_worktree(Path::new(&app), "NIT-4").unwrap().is_none());
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn project_review_declarations_use_target_policy_and_fail_closed_for_remote_ambiguity() {
+        let base = crate::paths::unique_temp("nitely-review-project", "");
+        let app = base.join("app");
+        let web = base.join("web");
+        for root in [&app, &web] {
+            std::fs::create_dir_all(root.join(".nitely")).unwrap();
+        }
+        std::fs::write(app.join(PLAYBOOK_PATH), "[approval]\nhuman_paths = []\n").unwrap();
+        std::fs::write(web.join(PLAYBOOK_PATH), "[[approval.human_paths]]\npattern = '^src/billing/'\nreason = 'Money'\n").unwrap();
+        let repo = |name: &str, root: &Path, project: &str| crate::RepoConfig {
+            name: name.into(), root: root.to_string_lossy().into_owned(), integration_branch: "main".into(), project: Some(project.into()),
+        };
+        let mut config = crate::Config { repos: vec![repo("app", &app, "APP"), repo("web", &web, "WEB")], ..Default::default() };
+        let paths = vec!["src/billing/pay.ts".into()];
+        // Local cross-project calls and remote sessions both use WEB's policy.
+        for dir in [Some(app.to_str().unwrap()), None] {
+            let (level, note) = project_review_declaration(&config, Some("WEB"), dir, Some("inert"), &paths).unwrap();
+            assert_eq!(level.as_deref(), Some("sensitive"));
+            assert!(note.unwrap().contains("Money"));
+        }
+        assert!(project_review_declaration(&config, Some("MISSING"), Some(app.to_str().unwrap()), Some("inert"), &paths).is_err());
+        std::fs::write(web.join(PLAYBOOK_PATH), "[approval\n").unwrap();
+        assert!(project_review_declaration(&config, Some("WEB"), None, Some("inert"), &paths).is_err());
+        std::fs::remove_file(web.join(PLAYBOOK_PATH)).unwrap();
+        assert!(project_review_declaration(&config, Some("WEB"), None, Some("inert"), &paths).is_err());
+        config.repos.push(repo("web-other", &app, "WEB"));
+        assert!(project_review_declaration(&config, Some("WEB"), None, Some("inert"), &paths).unwrap_err().to_string().contains("ambiguous"));
         std::fs::remove_dir_all(base).ok();
     }
 

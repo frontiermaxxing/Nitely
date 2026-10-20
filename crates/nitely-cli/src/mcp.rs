@@ -644,7 +644,7 @@ fn tools() -> Value {
                 "goal": { "type": "integer", "description": "An active goal of the project to file it into (the goals tool lists them)." },
                 "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Issues that must close before this one can start, e.g. [\"NIT-9\"]." },
                 "labels": { "type": "array", "items": { "type": "string" }, "description": "Areas and platforms, e.g. [\"ios\", \"billing\"]: reuse the project's labels (list_issues shows them); kind and priority have their own fields." },
-                "review_level": { "type": "string", "enum": ["inert", "contained", "standard", "sensitive"], "description": "How much verification the change needs: inert (prose, comments or display copy), contained (one component), standard (the usual change), sensitive (approval, auth, migrations, landing, release). Leave it off only when you cannot tell: undeclared gets today's full gate. A path in paths that matches a human or blocked path raises this to sensitive; you cannot lower that." },
+                "review_level": { "type": "string", "enum": ["inert", "contained", "standard", "sensitive"], "description": "How much verification the change needs: inert (prose, comments or display copy), contained (one component), standard (the usual change), sensitive (approval, auth, migrations, landing, release). Omitting it on a new issue defaults to standard; legacy undeclared issues retain the full gate. A path in paths that matches a human or blocked path raises this to sensitive; you cannot lower that." },
                 "paths": { "type": "array", "items": { "type": "string" }, "description": "Files this change will touch, so a human or blocked path can raise review_level. Not stored on the issue." }
             } }
         },
@@ -1043,13 +1043,13 @@ fn new_issue(args: &Value, project: &str, vendor: &str) -> Result<NewIssue> {
 
 /// Applies `review_level` and `paths` from a filing or update call. An empty pair leaves the
 /// issue's declaration alone (`None` for both results).
-fn declared_review(place: &str, args: &Value) -> Result<Option<(Option<String>, Option<String>)>> {
+fn declared_review(config: &Config, project: Option<&str>, dir: Option<&str>, args: &Value) -> Result<Option<(Option<String>, Option<String>)>> {
     let declared = str_arg(args, "review_level");
     let paths = keys_arg(args, "paths");
     if declared.is_none() && paths.is_empty() {
         return Ok(None);
     }
-    let (level, note) = playbook::review_declaration(std::path::Path::new(place), declared, &paths)?;
+    let (level, note) = playbook::project_review_declaration(config, project, dir, declared, &paths)?;
     Ok(Some((level, note)))
 }
 
@@ -1328,17 +1328,14 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
                 existing: keys_arg(args, "existing"),
                 planning_issue: None,
             };
-            let repo = PathBuf::from(server.place());
+            let project = project(&db)?;
             for item in &mut plan.issues {
-                if item.review_level.is_none() && item.touches.is_empty() {
-                    continue;
-                }
-                let (level, note) = playbook::review_declaration(&repo, item.review_level.as_deref(), &item.touches)
+                let (level, note) = playbook::project_review_declaration(&config, Some(&project), server.remote.is_none().then_some(server.cwd.as_str()), item.review_level.as_deref().or(Some("standard")), &item.touches)
                     .with_context(|| format!("item {}", item.local_ref))?;
                 item.review_level = level;
                 item.review_note = note;
             }
-            json!(db.propose_goal(&project(&db)?, &plan, str_arg(args, "planning_issue"), &actor)?)
+            json!(db.propose_goal(&project, &plan, str_arg(args, "planning_issue"), &actor)?)
         }
         "save_goal" => {
             let change = nitely_core::goals::GoalChange {
@@ -1384,7 +1381,7 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
         "file_issue" => {
             let project = project(&db)?;
             let mut new = new_issue(args, &project, &server.vendor)?;
-            if let Some((level, note)) = declared_review(&server.place(), args)? {
+            if let Some((level, note)) = declared_review(&config, Some(&project), server.remote.is_none().then_some(server.cwd.as_str()), args)? {
                 new.review_level = level;
                 new.review_note = note;
                 if new.review_level.is_some() {
@@ -1407,7 +1404,7 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
                 .enumerate()
                 .map(|(n, item)| {
                     let mut issue = new_issue(item, &project, &server.vendor).with_context(|| format!("item {}", n + 1))?;
-                    if let Some((level, note)) = declared_review(&server.place(), item).with_context(|| format!("item {}", n + 1))? {
+                    if let Some((level, note)) = declared_review(&config, Some(&project), server.remote.is_none().then_some(server.cwd.as_str()), item).with_context(|| format!("item {}", n + 1))? {
                         issue.review_level = level;
                         issue.review_note = note;
                         if issue.review_level.is_some() {
@@ -1433,7 +1430,13 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             let goal = args.get("goal").and_then(Value::as_i64);
             let (title, body) = (args.get("title").and_then(Value::as_str), args.get("body").and_then(Value::as_str));
             let priority = args.get("priority").and_then(Value::as_i64);
-            let review = declared_review(&server.place(), args)?;
+            let issue = db.issue(key)?.with_context(|| format!("no issue {key}"))?;
+            let review = declared_review(&config, issue.project.as_deref(), server.remote.is_none().then_some(server.cwd.as_str()), args)?;
+            if let Some((level, _)) = &review {
+                if level.is_some() || str_arg(args, "review_level").is_some() {
+                    db.check_review_level_change(key, level.as_deref(), &actor)?;
+                }
+            }
             if str_arg(args, "state").is_none()
                 && add.is_empty()
                 && remove.is_empty()

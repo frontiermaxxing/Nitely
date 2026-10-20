@@ -64,6 +64,21 @@ pub fn resolve_review_level(declared: Option<&str>, protected: Option<&str>) -> 
     Ok((Some(stored.to_string()), note))
 }
 
+fn check_review_change(old: Option<&str>, level: Option<&str>, actor: &Actor) -> Result<()> {
+    if let Some(level) = level {
+        check_review_level(level)?;
+    }
+    if !matches!(actor, Actor::Human) {
+        let level = level.context("only the person clears a review level")?;
+        if let Some(old) = old {
+            if review_rank(level).unwrap_or(0) < review_rank(old).unwrap_or(0) {
+                bail!("a review level can only be raised from {old}; the person sets a lower one");
+            }
+        }
+    }
+    Ok(())
+}
+
 fn review_change_summary(from: Option<&str>, to: Option<&str>, source: &str, note: Option<&str>) -> String {
     let name = |l: Option<&str>| match l {
         None | Some("") => "undeclared".to_string(),
@@ -363,7 +378,7 @@ pub struct NewIssue {
     pub labels: Vec<String>,
     /// An active goal of the same project to file it into.
     pub goal: Option<i64>,
-    /// inert, contained, standard or sensitive. None is undeclared.
+    /// inert, contained, standard or sensitive. New issues default to standard.
     pub review_level: Option<String>,
     /// author, planner, coordinator, human or implementer. author when a level is set and this is empty.
     pub review_source: Option<String>,
@@ -1031,7 +1046,7 @@ impl Db {
             self.goal_for(Some(&project.key), goal)?;
         }
         let review_level = match new.review_level.as_deref().map(str::trim).filter(|s| !s.is_empty() && *s != "undeclared") {
-            None => None,
+            None => Some("standard".to_string()),
             Some(level) => {
                 check_review_level(level)?;
                 Some(level.to_string())
@@ -1582,6 +1597,17 @@ impl Db {
         self.issue(&key)?.with_context(|| format!("no issue {key}"))
     }
 
+    /// Preflight a compound edit before its other fields are written. The setter repeats this
+    /// check under its write lock, so callers cannot use a stale preflight to lower the level.
+    pub fn check_review_level_change(&self, key: &str, level: Option<&str>, actor: &Actor) -> Result<()> {
+        let level = level.map(str::trim).filter(|s| !s.is_empty() && *s != "undeclared");
+        let issue = self.issue(key)?.with_context(|| format!("no issue {key}"))?;
+        if issue.origin != "nitely" {
+            bail!("{} is mirrored from {}; change it there", issue.key, issue.origin);
+        }
+        check_review_change(issue.review_level.as_deref(), level, actor)
+    }
+
     /// Sets the declared review level, or clears it (`level` None or "undeclared"). An agent can
     /// only raise it. The person can set any level or clear it. An agent that holds the issue
     /// (its claim) is the implementer: the stored source is `implementer`, a hint. Anyone else
@@ -1608,16 +1634,7 @@ impl Db {
             Actor::Agent(id) if claimed_by.as_deref() == Some(id.as_str()) => "implementer",
             Actor::Agent(_) => "coordinator",
         };
-        if !matches!(actor, Actor::Human) {
-            if level.is_none() {
-                bail!("only the person clears a review level");
-            }
-            if let (Some(old_level), Some(new_level)) = (old.as_deref(), level) {
-                if review_rank(new_level).unwrap_or(0) < review_rank(old_level).unwrap_or(0) {
-                    bail!("a review level can only be raised from {old_level}; the person sets a lower one");
-                }
-            }
-        }
+        check_review_change(old.as_deref(), level, actor)?;
         if old.as_deref() != level {
             let ts = now();
             tx.execute(
@@ -2224,7 +2241,8 @@ mod tests {
         db.add_note("NIT-1", "picked it up", "note", &Actor::Agent("claude:c:/code/my-app".into())).unwrap();
         let timeline = db.timeline("NIT-1").unwrap();
         assert_eq!((timeline[0].actor.as_str(), timeline[0].place.as_deref()), (session.id(), Some(r"C:\Code\my-app")));
-        assert_eq!((timeline[1].actor.as_str(), timeline[1].place.as_deref()), ("claude:c:/code/my-app", None), "an older folder id says its folder itself");
+        let note = timeline.iter().find(|entry| entry.kind == "note").unwrap();
+        assert_eq!((note.actor.as_str(), note.place.as_deref()), ("claude:c:/code/my-app", None), "an older folder id says its folder itself");
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -2245,6 +2263,21 @@ mod tests {
         assert!(db.set_priority("NIT-1", 5, &agent).is_err() && db.set_priority("NIT-1", -1, &agent).is_err());
         db.conn.execute("INSERT INTO issue (key, origin, title, state, state_type, updated_at) VALUES ('LIN-1', 'linear', 'Mirrored', 'Todo', 'unstarted', '')", []).unwrap();
         assert!(db.set_priority("LIN-1", 1, &agent).unwrap_err().to_string().contains("mirrored from linear"));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn new_review_declarations_default_to_standard_without_rewriting_legacy_rows() {
+        let (mut db, dir) = db();
+        db.create_project("NIT", "Nitely").unwrap();
+        db.conn.execute("INSERT INTO issue (key, origin, title, state, state_type, updated_at) VALUES ('OLD-1', 'nitely', 'Legacy', 'Todo', 'unstarted', '')", []).unwrap();
+        let filed = db.create_issue(&new("Default review declaration"), &Actor::Agent("codex:test".into())).unwrap();
+        assert_eq!(filed.review_level.as_deref(), Some("standard"));
+        assert_eq!(filed.review_level_by.as_deref(), Some("codex:test"));
+        assert_eq!(filed.review_level_source.as_deref(), Some("author"));
+        assert!(db.issue("OLD-1").unwrap().unwrap().review_level.is_none());
+        assert!(db.check_review_level_change(&filed.key, Some("inert"), &Actor::Agent("cli".into())).is_err());
+        assert!(db.check_review_level_change(&filed.key, Some("inert"), &Actor::Human).is_ok());
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -2336,7 +2369,7 @@ mod tests {
         assert_eq!(db.move_issue("nit-1", "approved", None, None, &Actor::Human).unwrap().state, "Approved");
         let done = db.move_issue("NIT-1", "Done", Some("cargo test passed"), None, &agent).unwrap();
         assert_eq!((done.state.as_str(), done.evidence.as_str()), ("Done", "cargo test passed"));
-        assert_eq!(db.timeline("NIT-1").unwrap().len(), 3);
+        assert_eq!(db.timeline("NIT-1").unwrap().len(), 4, "filing, default review declaration and two moves");
         std::fs::remove_dir_all(dir).ok();
     }
 

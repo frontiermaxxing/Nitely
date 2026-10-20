@@ -547,7 +547,7 @@ enum IssueCmd {
         /// An active goal of the project to file it into.
         #[arg(long)]
         goal: Option<i64>,
-        /// inert, contained, standard or sensitive. Omitted is undeclared.
+        /// inert, contained, standard or sensitive. Omitted defaults to standard.
         #[arg(long)]
         review_level: Option<String>,
     },
@@ -1147,7 +1147,7 @@ fn run(cmd: Cmd) -> Result<()> {
                             goal,
                             review_level,
                             review_note,
-                            review_source: Some("human".into()),
+                            review_source: Some("author".into()),
                         },
                         &me,
                     )?;
@@ -1182,7 +1182,7 @@ fn run(cmd: Cmd) -> Result<()> {
                                 labels: strings(item, "labels"),
                                 goal: item.get("goal").and_then(|g| g.as_i64()).filter(|g| *g > 0),
                                 review_level: opt(item, "review_level"),
-                                review_source: Some("human".into()),
+                                review_source: Some("author".into()),
                                 ..Default::default()
                             },
                         })
@@ -1207,12 +1207,15 @@ fn run(cmd: Cmd) -> Result<()> {
                         nitely_core::issues::check_priority(p)?;
                     }
                     let key = db.current_key(&key)?;
+                    if let Some(level) = review_level.as_deref() {
+                        db.check_review_level_change(&key, Some(level), &me)?;
+                    }
                     let mut issue = db.edit_issue(&key, title.as_deref(), body.as_deref(), &me)?;
                     if let Some(priority) = priority {
                         issue = db.set_priority(&key, priority, &me)?;
                     }
                     if let Some(level) = review_level {
-                        issue = db.set_review_level(&key, Some(&level), None, &Actor::Human)?;
+                        issue = db.set_review_level(&key, Some(&level), None, &me)?;
                     }
                     print_json(&issue)
                 }

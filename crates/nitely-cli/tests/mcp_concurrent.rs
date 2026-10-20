@@ -225,3 +225,63 @@ fn a_detached_call_runs_as_the_session_it_was_given_and_writes_its_answer() {
     drop(conn);
     std::fs::remove_dir_all(base).ok();
 }
+
+#[test]
+fn review_declarations_use_the_target_project_and_rejected_updates_write_nothing() {
+    let (mut mcp, _run, base) = setup("nitely-mcp-review-declarations");
+    let db = nitely_core::Db::open(&base.join("nitely.db")).unwrap();
+    db.create_project("WEB", "Website").unwrap();
+    db.create_project("LOST", "Disconnected").unwrap();
+    let web = base.join("web");
+    std::fs::create_dir_all(base.join(".nitely")).unwrap();
+    std::fs::create_dir_all(web.join(".nitely")).unwrap();
+    std::fs::write(base.join(".nitely/playbook.toml"), "[approval]\nhuman_paths = []\n").unwrap();
+    std::fs::write(web.join(".nitely/playbook.toml"), "[[approval.human_paths]]\npattern = '^src/billing/'\nreason = 'Money'\n").unwrap();
+    std::fs::write(base.join("config.json"), json!({ "repos": [
+        { "name": "app", "root": base, "integration_branch": "main", "project": "APP" },
+        { "name": "web", "root": web, "integration_branch": "main", "project": "WEB" }
+    ] }).to_string()).unwrap();
+    let mut id = 30;
+    let mut call = |name: &str, args: Value| {
+        id += 1;
+        mcp.call(id, name, args);
+        let reply = mcp.next(Duration::from_secs(20)).unwrap();
+        assert_eq!(reply["id"], id);
+        reply
+    };
+    let filed = call("file_issue", json!({ "project": "WEB", "title": "Protected payment repair", "kind": "bug", "body": "Repair payment flow", "evidence": "scenario", "review_level": "inert", "paths": ["src/billing/pay.ts"] }));
+    assert_ne!(filed["result"]["isError"], true, "{filed}");
+    let issue = db.issue("WEB-1").unwrap().unwrap();
+    assert_eq!(issue.review_level.as_deref(), Some("sensitive"));
+    let batch = call("file_issues", json!({ "project": "WEB", "issues": [
+        { "ref": "a", "title": "Keyboard menu navigation", "kind": "feature", "body": "Support keys", "evidence": "scenario" },
+        { "ref": "b", "title": "Billing tax display", "kind": "feature", "body": "Show tax", "evidence": "scenario", "review_level": "contained", "paths": ["src/billing/tax.ts"] }
+    ] }));
+    assert_ne!(batch["result"]["isError"], true, "{batch}");
+    assert_eq!(db.issue("WEB-2").unwrap().unwrap().review_level.as_deref(), Some("standard"));
+    assert_eq!(db.issue("WEB-3").unwrap().unwrap().review_level.as_deref(), Some("sensitive"));
+    let events = db.timeline("WEB-1").unwrap().len();
+    let rejected = call("update_issue", json!({ "key": "WEB-1", "title": "Wrong title", "body": "Wrong body", "priority": 2, "blocked_by": ["WEB-2"], "review_level": "inert" }));
+    assert_eq!(rejected["result"]["isError"], true, "{rejected}");
+    let after = db.issue("WEB-1").unwrap().unwrap();
+    assert_eq!((after.title, after.body, after.priority, after.blocked_by, after.review_level), (issue.title, issue.body, issue.priority, issue.blocked_by, issue.review_level));
+    assert_eq!(db.timeline("WEB-1").unwrap().len(), events);
+    let updated = call("update_issue", json!({ "key": "WEB-2", "review_level": "inert", "paths": ["src/billing/menu.ts"] }));
+    assert_ne!(updated["result"]["isError"], true, "{updated}");
+    assert_eq!(db.issue("WEB-2").unwrap().unwrap().review_level.as_deref(), Some("sensitive"));
+    let proposed = call("propose_goal", json!({ "project": "WEB", "sentence": "Improve invoices", "title": "Invoice workflow", "outcome": "Invoices are easy to use", "issues": [
+        { "ref": "a", "title": "Invoice export", "kind": "feature", "body": "Export invoices", "evidence": "scenario", "touches": ["src/billing/export.ts"], "review_level": "inert" },
+        { "ref": "b", "title": "Receipt search", "kind": "feature", "body": "Find receipts", "evidence": "scenario", "touches": ["src/search.ts"] }
+    ] }));
+    assert_ne!(proposed["result"]["isError"], true, "{proposed}");
+    let proposed = text(&proposed);
+    let plan = db.goal_plan_for_issue(proposed["issue"]["key"].as_str().unwrap()).unwrap().unwrap();
+    assert_eq!(plan.plan.issues[0].review_level.as_deref(), Some("sensitive"));
+    assert_eq!(plan.plan.issues[1].review_level.as_deref(), Some("standard"));
+    let missing = call("file_issue", json!({ "project": "LOST", "title": "Unknown policy", "kind": "feature", "body": "Unknown", "evidence": "scenario", "review_level": "inert", "paths": ["src/billing/pay.ts"] }));
+    assert_eq!(missing["result"]["isError"], true, "{missing}");
+    assert!(db.list_issues(Some("LOST"), true).unwrap().is_empty());
+    drop(db);
+    drop(mcp);
+    std::fs::remove_dir_all(base).ok();
+}
