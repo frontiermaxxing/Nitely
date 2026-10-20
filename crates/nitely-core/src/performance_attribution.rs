@@ -700,7 +700,7 @@ impl Sampler {
                     break;
                 };
                 // A reused parent PID must not retroactively adopt an older child.
-                if !parent.started.parse::<u64>().ok().zip(cursor.started.parse::<u64>().ok()).is_some_and(|(p, c)| p <= c) {
+                if parent.started.parse::<u64>().ok().zip(cursor.started.parse::<u64>().ok()).is_none_or(|(p, c)| p > c) {
                     break;
                 }
                 cursor = parent.clone();
