@@ -5218,7 +5218,9 @@ wanted {shown}", ran.output);
                     std::fs::remove_file(r.join("notes.txt")).unwrap();
                     return memory;
                 }
-                assert!(started.elapsed() < Duration::from_secs(30), "the request never waited for the checkout");
+                // Only a guard against a hang: it counts the run's setup of the checkout too, which a
+                // loaded gate machine has taken past 30 s.
+                assert!(started.elapsed() < Duration::from_secs(120), "the request never waited for the checkout");
                 std::thread::sleep(Duration::from_millis(50));
             }
         });
