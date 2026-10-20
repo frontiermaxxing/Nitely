@@ -1101,9 +1101,15 @@ mod tests {
         let dir = Temp::new();
         std::fs::create_dir_all(&dir.0).unwrap();
         let db = crate::Db { conn: rusqlite::Connection::open(dir.0.join("test.db")).unwrap() };
+        let empty = Scope::new(&db, Context::default());
+        assert!(LAUNCH.with(|s| s.borrow().is_none()), "a test DB without history must not use the real recorder");
+        drop(empty);
         Store::open(&dir.0.join("performance")).unwrap();
         let _scope = Scope::new(&db, Context { issue: Some("APP-1".into()), worker_id: Some(12), ..Default::default() });
-        assert_eq!(LAUNCH.with(|s| s.borrow().as_ref().unwrap().dir.clone()), dir.0.join("performance"));
+        // SQLite may resolve a temp-directory symlink (macOS /var -> /private/var). Compare
+        // filesystem identities, still requiring this exact test folder rather than any recorder.
+        let observed = LAUNCH.with(|s| s.borrow().as_ref().unwrap().dir.clone());
+        assert_eq!(observed.canonicalize().unwrap(), dir.0.join("performance").canonicalize().unwrap());
         {
             let _inner = Scope::new(&db, Context { issue: Some("APP-1".into()), run_id: Some(9), ..Default::default() });
             assert_eq!(LAUNCH.with(|s| s.borrow().as_ref().unwrap().context.worker_id), Some(12));
