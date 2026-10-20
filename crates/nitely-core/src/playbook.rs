@@ -19,6 +19,10 @@ const OUTPUT_TAIL: usize = 4000;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Playbook {
+    #[serde(skip)]
+    pub mode_authority: Option<String>,
+    #[serde(skip)]
+    pub mode_project: Option<String>,
     /// Mechanical verification recommendations. Shadow never replaces the normal gate/review.
     #[serde(default)]
     pub verification: crate::verification::Rules,
@@ -1146,6 +1150,8 @@ pub struct CommandResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GateResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode_authority: Option<String>,
     pub passed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<crate::verification::Plan>,
@@ -1308,40 +1314,27 @@ pub fn run_gate(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<&s
 /// `run_gate`, saying what the gate is for: in a repo with build lanes (`[lanes]`), the gate runs
 /// there as a request of that kind, land's first, and never builds in the worktree.
 pub fn run_gate_as(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<&str>, actor: &Actor, kind: crate::lanes::Kind) -> Result<GateResult> {
-    run_gate_inner(db, repo_root, worktree, issue_key, actor, kind, &[])
+    run_gate_inner(db, repo_root, worktree, issue_key, actor, kind, &[], None)
 }
 
 pub(crate) fn run_automatic_gate(db: &Db, repo_root: &Path, worktree: &Path, keys: &[&str], actor: &Actor, kind: crate::lanes::Kind) -> Result<GateResult> {
-    if !crate::project_yolo::all_enabled(db,keys)? && keys.len()==1 {
-        if let Some(plan)=crate::verification::execution_plan(db,repo_root,worktree,keys[0])? {
-            let pb=Playbook::load(repo_root)?;
-            if pb.lanes.is_some() {
-                let steps=plan.commands.iter().map(|c|(c.clone(),None)).collect::<Vec<_>>();
-                // Discovery evidence must be present, so reduced gates execute instead of
-                // consuming a cache record that has no per-test discovery output.
-                let lane=crate::lanes::gate_fresh(db,repo_root,&pb,worktree,Some(keys[0]),kind,&steps,actor)?;
-                let mut passed=lane.passed;
-                let mut warnings=lane.warnings;
-                if passed {
-                    if let Err(e)=crate::verification::validate_selected(&plan,&lane.results) {
-                        passed=false;
-                        warnings.push(format!("Selected test evidence incomplete: {e:#}"));
-                    }
-                }
-                let mut gate=record_gate(db,Some(keys[0]),worktree,actor,&lane.commit,lane.results,passed,lane.flaked,warnings)?;
-                gate.lane_run=lane.run;
-                gate.plan=Some(plan);
-                crate::verification::check_gate_authority(db,repo_root,worktree,keys[0],&gate)?;
-                return Ok(gate);
-            }
-        }
-    }
-    run_gate_inner(db, repo_root, worktree, keys.last().copied(), actor, kind, keys)
+    let authority=keys.first().map(|k|crate::project_modes::authority_for_issue(db,k)).transpose()?.flatten();
+    for key in keys {if crate::project_modes::authority_for_issue(db,key)?!=authority {bail!("batch members have incompatible project review modes; land individually");}}
+    let plan=if !crate::project_yolo::all_enabled(db,keys)? && keys.len()==1 {crate::verification::execution_plan(db,repo_root,worktree,keys[0])?}else{None};
+    let mut gate=run_gate_inner(db,repo_root,worktree,keys.last().copied(),actor,kind,keys,plan.as_ref())?;
+    gate.mode_authority=authority;
+    gate.plan=plan;
+    crate::project_modes::check_gate_authority(db,keys,&gate)?;
+    if keys.len()==1 {crate::verification::check_gate_authority(db,repo_root,worktree,keys[0],&gate)?;}
+    Ok(gate)
 }
 
-fn run_gate_inner(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<&str>, actor: &Actor, kind: crate::lanes::Kind, yolo_keys: &[&str]) -> Result<GateResult> {
+#[allow(clippy::too_many_arguments)]
+fn run_gate_inner(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<&str>, actor: &Actor, kind: crate::lanes::Kind, yolo_keys: &[&str], plan:Option<&crate::verification::Plan>) -> Result<GateResult> {
     if crate::project_yolo::all_enabled(db, yolo_keys)? { return crate::project_yolo::skipped_gate(db, worktree, yolo_keys, actor); }
-    let playbook = Playbook::load(repo_root)?;
+    let mut playbook = Playbook::load(repo_root)?;
+    if let Some(key)=yolo_keys.first() {crate::project_modes::apply_issue(db,key,&mut playbook)?;}
+    if let Some(plan)=plan {playbook.gate.commands=plan.commands.clone();playbook.gate.steps.clear();}
     if playbook.gate.commands.is_empty() && playbook.gate.steps.is_empty() {
         bail!("this repo's playbook has no gate commands; add them under [gate] in {PLAYBOOK_PATH}");
     }
@@ -1363,11 +1356,14 @@ fn run_gate_inner(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<
     if playbook.lanes.is_some() {
         // In a lane: a full checkout of the worktree's snapshot, set up there. The worktree itself
         // is not built, made whole or set up.
-        let lane = crate::lanes::gate(db, repo_root, &playbook, worktree, issue_key, kind, &steps, actor, yolo_keys)?;
+        let lane = if plan.is_some() {crate::lanes::gate_fresh_checked(db,repo_root,&playbook,worktree,issue_key,kind,&steps,actor,yolo_keys)?}
+            else {crate::lanes::gate(db, repo_root, &playbook, worktree, issue_key, kind, &steps, actor, yolo_keys)?};
         if lane.yolo_skipped { return crate::project_yolo::skipped_gate(db, worktree, yolo_keys, actor); }
         let mut warnings = playbook.unknown_warnings();
         warnings.extend(lane.warnings);
-        let mut gate = record_gate(db, issue_key, worktree, actor, &lane.commit, lane.results, lane.passed, lane.flaked, warnings)?;
+        let mut passed=lane.passed;
+        validate_gate_plan(plan,&lane.results,&mut passed,&mut warnings);
+        let mut gate = record_gate(db, issue_key, worktree, actor, &lane.commit, lane.results, passed, lane.flaked, warnings)?;
         gate.lane_run = lane.run;
         return Ok(gate);
     }
@@ -1385,6 +1381,7 @@ fn run_gate_inner(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<
         Err(e) => return Err(e),
     };
     if crate::project_yolo::all_enabled(db, yolo_keys)? { return crate::project_yolo::skipped_gate(db, worktree, yolo_keys, actor); }
+    crate::project_modes::check_playbook_authority(db,yolo_keys,&playbook)?;
     // A sparse worktree lacks files the gate builds (a workspace's other members): without build
     // lanes, it becomes whole first, so the gate sees what land will.
     let whole = crate::light::make_whole(worktree)?;
@@ -1397,6 +1394,7 @@ fn run_gate_inner(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<
         steps.clear();
     }
     for (command, skip) in steps {
+        crate::project_modes::check_playbook_authority(db,yolo_keys,&playbook)?;
         if crate::project_yolo::all_enabled(db, yolo_keys)? { return crate::project_yolo::skipped_gate(db, worktree, yolo_keys, actor); }
         let command = expand(&command, repo_root, worktree, base);
         if let Some(why) = skip {
@@ -1411,8 +1409,14 @@ fn run_gate_inner(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<
             break;
         }
     }
+    let mut warnings=playbook.unknown_warnings();
+    validate_gate_plan(plan,&results,&mut passed,&mut warnings);
     turn.finish(passed);
-    record_gate(db, issue_key, worktree, actor, &commit, results, passed, flaked, playbook.unknown_warnings())
+    record_gate(db, issue_key, worktree, actor, &commit, results, passed, flaked, warnings)
+}
+
+fn validate_gate_plan(plan:Option<&crate::verification::Plan>,results:&[CommandResult],passed:&mut bool,warnings:&mut Vec<String>) {
+    if *passed {if let Some(plan)=plan {if let Err(e)=crate::verification::validate_selected(plan,results) {*passed=false;warnings.push(format!("Selected test evidence incomplete: {e:#}"));}}}
 }
 
 /// Puts a gate's outcome on the issue's timeline (its flakes, then passed or failed) and returns it.
@@ -1429,7 +1433,7 @@ fn record_gate(db: &Db, issue_key: Option<&str>, worktree: &Path, actor: &Actor,
         format!("Gate failed at {commit}: {}", results.last().map(|r| r.command.as_str()).unwrap_or(""))
     };
     db.log_event(actor, issue_key, at.as_deref(), if passed { "gate_passed" } else { "gate_failed" }, &summary)?;
-    Ok(GateResult { passed, plan: None, skipped: None, commit: commit.to_string(), results, warnings, flaked, lane_run: None })
+    Ok(GateResult { mode_authority: None, passed, plan: None, skipped: None, commit: commit.to_string(), results, warnings, flaked, lane_run: None })
 }
 
 /// Fills `{main}` (the main checkout), `{worktree}` and `{base}` in a playbook command.

@@ -91,7 +91,7 @@ mod tests {
         g(&repo,&["commit","-qam","comment"]);
         let plan=crate::verification::assess(&repo,&base,"HEAD",&issue).unwrap();
         let result=|command:&str,seconds|CommandResult{command:command.into(),ok:true,seconds,output:"executed".into(),skipped:false};
-        let gate=GateResult{passed:true,skipped:None,commit:plan.head.clone(),
+        let gate=GateResult{mode_authority:None,passed:true,skipped:None,commit:plan.head.clone(),
             results:plan.commands.iter().map(|c|result(c,1)).collect(),plan:Some(plan.clone()),
             warnings:vec![],flaked:vec![],lane_run:Some(1)};
         db.conn.execute("INSERT INTO review(issue_key,patch_id,commit_sha,reviewer,verdict,approver,ts,gate) VALUES(?1,'patch',?2,'','light','agent',1,?3)",

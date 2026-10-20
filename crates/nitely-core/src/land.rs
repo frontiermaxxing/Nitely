@@ -74,7 +74,8 @@ pub struct LandOptions<'a> {
 pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Actor) -> Result<Landed> {
     let issue = db.issue(opts.issue_key)?.with_context(|| format!("no issue {}", opts.issue_key))?;
     let root = playbook::repo_for_issue(config, issue.project.as_deref(), opts.dir)?;
-    let pb = Playbook::load(&root)?;
+    let mut pb = Playbook::load(&root)?;
+    crate::project_modes::apply_issue(db, &issue.key, &mut pb)?;
     // With `[land] batch`, a change that may land with others waits in the queue (land_queue.rs).
     // One that is not to be pushed lands alone: a stack is pushed as one.
     if opts.push && crate::land_queue::lands_alone(db, &root, &pb, &issue.key)?.is_none() {
@@ -111,7 +112,8 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
         });
     }
     // Settings may have changed between the initial routing decision and taking the land lock.
-    let pb = Playbook::load(&root)?;
+    let mut pb = Playbook::load(&root)?;
+    crate::project_modes::apply_issue(db, &issue.key, &mut pb)?;
     let result = run(db, &root, &pb, &issue.key, opts, actor, &mut report);
     // Still under the lock, so the next land cannot change the main checkout mid-build; and, in
     // large-repo mode, with the checkout held from build requests.
@@ -140,6 +142,28 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
     Ok(report)
 }
 
+/// The queue already owns the repository lock; a changed mode can require an individual land.
+pub(crate) fn queued_alone(db: &mut Db, root: &Path, key: &str, opts: &LandOptions, actor: &Actor) -> Result<Landed> {
+    let issue = db.issue(key)?.with_context(|| format!("no issue {key}"))?;
+    let mut pb = Playbook::load(root)?;
+    crate::project_modes::apply_issue(db, key, &mut pb)?;
+    let _telemetry = crate::performance_attribution::Scope::new(db, crate::performance_attribution::Context { project: issue.project.clone(), issue: Some(key.into()), ..Default::default() });
+    let mut report = Landed { issue: key.into(), base: pb.integration_branch().into(), ..Default::default() };
+    match run(db, root, &pb, key, opts, actor, &mut report) {
+        Ok(()) => {
+            if report.landed {
+                match crate::lanes::hold_checkout(root, &pb) {
+                    Ok(_held) => after_land(root, &pb, &mut report),
+                    Err(e) => report.warnings.push(format!("the after-land steps did not run: {e:#}")),
+                }
+            }
+            record_landed(db, root, &issue, &mut report, actor)?;
+        }
+        Err(e) => record_stopped(db, key, &format!("{e:#}"), &mut report, actor)?,
+    }
+    Ok(report)
+}
+
 /// What a land that went through does to its issue: the landed event, Done with the gate as
 /// evidence, and the issues it unblocked.
 pub(crate) fn record_landed(db: &mut Db, root: &Path, issue: &IssueRecord, report: &mut Landed, actor: &Actor) -> Result<()> {
@@ -147,7 +171,7 @@ pub(crate) fn record_landed(db: &mut Db, root: &Path, issue: &IssueRecord, repor
         report.warnings.push(format!("post-merge verification record needs recovery: {e:#}"));
         db.log_event(actor,Some(&issue.key),None,"verification_record_failed",&format!("{e:#}"))?;
     }
-    if let Some(plan)=report.gate.as_ref().and_then(|g|g.plan.as_ref()).filter(|p|matches!(p.effective.as_str(),"inert"|"contained")) {
+    if let Some(plan)=report.gate.as_ref().and_then(|g|g.plan.as_ref()).filter(|p|matches!(p.effective.as_str(),"inert"|"basic"|"contained")) {
         let audit=(|| -> Result<()> {
             let (vendor,_)=crate::git::parse_branch(&report.branch);
             if let Some(candidate)=crate::verification::audit_candidate(root,issue,plan,vendor.as_deref().unwrap_or(actor.id()))? {
@@ -605,7 +629,7 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
     if let Some(why) = crate::submodules::unchanged(&worktree, &moving)? {
         bail!("{why}");
     }
-    crate::project_yolo::check_gate_authority(db, &[key], report.gate.as_ref().expect("gate recorded"))?;
+    crate::project_modes::check_gate_authority(db, &[key], report.gate.as_ref().expect("gate recorded"))?;
     crate::verification::check_gate_authority(db,root,&worktree,key,report.gate.as_ref().expect("gate recorded"))?;
     report.approval = Some(check_approval(db, &Playbook::load(root)?, key, &worktree, &base, &branch)?);
 
@@ -626,7 +650,7 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
     }
     // The submodules' integration branches first, then the repo's; when the repo's refuses, theirs
     // go back, so neither moves.
-    crate::project_yolo::check_gate_authority(db, &[key], report.gate.as_ref().expect("gate recorded"))?;
+    crate::project_modes::check_gate_authority(db, &[key], report.gate.as_ref().expect("gate recorded"))?;
     crate::verification::check_gate_authority(db,root,&worktree,key,report.gate.as_ref().expect("gate recorded"))?;
     check_yolo_policy(db, key, &db.reviews(key)?.into_iter().next().context("submission evidence disappeared")?)?;
     let undo = crate::submodules::fast_forward(&moving)?;
@@ -746,6 +770,9 @@ pub(crate) fn check_worktree(worktree: &Path, branch: &str) -> Result<()> {
 /// approve, with that approval given in Nitely after the review. `worktree` holds the change at
 /// HEAD on top of `base`; `branch` is the issue's branch, whose name says its vendor.
 pub(crate) fn check_approval(db: &Db, pb: &Playbook, key: &str, worktree: &Path, base: &str, branch: &str) -> Result<String> {
+    let mut current = pb.clone();
+    crate::project_modes::apply_issue(db, key, &mut current)?;
+    let pb = &current;
     let patch = patch_id(worktree, base)?;
     let review = db.reviews(key)?.into_iter().next().with_context(|| format!("{key} has no review; submit it first"))?;
     if review.patch_id != patch && !crate::test_command_merge::equivalent(worktree, base, &review).unwrap_or(false) {
@@ -819,7 +846,12 @@ pub(crate) fn check_approval(db: &Db, pb: &Playbook, key: &str, worktree: &Path,
 }
 
 pub(crate) fn check_yolo_policy(db: &Db, key: &str, review: &crate::submit::ReviewRecord) -> Result<()> {
-    if (review.verdict == "yolo" || review.gate.as_ref().is_some_and(|g| g.skipped.is_some())) && !crate::project_yolo::enabled_for_issue(db, key)? {
+    if let Some(gate) = &review.gate {
+        crate::project_modes::check_gate_authority(db, &[key], gate)?;
+    } else if crate::project_modes::authority_for_issue(db, key)?.is_some() {
+        bail!("the submission has no project-mode evidence; submit again under the current settings");
+    }
+    if review.verdict == "yolo" && !crate::project_yolo::enabled_for_issue(db, key)? {
         bail!("YOLO mode is disabled; submit this unchecked revision for the normal gate and PR review before landing");
     }
     Ok(())
@@ -1364,7 +1396,7 @@ when_changed = ["billing"]
         reviewed_with(&f, &a, blocker, 1);
         let ask = f.db.request_acceptance(&a, "1", "Only the person changes the playbook.", None, &f.actor).unwrap();
         // Later rounds are told its words and say it the same way: it stays one open request.
-        let no_gate = crate::playbook::GateResult { passed: true, plan: None, skipped: None, commit: "c".into(), results: vec![], warnings: vec![], flaked: vec![], lane_run: None };
+        let no_gate = crate::playbook::GateResult { mode_authority: None, passed: true, plan: None, skipped: None, commit: "c".into(), results: vec![], warnings: vec![], flaked: vec![], lane_run: None };
         for round in 2..4 {
             reviewed_with(&f, &a, blocker, round);
             let latest = f.db.reviews(&a).unwrap().remove(0);

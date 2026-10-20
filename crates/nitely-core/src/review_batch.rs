@@ -195,6 +195,7 @@ pub fn review_in_batch(db: &Db, rules: &ReviewRules, c: &Candidate, actor: &Acto
         let row = queued(db, id)?.context("the change's place in the review queue went missing")?;
         match row.state.as_str() {
             "done" => {
+                rules.require_enabled()?;
                 let review: Review = serde_json::from_str(row.result.as_deref().unwrap_or("")).context("reading the change's review from its batch")?;
                 return Ok(Outcome::Reviewed(review));
             }
@@ -207,9 +208,7 @@ pub fn review_in_batch(db: &Db, rules: &ReviewRules, c: &Candidate, actor: &Acto
             "reviewing" => settle_dead_batch(db, row.batch_id.unwrap_or_default())?,
             _ => {
                 if let Err(e) = rules.require_enabled() {
-                    if e.is::<crate::review::Disabled>() || e.is::<crate::project_yolo::SkipReview>() {
-                        db.conn.execute("UPDATE review_queue SET state = 'alone', why = ?2 WHERE id = ?1 AND state = 'waiting'", params![id, format!("{e:#}")])?;
-                    }
+                    db.conn.execute("UPDATE review_queue SET state = 'alone', why = ?2 WHERE id = ?1 AND state = 'waiting'", params![id, format!("{e:#}")])?;
                     return Err(e);
                 }
                 if let Some((batch, rows)) = close_if_due(db, rules, window, &repo, &row.reviewer, false)? {
@@ -315,6 +314,15 @@ fn fail_batch(db: &Db, batch: i64, why: &str) -> Result<()> {
     Ok(())
 }
 
+/// Explicit project modes can independently disable batching, including while rows wait.
+fn project_allows_batch(db: &Db, key: &str, shadow: bool) -> Result<bool> {
+    Ok(match crate::project_modes::for_issue(db, key)?.and_then(|s| s.options().pre_review) {
+        None => true,
+        Some(crate::project_modes::PreReview::Batched) => !shadow,
+        Some(_) => false,
+    })
+}
+
 /// Takes the repository's next batch for `reviewer` when it is due, under the queue's lock: full,
 /// its oldest change past the window, or (`busy`) no batch of the repository under review. A batch
 /// of one is no batch: that change is told to go alone.
@@ -332,6 +340,13 @@ fn close_if_due(db: &Db, rules: &ReviewRules, window: Window, repo: &str, review
     let mut waiting = vec![];
     for r in rows {
         if r.pid == std::process::id() || crate::submit_job::process_runs(r.pid) {
+            if !project_allows_batch(db, &r.issue, shadow)? {
+                db.conn.execute("UPDATE review_queue SET state = 'alone', why = 'the current project mode does not use this review batch' WHERE id = ?1 AND state = 'waiting'", [r.id])?;
+                continue;
+            }
+            // Different project-mode revisions never borrow another submitter's policy.
+            let expected = rules.yolo_guards.first().and_then(|g| g.authority.clone());
+            if crate::project_modes::authority_for_issue(db, &r.issue)? != expected { continue; }
             waiting.push(r);
         } else {
             db.conn.execute("UPDATE review_queue SET state = 'abandoned', why = 'its submit stopped while it waited' WHERE id = ?1 AND state = 'waiting'", [r.id])?;
@@ -448,7 +463,13 @@ fn lock_name(repo: &str, reviewer: &str) -> String {
 /// says nothing on the issues.
 fn run_batch(db: &Db, rules: &ReviewRules, batch: i64, rows: &[Queued], shadow: bool) -> Result<()> {
     let mut checked_rules = rules.clone();
+    let expected = rules.yolo_guards.first().and_then(|g| g.authority.clone());
     for row in rows {
+        if !project_allows_batch(db, &row.issue, shadow)?
+            || crate::project_modes::authority_for_issue(db, &row.issue)? != expected {
+            fail_batch(db, batch, "the project review mode changed before its batch launched; submit again")?;
+            return Ok(());
+        }
         if let Some(guard) = crate::project_yolo::ReviewGuard::for_issue(db, &row.issue)? { checked_rules.yolo_guards.push(guard); }
     }
     let rules = &checked_rules;
@@ -685,10 +706,8 @@ pub fn shadow(db: &Db, s: &Shadow) -> Result<()> {
         match row.state.as_str() {
             "waiting" => {
                 if let Err(e) = s.rules.require_enabled() {
-                    if e.is::<crate::review::Disabled>() || e.is::<crate::project_yolo::SkipReview>() {
-                        db.conn.execute("UPDATE review_queue SET state = 'alone', why = ?2 WHERE id = ?1 AND state = 'waiting'", params![id, format!("{e:#}")])?;
-                        return Ok(());
-                    }
+                    db.conn.execute("UPDATE review_queue SET state = 'alone', why = ?2 WHERE id = ?1 AND state = 'waiting'", params![id, format!("{e:#}")])?;
+                    if e.is::<crate::review::Disabled>() || e.is::<crate::project_yolo::SkipReview>() { return Ok(()); }
                     return Err(e);
                 }
                 if let Some((batch, rows)) = close_if_due(db, &s.rules, window, &s.repo, &s.reviewer, true)? {
@@ -791,6 +810,27 @@ mod tests {
             assert_eq!(row.why.as_deref(), Some(crate::review::DISABLED_NOTE));
             assert!(row.result.is_none());
         }
+    }
+
+    #[test]
+    fn project_mode_change_cancels_waiting_and_claimed_batches_before_launch() {
+        use crate::project_modes::{Mode, Options, PreReview};
+        let mut q = Queue::new();
+        let (_, a) = q.waiting("repo-mode", "One");
+        let (_, b) = q.waiting("repo-mode", "Two");
+        let rules = rules(&["nitely-test-do-not-launch"]);
+        let (batch, rows) = close_if_due(&q.db, &rules, Window::After(Duration::ZERO), "repo-mode", "claude", false).unwrap().unwrap();
+        q.db.set_project_review_mode("NIT", Mode::Custom, Options { pre_review: Some(PreReview::Individual), ..Default::default() }, 0, &Actor::Human).unwrap();
+        run_batch(&q.db, &rules, batch, &rows, false).unwrap();
+        for id in [a, b] {
+            assert_eq!(q.row(id).state, "alone");
+            assert!(q.row(id).result.is_none());
+            assert!(q.row(id).why.unwrap().contains("mode changed"));
+        }
+        let (_, c) = q.waiting("repo-mode", "Three");
+        let (_, d) = q.waiting("repo-mode", "Four");
+        assert!(close_if_due(&q.db, &rules, Window::After(Duration::ZERO), "repo-mode", "claude", false).unwrap().is_none());
+        for id in [c, d] { assert_eq!(q.row(id).state, "alone"); }
     }
 
     #[test]

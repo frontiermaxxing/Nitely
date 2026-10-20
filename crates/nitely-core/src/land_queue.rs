@@ -167,8 +167,19 @@ fn repo_key(root: &Path) -> String {
     crate::paths::normalize(&root.to_string_lossy())
 }
 
+// Explicit project batching replaces a reduced submit gate with a Full combined gate. The
+// legacy Basic review exemption remains individual because the stack has no equivalent proof.
+fn review_requires_individual(db: &Db, key: &str, review: Option<&crate::submit::ReviewRecord>) -> Result<bool> {
+    let Some(review) = review else { return Ok(false) };
+    Ok(review.verdict == "light" || (review.gate.as_ref().is_some_and(|g| g.plan.is_some())
+        && crate::project_modes::for_issue(db, key)?.is_none_or(|s| s.options().land_batch != Some(true))))
+}
+
 /// Why `key` lands alone even though it could wait in a queue, or None when it goes in the queue.
 pub fn lands_alone(db: &Db, root: &Path, pb: &Playbook, key: &str) -> Result<Option<String>> {
+    let mut current = pb.clone();
+    crate::project_modes::apply_issue(db, key, &mut current)?;
+    let pb = &current;
     if pb.land.batch == LandBatch::Off {
         return Ok(Some("the playbook lands each change alone".into()));
     }
@@ -187,7 +198,7 @@ pub fn lands_alone(db: &Db, root: &Path, pb: &Playbook, key: &str) -> Result<Opt
     let Some(review) = db.reviews(key)?.into_iter().next() else {
         return Ok(Some("it has no review yet".into()));
     };
-    if review.verdict=="light" || review.gate.as_ref().is_some_and(|g|g.plan.is_some()) {
+    if review_requires_individual(db, key, Some(&review))? {
         return Ok(Some("reduced verification is bound to this individual patch".into()));
     }
     if review.approver == "human" || !review.reasons.is_empty() || db.issue(key)?.is_some_and(|i| i.state == "Approved") {
@@ -323,17 +334,37 @@ pub fn run_queue(db: &mut Db, root: &Path) -> Result<()> {
     // live, so they wait again.
     db.conn.execute("UPDATE land_queue SET state = 'queued', run_id = NULL WHERE repo = ?1 AND state = 'running'", [repo_key(root)])?;
     loop {
-        let pb = Playbook::load(root)?;
         let waiting = db.land_queue(root)?;
         let Some(oldest) = waiting.first() else { return Ok(()) };
+        let mut pb = Playbook::load(root)?;
+        crate::project_modes::apply_issue(db, &oldest.issue, &mut pb)?;
+        // A project can switch to individual land while this row waits. The queue already
+        // holds the repository lock, so run the single-change path without reacquiring it.
+        if lands_alone(db, root, &pb, &oldest.issue)?.is_some() {
+            db.conn.execute("UPDATE land_queue SET state = 'running' WHERE id = ?1", [oldest.id])?;
+            let dir = root.to_string_lossy();
+            let opts = LandOptions { dir: &dir, issue_key: &oldest.issue, push: oldest.push, keep: oldest.keep, break_lock: false };
+            let report = land::queued_alone(db, root, &oldest.issue, &opts, &oldest.actor())?;
+            finish(db, oldest, if report.landed { "landed" } else { "sent_back" }, &report)?;
+            continue;
+        }
         // With a window, the run waits for more; the lock is held meanwhile, so nothing lands
         // around it.
         let window = pb.land.batch_window();
         let ready_at = oldest.queued_at + window.as_secs() as i64;
         if now() < ready_at {
-            std::thread::sleep(Duration::from_secs((ready_at - now()) as u64).min(window));
+            std::thread::sleep(Duration::from_millis(500));
+            continue; // Reload human settings while the batching window is open.
         }
-        let batch: Vec<Entry> = db.land_queue(root)?.into_iter().take(pb.land.batch_max()).collect();
+        let mut batch = Vec::new();
+        for entry in db.land_queue(root)?.into_iter().take(pb.land.batch_max()) {
+            if crate::project_modes::authority_for_issue(db, &entry.issue)? != pb.mode_authority
+                || lands_alone(db, root, &pb, &entry.issue)?.is_some() {
+                break; // Another policy gets its own run on the next iteration.
+            }
+            batch.push(entry);
+        }
+        if batch.is_empty() { continue; }
         let ids: Vec<i64> = batch.iter().map(|e| e.id).collect();
         if let Err(e) = run_batch(db, root, &pb, batch) {
             // An error of the run itself (not of one change): its changes are told, not retried
@@ -508,12 +539,22 @@ fn gate_prefix(db: &Db, root: &Path, stack: &Path, stacked: &[Stacked], n: usize
     let last = &stacked[n - 1];
     checkout(stack, &last.tip)?;
     let keys: Vec<&str> = stacked[..n].iter().map(|s| s.entry.issue.as_str()).collect();
+    let authority = crate::project_modes::authority_for_issue(db, keys[0])?;
+    for key in &keys {
+        anyhow::ensure!(crate::project_modes::authority_for_issue(db, key)? == authority, "project modes changed during the land batch; submit again");
+    }
     // A skipped prefix proves nothing about which change caused the failed full stack.
-    let gate = if allow_yolo {
+    let mut gate = if allow_yolo {
         playbook::run_automatic_gate(db, root, stack, &keys, &last.entry.actor(), crate::lanes::Kind::Land)?
     } else {
         playbook::run_gate_as(db, root, stack, Some(&last.entry.issue), &last.entry.actor(), crate::lanes::Kind::Land)?
     };
+    if !allow_yolo {
+        // Diagnostic prefixes deliberately run the Full gate; bind that stronger evidence to
+        // the same mode authority so it cannot be reused across a settings change.
+        gate.mode_authority = authority;
+    }
+    crate::project_modes::check_gate_authority(db, &keys, &gate)?;
     if gate.skipped.is_none() { *gates += 1; }
     Ok(gate)
 }
@@ -574,7 +615,8 @@ fn checkout(stack: &Path, commit: &str) -> Result<()> {
 fn stack_one(db: &Db, root: &Path, pb: &Playbook, stack: &Path, entry: &Entry, onto: &str, base: &str, below: &[String]) -> std::result::Result<Stacked, String> {
     let key = &entry.issue;
     let inner = || -> Result<Stacked> {
-        anyhow::ensure!(!db.reviews(key)?.first().is_some_and(|r| r.verdict == "light" || r.gate.as_ref().is_some_and(|g| g.plan.is_some())),
+        crate::project_modes::check_playbook_authority(db, &[key], pb)?;
+        anyhow::ensure!(!review_requires_individual(db, key, db.reviews(key)?.first())?,
             "reduced verification is bound to this individual patch; it must land alone");
         let (branch, worktree) = land::branch_of(root, key)?;
         if let Some(wt) = &worktree {
@@ -645,7 +687,8 @@ fn land_prefix(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stack: &Path, 
         }
     }
     let keys: Vec<&str> = stacked.iter().map(|s| s.entry.issue.as_str()).collect();
-    crate::project_yolo::check_gate_authority(db, &keys, gate)?;
+    crate::project_modes::check_gate_authority(db, &keys, gate)?;
+    crate::project_modes::check_playbook_authority(db, &keys, pb)?;
     let current = Playbook::load(root)?;
     let mut refused = false;
     for s in &stacked {
@@ -653,7 +696,9 @@ fn land_prefix(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stack: &Path, 
         // signature, changed review, or newly required human approval cannot ride a green gate.
         checkout(stack, &s.tip)?;
         let authorization = (|| -> Result<()> {
-            anyhow::ensure!(!db.reviews(&s.entry.issue)?.first().is_some_and(|r| r.verdict == "light" || r.gate.as_ref().is_some_and(|g| g.plan.is_some())),
+            anyhow::ensure!(lands_alone(db, root, &current, &s.entry.issue)?.is_none(),
+                "the current project policy requires this change to land individually");
+            anyhow::ensure!(!review_requires_individual(db, &s.entry.issue, db.reviews(&s.entry.issue)?.first())?,
                 "reduced verification is bound to this individual patch; it must land alone");
             anyhow::ensure!(unchanged_submodules(root, &current, &s.from, &s.tip)?,
                 "the managed submodule baseline changed; this change must land alone");
@@ -671,6 +716,7 @@ fn land_prefix(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stack: &Path, 
         db.conn.execute("UPDATE land_queue SET state = 'queued', run_id = NULL WHERE run_id = ?1 AND state = 'running'", [run])?;
         return Ok(());
     }
+    crate::project_modes::check_playbook_authority(db, &keys, pb)?;
     anyhow::ensure!(land::rev(root, &base)? == before, "{base} moved after the gate; land again");
     land::fast_forward_main(root, &tip).with_context(|| land::refused_fast_forward(root))?;
     let head = git(root, &["rev-parse", "--short", "HEAD"])?.trim().to_string();
@@ -1011,6 +1057,46 @@ batch = "waiting"
         assert!(f.error(&b).contains("not signed"), "{}", f.error(&b));
         assert_eq!(f.entry(&a).state, "queued");
         std::fs::remove_dir_all(&f.base).ok();
+    }
+
+    #[test]
+    fn explicit_basic_submissions_can_batch_only_with_a_full_combined_gate() {
+        use crate::project_modes::{Mode, Options};
+        let mut f = fixture();
+        let path = f.repo.join(playbook::PLAYBOOK_PATH);
+        let policy = std::fs::read_to_string(&path).unwrap().replace("commands = [\"exit 0\"]", "commands = [\"echo full-batch\"]");
+        std::fs::write(&path, format!("{policy}\n[verification]\nversion=1\nbasic=['echo basic-submit']\n")).unwrap();
+        sh(&f.repo, &["commit", "-qam", "separate Basic and Full checks"]);
+        f.db.set_project_review_mode("NIT", Mode::Fast, Options::default(), 0, &Actor::Human).unwrap();
+        let (a, _) = f.submitted("First Basic change", &[("first.txt", "one")]);
+        let (b, _) = f.submitted("Second Basic change", &[("second.txt", "two")]);
+        for key in [&a, &b] {
+            let review = f.db.reviews(key).unwrap().remove(0);
+            assert_eq!(review.verdict, "disabled");
+            assert_eq!(review.gate.as_ref().unwrap().plan.as_ref().unwrap().effective, "basic");
+            assert!(lands_alone(&f.db, &f.repo, &Playbook::load(&f.repo).unwrap(), key).unwrap().is_none());
+        }
+        f.queue_and_run(&[&a, &b]);
+        assert!(f.on_main("first.txt") && f.on_main("second.txt"));
+        assert_eq!(f.runs().last().unwrap().gates, 1);
+        let report: Landed = serde_json::from_value(f.entry(&a).result.unwrap()).unwrap();
+        let gate = report.gate.unwrap();
+        assert!(gate.passed && gate.plan.is_none());
+        assert!(gate.results.iter().any(|r| r.command == "echo full-batch"));
+    }
+
+    #[test]
+    fn queued_mode_change_routes_individually_and_refuses_stale_submission() {
+        use crate::project_modes::{Mode, Options};
+        let mut f = fixture();
+        let (a, _) = f.submitted("Queued change", &[("queued.txt", "queued")]);
+        enqueue(&f.db, &f.repo, &a, &f.opts(), &f.actor).unwrap();
+        f.db.set_project_review_mode("NIT", Mode::Custom, Options { land_batch: Some(false), ..Default::default() }, 0, &Actor::Human).unwrap();
+        run_queue(&mut f.db, &f.repo).unwrap();
+        assert_eq!(f.entry(&a).state, "sent_back");
+        assert!(!f.on_main("queued.txt"));
+        assert!(f.runs().is_empty(), "a queued row cannot retain an obsolete batched-land policy");
+        assert!(f.error(&a).contains("mode changed"), "{}", f.error(&a));
     }
 
     #[test]

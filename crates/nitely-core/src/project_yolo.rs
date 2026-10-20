@@ -1,7 +1,7 @@
 //! Human-controlled project bypass for automatic verification. Manual checks still run.
 use crate::{Db, issues::Actor, playbook::{self, GateResult}};
 use anyhow::{bail, Context, Result};
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -15,30 +15,17 @@ pub struct ProjectYolo {
 }
 
 fn read(conn: &Connection, project: &str) -> Result<ProjectYolo> {
-    conn.query_row("SELECT p.key, COALESCE(y.enabled, 0), COALESCE(y.revision, 0) FROM project p LEFT JOIN project_yolo y ON y.project = p.key WHERE p.key = ?1 COLLATE NOCASE", [project], |r| Ok(ProjectYolo { project: r.get(0)?, enabled: r.get(1)?, revision: r.get(2)? }))
-        .optional()?.with_context(|| format!("no project {project}"))
+    let s=crate::project_modes::read(conn,project)?;
+    Ok(ProjectYolo{project:s.project,enabled:s.mode==crate::project_modes::Mode::Yolo,revision:s.revision})
 }
-
 impl Db {
-    pub fn project_yolo(&self, project: &str) -> Result<ProjectYolo> {
-        let project = self.project(project)?.with_context(|| format!("no project {project}"))?.key;
-        read(&self.conn, &project)
-    }
-
-    pub fn set_project_yolo(&mut self, project: &str, enabled: bool, expected_revision: i64, actor: &Actor) -> Result<ProjectYolo> {
-        if *actor != Actor::Human { bail!("only the person changes YOLO mode, in project settings"); }
-        let project = self.project(project)?.with_context(|| format!("no project {project}"))?.key;
-        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let before = read(&tx, &project)?;
-        if before.revision != expected_revision { bail!("YOLO settings changed; reload them before saving"); }
-        if before.enabled != enabled {
-            let at = crate::db::now();
-            tx.execute("INSERT INTO project_yolo (project, enabled, revision, updated_at, updated_by) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(project) DO UPDATE SET enabled = excluded.enabled, revision = excluded.revision, updated_at = excluded.updated_at, updated_by = excluded.updated_by", params![before.project, enabled, before.revision + 1, at, actor.id()])?;
-            tx.execute("INSERT INTO event (ts, actor, type, summary, payload) VALUES (?1, ?2, 'project_yolo_changed', ?3, ?4)", params![at, actor.id(), format!("{} YOLO mode {}", before.project, if enabled { "enabled: automatic gates and PR review skipped" } else { "disabled: normal verification required" }), serde_json::json!({"project": before.project, "before": before, "enabled": enabled}).to_string()])?;
-        }
-        let after = read(&tx, &project)?;
-        tx.commit()?;
-        Ok(after)
+    pub fn project_yolo(&self,project:&str)->Result<ProjectYolo> {read(&self.conn,project)}
+    pub fn set_project_yolo(&mut self,project:&str,enabled:bool,expected_revision:i64,actor:&Actor)->Result<ProjectYolo> {
+        let before=self.project_yolo(project)?;
+        let mode=if enabled {crate::project_modes::Mode::Yolo}else{crate::project_modes::Mode::Custom};
+        self.set_project_review_mode(project,mode,Default::default(),expected_revision,actor)?;
+        if before.enabled!=enabled {self.log_event(actor,None,None,"project_yolo_changed",&format!("{project} YOLO mode {}",if enabled {"enabled"}else{"disabled"}))?;}
+        self.project_yolo(project)
     }
 }
 
@@ -50,34 +37,38 @@ pub(crate) fn enabled_for_issue(db: &Db, key: &str) -> Result<bool> {
 /// Every member of a stack must opt in; another project's settings never skip its checks.
 pub(crate) fn all_enabled(db: &Db, keys: &[&str]) -> Result<bool> {
     if keys.is_empty() { return Ok(false); }
-    for key in keys { if !enabled_for_issue(db, key)? { return Ok(false); } }
+    for key in keys { if !crate::project_modes::tests_off(db, key)? { return Ok(false); } }
     Ok(true)
 }
 
 pub(crate) fn skipped_gate(db: &Db, worktree: &Path, keys: &[&str], actor: &Actor) -> Result<GateResult> {
     let commit = playbook::git(worktree, &["rev-parse", "HEAD"])?.trim().to_string();
-    for key in keys { db.log_event(actor, Some(key), Some(&worktree.to_string_lossy()), "gate_skipped", NOTE)?; }
-    Ok(GateResult { passed: false, plan: None, skipped: Some(NOTE.into()), commit, results: vec![], warnings: vec![], flaked: vec![], lane_run: None })
+    let note=if keys.iter().all(|k|enabled_for_issue(db,k).unwrap_or(false)) {NOTE}else{"Automatic tests disabled by project review mode"};
+    for key in keys { db.log_event(actor, Some(key), Some(&worktree.to_string_lossy()), "gate_skipped", note)?; }
+    let mode_authority=keys.first().map(|key|crate::project_modes::authority_for_issue(db,key)).transpose()?.flatten();
+    Ok(GateResult { mode_authority, passed: false, plan: None, skipped: Some(note.into()), commit, results: vec![], warnings: vec![], flaked: vec![], lane_run: None })
 }
 
-pub(crate) fn check_gate_authority(db: &Db, keys: &[&str], gate: &GateResult) -> Result<()> {
-    if gate.skipped.is_some() && !all_enabled(db, keys)? {
-        bail!("YOLO mode was disabled; submit again with the normal gate and PR review before landing");
-    }
-    Ok(())
-}
 
 #[derive(Debug, Clone)]
-pub struct ReviewGuard { pub database: PathBuf, pub project: String }
+pub struct ReviewGuard { pub database: PathBuf, pub project: String, pub authority: Option<String> }
 impl ReviewGuard {
     pub(crate) fn for_issue(db: &Db, key: &str) -> Result<Option<Self>> {
         let Some(project) = db.issue(key)?.and_then(|i| i.project) else { return Ok(None) };
         let database = db.conn.path().context("review needs the project's persistent settings database")?;
-        Ok(Some(Self { database: database.into(), project }))
+        Ok(Some(Self { database: database.into(), authority: db.project_review_mode(&project)?.authority()?, project }))
+    }
+    pub(crate) fn enabled_override(&self)->Result<Option<bool>> {
+        let conn=Connection::open_with_flags(&self.database,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        Ok(crate::project_modes::read(&conn,&self.project)?.options().pre_review.map(|r|r!=crate::project_modes::PreReview::Off))
     }
     pub(crate) fn require_review(&self) -> Result<()> {
         let conn = Connection::open_with_flags(&self.database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        if read(&conn, &self.project)?.enabled { bail!(SkipReview); }
+        let mode=crate::project_modes::read(&conn,&self.project)?;
+        if mode.options().pre_review==Some(crate::project_modes::PreReview::Off) {
+            if mode.mode==crate::project_modes::Mode::Yolo {bail!(SkipReview);} else {bail!(crate::review::Disabled);}
+        }
+        if mode.authority()?!=self.authority {bail!("project review mode changed before reviewer launch; submit again");}
         Ok(())
     }
 }
@@ -136,12 +127,12 @@ mod tests {
         let path = dir.join("test.db");
         let mut db = Db::open(&path).unwrap();
         db.create_project("APP", "App").unwrap();
-        let guard = ReviewGuard { database: path, project: "APP".into() };
+        let guard = ReviewGuard { database: path, project: "APP".into(), authority: None };
         guard.require_review().unwrap();
         db.set_project_yolo("APP", true, 0, &Actor::Human).unwrap();
         assert!(guard.require_review().unwrap_err().is::<SkipReview>());
         db.set_project_yolo("APP", false, 1, &Actor::Human).unwrap();
-        guard.require_review().unwrap();
+        assert!(guard.require_review().is_err(), "a queued reviewer cannot retain stale mode authority");
         drop(db);
         std::fs::remove_dir_all(dir).ok();
     }

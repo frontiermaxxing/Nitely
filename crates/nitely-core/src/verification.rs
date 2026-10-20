@@ -176,6 +176,9 @@ fn blob(repo: &Path, revision: &str, path: &str) -> Result<String> {
 /// Uses immutable integration policy, never the candidate's edited rules. On uncertainty,
 /// report Full; do not turn a classifier failure into a validation exemption.
 pub fn assess(repo: &Path, base: &str, head: &str, issue: &IssueRecord) -> Result<Plan> {
+    assess_with_mode(repo,base,head,issue,None)
+}
+fn assess_with_mode(repo:&Path,base:&str,head:&str,issue:&IssueRecord,settings:Option<&crate::project_modes::ProjectReviewMode>)->Result<Plan> {
     let base = git(repo, &["rev-parse", "--verify", &format!("{base}^{{commit}}")])?.trim().to_string();
     let head = git(repo, &["rev-parse", "--verify", &format!("{head}^{{commit}}")])?.trim().to_string();
     let policy_commit = base;
@@ -190,7 +193,7 @@ pub fn assess(repo: &Path, base: &str, head: &str, issue: &IssueRecord) -> Resul
         effective: "sensitive".into(), depth: "Full".into(), shadow: true, reasons: vec![], files: vec![],
         enforcement: "Shadow only: the existing full gate, review and approval rules still apply.".into(),
     };
-    let attempted = assess_inner(repo, issue, &mut plan);
+    let attempted = assess_inner(repo, issue, &mut plan,settings);
     if let Err(error) = attempted { plan.reasons.push(format!("Full fallback: {error:#}")); }
     // Retain affected-test advice separately: an input map does not overrule a safety floor.
     plan.affected = Some(crate::affected_tests::select_with_policy(repo,&plan.base,&plan.head,&plan.policy_commit)?);
@@ -205,7 +208,8 @@ pub fn assess(repo: &Path, base: &str, head: &str, issue: &IssueRecord) -> Resul
         plan.reasons.push("One mapped component within five files and 200 changed lines.".into());
     }
     if !plan.shadow && matches!(plan.effective.as_str(),"inert"|"contained"|"standard") {
-        let pb=Playbook::parse(&blob(repo,&plan.policy_commit,PLAYBOOK_PATH)?)?;
+        let mut pb=Playbook::parse(&blob(repo,&plan.policy_commit,PLAYBOOK_PATH)?)?;
+        overlay_verification(settings,&mut pb);
         if plan.effective=="inert" {
             plan.commands=pb.verification.basic.clone();
         } else if let Some(selection)=plan.affected.as_ref().filter(|s|!s.full) {
@@ -233,13 +237,14 @@ fn changed_lines(repo:&Path,base:&str,head:&str)->Result<usize> {
         .try_fold(0usize,|total,line| { let mut cells=line.split('\t'); Ok(total+cells.next().context("missing count")?.parse::<usize>()?+cells.next().context("missing count")?.parse::<usize>()?) })
 }
 
-fn assess_inner(repo: &Path, issue: &IssueRecord, plan: &mut Plan) -> Result<()> {
+fn assess_inner(repo: &Path, issue: &IssueRecord, plan: &mut Plan,settings:Option<&crate::project_modes::ProjectReviewMode>) -> Result<()> {
     let policy = blob(repo, &plan.policy_commit, PLAYBOOK_PATH).context("committed integration policy unavailable")?;
-    let pb = Playbook::parse(&policy)?;
+    let mut pb = Playbook::parse(&policy)?;
+    overlay_verification(settings,&mut pb);
     plan.policy_fingerprint=Some(crate::verification_audit::policy_fingerprint(policy.as_bytes(),CLASSIFIER));
     if pb.unknown.iter().any(|key| key.starts_with("verification")) { bail!("unknown verification policy fields"); }
     let rules = &pb.verification;
-    if !(10..=100).contains(&rules.audit_percent) {bail!("audit_percent must be between 10 and 100");}
+    if rules.audit_percent!=0 && !(10..=100).contains(&rules.audit_percent) {bail!("audit_percent must be zero or between 10 and 100");}
     plan.audit_percent=rules.audit_percent;
     if !matches!(rules.mode.as_str(),"shadow"|"active") || rules.version != 1 { bail!("verification policy version 1 is not configured"); }
     plan.shadow = rules.mode != "active";
@@ -299,8 +304,48 @@ fn assess_inner(repo: &Path, issue: &IssueRecord, plan: &mut Plan) -> Result<()>
     Ok(())
 }
 
+fn overlay_verification(settings:Option<&crate::project_modes::ProjectReviewMode>,pb:&mut Playbook) {
+    let Some(settings)=settings else{return;};let o=settings.options();
+    if let Some(depth)=o.test_depth {
+        pb.verification.mode=if matches!(depth,crate::project_modes::TestDepth::Risk|crate::project_modes::TestDepth::Basic) {"active"}else{"shadow"}.into();
+        pb.verification.version=1;
+    }
+    if let Some(n)=o.audit_percent {pb.verification.audit_percent=n;}
+}
+fn project_plan(db:&Db,repo:&Path,base:&str,head:&str,issue:&IssueRecord)->Result<Plan> {
+    let settings=issue.project.as_deref().map(|p|db.project_review_mode(p)).transpose()?;
+    let mut plan=assess_with_mode(repo,base,head,issue,settings.as_ref())?;
+    if let Some(settings)=settings {
+        let o=settings.options();
+        if let Some(authority)=settings.authority()? {
+            plan.policy_fingerprint=Some(crate::verification_audit::policy_fingerprint(format!("{}:{authority}",plan.policy_fingerprint.as_deref().unwrap_or("")).as_bytes(),CLASSIFIER));
+        }
+        match o.test_depth {
+            Some(crate::project_modes::TestDepth::Off|crate::project_modes::TestDepth::Full)=>{
+                plan.commands.clear();plan.depth=if o.test_depth==Some(crate::project_modes::TestDepth::Off) {"Off"}else{"Full"}.into();
+                plan.enforcement=if plan.depth=="Off" {"Automatic tests disabled by project review mode; no passing evidence."}else{"Full configured gate required by project review mode."}.into();
+            }
+            Some(crate::project_modes::TestDepth::Basic)=>{
+                let pb=Playbook::parse(&blob(repo,&plan.policy_commit,PLAYBOOK_PATH)?)?;
+                if pb.verification.basic.is_empty() {
+                    plan.commands.clear();plan.depth="Full".into();plan.reasons.push("Basic commands are not configured; Full gate required.".into());
+                }else{
+                    plan.commands=pb.verification.basic;
+                    plan.commands.insert(0,format!("git diff --check {} {}",plan.base,plan.head));
+                    plan.effective="basic".into();plan.depth="Basic".into();plan.shadow=false;
+                    plan.rule_ids=vec!["project-mode:basic".into()];
+                    plan.enforcement="Configured Basic commands selected by human project mode; review is independently configured.".into();
+                }
+            }
+            _=>{}
+        }
+        if let Some(n)=o.audit_percent {plan.audit_percent=n;}
+    }
+    Ok(plan)
+}
+
 pub fn assess_and_record(db:&mut Db,repo:&Path,base:&str,head:&str,issue:&IssueRecord,actor:&Actor)->Result<Plan> {
-    let mut plan=assess(repo,base,head,issue)?;
+    let mut plan=project_plan(db,repo,base,head,issue)?;
     if let Some(project)=&issue.project {
         let disabled=crate::verification_audit::disabled_rules(db,project)?;
         if plan.rule_ids.iter().any(|r|disabled.contains(r)) {
@@ -308,7 +353,7 @@ pub fn assess_and_record(db:&mut Db,repo:&Path,base:&str,head:&str,issue:&IssueR
             plan.commands.clear();
             plan.reasons.push("A confirmed escape disabled a matching lowering rule.".into());
         }
-        if matches!(plan.effective.as_str(),"inert"|"contained") {
+        if plan.audit_percent>0 && matches!(plan.effective.as_str(),"inert"|"contained"|"basic") {
             let branch=git(repo,&["rev-parse","--abbrev-ref","HEAD"])?;
             let (vendor,_)=crate::git::parse_branch(branch.trim());
             if let Some(candidate)=audit_candidate(repo,issue,&plan,vendor.as_deref().unwrap_or(actor.id()))? {
@@ -325,14 +370,16 @@ pub fn assess_and_record(db:&mut Db,repo:&Path,base:&str,head:&str,issue:&IssueR
 pub(crate) fn execution_plan(db:&Db,root:&Path,worktree:&Path,key:&str)->Result<Option<Plan>> {
     let issue=db.issue(key)?.context("verification issue disappeared")?;
     let base=Playbook::load(root)?.integration_branch().to_string();
-    let plan=assess(worktree,&base,"HEAD",&issue)?;
+    let plan=project_plan(db,worktree,&base,"HEAD",&issue)?;
     if plan.shadow || plan.commands.is_empty() {return Ok(None);}
     if let Some(project)=issue.project.as_deref() {
         let disabled=crate::verification_audit::disabled_rules(db,project)?;
         if plan.rule_ids.iter().any(|r|disabled.contains(r)) {return Ok(None);}
     }
-    let policy=Playbook::parse(&blob(worktree,&plan.policy_commit,PLAYBOOK_PATH)?)?;
-    if crate::verification_backstop::reduced_ready(db,root,&policy.verification.backstop,crate::db::now()).is_err() {return Ok(None);}
+    let mut policy=Playbook::parse(&blob(worktree,&plan.policy_commit,PLAYBOOK_PATH)?)?;
+    crate::project_modes::apply_issue(db,key,&mut policy)?;
+    let explicit_depth=crate::project_modes::for_issue(db,key)?.and_then(|s|s.options().test_depth);
+    if (explicit_depth.is_none() || policy.verification.backstop.enabled) && crate::verification_backstop::reduced_ready(db,root,&policy.verification.backstop,crate::db::now()).is_err() {return Ok(None);}
     Ok(Some(plan))
 }
 
@@ -349,7 +396,7 @@ pub(crate) fn check_gate_authority(db:&Db,root:&Path,worktree:&Path,key:&str,gat
 }
 
 pub(crate) fn validate_selected(plan:&Plan,results:&[crate::playbook::CommandResult])->Result<()> {
-    if plan.effective=="inert" {return Ok(());}
+    if matches!(plan.effective.as_str(),"inert"|"basic") {return Ok(());}
     let selection=plan.affected.as_ref().context("affected selection missing")?;
     for check in &selection.checks {
         let output=|command:&str|->Result<&str> {
@@ -372,6 +419,7 @@ pub(crate) fn validate_selected(plan:&Plan,results:&[crate::playbook::CommandRes
     Ok(())
 }
 pub(crate) fn audit_candidate(repo:&Path,issue:&IssueRecord,plan:&Plan,author:&str)->Result<Option<crate::verification_audit::Candidate>> {
+    if plan.audit_percent==0 || !matches!(plan.effective.as_str(),"inert"|"contained"|"basic") {return Ok(None);}
     let (Some(project),Some(policy))=(issue.project.clone(),plan.policy_fingerprint.clone()) else {return Ok(None);};
     Ok(Some(crate::verification_audit::Candidate {repo:crate::verification_audit::repository_id(repo)?,project,issue_key:issue.key.clone(),policy,author:author.into(),declarer:plan.declared_by.clone(),declaration_source:plan.declared_source.clone(),declared:plan.declared.clone(),effective:plan.effective.clone(),rules:plan.rule_ids.clone()}))
 }
@@ -513,7 +561,7 @@ mod tests {
         assert_eq!(plan.effective,"inert");
         assert_eq!(plan.files.len(),1,"unrelated main work must not enter the candidate diff");
         assert_eq!(plan.commands.last().unwrap(),"echo syntax-checked");
-        let gate=crate::playbook::GateResult{passed:true,commit:plan.head.clone(),plan:Some(plan),skipped:None,results:vec![],warnings:vec![],flaked:vec![],lane_run:None};
+        let gate=crate::playbook::GateResult{mode_authority:None,passed:true,commit:plan.head.clone(),plan:Some(plan),skipped:None,results:vec![],warnings:vec![],flaked:vec![],lane_run:None};
         check_gate_authority(&db,&repo,&repo,&issue.key,&gate).unwrap();
         std::fs::write(repo.join("src/math.rs"),"// clearer\nfn value()->i32 { 2 }").unwrap();
         g(&repo,&["add","src/math.rs"]);g(&repo,&["commit","-m","behavior"]);

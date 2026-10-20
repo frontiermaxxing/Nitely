@@ -1026,7 +1026,13 @@ pub fn gate_fresh(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, iss
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn gate_fresh_checked(db:&Db,repo_root:&Path,pb:&Playbook,worktree:&Path,issue:Option<&str>,kind:Kind,steps:&[(String,Option<String>)],actor:&Actor,keys:&[&str])->Result<GateRun> {
+    gate_inner(db,repo_root,pb,worktree,issue,kind,steps,actor,false,keys)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn gate_inner(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Option<&str>, kind: Kind, steps: &[(String, Option<String>)], actor: &Actor, reuse: bool, yolo_keys: &[&str]) -> Result<GateRun> {
+    crate::project_modes::check_playbook_authority(db,yolo_keys,pb)?;
     // What is committed, as land will build it: the branch head, never a commit made for the
     // request, so the gate reports the commit the review sees.
     let top = PathBuf::from(git(worktree, &["rev-parse", "--show-toplevel"])?.trim());
@@ -1084,6 +1090,7 @@ fn gate_inner(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: 
         // the cap it was admitted with (NIT-323).
         let mut peak: Option<u64> = None;
         for (command, skip) in steps {
+            crate::project_modes::check_playbook_authority(db,yolo_keys,pb)?;
             if crate::project_yolo::all_enabled(db, yolo_keys)? {
                 yolo_skipped = true;
                 // Never an exit-code-zero lane cache entry for unchecked work.
@@ -2116,6 +2123,7 @@ fn take_turn(
     let mut waits_for_memory = false;
     'turn: loop {
         crate::project_yolo::check_queued_gate(db, id, yolo_keys)?;
+        crate::project_modes::check_playbook_authority(db,yolo_keys,pb)?;
         // The budget read again on every look, so a change in Settings counts at once (NIT-291).
         let slots = slots();
         if let Some(turn) = my_turn_is(db, id, slots, &mut alive)? {
@@ -2262,11 +2270,13 @@ pub(crate) fn hold_machine_checked<'a>(db: &'a Db, repo_root: &Path, worktree: &
         params![project.to_uppercase(), repo_root.to_string_lossy(), issue, actor.id(), kind.as_str(), head, tree, command, now(), std::process::id(), priority, slots, crate::procs::me().1, SCHEDULER],
     )?;
     let id = db.conn.last_insert_rowid();
+    let authorities=yolo_keys.iter().map(|key|crate::project_modes::authority_for_issue(db,key)).collect::<Result<Vec<_>>>()?;
     let mut waits_for_memory = false;
     let taken = (|| -> Result<SlotLock> {
         let mut alive = |r: &Requester| !r.gone();
         loop {
             crate::project_yolo::check_queued_gate(db, id, yolo_keys)?;
+            for (key,authority) in yolo_keys.iter().zip(&authorities) {if &crate::project_modes::authority_for_issue(db,key)?!=authority {bail!("project review mode changed while waiting for memory; submit again");}}
             let slots = slots_now();
             if my_turn(db, id, slots, &mut alive)? {
                 if let Some(slot) = (1..=slots.max(1)).find_map(|k| try_slot(db, k).ok().flatten()) {

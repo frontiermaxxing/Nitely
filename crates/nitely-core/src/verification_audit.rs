@@ -115,7 +115,7 @@ fn validate(candidate: &Candidate, percent: u8) -> Result<()> {
     if candidate.policy.len() != 64 || !candidate.policy.bytes().all(|b| b.is_ascii_hexdigit()) {
         bail!("audit policy must be an authoritative SHA-256 fingerprint");
     }
-    if !matches!(candidate.effective.as_str(), "inert" | "contained") { bail!("only reduced candidates enter audit sampling"); }
+    if !matches!(candidate.effective.as_str(), "inert" | "contained" | "basic") { bail!("only reduced candidates enter audit sampling"); }
     if candidate.rules.is_empty() || candidate.rules.len() > 100 || candidate.rules.iter().any(|r| r.is_empty() || r.len() > 256) {
         bail!("audit candidate needs 1–100 bounded lowering-rule identities");
     }
@@ -225,6 +225,9 @@ pub fn run_next(db:&mut Db, project:&str, repo:&str, execute:impl FnOnce(&AuditJ
 /// Use a dedicated clean checkout at the landed commit, never a moving integration checkout.
 /// Existing review launch checks and policy settings still apply; unavailable review is failure.
 pub fn full_review(job:&AuditJob, checkout:&Path, rules:&ReviewRules) -> Result<Review> {
+    full_review_checked(job,checkout,rules,&mut ||rules.require_enabled())
+}
+pub(crate) fn full_review_checked(job:&AuditJob,checkout:&Path,rules:&ReviewRules,authority:&mut dyn FnMut()->Result<()>)->Result<Review> {
     use crate::playbook::git;
     if repository_id(checkout)?!=job.repo { bail!("audit checkout belongs to another repository"); }
     let check=||->Result<()> {
@@ -239,7 +242,8 @@ pub fn full_review(job:&AuditJob, checkout:&Path, rules:&ReviewRules) -> Result<
     if !choice.independent { bail!("audit needs an independent peer reviewer"); }
     let mut rules=rules.clone();
     rules.context=format!("Post-landing full audit of {}. Review the entire {}..{} diff; no earlier review or reduced checks replace this audit.\n{}",job.issue_key,job.base,job.head,rules.context);
-    let result=rules.run(&choice.reviewer,checkout,&job.base,None)?;
+    let result=rules.run_checked(&choice.reviewer,checkout,&job.base,None,&mut ||{authority()?;check()})?;
+    authority()?;
     check()?;
     Ok(result)
 }
@@ -478,6 +482,11 @@ mod tests {
         rules.commands.insert("fake".into(),vec![crate::playbook::posix_sh(),"-c".into(),"prompt=$(cat); case \"$prompt\" in *'Post-landing full audit'*'Review the entire'*) printf 'Complete diff inspected.\\nVERDICT: clean\\n' ;; *) exit 4 ;; esac".into()]);
         let done=run_next(&mut db,"APP",&c.repo,|j|full_review(j,&repo,&rules)).unwrap().unwrap();
         assert_eq!(done.state,"passed","{:?}",done.error);
-        assert_eq!(done.result.unwrap().reviewer,"fake");
+        assert_eq!(done.result.as_ref().unwrap().reviewer,"fake");
+        rules.enabled=false;
+        assert!(full_review(&done,&repo,&rules).is_err(),"legacy PR switch remains enforced for legacy audit callers");
+        let independent=full_review_checked(&done,&repo,&rules,&mut ||Ok(())).unwrap();
+        assert_eq!(independent.verdict,"pass","an independently enabled audit does not inherit the pre-merge review switch");
+        assert!(full_review_checked(&done,&repo,&rules,&mut ||bail!("audit settings changed")).unwrap_err().to_string().contains("audit settings changed"));
     }
 }

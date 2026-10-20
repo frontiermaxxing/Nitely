@@ -54,6 +54,7 @@ pub mod procs;
 pub mod proposals;
 pub mod projects;
 pub mod project_yolo;
+pub mod project_modes;
 pub mod relay;
 pub mod report_text;
 pub mod release_notes;

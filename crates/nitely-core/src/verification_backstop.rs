@@ -75,7 +75,7 @@ pub fn reduced_ready(db: &Db, repo: &Path, rules: &Rules, at: i64) -> Result<()>
 fn due(h:&Health,r:&Rules,at:i64)->bool {
     if h.observed_head==h.verified_head.as_deref().unwrap_or("") { return false; }
     h.verified_head.is_none() || h.reduced_count>=r.landings.max(1)
-        || (h.reduced_count>0 && at.saturating_sub(h.pending_since)>=r.delay_seconds.clamp(1,1800))
+        || (h.reduced_count>0 && at.saturating_sub(h.pending_since)>=r.delay_seconds.clamp(1,86400))
         || at.saturating_sub(h.checked_at)>=r.nightly_seconds.clamp(1,86400)
 }
 
@@ -138,7 +138,7 @@ fn optional_policy(db:&Db,repo:&Path,head:&str)->Result<Option<(Playbook,String)
     let contents=git(repo,&["show",&format!("{head}:{}",playbook::PLAYBOOK_PATH)]).ok();
     if let Some(contents)=&contents {
         let document:toml::Value=toml::from_str(contents)?;
-        if document.get("verification").is_some() {return committed_policy(repo,head).map(Some);}
+        if document.get("verification").is_some() || health(db,repo)?.is_some_and(|h|db.project_review_mode(&h.project).map(|m|m.explicit).unwrap_or(false)) {return committed_policy(repo,head).map(Some);}
     }
     let jobs:bool=db.conn.query_row("SELECT EXISTS(SELECT 1 FROM verification_audit WHERE repo=?1)",[&id],|r|r.get(0))?;
     if health(db,repo)?.is_some() || jobs {
@@ -147,9 +147,17 @@ fn optional_policy(db:&Db,repo:&Path,head:&str)->Result<Option<(Playbook,String)
     }
     Ok(None)
 }
+fn automatic_policy(db:&Db,repo:&Path,head:&str,project:&str)->Result<Option<(Playbook,String)>> {
+    let settings=db.project_review_mode(project)?;
+    let policy=if settings.options().full_backstop.is_some() {Some(committed_policy(repo,head)?)}else{optional_policy(db,repo,head)?};
+    let Some((mut pb,mut identity))=policy else{return Ok(None);};
+    crate::project_modes::apply_project(db,project,&mut pb)?;
+    if let Some(authority)=settings.authority()? {identity.push_str(&format!(":{authority}"));}
+    Ok(Some((pb,identity)))
+}
 pub(crate) fn on_landed(db:&mut Db,repo:&Path,issue:&crate::issues::IssueRecord,land:&crate::land::Landed)->Result<()> {
     let Some(head)=&land.head else { return Ok(()); };
-    let Some((pb,_))=optional_policy(db,repo,head)? else {return Ok(());};
+    let Some((pb,_))=automatic_policy(db,repo,head,issue.project.as_deref().unwrap_or(""))? else {return Ok(());};
     if !pb.verification.backstop.enabled { return Ok(()); }
     let commands:Vec<_>=pb.gate.commands.iter().chain(pb.gate.steps.iter().map(|s|&s.run)).collect();
     let full=!commands.is_empty() && land.gate.as_ref().is_some_and(|g|g.passed && commands.iter().all(|c|g.results.iter().any(|r|r.command==c.as_str() && r.ok && (!r.skipped || r.output.starts_with("skipped: this tree passed it in lane run ")))));
@@ -179,9 +187,18 @@ fn tick_all_inner(db:&mut Db,config:&Config,force:bool)->Result<()> {
 }
 fn run_audit(db:&mut Db,repo:&Path,project:&str,branch:&str)->Result<()> {
     let head=git(repo,&["rev-parse",&format!("refs/heads/{branch}")])?;
-    let Some((mut pb,_))=optional_policy(db,repo,head.trim())? else {return Ok(());};
+    let Some((mut pb,_))=automatic_policy(db,repo,head.trim(),project)? else {return Ok(());};
+    if pb.verification.audit_percent==0 {return Ok(());}
     pb.review.policy_root=Some(repo.to_path_buf());
-    crate::verification_audit::run_next(db,project,&repo_id(repo)?,|job|with_checkout(repo,&job.head,|wt|crate::verification_audit::full_review(job,wt,&pb.review)))?;
+    let settings=db.project_review_mode(project)?;
+    let expected=settings.authority()?;
+    let connection=rusqlite::Connection::open_with_flags(db.conn.path().context("audit needs a persistent settings database")?,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    crate::verification_audit::run_next(db,project,&repo_id(repo)?,|job|with_checkout(repo,&job.head,|wt|crate::verification_audit::full_review_checked(job,wt,&pb.review,&mut || {
+        let current=crate::project_modes::read(&connection,project)?;
+        if current.authority()?!=expected || current.options().audit_percent==Some(0) {bail!("project audit settings changed before launch; retry under current policy");}
+        if current.options().audit_percent.is_none() {pb.review.require_enabled()?;}
+        Ok(())
+    })))?;
     Ok(())
 }
 pub fn tick(db:&mut Db,config:&Config,repo:&Path,project:&str,branch:&str)->Result<()> {
@@ -191,10 +208,9 @@ fn tick_inner(db:&mut Db,config:&Config,repo:&Path,project:&str,branch:&str,forc
     let lock_path=PathBuf::from(repo_id(repo)?).join("nitely-verification.lock");
     let Some(_lock)=crate::land::Lock::try_take(&lock_path,"verification",false)? else { return Ok(()); };
     let head=git(repo,&["rev-parse",&format!("refs/heads/{branch}")])?.trim().to_string();
-    let Some((pb,policy))=optional_policy(db,repo,&head)? else {return Ok(());};
+    let Some((pb,policy))=automatic_policy(db,repo,&head,project)? else {return Ok(());};
     let rules=&pb.verification.backstop;
     if !rules.enabled { return Ok(()); }
-    if pb.lanes.is_none() { bail!("post-merge verification requires memory-admitted build lanes"); }
     observe(db,repo,project,&head)?;
     reconcile(db,repo)?;
     let h=health(db,repo)?.context("missing branch health")?;
@@ -265,7 +281,22 @@ fn execute(db:&Db,repo:&Path,pb:&Playbook,head:&str,commands:&[String],actor:&Ac
         let mut pb=pb.clone();
         pb.gate.retries=0;
         let steps=commands.iter().map(|c|(c.clone(),None)).collect::<Vec<_>>();
-        crate::lanes::gate_fresh(db,repo,&pb,wt,None,crate::lanes::Kind::Run,&steps,actor)
+        if pb.lanes.is_some() {return crate::lanes::gate_fresh(db,repo,&pb,wt,None,crate::lanes::Kind::Run,&steps,actor);}
+        // Custom may disable shared checkouts, never machine memory/slot admission.
+        let turn=crate::lanes::hold_machine(db,repo,wt,pb.mode_project.as_deref().unwrap_or(""),None,crate::lanes::Kind::Run,&commands.join("\n"),actor)?;
+        crate::project_modes::check_playbook_authority(db,&[],&pb)?;
+        let run=turn.id();
+        let mut flaked=vec![];
+        let (mut results,mut passed)=playbook::refresh_setup(&pb.worktree,wt,repo,pb.integration_branch(),0,&mut flaked)?;
+        if passed {for command in commands {
+            crate::project_modes::check_playbook_authority(db,&[],&pb)?;
+            let command=playbook::expand(command,repo,wt,pb.integration_branch());
+            let (ok,output,seconds)=playbook::run_shell_kind(&command,wt,"build")?;
+            results.push(playbook::CommandResult{command,ok,output,seconds,skipped:false});
+            if !ok {passed=false;break;}
+        }}
+        turn.finish(passed);
+        Ok(crate::lanes::GateRun{yolo_skipped:false,commit:head.into(),results,passed,flaked,run:Some(run),warnings:vec![]})
     })
 }
 

@@ -116,7 +116,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     let (worktree, branch) = playbook::worktree_and_branch(opts.dir)?;
     let (_, branch_key) = crate::git::parse_branch(&branch);
     let root = playbook::repo_root(config, opts.dir).with_context(|| format!("{} is not inside a git repo", opts.dir))?;
-    let pb = Playbook::load(&root)?;
+    let mut pb = Playbook::load(&root)?;
     let handed_in = opts.solution_commit.map(str::to_string).unwrap_or(git(&worktree, &["rev-parse", "HEAD"])?.trim().to_string());
     let base = pb.integration_branch().to_string();
     let explained_patch = if opts.solution.is_some() {
@@ -133,6 +133,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     }
     let key = opts.issue_key.map(str::to_string).or(branch_key).context("the branch names no issue; pass the issue key")?;
     let issue = db.issue(&key)?.with_context(|| format!("no issue {key}"))?;
+    crate::project_modes::apply_issue(db, &key, &mut pb)?;
     let _telemetry = crate::performance_attribution::Scope::new(db, crate::performance_attribution::Context { project: issue.project.clone(), issue: Some(key.clone()), ..Default::default() });
     if rebase_in_progress(&worktree) {
         bail!("a rebase is in progress in {}", worktree.display());
@@ -165,7 +166,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     let mut verification = crate::verification::assess_and_record(db, &worktree, &base, &checked_head, &issue,actor)?;
     let gate = playbook::run_automatic_gate(db, &root, &worktree, &[&issue.key], actor, crate::lanes::Kind::Gate)?;
     if gate.skipped.is_some() {
-        verification.enforcement="YOLO override: automatic verification did not run; classification is advice only.".into();
+        verification.enforcement="Project mode: automatic tests did not run; classification is advice only.".into();
         verification.commands.clear();
     } else if !verification.shadow && gate.plan.is_none() {
         verification.enforcement="Full configured gate used: reduced checks were unavailable or the post-merge baseline was missing, overdue or unhealthy.".into();
@@ -208,14 +209,15 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
 
     // A queued gate may outlive a human settings change. Read the authoritative policy again.
     let mut pb = Playbook::load(&root)?;
+    crate::project_modes::apply_issue(db, &issue.key, &mut pb)?;
     pb.review.policy_root = Some(root.clone());
     pb.review.yolo_guards = crate::project_yolo::ReviewGuard::for_issue(db, &issue.key)?.into_iter().collect();
-    crate::project_yolo::check_gate_authority(db, &[&issue.key], &out.gate)?;
+    crate::project_modes::check_gate_authority(db, &[&issue.key], &out.gate)?;
     pb.approval.check_blocked(&files)?;
     out.reasons = pb.human_reasons(&files)?;
     if crate::project_yolo::enabled_for_issue(db, &issue.key)? {
         out.yolo = true;
-    } else if out.gate.plan.as_ref().is_some_and(|p|p.effective=="inert") {
+    } else if out.gate.plan.as_ref().is_some_and(|p|p.effective=="inert") && crate::project_modes::for_issue(db, &issue.key)?.is_none_or(|s| s.options().pre_review.is_none()) {
         out.review_light = true;
     } else if !pb.review.enabled {
         out.review_disabled = true;
@@ -282,12 +284,17 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
             Ok(())
         })();
         if let Err(e) = reviewed {
-            if e.is::<crate::project_yolo::SkipReview>() { out.yolo = true; }
+            if e.is::<crate::project_yolo::SkipReview>() {
+                out.yolo = crate::project_yolo::enabled_for_issue(db, &issue.key)?;
+                out.review_disabled = !out.yolo;
+            }
             else if e.is::<crate::review::Disabled>() { out.review_disabled = true; } else { return Err(e); }
         }
     }
     if out.review_disabled || out.yolo || out.review_light {
-        out.reasons.extend(Playbook::load(&root)?.review.unevaluated_reasons());
+        let mut latest = Playbook::load(&root)?;
+        crate::project_modes::apply_issue(db, &issue.key, &mut latest)?;
+        out.reasons.extend(latest.review.unevaluated_reasons());
     }
     out.approver = if out.reasons.is_empty() { "agent" } else { "human" }.into();
     let mut verdict = out.review.as_ref().map_or(if out.yolo { "yolo" } else if out.review_light { "light" } else if out.review_disabled { "disabled" } else { "none" }, |r| r.verdict.as_str()).to_string();
@@ -363,12 +370,12 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     if out.yolo || out.gate.skipped.is_some() {
         let current_head = git(&worktree, &["rev-parse", "HEAD"])?.trim().to_string();
         if current_head != checked_head || git(&worktree, &["rev-parse", &out.commit])?.trim() != checked_head {
-            bail!("the branch changed during the YOLO submission; submit again so path and approval checks cover this revision");
+            bail!("the branch changed while automatic checks were skipped; submit again so path and approval checks cover this revision");
         }
     }
     // Settings can change while queued reviewers or commands run. Unchecked evidence is usable
     // only while the person still authorizes that bypass.
-    crate::project_yolo::check_gate_authority(db, &[&issue.key], &out.gate)?;
+    crate::project_modes::check_gate_authority(db, &[&issue.key], &out.gate)?;
     if out.yolo && !crate::project_yolo::enabled_for_issue(db, &issue.key)? {
         bail!("YOLO mode was disabled during submit; submit again for normal verification");
     }
@@ -431,6 +438,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         (None, "human") if out.yolo => format!("{}; waits for a human under the remaining approval rules", crate::project_yolo::NOTE),
         (None, _) if out.yolo => format!("{}; unverified and ready to land", crate::project_yolo::NOTE),
         (None, "human") if out.review_disabled => format!("{}; waits for a human under the remaining approval rules", crate::review::DISABLED_NOTE),
+        (None, _) if out.review_disabled && out.gate.skipped.is_some() => "Automatic tests and pre-merge review skipped by project settings; unverified and ready to land".into(),
         (None, _) if out.review_disabled => format!("{}; gate passed and ready to land", crate::review::DISABLED_NOTE),
         (None, _) => "Submitted without a review; waits for a human".to_string(),
     };
@@ -468,6 +476,8 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         ("In Review", "Basic checks passed under the committed verification policy; pre-land review is exempt. Call land; post-merge audit applies.")
     } else if out.yolo {
         ("In Review", "YOLO mode: automatic gate and PR review skipped. This revision is unverified. Call land while YOLO remains enabled.")
+    } else if out.review_disabled && out.gate.skipped.is_some() {
+        ("In Review", "Automatic tests and pre-merge review are disabled for this project. This revision is unverified. Call land while the current mode permits it.")
     } else if out.review_disabled {
         ("In Review", "Review disabled for this project. The gate passed and no human approval is needed. Call land to put it on the integration branch.")
     } else {
@@ -1331,8 +1341,10 @@ reason = "money logic"
         assert!(!playbook::run_gate(&f.db, &f.repo, &wt, Some(&issue.key), &f.actor).unwrap().passed, "manual checks still execute");
         let pb = Playbook::load(&f.repo).unwrap();
         f.db.set_project_yolo("NIT", false, 1, &Actor::Human).unwrap();
-        assert!(crate::land::check_approval(&f.db, &pb, &issue.key, &wt, "main", &s.branch).unwrap_err().to_string().contains("unchecked revision"));
+        assert!(crate::land::check_approval(&f.db, &pb, &issue.key, &wt, "main", &s.branch).unwrap_err().to_string().contains("project review mode changed"));
         f.db.set_project_yolo("NIT", true, 2, &Actor::Human).unwrap();
+        assert!(crate::land::check_approval(&f.db, &pb, &issue.key, &wt, "main", &s.branch).is_err(), "restoring a preset does not restore stale revision authority");
+        f.submit(&wt, true).unwrap();
         let mut protected = pb.clone();
         protected.approval.blocked_paths.push(playbook::PathRule { pattern: "feature".into(), reason: "Protected".into() });
         assert!(crate::land::check_approval(&f.db, &protected, &issue.key, &wt, "main", &s.branch).is_err());
@@ -1340,6 +1352,27 @@ reason = "money logic"
         assert!(landed.landed, "{landed:?}");
         assert!(landed.gate.as_ref().is_some_and(|g| !g.passed && g.skipped.is_some()));
         assert!(f.db.issue(&issue.key).unwrap().unwrap().evidence.contains(crate::project_yolo::NOTE));
+    }
+
+    #[test]
+    fn custom_mode_controls_tests_and_review_independently_and_invalidates_old_evidence() {
+        use crate::project_modes::{Mode, Options, PreReview, TestDepth};
+        let mut f = fixture();
+        let policy = format!("[worktree]\ndir='../wt/{{key}}'\n[gate]\ncommands=['exit 0']\n[review]\nreviewer={{ '*'='claude' }}\ncommands={{ claude=[{:?},'review.sh'] }}\n", playbook::posix_sh());
+        std::fs::write(f.repo.join(playbook::PLAYBOOK_PATH), policy).unwrap();
+        sh(&f.repo, &["commit", "-qam", "independent checks"]);
+        f.db.set_project_review_mode("NIT", Mode::Custom, Options { test_depth: Some(TestDepth::Full), pre_review: Some(PreReview::Off), ..Default::default() }, 0, &Actor::Human).unwrap();
+        let (issue, wt) = f.committed("Independent checks", "feature.txt");
+        let full = f.submit(&wt, true).unwrap();
+        assert!(full.gate.passed && full.gate.skipped.is_none() && full.review_disabled && full.review.is_none() && !full.yolo);
+        assert_eq!(full.gate.results.len(), 1, "turning review off still executes tests");
+        f.db.set_project_review_mode("NIT", Mode::Custom, Options { test_depth: Some(TestDepth::Off), pre_review: Some(PreReview::Individual), ..Default::default() }, 1, &Actor::Human).unwrap();
+        let pb = Playbook::load(&f.repo).unwrap();
+        assert!(crate::land::check_approval(&f.db, &pb, &issue.key, &wt, "main", &full.branch).unwrap_err().to_string().contains("mode changed"));
+        let reviewed = f.submit(&wt, true).unwrap();
+        assert!(!reviewed.gate.passed && reviewed.gate.skipped.is_some() && reviewed.gate.results.is_empty());
+        assert!(!reviewed.review_disabled && !reviewed.yolo && reviewed.review.as_ref().is_some_and(|r| r.verdict == "pass"), "{reviewed:?}");
+        assert!(crate::land::check_approval(&f.db, &pb, &issue.key, &wt, "main", &reviewed.branch).is_ok());
     }
 
     #[test]

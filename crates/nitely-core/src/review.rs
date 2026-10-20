@@ -88,6 +88,8 @@ impl ReviewRules {
             Some(root) => crate::playbook::Playbook::load(root)?.review.enabled,
             None => self.enabled,
         };
+        let mut enabled=enabled;
+        for guard in &self.yolo_guards {if let Some(value)=guard.enabled_override()? {enabled=value;}}
         if !enabled { bail!(Disabled); }
         Ok(())
     }
@@ -762,7 +764,10 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
 
     /// Runs `reviewer` in `worktree` and parses its reply.
     pub fn run(&self, reviewer: &str, worktree: &Path, base: &str, previous: Option<&PreviousRound>) -> Result<Review> {
-        let reply = self.run_review_prompt(reviewer, worktree, &with_submodule_code(self.prompt(base, previous), worktree, base))?;
+        self.run_checked(reviewer,worktree,base,previous,&mut ||self.require_enabled())
+    }
+    pub(crate) fn run_checked(&self,reviewer:&str,worktree:&Path,base:&str,previous:Option<&PreviousRound>,check:&mut dyn FnMut()->Result<()>)->Result<Review> {
+        let reply = self.run_prompt_checked(reviewer, worktree, &with_submodule_code(self.prompt(base, previous), worktree, base),check)?;
         let mut review =
             self.parse(reviewer, &reply.text, reply.seconds, previous, Some(worktree)).map_err(|e| if reply.only_a_login_message { reply.signed_out(self) } else { e })?;
         review.tokens = reply.tokens;
@@ -780,7 +785,7 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
         self.run_prompt_checked(reviewer, worktree, prompt, &mut || self.require_enabled())
     }
 
-    fn run_prompt_checked(&self, reviewer: &str, worktree: &Path, prompt: &str, check: &mut dyn FnMut() -> Result<()>) -> Result<Reply> {
+    pub(crate) fn run_prompt_checked(&self, reviewer: &str, worktree: &Path, prompt: &str, check: &mut dyn FnMut() -> Result<()>) -> Result<Reply> {
         check()?;
         let command = self
             .commands
