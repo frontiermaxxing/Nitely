@@ -994,6 +994,29 @@ fn run_with(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Act
     Ok(done)
 }
 
+/// The newest local lane run that already passed the gate's commands `to_run` on `tree` in `repo`,
+/// and its kind. A gate or land run that ran the same commands counts; so does a `run` (NIT-455)
+/// whose one command is the same commands joined by `&&`, so each ran only after the one before it
+/// passed, as a gate runs them. The tree is the commit's whole tree, so a run of uncommitted work (a
+/// snapshot of its own) never matches, and the lockfiles, toolchain file and playbook are part of
+/// it. A run that failed, timed out or never finished, ran elsewhere, or ran other commands, in
+/// another order or joined otherwise (a line break or `;` runs on past a failure), never counts.
+fn passed_on_tree(db: &Db, repo: &str, tree: &str, to_run: &[&str]) -> Result<Option<(i64, String)>> {
+    let gate_key = to_run.join("\n");
+    let run_key = to_run.join(" && ");
+    Ok(db
+        .conn
+        .query_row(
+            "SELECT id, kind FROM lane_run WHERE repo = ?1 AND tree = ?2
+               AND ((kind IN ('gate', 'land') AND command = ?3) OR (kind = 'run' AND command = ?4))
+               AND state = 'done' AND exit_code = 0 AND timed_out = 0 AND error IS NULL AND executor = 'local'
+             ORDER BY id DESC LIMIT 1",
+            params![repo, tree, gate_key, run_key],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?)
+}
+
 /// A gate that ran in a lane (or was answered from one), for `playbook::run_gate` to record the way
 /// it records a gate in a worktree.
 pub struct GateRun {
@@ -1055,27 +1078,22 @@ fn gate_inner(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: 
     // One command per line is the key, so a command that holds a line break of its own could
     // stand for two: such a gate is never answered from a record.
     let keyed = !to_run.iter().any(|c| c.contains('\n'));
-    let passed_before: Option<i64> = if !keyed || !reuse {
-        None
-    } else {
-        db.conn
-            .query_row(
-                "SELECT id FROM lane_run WHERE repo = ?1 AND tree = ?2 AND command = ?3 AND kind IN ('gate', 'land') AND state = 'done' AND exit_code = 0 AND executor = 'local' ORDER BY id DESC LIMIT 1",
-                params![root, snap.tree, key],
-                |r| r.get(0),
-            )
-            .optional()?
-    };
-    if let Some(id) = passed_before {
+    let passed_before: Option<(i64, String)> = if !keyed || !reuse { None } else { passed_on_tree(db, &root, &snap.tree, &to_run)? };
+    if let Some((id, kind)) = passed_before {
+        let (step, said) = if kind == "run" {
+            (format!("run {id} ran it on this same tree and passed; not run again"), format!("The gate for {short} is satisfied by run {id} at the same tree, which ran its exact commands and passed; not run again"))
+        } else {
+            (format!("this tree passed it in lane run {id}; not run again"), format!("The gate for {short} passed in lane run {id} already; not run again"))
+        };
         let results = steps
             .iter()
             .map(|(command, skip)| match skip {
                 Some(why) => skipped(why, command),
-                None => skipped(&format!("this tree passed it in lane run {id}; not run again"), command),
+                None => skipped(&step, command),
             })
             .collect();
         if let Some(key) = issue {
-            db.log_event(actor, Some(key), None, "lane_run", &format!("The gate for {short} passed in lane run {id} already; not run again")).ok();
+            db.log_event(actor, Some(key), None, "lane_run", &said).ok();
         }
         return Ok(GateRun { yolo_skipped: false, commit: short, results, passed: true, flaked: vec![], run: Some(id), warnings });
     }
@@ -3812,6 +3830,9 @@ let id = db.conn.last_insert_rowid();
         assert!(again.passed && again.results.iter().all(|r| r.skipped && r.output.contains("not run again")), "{again:?}");
         assert_eq!(rows(&db).len(), 1, "no new run");
 
+        // A `run` of the gate's exact commands on a tree answers the gate there (NIT-455); see
+        // a_passing_run_of_the_gates_commands_answers_the_gate for what never does.
+
         // Uncommitted work is not what a gate builds: it says so, and the record answers it.
         std::fs::write(root.join("src/a.txt"), "changed\n").unwrap();
         let dirty = playbook::run_gate(&db, &root, &root, Some("APP-1"), &actor).unwrap();
@@ -3829,6 +3850,74 @@ let id = db.conn.last_insert_rowid();
         assert_eq!(now[0].kind, "land");
         let priority: i64 = db.conn.query_row("SELECT priority FROM lane_run WHERE id = ?1", [now[0].id], |r| r.get(0)).unwrap();
         assert_eq!(priority, 1);
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn a_passing_run_of_the_gates_commands_answers_the_gate() {
+        let base = crate::paths::unique_temp("nitely-lane-run-gate", "");
+        let root = repo(&base);
+        let db = Db::open(&base.join("t.db")).unwrap();
+        let actor = Actor::Agent("claude:test".into());
+        std::fs::create_dir_all(root.join(".nitely")).unwrap();
+        std::fs::write(root.join(playbook::PLAYBOOK_PATH), "[gate]\ncommands = [\"echo one\", \"echo two\"]\n[lanes]\n").unwrap();
+        let g = |args: &[&str]| assert!(playbook::run_git(Command::new("git").arg("-C").arg(&root).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args)).unwrap().status.success(), "{args:?}");
+        g(&["add", "."]);
+        g(&["commit", "-q", "-m", "playbook"]);
+        let tree = git(&root, &["rev-parse", "HEAD^{tree}"]).unwrap().trim().to_string();
+        let repo_key = root.to_string_lossy().into_owned();
+        // A finished run as `nitely run` leaves one: its kind, tree, command and how it ended.
+        let ran = |kind: &str, tree: &str, command: &str, exit: Option<i64>, timed_out: bool, executor: &str| -> i64 {
+            db.conn
+                .execute(
+                    "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, queued_at, ended_at, exit_code, timed_out, executor)
+                     VALUES ('APP', ?1, 'claude:test', ?2, 'snap', ?3, 'base', ?4, 'done', 1, 2, ?5, ?6, ?7)",
+                    params![repo_key, kind, tree, command, exit, timed_out, executor],
+                )
+                .unwrap();
+            db.conn.last_insert_rowid()
+        };
+        let gate_runs = |db: &Db| db.lane_runs("", 50).unwrap().into_iter().filter(|r| r.kind == "gate").count();
+        let answered = |id: i64| {
+            let gate = playbook::run_gate(&db, &root, &root, Some("APP-1"), &actor).unwrap();
+            gate.passed && gate.lane_run == Some(id) && gate.results.iter().all(|r| r.skipped)
+        };
+
+        // Each of these leaves the gate to run: another tree (uncommitted work, or another commit),
+        // other commands or order, commands joined so that a failure runs on, a failure, a timeout,
+        // or a run on another executor.
+        let refused = [
+            ran("run", "another-tree", "echo one && echo two", Some(0), false, "local"),
+            ran("run", &tree, "echo one", Some(0), false, "local"),
+            ran("run", &tree, "echo two && echo one", Some(0), false, "local"),
+            ran("run", &tree, "echo one\necho two", Some(0), false, "local"),
+            ran("run", &tree, "echo one ; echo two", Some(0), false, "local"),
+            ran("run", &tree, "echo one && echo two", Some(1), false, "local"),
+            ran("run", &tree, "echo one && echo two", None, true, "local"),
+            ran("run", &tree, "echo one && echo two", Some(0), false, "remote"),
+        ];
+        let gate = playbook::run_gate(&db, &root, &root, Some("APP-1"), &actor).unwrap();
+        assert!(gate.passed && !refused.contains(&gate.lane_run.unwrap()), "none of those answers it: {gate:?}");
+        assert_eq!(gate_runs(&db), 1, "the gate ran");
+
+        // The exact commands, in order and joined by &&, passed on this tree: that run answers it,
+        // and the issue says so.
+        g(&["commit", "-q", "--allow-empty", "-m", "same tree, new commit"]);
+        std::fs::write(root.join("src/a.txt"), "next\n").unwrap();
+        g(&["commit", "-q", "-am", "another tree"]);
+        let tree = git(&root, &["rev-parse", "HEAD^{tree}"]).unwrap().trim().to_string();
+        let run = ran("run", &tree, "echo one && echo two", Some(0), false, "local");
+        assert!(answered(run), "a passing run of the exact commands on this tree answers the gate");
+        assert_eq!(gate_runs(&db), 1, "nothing ran");
+        let said: Vec<String> = db.timeline("APP-1").unwrap().into_iter().filter_map(|t| t.summary).collect();
+        assert!(said.iter().any(|s| s.contains(&format!("satisfied by run {run} at the same tree"))), "{said:?}");
+
+        // A changed gate policy (the playbook is in the tree) is another tree, and other commands.
+        std::fs::write(root.join(playbook::PLAYBOOK_PATH), "[gate]\ncommands = [\"echo one\", \"echo three\"]\n[lanes]\n").unwrap();
+        g(&["commit", "-q", "-am", "policy"]);
+        let changed = playbook::run_gate(&db, &root, &root, Some("APP-1"), &actor).unwrap();
+        assert!(changed.passed && changed.lane_run != Some(run), "{changed:?}");
+        assert_eq!(gate_runs(&db), 2, "it ran again");
         std::fs::remove_dir_all(base).ok();
     }
 
