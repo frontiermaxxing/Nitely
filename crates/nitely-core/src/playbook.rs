@@ -1810,14 +1810,64 @@ mod tests {
     #[test]
     fn ci_runs_the_same_gate_as_the_playbook() {
         let pb = Playbook::parse(include_str!("../../../.nitely/playbook.toml")).unwrap();
-        let ci = include_str!("../../../.github/workflows/ci.yml");
+        ci_agrees_with_the_gate(&pb, include_str!("../../../.github/workflows/ci.yml")).unwrap();
+    }
+
+    /// Every gate command or step runs in CI, and every cargo or npm command CI runs is in the gate:
+    /// a step the gate skips for some changes (`unless_only`, `when_changed`) still runs in CI on
+    /// every pull request, which stays the backstop (NIT-464).
+    fn ci_agrees_with_the_gate(pb: &Playbook, ci: &str) -> std::result::Result<(), String> {
         let runs: Vec<&str> = ci.lines().filter_map(|l| l.trim().strip_prefix("- run: ")).map(str::trim).collect();
-        for command in pb.gate.commands.iter().chain(pb.gate.steps.iter().map(|s| &s.run)) {
-            assert!(runs.contains(&command.as_str()), "the CI workflow does not run the gate command {command:?}");
+        let gate: Vec<&String> = pb.gate.commands.iter().chain(pb.gate.steps.iter().map(|s| &s.run)).collect();
+        for command in &gate {
+            if !runs.contains(&command.as_str()) {
+                return Err(format!("the CI workflow does not run the gate command {command:?}"));
+            }
         }
         for run in runs.iter().filter(|r| r.starts_with("cargo ") || r.starts_with("npm ")) {
-            assert!(*run == "npm ci" || pb.gate.commands.iter().any(|c| c == run), "the CI workflow runs {run:?}, which the gate does not");
+            if *run != "npm ci" && !gate.iter().any(|c| c == run) {
+                return Err(format!("the CI workflow runs {run:?}, which the gate does not"));
+            }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn frontend_only_changes_skip_the_cargo_steps_and_ci_still_runs_them() {
+        // The playbook NIT-464 proposes: Cargo as steps that frontend and prose changes skip.
+        let pb = Playbook::parse(
+            r#"
+[gate]
+commands = ["npm test", "npm run build"]
+
+[[gate.steps]]
+run = "cargo test --workspace"
+unless_only = ['^src/', '^scripts/', '^public/', '^index\.html$', '^docs/.*\.md$']
+
+[[gate.steps]]
+run = "cargo clippy --workspace -- -D warnings"
+unless_only = ['^src/', '^scripts/', '^public/', '^index\.html$', '^docs/.*\.md$']
+"#,
+        )
+        .unwrap();
+        let skip = |files: &[&str]| -> Vec<Option<String>> {
+            let files: Vec<String> = files.iter().map(|f| f.to_string()).collect();
+            pb.gate.steps.iter().map(|s| s.skip_reason(&files).unwrap()).collect()
+        };
+        // A src/ and docs change skips both, with the reason shown on the gate.
+        let frontend = skip(&["src/Rules.tsx", "src/rules/Paths.tsx", "docs/visualization.md"]);
+        assert!(frontend.iter().all(|r| r.as_deref().is_some_and(|r| r.starts_with("only paths matching ^src/"))), "{frontend:?}");
+        // Anything else runs them: Rust, a manifest, a lockfile, the playbook, CI, a file Rust embeds
+        // from docs, or a path nobody listed.
+        for other in ["crates/nitely-core/src/lanes.rs", "Cargo.lock", "package.json", ".nitely/playbook.toml", ".github/workflows/ci.yml", "docs/claude-hooks.json", "phone.html", "src-tauri/src/main.rs"] {
+            assert!(skip(&["src/App.tsx", other]).iter().all(Option::is_none), "{other} runs Cargo");
+        }
+        // CI runs every step on every pull request, and the agreement check accepts steps.
+        let ci = "      - run: npm ci\n      - run: cargo test --workspace\n      - run: cargo clippy --workspace -- -D warnings\n      - run: npm test\n      - run: npm run build\n";
+        ci_agrees_with_the_gate(&pb, ci).unwrap();
+        // A CI that dropped a step the gate skips locally is refused: CI is the backstop.
+        let dropped = ci.replace("      - run: cargo clippy --workspace -- -D warnings\n", "");
+        assert!(ci_agrees_with_the_gate(&pb, &dropped).unwrap_err().contains("cargo clippy"));
     }
 
     #[test]
