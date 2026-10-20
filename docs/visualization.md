@@ -128,6 +128,17 @@ Helpers: `livenessOf(session, now)` (adds "stale" after 30 minutes quiet), `vend
 `journeyOf(timeline, reviews)` (`src/ui/rounds.ts`) for the rounds between Working and Done
 (each round's gate runs, its review and verdict, then each land), and `describeFindings`.
 
+### On/off and choices (`src/ui/Toggles.tsx`)
+
+- **Switch** for a setting that takes effect on its own (notifications, review on or off): 28 by 16,
+  teal when on. **Checkbox** only for a choice inside a form saved as a whole.
+- **Segmented control** for two or three short options; **Radio cards** for options that each need
+  a sentence (a title and one line of why).
+- No "Inherit (…)" entry: the option that equals the default carries a small "default" mark
+  (`isDefault`), and choosing it clears the project's own value.
+- The choices are native radios underneath, so Tab reaches the group, arrow keys move within it and
+  skip disabled options, and focus shows as the usual ring. The Visual kit (`#kit`) shows every state.
+
 ### Agents
 
 | Vendor | Shape                   | Token              |

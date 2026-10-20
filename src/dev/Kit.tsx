@@ -2,6 +2,7 @@
 // when building a view, and add a row here when a primitive gains a state.
 
 import { GoalRow } from "../GoalRows";
+import { KitToggles } from "./KitToggles";
 import type { GoalDetail, IssueRecord, MarkKind, PrRecord } from "../types";
 import { nowSecs } from "../util";
 import {
@@ -359,6 +360,8 @@ export default function Kit() {
           </span>
         </div>
       </section>
+
+      <KitToggles />
 
       <section>
         <h2>Settings kit: fields, buttons, source tags, notices</h2>
