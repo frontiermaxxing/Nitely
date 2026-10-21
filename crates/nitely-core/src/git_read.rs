@@ -311,7 +311,7 @@ pub(crate) fn worktrees(root: &Path) -> Option<Vec<crate::git::Worktree>> {
     let mut out = vec![worktree_entry(&repo, main, &common.join("HEAD"), true, false, false)?];
     let linked = common.join("worktrees");
     let Ok(ids) = std::fs::read_dir(&linked) else { return Some(out) };
-    // In the order the folder lists them, as git reads them.
+    let first_linked = out.len();
     for id in ids {
         let dir = id.ok()?.path();
         if !dir.is_dir() {
@@ -327,6 +327,10 @@ pub(crate) fn worktrees(root: &Path) -> Option<Vec<crate::git::Worktree>> {
         let prunable = !locked && !Path::new(gitdir).exists();
         out.push(worktree_entry(&repo, path.to_string(), &dir.join("HEAD"), false, locked, prunable)?);
     }
+    // git lists the linked ones by path, ignoring ASCII case where core.ignorecase says so.
+    let ignore_case = repo.config_snapshot().boolean("core.ignorecase").unwrap_or(false);
+    let key = |w: &crate::git::Worktree| if ignore_case { w.path.to_ascii_lowercase() } else { w.path.clone() };
+    out[first_linked..].sort_by_key(key);
     Some(out)
 }
 
@@ -544,8 +548,8 @@ mod tests {
             let counted = "--format=%(refname:short)%00%(committerdate:unix)%00%(ahead-behind:main)%00%(subject)";
             (crate::git::parse_worktrees(&cli(&["worktree", "list", "--porcelain"])), crate::git::parse_branch_refs(&cli(&["for-each-ref", "--sort=-committerdate", counted, "refs/heads"])))
         };
-        // Worktree ids listed in another order than their paths; one locked, one detached, one
-        // whose folder is gone.
+        // Worktrees made in another order than their paths sort in, one whose capital sorts
+        // first only where case counts; one locked, one detached, one whose folder is gone.
         let add = |name: &str, args: &[&str]| {
             let path = dir.join(name).to_string_lossy().into_owned();
             let (commit, options) = args.split_last().unwrap();
@@ -558,6 +562,7 @@ mod tests {
         add("a-second", &["-b", "claude/app-1-x", "main"]);
         add("detached", &["--detach", "main"]);
         add("gone", &["-b", "claude/app-3-gone", "main"]);
+        add("B-upper", &["-b", "claude/app-4-upper", "main"]);
         git(&root, &["worktree", "lock", &dir.join("a-second").to_string_lossy()]);
         std::fs::remove_dir_all(dir.join("gone")).unwrap();
         // Branches ahead, behind, both, committed in the same second, with a two-line title.
@@ -572,7 +577,7 @@ mod tests {
         git(&root, &["branch", "same-second-a", "main"]);
 
         let (worktrees, branches) = as_git();
-        assert_eq!(worktrees.len(), 5);
+        assert_eq!(worktrees.len(), 6);
         assert!(worktrees.iter().any(|w| w.locked) && worktrees.iter().any(|w| w.prunable) && worktrees.iter().any(|w| w.branch.is_none()));
         assert_eq!(super::worktrees(&root), Some(worktrees));
         assert!(branches.iter().any(|b| b.ahead == Some(1) && b.behind == Some(1)));
