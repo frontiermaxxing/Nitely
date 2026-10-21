@@ -111,11 +111,22 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
     // A saved preset crosses the settings UI, native command and durable project policy. A new
     // project starts on Fast (NIT-511), so Careful is the change; Save stays off for the mode already
     // shown. Restore inherited Custom afterwards so the remainder still exercises the repo's rules.
+    // Save sits at the foot of a long settings page, below the window: a click at its place off
+    // screen lands on nothing, so it is scrolled into view first, and clicked once it is enabled.
+    const pickMode = async (mode) => {
+      const css = `[role=radiogroup][aria-label="Review mode"] input[value="${mode}"]`;
+      await page.eval(`document.querySelector(${JSON.stringify(css)}).scrollIntoView({ block: "center" }); return true;`);
+      await page.click({ css });
+    };
+    const saveReviewMode = async () => {
+      await page.waitFor(`const b = [...document.querySelectorAll(".review-mode-save button")].find((b) => b.textContent.trim() === "Save review mode"); if (!b || b.disabled) return false; b.scrollIntoView({ block: "center" }); return true;`, { what: "Save review mode enabled" });
+      await page.click({ css: ".review-mode-save button", text: "Save review mode" });
+    };
     const originalMode = await page.invoke("project_review_mode", { project: "APP" });
     await page.open("#project/APP/settings");
     await page.waitFor(`return document.querySelector('[role=radiogroup][aria-label="Review mode"] input[value="careful"]') !== null;`, { what: "the review mode cards" });
-    await page.click({ css: '[role=radiogroup][aria-label="Review mode"] input[value="careful"]' });
-    await page.click({ css: "button", text: "Save review mode" });
+    await pickMode("careful");
+    await saveReviewMode();
     await page.waitFor(`return document.querySelector(".review-mode-settings")?.textContent.includes("Saved: Careful.");`);
     const savedMode = await page.invoke("project_review_mode", { project: "APP" });
     assert.equal(savedMode.mode, "careful");
@@ -134,8 +145,8 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
     assert.match(staleModeSave, /changed|stale|revision/i);
     assert.equal((await page.invoke("project_review_mode", { project: "APP" })).mode, "careful");
     await shot("review-mode");
-    await page.click({ css: '[role=radiogroup][aria-label="Review mode"] input[value="custom"]' });
-    await page.click({ css: "button", text: "Save review mode" });
+    await pickMode("custom");
+    await saveReviewMode();
     await page.waitFor(`return document.querySelector(".review-mode-settings")?.textContent.includes("Saved: Custom.");`);
     assert.deepEqual((await page.invoke("project_review_mode", { project: "APP" })).overrides, originalMode.overrides);
 
