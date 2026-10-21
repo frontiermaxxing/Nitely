@@ -18,6 +18,7 @@ pub mod db;
 pub mod focus;
 pub mod executor;
 pub mod git;
+mod git_read;
 pub mod goal_plans;
 pub mod goal_report;
 pub mod goals;

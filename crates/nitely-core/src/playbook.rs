@@ -783,18 +783,27 @@ pub fn git(dir: &Path, args: &[&str]) -> Result<String> {
         where_query(dir, args)
     };
     let Some(key) = key else {
-        return finish(shell_free_command("git").arg("-C").arg(dir).args(args), args);
+        return ask(dir, args);
     };
     if let Some(hit) = SETTLED.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
         return Ok(hit.clone());
     }
-    let out = finish(shell_free_command("git").arg("-C").arg(dir).args(args), args)?;
+    let out = ask(dir, args)?;
     let mut memo = SETTLED.lock().unwrap_or_else(|e| e.into_inner());
     if memo.len() >= SETTLED_MAX {
         memo.clear();
     }
     memo.insert(key, out.clone());
     Ok(out)
+}
+
+/// git's answer to `args` in `dir`: read in this process when git_read knows the question
+/// (NIT-518), from the git CLI otherwise.
+fn ask(dir: &Path, args: &[&str]) -> Result<String> {
+    if let Some(answer) = crate::git_read::answer(dir, args) {
+        return answer;
+    }
+    finish(shell_free_command("git").arg("-C").arg(dir).args(args), args)
 }
 
 /// Answers to `settled_query` and `where_query` questions, by folder and arguments. A land or a submit asks the same
