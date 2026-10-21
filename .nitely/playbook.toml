@@ -67,11 +67,11 @@ codex = "codex"
 
 [verification]
 version = 1
-mode = "shadow"
+mode = "active"
 prose = ['docs/.*\.md']
-comments = ['src/.*\.(ts|tsx|js|jsx)']
+comments = ['src/.*\.(ts|tsx|js|jsx)', 'crates/.*\.rs', 'src-tauri/src/.*\.rs']
 display_copy = ['src/.*\.tsx']
-protected = ['src/phone/.*', 'src/approval.*']
+protected = ['src/phone/.*', 'src/approval.*', 'crates/nitely-core/src/(lanes|executor|submit|review|review_batch|accept|project_modes|project_yolo|affected_tests)\.rs']
 basic = ['node node_modules/typescript/bin/tsc --noEmit']
 audit_percent = 10
 
