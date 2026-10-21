@@ -1924,19 +1924,57 @@ mod tests {
     /// a step the gate skips for some changes (`unless_only`, `when_changed`) still runs in CI on
     /// every pull request, which stays the backstop (NIT-464).
     fn ci_agrees_with_the_gate(pb: &Playbook, ci: &str) -> std::result::Result<(), String> {
-        let runs: Vec<&str> = ci.lines().filter_map(|l| l.trim().strip_prefix("- run: ")).map(str::trim).collect();
-        let gate: Vec<&String> = pb.gate.commands.iter().chain(pb.gate.steps.iter().map(|s| &s.run)).collect();
+        let runs: Vec<String> = ci.lines().filter_map(|l| l.trim().strip_prefix("- run: ")).map(|r| same_tests(r.trim())).collect();
+        let gate: Vec<String> = pb.gate.commands.iter().chain(pb.gate.steps.iter().map(|s| &s.run)).map(|c| same_tests(c)).collect();
         for command in &gate {
-            if !runs.contains(&command.as_str()) {
+            if !runs.contains(command) {
                 return Err(format!("the CI workflow does not run the gate command {command:?}"));
             }
         }
         for run in runs.iter().filter(|r| r.starts_with("cargo ") || r.starts_with("npm ")) {
-            if *run != "npm ci" && !gate.iter().any(|c| c == run) {
+            if run != "npm ci" && !gate.contains(run) {
                 return Err(format!("the CI workflow runs {run:?}, which the gate does not"));
             }
         }
         Ok(())
+    }
+
+    /// A `cargo test` command without a trailing `--test-threads=N` for the test binaries: the
+    /// thread count only schedules the run on the machine it runs on (the gate's lanes measured 12,
+    /// NIT-458; a CI runner picks its own), and the same tests run either way (NIT-474). Anything
+    /// else, another package, filter or flag, stays part of the command.
+    fn same_tests(command: &str) -> String {
+        let words: Vec<&str> = command.split_whitespace().collect();
+        if !command.starts_with("cargo test") {
+            return words.join(" ");
+        }
+        let mut kept: Vec<&str> = words.iter().copied().filter(|w| !(w.starts_with("--test-threads=") && w[15..].chars().all(|c| c.is_ascii_digit()) && w.len() > 15)).collect();
+        if kept.last() == Some(&"--") {
+            kept.pop();
+        }
+        kept.join(" ")
+    }
+
+    #[test]
+    fn a_cargo_test_thread_count_is_the_same_command_and_nothing_else_is() {
+        let gate = |test: &str| {
+            Playbook::parse(&format!("[gate]\ncommands = [\"npm test\"]\n\n[[gate.steps]]\nrun = {test:?}\nunless_only = ['^src/']\n")).unwrap()
+        };
+        let ci = "      - run: npm ci\n      - run: npm test\n      - run: cargo test --workspace\n";
+        // The lanes' thread count: the same tests as CI's plain run (NIT-458's 12 threads).
+        ci_agrees_with_the_gate(&gate("cargo test --workspace -- --test-threads=12"), ci).unwrap();
+        ci_agrees_with_the_gate(&gate("cargo test --workspace"), ci).unwrap();
+        // Anything else is another command: another package, a filter, ignored tests, other flags.
+        for other in [
+            "cargo test -p nitely-core -- --test-threads=12",
+            "cargo test --workspace lanes -- --test-threads=12",
+            "cargo test --workspace -- --ignored",
+            "cargo test --workspace -- --test-threads=12 --ignored",
+            "cargo test --workspace --release -- --test-threads=12",
+            "cargo test --workspace -- --test-threads=abc",
+        ] {
+            assert!(ci_agrees_with_the_gate(&gate(other), ci).is_err(), "{other} is not CI's cargo test");
+        }
     }
 
     #[test]
