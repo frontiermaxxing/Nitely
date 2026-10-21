@@ -60,6 +60,11 @@ struct Component {
     roots: Vec<String>,
     #[serde(default)]
     depends_on: Vec<String>,
+    /// The crate's build script and every input it reads, as approved (NIT-484): exact files or
+    /// directory prefixes ending in '/'. A crate with a build script reduces only when its script
+    /// is listed here, and a change to any of these keeps the full gate.
+    #[serde(default)]
+    build_inputs: Vec<String>,
     checks: Vec<String>,
     suites: Vec<Suite>,
 }
@@ -258,6 +263,11 @@ fn validate(policy: &Policy, before: &Snapshot, after: &Snapshot) -> Result<()> 
                 bail!("invalid or stale component root: {root}");
             }
         }
+        for input in &c.build_inputs {
+            if !valid_path(input) || !before.keys().chain(after.keys()).any(|p| under(p, input)) {
+                bail!("invalid or stale build-script input: {input}");
+            }
+        }
         for s in &c.suites {
             if !suites.insert(&s.id)
                 || s.id.trim().is_empty()
@@ -386,6 +396,9 @@ fn select_inner(repo: &Path, result: &mut Selection, policy_commit:&str) -> Resu
             {
                 bail!("nonregular changed input: {path}");
             }
+        }
+        if policy.components.iter().any(|c| c.build_inputs.iter().any(|i| under(path, i))) {
+            bail!("changed build-script input: {path}");
         }
         let c = owner(&policy, path).with_context(|| format!("unmapped changed input: {path}"))?;
         affected.insert(c.id.clone());
@@ -582,13 +595,19 @@ fn cargo_check(
         .manifest
         .strip_suffix("Cargo.toml")
         .context("not a Cargo manifest")?;
-    if files.contains_key(&format!("{root}build.rs"))
-        || manifest
-            .get("package")
-            .and_then(|p| p.get("build"))
-            .is_some_and(|v| v.as_bool() != Some(false))
-    {
-        bail!("generated Cargo inputs require Full");
+    // A build script generates inputs this selector cannot see. It reduces only when the approved
+    // map names the script and what it reads (`build_inputs`), none of which changed (checked
+    // with the changed paths); otherwise the crate keeps the full gate.
+    let script = match manifest.get("package").and_then(|p| p.get("build")) {
+        Some(toml::Value::Boolean(false)) => None,
+        Some(toml::Value::String(path)) => Some(format!("{root}{path}")),
+        Some(_) => bail!("unsupported Cargo build setting"),
+        None => Some(format!("{root}build.rs")).filter(|p| files.contains_key(p)),
+    };
+    if let Some(script) = script {
+        if !c.build_inputs.iter().any(|i| under(&script, i)) {
+            bail!("generated Cargo inputs require Full: approve {script} and what it reads in build_inputs");
+        }
     }
     let (flag, target_path, target_table) = match suite.target_kind {
         TargetKind::Lib => {
@@ -1080,6 +1099,41 @@ test_ids = ["adds"]
                 ],
             )
         })
+    }
+
+    /// A crate with a build script reduces only when the map approves the script and its inputs,
+    /// and only while none of them changed (NIT-484).
+    #[test]
+    fn a_build_script_reduces_only_with_its_inputs_approved_and_unchanged() {
+        let repo = cargo_repo();
+        std::fs::write(repo.join("build.rs"), "fn main() { println!(\"cargo:rerun-if-changed=assets\"); }").unwrap();
+        std::fs::create_dir_all(repo.join("assets")).unwrap();
+        std::fs::write(repo.join("assets/table.txt"), "1").unwrap();
+        g(&repo, &["add", "."]);
+        g(&repo, &["commit", "-qm", "a build script"]);
+        let full = |repo: &Path, base: &str, why: &str| {
+            let s = select(repo, base, "HEAD").unwrap();
+            assert!(s.full && s.checks.is_empty(), "{s:?}");
+            assert!(s.reasons.iter().any(|r| r.contains(why)), "{why}: {:?}", s.reasons);
+        };
+        // Not approved: the build script keeps the crate on Full, as before.
+        let base = edit(&repo, "src/math.rs", "pub fn add()->i32 {2}");
+        full(&repo, &base, "approve build.rs");
+        // Approved with what it reads: a source change reduces.
+        let approved = CARGO_POLICY.replace("checks = [", "build_inputs = [\"build.rs\", \"assets/\"]\nchecks = [");
+        edit(&repo, POLICY_PATH, &approved);
+        let base = edit(&repo, "src/math.rs", "pub fn add()->i32 {3}");
+        assert_eq!(selected(&repo, &base).components, ["math"]);
+        // A changed input of the script, or the script itself: Full.
+        let base = edit(&repo, "assets/table.txt", "2");
+        full(&repo, &base, "changed build-script input: assets/table.txt");
+        let base = edit(&repo, "build.rs", "fn main() {}");
+        full(&repo, &base, "build.rs");
+        // An approved input that does not exist is a stale map: Full.
+        edit(&repo, POLICY_PATH, &approved.replace("\"assets/\"", "\"missing/\""));
+        let base = edit(&repo, "src/math.rs", "pub fn add()->i32 {4}");
+        full(&repo, &base, "invalid or stale build-script input: missing/");
+        std::fs::remove_dir_all(repo).unwrap();
     }
 
     fn edit(repo: &Path, path: &str, text: &str) -> String {
