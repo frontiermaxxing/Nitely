@@ -492,10 +492,10 @@ async fn move_issue(key: String, state: String, evidence: Option<String>, reason
     let secret = if approving { Some(approval_key(&db)?) } else { None };
     db.check_open_asks(&key, &state).map_err(err)?;
     // Recorded as landed when it reached the integration branch another way (NIT-361).
-    if let (Ok(("Done", _)), Some(evidence)) = (nitely_core::issues::parse_state(&state), evidence.as_deref()) {
+    if let Ok(("Done", _)) = nitely_core::issues::parse_state(&state) {
         let project = db.issue(&key).map_err(err)?.and_then(|i| i.project);
         if let Ok(root) = nitely_core::playbook::repo_for_issue(&nitely_core::Config::load().unwrap_or_default(), project.as_deref(), ".") {
-            nitely_core::landed_elsewhere::record(&db, &root, &key, evidence, &ME).map_err(err)?;
+            nitely_core::landed_elsewhere::record(&db, &root, &key, &ME).map_err(err)?;
         }
     }
     let moved = db.move_issue(&key, &state, evidence.as_deref(), reason.as_deref(), &ME).map_err(err)?;

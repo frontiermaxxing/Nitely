@@ -1323,7 +1323,7 @@ impl Db {
             let unlanded = submitted.is_some_and(|s| landed.is_none_or(|l| l < s));
             if unlanded {
                 bail!(
-                    "{}'s change was submitted and never landed, so it is not on the integration branch: land it, or Cancel the issue with a reason to close it without landing. If it reached the integration branch another way, Done takes it once that branch holds its submitted commit, or once the evidence names the issue whose change it landed in",
+                    "{}'s change was submitted and never landed, so it is not on the integration branch: land it, or Cancel the issue with a reason to close it without landing. If its commits reached the integration branch another way (merged by hand, or rebased into another change), Done takes it once that branch holds every commit of its last submit",
                     issue.key
                 );
             }

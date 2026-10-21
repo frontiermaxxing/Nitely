@@ -1657,9 +1657,9 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             if let Some(state) = str_arg(args, "state") {
                 // A change that reached the integration branch without landing by itself (merged by
                 // hand, or in another issue's change) is recorded as landed first (NIT-361).
-                if let (true, Some(evidence)) = (nitely_core::issues::parse_state(state)?.0 == "Done", str_arg(args, "evidence")) {
+                if nitely_core::issues::parse_state(state)?.0 == "Done" {
                     if let Ok(root) = playbook::repo_for_issue(&config, issue.project.as_deref(), &server.cwd) {
-                        nitely_core::landed_elsewhere::record(&db, &root, key, evidence, &actor)?;
+                        nitely_core::landed_elsewhere::record(&db, &root, key, &actor)?;
                     }
                 }
                 db.check_move(key, state, str_arg(args, "evidence"), str_arg(args, "reason"), &actor)?;
