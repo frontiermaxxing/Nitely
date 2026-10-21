@@ -999,13 +999,17 @@ fn run_with(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Act
     let now_share = share();
     let run_share = Share { jobs: now_share.jobs, cap: recorded.map(|c| c.max(0) as u64).or(now_share.cap) };
     let _telemetry = crate::performance_attribution::Scope::new(db, crate::performance_attribution::Context { project: Some(req.project.into()), issue: req.issue.map(str::to_owned), run_id: Some(id), lane: Some(n), ..Default::default() });
+    // While it runs, the part of its reservation its live memory no longer needs goes back to
+    // the queue (NIT-516).
+    let live = LiveScope::begin(db, id)?;
     let outcome = serve(repo_root, pb, &rules, &lane, &log, req, run_share, exec);
+    let test_peak = live.and_then(LiveScope::end);
     let ended = now();
     match outcome {
         Ok(o) => {
             db.conn.execute(
-                "UPDATE lane_run SET state = 'done', ended_at = ?2, exit_code = ?3, timed_out = ?4, setup_ran = ?5, files_switched = ?6, output = ?7, peak_memory = ?8 WHERE id = ?1",
-                params![id, ended, o.exit_code, o.timed_out, o.setup_ran, o.files_switched, o.output, o.peak.map(|p| p as i64)],
+                "UPDATE lane_run SET state = 'done', ended_at = ?2, exit_code = ?3, timed_out = ?4, setup_ran = ?5, files_switched = ?6, output = ?7, peak_memory = ?8, test_peak_memory = ?9 WHERE id = ?1",
+                params![id, ended, o.exit_code, o.timed_out, o.setup_ran, o.files_switched, o.output, o.peak.map(|p| p as i64), test_peak.map(|p| p as i64)],
             )?;
         }
         Err(e) => {
@@ -1662,6 +1666,137 @@ fn light_command(command: &str) -> bool {
         any = true;
     }
     any
+}
+
+/// How often a running command's live memory is read (NIT-516).
+const LIVE_EVERY: Duration = Duration::from_secs(2);
+
+/// How long a run's live memory must stay under half its phase's peak before the unused part of
+/// its reservation goes back (NIT-516): a short dip between two crates' builds is no end of
+/// compiling.
+const LIVE_LOW_FOR: Duration = Duration::from_secs(20);
+
+/// A running request's live memory as admission sees it (NIT-516): what it was admitted with, the
+/// peak of the phase it is in, since when its use has been low, and what it holds now once part of
+/// its reservation went back.
+#[derive(Debug, Clone)]
+struct LiveRun {
+    db: PathBuf,
+    id: i64,
+    admitted: u64,
+    phase_peak: u64,
+    low_since: Option<Instant>,
+    released: Option<u64>,
+    test_peak: u64,
+}
+
+impl LiveRun {
+    /// What its reservation becomes after reading `current` at `now`, when it changes. Once its
+    /// use has stayed under half its phase's peak for `LIVE_LOW_FOR` (compiling is over), it holds
+    /// half as much again as it uses now, at least `LIGHT_MIN`, never more than it was admitted
+    /// with; once it climbs back to four fifths of that, its whole reservation is back.
+    fn next(&mut self, current: u64, now: Instant) -> Option<u64> {
+        match self.released {
+            Some(held) => {
+                self.test_peak = self.test_peak.max(current);
+                if current > held / 5 * 4 {
+                    self.released = None;
+                    self.phase_peak = current;
+                    self.low_since = None;
+                    return Some(self.admitted);
+                }
+                None
+            }
+            None => {
+                self.phase_peak = self.phase_peak.max(current);
+                if current.saturating_mul(2) > self.phase_peak {
+                    self.low_since = None;
+                    return None;
+                }
+                let since = *self.low_since.get_or_insert(now);
+                if now.duration_since(since) < LIVE_LOW_FOR {
+                    return None;
+                }
+                let held = (current + current / 2).max(LIGHT_MIN).min(self.admitted);
+                if held >= self.admitted {
+                    return None;
+                }
+                self.released = Some(held);
+                self.test_peak = self.test_peak.max(current);
+                Some(held)
+            }
+        }
+    }
+
+    /// A new command starts (another step may build): its whole reservation is back.
+    fn step_begins(&mut self) -> Option<u64> {
+        self.phase_peak = 0;
+        self.low_since = None;
+        self.released.take().map(|_| self.admitted)
+    }
+
+    /// Records what it holds now, for the next admission to count.
+    fn record(&self, reserved: u64) {
+        if let Ok(conn) = rusqlite::Connection::open(&self.db) {
+            conn.busy_timeout(Duration::from_secs(5)).ok();
+            conn.execute("UPDATE lane_run SET memory_reserved = ?2 WHERE id = ?1 AND state = 'running'", params![self.id, reserved as i64]).ok();
+        }
+    }
+}
+
+thread_local! {
+    /// The run this thread serves, while it does (`LiveScope`).
+    static LIVE: std::cell::RefCell<Option<LiveRun>> = const { std::cell::RefCell::new(None) };
+}
+
+/// While it lives, the commands this thread runs report their live memory to run `id`'s
+/// reservation (NIT-516).
+struct LiveScope;
+
+impl LiveScope {
+    /// For run `id`, admitted with what it set aside; None for one with nothing set aside, or a
+    /// database with no file to write through.
+    fn begin(db: &Db, id: i64) -> Result<Option<LiveScope>> {
+        let Some(path) = db.conn.path().filter(|p| !p.is_empty()).map(PathBuf::from) else { return Ok(None) };
+        let admitted: Option<i64> = db.conn.query_row("SELECT memory_reserved FROM lane_run WHERE id = ?1", [id], |r| r.get(0)).optional()?.flatten();
+        let Some(admitted) = admitted.filter(|a| *a > 0) else { return Ok(None) };
+        LIVE.with(|l| *l.borrow_mut() = Some(LiveRun { db: path, id, admitted: admitted as u64, phase_peak: 0, low_since: None, released: None, test_peak: 0 }));
+        Ok(Some(LiveScope))
+    }
+
+    /// Its test-phase peak, once part of its reservation went back; None when it never did.
+    fn end(self) -> Option<u64> {
+        let run = LIVE.with(|l| l.borrow_mut().take())?;
+        (run.test_peak > 0).then_some(run.test_peak)
+    }
+}
+
+impl Drop for LiveScope {
+    fn drop(&mut self) {
+        LIVE.with(|l| l.borrow_mut().take());
+    }
+}
+
+/// `LiveRun::next` for this thread's run, recorded when it changes.
+fn live_sample(current: u64) {
+    LIVE.with(|l| {
+        if let Some(run) = l.borrow_mut().as_mut() {
+            if let Some(reserved) = run.next(current, Instant::now()) {
+                run.record(reserved);
+            }
+        }
+    });
+}
+
+/// `LiveRun::step_begins` for this thread's run, recorded when it changes.
+fn live_step_begins() {
+    LIVE.with(|l| {
+        if let Some(run) = l.borrow_mut().as_mut() {
+            if let Some(reserved) = run.step_begins() {
+                run.record(reserved);
+            }
+        }
+    });
 }
 
 /// How many of a command's last finished runs in its repo its expected peak is read from.
@@ -3090,7 +3225,16 @@ fn run_logged(command: &str, dir: &Path, log: &Path, limit: Duration, share: Sha
     }
     let started = Instant::now();
     let over_memory = || guard.as_ref().is_some_and(|g| g.over_memory());
+    // A new command may build again: its run's whole reservation is back while it does (NIT-516).
+    live_step_begins();
+    let mut sampled = Instant::now();
     let (code, timed_out, out_of_memory) = loop {
+        if sampled.elapsed() >= LIVE_EVERY {
+            sampled = Instant::now();
+            if let Some(current) = guard.as_ref().and_then(|g| g.current_memory()) {
+                live_sample(current);
+            }
+        }
         if let Some(status) = child.try_wait()? {
             // A process the cap stopped may have ended before it was seen.
             break (status.code(), false, over_memory());
@@ -4305,6 +4449,59 @@ let id = db.conn.last_insert_rowid();
     /// A command with no history starts with nothing running though the machine's own programs
     /// leave less than the floor and a whole cap free (NIT-372): it needs the least a run sets
     /// aside free above the floor, and still sets its whole cap aside for the next runs to count.
+    /// A run whose live use drops below its reservation lets a waiting run start (NIT-516): once
+    /// compiling is over and its working set stays low, the unused part goes back, and when it
+    /// builds again its whole reservation is back.
+    #[test]
+    fn a_run_that_stops_compiling_gives_its_unused_reservation_back() {
+        let base = crate::paths::unique_temp("nitely-lane-live", "");
+        std::fs::create_dir_all(&base).unwrap();
+        let db = Db::open(&base.join("t.db")).unwrap();
+        let me = std::process::id() as i64;
+        let gib = machine::GIB as i64;
+        let add = |state: &str, command: &str| -> i64 {
+            db.conn
+                .execute(
+                    "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, priority, lane_count)
+                     VALUES ('APP', 'C:/Code/app', 'x', 'gate', 's', 't', 'b', ?1, ?2, 'local', 1, ?3, 2, 3)",
+                    params![command, state, me],
+                )
+                .unwrap();
+            db.conn.last_insert_rowid()
+        };
+        let l = machine::limits_for(64 * machine::GIB, None, None); // 51.2 GB above the floor, 10.2 GB a slot
+        let mut running = Vec::new();
+        for n in 0..5 {
+            let id = add("queued", &format!("cargo test -p crate-{n}"));
+            reserve_cap(&db, id, Some(&l), 5).unwrap();
+            db.conn.execute("UPDATE lane_run SET state = 'running' WHERE id = ?1", [id]).unwrap();
+            running.push(id);
+        }
+        let waiting = add("queued", "cargo build -p other");
+        assert!(caps_fit(&db, waiting, Some(&l), 5).unwrap().is_some(), "five whole caps fill the room");
+
+        // The first run compiles at 8 GB, then its tests hold 50 MB.
+        let scope = LiveScope::begin(&db, running[0]).unwrap().unwrap();
+        let t0 = Instant::now();
+        let mut run = LIVE.with(|l| l.borrow().clone()).unwrap();
+        assert_eq!(run.next(8 * machine::GIB, t0), None, "compiling");
+        assert_eq!(run.next(50 << 20, t0 + Duration::from_secs(5)), None, "a dip is no end of compiling yet");
+        let held = run.next(50 << 20, t0 + Duration::from_secs(30)).unwrap();
+        assert_eq!(held, LIGHT_MIN, "half as much again as it uses, at least the least a run holds");
+        run.record(held);
+        assert_eq!(db.lane_run(running[0]).unwrap().unwrap().memory_reserved, Some(LIGHT_MIN as i64));
+        assert_eq!(caps_fit(&db, waiting, Some(&l), 5).unwrap(), None, "the waiting run fits now");
+
+        // Its next step builds again: its whole reservation is back.
+        let admitted = run.admitted;
+        assert_eq!(run.next(6 * machine::GIB, t0 + Duration::from_secs(40)), Some(admitted));
+        assert_eq!(run.step_begins(), None, "already whole");
+        assert!(run.admitted >= 10 * gib as u64 / 10 * 9, "it was admitted with its whole cap");
+        drop(scope);
+        assert!(LIVE.with(|l| l.borrow().is_none()), "the scope ends with its run");
+        std::fs::remove_dir_all(base).ok();
+    }
+
     /// Which commands are light with no history (NIT-454).
     #[test]
     fn a_light_command_is_a_check_not_a_build() {

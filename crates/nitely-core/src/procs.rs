@@ -342,6 +342,20 @@ impl TreeGuard {
         }
     }
 
+    /// The memory what the guard holds uses now, in bytes (NIT-516): on Windows the private
+    /// commit of the job's processes, elsewhere the resident size of the tree; None when it cannot
+    /// be told.
+    pub fn current_memory(&self) -> Option<u64> {
+        #[cfg(windows)]
+        {
+            self.job.current_memory()
+        }
+        #[cfg(not(windows))]
+        {
+            self.watch.lock().ok().and_then(|mut w| w.current())
+        }
+    }
+
     /// The most memory what the guard holds has used at once, in bytes, where the system tells it
     /// (on Windows exactly; elsewhere as last measured, only with a cap).
     pub fn peak_memory(&self) -> Option<u64> {
@@ -523,6 +537,14 @@ mod unix {
     }
 
     impl Watch {
+        /// What the tree under `root` holds now, in resident bytes (NIT-516).
+        pub fn current(&mut self) -> Option<u64> {
+            let root = self.root?;
+            let used = tree(root).iter().map(|(_, _, rss)| rss).sum::<u64>();
+            self.peak = self.peak.max(used);
+            Some(used)
+        }
+
         /// Whether the tree under `root` holds more than `cap` bytes, measured at most every
         /// second (Linux) or two (macOS, where it costs a `ps`).
         pub fn over(&mut self, cap: u64) -> bool {
@@ -887,6 +909,22 @@ mod win {
 
     const JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION: u32 = 1;
 
+    /// PROCESS_MEMORY_COUNTERS_EX.
+    #[repr(C)]
+    struct MemoryCounters {
+        cb: u32,
+        page_faults: u32,
+        peak_working_set: usize,
+        working_set: usize,
+        quota_peak_paged: usize,
+        quota_paged: usize,
+        quota_peak_nonpaged: usize,
+        quota_nonpaged: usize,
+        pagefile: usize,
+        peak_pagefile: usize,
+        private_usage: usize,
+    }
+
     #[repr(C)]
     struct CompletionPort {
         key: *mut c_void,
@@ -1045,6 +1083,44 @@ mod win {
         pub fn terminate(&self) {
             // SAFETY: the job's open handle.
             unsafe { TerminateJobObject(self.job, 1) };
+        }
+
+        /// The private commit of the job's processes now, in bytes (NIT-516): what its memory cap
+        /// counts, summed over the processes in it.
+        pub fn current_memory(&self) -> Option<u64> {
+            #[link(name = "kernel32")]
+            extern "system" {
+                fn K32GetProcessMemoryInfo(process: Handle, counters: *mut MemoryCounters, size: u32) -> i32;
+            }
+            const JOB_OBJECT_BASIC_PROCESS_ID_LIST: u32 = 3;
+            // Room for 1024 processes: two u32 counts, then the ids.
+            let mut list = vec![0usize; 1 + 1024];
+            let size = (list.len() * std::mem::size_of::<usize>()) as u32;
+            // SAFETY: the job's open handle and a buffer of `size` bytes, aligned for the struct.
+            let ok = unsafe { QueryInformationJobObject(self.job, JOB_OBJECT_BASIC_PROCESS_ID_LIST, list.as_mut_ptr().cast(), size, std::ptr::null_mut()) } != 0;
+            if !ok {
+                return None;
+            }
+            // SAFETY: the first eight bytes are the two counts the call wrote.
+            let listed = unsafe { *(list.as_ptr().cast::<u32>()).add(1) } as usize;
+            let mut total = 0u64;
+            for &pid in list.iter().skip(1).take(listed.min(1024)) {
+                // SAFETY: a plain call; the handle is closed below.
+                let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32) };
+                if process.is_null() {
+                    continue;
+                }
+                // SAFETY: all zeros is a valid MemoryCounters, `cb` says its size.
+                let mut counters: MemoryCounters = unsafe { std::mem::zeroed() };
+                counters.cb = std::mem::size_of::<MemoryCounters>() as u32;
+                // SAFETY: the open handle and the struct the call fills, of the size it says.
+                if unsafe { K32GetProcessMemoryInfo(process, &mut counters, counters.cb) } != 0 {
+                    total += counters.private_usage as u64;
+                }
+                // SAFETY: the handle from OpenProcess, closed once.
+                unsafe { CloseHandle(process) };
+            }
+            Some(total)
         }
 
         /// How many of the job's processes have not ended yet.
