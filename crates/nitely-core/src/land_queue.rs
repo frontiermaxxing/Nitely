@@ -1205,45 +1205,44 @@ batch = "waiting"
         std::fs::remove_dir_all(&f.base).ok();
     }
 
+    /// One queue run over what waited: the changes that stack land together on one gate; one that
+    /// conflicts with the change landing just before it goes back with its branch and worktree as
+    /// handed in; one that moved since its review goes back for a new one.
     #[test]
-    fn what_waits_lands_together_on_one_gate() {
+    fn what_waits_lands_together_on_one_gate_and_what_cannot_goes_back() {
         let mut f = fixture();
-        let (a, wa) = f.submitted("A", &[("a.txt", "a")]);
-        let (b, _) = f.submitted("B", &[("b.txt", "b")]);
+        let (a, wa) = f.submitted("A", &[("shared.txt", "from A\n")]);
+        let (b, wb) = f.reviewed("B", &[("shared.txt", "from B\n")]);
+        let (m, wm) = f.reviewed("M", &[("m.txt", "m")]);
         let (c, _) = f.submitted("C", &[("c.txt", "c")]);
-        f.queue_and_run(&[&a, &b, &c]);
-        for k in [&a, &b, &c] {
+        let b_head = sh(&wb, &["rev-parse", "HEAD"]);
+        std::fs::write(wm.join("later.txt"), "after the review").unwrap();
+        sh(&wm, &["add", "."]);
+        sh(&wm, &["commit", "-q", "-m", "more"]);
+        f.queue_and_run(&[&a, &b, &m, &c]);
+        for k in [&a, &c] {
             assert_eq!(f.entry(k).state, "landed", "{k}: {}", f.error(k));
             assert_eq!(f.db.issue(k).unwrap().unwrap().state, "Done");
         }
         let runs = f.runs();
         assert_eq!(runs.len(), 1);
-        assert_eq!((runs[0].gates, runs[0].landed.clone()), (1, vec![a.clone(), b.clone(), c.clone()]));
-        assert!(f.on_main("a.txt") && f.on_main("b.txt") && f.on_main("c.txt"));
+        assert_eq!((runs[0].gates, runs[0].landed.clone()), (1, vec![a.clone(), c.clone()]));
+        assert!(f.on_main("c.txt") && !f.on_main("m.txt"));
         assert!(!wa.exists(), "its worktree is cleaned up once landed");
         let landed: Landed = serde_json::from_value(f.entry(&a).result.unwrap()).unwrap();
         let note = landed.batch.unwrap();
-        assert_eq!((note.with, note.gates), (vec![b.clone(), c.clone()], 1));
+        assert_eq!((note.with, note.gates), (vec![c.clone()], 1));
         assert!(landed.approval.unwrap().contains("no human approval is needed"));
-        std::fs::remove_dir_all(&f.base).ok();
-    }
 
-    #[test]
-    fn a_conflict_in_the_middle_goes_back_and_the_rest_land() {
-        let mut f = fixture();
-        let (a, _) = f.reviewed("A", &[("shared.txt", "from A\n")]);
-        let (b, wb) = f.reviewed("B", &[("shared.txt", "from B\n")]);
-        let (c, _) = f.reviewed("C", &[("c.txt", "c")]);
-        let b_head = sh(&wb, &["rev-parse", "HEAD"]);
-        f.queue_and_run(&[&a, &b, &c]);
-        assert_eq!((f.entry(&a).state.as_str(), f.entry(&c).state.as_str()), ("landed", "landed"));
         assert_eq!(f.entry(&b).state, "sent_back");
         let why = f.error(&b);
         assert!(why.contains(&format!("conflicts with main or with {a}, landing just before it")) && why.contains("shared.txt"), "{why}");
         assert_eq!(sh(&wb, &["rev-parse", "HEAD"]), b_head, "its branch is as it was handed in");
         assert!(sh(&wb, &["status", "--porcelain"]).is_empty(), "and its worktree untouched");
-        assert_eq!(f.runs()[0].gates, 1);
         assert!(f.db.timeline(&b).unwrap().iter().any(|t| t.kind == "land_failed"));
+
+        assert_eq!(f.entry(&m).state, "sent_back");
+        assert!(f.error(&m).contains("changed since its review"), "{}", f.error(&m));
         std::fs::remove_dir_all(&f.base).ok();
     }
 
@@ -1300,21 +1299,6 @@ batch = "waiting"
         assert_eq!((f.entry(&a).state.as_str(), f.entry(&b).state.as_str(), f.entry(&c).state.as_str()), ("landed", "sent_back", "landed"));
         assert!(f.error(&b).contains("bad.txt is in the tree"), "the gate's output goes back with it: {}", f.error(&b));
         assert_eq!(f.runs().iter().map(|r| r.gates).sum::<u32>(), 2, "the stack, then the stack without the one it names");
-        std::fs::remove_dir_all(&f.base).ok();
-    }
-
-    #[test]
-    fn a_change_that_moved_since_its_review_leaves_for_a_new_one() {
-        let mut f = fixture();
-        let (a, wa) = f.reviewed("A", &[("a.txt", "a")]);
-        let (b, _) = f.reviewed("B", &[("b.txt", "b")]);
-        std::fs::write(wa.join("later.txt"), "after the review").unwrap();
-        sh(&wa, &["add", "."]);
-        sh(&wa, &["commit", "-q", "-m", "more"]);
-        f.queue_and_run(&[&a, &b]);
-        assert_eq!(f.entry(&a).state, "sent_back");
-        assert!(f.error(&a).contains("changed since its review"), "{}", f.error(&a));
-        assert_eq!(f.entry(&b).state, "landed");
         std::fs::remove_dir_all(&f.base).ok();
     }
 
