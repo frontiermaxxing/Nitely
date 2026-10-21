@@ -1811,11 +1811,56 @@ const MIN_RESERVED: u64 = 2 * machine::GIB;
 /// command.
 fn peaks_of(db: &Db, id: i64) -> Result<(Vec<i64>, String)> {
     let (repo, command): (String, String) = db.conn.query_row("SELECT repo, command FROM lane_run WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    // The same build under another thread count or output format is the same command here
+    // (`history_key`, NIT-481): scan the repo's recent finished runs and keep those that match.
+    let key = history_key(&command);
     let mut stmt = db.conn.prepare(
-        "SELECT peak_memory FROM lane_run WHERE repo = ?1 AND command = ?2 AND id != ?3 AND state = 'done' AND executor IN ('local', 'worktree') AND peak_memory IS NOT NULL ORDER BY id DESC LIMIT ?4",
+        "SELECT command, peak_memory FROM lane_run WHERE repo = ?1 AND id != ?2 AND state = 'done' AND executor IN ('local', 'worktree') AND peak_memory IS NOT NULL ORDER BY id DESC LIMIT ?3",
     )?;
-    let peaks: Vec<i64> = stmt.query_map(params![repo, command, id, PEAK_HISTORY], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    let rows: Vec<(String, i64)> = stmt.query_map(params![repo, id, PEAK_SCAN], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+    let peaks: Vec<i64> = rows.into_iter().filter(|(c, _)| *c == command || history_key(c) == key).map(|(_, p)| p).take(PEAK_HISTORY as usize).collect();
     Ok((peaks, command))
+}
+
+/// How many of a repo's last finished runs `peaks_of` looks through for a command's history.
+const PEAK_SCAN: i64 = 500;
+
+/// `command` with the options that change how it runs but not what it builds left out, so its
+/// memory history survives them (NIT-481): thread and job counts (`--test-threads=12`, `-j 8`,
+/// `--jobs`), output (`--color`, `--message-format`, `--format`, `--quiet`, `-q`, `--nocapture`,
+/// `--show-output`), each with its value, and runs of spaces.
+fn history_key(command: &str) -> String {
+    const WITH_VALUE: &[&str] = &["--test-threads", "-j", "--jobs", "--color", "--message-format", "--format", "--test-concurrency"];
+    const ALONE: &[&str] = &["--quiet", "-q", "--nocapture", "--show-output"];
+    command
+        .lines()
+        .map(|line| {
+            let words: Vec<&str> = line.split_whitespace().collect();
+            let mut kept: Vec<&str> = Vec::new();
+            let mut i = 0;
+            while i < words.len() {
+                let w = words[i];
+                let name = w.split('=').next().unwrap_or(w);
+                if WITH_VALUE.contains(&name) {
+                    i += if w.contains('=') { 1 } else { 2 };
+                    continue;
+                }
+                if ALONE.contains(&w) {
+                    i += 1;
+                    continue;
+                }
+                kept.push(w);
+                i += 1;
+            }
+            // A `--` left with nothing after it adds nothing.
+            if kept.last() == Some(&"--") {
+                kept.pop();
+            }
+            kept.join(" ")
+        })
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The p90 of `peaks` plus a quarter, at least `MIN_RESERVED`, never more than `cap`; `cap` when
@@ -4532,6 +4577,44 @@ let id = db.conn.last_insert_rowid();
         assert!(run.admitted >= 10 * gib as u64 / 10 * 9, "it was admitted with its whole cap");
         drop(scope);
         assert!(LIVE.with(|l| l.borrow().is_none()), "the scope ends with its run");
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// A command that gains a thread-count flag keeps its memory history (NIT-481), and one that
+    /// builds something else does not.
+    #[test]
+    fn a_commands_history_survives_a_thread_count_flag() {
+        let was = "cargo test --workspace\ncargo clippy --workspace -- -D warnings\nnpm test";
+        let now = "cargo test --workspace -- --test-threads=12\ncargo clippy --workspace -- -D warnings\nnpm test";
+        assert_eq!(history_key(was), history_key(now));
+        assert_eq!(history_key("cargo build -j 8 --color always"), history_key("cargo build"));
+        assert_eq!(history_key("cargo test -- --nocapture --test-threads 4"), history_key("cargo test"));
+        assert_ne!(history_key("cargo test --workspace"), history_key("cargo test -p nitely-core"));
+        assert_ne!(history_key("cargo test -- -D warnings"), history_key("cargo test"), "an option that changes the check stays");
+
+        let base = crate::paths::unique_temp("nitely-lane-history-key", "");
+        std::fs::create_dir_all(&base).unwrap();
+        let db = Db::open(&base.join("t.db")).unwrap();
+        let gib = machine::GIB as i64;
+        let add = |command: &str, state: &str, peak: Option<i64>| -> i64 {
+            db.conn
+                .execute(
+                    "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, priority, lane_count, peak_memory)
+                     VALUES ('APP', 'C:/Code/app', 'x', 'gate', 's', 't', 'b', ?1, ?2, 'local', 1, 2, 3, ?3)",
+                    params![command, state, peak],
+                )
+                .unwrap();
+            db.conn.last_insert_rowid()
+        };
+        for _ in 0..3 {
+            add(was, "done", Some(5 * gib));
+        }
+        add("cargo build --release", "done", Some(9 * gib));
+        let gate = add(now, "queued", None);
+        let (peaks, _) = peaks_of(&db, gate).unwrap();
+        assert_eq!(peaks, [5 * gib; 3], "the old command's peaks, not the other build's");
+        let cap = 10 * machine::GIB;
+        assert_eq!(sizing_of(&db, gate, cap).unwrap().reserve, 5 * machine::GIB + 5 * machine::GIB / 4, "its expected peak, not the whole cap");
         std::fs::remove_dir_all(base).ok();
     }
 
