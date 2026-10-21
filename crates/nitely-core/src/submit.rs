@@ -173,6 +173,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         verification.commands.clear();
     }
     crate::verification::record(db,&issue,&verification,actor)?;
+    if let Some(note)=crate::verification::checks_note(&gate) {db.add_note(&issue.key,&note,"verification_checks",actor)?;}
     let submitted_patch = patch_id_range(&worktree, &since, &gate.commit)?;
     let explained_revision = git(&worktree, &["rev-parse", "--verify", &format!("{}^{{commit}}", gate.commit)])?.trim() == handed_in;
     let mut out = Submitted {
@@ -1355,7 +1356,7 @@ reason = "money logic"
         f.db.set_project_yolo("NIT", false, 1, &Actor::Human).unwrap();
         assert!(crate::land::check_approval(&f.db, &pb, &issue.key, &wt, "main", &s.branch).unwrap_err().to_string().contains("project review mode changed"));
         f.db.set_project_yolo("NIT", true, 2, &Actor::Human).unwrap();
-        assert!(crate::land::check_approval(&f.db, &pb, &issue.key, &wt, "main", &s.branch).is_err(), "restoring a preset does not restore stale revision authority");
+        crate::land::check_approval(&f.db, &pb, &issue.key, &wt, "main", &s.branch).expect("the same policy restored covers the work checked under it (NIT-487)");
         f.submit(&wt, true).unwrap();
         let mut protected = pb.clone();
         protected.approval.blocked_paths.push(playbook::PathRule { pattern: "feature".into(), reason: "Protected".into() });

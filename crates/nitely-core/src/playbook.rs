@@ -1444,6 +1444,17 @@ fn run_gate_inner(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<
     if playbook.lanes.is_some() {
         // In a lane: a full checkout of the worktree's snapshot, set up there. The worktree itself
         // is not built, made whole or set up.
+        // A reduced gate already validated on this exact tree is not run again (NIT-494); a lane's
+        // own record cannot answer it, since its selected tests must be seen to run.
+        let tree = if plan.is_some() {Some(git(worktree,&["rev-parse","HEAD^{tree}"])?.trim().to_string())} else {None};
+        if let (Some(plan),Some(tree)) = (plan,&tree) {
+            if let Some(run)=crate::verification::validated_pass(db,repo_root,tree,&plan.commands)? {
+                let results=plan.commands.iter().map(|c|CommandResult{command:c.clone(),ok:true,seconds:0,output:format!("passed on this same tree in lane run {run}, every selected test seen to run; not run again"),skipped:true,timed_out:false}).collect();
+                let mut gate=record_gate(db,issue_key,worktree,actor,&commit,results,true,vec![],playbook.unknown_warnings())?;
+                gate.lane_run=Some(run);
+                return Ok(gate);
+            }
+        }
         let lane = if plan.is_some() {crate::lanes::gate_fresh_checked(db,repo_root,&playbook,worktree,issue_key,kind,&steps,actor,yolo_keys)?}
             else {crate::lanes::gate(db, repo_root, &playbook, worktree, issue_key, kind, &steps, actor, yolo_keys)?};
         if lane.yolo_skipped { return crate::project_yolo::skipped_gate(db, worktree, yolo_keys, actor); }
@@ -1451,6 +1462,7 @@ fn run_gate_inner(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<
         warnings.extend(lane.warnings);
         let mut passed=lane.passed;
         validate_gate_plan(plan,&lane.results,&mut passed,&mut warnings);
+        if let (true,Some(plan),Some(tree),Some(run))=(passed,plan,&tree,lane.run) {crate::verification::remember_pass(db,repo_root,tree,&plan.commands,run)?;}
         let mut gate = record_gate(db, issue_key, worktree, actor, &lane.commit, lane.results, passed, lane.flaked, warnings)?;
         gate.lane_run = lane.run;
         return Ok(gate);

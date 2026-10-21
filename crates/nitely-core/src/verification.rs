@@ -1,6 +1,7 @@
 //! Mechanical, revision-bound verification. Active execution requires committed owner policy
 //! and a healthy post-merge backstop; shadow mode only records advice.
 use anyhow::{bail, Context, Result};
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::{path::Path, process::Command};
 use tree_sitter::{Node, Parser};
@@ -354,6 +355,49 @@ fn risk_floor(repo:&Path,plan:&Plan,pb:&Playbook)->Result<Option<String>> {
     }
     Ok(None)
 }
+/// Before landing under a risk-based mode (Fast and Careful), only the quick checks: compile and
+/// lint (the playbook's `basic` commands) and the tests the change affects (NIT-494). Size, new or
+/// renamed files and a missing declaration no longer force the full suite here, because the land
+/// batch and the backstop on main run it. A protected or flagged path, a change the test map does
+/// not cover, or a declared sensitive change still runs the full gate.
+fn fast_checks(repo:&Path,plan:&mut Plan,issue:&IssueRecord)->Result<()> {
+    if issue.review_level.as_deref()==Some("sensitive") {return Ok(());}
+    let Some(selection)=plan.affected.clone() else {return Ok(());};
+    if selection.full {plan.reasons.push(format!("Fast checks unavailable, the test map keeps the full gate: {}",selection.reasons.join("; ")));return Ok(());}
+    let mut pb=Playbook::parse(&blob(repo,&plan.policy_commit,PLAYBOOK_PATH)?)?;
+    if pb.verification.basic.is_empty() {return Ok(());}
+    if let Some(hit)=risk_floor(repo,plan,&pb)? {plan.reasons.push(format!("The risk floor keeps the full gate: {hit}"));return Ok(());}
+    plan.commands=vec![format!("git diff --check {} {}",plan.base,plan.head)];
+    plan.commands.append(&mut pb.verification.basic);
+    for check in &selection.checks {
+        if let Some(d)=&check.discovery {plan.commands.extend([d.command.clone(),d.ignored_command.clone()]);}
+        plan.commands.push(check.command.clone());
+    }
+    plan.effective="standard".into();plan.depth=crate::issues::review_depth("standard").into();plan.shadow=false;
+    for component in &selection.components {let id=format!("component:{component}");if !plan.rule_ids.contains(&id) {plan.rule_ids.push(id);}}
+    plan.reasons.push("Fast checks before landing: compile, lint and the affected tests; the land batch and the backstop on main run the full suite.".into());
+    plan.enforcement="Compile, lint and affected tests before landing; full suite in the land batch and on main.".into();
+    Ok(())
+}
+/// A reduced gate that passed in a lane and whose selected tests were all seen to run, by tree and
+/// commands, so land can take it instead of running the same checks on the same tree again.
+pub(crate) fn remember_pass(db:&Db,repo:&Path,tree:&str,commands:&[String],run:i64)->Result<()> {
+    db.conn.execute("INSERT OR REPLACE INTO verification_gate_pass(repo,tree,commands,lane_run,recorded_at) VALUES(?1,?2,?3,?4,?5)",
+        rusqlite::params![repo.to_string_lossy(),tree,commands.join("\n"),run,crate::db::now()])?;
+    Ok(())
+}
+pub(crate) fn validated_pass(db:&Db,repo:&Path,tree:&str,commands:&[String])->Result<Option<i64>> {
+    Ok(db.conn.query_row("SELECT lane_run FROM verification_gate_pass WHERE repo=?1 AND tree=?2 AND commands=?3",
+        rusqlite::params![repo.to_string_lossy(),tree,commands.join("\n")],|r|r.get(0)).optional()?)
+}
+/// What a gate ran and how long each check took, for the issue's timeline.
+pub(crate) fn checks_note(gate:&crate::playbook::GateResult)->Option<String> {
+    if gate.skipped.is_some() || gate.results.is_empty() {return None;}
+    let what=if gate.plan.is_some() {"Fast checks before landing"} else {"Full gate before landing"};
+    let total:u64=gate.results.iter().map(|r|r.seconds).sum();
+    let lines:Vec<String>=gate.results.iter().map(|r|if r.skipped {format!("- `{}`: {}",r.command,r.output)} else {format!("- `{}`: {} in {} s",r.command,if r.ok {"passed"} else {"failed"},r.seconds)}).collect();
+    Some(format!("{what}, {} {} in {total} s:\n{}",lines.len(),if lines.len()==1 {"check"} else {"checks"},lines.join("\n")))
+}
 fn project_plan(db:&Db,repo:&Path,base:&str,head:&str,issue:&IssueRecord)->Result<Plan> {
     let settings=issue.project.as_deref().map(|p|db.project_review_mode(p)).transpose()?;
     let mut plan=assess_with_mode(repo,base,head,issue,settings.as_ref())?;
@@ -382,6 +426,7 @@ fn project_plan(db:&Db,repo:&Path,base:&str,head:&str,issue:&IssueRecord)->Resul
                     plan.enforcement="Configured Basic commands selected by human project mode; review is independently configured.".into();
                 }
             }
+            Some(crate::project_modes::TestDepth::Risk) if plan.commands.is_empty() => fast_checks(repo,&mut plan,issue)?,
             _=>{}
         }
         if let Some(n)=o.audit_percent {plan.audit_percent=n;}
@@ -576,6 +621,53 @@ mod tests {
         assert_eq!(assess(&repo, &base, "HEAD", &issue).unwrap().depth, "Full");
         drop(db);
         std::fs::remove_dir_all(repo).unwrap();
+    }
+    #[test]
+    fn fast_and_careful_run_only_quick_checks_before_landing_except_at_a_risk_floor() {
+        use crate::project_modes::{Mode, Options};
+        use crate::test_repo::git as g;
+        const MAP: &str = "version = 1\n[[components]]\nid = 'web'\nroots = ['src/']\nchecks = ['npm run build']\n[[components.suites]]\nid = 'unit'\ninputs = ['src/']\n[components.suites.javascript]\ncommand = 'npm test'\ntest_files = ['src/app.test.ts']\n";
+        let repo = crate::test_repo::copy("verification-fast-checks", |dir| {
+            crate::test_repo::init(dir, &[
+                (PLAYBOOK_PATH, "[verification]\nversion=1\nmode='active'\nbasic=['echo typed']\nprotected=['src/keys/.*']\n"),
+                (crate::affected_tests::POLICY_PATH, MAP),
+                ("package.json", "{}"),
+                ("src/app.ts", "export const a = 1;"),
+                ("src/app.test.ts", "import {a} from './app'; export const ok = a === 1;"),
+                ("src/keys/key.ts", "export const k = 1;"),
+                ("notes.txt", "notes"),
+            ]);
+        });
+        let mut db = Db::open(&repo.join("state.sqlite")).unwrap();
+        db.create_project("APP", "Example").unwrap();
+        let mut issue = |level: Option<&str>| db.create_issue(&crate::NewIssue { project: "APP".into(), title: format!("A {level:?} change"), body: "b".into(), kind: "feature".into(), source: "codex".into(), evidence: "test".into(), review_level: level.map(str::to_string), allow_similar: true, ..Default::default() }, &Actor::Human).unwrap();
+        let (undeclared, sensitive) = (issue(None), issue(Some("sensitive")));
+        db.set_project_review_mode("APP", Mode::Fast, Options::default(), 0, &Actor::Human).unwrap();
+        let base = g(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        let change = |path: &str| {
+            g(&repo, &["checkout", "-q", "--detach", &base]);
+            std::fs::create_dir_all(repo.join(path).parent().unwrap()).unwrap();
+            std::fs::write(repo.join(path), "export const changed = 2;").unwrap();
+            g(&repo, &["add", path]);
+            g(&repo, &["commit", "-qm", path]);
+        };
+        // A new file and no declaration used to force the full suite; under Fast, compile, lint and
+        // the affected checks run, and the land batch and the backstop run the rest.
+        change("src/feature.ts");
+        let fast = project_plan(&db, &repo, &base, "HEAD", &undeclared).unwrap();
+        assert_eq!(fast.depth, "Integration", "{:?}", fast.reasons);
+        assert!(!fast.shadow && ["echo typed", "npm run build", "npm test"].iter().all(|c| fast.commands.iter().any(|x| x == c)), "{:?}", fast.commands);
+        assert!(checks_note(&crate::playbook::GateResult { mode_authority: None, passed: true, plan: Some(fast.clone()), skipped: None, commit: "abc".into(), results: vec![crate::playbook::CommandResult { command: "npm run build".into(), ok: true, seconds: 7, output: String::new(), skipped: false, timed_out: false }], warnings: vec![], flaked: vec![], lane_run: None }).unwrap().contains("`npm run build`: passed in 7 s"));
+        assert!(project_plan(&db, &repo, &base, "HEAD", &sensitive).unwrap().commands.is_empty(), "a declared sensitive change keeps the full gate");
+        // The risk floors: a protected path, and a file the test map does not cover.
+        for path in ["src/keys/key.ts", "notes.txt"] {
+            change(path);
+            let full = project_plan(&db, &repo, &base, "HEAD", &undeclared).unwrap();
+            assert!(full.commands.is_empty(), "{path}: {:?}", full.commands);
+        }
+        change("src/feature.ts");
+        db.set_project_review_mode("APP", Mode::Release, Options::default(), 1, &Actor::Human).unwrap();
+        assert_eq!(project_plan(&db, &repo, &base, "HEAD", &undeclared).unwrap().depth, "Full", "Release runs the full suite before every land");
     }
     #[test]
     fn a_test_inside_a_mapped_component_runs_its_checks_and_test_infrastructure_stays_full() {

@@ -242,7 +242,9 @@ pub fn check_playbook_authority(db:&Db,keys:&[&str],pb:&Playbook)->Result<()> {
 }
 
 #[derive(Debug,Clone,Serialize)]
-pub struct EffectiveRepository {pub repo:String,pub options:Options,pub warnings:Vec<String>}
+pub struct EffectiveRepository {pub repo:String,pub options:Options,pub warnings:Vec<String>,
+ /// Nothing runs the full suite on main: only Custom can choose this, and the app shows it in red.
+ pub backstop_off:bool}
 pub fn effective_repositories(db:&Db,config:&crate::Config,project:&str)->Result<Vec<EffectiveRepository>> {
  let settings=db.project_review_mode(project)?;
  config.repos.iter().filter(|r|r.project.as_deref().is_some_and(|p|p.eq_ignore_ascii_case(project))).map(|repo| {
@@ -258,7 +260,8 @@ pub fn effective_repositories(db:&Db,config:&crate::Config,project:&str)->Result
   }
   if options.test_depth==Some(TestDepth::Risk) {warnings.push("Risk-based verification falls back to Full for missing mappings, protected changes or an unhealthy enabled backstop.".into());}
   if options.full_backstop.as_ref().is_some_and(|b|!b.enabled) {warnings.push("The full suite on main is off: nothing checks main after reduced checks land.".into());}
-  Ok(EffectiveRepository{repo:repo.name.clone(),options,warnings})
+  let backstop_off=options.full_backstop.as_ref().is_some_and(|b|!b.enabled);
+  Ok(EffectiveRepository{repo:repo.name.clone(),options,warnings,backstop_off})
  }).collect()
 }
 

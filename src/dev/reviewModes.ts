@@ -34,7 +34,7 @@ export function effectiveModes(project: string) {
   const options = optionsFor(mode.mode, mode.presets, mode.overrides);
   const fallback = { ...presets.find((p) => p.mode === "release")!.options, land_batch: true };
   const effective = Object.fromEntries(Object.entries(options).map(([key, value]) => [key, value ?? fallback[key as keyof ModeOptions]])) as unknown as ModeOptions;
-  return [{ repo: "Sample project", options: effective, warnings: [] }];
+  return [{ repo: "Sample project", options: effective, warnings: [], backstop_off: effective.full_backstop?.enabled === false }];
 }
 export function periodicReviews(project: string): PeriodicStatus[] {
   if (project !== "NIT") return [];
