@@ -12,6 +12,19 @@ use std::time::{Duration, Instant, SystemTime};
 /// A migration no build has: the database reads as upgraded by a newer Nitely.
 const FUTURE: &str = "29991231-from-a-newer-build";
 
+/// Starts a copy of the built binary. On Linux a test's child forked while the copy was still open
+/// for writing holds that descriptor until it execs, and exec fails with "Text file busy" meanwhile
+/// (NIT-541): that error is tried again, briefly; any other is not.
+fn spawn(command: &mut Command) -> Child {
+    for _ in 0..100 {
+        match command.spawn() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => std::thread::sleep(Duration::from_millis(20)),
+            started => return started.unwrap(),
+        }
+    }
+    command.spawn().unwrap()
+}
+
 struct Mcp {
     child: Child,
     stdin: ChildStdin,
@@ -48,16 +61,16 @@ fn setup(name: &str, install_wait: u64) -> (Mcp, PathBuf, PathBuf) {
     set_future(&base, true);
     let exe = base.join("bin").join(format!("nitely{}", std::env::consts::EXE_SUFFIX));
     std::fs::copy(env!("CARGO_BIN_EXE_nitely"), &exe).unwrap();
-    let mut child = Command::new(&exe)
-        .arg("mcp")
-        .current_dir(&base)
-        .env("NITELY_HOME", &base)
-        .env("NITELY_MCP_INSTALL_WAIT", install_wait.to_string())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut child = spawn(
+        Command::new(&exe)
+            .arg("mcp")
+            .current_dir(&base)
+            .env("NITELY_HOME", &base)
+            .env("NITELY_MCP_INSTALL_WAIT", install_wait.to_string())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    );
     let stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
     let (tx, replies) = mpsc::channel();

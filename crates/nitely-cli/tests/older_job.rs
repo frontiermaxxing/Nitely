@@ -3,11 +3,24 @@
 //! stopped instead of "its process ended" with no reason (NIT-314).
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
 /// A migration no build has: the database reads as upgraded by a newer Nitely.
 const FUTURE: &str = "29991231-from-a-newer-build";
+
+/// Starts a copy of the built binary. On Linux a test's child forked while the copy was still open
+/// for writing holds that descriptor until it execs, and exec fails with "Text file busy" meanwhile
+/// (NIT-541): that error is tried again, briefly; any other is not.
+fn spawn(command: &mut Command) -> Child {
+    for _ in 0..100 {
+        match command.spawn() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => std::thread::sleep(Duration::from_millis(20)),
+            started => return started.unwrap(),
+        }
+    }
+    command.spawn().unwrap()
+}
 
 /// A Nitely home with one queued submit job, its database upgraded by a "newer" build, and this
 /// build copied to `bin/` as if installed there.
@@ -52,16 +65,16 @@ fn install_over(exe: &Path) {
 
 /// Runs `nitely submit-job <id>` from `exe` the way submit starts it, and waits for it.
 fn run_job(base: &Path, exe: &Path, id: i64, install_wait: u64, meanwhile: impl FnOnce()) -> std::process::ExitStatus {
-    let mut child = Command::new(exe)
-        .args(["submit-job", &id.to_string()])
-        .current_dir(base)
-        .env("NITELY_HOME", base)
-        .env("NITELY_MCP_INSTALL_WAIT", install_wait.to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let mut child = spawn(
+        Command::new(exe)
+            .args(["submit-job", &id.to_string()])
+            .current_dir(base)
+            .env("NITELY_HOME", base)
+            .env("NITELY_MCP_INSTALL_WAIT", install_wait.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
     meanwhile();
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
