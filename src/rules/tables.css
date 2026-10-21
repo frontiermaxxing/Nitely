@@ -1,0 +1,68 @@
+/* What waits for you (Paths.tsx, Questions.tsx): each rule a row of its name and why beside its
+   table; patterns in mono, cut off with … until the field has the focus; an empty list a dashed
+   box with its add button inside; a committed playbook's settings as read-only tiles. */
+.rules-section-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+.rules-section-head h2 { margin: 0 0 8px; }
+.rules-lock { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; font-size: var(--text-sm); color: var(--fg-3); }
+
+.rules-row {
+  display: grid; grid-template-columns: minmax(200px, 280px) minmax(0, 1fr); gap: 8px 24px; align-items: start;
+  padding: 14px 0; border-top: 1px solid var(--line);
+}
+.rules-row-label h3 { display: flex; align-items: baseline; gap: 8px; margin: 0 0 4px; font-size: 13.5px; font-weight: var(--weight-medium); }
+.rules-row-label .settings-why { margin: 0; font-size: 12.5px; line-height: 1.5; }
+.rules-count { font-family: var(--font-mono); font-size: 11.5px; color: var(--attention-ink); }
+.rules-count-quiet { color: var(--fg-3); }
+.rules-row-control { min-width: 0; padding-top: 2px; }
+
+.rules-table { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
+.rules-table-paths { grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr) 28px; }
+.rules-table-flags { grid-template-columns: minmax(120px, 200px) minmax(0, 1fr) 28px; }
+.rules-table-head {
+  display: grid; gap: 10px; height: 30px; align-items: center; padding: 0 8px 0 12px;
+  background: var(--sunken); border-bottom: 1px solid var(--line); font-size: 11.5px; color: var(--fg-3);
+}
+.rules-table-row { display: grid; gap: 10px; align-items: center; padding: 5px 8px 5px 4px; border-bottom: 1px solid var(--line); }
+.rules-table-foot { display: flex; padding: 2px 4px; }
+.rules-table-add { gap: 6px; }
+.rules-table-add span { font-size: 15px; line-height: 1; }
+
+/* A cell edits in place: no border until it is hovered or has the focus. */
+.rules .rules-table input.rules-cell {
+  width: 100%; min-width: 0; height: 30px; min-height: 30px; padding: 0 8px; box-sizing: border-box;
+  border: 1px solid transparent; border-radius: 6px; background: transparent;
+  font: inherit; font-size: var(--text-md); color: var(--fg); text-overflow: ellipsis;
+}
+.rules .rules-table input.rules-cell:hover { border-color: var(--line-strong); }
+.rules .rules-table input.rules-cell:focus { border-color: var(--line-strong); background: var(--sunken); outline: 2px solid var(--focus); outline-offset: -1px; text-overflow: clip; }
+.rules .rules-table input.rules-cell-mono { font-family: var(--font-mono); font-size: 12px; }
+.rules .rules-table input.rules-cell-flag { font-weight: var(--weight-strong); color: var(--attention-ink); }
+.rules-cell-dotted { display: flex; align-items: center; gap: 2px; min-width: 0; }
+.rules-dot { width: 6px; height: 6px; margin-left: 4px; border-radius: 50%; flex: none; }
+.rules-dot-you { background: var(--attention); }
+.rules-dot-refused { background: var(--fg-3); }
+
+.rules-empty {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 44px; box-sizing: border-box;
+  padding: 0 6px 0 14px; border: 1px dashed var(--line-strong); border-radius: 9px; font-size: 12.5px; color: var(--fg-3);
+}
+
+.rules-tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.rules-tile { display: flex; flex-direction: column; gap: 6px; height: 100%; box-sizing: border-box; padding: 14px; border: 1px dashed var(--line-strong); border-radius: 9px; min-width: 0; }
+.rules-tile-title { font-size: var(--text-md); font-weight: var(--weight-medium); }
+.rules-tile-value { font-size: 12.5px; color: var(--fg-3); }
+.rules-tile ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 4px; font-size: var(--text-sm); }
+.rules-tile li { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.rules-tile .mono { font-size: 11.5px; }
+
+@media (max-width: 1000px) {
+  .rules-row { grid-template-columns: minmax(0, 1fr); }
+  .rules-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 640px) {
+  .rules-table-paths, .rules-table-flags { grid-template-columns: minmax(0, 1fr) 28px; }
+  .rules-table-head span:nth-child(2) { display: none; }
+  .rules-table-row > :nth-child(2) { grid-column: 1; }
+  .rules-table-row > :nth-child(3) { grid-row: 1; grid-column: 2; }
+  .rules-tiles { grid-template-columns: minmax(0, 1fr); }
+}

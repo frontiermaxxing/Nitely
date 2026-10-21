@@ -16,11 +16,6 @@
 }
 .rules-check { display: inline-flex; align-items: center; gap: 8px; font-size: var(--text-md); cursor: pointer; }
 
-.rules-list { display: grid; gap: 6px; }
-.rules-item { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr) auto; gap: 6px; align-items: center; }
-.rules-flag { grid-template-columns: minmax(0, 1.2fr) minmax(0, 3fr) auto; }
-.rules-add { justify-self: start; }
-.rules-none { margin: 0; }
 
 .rules input:not([type]), .rules input[type="text"], .rules select, .rules textarea,
 .rules-defaults select, .rules-defaults textarea {
@@ -144,8 +139,6 @@
 }
 
 @media (max-width: 640px) {
-  .rules-item, .rules-flag { grid-template-columns: 1fr; }
-  .rules-item .btn { justify-self: start; }
   .rules-dry { grid-template-columns: 1fr; }
   .rules-dry-cell + .rules-dry-cell { border-left: 0; border-top: 1px solid var(--line); }
   .rules-dry-pick { grid-template-columns: minmax(0, 1fr) auto; }
