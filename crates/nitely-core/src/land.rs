@@ -942,7 +942,10 @@ pub(crate) fn cleanup(root: &Path, pb: &Playbook, worktree: &Path, branch: &str,
         return (message, held);
     }
     let teardown = teardown(root, pb, worktree);
-    let removed = match crate::submodules::remove_worktrees(root, pb, worktree) {
+    // git worktree remove follows a junction in it and deletes what it points at (NIT-460): every
+    // link goes as a link first, or the worktree is kept.
+    let unlinked = crate::unlink::unlink_all(worktree).map_err(|e| format!("kept the worktree: {e:#}"));
+    let removed = match unlinked.and_then(|_| crate::submodules::remove_worktrees(root, pb, worktree)) {
         Err(kept) => Err(kept),
         Ok(()) => match git(root, &["worktree", "remove", &path]) {
             Ok(_) => Ok(()),
@@ -1022,7 +1025,7 @@ fn finish_removal(root: &Path, worktree: &Path, error: &anyhow::Error) -> std::r
         if attempt > 0 {
             std::thread::sleep(std::time::Duration::from_millis(700));
         }
-        if !worktree.exists() || std::fs::remove_dir_all(worktree).is_ok() {
+        if !worktree.exists() || crate::unlink::remove_tree(worktree).is_ok() {
             git(root, &["worktree", "prune"]).ok();
             return Ok(());
         }
@@ -1971,6 +1974,35 @@ when_changed = ["billing"]
         assert!(!merged.exists() && !stray.exists() && !empty.exists(), "{r:?}");
         assert!(unknown.exists() && clone.join("work.txt").exists(), "{r:?}");
         assert_eq!(r.tidied.len(), 3, "{r:?}");
+        std::fs::remove_dir_all(&f.base).ok();
+    }
+
+    #[test]
+    fn removing_a_worktree_never_deletes_through_a_link_in_it() {
+        let mut f = fixture();
+        // node_modules is ignored, as in a real repo: git removes a worktree that holds ignored files.
+        std::fs::create_dir_all(f.repo.join(".git").join("info")).unwrap();
+        std::fs::write(f.repo.join(".git").join("info").join("exclude"), "node_modules\n").unwrap();
+        // The person's own node_modules, which an agent linked its worktree's to (NIT-460).
+        let outside = crate::unlink::tests::outside(&f.base);
+        let (a, wt) = f.submitted("Linked deps", "linked.txt", "x");
+        crate::unlink::tests::link_folder(&wt.join("node_modules"), &outside);
+
+        let r = f.land(&a);
+        assert!(r.landed && !wt.exists(), "{r:?}");
+        assert!(crate::unlink::tests::intact(&outside), "the land removed the link, not what it points at: {r:?}");
+
+        // What a land git stopped halfway leaves, with a link in it: the next land's cleanup.
+        let stray = wt.parent().unwrap().join("nit-stray-linked");
+        std::fs::create_dir_all(stray.join("target")).unwrap();
+        let record = f.repo.join(".git").join("worktrees").join("nit-stray-linked");
+        std::fs::write(stray.join(".git"), format!("gitdir: {}\n", record.display())).unwrap();
+        crate::unlink::tests::link_folder(&stray.join("target").join("deps"), &outside);
+        f.db.log_event(&f.actor, Some(&a), Some(&stray.to_string_lossy()), "worktree_held", "Worktree kept after landing").unwrap();
+        let (b, _) = f.submitted("Next", "next.txt", "z");
+        let r = f.land(&b);
+        assert!(r.landed && !stray.exists(), "{r:?}");
+        assert!(crate::unlink::tests::intact(&outside), "the cleanup removed the link, not what it points at: {r:?}");
         std::fs::remove_dir_all(&f.base).ok();
     }
 

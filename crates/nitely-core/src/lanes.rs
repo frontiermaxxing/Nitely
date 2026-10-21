@@ -2684,7 +2684,7 @@ fn create_lane(repo_root: &Path, lane: &Path, commit: &str) -> Result<()> {
     // A folder left by a lane whose registration is gone (a crash during creation) goes first.
     git(repo_root, &["worktree", "prune"]).ok();
     if lane.exists() {
-        std::fs::remove_dir_all(lane).with_context(|| format!("removing the half-made lane {}", lane.display()))?;
+        crate::unlink::remove_tree(lane).with_context(|| format!("removing the half-made lane {}", lane.display()))?;
     }
     git(repo_root, &["worktree", "add", "--detach", &lane.to_string_lossy(), commit])?;
     Ok(())

@@ -171,9 +171,10 @@ fn not_ours(root: &Path, folder: &Path) -> Option<String> {
 /// Deletes a folder git no longer lists, then its branch when that is merged. One that went for
 /// being `empty` goes by remove_dir, which refuses a folder that has gained anything since.
 fn remove_folder(root: &Path, folder: &Path, branch: &str, empty: bool) -> String {
-    let removed = if empty { std::fs::remove_dir(folder) } else { std::fs::remove_dir_all(folder) };
+    // Links in it go as links, never through them to what they point at (NIT-460).
+    let removed = if empty { std::fs::remove_dir(folder).map_err(anyhow::Error::from) } else { crate::unlink::remove_tree(folder) };
     if let Err(e) = removed {
-        return format!("could not delete the rest of the folder: {e}");
+        return format!("could not delete the rest of the folder: {e:#}");
     }
     playbook::git(root, &["worktree", "prune"]).ok();
     if branch.is_empty() {

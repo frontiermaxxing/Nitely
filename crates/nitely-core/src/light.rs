@@ -56,7 +56,7 @@ pub fn reference_tree(pb: &Playbook, repo_root: &Path) -> Result<PathBuf> {
         // A folder git still lists but that is gone (deleted by hand) would refuse the add.
         git(repo_root, &["worktree", "prune"]).ok();
         if path.exists() {
-            std::fs::remove_dir_all(&path).with_context(|| format!("clearing {}", path.display()))?;
+            crate::unlink::remove_tree(&path).with_context(|| format!("clearing {}", path.display()))?;
         }
         git(repo_root, &["worktree", "add", "--detach", &at, &base]).context("creating the reference tree")?;
         return Ok(path);

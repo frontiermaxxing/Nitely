@@ -596,7 +596,7 @@ fn stack_worktree(root: &Path, pb: &Playbook, at: &str) -> Result<PathBuf> {
         std::fs::create_dir_all(path.parent().unwrap())?;
         git(root, &["worktree", "prune"]).ok();
         if path.exists() {
-            std::fs::remove_dir_all(&path).with_context(|| format!("clearing {}", path.display()))?;
+            crate::unlink::remove_tree(&path).with_context(|| format!("clearing {}", path.display()))?;
         }
         git(root, &["worktree", "add", "--detach", &path.to_string_lossy(), at]).context("making the land queue's stack worktree")?;
         return Ok(path);

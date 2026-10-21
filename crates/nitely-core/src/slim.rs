@@ -169,7 +169,8 @@ pub fn reclaim(candidates: &[Candidate]) -> Reclaimed {
         let mut any = false;
         for (dir, bytes) in &c.dirs {
             let path = c.worktree.join(dir);
-            match std::fs::remove_dir_all(&path) {
+            // A link among the build output goes as a link, never through it (NIT-460).
+            match crate::unlink::remove_tree(&path) {
                 Ok(()) => {
                     out.bytes += bytes;
                     any = true;
@@ -177,7 +178,7 @@ pub fn reclaim(candidates: &[Candidate]) -> Reclaimed {
                 Err(e) => {
                     // Part of it may be gone: count what is.
                     out.bytes += bytes.saturating_sub(size(&path));
-                    out.failed.push(format!("{}: {e}", path.display()));
+                    out.failed.push(format!("{}: {e:#}", path.display()));
                 }
             }
         }
