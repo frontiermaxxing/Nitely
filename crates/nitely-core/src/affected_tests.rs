@@ -951,6 +951,64 @@ mod tests {
     use super::*;
     use crate::test_repo::{git as g, init};
 
+    /// This repo's own map (.nitely/affected-tests.toml) against candidate commits made on a
+    /// shared clone of it, without a checkout: which changes get the frontend's checks and which
+    /// keep the full gate (NIT-483).
+    #[test]
+    fn the_repos_own_map_selects_the_frontend_and_keeps_everything_else_full() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let base_dir = crate::paths::unique_temp("nitely-own-map", "");
+        let clone = base_dir.join("clone");
+        std::fs::create_dir_all(&base_dir).unwrap();
+        g(&base_dir, &["clone", "-q", "--shared", "--no-checkout", &repo.to_string_lossy(), &clone.to_string_lossy()]);
+        let base = g(&clone, &["rev-parse", "HEAD"]);
+        assert!(!g(&clone, &["ls-tree", "--name-only", &base, POLICY_PATH]).is_empty(), "the map is committed");
+        // A commit on `base` that changes each (path, content): plumbing, so nothing is checked out.
+        let index = base_dir.join("index");
+        let plumb = |args: &[&str]| -> String {
+            let o = crate::playbook::run_git(std::process::Command::new("git").arg("-C").arg(&clone).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).env("GIT_INDEX_FILE", &index)).unwrap();
+            assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+            String::from_utf8_lossy(&o.stdout).trim().to_string()
+        };
+        let candidate = |changes: &[(&str, &str)]| -> String {
+            plumb(&["read-tree", &base]);
+            for (i, (path, content)) in changes.iter().enumerate() {
+                let file = base_dir.join(format!("blob-{i}"));
+                std::fs::write(&file, content).unwrap();
+                let blob = plumb(&["hash-object", "-w", &file.to_string_lossy()]);
+                plumb(&["update-index", "--add", "--cacheinfo", &format!("100644,{blob},{path}")]);
+            }
+            let tree = plumb(&["write-tree"]);
+            plumb(&["commit-tree", &tree, "-p", &base, "-m", "candidate"])
+        };
+        let edited = |path: &str| format!("{}\n// edited\n", g(&clone, &["show", &format!("{base}:{path}")]));
+        let select = |head: &str| select_with_policy(&clone, &base, head, &base).unwrap();
+
+        // A frontend change, and a scripts change: the frontend's build and its whole test suite.
+        for path in ["src/Rules.tsx", "scripts/version.mjs"] {
+            let s = select(&candidate(&[(path, &edited(path))]));
+            assert!(!s.full, "{path}: {:?}", s.reasons);
+            assert_eq!(s.components, ["web"], "{path}");
+            let commands: Vec<&str> = s.checks.iter().map(|c| c.command.as_str()).collect();
+            assert_eq!(commands, ["npm run build", "npm test"], "{path}");
+        }
+        // Anything the map does not own keeps the full gate: Rust, the map itself, a manifest, a
+        // frontend change that also touches Rust, and a new test file the map does not list.
+        let rust = "crates/nitely-core/src/lanes.rs";
+        for changes in [
+            vec![(rust, edited(rust))],
+            vec![(POLICY_PATH, edited(POLICY_PATH))],
+            vec![("package.json", edited("package.json"))],
+            vec![("src/Rules.tsx", edited("src/Rules.tsx")), (rust, edited(rust))],
+            vec![("src/new.test.ts", "export {};\n".to_string())],
+        ] {
+            let pairs: Vec<(&str, &str)> = changes.iter().map(|(p, c)| (*p, c.as_str())).collect();
+            let s = select(&candidate(&pairs));
+            assert!(s.full && s.checks.is_empty(), "{:?} must stay full: {:?}", pairs.iter().map(|p| p.0).collect::<Vec<_>>(), s.reasons);
+        }
+        std::fs::remove_dir_all(base_dir).ok();
+    }
+
     const JS_POLICY: &str = r#"
 version = 1
 [[components]]

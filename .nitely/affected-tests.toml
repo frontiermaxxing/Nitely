@@ -1,0 +1,66 @@
+# Which tests a change can affect (docs/affected-tests.md, NIT-483). Human-approved policy: a
+# changed file no component owns, or one this map cannot prove, keeps the full gate. Editing this
+# file is itself a Full change.
+version = 1
+
+# The frontend and the repo's scripts: `npm test` runs every src/ test and scripts/*.test.mjs, and
+# `npm run build` type-checks and bundles. Whole-suite mapping (inputs), since vite and tsconfig
+# resolve imports in ways the static graph does not claim. No Rust code reads these paths.
+[[components]]
+id = "web"
+roots = ["src/", "scripts/", "public/", "vite.config.ts", "index.html", "phone.html"]
+checks = ["npm run build"]
+
+[[components.suites]]
+id = "npm-test"
+inputs = ["src/", "scripts/", "public/", "vite.config.ts", "index.html", "phone.html"]
+[components.suites.javascript]
+command = "npm test"
+test_files = [
+  "scripts/dco.test.mjs",
+  "scripts/performance-probe.test.mjs",
+  "scripts/release-meta.test.mjs",
+  "scripts/release-verify-ci.test.mjs",
+  "scripts/test-sweep.test.mjs",
+  "scripts/update-manifest.test.mjs",
+  "scripts/verified-release.test.mjs",
+  "scripts/version.test.mjs",
+  "src/agents.test.ts",
+  "src/approvalSolution.test.ts",
+  "src/batches.test.ts",
+  "src/crew.test.ts",
+  "src/decisions.test.ts",
+  "src/goals.test.ts",
+  "src/lanes.test.ts",
+  "src/markdown.test.ts",
+  "src/notify.test.ts",
+  "src/performance.test.ts",
+  "src/performancePolling.test.ts",
+  "src/phone/plain.test.ts",
+  "src/phone/pushEnv.test.ts",
+  "src/phone/select.test.ts",
+  "src/refresh.test.ts",
+  "src/repos.test.ts",
+  "src/reviewModes.test.ts",
+  "src/spend.test.ts",
+  "src/ui/agents.test.ts",
+  "src/ui/lifecycle.test.ts",
+  "src/ui/rounds.test.ts",
+  "src/ui/selectKeys.test.ts",
+  "src/verificationHealth.test.ts",
+  "src/waits.test.ts",
+]
+
+# The test-sweep script Nitely embeds (include_str!) and its own node test. Its paths name "test",
+# so verification keeps any change to it on Full; it is mapped so every JavaScript file has an owner.
+[[components]]
+id = "test-sweep"
+roots = ["crates/nitely-core/src/test_sweep.cjs", "crates/nitely-core/src/test_sweep.test.cjs"]
+checks = ["node --check crates/nitely-core/src/test_sweep.cjs"]
+
+[[components.suites]]
+id = "node-test"
+inputs = ["crates/nitely-core/src/test_sweep.cjs", "crates/nitely-core/src/test_sweep.test.cjs"]
+[components.suites.javascript]
+command = "node --test crates/nitely-core/src/test_sweep.test.cjs"
+test_files = ["crates/nitely-core/src/test_sweep.test.cjs"]
