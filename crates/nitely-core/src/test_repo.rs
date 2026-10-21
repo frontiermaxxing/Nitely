@@ -104,6 +104,24 @@ pub(crate) fn add_remote(repo: &Path, remote: &Path) {
     git(repo, &["push", "-q", "-u", "origin", "main"]);
 }
 
+/// What a submit that passed with no person needed leaves for land: a passing review of the
+/// branch's real patch at its head, and the issue In Review. For tests about what happens after
+/// submit; a submit runs a gate and a reviewer, tens of git processes each (NIT-498).
+pub(crate) fn reviewed(db: &mut crate::db::Db, worktree: &Path, key: &str, actor: &crate::issues::Actor) {
+    let patch = crate::submit::patch_id(worktree, "main").unwrap();
+    let head = git(worktree, &["rev-parse", "HEAD"]);
+    let branch = git(worktree, &["branch", "--show-current"]);
+    db.conn
+        .execute(
+            "INSERT INTO review (issue_key, patch_id, commit_sha, branch, reviewer, verdict, approver, findings, ts) VALUES (?1, ?2, ?3, ?4, 'fake', 'pass', 'agent', '[]', ?5)",
+            rusqlite::params![key, patch, head, branch, crate::db::now()],
+        )
+        .unwrap();
+    if db.issue(key).unwrap().is_some_and(|i| i.state != "In Review") {
+        db.move_issue(key, "In Review", None, None, actor).unwrap();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

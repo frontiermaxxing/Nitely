@@ -525,28 +525,19 @@ mod tests {
     use crate::issues::NewIssue;
     use crate::playbook;
     use std::path::Path;
-    use std::process::Command;
 
     /// A repo with a playbook whose gate passes and whose only reviewer passes everything, an issue
     /// with a worktree and a commit on its branch.
     fn fixture() -> (PathBuf, PathBuf, crate::Config, String, PathBuf) {
-        let base = crate::paths::unique_temp("nitely-submit-job", "");
+        let base = crate::test_repo::copy("submit-job", |base| {
+            let text = "[worktree]\ndir = \"../wt/{key}\"\n[gate]\ncommands = [\"exit 0\"]\n[review]\nreviewer = { \"*\" = \"claude\" }\ncommands = { claude = [\"{sh}\", \"review.sh\"] }\n"
+                .replace("{sh}", &playbook::posix_sh());
+            crate::test_repo::init(&base.join("repo"), &[("review.sh", "cat > /dev/null\necho 'Fine.'\necho 'VERDICT: clean'\n"), (playbook::PLAYBOOK_PATH, &text)]);
+        });
         let repo = base.join("repo");
-        std::fs::create_dir_all(repo.join(".nitely")).unwrap();
         let sh = |dir: &Path, args: &[&str]| {
-            let o = playbook::run_git(Command::new("git").arg("-C").arg(dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args)).unwrap();
-            assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+            crate::test_repo::git(dir, args);
         };
-        sh(&repo, &["init", "-q", "-b", "main"]);
-        std::fs::write(repo.join("review.sh"), "cat > /dev/null\necho 'Fine.'\necho 'VERDICT: clean'\n").unwrap();
-        std::fs::write(
-            repo.join(playbook::PLAYBOOK_PATH),
-            "[worktree]\ndir = \"../wt/{key}\"\n[gate]\ncommands = [\"exit 0\"]\n[review]\nreviewer = { \"*\" = \"claude\" }\ncommands = { claude = [\"{sh}\", \"review.sh\"] }\n"
-                .replace("{sh}", &playbook::posix_sh()),
-        )
-        .unwrap();
-        sh(&repo, &["add", "."]);
-        sh(&repo, &["commit", "-q", "-m", "init"]);
         let db_path = base.join("t.db");
         let mut db = Db::open(&db_path).unwrap();
         db.create_project("APP", "App").unwrap();
@@ -628,7 +619,8 @@ mod tests {
         crate::test_repo::git(&wt, &["commit", "-q", "-m", "help text"]);
         let dir = wt.to_string_lossy().into_owned();
         let solution = crate::submit::SolutionSummary::from_fields(Some("Add a footer and help text"), Some("Add the footer link and its help page.")).unwrap().unwrap();
-        let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: false, solution: Some(&solution), solution_commit: None, solution_patch_id: None };
+        // About which revision the text binds to, not the reviewer: an unreviewed submit records it the same.
+        let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: true, local_only: true, batch: false, solution: Some(&solution), solution_commit: None, solution_patch_id: None };
         let queued = enqueue(&db, &opts, &actor).unwrap();
         // Another land absorbed the first commit: this branch has exactly the same head, but
         // only the help text remains to approve. Its old description covers too much.

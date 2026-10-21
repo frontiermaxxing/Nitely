@@ -97,19 +97,21 @@ pub fn plan_repo(name: &str, repo_root: &Path, recent: &Recent) -> Result<Vec<Ca
             continue;
         }
         let bytes = dirs.iter().map(|(_, b)| b).sum();
-        let at = crate::paths::normalize(&wt.path);
-        let in_it = recent.folders.iter().any(|r| r == &at || r.starts_with(&format!("{at}/")));
-        let key = wt.branch.as_deref().and_then(|b| crate::git::parse_branch(b).1).map(|k| k.to_uppercase());
-        let skip = if in_it {
-            Some("an agent worked in it within the hour".into())
-        } else if let Some(k) = key.filter(|k| recent.issues.contains(k)) {
-            Some(format!("{k} had activity within the hour"))
-        } else {
-            why_kept(&path, wt.branch.as_deref(), &wt.head, &base)
-        };
+        let skip = at_work(recent, &wt.path, wt.branch.as_deref()).or_else(|| why_kept(&path, wt.branch.as_deref(), &wt.head, &base));
         out.push(Candidate { repo: name.to_string(), worktree: path, branch: wt.branch.clone(), dirs, bytes, skip });
     }
     Ok(out)
+}
+
+/// Why the worktree at `path` on `branch` keeps its build output while an agent is at work: a
+/// session in it or in a folder inside it, or activity on the issue its branch names.
+fn at_work(recent: &Recent, path: &str, branch: Option<&str>) -> Option<String> {
+    let at = crate::paths::normalize(path);
+    if recent.folders.iter().any(|r| r == &at || r.starts_with(&format!("{at}/"))) {
+        return Some("an agent worked in it within the hour".into());
+    }
+    let key = branch.and_then(|b| crate::git::parse_branch(b).1).map(|k| k.to_uppercase());
+    key.filter(|k| recent.issues.contains(k)).map(|k| format!("{k} had activity within the hour"))
 }
 
 /// The signs of agents at work within `RECENT_SECS`; none when the database cannot be read.
@@ -263,13 +265,9 @@ mod tests {
         sh(&repo, &["worktree", "add", "-q", "--detach", &reference.to_string_lossy(), "main"]);
         built(&reference, "target");
 
-        // An agent at work in the pushed worktree (its session's folder, or one inside it), or on
-        // its issue, keeps it.
-        let working = Recent { folders: vec![crate::paths::normalize(&pushed.join("src").to_string_lossy())], issues: vec![] };
-        let plan = plan_repo("repo", &repo, &working).unwrap();
-        let skip_of = |plan: &[Candidate]| plan.iter().find(|c| c.branch.as_deref() == Some("claude/nit-2-pushed")).unwrap().skip.clone();
-        assert_eq!(skip_of(&plan).as_deref(), Some("an agent worked in it within the hour"));
+        // An agent at work on its issue keeps it (an_agent_at_work_keeps_a_worktree has the rest).
         let plan = plan_repo("repo", &repo, &Recent { folders: vec![], issues: vec!["NIT-2".into()] }).unwrap();
+        let skip_of = |plan: &[Candidate]| plan.iter().find(|c| c.branch.as_deref() == Some("claude/nit-2-pushed")).unwrap().skip.clone();
         assert_eq!(skip_of(&plan).as_deref(), Some("NIT-2 had activity within the hour"));
 
         let plan = plan_repo("repo", &repo, &Recent::default()).unwrap();
@@ -289,14 +287,11 @@ mod tests {
         // A playbook that names its build directories is read, whichever nitely wrote it.
         std::fs::create_dir_all(repo.join(".nitely")).unwrap();
         std::fs::write(repo.join(crate::playbook::PLAYBOOK_PATH), "[lanes]\nkeep = [\"build\"]\n").unwrap();
-        assert_eq!(keep_dirs(&repo), ["build"]);
         built(&landed, "build");
         let plan = plan_repo("repo", &repo, &Recent::default()).unwrap();
         assert_eq!(plan.iter().map(|c| c.dirs[0].0.as_str()).collect::<Vec<_>>(), ["build"], "target is not a build directory now");
-        // Only plain names inside the worktree, and only what git ignores, are ever build output.
+        // Only what git ignores is ever build output: src is named here, but tracked.
         std::fs::write(repo.join(crate::playbook::PLAYBOOK_PATH), "[lanes]\nkeep = [\".\", \"..\", \"/tmp\", \"C:/Code\", \"a\\\\b\", \"src\", \"build\"]\n").unwrap();
-        // A leading slash anchors an entry at the root, inside the worktree all the same.
-        assert_eq!(keep_dirs(&repo), ["/tmp", "src", "build"]);
         std::fs::create_dir_all(landed.join("src")).unwrap();
         std::fs::write(landed.join("src/kept.rs"), "work").unwrap();
         sh(&landed, &["add", "-A"]);
@@ -311,10 +306,42 @@ mod tests {
         let landed_dirs = |plan: &[Candidate]| plan.iter().find(|c| crate::paths::normalize(&c.worktree.to_string_lossy()) == crate::paths::normalize(&landed.to_string_lossy())).map(|c| c.dirs.iter().map(|(d, _)| d.clone()).collect::<Vec<_>>()).unwrap_or_default();
         assert_eq!(landed_dirs(&plan), ["build", "pkg/build"], "{plan:#?}");
         std::fs::write(repo.join(crate::playbook::PLAYBOOK_PATH), "[lanes]\nkeep = [\"/build\"]\n").unwrap();
-        assert_eq!(keep_dirs(&repo), ["/build"], "kept, not dropped for the defaults");
         assert_eq!(landed_dirs(&plan_repo("repo", &repo, &Recent::default()).unwrap()), ["build"]);
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// What a playbook names as build directories: plain names inside the worktree only, a
+    /// leading slash anchoring one at the root, the defaults when it names none. No git involved.
+    #[test]
+    fn keep_dirs_are_plain_names_inside_the_worktree() {
+        let repo = crate::paths::unique_temp("nitely-slim-keep", "");
+        std::fs::create_dir_all(repo.join(".nitely")).unwrap();
+        let keep = |text: &str| {
+            std::fs::write(repo.join(crate::playbook::PLAYBOOK_PATH), text).unwrap();
+            keep_dirs(&repo)
+        };
+        assert_eq!(keep(""), DEFAULT_KEEP);
+        assert_eq!(keep("[lanes]\nkeep = [\"build\"]\n"), ["build"], "read whichever nitely wrote it");
+        assert_eq!(keep("[lanes]\nkeep = [\".\", \"..\", \"/tmp\", \"C:/Code\", \"a\\\\b\", \"src\", \"build\"]\n"), ["/tmp", "src", "build"]);
+        assert_eq!(keep("[lanes]\nkeep = [\"/build\"]\n"), ["/build"], "kept, not dropped for the defaults");
         assert_eq!(human(3 * 4096), "12 KB");
         assert_eq!(human(7_000_000_000), "6.5 GB");
-        std::fs::remove_dir_all(base).ok();
+        std::fs::remove_dir_all(repo).ok();
+    }
+
+    /// An agent at work in a worktree (its session's folder, or one inside it), or on its issue,
+    /// keeps its build output; a folder that only shares the name's start does not.
+    #[test]
+    fn an_agent_at_work_keeps_a_worktree() {
+        let wt = if cfg!(windows) { "C:/wt/nit-2-pushed" } else { "/wt/nit-2-pushed" };
+        let folder = |p: &str| Recent { folders: vec![crate::paths::normalize(p)], issues: vec![] };
+        let branch = Some("claude/nit-2-pushed");
+        assert_eq!(at_work(&folder(&format!("{wt}/src")), wt, branch).as_deref(), Some("an agent worked in it within the hour"));
+        assert_eq!(at_work(&folder(wt), wt, branch).as_deref(), Some("an agent worked in it within the hour"));
+        assert_eq!(at_work(&folder(&format!("{wt}-other")), wt, branch), None);
+        let on_issue = Recent { folders: vec![], issues: vec!["NIT-2".into()] };
+        assert_eq!(at_work(&on_issue, wt, branch).as_deref(), Some("NIT-2 had activity within the hour"));
+        assert_eq!(at_work(&on_issue, wt, None), None);
+        assert_eq!(at_work(&on_issue, wt, Some("claude/nit-3-other")), None);
     }
 }

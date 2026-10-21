@@ -946,19 +946,12 @@ batch = "waiting"
             (key, wt)
         }
 
-        /// Bisection starts after submission. Seed that boundary with a review of the real
-        /// patch, rather than running an unrelated gate and reviewer for every member.
-        fn reviewed_for_bisection(&mut self, title: &str, files: &[(&str, &str)]) -> String {
+        /// As `submitted`, with a passing review of the real patch standing in for the submit:
+        /// what the queue starts from, without a gate and a reviewer per member.
+        fn reviewed(&mut self, title: &str, files: &[(&str, &str)]) -> (String, PathBuf) {
             let (key, wt) = self.committed(title, files);
-            let patch = crate::submit::patch_id(&wt, "main").unwrap();
-            let head = sh(&wt, &["rev-parse", "HEAD"]);
-            let branch = sh(&wt, &["branch", "--show-current"]);
-            self.db.conn.execute(
-                "INSERT INTO review (issue_key, patch_id, commit_sha, branch, reviewer, verdict, approver, findings, ts) VALUES (?1, ?2, ?3, ?4, 'fake', 'pass', 'agent', '[]', ?5)",
-                params![key, patch, head, branch, now()],
-            ).unwrap();
-            self.db.move_issue(&key, "In Review", None, None, &self.actor).unwrap();
-            key
+            crate::test_repo::reviewed(&mut self.db, &wt, &key, &self.actor);
+            (key, wt)
         }
 
         /// The gate from now on: fails when the tree has `bad.txt` (saying so) or `quiet-bad.txt`
@@ -1030,8 +1023,8 @@ batch = "waiting"
         sh(&f.repo, &["add", "."]);
         sh(&f.repo, &["commit", "-qm", "managed engine"]);
         let pointer = sh(&f.repo, &["ls-tree", "HEAD", "--", "engine"]);
-        let (a, _) = f.submitted("A", &[("a.txt", "a")]);
-        let (b, _) = f.submitted("B", &[("b.txt", "b")]);
+        let (a, _) = f.reviewed("A", &[("a.txt", "a")]);
+        let (b, _) = f.reviewed("B", &[("b.txt", "b")]);
         f.require_and_sign(&[&a, &b]);
         let pb = Playbook::load(&f.repo).unwrap();
         assert!(lands_alone(&f.db, &f.repo, &pb, &a).unwrap().is_none());
@@ -1056,8 +1049,8 @@ batch = "waiting"
     #[test]
     fn approval_revoked_after_the_combined_gate_prevents_any_fast_forward() {
         let mut f = fixture();
-        let (a, _) = f.submitted("A", &[("a.txt", "a")]);
-        let (b, _) = f.submitted("B", &[("b.txt", "b")]);
+        let (a, _) = f.reviewed("A", &[("a.txt", "a")]);
+        let (b, _) = f.reviewed("B", &[("b.txt", "b")]);
         f.require_and_sign(&[&a, &b]);
         let pb = Playbook::load(&f.repo).unwrap();
         for key in [&a, &b] {assert!(lands_alone(&f.db, &f.repo, &pb, key).unwrap().is_none(), "both signed changes start eligible for the batch");}
@@ -1151,9 +1144,9 @@ batch = "waiting"
         let text = std::fs::read_to_string(&path).unwrap();
         std::fs::write(&path, format!("{text}\n[[land.after]]\nrun = \"echo installed fixture\"\n")).unwrap();
         sh(&f.repo, &["commit", "-qam", "add fixture install"]);
-        let (a, _) = f.submitted("A", &[("a.txt", "a")]);
-        let (b, _) = f.submitted("B", &[("b.txt", "b")]);
-        let (c, _) = f.submitted("C", &[("c.txt", "c")]);
+        let (a, _) = f.reviewed("A", &[("a.txt", "a")]);
+        let (b, _) = f.reviewed("B", &[("b.txt", "b")]);
+        let (c, _) = f.reviewed("C", &[("c.txt", "c")]);
         let store = crate::performance::Store::open(&f.base.join("performance")).unwrap();
         // Simulate A's caller draining another issue, then a shared batch. Each after-land
         // command must get context from what actually landed, not this ambient caller.
@@ -1238,9 +1231,9 @@ batch = "waiting"
     #[test]
     fn a_conflict_in_the_middle_goes_back_and_the_rest_land() {
         let mut f = fixture();
-        let (a, _) = f.submitted("A", &[("shared.txt", "from A\n")]);
-        let (b, wb) = f.submitted("B", &[("shared.txt", "from B\n")]);
-        let (c, _) = f.submitted("C", &[("c.txt", "c")]);
+        let (a, _) = f.reviewed("A", &[("shared.txt", "from A\n")]);
+        let (b, wb) = f.reviewed("B", &[("shared.txt", "from B\n")]);
+        let (c, _) = f.reviewed("C", &[("c.txt", "c")]);
         let b_head = sh(&wb, &["rev-parse", "HEAD"]);
         f.queue_and_run(&[&a, &b, &c]);
         assert_eq!((f.entry(&a).state.as_str(), f.entry(&c).state.as_str()), ("landed", "landed"));
@@ -1265,7 +1258,7 @@ batch = "waiting"
             if i == bad {
                 files.push(("quiet-bad.txt", "x"));
             }
-            keys.push(f.reviewed_for_bisection(&format!("Change {i}"), &files));
+            keys.push(f.reviewed(&format!("Change {i}"), &files).0);
         }
         f.strict_gate();
         let refs: Vec<&str> = keys.iter().map(String::as_str).collect();
@@ -1299,9 +1292,9 @@ batch = "waiting"
     #[test]
     fn a_failure_that_names_one_changes_file_costs_one_more_gate() {
         let mut f = fixture();
-        let (a, _) = f.submitted("A", &[("a.txt", "a")]);
-        let (b, _) = f.submitted("B", &[("bad.txt", "b")]);
-        let (c, _) = f.submitted("C", &[("c.txt", "c")]);
+        let (a, _) = f.reviewed("A", &[("a.txt", "a")]);
+        let (b, _) = f.reviewed("B", &[("bad.txt", "b")]);
+        let (c, _) = f.reviewed("C", &[("c.txt", "c")]);
         f.strict_gate();
         f.queue_and_run(&[&a, &b, &c]);
         assert_eq!((f.entry(&a).state.as_str(), f.entry(&b).state.as_str(), f.entry(&c).state.as_str()), ("landed", "sent_back", "landed"));
@@ -1313,8 +1306,8 @@ batch = "waiting"
     #[test]
     fn a_change_that_moved_since_its_review_leaves_for_a_new_one() {
         let mut f = fixture();
-        let (a, wa) = f.submitted("A", &[("a.txt", "a")]);
-        let (b, _) = f.submitted("B", &[("b.txt", "b")]);
+        let (a, wa) = f.reviewed("A", &[("a.txt", "a")]);
+        let (b, _) = f.reviewed("B", &[("b.txt", "b")]);
         std::fs::write(wa.join("later.txt"), "after the review").unwrap();
         sh(&wa, &["add", "."]);
         sh(&wa, &["commit", "-q", "-m", "more"]);
@@ -1328,8 +1321,8 @@ batch = "waiting"
     #[test]
     fn a_branch_that_gains_commits_during_the_gate_keeps_them_and_goes_back() {
         let mut f = fixture();
-        let (a, wa) = f.submitted("A", &[("a.txt", "a")]);
-        let (b, _) = f.submitted("B", &[("b.txt", "b")]);
+        let (a, wa) = f.reviewed("A", &[("a.txt", "a")]);
+        let (b, _) = f.reviewed("B", &[("b.txt", "b")]);
         // The gate commits on A's branch while it runs, as its agent might.
         let wt = wa.to_string_lossy().replace('\\', "/");
         let commits = if cfg!(windows) {
@@ -1352,8 +1345,8 @@ batch = "waiting"
     #[test]
     fn a_land_alone_lands_what_queued_behind_it_and_a_local_land_never_goes_in_a_stack() {
         let mut f = fixture();
-        let (a, _) = f.submitted("A", &[("a.txt", "a")]);
-        let (b, _) = f.submitted("B", &[("b.txt", "b")]);
+        let (a, _) = f.reviewed("A", &[("a.txt", "a")]);
+        let (b, _) = f.reviewed("B", &[("b.txt", "b")]);
         // B queued while another land held the lock, and its own land stopped waiting.
         enqueue(&f.db, &f.repo, &b, &f.opts(), &f.actor).unwrap();
         // A lands alone (not to be pushed: a stack is pushed as one), and then lands B under its lock.
@@ -1366,8 +1359,8 @@ batch = "waiting"
 
         // With a remote, a land kept local leaves the queue alone: landing it would push it.
         crate::test_repo::add_remote(&f.repo, &f.base.join("remote.git"));
-        let (c, _) = f.submitted("C", &[("c.txt", "c")]);
-        let (d, _) = f.submitted("D", &[("d.txt", "d")]);
+        let (c, _) = f.reviewed("C", &[("c.txt", "c")]);
+        let (d, _) = f.reviewed("D", &[("d.txt", "d")]);
         enqueue(&f.db, &f.repo, &d, &f.opts(), &f.actor).unwrap();
         let opts = LandOptions { dir: &dir, issue_key: &c, push: false, keep: false, break_lock: false };
         assert!(land::land(&mut f.db, &crate::Config::default(), &opts, &f.actor).unwrap().landed);
@@ -1379,7 +1372,7 @@ batch = "waiting"
     #[test]
     fn approvals_large_repos_and_repos_without_lanes_land_alone() {
         let mut f = fixture();
-        let (a, _) = f.submitted("A", &[("a.txt", "a")]);
+        let (a, _) = f.reviewed("A", &[("a.txt", "a")]);
         let pb = Playbook::load(&f.repo).unwrap();
         assert_eq!(lands_alone(&f.db, &f.repo, &pb, &a).unwrap(), None);
         // A change a person must approve: its approval is given and checked per change.
@@ -1418,7 +1411,7 @@ batch = "waiting"
     #[test]
     fn a_land_waits_its_turn_and_lands_once_the_lock_is_free() {
         let mut f = fixture();
-        let (a, _) = f.submitted("A", &[("a.txt", "a")]);
+        let (a, _) = f.reviewed("A", &[("a.txt", "a")]);
         let dir = f.repo.to_string_lossy().into_owned();
         let opts = LandOptions { dir: &dir, issue_key: &a, push: true, keep: false, break_lock: false };
         // Another land runs: this one waits in the queue, and says so when it stops waiting.
@@ -1440,7 +1433,7 @@ batch = "waiting"
     #[test]
     fn a_left_index_lock_stops_the_run_and_ends_it() {
         let mut f = fixture();
-        let (a, _) = f.submitted("A", &[("a.txt", "a")]);
+        let (a, _) = f.reviewed("A", &[("a.txt", "a")]);
         let dir = f.repo.to_string_lossy().into_owned();
         let opts = LandOptions { dir: &dir, issue_key: &a, push: true, keep: false, break_lock: false };
         let held = land::Lock::try_take(&land::lock_path(&f.repo).unwrap(), "another land", false).unwrap().unwrap();
@@ -1460,8 +1453,8 @@ batch = "waiting"
     #[test]
     fn changes_wait_again_when_the_branch_moves_during_their_gate() {
         let mut f = fixture();
-        let (a, _) = f.submitted("A", &[("a.txt", "a")]);
-        let (b, _) = f.submitted("B", &[("b.txt", "b")]);
+        let (a, _) = f.reviewed("A", &[("a.txt", "a")]);
+        let (b, _) = f.reviewed("B", &[("b.txt", "b")]);
         // The first gate commits to main while it runs (as a person pushing by hand would); the
         // stack it gated is then not what main is, so nothing lands from it.
         let mark = f.base.join("moved-once").to_string_lossy().replace('\\', "/");

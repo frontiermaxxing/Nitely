@@ -1309,6 +1309,19 @@ reason = "money logic"
         }
     }
 
+    /// A review round as a submit records it, of the worktree's head, `ago` seconds back: for tests
+    /// about a later round, without running the earlier ones. Each finding is (priority, text, carried).
+    fn round(f: &Fixture, key: &str, wt: &Path, verdict: &str, findings: &[(u8, &str, bool)], ago: i64) {
+        let findings: Vec<crate::review::Finding> =
+            findings.iter().map(|(priority, text, carried)| crate::review::Finding { priority: *priority, text: (*text).into(), carried: *carried, raised_as: None, now: None }).collect();
+        f.db.conn
+            .execute(
+                "INSERT INTO review (issue_key, patch_id, commit_sha, branch, reviewer, verdict, approver, findings, note, ts) VALUES (?1, ?2, ?3, ?4, 'claude', ?5, 'agent', ?6, 'same vendor: codex not installed', ?7)",
+                rusqlite::params![key, patch_id(wt, "main").unwrap(), sh(wt, &["rev-parse", "HEAD"]), sh(wt, &["branch", "--show-current"]), verdict, serde_json::to_string(&findings).unwrap(), crate::db::now() - ago],
+            )
+            .unwrap();
+    }
+
 
     #[test]
     fn basic_submission_and_land_run_only_basic_checks_and_enqueue_an_audit() {
@@ -1469,18 +1482,19 @@ reason = "money logic"
     #[test]
     fn submits_with_a_review_and_routes_flags_to_a_human() {
         let mut f = fixture();
-        for (title, file, approver, state) in
-            [("Sidebar polish", "sidebar.txt", "agent", "In Review"), ("Billing fix", "billing.txt", "human", "Needs You")]
+        // The first change also goes through the push to the remote; the second stays local.
+        for (title, file, approver, state, push) in
+            [("Sidebar polish", "sidebar.txt", "agent", "In Review", true), ("Billing fix", "billing.txt", "human", "Needs You", false)]
         {
             let (issue, wt) = f.started(title);
             std::fs::write(wt.join(file), "x").unwrap();
-            let empty = f.submit(&wt, false).unwrap_err().to_string();
+            let empty = f.submit(&wt, !push).unwrap_err().to_string();
             assert!(empty.contains("no changes"), "{empty}");
             sh(&wt, &["add", "."]);
             sh(&wt, &["commit", "-q", "-m", title]);
 
-            let s = f.submit(&wt, false).unwrap();
-            assert!(s.gate.passed && s.pushed, "{s:?}");
+            let s = f.submit(&wt, !push).unwrap();
+            assert!(s.gate.passed && s.pushed == push, "{s:?}");
             let review = s.review.as_ref().unwrap();
             assert_eq!((review.verdict.as_str(), review.reviewer.as_str()), ("pass", "claude"));
             assert_eq!(review.note, "same vendor: codex not installed");
@@ -1488,7 +1502,7 @@ reason = "money logic"
             assert_eq!(f.db.reviews(&issue.key).unwrap()[0].note, "same vendor: codex not installed");
             assert!(describe(&issue, &s, Default::default()).contains("**Review** by claude (same vendor: codex not installed)"));
             // A local bare remote is not a code host, so there is no PR, and it says why.
-            assert!(s.pr_url.is_none() && s.pr_error.as_deref().unwrap().contains("not on GitHub"));
+            assert!(s.pr_url.is_none() && (!push || s.pr_error.as_deref().unwrap().contains("not on GitHub")), "{s:?}");
             assert_eq!(f.db.reviews(&issue.key).unwrap()[0].patch_id, s.patch_id);
             assert!(describe(&issue, &s, Default::default()).contains(&format!("patch={}", s.patch_id)));
         }
@@ -1521,8 +1535,11 @@ reason = "money logic"
         std::fs::write(wt.join("stuck.txt"), "let stuck = 1;").unwrap();
         sh(&wt, &["add", "."]);
         sh(&wt, &["commit", "-q", "-m", "stuck"]);
-        let states: Vec<String> = (0..3).map(|_| f.submit(&wt, true).unwrap().state).collect();
-        assert_eq!(states, ["In Progress", "In Progress", "Needs You"]);
+        // Rounds one and two as submit records them: the P1 raised, then carried as open.
+        let stuck = "Stuck: stuck.txt, the x is never read";
+        round(&f, &issue.key, &wt, "changes", &[(1, stuck, false)], 2);
+        round(&f, &issue.key, &wt, "changes", &[(1, stuck, true)], 1);
+        assert_eq!(f.submit(&wt, true).unwrap().state, "Needs You");
         let last: String = f
             .db
             .conn
@@ -1742,17 +1759,20 @@ reason = "money logic"
     fn a_shadow_batch_starts_from_the_round_before_the_review_that_decided() {
         let mut f = fixture();
         let (issue, wt) = f.committed("Edge again", "edge.txt");
-        let first = f.submit(&wt, true).unwrap();
+        // Two rounds as submit records them: a P2 found, then carried after a fix.
+        let edge = "Edge case: edge.txt, the empty line";
+        let first = sh(&wt, &["rev-parse", "HEAD"]);
+        round(&f, &issue.key, &wt, "pass", &[(2, edge, false)], 1);
         std::fs::write(wt.join("edge.txt"), "let edge = 2;").unwrap();
         sh(&wt, &["commit", "-q", "-am", "edge again"]);
-        f.submit(&wt, true).unwrap();
+        round(&f, &issue.key, &wt, "pass", &[(2, edge, true)], 0);
         let deciding: i64 = f.db.conn.query_row("SELECT MAX(id) FROM review WHERE issue_key = ?1", [&issue.key], |r| r.get(0)).unwrap();
         // The next round would start from the deciding review; its shadow batch starts where that
         // review started, from the first round, so it does not see the answers it is measured against.
         let next = previous_round(&f.db, &issue.key, &wt).unwrap().unwrap();
         let shadow = previous_round_at(&f.db, &issue.key, &wt, "HEAD", Some(deciding)).unwrap().unwrap();
         assert_ne!(next.commit, shadow.commit);
-        assert_eq!(shadow.commit, first.commit);
+        assert_eq!(shadow.commit, first);
         assert!(shadow.in_history && shadow.findings.len() == 1 && !shadow.findings[0].carried, "{shadow:?}");
     }
 
@@ -1819,8 +1839,13 @@ focus = \"Money first.\"
     #[test]
     fn a_review_is_told_what_the_change_is_for_what_the_author_said_and_what_was_accepted_elsewhere() {
         let mut f = fixture();
-        let (issue, wt) = f.committed("Footer links", "footer.txt");
-        let first = f.submit(&wt, true).unwrap();
+        // The context reads only the database and the gate: a round recorded, and the gate it passed.
+        let issue = f.db.create_issue(&new("Footer links"), &f.actor).unwrap();
+        f.db.conn
+            .execute("INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, ts) VALUES (?1, 'p', 'c', 'claude', 'pass', 'agent', ?2)", rusqlite::params![issue.key, crate::db::now()])
+            .unwrap();
+        let ok = playbook::CommandResult { command: "exit 0".into(), ok: true, seconds: 0, output: String::new(), skipped: false, timed_out: false };
+        let gate = GateResult { mode_authority: None, plan: None, skipped: None, passed: true, commit: "c".into(), results: vec![ok], warnings: vec![], flaked: vec![], lane_run: None };
         // Since that round: the author's note, and a finding the person accepted on another issue.
         std::thread::sleep(std::time::Duration::from_millis(1100));
         f.db.add_note(&issue.key, "The empty line is kept on purpose: the footer needs it.", "note", &f.actor).unwrap();
@@ -1839,7 +1864,7 @@ focus = \"Money first.\"
         accept("No migration: keys.txt, load", "no outside users yet", signed);
         accept("Never log in: auth.rs, login", "forged", "zz".into());
         let issue = f.db.issue(&issue.key).unwrap().unwrap();
-        let c = review_context(&f.db, &issue, &first.gate).unwrap();
+        let c = review_context(&f.db, &issue, &gate).unwrap();
         assert!(c.contains(&format!("its issue {} \"Footer links\"", issue.key)) && c.contains("does what the issue asks"), "{c}");
         assert!(c.contains("The gate passed on this tree: `exit 0`."), "{c}");
         assert!(c.contains("- The empty line is kept on purpose: the footer needs it."), "{c}");
@@ -1852,7 +1877,7 @@ focus = \"Money first.\"
         let words = format!("Drops a row: rows.txt, export: the last row{}", ", and then the next".repeat(60));
         let asked_finding = serde_json::json!({ "priority": 1, "text": words });
         f.db.conn.execute("UPDATE ask SET finding = ?2 WHERE id = ?1", rusqlite::params![asked.id, asked_finding.to_string()]).unwrap();
-        let c = review_context(&f.db, &issue, &first.gate).unwrap();
+        let c = review_context(&f.db, &issue, &gate).unwrap();
         assert!(c.contains("report it in exactly these words") && c.contains(&format!("- [P1] {words}\n")), "{c}");
         assert!(!c.contains("The agent's reasoning."), "{c}");
     }
@@ -1866,8 +1891,12 @@ focus = \"Money first.\"
         std::fs::write(wt.join("stale.txt"), "let stale = 1;").unwrap();
         sh(&wt, &["add", "."]);
         sh(&wt, &["commit", "-q", "-m", "stale"]);
-        let states: Vec<String> = (0..3).map(|_| f.submit(&wt, true).unwrap().state).collect();
-        assert_eq!(states, ["In Progress", "In Progress", "In Review"]);
+        // Rounds one and two as submit records them; the fake reviewer has raised it once already.
+        let stale = "Stale: stale.txt, the x is never read";
+        round(&f, &issue.key, &wt, "changes", &[(1, stale, false)], 2);
+        round(&f, &issue.key, &wt, "changes", &[(1, stale, true)], 1);
+        std::fs::write(wt.parent().unwrap().join("stale-seen"), "").unwrap();
+        assert_eq!(f.submit(&wt, true).unwrap().state, "In Review");
         let last = &f.db.reviews(&issue.key).unwrap()[0];
         assert_eq!((last.verdict.as_str(), last.note.as_str()), ("pass", "same vendor: codex not installed; fresh, without the earlier rounds"));
         assert!(f.db.open_asks().unwrap().iter().all(|a| a.issue_key.as_deref() != Some(issue.key.as_str())), "nothing for the person");
@@ -1909,8 +1938,9 @@ focus = \"Money first.\"
                 rusqlite::params![issue.key, first.patch_id, finding, reason, signature],
             )
             .unwrap();
-        let states: Vec<String> = (0..2).map(|_| f.submit(&wt, true).unwrap().state).collect();
-        assert_eq!(states, ["In Progress", "In Review"]);
+        // Round two as submit records it: the accepted finding no longer told, the other carried open.
+        round(&f, &issue.key, &wt, "changes", &[(1, "Worded: worded.txt, the x is never read", true)], 0);
+        assert_eq!(f.submit(&wt, true).unwrap().state, "In Review");
         let last = &f.db.reviews(&issue.key).unwrap()[0];
         assert!(last.note.ends_with("fresh, without the earlier rounds") && last.verdict == "pass", "{last:?}");
         assert!(last.findings.is_empty(), "the accepted finding is not raised again: {:?}", last.findings);

@@ -1546,6 +1546,21 @@ when_changed = ["billing"]
     impl Fixture {
         /// Files an issue, starts its worktree, commits `file`, and submits it.
         fn submitted(&mut self, title: &str, file: &str, content: &str) -> (String, PathBuf) {
+            let (key, wt) = self.committed(title, file, content);
+            self.submit(&wt);
+            (key, wt)
+        }
+
+        /// As `submitted`, with a passing review standing in for the submit: for tests about
+        /// what land does with a reviewed change that needs no person.
+        fn reviewed(&mut self, title: &str, file: &str, content: &str) -> (String, PathBuf) {
+            let (key, wt) = self.committed(title, file, content);
+            crate::test_repo::reviewed(&mut self.db, &wt, &key, &self.actor);
+            (key, wt)
+        }
+
+        /// Files an issue, starts its worktree, and commits `file` there.
+        fn committed(&mut self, title: &str, file: &str, content: &str) -> (String, PathBuf) {
             let issue = self
                 .db
                 .create_issue(
@@ -1570,7 +1585,6 @@ when_changed = ["billing"]
             std::fs::write(wt.join(file), content).unwrap();
             sh(&wt, &["add", "."]);
             sh(&wt, &["commit", "-q", "-m", title]);
-            self.submit(&wt);
             (issue.key, wt)
         }
 
@@ -1644,14 +1658,8 @@ when_changed = ["billing"]
         // Rounds that do not converge (NIT-220): the person decides each open finding; the issue
         // stays the agents' and waits in Needs You until every one is decided.
         let mut f = fixture();
-        let pb_path = f.repo.join(playbook::PLAYBOOK_PATH);
-        let pb = std::fs::read_to_string(&pb_path).unwrap().replace(
-            "echo 'Fine.'; echo 'VERDICT: clean'",
-            "echo 'x'; echo '- [P1] Drops a row: rows.txt, f: the last row'; echo '- [P0] Leaks a key: keys.txt, g: logs it'; echo 'VERDICT: findings'",
-        );
-        std::fs::write(&pb_path, pb).unwrap();
-        sh(&f.repo, &["commit", "-q", "-am", "a reviewer with two findings"]);
-        let (a, _) = f.submitted("Rows", "rows.txt", "x");
+        let (a, _) = f.reviewed("Rows", "rows.txt", "x");
+        asked_for(&f, &a, &[(1, "Drops a row: rows.txt, f: the last row"), (0, "Leaks a key: keys.txt, g: logs it")], 1);
         assert_eq!(f.db.ask_to_decide_findings(&a, "1 P0/P1 finding still open after two rounds", &f.actor).unwrap(), "Needs You");
         // Asked again (another stalled round), the requests already open stand.
         f.db.ask_to_decide_findings(&a, "again", &f.actor).unwrap();
@@ -1670,7 +1678,13 @@ when_changed = ["billing"]
 
     /// A round of review on `key` that asks for changes with one P1 `finding`, `after` seconds on.
     fn reviewed_with(f: &Fixture, key: &str, finding: &str, after: i64) {
-        let findings = vec![crate::review::Finding { priority: 1, text: finding.into(), carried: false, raised_as: None, now: None }];
+        asked_for(f, key, &[(1, finding)], after);
+    }
+
+    /// A round of review on `key` that asks for changes with `(priority, text)` findings, `after`
+    /// seconds on, as the reviewer's findings are recorded.
+    fn asked_for(f: &Fixture, key: &str, findings: &[(u8, &str)], after: i64) {
+        let findings: Vec<_> = findings.iter().map(|(priority, text)| crate::review::Finding { priority: *priority, text: (*text).into(), carried: false, raised_as: None, now: None }).collect();
         f.db.conn
             .execute(
                 "INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, findings, ts) VALUES (?1, 'p1', 'c', 'fake', 'changes', 'agent', ?2, ?3)",
@@ -1682,7 +1696,7 @@ when_changed = ["billing"]
     #[test]
     fn a_finding_the_rounds_keep_raising_keeps_one_open_request() {
         let mut f = fixture();
-        let (a, _) = f.submitted("Lock", "lock.txt", "x");
+        let (a, _) = f.reviewed("Lock", "lock.txt", "x");
         let blocker = "Install holds the land lock: `crates/app/src/land.rs:416`, `after_land_outside_lock`: the install step never sets `outside_lock = true`.";
         let other = "Ignores a failed push: `crates/app/src/land.rs:500`, `after_land_outside_lock`: the push result is dropped.";
         reviewed_with(&f, &a, blocker, 1);
@@ -1712,7 +1726,7 @@ when_changed = ["billing"]
     #[test]
     fn two_blockers_in_one_function_are_two_requests() {
         let mut f = fixture();
-        let (a, _) = f.submitted("Rows", "rows.txt", "x");
+        let (a, _) = f.reviewed("Rows", "rows.txt", "x");
         let two = vec![
             crate::review::Finding { priority: 1, text: "Drops the last row: src/rows.rs:12, export: the loop stops early.".into(), carried: false, raised_as: None, now: None },
             crate::review::Finding { priority: 1, text: "Ignores write failures: src/rows.rs:30, export: an error is dropped.".into(), carried: false, raised_as: None, now: None },
@@ -1740,7 +1754,7 @@ when_changed = ["billing"]
     #[test]
     fn two_requests_for_one_finding_become_one_and_the_newest_stands() {
         let mut f = fixture();
-        let (a, _) = f.submitted("Twice", "twice.txt", "x");
+        let (a, _) = f.reviewed("Twice", "twice.txt", "x");
         let finding = "Drops a row: `src/rows.rs:12`, `export`: the last row is never written.";
         reviewed_with(&f, &a, finding, 1);
         // Two requests for it, as an earlier build filed them.
@@ -1765,13 +1779,8 @@ when_changed = ["billing"]
     #[test]
     fn a_finding_sent_back_stays_a_defect_to_fix() {
         let mut f = fixture();
-        let pb_path = f.repo.join(playbook::PLAYBOOK_PATH);
-        let pb = std::fs::read_to_string(&pb_path)
-            .unwrap()
-            .replace("echo 'Fine.'; echo 'VERDICT: clean'", "echo 'x'; echo '- [P1] Drops a row: rows.txt, f: the last row'; echo 'VERDICT: findings'");
-        std::fs::write(&pb_path, pb).unwrap();
-        sh(&f.repo, &["commit", "-q", "-am", "a reviewer with a P1"]);
-        let (a, _) = f.submitted("Rows", "rows.txt", "x");
+        let (a, _) = f.reviewed("Rows", "rows.txt", "x");
+        asked_for(&f, &a, &[(1, "Drops a row: rows.txt, f: the last row")], 1);
         // A person's own issue (handed over after rounds that did not converge) goes back to the
         // agents when they decide, and a request a later review made moot can still be sent back.
         f.db.set_owner(&a, "human", &f.actor).ok();
@@ -1810,7 +1819,7 @@ when_changed = ["billing"]
     #[test]
     fn removes_its_own_worktree_however_its_path_is_spelled() {
         let mut f = fixture();
-        let (_, wt) = f.submitted("Spelled", "spelled.txt", "x");
+        let (_, wt) = f.committed("Spelled", "spelled.txt", "x");
         let branch = sh(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]).trim().to_string();
         // The worktree as git or the system may name it, which need not be how the repo's root is
         // spelled: through `/private` on a Mac, with 8.3 short names on Windows (NIT-261).
@@ -1824,39 +1833,6 @@ when_changed = ["billing"]
         let (message, _) = cleanup(&f.repo, &pb, Path::new(&other), &branch, false, false);
         assert!(message.starts_with("removed the worktree"), "{message} ({other})");
         assert!(!wt.exists());
-    }
-
-    #[test]
-    fn keeps_a_worktree_a_process_still_uses() {
-        let mut f = fixture();
-        let (a, wt) = f.submitted("Pulse view", "pulse.txt", "x");
-        // A dev server started in the worktree, as the browser preview asks agents to do. It runs
-        // until the test stops it (at most ten minutes): on a busy machine the land below can take minutes, and a server
-        // that ended first would rightly leave the worktree free (NIT-309).
-        let mut server = std::process::Command::new(playbook::posix_sh()).arg("-c").arg(format!("sleep 600; : {}", wt.display())).spawn().unwrap();
-        // Land sees it the way this does; wait until it shows (NIT-122).
-        assert!(crate::procs::tests::held_by(&wt, server.id()).iter().any(|h| h.pid == server.id()), "the server is listed");
-        let r = f.land(&a);
-        server.kill().ok();
-        server.wait().ok();
-        assert!(r.landed, "{r:?}");
-        assert!(r.held_by.iter().any(|h| h.pid == server.id()), "{r:?}");
-        assert!(r.cleanup.as_deref().unwrap().contains("kept"), "{r:?}");
-        let listed = crate::paths::normalize(&sh(&f.repo, &["worktree", "list"]));
-        assert!(wt.exists() && listed.contains(&crate::paths::normalize(&wt.to_string_lossy())), "kept whole and still registered");
-        // Said on the issue, so a later land tries again (NIT-340).
-        assert!(f.db.timeline(&a).unwrap().iter().any(|t| t.kind == "worktree_held"), "the keep is on the issue");
-        // The server is gone now: listed as going, and the next land removes it with its branch.
-        let pb = Playbook::load(&f.repo).unwrap();
-        let found = crate::leftovers::leftovers(&f.db, &f.repo, &pb, false, &Actor::Human).unwrap();
-        assert!(found.iter().any(|l| l.issue == a && l.stays.is_none()), "{found:?}");
-        let (b, _) = f.submitted("Next", "next.txt", "y");
-        let r = f.land(&b);
-        assert!(r.landed, "{r:?}");
-        assert!(r.tidied.iter().any(|t| t.contains(&a)), "{r:?}");
-        assert!(!wt.exists(), "removed");
-        assert!(f.db.timeline(&a).unwrap().iter().any(|t| t.kind == "worktree_removed"));
-        std::fs::remove_dir_all(&f.base).ok();
     }
 
     #[test]
@@ -1985,7 +1961,7 @@ when_changed = ["billing"]
     }
 
     #[test]
-    fn lands_only_what_a_human_approved_when_the_playbook_says_human() {
+    fn lands_only_what_a_human_approved_when_the_playbook_says_human_and_leaves_it_to_the_agent_by_author() {
         let mut f = fixture();
         let mut reported = HashMap::new();
         // "human" sends every change to a human, then lands it on approval.
@@ -2006,14 +1982,11 @@ when_changed = ["billing"]
         let r = land_approved(&mut f.db, &linked, &mut reported).unwrap();
         assert!(r.len() == 1 && r[0].landed, "{r:?}");
         assert_eq!(state(&f, &d), "Done");
-        std::fs::remove_dir_all(&f.base).ok();
-    }
 
-    #[test]
-    fn leaves_the_land_to_the_agent_when_the_playbook_says_author() {
-        let mut f = fixture();
         // "author" (the default) leaves the land to the agent.
-        set_mode(&f, "author");
+        let path = f.repo.join(playbook::PLAYBOOK_PATH);
+        std::fs::write(&path, std::fs::read_to_string(&path).unwrap().replace("by = \"human\"", "by = \"author\"")).unwrap();
+        sh(&f.repo, &["commit", "-q", "-am", "author"]);
         let (e, _) = f.submitted("Footer tweak", "footer.txt", "x");
         assert_eq!(state(&f, &e), "In Review");
         std::fs::remove_dir_all(&f.base).ok();
@@ -2052,7 +2025,7 @@ when_changed = ["billing"]
     }
 
     #[test]
-    fn lands_only_with_the_apps_signed_approval() {
+    fn lands_only_with_the_apps_signed_approval_of_the_patch_it_saw() {
         let mut f = fixture();
         let (b, wt_b) = f.submitted("Billing fix", "billing.txt", "x");
         let r = f.land(&b);
@@ -2094,6 +2067,14 @@ when_changed = ["billing"]
         f.submit(&wt_b);
         assert_eq!(f.db.issue(&b).unwrap().unwrap().state, "Approved");
         assert!(f.db.standing_approval(&b).unwrap().is_some());
+        // A changed patch needs a new approval.
+        std::fs::write(wt_b.join("billing.txt"), "y").unwrap();
+        sh(&wt_b, &["commit", "-q", "-am", "round again"]);
+        f.submit(&wt_b);
+        assert_eq!(f.db.issue(&b).unwrap().unwrap().state, "Needs You");
+        assert!(f.db.standing_approval(&b).unwrap().is_none());
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        approve(&mut f.db, &b);
         let r = f.land(&b);
         assert!(r.landed, "{r:?}");
         // A failing after-land step is a warning; the land stands.
@@ -2141,41 +2122,30 @@ when_changed = ["billing"]
         std::fs::remove_dir_all(&f.base).ok();
     }
 
-    #[test]
-    fn a_changed_patch_needs_a_new_approval() {
-        let mut f = fixture();
-        let (c, wt_c) = f.submitted("Billing rounding", "billing-rounding.txt", "x");
-        approve(&mut f.db, &c);
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-        std::fs::write(wt_c.join("billing-rounding.txt"), "y").unwrap();
-        sh(&wt_c, &["commit", "-q", "-am", "round again"]);
-        f.submit(&wt_c);
-        assert_eq!(f.db.issue(&c).unwrap().unwrap().state, "Needs You");
-        assert!(f.db.standing_approval(&c).unwrap().is_none());
-        std::fs::remove_dir_all(&f.base).ok();
-    }
-
+    /// The after steps a land runs (`land` calls this with where main was): a dependency file
+    /// that landed with no after step to set it up is a warning naming the setup (NIT-81).
     #[test]
     fn warns_when_a_dependency_landed_that_no_after_step_set_up() {
-        let mut f = fixture();
+        let base = crate::paths::unique_temp("nitely-after-deps", "");
+        let repo = base.join("repo");
+        crate::test_repo::init(&repo, &[("a.txt", "one\n")]);
         // Setup in worktrees, and an after step that takes care of Cargo.lock but not package-lock.json.
-        let pb = std::fs::read_to_string(f.repo.join(playbook::PLAYBOOK_PATH))
-            .unwrap()
-            .replace("teardown = [", "setup = [\"exit 0\"]\nteardown = [")
-            + "[[land.after]]\nrun = \"exit 0\"\nwhen_changed = ['^Cargo\\.lock$']\n";
-        std::fs::write(f.repo.join(playbook::PLAYBOOK_PATH), pb).unwrap();
-        sh(&f.repo, &["commit", "-q", "-am", "setup"]);
-
-        let (a, _) = f.submitted("Add a dependency", "package-lock.json", "{}");
-        let r = f.land(&a);
-        assert!(r.landed, "{r:?}");
+        let pb = Playbook::parse("[worktree]\nsetup = [\"exit 0\"]\n[[land.after]]\nrun = \"exit 0\"\nwhen_changed = ['^Cargo\\.lock$']\n").unwrap();
+        let landed = |file: &str| {
+            let from = sh(&repo, &["rev-parse", "HEAD"]);
+            std::fs::write(repo.join(file), "{}").unwrap();
+            sh(&repo, &["add", file]);
+            sh(&repo, &["commit", "-qm", file]);
+            let mut report = Landed { base: "main".into(), landed_from: Some(from), ..Default::default() };
+            after_land(&repo, &pb, &mut report);
+            report
+        };
+        let r = landed("package-lock.json");
         let warning = r.warnings.iter().find(|w| w.contains("package-lock.json")).unwrap_or_else(|| panic!("{r:?}"));
         assert!(warning.contains("`exit 0`"), "names the setup to run: {warning}");
-
-        let (b, _) = f.submitted("Bump a crate", "Cargo.lock", "x");
-        let r = f.land(&b);
-        assert!(r.landed && r.warnings.is_empty(), "the after step set it up: {r:?}");
-        std::fs::remove_dir_all(&f.base).ok();
+        let r = landed("Cargo.lock");
+        assert!(r.warnings.is_empty() && r.after.iter().all(|a| a.ok && !a.skipped), "the after step set it up: {r:?}");
+        std::fs::remove_dir_all(&base).ok();
     }
 
     /// A land handed in after another issue waits until that issue is Done, then lands as `land`
@@ -2187,8 +2157,8 @@ when_changed = ["billing"]
         let mut f = fixture();
         let dir = f.repo.to_string_lossy().into_owned();
         let path = f.base.join("t.db");
-        let (first, _) = f.submitted("Header", "header.txt", "x");
-        let (second, _) = f.submitted("Footer", "footer.txt", "x");
+        let (first, _) = f.reviewed("Header", "header.txt", "x");
+        let (second, _) = f.reviewed("Footer", "footer.txt", "x");
         assert_eq!(crate::land_job::waits_for(&f.db, &second, std::slice::from_ref(&first)).unwrap(), [first.clone()]);
         let job = crate::land_job::enqueue(&f.db, &second, std::slice::from_ref(&first), &dir, &f.actor).unwrap();
         // Its process: waits, then lands.
@@ -2214,8 +2184,8 @@ when_changed = ["billing"]
         assert_eq!(f.db.undelivered_land_jobs(f.actor.id()).unwrap().len(), 1, "told once, on the agent's next call");
 
         // Behind a change to the same file: the rebase conflicts, and it stops cleanly.
-        let (third, _) = f.submitted("Menu", "menu.txt", "a");
-        let (fourth, _) = f.submitted("Menu too", "menu.txt", "b");
+        let (third, _) = f.reviewed("Menu", "menu.txt", "a");
+        let (fourth, _) = f.reviewed("Menu too", "menu.txt", "b");
         let job = crate::land_job::enqueue(&f.db, &fourth, std::slice::from_ref(&third), &dir, &f.actor).unwrap();
         assert!(f.land(&third).landed);
         let mut db = Db::open(&path).unwrap();
@@ -2226,8 +2196,8 @@ when_changed = ["billing"]
         assert_ne!(state(&f, &fourth), "Done");
 
         // What it waits for is closed without landing: the wait ends, and says why.
-        let (fifth, _) = f.submitted("Fifth", "fifth.txt", "x");
-        let (sixth, _) = f.submitted("Sixth", "sixth.txt", "x");
+        let (fifth, _) = f.reviewed("Fifth", "fifth.txt", "x");
+        let (sixth, _) = f.reviewed("Sixth", "sixth.txt", "x");
         let job = crate::land_job::enqueue(&f.db, &sixth, std::slice::from_ref(&fifth), &dir, &f.actor).unwrap();
         f.db.move_issue(&fifth, "Canceled", None, Some("not needed"), &f.actor).unwrap();
         match crate::land_job::wait_for_blockers(&db, job.id).unwrap() {
@@ -2238,37 +2208,81 @@ when_changed = ["billing"]
         std::fs::remove_dir_all(&f.base).ok();
     }
 
+    /// What lands leave and what a later land tidies (NIT-309, NIT-340, NIT-370, NIT-460): a
+    /// worktree landed with --keep stays; one a process still uses is kept whole and said on the
+    /// issue; a link in a worktree goes, never what it points at; and the next land removes the
+    /// leftovers of closed issues nothing keeps, leaving what is a person's to look at.
     #[test]
-    fn later_lands_leave_a_kept_worktree_and_remove_closed_ones_nothing_keeps() {
+    fn later_lands_tidy_what_earlier_ones_left_and_spare_what_is_kept_used_or_linked() {
         let mut f = fixture();
-        // Landed with --keep: kept, and said so for later lands.
-        let (a, kept) = f.submitted("Kept", "kept.txt", "x");
+        // node_modules is ignored, as in a real repo: git removes a worktree that holds ignored files.
+        std::fs::create_dir_all(f.repo.join(".git").join("info")).unwrap();
+        std::fs::write(f.repo.join(".git").join("info").join("exclude"), "node_modules\n").unwrap();
         let dir = f.repo.to_string_lossy().into_owned();
+
+        // Landed with --keep: kept, and said so for later lands.
+        let (a, kept) = f.reviewed("Kept", "kept.txt", "x");
         let opts = LandOptions { dir: &dir, issue_key: &a, push: true, keep: true, break_lock: false };
         assert!(land(&mut f.db, &crate::Config::default(), &opts, &f.actor).unwrap().landed);
+
+        // The person's own node_modules, which an agent linked its worktree's to (NIT-460).
+        let outside = crate::unlink::tests::outside(&f.base);
+        let (l, linked) = f.reviewed("Linked deps", "linked.txt", "x");
+        crate::unlink::tests::link_folder(&linked.join("node_modules"), &outside);
+        let r = f.land(&l);
+        assert!(r.landed && !linked.exists(), "{r:?}");
+        assert!(crate::unlink::tests::intact(&outside), "the land removed the link, not what it points at: {r:?}");
+
+        let (p, pulse) = f.reviewed("Pulse view", "pulse.txt", "x");
+        // A dev server started in the worktree, as the browser preview asks agents to do. It runs
+        // until the test stops it (at most ten minutes): on a busy machine the land below can take minutes, and a server
+        // that ended first would rightly leave the worktree free (NIT-309).
+        let mut server = std::process::Command::new(playbook::posix_sh()).arg("-c").arg(format!("sleep 600; : {}", pulse.display())).spawn().unwrap();
+        // Land sees it the way this does; wait until it shows (NIT-122).
+        assert!(crate::procs::tests::held_by(&pulse, server.id()).iter().any(|h| h.pid == server.id()), "the server is listed");
+        let r = f.land(&p);
+        server.kill().ok();
+        server.wait().ok();
+        assert!(r.landed, "{r:?}");
+        assert!(r.held_by.iter().any(|h| h.pid == server.id()), "{r:?}");
+        assert!(r.cleanup.as_deref().unwrap().contains("kept"), "{r:?}");
+        let listed = crate::paths::normalize(&sh(&f.repo, &["worktree", "list"]));
+        assert!(pulse.exists() && listed.contains(&crate::paths::normalize(&pulse.to_string_lossy())), "kept whole and still registered");
+        // Said on the issue, so a later land tries again (NIT-340).
+        assert!(f.db.timeline(&p).unwrap().iter().any(|t| t.kind == "worktree_held"), "the keep is on the issue");
+
         // Closed without a land: its branch merged by hand, the issue canceled.
-        let (c, merged) = f.submitted("Merged by hand", "hand.txt", "y");
+        let (c, merged) = f.committed("Merged by hand", "hand.txt", "y");
         let branch = sh(&merged, &["rev-parse", "--abbrev-ref", "HEAD"]).trim().to_string();
         sh(&f.repo, &["merge", "-q", "--ff-only", &branch]);
         f.db.move_issue(&c, "Canceled", None, Some("merged by hand"), &f.actor).unwrap();
+        let held = |f: &Fixture, key: &str, path: &Path| {
+            f.db.log_event(&f.actor, Some(key), Some(&path.to_string_lossy()), "worktree_held", "Worktree kept after landing").unwrap();
+        };
         // What a land that git stopped halfway leaves: a folder git no longer lists, its .git file
-        // naming this repo's record of it, now gone.
-        let stray = merged.parent().unwrap().join("nit-stray-left-behind");
-        std::fs::create_dir_all(stray.join("target")).unwrap();
-        let record = f.repo.join(".git").join("worktrees").join("nit-stray-left-behind");
-        std::fs::write(stray.join(".git"), format!("gitdir: {}\n", record.display())).unwrap();
-        f.db.log_event(&f.actor, Some(&c), Some(&stray.to_string_lossy()), "worktree_held", "Worktree kept after landing").unwrap();
+        // naming this repo's record of it, now gone; one of them with a link in it.
+        let left = |name: &str| {
+            let stray = merged.parent().unwrap().join(name);
+            std::fs::create_dir_all(stray.join("target")).unwrap();
+            std::fs::write(stray.join(".git"), format!("gitdir: {}\n", f.repo.join(".git").join("worktrees").join(name).display())).unwrap();
+            stray
+        };
+        let stray = left("nit-stray-left-behind");
+        held(&f, &c, &stray);
+        let stray_linked = left("nit-stray-linked");
+        crate::unlink::tests::link_folder(&stray_linked.join("target").join("deps"), &outside);
+        held(&f, &l, &stray_linked);
         // One that says nothing of where it came from, and a clone made where one was removed:
         // both are a person's to look at.
         let unknown = merged.parent().unwrap().join("nit-stray-unknown");
         std::fs::create_dir_all(unknown.join("target")).unwrap();
-        f.db.log_event(&f.actor, Some(&c), Some(&unknown.to_string_lossy()), "worktree_held", "Worktree kept after landing").unwrap();
+        held(&f, &c, &unknown);
         // An empty one is nobody's work, wherever it came from (NIT-370).
         let empty = merged.parent().unwrap().join("nit-stray-empty");
         std::fs::create_dir_all(&empty).unwrap();
-        f.db.log_event(&f.actor, Some(&c), Some(&empty.to_string_lossy()), "worktree_held", "Worktree kept after landing").unwrap();
+        held(&f, &c, &empty);
         let clone = merged.parent().unwrap().join("nit-stray-reused");
-        f.db.log_event(&f.actor, Some(&c), Some(&clone.to_string_lossy()), "worktree_held", "Worktree kept after landing").unwrap();
+        held(&f, &c, &clone);
         f.db.log_event(&f.actor, Some(&c), Some(&clone.to_string_lossy()), "worktree_removed", "Removed").unwrap();
         crate::test_repo::init(&clone, &[("work.txt", "mine")]);
 
@@ -2276,55 +2290,31 @@ when_changed = ["billing"]
         let found = crate::leftovers::leftovers(&f.db, &f.repo, &pb, false, &Actor::Human).unwrap();
         let of = |p: &Path| found.iter().find(|l| crate::paths::normalize(&l.worktree.to_string_lossy()) == crate::paths::normalize(&p.to_string_lossy())).cloned();
         assert!(of(&kept).and_then(|l| l.stays).is_some_and(|s| s.contains("on purpose")), "{found:?}");
+        // The server is gone now: listed as going.
+        assert!(found.iter().any(|l| l.issue == p && l.stays.is_none()), "{found:?}");
         assert!(of(&merged).is_some_and(|l| l.stays.is_none()), "{found:?}");
         assert!(of(&stray).is_some_and(|l| l.stays.is_none()), "{found:?}");
         assert!(of(&unknown).and_then(|l| l.stays).is_some_and(|s| s.contains("by hand")), "{found:?}");
         assert!(of(&empty).is_some_and(|l| l.stays.is_none()), "{found:?}");
         assert!(of(&clone).is_none(), "removed since it was kept: not a leftover {found:?}");
 
-        let (b, _) = f.submitted("Next", "next.txt", "z");
+        let (b, _) = f.reviewed("Next", "next.txt", "z");
         let r = f.land(&b);
         assert!(r.landed, "{r:?}");
         assert!(kept.exists(), "--keep holds at the next land too");
-        assert!(!merged.exists() && !stray.exists() && !empty.exists(), "{r:?}");
+        assert!(!merged.exists() && !stray.exists() && !empty.exists() && !stray_linked.exists() && !pulse.exists(), "{r:?}");
         assert!(unknown.exists() && clone.join("work.txt").exists(), "{r:?}");
-        assert_eq!(r.tidied.len(), 3, "{r:?}");
-        std::fs::remove_dir_all(&f.base).ok();
-    }
-
-    #[test]
-    fn removing_a_worktree_never_deletes_through_a_link_in_it() {
-        let mut f = fixture();
-        // node_modules is ignored, as in a real repo: git removes a worktree that holds ignored files.
-        std::fs::create_dir_all(f.repo.join(".git").join("info")).unwrap();
-        std::fs::write(f.repo.join(".git").join("info").join("exclude"), "node_modules\n").unwrap();
-        // The person's own node_modules, which an agent linked its worktree's to (NIT-460).
-        let outside = crate::unlink::tests::outside(&f.base);
-        let (a, wt) = f.submitted("Linked deps", "linked.txt", "x");
-        crate::unlink::tests::link_folder(&wt.join("node_modules"), &outside);
-
-        let r = f.land(&a);
-        assert!(r.landed && !wt.exists(), "{r:?}");
-        assert!(crate::unlink::tests::intact(&outside), "the land removed the link, not what it points at: {r:?}");
-
-        // What a land git stopped halfway leaves, with a link in it: the next land's cleanup.
-        let stray = wt.parent().unwrap().join("nit-stray-linked");
-        std::fs::create_dir_all(stray.join("target")).unwrap();
-        let record = f.repo.join(".git").join("worktrees").join("nit-stray-linked");
-        std::fs::write(stray.join(".git"), format!("gitdir: {}\n", record.display())).unwrap();
-        crate::unlink::tests::link_folder(&stray.join("target").join("deps"), &outside);
-        f.db.log_event(&f.actor, Some(&a), Some(&stray.to_string_lossy()), "worktree_held", "Worktree kept after landing").unwrap();
-        let (b, _) = f.submitted("Next", "next.txt", "z");
-        let r = f.land(&b);
-        assert!(r.landed && !stray.exists(), "{r:?}");
         assert!(crate::unlink::tests::intact(&outside), "the cleanup removed the link, not what it points at: {r:?}");
+        assert!(r.tidied.iter().any(|t| t.contains(&p)), "{r:?}");
+        assert_eq!(r.tidied.len(), 5, "{r:?}");
+        assert!(f.db.timeline(&p).unwrap().iter().any(|t| t.kind == "worktree_removed"));
         std::fs::remove_dir_all(&f.base).ok();
     }
 
     #[test]
     fn refuses_changes_after_review_conflicts_and_a_held_lock() {
         let mut f = fixture();
-        let (a, wt) = f.submitted("Edit shared", "shared.txt", "two\n");
+        let (a, wt) = f.reviewed("Edit shared", "shared.txt", "two\n");
 
         // A commit after the review is not what was reviewed.
         std::fs::write(wt.join("extra.txt"), "x").unwrap();
@@ -2332,7 +2322,7 @@ when_changed = ["billing"]
         sh(&wt, &["commit", "-q", "-m", "extra"]);
         let r = f.land(&a);
         assert!(r.error.as_deref().unwrap().contains("changed since its review"), "{r:?}");
-        f.submit(&wt);
+        crate::test_repo::reviewed(&mut f.db, &wt, &a, &f.actor);
 
         // Someone else lands a conflicting edit first.
         std::fs::write(f.repo.join("shared.txt"), "three\n").unwrap();
@@ -2364,13 +2354,13 @@ when_changed = ["billing"]
         let mut f = fixture();
         let lock = f.repo.join(".git").join(LOCK_FILE);
         std::fs::write(&lock, "NIT-9 pid 4000000000 since 2026-10-18T05:06:53Z\n").unwrap();
-        let (a, _) = f.submitted("Dead lock", "dead.txt", "x");
+        let (a, _) = f.reviewed("Dead lock", "dead.txt", "x");
         let r = f.land(&a);
         assert!(r.landed, "{r:?}");
         assert!(r.warnings.iter().any(|w| w.contains("took over the land lock NIT-9")), "{r:?}");
         assert!(!lock.exists(), "released after the land");
 
-        let (b, _) = f.submitted("Left index lock", "left.txt", "x");
+        let (b, _) = f.reviewed("Left index lock", "left.txt", "x");
         let index_lock = f.repo.join(".git").join("index.lock");
         let left = std::fs::File::create(&index_lock).unwrap();
         left.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600)).unwrap();
@@ -2411,7 +2401,8 @@ when_changed = ["billing"]
             self.repo.join("engine")
         }
 
-        /// Starts an issue whose change edits both the repo and its engine, committed in both.
+        /// Starts an issue whose change edits both the repo and its engine, committed in both, not
+        /// submitted.
         fn spanning(&mut self, title: &str) -> (String, PathBuf) {
             let issue = self
                 .db
@@ -2429,7 +2420,6 @@ when_changed = ["billing"]
             std::fs::write(wt.join("shared.txt"), "one\nuses faster\n").unwrap();
             sh(&wt, &["add", "shared.txt", "engine"]);
             sh(&wt, &["commit", "-q", "-m", title]);
-            self.submit(&wt);
             (issue.key, wt)
         }
 
@@ -2448,6 +2438,7 @@ when_changed = ["billing"]
     fn a_change_that_spans_a_submodule_lands_both_branches_together() {
         let mut f = submodule_fixture();
         let (key, wt) = f.spanning("Faster engine");
+        crate::test_repo::reviewed(&mut f.db, &wt, &key, &f.actor);
         f.land_elsewhere();
 
         let landed = f.land(&key);
@@ -2472,6 +2463,7 @@ when_changed = ["billing"]
     fn when_the_repo_cannot_move_the_submodule_does_not_either() {
         let mut f = submodule_fixture();
         let (key, wt) = f.spanning("Faster engine");
+        crate::test_repo::reviewed(&mut f.db, &wt, &key, &f.actor);
         // The engine's copy detached at main, as `git submodule update` leaves it: main moves by
         // itself there, and the checkout follows it.
         sh(&f.engine(), &["checkout", "-q", "--detach", "main"]);
@@ -2502,7 +2494,7 @@ when_changed = ["billing"]
     #[test]
     fn a_change_that_leaves_the_submodule_alone_lands_as_any_other() {
         let mut f = submodule_fixture();
-        let (key, wt) = f.submitted("Words only", "words.txt", "w
+        let (key, wt) = f.reviewed("Words only", "words.txt", "w
 ");
         assert!(wt.join("engine/.git").is_file());
         // Another land moves the pointer meanwhile: this change still does not move the engine.
@@ -2539,7 +2531,7 @@ when_changed = ["billing"]
     fn submit_says_to_move_a_submodule_checkout_back_after_a_rollback() {
         let mut f = submodule_fixture();
         f.land_elsewhere();
-        let (_, wt) = f.submitted("Words only", "words.txt", "w
+        let (_, wt) = f.committed("Words only", "words.txt", "w
 ");
         let older = sh(&f.engine(), &["rev-parse", "HEAD~1"]);
         sh(&f.engine(), &["checkout", "-q", &older]);
@@ -2564,7 +2556,7 @@ when_changed = ["billing"]
     #[test]
     fn submit_says_to_update_a_submodule_checkout_a_rebase_left_behind() {
         let mut f = submodule_fixture();
-        let (_, wt) = f.submitted("Words only", "words.txt", "w\n");
+        let (_, wt) = f.committed("Words only", "words.txt", "w\n");
         f.land_elsewhere();
         sh(&wt, &["rebase", "-q", "main"]);
         let dir = wt.to_string_lossy().into_owned();
