@@ -1463,12 +1463,19 @@ pub fn cap_for(limits: &machine::Limits, slots: u32) -> u64 {
 }
 
 /// Holds a build command to its share of cores: the build tools that read one get it from the
-/// environment (`NITELY_JOBS`, `CARGO_BUILD_JOBS`, `MAKEFLAGS`, and `RUST_TEST_THREADS` for the
-/// tests cargo runs, fewer while the machine starts processes slowly, NIT-519).
+/// environment (`share_vars`).
 pub fn share_env(cmd: &mut std::process::Command, jobs: u32) {
-    let tests = crate::pace::current().test_threads_for(jobs).to_string();
-    let jobs = jobs.to_string();
-    cmd.env("NITELY_JOBS", &jobs).env("CARGO_BUILD_JOBS", &jobs).env("RUST_TEST_THREADS", &tests).env("MAKEFLAGS", format!("-j{jobs}"));
+    for (name, value) in share_vars(jobs, crate::pace::current().test_threads_for(jobs)) {
+        cmd.env(name, value);
+    }
+}
+
+/// The environment for a share of `jobs` cores whose tests may run `tests` at once: compilers get
+/// the cores (`CARGO_BUILD_JOBS`, `MAKEFLAGS`), and what runs tests gets `tests`, fewer while the
+/// machine starts processes slowly (NIT-519): `RUST_TEST_THREADS`, and `NITELY_JOBS`, which a
+/// repo's own test runner may read (this repo's `npm test` does).
+fn share_vars(jobs: u32, tests: u32) -> [(&'static str, String); 4] {
+    [("NITELY_JOBS", tests.to_string()), ("CARGO_BUILD_JOBS", jobs.to_string()), ("RUST_TEST_THREADS", tests.to_string()), ("MAKEFLAGS", format!("-j{jobs}"))]
 }
 
 /// `command` held to the test threads of a share of `jobs` cores at the machine's pace (NIT-519):
@@ -4400,6 +4407,9 @@ let id = db.conn.last_insert_rowid();
         let held = paced(budget_for(32, Some(&gb(64)), None), &slow);
         assert_eq!((held.slots, held.jobs, held.from.as_str()), (1, 30, "pace"));
         assert_eq!(paced(set.clone(), &slow).slots, 6);
+        // The one slot's 30 cores go to compiling; its tests, whatever reads them, still get 4.
+        let vars = share_vars(held.jobs, slow.test_threads_for(held.jobs));
+        assert_eq!(vars.map(|(_, v)| v), ["4", "30", "4", "-j30"].map(String::from));
     }
 
     /// Every slot at its cap still leaves the floor free (the NIT-291 review): on 64 GB, 5 slots
