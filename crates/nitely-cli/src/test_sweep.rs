@@ -27,6 +27,20 @@ pub enum Command {
         #[arg(long)]
         issue: Option<String>,
     },
+    /// The tests a report flags (slow, flaky, failing, a wait or a UI assertion in their body) as
+    /// a template to classify; with --classes, the map of those classes as markdown.
+    Map {
+        file: PathBuf,
+        /// A JSON array of {test, class, ...} for every flagged test (see `guide`).
+        #[arg(long)]
+        classes: Option<PathBuf>,
+        /// Slower than this many seconds (median, one measuring method) is flagged.
+        #[arg(long, default_value_t = 2.0)]
+        slow: f64,
+        /// Where to write the map; standard output when absent.
+        #[arg(long, requires = "classes")]
+        output: Option<PathBuf>,
+    },
     /// Show existing evidence without executing tests.
     Report {
         file: PathBuf,
@@ -54,7 +68,34 @@ fn quoted(path: &std::path::Path) -> Result<String> {
 }
 pub fn run(command: Command) -> Result<()> {
     match command {
-        Command::Guide => println!("{}", test_sweep::GUIDE),
+        Command::Guide => println!("{}\n{}", test_sweep::GUIDE, test_sweep::OPTIMIZE_GUIDE),
+        Command::Map {
+            file,
+            classes,
+            slow,
+            output,
+        } => {
+            let report = Report::read(&file)?;
+            let flagged = report.flagged(slow);
+            let Some(classes) = classes else {
+                // The template: each flagged test, its evidence, and an empty class to fill.
+                let template: Vec<_> = flagged
+                    .iter()
+                    .map(|f| serde_json::json!({ "test": f.test, "class": "", "why": f.why, "seconds": f.seconds, "path": f.path, "line": f.line, "hints": f.hints }))
+                    .collect();
+                return crate::print_json(&template);
+            };
+            if classes.metadata()?.len() > 4 * 1024 * 1024 {
+                bail!("the classes file exceeds 4 MiB");
+            }
+            let classes: Vec<test_sweep::Classified> = serde_json::from_slice(&std::fs::read(&classes)?)
+                .context("classes must be a JSON array of {test, class, ...}: decision (with decision and module), scenario, presence, wall-clock, duplicate (with of) or restates")?;
+            let map = test_sweep::render_map(&report.revision, &flagged, &classes)?;
+            match output {
+                Some(path) => std::fs::write(path, map)?,
+                None => print!("{map}"),
+            }
+        }
         Command::Report { file } => crate::print_json(&Report::read(&file)?)?,
         Command::Propose {
             file,

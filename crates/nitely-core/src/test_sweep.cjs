@@ -41,27 +41,72 @@ function merged(command, args, options) {
     return { ...out, text: size > MAX ? '' : fs.readFileSync(file, 'utf8'), error: out.error || (size > MAX ? Error('output exceeds 16 MiB') : undefined) };
   } finally { try { fs.closeSync(fd); } catch {} fs.rmSync(dir, { recursive: true, force: true }); }
 }
+// Mechanical hints for classifying a test (NIT-555): counts of what its body does, in any language.
+// Leads for the agent reading the code, never a verdict.
+const HINTS = {
+  // A wait on the clock or on machine load.
+  waits: /\b(?:sleep|setTimeout|Thread\.sleep|time\.sleep|asyncio\.sleep|from_secs|from_millis|wait_for|waitFor|waitForTimeout|Task\.Delay|timeout)\b/g,
+  // UI text or element presence.
+  ui: /\b(?:textContent|innerText|innerHTML|outerHTML|getByText|findByText|queryByText|getByRole|getByLabelText|toBeInTheDocument|toHaveTextContent|toBeVisible|querySelector(?:All)?|html)\b/g,
+  // Real I/O a scenario proves, or a unit test pays for.
+  process: /\b(?:Command::new|spawn(?:Sync)?|execFile(?:Sync)?|execSync|child_process|subprocess|exec\.Command|Process\.Start|ProcessBuilder)\b/g,
+  git: /\bgit\b/g,
+  network: /\b(?:fetch|reqwest|TcpListener|TcpStream|http\.Get|HttpClient|requests\.(?:get|post)|urlopen|WebSocket|listen)\b/g,
+  db: /\b(?:Db::open|rusqlite|sqlite3?|Connection|createConnection|sql\.Open|DriverManager|SqlConnection|database)\b/gi,
+};
+function hints(body) {
+  const out = {};
+  for (const [key, pattern] of Object.entries(HINTS)) { const n = (body.match(pattern) || []).length; if (n) out[key] = n; }
+  return out;
+}
+// Where named test bodies start, by language: a pattern whose last character opens the body, and the group holding the name.
+const STARTS = [
+  [/\.rs$/, /#\[(?:test|tokio::test[^\]]*)\][\s\S]{0,180}?\bfn\s+(\w+)\s*\([^)]*\)[^{]*\{/g, 1],
+  [/\.[cm]?[jt]sx?$/, /\b(?:test|it)\s*\(\s*(['"`])([^\n]*?)\1[\s\S]{0,120}?=>\s*\{/g, 2],
+  [/\.go$/, /\bfunc\s+(Test\w*)\s*\([^)]*\)\s*\{/g, 1],
+  [/\.(?:java|kt)$/, /@(?:Test|ParameterizedTest)\b[\s\S]{0,240}?\b(?:void|fun)\s+(\w+)\s*\([^)]*\)[^{]*\{/g, 1],
+  [/\.cs$/, /\[(?:Fact|Theory|Test|TestMethod)\b[^\]]*\][\s\S]{0,240}?\b(?:void|Task)\s+(\w+)\s*\([^)]*\)[^{]*\{/g, 1],
+];
 function bodies(text, ext) {
+  if (ext === '.py') return pythonBodies(text);
+  const start = STARTS.find(([file]) => file.test(ext)); if (!start) return [];
+  const [, pattern, group] = start; pattern.lastIndex = 0;
   // Conservatively extract named test bodies, balancing braces while masking comments/strings.
   const masked = text.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`/g, x => x.replace(/[^\n]/g, ' '));
-  const pattern = ext === '.rs' ? /#\[(?:test|tokio::test[^\]]*)\][\s\S]{0,180}?\bfn\s+(\w+)\s*\([^)]*\)[^{]*\{/g : /\b(?:test|it)\s*\(\s*(['"`])([^\n]*?)\1[\s\S]{0,120}?=>\s*\{/g;
   const out = []; let m;
   while ((m = pattern.exec(text))) {
-    const start = pattern.lastIndex - 1; let depth = 1, end = start + 1;
+    const open = pattern.lastIndex - 1; let depth = 1, end = open + 1;
     for (; end < masked.length && depth; end++) { if (masked[end] === '{') depth++; else if (masked[end] === '}') depth--; }
     if (depth) continue;
-    const body = text.slice(start + 1, end - 1);
+    const body = text.slice(open + 1, end - 1);
     if (body.length > 50000) continue;
-    const normalized = body.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '').replace(/\s+/g, ' ').trim();
-    out.push({ name: ext === '.rs' ? m[1] : m[2], line: text.slice(0, m.index).split('\n').length, hash: hash(body), signature: normalized.length >= 100 ? hash(normalized) : undefined, mocks: (body.match(/\b(?:mock|spyOn|mockImplementation|mockReturnValue|expect_call|withf)\s*[.(]/g) || []).length });
+    out.push(record(m[group], text.slice(0, m.index).split('\n').length, body));
   }
   return out;
 }
+// pytest's `def test_...` (top level or in a class), its body the lines indented under it.
+function pythonBodies(text) {
+  const lines = text.split('\n'); const out = [];
+  lines.forEach((line, i) => {
+    const m = line.match(/^(\s*)(?:async\s+)?def\s+(test\w*)\s*\(/); if (!m) return;
+    let end = i + 1;
+    while (end < lines.length && (!lines[end].trim() || lines[end].match(/^\s*/)[0].length > m[1].length)) end++;
+    const body = lines.slice(i + 1, end).join('\n');
+    if (body.length <= 50000) out.push(record(m[2], i + 1, body));
+  });
+  return out;
+}
+function record(name, line, body) {
+  const normalized = body.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*|#[^\n]*/g, '').replace(/\s+/g, ' ').trim();
+  return { name, line, hash: hash(body), signature: normalized.length >= 100 ? hash(normalized) : undefined, mocks: (body.match(/\b(?:mock|spyOn|mockImplementation|mockReturnValue|expect_call|withf|Mock|patch)\s*[.(]/g) || []).length, hints: hints(body) };
+}
+// Test files by name, in the languages `bodies` reads.
+const TEST_FILE = /(?:\.rs|(?:test|spec)\.[cm]?[jt]sx?|_test\.go|(?:^|\/)test_\w+\.py|_test\.py|Tests?\.(?:java|kt|cs))$/;
 function inventory(root) {
   const listed = cp.execFileSync('git', ['ls-files', '-z'], { cwd: root, maxBuffer: MAX }).toString().split('\0').filter(Boolean);
   const tests = []; let bytes = 0; let truncated = false;
   for (const file of listed) {
-    if (!(file.endsWith('.rs') || /(?:test|spec)\.[cm]?[jt]sx?$/.test(file))) continue;
+    if (!TEST_FILE.test(file)) continue;
     const absolute = path.join(root, file); if (!fs.existsSync(absolute) || fs.lstatSync(absolute).isSymbolicLink()) continue;
     const size = fs.statSync(absolute).size;
     if (size > 1024 * 1024 || bytes + size > MAX || tests.length >= 10000) { truncated = true; continue; }
@@ -148,5 +193,5 @@ function main(args) {
   fs.writeFileSync(opts.output, JSON.stringify(report, null, 2), { flag: 'wx' });
   console.log(JSON.stringify({ report: opts.output, revision, observed: observations.length, inventoried: inv.tests.length, candidates: candidates.length, truncated: report.truncated }));
 }
-module.exports = { merged, parseLog, bodies, classify };
+module.exports = { merged, parseLog, bodies, classify, hints };
 if (require.main === module) main(process.argv.slice(2));

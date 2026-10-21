@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 pub const GUIDE: &str = include_str!("test_sweep_guide.md");
+/// The analysis step of /nitely-test-optimize: classifying each flagged test (NIT-555).
+pub const OPTIMIZE_GUIDE: &str = include_str!("test_optimize_guide.md");
 pub const COLLECTOR: &str = include_str!("test_sweep.cjs");
 pub const LABEL: &str = "test-sweep";
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -220,6 +222,272 @@ pub fn schedule(
     Ok(())
 }
 
+/// What a slow, flaky or flagged test is, as the agent finds it reading the code (NIT-555).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "class")]
+pub enum Class {
+    /// It checks one decision, which `module` makes: lift it into a pure function and test that.
+    Decision { decision: String, module: String },
+    /// It proves real I/O (a process, git, the network, a database) end to end: keep it, named.
+    Scenario,
+    /// It asserts that UI text or an element exists.
+    Presence,
+    /// It waits on the clock or on machine load.
+    WallClock,
+    /// Another test checks the same thing.
+    Duplicate { of: String },
+    /// It restates the implementation instead of checking a behaviour.
+    Restates,
+}
+
+/// One test's class, keyed by the `test` a `flagged` entry names.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Classified {
+    pub test: String,
+    #[serde(flatten)]
+    pub class: Class,
+    #[serde(default)]
+    pub note: String,
+}
+
+/// A test the agent must classify, and why: slow, flaky or failing, or a mechanical hint.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Flagged {
+    /// `path::name` from the inventory, or an observation's id when no source was found.
+    pub test: String,
+    pub path: Option<String>,
+    pub line: Option<u64>,
+    /// Its median time by the method that timed the most tests, when timed.
+    pub seconds: Option<f64>,
+    pub why: Vec<String>,
+    pub hints: serde_json::Value,
+}
+
+impl Report {
+    /// The tests to classify: slower than `slow_seconds`, flaky or failing at the report's
+    /// revision, or whose body waits on time or asserts UI text or presence. Times are compared
+    /// within one measuring method, as the collector compares them.
+    pub fn flagged(&self, slow_seconds: f64) -> Vec<Flagged> {
+        use std::collections::BTreeMap;
+        let method_of = |o: &serde_json::Value| o["method"].as_str().unwrap_or("lane").to_string();
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for o in self
+            .observations
+            .iter()
+            .filter(|o| o["revision"] == self.revision.as_str() && o["duration_ms"].is_number())
+        {
+            *counts.entry(method_of(o)).or_default() += 1;
+        }
+        let method = counts.into_iter().max_by_key(|(_, n)| *n).map(|(m, _)| m);
+        // Each observed test: its name, times by that method, and outcomes, at this revision.
+        let mut seen: BTreeMap<String, (String, Vec<f64>, bool, bool)> = BTreeMap::new();
+        for o in self
+            .observations
+            .iter()
+            .filter(|o| o["revision"] == self.revision.as_str() && o["ambiguous"] != true)
+        {
+            let (Some(id), Some(name)) = (o["id"].as_str(), o["name"].as_str()) else {
+                continue;
+            };
+            let entry = seen
+                .entry(id.to_string())
+                .or_insert_with(|| (name.to_string(), vec![], false, false));
+            if Some(method_of(o)) == method {
+                entry
+                    .1
+                    .extend(o["duration_ms"].as_f64().map(|ms| ms / 1000.0));
+            }
+            entry.2 |= o["outcome"] == "pass";
+            entry.3 |= o["outcome"] == "fail";
+        }
+        let source = |name: &str| {
+            let found: Vec<_> = self
+                .tests
+                .iter()
+                .filter(|t| {
+                    t["name"]
+                        .as_str()
+                        .is_some_and(|n| n == name || name.ends_with(&format!("::{n}")))
+                })
+                .collect();
+            (found.len() == 1).then(|| found[0])
+        };
+        let key = |t: &serde_json::Value| {
+            format!(
+                "{}::{}",
+                t["path"].as_str().unwrap_or_default(),
+                t["name"].as_str().unwrap_or_default()
+            )
+        };
+        let mut out: BTreeMap<String, Flagged> = BTreeMap::new();
+        let mut flag =
+            |test: String, t: Option<&serde_json::Value>, seconds: Option<f64>, why: String| {
+                let entry = out.entry(test.clone()).or_insert_with(|| Flagged {
+                    test,
+                    path: t.and_then(|t| t["path"].as_str().map(String::from)),
+                    line: t.and_then(|t| t["line"].as_u64()),
+                    seconds,
+                    why: vec![],
+                    hints: t
+                        .map(|t| t["hints"].clone())
+                        .filter(|h| !h.is_null())
+                        .unwrap_or_else(|| serde_json::json!({})),
+                });
+                entry.seconds = entry.seconds.or(seconds);
+                entry.why.push(why);
+            };
+        for (id, (name, mut times, passed, failed)) in seen {
+            let t = source(&name);
+            let test = t.map(key).unwrap_or(id);
+            times.sort_by(f64::total_cmp);
+            let median = times.get(times.len() / 2).copied();
+            if let Some(s) = median.filter(|s| *s > slow_seconds) {
+                flag(
+                    test.clone(),
+                    t,
+                    median,
+                    format!(
+                        "slow: {s:.1} s median by {}",
+                        method.as_deref().unwrap_or("?")
+                    ),
+                );
+            }
+            if failed {
+                flag(
+                    test.clone(),
+                    t,
+                    median,
+                    if passed {
+                        "flaky: passed and failed at one revision".into()
+                    } else {
+                        "failing".into()
+                    },
+                );
+            }
+        }
+        for t in &self.tests {
+            for (hint, why) in [
+                ("waits", "waits on time or load"),
+                ("ui", "asserts UI text or presence"),
+            ] {
+                if let Some(n) = t["hints"][hint].as_u64() {
+                    flag(key(t), Some(t), None, format!("{why} ({n} in its body)"));
+                }
+            }
+        }
+        // The collector's leads: a body the same as another's, heavy mocking.
+        for c in self.candidates.iter().filter(|c| c.kind == "inspect") {
+            let at = |t: &&serde_json::Value| {
+                t["path"].as_str() == c.path.as_deref()
+                    && t["line"].as_u64() == c.line.map(|l| l as u64)
+            };
+            if let Some(t) = self.tests.iter().find(at) {
+                flag(key(t), Some(t), None, c.title.clone());
+            }
+        }
+        out.into_values().collect()
+    }
+}
+
+/// The map of flagged tests to their classes, as markdown for the person (docs/pure-cut.md was
+/// NIT's): decisions by the module that makes them (the refactor cards), then the scenarios kept,
+/// and the presence tests, clock waits, duplicates and restatements to delete or rewrite. Every
+/// flagged test needs a class; a class for a test not flagged is refused, so the map stays the
+/// evidence's.
+pub fn render_map(revision: &str, flagged: &[Flagged], classes: &[Classified]) -> Result<String> {
+    use std::collections::BTreeMap;
+    let by_test: BTreeMap<&str, &Classified> =
+        classes.iter().map(|c| (c.test.as_str(), c)).collect();
+    if by_test.len() != classes.len() {
+        bail!("a test is classified twice");
+    }
+    if let Some(c) = classes
+        .iter()
+        .find(|c| !flagged.iter().any(|f| f.test == c.test))
+    {
+        bail!(
+            "{} is not among the flagged tests; classify only what the evidence flagged",
+            c.test
+        );
+    }
+    let missing: Vec<&str> = flagged
+        .iter()
+        .filter(|f| !by_test.contains_key(f.test.as_str()))
+        .map(|f| f.test.as_str())
+        .collect();
+    if !missing.is_empty() {
+        bail!(
+            "{} flagged tests have no class yet: {}",
+            missing.len(),
+            missing.join(", ")
+        );
+    }
+    let time = |f: &Flagged| {
+        f.seconds
+            .map(|s| format!("{s:.1} s"))
+            .unwrap_or_else(|| "not timed".into())
+    };
+    let row = |f: &Flagged, c: &Classified| {
+        let note = if c.note.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", c.note)
+        };
+        format!(
+            "- `{}` ({}; {}).{note}\n",
+            f.test,
+            time(f),
+            f.why.join("; ")
+        )
+    };
+    let mut modules: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    let mut groups: [(&str, &str, Vec<String>); 5] = [
+        ("Scenarios kept", "Real I/O end to end: keep each, named in the test budget's scenarios.", vec![]),
+        ("Presence tests", "They assert that UI text or an element exists: delete, or check behaviour through state instead.", vec![]),
+        ("Clock waits", "They wait on time or machine load: replace the wait with an event or an injected clock.", vec![]),
+        ("Duplicates", "Another test checks the same thing: delete, naming what covers it.", vec![]),
+        ("Restatements", "They restate the implementation: delete or rewrite against a behaviour.", vec![]),
+    ];
+    let mut saving: BTreeMap<&str, f64> = BTreeMap::new();
+    for f in flagged {
+        let c = by_test[f.test.as_str()];
+        match &c.class {
+            Class::Decision { decision, module } => {
+                *saving.entry(module.as_str()).or_default() += f.seconds.unwrap_or(0.0);
+                modules.entry(module.as_str()).or_default().push(format!(
+                    "- {decision}: `{}` ({})\n",
+                    f.test,
+                    time(f)
+                ));
+            }
+            Class::Scenario => groups[0].2.push(row(f, c)),
+            Class::Presence => groups[1].2.push(row(f, c)),
+            Class::WallClock => groups[2].2.push(row(f, c)),
+            Class::Duplicate { of } => groups[3].2.push(format!(
+                "- `{}` ({}): covered by `{of}`.\n",
+                f.test,
+                time(f)
+            )),
+            Class::Restates => groups[4].2.push(row(f, c)),
+        }
+    }
+    let mut md = format!("# Test map at {}\n\n{} tests flagged as slow, flaky or failing, or by a mechanical hint, each with its class. Times are medians by one measuring method; untimed tests are unknown, not fast.\n\n", &revision[..revision.len().min(12)], flagged.len());
+    if !modules.is_empty() {
+        md.push_str("## Decisions to lift, by module\n\nEach module is one refactor card: lift these decisions into pure functions, test those, and keep one or two scenarios.\n\n");
+        for (module, lines) in &modules {
+            md.push_str(&format!(
+                "### {module} (up to {:.1} s measured)\n\n{}\n",
+                saving[module],
+                lines.concat()
+            ));
+        }
+    }
+    for (title, what, lines) in groups.iter().filter(|g| !g.2.is_empty()) {
+        md.push_str(&format!("## {title}\n\n{what}\n\n{}\n", lines.concat()));
+    }
+    Ok(md)
+}
+
 /// One imported log (JUnit XML, libtest or TAP: `test_evidence::read`) as the collector's
 /// observations and its run. A test named twice in one log is ambiguous, not a repeat; a log not
 /// read whole is a partial run, and the tests it did not report stay unobserved.
@@ -294,6 +562,93 @@ mod tests {
         schedule(&mut db, "APP", &rules, &actor, 300000).unwrap();
         assert_eq!(db.list_issues(Some("APP"), true).unwrap().len(), 2);
     }
+    /// The tests to classify come from the evidence (slow by one method, flaky, a hint, a
+    /// candidate), and the map needs a class for each of them and for nothing else.
+    #[test]
+    fn flagged_tests_need_a_class_each_and_the_map_groups_decisions_by_module() {
+        let rev = "c".repeat(40);
+        let obs = |id: &str, run: &str, outcome: &str, ms: f64, method: &str| serde_json::json!({"id": id, "name": id.rsplit("::").next().unwrap(), "outcome": outcome, "run": run, "revision": rev, "source": "CI", "method": method, "ambiguous": false, "duration_ms": ms});
+        let report = Report {
+            version: 1,
+            revision: rev.clone(),
+            generated_at: "now".into(),
+            report_only: true,
+            runs: vec![],
+            observations: vec![
+                obs("core::land::batches", "ci-1", "pass", 9000.0, "ci-log"),
+                obs("core::land::batches", "ci-2", "pass", 8000.0, "ci-log"),
+                obs("core::cart::adds", "ci-1", "pass", 10.0, "ci-log"),
+                obs("core::cart::adds", "ci-2", "fail", 12.0, "ci-log"),
+                // Timed only in a lane: not compared with CI's times, so not slow.
+                obs("core::sync::pulls", "lane-1", "pass", 60000.0, "lane"),
+            ],
+            tests: vec![
+                serde_json::json!({"name": "batches", "path": "src/land.rs", "line": 10, "hints": {"process": 2, "git": 4}}),
+                serde_json::json!({"name": "adds", "path": "src/cart.rs", "line": 3, "hints": {}}),
+                serde_json::json!({"name": "shows_title", "path": "web/page.test.tsx", "line": 7, "hints": {"ui": 2}}),
+                serde_json::json!({"name": "pulls", "path": "src/sync.rs", "line": 5, "hints": {}}),
+            ],
+            candidates: vec![],
+            truncated: false,
+            warnings: vec![],
+        };
+        let flagged = report.flagged(2.0);
+        let names: Vec<(&str, &str)> = flagged
+            .iter()
+            .map(|f| (f.test.as_str(), f.why[0].as_str()))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                (
+                    "src/cart.rs::adds",
+                    "flaky: passed and failed at one revision"
+                ),
+                ("src/land.rs::batches", "slow: 9.0 s median by ci-log"),
+                (
+                    "web/page.test.tsx::shows_title",
+                    "asserts UI text or presence (2 in its body)"
+                )
+            ]
+        );
+        assert_eq!(flagged[1].hints["git"], 4);
+
+        let classes: Vec<Classified> = serde_json::from_value(serde_json::json!([
+            {"test": "src/land.rs::batches", "class": "decision", "decision": "which changes land in one batch", "module": "land_rules"},
+            {"test": "src/cart.rs::adds", "class": "wall-clock", "note": "waits for a debounce"},
+        ]))
+        .unwrap();
+        let err = render_map(&rev, &flagged, &classes)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("web/page.test.tsx::shows_title"), "{err}");
+        let mut all = classes.clone();
+        all.push(
+            serde_json::from_value(
+                serde_json::json!({"test": "web/page.test.tsx::shows_title", "class": "presence"}),
+            )
+            .unwrap(),
+        );
+        let map = render_map(&rev, &flagged, &all).unwrap();
+        assert!(map.contains("### land_rules (up to 9.0 s measured)\n\n- which changes land in one batch: `src/land.rs::batches` (9.0 s)"), "{map}");
+        assert!(
+            map.contains("## Presence tests")
+                && map.contains("## Clock waits")
+                && !map.contains("## Scenarios kept"),
+            "{map}"
+        );
+        all.push(
+            serde_json::from_value(
+                serde_json::json!({"test": "src/sync.rs::pulls", "class": "scenario"}),
+            )
+            .unwrap(),
+        );
+        assert!(
+            render_map(&rev, &flagged, &all).is_err(),
+            "a class for a test the evidence did not flag is refused"
+        );
+    }
+
     /// A JUnit file imports as the same observations the collector classifies from libtest and
     /// TAP; a cut one is a partial run.
     #[test]

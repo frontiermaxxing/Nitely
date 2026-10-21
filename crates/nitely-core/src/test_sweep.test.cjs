@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { merged, parseLog, classify, bodies } = require('./test_sweep.cjs');
+const { merged, parseLog, classify, bodies, hints } = require('./test_sweep.cjs');
 const revision = 'a'.repeat(40);
 test('same-revision distinct runs distinguish flakes from repeats and ambiguous names', () => {
  const passed = parseLog('test parser::roundtrip ... ok', '1', revision, 'lane 1');
@@ -55,4 +55,17 @@ test('a fresh run keeps stderr and stdout in order, and a pass only on retry is 
   const failedRetry = (run) => ({ ...retried, run, outcome: 'fail' });
   assert.match(classify([failedRetry('ci-1'), failedRetry('ci-2')], [], revision)[0].title, /^Repeated failure: cart::adds/);
   assert.deepEqual(parseLog('test rejects - should panic ... FAILED', '1', revision, 'lane 1').map(r => [r.id, r.outcome]), [['rejects', 'fail']]);
+});
+test('test bodies in each language carry hints of waits, UI presence and real I/O', () => {
+  const py = bodies('import time\n\ndef test_total():\n    assert total() == 3\n\nclass TestPage:\n    def test_title(self):\n        time.sleep(2)\n        assert "Cart" in html\n', '.py');
+  assert.deepEqual(py.map(t => [t.name, t.line, t.hints]), [['test_total', 3, {}], ['test_title', 7, { waits: 1, ui: 1 }]]);
+  const go = bodies('func TestClone(t *testing.T) {\n\tout, _ := exec.Command("git", "clone").Output()\n\tif len(out) == 0 { t.Fatal() }\n}\n', '.go');
+  assert.deepEqual(go.map(t => [t.name, t.hints]), [['TestClone', { process: 1, git: 1 }]]);
+  const java = bodies('@Test\nvoid opens() {\n  Thread.sleep(500);\n}\n', '.java');
+  assert.deepEqual(java.map(t => [t.name, t.hints]), [['opens', { waits: 1 }]]);
+  const cs = bodies('[Fact]\npublic async Task Saves() {\n  using var c = new SqlConnection(cs);\n}\n', '.cs');
+  assert.deepEqual(cs.map(t => [t.name, t.hints]), [['Saves', { db: 1 }]]);
+  const js = bodies("test('shows the board', () => { expect(screen.getByText('Board')).toBeInTheDocument(); });", '.tsx');
+  assert.deepEqual(js.map(t => [t.name, t.hints]), [['shows the board', { ui: 2 }]]);
+  assert.deepEqual(hints('assert_eq!(decide(&a, &b), Verdict::Land);'), {});
 });
