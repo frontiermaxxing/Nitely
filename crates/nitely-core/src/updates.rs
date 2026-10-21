@@ -63,8 +63,11 @@ impl Digest {
 
 /// The person's own moves, as the event table records them.
 const DECISIONS: &[&str] = &["answer", "issue_moved", "issue_edited", "goal_changed", "note", "project_review_mode_changed", "project_focus_changed", "project_yolo_changed", "owner_changed", "issue_created", "ask_closed"];
-/// Outcomes of work, whoever's they are.
-const OUTCOMES: &[&str] = &["landed", "land_failed"];
+/// Outcomes of work, whoever's they are: lands, sent-backs, a goal done or dropped.
+const OUTCOMES: &[&str] = &["landed", "land_failed", "goal_state"];
+/// Who files the recovery issue when the full check on the integration branch fails
+/// (verification_backstop.rs): that issue's filing is the failure's news.
+const BACKSTOP: &str = "verification-backstop";
 
 /// The longest a line's quote of an event may be.
 const QUOTE: usize = 90;
@@ -80,7 +83,7 @@ pub fn digest(events: &[FeedEvent], reader: &str, scope: &Scope, cap: usize) -> 
             return false;
         }
         let decision = e.actor == "human" && DECISIONS.contains(&e.kind.as_str());
-        let outcome = OUTCOMES.contains(&e.kind.as_str());
+        let outcome = OUTCOMES.contains(&e.kind.as_str()) || (e.actor == BACKSTOP && e.kind == "issue_created");
         if !decision && !outcome {
             return false;
         }
@@ -143,7 +146,11 @@ fn line(e: &FeedEvent) -> String {
         "answer" => format!("The person answered the ask{on}: \"{said}\""),
         "issue_moved" => format!("The person moved {}: {said}", e.issue_key.as_deref().unwrap_or("an issue")),
         "note" => format!("The person noted{on}: {said}"),
+        "issue_created" if e.actor == BACKSTOP => {
+            format!("The full check on the integration branch failed; {} tracks it", e.issue_key.as_deref().unwrap_or("a recovery issue"))
+        }
         "issue_created" => format!("The person filed {}", e.issue_key.as_deref().unwrap_or("an issue")),
+        "goal_state" => said,
         "issue_edited" => {
             // `edit_issue` records what it was: "Title was: ...", "Body was: ...".
             let parts: Vec<&str> = [("Title was", "title"), ("Body was", "requirements")].iter().filter(|(mark, _)| e.summary.contains(mark)).map(|(_, part)| *part).collect();
@@ -182,7 +189,8 @@ pub fn read(db: &Db, reader: &str, projects: &[String], whole: bool, cap: usize)
     };
     let mut stmt = db.conn.prepare(
         "SELECT e.id, e.actor, e.issue_key, e.type, COALESCE(e.summary, ''),
-                COALESCE(i.project, CASE WHEN json_valid(e.payload) THEN json_extract(e.payload, '$.project') END), i.goal
+                COALESCE(i.project, CASE WHEN json_valid(e.payload) THEN json_extract(e.payload, '$.project') END),
+                COALESCE(i.goal, CASE WHEN json_valid(e.payload) THEN json_extract(e.payload, '$.goal') END)
          FROM event e LEFT JOIN issue i ON i.key = e.issue_key COLLATE NOCASE
          WHERE e.id > ?1 ORDER BY e.id LIMIT 5000",
     )?;
@@ -247,6 +255,8 @@ mod tests {
             ev(18, "codex:x", Some("APP-6"), Some("APP"), Some(22), "land_failed", "Land stopped: rebase conflict in a.rs"),
             ev(19, "human", Some("APP-3"), Some("APP"), Some(22), "issue_edited", "Title was: Old\n\nBody was:\nold body"),
             ev(20, "human", None, Some("WEB"), None, "project_focus_changed", "WEB focus: something else"),
+            ev(21, "verification-backstop", Some("APP-80"), Some("APP"), None, "issue_created", "Filed as Todo"),
+            ev(22, "human", None, Some("APP"), Some(22), "goal_state", "Goal 22 \"Less ceremony\" is done"),
         ]
     }
 
@@ -261,11 +271,15 @@ mod tests {
                 "The person moved APP-70: Needs You → Todo: answered; it waits for the next agent",
                 "APP-6 was sent back from landing: Land stopped: rebase conflict in a.rs",
                 "The person edited its title and requirements on APP-3: read it again",
+                "Goal 22 \"Less ceremony\" is done",
                 "The person put APP-4, APP-5 in Less ceremony",
             ],
             "another agent's land of an issue outside its goals, its own land, a status, another project's answer and another project's focus are left out"
         );
-        assert_eq!((d.more, d.cursor), (0, 20), "the cursor moves past everything read");
+        assert_eq!((d.more, d.cursor), (0, 22), "the cursor moves past everything read");
+        // A coordinator also hears that the full check on main failed (the backstop's recovery issue).
+        let whole = digest(&feed(), "claude:coord", &Scope::Project(["APP".to_string()].into()), 20);
+        assert!(whole.lines.contains(&"The full check on the integration branch failed; APP-80 tracks it".to_string()), "{:?}", whole.lines);
 
         // A coordinator reads the whole project: other agents' lands too, grouped on one line.
         let whole = digest(&feed(), "claude:coord", &Scope::Project(["APP".to_string()].into()), 10);
@@ -277,16 +291,16 @@ mod tests {
     fn the_block_is_capped_and_says_how_to_read_the_rest_and_nothing_new_adds_nothing() {
         let whole = Scope::Project(["APP".to_string()].into());
         let d = digest(&feed(), "claude:coord", &whole, 2);
-        assert_eq!((d.lines.len(), d.more), (2, 6), "the six updates after the first two are left for the next read");
+        assert_eq!((d.lines.len(), d.more), (2, 8), "the eight updates after the first two are left for the next read");
         let block = d.block().unwrap();
-        assert!(block.starts_with("Nitely, since you last looked:\n- The person answered the ask on APP-70") && block.ends_with("- and 6 more: call `updates`"), "{block}");
+        assert!(block.starts_with("Nitely, since you last looked:\n- The person answered the ask on APP-70") && block.ends_with("- and 8 more: call `updates`"), "{block}");
         // The cursor stops before the first update not told: the next read starts there, so the
         // rest are told and none is lost (the review of NIT-562).
         assert_eq!(d.cursor, 11);
         let rest: Vec<FeedEvent> = feed().into_iter().filter(|e| e.id > d.cursor).collect();
         let next = digest(&rest, "claude:coord", &whole, 8);
-        assert_eq!(next.lines.len(), 4, "{:?}", next.lines);
-        assert_eq!((next.more, next.cursor), (0, 20));
+        assert_eq!(next.lines.len(), 6, "{:?}", next.lines);
+        assert_eq!((next.more, next.cursor), (0, 22));
         let quiet = digest(&[ev(20, "claude:other", Some("APP-9"), Some("APP"), None, "status", "Working")], "claude:coord", &whole, 8);
         assert_eq!((quiet.block(), quiet.cursor), (None, 20), "nothing to say, but the cursor still moves");
         assert_eq!(digest(&[], "r", &whole, 8).block(), None);

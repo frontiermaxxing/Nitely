@@ -229,6 +229,7 @@ impl Db {
                 self.conn.last_insert_rowid()
             }
             Some(id) => {
+                let before: Option<String> = self.conn.query_row("SELECT state FROM goal WHERE id = ?1", [id], |r| r.get(0)).optional()?;
                 // Only the fields given change, in one statement: two agents editing different
                 // fields at once both keep their edit.
                 let changed = self.conn.execute(
@@ -240,6 +241,15 @@ impl Db {
                 )?;
                 if changed == 0 {
                     bail!("no goal {id}");
+                }
+                // A goal done or dropped is news to whoever works toward it (the updates feed,
+                // NIT-562): one event, with its project, since it names no issue.
+                if let Some(state) = change.state.as_deref().filter(|s| before.as_deref() != Some(*s)) {
+                    let goal = self.goal(id)?.context("goal vanished")?;
+                    self.conn.execute(
+                        "INSERT INTO event (ts, actor, issue_key, type, summary, payload) VALUES (?1, ?2, NULL, 'goal_state', ?3, ?4)",
+                        params![ts, actor.id(), format!("Goal {id} \"{}\" is {state}", goal.title), serde_json::json!({ "project": goal.project, "goal": id }).to_string()],
+                    )?;
                 }
                 id
             }
