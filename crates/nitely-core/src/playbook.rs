@@ -220,12 +220,47 @@ const SETUP_FILES: &[&str] = &[
     "Gemfile.lock",
 ];
 
+/// The dependency files of each kind of tool a setup command starts with.
+const JS_FILES: &[&str] = &["package.json", "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb"];
+const PYTHON_FILES: &[&str] = &["requirements.txt", "poetry.lock", "uv.lock", "Pipfile.lock"];
+
+/// The dependency files `setup`'s commands read (NIT-287): `npm ci` reads package.json and the JS
+/// lockfiles, not Cargo.lock, so a lane serving branches that differ only in Cargo.lock does not
+/// install node_modules again for each. A command whose tool it does not know (`make`, a script)
+/// may read any of them; `cd`, `echo` and `git` read none.
+pub(crate) fn setup_files_for(setup: &[String]) -> Vec<&'static str> {
+    let mut files: Vec<&'static str> = Vec::new();
+    for part in setup.iter().flat_map(|c| c.split(['&', '|', ';', '\n'])) {
+        // The program, past any `NAME=value` the command sets first.
+        let Some(first) = part.split_whitespace().find(|w| !w.contains('=')) else { continue };
+        let name = first.rsplit(['/', '\\']).next().unwrap_or(first).to_ascii_lowercase();
+        let name = name.strip_suffix(".exe").or_else(|| name.strip_suffix(".cmd")).unwrap_or(&name);
+        let these: &[&'static str] = match name {
+            "cd" | "echo" | "git" | "set" => continue,
+            "npm" | "npx" | "pnpm" | "yarn" | "bun" | "node" | "corepack" => JS_FILES,
+            "cargo" | "rustup" => &["Cargo.lock"],
+            "pip" | "pip3" | "python" | "python3" | "py" | "poetry" | "uv" | "pipenv" => PYTHON_FILES,
+            "go" => &["go.sum"],
+            "bundle" | "bundler" | "gem" => &["Gemfile.lock"],
+            _ => SETUP_FILES,
+        };
+        for f in these {
+            if !files.contains(f) {
+                files.push(f);
+            }
+        }
+    }
+    files.sort_by_key(|f| SETUP_FILES.iter().position(|s| s == f));
+    files
+}
+
 /// The dependency files among `files` (paths relative to the repo root): what makes a checkout's
 /// setup stale when it changes.
 pub fn setup_files_in(rules: &WorktreeRules, files: &[String]) -> Vec<String> {
+    let read = setup_files_for(&rules.setup);
     files
         .iter()
-        .filter(|f| SETUP_FILES.contains(&f.as_str()) || rules.setup_when_changed.iter().any(|w| w.trim_start_matches("./") == f.as_str()))
+        .filter(|f| read.contains(&f.as_str()) || rules.setup_when_changed.iter().any(|w| w.trim_start_matches("./") == f.as_str()))
         .cloned()
         .collect()
 }
@@ -244,7 +279,8 @@ pub fn setup_passed(worktree: &Path) -> bool {
     worktree.join(".git").exists() && setup_record(worktree).is_some_and(|r| r.exists())
 }
 
-/// FNV-1a over the names and contents of the dependency files present, stable across builds.
+/// FNV-1a over the names and contents of the dependency files present that its setup reads
+/// (`setup_files_for`), stable across builds.
 pub(crate) fn setup_fingerprint(rules: &WorktreeRules, worktree: &Path) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     let mut eat = |bytes: &[u8]| {
@@ -253,7 +289,7 @@ pub(crate) fn setup_fingerprint(rules: &WorktreeRules, worktree: &Path) -> Strin
             hash = hash.wrapping_mul(0x0100_0000_01b3);
         }
     };
-    for name in SETUP_FILES.iter().copied().chain(rules.setup_when_changed.iter().map(String::as_str)) {
+    for name in setup_files_for(&rules.setup).into_iter().chain(rules.setup_when_changed.iter().map(String::as_str)) {
         if let Ok(bytes) = std::fs::read(worktree.join(name)) {
             eat(name.as_bytes());
             eat(&[0]);
@@ -1574,6 +1610,22 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// NIT-287: a lane serving branches that differ only in Cargo.lock ran `npm ci` again for each,
+    /// because the setup fingerprint read every lockfile. Setup reads only its tools' files now.
+    #[test]
+    fn setup_goes_stale_only_on_the_files_its_tools_read() {
+        let s = |c: &[&str]| setup_files_for(&c.iter().map(|c| c.to_string()).collect::<Vec<_>>());
+        assert_eq!(s(&["npm ci"]), JS_FILES);
+        assert!(!s(&["npm ci"]).contains(&"Cargo.lock"));
+        assert_eq!(s(&["cd app && CI=1 pnpm install", "cargo fetch"]).len(), JS_FILES.len() + 1);
+        assert_eq!(s(&["C:\\Tools\\uv.exe sync"]), PYTHON_FILES);
+        assert_eq!(s(&["./setup.sh"]), SETUP_FILES, "a tool it does not know may read any");
+        assert!(s(&["git submodule update --init"]).is_empty());
+        let rules = WorktreeRules { setup: vec!["npm ci".into()], setup_when_changed: vec!["./tools/versions.txt".into()], ..Default::default() };
+        let changed = ["Cargo.lock", "package-lock.json", "tools/versions.txt"].map(String::from);
+        assert_eq!(setup_files_in(&rules, &changed), ["package-lock.json", "tools/versions.txt"]);
+    }
 
     #[test]
     fn git_keeps_answers_about_object_ids_but_asks_again_about_a_moved_branch() {
