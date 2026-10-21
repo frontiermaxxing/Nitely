@@ -319,7 +319,7 @@ pub fn stats(db: &Db, inputs: &Inputs) -> Result<Leaderboard> {
             by_start.get(&start).map(|w| (*w).clone()).unwrap_or(WeekPoint { week_start: start, landed: 0, active_days: 0 })
         })
         .collect::<Vec<WeekPoint>>();
-    let weekly_agent_hours = weekly.iter().map(|w| hours_between(&sessions, w.week_start, week_start(w.week_start + WEEK + DAY))).collect();
+    let weekly_agent_hours: Vec<f64> = weekly.iter().map(|w| hours_between(&sessions, w.week_start, week_start(w.week_start + WEEK + DAY))).collect();
 
     let mut per_day: BTreeMap<i64, u64> = BTreeMap::new();
     for c in &changes {
