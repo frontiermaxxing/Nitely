@@ -325,6 +325,112 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    /// A stand-in for the service on this machine that counts every connection made to it and
+    /// answers each with `body`.
+    struct CountingService {
+        url: String,
+        connections: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl CountingService {
+        fn start(body: &'static str) -> CountingService {
+            use std::io::{Read, Write};
+            use std::sync::atomic::Ordering;
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+            let connections = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (count, done) = (connections.clone(), stop.clone());
+            std::thread::spawn(move || {
+                while !done.load(Ordering::SeqCst) {
+                    match listener.accept() {
+                        Ok((mut conn, _)) => {
+                            count.fetch_add(1, Ordering::SeqCst);
+                            conn.set_nonblocking(false).ok();
+                            conn.set_read_timeout(Some(std::time::Duration::from_secs(2))).ok();
+                            let mut buf = [0u8; 4096];
+                            let _ = conn.read(&mut buf);
+                            let reply = format!("HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Length: {}
+Connection: close
+
+{body}", body.len());
+                            let _ = conn.write_all(reply.as_bytes());
+                        }
+                        Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                    }
+                }
+            });
+            CountingService { url, connections, stop }
+        }
+
+        fn connections(&self) -> usize {
+            self.connections.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for CountingService {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// NIT-449: the leaderboard reaches its service only when the person asks it to. Reading the
+    /// status, joining, saving changes, the weekly check before a first send by hand, and leaving
+    /// without having sent all stay on this machine; viewing the board is the one request a
+    /// person can make before sharing, and it is one request.
+    #[test]
+    fn nothing_reaches_the_service_before_the_person_asks() {
+        let service = CountingService::start(r#"{"schema":1,"period":"week","week":"2026-W43","generated_at":0,"entries":[]}"#);
+        let dir = nitely_core::paths::unique_temp("nitely-leaderboard-optin", "");
+        let sharing = Sharing::new(&dir);
+        // The address is saved only by joining; before that, point the state at the stand-in so a
+        // stray request would be seen rather than go to the real service.
+        sharing.save(&State { url: Some(service.url.clone()), ..Default::default() }).unwrap();
+        let db = nitely_core::db::Db::open(&dir.join("t.db")).unwrap();
+        let config = nitely_core::Config::default();
+        let report = crate::leaderboard_report::Report {
+            schema: 1,
+            display_name: "x".into(),
+            links: Default::default(),
+            week: "2026-W43".into(),
+            projects: 0,
+            periods: vec![],
+            weekly: vec![],
+            records: Default::default(),
+        };
+
+        // Not joined: nothing goes anywhere, whatever is asked.
+        assert!(!sharing.status(1_792_000_000).unwrap().state.joined);
+        assert_eq!(sharing.send_if_due(&config, &db).unwrap(), None);
+        assert!(sharing.send(&config, &db).is_err(), "sending before joining is refused");
+        assert!(sharing.send_report(&report).is_err());
+        assert_eq!(sharing.delete().unwrap(), 0);
+        assert_eq!(service.connections(), 0, "before joining");
+
+        // Joining and changing the profile: still nothing, and no weekly send before one by hand.
+        let profile = Profile { display_name: "Night Owl".into(), github: Some("octocat".into()), x: None, website: None };
+        sharing.join(&profile, &[], Some(&service.url)).unwrap();
+        sharing.join(&Profile { display_name: "Owl".into(), ..profile.clone() }, &["NIT".into()], None).unwrap();
+        assert!(sharing.status(1_792_000_000).unwrap().state.joined);
+        assert_eq!(sharing.send_if_due(&config, &db).unwrap(), None, "never automatic before a send by hand");
+        assert_eq!(service.connections(), 0, "joining sends nothing");
+
+        // Viewing the board is a request the person makes: exactly one.
+        let board = sharing.board("week").unwrap();
+        assert_eq!(board["entries"], serde_json::json!([]));
+        assert_eq!(service.connections(), 1, "viewing the board is one request");
+
+        // Leaving without ever sending deletes nothing remotely, so it asks nothing.
+        assert_eq!(sharing.leave().unwrap(), 0);
+        assert_eq!(service.connections(), 1, "leaving unsent stays on this machine");
+        drop(db);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     #[test]
     fn addresses_are_https_or_this_machine() {
         assert!(check_url("https://example.com").is_ok());
