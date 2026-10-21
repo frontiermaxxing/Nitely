@@ -13,7 +13,7 @@ import { SaveBar } from "./rules/SaveBar";
 import type { RulesDraft } from "./rules/shared";
 import { draftChanges, draftOf, LAND_BY } from "./rules/shared";
 import { confirmLoosening } from "./rules/save";
-import { optionsFor, type ProjectReviewMode } from "./reviewModes";
+import { optionsFor, type EffectiveRepository, type ProjectReviewMode } from "./reviewModes";
 import "./rules.css";
 
 export { LAND_BY } from "./rules/shared";
@@ -108,7 +108,12 @@ export function ProjectRules(props: { projectKey: string }) {
     let current = true;
     setMode(null);
     invoke<ProjectReviewMode>("project_review_mode", { project: props.projectKey })
-      .then((m) => current && setMode({ mode: m.mode, options: optionsFor(m.mode, m.presets, m.overrides) }))
+      .then(async (m) => {
+        const options = optionsFor(m.mode, m.presets, m.overrides);
+        // Custom may leave the full suite on main to each repo's playbook: read what it resolves to.
+        const rows = options.full_backstop ? [] : await invoke<EffectiveRepository[]>("project_review_mode_effective", { project: props.projectKey }).catch(() => []);
+        if (current) setMode({ mode: m.mode, options, backstop: Object.fromEntries(rows.map((r) => [r.repo, r.options.full_backstop])) });
+      })
       .catch(() => undefined);
     return () => {
       current = false;

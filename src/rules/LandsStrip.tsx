@@ -24,6 +24,8 @@ interface Station {
 export interface ModeFacts {
   mode: ReviewMode;
   options: ModeOptions;
+  /** Each repo's effective full suite on main, by repo name: Custom may leave it to the playbook. */
+  backstop?: Record<string, ModeOptions["full_backstop"]>;
 }
 
 const LAND_SHORT = { author: "The agent that wrote it", auto: "Nitely, at once", human: "Nitely, after you approve" } as const;
@@ -94,12 +96,12 @@ export function landsStations(v: RulesView, d: RulesEdit, landBy: RulesDraft["la
   const b = v.batching;
   const batched = b && b.land !== "off" && !b.land_alone && !(mode?.options.land_batch === false);
   const landed: Station = { label: "Landed by", value: LAND_SHORT[landBy], why: batched ? `In batches of up to ${b.land_max}` : "Each change alone", tone: "ink", section: "landing" };
-  const backstop = mode?.options.full_backstop;
+  const backstop = mode?.options.full_backstop ?? mode?.backstop?.[v.repo];
   const minutes = backstop ? Math.round(backstop.delay_seconds / 60) : 0;
   const checked: Station | null = !mode || !backstop
     ? null
     : !backstop.enabled
-      ? { label: "Checked on main", value: "Off", why: `${MODE_LABEL[mode.mode]} turns off the full suite on main`, tone: "off", section: null }
+      ? { label: "Checked on main", value: "Off", why: mode.options.full_backstop ? `${MODE_LABEL[mode.mode]} turns off the full suite on main` : `${MODE_LABEL[mode.mode]} leaves it to the playbook, which has it off`, tone: "off", section: null }
       : { label: "Checked on main", value: "Full suite", why: backstop.landings <= 1 ? "After every land, reverting a culprit" : `After ${backstop.landings} lands or ${minutes} min, reverting a culprit`, tone: "agent", section: null };
   return checked ? [refused, gate, review, waits, landed, checked] : [refused, gate, review, waits, landed];
 }
