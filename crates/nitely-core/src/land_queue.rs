@@ -759,9 +759,6 @@ fn land_prefix(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stack: &Path, 
             landed_from: Some(s.from.clone()),
             after: after.after.clone(),
             warnings: after.warnings.clone(),
-            // The integration branch the run gated against: what the verification record of this
-            // change starts from, as a single land's does (NIT-469).
-            landed_from: Some(before.to_string()),
             batch: Some(BatchNote {
                 entry: s.entry.id,
                 run: Some(run),
