@@ -37,8 +37,11 @@ on:
   push:
     branches: [main]
 
+# Keyed by event and pull request too (NIT-540): a pull request whose head is already on main (a
+# land fast-forwards it there) runs with github.ref = refs/heads/main, and would otherwise share the
+# push run's group and cancel it.
 concurrency:
-  group: ci-${{ github.ref }}-${{ inputs.nitely_run || 'gate' }}
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ inputs.nitely_run || 'gate' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
