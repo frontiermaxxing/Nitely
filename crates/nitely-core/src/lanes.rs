@@ -1251,7 +1251,6 @@ fn gate_on(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Opt
         let timed_out = why.starts_with(SETUP_TIMED_OUT);
         results.push(playbook::CommandResult { command: format!("lane {}", run.lane.unwrap_or(0)), ok: false, seconds: 0, output, skipped: false, timed_out });
     }
-    let mut warnings = warnings;
     warnings.extend(budget_warnings(db, worktree, issue, actor, &timings));
     Ok(GateRun { yolo_skipped, commit: short, passed: run.passed() && !yolo_skipped, results, flaked, run: Some(run.id), warnings })
 }
