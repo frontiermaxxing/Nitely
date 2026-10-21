@@ -25,7 +25,9 @@ export function ProfileDialog(props: { profile: Profile; projects: Project[]; on
     edited.github !== (p.github ?? null) ||
     edited.x !== (p.x ?? null) ||
     edited.website !== (p.website ?? null) ||
-    projects.join(",") !== p.projects.join(",");
+    projects.join(",") !== p.projects.join(",") ||
+    // No project chosen is not "every project" (the empty list's meaning): it can't be saved or shared.
+    counted.length === 0;
 
   // Each field is checked inline by the report builder, the same check a save makes.
   const key = JSON.stringify([projects, edited]);
@@ -69,8 +71,11 @@ export function ProfileDialog(props: { profile: Profile; projects: Project[]; on
   };
   const on = sharing(p);
 
-  // Esc closes, Tab stays inside, and the focus goes back where it was.
+  // Esc closes, Tab stays inside, and the focus goes back where it was. Set up once when the
+  // dialog opens: the page re-renders on every refresh, and must not pull the focus back.
   const box = useRef<HTMLDivElement>(null);
+  const onClose = useRef(props.onClose);
+  onClose.current = props.onClose;
   useEffect(() => {
     const was = document.activeElement as HTMLElement | null;
     box.current?.querySelector<HTMLElement>("input")?.focus();
@@ -78,7 +83,7 @@ export function ProfileDialog(props: { profile: Profile; projects: Project[]; on
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopImmediatePropagation();
-        props.onClose();
+        onClose.current();
       } else if (e.key === "Tab" && box.current) {
         const all = [...box.current.querySelectorAll<HTMLElement>("button:not([disabled]), input:not([disabled]), [tabindex='0']")];
         const first = all[0];
@@ -97,7 +102,7 @@ export function ProfileDialog(props: { profile: Profile; projects: Project[]; on
       window.removeEventListener("keydown", onKey, true);
       if (was?.isConnected) was.focus({ preventScroll: true });
     };
-  }, [props.onClose]);
+  }, []);
 
   return (
     <div className="palette-veil lb-veil" onMouseDown={props.onClose}>
