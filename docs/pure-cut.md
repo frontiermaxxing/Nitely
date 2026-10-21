@@ -473,6 +473,14 @@ every lane, crew and performance test drops. Then:
 - `db::processes_opening_an_old_database_together_upgrade_it_once` (10 s): SCENARIO, cut to one
   or two rounds.
 
+Done (NIT-535): `Store::open` creates its schema in one IMMEDIATE transaction, synced once; the
+recorder retries an announcement that failed after 250 ms doubling to the cadence (`next_wait`)
+rather than after a whole cadence; `keep_event` and `admit_workload` are the decisions; the busy
+test reads the `busy_timeout` pragma and waits 300 ms instead of 6 s; the racing open runs two
+rounds. Measured with `nitely run` on Windows, 34 tests of performance, attribution, events, pace
+and the two db tests: 12.67 s before, 3.57 s after (store tests 1.5 to 2.4 s each before, 0.2 to
+0.7 s after; the announcement test 9.0 to 2.3 s); crew's `performance_query`, 11 tests, 2.2 s.
+
 ## NIT-536: the CLI's clocks
 
 These are the Linux-slow ones, in `crates/nitely-cli/tests` and `phone`:

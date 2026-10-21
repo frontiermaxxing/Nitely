@@ -901,10 +901,13 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("t.db");
         let holder = super::Db::open(&path).unwrap();
+        // How long it waits is the pragma, so the test reads it rather than sitting it out (NIT-535).
+        let waits: i64 = holder.conn.query_row("PRAGMA busy_timeout", [], |r| r.get(0)).unwrap();
+        assert_eq!(waits, super::BUSY_TIMEOUT.as_millis() as i64);
         holder.conn.execute_batch("BEGIN IMMEDIATE").unwrap();
         let other = path.clone();
         let writer = std::thread::spawn(move || super::Db::open(&other).and_then(|db| db.note_tool_call("call-1", "session-1")));
-        std::thread::sleep(std::time::Duration::from_secs(6));
+        std::thread::sleep(std::time::Duration::from_millis(300));
         assert!(!writer.is_finished(), "it waits while the lock is held");
         holder.conn.execute_batch("COMMIT").unwrap();
         writer.join().unwrap().unwrap();
@@ -1103,8 +1106,9 @@ mod tests {
     #[test]
     fn processes_opening_an_old_database_together_upgrade_it_once() {
         // As the app, a hook and an MCP server do right after an install (NIT-103): each opens
-        // its own connection to a v10 database whose review table has no note column yet.
-        for round in 0..8 {
+        // its own connection to a v10 database whose review table has no note column yet. Two
+        // rounds of six racing opens: more added seconds, not coverage (NIT-535).
+        for round in 0..2 {
             let dir = crate::paths::unique_temp("nitely-upgrade", "");
             std::fs::create_dir_all(&dir).unwrap();
             let path = dir.join("t.db");

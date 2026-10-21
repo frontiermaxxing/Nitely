@@ -31,6 +31,11 @@ pub fn record(dir: &Path, event: &Event) -> Result<()> {
     let mut store = Store::open(dir)?;
     record_in_store(&mut store, event)
 }
+/// Whether an event goes in the history: not under a newer recorder, not while recording is paused,
+/// and not when it repeats its run's last kind (NIT-535).
+fn keep_event(version: i64, enabled: bool, prior: Option<&str>, kind: &str) -> bool {
+    version <= performance::RECORDER_VERSION && enabled && prior != Some(kind)
+}
 fn record_in_store(store: &mut Store, event: &Event) -> Result<()> {
     let kind = serde_json::to_string(&event.kind)?;
     let tx = store.db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -39,10 +44,9 @@ fn record_in_store(store: &mut Store, event: &Event) -> Result<()> {
     let version: i64 = tx.query_row("SELECT version FROM recorder_version WHERE id=1", [], |r| r.get(0))?;
     let settings: Option<String> = tx.query_row("SELECT json FROM settings WHERE id=1", [], |r| r.get(0)).optional()?;
     let settings: performance::Settings = settings.map(|s| serde_json::from_str(&s)).transpose()?.unwrap_or_default();
-    if version > performance::RECORDER_VERSION || !settings.enabled { return Ok(()); }
-    let days = settings.summary_days;
     let prior: Option<String> = tx.query_row("SELECT kind FROM performance_event WHERE run=?1 ORDER BY id DESC LIMIT 1", [event.run], |r| r.get(0)).optional()?;
-    if prior.as_deref() == Some(&kind) { return Ok(()); }
+    if !keep_event(version, settings.enabled, prior.as_deref(), &kind) { return Ok(()); }
+    let days = settings.summary_days;
     tx.execute("DELETE FROM performance_event WHERE wall_ms<?1 OR id<=(SELECT max(id) FROM performance_event)-19999", [event.wall_ms.saturating_sub(i64::from(days)*86_400_000)])?;
     tx.execute("INSERT INTO performance_event(wall_ms,project,run,kind,json) VALUES(?1,?2,?3,?4,?5)", params![event.wall_ms,event.project,event.run,kind,serde_json::to_string(event)?])?;
     tx.commit()?;
@@ -73,6 +77,15 @@ pub fn read_for_boot(store: &Store, from: i64, to: i64, project: Option<&str>, l
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn an_event_is_kept_only_when_recording_and_new_for_its_run() {
+        let v = performance::RECORDER_VERSION;
+        assert!(keep_event(v, true, None, "\"started\""));
+        assert!(keep_event(v, true, Some("\"queued\""), "\"started\""));
+        assert!(!keep_event(v, true, Some("\"started\""), "\"started\""), "a repeat of the run's last kind");
+        assert!(!keep_event(v, false, None, "\"started\""), "paused");
+        assert!(!keep_event(v + 1, true, None, "\"started\""), "a newer recorder owns the history");
+    }
     #[test]
     fn events_follow_the_coordination_home_and_survive_workload_exit_without_commands() {
         let home = crate::paths::unique_temp("performance-events", "");

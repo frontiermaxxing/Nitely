@@ -112,18 +112,22 @@ impl Store {
         std::fs::create_dir_all(dir)?;
         let db = Connection::open(dir.join("history.sqlite"))?;
         db.busy_timeout(Duration::from_millis(250))?;
-        db.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA max_page_count=65536;
-            CREATE TABLE IF NOT EXISTS settings(id INTEGER PRIMARY KEY CHECK(id=1), json TEXT NOT NULL);
+        db.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA max_page_count=65536;")?;
+        // The schema in one write, synced once: each statement on its own was a sync of its own,
+        // paid by every lane event on Windows (NIT-535).
+        let tx = rusqlite::Transaction::new_unchecked(&db, rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS settings(id INTEGER PRIMARY KEY CHECK(id=1), json TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS recorder_version(id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS samples(id INTEGER PRIMARY KEY, wall_ms INTEGER NOT NULL, json TEXT NOT NULL CHECK(length(json)<=8192));
             CREATE TABLE IF NOT EXISTS minutes(id INTEGER PRIMARY KEY, wall_ms INTEGER NOT NULL, json TEXT NOT NULL CHECK(length(json)<=24576));
             CREATE TABLE IF NOT EXISTS sessions(id INTEGER PRIMARY KEY, session TEXT NOT NULL, boot TEXT, started_ms INTEGER NOT NULL, stopped_ms INTEGER);
             CREATE INDEX IF NOT EXISTS samples_time ON samples(wall_ms);
             CREATE INDEX IF NOT EXISTS minutes_time ON minutes(wall_ms);")?;
-        crate::performance_events::schema(&db)?;
-        crate::pace::schema(&db)?;
-        db.execute("INSERT INTO recorder_version VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET version=excluded.version WHERE excluded.version>version", [RECORDER_VERSION])?;
-        crate::performance_attribution::schema(&db)?;
+        crate::performance_events::schema(&tx)?;
+        crate::pace::schema(&tx)?;
+        tx.execute("INSERT INTO recorder_version VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET version=excluded.version WHERE excluded.version>version", [RECORDER_VERSION])?;
+        crate::performance_attribution::schema(&tx)?;
+        tx.commit()?;
         Ok(Self { db })
     }
     /// Queries never initialize a store, collect a sample, or contend for recorder ownership.
@@ -290,10 +294,14 @@ pub fn background(dir: PathBuf) -> Recording {
         // Announce before acquiring ownership, so an older owner can relinquish its lock.
         // Failures stay isolated from the app/agent and are retried below.
         let mut announced = false;
+        let mut failed_announcements = 0;
         while !stopping.load(Ordering::Relaxed) {
             let result = (|| {
                 if !announced {
-                    Store::open(&dir)?;
+                    if let Err(e) = Store::open(&dir) {
+                        failed_announcements += 1;
+                        return Err(e);
+                    }
                     announced = true;
                 }
                 crate::performance_attribution::ensure_service(&dir);
@@ -304,7 +312,7 @@ pub fn background(dir: PathBuf) -> Recording {
                 let text = format!("{}: {error:#}", wall_ms());
                 let _ = std::fs::write(dir.join("last-error.txt"), text.chars().take(2048).collect::<String>());
             }
-            wait(&stopping, Duration::from_millis(CADENCE_MS));
+            wait(&stopping, next_wait(announced, failed_announcements));
         }
     });
     let thread = match thread {
@@ -317,6 +325,16 @@ pub fn background(dir: PathBuf) -> Recording {
     };
     Recording { stop, thread }
 }
+/// How long the recorder waits before its next round. Until its version is announced (a busy
+/// database, say), it tries again soon, 250 ms doubling up to the cadence, so an older owner
+/// learns to let go without a whole cadence lost each time (NIT-535); after that, the cadence.
+fn next_wait(announced: bool, failed_announcements: u32) -> Duration {
+    if announced || failed_announcements == 0 {
+        return Duration::from_millis(CADENCE_MS);
+    }
+    Duration::from_millis((250u64 << (failed_announcements - 1).min(5)).min(CADENCE_MS))
+}
+
 fn wait(stop: &AtomicBool, duration: Duration) {
     let until = Instant::now() + duration;
     while !stop.load(Ordering::Relaxed) && Instant::now() < until { std::thread::sleep(Duration::from_millis(100)); }
@@ -361,6 +379,15 @@ fn sample_until_stopped(store: &mut Store, collector: &mut Collector, first: Sam
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn an_unannounced_recorder_retries_soon_and_an_announced_one_at_the_cadence() {
+        let cadence = Duration::from_millis(CADENCE_MS);
+        assert_eq!(next_wait(true, 3), cadence);
+        assert_eq!(next_wait(false, 0), cadence);
+        assert_eq!(next_wait(false, 1), Duration::from_millis(250));
+        assert_eq!(next_wait(false, 2), Duration::from_millis(500));
+        assert_eq!(next_wait(false, 40), cadence, "never longer than the cadence, never overflowing");
+    }
     struct Temp(PathBuf);
     impl Temp { fn new() -> Self { Self(crate::paths::unique_temp("nitely-performance", "")) } }
     impl Drop for Temp { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }

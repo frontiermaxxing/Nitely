@@ -505,6 +505,20 @@ impl Tracked {
 fn save_workload(dir: &Path, workload: &Workload) -> Result<()> {
     save_workload_inner(dir, workload, true)
 }
+/// Whether a workload's row is written: an update of one already known always is, a new one only
+/// when the caller may create it, and never past the 8,192-row bound (NIT-535).
+fn admit_workload(exists: bool, create: bool, count: i64) -> Result<bool> {
+    if exists {
+        return Ok(true);
+    }
+    if !create {
+        return Ok(false);
+    }
+    if count >= 8192 {
+        bail!("workload metadata capacity reached");
+    }
+    Ok(true)
+}
 fn save_workload_inner(dir: &Path, workload: &Workload, create: bool) -> Result<()> {
     // Registration never initializes a store or waits on recorder ownership; launch must proceed.
     let mut db = rusqlite::Connection::open_with_flags(dir.join("history.sqlite"), rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
@@ -529,12 +543,9 @@ fn save_workload_inner(dir: &Path, workload: &Workload, create: bool) -> Result<
         [crate::performance::wall_ms().saturating_sub(i64::from(settings.summary_days) * 86400000)],
     )?;
     let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM workloads WHERE id=?1)", [&workload.id], |r| r.get(0))?;
-    if !create && !exists {
+    let count: i64 = if exists { 0 } else { tx.query_row("SELECT COUNT(*) FROM workloads", [], |r| r.get(0))? };
+    if !admit_workload(exists, create, count)? {
         return Ok(());
-    }
-    let count: i64 = tx.query_row("SELECT COUNT(*) FROM workloads", [], |r| r.get(0))?;
-    if !exists && count >= 8192 {
-        bail!("workload metadata capacity reached");
     }
     tx.execute(
         "INSERT INTO workloads(id,json,ended) VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET json=excluded.json,ended=excluded.ended",
@@ -770,6 +781,13 @@ impl Sampler {
 mod tests {
     use super::*;
     use crate::procs::{ProcessMetrics, ProcessSnapshot};
+    #[test]
+    fn a_known_workload_updates_a_new_one_needs_create_and_room() {
+        assert!(admit_workload(true, false, 9000).unwrap(), "an update never counts the bound");
+        assert!(!admit_workload(false, false, 0).unwrap(), "an end report for an unknown workload writes nothing");
+        assert!(admit_workload(false, true, 8191).unwrap());
+        assert!(admit_workload(false, true, 8192).is_err());
+    }
     fn machine(ms: u64) -> Sample {
         Sample {
             wall_ms: ms as i64,
