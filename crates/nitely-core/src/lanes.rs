@@ -2387,9 +2387,8 @@ fn queue_rows(db: &Db, me: Option<i64>, alive: &mut dyn FnMut(&Requester) -> boo
     let mut classes: std::collections::HashMap<(String, String, String), Option<i64>> = std::collections::HashMap::new();
     for (w, .., command, _) in &raw {
         let key = (w.repo.clone(), w.kind.clone(), command.clone());
-        if !classes.contains_key(&key) {
-            let class = quick_request(db, &w.repo, &w.kind, command)?;
-            classes.insert(key, class);
+        if let std::collections::hash_map::Entry::Vacant(e) = classes.entry(key) {
+            e.insert(quick_request(db, &w.repo, &w.kind, command)?);
         }
     }
     let rows = raw
