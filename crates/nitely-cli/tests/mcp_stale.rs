@@ -103,7 +103,7 @@ fn a_call_that_meets_a_newer_database_waits_for_the_install_and_goes_to_the_new_
     let installer = {
         let (base, exe) = (base.clone(), exe.clone());
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(1500));
+            std::thread::sleep(Duration::from_millis(500));
             // The "newer" build, which knows the database (here: the migration it needs is gone).
             set_future(&base, false);
             install_over(&exe);
@@ -119,7 +119,7 @@ fn a_call_that_meets_a_newer_database_waits_for_the_install_and_goes_to_the_new_
 
 #[test]
 fn with_nothing_newer_installed_it_refuses_and_says_so_without_waiting_again() {
-    let (mut mcp, base, _exe) = setup("nitely-mcp-stale-none", 2);
+    let (mut mcp, base, _exe) = setup("nitely-mcp-stale-none", 1);
     let reply = mcp.call(2);
     assert_eq!(reply["result"]["isError"], true, "{reply}");
     let said = text(&reply);

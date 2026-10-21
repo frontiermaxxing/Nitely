@@ -61,11 +61,11 @@ impl Drop for Recorder {
 
 #[test]
 fn performance_record_duration_stops_cleanly() {
-    // The duration counts from the process start, and opening the store and taking the first
-    // sample come out of it: it must be longer than a loaded machine takes to get that far.
-    let mut recorder = Recorder::start(&["--seconds", "20"]);
+    // The duration counts from the first saved sample (NIT-536), so one second is enough however
+    // long a loaded machine takes to get that far.
+    let mut recorder = Recorder::start(&["--seconds", "1"]);
     recorder.wait_for_sample();
-    recorder.wait_for_clean_exit(Duration::from_secs(20 + 15));
+    recorder.wait_for_clean_exit(Duration::from_secs(1 + 15));
 }
 
 #[test]

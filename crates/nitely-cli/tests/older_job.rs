@@ -84,7 +84,7 @@ fn a_job_that_meets_a_newer_database_runs_in_the_build_installed_meanwhile() {
     run_job(&base, &exe, id, 30, || {
         // The install lands a moment after the job started: the newer build, which knows the
         // database (here: the migration it needs is gone), at the job's path.
-        std::thread::sleep(Duration::from_millis(1500));
+        std::thread::sleep(Duration::from_millis(500));
         set_future(&base, false);
         install_over(&exe);
     });
@@ -98,7 +98,7 @@ fn a_job_that_meets_a_newer_database_runs_in_the_build_installed_meanwhile() {
 #[test]
 fn with_nothing_newer_installed_the_job_says_why_it_stopped() {
     let (base, exe, id) = setup("nitely-older-job-none");
-    let status = run_job(&base, &exe, id, 2, || {});
+    let status = run_job(&base, &exe, id, 1, || {});
     assert!(!status.success());
     let (state, error) = job(&base, id);
     assert_eq!(state, "failed");

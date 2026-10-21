@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::{Args, Subcommand};
 use nitely_core::performance::{self, Store};
 use nitely_crew::performance_query::{self, Query, View};
+use std::time::{Duration, Instant};
 
 #[derive(Args)]
 pub struct Range {
@@ -58,9 +59,20 @@ pub fn run(command: Command) -> Result<()> {
             // its clean-stop marker. Install it before recording can acquire ownership.
             let (stop, stopped) = std::sync::mpsc::sync_channel(1);
             ctrlc::set_handler(move || { let _ = stop.try_send(()); })?;
-            let _recording = performance::background(dir);
-            if let Some(seconds) = seconds { let _ = stopped.recv_timeout(std::time::Duration::from_secs(seconds)); }
-            else { let _ = stopped.recv(); }
+            let _recording = performance::background(dir.clone());
+            if let Some(seconds) = seconds {
+                // The duration counts from the first saved sample, so a loaded machine's slow start
+                // never eats it (NIT-536).
+                let (started, limit) = (Instant::now(), Duration::from_secs(seconds));
+                let mut first = None;
+                loop {
+                    let now = Instant::now();
+                    if first.is_none() && sampled(&dir) { first = Some(now); }
+                    let end = record_end(started, first, limit);
+                    if now >= end { break; }
+                    if stopped.recv_timeout((end - now).min(Duration::from_millis(250))).is_ok() { break; }
+                }
+            } else { let _ = stopped.recv(); }
         }
         Command::Status => {
             let store = Store::read(&dir)?;
@@ -86,4 +98,30 @@ pub fn run(command: Command) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// How long `record --seconds` waits for a first sample before counting from its own start.
+const FIRST_SAMPLE_GRACE: Duration = Duration::from_secs(60);
+
+/// When `record --seconds` stops: `limit` after the first saved sample, or after its own start
+/// plus the grace when none has come (recording paused, say), so it never runs on unbounded.
+fn record_end(started: Instant, first_sample: Option<Instant>, limit: Duration) -> Instant {
+    first_sample.unwrap_or(started + FIRST_SAMPLE_GRACE) + limit
+}
+
+fn sampled(dir: &std::path::Path) -> bool {
+    Store::read(dir).ok().flatten().is_some_and(|store| store.samples(0, i64::MAX, 1).is_ok_and(|s| !s.is_empty()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_timed_recording_counts_from_its_first_sample() {
+        let start = Instant::now();
+        let limit = Duration::from_secs(1);
+        assert_eq!(record_end(start, Some(start + Duration::from_secs(9)), limit), start + Duration::from_secs(10));
+        assert_eq!(record_end(start, None, limit), start + FIRST_SAMPLE_GRACE + limit, "no sample: bounded by the grace");
+    }
 }

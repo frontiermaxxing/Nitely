@@ -498,6 +498,14 @@ These are the Linux-slow ones, in `crates/nitely-cli/tests` and `phone`:
 | `older_job::a_job_that_meets_a_newer_database_runs_in_the_build_installed_meanwhile` | 3.6 | 1.5 s plus 750 ms | MERGE into the `mcp_stale` scenario |
 | executor `machine_transport_runs_snapshot_and_records_executor_without_local_lane` | 2.0 | | see the load-flaky table |
 
+Done (NIT-536), measured with `nitely run` on Windows: `record --seconds` counts from the first
+saved sample (`record_end`), so the recording test asks for 1 s: 20 s to 2.5 s. The phone server's
+request deadline is a field (`Phone::with_io_timeout`): the trickling-TLS test runs with 1 s, 10 s to
+1.3 s, and the HTTPS page test closes plain HTTP in 300 ms, 3.1 s to 0.3 s. The MCP server's call
+bookkeeping is `Calls` and run_status's bound `status_wait`, both pure; the concurrency scenarios
+run with a 1 s cap: the file 3.4 s. The stale-build wait decides in `install_poll`; its scenarios
+wait 1 s for nothing and install after 0.5 s: 1.4 to 1.9 s each, from 2.1 to 3.6 s.
+
 ## NIT-537: the long tail
 
 | Test | Win | Decision | Verdict |

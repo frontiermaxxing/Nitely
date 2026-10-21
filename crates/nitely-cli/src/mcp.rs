@@ -182,14 +182,43 @@ fn send(out: &Mutex<std::io::Stdout>, message: &Value) {
     out.flush().ok();
 }
 
+/// How long `run_status` waits, in seconds: what it was asked, at most ten minutes and at most the
+/// client's wait cap.
+fn status_wait(asked: Option<u64>, cap: Duration) -> u64 {
+    asked.unwrap_or(0).min(600).min(cap.as_secs())
+}
+
+/// Tool calls still running, and those of them the client cancelled: a cancelled one is not
+/// answered. A call is forgotten when it ends, so an id the client uses again is a new call, and a
+/// cancel for an id not running marks nothing. One lock for both, so a call cannot end between
+/// the check and the mark (NIT-536: the bookkeeping, tested without a server).
+#[derive(Default)]
+struct Calls {
+    running: HashSet<String>,
+    cancelled: HashSet<String>,
+}
+
+impl Calls {
+    fn start(&mut self, id: &str) {
+        self.running.insert(id.to_string());
+    }
+    fn cancel(&mut self, id: &str) {
+        if self.running.contains(id) {
+            self.cancelled.insert(id.to_string());
+        }
+    }
+    /// Whether the call that ended is answered.
+    fn end(&mut self, id: &str) -> bool {
+        self.running.remove(id);
+        !self.cancelled.remove(id)
+    }
+}
+
 pub fn serve() -> Result<()> {
     let exe = std::env::current_exe().ok().and_then(|p| nitely_core::install::stamp(&p).map(|s| (p, s)));
     let server = Mutex::new(Server { vendor: "agent".into(), cwd: std::env::current_dir()?.to_string_lossy().into_owned(), exe, remote: None });
     let out = Arc::new(Mutex::new(std::io::stdout()));
-    // Tool calls still running, and those of them the client cancelled: a cancelled one is not
-    // answered. Both forget a call when it ends, so an id the client uses again is a new call.
-    let running: Arc<Mutex<HashSet<String>>> = Arc::default();
-    let cancelled: Arc<Mutex<HashSet<String>>> = Arc::default();
+    let calls: Arc<Mutex<Calls>> = Arc::default();
     let stdin = std::io::stdin();
     for line in stdin.lock().lines() {
         let line = line?;
@@ -206,28 +235,18 @@ pub fn serve() -> Result<()> {
         match (msg.get("method").and_then(Value::as_str).unwrap_or(""), msg.get("id")) {
             ("notifications/cancelled", _) => {
                 if let Some(id) = msg.pointer("/params/requestId").map(Value::to_string) {
-                    // Held while it marks the call, so the call cannot end in between and leave
-                    // the mark behind for a later call with its id.
-                    let running = lock(&running);
-                    if running.contains(&id) {
-                        lock(&cancelled).insert(id);
-                    }
+                    lock(&calls).cancel(&id);
                 }
             }
             // A tool call runs on its own thread: a long one holds up nothing after it.
             ("tools/call", Some(id)) => {
-                let (mut server, out, running, cancelled, id) = (lock(&server).clone(), Arc::clone(&out), Arc::clone(&running), Arc::clone(&cancelled), id.to_string());
-                lock(&running).insert(id.clone());
+                let (mut server, out, calls, id) = (lock(&server).clone(), Arc::clone(&out), Arc::clone(&calls), id.to_string());
+                lock(&calls).start(&id);
                 let busy = Busy::start();
                 std::thread::spawn(move || {
                     let _busy = busy;
                     let reply = handle(&mut server, &msg);
-                    let was_cancelled = {
-                        let mut running = lock(&running);
-                        running.remove(&id);
-                        lock(&cancelled).remove(&id)
-                    };
-                    if !was_cancelled {
+                    if lock(&calls).end(&id) {
                         if let Some(reply) = reply {
                             send(&out, &reply);
                         }
@@ -803,6 +822,32 @@ fn install_wait() -> Duration {
     Duration::from_secs(secs).min(wait_cap())
 }
 
+type Stamp = (u64, SystemTime);
+
+#[derive(Debug, PartialEq)]
+enum InstallPoll {
+    /// A whole newer build is installed: the call goes to it.
+    Forward,
+    /// Refuse now; `remember` the installed build as one waited for in vain.
+    GiveUp { remember: bool },
+    Wait,
+}
+
+/// One look at the install while an older server waits for a newer build (NIT-536: the decision,
+/// tested without the clock): a whole new build wins; the build it already waited for in vain is
+/// refused at once; past the deadline it gives up and remembers what is installed.
+fn install_poll(whole_newer: bool, installed: Option<Stamp>, waited_in_vain: Option<Stamp>, past_deadline: bool) -> InstallPoll {
+    if whole_newer {
+        InstallPoll::Forward
+    } else if installed.is_some() && installed == waited_in_vain {
+        InstallPoll::GiveUp { remember: false }
+    } else if past_deadline {
+        InstallPoll::GiveUp { remember: true }
+    } else {
+        InstallPoll::Wait
+    }
+}
+
 /// The installed build this server last waited for in vain: it does not wait again for the same
 /// one, so with nothing newer coming each call refuses at once rather than after `install_wait`.
 static WAITED_IN_VAIN: Mutex<Option<(u64, SystemTime)>> = Mutex::new(None);
@@ -817,18 +862,20 @@ fn forward_once_installed(server: &Server, params: &Value) -> std::result::Resul
     let deadline = std::time::Instant::now() + install_wait();
     loop {
         // Only a whole build: one still being copied in cannot start (NIT-348).
-        if crate::newer::replaced(exe, stamp) {
-            return forward(server, params).ok_or_else(|| format!("The build installed at {} could not take the call either.", exe.display()));
-        }
+        let whole = crate::newer::replaced(exe, stamp);
         let now_installed = installed();
-        if now_installed.is_some() && *lock(&WAITED_IN_VAIN) == now_installed {
-            break;
+        // Read on its own line: a guard taken in the match head would live through its arms.
+        let in_vain = *lock(&WAITED_IN_VAIN);
+        match install_poll(whole, now_installed, in_vain, std::time::Instant::now() >= deadline) {
+            InstallPoll::Forward => return forward(server, params).ok_or_else(|| format!("The build installed at {} could not take the call either.", exe.display())),
+            InstallPoll::GiveUp { remember } => {
+                if remember {
+                    *lock(&WAITED_IN_VAIN) = now_installed;
+                }
+                break;
+            }
+            InstallPoll::Wait => std::thread::sleep(Duration::from_millis(250)),
         }
-        if std::time::Instant::now() >= deadline {
-            *lock(&WAITED_IN_VAIN) = now_installed;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(250));
     }
     Err(format!(
         "This MCP server runs the build installed at {}, which is older than the database, and nothing newer is installed there: install the newer version and the next call goes to it.",
@@ -1270,7 +1317,7 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
         }
         "run_status" => match args.get("id").and_then(Value::as_i64) {
             Some(id) => {
-                let wait = args.get("wait_seconds").and_then(Value::as_u64).unwrap_or(0).min(600).min(wait_cap().as_secs());
+                let wait = status_wait(args.get("wait_seconds").and_then(Value::as_u64), wait_cap());
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait);
                 loop {
                     let run = db.lane_run(id)?.with_context(|| format!("no run {id}"))?;
@@ -1771,6 +1818,37 @@ fn job_json(db: &Db, job: &nitely_core::submit_job::Job, actor: &nitely_core::is
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_status_waits_what_it_was_asked_within_ten_minutes_and_the_cap() {
+        assert_eq!(status_wait(None, Duration::from_secs(300)), 0);
+        assert_eq!(status_wait(Some(30), Duration::from_secs(300)), 30);
+        assert_eq!(status_wait(Some(9999), Duration::from_secs(3600)), 600);
+        assert_eq!(status_wait(Some(600), Duration::from_secs(3)), 3);
+    }
+
+    #[test]
+    fn an_older_server_forwards_to_a_whole_new_build_and_waits_in_vain_once() {
+        let built: Stamp = (7, SystemTime::UNIX_EPOCH);
+        assert_eq!(install_poll(true, Some(built), Some(built), true), InstallPoll::Forward, "a new build wins, even late");
+        assert_eq!(install_poll(false, Some(built), None, false), InstallPoll::Wait);
+        assert_eq!(install_poll(false, Some(built), None, true), InstallPoll::GiveUp { remember: true });
+        assert_eq!(install_poll(false, Some(built), Some(built), false), InstallPoll::GiveUp { remember: false }, "no second wait for the same build");
+        assert_eq!(install_poll(false, None, None, false), InstallPoll::Wait, "an unreadable path is never the one waited for");
+    }
+
+    #[test]
+    fn a_cancelled_call_goes_unanswered_and_its_id_is_free_again() {
+        let mut calls = Calls::default();
+        calls.cancel("7");
+        calls.start("7");
+        assert!(calls.end("7"), "a cancel before the call ran marks nothing");
+        calls.start("4");
+        calls.cancel("4");
+        assert!(!calls.end("4"), "cancelled while running: no answer");
+        calls.start("4");
+        assert!(calls.end("4"), "the same id again is a new call");
+    }
 
     #[test]
     fn the_sweep_removes_only_day_old_answers_and_logs_of_calls_apart() {

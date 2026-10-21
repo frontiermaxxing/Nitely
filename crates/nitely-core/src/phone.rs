@@ -620,6 +620,8 @@ pub struct Phone {
     in_worktrees: InWorktrees,
     /// Web push to the paired phones that ask for it (push.rs); off until the app sets it.
     push: std::sync::OnceLock<Arc<crate::push::Push>>,
+    /// How long one request may take, from its first byte: `http::IO_TIMEOUT`, shorter in tests.
+    io_timeout: std::time::Duration,
 }
 
 /// How often the phone server looks for new decisions to notify the phones of.
@@ -665,7 +667,12 @@ impl Running {
 
 impl Phone {
     pub fn new(devices: Devices, assets: Assets, db: OpenDb, in_worktrees: InWorktrees) -> Arc<Phone> {
-        Arc::new(Phone { state: Mutex::new(State::default()), devices, assets, db, in_worktrees, push: std::sync::OnceLock::new() })
+        Phone::with_io_timeout(devices, assets, db, in_worktrees, IO_TIMEOUT)
+    }
+
+    /// `new`, with a request deadline of `io_timeout` instead of `http::IO_TIMEOUT` (NIT-536).
+    pub(crate) fn with_io_timeout(devices: Devices, assets: Assets, db: OpenDb, in_worktrees: InWorktrees, io_timeout: std::time::Duration) -> Arc<Phone> {
+        Arc::new(Phone { state: Mutex::new(State::default()), devices, assets, db, in_worktrees, push: std::sync::OnceLock::new(), io_timeout })
     }
 
     /// Turns on web push: phones may subscribe, and while the server runs it notifies them of new
@@ -736,7 +743,7 @@ impl Phone {
             let handler: http::Handler = Arc::new(move |stream: &mut TcpStream, _peer: SocketAddr| match &config {
                 Some(config) => {
                     let Ok(conn) = rustls::ServerConnection::new(config.clone()) else { return };
-                    let deadline = Instant::now() + http::IO_TIMEOUT;
+                    let deadline = Instant::now() + me.io_timeout;
                     me.connection(&mut TlsConn { conn, sock: Sock { tcp: stream, deadline } });
                 }
                 None => me.connection(stream),
@@ -833,7 +840,7 @@ impl Phone {
     }
 
     fn connection<C: http::Conn + ?Sized>(&self, stream: &mut C) {
-        let deadline = Instant::now() + IO_TIMEOUT;
+        let deadline = Instant::now() + self.io_timeout;
         let head = match read_head(stream, deadline) {
             Ok(h) => h,
             Err((status, message)) => return write_response(stream, status, "text/plain", &[], message.as_bytes()),
@@ -1749,7 +1756,9 @@ mod tests {
         let tls = tls_from_files(&cert, &key, "Nitely.Test.").unwrap();
 
         let assets: Assets = Arc::new(|p: &str| (p == "phone.html").then(|| (b"<html>phone</html>".to_vec(), content_type(p))));
-        let phone = Phone::new(Arc::new(|| Ok(vec![])), assets, Arc::new(|| anyhow::bail!("no database in this test")), Arc::new(|_: &crate::Db| vec![]));
+        // A short request deadline, so the plain-HTTP connection below is closed in 300 ms rather
+        // than waiting out the client's read timeout (NIT-536).
+        let phone = Phone::with_io_timeout(Arc::new(|| Ok(vec![])), assets, Arc::new(|| anyhow::bail!("no database in this test")), Arc::new(|_: &crate::Db| vec![]), std::time::Duration::from_millis(300));
         let running = phone.start(&["127.0.0.1".parse().unwrap()], 0, Some(tls)).unwrap();
         let port = running.addrs[0].port();
         assert_eq!(running.pages(), [format!("https://nitely.test:{port}/phone/")]);
@@ -1848,7 +1857,10 @@ mod tests {
         let made = rcgen::generate_simple_self_signed(vec!["nitely.test".to_string()]).unwrap();
         let tls = tls_from_pem(made.cert.pem().as_bytes(), made.key_pair.serialize_pem().as_bytes(), "nitely.test", "cert", "key").unwrap();
         let assets: Assets = Arc::new(|_: &str| None);
-        let phone = Phone::new(Arc::new(|| Ok(vec![])), assets, Arc::new(|| anyhow::bail!("no database in this test")), Arc::new(|_: &crate::Db| vec![]));
+        // The deadline is the server's own setting: one second here, the same code path as the ten
+        // seconds a real server allows (NIT-536).
+        let timeout = std::time::Duration::from_secs(1);
+        let phone = Phone::with_io_timeout(Arc::new(|| Ok(vec![])), assets, Arc::new(|| anyhow::bail!("no database in this test")), Arc::new(|_: &crate::Db| vec![]), timeout);
         let running = phone.start(&["127.0.0.1".parse().unwrap()], 0, Some(tls)).unwrap();
         let mut sock = TcpStream::connect(running.addrs[0]).unwrap();
         sock.set_read_timeout(Some(std::time::Duration::from_millis(50))).unwrap();
@@ -1875,12 +1887,12 @@ mod tests {
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
-            if started.elapsed() > http::IO_TIMEOUT + std::time::Duration::from_secs(5) {
+            if started.elapsed() > timeout + std::time::Duration::from_secs(5) {
                 break;
             }
         }
         assert!(closed, "the server still held the connection after {:?}", started.elapsed());
-        assert!(started.elapsed() < http::IO_TIMEOUT + std::time::Duration::from_secs(3), "{:?}", started.elapsed());
+        assert!(started.elapsed() < timeout + std::time::Duration::from_secs(3), "{:?}", started.elapsed());
         running.stop();
     }
 

@@ -60,7 +60,7 @@ fn setup(name: &str) -> (Mcp, i64, std::path::PathBuf) {
         .arg("mcp")
         .current_dir(&base)
         .env("NITELY_HOME", &base)
-        .env("NITELY_MCP_WAIT_CAP", "3")
+        .env("NITELY_MCP_WAIT_CAP", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -152,7 +152,7 @@ fn a_long_call_holds_up_none_after_it_and_ends_at_the_cap() {
     let second = mcp.next(Duration::from_secs(20)).unwrap();
     assert_eq!(second["id"], 2);
     let waited = asked.elapsed();
-    assert!(waited >= Duration::from_secs(3) && waited < Duration::from_secs(15), "it waits up to the cap, not the 600 s asked: {waited:?}");
+    assert!(waited >= Duration::from_secs(1) && waited < Duration::from_secs(15), "it waits up to the 1 s cap, not the 600 s asked: {waited:?}");
     let status = text(&second);
     assert_eq!(status["state"], "queued");
     assert!(status["next"].as_str().unwrap().contains("call run_status"), "{status}");
@@ -168,7 +168,7 @@ fn a_cancelled_call_is_not_answered_and_frees_the_server() {
     mcp.call(5, "list_issues", json!({ "project": "APP" }));
     assert_eq!(mcp.next(Duration::from_secs(20)).unwrap()["id"], 5);
     // Past the cap, the cancelled call ends without a word.
-    assert!(mcp.next(Duration::from_secs(6)).is_none(), "a cancelled call gets no answer");
+    assert!(mcp.next(Duration::from_secs(3)).is_none(), "a cancelled call gets no answer");
     mcp.call(6, "list_issues", json!({ "project": "APP" }));
     assert_eq!(mcp.next(Duration::from_secs(20)).unwrap()["id"], 6);
     drop(mcp);
@@ -189,14 +189,14 @@ fn a_cancel_for_a_call_not_running_does_not_silence_a_later_one() {
 fn a_call_still_running_when_the_client_leaves_finishes_before_the_server_exits() {
     let (mut mcp, run, base) = setup("nitely-mcp-leave");
     mcp.call(8, "run_status", json!({ "id": run, "wait_seconds": 600 }));
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(Duration::from_millis(200));
     let left = Instant::now();
     mcp.stdin.take();
     let answered = mcp.next(Duration::from_secs(20)).expect("the call still ends and answers");
     assert_eq!(answered["id"], 8);
     let status = mcp.child.wait().unwrap();
     assert!(status.success(), "{status:?}");
-    assert!(left.elapsed() >= Duration::from_secs(2), "it waited for the call: {:?}", left.elapsed());
+    assert!(left.elapsed() >= Duration::from_millis(500), "it waited for the call: {:?}", left.elapsed());
     std::fs::remove_dir_all(base).ok();
 }
 
