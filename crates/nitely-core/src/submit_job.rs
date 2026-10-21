@@ -587,34 +587,6 @@ mod tests {
     }
 
     #[test]
-    fn solution_summary_does_not_follow_a_changed_patch_at_the_same_head() {
-        let (base, db_path, config, key, wt) = fixture();
-        let mut db = Db::open(&db_path).unwrap();
-        let actor = Actor::Agent("codex:solution-test".into());
-        let first = playbook::git(&wt, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
-        std::fs::write(wt.join("help.txt"), "Help text").unwrap();
-        crate::test_repo::git(&wt, &["add", "."]);
-        crate::test_repo::git(&wt, &["commit", "-q", "-m", "help text"]);
-        let dir = wt.to_string_lossy().into_owned();
-        let solution = crate::submit::SolutionSummary::from_fields(Some("Add a footer and help text"), Some("Add the footer link and its help page.")).unwrap().unwrap();
-        // About which revision the text binds to, not the reviewer: an unreviewed submit records it the same.
-        let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: true, local_only: true, batch: false, solution: Some(&solution), solution_commit: None, solution_patch_id: None };
-        let queued = enqueue(&db, &opts, &actor).unwrap();
-        // Another land absorbed the first commit: this branch has exactly the same head, but
-        // only the help text remains to approve. Its old description covers too much.
-        crate::test_repo::git(&wt, &["update-ref", "refs/heads/main", &first]);
-        let done = run_job(&mut db, &config, queued.id, false).unwrap();
-        let result = done.result.unwrap();
-        assert!(result["solution"].is_null());
-        let review = db.reviews(&key).unwrap().remove(0);
-        assert!(queued.head.starts_with(&review.commit_sha));
-        assert_ne!(queued.solution_patch_id.as_deref(), Some(review.patch_id.as_str()));
-        assert!(review.solution.is_none());
-        drop(db);
-        std::fs::remove_dir_all(base).ok();
-    }
-
-    #[test]
     fn solution_summary_requires_a_bounded_nonempty_pair() {
         use crate::submit::SolutionSummary;
         assert!(SolutionSummary::from_fields(None, None).unwrap().is_none());

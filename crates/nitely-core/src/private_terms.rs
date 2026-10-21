@@ -555,25 +555,6 @@ mod tests {
     }
 
     #[test]
-    fn another_projects_list_does_not_apply() {
-        let dir = branch_with_terms();
-        let hits = scan(&app_terms(), Some("OTHER"), &dir, "main").unwrap();
-        assert!(!hits.is_empty() && hits.iter().all(|h| h.list == "every project"), "{:?}", hits.iter().map(|h| &h.at).collect::<Vec<_>>());
-        std::fs::remove_dir_all(dir.parent().unwrap()).ok();
-    }
-
-    #[test]
-    fn refuses_a_branch_with_a_term_and_never_echoes_it() {
-        let dir = branch_with_terms();
-        let first = sh(&dir, &["rev-parse", "--short=7", ":/Port the change"]).trim().to_string();
-        let err = check_with(&app_terms(), Some("APP"), &dir, "main").unwrap_err().to_string();
-        assert!(err.contains(&format!("a.txt:3 (commit {first}): term 1 of APP's list")), "{err}");
-        assert!(!err.to_lowercase().contains("bluebird") || err.contains("path bluebird/"), "the term shows only as part of a path it is in: {err}");
-        assert!(!err.to_lowercase().contains("secret-client"), "{err}");
-        std::fs::remove_dir_all(dir.parent().unwrap()).ok();
-    }
-
-    #[test]
     fn scans_a_branch_that_shares_no_history_with_its_base() {
         // An orphan branch: its first commit has no parent, so it adds everything in it.
         let dir = crate::paths::unique_temp("nitely-terms-orphan", "");

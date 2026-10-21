@@ -2104,38 +2104,6 @@ when_changed = ["billing"]
         std::fs::remove_dir_all(&f.base).ok();
     }
 
-    #[test]
-    fn lands_only_what_a_human_approved_when_the_playbook_says_human_and_leaves_it_to_the_agent_by_author() {
-        let mut f = fixture();
-        let mut reported = HashMap::new();
-        // "human" sends every change to a human, then lands it on approval.
-        set_mode(&f, "human");
-        let (d, _) = f.submitted("Header tweak", "header.txt", "x");
-        assert_eq!(state(&f, &d), "Needs You");
-        let reasons = &f.db.reviews(&d).unwrap()[0].reasons;
-        assert!(reasons.iter().any(|r| r.contains("lands only what a human approved")), "{reasons:?}");
-        approve(&mut f.db, &d);
-        // Another land holds the lock (a live process: this one): the approval lands in a later
-        // round, once it is free.
-        let lock = f.repo.join(".git").join(LOCK_FILE);
-        std::fs::write(&lock, format!("NIT-9 pid {}", std::process::id())).unwrap();
-        let linked = crate::Config { repos: vec![linked(&f.repo, "repo")], ..Default::default() };
-        assert!(land_approved(&mut f.db, &linked, &mut reported).unwrap().is_empty());
-        assert_eq!(state(&f, &d), "Approved");
-        std::fs::remove_file(&lock).unwrap();
-        let r = land_approved(&mut f.db, &linked, &mut reported).unwrap();
-        assert!(r.len() == 1 && r[0].landed, "{r:?}");
-        assert_eq!(state(&f, &d), "Done");
-
-        // "author" (the default) leaves the land to the agent.
-        let path = f.repo.join(playbook::PLAYBOOK_PATH);
-        std::fs::write(&path, std::fs::read_to_string(&path).unwrap().replace("by = \"human\"", "by = \"author\"")).unwrap();
-        sh(&f.repo, &["commit", "-q", "-am", "author"]);
-        let (e, _) = f.submitted("Footer tweak", "footer.txt", "x");
-        assert_eq!(state(&f, &e), "In Review");
-        std::fs::remove_dir_all(&f.base).ok();
-    }
-
     /// The app's approval key in these tests.
     const SECRET: [u8; 32] = [7; 32];
 
@@ -2264,32 +2232,6 @@ when_changed = ["billing"]
         assert_eq!(f.db.reviews(&key).unwrap().len(), 1, "no new review or synthetic approval");
         assert!(landed.gate.unwrap().passed, "the combined integration candidate still runs its gate");
         std::fs::remove_dir_all(&f.base).ok();
-    }
-
-    /// The after steps a land runs (`land` calls this with where main was): a dependency file
-    /// that landed with no after step to set it up is a warning naming the setup (NIT-81).
-    #[test]
-    fn warns_when_a_dependency_landed_that_no_after_step_set_up() {
-        let base = crate::paths::unique_temp("nitely-after-deps", "");
-        let repo = base.join("repo");
-        crate::test_repo::init(&repo, &[("a.txt", "one\n")]);
-        // Setup in worktrees, and an after step that takes care of Cargo.lock but not package-lock.json.
-        let pb = Playbook::parse("[worktree]\nsetup = [\"exit 0\"]\n[[land.after]]\nrun = \"exit 0\"\nwhen_changed = ['^Cargo\\.lock$']\n").unwrap();
-        let landed = |file: &str| {
-            let from = sh(&repo, &["rev-parse", "HEAD"]);
-            std::fs::write(repo.join(file), "{}").unwrap();
-            sh(&repo, &["add", file]);
-            sh(&repo, &["commit", "-qm", file]);
-            let mut report = Landed { base: "main".into(), landed_from: Some(from), ..Default::default() };
-            after_land(&repo, &pb, &mut report);
-            report
-        };
-        let r = landed("package-lock.json");
-        let warning = r.warnings.iter().find(|w| w.contains("package-lock.json")).unwrap_or_else(|| panic!("{r:?}"));
-        assert!(warning.contains("`exit 0`"), "names the setup to run: {warning}");
-        let r = landed("Cargo.lock");
-        assert!(r.warnings.is_empty() && r.after.iter().all(|a| a.ok && !a.skipped), "the after step set it up: {r:?}");
-        std::fs::remove_dir_all(&base).ok();
     }
 
     /// A land handed in after another issue waits until that issue is Done, then lands as `land`

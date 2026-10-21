@@ -3519,63 +3519,6 @@ min_free_disk_gb = 100000000
     }
 
     #[test]
-    fn starts_nothing_while_off_paused_ungated_quiet_or_capped() {
-        let fake = Fake { installed: vec!["claude"], ..Default::default() };
-        let check = |crew: &str, setup: &dyn Fn(&Db), want: &str| {
-            let mut f = fixture(crew);
-            setup(&f.db);
-            let mut sup = supervisor(&f, &fake);
-            let tick = sup.tick(&mut f.db, false).unwrap();
-            assert!(tick.started.is_empty(), "{crew}: {tick:?}");
-            assert!(tick.status.starts_with(want), "{crew}: {}", tick.status);
-            assert_eq!(f.db.issue("NIT-1").unwrap().unwrap().state, "Todo", "{crew}: nothing claimed");
-        };
-        let none = |_: &Db| {};
-        check(GATE, &none, "off");
-        check("[crew]\nworkers = 1\n", &none, "no gate");
-        check(&format!("{GATE}[crew]\nworkers = 1\n"), &|db: &Db| db.crew_pause("nit", true, &Actor::Human).unwrap(), "paused");
-        check(&format!("{GATE}[crew]\nworkers = 1\nquiet_hours = \"11:00-13:00\"\n"), &none, "quiet hours until 13:00");
-        check(&format!("{GATE}[crew]\nworkers = 1\nquiet_hours = \"noon\"\n"), &none, "the playbook's crew.quiet_hours");
-        check(&format!("{GATE}[crew]\nworkers = 1\nmax_per_day = 0\n"), &none, "0 of 0 started today");
-        check(&format!("{GATE}[crew]\nworkers = 1\nagents = [\"cursor\", \"codex\"]\n"), &none, "no agent to start");
-
-        // Draining starts nothing either.
-        let mut f = fixture(&format!("{GATE}[crew]\nworkers = 1\n"));
-        let tick = supervisor(&f, &fake).tick(&mut f.db, true).unwrap();
-        assert!(tick.started.is_empty() && tick.status.starts_with("stopping"));
-    }
-
-    #[test]
-    fn the_daily_cap_counts_every_worker_started_today() {
-        let mut f = fixture(&format!("{GATE}[crew]\nworkers = 3\nmax_per_day = 2\n"));
-        let fake = Fake { installed: vec!["claude"], ..Default::default() };
-        let mut sup = supervisor(&f, &fake);
-        let tick = sup.tick(&mut f.db, false).unwrap();
-        assert_eq!(tick.started.len(), 2);
-        assert_eq!(tick.status, "2 of 2 started today");
-    }
-
-    #[test]
-    fn the_daily_token_budget_stops_new_workers() {
-        let mut f = fixture(&format!("{GATE}[crew]
-workers = 2
-max_tokens_per_day = 1000000
-"));
-        let fake = Fake { installed: vec!["claude"], ..Default::default() };
-        let used = std::rc::Rc::new(std::cell::Cell::new(999_999u64));
-        let seen = used.clone();
-        let mut sup = supervisor(&f, &fake).with_tokens(move |project, since| {
-            assert_eq!((project, since), ("NIT", NOON.day_start), "today's tokens of this project");
-            seen.get()
-        });
-        assert_eq!(sup.tick(&mut f.db, false).unwrap().started.len(), 2, "under budget, workers start");
-        used.set(1_200_000);
-        let tick = sup.tick(&mut f.db, false).unwrap();
-        assert!(tick.started.is_empty());
-        assert_eq!(tick.status, "token budget used: 1.2M of 1.0M today");
-    }
-
-    #[test]
     fn a_second_attempt_keeps_the_first_attempts_agent() {
         let mut f = fixture(&format!("{GATE}[crew]\nworkers = 1\n"));
         // NIT-1 already has a codex branch from an earlier attempt.

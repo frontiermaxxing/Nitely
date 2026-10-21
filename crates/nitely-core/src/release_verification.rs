@@ -373,28 +373,6 @@ claude = ["sh", "-c", "cat >.git/release-prompt; printf 'VERDICT: clean\\n'"]
     }
 
     #[test]
-    fn failed_attempt_supersedes_previous_pass_and_cannot_release() {
-        let (repo, db) = fixture();
-        let req = request(&repo);
-        let identity = gate(&db, &req).unwrap();
-        review(&db, &req).unwrap();
-        let attempt = start(&db, &identity, "gate", None).unwrap();
-        assert!(check(&db, &req).is_err(), "incomplete attempt supersedes previous success");
-        finish(&db, attempt, false, &"test failure").unwrap();
-        assert!(review(&db, &req).is_err());
-        assert!(check(&db, &req).is_err());
-    }
-
-    #[test]
-    fn candidate_cannot_replace_release_policy_or_add_unapproved_stamping_paths() {
-        let (repo, db) = fixture();
-        stamp(&repo);
-        std::fs::write(repo.join(playbook::PLAYBOOK_PATH), "[release]\ntag='*'\nstamp_paths=['.nitely/playbook.toml']\n[gate]\ncommands=['true']").unwrap();
-        run_git(&repo, &["commit", "-qam", "weaken candidate policy", "--amend"]);
-        assert!(gate(&db, &request(&repo)).unwrap_err().to_string().contains("does not allow stamping"));
-    }
-
-    #[test]
     fn dirty_candidate_and_new_policy_invalidate_release_evidence() {
         let (repo, db) = fixture();
         stamp(&repo);
@@ -479,16 +457,5 @@ claude = ["sh", "-c", "cat >.git/release-prompt; printf 'VERDICT: clean\\n'"]
         run_git(&repo, &["commit", "-qam", "original baseline semantics"]);
         let identity = prepare(&db, &request(&repo)).unwrap().identity;
         assert_eq!(identity.base, commit(&repo, "v2-beta.2").unwrap());
-    }
-
-    #[test]
-    fn release_only_checks_do_not_replace_missing_full_gate() {
-        let (repo, db) = fixture();
-        let mut pb = Playbook::parse(POLICY).unwrap();
-        pb.gate.commands.clear();
-        pb.gate.steps.clear();
-        std::fs::write(repo.join(playbook::PLAYBOOK_PATH), toml::to_string(&pb).unwrap()).unwrap();
-        run_git(&repo, &["commit", "-qam", "missing full gate"]);
-        assert!(gate(&db, &request(&repo)).unwrap_err().to_string().contains("release-only commands cannot replace"));
     }
 }

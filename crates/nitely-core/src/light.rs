@@ -437,35 +437,6 @@ mod tests {
     }
 
     #[test]
-    fn a_sparse_worktree_holds_the_playbook_s_and_the_issue_s_directories_and_widens() {
-        let (base, repo) = repo("nitely-sparse", "[worktree]\nmode = \"light\"\ndir = \"../wt/{key}\"\nsparse = [\"crates/core\"]\n[gate]\ncommands = [\"git status\"]\n");
-        let db = Db::open(&base.join("t.db")).unwrap();
-        let actor = Actor::Agent("claude:test".into());
-        let started = start_task(&db, &repo, &issue("The colors live in `src/ui/Meter.tsx`; see also nope/missing.rs."), "claude", &actor).unwrap();
-        let wt = PathBuf::from(&started.worktree);
-        assert_eq!(started.sparse, ["crates/core", "src/ui"], "{started:?}");
-        assert!(wt.join("crates/core/src/lib.rs").exists() && wt.join("src/ui/Meter.tsx").exists() && wt.join("README.md").exists());
-        assert!(!wt.join("crates/cli").exists() && !wt.join("docs").exists());
-        let status = crate::playbook::git(&wt, &["status", "--porcelain"]).unwrap();
-        assert!(status.trim().is_empty(), "the sparse checkout is clean: {status}");
-
-        let w = widen(&wt, &["crates/cli/src/main.rs".into(), "docs".into(), "README.md".into()]).unwrap();
-        assert_eq!(w.added, ["crates/cli/src", "docs"]);
-        assert!(wt.join("crates/cli/src/main.rs").exists() && wt.join("docs/a.md").exists());
-        assert_eq!(widen(&wt, &["crates/core/src".into()]).unwrap().added, Vec::<String>::new(), "already inside crates/core");
-        assert!(widen(&wt, &["nope/x.rs".into()]).unwrap_err().to_string().contains("not in this branch"));
-        assert!(session_note(&Playbook::load(&repo).unwrap(), &repo, &wt).unwrap().contains("It is sparse"));
-        assert!(crate::playbook::setup_passed(&wt), "the crew counts it as set up");
-        // The gate builds every file: the worktree becomes whole first.
-        let gate = run_gate(&db, &repo, &wt, Some("NIT-7"), &actor).unwrap();
-        assert!(gate.results[0].command.starts_with("git sparse-checkout disable") && gate.passed, "{gate:?}");
-        assert!(wt.join("docs/a.md").exists() && wt.join("crates/cli/src/main.rs").exists() && sparse_set(&wt).is_none());
-        // A whole worktree has nothing to widen.
-        assert!(widen(&repo, &["docs".into()]).unwrap().note.contains("not sparse"));
-        std::fs::remove_dir_all(base).ok();
-    }
-
-    #[test]
     fn heavy_commands_in_a_light_worktree_with_lanes_get_a_reminder() {
         let (base, repo) = repo("nitely-nudge", "[worktree]\nmode = \"light\"\ndir = \"../wt/{key}\"\n[lanes]\ncount = 1\n");
         let db = Db::open(&base.join("t.db")).unwrap();

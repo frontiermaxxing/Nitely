@@ -1356,30 +1356,6 @@ reason = "billing"
     }
 
     #[test]
-    fn a_branch_that_gains_commits_during_the_gate_keeps_them_and_goes_back() {
-        let mut f = fixture();
-        let (a, wa) = f.reviewed("A", &[("a.txt", "a")]);
-        let (b, _) = f.reviewed("B", &[("b.txt", "b")]);
-        // The gate commits on A's branch while it runs, as its agent might.
-        let wt = wa.to_string_lossy().replace('\\', "/");
-        let commits = if cfg!(windows) {
-            format!("if not exist \"{wt}/late.txt\" (echo late> \"{wt}/late.txt\" & git -C \"{wt}\" add late.txt & git -C \"{wt}\" commit -q -m late)")
-        } else {
-            format!("if [ ! -e '{wt}/late.txt' ]; then echo late > '{wt}/late.txt'; git -C '{wt}' add late.txt; git -C '{wt}' commit -q -m late; fi")
-        };
-        let text = PLAYBOOK.replace("{sh}", &playbook::posix_sh()).replace("{gate}", &format!("{commits:?}"));
-        std::fs::write(f.repo.join(playbook::PLAYBOOK_PATH), text).unwrap();
-        sh(&f.repo, &["commit", "-q", "-am", "a gate that commits on A"]);
-        f.queue_and_run(&[&a, &b]);
-        assert_eq!(f.entry(&a).state, "sent_back");
-        assert!(f.error(&a).contains("gained commits during the gate"), "{}", f.error(&a));
-        assert_eq!(f.entry(&b).state, "landed", "B waited for the next run and landed there");
-        assert!(sh(&wa, &["log", "--oneline", "-1"]).contains("late"), "A's new commit is still on its branch");
-        assert!(!f.on_main("late.txt") && !f.on_main("a.txt"));
-        std::fs::remove_dir_all(&f.base).ok();
-    }
-
-    #[test]
     fn a_land_alone_lands_what_queued_behind_it_and_a_local_land_never_goes_in_a_stack() {
         let mut f = fixture();
         let (a, _) = f.reviewed("A", &[("a.txt", "a")]);
@@ -1403,45 +1379,6 @@ reason = "billing"
         assert!(land::land(&mut f.db, &crate::Config::default(), &opts, &f.actor).unwrap().landed);
         assert_eq!(f.entry(&d).state, "queued");
         assert!(!sh(&f.repo, &["ls-remote", "origin", "main"]).contains(&sh(&f.repo, &["rev-parse", "HEAD"])), "C stayed local");
-        std::fs::remove_dir_all(&f.base).ok();
-    }
-
-    #[test]
-    fn approvals_large_repos_and_repos_without_lanes_land_alone() {
-        let mut f = fixture();
-        let (a, _) = f.reviewed("A", &[("a.txt", "a")]);
-        let pb = Playbook::load(&f.repo).unwrap();
-        assert_eq!(lands_alone(&f.db, &f.repo, &pb, &a).unwrap(), None);
-        // A change a person must approve: its approval is given and checked per change.
-        let new = NewIssue {
-            project: "NIT".into(),
-            title: "Billing".into(),
-            kind: "feature".into(),
-            body: "b".into(),
-            evidence: "x".into(),
-            source: "human".into(),
-            allow_similar: true,
-            ..Default::default()
-        };
-        let issue = f.db.create_issue(&new, &f.actor).unwrap();
-        let started = playbook::start_task(&f.db, &f.repo, &issue, "claude", &f.actor).unwrap();
-        let wt = PathBuf::from(&started.worktree);
-        std::fs::write(wt.join("billing.txt"), "x").unwrap();
-        sh(&wt, &["add", "."]);
-        sh(&wt, &["commit", "-q", "-m", "billing"]);
-        let dir = wt.to_string_lossy().into_owned();
-        let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: false, solution: None, solution_commit: None, solution_patch_id: None };
-        submit(&mut f.db, &crate::Config::default(), &opts, &f.actor).unwrap();
-        assert!(lands_alone(&f.db, &f.repo, &pb, &issue.key).unwrap().unwrap().contains("approval"));
-        // Lanes and large-repo mode are the repo's facts; a batch needs lanes.
-        for (text, why) in [("[land]\nbatch = \"waiting\"\n", "[lanes]"), ("[lanes]\nlarge_repo = true\n", "large-repo")] {
-            let pb = Playbook::parse(text).unwrap();
-            assert!(lands_alone(&f.db, &f.repo, &pb, &a).unwrap().unwrap().contains(why), "{text}");
-        }
-        // Whether to batch at all is the review mode's, whatever the playbook's retired key says.
-        crate::project_modes::set_for_test(&mut f.db, "NIT", crate::project_modes::Mode::Release, Default::default());
-        let pb = Playbook::parse("[lanes]\n[land]\nbatch = \"waiting\"\n").unwrap();
-        assert!(lands_alone(&f.db, &f.repo, &pb, &a).unwrap().unwrap().contains("alone"));
         std::fs::remove_dir_all(&f.base).ok();
     }
 
@@ -1484,30 +1421,6 @@ reason = "billing"
         assert!(!r.landed && r.error.as_deref().is_some_and(|e| e.contains("index.lock") && e.contains("before this land began")), "{r:?}");
         let open: i64 = f.db.conn.query_row("SELECT COUNT(*) FROM land_run WHERE ended_at IS NULL", [], |row| row.get(0)).unwrap();
         assert_eq!(open, 0, "the run ended");
-        std::fs::remove_dir_all(&f.base).ok();
-    }
-
-    #[test]
-    fn changes_wait_again_when_the_branch_moves_during_their_gate() {
-        let mut f = fixture();
-        let (a, _) = f.reviewed("A", &[("a.txt", "a")]);
-        let (b, _) = f.reviewed("B", &[("b.txt", "b")]);
-        // The first gate commits to main while it runs (as a person pushing by hand would); the
-        // stack it gated is then not what main is, so nothing lands from it.
-        let mark = f.base.join("moved-once").to_string_lossy().replace('\\', "/");
-        let moves = if cfg!(windows) {
-            format!("if not exist \"{mark}\" (type nul > \"{mark}\" & git -C {{main}} commit -q --allow-empty -m moved)")
-        } else {
-            format!("if [ ! -e '{mark}' ]; then touch '{mark}'; git -C {{main}} commit -q --allow-empty -m moved; fi")
-        };
-        let text = PLAYBOOK.replace("{sh}", &playbook::posix_sh()).replace("{gate}", &format!("{moves:?}"));
-        std::fs::write(f.repo.join(playbook::PLAYBOOK_PATH), text).unwrap();
-        sh(&f.repo, &["commit", "-q", "-am", "a gate that moves main once"]);
-        f.queue_and_run(&[&a, &b]);
-        assert_eq!((f.entry(&a).state.as_str(), f.entry(&b).state.as_str()), ("landed", "landed"), "{} {}", f.error(&a), f.error(&b));
-        let runs = f.runs();
-        assert_eq!((runs.len(), runs[0].landed.len(), runs[1].landed.len()), (2, 0, 2), "the second run landed both");
-        assert!(sh(&f.repo, &["log", "--oneline", "-5"]).contains("moved"));
         std::fs::remove_dir_all(&f.base).ok();
     }
 

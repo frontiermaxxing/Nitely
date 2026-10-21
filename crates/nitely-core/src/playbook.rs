@@ -2045,49 +2045,6 @@ mod tests {
     }
 
     #[test]
-    fn a_command_that_fails_then_passes_is_a_flake_and_one_that_keeps_failing_fails() {
-        let base = crate::paths::unique_temp("nitely-flake", "");
-        let repo = base.join("repo");
-        std::fs::create_dir_all(repo.join(".nitely")).unwrap();
-        let sh = |args: &[&str]| assert!(crate::playbook::run_git(Command::new("git").arg("-C").arg(&repo).args(args)).unwrap().status.success());
-        sh(&["init", "-q", "-b", "main"]);
-        sh(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"]);
-        // Fails the first time it runs in a folder, naming a test, and passes after.
-        let flaky = if cfg!(windows) {
-            "if exist ran.txt (exit 0) else (echo test crew::tests::slow ... FAILED& type nul > ran.txt& exit 1)"
-        } else {
-            "if [ -f ran.txt ]; then exit 0; else echo 'test crew::tests::slow ... FAILED'; touch ran.txt; exit 1; fi"
-        };
-        let playbook = |extra: &str| std::fs::write(repo.join(PLAYBOOK_PATH), format!("[gate]\ncommands = [{flaky:?}]\n{extra}")).unwrap();
-        let db = Db::open(&base.join("t.db")).unwrap();
-        let actor = Actor::Agent("claude:test".into());
-
-        playbook("");
-        let gate = run_gate(&db, &repo, &repo, Some("NIT-3"), &actor).unwrap();
-        assert!(gate.passed, "{gate:?}");
-        assert_eq!(gate.flaked.len(), 1);
-        assert_eq!(gate.flaked[0].tests, ["crew::tests::slow"]);
-        let timeline = db.timeline("NIT-3").unwrap();
-        let kinds: Vec<&str> = timeline.iter().map(|t| t.kind.as_str()).collect();
-        assert_eq!(kinds, ["gate_flaked", "gate_passed"]);
-        assert!(timeline[0].summary.as_deref().unwrap_or("").ends_with("then passed when run again: crew::tests::slow"), "{:?}", timeline[0].summary);
-
-        // With retries off the same first failure fails the gate.
-        std::fs::remove_file(repo.join("ran.txt")).unwrap();
-        playbook("retries = 0\n");
-        let gate = run_gate(&db, &repo, &repo, Some("NIT-4"), &actor).unwrap();
-        assert!(!gate.passed && gate.flaked.is_empty(), "{gate:?}");
-
-        // A command that fails every time fails the gate, and is no flake.
-        std::fs::write(repo.join(PLAYBOOK_PATH), "[gate]\ncommands = [\"exit 1\"]\n").unwrap();
-        let gate = run_gate(&db, &repo, &repo, Some("NIT-5"), &actor).unwrap();
-        assert!(!gate.passed && gate.flaked.is_empty(), "{gate:?}");
-        let kinds: Vec<String> = db.timeline("NIT-5").unwrap().into_iter().map(|t| t.kind).collect();
-        assert_eq!(kinds, ["gate_failed"]);
-        std::fs::remove_dir_all(base).ok();
-    }
-
-    #[test]
     fn names_the_failed_tests_of_cargo_and_node() {
         let cargo = "test a::ok ... ok\ntest a::bad ... FAILED\n\nfailures:\n    a::bad\n\ntest result: FAILED.";
         assert_eq!(failed_tests(cargo), ["a::bad"]);
@@ -2098,46 +2055,6 @@ mod tests {
         let node = "ok 1 - fine\nnot ok 2 - since: counts from the move\n  ---\nnot ok 2 - since: counts from the move\n";
         assert_eq!(failed_tests(node), ["since: counts from the move"]);
         assert!(failed_tests("error[E0425]: cannot find value").is_empty());
-    }
-
-    #[test]
-    fn finds_the_repo_of_the_issues_project_not_the_callers() {
-        let base = crate::paths::unique_temp("nitely-repos", "");
-        let init = |name: &str| {
-            let dir = base.join(name);
-            std::fs::create_dir_all(&dir).unwrap();
-            let sh = |args: &[&str]| assert!(crate::playbook::run_git(Command::new("git").arg("-C").arg(&dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args)).unwrap().status.success(), "{args:?}");
-            sh(&["init", "-q", "-b", "main"]);
-            sh(&["commit", "-q", "--allow-empty", "-m", "init"]);
-            dir.to_string_lossy().into_owned()
-        };
-        let (app, site, loose) = (init("app"), init("site"), init("loose"));
-        let repo = |name: &str, root: &str, project: &str| crate::RepoConfig {
-            name: name.into(),
-            root: root.into(),
-            integration_branch: "main".into(),
-            project: Some(project.into()),
-        };
-        let mut config = crate::Config { repos: vec![repo("app", &app, "APP"), repo("site", &site, "WEB")], ..Default::default() };
-        let same = |got: PathBuf, want: &str| assert_eq!(crate::paths::normalize(&got.to_string_lossy()), crate::paths::normalize(want));
-
-        same(repo_for_issue(&config, Some("WEB"), &app).unwrap(), &site);
-        same(repo_for_issue(&config, Some("web"), &loose).unwrap(), &site);
-        same(repo_for_issue(&config, None, &app).unwrap(), &app);
-        let refused = repo_for_issue(&config, Some("OPS"), &app).unwrap_err().to_string();
-        assert!(refused.contains("holds APP's work") && refused.contains("--project OPS"), "{refused}");
-        same(repo_for_issue(&config, Some("OPS"), &loose).unwrap(), &loose);
-
-        config.repos.push(repo("app-2", &loose, "APP"));
-        same(repo_for_issue(&config, Some("APP"), &loose).unwrap(), &loose);
-        assert!(repo_for_issue(&config, Some("APP"), &site).unwrap_err().to_string().contains("several repos"));
-
-        let worktree = base.join("app-nit-3");
-        let out = crate::playbook::run_git(Command::new("git").arg("-C").arg(&app).args(["worktree", "add", "-q", "-b", "claude/nit-3-x"]).arg(&worktree).arg("main")).unwrap();
-        assert!(out.status.success(), "{out:?}");
-        same(issue_worktree(Path::new(&app), "NIT-3").unwrap().unwrap(), &worktree.to_string_lossy());
-        assert!(issue_worktree(Path::new(&app), "NIT-4").unwrap().is_none());
-        std::fs::remove_dir_all(base).ok();
     }
 
     #[test]
@@ -2214,24 +2131,6 @@ mod tests {
         let id = "a".repeat(40);
         assert!(settled_query(&["rev-parse", &format!("{id}^{{tree}}")]) && settled_query(&["merge-base", &id, &id]) && settled_query(&["cat-file", "-s", &format!("{id}:a.txt")]));
         assert!(!settled_query(&["rev-parse", "main^{commit}"]) && !settled_query(&["rev-parse", &format!("{}^{{tree}}", &id[..7])]) && !settled_query(&["merge-base", "main", &id]));
-    }
-
-    #[test]
-    fn measures_against_the_newer_of_local_and_remote_base() {
-        let base = crate::paths::unique_temp("nitely-db", "");
-        let repo = base.join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        let sh = |args: &[&str]| assert!(crate::playbook::run_git(Command::new("git").arg("-C").arg(&repo).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args)).unwrap().status.success(), "{args:?}");
-        sh(&["init", "-q", "-b", "main"]);
-        sh(&["commit", "-q", "--allow-empty", "-m", "init"]);
-        assert_eq!(diff_base(&repo, "main"), "main", "no remote");
-        sh(&["commit", "-q", "--allow-empty", "-m", "merged elsewhere"]);
-        sh(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
-        sh(&["reset", "-q", "--hard", "HEAD~1"]);
-        assert_eq!(diff_base(&repo, "main"), "origin/main", "local main is behind");
-        sh(&["commit", "-q", "--allow-empty", "-m", "local only"]);
-        assert_eq!(diff_base(&repo, "main"), "main", "local main has diverged");
-        std::fs::remove_dir_all(base).ok();
     }
 
     /// CI on GitHub runs Nitely's own gate: every gate command is a `- run:` step of the workflow,

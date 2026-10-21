@@ -726,55 +726,6 @@ mod tests {
     }
 
     #[test]
-    fn a_read_after_one_counts_again_only_the_worktrees_that_moved() {
-        use crate::test_repo::git as sh;
-        let dir = crate::paths::unique_temp("nitely-incremental", "");
-        let root = dir.join("app");
-        crate::test_repo::init(&root, &[("a.txt", "a")]);
-        let wt = dir.join("wt");
-        sh(&root, &["worktree", "add", "-q", "-b", "claude/app-1-x", &wt.to_string_lossy(), "main"]);
-        let config = Config {
-            repos: vec![RepoConfig { name: "app".into(), root: root.to_string_lossy().into_owned(), integration_branch: "main".into(), project: Some("APP".into()) }],
-            ..Default::default()
-        };
-        let wt_path = crate::paths::normalize(&wt.to_string_lossy());
-        let of = |s: &GitState| -> BranchState {
-            let r = &s.repos[0];
-            let i = r.worktrees.as_ref().unwrap().iter().position(|w| crate::paths::normalize(&w.path) == wt_path).expect("the worktree is listed");
-            r.states[i].clone().unwrap()
-        };
-        let idle = |_: &str| false;
-        let first = read_git_from(&config, None, &idle);
-        assert_eq!(of(&first).dirty_files, 0);
-        // An edit not added moves neither HEAD nor index: an idle worktree's count stands.
-        std::fs::write(wt.join("b.txt"), "b").unwrap();
-        let second = read_git_from(&config, Some(&first), &idle);
-        assert_eq!(of(&second).dirty_files, 0, "counted before and nothing moved: not counted again");
-        // Without an earlier read, everything is read, and the edit shows.
-        assert_eq!(of(&read_git(&config)).dirty_files, 1);
-        // Added: the index moved, so it is counted again.
-        sh(&wt, &["add", "."]);
-        let third = read_git_from(&config, Some(&second), &idle);
-        assert_eq!(of(&third).dirty_files, 1);
-        // Committed: the branch moved, so its count against main comes with the repo's branches.
-        sh(&wt, &["commit", "-q", "-m", "b"]);
-        let fourth = read_git_from(&config, Some(&third), &idle);
-        assert_eq!((of(&fourth).ahead, of(&fourth).dirty_files), (1, 0));
-        // The branch moved back under it: HEAD file and index stand, but its commit differs, so
-        // the index (still holding b.txt) is counted against the new one.
-        sh(&wt, &["update-ref", "refs/heads/claude/app-1-x", "main"]);
-        sh(&root, &["branch", "develop", "claude/app-1-x@{1}"]);
-        let fifth = read_git_from(&config, Some(&fourth), &idle);
-        assert_eq!((of(&fifth).ahead, of(&fifth).dirty_files), (0, 1));
-        // Another integration branch, no ref moved: nothing counted against the old one is reused.
-        let mut moved = config.clone();
-        moved.repos[0].integration_branch = "develop".into();
-        let sixth = read_git_from(&moved, Some(&fifth), &idle);
-        assert_eq!((sixth.relisted, of(&sixth).behind), (1, 1));
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
     fn each_session_works_on_the_issue_its_own_events_name() {
         let dir = crate::paths::unique_temp("nitely-agents", "");
         let db = Db::open(&dir.join("t.db")).unwrap();

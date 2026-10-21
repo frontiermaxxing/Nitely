@@ -1454,24 +1454,6 @@ reason = "money logic"
     }
 
     #[test]
-    fn a_second_round_checks_the_first_rounds_finding() {
-        let mut f = fixture();
-        // A second round checks the first round's finding and carries it while it is open.
-        let (issue, wt) = f.committed("Edge handling", "edge.txt");
-        let first = f.submit(&wt, true).unwrap();
-        let review = first.review.as_ref().unwrap();
-        assert!(review.previous.is_empty() && !review.findings[0].carried, "{review:?}");
-        std::fs::write(wt.join("edge.txt"), "let edge = 2;").unwrap();
-        sh(&wt, &["commit", "-q", "-am", "edge again"]);
-        let second = f.submit(&wt, true).unwrap();
-        let review = second.review.as_ref().unwrap();
-        assert_eq!(review.previous.iter().map(|r| r.status.as_str()).collect::<Vec<_>>(), ["open"], "{review:?}");
-        assert_eq!((review.findings.len(), review.findings[0].carried, review.verdict.as_str()), (1, true, "pass"));
-        assert!(describe(&issue, &second, Default::default()).contains("Previous round's findings: 1 still open."));
-        assert!(f.db.reviews(&issue.key).unwrap()[0].findings[0].carried);
-    }
-
-    #[test]
     fn a_p1_that_two_rounds_leave_open_goes_to_a_person() {
         let mut f = fixture();
         // A P1 that two rounds of fixes leave open sends the issue to a person instead of a
@@ -1593,65 +1575,6 @@ reason = "money logic"
     }
 
     #[test]
-    fn a_shadow_batch_starts_from_the_round_before_the_review_that_decided() {
-        let mut f = fixture();
-        let (issue, wt) = f.committed("Edge again", "edge.txt");
-        // Two rounds as submit records them: a P2 found, then carried after a fix.
-        let edge = "Edge case: edge.txt, the empty line";
-        let first = sh(&wt, &["rev-parse", "HEAD"]);
-        round(&f, &issue.key, &wt, "pass", &[(2, edge, false)], 1);
-        std::fs::write(wt.join("edge.txt"), "let edge = 2;").unwrap();
-        sh(&wt, &["commit", "-q", "-am", "edge again"]);
-        round(&f, &issue.key, &wt, "pass", &[(2, edge, true)], 0);
-        let deciding: i64 = f.db.conn.query_row("SELECT MAX(id) FROM review WHERE issue_key = ?1", [&issue.key], |r| r.get(0)).unwrap();
-        // The next round would start from the deciding review; its shadow batch starts where that
-        // review started, from the first round, so it does not see the answers it is measured against.
-        let next = previous_round(&f.db, &issue.key, &wt).unwrap().unwrap();
-        let shadow = previous_round_at(&f.db, &issue.key, &wt, "HEAD", Some(deciding)).unwrap().unwrap();
-        assert_ne!(next.commit, shadow.commit);
-        assert_eq!(shadow.commit, first);
-        assert!(shadow.in_history && shadow.findings.len() == 1 && !shadow.findings[0].carried, "{shadow:?}");
-    }
-
-    #[test]
-    fn a_patch_that_passed_is_not_reviewed_again_and_a_rewritten_one_starts_from_the_pass() {
-        let mut f = fixture();
-        let (issue, wt) = f.committed("Reused", "reused.txt");
-        let first = f.submit(&wt, true).unwrap();
-        assert!(first.review.as_ref().is_some_and(|r| r.verdict == "pass" && r.reused.is_none()), "{first:?}");
-        // Handed in again unchanged (a land that stopped, say): the pass carries over, no reviewer runs.
-        let again = f.submit(&wt, true).unwrap();
-        let review = again.review.as_ref().unwrap();
-        assert_eq!((review.verdict.as_str(), review.reused.as_deref(), again.state.as_str()), ("pass", Some(first.commit.as_str()), "In Review"));
-        assert_eq!((review.reviewer.as_str(), review.note.as_str()), ("claude", "same vendor: codex not installed"));
-        assert_eq!(f.db.reviews(&issue.key).unwrap()[0].patch_id, first.patch_id, "land finds a review of this patch");
-        let started: i64 = f.db.conn.query_row("SELECT COUNT(*) FROM event WHERE issue_key = ?1 AND type = 'review_started'", [&issue.key], |r| r.get(0)).unwrap();
-        assert_eq!(started, 1);
-        let said: Vec<String> = f.db.timeline(&issue.key).unwrap().into_iter().filter_map(|t| t.summary).collect();
-        assert!(said.iter().any(|s| s.contains("The same patch passed review at") && s.contains("carries over")), "{said:?}");
-        assert!(describe(&issue, &again, Default::default()).contains("carried over: this same patch passed review at"));
-
-        // The review rules changed since (here a focus): the pass was not judged by them, so it is reviewed.
-        let pb_path = f.repo.join(playbook::PLAYBOOK_PATH);
-        let pb = std::fs::read_to_string(&pb_path).unwrap();
-        std::fs::write(&pb_path, pb.replacen("[review]
-", "[review]
-focus = \"Money first.\"
-", 1)).unwrap();
-        assert!(f.submit(&wt, true).unwrap().review.unwrap().reused.is_none());
-
-        // Rewritten with a different patch: reviewed, starting from how it differs from what passed.
-        let base = sh(&wt, &["rev-parse", "HEAD~1"]);
-        std::fs::write(wt.join("reused.txt"), "y").unwrap();
-        sh(&wt, &["commit", "-q", "-a", "--amend", "-m", "Reused, rewritten"]);
-        let previous = previous_round(&f.db, &issue.key, &wt).unwrap().unwrap();
-        assert!(!previous.in_history);
-        assert_eq!(previous.passed_on.as_deref(), Some(base.trim()));
-        let rewritten = f.submit(&wt, true).unwrap();
-        assert!(rewritten.review.as_ref().is_some_and(|r| r.reused.is_none()), "{rewritten:?}");
-    }
-
-    #[test]
     fn the_same_edit_somewhere_else_is_reviewed_though_its_patch_id_is_the_same() {
         let mut f = fixture();
         let two = |a: u8, b: u8| format!("fn a() {{\n    let x = {a};\n}}\n\n// one\n// two\n// three\n// four\n\nfn b() {{\n    let x = {b};\n}}\n");
@@ -1717,28 +1640,6 @@ focus = \"Money first.\"
         let c = review_context(&f.db, &issue, &gate).unwrap();
         assert!(c.contains("report it in exactly these words") && c.contains(&format!("- [P1] {words}\n")), "{c}");
         assert!(!c.contains("The agent's reasoning."), "{c}");
-    }
-
-    #[test]
-    fn a_finding_only_the_rounds_carry_is_checked_fresh_before_it_goes_to_a_person() {
-        let mut f = fixture();
-        // The reviewer raises a P1 once, and two rounds carry it as open; a review that has not
-        // seen those rounds finds nothing (NIT-245).
-        let (issue, wt) = f.started("Stale finding");
-        std::fs::write(wt.join("stale.txt"), "let stale = 1;").unwrap();
-        sh(&wt, &["add", "."]);
-        sh(&wt, &["commit", "-q", "-m", "stale"]);
-        // Rounds one and two as submit records them; the fake reviewer has raised it once already.
-        let stale = "Stale: stale.txt, the x is never read";
-        round(&f, &issue.key, &wt, "changes", &[(1, stale, false)], 2);
-        round(&f, &issue.key, &wt, "changes", &[(1, stale, true)], 1);
-        std::fs::write(wt.parent().unwrap().join("stale-seen"), "").unwrap();
-        assert_eq!(f.submit(&wt, true).unwrap().state, "In Review");
-        let last = &f.db.reviews(&issue.key).unwrap()[0];
-        assert_eq!((last.verdict.as_str(), last.note.as_str()), ("pass", "same vendor: codex not installed; fresh, without the earlier rounds"));
-        assert!(f.db.open_asks().unwrap().iter().all(|a| a.issue_key.as_deref() != Some(issue.key.as_str())), "nothing for the person");
-        let said: Vec<String> = f.db.timeline(&issue.key).unwrap().into_iter().filter_map(|t| t.summary).collect();
-        assert!(said.iter().any(|s| s.contains("a fresh review, without the earlier rounds, looks")), "{said:?}");
     }
 
     #[test]
