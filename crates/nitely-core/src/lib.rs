@@ -77,6 +77,7 @@ pub mod release_verification;
 pub mod push;
 pub mod watch;
 pub mod submit;
+pub mod submit_rules;
 mod test_command_merge;
 pub mod submit_job;
 pub mod unlink;

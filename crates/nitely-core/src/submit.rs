@@ -178,7 +178,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     crate::verification::record(db,&issue,&verification,actor)?;
     if let Some(note)=crate::verification::checks_note(&gate) {db.add_note(&issue.key,&note,"verification_checks",actor)?;}
     let submitted_patch = patch_id_range(&worktree, &since, &gate.commit)?;
-    let explained_revision = git(&worktree, &["rev-parse", "--verify", &format!("{}^{{commit}}", gate.commit)])?.trim() == handed_in;
+    let gate_ran_on_it = git(&worktree, &["rev-parse", "--verify", &format!("{}^{{commit}}", gate.commit)])?.trim() == handed_in;
     let mut out = Submitted {
         verification: Some(verification),
         issue: issue.key.clone(),
@@ -188,7 +188,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         patch_id: submitted_patch.clone(),
         commit: gate.commit.clone(),
         files: files.len(),
-        solution: opts.solution.filter(|_| explained_revision && explained_patch.as_ref() == Some(&submitted_patch)).cloned(),
+        solution: opts.solution.filter(|_| crate::submit_rules::solution_applies(gate_ran_on_it, explained_patch.as_deref(), &submitted_patch)).cloned(),
         gate,
         review: None,
         review_disabled: false,
@@ -302,8 +302,8 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     // review is recorded as it asked, and goes on as a passing one (land checks the same).
     let accepted_only = match &out.review {
         Some(r) if verdict == "changes" => {
-            let accepted = db.accepted_for(&issue.key, &out.patch_id)?;
-            r.findings.iter().filter(|f| f.priority <= 1).all(|f| accepted.iter().any(|a| a.finding == f.text))
+            let accepted: Vec<String> = db.accepted_for(&issue.key, &out.patch_id)?.into_iter().map(|a| a.finding).collect();
+            crate::submit_rules::accepted_only(&r.findings, &accepted)
         }
         _ => false,
     };
@@ -334,34 +334,16 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         }
         if let Ok(mut fresh) = rules.run(&r.reviewer, &worktree, &since, None) {
             fresh.note = if r.note.is_empty() { FRESH.to_string() } else { format!("{}; {FRESH}", r.note) };
-            // An interaction with another change in a review batch is no reviewer's opinion: only its
-            // landing under this branch ends it, so the fresh review keeps it.
-            for f in r.findings.iter().filter(|f| crate::review_batch::is_interaction(&f.text)) {
-                if !fresh.findings.iter().any(|x| x.text == f.text) {
-                    fresh.findings.push(f.clone());
-                }
-            }
-            if fresh.findings.iter().any(|f| f.priority <= 1) {
-                fresh.verdict = "changes".into();
+            // What the person accepted as it is blocks nothing, whichever review says it again.
+            let accepted: Vec<String> = db.accepted_for(&issue.key, &out.patch_id)?.into_iter().map(|a| a.finding).collect();
+            stalled = crate::submit_rules::settle_fresh(&r, &mut fresh, &accepted, &why);
+            if stalled.is_none() {
+                verdict = "pass".into();
             }
             for reason in pb.review.flag_reasons(&fresh) {
                 if !out.reasons.contains(&reason) {
                     out.reasons.push(reason);
                 }
-            }
-            // What the person accepted as it is blocks nothing, whichever review says it again.
-            let accepted = db.accepted_for(&issue.key, &out.patch_id)?;
-            let blocking: Vec<String> = fresh
-                .findings
-                .iter()
-                .filter(|f| f.priority <= 1 && !accepted.iter().any(|a| a.finding == f.text))
-                .map(|f| format!("[P{}] {}", f.priority, f.text))
-                .collect();
-            if blocking.is_empty() {
-                verdict = "pass".into();
-                stalled = None;
-            } else {
-                stalled = Some(format!("{}; a fresh review without the earlier rounds still finds: {}", why.split(". Open:").next().unwrap_or(&why), blocking.join("; ")));
             }
             out.review = Some(fresh);
             out.approver = if out.reasons.is_empty() { "agent" } else { "human" }.into();
@@ -452,33 +434,18 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
 
     let push_failed = !local_only && !out.pushed;
     let by_nitely = pb.land.by.by_nitely();
-    let (state, next) = if stalled.is_some() {
-        // Another round would cost as much again and likely end the same: a person decides each open
-        // finding (accept it as it is, signed, or send it back). The issue stays the agents' work: a
-        // change that failed review is never the person's own task to mark done.
-        ("Needs You", "The review rounds are not converging, so Nitely asked the human to decide each open P0/P1 finding in the Inbox: accept it as it is, or send it back to be fixed. Stop working on it and pick up other work. If you have reasoning for a finding (a trade-off they decided, say), add it in a `note` on the issue: they read it beside the finding.")
-    } else if verdict == "changes" {
-        ("In Progress", "The review found P0 or P1 problems. Fix them, commit, and submit again. If one is a trade-off the human decided or should decide, not a defect (they ruled out what it asks for), call request_acceptance with it and your reasoning instead of looping on it.")
-    } else if push_failed {
-        // Not handed in: nobody can see or merge the branch, so it must not look ready to land.
-        ("In Progress", "The push failed, so the change is not handed in. Fix the remote or its access (ask the human if it is a permission error), then submit again.")
-    } else if out.approval_stands {
-        ("Approved", "The human approved this exact patch before and the review raised nothing new, so the approval stands. Call land.")
-    } else if out.approver == "human" && by_nitely {
-        ("Needs You", "It waits for the human's approval in the Nitely inbox, and Nitely lands it as soon as they approve it; you do not call land. Nitely already asked them, so do not `ask` for this approval yourself. Pick up other work meanwhile.")
-    } else if out.approver == "human" {
-        ("Needs You", "It waits for the human's approval in the Nitely inbox. Nitely already asked them, so do not `ask` for this approval yourself. Pick up other work meanwhile; once it is Approved, call land.")
-    } else if out.review_batched {
-        ("In Review", "The gate passed; its review waits for its land queue batch. Call land: the queue reviews it with whatever else is waiting, in one reviewer call, before their gate, and nothing lands unreviewed. If the review asks for changes, land says so and the issue is back with you.")
-    } else if out.yolo {
-        ("In Review", "YOLO mode: automatic gate and PR review skipped. This revision is unverified. Call land while YOLO remains enabled.")
-    } else if out.review_disabled && out.gate.skipped.is_some() {
-        ("In Review", "Automatic tests and pre-merge review are disabled for this project. This revision is unverified. Call land while the current mode permits it.")
-    } else if out.review_disabled {
-        ("In Review", "Review disabled for this project. The gate passed and no human approval is needed. Call land to put it on the integration branch.")
-    } else {
-        ("In Review", "The review passed and no human approval is needed. Call land to put it on the integration branch.")
-    };
+    let (state, next) = crate::submit_rules::next_state(&crate::submit_rules::Outcome {
+        stalled: stalled.is_some(),
+        changes: verdict == "changes",
+        push_failed,
+        approval_stands: out.approval_stands,
+        human: out.approver == "human",
+        by_nitely,
+        batched: out.review_batched,
+        yolo: out.yolo,
+        review_disabled: out.review_disabled,
+        gate_skipped: out.gate.skipped.is_some(),
+    });
     if let Some(why) = &stalled {
         out.state = db.ask_to_decide_findings(&issue.key, why, actor)?;
     } else if issue.state != state && issue.origin == "nitely" {
@@ -788,10 +755,9 @@ fn reused_pass(
         )
         .optional()?;
     let Some(((reviewer, verdict, last_diff, commit), (findings, flagged, note, ran_under))) = last else { return Ok(None) };
-    if verdict != "pass" || last_diff != diff || ran_under.as_deref() != Some(rules_of(rules).as_str()) {
-        return Ok(None);
-    }
-    if rules.choose(vendor, installed).ok().map(|c| c.reviewer).as_deref() != Some(reviewer.as_str()) {
+    let previous = crate::submit_rules::LastReview { reviewer: &reviewer, verdict: &verdict, diff_id: &last_diff, rules: ran_under.as_deref() };
+    let chosen = rules.choose(vendor, installed).ok().map(|c| c.reviewer);
+    if !crate::submit_rules::reusable(&previous, diff, &rules_of(rules), chosen.as_deref()) {
         return Ok(None);
     }
     let review = Review {

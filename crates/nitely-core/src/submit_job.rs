@@ -189,8 +189,8 @@ impl Db {
         // Long after the job started, its process id may be one the OS has given to another program
         // since: past that, the process must still be this job's (when its command line can be read).
         let since = j.started_at.unwrap_or(j.queued_at);
-        let reused = || now() - since > PID_CHECK_AFTER_SECS && crate::procs::command_line(pid).is_some_and(|c| !runs_job(&c, &j));
-        if process_runs(pid) && !reused() {
+        let runs_this_job = || crate::procs::command_line(pid).map(|c| runs_job(&c, &j));
+        if !crate::submit_rules::job_abandoned(process_runs(pid), now() - since, PID_CHECK_AFTER_SECS, runs_this_job) {
             return Ok(j);
         }
         let why = format!("{ABANDONED} (the machine restarted, or it was stopped); submit again");
