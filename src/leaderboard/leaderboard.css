@@ -184,6 +184,33 @@
 .lb-json-str { color: var(--fg-2); }
 .lb-report-wait { margin: 0; padding: 24px 16px; font-size: var(--text-sm); color: var(--fg-3); }
 
+/* L4, your profile: a dialog over the page. */
+.lb-chip-button { cursor: pointer; background: none; font: inherit; font-size: 11.5px; }
+.lb-chip-button:not(.lb-chip-on) { border-style: solid; color: var(--fg-2); }
+.lb-chip-button.lb-chip-on { background: var(--live-wash); }
+.lb-chip-button:hover { border-color: var(--fg-3); }
+.lb-chip-button:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.lb-dialog {
+  width: min(560px, 100%); max-height: calc(100vh - 140px); display: flex; flex-direction: column; overflow: hidden;
+  background: var(--surface); border: 1px solid var(--line-strong); border-radius: 12px; box-shadow: var(--shadow-float);
+}
+.lb-dialog-head { display: flex; align-items: center; gap: 10px; padding: 14px 16px 14px 20px; border-bottom: 1px solid var(--line); }
+.lb-dialog-head h2 { flex: 1; margin: 0; font-size: var(--text-lg); font-weight: var(--weight-strong); }
+.lb-dialog-body { display: flex; flex-direction: column; gap: 16px; padding: 20px; overflow-y: auto; }
+.lb-dialog-row { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 14px; align-items: center; }
+.lb-dialog-row.lb-form-top { align-items: start; }
+.lb-dialog-row.lb-form-top .lb-form-label { padding-top: 7px; }
+.lb-dialog-row .ui-field { width: 100%; }
+.lb-projects { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
+.lb-sharing { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; font-size: var(--text-md); }
+.lb-sharing .lb-report-box { align-self: stretch; }
+.lb-sharing .lb-json { max-height: 260px; }
+.lb-see-report { font-size: var(--text-sm); color: var(--fg-2); }
+.lb-link-clear { flex: none; align-self: center; margin-right: 2px; }
+.lb-dialog-foot { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 14px 20px; border-top: 1px solid var(--line); }
+.lb-dialog-spacer { flex: 1; }
+.lb-leave-link { color: var(--fail); font-size: 12.5px; text-decoration-color: color-mix(in oklab, var(--fail) 40%, transparent); }
+
 @media (max-width: 1000px) {
   .lb-grid-wide, .lb-grid-three { grid-template-columns: minmax(0, 1fr); }
   .lb-headline { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -202,4 +229,6 @@
   .lb-lists { grid-template-columns: minmax(0, 1fr); }
   .lb-form-row { grid-template-columns: minmax(0, 1fr); gap: 6px; }
   .lb-form-top .lb-form-label { padding-top: 0; }
+  .lb-dialog-row { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .lb-veil { padding-top: 24px; }
 }

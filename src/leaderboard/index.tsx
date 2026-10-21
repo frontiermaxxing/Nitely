@@ -3,7 +3,8 @@ import { invoke } from "../backend";
 import { EmptyState, Loading, Segmented } from "../ui";
 import type { Project } from "../types";
 import { OptIn } from "./OptIn";
-import { leave, useProfile } from "./profile";
+import { sharing, useProfile } from "./profile";
+import { ProfileDialog } from "./EditProfile";
 import { PERIOD_LABEL, type LeaderboardStats, type PeriodKey } from "./stats";
 import { You } from "./You";
 import "./leaderboard.css";
@@ -20,6 +21,7 @@ export function Leaderboard(props: { now: number; version: number; projects: Pro
   const tab = chosen ?? (profile ? "you" : "join");
   const joining = profile === null && tab === "join";
   const [period, setPeriod] = useState<PeriodKey>("week");
+  const [editing, setEditing] = useState(false);
   const [stats, setStats] = useState<LeaderboardStats | null>(null);
   const [error, setError] = useState<string | null>(null);
   const projects = profile?.projects ?? [];
@@ -40,10 +42,13 @@ export function Leaderboard(props: { now: number; version: number; projects: Pro
       <div className="page-head lb-head">
         <h1>Leaderboard</h1>
         {profile ? (
-          <span className="lb-chip lb-chip-on">
+          <button className={`lb-chip lb-chip-button${sharing(profile) ? " lb-chip-on" : ""}`} onClick={() => setEditing(true)} aria-haspopup="dialog" title="Edit your leaderboard profile">
             <span className="lb-chip-dot" aria-hidden="true" />
-            Joined as {profile.display_name}
-          </span>
+            {sharing(profile) ? "Sharing" : "Joined"} as {profile.display_name}
+            <svg width="10" height="10" viewBox="0 0 12 12" aria-hidden="true">
+              <path d="M3 4.5 6 7.5 9 4.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
         ) : (
           <span className="lb-chip">
             <span className="lb-chip-dot" aria-hidden="true" />
@@ -79,8 +84,16 @@ export function Leaderboard(props: { now: number; version: number; projects: Pro
           profile={profile}
           now={props.now}
           onJoin={() => setTab("join")}
-          onLeave={async () => {
-            await leave();
+          onEdit={() => setEditing(true)}
+        />
+      )}
+      {editing && profile && (
+        <ProfileDialog
+          profile={profile}
+          projects={props.projects}
+          onClose={() => setEditing(false)}
+          onLeft={() => {
+            setEditing(false);
             setTab("join");
           }}
         />

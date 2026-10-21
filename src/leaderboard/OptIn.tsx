@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "../backend";
 import type { Project } from "../types";
-import { Button, Checkbox, TextField } from "../ui";
+import { Button, Checkbox, RemoveButton, TextField } from "../ui";
 import { join as joinBoard } from "./profile";
 
 // L1: joining the leaderboard. The right side is the report exactly as it would be sent, built
@@ -31,10 +31,10 @@ const NEVER = [
   "Your time zone, and which days and hours you worked",
 ];
 
-type Field = "name" | "github" | "x" | "website";
+export type Field = "name" | "github" | "x" | "website";
 
 /** Which field a refusal from the report builder is about. */
-function fieldOf(error: string): Field | null {
+export function fieldOf(error: string): Field | null {
   if (/display name/i.test(error)) return "name";
   if (/github/i.test(error)) return "github";
   if (/\bX link\b/.test(error)) return "x";
@@ -240,7 +240,8 @@ export function OptIn(props: { projects: Project[] }) {
   );
 }
 
-function LinkField(props: { label: string; prefix?: string; value: string; onChange: (v: string) => void; placeholder: string; error: string | null }) {
+/** A public link: its site, a fixed prefix, the part you type, and with `clearable` an × that empties it. */
+export function LinkField(props: { label: string; prefix?: string; value: string; onChange: (v: string) => void; placeholder: string; error: string | null; clearable?: boolean }) {
   return (
     <div className="lb-link-field">
       <div className={`lb-link-input${props.error ? " lb-invalid" : ""}`}>
@@ -255,6 +256,7 @@ function LinkField(props: { label: string; prefix?: string; value: string; onCha
           spellCheck={false}
           autoComplete="off"
         />
+        {props.clearable && props.value && <RemoveButton className="lb-link-clear" label={`Clear the ${props.label} link`} onClick={() => props.onChange("")} />}
       </div>
       {props.error && (
         <span className="ui-field-error" role="alert">
@@ -266,7 +268,7 @@ function LinkField(props: { label: string; prefix?: string; value: string; onCha
 }
 
 /** Pretty-printed JSON with keys a step back from the values. */
-function Json(props: { text: string }) {
+export function Json(props: { text: string }) {
   return (
     <>
       {props.text.split("\n").map((line, i) => {
