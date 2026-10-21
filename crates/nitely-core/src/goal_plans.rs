@@ -561,20 +561,14 @@ impl Db {
         Ok(PlanApproved { goal, filed, attached, not_attached, issue })
     }
 
-    /// What proves a plan was asked for: it answers a "Plan a goal" issue the person created in the
-    /// app, by that issue's own record of who filed it. Agents never act as the person, so no agent
-    /// can make one; anything else is an agent's initiative (NIT-550).
+    /// What proves a plan was asked for: it answers a "Plan a goal" request the person made in the
+    /// app, recorded by `start_goal` at that moment (goal_request). A label or title an agent adds
+    /// later proves nothing, nor does who created the issue; anything else is an agent's initiative
+    /// (NIT-550).
     pub(crate) fn plan_origin(&self, planning: Option<&IssueRecord>) -> Result<Origin> {
-        let Some(planning) = planning.filter(|i| is_planning(i)) else { return Ok(Origin::AgentInitiative) };
-        let by: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT actor FROM event WHERE issue_key = ?1 COLLATE NOCASE AND type = 'issue_created' ORDER BY id LIMIT 1",
-                [&planning.key],
-                |r| r.get(0),
-            )
-            .optional()?;
-        Ok(if by.as_deref() == Some(Actor::Human.id()) { Origin::PersonAsked } else { Origin::AgentInitiative })
+        let Some(planning) = planning else { return Ok(Origin::AgentInitiative) };
+        let asked: bool = self.conn.query_row("SELECT EXISTS(SELECT 1 FROM goal_request WHERE issue_key = ?1 COLLATE NOCASE)", [&planning.key], |r| r.get(0))?;
+        Ok(if asked { Origin::PersonAsked } else { Origin::AgentInitiative })
     }
 
     /// Starts a plan the review mode lets start: the goal and its issues are filed at once, as the
@@ -684,7 +678,7 @@ impl Db {
             bail!("say in a sentence what the goal is");
         }
         let short: String = sentence.chars().take(80).collect();
-        self.create_issue(
+        let issue = self.create_issue(
             &NewIssue {
                 project: project.to_string(),
                 title: format!("Plan a goal: {short}"),
@@ -700,7 +694,12 @@ impl Db {
                 ..Default::default()
             },
             actor,
-        )
+        )?;
+        // The person's own request is what lets the review mode start its plan (NIT-550).
+        if *actor == Actor::Human {
+            self.conn.execute("INSERT OR IGNORE INTO goal_request (issue_key, asked_at) VALUES (?1, ?2)", params![issue.key, now()])?;
+        }
+        Ok(issue)
     }
 }
 
@@ -793,6 +792,11 @@ mod tests {
         let filed_by_agent = db.start_goal("NIT", "make Nitely installable by strangers", &agent()).unwrap();
         let theirs = db.propose_goal("NIT", &GoalPlan { title: "Their idea".into(), ..plan() }, Some(&filed_by_agent.key), &agent()).unwrap();
         assert_eq!(db.goal_plan_for_issue(&theirs.issue.key).unwrap().unwrap().status, "pending");
+        // An issue the person filed for something else, labeled planning afterwards, is no request.
+        let other = NewIssue { project: "NIT".into(), title: "Fix the export".into(), kind: "bug".into(), body: "b".into(), evidence: "e".into(), source: "human".into(), allow_similar: true, labels: vec![PLANNING_LABEL.into()], ..Default::default() };
+        let other = db.create_issue(&other, &Actor::Human).unwrap();
+        let relabeled = db.propose_goal("NIT", &GoalPlan { title: "Borrowed request".into(), ..plan() }, Some(&other.key), &agent()).unwrap();
+        assert_eq!(db.goal_plan_for_issue(&relabeled.issue.key).unwrap().unwrap().status, "pending", "only start_goal's own record proves a request");
     }
 
     #[test]
