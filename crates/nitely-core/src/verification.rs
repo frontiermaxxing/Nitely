@@ -75,7 +75,25 @@ fn built_in_protected(path: &str) -> bool {
     let name = p.rsplit('/').next().unwrap_or(&p);
     p.starts_with('.') || p.split('/').any(|s| matches!(s, "migrations" | "skills" | "vendor" | "generated" | "node_modules"))
         || matches!(name, "agents.md" | "claude.md" | "skill.md" | "cargo.toml" | "cargo.lock" | "package.json" | "package-lock.json" | "build.rs")
-        || ["approval", "credential", "keychain", "auth", "release", "install", "verification", "playbook", "land.", "land_queue", "recovery", "db.", "test", "spec"].iter().any(|s| p.contains(s))
+        || ["approval", "credential", "keychain", "auth", "release", "install", "verification", "playbook", "land.", "land_queue", "recovery", "db."].iter().any(|s| p.contains(s))
+        || test_infrastructure(&p)
+}
+
+/// A test or spec, by its path. It is checked like the code it tests: inside a component the
+/// approved affected-test map owns it selects that component's checks, its own tests included;
+/// outside the map it keeps the full gate (NIT-485). A weakened assertion that slips through is
+/// what the post-merge backstop and the periodic review are for.
+fn test_path(path: &str) -> bool {
+    let p = path.to_ascii_lowercase();
+    p.contains("test") || p.contains("spec")
+}
+
+/// What decides which tests run, or how: it always keeps the full gate, wherever it sits
+/// (NIT-485). The selector and verification itself are covered by name above; CI by its dotfile.
+fn test_infrastructure(p: &str) -> bool {
+    ["affected_tests", "test_repo", "test_command", "test_sweep", "testing_standard", "scripts/test.mjs", "scripts/harness/", "tsconfig.test", ".test-build"]
+        .iter()
+        .any(|s| p.contains(s))
 }
 
 fn ordinary_comment(text: &str) -> bool {
@@ -199,6 +217,18 @@ fn assess_with_mode(repo:&Path,base:&str,head:&str,issue:&IssueRecord,settings:O
     if let Err(error) = attempted { plan.reasons.push(format!("Full fallback: {error:#}")); }
     // Retain affected-test advice separately: an input map does not overrule a safety floor.
     plan.affected = Some(crate::affected_tests::select_with_policy(repo,&plan.base,&plan.head,&plan.policy_commit)?);
+    // A test runs its component's checks: never Basic, and only where the map selects it (NIT-485).
+    if plan.files.iter().any(|f| test_path(&f.path)) {
+        if plan.affected.as_ref().is_none_or(|s| s.full) {
+            plan.effective = "sensitive".into();
+            plan.depth = "Full".into();
+            plan.reasons.push("A changed test outside the approved affected-test map keeps the full gate.".into());
+        } else if plan.effective == "inert" {
+            plan.effective = "standard".into();
+            plan.depth = crate::issues::review_depth("standard").into();
+            plan.reasons.push("A changed test runs its component's checks, not Basic.".into());
+        }
+    }
     if plan.effective == "standard" && issue.review_level.as_deref().is_some_and(|l| matches!(l,"inert"|"contained"))
         && plan.files.len() <= 5 && plan.affected.as_ref().is_some_and(|s| !s.full && s.components.len() == 1)
         && changed_lines(repo,&plan.base,&plan.head)? <= 200 {
@@ -534,6 +564,54 @@ mod tests {
         drop(db);
         std::fs::remove_dir_all(repo).unwrap();
     }
+    #[test]
+    fn a_test_inside_a_mapped_component_runs_its_checks_and_test_infrastructure_stays_full() {
+        use crate::test_repo::git as g;
+        const MAP: &str = "version = 1\n[[components]]\nid = 'web'\nroots = ['src/', 'scripts/']\nchecks = ['npm run build']\n[[components.suites]]\nid = 'unit'\ninputs = ['src/', 'scripts/']\n[components.suites.javascript]\ncommand = 'npm test'\ntest_files = ['src/math.test.ts']\n";
+        let repo = crate::test_repo::copy("verification-test-paths", |dir| {
+            crate::test_repo::init(dir, &[
+                (PLAYBOOK_PATH, "[verification]\nversion=1\nmode='active'\nbasic=['echo typed']\ncomments=['src/.*', 'crates/.*']\n"),
+                (crate::affected_tests::POLICY_PATH, MAP),
+                ("package.json", "{}"),
+                ("src/math.ts", "export const sum = 1;"),
+                ("src/math.test.ts", "import {sum} from './math'; export const ok = sum === 1;"),
+                ("crates/core/src/spec_check.rs", "fn checked() {}"),
+                ("scripts/test.mjs", "// runs the tests"),
+                ("crates/core/src/test_repo.rs", "// fixtures"),
+            ]);
+        });
+        let mut db = Db::open(&repo.join("state.sqlite")).unwrap();
+        db.create_project("APP", "Example").unwrap();
+        let mut issue = |level: &str| db.create_issue(&crate::NewIssue { project: "APP".into(), title: format!("A {level} test change"), body: "b".into(), kind: "feature".into(), source: "codex".into(), evidence: "test".into(), review_level: Some(level.into()), allow_similar: true, ..Default::default() }, &Actor::Human).unwrap();
+        let standard = issue("standard");
+        let inert = issue("inert");
+        let base = g(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        let change = |path: &str, text: &str| {
+            g(&repo, &["checkout", "-q", "--detach", &base]);
+            std::fs::write(repo.join(path), text).unwrap();
+            g(&repo, &["add", path]);
+            g(&repo, &["commit", "-qm", path]);
+        };
+        // A test in the mapped component: that component's checks, its own suite included.
+        change("src/math.test.ts", "import {sum} from './math'; export const ok = sum === 1 && sum > 0;");
+        let plan = assess(&repo, &base, "HEAD", &standard).unwrap();
+        assert_eq!(plan.depth, "Integration", "{:?}", plan.reasons);
+        assert!(plan.commands.iter().any(|c| c == "npm test") && plan.commands.iter().any(|c| c == "npm run build"), "{:?}", plan.commands);
+        // Only a comment in a test is still not Basic: the component's checks run.
+        change("src/math.test.ts", "// checks the sum\nimport {sum} from './math'; export const ok = sum === 1;");
+        let commented = assess(&repo, &base, "HEAD", &inert).unwrap();
+        assert!(commented.depth != "Basic" && commented.commands.iter().any(|c| c == "npm test"), "{:?} {:?}", commented.depth, commented.reasons);
+        // A test the map does not own, and what decides which tests run: the full gate.
+        for (path, text) in [("crates/core/src/spec_check.rs", "fn checked() { let _ = 1; }"), ("scripts/test.mjs", "// runs every test"), ("crates/core/src/test_repo.rs", "// other fixtures")] {
+            change(path, text);
+            let full = assess(&repo, &base, "HEAD", &standard).unwrap();
+            assert_eq!(full.depth, "Full", "{path}: {:?}", full.reasons);
+            assert!(full.commands.is_empty(), "{path}");
+        }
+        drop(db);
+        std::fs::remove_dir_all(repo).ok();
+    }
+
     #[test]
     fn active_basic_authority_tracks_integration_policy_and_actual_branch_diff() {
         use crate::test_repo::git as g;
