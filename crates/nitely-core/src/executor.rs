@@ -1379,6 +1379,75 @@ mod tests {
         assert!(!allowed(&["APP".into()], "OTHER"));
     }
     #[test]
+    fn a_suite_goes_to_ci_only_for_named_commands_and_passes_only_when_every_job_did() {
+        let pb = Playbook::parse("[lanes]\nci_commands = [\"cargo test --workspace\", \"cargo test {worktree}\", \"npm test\"]\n").unwrap();
+        let steps = vec![
+            ("cargo test --workspace".to_string(), None),
+            ("npm run build".to_string(), None),
+            ("cargo test {worktree}".to_string(), None),
+            ("npm test".to_string(), Some("only docs changed".to_string())),
+        ];
+        // Exact names only; a local path or a skipped step stays local.
+        assert_eq!(ci_commands(&pb, &steps), vec!["cargo test --workspace".to_string()]);
+        assert!(ci_commands(&Playbook::parse("[lanes]\n").unwrap(), &steps).is_empty());
+
+        let commands = vec!["cargo test --workspace".to_string(), "npm test".to_string()];
+        let job = |name: &str, conclusion: &str| serde_json::json!({"databaseId": 7, "name": name, "conclusion": conclusion, "url": "https://github.com/acme/app/actions/runs/1/job/7", "startedAt": "2026-01-01T00:00:00Z", "completedAt": "2026-01-01T00:04:10Z"});
+        let mut view = serde_json::json!({"status": "in_progress", "conclusion": "", "jobs": [job("cargo test --workspace", "success"), job("npm test", "success")]});
+        assert!(suite_result(&view, &commands).is_none(), "an unfinished run has no result");
+        view["status"] = "completed".into();
+        view["conclusion"] = "success".into();
+        let (passed, jobs) = suite_result(&view, &commands).unwrap();
+        assert!(passed);
+        assert_eq!(jobs[0].1, 250);
+        view["jobs"][1]["conclusion"] = "failure".into();
+        assert!(!suite_result(&view, &commands).unwrap().0);
+        // A run that never made a job for a command (a workflow without the suite job) fails.
+        view["jobs"] = serde_json::json!([job("Gate (ubuntu-latest)", "success")]);
+        let (passed, jobs) = suite_result(&view, &commands).unwrap();
+        assert!(!passed && jobs.iter().all(|j| !j.0));
+    }
+
+    #[test]
+    fn a_suite_without_ci_permission_is_unavailable_and_touches_nothing() {
+        let dir = Scratch::new().unwrap();
+        let db = Db::open(&dir.0.join("nitely.db")).unwrap();
+        let pb = Playbook::parse("[lanes]\nci_commands = [\"cargo test\"]\n").unwrap();
+        let snap = Snapshot { commit: "a".repeat(40), tree: "b".repeat(40), base: "a".repeat(40), made: false };
+        let commands = vec!["cargo test".to_string()];
+        let req = SuiteRequest { project: "APP", issue: None, kind: Kind::Gate, snapshot: &snap, commands: &commands, workflow_ref: None };
+        let actor = Actor::Agent("claude:test".into());
+        assert!(matches!(dispatch_with(&Settings::default(), &db, &dir.0, &pb, &req, &actor).unwrap(), Dispatch::Unavailable(_)));
+        assert_eq!(db.conn.query_row("SELECT COUNT(*) FROM lane_run", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    }
+
+    /// A real run on GitHub: `NITELY_CI_LIVE_ROOT` (a checkout whose origin is on GitHub and holds
+    /// the commit), `NITELY_CI_LIVE_COMMIT`, `NITELY_CI_LIVE_REF` (the branch whose workflow runs)
+    /// and `NITELY_CI_LIVE_COMMANDS` (one per line). Uses the gh CLI as it is signed in.
+    #[test]
+    #[ignore]
+    fn live_suite_on_github() {
+        let var = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("{k} not set"));
+        let root = PathBuf::from(var("NITELY_CI_LIVE_ROOT"));
+        let commit = var("NITELY_CI_LIVE_COMMIT");
+        let tree = git(&root, &["rev-parse", &format!("{commit}^{{tree}}")], &[], None).unwrap();
+        let commands: Vec<String> = var("NITELY_CI_LIVE_COMMANDS").lines().map(str::to_string).collect();
+        let workflow_ref = var("NITELY_CI_LIVE_REF");
+        let dir = Scratch::new().unwrap();
+        let db = Db::open(&dir.0.join("nitely.db")).unwrap();
+        let pb = Playbook::parse("[lanes]\ntimeout_minutes = 75\n").unwrap();
+        let snap = Snapshot { commit: commit.clone(), tree, base: commit, made: false };
+        let req = SuiteRequest { project: "NIT", issue: None, kind: Kind::Gate, snapshot: &snap, commands: &commands, workflow_ref: Some(&workflow_ref) };
+        let actor = Actor::Agent("claude:live".into());
+        let settings = Settings { ci_projects: vec!["NIT".into()], ..Default::default() };
+        let started = Instant::now();
+        let Dispatch::Started(pending) = dispatch_with(&settings, &db, &root, &pb, &req, &actor).unwrap() else { panic!("CI unavailable") };
+        let evidence = wait(&db, pending).unwrap();
+        println!("NITELY_CI_LIVE {} wall={}s", serde_json::to_string(&evidence).unwrap(), started.elapsed().as_secs());
+        assert!(evidence.passed, "{}", evidence.url);
+    }
+
+    #[test]
     fn ci_requires_fresh_exact_sha_and_app_and_success() {
         let checks = vec![RequiredCheck {
             name: "test".into(),

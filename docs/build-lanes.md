@@ -364,6 +364,43 @@ with more than 100 check runs cannot pass. An unconfirmed dispatch or cleanup
 reports the exact branch to inspect. CI permission covers source publication;
 remote secrets and workflow policy remain the repository owner's responsibility.
 
+### Full suites in GitHub Actions
+
+`executor = "ci"` sends a whole gate to CI and reads checks. To send only the full suites, and keep
+quick checks on the person's PC, name them instead (NIT-493):
+
+```toml
+[lanes]
+ci_commands = ["cargo test --workspace -- --test-threads=12", "cargo clippy --workspace -- -D warnings"]
+ci_workflow = "ci.yml"   # the default
+# ci_ref = "main"        # the branch whose copy of the workflow runs; unset, the integration branch
+```
+
+A gate whose steps include one of those commands, spelled exactly as the gate spells it, pushes
+the gate's commit to `refs/nitely/ci/<request>` (a ref of its own: no branch, so no push workflow
+fires), and dispatches the workflow with `gh workflow run`, using the gh CLI as the person signed it
+in: no token is stored anywhere. The run's inputs are that ref, the commit, its tree and the
+commands as JSON; this repo's `ci.yml` shows the job that takes them: one Linux job per command,
+in parallel, each failing unless its checkout is exactly that commit and tree. The gate's other
+commands run in a lane meanwhile. A local failure ends the gate at once and cancels the run. When the
+run completes, each command's result is its job's (time, page, the end of a failed job's log), the
+CI request is a `lane_run` row with executor `ci` at that tree, its output the run's address and
+how long it queued and ran, and the ref is deleted.
+
+CI runs nothing unless this machine's `executors.json` lists the project in `ci_projects`. Without
+that, without a GitHub origin, without a signed-in gh, or when the push or the dispatch is refused
+(a workflow on that branch without Nitely's inputs, say), the commands run in a lane as before, one
+full suite at a time, and the issue says why. Unlike a machine executor, a CI run that dispatched
+but cannot report (gh failing five times in a row, or past `timeout_minutes` plus 30 minutes, when
+it is cancelled) also falls back to a lane: a second run of a test suite on a throwaway runner
+has no side effect to fear. Failed tests in CI are the gate's result and never run again locally.
+
+GitHub runs a dispatched workflow only when the file is on the default branch, and runs the copy on
+the branch it is dispatched on: a new input works once that branch has it. For other callers
+(checkpoint lands, the backstop on main) `executor::suite` takes a `SuiteRequest` (the snapshot, the
+commands, and the branch whose workflow runs) and returns the `SuiteEvidence`, or why CI is
+unavailable; `dispatch` and `wait` split it, to run something else meanwhile.
+
 Validation so far covers isolated local receiver execution, binary snapshot
 reconstruction, request replay/refusal, and CI evidence classification. Real SSH
 execution on a second machine and a hosted CI gate require configured hosts and
@@ -523,6 +560,7 @@ keep = ["target", "node_modules"]    # build directories a lane keeps between re
 timeout_minutes = 30                 # a command running longer is stopped with what it started
 heavy = ["^cargo (build|test|clippy)", "^npm (ci|install|test|run build)"]
 executor = "local"                   # "local", "machine:<name>" or "ci" (the gate only)
+ci_commands = []                     # gate commands that run in GitHub Actions instead (NIT-493)
 base = "tip"                         # or "every 4h"
 large_repo = false                   # true: the main checkout is the only lane
 quick = true                         # false: no quick lane for short runs (off in large-repo mode)
