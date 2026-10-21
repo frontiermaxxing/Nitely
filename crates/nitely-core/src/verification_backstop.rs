@@ -14,12 +14,15 @@ pub struct Rules {
     pub delay_seconds: i64,
     pub nightly_seconds: i64,
     pub auto_revert: bool,
-    /// Every reverted path needs an authoritative allow rule. Unknown side effects pause.
-    pub reversible_paths: Vec<String>,
+    /// The paths an automatic revert may touch; unset, every path (NIT-496), so auto-revert is on
+    /// unless the playbook narrows it. The built-in list (migrations, schemas, deploys, releases,
+    /// installs, credentials, secrets, the playbook, `.nitely/`, `.github/`) and
+    /// `irreversible_paths` always pause instead. `[]` reverts nothing.
+    pub reversible_paths: Option<Vec<String>>,
     pub irreversible_paths: Vec<String>,
 }
 impl Default for Rules {
-    fn default() -> Self { Self { enabled: false, landings: 5, delay_seconds: 1800, nightly_seconds: 86400, auto_revert: true, reversible_paths: vec![], irreversible_paths: vec![] } }
+    fn default() -> Self { Self { enabled: false, landings: 5, delay_seconds: 1800, nightly_seconds: 86400, auto_revert: true, reversible_paths: None, irreversible_paths: vec![] } }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -280,7 +283,7 @@ fn tick_inner(db:&mut Db,config:&Config,repo:&Path,project:&str,branch:&str,forc
     db.conn.execute("UPDATE verification_backstop_run SET state='interrupted',ended_at=?2 WHERE repo=?1 AND state='running'",params![id,now()])?;
     db.conn.execute("INSERT INTO verification_backstop_run(repo,head,base,policy,commands,started_at,state) VALUES(?1,?2,?3,?4,?5,?6,'running')",params![id,head,h.verified_head,policy,serde_json::to_string(&commands)?,now()])?;
     let run=db.conn.last_insert_rowid();
-    db.conn.execute("UPDATE verification_health SET status='running',message='Full check queued in a build lane',recovery_issue=NULL WHERE repo=?1",[&id])?;
+    db.conn.execute("UPDATE verification_health SET status='running',message='Full check queued in CI or a build lane',recovery_issue=NULL WHERE repo=?1",[&id])?;
     let actor=Actor::Agent("verification-backstop".into());
     let result=execute(db,repo,&pb,&head,&commands,&actor);
     match result {
@@ -348,6 +351,7 @@ pub(crate) fn with_checkout<T>(repo:&Path,head:&str,f:impl FnOnce(&Path)->Result
     match (result,cleanup) { (Ok(v),Ok(_))=>Ok(v),(Err(e),_)=>Err(e),(Ok(_),Err(e))=>Err(e.context("removing verification checkout")) }
 }
 fn execute(db:&Db,repo:&Path,pb:&Playbook,head:&str,commands:&[String],actor:&Actor)->Result<crate::lanes::GateRun> {
+    if let Some(gate)=in_ci(db,repo,pb,head,commands,actor)? {return Ok(gate);}
     with_checkout(repo,head,|wt| {
         let mut pb=pb.clone();
         pb.gate.retries=0;
@@ -369,6 +373,25 @@ fn execute(db:&Db,repo:&Path,pb:&Playbook,head:&str,commands:&[String],actor:&Ac
         turn.finish(passed);
         Ok(crate::lanes::GateRun{yolo_skipped:false,commit:head.into(),results,passed,flaked,run:Some(run),warnings:vec![]})
     })
+}
+
+/// The Full gate in GitHub Actions through the CI executor (NIT-493, NIT-496): every command,
+/// not only `[lanes] ci_commands`, since nothing waits on the backstop locally. None when CI cannot
+/// take it (no `ci_projects` opt-in, no GitHub origin or gh, the dispatch refused, a run that never
+/// reported) or a command names a local path: the gate then runs in a lane as before. Failed tests
+/// in CI are the result, and bisection runs in CI the same way.
+fn in_ci(db:&Db,repo:&Path,pb:&Playbook,head:&str,commands:&[String],actor:&Actor)->Result<Option<crate::lanes::GateRun>> {
+    if commands.iter().any(|c|["{main}","{worktree}","{base}"].iter().any(|p|c.contains(p))) {return Ok(None);}
+    crate::project_modes::check_playbook_authority(db,&[],pb)?;
+    let tree=git(repo,&["rev-parse",&format!("{head}^{{tree}}")])?.trim().to_string();
+    let snapshot=crate::lanes::Snapshot{commit:head.into(),tree,base:head.into(),made:false};
+    let req=crate::executor::SuiteRequest{project:pb.mode_project.as_deref().unwrap_or(""),issue:None,kind:crate::lanes::Kind::Run,snapshot:&snapshot,commands,workflow_ref:None};
+    match crate::executor::suite(db,repo,pb,&req,actor) {
+        Ok(crate::executor::Suite::Ran(e))=>Ok(Some(crate::lanes::GateRun{yolo_skipped:false,commit:head.into(),results:e.results,passed:e.passed,flaked:vec![],run:Some(e.run),warnings:vec![format!("Full gate ran in CI: {} (queued {} s, ran {} s)",e.url,e.queued_seconds,e.run_seconds)]})),
+        Ok(crate::executor::Suite::Unavailable(_))=>Ok(None),
+        // A run that never reported: its CI row records why, and the lane runs the gate instead.
+        Err(_)=>Ok(None),
+    }
 }
 
 /// Bisect first-parent commits, then independently verify parent, culprit and inverse at tip.
@@ -408,7 +431,8 @@ fn commit_snapshot(repo:&Path,message:&str)->Result<String> {
 fn reversible(repo:&Path,rules:&Rules,commit:&str)->Result<bool> {
     let paths=git(repo,&["diff-tree","--no-commit-id","--name-only","-r",commit])?;
     if paths.trim().is_empty() { return Ok(false); }
-    let allowed=rules.reversible_paths.iter().map(|s|regex::Regex::new(&format!("^(?:{s})$"))).collect::<std::result::Result<Vec<_>,_>>()?;
+    let every=vec![".*".to_string()];
+    let allowed=rules.reversible_paths.as_ref().unwrap_or(&every).iter().map(|s|regex::Regex::new(&format!("^(?:{s})$"))).collect::<std::result::Result<Vec<_>,_>>()?;
     let denied=rules.irreversible_paths.iter().map(|s|regex::Regex::new(&format!("^(?:{s})$"))).collect::<std::result::Result<Vec<_>,_>>()?;
     Ok(paths.lines().all(|p| {
         let lower=p.to_ascii_lowercase();
@@ -676,8 +700,10 @@ mod tests {
         let tip=change(&repo,"a.txt","1");
         let isolated=isolate_with(&repo,&base,&tip,&mut |rev|Ok(git(&repo,&["show",&format!("{rev}:value.txt")])?.trim()=="good")).unwrap();
         assert_eq!(isolated,culprit);
-        let r=Rules{reversible_paths:vec![".*".into()],..Default::default()};assert!(reversible(&repo,&r,&culprit).unwrap());
+        // Unset paths revert anything but the built-in list; an explicit [] reverts nothing.
+        let r=Rules::default();assert!(reversible(&repo,&r,&culprit).unwrap());
         let migration=change(&repo,"schema.sql","change schema");assert!(!reversible(&repo,&r,&migration).unwrap());
+        assert!(!reversible(&repo,&Rules{reversible_paths:Some(vec![]),..Default::default()},&culprit).unwrap());
         let (_db,repo,base)=fixture();change(&repo,"a.txt","1");let tip=change(&repo,"b.txt","1");
         let result=isolate_with(&repo,&base,&tip,&mut |rev| {
             let a=git(&repo,&["show",&format!("{rev}:a.txt")])?;let b=git(&repo,&["show",&format!("{rev}:b.txt")])?;

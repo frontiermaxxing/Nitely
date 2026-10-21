@@ -55,7 +55,7 @@ unset falls through to the playbook.
 | `[worktree] dir`, `setup`, `mode` | full | light, npm ci | `start_task`, setup before the gate |
 | `[verification] mode`, `version`, `prose`, `comments`, `display_copy`, `protected`, `basic` | "", 0, [] | active, 1, patterns, `tsc --noEmit` | classifier (`verification.rs:272`), from the base commit only |
 | `[verification] audit_percent` | **10** | 10 | `verification.rs:388`, `verification_audit.rs:150` |
-| `[verification.backstop] enabled`, `landings`, `delay_seconds`, `nightly_seconds`, `auto_revert`, `reversible_paths`, `irreversible_paths` | false, 5, 1800, 86400, true, [], [] | enabled = false | `verification_backstop.rs:248`; auto-revert needs every path in `reversible_paths` (empty: never) |
+| `[verification.backstop] enabled`, `landings`, `delay_seconds`, `nightly_seconds`, `auto_revert`, `reversible_paths`, `irreversible_paths` | false, 5, 1800, 86400, true, [], [] | enabled = false | `verification_backstop.rs:248`; auto-revert needs every path in `reversible_paths` (unset: every path but the built-in list, NIT-496; `[]`: never) |
 | `[release] tag`, `commands`, `stamp_paths` | none: release refuses | v* | `release_verification.rs:61`; always the Full gate plus these |
 
 ### Other inputs

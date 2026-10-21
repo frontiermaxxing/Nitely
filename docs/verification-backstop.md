@@ -2,8 +2,17 @@
 
 The backstop is opt-in committed integration policy. The desktop checks once a minute;
 headless installations can run `nitely verification --tick` from their scheduler. Both
-use one repository lock and durable records, so they do not duplicate a check. Builds
-run in the project's warm lanes under the existing machine admission limits.
+use one repository lock and durable records, so they do not duplicate a check. The Full
+gate, and the runs that bisect a failure, go to GitHub Actions through the CI executor
+(docs/build-lanes.md, "Full suites in GitHub Actions"): every gate command, at the exact
+commit. When CI cannot take one (this machine's `executors.json` has no `ci_projects` for
+the project, the origin is not on GitHub, gh is not signed in, the dispatch is refused, or a
+run never reports), it runs in the project's warm lanes under the existing machine
+admission limits, as before.
+
+Every preset keeps the backstop on, with automatic revert (NIT-496): Fast and Careful check
+after five landings or 30 minutes, Release after every land. Only Custom turns it off, and
+"How a change lands" shows that in red.
 
 This is a proposal example, not an active Nitely policy change:
 
@@ -46,8 +55,9 @@ bisects a bounded first-parent range, then verifies the candidate's parent, the 
 alone on the baseline, and its inverse on the failed tip. A flaky result, failing baseline,
 interacting changes, merge commit or conflict pauses recovery instead of guessing a culprit.
 
-Automatic reversal additionally requires every changed path to match an approved reversible
-rule. Migrations, schema changes, releases, installation, credentials and policy files are
+Automatic reversal additionally requires every changed path to match `reversible_paths`.
+Unset, that is every path, so automatic revert is on by default; `[]` reverts nothing.
+Migrations, schema changes, releases, installation, credentials and policy files are
 always excluded. Unknown external effects stay paused for inspection. A confirmed regression
 disables its recorded lowering rules even when it cannot safely be reverted.
 
