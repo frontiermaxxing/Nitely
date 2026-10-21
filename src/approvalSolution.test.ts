@@ -11,7 +11,7 @@ test("Basic exemption never counts as a completed review or Full gate", () => {
 
 test("YOLO remains unverified even if a stale reviewer or passing flag accompanies it", () => {
   const yolo = { reviewer: "codex", verdict: "yolo" };
-  assert.deepEqual(automatedReviewEvidence(yolo), { ran: false, text: "YOLO mode: automatic gate and PR review skipped", tone: null });
+  assert.deepEqual(automatedReviewEvidence(yolo), { ran: false, text: "Tests and review off (Custom mode): automatic gate and PR review skipped", tone: null });
   assert.deepEqual(automatedGateEvidence({ commit: "head", passed: true, skipped: "YOLO mode", results: [] }), { ran: false, text: "Gate skipped", reason: "YOLO mode" });
   const timeline = [{ ts: 1, kind: "gate_failed" }, { ts: 2, kind: "gate_skipped" }] as TimelineEntry[];
   assert.equal(latestGateEvent(timeline)?.kind, "gate_skipped");

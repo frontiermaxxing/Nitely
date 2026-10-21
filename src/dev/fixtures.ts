@@ -1104,7 +1104,6 @@ function projectSpend(args: Record<string, unknown>): ProjectSpend {
 
 /** The mirror in the preview: Nitely's repo is on GitHub; Orbit's Bitbucket repo has no issue tracker. */
 const mirrorOn = new Map<string, string | null>([["NIT", "open"]]);
-const projectYolo = new Map<string, { project: string; enabled: boolean; revision: number }>();
 const privateIssues = new Set<string>(["NIT-20"]);
 
 function mirrorPreview(project: string): MirrorPreview {
@@ -2228,10 +2227,6 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return goals(args);
       case "project_focus":
         return projectFocus(String(args.project).toUpperCase());
-      case "project_yolo": {
-        const project = String(args.project).toUpperCase();
-        return projectYolo.get(project) ?? { project, enabled: false, revision: 0 };
-      }
       case "project_review_mode":
         return reviewMode(String(args.project).toUpperCase());
       case "project_review_mode_effective":
@@ -2246,14 +2241,6 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return periodicReviews(String(args.project).toUpperCase());
       case "retry_periodic_review":
         retryPeriodic(String(args.project).toUpperCase(), String(args.repo), Number(args.id)); return null;
-      case "set_project_yolo": {
-        const project = String(args.project).toUpperCase();
-        const before = projectYolo.get(project) ?? { project, enabled: false, revision: 0 };
-        if (args.expectedRevision !== before.revision) throw new Error("Project mode changed. Reload and try again.");
-        const next = { project, enabled: Boolean(args.enabled), revision: before.revision + 1 };
-        projectYolo.set(project, next);
-        return next;
-      }
       case "confirm_verification_escape":
       case "retry_verification_audit": {
         const report = structuredClone(verificationAudit("NIT")!);

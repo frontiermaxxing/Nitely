@@ -175,9 +175,6 @@ pub fn status(db: &Db, project: &str) -> Result<Vec<RepositoryStatus>> {
 }
 fn rules(db: &Db, project: &str) -> Result<Option<crate::project_modes::Periodic>> {
     let mode = db.project_review_mode(project)?;
-    if db.project_yolo(project)?.enabled {
-        return Ok(None);
-    }
     Ok(mode.options().periodic.filter(|p| p.enabled))
 }
 fn initial(db: &Db, repo: &str, project: &str, head: &str) -> Result<()> {

@@ -317,7 +317,6 @@ impl Db {
         for table in ["periodic_review_state","periodic_review_landing","periodic_review_job"] {
             tx.execute(&format!("UPDATE {table} SET project=?2 WHERE project=?1"),params![from,to])?;
         }
-        tx.execute("UPDATE project_yolo SET project = ?2 WHERE project = ?1", params![from, to])?;
         tx.execute("UPDATE goal SET project = ?2 WHERE project = ?1", params![from, to])?;
         tx.execute("UPDATE goal_plan SET project = ?2 WHERE project = ?1", params![from, to])?;
         tx.execute("UPDATE crew_worker SET project = ?2 WHERE project = ?1", params![from, to])?;
@@ -372,7 +371,6 @@ impl Db {
         for table in ["periodic_review_job","periodic_review_landing","periodic_review_state"] {
             tx.execute(&format!("DELETE FROM {table} WHERE project=?1"),[&key])?;
         }
-        tx.execute("DELETE FROM project_yolo WHERE project = ?1", [&key])?;
         tx.execute("DELETE FROM goal WHERE project = ?1", [&key])?;
         tx.execute("DELETE FROM crew_control WHERE project = ?1", [&key])?;
         // A project made again under this key starts with the mirror off and nothing published.

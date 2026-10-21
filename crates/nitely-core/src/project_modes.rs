@@ -183,9 +183,6 @@ impl Db {
    remember(&tx,&before)?;
    let at=crate::db::now();let mode_text=serde_json::to_value(mode)?.as_str().context("mode name")?.to_owned();
    tx.execute("INSERT INTO project_review_mode(project,mode,overrides,revision,explicit,updated_at,updated_by,migrated_from) VALUES(?1,?2,?3,?4,1,?5,?6,NULL) ON CONFLICT(project) DO UPDATE SET mode=excluded.mode,overrides=excluded.overrides,revision=excluded.revision,explicit=1,updated_at=excluded.updated_at,updated_by=excluded.updated_by,migrated_from=NULL",params![before.project,mode_text,serde_json::to_string(&overrides)?,before.revision+1,at,actor.id()])?;
-   // The legacy switch mirrors "tests off", which only Custom can choose now.
-   let tests_off=mode==Mode::Custom && overrides.test_depth==Some(TestDepth::Off);
-   tx.execute("INSERT INTO project_yolo(project,enabled,revision,updated_at,updated_by) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(project) DO UPDATE SET enabled=excluded.enabled,revision=excluded.revision,updated_at=excluded.updated_at,updated_by=excluded.updated_by",params![before.project,tests_off,before.revision+1,at,actor.id()])?;
    tx.execute("INSERT INTO event(ts,actor,type,summary,payload) VALUES(?1,?2,'project_review_mode_changed',?3,?4)",params![at,actor.id(),format!("{} review mode: {mode_text}",before.project),serde_json::json!({"project":before.project,"before":before,"mode":mode,"overrides":overrides}).to_string()])?;
   }
   let after=read(&tx,project)?;remember(&tx,&after)?;tx.commit()?;Ok(after)
@@ -288,7 +285,6 @@ mod tests {
   assert!(db.set_project_review_mode("APP",Mode::Release,Options::default(),3,&Actor::Agent("cli".into())).is_err());
   let changed=db.set_project_review_mode("app",Mode::Release,Options::default(),3,&Actor::Human).unwrap();
   assert_eq!(changed.revision,4);assert!(changed.authority().unwrap().is_some());assert!(changed.migrated_from.is_none()&&changed.migration_changes.is_empty());
-  assert!(!db.project_yolo("APP").unwrap().enabled);
   assert!(db.set_project_review_mode("APP",Mode::Fast,Options::default(),3,&Actor::Human).is_err());
   // Every preset keeps the backstop on and the person's approval rules; Release lands alone.
   let mut pb=Playbook::default();pb.approval.always_human=true;

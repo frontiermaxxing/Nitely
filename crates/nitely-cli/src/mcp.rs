@@ -1457,7 +1457,6 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             let project = project(&db)?;
             let mut out = json!(db.project_brief(&project)?);
             out["focus"] = json!(db.project_focus(&project)?);
-            out["yolo"] = json!(db.project_yolo(&project)?);
             out["review_mode"] = json!(db.project_review_mode(&project)?);
             out
         }

@@ -1133,7 +1133,9 @@ batch = "waiting"
     fn yolo_batch_lands_without_a_gate_pass_or_cached_success() {
         let mut f = fixture();
         f.strict_gate();
-        f.db.set_project_yolo("NIT", true, 0, &Actor::Human).unwrap();
+        let off = crate::project_modes::Options { test_depth: Some(crate::project_modes::TestDepth::Off), pre_review: Some(crate::project_modes::PreReview::Off), ..Default::default() };
+        let rev = f.db.project_review_mode("NIT").unwrap().revision;
+        f.db.set_project_review_mode("NIT", crate::project_modes::Mode::Custom, off, rev, &Actor::Human).unwrap();
         let (a, _) = f.submitted("Unchecked first", &[("bad.txt", "fails the configured gate")]);
         let (b, _) = f.submitted("Unchecked second", &[("second.txt", "second")]);
         f.queue_and_run(&[&a, &b]);

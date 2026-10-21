@@ -129,7 +129,7 @@ pub fn why_alone(
         "its previous review raised a flag"
     } else if large_repo {
         "the project is in large-repo mode"
-    } else if matches!(rules.batch, BatchMode::Small | BatchMode::Shadow) && (lines > rules.small_lines || files.len() > rules.small_files) {
+    } else if rules.batch == BatchMode::Small && (lines > rules.small_lines || files.len() > rules.small_files) {
         return Ok(Some(format!("it is not small ({lines} lines in {} files; small is at most {} in {})", files.len(), rules.small_lines, rules.small_files)));
     } else if rules.batch == BatchMode::All && lines > rules.max_lines {
         return Ok(Some(format!("it is larger than a batch may be ({lines} lines; at most {})", rules.max_lines)));
@@ -211,8 +211,8 @@ pub fn review_in_batch(db: &Db, rules: &ReviewRules, c: &Candidate, actor: &Acto
                     db.conn.execute("UPDATE review_queue SET state = 'alone', why = ?2 WHERE id = ?1 AND state = 'waiting'", params![id, format!("{e:#}")])?;
                     return Err(e);
                 }
-                if let Some((batch, rows)) = close_if_due(db, rules, window, &repo, &row.reviewer, false)? {
-                    run_batch(db, rules, batch, &rows, false)?;
+                if let Some((batch, rows)) = close_if_due(db, rules, window, &repo, &row.reviewer)? {
+                    run_batch(db, rules, batch, &rows)?;
                     continue;
                 }
             }
@@ -242,7 +242,7 @@ struct Queued {
     queued_at: i64,
     result: Option<String>,
     why: Option<String>,
-    /// A shadow change's single review, which decided it.
+    /// Set only on rows of the retired shadow batches (NIT-217, NIT-499): the review that decided it.
     review_id: Option<i64>,
     repo: String,
 }
@@ -315,10 +315,10 @@ fn fail_batch(db: &Db, batch: i64, why: &str) -> Result<()> {
 }
 
 /// Explicit project modes can independently disable batching, including while rows wait.
-fn project_allows_batch(db: &Db, key: &str, shadow: bool) -> Result<bool> {
+fn project_allows_batch(db: &Db, key: &str) -> Result<bool> {
     Ok(match crate::project_modes::for_issue(db, key)?.and_then(|s| s.options().pre_review) {
         None => true,
-        Some(crate::project_modes::PreReview::Batched) => !shadow,
+        Some(crate::project_modes::PreReview::Batched) => true,
         Some(_) => false,
     })
 }
@@ -326,21 +326,20 @@ fn project_allows_batch(db: &Db, key: &str, shadow: bool) -> Result<bool> {
 /// Takes the repository's next batch for `reviewer` when it is due, under the queue's lock: full,
 /// its oldest change past the window, or (`busy`) no batch of the repository under review. A batch
 /// of one is no batch: that change is told to go alone.
-/// Shadow batches (NIT-217) queue apart from real ones.
-fn close_if_due(db: &Db, rules: &ReviewRules, window: Window, repo: &str, reviewer: &str, shadow: bool) -> Result<Option<(i64, Vec<Queued>)>> {
+fn close_if_due(db: &Db, rules: &ReviewRules, window: Window, repo: &str, reviewer: &str) -> Result<Option<(i64, Vec<Queued>)>> {
     let dir = crate::paths::data_dir().join("review-batches");
     std::fs::create_dir_all(&dir)?;
-    let name = if shadow { format!("{}-shadow", lock_name(repo, reviewer)) } else { lock_name(repo, reviewer) };
+    let name = lock_name(repo, reviewer);
     let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join(format!("{name}.lock")))?;
     if lock.try_lock().is_err() {
         return Ok(None);
     }
-    let mut stmt = db.conn.prepare(&format!("SELECT {COLUMNS} FROM review_queue WHERE repo = ?1 AND reviewer = ?2 AND shadow = ?3 AND state = 'waiting' ORDER BY id"))?;
-    let rows: Vec<Queued> = stmt.query_map(params![repo, reviewer, shadow], row)?.collect::<rusqlite::Result<_>>()?;
+    let mut stmt = db.conn.prepare(&format!("SELECT {COLUMNS} FROM review_queue WHERE repo = ?1 AND reviewer = ?2 AND shadow = 0 AND state = 'waiting' ORDER BY id"))?;
+    let rows: Vec<Queued> = stmt.query_map(params![repo, reviewer], row)?.collect::<rusqlite::Result<_>>()?;
     let mut waiting = vec![];
     for r in rows {
         if r.pid == std::process::id() || crate::submit_job::process_runs(r.pid) {
-            if !project_allows_batch(db, &r.issue, shadow)? {
+            if !project_allows_batch(db, &r.issue)? {
                 db.conn.execute("UPDATE review_queue SET state = 'alone', why = 'the current project mode does not use this review batch' WHERE id = ?1 AND state = 'waiting'", [r.id])?;
                 continue;
             }
@@ -357,15 +356,15 @@ fn close_if_due(db: &Db, rules: &ReviewRules, window: Window, repo: &str, review
     // A batch whose process died must not keep the queue busy.
     let reviewing: Vec<i64> = db
         .conn
-        .prepare("SELECT id FROM review_batch WHERE repo = ?1 AND reviewer = ?2 AND shadow = ?3 AND state = 'reviewing'")?
-        .query_map(params![repo, reviewer, shadow], |r| r.get(0))?
+        .prepare("SELECT id FROM review_batch WHERE repo = ?1 AND reviewer = ?2 AND shadow = 0 AND state = 'reviewing'")?
+        .query_map(params![repo, reviewer], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     for batch in reviewing {
         settle_dead_batch(db, batch)?;
     }
     let busy: bool = db.conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM review_batch WHERE repo = ?1 AND reviewer = ?2 AND shadow = ?3 AND state = 'reviewing')",
-        params![repo, reviewer, shadow],
+        "SELECT EXISTS (SELECT 1 FROM review_batch WHERE repo = ?1 AND reviewer = ?2 AND shadow = 0 AND state = 'reviewing')",
+        params![repo, reviewer],
         |r| r.get(0),
     )?;
     let due = waiting.len() >= max
@@ -392,18 +391,18 @@ fn close_if_due(db: &Db, rules: &ReviewRules, window: Window, repo: &str, review
         )?;
         return Ok(None);
     }
-    claim(db, repo, reviewer, shadow, taken)
+    claim(db, repo, reviewer, taken)
 }
 
 /// Makes a batch of the changes taken, in one write that no newer submit can slip into: only those
 /// still waiting join (one superseded since stays superseded), and with fewer than two left there
 /// is no batch and nothing changes.
-fn claim(db: &Db, repo: &str, reviewer: &str, shadow: bool, taken: Vec<Queued>) -> Result<Option<(i64, Vec<Queued>)>> {
+fn claim(db: &Db, repo: &str, reviewer: &str, taken: Vec<Queued>) -> Result<Option<(i64, Vec<Queued>)>> {
     let tx = rusqlite::Transaction::new_unchecked(&db.conn, rusqlite::TransactionBehavior::Immediate)?;
     let issues: Vec<String> = taken.iter().map(|r| r.issue.clone()).collect();
     tx.execute(
-        "INSERT INTO review_batch (repo, reviewer, issues, state, pid, started_at, shadow) VALUES (?1, ?2, ?3, 'reviewing', ?4, ?5, ?6)",
-        params![repo, reviewer, serde_json::to_string(&issues)?, std::process::id(), now(), shadow],
+        "INSERT INTO review_batch (repo, reviewer, issues, state, pid, started_at, shadow) VALUES (?1, ?2, ?3, 'reviewing', ?4, ?5, 0)",
+        params![repo, reviewer, serde_json::to_string(&issues)?, std::process::id(), now()],
     )?;
     let batch = tx.last_insert_rowid();
     let mut claimed = vec![];
@@ -459,13 +458,12 @@ fn lock_name(repo: &str, reviewer: &str) -> String {
 }
 
 /// Reviews a batch in one call and writes each change's review, or why it goes alone, into its row.
-/// Each change's timeline says so under its own submitter; a shadow batch, which only measures,
-/// says nothing on the issues.
-fn run_batch(db: &Db, rules: &ReviewRules, batch: i64, rows: &[Queued], shadow: bool) -> Result<()> {
+/// Each change's timeline says so under its own submitter.
+fn run_batch(db: &Db, rules: &ReviewRules, batch: i64, rows: &[Queued]) -> Result<()> {
     let mut checked_rules = rules.clone();
     let expected = rules.yolo_guards.first().and_then(|g| g.authority.clone());
     for row in rows {
-        if !project_allows_batch(db, &row.issue, shadow)?
+        if !project_allows_batch(db, &row.issue)?
             || crate::project_modes::authority_for_issue(db, &row.issue)? != expected {
             fail_batch(db, batch, "the project review mode changed before its batch launched; submit again")?;
             return Ok(());
@@ -482,13 +480,13 @@ fn run_batch(db: &Db, rules: &ReviewRules, batch: i64, rows: &[Queued], shadow: 
     let project = (projects.len() == 1).then(|| projects.into_iter().next()).flatten();
     let _performance = crate::performance_attribution::Scope::new(db, crate::performance_attribution::Context { project, review_batch_id: Some(batch), ..Default::default() });
     let keys: Vec<String> = rows.iter().map(|r| r.issue.clone()).collect();
-    for (i, r) in rows.iter().enumerate().filter(|_| !shadow) {
+    for (i, r) in rows.iter().enumerate() {
         let with: Vec<&str> = keys.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, k)| k.as_str()).collect();
         let note = if r.note.is_empty() { String::new() } else { format!(" ({})", r.note) };
         let started = format!("Review by {}{note} started in a batch with {}", r.reviewer, with.join(", "));
         db.log_event(&actor_of(r), Some(&r.issue), Some(&r.worktree), "review_started", &started)?;
     }
-    // A worktree already cleaned up (a shadow change Nitely landed meanwhile): a scratch clone of the
+    // A worktree already cleaned up (a change Nitely landed meanwhile): a scratch clone of the
     // repo at the change's head stands in for it, so what its findings cite is read as the change
     // has it; the repo itself only when even that cannot be made. Removed when the batch is done.
     let scratch = Scratch(std::cell::RefCell::new(vec![]));
@@ -555,9 +553,6 @@ fn run_batch(db: &Db, rules: &ReviewRules, batch: i64, rows: &[Queued], shadow: 
                 r.verdict = "changes".into();
             }
             Err(_) => carried[*k].push(finding),
-        }
-        if shadow {
-            continue;
         }
         let note = format!("Reviewed in a batch with {second}, which interacts with it: {what}. {second} is reviewed again on top of this change once it lands.");
         db.add_note(first, &note, "review", &actor_of(&rows[*j]))?;
@@ -652,76 +647,6 @@ fn not_on_top_of(db: &Db, worktree: &Path, key: &str) -> Result<Option<String>> 
     Ok(Some(format!("{key} landed at {at}, and this branch is not rebased onto it yet")))
 }
 
-/// A change to review again in a shadow batch, after its single review decided it (NIT-217).
-#[derive(Debug, Clone)]
-pub struct Shadow {
-    pub issue: String,
-    pub title: String,
-    pub repo: String,
-    pub worktree: String,
-    pub branch: String,
-    pub base: String,
-    pub head: String,
-    pub files: Vec<String>,
-    pub lines: usize,
-    pub reviewer: String,
-    pub note: String,
-    /// The single review's row, to compare with.
-    pub review_id: i64,
-    pub rules: ReviewRules,
-}
-
-/// Puts a change its single review already decided in the shadow queue and stays until its shadow
-/// batch is reviewed (this process may be the one that reviews it). Nothing routes on the result:
-/// it is recorded for `nitely batches compare`.
-pub fn shadow(db: &Db, s: &Shadow) -> Result<()> {
-    if let Err(e) = s.rules.require_enabled() {
-        if e.is::<crate::review::Disabled>() || e.is::<crate::project_yolo::SkipReview>() { return Ok(()); }
-        return Err(e);
-    }
-    let window = Window::parse(&s.rules.batch_window).unwrap_or(Window::After(Duration::from_secs(300)));
-    db.conn.execute(
-        "INSERT INTO review_queue (issue_key, repo, reviewer, note, title, branch, worktree, base, head, lines, files, pid, actor, state, queued_at, shadow, review_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, '', 'waiting', ?13, 1, ?14)",
-        params![
-            s.issue,
-            s.repo,
-            s.reviewer,
-            s.note,
-            s.title,
-            s.branch,
-            s.worktree,
-            s.base,
-            s.head,
-            s.lines as i64,
-            serde_json::to_string(&s.files)?,
-            std::process::id(),
-            now(),
-            s.review_id
-        ],
-    )?;
-    let id = db.conn.last_insert_rowid();
-    loop {
-        let row = queued(db, id)?.context("the change's place in the shadow queue went missing")?;
-        match row.state.as_str() {
-            "waiting" => {
-                if let Err(e) = s.rules.require_enabled() {
-                    db.conn.execute("UPDATE review_queue SET state = 'alone', why = ?2 WHERE id = ?1 AND state = 'waiting'", params![id, format!("{e:#}")])?;
-                    if e.is::<crate::review::Disabled>() || e.is::<crate::project_yolo::SkipReview>() { return Ok(()); }
-                    return Err(e);
-                }
-                if let Some((batch, rows)) = close_if_due(db, &s.rules, window, &s.repo, &s.reviewer, true)? {
-                    run_batch(db, &s.rules, batch, &rows, true)?;
-                    continue;
-                }
-            }
-            "reviewing" => settle_dead_batch(db, row.batch_id.unwrap_or_default())?,
-            _ => return Ok(()),
-        }
-        std::thread::sleep(POLL);
-    }
-}
-
 /// A newer submit of an issue replaces its change waiting in the queue.
 pub fn supersede_waiting(db: &Db, issue: &str) -> Result<()> {
     db.conn.execute("UPDATE review_queue SET state = 'superseded' WHERE issue_key = ?1 COLLATE NOCASE AND state = 'waiting'", [issue])?;
@@ -801,9 +726,9 @@ mod tests {
         let (_, a) = q.waiting("repo-disabled", "One");
         let (_, b) = q.waiting("repo-disabled", "Two");
         let mut rules = rules(&["nitely-test-do-not-launch"]);
-        let (batch, rows) = close_if_due(&q.db, &rules, Window::After(Duration::ZERO), "repo-disabled", "claude", false).unwrap().unwrap();
+        let (batch, rows) = close_if_due(&q.db, &rules, Window::After(Duration::ZERO), "repo-disabled", "claude").unwrap().unwrap();
         rules.enabled = false;
-        run_batch(&q.db, &rules, batch, &rows, false).unwrap();
+        run_batch(&q.db, &rules, batch, &rows).unwrap();
         for id in [a, b] {
             let row = q.row(id);
             assert_eq!(row.state, "alone");
@@ -819,9 +744,9 @@ mod tests {
         let (_, a) = q.waiting("repo-mode", "One");
         let (_, b) = q.waiting("repo-mode", "Two");
         let rules = rules(&["nitely-test-do-not-launch"]);
-        let (batch, rows) = close_if_due(&q.db, &rules, Window::After(Duration::ZERO), "repo-mode", "claude", false).unwrap().unwrap();
+        let (batch, rows) = close_if_due(&q.db, &rules, Window::After(Duration::ZERO), "repo-mode", "claude").unwrap().unwrap();
         q.db.set_project_review_mode("NIT", Mode::Custom, Options { pre_review: Some(PreReview::Individual), ..Default::default() }, 0, &Actor::Human).unwrap();
-        run_batch(&q.db, &rules, batch, &rows, false).unwrap();
+        run_batch(&q.db, &rules, batch, &rows).unwrap();
         for id in [a, b] {
             assert_eq!(q.row(id).state, "alone");
             assert!(q.row(id).result.is_none());
@@ -829,7 +754,7 @@ mod tests {
         }
         let (_, c) = q.waiting("repo-mode", "Three");
         let (_, d) = q.waiting("repo-mode", "Four");
-        assert!(close_if_due(&q.db, &rules, Window::After(Duration::ZERO), "repo-mode", "claude", false).unwrap().is_none());
+        assert!(close_if_due(&q.db, &rules, Window::After(Duration::ZERO), "repo-mode", "claude").unwrap().is_none());
         for id in [c, d] { assert_eq!(q.row(id).state, "alone"); }
     }
 
@@ -840,13 +765,13 @@ mod tests {
         // One change, inside its window: nothing closes yet. A second fills the batch.
         let (_, a) = q.waiting("repo-a", "One");
         let no_reviewer = rules(&["nitely-test-no-such-reviewer"]);
-        assert!(close_if_due(&q.db, &no_reviewer, wait, "repo-a", "claude", false).unwrap().is_none());
+        assert!(close_if_due(&q.db, &no_reviewer, wait, "repo-a", "claude").unwrap().is_none());
         let (_, b) = q.waiting("repo-a", "Two");
-        let (batch, rows) = close_if_due(&q.db, &no_reviewer, wait, "repo-a", "claude", false).unwrap().unwrap();
+        let (batch, rows) = close_if_due(&q.db, &no_reviewer, wait, "repo-a", "claude").unwrap().unwrap();
         assert_eq!(rows.iter().map(|r| r.id).collect::<Vec<_>>(), [a, b]);
         assert_eq!(q.row(a).state, "reviewing");
         // A reviewer that cannot run sends every change back to be reviewed alone.
-        run_batch(&q.db, &no_reviewer, batch, &rows, false).unwrap();
+        run_batch(&q.db, &no_reviewer, batch, &rows).unwrap();
         for id in [a, b] {
             let r = q.row(id);
             assert_eq!(r.state, "alone");
@@ -855,7 +780,7 @@ mod tests {
 
         // With `busy`, a change goes as soon as no batch of its repository is under review: alone.
         let (_, lone) = q.waiting("repo-b", "Lone");
-        assert!(close_if_due(&q.db, &no_reviewer, Window::Busy, "repo-b", "claude", false).unwrap().is_none());
+        assert!(close_if_due(&q.db, &no_reviewer, Window::Busy, "repo-b", "claude").unwrap().is_none());
         assert_eq!((q.row(lone).state.as_str(), q.row(lone).why.as_deref()), ("alone", Some("no other change joined it in time")));
     }
 
@@ -868,8 +793,8 @@ mod tests {
         let rules = rules(&[&sh, "-c", reply]);
         let (first, a) = q.waiting("repo-c", "Bump one");
         let (second, b) = q.waiting("repo-c", "Bump two");
-        let (batch, rows) = close_if_due(&q.db, &rules, Window::After(Duration::from_secs(300)), "repo-c", "claude", false).unwrap().unwrap();
-        run_batch(&q.db, &rules, batch, &rows, false).unwrap();
+        let (batch, rows) = close_if_due(&q.db, &rules, Window::After(Duration::from_secs(300)), "repo-c", "claude").unwrap().unwrap();
+        run_batch(&q.db, &rules, batch, &rows).unwrap();
         let review = |id| -> Review { serde_json::from_str(q.row(id).result.as_deref().unwrap()).unwrap() };
         let (one, two) = (review(a), review(b));
         assert_eq!((one.verdict.as_str(), one.batch.as_ref().unwrap().with.clone()), ("pass", vec![second.clone()]));
@@ -895,7 +820,7 @@ mod tests {
         // A waiting change whose own submit is gone leaves the queue.
         let (_, gone) = q.waiting("repo-e", "Gone");
         q.db.conn.execute("UPDATE review_queue SET pid = 999999 WHERE id = ?1", [gone]).unwrap();
-        assert!(close_if_due(&q.db, &rules(&[]), Window::After(Duration::ZERO), "repo-e", "claude", false).unwrap().is_none());
+        assert!(close_if_due(&q.db, &rules(&[]), Window::After(Duration::ZERO), "repo-e", "claude").unwrap().is_none());
         assert_eq!(q.row(gone).state, "abandoned");
         // A newer submit of the issue replaces the change waiting in the queue.
         let (key, waiting) = q.waiting("repo-f", "Replaced");
@@ -905,7 +830,7 @@ mod tests {
         // superseded change stays superseded, and one left alone is no batch.
         let (_, kept) = q.waiting("repo-f", "Kept");
         let taken = vec![q.row(waiting), q.row(kept)];
-        assert!(claim(&q.db, "repo-f", "claude", false, taken).unwrap().is_none());
+        assert!(claim(&q.db, "repo-f", "claude", taken).unwrap().is_none());
         assert_eq!((q.row(waiting).state.as_str(), q.row(kept).state.as_str()), ("superseded", "waiting"));
         let batches: i64 = q.db.conn.query_row("SELECT COUNT(*) FROM review_batch WHERE repo = 'repo-f'", [], |r| r.get(0)).unwrap();
         assert_eq!(batches, 0);
@@ -923,7 +848,7 @@ mod tests {
         let mut q = Queue::new();
         q.db.conn.execute("INSERT INTO review_batch (repo, reviewer, state, pid, started_at) VALUES ('repo-g', 'claude', 'reviewing', 999999, ?1)", [now()]).unwrap();
         let (_, lone) = q.waiting("repo-g", "After a crash");
-        assert!(close_if_due(&q.db, &rules(&[]), Window::Busy, "repo-g", "claude", false).unwrap().is_none());
+        assert!(close_if_due(&q.db, &rules(&[]), Window::Busy, "repo-g", "claude").unwrap().is_none());
         assert_eq!(q.row(lone).state, "alone", "the dead batch no longer counts as busy");
     }
 
@@ -936,8 +861,8 @@ mod tests {
         let rules = rules(&[&sh, "-c", reply]);
         let (first, _) = q.waiting("repo-h", "Bump one");
         let (_, b) = q.waiting("repo-h", "Bump two");
-        let (batch, rows) = close_if_due(&q.db, &rules, Window::After(Duration::from_secs(300)), "repo-h", "claude", false).unwrap().unwrap();
-        run_batch(&q.db, &rules, batch, &rows, false).unwrap();
+        let (batch, rows) = close_if_due(&q.db, &rules, Window::After(Duration::from_secs(300)), "repo-h", "claude").unwrap().unwrap();
+        run_batch(&q.db, &rules, batch, &rows).unwrap();
         let row = q.row(b);
         assert_eq!(row.state, "alone");
         let carried: Vec<Finding> = serde_json::from_str(row.result.as_deref().unwrap()).unwrap();

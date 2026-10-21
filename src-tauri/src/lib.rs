@@ -289,11 +289,6 @@ async fn project_focus(project: String) -> Result<nitely_core::focus::ProjectFoc
 }
 
 #[tauri::command]
-async fn project_yolo(project: String) -> Result<nitely_core::project_yolo::ProjectYolo, String> {
-    db()?.project_yolo(&project).map_err(err)
-}
-
-#[tauri::command]
 async fn project_review_mode(project: String) -> Result<nitely_core::project_modes::ProjectReviewMode, String> {
     db()?.project_review_mode(&project).map_err(err)
 }
@@ -331,11 +326,6 @@ async fn retry_periodic_review(project: String, repo: String, id: i64) -> Result
 }
 
 /// Only the app exposes this human setting; CLI and MCP may read it but cannot enable it.
-#[tauri::command]
-async fn set_project_yolo(project: String, enabled: bool, expected_revision: i64) -> Result<nitely_core::project_yolo::ProjectYolo, String> {
-    db()?.set_project_yolo(&project, enabled, expected_revision, &ME).map_err(err)
-}
-
 /// Audit confirmation only tightens verification; it never approves a patch.
 #[tauri::command]
 async fn confirm_verification_escape(id: i64, rule: String, evidence: String) -> Result<nitely_core::verification_audit::Report, String> {
@@ -1072,7 +1062,6 @@ pub fn run() {
             goal_report,
             goal_order,
             project_focus,
-            project_yolo,
             project_review_mode,
             project_review_mode_effective,
             lands_pipeline,
@@ -1080,7 +1069,6 @@ pub fn run() {
             set_project_review_mode,
             periodic_review_status,
             retry_periodic_review,
-            set_project_yolo,
             confirm_verification_escape,
             retry_verification_audit,
             set_project_focus,

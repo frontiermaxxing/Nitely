@@ -46,9 +46,8 @@ pub struct ReviewRules {
     pub require_cross_vendor: bool,
     /// Review several changes in one reviewer call (docs/batching.md): `off` (each alone, the
     /// default), `small` (changes of at most `small_lines` and `small_files`), or `all`. Only a
-    /// submit that runs in the background waits for a batch. `shadow` measures batching without
-    /// using it: each change is reviewed alone, which decides, and small ones are also reviewed in
-    /// a batch that is only recorded (`nitely batches compare`).
+    /// submit that runs in the background waits for a batch. Set by the review mode (Fast reviews
+    /// each batch of changes with no goal as one); the playbook's own `[review] batch` is retired.
     pub batch: BatchMode,
     /// How long the oldest change in the queue waits for others ("5m", "30s", "0"), or `busy`:
     /// until no batch of the repository is being reviewed.
@@ -64,11 +63,12 @@ pub struct ReviewRules {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BatchMode {
+    /// The retired `shadow` measurement reads as `off` (NIT-499).
     #[default]
+    #[serde(alias = "shadow")]
     Off,
     Small,
     All,
-    Shadow,
 }
 
 pub const DISABLED_NOTE: &str = "Review disabled for this project";

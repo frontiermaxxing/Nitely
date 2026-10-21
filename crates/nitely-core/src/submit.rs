@@ -63,10 +63,6 @@ pub struct Submitted {
     /// The land Nitely ran itself, when the playbook's `[land] by` lands without the author.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub land: Option<crate::land::Landed>,
-    /// With `[review] batch = "shadow"`: the change to review again in a shadow batch once this
-    /// submit has handed its result back (NIT-217).
-    #[serde(skip)]
-    pub shadow: Option<crate::review_batch::Shadow>,
     /// The issue's state afterwards.
     pub state: String,
     pub next: String,
@@ -203,7 +199,6 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         pr_url: None,
         pr_error: None,
         land: None,
-        shadow: None,
         state: issue.state.clone(),
         next: String::new(),
     };
@@ -287,9 +282,6 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
             crate::review_batch::hold_interactions(db, &worktree, &mut review)?;
             let reviewer = choice.reviewer.clone();
             review.note = choice.note.clone();
-            if opts.batch && pb.review.batch == crate::review::BatchMode::Shadow && review.reused.is_none() {
-                out.shadow = shadow_of(db, &pb, &issue, &root, &worktree, &branch, &since, &files, &vendor, &choice, &out.reasons, previous.as_ref())?;
-            }
             out.reasons.extend(pb.review.independence_reason(&reviewer, &vendor, &choice.note));
             out.reasons.extend(pb.review.flag_reasons(&review));
             out.review = Some(review);
@@ -398,9 +390,6 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         // The commit the gate and review ran on, not what HEAD is now: a commit since was not reviewed.
         let diff = diff_id(&worktree, &since, &out.commit).ok();
         db.conn.execute("UPDATE review SET rules = ?2, diff_id = ?3 WHERE id = ?1", rusqlite::params![review_id, rules_of(&pb.review), diff])?;
-    }
-    if let Some(shadow) = out.shadow.as_mut() {
-        shadow.review_id = review_id;
     }
     // A request to accept a finding this round no longer raised has nothing left to decide.
     if let Some(r) = &out.review {
@@ -560,7 +549,6 @@ fn submit_into_goal(db: &mut Db, config: &crate::Config, issue: &IssueRecord, ro
         pr_error: None,
         state: db.issue(&issue.key)?.map(|i| i.state).unwrap_or_default(),
         land: Some(landed),
-        shadow: None,
         next,
     })
 }
@@ -609,49 +597,6 @@ fn in_a_batch(
             Ok((None, carried))
         }
     }
-}
-
-/// The change to review again in a shadow batch, when it could have joined a real one.
-#[allow(clippy::too_many_arguments)]
-fn shadow_of(
-    db: &Db,
-    pb: &Playbook,
-    issue: &IssueRecord,
-    root: &Path,
-    worktree: &Path,
-    branch: &str,
-    since: &str,
-    files: &[String],
-    vendor: &str,
-    choice: &crate::review::Choice,
-    reasons: &[String],
-    previous: Option<&PreviousRound>,
-) -> Result<Option<crate::review_batch::Shadow>> {
-    if let Err(e) = pb.review.require_enabled() {
-        if e.is::<crate::review::Disabled>() || e.is::<crate::project_yolo::SkipReview>() { return Ok(None); }
-        return Err(e);
-    }
-    let lines = crate::review_batch::changed_lines(worktree, since)?;
-    let large_repo = pb.lanes.as_ref().is_some_and(|l| l.large_repo);
-    if crate::review_batch::why_alone(db, &pb.review, vendor, choice, reasons, files, lines, previous, large_repo, &issue.key)?.is_some() {
-        return Ok(None);
-    }
-    let rev = |r: &str| git(worktree, &["rev-parse", r]).map(|o| o.trim().to_string());
-    Ok(Some(crate::review_batch::Shadow {
-        issue: issue.key.clone(),
-        title: issue.title.clone(),
-        repo: crate::paths::normalize(&root.to_string_lossy()),
-        worktree: worktree.to_string_lossy().into_owned(),
-        branch: branch.to_string(),
-        base: rev(since)?,
-        head: rev("HEAD")?,
-        files: files.to_vec(),
-        lines,
-        reviewer: choice.reviewer.clone(),
-        note: choice.note.clone(),
-        review_id: 0,
-        rules: pb.review.clone(),
-    }))
 }
 
 /// What a single review is told about the change beyond its diff (NIT-282): the issue it is for,
@@ -1410,12 +1355,14 @@ reason = "money logic"
     }
 
     #[test]
-    fn yolo_skips_automatic_checks_but_preserves_manual_checks_and_restored_policy() {
+    fn tests_and_review_off_skip_automatic_checks_but_preserve_manual_checks_and_restored_policy() {
         let mut f = fixture();
         let policy = "[worktree]\ndir = \"../wt/{key}\"\n[gate]\ncommands = [\"exit 37\"]\n[review]\nreviewer = { \"*\" = \"missing\" }\ncommands = { missing = [\"nitely-test-do-not-launch\"] }\n";
         std::fs::write(f.repo.join(playbook::PLAYBOOK_PATH), policy).unwrap();
         sh(&f.repo, &["commit", "-qam", "checks must not launch"]);
-        f.db.set_project_yolo("NIT", true, 0, &Actor::Human).unwrap();
+        use crate::project_modes::{Mode, Options, PreReview, TestDepth};
+        let off = || Options { test_depth: Some(TestDepth::Off), pre_review: Some(PreReview::Off), ..Default::default() };
+        f.db.set_project_review_mode("NIT", Mode::Custom, off(), 0, &Actor::Human).unwrap();
         let (issue, wt) = f.committed("Unchecked feature", "feature.txt");
         let s = f.submit(&wt, true).unwrap();
         assert!(s.yolo && !s.gate.passed && s.gate.skipped.is_some() && s.review.is_none());
@@ -1424,9 +1371,9 @@ reason = "money logic"
         assert!(!describe(&issue, &s, Default::default()).contains("**Gate** passed"));
         assert!(!playbook::run_gate(&f.db, &f.repo, &wt, Some(&issue.key), &f.actor).unwrap().passed, "manual checks still execute");
         let pb = Playbook::load(&f.repo).unwrap();
-        f.db.set_project_yolo("NIT", false, 1, &Actor::Human).unwrap();
+        f.db.set_project_review_mode("NIT", Mode::Release, Options::default(), 1, &Actor::Human).unwrap();
         assert!(crate::land::check_approval(&f.db, &pb, &issue.key, &wt, "main", &s.branch).unwrap_err().to_string().contains("project review mode changed"));
-        f.db.set_project_yolo("NIT", true, 2, &Actor::Human).unwrap();
+        f.db.set_project_review_mode("NIT", Mode::Custom, off(), 2, &Actor::Human).unwrap();
         crate::land::check_approval(&f.db, &pb, &issue.key, &wt, "main", &s.branch).expect("the same policy restored covers the work checked under it (NIT-487)");
         f.submit(&wt, true).unwrap();
         let mut protected = pb.clone();
@@ -1471,7 +1418,7 @@ reason = "money logic"
             std::fs::write(f.repo.join(playbook::PLAYBOOK_PATH), &policy).unwrap();
             sh(&f.repo, &["commit", "-qam", "disable review"]);
             let s = submit(&mut f.db, &f.config, &SubmitOptions { dir: &wt.to_string_lossy(), issue_key: None, skip_review: false, local_only: mode != "shadow", batch: true, solution: None, solution_commit: None, solution_patch_id: None }, &f.actor).unwrap();
-            assert!(s.gate.passed && s.review_disabled && s.review.is_none() && s.shadow.is_none(), "{s:?}");
+            assert!(s.gate.passed && s.review_disabled && s.review.is_none(), "{s:?}");
             assert_eq!((s.approver.as_str(), s.state.as_str()), ("agent", "In Review"));
             assert!(s.reasons.is_empty());
             assert_eq!(s.pushed, mode == "shadow", "one mode exercises the remote boundary");
@@ -1764,53 +1711,6 @@ reason = "money logic"
         f.submit(&wt, true).unwrap();
         let said: Vec<String> = f.db.timeline(&fg.key).unwrap().into_iter().filter_map(|t| t.summary).collect();
         assert!(!said.iter().any(|s| s.contains("batch")), "{said:?}");
-    }
-
-    #[test]
-    fn a_shadow_batch_is_recorded_beside_the_single_reviews_and_routes_nothing() {
-        let mut f = fixture();
-        batching(&f, "60s");
-        let pb_path = f.repo.join(playbook::PLAYBOOK_PATH);
-        let pb = std::fs::read_to_string(&pb_path).unwrap();
-        std::fs::write(&pb_path, pb.replace("batch = \"small\"", "batch = \"shadow\"")).unwrap();
-        let db_path = f.base.join("t.db");
-        // Each change is reviewed alone, which decides: both pass and are ready to land.
-        let (a, wa) = f.committed("Totals", "shared.txt");
-        let (b, wb) = f.committed("Totals again", "shared.txt");
-        let decided: Vec<Submitted> = [&wa, &wb].iter().map(|wt| submit_in_background(&db_path, &f.config, &f.actor, wt).unwrap()).collect();
-        for s in &decided {
-            let review = s.review.as_ref().unwrap();
-            assert!(review.batch.is_none() && review.verdict == "pass" && s.state == "In Review", "{s:?}");
-            assert!(s.shadow.as_ref().is_some_and(|sh| sh.review_id > 0), "{s:?}");
-        }
-        // A foreground submit is never measured.
-        let (_, wc) = f.committed("Foreground", "fg.txt");
-        assert!(f.submit(&wc, true).unwrap().shadow.is_none());
-
-        // Their shadow batch, once both jobs have handed their results back.
-        let threads: Vec<_> = decided
-            .into_iter()
-            .map(|s| {
-                let db_path = db_path.clone();
-                std::thread::spawn(move || crate::review_batch::shadow(&Db::open(&db_path).unwrap(), s.shadow.as_ref().unwrap()).map_err(|e| format!("{e:#}")))
-            })
-            .collect();
-        for t in threads {
-            t.join().unwrap().unwrap();
-        }
-        let pairs = crate::review_compare::shadow_pairs(&f.db).unwrap();
-        assert_eq!(pairs.len(), 2, "{pairs:?}");
-        // The batch found a P1 on its second change that its single review did not: recorded, never routed.
-        let differ: Vec<&crate::review_compare::Pair> = pairs.iter().filter(|p| p.single.verdict != p.batched.verdict).collect();
-        assert_eq!(differ.len(), 1, "{pairs:?}");
-        assert_eq!((differ[0].batched.verdict.as_str(), differ[0].batch_size), ("changes", 2));
-        for key in [&a.key, &b.key] {
-            assert_eq!(f.db.issue(key).unwrap().unwrap().state, "In Review");
-            let said: Vec<String> = f.db.timeline(key).unwrap().into_iter().filter_map(|t| t.summary).collect();
-            assert!(!said.iter().any(|s| s.contains("batch")), "a shadow batch says nothing on the issue: {said:?}");
-        }
-        let report = crate::review_compare::Report::of(&pairs);
-        assert_eq!((report.changes, report.batches, report.same_verdict, report.blocking_batched), (2, 1, 1, 1));
     }
 
     #[test]

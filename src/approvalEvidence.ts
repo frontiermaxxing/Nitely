@@ -13,7 +13,7 @@ export function automatedReviewEvidence(review?: { reviewer?: string; verdict?: 
   const disabled = review?.verdict === "disabled" || yolo || light;
   return {
     ran: !!review?.reviewer && review.verdict !== "none" && !disabled,
-    text: review?.note || (yolo ? "YOLO mode: automatic gate and PR review skipped" : light ? "Basic checks: pre-merge review exempt; post-merge audit applies" : disabled ? "Review disabled for this project" : "No automated review ran."),
+    text: review?.note || (yolo ? "Tests and review off (Custom mode): automatic gate and PR review skipped" : light ? "Basic checks: pre-merge review exempt; post-merge audit applies" : disabled ? "Review disabled for this project" : "No automated review ran."),
     tone: disabled ? null : "bad" as const,
   };
 }

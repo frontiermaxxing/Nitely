@@ -1,39 +1,17 @@
-//! Human-controlled project bypass for automatic verification. Manual checks still run.
+//! Custom mode with automatic tests and PR review both off: the gate and the review are skipped
+//! and recorded as skipped. The legacy YOLO switch and its table are gone (NIT-499); only the
+//! person chooses this, in Custom. Manual checks still run.
 use crate::{Db, issues::Actor, playbook::{self, GateResult}};
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection};
-use serde::Serialize;
 use std::path::{Path, PathBuf};
 
-pub const NOTE: &str = "YOLO mode: automatic gate and PR review skipped";
+pub const NOTE: &str = "Tests and review off (Custom mode): automatic gate and PR review skipped";
 
-#[derive(Debug, Clone, Serialize)]
-pub struct ProjectYolo {
-    pub project: String,
-    pub enabled: bool,
-    pub revision: i64,
-}
-
-fn read(conn: &Connection, project: &str) -> Result<ProjectYolo> {
-    let s=crate::project_modes::read(conn,project)?;
-    let o=s.options();
-    Ok(ProjectYolo{project:s.project,enabled:o.test_depth==Some(crate::project_modes::TestDepth::Off)&&o.pre_review==Some(crate::project_modes::PreReview::Off),revision:s.revision})
-}
-impl Db {
-    pub fn project_yolo(&self,project:&str)->Result<ProjectYolo> {read(&self.conn,project)}
-    pub fn set_project_yolo(&mut self,project:&str,enabled:bool,expected_revision:i64,actor:&Actor)->Result<ProjectYolo> {
-        let before=self.project_yolo(project)?;
-        // YOLO is retired (NIT-491): the switch sets Custom with tests and review off.
-        let overrides=if enabled {crate::project_modes::Options{test_depth:Some(crate::project_modes::TestDepth::Off),pre_review:Some(crate::project_modes::PreReview::Off),..Default::default()}}else{Default::default()};
-        self.set_project_review_mode(project,crate::project_modes::Mode::Custom,overrides,expected_revision,actor)?;
-        if before.enabled!=enabled {self.log_event(actor,None,None,"project_yolo_changed",&format!("{project} YOLO mode {}",if enabled {"enabled"}else{"disabled"}))?;}
-        self.project_yolo(project)
-    }
-}
-
+/// Whether the issue's project skips both the gate and the review.
 pub(crate) fn enabled_for_issue(db: &Db, key: &str) -> Result<bool> {
-    let issue = db.issue(key)?.with_context(|| format!("no issue {key}"))?;
-    issue.project.as_deref().map(|p| db.project_yolo(p).map(|s| s.enabled)).unwrap_or(Ok(false))
+    let o = crate::project_modes::for_issue(db, key)?.map(|s| s.options()).unwrap_or_default();
+    Ok(o.test_depth == Some(crate::project_modes::TestDepth::Off) && o.pre_review == Some(crate::project_modes::PreReview::Off))
 }
 
 /// Every member of a stack must opt in; another project's settings never skip its checks.
@@ -101,39 +79,21 @@ impl std::error::Error for SkipReview {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn yolo_is_default_off_human_only_revision_checked_and_project_scoped() {
-        let dir = crate::paths::unique_temp("nitely-yolo", "");
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut db = Db::open(&dir.join("test.db")).unwrap();
-        db.create_project("APP", "App").unwrap();
-        db.create_project("WEB", "Web").unwrap();
-        assert!(!db.project_yolo("APP").unwrap().enabled);
-        assert!(db.set_project_yolo("APP", true, 0, &Actor::Agent("cli".into())).is_err());
-        let enabled = db.set_project_yolo("app", true, 0, &Actor::Human).unwrap();
-        assert!(enabled.enabled);
-        assert_eq!(enabled.revision, 1);
-        assert!(!db.project_yolo("WEB").unwrap().enabled);
-        assert!(db.set_project_yolo("APP", false, 0, &Actor::Human).is_err());
-        assert!(!db.set_project_yolo("APP", false, 1, &Actor::Human).unwrap().enabled);
-        let events: i64 = db.conn.query_row("SELECT COUNT(*) FROM event WHERE type = 'project_yolo_changed' AND actor = 'human'", [], |r| r.get(0)).unwrap();
-        assert_eq!(events, 2);
-        drop(db);
-        std::fs::remove_dir_all(dir).ok();
-    }
+    use crate::project_modes::{Mode, Options, PreReview, TestDepth};
 
     #[test]
-    fn yolo_review_guard_reloads_authority_before_each_launch() {
-        let dir = crate::paths::unique_temp("nitely-yolo-review", "");
+    fn review_guard_reloads_authority_before_each_launch() {
+        let dir = crate::paths::unique_temp("nitely-checks-off-review", "");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("test.db");
         let mut db = Db::open(&path).unwrap();
         db.create_project("APP", "App").unwrap();
         let guard = ReviewGuard { database: path, project: "APP".into(), authority: None };
         guard.require_review().unwrap();
-        db.set_project_yolo("APP", true, 0, &Actor::Human).unwrap();
+        let off = Options { test_depth: Some(TestDepth::Off), pre_review: Some(PreReview::Off), ..Default::default() };
+        db.set_project_review_mode("APP", Mode::Custom, off, 0, &Actor::Human).unwrap();
         assert!(guard.require_review().unwrap_err().is::<SkipReview>());
-        db.set_project_yolo("APP", false, 1, &Actor::Human).unwrap();
+        db.set_project_review_mode("APP", Mode::Release, Options::default(), 1, &Actor::Human).unwrap();
         assert!(guard.require_review().is_err(), "a queued reviewer cannot retain stale mode authority");
         drop(db);
         std::fs::remove_dir_all(dir).ok();

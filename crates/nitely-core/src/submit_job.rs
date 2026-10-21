@@ -444,28 +444,20 @@ pub fn submit_async(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, a
 /// Runs a job: the job's own process calls this. One job of an issue runs at a time (a file lock
 /// per issue); a job superseded while it waited does nothing.
 pub fn run(db: &mut Db, config: &crate::Config, id: i64) -> Result<Job> {
-    run_job(db, config, id, false).map(|(job, _)| job)
+    run_job(db, config, id, false)
 }
 
-/// `run`, then, once the job has handed its result back and released the issue, its change's
-/// shadow batch (`[review] batch = "shadow"`, NIT-217). Only the job's own process does this: it
-/// waits for the batch's window, and nobody waits on that process.
+/// `run` in the job's own process, which nobody waits on, so it may wait for a review batch.
 pub fn run_in_background(db: &mut Db, config: &crate::Config, id: i64) -> Result<Job> {
-    let (job, shadow) = run_job(db, config, id, true)?;
-    if let Some(shadow) = shadow {
-        if let Err(e) = crate::review_batch::shadow(db, &shadow) {
-            eprintln!("the shadow batch of {} did not finish: {e:#}", job.issue);
-        }
-    }
-    Ok(job)
+    run_job(db, config, id, true)
 }
 
 /// `detached`: this is the job's own process, which nobody waits on; otherwise the job runs in its
 /// caller (no process could be started), which waits for it, so it never waits for a review batch.
-fn run_job(db: &mut Db, config: &crate::Config, id: i64, detached: bool) -> Result<(Job, Option<crate::review_batch::Shadow>)> {
+fn run_job(db: &mut Db, config: &crate::Config, id: i64, detached: bool) -> Result<Job> {
     let job = db.submit_job(id)?.with_context(|| format!("no submit job {id}"))?;
     if job.state != "queued" {
-        return Ok((job, None));
+        return Ok(job);
     }
     let locks = crate::paths::data_dir().join("jobs");
     std::fs::create_dir_all(&locks)?;
@@ -477,7 +469,7 @@ fn run_job(db: &mut Db, config: &crate::Config, id: i64, detached: bool) -> Resu
     )?;
     if started == 0 {
         // Superseded while it waited for the lock.
-        return Ok((db.submit_job(id)?.context("the job's record went missing")?, None));
+        return db.submit_job(id)?.context("the job's record went missing");
     }
     let _telemetry = crate::performance_attribution::Scope::new(db, crate::performance_attribution::Context { project: db.issue(&job.issue)?.and_then(|i| i.project), issue: Some(job.issue.clone()), job_id: Some(id), ..Default::default() });
     let tracked = detached.then(|| crate::performance_attribution::track(std::process::id(), "submit")).flatten();
@@ -503,8 +495,7 @@ fn run_job(db: &mut Db, config: &crate::Config, id: i64, detached: bool) -> Resu
         }
     }
     drop(lock);
-    let shadow = outcome.ok().and_then(|s| s.shadow);
-    Ok((db.submit_job(id)?.context("the job's record went missing")?, shadow))
+    db.submit_job(id)?.context("the job's record went missing")
 }
 
 /// Waits up to `limit` for a job to finish, and returns it as it stands then.
@@ -574,7 +565,7 @@ mod tests {
         let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: true, local_only: true, batch: false, solution: Some(&solution), solution_commit: None, solution_patch_id: None };
         let job = enqueue(&db, &opts, &actor).unwrap();
         assert_eq!(db.submit_job(job.id).unwrap().unwrap().solution.as_ref(), Some(&solution));
-        let done = run_job(&mut db, &config, job.id, false).unwrap().0;
+        let done = run_job(&mut db, &config, job.id, false).unwrap();
         assert_eq!(done.result.as_ref().unwrap()["solution"]["title"], solution.title);
         let first = db.reviews(&key).unwrap().remove(0);
         assert!(job.head.starts_with(&first.commit_sha));
@@ -589,7 +580,7 @@ mod tests {
         std::fs::write(wt.join("footer.txt"), "a different implementation").unwrap();
         crate::test_repo::git(&wt, &["add", "."]);
         crate::test_repo::git(&wt, &["commit", "-q", "-m", "different footer"]);
-        let done = run_job(&mut db, &config, queued.id, false).unwrap().0;
+        let done = run_job(&mut db, &config, queued.id, false).unwrap();
         assert!(done.result.as_ref().unwrap()["solution"].is_null());
         let latest = db.reviews(&key).unwrap().remove(0);
         assert_ne!(latest.patch_id, first.patch_id);
@@ -625,7 +616,7 @@ mod tests {
         // Another land absorbed the first commit: this branch has exactly the same head, but
         // only the help text remains to approve. Its old description covers too much.
         crate::test_repo::git(&wt, &["update-ref", "refs/heads/main", &first]);
-        let done = run_job(&mut db, &config, queued.id, false).unwrap().0;
+        let done = run_job(&mut db, &config, queued.id, false).unwrap();
         let result = done.result.unwrap();
         assert!(result["solution"].is_null());
         let review = db.reviews(&key).unwrap().remove(0);
