@@ -1,0 +1,15 @@
+# The test suite's time budget (goal 20, NIT-522). Every gate reads each test's time from what
+# cargo test and node:test print, shows the slowest, and flags a gate that breaks this budget.
+# docs/testing.md has the baseline and how the times are taken.
+
+# Seconds any one test may take, unless it is a named scenario below.
+test_seconds = 2
+
+# Seconds a whole test binary may take, by the name cargo prints for it (`node` for node:test),
+# in a warm lane.
+[suites]
+nitely_core = 60
+
+# Tests allowed past test_seconds: the end-to-end scenarios each feature keeps (one or two per
+# feature), by the name the runner prints, each with what it proves. NIT-523 names them.
+[scenarios]

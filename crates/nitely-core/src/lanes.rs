@@ -1180,6 +1180,7 @@ fn gate_on(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Opt
     let retries = pb.gate.retries;
     let req = Request { project: &project, issue, kind, snapshot: &snap, command: &key };
     let mut yolo_skipped = false;
+    let mut timings = crate::test_budget::Timings::default();
     let run = run_with(db, repo_root, pb, &req, actor, &mut |_| {}, yolo_keys, &mut |lane: &Path, log: &Path, limit: Duration, temp: &Path, share: Share| {
         // The machine's share as it is when the gate starts, not when it was queued (NIT-291), with
         // the cap it was admitted with (NIT-323).
@@ -1203,7 +1204,8 @@ fn gate_on(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Opt
                 let ended = run_logged(&command, lane, log, limit, share, Some(temp))?;
                 let (code, timed_out) = (ended.code, ended.timed_out);
                 peak = peak.max(ended.peak);
-                let output = log_since(log, from);
+                let text = log_text_since(log, from);
+                let output = playbook::tail(&text);
                 let seconds = started.elapsed().as_secs();
                 if timed_out {
                     let output = format!("Ran past the lane's {}-minute limit and was stopped.\n{output}", limit.as_secs() / 60);
@@ -1220,10 +1222,12 @@ fn gate_on(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Opt
                         });
                         flaked.push(playbook::Flake { command: command.clone(), tests, output: failures.swap_remove(0) });
                     }
+                    timings.extend(crate::test_budget::parse(&text));
                     results.push(playbook::CommandResult { command: command.clone(), ok: true, seconds, output, skipped: false, timed_out: false });
                     break;
                 }
                 if failures.len() as u32 >= retries {
+                    timings.extend(crate::test_budget::parse(&text));
                     results.push(playbook::CommandResult { command: command.clone(), ok: false, seconds, output, skipped: false, timed_out: false });
                     return Ok(Ended { code, timed_out: false, peak });
                 }
@@ -1247,6 +1251,8 @@ fn gate_on(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Opt
         let timed_out = why.starts_with(SETUP_TIMED_OUT);
         results.push(playbook::CommandResult { command: format!("lane {}", run.lane.unwrap_or(0)), ok: false, seconds: 0, output, skipped: false, timed_out });
     }
+    let mut warnings = warnings;
+    warnings.extend(budget_warnings(db, worktree, issue, actor, &timings));
     Ok(GateRun { yolo_skipped, commit: short, passed: run.passed() && !yolo_skipped, results, flaked, run: Some(run.id), warnings })
 }
 
@@ -1270,8 +1276,12 @@ fn gate_beside_ci(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, iss
     } else {
         None
     };
-    let (ci_results, ci_passed, ci_flaked, note) = match crate::executor::wait(db, pending) {
-        Ok(evidence) => (evidence.results, evidence.passed, vec![], format!("{} ran in CI: {} (queued {} s, ran {} s)", to_ci.join(", "), evidence.url, evidence.queued_seconds, evidence.run_seconds)),
+    let (ci_results, ci_passed, ci_flaked, notes) = match crate::executor::wait(db, pending) {
+        Ok(evidence) => {
+            let mut notes = vec![format!("{} ran in CI: {} (queued {} s, ran {} s)", to_ci.join(", "), evidence.url, evidence.queued_seconds, evidence.run_seconds)];
+            notes.extend(budget_warnings(db, worktree, issue, actor, &evidence.timings));
+            (evidence.results, evidence.passed, vec![], notes)
+        }
         Err(e) => {
             if let Some(key) = issue {
                 db.log_event(actor, Some(key), None, "executor_fallback", &format!("CI run {ci_run} did not report: {e:#}; running {} locally", to_ci.join(", "))).ok();
@@ -1281,7 +1291,9 @@ fn gate_beside_ci(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, iss
             if there.yolo_skipped {
                 return Ok(GateRun { warnings, ..there });
             }
-            (there.results, there.passed, there.flaked, format!("CI run {ci_run} did not report ({e:#}); {} ran in a lane instead", to_ci.join(", ")))
+            let mut notes = vec![format!("CI run {ci_run} did not report ({e:#}); {} ran in a lane instead", to_ci.join(", "))];
+            notes.extend(there.warnings);
+            (there.results, there.passed, there.flaked, notes)
         }
     };
     // Each step's result in the gate's order: the local one, or CI's for a command CI ran (in place
@@ -1302,17 +1314,24 @@ fn gate_beside_ci(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, iss
     // A lane problem in a fallback is a result of its own.
     results.extend(from_ci);
     let mut warnings = warnings;
-    warnings.push(note);
+    warnings.extend(notes);
     let (local_passed, run, mut flaked) = match here {
-        Some(h) => (h.passed, h.run, h.flaked),
+        Some(h) => {
+            // The local gate's word on test time too.
+            warnings.extend(h.warnings);
+            (h.passed, h.run, h.flaked)
+        }
         None => (true, Some(ci_run), vec![]),
     };
     flaked.extend(ci_flaked);
+    // The nested gates repeat this one's own warnings (uncommitted work): each is said once.
+    let mut said = std::collections::HashSet::new();
+    warnings.retain(|w| said.insert(w.clone()));
     Ok(GateRun { yolo_skipped: false, commit: short, results, passed: local_passed && ci_passed, flaked, run, warnings })
 }
 
-/// What `log` gained after byte `from`, its end kept as a command's output is.
-fn log_since(log: &Path, from: u64) -> String {
+/// All `log` gained after byte `from` (`playbook::tail` keeps a command's output to its end).
+fn log_text_since(log: &Path, from: u64) -> String {
     use std::io::{Read, Seek, SeekFrom};
     let mut text = Vec::new();
     if let Ok(mut f) = std::fs::File::open(log) {
@@ -1320,7 +1339,29 @@ fn log_since(log: &Path, from: u64) -> String {
             f.read_to_end(&mut text).ok();
         }
     }
-    playbook::tail(&String::from_utf8_lossy(&text))
+    String::from_utf8_lossy(&text).into_owned()
+}
+
+/// What the gate says about test time (NIT-522): each suite's time and the slowest tests, and,
+/// when the worktree's budget is broken, what broke it, on the issue's timeline too. A broken
+/// budget is flagged, not failed.
+fn budget_warnings(db: &Db, worktree: &Path, issue: Option<&str>, actor: &Actor, timings: &crate::test_budget::Timings) -> Vec<String> {
+    if timings.is_empty() {
+        return vec![];
+    }
+    let budget = match crate::test_budget::load(worktree) {
+        Ok(budget) => budget.unwrap_or_default(),
+        Err(e) => return vec![format!("the test budget could not be read: {e:#}")],
+    };
+    let report = crate::test_budget::check(&budget, timings);
+    let mut said = vec![report.summary(&budget)];
+    if let Some(breach) = report.breach(&budget) {
+        if let Some(key) = issue {
+            db.log_event(actor, Some(key), None, "test_budget", &breach).ok();
+        }
+        said.push(breach);
+    }
+    said
 }
 
 /// Deletes snapshot refs and logs older than `KEEP_SECS`. Best effort.
@@ -3292,6 +3333,10 @@ fn run_logged(command: &str, dir: &Path, log: &Path, limit: Duration, share: Sha
     cmd.current_dir(dir).stdin(std::process::Stdio::null()).stdout(file.try_clone()?).stderr(file.try_clone()?);
     // The machine's share for one request (NIT-199), for the build tools that read it.
     share_env(&mut cmd, share.jobs);
+    // Each test's time in the log, for the test budget (NIT-522).
+    if let Some(env) = crate::test_budget::runner_env(command, dir) {
+        cmd.envs(env);
+    }
     // Its temporary files in the request's own folder, and git's templates empty (NIT-289).
     if let Some(temp) = temp {
         cmd.env("TMP", temp).env("TEMP", temp).env("TMPDIR", temp).env("GIT_TEMPLATE_DIR", temp.join(GIT_TEMPLATE));

@@ -365,7 +365,12 @@ pub fn failed_tests(output: &str) -> Vec<String> {
     let mut in_list = false;
     for line in output.lines() {
         let line = line.trim_end();
-        let name = if let Some(rest) = line.strip_prefix("test ").and_then(|r| r.strip_suffix(" ... FAILED")) {
+        // With per-test times on (test_budget.rs), the line ends in the time: `... FAILED <1.234s>`.
+        let untimed = match line.rsplit_once(" <") {
+            Some((rest, time)) if time.ends_with("s>") => rest,
+            _ => line,
+        };
+        let name = if let Some(rest) = untimed.strip_prefix("test ").and_then(|r| r.strip_suffix(" ... FAILED")) {
             rest.trim()
         } else if let Some(rest) = line.strip_prefix("not ok ") {
             rest.split_once(" - ").map(|(_, n)| n.trim()).unwrap_or("")
@@ -1846,6 +1851,7 @@ mod tests {
     fn names_the_failed_tests_of_cargo_and_node() {
         let cargo = "test a::ok ... ok\ntest a::bad ... FAILED\n\nfailures:\n    a::bad\n\ntest result: FAILED.";
         assert_eq!(failed_tests(cargo), ["a::bad"]);
+        assert_eq!(failed_tests("test a::ok ... ok <0.010s>\ntest a::timed ... FAILED <3.250s>\n"), ["a::timed"]);
         // A long run's kept tail may start after the `... FAILED` lines; its closing list names them.
         let tail = "…oo\n\nfailures:\n\n---- b::slow stdout ----\nthread panicked at x.rs:3\n    left: 1\n\nfailures:\n    b::slow\n    c::late\n\ntest result: FAILED. 1 passed; 2 failed";
         assert_eq!(failed_tests(tail), ["b::slow", "c::late"]);

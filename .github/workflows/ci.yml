@@ -189,9 +189,12 @@ jobs:
       # A cargo test thread count only schedules the run on the machine it was tuned for (the
       # gate's 12 for the lanes, NIT-458); the same tests run either way (NIT-474). Here it is the
       # runner's cores: 12 threads on a 4-core runner starve the timing-sensitive lane tests.
+      # Each test binary through scripts/test-runner.sh, which turns on libtest's per-test times for
+      # the test budget (NIT-522); Nitely reads them from this job's log.
       - name: Run
         env:
           NITELY_COMMAND: ${{ matrix.command }}
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: bash ${{ github.workspace }}/scripts/test-runner.sh
         run: |
           command=$(printf '%s' "$NITELY_COMMAND" | sed -E "s/--test-threads=[0-9]+/--test-threads=$(nproc)/")
           echo "Running: $command"

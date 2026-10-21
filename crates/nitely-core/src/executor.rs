@@ -936,6 +936,9 @@ pub struct SuiteEvidence {
     /// From the dispatch to the first job starting, and from then to the last job ending.
     pub queued_seconds: u64,
     pub run_seconds: u64,
+    /// Each test's time, read from the test jobs' whole logs (NIT-522).
+    #[serde(skip)]
+    pub timings: crate::test_budget::Timings,
 }
 
 pub enum Dispatch {
@@ -1143,9 +1146,18 @@ pub fn wait(db: &Db, pending: Pending) -> Result<SuiteEvidence> {
     delete_ref(&root, &pending.reference, &pending.commit);
     match outcome {
         Ok(mut evidence) => {
-            for result in evidence.results.iter_mut().filter(|r| !r.ok) {
-                // The end of the failed job's log, so the gate's output says what failed.
+            for result in evidence.results.iter_mut() {
                 let job = result.output.rsplit('/').next().and_then(|j| j.parse::<u64>().ok());
+                // A test job's whole log, for each test's time; best effort.
+                if result.command.contains("test") {
+                    if let Some(log) = job.and_then(|j| gh(&["run", "view", "--repo", &pending.slug, "--job", &j.to_string(), "--log"], Duration::from_secs(120)).ok()) {
+                        evidence.timings.extend(crate::test_budget::parse(&log));
+                    }
+                }
+                if result.ok {
+                    continue;
+                }
+                // The end of the failed job's log, so the gate's output says what failed.
                 if let Some(log) = job.and_then(|j| gh(&["run", "view", "--repo", &pending.slug, "--job", &j.to_string(), "--log-failed"], Duration::from_secs(60)).ok()) {
                     result.output = format!("{}\n{}", result.output, playbook::tail(&log));
                 }
@@ -1234,6 +1246,7 @@ fn evidence(pending: &Pending, view: &serde_json::Value, (passed, jobs): (bool, 
             .collect(),
         queued_seconds: pending.dispatched.elapsed().as_secs().saturating_sub(run_seconds),
         run_seconds,
+        timings: Default::default(),
     }
 }
 

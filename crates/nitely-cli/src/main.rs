@@ -806,6 +806,12 @@ fn exit(code: i32) -> ! {
 /// stack frames in a debug build, past the 1 MB Windows gives a process's main thread, and a new
 /// subcommand can tip it over (the binary then dies at start with a stack overflow).
 fn main() {
+    // Cargo's test runner in a lane (test_budget.rs): it starts once per test binary, so it skips
+    // the parser and everything else a nitely start does.
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if args.first().is_some_and(|a| a == "test-runner") {
+        std::process::exit(nitely_core::test_budget::run_test_binary(&args[1..]));
+    }
     newer::started();
     let worker = std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)

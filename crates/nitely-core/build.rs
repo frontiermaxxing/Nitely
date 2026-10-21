@@ -7,6 +7,8 @@ fn main() {
     // Source installs supply HEAD explicitly, invalidating the generated migration manifest even
     // when a checkout/ref update preserved file timestamps.
     println!("cargo:rerun-if-env-changed=NITELY_SOURCE_COMMIT");
+    // The machine this build runs on, for cargo's per-target test runner setting (test_budget.rs).
+    println!("cargo:rustc-env=NITELY_HOST_TARGET={}", std::env::var("TARGET").expect("cargo sets TARGET"));
     // Read when the script runs, not when it was compiled: cargo reuses a compiled build script
     // for another checkout of the same crate (a release build into a shared target folder), and
     // the folder it was compiled in may be gone by then (NIT-469).
