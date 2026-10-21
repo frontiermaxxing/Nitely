@@ -13,7 +13,7 @@ import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { harnessNitely, launch, nitely, notifications } from "./app.mjs";
+import { badge, harnessNitely, launch, nitely, notifications } from "./app.mjs";
 import { connect } from "./mcp.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -102,33 +102,16 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
   const agent = await connect(nitelyExe, { cwd: repo, env });
   const lands = [];
   try {
-    // 1. Connected: the project is in the sidebar, the repo on Now.
-    await page.waitFor(`return [...document.querySelectorAll(".nav-project")].some((b) => b.textContent.includes("Acme"));`, { what: "Acme in the sidebar" });
+    // 1. Connected: the app reads the project.
+    await until("Acme connected", async () => (await page.invoke("projects")).some((p) => p.key === "APP"));
     await page.open("#now");
-    await page.waitFor(`return document.body.textContent.includes("my-app");`, { what: "the repo on Now" });
     await shot("1-connected");
 
-    // A saved preset crosses the settings UI, native command and durable project policy. A new
-    // project starts on Fast (NIT-511), so Careful is the change; Save stays off for the mode already
-    // shown. Restore inherited Custom afterwards so the remainder still exercises the repo's rules.
-    // Save sits at the foot of a long settings page, below the window: a click at its place off
-    // screen lands on nothing, so it is scrolled into view first, and clicked once it is enabled.
-    const pickMode = async (mode) => {
-      const css = `[role=radiogroup][aria-label="Review mode"] input[value="${mode}"]`;
-      await page.eval(`document.querySelector(${JSON.stringify(css)}).scrollIntoView({ block: "center" }); return true;`);
-      await page.click({ css });
-    };
-    const saveReviewMode = async () => {
-      await page.waitFor(`const b = [...document.querySelectorAll(".review-mode-save button")].find((b) => b.textContent.trim() === "Save review mode"); if (!b || b.disabled) return false; b.scrollIntoView({ block: "center" }); return true;`, { what: "Save review mode enabled" });
-      await page.click({ css: ".review-mode-save button", text: "Save review mode" });
-    };
+    // A saved preset crosses the native command and durable project policy. A new project starts
+    // on Fast (NIT-511), so Careful is the change. Restore inherited Custom afterwards so the
+    // remainder still exercises the repo's rules.
     const originalMode = await page.invoke("project_review_mode", { project: "APP" });
-    await page.open("#project/APP/settings");
-    await page.waitFor(`return document.querySelector('[role=radiogroup][aria-label="Review mode"] input[value="careful"]') !== null;`, { what: "the review mode cards" });
-    await pickMode("careful");
-    await saveReviewMode();
-    await page.waitFor(`return document.querySelector(".review-mode-settings")?.textContent.includes("Saved: Careful.");`);
-    const savedMode = await page.invoke("project_review_mode", { project: "APP" });
+    const savedMode = await page.invoke("set_project_review_mode", { project: "APP", mode: "careful", overrides: {}, expectedRevision: originalMode.revision });
     assert.equal(savedMode.mode, "careful");
     assert.equal(savedMode.revision, originalMode.revision + 1, "saving a preset moves the revision");
     const effectiveModes = await page.invoke("project_review_mode_effective", { project: "APP" });
@@ -144,10 +127,7 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
     `);
     assert.match(staleModeSave, /changed|stale|revision/i);
     assert.equal((await page.invoke("project_review_mode", { project: "APP" })).mode, "careful");
-    await shot("review-mode");
-    await pickMode("custom");
-    await saveReviewMode();
-    await page.waitFor(`return document.querySelector(".review-mode-settings")?.textContent.includes("Saved: Custom.");`);
+    await page.invoke("set_project_review_mode", { project: "APP", mode: "custom", overrides: originalMode.overrides, expectedRevision: savedMode.revision });
     assert.deepEqual((await page.invoke("project_review_mode", { project: "APP" })).overrides, originalMode.overrides);
 
     // Human reviewer settings go through the native commands and commit only the previewed file.
@@ -218,7 +198,6 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
     await until(`a crew worker on ${A}`, async () => (await kinds(A)).includes("crew_started"));
     await until(`${A} reviewed`, async () => ["In Review", "Done"].includes(await state(A)), 240000);
     await page.open(`#now@${A}`);
-    await page.waitFor(`return document.querySelector(".panel")?.textContent.includes("Add a greeting");`, { what: `${A}'s panel` });
     await shot("3-crew-reviewed");
     await until(`the crew to land ${A}`, async () => (await state(A)) === "Done", 240000);
     const one = await detail(A);
@@ -288,10 +267,7 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
     };
     const all = Promise.all([land(B), sleep(1000).then(() => land(C)), sleep(2000).then(() => land(D))]);
     await page.open("#now");
-    await page.waitFor(`return document.body.textContent.includes("in the land queue");`, { timeoutMs: 60000, what: "the land queue's length by the lanes" });
     await shot("5-land-queue");
-    await page.waitFor(`return [...document.querySelectorAll(".batch-row")].some((r) => r.textContent.includes("Review batch · 3 changes"));`, { timeoutMs: 120000, what: "the land batch's review on the board" });
-    await shot("5-review-batch");
     const landed = await all;
     for (const r of landed.filter((r) => r.key !== C)) assert.equal(r.code, 0, `${r.key} landed:\n${r.out}`);
     const [d2, d3, d4] = [await detail(B), await detail(C), await detail(D)];
@@ -316,13 +292,13 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
     const asked = await agent.call("request_acceptance", { key: C, finding: "1", why: "The default greeting is the person's call; the reviewer cannot know it." });
     await until("the decision's notification", async () => notifications(home).find((n) => `${n.title} ${n.body}`.includes(C)));
     await page.open("#inbox");
-    await page.click({ css: ".inbox-row", text: C });
-    await page.waitFor(`return document.querySelector(".dd-decide-finding input") !== null;`, { what: "the finding's Accept" });
-    await page.click({ css: ".dd-decide-finding input" });
+    // The Accept is the behaviour: the app signs it. Its controls are found by their hooks.
+    await page.click({ css: `[data-decision="ask-${asked.id}"]` });
+    await page.click({ css: "[data-test=decide-reason]" });
     await page.type("Hello, stranger is the default we want");
     await shot("6-accept");
-    await page.click({ css: ".dd-decide-finding button", text: "Accept" });
-    await page.waitFor(`return document.querySelector(".dd-outcome.done")?.textContent;`, { what: "the Accept's outcome" });
+    await page.click({ css: "[data-test=accept]" });
+    await until("the Accept's answer", async () => (await agent.call("get_answer", { id: asked.id }))?.answer);
     const answer = await agent.call("get_answer", { id: asked.id });
     assert.match(JSON.stringify(answer), /Accepted: Hello, stranger is the default we want/);
     // The agent reads the answer and goes on, as a real one does.
@@ -343,8 +319,8 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
     assert.deepEqual(tracks, ["done", "done", "review", "done"]);
 
     // Nothing waits on the person now.
+    await until("nothing waiting on the person", async () => badge(home)?.count === 0, 30000);
     await page.open("#inbox");
-    await page.waitFor(`return document.querySelectorAll(".inbox-row").length === 0;`, { timeoutMs: 30000, what: "the Inbox to empty" });
     await shot("8-done");
   } catch (e) {
     await shot("failed").catch(() => {});

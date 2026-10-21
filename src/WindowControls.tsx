@@ -80,12 +80,12 @@ export function WindowControls() {
     <>
       <div className="titlebar-drag" data-tauri-drag-region aria-hidden="true" />
       <div className={`caption${focused ? "" : " caption-blurred"}`} role="group" aria-label="Window">
-        <button className="caption-btn" aria-label="Minimize" title="Minimize" onClick={() => win?.minimize()}>
+        <button className="caption-btn" data-test="minimize" aria-label="Minimize" title="Minimize" onClick={() => win?.minimize()}>
           <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
             <path d="M0 5h10" stroke="currentColor" strokeWidth="1" />
           </svg>
         </button>
-        <button className="caption-btn" aria-label={maximized ? "Restore" : "Maximize"} title={maximized ? "Restore Down" : "Maximize"} onClick={() => win?.toggleMaximize()}>
+        <button className="caption-btn" data-test="maximize" aria-label={maximized ? "Restore" : "Maximize"} title={maximized ? "Restore Down" : "Maximize"} onClick={() => win?.toggleMaximize()}>
           {maximized ? (
             <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
               <path d="M2.5 2.5V.5h7v7h-2M.5 2.5h7v7h-7z" fill="none" stroke="currentColor" strokeWidth="1" />
@@ -96,7 +96,7 @@ export function WindowControls() {
             </svg>
           )}
         </button>
-        <button className="caption-btn caption-close" aria-label="Close" title="Close" onClick={() => win?.close()}>
+        <button className="caption-btn caption-close" data-test="close" aria-label="Close" title="Close" onClick={() => win?.close()}>
           <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
             <path d="M.5.5l9 9M9.5.5l-9 9" stroke="currentColor" strokeWidth="1" />
           </svg>

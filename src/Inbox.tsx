@@ -1100,8 +1100,8 @@ function DecideFinding(props: { askId: number; busy: boolean; onDecide: (accept:
         props.onDecide(true, text);
       }}
     >
-      <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Why, in one line" aria-label="Why, in one line: the record and the agent keep it" />
-      <button className="btn primary" type="submit" disabled={props.busy || !text.trim()}>
+      <input data-test="decide-reason" value={text} onChange={(e) => setText(e.target.value)} placeholder="Why, in one line" aria-label="Why, in one line: the record and the agent keep it" />
+      <button className="btn primary" type="submit" data-test="accept" disabled={props.busy || !text.trim()}>
         Accept
       </button>
       <button className="btn" type="button" disabled={props.busy || !text.trim()} onClick={() => props.onDecide(false, text)}>

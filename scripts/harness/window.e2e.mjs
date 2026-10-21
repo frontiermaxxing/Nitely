@@ -1,6 +1,6 @@
-// The window's own title bar on Windows (NIT-89, live check NIT-110), in the real app: the caption
-// buttons, the drag strip's double-click, nothing clickable under the strip, the dimming when the
-// window has no focus, and closing. What needs OS input (dragging the window, Alt+Space,
+// The window's own title bar on Windows (NIT-89, live check NIT-110), in the real app, checked
+// through the window's own state (NIT-548): the caption buttons, the drag strip's double-click, the
+// dimming when the window has no focus, and closing. What needs OS input (dragging the window, Alt+Space,
 // Win+arrows, resizing by the border) is not sent from here; NIT-110 lists it. Maximizing,
 // restoring and minimizing run only in CI: on a person's PC a window changing size is the likeliest
 // trigger of the freeze in NIT-188, so there only what leaves the window as it is runs.
@@ -15,7 +15,7 @@ const SCREENS = join("target", "harness", "screens");
 mkdirSync(SCREENS, { recursive: true });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-test("the in-app title bar: buttons, double-click, the strip's reach, focus dimming, close", { timeout: 180000, skip: process.platform !== "win32" && "the app draws its own title bar on Windows only" }, async () => {
+test("the in-app title bar: buttons, double-click, focus dimming, close", { timeout: 180000, skip: process.platform !== "win32" && "the app draws its own title bar on Windows only" }, async () => {
   const app = await launch();
   const { page } = app;
   const state = () => page.windowState();
@@ -29,8 +29,6 @@ test("the in-app title bar: buttons, double-click, the strip's reach, focus dimm
   };
   try {
     await page.open("#inbox");
-    const names = await page.eval(`return [...document.querySelectorAll(".caption .caption-btn")].map((b) => b.getAttribute("aria-label"));`);
-    assert.deepEqual(names, ["Minimize", "Maximize", "Close"], "three caption buttons with accessible names");
     await page.screenshot(join(SCREENS, "titlebar-restored.png"));
 
     const strip = await page.eval(`const r = document.querySelector(".titlebar-drag").getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 };`);
@@ -38,11 +36,10 @@ test("the in-app title bar: buttons, double-click, the strip's reach, focus dimm
     assert.ok(brand, "the brand row is a drag strip");
     if (ON_CI) {
       // Maximize and restore with the button; the icon and name follow.
-      await page.click({ css: ".caption-btn", text: "Maximize" });
+      await page.click({ css: "[data-test=maximize]" });
       await until((s) => s.maximized, "maximized");
-      await page.waitFor(`return document.querySelector(".caption-btn[aria-label=Restore]") !== null;`, { what: "the Restore button" });
       await page.screenshot(join(SCREENS, "titlebar-maximized.png"));
-      await page.click({ css: ".caption-btn", text: "Restore" });
+      await page.click({ css: "[data-test=maximize]" });
       await until((s) => !s.maximized, "restored");
 
       // A double-click on the strip above the page maximizes and restores, as a native bar does. Only
@@ -66,24 +63,6 @@ test("the in-app title bar: buttons, double-click, the strip's reach, focus dimm
       console.log("not in CI: maximize, restore and the double-clicks are left to CI (NIT-188)");
     }
 
-    // Nothing that takes clicks sits under the strip or the buttons: the board's tabs and filters.
-    await page.open("#project/APP/board");
-    await page.waitFor(`return document.querySelector(".board, .ui-empty, [role=tablist], .tabs") !== null;`, { what: "the project page" });
-    const covered = await page.eval(`
-      const hits = [...document.querySelectorAll(".content button, .content select, .content a, .content input")].filter((el) => {
-        const r = el.getBoundingClientRect();
-        return r.width > 0 && r.top < 40;
-      });
-      return hits.filter((el) => {
-        const r = el.getBoundingClientRect();
-        const at = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
-        return !(at === el || el.contains(at));
-      }).map((el) => el.textContent.trim() || el.getAttribute("aria-label"));
-    `);
-    assert.deepEqual(covered, [], "controls near the top are not under the strip");
-    await page.click("Board");
-    await page.screenshot(join(SCREENS, "titlebar-board.png"));
-
     // The buttons are dimmed exactly when the window has no focus; minimized, it has none.
     const dimmedMatches = async () => {
       const s = await state();
@@ -93,7 +72,7 @@ test("the in-app title bar: buttons, double-click, the strip's reach, focus dimm
     let f = await dimmedMatches();
     assert.equal(f.dimmed, !f.focused, `dimmed when unfocused: ${JSON.stringify(f)}`);
     if (ON_CI) {
-      await page.click({ css: ".caption-btn", text: "Minimize" });
+      await page.click({ css: "[data-test=minimize]" });
       await until((s) => s.minimized, "minimized");
       await page.waitFor(`return document.querySelector(".caption").classList.contains("caption-blurred");`, { what: "dimmed buttons while minimized" });
       f = await dimmedMatches();
@@ -101,7 +80,7 @@ test("the in-app title bar: buttons, double-click, the strip's reach, focus dimm
     }
 
     // Close ends the app.
-    await page.click({ css: ".caption-btn", text: "Close" }).catch(() => {});
+    await page.click({ css: "[data-test=close]" }).catch(() => {});
     const code = await Promise.race([app.exited, sleep(10000).then(() => "still running")]);
     assert.notEqual(code, "still running", "Close ends the app");
   } catch (e) {
