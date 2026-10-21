@@ -115,12 +115,18 @@ pub fn changes_no_repo_files(text: &str) -> bool {
 
 /// What an agent does with work outside the repo (NIT-551): start_task, submit, next_task and the
 /// crew's brief all say it.
-pub const OUTSIDE_REPO: &str = "This work is outside the repo: do it, then close it with update_issue Done and evidence (links to the design, what was decided). It needs no branch, worktree, submit or land. If it turns out to need repo changes after all, take the \"Changes no repo files:\" line out of its body with update_issue and call start_task again.";
+pub const OUTSIDE_REPO: &str = "This work is outside the repo: do it, then close it with update_issue Done and evidence (links to the design, what was decided). It needs no branch, worktree, submit or land. If it turns out to need repo changes after all, name the files it will change in update_issue's paths (or take the \"Changes no repo files:\" line out of its body) and call start_task again.";
 
 /// Whether work on an issue goes on outside the repo: its body says it changes no repo files, and it
 /// has no commits of its own. A branch with commits changed files after all, and goes the usual way.
 pub fn outside_repo(body: &str, has_commits: bool) -> bool {
     changes_no_repo_files(body) && !has_commits
+}
+
+/// `body` without the note that its work changes no repo files: naming the files it will change
+/// takes the note back (NIT-551).
+pub fn without_no_repo_changes(body: &str) -> String {
+    body.lines().filter(|l| !l.trim_start().starts_with(NO_REPO_CHANGES)).collect::<Vec<_>>().join("\n").trim_end().to_string()
 }
 
 /// `body` with the note that the work changes no repo files, and why. Refused without a reason:
@@ -380,6 +386,7 @@ mod tests {
     fn work_outside_the_repo_gets_no_worktree_and_no_submit_until_it_has_commits() {
         let marked = with_no_repo_changes("Design the settings screens.", "designs them in the design tool").unwrap();
         assert!(outside_repo(&marked, false), "marked, nothing committed: outside the repo");
+        assert_eq!(without_no_repo_changes(&marked), "Design the settings screens.", "naming files takes the note back");
         assert!(!outside_repo(&marked, true), "a branch with commits changed files after all: the usual way");
         assert!(!outside_repo("Fix the settings screen.", false), "not marked: the usual way");
         let issue = crate::issues::IssueRecord { key: "APP-3".into(), body: marked, ..Default::default() };

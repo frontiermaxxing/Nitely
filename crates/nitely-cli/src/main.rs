@@ -1619,6 +1619,9 @@ fn run(cmd: Cmd) -> Result<()> {
                     eprintln!("{}", r.output);
                 }
             }
+            if let Some(outside) = &started.outside_repo {
+                eprintln!("{outside}");
+            }
             println!("{}", started.worktree);
             if started.setup.iter().any(|r| !r.ok) {
                 exit(1);

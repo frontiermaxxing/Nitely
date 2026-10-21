@@ -160,11 +160,13 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     if branch == base || branch == "HEAD" {
         bail!("{branch} is not a task branch; submit from the worktree start_task made");
     }
-    let key = opts.issue_key.map(str::to_string).or(branch_key).context("the branch names no issue; pass the issue key")?;
+    let key = opts.issue_key.map(str::to_string).or(branch_key.clone()).context("the branch names no issue; pass the issue key")?;
     let issue = db.issue(&key)?.with_context(|| format!("no issue {key}"))?;
     if crate::overlap::changes_no_repo_files(&issue.body) {
+        // Only the issue's own branch counts: another task's worktree has commits of its own.
+        let own = branch_key.as_deref().is_some_and(|k| k.eq_ignore_ascii_case(&issue.key));
         let ahead = git(&worktree, &["rev-list", "--count", &format!("{}..HEAD", playbook::diff_base(&worktree, &base))])?;
-        refuse_outside_repo(&issue, ahead.trim() != "0")?;
+        refuse_outside_repo(&issue, own && ahead.trim() != "0")?;
     }
     crate::project_modes::apply_issue(db, &key, &mut pb)?;
     let _telemetry = crate::performance_attribution::Scope::new(db, crate::performance_attribution::Context { project: issue.project.clone(), issue: Some(key.clone()), ..Default::default() });

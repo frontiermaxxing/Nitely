@@ -652,6 +652,15 @@ impl Supervisor {
             if let Some(why) = why {
                 db.log_event(&self.actor(), Some(&issue.key), None, "picked", &format!("The crew picked {}: {why}", issue.key))?;
             }
+            // Work outside the repo (NIT-551) has no worktree for a worker to start in: a person, or
+            // an agent they start for it, does it and closes it with evidence. One whose branch was
+            // started before it was marked goes the usual way.
+            let worktree = playbook.worktree_for(&self.repo_root, &installed[0], &issue);
+            let started = worktree.join(".git").exists() || !branch_vendors(&self.repo.branches(&self.repo_root), &issue.key).is_empty();
+            if nitely_core::overlap::outside_repo(&issue.body, started) {
+                self.wait(db, &issue.key, "its work is outside the repo, and crew workers work in worktrees".to_string())?;
+                continue;
+            }
             // A second attempt continues the first one's branch, with the first one's agent: the
             // branch's prefix picks the reviewer, so another agent on it would review itself.
             let vendors = branch_vendors(&self.repo.branches(&self.repo_root), &issue.key);
@@ -875,8 +884,7 @@ impl Supervisor {
             agent: agent.into(),
             program,
             args: command[1..].iter().map(|a| fill(a)).collect(),
-            // Work outside the repo has no worktree: the worker starts in a folder of its own.
-            cwd: if worktree.exists() { worktree.clone() } else { scratch(&logs, &issue.key)? },
+            cwd: worktree.clone(),
             brief: brief(issue, &self.project, &worktree, &branch, &self.repo_root, port),
             log: log.clone(),
             env,
@@ -1434,11 +1442,6 @@ pub fn brief(issue: &IssueRecord, project: &str, worktree: &Path, branch: &str, 
     if nitely_core::goal_plans::is_planning(issue) {
         return planner_brief(issue, project, worktree, repo);
     }
-    // As start_task decides it: a worktree it made means the work has a branch of its own, and
-    // goes the usual way through submit.
-    if nitely_core::overlap::outside_repo(&issue.body, worktree.join(".git").exists()) {
-        return outside_brief(issue, project, repo);
-    }
     // A light worktree with lanes builds through `run` (docs/build-lanes.md).
     let lanes = Playbook::load(repo).ok().is_some_and(|pb| pb.lanes.is_some());
     let mut light = if lanes && nitely_core::light::is_light(worktree) { format!("\n{}\n", nitely_core::light::RUN_LINE) } else { String::new() };
@@ -1463,25 +1466,6 @@ Work only there; never edit or commit in {repo}.
 
 Then end. Do not take another issue: Nitely starts a new worker for it.
 {light}"
-    )
-}
-
-/// The brief of a worker whose issue changes no repo files (NIT-551): it has no worktree, works in
-/// the outside tool the issue names, and closes the issue with evidence.
-fn outside_brief(issue: &IssueRecord, project: &str, repo: &Path) -> String {
-    let (key, title, repo) = (&issue.key, &issue.title, repo.display());
-    format!(
-        "You are a Nitely crew worker: Nitely started you to work on one issue, {key}, \"{title}\", in project {project}. \
-Nobody is watching this session; nobody will answer a question here.
-
-The issue is claimed for you. Its body says it changes no repo files, so it has no worktree: never edit or commit in {repo}. {}
-
-1. Read the issue with get_issue {key}. Call report with key {key} at each step, one line.
-2. If only the human can decide something, ask it, move {key} to Needs You, leave a handoff note and stop.
-3. When it is done, update_issue {key} to Done with the evidence. Before you stop, for any reason, leave a note on {key} with handoff: true.
-
-Then end. Do not take another issue.",
-        nitely_core::overlap::OUTSIDE_REPO
     )
 }
 
@@ -1748,13 +1732,6 @@ fn branch_vendors(branches: &[String], key: &str) -> Vec<String> {
         }
     }
     vendors
-}
-
-/// A folder of its own for a worker with no worktree (work outside the repo), beside its logs.
-fn scratch(logs: &Path, key: &str) -> Result<PathBuf> {
-    let dir = logs.join(format!("{}-outside", key.to_lowercase()));
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    Ok(dir)
 }
 
 /// `s` as a TOML string, for a `-c key=value` override.
@@ -2819,18 +2796,15 @@ max_per_day = 5
     }
 
     #[test]
-    fn work_outside_the_repo_is_closed_with_evidence_unless_its_branch_was_started() {
-        let body = nitely_core::overlap::with_no_repo_changes("Design the screens.", "designs them in the design tool").unwrap();
-        let issue = IssueRecord { key: "NIT-8".into(), title: "Design the screens".into(), body, ..Default::default() };
-        let dir = nitely_core::paths::unique_temp("nitely-outside-brief", "");
-        let b = brief(&issue, "NIT", &dir.join("nit-8"), "claude/nit-8-design", Path::new("/r"), None);
-        assert!(b.contains("has no worktree") && b.contains("update_issue Done") && !b.contains("call submit"), "{b}");
-        // Started before it was marked: its worktree is there, and it goes through submit.
-        std::fs::create_dir_all(dir.join("nit-8")).unwrap();
-        std::fs::write(dir.join("nit-8").join(".git"), "gitdir: x").unwrap();
-        let b = brief(&issue, "NIT", &dir.join("nit-8"), "claude/nit-8-design", Path::new("/r"), None);
-        assert!(b.contains("call submit"), "{b}");
-        std::fs::remove_dir_all(&dir).ok();
+    fn the_crew_passes_over_work_outside_the_repo() {
+        let mut f = fixture(&format!("{GATE}[crew]\nworkers = 1\n"));
+        let body = nitely_core::overlap::with_no_repo_changes("wanted", "designs it in the design tool").unwrap();
+        f.db.edit_issue("NIT-1", None, Some(&body), &Actor::Human).unwrap();
+        let fake = Fake { installed: vec!["claude"], ..Default::default() };
+        let tick = supervisor(&f, &fake).tick(&mut f.db, false).unwrap();
+        assert_eq!(tick.started.iter().map(|w| w.issue.as_str()).collect::<Vec<_>>(), ["NIT-2"], "{tick:?}");
+        let one = f.db.issue("NIT-1").unwrap().unwrap();
+        assert_eq!((one.state.as_str(), one.claimed_by), ("Todo", None), "handed back, unclaimed");
     }
 
     #[test]

@@ -1654,6 +1654,13 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             if title.is_some() || body.is_some() {
                 db.edit_issue(key, title, body, &actor)?;
             }
+            // Naming the files the work will change takes back "Changes no repo files:" (NIT-551).
+            if !keys_arg(args, "paths").is_empty() {
+                let current = db.issue(key)?.with_context(|| format!("no issue {key}"))?;
+                if nitely_core::overlap::changes_no_repo_files(&current.body) {
+                    db.edit_issue(key, None, Some(&nitely_core::overlap::without_no_repo_changes(&current.body)), &actor)?;
+                }
+            }
             if let Some(priority) = priority {
                 db.set_priority(key, priority, &actor)?;
             }
