@@ -10,6 +10,7 @@ This is the analysis step of /nitely-test-optimize. It reads code; it changes no
    - `wall-clock`: it waits on the clock or on machine load. That is a defect: wait on the event instead, or inject the clock.
    - `duplicate`: another test checks the same thing. Name it in `of`.
    - `restates`: it restates the implementation (mirrors its steps, pins private details or mock calls) instead of checking a behaviour.
+   - `keep`: it is worth what it costs as it is, and the hint that flagged it was a false lead (a variable named `html`, a timeout that is an argument, not a wait). Its `note` must say why.
    Add a `note` when the class needs a reason the next person would ask for.
 3. `nitely test-sweep map report.json --classes classes.json --output <scratch>/test-map.md` checks that every flagged test has exactly one class and nothing else is classified, and writes the map: decisions grouped by module with their measured time, then the scenarios kept and the tests to delete or rewrite. Keep it in scratch. It goes into the repo's docs only once the person approves the goal built from it, as one change with the first refactor.
 4. Nothing is deleted or refactored here. The map feeds the goal proposal, where the person approves refactors module by module and deletions once, each deletion naming what covers it.

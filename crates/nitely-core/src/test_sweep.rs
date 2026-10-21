@@ -238,6 +238,9 @@ pub enum Class {
     Duplicate { of: String },
     /// It restates the implementation instead of checking a behaviour.
     Restates,
+    /// It is worth what it costs as it is: a hint that led here was a false lead. Its `note` says
+    /// why.
+    Keep,
 }
 
 /// One test's class, keyed by the `test` a `flagged` entry names.
@@ -452,6 +455,12 @@ pub fn render_map(revision: &str, flagged: &[Flagged], classes: &[Classified]) -
             c.test
         );
     }
+    if let Some(c) = classes
+        .iter()
+        .find(|c| c.class == Class::Keep && c.note.trim().is_empty())
+    {
+        bail!("{} is kept as it is: say why in its note", c.test);
+    }
     let missing: Vec<&str> = flagged
         .iter()
         .filter(|f| !by_test.contains_key(f.test.as_str()))
@@ -483,12 +492,13 @@ pub fn render_map(revision: &str, flagged: &[Flagged], classes: &[Classified]) -
         )
     };
     let mut modules: BTreeMap<&str, Vec<String>> = BTreeMap::new();
-    let mut groups: [(&str, &str, Vec<String>); 5] = [
+    let mut groups: [(&str, &str, Vec<String>); 6] = [
         ("Scenarios kept", "Real I/O end to end: keep each, named in the test budget's scenarios.", vec![]),
         ("Presence tests", "They assert that UI text or an element exists: delete, or check behaviour through state instead.", vec![]),
         ("Clock waits", "They wait on time or machine load: replace the wait with an event or an injected clock.", vec![]),
         ("Duplicates", "Another test checks the same thing: delete, naming what covers it.", vec![]),
         ("Restatements", "They restate the implementation: delete or rewrite against a behaviour.", vec![]),
+        ("Kept as they are", "Flagged by a lead that was false: each is worth its cost, for the reason given.", vec![]),
     ];
     let mut saving: BTreeMap<&str, f64> = BTreeMap::new();
     for f in flagged {
@@ -511,6 +521,7 @@ pub fn render_map(revision: &str, flagged: &[Flagged], classes: &[Classified]) -
                 time(f)
             )),
             Class::Restates => groups[4].2.push(row(f, c)),
+            Class::Keep => groups[5].2.push(row(f, c)),
         }
     }
     let mut md = format!("# Test map at {}\n\n{} tests flagged as slow, flaky or failing, or by a mechanical hint, each with its class. Times are medians by one measuring method; untimed tests are unknown, not fast.\n\n", &revision[..revision.len().min(12)], flagged.len());
@@ -706,6 +717,20 @@ mod tests {
             render_map(&rev, &flagged, &all).is_err(),
             "a class for a test the evidence did not flag is refused"
         );
+        // A false lead is kept as it is, with its reason.
+        all.pop();
+        all[2] = serde_json::from_value(
+            serde_json::json!({"test": "web/page.test.tsx::shows_title", "class": "keep"}),
+        )
+        .unwrap();
+        assert!(render_map(&rev, &flagged, &all)
+            .unwrap_err()
+            .to_string()
+            .contains("say why"));
+        all[2].note = "checks the rendered total, not that a label exists".into();
+        assert!(render_map(&rev, &flagged, &all)
+            .unwrap()
+            .contains("## Kept as they are"));
     }
 
     /// A JUnit file imports as the same observations the collector classifies from libtest and
