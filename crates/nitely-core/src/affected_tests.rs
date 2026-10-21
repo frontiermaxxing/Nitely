@@ -4,7 +4,8 @@ use crate::playbook::git;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::Path,
 };
 use tree_sitter::{Node, Parser};
@@ -187,15 +188,44 @@ fn snapshot(repo: &Path, revision: &str) -> Result<Snapshot> {
     Ok(files)
 }
 
-fn read(repo: &Path, files: &Snapshot, path: &str) -> Result<String> {
+/// Where the selector reads file contents, by object id: git in a repo, or a map in a test
+/// (NIT-526). The decision reads nothing else.
+pub(crate) trait Objects {
+    fn text(&self, oid: &str) -> Result<String>;
+    /// The blobs in `oids`, as `blobs::read` gives them: None when they come to over `total` bytes.
+    fn texts(&self, oids: &[String], max: usize, total: usize) -> Result<Option<HashMap<String, crate::blobs::Blob>>>;
+}
+
+/// A repo's objects. Each text is read once per selection, however many suites share a manifest.
+struct GitObjects<'a> {
+    repo: &'a Path,
+    read: RefCell<HashMap<String, String>>,
+}
+
+impl Objects for GitObjects<'_> {
+    fn text(&self, oid: &str) -> Result<String> {
+        if let Some(text) = self.read.borrow().get(oid) {
+            return Ok(text.clone());
+        }
+        // One git, the size checked on what it read: the inputs are manifests and sources (NIT-508).
+        let text = git(self.repo, &["cat-file", "blob", oid])?;
+        self.read.borrow_mut().insert(oid.to_string(), text.clone());
+        Ok(text)
+    }
+
+    fn texts(&self, oids: &[String], max: usize, total: usize) -> Result<Option<HashMap<String, crate::blobs::Blob>>> {
+        crate::blobs::read(self.repo, oids, max, total)
+    }
+}
+
+fn read(objects: &dyn Objects, files: &Snapshot, path: &str) -> Result<String> {
     let e = files
         .get(path)
         .with_context(|| format!("missing input {path}"))?;
     if !matches!(e.mode.as_str(), "100644" | "100755") {
         bail!("nonregular input {path}");
     }
-    // One git, the size checked on what it read: the inputs are manifests and sources (NIT-508).
-    let text = git(repo, &["cat-file", "blob", &e.oid])?;
+    let text = objects.text(&e.oid)?;
     if text.len() > MAX_FILE_BYTES {
         bail!("input exceeds selector file limit: {path}");
     }
@@ -248,6 +278,8 @@ pub fn select(repo: &Path, base: &str, head: &str) -> Result<Selection> {
     select_with_policy(repo,base,head,base)
 }
 
+/// The thin shell around `decide`: git names the commits and lists their trees, and the decision
+/// reads contents through `GitObjects`.
 pub fn select_with_policy(repo: &Path, base: &str, head: &str, policy_commit:&str) -> Result<Selection> {
     let policy_is_base = policy_commit == base;
     // One git for the three, as verification reads them (NIT-508). git fails the whole call when
@@ -270,12 +302,26 @@ pub fn select_with_policy(repo: &Path, base: &str, head: &str, policy_commit:&st
         checks: vec![],
         reasons: vec![],
     };
-    if let Err(e) = select_inner(repo, &mut selection, policy_commit, policy_is_base) {
+    let (base, head) = (selection.base.clone(), selection.head.clone());
+    let decided = (|| {
+        let before = snapshot(repo, &base)?;
+        let after = snapshot(repo, &head)?;
+        // The policy is usually the base's own: the same tree, not listed again.
+        let policy_files = if policy_is_base || policy_commit == base { before.clone() } else { snapshot(repo, policy_commit)? };
+        let objects = GitObjects { repo, read: RefCell::new(HashMap::new()) };
+        decide(&policy_files, &before, &after, &objects, &mut selection)
+    })();
+    fall_back(&mut selection, decided);
+    Ok(selection)
+}
+
+/// Anything the selector cannot prove keeps the full gate, and says why.
+fn fall_back(selection: &mut Selection, decided: Result<()>) {
+    if let Err(e) = decided {
         selection.full = true;
         selection.checks.clear();
         selection.reasons.push(format!("Full fallback: {e:#}"));
     }
-    Ok(selection)
 }
 
 fn validate(policy: &Policy, before: &Snapshot, after: &Snapshot) -> Result<()> {
@@ -418,14 +464,13 @@ fn owner<'a>(policy: &'a Policy, path: &str) -> Option<&'a Component> {
         .find(|c| c.roots.iter().any(|r| under(path, r)))
 }
 
-fn select_inner(repo: &Path, result: &mut Selection, policy_commit:&str, policy_is_base: bool) -> Result<()> {
-    let before = snapshot(repo, &result.base)?;
-    let after = snapshot(repo, &result.head)?;
-    // The policy is usually the base's own: the same tree, not listed again.
-    let policy_files = if policy_is_base || policy_commit == result.base { before.clone() } else { snapshot(repo, policy_commit)? };
+/// The selection for a change from `before` to `after` under the map in `policy_files`: which
+/// components and checks it needs, or an error, which keeps the full gate. Plain data in, and
+/// contents only through `objects` (NIT-526).
+fn decide(policy_files: &Snapshot, before: &Snapshot, after: &Snapshot, objects: &dyn Objects, result: &mut Selection) -> Result<()> {
     result.policy_blob = policy_files.get(POLICY_PATH).map(|e| e.oid.clone());
-    let policy: Policy = toml::from_str(&read(repo, &policy_files, POLICY_PATH)?)?;
-    validate(&policy, &before, &after)?;
+    let policy: Policy = toml::from_str(&read(objects, policy_files, POLICY_PATH)?)?;
+    validate(&policy, before, after)?;
     let changed: BTreeSet<_> = before
         .keys()
         .chain(after.keys())
@@ -442,7 +487,7 @@ fn select_inner(repo: &Path, result: &mut Selection, policy_commit:&str, policy_
         if protected(path) {
             bail!("changed policy, manifest, generator or configuration: {path}");
         }
-        for files in [&before, &after] {
+        for files in [before, after] {
             if files
                 .get(path)
                 .is_some_and(|e| !matches!(e.mode.as_str(), "100644" | "100755"))
@@ -496,7 +541,7 @@ fn select_inner(repo: &Path, result: &mut Selection, policy_commit:&str, policy_
         );
     }
     let graph = if needs_js && !explicit_js {
-        js_graph(repo, &before, &after)?
+        js_graph(objects, before, after)?
     } else {
         BTreeMap::new()
     };
@@ -561,7 +606,7 @@ fn select_inner(repo: &Path, result: &mut Selection, policy_commit:&str, policy_
         for s in &c.suites {
             if let Some(cargo) = &s.cargo {
                 if dependency || reached.iter().any(|p| s.inputs.iter().any(|i| under(p, i))) {
-                    result.checks.push(cargo_check(repo, &after, c, s, cargo)?);
+                    result.checks.push(cargo_check(objects, after, c, s, cargo)?);
                     selected += 1;
                 }
             }
@@ -569,7 +614,7 @@ fn select_inner(repo: &Path, result: &mut Selection, policy_commit:&str, policy_
                 let approved =
                     explicit_js && reached.iter().any(|p| s.inputs.iter().any(|i| under(p, i)));
                 let tests: Vec<_> = js
-                    .tests(&after)
+                    .tests(after)
                     .into_iter()
                     .filter(|p| dependency || approved || reached.contains(p))
                     .collect();
@@ -600,7 +645,7 @@ fn select_inner(repo: &Path, result: &mut Selection, policy_commit:&str, policy_
                 || c.suites
                     .iter()
                     .filter_map(|s| s.javascript.as_ref())
-                    .any(|s| s.tests(&after).iter().any(|t| reaches(&graph, t, path)));
+                    .any(|s| s.tests(after).iter().any(|t| reaches(&graph, t, path)));
             if !mapped {
                 bail!("changed input has no test consumer: {path}");
             }
@@ -628,13 +673,13 @@ fn reaches(graph: &BTreeMap<String, BTreeSet<String>>, start: &str, target: &str
 }
 
 fn cargo_check(
-    repo: &Path,
+    objects: &dyn Objects,
     files: &Snapshot,
     c: &Component,
     s: &Suite,
     suite: &CargoSuite,
 ) -> Result<Check> {
-    let manifest: toml::Value = toml::from_str(&read(repo, files, &suite.manifest)?)?;
+    let manifest: toml::Value = toml::from_str(&read(objects, files, &suite.manifest)?)?;
     if manifest
         .get("package")
         .and_then(|p| p.get("name"))
@@ -760,7 +805,7 @@ pub fn verify_cargo_discovery(check: &Check, listed: &str, ignored: &str) -> Res
 }
 
 fn js_graph(
-    repo: &Path,
+    objects: &dyn Objects,
     before: &Snapshot,
     after: &Snapshot,
 ) -> Result<BTreeMap<String, BTreeSet<String>>> {
@@ -783,7 +828,7 @@ fn js_graph(
                 bail!("custom JavaScript resolver requires an approved whole-suite mapping");
             }
             if name.starts_with("tsconfig") && name.ends_with(".json") {
-                let config: serde_json::Value = serde_json::from_str(&read(repo, files, path)?)
+                let config: serde_json::Value = serde_json::from_str(&read(objects, files, path)?)
                     .context("non-JSON TypeScript resolver configuration")?;
                 if config.get("extends").is_some()
                     || config.get("compilerOptions").is_some_and(|c| {
@@ -803,7 +848,7 @@ fn js_graph(
             .filter(|(p, e)| source_path(p) && regular(e) && !cache.contains_key(&e.oid))
             .map(|(_, e)| e.oid.clone())
             .collect();
-        let Some(fetched) = crate::blobs::read(repo, &wanted, MAX_FILE_BYTES, MAX_SOURCE_BYTES - bytes)? else {
+        let Some(fetched) = objects.texts(&wanted, MAX_FILE_BYTES, MAX_SOURCE_BYTES - bytes)? else {
             bail!("JavaScript inventory exceeds byte limit");
         };
         for (path, entry) in files.iter().filter(|(p, _)| source_path(p)) {
@@ -814,7 +859,7 @@ fn js_graph(
                     Some(crate::blobs::Blob::Text(text)) => String::from_utf8_lossy(text).into_owned(),
                     Some(crate::blobs::Blob::TooLarge(_)) => bail!("input exceeds selector file limit: {path}"),
                     // Says why as reading it alone does: not a regular file, or not there.
-                    _ => read(repo, files, path)?,
+                    _ => read(objects, files, path)?,
                 };
                 bytes += source.len();
                 if bytes > MAX_SOURCE_BYTES {
@@ -828,7 +873,7 @@ fn js_graph(
                 if specifier.starts_with('.') {
                     let input = resolve(files, path, &specifier)?;
                     graph.entry(path.clone()).or_default().insert(input);
-                } else if !external(repo, files, path, &specifier)? {
+                } else if !external(objects, files, path, &specifier)? {
                     bail!("unresolved package/alias in {path}: {specifier}");
                 }
             }
@@ -837,7 +882,7 @@ fn js_graph(
     Ok(graph)
 }
 
-fn external(repo: &Path, files: &Snapshot, path: &str, specifier: &str) -> Result<bool> {
+fn external(objects: &dyn Objects, files: &Snapshot, path: &str, specifier: &str) -> Result<bool> {
     if specifier.starts_with("node:") {
         return Ok(true);
     }
@@ -855,7 +900,7 @@ fn external(repo: &Path, files: &Snapshot, path: &str, specifier: &str) -> Resul
             format!("{}/package.json", parts.join("/"))
         };
         if files.contains_key(&manifest) {
-            let value: serde_json::Value = serde_json::from_str(&read(repo, files, &manifest)?)?;
+            let value: serde_json::Value = serde_json::from_str(&read(objects, files, &manifest)?)?;
             // Workspaces/self-references can refer to local source, so they are never external.
             if value.get("workspaces").is_some()
                 || value.get("name").and_then(|v| v.as_str()) == Some(&package)
@@ -1566,5 +1611,357 @@ target_kind = "lib"
             |c| c.command == "cargo test --manifest-path consumer/Cargo.toml -p consumer --lib"
         ));
         std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    /// The decision alone, on trees and contents in memory (NIT-526): each case below is one a
+    /// test above makes with a repo and commits, here without git. Only the repo's own map reads
+    /// this checkout's tree, once, to have the real file list.
+    mod decided {
+        use super::*;
+        use crate::blobs::Blob;
+        use std::hash::{Hash, Hasher};
+
+        /// Contents by object id, as git gives them, and optionally files on disk by their id.
+        #[derive(Default)]
+        struct Mem {
+            texts: HashMap<String, String>,
+            disk: Option<(std::path::PathBuf, HashMap<String, String>)>,
+        }
+
+        impl Objects for Mem {
+            fn text(&self, oid: &str) -> Result<String> {
+                if let Some(text) = self.texts.get(oid) {
+                    return Ok(text.clone());
+                }
+                let (root, paths) = self.disk.as_ref().with_context(|| format!("no object {oid}"))?;
+                let path = paths.get(oid).with_context(|| format!("no object {oid}"))?;
+                Ok(std::fs::read_to_string(root.join(path))?)
+            }
+
+            fn texts(&self, oids: &[String], max: usize, total: usize) -> Result<Option<HashMap<String, Blob>>> {
+                let mut found = HashMap::new();
+                let mut bytes = 0;
+                for oid in oids {
+                    let blob = match self.text(oid) {
+                        Ok(text) if text.len() > max => Blob::TooLarge(text.len()),
+                        Ok(text) => {
+                            bytes += text.len();
+                            Blob::Text(text.into_bytes())
+                        }
+                        Err(_) => Blob::Missing,
+                    };
+                    found.insert(oid.clone(), blob);
+                }
+                Ok((bytes <= total).then_some(found))
+            }
+        }
+
+        impl Mem {
+            fn put(&mut self, text: &str) -> String {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                text.hash(&mut h);
+                let oid = format!("{:016x}", h.finish());
+                self.texts.insert(oid.clone(), text.to_string());
+                oid
+            }
+
+            /// A tree of `files`, each under an id of its contents.
+            fn tree(&mut self, files: &[(&str, &str)]) -> Snapshot {
+                self.change(&Snapshot::new(), &files.iter().map(|(p, t)| (*p, Some(*t))).collect::<Vec<_>>())
+            }
+
+            /// `tree` with each path set to its text, or removed for None.
+            fn change(&mut self, tree: &Snapshot, changes: &[(&str, Option<&str>)]) -> Snapshot {
+                let mut tree = tree.clone();
+                for (path, text) in changes {
+                    match text {
+                        Some(text) => {
+                            let oid = self.put(text);
+                            tree.insert(path.to_string(), Entry { mode: "100644".into(), oid });
+                        }
+                        None => {
+                            tree.remove(*path);
+                        }
+                    }
+                }
+                tree
+            }
+        }
+
+        /// What `select_with_policy` gives for `before` to `after` under the map in `policy`.
+        fn under(policy: &Snapshot, before: &Snapshot, after: &Snapshot, objects: &Mem) -> Selection {
+            let mut s = Selection { base: "base".into(), head: "head".into(), tree: "tree".into(), policy_blob: None, selector: SELECTOR.into(), full: true, components: vec![], checks: vec![], reasons: vec![] };
+            let decided = decide(policy, before, after, objects, &mut s);
+            fall_back(&mut s, decided);
+            s
+        }
+
+        fn decided(before: &Snapshot, after: &Snapshot, objects: &Mem) -> Selection {
+            under(before, before, after, objects)
+        }
+
+        fn reduced(before: &Snapshot, after: &Snapshot, objects: &Mem) -> Selection {
+            let s = decided(before, after, objects);
+            assert!(!s.full, "{:?}", s.reasons);
+            s
+        }
+
+        fn full_because(before: &Snapshot, after: &Snapshot, objects: &Mem, why: &str) {
+            let s = decided(before, after, objects);
+            assert!(s.full && s.checks.is_empty(), "{s:?}");
+            assert!(s.reasons.join(" ").contains(why), "{why}: {:?}", s.reasons);
+        }
+
+        fn js() -> (Mem, Snapshot) {
+            let mut m = Mem::default();
+            let t = m.tree(&[
+                (POLICY_PATH, JS_POLICY),
+                ("package.json", "{}"),
+                ("src/math.ts", "export const sum = 1;"),
+                ("src/helper.ts", "export {sum} from './math';"),
+                ("src/math.test.ts", "import {sum} from './helper.js'; export const result = sum;"),
+                ("src/other.test.ts", "export const result = 1;"),
+            ]);
+            (m, t)
+        }
+
+        fn cargo() -> (Mem, Snapshot) {
+            let mut m = Mem::default();
+            let t = m.tree(&[
+                (POLICY_PATH, CARGO_POLICY),
+                ("Cargo.toml", "[package]\nname='example'\nversion='0.1.0'"),
+                ("src/lib.rs", "mod math;"),
+                ("src/math.rs", "pub fn add()->i32 {1}"),
+                ("tests/helper.rs", "pub fn value()->i32 {1}"),
+                ("tests/arithmetic.rs", "mod helper; #[test] fn adds() {}"),
+            ]);
+            (m, t)
+        }
+
+        /// As `the_repos_own_map_selects_the_frontend_and_keeps_everything_else_full`, on this
+        /// checkout's own tree and map, with each candidate made in memory.
+        #[test]
+        fn the_repos_own_map_decides_in_memory() {
+            let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+            let base = snapshot(&repo, "HEAD").unwrap();
+            let paths = base.iter().map(|(p, e)| (e.oid.clone(), p.clone())).collect();
+            let mut m = Mem { texts: HashMap::new(), disk: Some((repo.clone(), paths)) };
+            // A candidate: the base with each path set to a text, or (None) its own text and one
+            // more line.
+            let mut make = |changes: &[(&str, Option<&str>)]| -> Snapshot {
+                let texts: Vec<(String, String)> = changes
+                    .iter()
+                    .map(|(p, t)| (p.to_string(), t.map(str::to_string).unwrap_or_else(|| format!("{}
+// edited
+", m.text(&base[*p].oid).unwrap()))))
+                    .collect();
+                let pairs: Vec<(&str, Option<&str>)> = texts.iter().map(|(p, t)| (p.as_str(), Some(t.as_str()))).collect();
+                m.change(&base, &pairs)
+            };
+            let frontend = ["src/Rules.tsx", "scripts/version.mjs"];
+            let build = ["src-tauri/tauri.conf.json", "src-tauri/capabilities/default.json", "crates/nitely-cli/build.rs"];
+            let rust = "crates/nitely-core/src/lanes.rs";
+            let fronts: Vec<Snapshot> = frontend.iter().map(|p| make(&[(p, None)])).collect();
+            let new_test = make(&[("src/rules/new.test.ts", Some("export {};
+"))]);
+            let crate_changes: Vec<Snapshot> = ["crates/nitely-cli/src/ui.rs", "src-tauri/src/notify.rs", "crates/nitely-crew/src/waits.rs"].iter().map(|p| make(&[(p, None)])).collect();
+            let builds: Vec<Snapshot> = build.iter().map(|p| make(&[(p, None)])).collect();
+            // Anything the map does not own keeps the full gate: Rust, the map itself, a manifest,
+            // a frontend change that also touches Rust, a test outside every mapped root, and one
+            // inside the frontend that no pattern matches.
+            let stay_full: Vec<Snapshot> = vec![
+                make(&[(rust, None)]),
+                make(&[(POLICY_PATH, None)]),
+                make(&[("package.json", None)]),
+                make(&[("src/Rules.tsx", None), (rust, None)]),
+                make(&[("docs/new.test.ts", Some("export {};
+"))]),
+                make(&[("src/new.spec.ts", Some("export {};
+"))]),
+            ];
+
+            for (path, after) in frontend.iter().zip(&fronts) {
+                let s = reduced(&base, after, &m);
+                assert_eq!(s.components, ["web"], "{path}");
+                let commands: Vec<&str> = s.checks.iter().map(|c| c.command.as_str()).collect();
+                assert_eq!(commands, ["npm run build", "npm test"], "{path}");
+            }
+            let s = reduced(&base, &new_test, &m);
+            assert!(s.checks.iter().any(|c| c.required_tests.iter().any(|t| t == "src/rules/new.test.ts")), "{:?}", s.checks);
+            for ((path, component, clippy, package), after) in [
+                ("crates/nitely-cli/src/ui.rs", "cli", "cargo clippy -p nitely-cli -- -D warnings", "nitely-cli"),
+                ("src-tauri/src/notify.rs", "app", "cargo clippy -p nitely-app -- -D warnings", "nitely-app"),
+            ]
+            .into_iter()
+            .zip(&crate_changes)
+            {
+                let s = reduced(&base, after, &m);
+                assert_eq!(s.components, [component], "{path}");
+                assert!(s.checks.iter().any(|c| c.command == clippy), "{path}");
+                assert!(s.checks.iter().filter(|c| c.discovery.is_some()).all(|c| c.command.contains(&format!("-p {package}"))), "{path}: {:?}", s.checks);
+                assert!(!s.checks.iter().any(|c| c.command.contains("nitely-core")), "{path}");
+            }
+            let s = reduced(&base, &crate_changes[2], &m);
+            assert_eq!(s.components, ["crew", "cli", "app"]);
+            assert!(s.checks.iter().any(|c| c.command == "cargo clippy -p nitely-crew -- -D warnings"), "{:?}", s.checks);
+            assert!(!s.checks.iter().any(|c| c.command.contains("nitely-core")), "{:?}", s.checks);
+            for (path, after) in build.iter().zip(&builds) {
+                assert!(decided(&base, after, &m).full, "{path}");
+            }
+            for after in &stay_full {
+                let s = decided(&base, after, &m);
+                assert!(s.full && s.checks.is_empty(), "{:?}", s.reasons);
+            }
+        }
+
+        /// As `a_build_script_reduces_only_with_its_inputs_approved_and_unchanged`.
+        #[test]
+        fn a_build_script_reduces_only_with_its_inputs_approved_and_unchanged() {
+            let (mut m, t) = cargo();
+            let script = "fn main() { println!(\"cargo:rerun-if-changed=assets\"); }";
+            let t = m.change(&t, &[("build.rs", Some(script)), ("assets/table.txt", Some("1"))]);
+            let math = |m: &mut Mem, t: &Snapshot, n: &str| m.change(t, &[("src/math.rs", Some(&format!("pub fn add()->i32 {{{n}}}")))]);
+            let after = math(&mut m, &t, "2");
+            full_because(&t, &after, &m, "approve build.rs");
+            let approved = CARGO_POLICY.replace("checks = [", "build_inputs = [\"build.rs\", \"assets/\"]\nchecks = [");
+            let t = m.change(&t, &[(POLICY_PATH, Some(&approved))]);
+            let after = math(&mut m, &t, "3");
+            assert_eq!(reduced(&t, &after, &m).components, ["math"]);
+            let after = m.change(&t, &[("assets/table.txt", Some("2"))]);
+            full_because(&t, &after, &m, "changed build-script input: assets/table.txt");
+            let after = m.change(&t, &[("build.rs", Some("fn main() {}"))]);
+            full_because(&t, &after, &m, "build.rs");
+            let stale = m.change(&t, &[(POLICY_PATH, Some(&approved.replace("\"assets/\"", "\"missing/\"")))]);
+            let after = math(&mut m, &stale, "4");
+            full_because(&stale, &after, &m, "invalid or stale build-script input: missing/");
+        }
+
+        /// As `reverse_imports_select_helpers_and_tests_but_execute_whole_suite`, the decision
+        /// part: the git scenario stays for the commit ids and the policy blob.
+        #[test]
+        fn reverse_imports_select_helpers_and_tests_and_run_the_whole_suite() {
+            let (mut m, t) = js();
+            let after = m.change(&t, &[("src/math.ts", Some("export const sum = 2;"))]);
+            let s = reduced(&t, &after, &m);
+            assert_eq!(s.checks.iter().map(|c| c.command.as_str()).collect::<Vec<_>>(), ["npm run build", "npm test"]);
+            assert_eq!(s.checks[1].required_tests, ["src/math.test.ts"]);
+            assert!(s.checks[1].whole_suite);
+            assert_eq!(s.policy_blob.as_deref(), Some(t[POLICY_PATH].oid.as_str()));
+            let after = m.change(&t, &[("src/math.test.ts", Some("import './helper.js'; export const changed = true;"))]);
+            assert_eq!(reduced(&t, &after, &m).checks[1].required_tests, ["src/math.test.ts"]);
+        }
+
+        /// As `deleted_source_keeps_previous_consumers`.
+        #[test]
+        fn deleted_source_keeps_previous_consumers() {
+            let (mut m, t) = js();
+            let after = m.change(&t, &[("src/math.ts", None), ("src/helper.ts", Some("export const sum = 1;"))]);
+            assert_eq!(reduced(&t, &after, &m).checks[1].required_tests, ["src/math.test.ts"]);
+        }
+
+        /// As `dynamic_import_missing_consumer_and_candidate_policy_fail_closed`.
+        #[test]
+        fn dynamic_import_missing_consumer_and_candidate_policy_fail_closed() {
+            for (path, text, why) in [
+                ("src/math.ts", "export const sum = import(name);", "nonliteral"),
+                ("src/uncovered.ts", "export const x = 1;", "no affected tests"),
+                (POLICY_PATH, "version=1\ncomponents=[]", "changed policy"),
+                ("src/new.test.ts", "import './math';", "missing from inventory"),
+            ] {
+                let (mut m, t) = js();
+                let after = m.change(&t, &[(path, Some(text))]);
+                full_because(&t, &after, &m, why);
+            }
+        }
+
+        /// As `consumers_outside_component_and_unknown_policy_fields_are_full`.
+        #[test]
+        fn consumers_outside_component_and_unknown_policy_fields_are_full() {
+            let (mut m, t) = js();
+            let t = m.change(&t, &[("outside/consumer.ts", Some("import '../src/math';"))]);
+            let after = m.change(&t, &[("src/math.ts", Some("export const sum = 2;"))]);
+            full_because(&t, &after, &m, "outside approved");
+            let t = m.change(&t, &[(POLICY_PATH, Some(&format!("unsupported=true\n{JS_POLICY}")))]);
+            let after = m.change(&t, &[("src/math.ts", Some("export const sum = 3;"))]);
+            assert!(decided(&t, &after, &m).full);
+        }
+
+        /// As `cargo_explicit_mapping_selects_target_and_shared_helper_consumers`.
+        #[test]
+        fn cargo_explicit_mapping_selects_target_and_shared_helper_consumers() {
+            let (mut m, t) = cargo();
+            let after = m.change(&t, &[("src/math.rs", Some("pub fn add()->i32 {2}"))]);
+            let s = reduced(&t, &after, &m);
+            assert_eq!(s.checks.len(), 2);
+            assert_eq!(s.checks[1].command, "cargo test --manifest-path Cargo.toml -p example --lib math::tests::");
+            assert!(!s.checks[1].whole_suite);
+            let after = m.change(&t, &[("tests/helper.rs", Some("pub fn value()->i32 {2}"))]);
+            let s = reduced(&t, &after, &m);
+            assert_eq!(s.checks.len(), 3);
+            assert!(s.checks[2].command.ends_with("--test arithmetic"));
+            // A missing target cannot become a passing run of zero tests.
+            let after = m.change(&after, &[("tests/arithmetic.rs", None)]);
+            assert!(decided(&t, &after, &m).full);
+        }
+
+        /// As `approved_whole_suite_mapping_handles_opaque_inputs_without_claiming_a_graph`.
+        #[test]
+        fn approved_whole_suite_mapping_handles_opaque_inputs_without_claiming_a_graph() {
+            let (mut m, t) = js();
+            let t = m.change(&t, &[(POLICY_PATH, Some(&JS_POLICY.replace("id = \"unit\"", "id = \"unit\"\ninputs = [\"src/\"]")))]);
+            let after = m.change(&t, &[("src/math.ts", Some("export const sum = import(name);"))]);
+            let s = reduced(&t, &after, &m);
+            assert_eq!(s.checks[1].required_tests, ["src/math.test.ts", "src/other.test.ts"]);
+            assert!(s.reasons.join(" ").contains("not inferred static coverage"));
+            let after = m.change(&after, &[("outside/consumer.ts", Some("import '../src/math';"))]);
+            assert!(decided(&t, &after, &m).full);
+        }
+
+        /// As `declared_component_consumers_run_all_their_suites`.
+        #[test]
+        fn declared_component_consumers_run_all_their_suites() {
+            let (mut m, t) = cargo();
+            let policy = format!(
+                r#"{CARGO_POLICY}
+[[components]]
+id = "consumer"
+roots = ["consumer/src/"]
+depends_on = ["math"]
+checks = ["cargo clippy -p consumer -- -D warnings"]
+[[components.suites]]
+id = "unit"
+inputs = ["consumer/src/"]
+[components.suites.cargo]
+manifest = "consumer/Cargo.toml"
+package = "consumer"
+target_kind = "lib"
+"#
+            );
+            let t = m.change(&t, &[
+                ("consumer/src/lib.rs", Some("pub fn use_math() {} ")),
+                ("consumer/Cargo.toml", Some("[package]\nname='consumer'\nversion='0.1.0'")),
+                (POLICY_PATH, Some(&policy)),
+            ]);
+            let after = m.change(&t, &[("src/math.rs", Some("pub fn add()->i32 {2}"))]);
+            let s = reduced(&t, &after, &m);
+            assert_eq!(s.components, ["math", "consumer"]);
+            assert!(s.checks.iter().any(|c| c.command == "cargo test --manifest-path consumer/Cargo.toml -p consumer --lib"));
+        }
+
+        /// The map comes from the policy commit when it is not the base (a goal branch measured
+        /// against main's newer map): that map decides, and its blob is the one recorded. No git
+        /// test reached this before.
+        #[test]
+        fn a_policy_commit_other_than_the_base_decides_with_its_own_map() {
+            let (mut m, t) = cargo();
+            let t = m.change(&t, &[("build.rs", Some("fn main() {}"))]);
+            let after = m.change(&t, &[("src/math.rs", Some("pub fn add()->i32 {2}"))]);
+            full_because(&t, &after, &m, "approve build.rs");
+            let approved = CARGO_POLICY.replace("checks = [", "build_inputs = [\"build.rs\"]\nchecks = [");
+            let main = m.change(&t, &[(POLICY_PATH, Some(&approved))]);
+            let s = under(&main, &t, &after, &m);
+            assert!(!s.full, "{:?}", s.reasons);
+            assert_eq!(s.policy_blob.as_deref(), Some(main[POLICY_PATH].oid.as_str()));
+        }
     }
 }
