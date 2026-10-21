@@ -10,7 +10,7 @@
 
 use crate::machine::{self, Limits, Memory};
 use anyhow::Result;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::Duration;
@@ -263,16 +263,22 @@ pub(crate) fn schema(db: &rusqlite::Connection) -> Result<()> {
 }
 
 /// Records `adjustment` in the machine's performance history, unless recording is paused. Kept
-/// as long as the history's summaries are.
+/// as long as the history's summaries are (the recorder prunes it with them).
 pub fn record(dir: &Path, adjustment: &Adjustment) -> Result<()> {
-    let store = crate::performance::Store::open(dir)?;
-    let settings = store.settings()?;
-    if !settings.enabled {
+    let mut store = crate::performance::Store::open(dir)?;
+    // The paused check and the insert in one write transaction, as workload events do: a pause and
+    // clear that comes between them must not see the adjustment come back.
+    let tx = store.db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let version: i64 = tx.query_row("SELECT version FROM recorder_version WHERE id=1", [], |r| r.get(0))?;
+    let settings: Option<String> = tx.query_row("SELECT json FROM settings WHERE id=1", [], |r| r.get(0)).optional()?;
+    let settings: crate::performance::Settings = settings.map(|s| serde_json::from_str(&s)).transpose()?.unwrap_or_default();
+    if version > crate::performance::RECORDER_VERSION || !settings.enabled {
         return Ok(());
     }
     let oldest = adjustment.wall_ms.saturating_sub(i64::from(settings.summary_days) * 86_400_000);
-    store.db.execute("DELETE FROM pace_adjustment WHERE wall_ms < ?1", [oldest])?;
-    store.db.execute("INSERT INTO pace_adjustment(wall_ms, json) VALUES(?1, ?2)", params![adjustment.wall_ms, serde_json::to_string(adjustment)?])?;
+    tx.execute("DELETE FROM pace_adjustment WHERE wall_ms < ?1", [oldest])?;
+    tx.execute("INSERT INTO pace_adjustment(wall_ms, json) VALUES(?1, ?2)", params![adjustment.wall_ms, serde_json::to_string(adjustment)?])?;
+    tx.commit()?;
     Ok(())
 }
 
