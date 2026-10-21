@@ -13,3 +13,10 @@ nitely_core = 60
 # Tests allowed past test_seconds: the end-to-end scenarios each feature keeps (one or two per
 # feature), by the name the runner prints, each with what it proves. NIT-523 names them.
 [scenarios]
+# Lanes, machine admission and executors (NIT-533).
+"lanes::tests::a_lane_runs_requests_keeping_only_its_build_dirs" = "the lane round trip: snapshot in, command run, only the build directories kept"
+"lanes::tests::a_request_runs_in_the_main_checkout_and_puts_it_back_on_its_branch" = "large-repo mode: the person's checkout lent to a request and given back on its branch"
+"lanes::tests::a_snapshot_is_head_or_a_commit_of_the_worktree_without_touching_it" = "a snapshot is HEAD or a commit of the worktree, which it never touches"
+"lanes::tests::a_lane_command_takes_what_it_started_with_it" = "process containment: what a lane command started ends with it"
+"executor::tests::receiver_reconstructs_binary_snapshot_runs_once_and_refuses_cross_project" = "the executor receiver: a binary patch rebuilt, run once per id, other projects refused"
+"machine_transport_runs_snapshot_and_records_executor_without_local_lane" = "the CLI machine transport end to end: nitely run through a relay to nitely executor receive"

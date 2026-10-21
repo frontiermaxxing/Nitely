@@ -179,6 +179,9 @@ fn process(
     .context("cannot contain executor transport")?;
     let mut child = guard.spawn(&mut cmd)?;
     let started = Instant::now();
+    // Looked at again soon at first, then less often (NIT-533): a git call that ends in 20 ms is
+    // seen ending then, not at the next 100 ms tick; a long run is still checked ten times a second.
+    let mut every = Duration::from_millis(1);
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
@@ -192,7 +195,8 @@ fn process(
             let _ = child.wait();
             bail!("executor transport exceeded its time/output bound; remote outcome may be unknown, so it was not retried");
         }
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(every);
+        every = (every * 2).min(Duration::from_millis(100));
     };
     guard.end(Duration::from_secs(2));
     if std::fs::metadata(&stdout)?.len() > limit || std::fs::metadata(&stderr)?.len() > 65536 {
@@ -302,7 +306,32 @@ fn execute(
     actor: &Actor,
     on_event: &mut dyn FnMut(&Run),
 ) -> Result<Option<(Run, Reply)>> {
-    let settings = Settings::load()?;
+    let mut transport = |m: &Machine, bytes: &[u8], timeout: Duration| {
+        let mut cmd = playbook::shell_free_command(&m.command[0]);
+        cmd.args(&m.command[1..]);
+        process(cmd, bytes, timeout, MAX_OUTPUT)
+    };
+    execute_with(db, root, pb, req, steps, actor, on_event, &Settings::load()?, &mut transport)
+}
+
+/// The machine transport `execute_with` hands a request to: the machine, the request's bytes and
+/// the time it may take; the reply's bytes back.
+type Transport<'a> = dyn FnMut(&Machine, &[u8], Duration) -> Result<Vec<u8>> + 'a;
+
+/// `execute` with the executor settings and the machine transport given (NIT-533), so a test can
+/// stand in for the other machine without a process, a relay or a lane.
+#[allow(clippy::too_many_arguments)]
+fn execute_with(
+    db: &Db,
+    root: &Path,
+    pb: &Playbook,
+    req: &Request,
+    steps: &[(String, Option<String>)],
+    actor: &Actor,
+    on_event: &mut dyn FnMut(&Run),
+    settings: &Settings,
+    transport: &mut Transport,
+) -> Result<Option<(Run, Reply)>> {
     let executor = selection(pb);
     let machine = if executor == "ci" {
         if !allowed(&settings.ci_projects, req.project) {
@@ -383,8 +412,6 @@ fn execute(
         if bytes.len() as u64 > MAX_REQUEST {
             bail!("snapshot exceeds the 12 MiB executor request bound");
         }
-        let mut cmd = playbook::shell_free_command(&machine.command[0]);
-        cmd.args(&machine.command[1..]);
         let timeout = Duration::from_secs(
             pb.lanes
                 .as_ref()
@@ -392,7 +419,7 @@ fn execute(
                 .unwrap_or(30)
                 * 60,
         );
-        let reply: Reply = serde_json::from_slice(&process(cmd, &bytes, timeout, MAX_OUTPUT)?)?;
+        let reply: Reply = serde_json::from_slice(&transport(machine, &bytes, timeout)?)?;
         validate_reply(&wire, &reply)?;
         Ok(reply)
     })();
@@ -1305,6 +1332,47 @@ fn evidence(pending: &Pending, view: &serde_json::Value, (passed, jobs): (bool, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the CLI's machine-transport test checks, without a process, a relay or a 30 s limit
+    /// (NIT-533): a request to a machine executor goes out as one wire request with the snapshot's
+    /// tree, no lane runs here, and the row keeps the machine's name and its exit code as it was.
+    #[test]
+    fn a_machine_executor_run_records_its_reply_without_a_local_lane() {
+        let dir = Scratch::new().unwrap();
+        let source = dir.0.join("source");
+        crate::test_repo::init(&source, &[("a.txt", "one\n")]);
+        std::fs::write(source.join("a.txt"), "two\n").unwrap();
+        let snap = lanes::snapshot(&source).unwrap();
+        let pb = Playbook::parse("[lanes]\nexecutor = \"machine:test\"\n").unwrap();
+        let settings = Settings {
+            machines: [("test".to_string(), Machine { command: vec!["unused".into()], project: "APP".into(), projects: vec!["APP".into()] })].into_iter().collect(),
+            ..Default::default()
+        };
+        let db = Db::open(&dir.0.join("data/nitely.db")).unwrap();
+        let req = Request { project: "APP", issue: None, kind: Kind::Run, snapshot: &snap, command: "exit 7" };
+        let mut sent = Vec::new();
+        let mut transport = |m: &Machine, bytes: &[u8], _: Duration| -> Result<Vec<u8>> {
+            let wire: WireRequest = serde_json::from_slice(bytes)?;
+            sent.push((m.project.clone(), wire.tree.clone(), wire.steps.clone()));
+            let reply = Reply { version: 1, id: wire.id, tree: wire.tree, passed: false, exit_code: Some(7), timed_out: false, results: vec![], flaked: vec![], remote_run: Some(41), unavailable: None };
+            Ok(serde_json::to_vec(&reply)?)
+        };
+        let steps = vec![("exit 7".to_string(), None)];
+        let (row, reply) = execute_with(&db, &source, &pb, &req, &steps, &Actor::Agent("claude:test".into()), &mut |_| {}, &settings, &mut transport).unwrap().unwrap();
+        assert_eq!(sent, vec![("APP".to_string(), snap.tree.clone(), steps.clone())]);
+        assert_eq!((row.executor.as_str(), row.lane, row.exit_code, row.state.as_str()), ("machine:test", None, Some(7), "done"));
+        assert_eq!(reply.remote_run, Some(41));
+        // A reply for another tree is refused, and the row says so.
+        let mut wrong = |_: &Machine, bytes: &[u8], _: Duration| -> Result<Vec<u8>> {
+            let wire: WireRequest = serde_json::from_slice(bytes)?;
+            let reply = Reply { version: 1, id: wire.id, tree: "0".repeat(40), passed: false, exit_code: Some(1), timed_out: false, results: vec![], flaked: vec![], remote_run: None, unavailable: None };
+            Ok(serde_json::to_vec(&reply)?)
+        };
+        assert!(execute_with(&db, &source, &pb, &req, &steps, &Actor::Agent("claude:test".into()), &mut |_| {}, &settings, &mut wrong).is_err());
+        let last = db.conn.query_row("SELECT state FROM lane_run ORDER BY id DESC LIMIT 1", [], |r| r.get::<_, String>(0)).unwrap();
+        assert_eq!(last, "lane_error");
+    }
+
     #[test]
     fn transport_bounds_a_peer_that_never_reads_or_never_stops_writing() {
         let mut cmd = playbook::shell_free_command("node");

@@ -1730,29 +1730,35 @@ fn run_cap() -> Option<u64> {
 /// each run is still stopped at its cap.
 fn caps_fit(db: &Db, id: i64, limits: Option<&machine::Limits>, slots: u32) -> Result<Option<String>> {
     let Some(limits) = limits.filter(|l| l.floor > 0) else { return Ok(None) };
-    let room = limits.total.saturating_sub(limits.floor);
     let mine = sizing_of(db, id, cap_for(limits, slots))?.reserve;
     // The running runs, and the queued ones that reserved (admitted, about to start).
     let mut stmt = db.conn.prepare(
         "SELECT COALESCE(memory_reserved, memory_cap), pid, pid_started FROM lane_run WHERE id != ?1 AND executor IN ('local', 'worktree') AND (state = 'running' OR (state = 'queued' AND memory_cap IS NOT NULL))",
     )?;
     let rows: Vec<(Option<i64>, Option<i64>, Option<String>)> = stmt.query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<_>>()?;
-    // A run an older nitely started recorded no cap: it may hold the full one.
-    let unrecorded = limits.cap.min(room);
-    let taken: u64 = rows
+    let set_aside: Vec<Option<u64>> = rows
         .into_iter()
         .filter(|(_, pid, started)| pid.is_none_or(|p| p as u32 == std::process::id() || requester_alive(p as u32, started.as_deref())))
-        .map(|(cap, _, _)| cap.map_or(unrecorded, |c| c.max(0) as u64))
-        .sum();
-    if taken.saturating_add(mine) <= room {
-        return Ok(None);
-    }
-    Ok(Some(format!(
-        "waiting for memory: the running builds have {} set aside and this one needs {}, more than the {} above the floor",
-        machine::gb(taken),
-        machine::gb(mine),
-        machine::gb(room)
-    )))
+        .map(|(cap, _, _)| cap.map(|c| c.max(0) as u64))
+        .collect();
+    Ok(reservations_fit(limits, &set_aside, mine))
+}
+
+/// Why a run that needs `mine` set aside must wait for what the live runs have set aside
+/// (`set_aside`, None for a run an older nitely started, which may hold the whole cap), or None when
+/// it all fits above the floor (NIT-533: `caps_fit`'s sum, over plain numbers).
+pub(crate) fn reservations_fit(limits: &machine::Limits, set_aside: &[Option<u64>], mine: u64) -> Option<String> {
+    let room = limits.total.saturating_sub(limits.floor);
+    let unrecorded = limits.cap.min(room);
+    let taken: u64 = set_aside.iter().map(|c| c.unwrap_or(unrecorded)).sum();
+    (taken.saturating_add(mine) > room).then(|| {
+        format!(
+            "waiting for memory: the running builds have {} set aside and this one needs {}, more than the {} above the floor",
+            machine::gb(taken),
+            machine::gb(mine),
+            machine::gb(room)
+        )
+    })
 }
 
 /// Records the cap request `id` is admitted with, and what is set aside for it (its expected peak,
@@ -3621,6 +3627,9 @@ fn run_logged(command: &str, dir: &Path, log: &Path, limit: Duration, share: Sha
     // A new command may build again: its run's whole reservation is back while it does (NIT-516).
     live_step_begins();
     let mut sampled = Instant::now();
+    // Looked at again soon at first, then every 200 ms (NIT-533): a command that ends in 30 ms is
+    // not held to the next tick.
+    let mut every = Duration::from_millis(1);
     let (code, timed_out, out_of_memory) = loop {
         if sampled.elapsed() >= LIVE_EVERY {
             sampled = Instant::now();
@@ -3642,7 +3651,8 @@ fn run_logged(command: &str, dir: &Path, log: &Path, limit: Duration, share: Sha
             child.wait().ok();
             break (None, !oom, oom);
         }
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(every);
+        every = (every * 2).min(Duration::from_millis(200));
     };
     if let Some(p) = &pids {
         std::fs::remove_file(p).ok();
@@ -4014,6 +4024,18 @@ mod tests {
         assert!(!answers_gate(&PriorRun { executor: "ci".into(), ..ran("gate", "npm test\ncargo test") }, &gate));
         assert!(!answers_gate(&PriorRun { timed_out: true, ..ran("gate", "npm test\ncargo test") }, &gate));
         assert!(!answers_gate(&PriorRun { errored: true, ..ran("gate", "npm test\ncargo test") }, &gate));
+    }
+
+    #[test]
+    fn a_run_waits_only_when_what_is_set_aside_and_its_own_need_pass_the_floor() {
+        let gb = machine::GIB;
+        // 64 GB, a 12.8 GB floor: 51.2 GB of room, a 16 GB cap.
+        let l = machine::limits_for(64 * gb, None, None);
+        assert_eq!(reservations_fit(&l, &[], 40 * gb), None);
+        assert_eq!(reservations_fit(&l, &[Some(10 * gb), Some(20 * gb)], 21 * gb), None, "51 of 51.2 fits");
+        let why = reservations_fit(&l, &[Some(10 * gb), Some(20 * gb)], 22 * gb).unwrap();
+        assert_eq!(why, "waiting for memory: the running builds have 30.0 GB set aside and this one needs 22.0 GB, more than the 51.2 GB above the floor");
+        assert!(reservations_fit(&l, &[None, None, None], 4 * gb).is_some(), "three unrecorded runs count at the 16 GB cap each");
     }
 
     #[test]

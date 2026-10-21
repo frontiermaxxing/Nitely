@@ -1,8 +1,4 @@
-use std::{
-    path::Path,
-    process::Command,
-    time::{Duration, Instant},
-};
+use std::{path::Path, process::Command};
 fn git(root: &Path, args: &[&str]) {
     let out = nitely_core::playbook::run_git(Command::new("git")
         .arg("-C")
@@ -84,21 +80,9 @@ fn machine_transport_runs_snapshot_and_records_executor_without_local_lane() {
         .stderr(std::fs::File::create(&error).unwrap())
         .spawn()
         .unwrap();
-    let started = Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        if started.elapsed() > Duration::from_secs(30) {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!(
-                "isolated executor CLI timed out: {}",
-                std::fs::read_to_string(&error).unwrap()
-            );
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    };
+    // A named scenario (NIT-533): it waits for the CLI as long as it takes, with no wall-clock
+    // limit of its own to fail a slow machine; the core test of `execute_with` checks the decision.
+    let status = child.wait().unwrap();
     assert!(
         status.success(),
         "{}",
