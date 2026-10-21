@@ -458,6 +458,25 @@ enum LeaderboardCmd {
         #[arg(long)]
         project: Vec<String>,
     },
+    /// The weekly report exactly as it would be shared: counts and rates only, never names,
+    /// paths or text. Prints it; sends nothing.
+    Report {
+        /// A project to count (repeat for more); without one, every project.
+        #[arg(long)]
+        project: Vec<String>,
+        /// The display name the board shows.
+        #[arg(long)]
+        name: String,
+        /// A GitHub user name.
+        #[arg(long)]
+        github: Option<String>,
+        /// An X handle.
+        #[arg(long)]
+        x: Option<String>,
+        /// An https address.
+        #[arg(long)]
+        website: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1640,6 +1659,12 @@ fn run(cmd: Cmd) -> Result<()> {
             let config = Config::load()?;
             let db = Db::open_default()?;
             print_json(&nitely_core::leaderboard::stats_now(&config, &db, &project)?)
+        }
+        Cmd::Leaderboard { command: LeaderboardCmd::Report { project, name, github, x, website } } => {
+            let config = Config::load()?;
+            let db = Db::open_default()?;
+            let profile = nitely_core::leaderboard_report::Profile { display_name: name, github, x, website };
+            print_json(&nitely_core::leaderboard_report::report_now(&config, &db, &project, &profile)?)
         }
         Cmd::Spend { issue, project, days } => {
             let config = Config::load()?;

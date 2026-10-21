@@ -26,6 +26,7 @@ pub mod hook;
 pub mod install;
 pub mod land;
 pub mod leaderboard;
+pub mod leaderboard_report;
 pub mod land_queue;
 pub mod lanes;
 mod lane_clone;
