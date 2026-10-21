@@ -2611,6 +2611,7 @@ dependencies = [
  "anyhow",
  "block2",
  "nitely-core",
+ "nitely-crew",
  "notify-rust",
  "objc2",
  "objc2-foundation",
@@ -2638,6 +2639,7 @@ dependencies = [
  "ctrlc",
  "mdns-sd",
  "nitely-core",
+ "nitely-crew",
  "rusqlite",
  "serde",
  "serde_json",
@@ -2677,6 +2679,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "nitely-crew"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "ed25519-dalek",
+ "nitely-core",
+ "regex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "toml 1.1.8+spec-1.1.0",
+ "toml_edit 0.23.10+spec-1.0.0",
+ "ureq",
+]
+
+[[package]]
 name = "nitely-leaderboard"
 version = "0.1.0"
 dependencies = [
@@ -2685,6 +2706,7 @@ dependencies = [
  "chrono",
  "ed25519-dalek",
  "nitely-core",
+ "nitely-crew",
  "rusqlite",
  "serde",
  "serde_json",
