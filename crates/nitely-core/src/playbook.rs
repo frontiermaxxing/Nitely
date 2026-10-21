@@ -1221,7 +1221,16 @@ pub(crate) fn tail(s: &str) -> String {
     while !s.is_char_boundary(start) {
         start += 1;
     }
-    format!("…{}", &s[start..])
+    let kept = &s[start..];
+    // A failure named only in the part cut off is named again at the top, so the end of a long
+    // run still says every test that failed (NIT-557: what each failure's fix was is kept per test).
+    let shown = failed_tests(kept);
+    let lost: Vec<String> = failed_tests(s).into_iter().filter(|n| !shown.contains(n)).collect();
+    if lost.is_empty() {
+        return format!("…{kept}");
+    }
+    let names: Vec<String> = lost.iter().map(|n| format!("not ok 0 - {n}")).collect();
+    format!("Failed earlier in the output:\n{}\n…{kept}", names.join("\n"))
 }
 
 /// The main checkout of the repo `dir` is in: the watched repo's root when Nitely knows it,
@@ -1792,6 +1801,22 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An early failure in a long run keeps its name when the output is cut to its end (NIT-557).
+    #[test]
+    fn the_end_of_a_long_run_still_names_a_failure_from_its_start() {
+        let mut out = String::from("not ok 3 - an early failure
+");
+        for i in 0..400 {
+            out.push_str(&format!("ok {i} - a passing test with a long enough name
+"));
+        }
+        let kept = tail(&out);
+        assert!(kept.len() < out.len());
+        assert_eq!(failed_tests(&kept), vec!["an early failure".to_string()]);
+        assert!(!tail(&"ok 1 - fine
+".repeat(400)).starts_with("Failed earlier"), "nothing failed, nothing added");
+    }
 
     /// NIT-287: a lane serving branches that differ only in Cargo.lock ran `npm ci` again for each,
     /// because the setup fingerprint read every lockfile. Setup reads only its tools' files now.

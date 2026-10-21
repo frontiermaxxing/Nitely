@@ -128,11 +128,14 @@ pub fn fix_spans(failures: &[Failure], passed: &str) -> Vec<FixSpan> {
     for (i, failure) in failures.iter().enumerate() {
         let later = &failures[i + 1..];
         for f in &failure.tests {
-            // A later failure of the same test holds its last failure; that record speaks for it.
-            if later.iter().any(|l| l.tests.iter().any(|t| t.test == f.test)) {
-                continue;
-            }
-            let fixed = later.iter().find(|l| l.passed_steps.contains(&f.step)).map(|l| l.commit.as_str()).unwrap_or(passed);
+            // The first later gate that says anything about this test: it failed again there (that
+            // later failure starts its own episode) or its step passed there (this episode's fix).
+            let next = later.iter().find(|l| l.tests.iter().any(|t| t.test == f.test) || l.passed_steps.contains(&f.step));
+            let fixed = match next {
+                Some(l) if l.tests.iter().any(|t| t.test == f.test) => continue,
+                Some(l) => l.commit.as_str(),
+                None => passed,
+            };
             if fixed != failure.commit {
                 spans.push(FixSpan { test: f.test.clone(), failed: failure.commit.clone(), fixed: fixed.to_string() });
             }
@@ -201,13 +204,15 @@ impl Db {
         Ok(())
     }
 
-    /// Catches and false alarms per module, most false alarms first.
-    pub fn catches_by_module(&self) -> Result<Vec<ModuleCatches>> {
+    /// A project's catches and false alarms per module, most false alarms first: modules of two
+    /// projects that share a name are counted apart.
+    pub fn catches_by_module(&self, project: &str) -> Result<Vec<ModuleCatches>> {
         let mut stmt = self.conn.prepare(
-            "SELECT module, SUM(verdict = 'catch'), SUM(verdict = 'false_alarm') FROM test_catch GROUP BY module
-             ORDER BY SUM(verdict = 'false_alarm') DESC, module",
+            "SELECT c.module, SUM(c.verdict = 'catch'), SUM(c.verdict = 'false_alarm') FROM test_catch c
+             JOIN issue i ON i.key = c.issue_key COLLATE NOCASE WHERE i.project = ?1 COLLATE NOCASE
+             GROUP BY c.module ORDER BY SUM(c.verdict = 'false_alarm') DESC, c.module",
         )?;
-        let rows = stmt.query_map([], |r| Ok(ModuleCatches { module: r.get(0)?, catches: r.get(1)?, false_alarms: r.get(2)? }))?;
+        let rows = stmt.query_map([project], |r| Ok(ModuleCatches { module: r.get(0)?, catches: r.get(1)?, false_alarms: r.get(2)? }))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 }
@@ -244,9 +249,12 @@ mod tests {
         // c2 failed on B in an earlier step, so A's step never ran there: A is judged up to the pass.
         let unseen = [failure("c1", &[("A", "cargo")], &["npm"]), failure("c2", &[("B", "npm")], &[])];
         assert_eq!(fix_spans(&unseen, "c3"), vec![span("A", "c1", "c3"), span("B", "c2", "c3")]);
-        // Failing again later: only its last failure counts.
+        // Failing again with no pass between: only its last failure counts.
         let again = [failure("c1", &[("A", "cargo")], &[]), failure("c2", &[("A", "cargo")], &[])];
         assert_eq!(fix_spans(&again, "c3"), vec![span("A", "c2", "c3")]);
+        // Two episodes: fixed c1..c2 (its step passed at c2), failing again at c3, fixed by the pass.
+        let twice = [failure("c1", &[("A", "cargo")], &[]), failure("c2", &[("B", "npm")], &["cargo"]), failure("c3", &[("A", "cargo")], &["npm"])];
+        assert_eq!(fix_spans(&twice, "c4"), vec![span("A", "c1", "c2"), span("B", "c2", "c3"), span("A", "c3", "c4")]);
         assert_eq!(fix_spans(&[failure("c1", &[("A", "cargo")], &[])], "c1"), vec![], "the same revision passing is a flake");
     }
 

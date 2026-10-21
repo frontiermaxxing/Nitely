@@ -166,7 +166,7 @@ impl Report {
             });
         }
         // The gates' own record (NIT-557): modules whose failures were only ever the tests' own.
-        let counts = db.catches_by_module()?;
+        let counts = db.catches_by_module(project)?;
         let noisy = crate::test_catches::false_alarm_modules(&counts);
         if !noisy.is_empty() {
             let mut body = format!("These modules' tests failed gates {} times in all, and every fix changed only tests: none of their failures caught a product defect. Rewrite them to check behaviour, or propose removing them with what covers them, for a separate human decision.\n\n", noisy.iter().map(|m| m.false_alarms).sum::<i64>());
