@@ -8,8 +8,8 @@
 .lands-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
 .lands-head h2 { margin: 0; font-size: 14px; font-weight: var(--weight-strong); }
 .lands-head .muted { font-size: var(--text-sm); }
-.lands-track { position: relative; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); margin: 0; padding: 0; list-style: none; }
-.lands-track::before { content: ""; position: absolute; left: 10%; right: 10%; top: 13px; height: 1.5px; background: var(--line-strong); }
+.lands-track { --stations: 5; position: relative; display: grid; grid-template-columns: repeat(var(--stations), minmax(0, 1fr)); margin: 0; padding: 0; list-style: none; }
+.lands-track::before { content: ""; position: absolute; left: calc(50% / var(--stations)); right: calc(50% / var(--stations)); top: 13px; height: 1.5px; background: var(--line-strong); }
 .lands-station { position: relative; min-width: 0; }
 .lands-go {
   display: flex; flex-direction: column; align-items: center; gap: 8px; width: 100%; height: 100%; box-sizing: border-box;

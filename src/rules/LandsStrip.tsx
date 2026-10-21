@@ -1,3 +1,4 @@
+import type { CSSProperties } from "react";
 import { MODE_LABEL, type ModeOptions, type ReviewMode } from "../reviewModes";
 import type { RulesEdit, RulesView } from "../types";
 import { vendorOf } from "../ui";
@@ -47,8 +48,10 @@ function reviewedBy(map: Record<string, string>, crossVendor: boolean): Pick<Sta
 }
 
 /**
- * The five stations a change passes under the draft, from the same data as `waitsSummary()`: what
- * refuses it, the gate, who reviews it, what sends it to you, and who lands it.
+ * The stations a change passes under the draft, from the same data as `waitsSummary()`: what
+ * refuses it, the gate, who reviews it, what sends it to you, who lands it, and, with a review
+ * mode, the full suite that checks main afterwards. That last one is red only when Custom turns
+ * it off, since every preset keeps it on (NIT-496).
  */
 export function landsStations(v: RulesView, d: RulesEdit, landBy: RulesDraft["landBy"], crossVendor: boolean, mode: ModeFacts | null): Station[] {
   const blocked = d.blocked_paths.filter((r) => r.pattern.trim());
@@ -91,7 +94,14 @@ export function landsStations(v: RulesView, d: RulesEdit, landBy: RulesDraft["la
   const b = v.batching;
   const batched = b && b.land !== "off" && !b.land_alone && !(mode?.options.land_batch === false);
   const landed: Station = { label: "Landed by", value: LAND_SHORT[landBy], why: batched ? `In batches of up to ${b.land_max}` : "Each change alone", tone: "ink", section: "landing" };
-  return [refused, gate, review, waits, landed];
+  const backstop = mode?.options.full_backstop;
+  const minutes = backstop ? Math.round(backstop.delay_seconds / 60) : 0;
+  const checked: Station | null = !mode || !backstop
+    ? null
+    : !backstop.enabled
+      ? { label: "Checked on main", value: "Off", why: `${MODE_LABEL[mode.mode]} turns off the full suite on main`, tone: "off", section: null }
+      : { label: "Checked on main", value: "Full suite", why: backstop.landings <= 1 ? "After every land, reverting a culprit" : `After ${backstop.landings} lands or ${minutes} min, reverting a culprit`, tone: "agent", section: null };
+  return checked ? [refused, gate, review, waits, landed, checked] : [refused, gate, review, waits, landed];
 }
 
 /** How a change lands under these rules, left to right; each station scrolls to its section. */
@@ -103,7 +113,7 @@ export function LandsStrip(props: { view: RulesView; draft: RulesEdit; landBy: R
         <h2>How a change lands in {props.view.repo}</h2>
         <span className="muted">from these rules, left to right</span>
       </div>
-      <ol className="lands-track">
+      <ol className="lands-track" style={{ "--stations": stations.length } as CSSProperties}>
         {stations.map((s) => {
           const body = (
             <>
