@@ -2276,8 +2276,10 @@ pub fn hold_machine<'a>(db: &'a Db, repo_root: &Path, worktree: &Path, project: 
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn hold_machine_checked<'a>(db: &'a Db, repo_root: &Path, worktree: &Path, project: &str, issue: Option<&str>, kind: Kind, command: &str, actor: &Actor, yolo_keys: &[&str]) -> Result<MachineTurn<'a>> {
-    let rev = |what: &str| git(worktree, &["rev-parse", what]).map(|s| s.trim().to_string()).unwrap_or_default();
-    let (head, tree) = (rev("HEAD"), rev("HEAD^{tree}"));
+    // Both in one git; empty when HEAD names nothing, as each was alone.
+    let ids = git(worktree, &["rev-parse", "HEAD", "HEAD^{tree}"]).unwrap_or_default();
+    let mut ids = ids.lines().map(|l| l.trim().to_string());
+    let (head, tree) = (ids.next().unwrap_or_default(), ids.next().unwrap_or_default());
     let priority = match kind {
         Kind::Land => 1,
         Kind::Gate => 2,

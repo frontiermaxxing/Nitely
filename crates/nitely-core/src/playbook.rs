@@ -728,7 +728,79 @@ pub(crate) fn normalize_lexically(p: &Path) -> PathBuf {
 }
 
 pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<String> {
-    finish(shell_free_command("git").arg("-C").arg(dir).args(args), args)
+    let key = if settled_query(args) {
+        Some(format!("{}\0{}", dir.to_string_lossy(), args.join("\0")))
+    } else {
+        where_query(dir, args)
+    };
+    let Some(key) = key else {
+        return finish(shell_free_command("git").arg("-C").arg(dir).args(args), args);
+    };
+    if let Some(hit) = SETTLED.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+        return Ok(hit.clone());
+    }
+    let out = finish(shell_free_command("git").arg("-C").arg(dir).args(args), args)?;
+    let mut memo = SETTLED.lock().unwrap_or_else(|e| e.into_inner());
+    if memo.len() >= SETTLED_MAX {
+        memo.clear();
+    }
+    memo.insert(key, out.clone());
+    Ok(out)
+}
+
+/// Answers to `settled_query` and `where_query` questions, by folder and arguments. A land or a submit asks the same
+/// ones several times (the verification plan reads both trees in the submit, again in its gate and
+/// again in the land), and on Windows each git costs 50 to 400 ms (NIT-458).
+static SETTLED: std::sync::Mutex<std::collections::BTreeMap<String, String>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+const SETTLED_MAX: usize = 2048;
+
+/// The memo's key for a question about where `dir`'s repository is (its git folder, its common
+/// folder, a path inside it, its top level), asked with `dir` at the top of a checkout: the answer
+/// depends only on `dir` and its `.git`, so the key holds both. A `.git` folder is a main checkout,
+/// whose answers follow from its path; a `.git` file names a worktree's git folder, and a worktree
+/// removed and added again elsewhere writes another. None for any other question, for a folder
+/// below the top, or when the environment points git elsewhere.
+fn where_query(dir: &Path, args: &[&str]) -> Option<String> {
+    let asks_where = match args {
+        ["rev-parse", "--path-format=absolute", "--git-common-dir" | "--git-dir"] | ["rev-parse", "--git-common-dir" | "--absolute-git-dir" | "--show-toplevel"] => true,
+        ["rev-parse", rest @ ..] => {
+            let rest = rest.strip_prefix(&["--path-format=absolute"]).unwrap_or(rest);
+            !rest.is_empty() && rest.chunks(2).all(|pair| matches!(pair, ["--git-path", p] if !p.is_empty()))
+        }
+        _ => false,
+    };
+    if !asks_where || ["GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE"].iter().any(|v| std::env::var_os(v).is_some()) {
+        return None;
+    }
+    let dot_git = dir.join(".git");
+    let meta = std::fs::symlink_metadata(&dot_git).ok()?;
+    let which = if meta.is_dir() {
+        "folder".to_string()
+    } else if meta.is_file() && meta.len() < 4096 {
+        std::fs::read_to_string(&dot_git).ok()?
+    } else {
+        return None;
+    };
+    Some(format!("{}\0{}\0{}", dir.to_string_lossy(), which.trim(), args.join("\0")))
+}
+
+/// Whether git's answer to `args` depends only on objects named by their full id, so no commit,
+/// ref move, checkout or fetch can change it: the commit or tree an id names, a tree's listing,
+/// a file's size at a commit, the merge base of two commits. Only answers git gave are kept, so an
+/// object that is missing now is asked about again.
+fn settled_query(args: &[&str]) -> bool {
+    fn id(s: &str) -> bool {
+        matches!(s.len(), 40 | 64) && s.bytes().all(|b| b.is_ascii_hexdigit())
+    }
+    let peeled = |s: &str| s.strip_suffix("^{commit}").or_else(|| s.strip_suffix("^{tree}")).is_some_and(id);
+    match args {
+        ["rev-parse", "--verify", r] => peeled(r),
+        ["rev-parse", rest @ ..] => !rest.is_empty() && rest.iter().all(|r| peeled(r)),
+        ["ls-tree", "-r", "-z", r] | ["ls-tree", "-r", "--name-only", r] => id(r),
+        ["cat-file", "-s", r] => r.split_once(':').is_some_and(|(c, _)| id(c)),
+        ["merge-base", a, b] => id(a) && id(b),
+        _ => false,
+    }
 }
 
 fn finish(cmd: &mut Command, args: &[&str]) -> Result<String> {
@@ -1467,6 +1539,41 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_keeps_answers_about_object_ids_but_asks_again_about_a_moved_branch() {
+        let repo = crate::paths::unique_temp("nitely-settled", "");
+        crate::test_repo::init(&repo, &[("a.txt", "one\n")]);
+        let first = git(&repo, &["rev-parse", "main^{commit}"]).unwrap();
+        std::fs::write(repo.join("a.txt"), "two\n").unwrap();
+        crate::test_repo::git(&repo, &["commit", "-q", "-am", "two"]);
+        let second = git(&repo, &["rev-parse", "main^{commit}"]).unwrap();
+        assert_ne!(first, second, "a branch is read again each time");
+        // The id's answer is kept: asked again, it is the same without a new git.
+        let tree = |id: &str| git(&repo, &["rev-parse", &format!("{}^{{tree}}", id.trim())]).unwrap();
+        assert_eq!(tree(&first), tree(&first));
+        assert!(settled_query(&["rev-parse", &format!("{}^{{tree}}", first.trim())]));
+        assert!(!settled_query(&["rev-parse", "main^{commit}"]) && !settled_query(&["rev-parse", "HEAD", "HEAD^{tree}"]));
+        assert!(!settled_query(&["rev-parse", &format!("{}^{{tree}}", &first.trim()[..7])]), "an abbreviated id can grow ambiguous");
+
+        // Where a worktree's repository is: kept while its .git names the same git folder, read
+        // again once the worktree at that path is another.
+        let wt = repo.with_extension("wt");
+        crate::test_repo::git(&repo, &["worktree", "add", "-q", "-b", "one", &wt.to_string_lossy()]);
+        let git_dir = |dir: &Path| git(dir, &["rev-parse", "--absolute-git-dir"]).unwrap();
+        let first_dir = git_dir(&wt);
+        assert_eq!(git_dir(&wt), first_dir);
+        crate::test_repo::git(&repo, &["worktree", "remove", &wt.to_string_lossy()]);
+        // Another worktree of the same name takes its git folder's name first.
+        let other = repo.with_extension("x").join(wt.file_name().unwrap());
+        crate::test_repo::git(&repo, &["worktree", "add", "-q", "-b", "two", &other.to_string_lossy()]);
+        crate::test_repo::git(&repo, &["worktree", "add", "-q", "-b", "three", &wt.to_string_lossy()]);
+        assert_ne!(git_dir(&wt), first_dir, "the new worktree's own git folder, not the old one's");
+        assert!(where_query(&wt.join("sub"), &["rev-parse", "--show-toplevel"]).is_none(), "below the top: asked each time");
+        std::fs::remove_dir_all(&wt).ok();
+        std::fs::remove_dir_all(repo.with_extension("x")).ok();
+        std::fs::remove_dir_all(&repo).ok();
+    }
 
     #[test]
     fn only_https_bitbucket_remotes_get_the_token_helper() {

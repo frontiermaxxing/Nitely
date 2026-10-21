@@ -518,6 +518,25 @@ pub struct NewEvent {
 }
 
 /// Beside the database: the version of Nitely that last upgraded its schema.
+/// A new database in a test: a copy of one migrated once per test run, since tests open hundreds
+/// and each would run every migration (NIT-458).
+#[cfg(test)]
+fn copy_template_db(path: &Path) -> Result<()> {
+    static TEMPLATE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    let template = TEMPLATE.get_or_init(|| {
+        let template = crate::paths::unique_temp("nitely-template-db", ".db");
+        // An empty file is an empty database, so `open` migrates it instead of copying.
+        std::fs::File::create(&template).expect("creating the template database");
+        drop(Db::open(&template).expect("migrating the template database"));
+        template
+    });
+    std::fs::copy(template, path)?;
+    if let Ok(stamp) = std::fs::read(upgraded_by_path(template)) {
+        std::fs::write(upgraded_by_path(path), stamp)?;
+    }
+    Ok(())
+}
+
 fn upgraded_by_path(db: &Path) -> std::path::PathBuf {
     let mut name = db.file_name().unwrap_or_default().to_os_string();
     name.push(".upgraded-by");
@@ -618,6 +637,10 @@ impl Db {
     fn open_with(path: &Path, migrations: &[(&str, &str)]) -> Result<Db> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
+        }
+        #[cfg(test)]
+        if std::ptr::eq(migrations, MIGRATIONS) && !path.exists() {
+            copy_template_db(path)?;
         }
         let conn = Connection::open(path)?;
         conn.busy_timeout(BUSY_TIMEOUT)?;

@@ -179,14 +179,16 @@ pub fn assess(repo: &Path, base: &str, head: &str, issue: &IssueRecord) -> Resul
     assess_with_mode(repo,base,head,issue,None)
 }
 fn assess_with_mode(repo:&Path,base:&str,head:&str,issue:&IssueRecord,settings:Option<&crate::project_modes::ProjectReviewMode>)->Result<Plan> {
-    let base = git(repo, &["rev-parse", "--verify", &format!("{base}^{{commit}}")])?.trim().to_string();
-    let head = git(repo, &["rev-parse", "--verify", &format!("{head}^{{commit}}")])?.trim().to_string();
+    // One git for the three: on Windows each costs 50 to 400 ms (NIT-458). git fails the whole call
+    // when any of them names nothing, as --verify did for each.
+    let ids = git(repo, &["rev-parse", &format!("{base}^{{commit}}"), &format!("{head}^{{commit}}"), &format!("{head}^{{tree}}")])?;
+    let [base, head, tree]: [String; 3] = ids.lines().map(|l| l.trim().to_string()).collect::<Vec<_>>().try_into().map_err(|_| anyhow::anyhow!("git rev-parse gave {ids:?}"))?;
     let policy_commit = base;
     let base = git(repo, &["merge-base", &policy_commit, &head])?.trim().to_string();
     let mut plan = Plan {
         commands: vec![],
         affected: None, audit_sample: None, policy_fingerprint: None, rule_ids: vec![], audit_percent:10,
-        tree: git(repo, &["rev-parse", &format!("{head}^{{tree}}")])?.trim().into(),
+        tree,
         head, base, policy_commit, classifier: CLASSIFIER.into(),
         declared: issue.review_level.clone(), declared_by: issue.review_level_by.clone(), declared_source: issue.review_level_source.clone(),
         declared_at: issue.review_level_at,
