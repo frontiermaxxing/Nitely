@@ -81,13 +81,9 @@ fn prepare(db: &Db, req: &Request<'_>) -> Result<Candidate> {
     let parents_of = |of: &str| listed.lines().map(|l| l.split_whitespace().collect::<Vec<_>>()).find(|l| l.first() == Some(&of)).map(|l| l[1..].iter().map(|p| p.to_string()).collect::<Vec<_>>()).unwrap_or_default();
     if candidate != source {
         let parents = parents_of(&candidate);
-        if parents != [source.clone()] { bail!("stamped release candidate must be a single commit directly on its original source"); }
-        let changed = git(req.worktree, &["diff", "--name-only", "-z", "--no-renames", &source, &candidate])?;
-        for path in changed.split('\0').filter(|s| !s.is_empty()) {
-            if !rules.stamp_paths.iter().any(|allowed| allowed == path) {
-                bail!("release candidate changes {path} after its source; integration policy does not allow stamping this path");
-            }
-        }
+        let changed = if parents == [source.clone()] { git(req.worktree, &["diff", "--name-only", "-z", "--no-renames", &source, &candidate])? } else { String::new() };
+        let changed: Vec<&str> = changed.split('\0').filter(|s| !s.is_empty()).collect();
+        check_stamp(&rules.stamp_paths, &source, &parents, &changed)?;
     }
     // Start at the parent to exclude the release tag already placed on SOURCE. Missing history
     // is an error, not an apparent first release: shallow clones must fetch their full history.
@@ -109,14 +105,7 @@ fn prepare(db: &Db, req: &Request<'_>) -> Result<Candidate> {
     } else {
         playbook::git_with_input(req.worktree, &["hash-object", "-t", "tree", "--stdin", "-w"], "")?.trim().into()
     };
-    if pb.gate.commands.is_empty() && pb.gate.steps.is_empty() {
-        bail!("release requires a nonempty Full gate; release-only commands cannot replace it");
-    }
-    let commands: Vec<String> = pb.gate.commands.iter().cloned()
-        .chain(pb.gate.steps.iter().map(|s| s.run.clone())).chain(rules.commands.iter().cloned()).collect();
-    if commands.is_empty() || commands.iter().any(|c| c.trim().is_empty()) {
-        bail!("release requires a nonempty Full gate; no lighter level or empty command is accepted");
-    }
+    let commands = release_commands(&pb.gate.commands, &pb.gate.steps.iter().map(|s| s.run.clone()).collect::<Vec<_>>(), &rules.commands)?;
     crate::verification_backstop::release_ready(db, &root, &source)?;
     let identity = Identity {
         repo: root.to_string_lossy().into_owned(), candidate,
@@ -124,6 +113,58 @@ fn prepare(db: &Db, req: &Request<'_>) -> Result<Candidate> {
         author_vendor: req.author_vendor.into(), commands, platform: std::env::consts::OS.into(),
     };
     Ok(Candidate { identity, playbook: pb, root })
+}
+
+/// Whether a stamped candidate may stand for its source (NIT-537): one commit directly on it
+/// (`parents`), changing only paths the integration policy lets the release job stamp.
+fn check_stamp(stamp_paths: &[String], source: &str, parents: &[String], changed: &[&str]) -> Result<()> {
+    if parents != [source] {
+        bail!("stamped release candidate must be a single commit directly on its original source");
+    }
+    if let Some(path) = changed.iter().find(|path| !stamp_paths.iter().any(|allowed| allowed == *path)) {
+        bail!("release candidate changes {path} after its source; integration policy does not allow stamping this path");
+    }
+    Ok(())
+}
+
+/// What a release runs (NIT-537): every Full gate command and conditional step, whatever its
+/// condition, then the release's own checks. Release-only checks never stand in for a missing
+/// Full gate, and no command may be empty.
+fn release_commands(gate: &[String], steps: &[String], release: &[String]) -> Result<Vec<String>> {
+    if gate.is_empty() && steps.is_empty() {
+        bail!("release requires a nonempty Full gate; release-only commands cannot replace it");
+    }
+    let commands: Vec<String> = gate.iter().chain(steps).chain(release).cloned().collect();
+    if commands.iter().any(|c| c.trim().is_empty()) {
+        bail!("release requires a nonempty Full gate; no lighter level or empty command is accepted");
+    }
+    Ok(commands)
+}
+
+/// One attempt of a phase, as the database keeps it: unfinished while `passed` is None.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Attempt {
+    id: i64,
+    gate_id: Option<i64>,
+    passed: Option<bool>,
+}
+
+/// The latest attempt of `phase` stands only when it finished and passed (NIT-537): a later
+/// failed or unfinished attempt supersedes an earlier pass.
+fn verdict(latest: Option<Attempt>, phase: &str) -> Result<(i64, Option<i64>)> {
+    match latest {
+        Some(Attempt { id, gate_id, passed: Some(true) }) => Ok((id, gate_id)),
+        _ => bail!("the exact release candidate has no completed passing {phase}; run release-verify {phase}"),
+    }
+}
+
+/// Why the release review cannot run on its own (NIT-537): paths the policy keeps for a person, or
+/// a reviewer not independent of the author. None when it may.
+fn review_refusal(human_reasons: &[String], independence: Option<&str>) -> Option<String> {
+    if !human_reasons.is_empty() {
+        return Some(format!("release needs human approval; automatic release verification cannot grant it: {}", human_reasons.join("; ")));
+    }
+    independence.map(|reason| format!("release review needs human approval: {reason}"))
 }
 
 fn unchanged(db: &Db, req: &Request<'_>, before: &Identity) -> Result<()> {
@@ -144,13 +185,10 @@ fn finish(db: &Db, id: i64, passed: bool, evidence: &impl Serialize) -> Result<(
 }
 
 fn latest(db: &Db, identity: &Identity, phase: &str) -> Result<(i64, Option<i64>)> {
-    let row: Option<(i64, Option<i64>, bool)> = db.conn.query_row(
+    let row: Option<Attempt> = db.conn.query_row(
         "SELECT id, gate_id, passed FROM release_verification WHERE identity=?1 AND phase=?2 ORDER BY id DESC LIMIT 1",
-        params![serde_json::to_string(identity)?, phase], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
-    match row {
-        Some((id, gate, true)) => Ok((id, gate)),
-        _ => bail!("the exact release candidate has no completed passing {phase}; run release-verify {phase}"),
-    }
+        params![serde_json::to_string(identity)?, phase], |r| Ok(Attempt { id: r.get(0)?, gate_id: r.get(1)?, passed: r.get(2)? })).optional()?;
+    verdict(row, phase)
 }
 
 pub fn gate(db: &Db, req: &Request<'_>) -> Result<Identity> {
@@ -207,13 +245,13 @@ fn execute_review(req: &Request<'_>, c: &Candidate) -> Result<crate::review::Rev
     let files = git(req.worktree, &["diff", "--name-only", "-z", "--no-renames", &c.identity.base, &c.identity.candidate])?.split('\0').filter(|s| !s.is_empty()).map(str::to_string).collect::<Vec<_>>();
     c.playbook.approval.check_blocked(&files)?;
     let reasons = c.playbook.human_reasons(&files)?;
-    if !reasons.is_empty() { bail!("release needs human approval; automatic release verification cannot grant it: {}", reasons.join("; ")); }
+    if let Some(why) = review_refusal(&reasons, None) { bail!(why); }
     let mut rules = c.playbook.review.clone();
     // The project PR review toggle does not exempt releases, nor does a lighter task level.
     rules.enabled = true;
     rules.policy_root = None;
     let choice = rules.choose(req.author_vendor, &|name| rules.is_installed(name, req.worktree))?;
-    if let Some(reason) = rules.independence_reason(&choice.reviewer, req.author_vendor, &choice.note) { bail!("release review needs human approval: {reason}"); }
+    if let Some(why) = review_refusal(&[], rules.independence_reason(&choice.reviewer, req.author_vendor, &choice.note).as_deref()) { bail!(why); }
     // Direct tree comparison also covers a first release (empty tree) and the stamped files.
     let prompt = rules.prompt(&c.identity.base, None).replace(
         &format!("git diff {}...HEAD", c.identity.base), &format!("git diff {} {}", c.identity.base, c.identity.candidate));
@@ -282,6 +320,32 @@ claude = ["sh", "-c", "cat >.git/release-prompt; printf 'VERDICT: clean\\n'"]
         run_git(repo, &["checkout", "-qb", "candidate"]);
         std::fs::write(repo.join("version.txt"), "2").unwrap();
         run_git(repo, &["commit", "-qam", "stamp"]);
+    }
+
+    /// What the release tests decide, over plain data (NIT-537).
+    #[test]
+    fn a_release_stands_on_its_latest_attempts_its_full_gate_and_its_stamped_paths() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        // The latest attempt rules: a pass stands; a later failure or an unfinished one does not.
+        let attempt = |id, passed| Some(Attempt { id, gate_id: Some(1), passed });
+        assert_eq!(verdict(attempt(4, Some(true)), "review").unwrap(), (4, Some(1)));
+        for latest in [attempt(5, Some(false)), attempt(5, None), None] {
+            assert!(verdict(latest, "gate").unwrap_err().to_string().contains("no completed passing gate"), "{latest:?}");
+        }
+        // Every Full command and step, then the release's own; release checks never replace Full.
+        assert_eq!(release_commands(&s(&["echo full"]), &s(&["echo step"]), &s(&["echo release"])).unwrap(), s(&["echo full", "echo step", "echo release"]));
+        assert!(release_commands(&[], &[], &s(&["echo release"])).unwrap_err().to_string().contains("release-only commands cannot replace"));
+        assert!(release_commands(&s(&["  "]), &[], &[]).unwrap_err().to_string().contains("no lighter level or empty command"));
+        // A stamped candidate: one commit on the source, touching only stamp paths.
+        let stamps = s(&["version.txt"]);
+        assert!(check_stamp(&stamps, "src", &s(&["src"]), &["version.txt"]).is_ok());
+        assert!(check_stamp(&stamps, "src", &s(&["other"]), &[]).unwrap_err().to_string().contains("single commit directly on its original source"));
+        assert!(check_stamp(&stamps, "src", &s(&["src", "x"]), &[]).is_err(), "a merge is not a stamp");
+        assert!(check_stamp(&stamps, "src", &s(&["src"]), &["version.txt", ".nitely/playbook.toml"]).unwrap_err().to_string().contains(".nitely/playbook.toml after its source"));
+        // The review needs a person for protected paths, or a reviewer not independent of the author.
+        assert_eq!(review_refusal(&[], None), None);
+        assert!(review_refusal(&s(&["always_human is set"]), None).unwrap().contains("cannot grant it: always_human is set"));
+        assert_eq!(review_refusal(&[], Some("same vendor")).as_deref(), Some("release review needs human approval: same vendor"));
     }
 
     #[test]
