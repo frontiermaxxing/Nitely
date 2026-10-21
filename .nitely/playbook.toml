@@ -19,7 +19,6 @@ commands = ["npm test", "npm run build"]
 focus = """Nitely's rules matter most here: only a human approves or answers asks (the CLI and MCP always \
 act as agents), hooks never block the agent and never record prompt text, and credentials are read, \
 never written or printed. A change that breaks one of these is a P0 or P1 finding."""
-batch = "shadow"
 batch_window = "5m"
 batch_max = 3
 
@@ -32,7 +31,6 @@ batch_max = 3
 shared_files = ["src/App.tsx", "src/types.ts", "src/dev/fixtures.ts", "src-tauri/src/lib.rs", "crates/nitely-cli/src/mcp.rs"]
 
 [land]
-batch = "waiting"
 batch_max = 5
 
 # Two warm checkouts of this repo that keep target/ and node_modules/ between requests; `run`,
@@ -44,6 +42,9 @@ keep = ["target", "node_modules"]
 # the browser preview needs node_modules in the worktree, and it costs 2 s and ~100 MB.
 heavy = ["^cargo (build|test|clippy|check)\\b", "^npm (test|run build)\\b"]
 timeout_minutes = 75
+# The full suites run in GitHub Actions (free for a public repo, in parallel), so this PC runs
+# only quick checks and never two full suites at once (NIT-493).
+ci_commands = ["cargo test --workspace -- --test-threads=12", "cargo clippy --workspace -- -D warnings"]
 
 [review.reviewer]
 claude = "codex"
@@ -52,16 +53,11 @@ codex = "codex"
 
 [verification]
 version = 1
-mode = "active"
 prose = ['docs/.*\.md']
 comments = ['src/.*\.(ts|tsx|js|jsx)', 'crates/.*\.rs', 'src-tauri/src/.*\.rs']
 display_copy = ['src/.*\.tsx']
 protected = ['src/phone/.*', 'src/approval.*', 'crates/nitely-core/src/(lanes|executor|submit|review|review_batch|accept|project_modes|project_yolo|affected_tests)\.rs']
 basic = ['node node_modules/typescript/bin/tsc --noEmit']
-audit_percent = 10
-
-[verification.backstop]
-enabled = false
 
 [release]
 tag = "v*"
