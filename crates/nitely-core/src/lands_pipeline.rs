@@ -111,7 +111,9 @@ pub fn pipeline(repo: &str, settings: &ProjectReviewMode, pb: &Playbook, has_map
         GoalPlans::All => "every plan starts by itself",
     };
     let routes = crate::goal_branch::goal_items_route(o.goal_branches, o.item_review, !pb.submodules.is_empty());
-    let goals = if routes.is_ok() {
+    let goals = if let Err(why) = routes {
+        Fact { value: "Straight to main".into(), why: format!("{why}. {}", capital(plans)), tone: Tone::Agent, source: goal_src }
+    } else {
         let item = match o.item_review.unwrap_or(ItemReview::Off) {
             ItemReview::Off => "items land on quick checks, unreviewed",
             ItemReview::Advisory => "each item is reviewed without blocking",
@@ -127,8 +129,6 @@ pub fn pipeline(repo: &str, settings: &ProjectReviewMode, pb: &Playbook, has_map
             tone: Tone::Agent,
             source: goal_src,
         }
-    } else {
-        Fact { value: "Straight to main".into(), why: format!("{}. {}", routes.unwrap_err(), capital(plans)), tone: Tone::Agent, source: goal_src }
     };
 
     let land_src = source(mode, chosen.land_batch.is_some());
