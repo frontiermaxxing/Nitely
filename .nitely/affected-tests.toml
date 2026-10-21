@@ -42,6 +42,7 @@ test_files = [
   "src/refresh.test.ts",
   "src/repos.test.ts",
   "src/reviewModes.test.ts",
+  "src/rules/save.test.ts",
   "src/spend.test.ts",
   "src/ui/agents.test.ts",
   "src/ui/lifecycle.test.ts",
