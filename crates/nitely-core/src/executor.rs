@@ -1018,6 +1018,11 @@ pub fn whole_suite(command: &str) -> bool {
         if !harness && (matches!(*w, "--test" | "--bench" | "--bin" | "--example") || w.starts_with("--test=")) {
             return false;
         }
+        // A run for its output (a test list, JSON, captured prints) or one that runs no test needs
+        // that output back, and CI returns only each job's result.
+        if ["--list", "--no-run", "--format", "--nocapture", "--show-output", "--logfile", "-Z", "--message-format"].iter().any(|f| w == f || w.starts_with(&format!("{f}="))) {
+            return false;
+        }
         if takes.contains(w) {
             rest.next();
         } else if !w.starts_with('-') {
@@ -1464,6 +1469,10 @@ mod tests {
             "cargo test -p nitely-core && cargo clippy --workspace -- -D warnings",
             "cargo test -p nitely-core\ncargo test -p nitely-crew",
             "cargo clippy -p nitely-core",
+            "cargo test -p nitely-core --lib -- --list",
+            "cargo test --workspace --no-run",
+            "cargo test -p nitely-core -- --format=json -Z unstable-options",
+            "cargo test -p nitely-core -- --nocapture",
             "npm run build",
         ] {
             assert_eq!(run_in_ci(&pb, local), None, "{local}");
