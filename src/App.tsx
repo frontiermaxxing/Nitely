@@ -352,7 +352,7 @@ export function App() {
           >
             <span className="nav-label">Leaderboard</span>
             {/* Until you join, nothing is shared: the tag says so where the entry is. */}
-            {!leaderboardProfile && <span className="nav-tag">opt in</span>}
+            {leaderboardProfile === null && <span className="nav-tag">opt in</span>}
           </button>
           <NavItem active={view.kind === "performance"} onClick={() => setView({ kind: "performance" })} label="Performance" />
           <button

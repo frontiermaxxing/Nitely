@@ -138,3 +138,32 @@ export function leaderboardReportFixture(args: Record<string, unknown>) {
     },
   };
 }
+
+/**
+ * The preview's sharing state, as leaderboard_send.rs keeps it: joining checks the profile the way
+ * the report does and saves it; leaving forgets it. Nothing is sent, so leaving deletes nothing.
+ * `?leaderboard=joined` starts joined.
+ */
+let sharing: { joined: boolean; profile: Record<string, unknown>; projects: string[]; last_sent_week: string | null } | null = null;
+
+function sharingState() {
+  sharing ??= new URLSearchParams(location.search).get("leaderboard") === "joined"
+    ? { joined: true, profile: { display_name: "lowtide", github: "lowtide", x: null, website: null }, projects: [], last_sent_week: null }
+    : { joined: false, profile: { display_name: "" }, projects: [], last_sent_week: null };
+  return sharing;
+}
+
+export function leaderboardStatusFixture() {
+  return { ...sharingState(), id: sharingState().joined ? "preview-key" : null, url: "https://api.nitely.net", due: false };
+}
+
+export function leaderboardJoinFixture(args: Record<string, unknown>) {
+  leaderboardReportFixture({ profile: args.profile, projects: args.projects });
+  sharing = { joined: true, profile: args.profile as Record<string, unknown>, projects: (args.projects as string[]) ?? [], last_sent_week: null };
+  return leaderboardStatusFixture();
+}
+
+export function leaderboardDeleteFixture(args: Record<string, unknown>) {
+  if (args.leave) sharing = { joined: false, profile: { display_name: "" }, projects: [], last_sent_week: null };
+  return 0;
+}

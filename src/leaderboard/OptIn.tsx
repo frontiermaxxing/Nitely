@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "../backend";
 import type { Project } from "../types";
 import { Button, Checkbox, TextField } from "../ui";
-import { saveProfile } from "./profile";
+import { join as joinBoard } from "./profile";
 
 // L1: joining the leaderboard. The right side is the report exactly as it would be sent, built
 // by the same code that will send it (`leaderboard_report`, crates/nitely-core/src/leaderboard_report.rs),
@@ -82,15 +82,16 @@ export function OptIn(props: { projects: Project[] }) {
   const bytes = json ? new TextEncoder().encode(JSON.stringify(report)).length : null;
   const canJoin = !!json && consent && counted.length > 0;
 
-  const join = () =>
-    saveProfile({
-      display_name: name.trim(),
-      github: github.trim() || null,
-      x: x.trim() || null,
-      website: website.trim() || null,
-      projects,
-      joined_at: Math.floor(Date.now() / 1000),
-    });
+  // Joining saves your choices in Nitely's data folder and makes this install's signing key; it sends nothing.
+  const [joining, setJoining] = useState(false);
+  const [joinError, setJoinError] = useState<string | null>(null);
+  const join = () => {
+    setJoining(true);
+    setJoinError(null);
+    joinBoard({ display_name: name.trim(), github: github.trim() || null, x: x.trim() || null, website: website.trim() || null }, projects)
+      .catch((e) => setJoinError(String(e)))
+      .finally(() => setJoining(false));
+  };
 
   return (
     <div className="lb-optin">
@@ -142,7 +143,7 @@ export function OptIn(props: { projects: Project[] }) {
           className="lb-form"
           onSubmit={(e) => {
             e.preventDefault();
-            if (canJoin) join();
+            if (canJoin && !joining) join();
           }}
         >
           <div className="lb-form-row">
@@ -192,10 +193,15 @@ export function OptIn(props: { projects: Project[] }) {
             />
           </div>
           <div className="lb-join">
-            <Button variant="primary" type="submit" disabled={!canJoin}>
-              Join the leaderboard
+            <Button variant="primary" type="submit" disabled={!canJoin || joining}>
+              {joining ? "Joining…" : "Join the leaderboard"}
             </Button>
             <span className="lb-sub">Joining sends nothing: browse first, turn sending on later.</span>
+            {joinError && (
+              <span className="ui-field-error" role="alert">
+                Could not join: {joinError}
+              </span>
+            )}
           </div>
         </form>
       </div>
