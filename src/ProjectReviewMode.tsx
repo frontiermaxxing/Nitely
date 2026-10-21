@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke, isLive } from "./backend";
 import { MODE_DESCRIPTION, MODE_LABEL, editMode, modeSave, modeValidation, optionsFor, type EffectiveRepository, type ModeDraft, type ModeOptions, type PeriodicStatus, type ProjectReviewMode, type ReviewMode } from "./reviewModes";
+import { Button, RadioCards, Segmented, Select, SettingsRow, SettingsSection, TextField, type ChoiceOption, type SelectOption } from "./ui";
 import "./review-modes.css";
 
 export function useProjectReviewMode(project: string, version: number, onChanged: () => void) {
@@ -41,18 +42,24 @@ export function useProjectReviewMode(project: string, version: number, onChanged
 }
 export type ReviewModeControl = ReturnType<typeof useProjectReviewMode>;
 
-function Choice({ label, value, choices, onChange }: { label: string; value: string; choices: [string, string][]; onChange: (value: string) => void }) {
-  return <label className="review-mode-field"><span>{label}</span><select value={value} onChange={(e) => onChange(e.target.value)}>
-    <option value="inherit">Use repository settings</option>
-    {choices.map(([v, text]) => <option key={v} value={v}>{text}</option>)}
-  </select></label>;
+/** A setting a mode can leave to each repository: its choices, plus "Repository settings" (null). */
+function Choice<T extends string>(props: { label: string; value: T | null; choices: [T, string][]; disabled: boolean; onChange: (value: T | null) => void }) {
+  const options: SelectOption<T | "repo">[] = [
+    { value: "repo", label: "Repository settings", detail: "Each repository keeps its own rules" },
+    ...props.choices.map(([value, label]) => ({ value, label })),
+  ];
+  return <Select<T | "repo"> aria-label={props.label} value={props.value ?? "repo"} options={options} disabled={props.disabled} onChange={(v) => props.onChange(v === "repo" || v === null ? null : v)} />;
 }
-function Count({ label, value, min = 1, max, onChange }: { label: string; value: number; min?: number; max?: number; onChange: (n: number) => void }) {
-  return <label className="review-mode-field"><span>{label}</span><input type="number" min={min} max={max} step="1" value={Number.isFinite(value) ? value : ""} onChange={(e) => onChange(e.target.value === "" ? NaN : Number(e.target.value))} /></label>;
+/** On, off, or left to each repository. */
+function Toggle(props: { label: string; value: boolean | null; disabled: boolean; onChange: (value: boolean | null) => void }) {
+  const options: ChoiceOption<"repo" | "on" | "off">[] = [{ value: "repo", label: "Repository" }, { value: "on", label: "On" }, { value: "off", label: "Off" }];
+  return <Segmented aria-label={props.label} options={options} value={props.value === null ? "repo" : props.value ? "on" : "off"} disabled={props.disabled} onChange={(v) => props.onChange(v === "repo" ? null : v === "on")} />;
 }
-const BOOL: [string, string][] = [["true", "On"], ["false", "Off"]];
-const boolValue = (v: boolean | null) => v === null ? "inherit" : String(v);
-const fromBool = (v: string) => v === "inherit" ? null : v === "true";
+function Count({ id, value, min = 1, max, disabled, onChange }: { id: string; value: number; min?: number; max?: number; disabled: boolean; onChange: (n: number) => void }) {
+  return <TextField id={id} className="review-mode-count" type="number" min={min} max={max} step="1" disabled={disabled} value={Number.isFinite(value) ? value : ""} onChange={(e) => onChange(e.target.value === "" ? NaN : Number(e.target.value))} />;
+}
+const PERIODIC_REVIEWERS: SelectOption[] = [{ value: "configured", label: "Repository reviewer routing" }, { value: "codex", label: "Codex" }, { value: "claude", label: "Claude" }, { value: "cursor", label: "Cursor" }];
+const FINDINGS: SelectOption[] = [{ value: "reopen_or_create", label: "Reopen the matching card or file a follow-up" }, { value: "create", label: "File linked follow-up cards" }];
 
 export function ProjectReviewModeSettings({ control, version }: { control: ReviewModeControl; version: number }) {
   const saved = control.value;
@@ -85,61 +92,76 @@ export function ProjectReviewModeSettings({ control, version }: { control: Revie
   const changed = saved && draft && (saved.mode !== draft.mode || (draft.mode === "custom" && JSON.stringify(saved.overrides) !== JSON.stringify(draft.overrides)));
   const periodic = options?.periodic ?? { enabled: true, every_landings: 5, max_delay_seconds: 1800, reviewer: "configured", findings_strategy: "reopen_or_create" };
   const backstop = options?.full_backstop ?? { enabled: true, landings: 5, delay_seconds: 1800 };
-  return <section className="settings-card review-mode-settings">
-    <div className="review-mode-heading"><h2>Review mode</h2>{saved && <span className="muted small">Current: {MODE_LABEL[saved.mode]}</span>}</div>
-    <p className="settings-why">Choose how this project checks changes before and after they reach main. Applies to every connected repository.</p>
-    {!saved && !control.error && <p className="muted small">Loading review modes…</p>}
+  const off = control.busy || isLive;
+  const audits: [string, string][] = [["0", "Off"], ["10", "10%"], ["25", "25%"], ["50", "50%"], ["100", "Every eligible change"]];
+  if (options && options.audit_percent !== null && !audits.some(([v]) => Number(v) === options.audit_percent)) audits.push([String(options.audit_percent), `${options.audit_percent}%`]);
+  return <div className="review-mode-settings">
+    <SettingsSection title="Review mode" description={<>How this project checks changes before and after they reach main, in every connected repository.{saved && <> Saved: <strong>{MODE_LABEL[saved.mode]}</strong>.</>}</>}>
+      {!saved && !control.error && <p className="muted small review-mode-loading">Loading review modes…</p>}
+      {saved && draft && <SettingsRow label="Mode" why="The settings below show what it does. Editing one of them makes it Custom.">
+        <RadioCards<ReviewMode> aria-label="Review mode" options={(Object.keys(MODE_LABEL) as ReviewMode[]).map((mode) => ({ value: mode, label: MODE_LABEL[mode], why: MODE_DESCRIPTION[mode] }))} value={draft.mode} disabled={off} onChange={pick} />
+      </SettingsRow>}
+    </SettingsSection>
     {saved && draft && options && <>
-      <fieldset className="review-mode-presets" disabled={control.busy || isLive} aria-label="Review mode">
-        {(Object.keys(MODE_LABEL) as ReviewMode[]).map((mode) => <label key={mode} className={draft.mode === mode ? "review-mode-preset selected" : "review-mode-preset"}>
-          <input type="radio" name={`mode-${saved.project}`} value={mode} checked={draft.mode === mode} onChange={() => pick(mode)} />
-          <span><strong>{MODE_LABEL[mode]}</strong><small>{MODE_DESCRIPTION[mode]}</small></span>
-        </label>)}
-      </fieldset>
-      <p className="settings-hint">The settings below show your selection. Editing one switches to Custom. “Use repository settings” keeps each repository’s existing rules.</p>
-      <fieldset className="review-mode-options" disabled={control.busy || isLive}>
-        <legend>Before merging</legend>
-        <div className="review-mode-grid">
-          <Choice label="Automatic tests" value={options.test_depth ?? "inherit"} choices={[["off", "Off"], ["basic", "Basic checks"], ["risk", "Match the change’s risk"], ["full", "Full suite"]]} onChange={(v) => edit({ test_depth: v === "inherit" ? null : v as ModeOptions["test_depth"] })} />
-          <Choice label="PR review" value={options.pre_review ?? "inherit"} choices={[["off", "Off"], ["individual", "Review each change"], ["batched", "Review changes in batches"]]} onChange={(v) => edit({ pre_review: v === "inherit" ? null : v as ModeOptions["pre_review"] })} />
-          <Choice label="Batch merges" value={boolValue(options.land_batch)} choices={BOOL} onChange={(v) => edit({ land_batch: fromBool(v) })} />
-          <Choice label="Shared build lanes" value={boolValue(options.shared_lanes)} choices={BOOL} onChange={(v) => edit({ shared_lanes: fromBool(v) })} />
-        </div>
-        <p className="settings-hint">Basic and risk-based checks use the repository’s configured commands. Missing configuration requires the full checks.</p>
-        {options.land_batch && options.test_depth !== "off" && <p className="settings-hint">When changes land together, the combined result runs the full checks.</p>}
-      </fieldset>
-      <fieldset className="review-mode-options" disabled={control.busy || isLive}>
-        <legend>After merging</legend>
-        <Choice label="Periodic review of main" value={options.periodic === null ? "inherit" : String(options.periodic.enabled)} choices={BOOL} onChange={(v) => edit({ periodic: v === "inherit" ? null : { ...periodic, enabled: v === "true" } })} />
-        {options.periodic?.enabled && <div className="review-mode-grid review-mode-nested">
-          <Count label="Review after this many merges" value={periodic.every_landings} max={1000} onChange={(every_landings) => edit({ periodic: { ...periodic, every_landings } })} />
-          <Count label="Or after minutes (0 = no time limit)" value={periodic.max_delay_seconds / 60} min={0} max={10080} onChange={(n) => edit({ periodic: { ...periodic, max_delay_seconds: n * 60 } })} />
-          <label className="review-mode-field"><span>Periodic reviewer</span><select value={periodic.reviewer} onChange={(e) => edit({ periodic: { ...periodic, reviewer: e.target.value } })}>
-            <option value="configured">Repository reviewer routing</option><option value="codex">Codex</option><option value="claude">Claude</option><option value="cursor">Cursor</option>
-          </select></label>
-          <label className="review-mode-field"><span>When a review finds a problem</span><select value={periodic.findings_strategy} onChange={(e) => edit({ periodic: { ...periodic, findings_strategy: e.target.value } })}>
-            <option value="reopen_or_create">Reopen matching card or create follow-up</option><option value="create">Create linked follow-up cards</option>
-          </select></label>
-        </div>}
-        <p className="settings-hint">Periodic reviews check accumulated changes without holding up merges. Failed reviews keep their place so no changes are silently skipped.</p>
-        <div className="review-mode-grid">
-          <Choice label="Full-suite checks on main" value={options.full_backstop === null ? "inherit" : String(options.full_backstop.enabled)} choices={BOOL} onChange={(v) => edit({ full_backstop: v === "inherit" ? null : { ...backstop, enabled: v === "true" } })} />
-          <Choice label="Sampled audits of light changes" value={options.audit_percent === null ? "inherit" : String(options.audit_percent)} choices={[[ "0", "Off"], ["10", "10%"], ["25", "25%"], ["50", "50%"], ["100", "Every eligible change"], ...(![null, 0, 10, 25, 50, 100].includes(options.audit_percent) ? [[String(options.audit_percent), `${options.audit_percent}%`] as [string, string]] : [])]} onChange={(v) => edit({ audit_percent: v === "inherit" ? null : Number(v) })} />
-        </div>
-        {options.full_backstop?.enabled && <div className="review-mode-grid review-mode-nested">
-          <Count label="Full suite after this many light or unchecked merges" value={backstop.landings} max={1000} onChange={(landings) => edit({ full_backstop: { ...backstop, landings } })} />
-          <Count label="Full suite after minutes" value={backstop.delay_seconds / 60} max={1440} onChange={(n) => edit({ full_backstop: { ...backstop, delay_seconds: n * 60 } })} />
-        </div>}
-      </fieldset>
-      <p className="settings-hint">Manual checks, release requirements and required human approvals remain separate. This controls Nitely’s automatic work; hosted CI has its own workflow settings.</p>
-      {isLive && <p className="settings-hint">Live preview is read-only. Change review modes in the desktop app.</p>}
+      <SettingsSection title="Before merging" description="Repository settings keeps each repository's own rules for that check.">
+        <SettingsRow label="Automatic tests" why="Basic and risk-based checks use the repository's configured commands. Without that configuration the full checks run.">
+          <Choice label="Automatic tests" value={options.test_depth} choices={[["off", "Off"], ["basic", "Basic checks"], ["risk", "Match the change's risk"], ["full", "Full suite"]]} disabled={off} onChange={(test_depth) => edit({ test_depth })} />
+        </SettingsRow>
+        <SettingsRow label="PR review">
+          <Choice label="PR review" value={options.pre_review} choices={[["off", "Off"], ["individual", "Review each change"], ["batched", "Review changes in batches"]]} disabled={off} onChange={(pre_review) => edit({ pre_review })} />
+        </SettingsRow>
+        <SettingsRow label="Batch merges" why={options.land_batch && options.test_depth !== "off" ? "When changes land together, the combined result runs the full checks." : undefined}>
+          <Toggle label="Batch merges" value={options.land_batch} disabled={off} onChange={(land_batch) => edit({ land_batch })} />
+        </SettingsRow>
+        <SettingsRow label="Shared build lanes">
+          <Toggle label="Shared build lanes" value={options.shared_lanes} disabled={off} onChange={(shared_lanes) => edit({ shared_lanes })} />
+        </SettingsRow>
+      </SettingsSection>
+      <SettingsSection title="After merging" description="Periodic reviews check what has landed without holding up merges. A failed review keeps its place, so no change is skipped.">
+        <SettingsRow label="Periodic review of main">
+          <Toggle label="Periodic review of main" value={options.periodic === null ? null : options.periodic.enabled} disabled={off} onChange={(v) => edit({ periodic: v === null ? null : { ...periodic, enabled: v } })} />
+        </SettingsRow>
+        {options.periodic?.enabled && <>
+          <SettingsRow label="Review after this many merges" htmlFor="review-mode-every">
+            <Count id="review-mode-every" value={periodic.every_landings} max={1000} disabled={off} onChange={(every_landings) => edit({ periodic: { ...periodic, every_landings } })} />
+          </SettingsRow>
+          <SettingsRow label="Or after this many minutes" why="0 is no time limit." htmlFor="review-mode-minutes">
+            <Count id="review-mode-minutes" value={periodic.max_delay_seconds / 60} min={0} max={10080} disabled={off} onChange={(n) => edit({ periodic: { ...periodic, max_delay_seconds: n * 60 } })} />
+          </SettingsRow>
+          <SettingsRow label="Periodic reviewer">
+            <Select aria-label="Periodic reviewer" value={periodic.reviewer} options={PERIODIC_REVIEWERS} disabled={off} onChange={(reviewer) => reviewer && edit({ periodic: { ...periodic, reviewer } })} />
+          </SettingsRow>
+          <SettingsRow label="When a review finds a problem">
+            <Select aria-label="When a review finds a problem" value={periodic.findings_strategy} options={FINDINGS} disabled={off} onChange={(findings_strategy) => findings_strategy && edit({ periodic: { ...periodic, findings_strategy } })} />
+          </SettingsRow>
+        </>}
+        <SettingsRow label="Full-suite checks on main">
+          <Toggle label="Full-suite checks on main" value={options.full_backstop === null ? null : options.full_backstop.enabled} disabled={off} onChange={(v) => edit({ full_backstop: v === null ? null : { ...backstop, enabled: v } })} />
+        </SettingsRow>
+        {options.full_backstop?.enabled && <>
+          <SettingsRow label="Full suite after this many light or unchecked merges" htmlFor="review-mode-landings">
+            <Count id="review-mode-landings" value={backstop.landings} max={1000} disabled={off} onChange={(landings) => edit({ full_backstop: { ...backstop, landings } })} />
+          </SettingsRow>
+          <SettingsRow label="Full suite after this many minutes" htmlFor="review-mode-backstop-minutes">
+            <Count id="review-mode-backstop-minutes" value={backstop.delay_seconds / 60} max={1440} disabled={off} onChange={(n) => edit({ full_backstop: { ...backstop, delay_seconds: n * 60 } })} />
+          </SettingsRow>
+        </>}
+        <SettingsRow label="Sampled audits of light changes">
+          <Choice label="Sampled audits of light changes" value={options.audit_percent === null ? null : String(options.audit_percent)} choices={audits} disabled={off} onChange={(v) => edit({ audit_percent: v === null ? null : Number(v) })} />
+        </SettingsRow>
+      </SettingsSection>
+      <div className="review-mode-save">
+        <Button variant="primary" disabled={!changed || !!validation || off} onClick={() => void control.save(draft)}>{control.busy ? "Saving…" : "Save review mode"}</Button>
+        <span className="muted small">{changed ? "Unsaved changes" : "Saved"}</span>
+      </div>
       {validation && <p className="error small" role="alert">{validation}</p>}
-      <div className="review-mode-save"><button className="btn primary" disabled={!changed || !!validation || control.busy || isLive} onClick={() => void control.save(draft)}>{control.busy ? "Saving…" : "Save review mode"}</button><span className="muted small">{changed ? "Unsaved changes" : "Saved"}</span></div>
+      <p className="settings-hint">Manual checks, release requirements and required human approvals stay separate. This controls Nitely's automatic work; hosted CI has its own workflow settings.</p>
+      {isLive && <p className="settings-hint">Live preview is read-only. Change review modes in the desktop app.</p>}
       <EffectiveModes project={saved.project} revision={saved.revision} />
       <PeriodicReviewHistory project={saved.project} version={version} />
     </>}
     {(control.error || localError) && <p className="error small" role="alert">{control.error || localError}</p>}
-  </section>;
+  </div>;
 }
 
 function EffectiveModes({ project, revision }: { project: string; revision: number }) {
@@ -196,7 +218,7 @@ function PeriodicReviewHistory({ project, version }: { project: string; version:
       {row.jobs.map((job) => <details key={job.id} className="periodic-review-job">
         <summary><span>{job.state === "findings" ? "Findings" : job.state === "passed" ? "Reviewed" : job.state === "failed" ? "Review failed" : job.state === "running" ? "Reviewing" : job.state === "applying" ? "Updating cards" : job.state === "canceled" ? "Canceled" : "Queued"}</span><code>{job.base.slice(0, 8)} → {job.head.slice(0, 8)}</code><span className="muted small">{job.findings.length ? `${job.findings.length} finding${job.findings.length === 1 ? "" : "s"}` : job.reviewer ?? ""}</span></summary>
         {job.error && <p className="error small">{job.error}</p>}
-        {job.state === "failed" && <button className="btn" disabled={isLive || retrying !== null} onClick={() => void retry(row.repo, job.id)}>{retrying === job.id ? "Retrying…" : "Retry review"}</button>}
+        {job.state === "failed" && <Button disabled={isLive || retrying !== null} onClick={() => void retry(row.repo, job.id)}>{retrying === job.id ? "Retrying…" : "Retry review"}</Button>}
         {job.findings.map((finding, i) => <p key={i} className="small periodic-review-finding"><strong>P{finding.priority}</strong> {finding.text} {finding.issue_key && <a href={`http://127.0.0.1:7423/i/${encodeURIComponent(finding.issue_key)}`}>{finding.issue_key}</a>} <span className="muted">({finding.action})</span></p>)}
       </details>)}
     </div>)}

@@ -89,7 +89,7 @@ export function Settings(props: {
       </Section>
 
       <Section id="reviews" label="Review defaults">
-        <RuleDefaultsCard titled={false} />
+        <RuleDefaultsCard />
       </Section>
 
       <Section id="crew" label="Crew" why="The agent workers Nitely runs on each project's Todo issues, one issue each, through the same gate and review as any agent. Running workers always finish their issue; the limits only stop new ones.">

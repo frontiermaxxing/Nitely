@@ -1,17 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "./backend";
 import type { DefaultsView, LandBy, RuleDefaults, RulesEdit, RulesView } from "./types";
-import { EmptyState, Loading } from "./ui";
+import { Button, EmptyState, Loading, RadioCards, SettingsRow, SourceTag, type ChoiceOption } from "./ui";
 import { DryRun } from "./rules/DryRun";
 import { Landing } from "./rules/Landing";
 import { LandsStrip, type ModeFacts, type RulesSection } from "./rules/LandsStrip";
 import { Loosen } from "./rules/Loosen";
 import { Mode } from "./rules/Mode";
 import { Paths } from "./rules/Paths";
-import { ReviewerMap, Reviewers } from "./rules/Reviewers";
+import { OwnVendor, ReviewerMap, Reviewers } from "./rules/Reviewers";
 import { SaveBar } from "./rules/SaveBar";
 import type { RulesDraft } from "./rules/shared";
-import { draftChanges, draftOf, From, LAND_BY } from "./rules/shared";
+import { draftChanges, draftOf, LAND_BY } from "./rules/shared";
 import { confirmLoosening } from "./rules/save";
 import { optionsFor, type ProjectReviewMode } from "./reviewModes";
 import "./rules.css";
@@ -147,8 +147,8 @@ export function ProjectRules(props: { projectKey: string }) {
   );
 }
 
-/** The app-wide defaults, in Settings: what a project that sets nothing uses. */
-export function RuleDefaultsCard({ titled = true }: { titled?: boolean } = {}) {
+/** The app-wide defaults, as rows of Settings' Review defaults section: what a project that sets nothing uses. */
+export function RuleDefaultsCard() {
   const [view, setView] = useState<DefaultsView | null>(null);
   const [draft, setDraft] = useState<RuleDefaults>({});
   const [loosens, setLoosens] = useState<string[] | null>(null);
@@ -197,56 +197,68 @@ export function RuleDefaultsCard({ titled = true }: { titled?: boolean } = {}) {
   const DEFAULT_NAMES: Record<keyof RuleDefaults, string> = { reviewer: "Who reviews whose work", require_cross_vendor: "A review by the author's own vendor", land_by: "Who lands a change", focus: "What matters most in a review" };
   const changes = (Object.keys(DEFAULT_NAMES) as (keyof RuleDefaults)[]).filter((k) => JSON.stringify(draft[k]) !== JSON.stringify(view.defaults[k])).map((k) => DEFAULT_NAMES[k]);
 
+  // What applies when the app sets nothing: Nitely's own defaults.
+  const builtIn = { require_cross_vendor: false, land_by: "author" as LandBy };
+  const tag = (set: boolean) => <SourceTag source={set ? "app" : "nitely"} />;
+  const landOptions: ChoiceOption<LandBy>[] = (Object.keys(LAND_BY) as LandBy[]).map((b) => ({ value: b, label: LAND_BY[b].label, why: LAND_BY[b].why, isDefault: b === builtIn.land_by }));
+
   return (
-    <section className="settings-card rules-defaults">
-      {titled && <h2>Review and landing defaults</h2>}
-      <p className="settings-why">What every project uses unless its playbook sets its own. A project's Rules tab shows what it inherits from here.</p>
-      <div className="rules-field">
-        <div className="rules-field-head">
-          <h3>Who reviews whose work</h3>
-          <From from={draft.reviewer ? "app" : "built-in"} />
+    <div className="rules-defaults">
+      <SettingsRow
+        label="Who reviews whose work"
+        why="When the named reviewer is not installed, another installed vendor reviews, and only then the author's own vendor, in a fresh read-only session."
+        source={tag(!!draft.reviewer)}
+      >
+        <div className="rules-stack">
+          <ReviewerMap map={draft.reviewer ?? view.built_in_reviewer} reviewers={view.reviewers} crossVendor={draft.require_cross_vendor ?? builtIn.require_cross_vendor} disabled={busy} onChange={(reviewer) => patch({ reviewer })} />
+          {draft.reviewer && (
+            <Button variant="quiet" disabled={busy} onClick={() => patch({ reviewer: undefined })}>
+              Use Nitely's
+            </Button>
+          )}
         </div>
-        <ReviewerMap map={draft.reviewer ?? view.built_in_reviewer} reviewers={view.reviewers} crossVendor={draft.require_cross_vendor ?? false} disabled={false} onChange={(reviewer) => patch({ reviewer })} />
-        {draft.reviewer && (
-          <button className="btn btn-quiet" onClick={() => patch({ reviewer: undefined })}>
-            Use Nitely's
-          </button>
-        )}
-      </div>
-      <div className="rules-field">
-        <h3>A review by the author's own vendor</h3>
-        <select
-          value={draft.require_cross_vendor === undefined ? "inherit" : draft.require_cross_vendor ? "yes" : "no"}
-          onChange={(e) => patch({ require_cross_vendor: e.target.value === "inherit" ? undefined : e.target.value === "yes" })}
-        >
-          <option value="inherit">Nitely's default (is enough)</option>
-          <option value="yes">waits for me</option>
-          <option value="no">is enough</option>
-        </select>
-      </div>
-      <div className="rules-field">
-        <h3>Who lands a change</h3>
-        <select value={draft.land_by ?? "inherit"} onChange={(e) => patch({ land_by: e.target.value === "inherit" ? undefined : (e.target.value as LandBy) })}>
-          <option value="inherit">Nitely's default ({LAND_BY.author.label})</option>
-          {(Object.keys(LAND_BY) as LandBy[]).map((b) => (
-            <option key={b} value={b}>
-              {LAND_BY[b].label}
-            </option>
-          ))}
-        </select>
-        <p className="settings-why small">{LAND_BY[draft.land_by ?? "author"].why}</p>
-      </div>
-      <div className="rules-field">
-        <h3>What matters most in a review</h3>
-        <textarea rows={3} value={draft.focus ?? ""} placeholder="Instructions every reviewer gets, unless a project sets its own." onChange={(e) => patch({ focus: e.target.value.trim() ? e.target.value : undefined })} />
-      </div>
-      {loosens ? (
-        <Loosen lead="in every project that sets none of these." loosens={loosens} confirmLabel="Loosen and save" busy={busy} onConfirm={save} onKeepEditing={() => setLoosens(null)} />
-      ) : (
-        <SaveBar label="Save defaults" changes={changes} busy={busy} onSave={save} onDiscard={() => setDraft(view.defaults)} />
+      </SettingsRow>
+      <SettingsRow label="A review by the author's own vendor" why="When no other vendor could review, is that enough, or does the change wait for you?" source={tag(draft.require_cross_vendor !== undefined)}>
+        <OwnVendor
+          value={draft.require_cross_vendor ?? null}
+          inherited={builtIn.require_cross_vendor}
+          disabled={busy}
+          onChange={(v) => patch({ require_cross_vendor: v ?? undefined })}
+        />
+      </SettingsRow>
+      <SettingsRow label="Who lands a change" source={tag(draft.land_by !== undefined)}>
+        <div className="rules-land-by">
+          <RadioCards
+            aria-label="Who lands a change"
+            options={landOptions}
+            value={draft.land_by ?? builtIn.land_by}
+            disabled={busy}
+            onChange={(b) => patch({ land_by: b === builtIn.land_by ? undefined : b })}
+          />
+        </div>
+      </SettingsRow>
+      <SettingsRow label="What matters most in a review" why="Instructions every reviewer gets, unless a project sets its own." htmlFor="rule-defaults-focus" source={tag(draft.focus !== undefined)}>
+        <textarea
+          id="rule-defaults-focus"
+          className="rules-focus"
+          rows={3}
+          disabled={busy}
+          value={draft.focus ?? ""}
+          placeholder="What is a P0 in your code, which rules a change must never break."
+          onChange={(e) => patch({ focus: e.target.value.trim() ? e.target.value : undefined })}
+        />
+      </SettingsRow>
+      {(loosens || changes.length > 0 || error) && (
+        <div className="rules-save">
+          {loosens ? (
+            <Loosen lead="in every project that sets none of these." loosens={loosens} confirmLabel="Loosen and save" busy={busy} onConfirm={save} onKeepEditing={() => setLoosens(null)} />
+          ) : (
+            <SaveBar label="Save defaults" changes={changes} busy={busy} onSave={save} onDiscard={() => setDraft(view.defaults)} />
+          )}
+          {error && <p className="error small" role="alert">{error}</p>}
+        </div>
       )}
-      {note && <p className="muted small">{note}</p>}
-      {error && <p className="error small">{error}</p>}
-    </section>
+      {note && <p className="muted small rules-saved" role="status">{note}</p>}
+    </div>
   );
 }
