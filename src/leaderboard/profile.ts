@@ -17,6 +17,8 @@ export interface Profile {
   projects: string[];
   /** The ISO week of the last report the service took, if one was sent. */
   last_sent_week: string | null;
+  /** Why the last send or delete failed, if it did. */
+  last_error: string | null;
 }
 
 /** `leaderboard_status`, as much of it as the page reads. */
@@ -25,12 +27,13 @@ interface Status {
   profile: { display_name: string; github?: string | null; x?: string | null; website?: string | null };
   projects: string[];
   last_sent_week?: string | null;
+  last_error?: string | null;
 }
 
 function profileOf(s: Status): Profile | null {
   if (!s.joined) return null;
   const p = s.profile;
-  return { display_name: p.display_name, github: p.github ?? null, x: p.x ?? null, website: p.website ?? null, projects: s.projects, last_sent_week: s.last_sent_week ?? null };
+  return { display_name: p.display_name, github: p.github ?? null, x: p.x ?? null, website: p.website ?? null, projects: s.projects, last_sent_week: s.last_sent_week ?? null, last_error: s.last_error ?? null };
 }
 
 // One copy for the whole app (the sidebar's tag and the page read the same), undefined until read.
@@ -58,7 +61,7 @@ function read(): Promise<void> {
   return reading;
 }
 
-function takeOld(): (Omit<Profile, "last_sent_week"> & { projects?: string[] }) | null {
+function takeOld(): (Omit<Profile, "last_sent_week" | "last_error"> & { projects?: string[] }) | null {
   try {
     const raw = localStorage.getItem(OLD_KEY);
     localStorage.removeItem(OLD_KEY);
@@ -99,4 +102,30 @@ export async function leave(): Promise<number> {
   const deleted = await invoke<number>("leaderboard_delete", { leave: true });
   changed(null);
   return deleted;
+}
+
+/** Whether this install is on the board: it sent a report, so the weekly send goes on. */
+export function sharing(p: Profile): boolean {
+  return p.last_sent_week !== null;
+}
+
+/**
+ * Sends this week's report now, by your hand; after the first, it goes once a week on its own.
+ * A request to the leaderboard's service.
+ */
+export async function sendNow(): Promise<void> {
+  try {
+    await invoke("leaderboard_send");
+  } finally {
+    await read();
+  }
+}
+
+/** Stops sharing: deletes every report this install sent from the board and stays joined, so nothing more goes until you send again. */
+export async function stopSharing(): Promise<number> {
+  try {
+    return await invoke<number>("leaderboard_delete", { leave: false });
+  } finally {
+    await read();
+  }
 }

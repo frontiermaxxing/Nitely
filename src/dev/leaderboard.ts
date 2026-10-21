@@ -147,8 +147,9 @@ export function leaderboardReportFixture(args: Record<string, unknown>) {
 let sharing: { joined: boolean; profile: Record<string, unknown>; projects: string[]; last_sent_week: string | null } | null = null;
 
 function sharingState() {
-  sharing ??= new URLSearchParams(location.search).get("leaderboard") === "joined"
-    ? { joined: true, profile: { display_name: "lowtide", github: "lowtide", x: null, website: null }, projects: [], last_sent_week: null }
+  const start = new URLSearchParams(location.search).get("leaderboard");
+  sharing ??= start === "joined" || start === "sharing"
+    ? { joined: true, profile: { display_name: "lowtide", github: "lowtide", x: null, website: null }, projects: [], last_sent_week: start === "sharing" ? "2026-W43" : null }
     : { joined: false, profile: { display_name: "" }, projects: [], last_sent_week: null };
   return sharing;
 }
@@ -164,6 +165,17 @@ export function leaderboardJoinFixture(args: Record<string, unknown>) {
 }
 
 export function leaderboardDeleteFixture(args: Record<string, unknown>) {
+  const sent = sharingState().last_sent_week ? 1 : 0;
   if (args.leave) sharing = { joined: false, profile: { display_name: "" }, projects: [], last_sent_week: null };
-  return 0;
+  else sharing = { ...sharingState(), last_sent_week: null };
+  return sent;
+}
+
+/** The preview never reaches the service: a send just records this week as sent. */
+export function leaderboardSendFixture() {
+  const s = sharingState();
+  if (!s.joined) throw "join the Leaderboard first: nothing is sent before you do";
+  const report = leaderboardReportFixture({ profile: s.profile, projects: s.projects });
+  sharing = { ...s, last_sent_week: report.week };
+  return report;
 }
