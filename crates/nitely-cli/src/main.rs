@@ -1520,7 +1520,7 @@ fn run(cmd: Cmd) -> Result<()> {
                         let project = db.issue(&key)?.and_then(|i| i.project);
                         let here = std::env::current_dir()?.to_string_lossy().into_owned();
                         if let Ok(root) = nitely_core::playbook::repo_for_issue(&nitely_core::Config::load().unwrap_or_default(), project.as_deref(), &here) {
-                            nitely_core::landed_elsewhere::record(&db, &root, &key, &me)?;
+                            nitely_core::landed_elsewhere::record(&db, &root, &key, evidence.as_deref(), &me)?;
                         }
                     }
                     db.check_open_asks(&key, &state)?;
@@ -1717,10 +1717,15 @@ fn run(cmd: Cmd) -> Result<()> {
                 return Ok(());
             }
             eprintln!("running the gate, then the review (this takes minutes)…");
-            let s = nitely_core::submit::submit(&mut db, &config, &opts, &me)?;
+            // As a job run here, so it is on record while it runs and after, as a background one is
+            // (closing an issue reads both: landed_elsewhere.rs).
+            let job = nitely_core::submit_job::enqueue(&db, &opts, &me)?;
+            let job = nitely_core::submit_job::run(&mut db, &config, job.id)?;
+            let Some(s) = job.result else { bail!("{}", job.error.unwrap_or_else(|| format!("submit job {} ended {}", job.id, job.state))) };
             print_json(&s)?;
-            eprintln!("{}", s.next);
-            if (s.gate.skipped.is_none() && !s.gate.passed) || s.review.as_ref().is_some_and(|r| r.verdict != "pass") {
+            eprintln!("{}", s["next"].as_str().unwrap_or_default());
+            let gate_failed = s["gate"]["skipped"].is_null() && s["gate"]["passed"] != serde_json::Value::Bool(true);
+            if gate_failed || s["review"]["verdict"].as_str().is_some_and(|v| v != "pass") {
                 exit(1);
             }
             Ok(())

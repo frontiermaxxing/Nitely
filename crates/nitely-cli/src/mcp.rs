@@ -1659,7 +1659,7 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
                 // hand, or in another issue's change) is recorded as landed first (NIT-361).
                 if nitely_core::issues::parse_state(state)?.0 == "Done" {
                     if let Ok(root) = playbook::repo_for_issue(&config, issue.project.as_deref(), &server.cwd) {
-                        nitely_core::landed_elsewhere::record(&db, &root, key, &actor)?;
+                        nitely_core::landed_elsewhere::record(&db, &root, key, str_arg(args, "evidence"), &actor)?;
                     }
                 }
                 db.check_move(key, state, str_arg(args, "evidence"), str_arg(args, "reason"), &actor)?;
