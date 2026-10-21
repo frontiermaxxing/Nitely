@@ -35,21 +35,6 @@ shared_files = ["src/App.tsx", "src/types.ts", "src/dev/fixtures.ts", "src-tauri
 batch = "waiting"
 batch_max = 5
 
-# land fast-forwards the main checkout but runs no setup there. When a change adds a dependency,
-# install it there too, so `npm run tauri dev` keeps working (NIT-81). `npm install` rather than
-# `npm ci`: it leaves node_modules in place, so a running dev server keeps going, and a failure is
-# only a warning on the land.
-[[land.after]]
-run = "npm install --no-save --no-audit --no-fund"
-when_changed = ['^package(-lock)?\.json$']
-
-# A change to Nitely's own code makes the installed nitely out of date, and the next submit or land
-# refuses to run until it is installed again (install.rs, stale_build). Install it here, under the
-# land lock, so no agent has to (NIT-163). The paths are the ones stale_build counts.
-[[land.after]]
-run = "cargo run --release -p nitely-cli -- install"
-when_changed = ['^crates/', '^Cargo\.(toml|lock)$']
-
 # Two warm checkouts of this repo that keep target/ and node_modules/ between requests; `run`,
 # submit's gate and land's gate run there, one request per lane at a time.
 [lanes]
@@ -91,3 +76,12 @@ unless_only = ['^src/', '^scripts/', '^public/', '^index\.html$', '^docs/.*\.md$
 [[gate.steps]]
 run = "cargo clippy --workspace -- -D warnings"
 unless_only = ['^src/', '^scripts/', '^public/', '^index\.html$', '^docs/.*\.md$']
+
+[[land.after]]
+run = "npm install --no-save --no-audit --no-fund"
+when_changed = ['^package(-lock)?\.json$']
+
+[[land.after]]
+run = "cargo run --release --target-dir {main}/target -p nitely-cli -- install"
+when_changed = ['^crates/', '^Cargo\.(toml|lock)$']
+outside_lock = true
