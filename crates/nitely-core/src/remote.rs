@@ -289,6 +289,26 @@ pub fn open_pr(repo_root: &str, branch: &str, base: &str, title: &str, body: &st
     bail!("origin is not on GitHub or Bitbucket, so there is nowhere to open a pull request")
 }
 
+/// Closes the branch's open pull request on the repo's code host with `comment` (declines it on
+/// Bitbucket), for a change that reached its base another way (landed_elsewhere.rs). Returns its
+/// URL, or None when it has none open or the repo is on neither host.
+pub fn close_pr(repo_root: &str, branch: &str, comment: &str) -> Result<Option<String>> {
+    if let Some(slug) = crate::git::github_slug(repo_root) {
+        return crate::github::close_pr(&slug, branch, comment);
+    }
+    let Some(slug) = crate::git::bitbucket_slug(repo_root) else { return Ok(None) };
+    let creds = credentials::load()?.context("no Bitbucket credentials file")?;
+    let auth = bitbucket_auth(&creds);
+    let api = format!("https://api.bitbucket.org/2.0/repositories/{slug}/pullrequests");
+    let q = format!("source.branch.name=\"{branch}\" AND state=\"OPEN\"");
+    let open: Value = get_json(&format!("{api}?q={}", url_encode(&q)), &auth)?;
+    let Some(id) = open.pointer("/values/0/id").and_then(Value::as_i64) else { return Ok(None) };
+    let url = open.pointer("/values/0/links/html/href").and_then(Value::as_str).map(str::to_string);
+    send_json("POST", &format!("{api}/{id}/comments"), &auth, &serde_json::json!({ "content": { "raw": comment } }))?;
+    send_json("POST", &format!("{api}/{id}/decline"), &auth, &serde_json::json!({}))?;
+    Ok(url)
+}
+
 pub(crate) fn bitbucket_auth(creds: &Credentials) -> String {
     let bb = &creds.bitbucket;
     format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", bb.email, bb.api_token)))
