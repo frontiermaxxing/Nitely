@@ -298,7 +298,8 @@ impl Report {
                     .extend(o["duration_ms"].as_f64().map(|ms| ms / 1000.0));
             }
             entry.2 |= o["outcome"] == "pass";
-            entry.3 |= o["outcome"] == "fail";
+            // A pass only after a failed attempt (a runner's retry) failed once too.
+            entry.3 |= o["outcome"] == "fail" || o["flaky"] == true;
         }
         let source = |name: &str| {
             let found: Vec<_> = self
