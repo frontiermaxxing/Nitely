@@ -714,18 +714,21 @@ pub fn optimize_plan(
         ));
     }
     // CI runs every test command where the repo has CI: the full suites leave the person's machine.
-    let ci_commands = (facts.has_ci
-        && facts.has_lanes
-        && facts.tests.iter().any(|t| !facts.ci_commands.contains(t)))
-    .then(|| {
-        let mut all = facts.ci_commands.to_vec();
-        all.extend(
-            facts
-                .tests
+    // A command naming a local path or share runs only in a lane, so CI never takes it.
+    let missing: Vec<String> = facts
+        .tests
+        .iter()
+        .filter(|t| !facts.ci_commands.contains(t))
+        .filter(|t| {
+            !["{main}", "{worktree}", "{base}", "{jobs}"]
                 .iter()
-                .filter(|t| !facts.ci_commands.contains(t))
-                .cloned(),
-        );
+                .any(|p| t.contains(p))
+        })
+        .cloned()
+        .collect();
+    let ci_commands = (facts.has_ci && facts.has_lanes && !missing.is_empty()).then(|| {
+        let mut all = facts.ci_commands.to_vec();
+        all.extend(missing);
         all
     });
     let saving: f64 = flagged
@@ -1135,16 +1138,18 @@ pub fn repo_facts(config: &crate::Config, root: &Path) -> Result<RepoFacts> {
             .as_ref()
             .map(|l| l.ci_commands.clone())
             .unwrap_or_default(),
+        // CI that can run ci_commands: a GitHub repo holding the playbook's suite workflow.
         has_ci: crate::git::github_slug(&root.to_string_lossy()).is_some()
-            && std::fs::read_dir(root.join(".github").join("workflows"))
-                .into_iter()
-                .flatten()
-                .flatten()
-                .any(|f| {
-                    f.path()
-                        .extension()
-                        .is_some_and(|e| e == "yml" || e == "yaml")
-                }),
+            && root
+                .join(".github")
+                .join("workflows")
+                .join(
+                    pb.lanes
+                        .as_ref()
+                        .map(|l| l.ci_workflow.as_str())
+                        .unwrap_or("ci.yml"),
+                )
+                .is_file(),
         has_lanes: pb.lanes.is_some(),
         target: repo.map(|r| crate::proposals::Target::of(&r.name, root)),
         project,
@@ -1523,7 +1528,11 @@ mod tests {
         ];
         let facts = OptimizeFacts {
             slow_seconds: 2.0,
-            tests: &["cargo test".into(), "npm test".into()],
+            tests: &[
+                "cargo test".into(),
+                "npm test".into(),
+                "cargo test --manifest-path {worktree}/x/Cargo.toml".into(),
+            ],
             ci_commands: &["cargo test".into()],
             has_ci: true,
             has_lanes: true,
