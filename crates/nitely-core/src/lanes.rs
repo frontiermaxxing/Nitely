@@ -838,6 +838,9 @@ pub fn run_in(config: &crate::Config, db: &Db, dir: &str, issue: Option<&str>, c
     if command.trim().is_empty() {
         bail!("say which command to run");
     }
+    if let Some(why) = playbook::unsupported_command(command, cfg!(windows)) {
+        bail!("{why}");
+    }
     let (worktree, branch_key) = playbook::current_worktree(dir)?;
     let key = issue.map(str::to_string).or(branch_key);
     let record = match key.as_deref() {

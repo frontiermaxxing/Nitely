@@ -1125,9 +1125,27 @@ pub(crate) fn shell_command(command: &str) -> Command {
     #[cfg(not(windows))]
     {
         cmd = shell_free_command("sh");
-        cmd.args(["-c", command]);
+        cmd.args(["-c", &sh_script(command)]);
     }
     cmd
+}
+
+/// A command of several lines for `sh -c`, which runs every line but exits with the last one's
+/// code: `set -e` first, so the first line that fails fails the whole (NIT-392). One shell keeps
+/// what a line sets (`cd`, a variable) and quoted line breaks. A one-line command is as written.
+#[cfg_attr(windows, allow(dead_code))]
+pub(crate) fn sh_script(command: &str) -> String {
+    let trimmed = command.trim_end_matches(['\r', '\n']);
+    if trimmed.contains('\n') { format!("set -e\n{trimmed}") } else { command.to_string() }
+}
+
+/// Why this platform's shell cannot run `command` faithfully, if it cannot: `cmd /C` runs only up to
+/// the first line break, and joining the lines would change what `rem` and `%VAR%` mean, so on
+/// Windows a command of several lines is refused instead of passing on its first line (NIT-392).
+pub(crate) fn unsupported_command(command: &str, windows: bool) -> Option<String> {
+    (windows && command.trim().contains('\n')).then(|| {
+        "on Windows a command runs through cmd, which stops at the first line break: send each line as its own run, or join them with && on one line".to_string()
+    })
 }
 
 /// Runs one playbook command through the platform shell, held to the machine's share for one
@@ -1744,6 +1762,16 @@ mod tests {
         // A launcher with no real git beside it, or some other git: left to --exec-path.
         assert_eq!(real_git_beside(Path::new("D:/Git/cmd/git.exe"), installed), None);
         assert_eq!(real_git_beside(Path::new("C:/scoop/shims/git.exe"), installed), None);
+    }
+
+    /// A multi-line command whose first line fails must never pass (NIT-392).
+    #[test]
+    fn a_multi_line_command_stops_at_its_first_failure_or_is_refused() {
+        assert_eq!(sh_script("cd app\nnpm test\n"), "set -e\ncd app\nnpm test");
+        assert_eq!(sh_script("npm test\n"), "npm test\n");
+        assert!(unsupported_command("rem check\r\ncargo test\nnpm test", true).is_some());
+        assert_eq!(unsupported_command("cargo test\n", true), None);
+        assert_eq!(unsupported_command("cargo test\nnpm test", false), None);
     }
 
     #[test]
