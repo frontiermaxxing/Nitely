@@ -383,6 +383,22 @@ enum Cmd {
     },
     /// Print the Now board as JSON.
     Now,
+    /// What the person did and what landed since this reader last looked; moves its cursor on
+    /// (NIT-562).
+    Updates {
+        /// Who reads: an agent session's id (`claude:<session>`) or a name for a script.
+        #[arg(long, default_value = "cli")]
+        reader: String,
+        /// `project` for everything in the project, as a coordinator reads it; `mine` (the default)
+        /// for the reader's own issues, their goals and the person's decisions.
+        #[arg(long, default_value = "mine")]
+        scope: String,
+        #[arg(long)]
+        project: Option<String>,
+        /// At most this many lines.
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
     /// Print what every agent session did over the last hours (the Activity view) as JSON.
     Activity {
         #[arg(long, default_value_t = 12)]
@@ -924,6 +940,20 @@ fn run_hook(vendor: &str, payload: Option<&str>) -> Result<()> {
                 Db::open_default()?.log_event(&actor, n.issue.as_deref(), Some(&at), "heavy_local", &format!("Built in its light worktree: {}", n.command))?;
             }
             return Ok(());
+        }
+    }
+    // Before Claude reads a prompt: what the person did and what landed since this session last
+    // looked, added to its context (NIT-562). Never in the way of the prompt.
+    if vendor == "claude" && value.get("hook_event_name").and_then(|v| v.as_str()) == Some("UserPromptSubmit") {
+        let session = value.get("session_id").and_then(|v| v.as_str()).unwrap_or_default();
+        let dir = value.get("cwd").and_then(|v| v.as_str()).unwrap_or_default();
+        if !session.is_empty() {
+            let added = (|| -> Result<Option<serde_json::Value>> {
+                nitely_core::updates::for_prompt(&Config::load()?, &Db::open_default()?, &format!("claude:{session}"), dir)
+            })();
+            if let Ok(Some(out)) = added {
+                println!("{out}");
+            }
         }
     }
     let event = match vendor {
@@ -1959,6 +1989,14 @@ dry run: would create {} issue(s) ({} to {}) and {} comment(s) in {} {}; run aga
                 return Ok(());
             }
             print_json(&nitely_core::linear_import::apply(&mut db, &issues, &plan, &me)?)
+        }
+        Cmd::Updates { reader, scope, project, limit } => {
+            let config = Config::load()?;
+            let db = Db::open_default()?;
+            let project = nitely_core::config::resolve_project(&config, &db, project.as_deref(), &cwd()?)?;
+            let digest = nitely_core::updates::read(&db, &reader, &[project], scope.eq_ignore_ascii_case("project"), limit)?;
+            println!("{}", digest.block().unwrap_or_else(|| "Nothing new since you last looked.".into()));
+            Ok(())
         }
         Cmd::Activity { hours } => {
             let to = nitely_core::db::now();

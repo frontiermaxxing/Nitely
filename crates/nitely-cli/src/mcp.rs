@@ -791,6 +791,15 @@ fn tools() -> Value {
             } }
         },
         {
+            "name": "updates",
+            "description": "What the person did (answers, approvals, moves, notes, goal and mode changes, issues filed) and what landed or was sent back since you last looked, short and grouped; reading moves your cursor on, so the next call says only what is newer. Call it when you resume after a pause. scope project tells you about the whole project, as a coordinator; the default is your own issues, their goals and the person's decisions.",
+            "inputSchema": { "type": "object", "properties": {
+                "scope": { "type": "string", "enum": ["mine", "project"] },
+                "project": { "type": "string" },
+                "limit": { "type": "integer" }
+            } }
+        },
+        {
             "name": "get_answer",
             "description": "The human's answer to an ask, or null while they have not answered.",
             "inputSchema": { "type": "object", "required": ["id"], "properties": {
@@ -1750,6 +1759,13 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
                 state: "waiting".into(),
             })?;
             json!(ask)
+        }
+        "updates" => {
+            let project = project(&db)?;
+            let whole = str_arg(args, "scope") == Some("project");
+            let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(50).clamp(1, 200) as usize;
+            let digest = nitely_core::updates::read(&db, actor.id(), &[project], whole, limit)?;
+            json!({ "lines": digest.lines, "more": digest.more, "text": digest.block().unwrap_or_else(|| "Nothing new since you last looked.".into()) })
         }
         "get_answer" => {
             let id = args.get("id").and_then(Value::as_i64).ok_or_else(|| anyhow!("missing id"))?;

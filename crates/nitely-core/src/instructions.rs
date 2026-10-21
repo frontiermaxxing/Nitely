@@ -35,6 +35,9 @@ up other work or stop. `submit` with wait: true blocks until the result instead.
 [NIT-14](http://127.0.0.1:7423/i/NIT-14), the `url` the tools return. It opens the issue in the Nitely app, \
 from a chat, a pull request or a terminal alike. Link an ask the same way, with the `url` that `ask` and \
 `get_answer` return: [ask 69](http://127.0.0.1:7423/a/69) opens its question, its answer and its issue.
+9. `updates` says what the person did in the app and what landed since you last looked; on Claude \
+Code it also comes with each prompt. Call it when you resume after a pause, before you tell the person \
+that something waits on them.
 
 Priority when you file: 1 exploitable today, data loss or a leak, a production job silently stopped, \
 or a broken release; 2 a user-visible bug, a blocker for shipping, or a missing safety net (CI, \
