@@ -206,6 +206,9 @@ impl Db {
             "INSERT INTO goal_branch (goal_id, repo, branch, created_at, created_from, checkpoint_items, checkpoint_head, enabled_by, enabled_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?5, ?7, ?8)",
             params![goal, repo_key(root), name, created_at, created_from, checkpoint_items.unwrap_or(CHECKPOINT_ITEMS), actor.id(), now()],
         )?;
+        if let (Some(head), Some(fork)) = (&exists, &created_from) {
+            adopt_items(self, root, goal, fork, head)?;
+        }
         let said = match &exists {
             Some(_) => format!("Goal {goal} lands its items into {name}, which is there already; checkpoints land it into {}", pb.integration_branch()),
             None => format!("Goal {goal} lands its items into {name}, made from {} when its first item starts; checkpoints land it into {}", pb.integration_branch(), pb.integration_branch()),
@@ -316,6 +319,37 @@ impl Db {
         self.conn.execute("UPDATE goal_branch SET state = 'green', red_reason = NULL, red_main = NULL, red_issue = NULL WHERE goal_id = ?1", [goal])?;
         Ok(())
     }
+}
+
+/// The items of a branch adopted with work on it already (landed by hand): its first-parent
+/// commits since it left main, one item per run of commits whose subjects name the same issue
+/// ("... (NIT-12)"). A commit that names none (a merge of main, say) goes with the item before it;
+/// those before any named one are recorded under the branch's name. So the first checkpoint holds
+/// them, and its bisect can find one of them.
+fn adopt_items(db: &Db, root: &Path, goal: i64, fork: &str, head: &str) -> Result<()> {
+    let project = db.goal(goal)?.map(|g| g.project).context("the goal went missing")?;
+    let named = regex::Regex::new(&format!(r"\b({}-[0-9]+)\b", regex::escape(&project)))?;
+    let log = git(root, &["log", "--first-parent", "--reverse", "--format=%H %P%x09%s", &format!("{fork}..{head}")])?;
+    let mut items: Vec<(String, String, String)> = Vec::new(); // (issue, from, to)
+    for line in log.lines().filter(|l| !l.trim().is_empty()) {
+        let (ids, subject) = line.split_once('\t').unwrap_or((line, ""));
+        let mut ids = ids.split_whitespace();
+        let (Some(sha), Some(parent)) = (ids.next(), ids.next()) else { continue };
+        let key = named.captures_iter(subject).last().map(|c| c[1].to_string());
+        match (items.last_mut(), key) {
+            (Some(last), Some(k)) if last.0 == k => last.2 = sha.to_string(),
+            (Some(last), None) => last.2 = sha.to_string(),
+            (_, key) => items.push((key.unwrap_or_else(|| "adopted".into()), parent.to_string(), sha.to_string())),
+        }
+    }
+    let at = now();
+    for (issue, from, to) in items {
+        db.conn.execute(
+            "INSERT INTO goal_branch_item (goal_id, issue_key, from_sha, to_sha, landed_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![goal, issue, from, to, at],
+        )?;
+    }
+    Ok(())
 }
 
 fn item_row(r: &rusqlite::Row) -> rusqlite::Result<Item> {
@@ -765,7 +799,7 @@ fn turn_red(db: &mut Db, root: &Path, gb: &GoalBranch, main: &str, why: &str, fi
         "UPDATE goal_branch SET state = 'red', red_reason = ?2, red_main = ?3, red_issue = ?4 WHERE goal_id = ?1",
         params![gb.goal, why, main, fix],
     )?;
-    if let Some(k) = &culprit {
+    if let Some(k) = culprit.as_ref().filter(|k| db.issue(k).ok().flatten().is_some()) {
         db.add_note(k, &format!("{} cannot take main: {why}. Your change last touched those files there; {fix} is filed to fix it.", gb.branch), "goal_branch", actor)?;
     }
     db.log_event(actor, Some(&fix), None, "goal_branch", &format!("{} is red: {why}", gb.branch))?;
@@ -932,10 +966,13 @@ pub(crate) fn bisect(db: &mut Db, root: &Path, pb: &Playbook, key: &str, failed:
         gb.branch,
         gb.branch
     );
-    if db.issue(&bad.issue)?.is_some_and(|i| i.origin == "nitely") {
-        db.move_issue(&bad.issue, "Todo", None, Some("its change fails the full gate at the goal's checkpoint"), actor).ok();
+    // An item adopted with its branch may name no issue here.
+    if let Some(issue) = db.issue(&bad.issue)? {
+        if issue.origin == "nitely" {
+            db.move_issue(&issue.key, "Todo", None, Some("its change fails the full gate at the goal's checkpoint"), actor).ok();
+        }
+        db.add_note(&issue.key, &why, "goal_branch", actor)?;
     }
-    db.add_note(&bad.issue, &why, "goal_branch", actor)?;
     db.conn.execute(
         "UPDATE goal_checkpoint SET state = 'sent_back', ended_at = ?2, note = ?3 WHERE id = ?1",
         params![cp.id, now(), format!("{} broke the full gate; reverted on {}", bad.issue, gb.branch)],
@@ -1131,6 +1168,33 @@ commands = { fake = ["{sh}", "-c", "cat > /dev/null; echo 'Fine.'; echo 'VERDICT
         let summary = f.db.goal_branch_summary(f.goal).unwrap().unwrap();
         assert_eq!((summary.items, summary.checkpoints, summary.full_runs, summary.reviews), (0, 1, 1, 1));
         assert!(f.db.open_checkpoint(f.goal).unwrap().is_none());
+        std::fs::remove_dir_all(&f.base).ok();
+    }
+
+    /// A goal run by hand on a branch of its own (as goal-19 was) becomes a goal branch with its
+    /// work as the first checkpoint's items: one per issue its commit subjects name, a commit that
+    /// names none going with the item before it.
+    #[test]
+    fn adopting_a_branch_with_work_on_it_makes_its_commits_the_first_checkpoints_items() {
+        let f = fixture("nitely-goal-adopt", false);
+        let fork = f.head("main");
+        sh(&f.repo, &["checkout", "-q", "-b", "by-hand"]);
+        let commit = |file: &str, subject: &str| {
+            std::fs::write(f.repo.join(file), subject).unwrap();
+            sh(&f.repo, &["add", file]);
+            sh(&f.repo, &["commit", "-q", "-m", subject]);
+            f.head("HEAD")
+        };
+        commit("a.txt", "First item (NIT-7)");
+        commit("a.txt", "Merge main into by-hand");
+        let seven = commit("a.txt", "Fix the first item's test (NIT-7)");
+        let nine = commit("b.txt", "Second item, UTF-8 safe (NIT-9)");
+        sh(&f.repo, &["checkout", "-q", "main"]);
+        let gb = f.db.enable_goal_branch(f.goal, &f.repo, Some("by-hand"), None, &f.actor).unwrap();
+        assert!(gb.created_at.is_some() && gb.created_from.as_deref() == Some(fork.as_str()));
+        let items: Vec<(String, String, String)> = f.db.goal_items_waiting(f.goal).unwrap().into_iter().map(|i| (i.issue, i.from, i.to)).collect();
+        assert_eq!(items, [("NIT-7".to_string(), fork, seven.clone()), ("NIT-9".to_string(), seven, nine)]);
+        assert_eq!(f.db.goal_branch_summary(f.goal).unwrap().unwrap().next_checkpoint, "at 10 items (8 to go)");
         std::fs::remove_dir_all(&f.base).ok();
     }
 
