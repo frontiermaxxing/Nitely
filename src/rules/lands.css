@@ -37,6 +37,8 @@ button.lands-go:focus-visible { outline: 2px solid var(--focus); outline-offset:
 [data-rules-section] { scroll-margin-top: 16px; }
 div[data-rules-section] { display: flex; flex-direction: column; gap: 14px; }
 div[data-rules-section] > .settings-card + .settings-card { margin-top: 0; }
+/* A settings section is first in its wrapper, so it loses its 28px; the page's 14px gap and these make it up. */
+div[data-rules-section] > .setting-group:first-child { padding-top: 14px; }
 
 @media (max-width: 760px) {
   .lands-track { grid-template-columns: 1fr; gap: 10px; }
