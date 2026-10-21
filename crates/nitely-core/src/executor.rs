@@ -997,7 +997,8 @@ pub fn run_in_ci(pb: &Playbook, command: &str) -> Option<String> {
 /// single integration test (`--test x`), and nothing joined to it or redirected.
 pub fn whole_suite(command: &str) -> bool {
     let command = command.trim();
-    if command.contains(['\n', '\r', ';', '|', '&', '<', '>', '`', '$']) {
+    // `{jobs}` and `{worktree}` are expanded only in a lane, so a command naming one stays local.
+    if command.contains(['\n', '\r', ';', '|', '&', '<', '>', '`', '$', '{']) {
         return false;
     }
     let words: Vec<&str> = command.split_whitespace().collect();
@@ -1473,6 +1474,7 @@ mod tests {
             "cargo test --workspace --no-run",
             "cargo test -p nitely-core -- --format=json -Z unstable-options",
             "cargo test -p nitely-core -- --nocapture",
+            "cargo test -p nitely-core --jobs {jobs}",
             "npm run build",
         ] {
             assert_eq!(run_in_ci(&pb, local), None, "{local}");
