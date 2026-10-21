@@ -938,9 +938,16 @@ pub(crate) fn checkpoint_landed(db: &mut Db, root: &Path, key: &str, actor: &Act
     let mut said = format!("Checkpoint landed {n} item{} of goal {} on main", if n == 1 { "" } else { "s" }, cp.goal);
     if let Some(gb) = gb {
         let goal_open = db.goal(cp.goal)?.is_some_and(|g| g.state == "active");
-        if !goal_open && db.goal_items_waiting(cp.goal)?.is_empty() {
+        let waiting = db.goal_items_waiting(cp.goal)?;
+        if !goal_open && waiting.is_empty() {
             db.conn.execute("UPDATE goal_branch SET closed_at = ?2 WHERE goal_id = ?1", params![cp.goal, now()])?;
             said.push_str(&format!("; the goal is closed, so {} is too", gb.branch));
+        } else if let Some(why) = due(&gb, &waiting, now(), db.goal_open_items(cp.goal, key)?) {
+            // Items that landed on the branch while this checkpoint was open (the goal's last, say)
+            // get the next one now: no later item would file it.
+            let head = rev(root, &format!("refs/heads/{}", gb.branch))?;
+            let next = open_checkpoint(db, &gb, &head, actor)?;
+            said.push_str(&format!("; {why}, so {} is filed to land the rest", next.issue));
         }
     }
     db.log_event(actor, Some(key), None, "goal_branch", &said)?;
@@ -1201,6 +1208,20 @@ commands = { fake = ["{sh}", "-c", "cat > /dev/null; echo 'Fine.'; echo 'VERDICT
         let cp = f.db.open_checkpoint(f.goal).unwrap().expect("nothing left open: the checkpoint is filed");
         assert!(landed.goals.iter().any(|g| g.contains("no open items left")), "and says why: {:?}", landed.goals);
         assert_eq!(f.db.issue(&cp.issue).unwrap().unwrap().goal, Some(f.goal));
+
+        // A last item that lands while that checkpoint is under way is not stranded: when the
+        // checkpoint lands, the next one is filed for it.
+        let opened = checkpoint(&mut f.db, &crate::Config::default(), f.goal, &f.repo.to_string_lossy(), Some("claude"), &f.actor).unwrap();
+        let cp_wt = PathBuf::from(&opened.started.as_ref().unwrap().worktree);
+        let c = f.issue("C", Some(f.goal));
+        f.work(&c, "c.txt", "c\n");
+        assert!(f.land(&c).landed);
+        assert_eq!(f.db.open_checkpoint(f.goal).unwrap().map(|o| o.issue), Some(cp.issue.clone()), "one checkpoint at a time");
+        f.submit(&cp_wt);
+        let landed = f.land(&cp.issue);
+        assert!(landed.landed && f.has("main", "b.txt") && !f.has("main", "c.txt"), "{landed:?}");
+        let next = f.db.open_checkpoint(f.goal).unwrap().expect("C waits on the branch: the next checkpoint is filed");
+        assert_ne!(next.issue, cp.issue);
 
         // An issue with no goal still starts from and lands on main.
         let issue = f.db.issue(&none).unwrap().unwrap();
