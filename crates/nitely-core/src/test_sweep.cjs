@@ -115,25 +115,39 @@ function inventory(root) {
   }
   return { tests:tests.slice(0,10000), truncated:truncated || tests.length>10000 };
 }
+// The measuring method with the most timed observations at `revision` (a fresh --execute run is a lane's).
+function timingMethod(observations, revision) {
+  const count = new Map();
+  for (const o of observations) if (o.revision === revision && Number.isFinite(o.duration_ms)) count.set(o.method || 'lane', (count.get(o.method || 'lane') || 0) + 1);
+  return [...count].sort((a, b) => b[1] - a[1])[0]?.[0];
+}
 function classify(observations, tests, revision) {
   const candidates = []; const by = new Map(); const signatures = new Map();
   for (const t of tests) { if (t.signature) { const group = signatures.get(t.signature) || []; group.push(t); signatures.set(t.signature, group); } }
   for (const o of observations) { if (o.revision !== revision || o.ambiguous || o.outcome === 'skip') continue; const group = by.get(o.id) || []; group.push(o); by.set(o.id, group); }
   const attach = (name) => { const matches = tests.filter(t => t.name === name || name.endsWith('::' + t.name)); return matches.length === 1 ? matches[0] : undefined; };
   const push = (kind, title, evidence, t, id) => candidates.push({ id: hash(kind + ':' + id).slice(0, 16), kind, title, evidence, path: t?.path, line: t?.line, source_hash: t?.hash });
+  // Times are compared within one measuring method only (a CI runner, a lane, a log): the one
+  // that timed the most observations.
+  const method = timingMethod(observations, revision);
   const times = [];
   for (const [id, all] of by) {
-    const rows = [...new Map(all.map(o => [o.run, o])).values()]; const pass = rows.filter(o => o.outcome === 'pass').length, fail = rows.filter(o => o.outcome === 'fail').length;
+    // One observation per run: a run's jobs and reports (a matrix, JUnit beside its console) are
+    // one execution, where a failure anywhere outweighs a pass.
+    const byRun = new Map(); for (const o of all) { const seen = byRun.get(o.run); if (!seen || (seen.outcome !== 'fail' && o.outcome === 'fail')) byRun.set(o.run, o); }
+    const rows = [...byRun.values()]; const pass = rows.filter(o => o.outcome === 'pass').length, fail = rows.filter(o => o.outcome === 'fail').length;
     const t = attach(rows[0].name);
     // A pass that needed a retry; a retry that failed too is a failure like any other.
     const retried = rows.filter(o => o.flaky && o.outcome === 'pass').length;
     if (pass && fail) push('fix', 'Flaky: ' + id, `${pass} passing and ${fail} failing distinct runs at ${revision}. Sources: ${rows.map(o=>o.source).join(', ')}`, t, id);
     else if (retried) push('fix', 'Flaky: ' + id, `${retried} run(s) at ${revision} passed only after a failed attempt (the runner's retry). Sources: ${rows.filter(o => o.flaky && o.outcome === 'pass').map(o=>o.source).join(', ')}`, t, id);
     else if (fail >= 2) push('fix', 'Repeated failure: ' + id, `${fail} failing runs and no passing run at ${revision}. Repair or explicitly justify retirement; failure alone is not evidence to delete. Sources: ${rows.map(o=>o.source).join(', ')}`, t, id);
-    const durations = rows.map(o => o.duration_ms).filter(Number.isFinite).sort((a,b) => a-b); if (durations.length) times.push({ id, t, ms: durations[Math.floor(durations.length / 2)], n: durations.length });
+    // One time per run, from any of its reports that timed the test (JUnit, when a console did not).
+    const timedRuns = new Map(); for (const o of all) if ((o.method || 'lane') === method && Number.isFinite(o.duration_ms)) timedRuns.set(o.run, Math.max(timedRuns.get(o.run) ?? 0, o.duration_ms));
+    const durations = [...timedRuns.values()].sort((a,b) => a-b); if (durations.length) times.push({ id, t, ms: durations[Math.floor(durations.length / 2)], n: durations.length });
   }
   times.sort((a,b) => b.ms - a.ms);
-  for (const t of times.slice(0, Math.ceil(times.length * .05))) push('speedup', 'Slow tail: ' + t.id, `Median ${t.ms.toFixed(2)} ms across ${t.n} timed observations; top 5% of ${times.length} tests with timings, not of unmeasured tests.`, t.t, t.id);
+  for (const t of times.slice(0, Math.ceil(times.length * .05))) push('speedup', 'Slow tail: ' + t.id, `Median ${t.ms.toFixed(2)} ms across ${t.n} observations timed by ${method}; top 5% of ${times.length} tests with timings, not of unmeasured tests.`, t.t, t.id);
   for (const group of signatures.values()) if (group.length > 1) {
     for (const t of group.slice(1)) push('inspect', 'Possible duplicate: ' + t.name, `Same normalized body as ${group[0].path}:${group[0].line}. Imports, fixtures and scope may differ. Verify equivalent contract before proposing deletion.`, t, t.path + ':' + t.line);
   }
@@ -185,6 +199,8 @@ function main(args) {
     }
   }
   const candidates = classify(observations, inv.tests, revision);
+  const timedBy = timingMethod(observations, revision); const others = [...new Set(observations.filter(o => o.revision === revision && Number.isFinite(o.duration_ms) && (o.method || 'lane') !== timedBy).map(o => o.method || 'lane'))];
+  if (others.length) warnings.push(`Times compare within one method: ${timedBy}. Times measured by ${others.join(', ')} are kept as observations but not compared with them.`);
   const known = new Set(opts.known_failures || []);
   for (const row of observations.filter(o=>o.revision===revision && o.outcome==='fail' && (known.has(o.id)||known.has(o.name)))) {
     if (!candidates.some(c=>c.title.endsWith(row.id))) candidates.push({id:hash('known:'+row.id).slice(0,16),kind:'fix',title:'Known failure: '+row.id,evidence:'Listed in the supplied known-failure list and failed in '+row.source+'. Known failures remain failures; repair or justify retirement.'});
@@ -193,5 +209,5 @@ function main(args) {
   fs.writeFileSync(opts.output, JSON.stringify(report, null, 2), { flag: 'wx' });
   console.log(JSON.stringify({ report: opts.output, revision, observed: observations.length, inventoried: inv.tests.length, candidates: candidates.length, truncated: report.truncated }));
 }
-module.exports = { merged, parseLog, bodies, classify, hints };
+module.exports = { merged, parseLog, bodies, classify, hints, timingMethod };
 if (require.main === module) main(process.argv.slice(2));

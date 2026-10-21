@@ -549,6 +549,7 @@ pub fn import(
     run: &str,
     revision: &str,
     source: &str,
+    method: Method,
 ) -> (Vec<serde_json::Value>, serde_json::Value) {
     let evidence = crate::test_evidence::read(text);
     let runner = evidence.runner.clone().unwrap_or_else(|| "unknown".into());
@@ -560,7 +561,7 @@ pub fn import(
         .tests
         .iter()
         .map(|t| {
-            let mut o = serde_json::json!({"id": t.id, "name": t.name, "runner": runner, "outcome": t.outcome, "run": run, "revision": revision, "source": source, "ambiguous": seen[t.id.as_str()] > 1});
+            let mut o = serde_json::json!({"id": t.id, "name": t.name, "runner": runner, "outcome": t.outcome, "run": run, "revision": revision, "source": source, "method": method, "ambiguous": seen[t.id.as_str()] > 1});
             for (key, value) in [("suite", t.suite.clone().map(Into::into)), ("file", t.file.clone().map(Into::into)), ("duration_ms", t.seconds.map(|s| (s * 1000.0).into())), ("flaky", t.flaky.then_some(true.into()))] {
                 if let Some(v) = value {
                     o[key] = v;
@@ -569,8 +570,221 @@ pub fn import(
             o
         })
         .collect();
-    let summary = serde_json::json!({"runner": runner, "run": run, "revision": revision, "source": source, "format": evidence.format, "duration_ms": evidence.seconds.map(|s| s * 1000.0), "partial": !evidence.complete, "tests": evidence.tests.len(), "warnings": evidence.warnings});
+    let summary = serde_json::json!({"runner": runner, "run": run, "revision": revision, "source": source, "method": method, "format": evidence.format, "duration_ms": evidence.seconds.map(|s| s * 1000.0), "partial": !evidence.complete, "tests": evidence.tests.len(), "warnings": evidence.warnings});
     (observations, summary)
+}
+
+/// How a run's evidence was measured (NIT-554). Times from different methods are never compared:
+/// a CI runner, a build lane and a log of either differ in machine and load.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Method {
+    /// A finished CI run's logs or artifacts, read and nothing run.
+    CiLog,
+    /// A CI run dispatched for the sweep.
+    CiRun,
+    /// A capped run in a build lane, for a repo without CI.
+    Lane,
+    /// A log the person supplied.
+    Imported,
+}
+
+impl Method {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Method::CiLog => "ci-log",
+            Method::CiRun => "ci-run",
+            Method::Lane => "lane",
+            Method::Imported => "imported",
+        }
+    }
+}
+
+/// A run's id from its parts (`ci`, the workflow run, its attempt), safe in a file name. A
+/// workflow run's jobs share one: they are one execution, where the collector keeps a failure over
+/// a pass.
+pub fn run_id(parts: &[&str]) -> String {
+    parts
+        .iter()
+        .map(|p| {
+            p.chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '.' {
+                        c
+                    } else {
+                        '-'
+                    }
+                })
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// The gate's commands that run tests: `cargo test`, `npm test`, `pytest`, `go test`,
+/// `dotnet test`, `mvn test`, `gradle test`, and the like. Builds and lints are not measured.
+pub fn test_commands(gate: &[String]) -> Vec<String> {
+    gate.iter()
+        .filter(|c| {
+            let words: Vec<&str> = c.split_whitespace().collect();
+            words.iter().any(|w| {
+                matches!(
+                    *w,
+                    "test"
+                        | "tests"
+                        | "--test"
+                        | "pytest"
+                        | "vitest"
+                        | "jest"
+                        | "nextest"
+                        | "gotestsum"
+                )
+            }) || words.iter().any(|w| w.starts_with("test:"))
+        })
+        .cloned()
+        .collect()
+}
+
+/// What `measure` does, in order of preference: read CI's logs at the revision when there are
+/// any; else dispatch CI runs of the test commands CI takes; else, only when the repo has no CI,
+/// run them in a build lane. A run is named, with its cost cap, before it starts: `start` says the
+/// person asked for that method, and without it the plan is only shown.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MeasurePlan {
+    pub method: Method,
+    pub commands: Vec<String>,
+    pub runs: u32,
+    pub minutes: u32,
+    /// Shown to the person before anything runs.
+    pub says: String,
+    /// Whether to run it now.
+    pub start: bool,
+}
+
+/// Where CI stands, as `plan_measure` needs it (the shell reads `executor::ci_state`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CiFact<'a> {
+    /// CI is reachable, and `workflow` says whether it has Nitely's suite workflow
+    /// (`[lanes] ci_commands` set up) to dispatch to.
+    Ready { workflow: bool },
+    /// The repo has no CI Nitely can use, or this machine keeps it local: a lane may measure.
+    Absent(&'a str),
+    /// The repo has CI that cannot be reached from here.
+    Blocked(&'a str),
+}
+
+/// The inputs `plan_measure` decides on, gathered by the shell.
+pub struct MeasureFacts<'a> {
+    pub revision: &'a str,
+    /// Logs found from finished CI runs that tested `revision`.
+    pub ci_logs: usize,
+    /// When HEAD has none, the newest integration-branch commit CI tested: its evidence is that
+    /// commit's, read by measuring in a checkout of it, never under HEAD's name.
+    pub tested_main: Option<&'a str>,
+    pub ci: CiFact<'a>,
+    /// The gate's test commands.
+    pub tests: &'a [String],
+    pub runs: u32,
+    pub minutes: u32,
+    /// The person asked for a CI run (`--dispatch`) or a lane run (`--lane`).
+    pub dispatch: bool,
+    pub lane: bool,
+}
+
+/// Each command's share of a lane run's cap, in whole minutes, at least one.
+pub fn lane_minutes(minutes: u32, commands: usize) -> u32 {
+    (minutes / commands.max(1) as u32).max(1)
+}
+
+pub fn plan_measure(f: &MeasureFacts) -> Result<MeasurePlan> {
+    let short = &f.revision[..f.revision.len().min(12)];
+    let plan = |method, commands: Vec<String>, says: String, start| MeasurePlan {
+        method,
+        commands,
+        runs: f.runs,
+        minutes: f.minutes,
+        says,
+        start,
+    };
+    if f.ci_logs > 0 && !f.dispatch && !f.lane {
+        return Ok(plan(
+            Method::CiLog,
+            vec![],
+            format!("{} CI logs at {short}: read them, nothing runs", f.ci_logs),
+            true,
+        ));
+    }
+    if f.tests.is_empty() {
+        bail!(
+            "the playbook's gate has no test command to measure; supply logs to `collect --logs`"
+        );
+    }
+    let ask = |says: String, flag: &str, start: bool| {
+        let says = match f.tested_main {
+            Some(sha) if !start => format!("{says}. Or read CI's evidence for {}, the newest main commit CI tested, by measuring in a checkout of it", &sha[..sha.len().min(12)]),
+            _ => says,
+        };
+        if start {
+            says
+        } else {
+            format!("{says}. Start it with {flag}.")
+        }
+    };
+    match f.ci {
+        CiFact::Blocked(why) => bail!("the repo has CI, which cannot be reached from here ({why}); fix that and measure again: nothing runs on this machine while the repo has CI"),
+        CiFact::Ready { .. } if f.lane => bail!("this repo has CI: measure there (--dispatch), not on this machine"),
+        CiFact::Ready { workflow: false } => bail!("CI has no Nitely suite workflow to dispatch to ([lanes] ci_commands is empty): set one up (docs/build-lanes.md), or have CI write JUnit and upload it as an artifact named for tests, and measure reads it from CI's finished runs"),
+        CiFact::Ready { workflow: true } => {
+            let (mut commands, mut skipped) = (vec![], vec![]);
+            for t in f.tests {
+                match crate::test_evidence::console_command(t) {
+                    Ok(c) => commands.push(c),
+                    Err(why) => skipped.push(why),
+                }
+            }
+            if commands.is_empty() {
+                bail!("{}", skipped.join("; "));
+            }
+            let mut says = format!("No CI logs at {short}. CI would run {} run(s) of {} at {short}, each run capped at {} minutes, queue included", f.runs, commands.join(" and "), f.minutes);
+            if f.runs > 1 {
+                says.push_str("; two runs at one revision tell a flaky test from a failing one");
+            }
+            if !skipped.is_empty() {
+                says.push_str(&format!(". Not dispatched: {}", skipped.join("; ")));
+            }
+            Ok(plan(Method::CiRun, commands, ask(says, "--dispatch", f.dispatch), f.dispatch))
+        }
+        CiFact::Absent(why) => {
+            if f.dispatch {
+                bail!("CI cannot take the test commands: {why}");
+            }
+            if (f.minutes as usize) < f.tests.len() {
+                bail!("a lane run's cap is shared by its {} commands: give it at least {} minutes (--minutes)", f.tests.len(), f.tests.len());
+            }
+            let says = format!("No CI ({why}). A build lane would run {} run(s) of {} at {short}, each run capped at {} minutes ({} per command)", f.runs, f.tests.join(" and "), f.minutes, lane_minutes(f.minutes, f.tests.len()));
+            Ok(plan(Method::Lane, f.tests.to_vec(), ask(says, "--lane", f.lane), f.lane))
+        }
+    }
+}
+
+/// HEAD of the checkout at `dir`, for measuring by running tests there (NIT-554): untracked files
+/// count as changes too, since its CI or lane snapshot would run them while the evidence names
+/// HEAD, and the evidence folder `out` must be outside it for the same reason.
+pub fn measured_revision(dir: &Path, out: &Path) -> Result<String> {
+    let top = crate::playbook::git(dir, &["rev-parse", "--show-toplevel"])?;
+    // Both resolved (`..`, links, case), so a folder beside the checkout is told from one in it.
+    let top = Path::new(top.trim()).canonicalize()?;
+    let out = out.canonicalize()?;
+    if out.starts_with(&top) {
+        bail!("write the evidence outside the checkout when tests run (--out), so no snapshot picks it up");
+    }
+    let status = crate::playbook::git(dir, &["status", "--porcelain", "--untracked-files=all"])?;
+    if !status.trim().is_empty() {
+        bail!("commit or remove changed and untracked files before measuring: a snapshot would run them under HEAD's name");
+    }
+    Ok(crate::playbook::git(dir, &["rev-parse", "HEAD"])?
+        .trim()
+        .to_string())
 }
 
 /// A clean source revision keeps imported outcomes and extracted bodies comparable.
@@ -733,12 +947,139 @@ mod tests {
             .contains("## Kept as they are"));
     }
 
+    /// Measuring prefers what CI already wrote, then a capped CI run named before it starts, and
+    /// runs on this machine's lanes only for a repo without CI.
+    #[test]
+    fn measure_reads_ci_logs_first_then_a_capped_ci_run_and_a_lane_only_without_ci() {
+        let gate = [
+            "npm run build",
+            "npm test",
+            "cargo test --workspace",
+            "cargo clippy --workspace",
+            "pytest -q",
+        ]
+        .map(String::from);
+        let tests = test_commands(&gate);
+        assert_eq!(tests, ["npm test", "cargo test --workspace", "pytest -q"]);
+        // Run ids are safe in file names; only push and scheduled runs tested their commit.
+        assert_ne!(
+            run_id(&["ci", "7", "1", "Gate (windows-latest)"]),
+            run_id(&["ci", "7", "1", "Gate (ubuntu-latest)"])
+        );
+        assert_eq!(
+            run_id(&["ci", "7", "1", "Gate (windows-latest)"]),
+            "ci-7-1-Gate--windows-latest-"
+        );
+        assert!(
+            crate::executor::tested_its_commit("push")
+                && !crate::executor::tested_its_commit("workflow_dispatch")
+                && !crate::executor::tested_its_commit("pull_request")
+        );
+        let rev = "a".repeat(40);
+        let facts = |ci_logs, ci, dispatch, lane| MeasureFacts {
+            revision: &rev,
+            ci_logs,
+            tested_main: None,
+            ci,
+            tests: &tests,
+            runs: 2,
+            minutes: 20,
+            dispatch,
+            lane,
+        };
+        let ready = CiFact::Ready { workflow: true };
+        let p = plan_measure(&facts(3, ready, false, false)).unwrap();
+        assert_eq!((p.method, p.start), (Method::CiLog, true));
+        // No logs: the CI run is shown with its cap and starts only when asked, with pytest -v
+        // so CI's console says each test's outcome.
+        let p = plan_measure(&facts(0, ready, false, false)).unwrap();
+        assert_eq!((p.method, p.start), (Method::CiRun, false));
+        assert_eq!(
+            p.commands,
+            [
+                "npm test",
+                "cargo test --workspace",
+                "pytest -v --durations=0 --durations-min=0"
+            ]
+        );
+        assert!(
+            p.says.contains("capped at 20 minutes") && p.says.contains("--dispatch"),
+            "{}",
+            p.says
+        );
+        assert!(plan_measure(&facts(0, ready, true, false)).unwrap().start);
+        // A repo with CI never runs the suite here: not with --lane, not with CI unreachable or
+        // without a suite workflow.
+        assert!(plan_measure(&facts(0, ready, false, true)).is_err());
+        assert!(
+            plan_measure(&facts(0, CiFact::Blocked("gh is signed out"), false, true))
+                .unwrap_err()
+                .to_string()
+                .contains("signed out")
+        );
+        assert!(plan_measure(&facts(0, CiFact::Ready { workflow: false }, false, true)).is_err());
+        assert!(
+            plan_measure(&facts(0, CiFact::Ready { workflow: false }, true, false))
+                .unwrap_err()
+                .to_string()
+                .contains("JUnit")
+        );
+        // No CI: a lane, shown first, each command capped.
+        let p = plan_measure(&facts(
+            0,
+            CiFact::Absent("the repo's origin is not on GitHub"),
+            false,
+            false,
+        ))
+        .unwrap();
+        assert_eq!(
+            (p.method, p.start, p.commands.len()),
+            (Method::Lane, false, 3)
+        );
+        assert!(
+            p.says.contains("not on GitHub")
+                && p.says
+                    .contains("each run capped at 20 minutes (6 per command)"),
+            "{}",
+            p.says
+        );
+        assert!(
+            plan_measure(&facts(0, CiFact::Absent("kept local"), false, true))
+                .unwrap()
+                .start
+        );
+        assert!(plan_measure(&facts(0, CiFact::Absent("kept local"), true, false)).is_err());
+        // A lane run's cap is shared: three commands need three minutes at least.
+        let tight = MeasureFacts {
+            minutes: 2,
+            ..facts(0, CiFact::Absent("kept local"), false, true)
+        };
+        assert!(plan_measure(&tight)
+            .unwrap_err()
+            .to_string()
+            .contains("at least 3 minutes"));
+        // Main's newest tested commit is named, never read under HEAD's name.
+        let main = "b".repeat(40);
+        let hinted = MeasureFacts {
+            tested_main: Some(&main),
+            ..facts(0, ready, false, false)
+        };
+        let p = plan_measure(&hinted).unwrap();
+        assert!(
+            p.says
+                .contains("bbbbbbbbbbbb, the newest main commit CI tested")
+                && p.commands.len() == 3,
+            "{}",
+            p.says
+        );
+    }
+
     /// A JUnit file imports as the same observations the collector classifies from libtest and
     /// TAP; a cut one is a partial run.
     #[test]
     fn imported_junit_becomes_observations_and_a_cut_file_a_partial_run() {
         let xml = r#"<testsuites name="pytest" time="1.5"><testsuite name="pytest"><testcase classname="tests.test_cart" name="test_total" time="1.25"/><testcase classname="tests.test_cart" name="test_tax"><failure/></testcase></testsuite></testsuites>"#;
-        let (rows, run) = import(xml, "ci-1", "abc", "CI job 7");
+        let (rows, run) = import(xml, "ci-1", "abc", "CI job 7", Method::CiLog);
         assert_eq!(rows[0]["id"], "tests.test_cart::test_total");
         assert_eq!(rows[0]["duration_ms"], 1250.0);
         assert_eq!(
@@ -749,7 +1090,13 @@ mod tests {
             (run["partial"].as_bool(), run["duration_ms"].as_f64()),
             (Some(false), Some(1500.0))
         );
-        let (rows, run) = import(&xml[..xml.len() - 40], "ci-2", "abc", "CI job 8");
+        let (rows, run) = import(
+            &xml[..xml.len() - 40],
+            "ci-2",
+            "abc",
+            "CI job 8",
+            Method::CiLog,
+        );
         assert_eq!(rows.len(), 1);
         assert_eq!(run["partial"], true);
     }
