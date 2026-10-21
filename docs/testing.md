@@ -163,3 +163,105 @@ same cost. Cutting those calls is
 single observations; the base commits differ by other goal-19 work, which added
 tests and fixed the one failure. This work removed six tests by merging and added
 two plain-function tests.
+
+
+## The time budget (NIT-522)
+
+[NIT-522](http://127.0.0.1:7423/i/NIT-522) gives every gate each test's time and holds the
+suite to `.nitely/test-budget.toml`:
+
+- `test_seconds`: what any one test may take (2 s);
+- `[suites]`: what a whole test binary may take, by the name cargo prints for it
+  (`nitely_core = 60`), or `node` for node:test;
+- `[scenarios]`: the end-to-end tests allowed past `test_seconds`, by name, each with what it
+  proves. One or two per feature; [NIT-523](http://127.0.0.1:7423/i/NIT-523) names them.
+
+**How the times are taken.** Stable Rust prints no per-test times. In a build lane, a command
+that runs `cargo test` gets `nitely test-runner` as cargo's test runner
+(`CARGO_TARGET_<triple>_RUNNER`). It starts each test binary with `-Z unstable-options
+--report-time` and `RUSTC_BOOTSTRAP=1`, which only the test binary sees, so the build is the one
+without it and a warm lane stays warm. A repo with a test harness or runner of its own
+(`harness = false`, a `runner` in `.cargo/config.toml`), or a command that sets `--format`, runs
+as before, without times. In CI, the suite job in `.github/workflows/ci.yml` writes the same
+runner into the job and sets it for Linux. node:test's TAP output has each test's `duration_ms`
+already.
+
+**What the gate says.** `test_budget.rs` reads the times from the lane's log, or from the CI
+job's whole log (`gh run view --log`), and adds two lines to the gate's warnings:
+
+- `Test time, N tests timed: nitely_core 31 s (target 60 s), ...; slowest: ...` on every gate
+  that ran tests;
+- `Over the test budget in .nitely/test-budget.toml: ...` when a suite is over its target or a
+  test that is not a named scenario is over `test_seconds`. It names the ten slowest and counts
+  the rest, and goes on the issue's timeline as a `test_budget` event.
+
+A broken budget is flagged, not failed, in every review mode for now: the suite is far over it
+on Windows (below), and failing every gate would stop all work until goal 20 is done. Making it
+fail under Careful and Release once the suite meets the budget is a follow-up.
+
+### Baseline, 2026-10-21
+
+The same tests, on two machines:
+
+| | CI, Linux (GitHub `ubuntu-latest`, 4 cores) | Build lane, Windows (this PC) |
+| --- | ---: | ---: |
+| Source | main `11f1516`, workflow run 39638986501 (552 tests) | `e67b215`, lane run 1666, 2026-10-20 (658 tests: the crew's were still in core) |
+| Command | `cargo test --workspace -- --test-threads=4` | `cargo test -p nitely-core --lib -- --test-threads=12` |
+| `nitely_core` wall time | **31 s** | **449 s** |
+| Summed test time, `nitely_core` | 123 s | 5,320 s |
+| `nitely_core` tests over 2 s | 13 | 245 |
+| over 10 s | 1 | 129 |
+| over 60 s | 0 | 28 |
+
+On Linux the core suite is already inside its 60 s target. On Windows it is 7.5 times over,
+and the summed test time is 43 times Linux's. The tests are the same; what differs is the cost
+of starting a process, which NIT-458 measured at about 83% of a land or submit test, and
+[NIT-518](http://127.0.0.1:7423/i/NIT-518) measured at 600 to 900 ms per git start on this PC.
+So the pure-function cut (NIT-523 to 527) pays most where processes are slow: every git call a
+test no longer makes is worth up to a second there.
+
+The CI run stopped after `nitely_core`, which had 10 failing `release_verification` tests and
+one `lanes` test on main at the time. Cargo stops at the first failing test binary, so
+`nitely_crew` and the leaderboard service are not in it. The other binaries that ran:
+
+| Binary | Wall time |
+| --- | ---: |
+| `performance_recording` | 20.2 s (one test: `performance_record_duration_stops_cleanly`, 20.1 s) |
+| `mcp_concurrent` | 6.2 s |
+| `older_job` | 3.6 s |
+| `mcp_stale` | 2.6 s |
+| `executor` | 2.0 s |
+| everything else | under 2 s each |
+
+The Linux tests over 2 s, which are the first list for NIT-523:
+
+| Test | Linux |
+| --- | ---: |
+| `performance_recording::performance_record_duration_stops_cleanly` | 20.1 s |
+| `phone::tests::a_client_trickling_tls_bytes_is_cut_off_at_the_deadline` | 10.2 s |
+| `mcp_concurrent::a_cancelled_call_is_not_answered_and_frees_the_server` | 6.1 s |
+| `db::tests::a_write_waits_out_a_long_write_of_another_connection` | 6.0 s |
+| `performance::tests::a_busy_database_does_not_lose_the_new_collectors_version_announcement` | 5.6 s |
+| `lanes::tests::a_memory_reason_goes_once_a_request_waits_for_the_checkout` | 4.1 s |
+| `lanes::tests::a_floor_lowered_while_a_request_waits_lets_it_go` | 4.1 s |
+| `lanes::tests::a_request_waits_for_memory_and_says_so` | 4.1 s |
+| `machine::tests::admit_waits_until_memory_frees_and_records_the_start` | 4.0 s |
+| `older_job::a_job_that_meets_a_newer_database_runs_in_the_build_installed_meanwhile` | 3.6 s |
+| `submit::tests::a_p1_that_two_rounds_leave_open_goes_to_a_person` | 3.4 s |
+| `land::tests::lands_only_with_the_apps_signed_approval_of_the_patch_it_saw` | 3.4 s |
+| `mcp_concurrent::a_call_still_running_when_the_client_leaves_finishes_before_the_server_exits` | 3.3 s |
+| `phone::tests::serves_the_page_over_https_with_the_given_certificate` | 3.1 s |
+| `mcp_concurrent::a_long_call_holds_up_none_after_it_and_ends_at_the_cap` | 3.1 s |
+| `mcp_stale::a_call_that_meets_a_newer_database_waits_for_the_install_and_goes_to_the_new_build` | 2.6 s |
+| `goal_branch::tests::items_land_into_the_goal_branch_and_a_checkpoint_lands_the_slice_on_main` | 2.6 s |
+| `lanes::tests::a_memory_reason_goes_once_a_request_waits_for_a_slot` | 2.4 s |
+| `older_job::with_nothing_newer_installed_the_job_says_why_it_stopped` | 2.2 s |
+| `lanes::tests::a_request_waits_while_the_main_checkout_has_changes_and_says_why` | 2.1 s |
+| `mcp_stale::with_nothing_newer_installed_it_refuses_and_says_so_without_waiting_again` | 2.1 s |
+
+Most of these wait on the clock (a deadline, a poll interval, memory that frees later), which
+the goal counts as a defect. On Windows the slowest are the git-heavy modules instead, by
+summed time: `land_queue` 1,039 s, `submit` 1,037 s, `land` 815 s, `lanes` 428 s,
+`release_verification` 328 s, `crew` 264 s, `submit_job` 233 s and `affected_tests` 138 s.
+These are single observations: run 1666 shared the PC with other agents' lanes, and a CI
+runner's speed varies from run to run.

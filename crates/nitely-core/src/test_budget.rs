@@ -76,7 +76,7 @@ fn re(cell: &'static OnceLock<regex::Regex>, pattern: &str) -> &'static regex::R
     cell.get_or_init(|| regex::Regex::new(pattern).unwrap())
 }
 
-/// A line without its colours, and without what GitHub's job log puts before each one: the job
+/// A line without its colours (which `gh run view --log` spells `^[[1m`), and without what GitHub's job log puts before each one: the job
 /// and step names and a timestamp (`gh run view --log`), or the timestamp alone.
 fn plain_line(line: &str) -> std::borrow::Cow<'_, str> {
     static PREFIX: OnceLock<regex::Regex> = OnceLock::new();
@@ -86,7 +86,7 @@ fn plain_line(line: &str) -> std::borrow::Cow<'_, str> {
         Some(m) => &line[m.end()..],
         None => line,
     };
-    re(&COLOUR, "\x1b\\[[0-9;]*m").replace_all(line, "")
+    re(&COLOUR, r"(?:\x1b|\^\[)\[[0-9;]*m").replace_all(line, "")
 }
 
 /// Every test time and suite time in `log`: cargo's `test x ... ok <1.234s>` lines under each
@@ -355,7 +355,7 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
         // GitHub's job log puts the job, the step and a timestamp before each line, and cargo
         // colours its own lines there.
-        let ci = cargo.replace("     Running", "\x1b[1m\x1b[92m     Running\x1b[0m").lines().map(|l| format!("cargo test\tRun\t2026-10-21T12:00:01.1234567Z {l}")).collect::<Vec<_>>().join("\n");
+        let ci = cargo.replace("     Running", "^[[1m^[[92m     Running^[[0m").replace("   Doc-tests", "\x1b[1m   Doc-tests\x1b[0m").lines().map(|l| format!("cargo test\tRun\t2026-10-21T12:00:01.1234567Z {l}")).collect::<Vec<_>>().join("\n");
         assert_eq!(parse(&ci), t);
 
         // node:test's TAP: a test with subtests is timed by them, not counted as one.
