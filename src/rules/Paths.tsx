@@ -1,7 +1,7 @@
 import type { PathRule } from "../types";
-import { LandsStrip } from "./LandsStrip";
 import { Questions } from "./Questions";
 import type { RulesDraft } from "./shared";
+import { waitsSummary } from "./shared";
 
 /** Path rules as rows of pattern and reason, with add and remove. */
 export function PathRules(props: { rules: PathRule[]; disabled: boolean; onChange: (rules: PathRule[]) => void; patternHint: string; reasonHint: string }) {
@@ -34,7 +34,7 @@ export function Paths({ draft, ro, landBy, crossVendor, patch }: RulesDraft) {
   return (
     <section className="settings-card">
       <h2>What waits for you</h2>
-      <LandsStrip draft={draft} landBy={landBy} crossVendor={crossVendor} />
+      <p className="rules-summary">{waitsSummary(draft, landBy, crossVendor)}</p>
       <label className="rules-check">
         <input type="checkbox" checked={draft.always_human} disabled={ro} onChange={(e) => patch({ always_human: e.target.checked })} />
         Every change waits for me
@@ -45,7 +45,7 @@ export function Paths({ draft, ro, landBy, crossVendor, patch }: RulesDraft) {
       <h3>Questions the reviewer answers</h3>
       <p className="settings-why">For what a path cannot show. The reviewer ends with a yes or no for each; a yes sends the change to you.</p>
       <Questions flags={draft.flags} disabled={ro} onChange={(flags) => patch({ flags })} />
-      <h3>Paths no task may change</h3>
+      <h3 data-rules-section="refused">Paths no task may change</h3>
       <p className="settings-why">Submit and land refuse a branch that touches these.</p>
       <PathRules rules={draft.blocked_paths} disabled={ro} onChange={(blocked_paths) => patch({ blocked_paths })} patternHint="^vendor/" reasonHint="updated by its own process" />
     </section>

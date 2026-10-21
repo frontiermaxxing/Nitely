@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "./backend";
 import type { DefaultsView, LandBy, RuleDefaults, RulesEdit, RulesView } from "./types";
 import { EmptyState, Loading } from "./ui";
 import { DryRun } from "./rules/DryRun";
 import { Landing } from "./rules/Landing";
+import { LandsStrip, type ModeFacts, type RulesSection } from "./rules/LandsStrip";
 import { Loosen } from "./rules/Loosen";
 import { Mode } from "./rules/Mode";
 import { Paths } from "./rules/Paths";
@@ -12,14 +13,16 @@ import { SaveBar } from "./rules/SaveBar";
 import type { RulesDraft } from "./rules/shared";
 import { draftChanges, draftOf, From, LAND_BY } from "./rules/shared";
 import { confirmLoosening } from "./rules/save";
+import { optionsFor, type ProjectReviewMode } from "./reviewModes";
 import "./rules.css";
 
 export { LAND_BY } from "./rules/shared";
 export { ReviewerMap } from "./rules/Reviewers";
 
 /** One repo's rules: what waits for you, who reviews, who lands, and a dry run. The draft lives here; each section edits it. */
-function RepoRules(props: { view: RulesView; onSaved: (v: RulesView) => void }) {
+function RepoRules(props: { view: RulesView; mode: ModeFacts | null; onSaved: (v: RulesView) => void }) {
   const v = props.view;
+  const page = useRef<HTMLDivElement>(null);
   const [draft, setDraft] = useState<RulesEdit>(() => draftOf(v));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -63,12 +66,20 @@ function RepoRules(props: { view: RulesView; onSaved: (v: RulesView) => void }) 
   };
 
   const rules: RulesDraft = { view: v, draft, ro, busy, landBy, crossVendor, patch };
+  const go = (section: RulesSection) => page.current?.querySelector(`[data-rules-section="${section}"]`)?.scrollIntoView({ behavior: "smooth", block: "start" });
   return (
-    <div className="settings rules">
+    <div className="settings rules" ref={page}>
+      <LandsStrip view={v} draft={draft} landBy={landBy} crossVendor={crossVendor} mode={props.mode} onGo={go} />
       <Mode view={v} />
-      <Paths {...rules} />
-      <Reviewers {...rules} onSaved={props.onSaved} />
-      <Landing {...rules} />
+      <div data-rules-section="waits">
+        <Paths {...rules} />
+      </div>
+      <div data-rules-section="review">
+        <Reviewers {...rules} onSaved={props.onSaved} />
+      </div>
+      <div data-rules-section="landing">
+        <Landing {...rules} />
+      </div>
 
       <DryRun repo={v.repo} stale={changed} />
 
@@ -90,7 +101,19 @@ function RepoRules(props: { view: RulesView; onSaved: (v: RulesView) => void }) 
 /** The project's Rules tab: each linked repo's review and landing rules. */
 export function ProjectRules(props: { projectKey: string }) {
   const [views, setViews] = useState<RulesView[] | null>(null);
+  const [mode, setMode] = useState<ModeFacts | null>(null);
   const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    // The review mode decides whether the gate and the review run; without it the strip shows the playbook's own.
+    let current = true;
+    setMode(null);
+    invoke<ProjectReviewMode>("project_review_mode", { project: props.projectKey })
+      .then((m) => current && setMode({ mode: m.mode, options: optionsFor(m.mode, m.presets, m.overrides) }))
+      .catch(() => undefined);
+    return () => {
+      current = false;
+    };
+  }, [props.projectKey]);
   useEffect(() => {
     // A late answer for the project left behind must not show (and then save) under this one.
     let current = true;
@@ -117,7 +140,7 @@ export function ProjectRules(props: { projectKey: string }) {
       {views.map((v) => (
         <div key={v.repo}>
           {views.length > 1 && <h2 className="rules-repo">{v.repo}</h2>}
-          <RepoRules view={v} onSaved={(saved) => setViews((current) => current && current.map((x) => (x.repo === saved.repo ? saved : x)))} />
+          <RepoRules view={v} mode={mode} onSaved={(saved) => setViews((current) => current && current.map((x) => (x.repo === saved.repo ? saved : x)))} />
         </div>
       ))}
     </>

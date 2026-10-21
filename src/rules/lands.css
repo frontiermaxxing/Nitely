@@ -1,0 +1,47 @@
+/* "How a change lands" at the top of Rules (LandsStrip.tsx): five stations on one line, each with
+   its value and a line of why. Teal when an agent or Nitely handles it, amber when it waits for you,
+   red when it is off or skipped, a dashed ring when nothing is set. */
+.lands {
+  display: grid; gap: 14px; margin-bottom: 8px; padding: 18px 20px;
+  border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--surface);
+}
+.lands-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.lands-head h2 { margin: 0; font-size: 14px; font-weight: var(--weight-strong); }
+.lands-head .muted { font-size: var(--text-sm); }
+.lands-track { position: relative; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); margin: 0; padding: 0; list-style: none; }
+.lands-track::before { content: ""; position: absolute; left: 10%; right: 10%; top: 13px; height: 1.5px; background: var(--line-strong); }
+.lands-station { position: relative; min-width: 0; }
+.lands-go {
+  display: flex; flex-direction: column; align-items: center; gap: 8px; width: 100%; height: 100%; box-sizing: border-box;
+  padding: 0 10px 4px; border: 0; border-radius: var(--radius); background: none; font: inherit; color: inherit; text-align: center;
+}
+button.lands-go { cursor: pointer; }
+button.lands-go:hover .lands-value { text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; }
+button.lands-go:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.lands-dot {
+  position: relative; width: 12px; height: 12px; margin-top: 7px; border-radius: 50%; box-sizing: border-box;
+  box-shadow: 0 0 0 6px var(--surface);
+}
+.lands-dot-agent { background: var(--live); }
+.lands-dot-you { background: var(--attention); box-shadow: 0 0 0 6px var(--surface), 0 0 0 9px var(--attention-wash); }
+.lands-dot-off { background: var(--fail); box-shadow: 0 0 0 6px var(--surface), 0 0 0 9px var(--fail-wash); }
+.lands-dot-ink { background: var(--fg); }
+.lands-dot-none { background: var(--surface); border: 1.5px dashed var(--fg-3); }
+.lands-label { font-size: 11.5px; letter-spacing: 0.02em; color: var(--fg-3); }
+.lands-value { font-size: 13.5px; font-weight: var(--weight-strong); color: var(--fg); overflow-wrap: anywhere; }
+.lands-value-you { color: var(--attention-ink); }
+.lands-value-off { color: var(--fail); }
+.lands-why { font-size: 11.5px; line-height: 1.45; color: var(--fg-2); text-wrap: pretty; overflow-wrap: anywhere; }
+
+/* A station's section, when the strip scrolls to it. */
+[data-rules-section] { scroll-margin-top: 16px; }
+div[data-rules-section] { display: flex; flex-direction: column; gap: 14px; }
+div[data-rules-section] > .settings-card + .settings-card { margin-top: 0; }
+
+@media (max-width: 760px) {
+  .lands-track { grid-template-columns: 1fr; gap: 10px; }
+  .lands-track::before { left: 15px; right: auto; top: 14px; bottom: 14px; width: 1.5px; height: auto; }
+  .lands-go { display: grid; grid-template-columns: 12px 120px minmax(0, 1fr); align-items: baseline; gap: 2px 12px; text-align: left; padding: 0 0 0 9px; }
+  .lands-dot { margin-top: 0; align-self: center; grid-row: span 2; }
+  .lands-why { grid-column: 3; }
+}
