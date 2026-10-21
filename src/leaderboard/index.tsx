@@ -3,19 +3,12 @@ import { invoke } from "../backend";
 import { EmptyState, Loading, Segmented } from "../ui";
 import type { Project } from "../types";
 import { OptIn } from "./OptIn";
-import { loadProfile, onProfileChange, saveProfile, type Profile } from "./profile";
+import { leave, useProfile } from "./profile";
 import { PERIOD_LABEL, type LeaderboardStats, type PeriodKey } from "./stats";
 import { You } from "./You";
 import "./leaderboard.css";
 
-export { leaderboardJoined } from "./profile";
-
-/** Your leaderboard profile, kept current when it is saved or cleared. */
-export function useProfile(): Profile | null {
-  const [profile, setProfile] = useState(loadProfile);
-  useEffect(() => onProfileChange(() => setProfile(loadProfile())), []);
-  return profile;
-}
+export { useProfile } from "./profile";
 
 const PERIODS: PeriodKey[] = ["week", "30d", "all"];
 
@@ -23,8 +16,9 @@ const PERIODS: PeriodKey[] = ["week", "30d", "all"];
 export function Leaderboard(props: { now: number; version: number; projects: Project[] }) {
   const profile = useProfile();
   // Before you join the page opens on joining; your own numbers are a tab away, joined or not.
-  const [tab, setTab] = useState<"join" | "you">(profile ? "you" : "join");
-  const joining = !profile && tab === "join";
+  const [chosen, setTab] = useState<"join" | "you" | null>(null);
+  const tab = chosen ?? (profile ? "you" : "join");
+  const joining = profile === null && tab === "join";
   const [period, setPeriod] = useState<PeriodKey>("week");
   const [stats, setStats] = useState<LeaderboardStats | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -70,7 +64,9 @@ export function Leaderboard(props: { now: number; version: number; projects: Pro
         {!joining && <span className="lb-head-note">Your stats are always here, sharing or not</span>}
         {!joining && <Segmented aria-label="Period" value={period} onChange={setPeriod} options={PERIODS.map((p) => ({ value: p, label: PERIOD_LABEL[p] }))} />}
       </div>
-      {joining ? (
+      {profile === undefined ? (
+        <Loading />
+      ) : joining ? (
         <OptIn projects={props.projects} />
       ) : error ? (
         <EmptyState title="Could not read your numbers">{error}</EmptyState>
@@ -83,8 +79,8 @@ export function Leaderboard(props: { now: number; version: number; projects: Pro
           profile={profile}
           now={props.now}
           onJoin={() => setTab("join")}
-          onLeave={() => {
-            saveProfile(null);
+          onLeave={async () => {
+            await leave();
             setTab("join");
           }}
         />

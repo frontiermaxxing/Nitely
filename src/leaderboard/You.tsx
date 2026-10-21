@@ -22,7 +22,7 @@ const IN_PERIOD: Record<PeriodKey, string> = { week: "this week", "30d": "in the
 const WORK_YEAR_HOURS = 52 * WORK_WEEK_HOURS;
 
 /** L3: your own numbers, always here, sharing or not. */
-export function You(props: { stats: LeaderboardStats; period: PeriodKey; profile: Profile | null; now: number; onJoin?: () => void; onEdit?: () => void; onLeave?: () => void }) {
+export function You(props: { stats: LeaderboardStats; period: PeriodKey; profile: Profile | null; now: number; onJoin?: () => void; onEdit?: () => void; onLeave?: () => Promise<void> }) {
   const { stats } = props;
   const p = periodOf(stats, props.period);
   const all = periodOf(stats, "all");
@@ -98,8 +98,12 @@ export function You(props: { stats: LeaderboardStats; period: PeriodKey; profile
   );
 }
 
-function ProfileRow(props: { profile: Profile | null; onJoin?: () => void; onEdit?: () => void; onLeave?: () => void }) {
+function ProfileRow(props: { profile: Profile | null; onJoin?: () => void; onEdit?: () => void; onLeave?: () => Promise<void> }) {
   const p = props.profile;
+  // Leaving deletes what was sent and makes a later join a new id, so it asks once more.
+  const [confirming, setConfirming] = useState(false);
+  const [leaving, setLeaving] = useState(false);
+  const [leaveError, setLeaveError] = useState<string | null>(null);
   if (!p)
     return (
       <section className="lb-profile">
@@ -130,7 +134,7 @@ function ProfileRow(props: { profile: Profile | null; onJoin?: () => void; onEdi
       <div className="lb-profile-text">
         <span className="lb-profile-name">
           {p.display_name}
-          <span className="lb-sub">joined {new Date(p.joined_at * 1000).toLocaleDateString("en-US", { month: "short", year: "numeric" })}</span>
+          <span className="lb-sub">{p.last_sent_week ? `last report sent for ${p.last_sent_week}` : "joined · nothing sent yet"}</span>
         </span>
         <span className="lb-links">
           {links.map(([k, v]) =>
@@ -148,11 +152,37 @@ function ProfileRow(props: { profile: Profile | null; onJoin?: () => void; onEdi
         </span>
       </div>
       {props.onEdit && <Button onClick={props.onEdit}>Edit profile</Button>}
-      {/* Nothing has been sent yet, so leaving only forgets your choices on this machine. */}
-      {props.onLeave && (
-        <Button variant="quiet" onClick={props.onLeave} title="Forget your leaderboard name and links on this machine">
-          Leave
-        </Button>
+      {props.onLeave &&
+        (confirming ? (
+          <span className="lb-leave">
+            <span className="lb-sub">{p.last_sent_week ? "Delete what you sent and leave?" : "Leave? Nothing was sent."}</span>
+            <Button
+              variant="danger"
+              disabled={leaving}
+              onClick={() => {
+                setLeaving(true);
+                setLeaveError(null);
+                props.onLeave!().catch((e) => {
+                  setLeaveError(String(e));
+                  setLeaving(false);
+                });
+              }}
+            >
+              {leaving ? "Leaving…" : "Leave"}
+            </Button>
+            <Button variant="quiet" disabled={leaving} onClick={() => setConfirming(false)}>
+              Cancel
+            </Button>
+          </span>
+        ) : (
+          <Button variant="quiet" onClick={() => setConfirming(true)} title="Leave the leaderboard: deletes what you sent and forgets your name, links and key on this machine">
+            Leave
+          </Button>
+        ))}
+      {leaveError && (
+        <span className="ui-field-error lb-leave-error" role="alert">
+          Could not leave: {leaveError}
+        </span>
       )}
     </section>
   );
