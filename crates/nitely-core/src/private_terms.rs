@@ -337,17 +337,22 @@ pub fn scan(terms: &PrivateTerms, project: Option<&str>, worktree: &Path, base: 
     if lists.iter().all(|(_, m)| m.is_empty()) {
         return Ok(vec![]);
     }
+    Ok(hits(&lists, &added(worktree, base)?))
+}
+
+/// Each place in `added` (where, text) that holds a term of one of `lists` (NIT-537).
+fn hits(lists: &[(String, Vec<(usize, Matcher)>)], added: &[(String, String)]) -> Vec<Hit> {
     let mut hits = Vec::new();
-    for (at, text) in added(worktree, base)? {
-        for (list, matchers) in &lists {
+    for (at, text) in added {
+        for (list, matchers) in lists {
             for (n, m) in matchers {
-                if m.matches(&text) {
+                if m.matches(text) {
                     hits.push(Hit { at: at.clone(), list: list.clone(), term: *n });
                 }
             }
         }
     }
-    Ok(hits)
+    hits
 }
 
 /// Refuses a branch that adds a private term, saying where and which entry, never the text.
@@ -356,9 +361,17 @@ pub fn check(project: Option<&str>, worktree: &Path, base: &str) -> Result<()> {
 }
 
 pub fn check_with(terms: &PrivateTerms, project: Option<&str>, worktree: &Path, base: &str) -> Result<()> {
-    let hits = scan(terms, project, worktree, base)?;
+    match refusal(&scan(terms, project, worktree, base)?) {
+        Some(msg) => bail!(msg),
+        None => Ok(()),
+    }
+}
+
+/// What a branch with `hits` is refused with (NIT-537): where and which entry of which list, a
+/// few places at most, never the term. None without hits.
+fn refusal(hits: &[Hit]) -> Option<String> {
     if hits.is_empty() {
-        return Ok(());
+        return None;
     }
     let mut msg = format!(
         "the branch adds {} you keep out of this repo. Every commit is pushed, so take {} out of the commits that add {}: \
@@ -374,7 +387,7 @@ pub fn check_with(terms: &PrivateTerms, project: Option<&str>, worktree: &Path, 
     if hits.len() > SHOWN {
         msg.push_str(&format!("\n  and {} more", hits.len() - SHOWN));
     }
-    bail!(msg)
+    Some(msg)
 }
 
 /// Which term `text` holds, as `term n of <list>`, checking the project's list and the list for
@@ -405,6 +418,33 @@ pub fn path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Which added lines hit which list's terms, and what the refusal says, over plain data
+    /// (NIT-537): what the slower branch-scanning tests below decide.
+    #[test]
+    fn hits_name_the_place_and_entry_and_the_refusal_never_the_term() {
+        let lists = vec![
+            ("every project".to_string(), compile("every project", &["# a comment".into(), "Acme".into()]).unwrap()),
+            ("APP".to_string(), compile("APP", &["re:secret-\\d+".into()]).unwrap()),
+        ];
+        let added = vec![
+            ("src/a.rs:3 (commit 1a2b3c4)".to_string(), "// talks to ACME's api".to_string()),
+            ("path docs/secret-42.md (commit 1a2b3c4)".to_string(), "docs/secret-42.md".to_string()),
+            ("src/b.rs:9 (commit 1a2b3c4)".to_string(), "nothing here".to_string()),
+        ];
+        let found = hits(&lists, &added);
+        let summary: Vec<(String, String, usize)> = found.iter().map(|h| (h.at.clone(), h.list.clone(), h.term)).collect();
+        assert_eq!(summary, vec![
+            ("src/a.rs:3 (commit 1a2b3c4)".into(), "every project".into(), 2),
+            ("path docs/secret-42.md (commit 1a2b3c4)".into(), "APP".into(), 1),
+        ]);
+        assert_eq!(refusal(&[]), None);
+        let said = refusal(&found).unwrap();
+        assert!(said.contains("private terms in 2 places") && said.contains("src/a.rs:3 (commit 1a2b3c4): term 2 of the list for every project") && said.contains("term 1 of APP's list"), "{said}");
+        assert!(!said.to_lowercase().contains("acme"), "the term itself is never echoed");
+        let many: Vec<Hit> = (0..SHOWN + 2).map(|i| Hit { at: format!("a.rs:{i}"), list: "APP".into(), term: 1 }).collect();
+        assert!(refusal(&many).unwrap().ends_with("and 2 more"));
+    }
     use std::process::Command;
 
     fn sh(dir: &Path, args: &[&str]) -> String {

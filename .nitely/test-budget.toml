@@ -20,3 +20,12 @@ nitely_core = 60
 "lanes::tests::a_lane_command_takes_what_it_started_with_it" = "process containment: what a lane command started ends with it"
 "executor::tests::receiver_reconstructs_binary_snapshot_runs_once_and_refuses_cross_project" = "the executor receiver: a binary patch rebuilt, run once per id, other projects refused"
 "machine_transport_runs_snapshot_and_records_executor_without_local_lane" = "the CLI machine transport end to end: nitely run through a relay to nitely executor receive"
+# The long tail (NIT-537).
+"release_verification::tests::stamped_candidate_full_gate_and_whole_release_review_ignore_pr_switch" = "a stamped release candidate's Full gate and whole-release review, against the last v* tag"
+"release_verification::tests::stable_baseline_keeps_earlier_beta_changes_in_the_release_review" = "git's describe picks the stable baseline with exclude_tags (prepare only)"
+"submodules::tests::a_lane_has_the_submodule_at_its_snapshot_and_keeps_its_build_output" = "a lane's submodule follows the snapshot's pointer and keeps its build folders"
+"submodules::tests::a_submodule_change_keeps_its_patch_when_the_lines_around_it_change" = "git's -U0 --submodule=diff patch id for a submodule change"
+"playbook::tests::starts_a_worktree_and_runs_the_gate" = "start_task's worktree and setup, and run_gate with its setup refresh"
+"git::tests::worktree_state_from_the_branch_line_matches_asking_git" = "the two ways of reading a worktree's state agree"
+"private_terms::tests::finds_added_lines_paths_and_messages" = "what counts as added: lines, paths and commit messages"
+"overlap::tests::next_task_reads_held_files_from_branches_and_says_why" = "the only test of the held-files reads"

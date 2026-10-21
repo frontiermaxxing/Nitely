@@ -159,6 +159,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_copys_paths_are_rewritten_in_every_spelling_git_writes() {
+        let (template, base) = (Path::new(r"C:\t\tpl"), Path::new(r"C:\b\copy"));
+        let text = r#"gitdir: C:/t/tpl/.git
+url = C:\\t\\tpl\\remote
+path C:\t\tpl\x"#;
+        assert_eq!(re_root(text, template, base), r#"gitdir: C:/b/copy/.git
+url = C:\\b\\copy\\remote
+path C:\b\copy\x"#);
+    }
+
+    #[test]
     fn a_copy_is_its_own_repo_with_its_own_remote() {
         let build = |dir: &Path| {
             init(&dir.join("repo"), &[("a.txt", "one\n")]);

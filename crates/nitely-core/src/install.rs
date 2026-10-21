@@ -192,6 +192,12 @@ pub fn stale_build(root: &Path, base: &str, built_at: &str) -> Option<String> {
     let mut args = vec!["rev-list", "--count", range.as_str(), "--"];
     args.extend(NITELY_CODE);
     let newer: usize = crate::playbook::git(root, &args).ok()?.trim().parse().ok()?;
+    stale_message(built_at, base, newer, root)
+}
+
+/// What `stale_build` says for a build `newer` commits to Nitely's code behind `base` (NIT-537);
+/// None when it is not behind.
+fn stale_message(built_at: &str, base: &str, newer: usize, root: &Path) -> Option<String> {
     (newer > 0).then(|| {
         format!(
             "this nitely was built from {} and {base} has {newer} newer commit{} to Nitely's code, so it could submit or land with \
@@ -355,6 +361,15 @@ pub fn without_error_boxes<T>(f: impl FnOnce() -> T) -> T {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_build_behind_by_commits_to_nitelys_code_says_how_to_install_the_landed_one() {
+        let root = Path::new("C:/Code/nitely");
+        assert_eq!(stale_message("0698f0a4c7d8", "main", 0, root), None);
+        let one = stale_message("0698f0a4c7d8", "main", 1, root).unwrap();
+        assert!(one.starts_with("this nitely was built from 0698f0a and main has 1 newer commit to Nitely's code"), "{one}");
+        assert!(stale_message("abc", "main", 2, root).unwrap().contains("built from abc and main has 2 newer commits"));
+    }
 
     /// A text file named .exe is never started as a program: on Windows that pops a modal "Unsupported
     /// 16-Bit Application" box on the desktop (NIT-459).
