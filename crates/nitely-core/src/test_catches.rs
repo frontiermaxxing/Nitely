@@ -9,7 +9,7 @@
 use crate::db::{now, Db};
 use crate::playbook::CommandResult;
 use anyhow::Result;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::params;
 use serde::Serialize;
 use std::path::Path;
 
@@ -89,6 +89,36 @@ pub fn failed_of(results: &[CommandResult]) -> Vec<String> {
     out
 }
 
+/// A failed test and the revisions between which it was fixed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FixSpan {
+    pub test: String,
+    pub failed: String,
+    pub fixed: String,
+}
+
+/// Each test of the failures since the last pass (oldest first), with the revision where it last
+/// failed and the next gate's revision, where it no longer did: its fix lies between them, even
+/// when that gate failed on other tests. `passed` is the passing revision that ends the run. A
+/// test that failed and passed on one revision was a flake, not fixed, and has no span.
+pub fn fix_spans(failures: &[(String, Vec<String>)], passed: &str) -> Vec<FixSpan> {
+    let mut spans = Vec::new();
+    for (i, (commit, tests)) in failures.iter().enumerate() {
+        let (next_commit, next_tests) = match failures.get(i + 1) {
+            Some((c, t)) => (c.as_str(), t.as_slice()),
+            None => (passed, &[][..]),
+        };
+        for t in tests {
+            // Still failing at the next gate: its span starts there.
+            if next_tests.contains(t) || next_commit == commit {
+                continue;
+            }
+            spans.push(FixSpan { test: t.clone(), failed: commit.clone(), fixed: next_commit.to_string() });
+        }
+    }
+    spans
+}
+
 /// One module's record: how often its failures caught something and how often they were the
 /// tests' own.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -113,28 +143,28 @@ impl Db {
             }
             return Ok(());
         }
-        let open: Option<(String, String)> = self
-            .conn
-            .query_row(
-                "SELECT commit_sha, tests FROM gate_failure WHERE issue_key = ?1 AND resolved_at IS NULL ORDER BY id DESC LIMIT 1",
-                [issue],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        let Some((failed, tests)) = open else { return Ok(()) };
+        let failures: Vec<(String, Vec<String>)> = {
+            let mut stmt = self.conn.prepare("SELECT commit_sha, tests FROM gate_failure WHERE issue_key = ?1 AND resolved_at IS NULL ORDER BY id")?;
+            let rows = stmt.query_map([issue], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?.into_iter().map(|(c, t)| (c, serde_json::from_str(&t).unwrap_or_default())).collect()
+        };
+        if failures.is_empty() {
+            return Ok(());
+        }
         // Every failure since the last pass is settled by this one.
         self.conn.execute("UPDATE gate_failure SET resolved_at = ?2 WHERE issue_key = ?1 AND resolved_at IS NULL", params![issue, now()])?;
-        if failed == commit {
-            return Ok(()); // The same revision passed: a flake, which the gate records itself.
-        }
-        let Ok(diff) = crate::playbook::git(worktree, &["diff", "--name-only", "--no-renames", &format!("{failed}..{commit}")]) else { return Ok(()) };
-        let changed: Vec<String> = diff.lines().filter(|l| !l.is_empty()).map(str::to_string).collect();
-        let v = verdict(&changed);
-        let tests: Vec<String> = serde_json::from_str(&tests).unwrap_or_default();
-        for t in tests {
+        let mut diffs: std::collections::HashMap<(String, String), Option<Verdict>> = std::collections::HashMap::new();
+        for span in fix_spans(&failures, commit) {
+            let key = (span.failed.clone(), span.fixed.clone());
+            let v = *diffs.entry(key).or_insert_with(|| {
+                crate::playbook::git(worktree, &["diff", "--name-only", "--no-renames", &format!("{}..{}", span.failed, span.fixed)])
+                    .ok()
+                    .map(|d| verdict(&d.lines().filter(|l| !l.is_empty()).map(str::to_string).collect::<Vec<_>>()))
+            });
+            let Some(v) = v else { continue }; // A revision git cannot diff records nothing.
             self.conn.execute(
                 "INSERT INTO test_catch (issue_key, test, module, verdict, failed_commit, fixed_commit, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![issue, t, module_of(&t), v.as_str(), failed, commit, now()],
+                params![issue, span.test, module_of(&span.test), v.as_str(), span.failed, span.fixed, now()],
             )?;
         }
         Ok(())
@@ -164,6 +194,17 @@ mod tests {
         assert_eq!(verdict(&files(&["crates/nitely-core/src/lanes.rs"])), Verdict::Catch, "a Rust inline test module lives in product code");
         assert_eq!(verdict(&[]), Verdict::FalseAlarm, "nothing changed: the test passed on its own");
         assert!(!is_test_path("src/latest.rs") && !is_test_path("src/contest/ranking.ts"), "a word containing test is not a test");
+    }
+
+    /// A fails, its fix exposes B, B is fixed: both are recorded, each against its own fix (NIT-557
+    /// review). A test still failing at the next gate is judged by the gate where it stopped.
+    #[test]
+    fn successive_failures_each_keep_their_own_fix() {
+        let f = |c: &str, t: &[&str]| (c.to_string(), t.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        let span = |t: &str, a: &str, b: &str| FixSpan { test: t.into(), failed: a.into(), fixed: b.into() };
+        assert_eq!(fix_spans(&[f("c1", &["A"]), f("c2", &["B"])], "c3"), vec![span("A", "c1", "c2"), span("B", "c2", "c3")]);
+        assert_eq!(fix_spans(&[f("c1", &["A", "B"]), f("c2", &["B"])], "c3"), vec![span("A", "c1", "c2"), span("B", "c2", "c3")]);
+        assert_eq!(fix_spans(&[f("c1", &["A"])], "c1"), vec![], "the same revision passing is a flake");
     }
 
     #[test]
