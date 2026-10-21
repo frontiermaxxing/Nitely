@@ -84,21 +84,33 @@ pub fn start(root: &Path, pb: &Playbook, worktree: &Path, branch: &str, text: &s
         }
         let exists = git(&repo, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_ok();
         let from = start_point(pb, s, worktree, &repo, branch, exists)?;
-        let prefix = format!("{}/", s.path());
         // The paths the issue names in it that exist there: a file at its root counts too (it needs
         // no directory of its own, cone mode always has those).
-        let named: Vec<String> = crate::overlap::paths_in(text)
-            .iter()
-            .filter_map(|p| p.trim_start_matches("./").strip_prefix(&prefix).map(|p| p.trim_matches('/').to_string()))
-            .filter(|p| !p.is_empty() && git(&repo, &["cat-file", "-e", &format!("{from}:{p}")]).is_ok())
-            .collect();
+        let named: Vec<String> = named_in(text, s.path()).into_iter().filter(|p| git(&repo, &["cat-file", "-e", &format!("{from}:{p}")]).is_ok()).collect();
         let dirs: Vec<String> = named.iter().filter_map(|p| crate::light::dir_of(&repo, &from, p)).collect();
-        let needed = s.checkout == Checkout::EveryTask || exists || !named.is_empty() || moves(pb, worktree, s.path())?;
+        let needed = needs_submodule(s.checkout == Checkout::EveryTask, exists, !named.is_empty(), &mut || moves(pb, worktree, s.path()))?;
         if needed {
             done.push(make(pb, s, worktree, &repo, branch, exists, &from, Some(&dirs))?);
         }
     }
     Ok(done)
+}
+
+/// The paths under the submodule at `path` that an issue's text names, relative to it (NIT-537).
+pub(crate) fn named_in(text: &str, path: &str) -> Vec<String> {
+    let prefix = format!("{path}/");
+    crate::overlap::paths_in(text)
+        .iter()
+        .filter_map(|p| p.trim_start_matches("./").strip_prefix(&prefix).map(|p| p.trim_matches('/').to_string()))
+        .filter(|p| !p.is_empty())
+        .collect()
+}
+
+/// Whether a task gets a submodule (NIT-537): every task does when the playbook says so; else one
+/// whose branch already exists there, whose issue names something in it, or whose branch already
+/// moves its pointer (`moves`, asked only when nothing else decided).
+pub(crate) fn needs_submodule(every_task: bool, branch_exists: bool, named: bool, moves: &mut dyn FnMut() -> Result<bool>) -> Result<bool> {
+    Ok(every_task || branch_exists || named || moves()?)
 }
 
 /// Where a task's submodule branch starts: the branch itself when it exists, else the commit the
@@ -118,6 +130,32 @@ fn start_point(pb: &Playbook, s: &SubmoduleRules, worktree: &Path, repo: &Path, 
 fn moves(pb: &Playbook, worktree: &Path, path: &str) -> Result<bool> {
     let Ok(fork) = git(worktree, &["merge-base", pb.integration_branch(), "HEAD"]) else { return Ok(false) };
     Ok(pointer(worktree, "HEAD", path)? != pointer(worktree, fork.trim(), path)?)
+}
+
+/// What `keep` keeps in the submodule at `path` (NIT-537): name entries (`node_modules`) at any
+/// depth, and path entries that lie under it, relative to it.
+pub(crate) fn kept_in<'a>(keep: &'a [String], path: &str) -> (Vec<&'a str>, Vec<String>) {
+    let prefix = format!("{path}/");
+    let names: Vec<&str> = keep.iter().filter_map(|k| crate::lanes::keep_anywhere(k)).collect();
+    let kept: Vec<String> = keep
+        .iter()
+        .filter(|k| crate::lanes::keep_anywhere(k).is_none())
+        .filter_map(|k| k.trim_matches('/').strip_prefix(&prefix).map(str::to_string))
+        .collect();
+    (names, kept)
+}
+
+/// A sparse lane's cone in a submodule (NIT-537): its `sparse` directories, the folders of the
+/// files its snapshot changes since the base (`changed`, git's NUL-separated names), the kept
+/// paths under it and the kept folders there now. Whole (empty) when it is not sparse.
+pub(crate) fn lane_cone(s: &SubmoduleRules, changed: &str, kept: &[String], kept_now: &[String]) -> Vec<String> {
+    if s.sparse.is_empty() {
+        return vec![];
+    }
+    let mut more: Vec<String> = changed.split('\0').filter_map(|f| f.rsplit_once('/').map(|(d, _)| d.to_string())).collect();
+    more.extend(kept.iter().cloned());
+    more.extend(kept_now.iter().cloned());
+    cone(s, &more)
 }
 
 /// The submodule's cone: its `sparse` directories and `more`, or empty (whole) when it has none.
@@ -618,36 +656,25 @@ pub fn sync_lane(root: &Path, pb: &Playbook, lane: &Path, commit: &str, keep: &[
         }
         // A sparse submodule: its cone, the directories the snapshot changes in it since the base, and
         // the `keep` folders under it (narrowing the cone would delete what they hold).
-        let prefix = format!("{path}/");
-        // A name entry (`node_modules`) holds at any depth, in the submodule too; a path entry only
-        // where it lies under the submodule.
-        let names: Vec<&str> = keep.iter().filter_map(|k| crate::lanes::keep_anywhere(k)).collect();
-        let kept: Vec<String> = keep
-            .iter()
-            .filter(|k| crate::lanes::keep_anywhere(k).is_none())
-            .filter_map(|k| k.trim_matches('/').strip_prefix(&prefix).map(str::to_string))
-            .collect();
+        let (names, kept) = kept_in(keep, path);
         let dirs = if s.sparse.is_empty() {
             vec![]
         } else {
             // NUL-separated: `--name-only` quotes unusual names otherwise.
-            let mut more: Vec<String> = match pointer(lane, pb.integration_branch(), path)? {
-                Some(base) if base != at_commit => git(&repo, &["diff", "-z", "--name-only", "--no-renames", &base, &at_commit])
-                    .unwrap_or_default()
-                    .split('\0')
-                    .filter_map(|f| f.rsplit_once('/').map(|(d, _)| d.to_string()))
-                    .collect(),
-                _ => vec![],
+            let changed = match pointer(lane, pb.integration_branch(), path)? {
+                Some(base) if base != at_commit => git(&repo, &["diff", "-z", "--name-only", "--no-renames", &base, &at_commit]).unwrap_or_default(),
+                _ => String::new(),
             };
-            more.extend(kept.iter().cloned());
             // And the folders a name entry keeps there now (`extra/node_modules`): narrowing the
             // cone would delete them before the clean could keep them.
             let checkout = lane.join(path);
-            if checked_out(&checkout) {
+            let kept_now = if checked_out(&checkout) {
                 let named: Vec<String> = names.iter().map(|n| n.to_string()).collect();
-                more.extend(crate::lanes::kept_dirs(&checkout, &named));
-            }
-            cone(s, &more)
+                crate::lanes::kept_dirs(&checkout, &named)
+            } else {
+                vec![]
+            };
+            lane_cone(s, &changed, &kept, &kept_now)
         };
         let at = lane.join(path);
         if !checked_out(&at) {
@@ -695,6 +722,27 @@ pub fn sync_lane(root: &Path, pb: &Playbook, lane: &Path, commit: &str, keep: &[
 mod tests {
     use super::*;
     use crate::test_repo::git as sh;
+
+    /// When a task gets the submodule, and a sparse lane's cone, over plain data (NIT-537): what
+    /// the task and sparse-lane tests below decide, without their repos.
+    #[test]
+    fn a_task_and_a_lane_take_only_what_they_need_of_a_submodule() {
+        assert_eq!(named_in("Fix `engine/core/run.rs` and engine/README.md, not engines/x.rs", "engine"), ["core/run.rs", "README.md"]);
+        let never = &mut || -> Result<bool> { panic!("moves is asked only when nothing else decided") };
+        assert!(needs_submodule(true, false, false, never).unwrap());
+        assert!(needs_submodule(false, true, false, never).unwrap());
+        assert!(needs_submodule(false, false, true, never).unwrap());
+        assert!(needs_submodule(false, false, false, &mut || Ok(true)).unwrap(), "its branch moves the pointer");
+        assert!(!needs_submodule(false, false, false, &mut || Ok(false)).unwrap());
+
+        let keep = vec!["node_modules".to_string(), "engine/out".to_string(), "target".to_string(), "other/out".to_string()];
+        let (names, kept) = kept_in(&keep, "engine");
+        assert_eq!((names, kept), (vec!["node_modules", "target"], vec!["out".to_string()]));
+        let sparse: SubmoduleRules = toml::from_str("path = 'engine'\nsparse = ['core']").unwrap();
+        assert_eq!(lane_cone(&sparse, "net/http.rs\0core/a.rs\0top.txt\0", &["out".into()], &["extra/node_modules".into()]), ["core", "extra/node_modules", "net", "out"]);
+        let whole: SubmoduleRules = toml::from_str("path = 'engine'").unwrap();
+        assert!(lane_cone(&whole, "net/http.rs\0", &["out".into()], &[]).is_empty(), "a submodule that is not sparse is whole");
+    }
 
     /// A repo whose `engine` submodule has three directories and a file at its root, with `playbook`.
     fn big_engine(base: &Path, playbook: &str) -> PathBuf {
