@@ -4555,6 +4555,12 @@ let id = db.conn.last_insert_rowid();
             db.conn.execute("UPDATE lane_run SET state = 'running' WHERE id = ?1", [id]).unwrap();
             running.push(id);
         }
+        // The waiting build has a history (6 GB peaks, so it sets aside 7.5 GB): what one run gives
+        // back covers it, where its whole 10.2 GB cap would not.
+        for _ in 0..3 {
+            let done = add("done", "cargo build -p other");
+            db.conn.execute("UPDATE lane_run SET peak_memory = ?1, pid = NULL WHERE id = ?2", params![6 * gib, done]).unwrap();
+        }
         let waiting = add("queued", "cargo build -p other");
         assert!(caps_fit(&db, waiting, Some(&l), 5).unwrap().is_some(), "five whole caps fill the room");
 

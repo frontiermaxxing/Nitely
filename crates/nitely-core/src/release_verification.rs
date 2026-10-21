@@ -67,7 +67,8 @@ fn prepare(db: &Db, req: &Request<'_>) -> Result<Candidate> {
         "rev-parse", "--is-shallow-repository", "--end-of-options",
         &format!("{}^{{commit}}", req.source), "HEAD^{commit}", &format!("{}^{{commit}}", req.integration_ref), "HEAD^{tree}",
     ])?;
-    let [shallow, source, candidate, policy, tree]: [String; 5] = names.lines().map(|l| l.trim().to_string()).collect::<Vec<_>>().try_into()
+    // Some gits (Linux CI's) print --end-of-options back as a line of output without --verify.
+    let [shallow, source, candidate, policy, tree]: [String; 5] = names.lines().map(|l| l.trim().to_string()).filter(|l| l != "--end-of-options").collect::<Vec<_>>().try_into()
         .map_err(|_| anyhow::anyhow!("git rev-parse gave {names:?}"))?;
     git(req.worktree, &["merge-base", "--is-ancestor", &source, &policy]).context("release source must already belong to the trusted integration history")?;
     let text = git(req.worktree, &["show", &format!("{policy}:{}", playbook::PLAYBOOK_PATH)])?;
