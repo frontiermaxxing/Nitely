@@ -2,6 +2,9 @@
 .review-mode-settings { display: grid; min-width: 0; }
 .review-mode-loading { margin: 16px 0 0; }
 .review-mode-count { width: 120px; }
+.review-mode-migrated { margin:12px 0 0; padding:12px 14px; border-radius:var(--radius); background:var(--attention-wash); color:var(--fg); font-size:13px; }
+.review-mode-migrated p { margin:0; }
+.review-mode-migrated ul { margin:8px 0; padding-left:18px; display:grid; gap:4px; }
 .review-mode-save { display: flex; align-items: center; gap: 12px; margin: 20px 0 12px; }
 .review-mode-settings .settings-hint { color:var(--fg-2); }
 .periodic-review-history { border-top:1px solid var(--line); padding-top:16px; }

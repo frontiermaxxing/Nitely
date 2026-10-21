@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke, isLive } from "./backend";
-import { MODE_DESCRIPTION, MODE_LABEL, editMode, modeSave, modeValidation, optionsFor, type EffectiveRepository, type ModeDraft, type ModeOptions, type PeriodicStatus, type ProjectReviewMode, type ReviewMode } from "./reviewModes";
+import { MODE_DESCRIPTION, MODE_LABEL, RETIRED_LABEL, editMode, modeSave, modeValidation, optionsFor, type EffectiveRepository, type ModeDraft, type ModeOptions, type PeriodicStatus, type ProjectReviewMode, type ReviewMode } from "./reviewModes";
 import { Button, RadioCards, Segmented, Select, SettingsRow, SettingsSection, TextField, type ChoiceOption, type SelectOption } from "./ui";
 import "./review-modes.css";
 
@@ -89,9 +89,11 @@ export function ProjectReviewModeSettings({ control, version }: { control: Revie
   };
   const options = draft?.overrides;
   const validation = options ? modeValidation(options) : null;
-  const changed = saved && draft && (saved.mode !== draft.mode || (draft.mode === "custom" && JSON.stringify(saved.overrides) !== JSON.stringify(draft.overrides)));
+  // Saving the mode the migration chose acknowledges its notice.
+  const changed = saved && draft && (saved.mode !== draft.mode || saved.migrated_from !== null || (draft.mode === "custom" && JSON.stringify(saved.overrides) !== JSON.stringify(draft.overrides)));
   const periodic = options?.periodic ?? { enabled: true, every_landings: 5, max_delay_seconds: 1800, reviewer: "configured", findings_strategy: "reopen_or_create" };
   const backstop = options?.full_backstop ?? { enabled: true, landings: 5, delay_seconds: 1800 };
+  const checkpoint = options?.checkpoint ?? { items: 5, daily: true };
   const off = control.busy || isLive;
   const audits: [string, string][] = [["0", "Off"], ["10", "10%"], ["25", "25%"], ["50", "50%"], ["100", "Every eligible change"]];
   if (options && options.audit_percent !== null && !audits.some(([v]) => Number(v) === options.audit_percent)) audits.push([String(options.audit_percent), `${options.audit_percent}%`]);
@@ -101,6 +103,11 @@ export function ProjectReviewModeSettings({ control, version }: { control: Revie
       {saved && draft && <SettingsRow label="Mode" why="The settings below show what it does. Editing one of them makes it Custom.">
         <RadioCards<ReviewMode> aria-label="Review mode" options={(Object.keys(MODE_LABEL) as ReviewMode[]).map((mode) => ({ value: mode, label: MODE_LABEL[mode], why: MODE_DESCRIPTION[mode] }))} value={draft.mode} disabled={off} onChange={pick} />
       </SettingsRow>}
+      {saved && saved.migration_changes.length > 0 && <div className="review-mode-migrated" role="status">
+        <p><strong>{saved.migrated_from === saved.mode ? `${MODE_LABEL[saved.mode]} changed` : `${RETIRED_LABEL[saved.migrated_from ?? ""] ?? "The old mode"} became ${MODE_LABEL[saved.mode]}`}.</strong> Nitely's modes are now Fast, Careful and Release. What changed for this project:</p>
+        <ul>{saved.migration_changes.slice(1).map((c) => <li key={c}>{c}</li>)}</ul>
+        <p className="muted small">Save the review mode to keep it and dismiss this note, or pick another.</p>
+      </div>}
     </SettingsSection>
     {saved && draft && options && <>
       <SettingsSection title="Before merging" description="Repository settings keeps each repository's own rules for that check.">
@@ -116,6 +123,22 @@ export function ProjectReviewModeSettings({ control, version }: { control: Revie
         <SettingsRow label="Shared build lanes">
           <Toggle label="Shared build lanes" value={options.shared_lanes} disabled={off} onChange={(shared_lanes) => edit({ shared_lanes })} />
         </SettingsRow>
+      </SettingsSection>
+      <SettingsSection title="Goals" description="A goal's items land on its goal branch with quick checks. A checkpoint then lands the branch on main with one full run and one review.">
+        <SettingsRow label="Goal branches">
+          <Toggle label="Goal branches" value={options.goal_branches} disabled={off} onChange={(goal_branches) => edit({ goal_branches })} />
+        </SettingsRow>
+        {options.goal_branches !== false && <>
+          <SettingsRow label="Review of each goal item" why="The checkpoint review of the whole slice blocks in every mode.">
+            <Choice label="Review of each goal item" value={options.item_review} choices={[["off", "None"], ["advisory", "Review without blocking"], ["blocking", "Review and block"]]} disabled={off} onChange={(item_review) => edit({ item_review })} />
+          </SettingsRow>
+          <SettingsRow label="Checkpoint after this many items" why="Sooner when the coordinator calls a coherent slice." htmlFor="review-mode-checkpoint">
+            <Count id="review-mode-checkpoint" value={checkpoint.items} max={100} disabled={off} onChange={(items) => edit({ checkpoint: { ...checkpoint, items } })} />
+          </SettingsRow>
+          <SettingsRow label="Checkpoint at least daily">
+            <Segmented aria-label="Checkpoint at least daily" options={[{ value: "on", label: "On" }, { value: "off", label: "Off" }]} value={checkpoint.daily ? "on" : "off"} disabled={off} onChange={(v) => edit({ checkpoint: { ...checkpoint, daily: v === "on" } })} />
+          </SettingsRow>
+        </>}
       </SettingsSection>
       <SettingsSection title="After merging" description="Periodic reviews check what has landed without holding up merges. A failed review keeps its place, so no change is skipped.">
         <SettingsRow label="Periodic review of main">
@@ -138,6 +161,7 @@ export function ProjectReviewModeSettings({ control, version }: { control: Revie
         <SettingsRow label="Full-suite checks on main">
           <Toggle label="Full-suite checks on main" value={options.full_backstop === null ? null : options.full_backstop.enabled} disabled={off} onChange={(v) => edit({ full_backstop: v === null ? null : { ...backstop, enabled: v } })} />
         </SettingsRow>
+        {options.full_backstop?.enabled === false && <p className="error small" role="alert">Main goes unchecked: changes that land with quick checks get no full run afterwards. Every preset keeps this on.</p>}
         {options.full_backstop?.enabled && <>
           <SettingsRow label="Full suite after this many light or unchecked merges" htmlFor="review-mode-landings">
             <Count id="review-mode-landings" value={backstop.landings} max={1000} disabled={off} onChange={(landings) => edit({ full_backstop: { ...backstop, landings } })} />
@@ -173,7 +197,8 @@ function EffectiveModes({ project, revision }: { project: string; revision: numb
     return () => { live = false; };
   }, [project, revision]);
   const tests = { off: "Off", basic: "Basic", risk: "Risk-based", full: "Full" };
-  const review = { off: "Off", individual: "Each change", batched: "Batched" };
+  const review = { off: "Off", individual: "Each change", batched: "Each batch" };
+  const items = { off: "None", advisory: "Without blocking", blocking: "Blocking" };
   return <details className="review-mode-effective"><summary>Saved effective settings by repository</summary>
     {error && <p className="error small">{error}</p>}
     {rows?.length === 0 && <p className="muted small">No connected repositories.</p>}
@@ -183,6 +208,8 @@ function EffectiveModes({ project, revision }: { project: string; revision: numb
         <dt>Merge batches</dt><dd>{r.options.land_batch ? "On" : "Off"}</dd>
         <dt>Shared lanes</dt><dd>{r.options.shared_lanes ? "On" : "Off"}</dd>
         <dt>Periodic review</dt><dd>{r.options.periodic?.enabled ? `Every ${r.options.periodic.every_landings} merges${r.options.periodic.max_delay_seconds ? ` or ${r.options.periodic.max_delay_seconds / 60} minutes` : ""}` : "Off"}</dd>
+        <dt>Goal branches</dt><dd>{r.options.goal_branches ? `On, checkpoint every ${r.options.checkpoint?.items ?? "?"} items${r.options.checkpoint?.daily ? " or daily" : ""}` : "Off"}</dd>
+        <dt>Goal item review</dt><dd>{r.options.goal_branches ? items[r.options.item_review ?? "off"] : "Not used"}</dd>
         <dt>Full-suite checks on main</dt><dd>{r.options.full_backstop?.enabled ? "On" : "Off"}</dd>
         <dt>Audit sampling</dt><dd>{r.options.audit_percent ? `${r.options.audit_percent}% of eligible changes` : "Off"}</dd></dl>
       {r.warnings.map((w, i) => <p key={i} className="settings-hint">{w}</p>)}

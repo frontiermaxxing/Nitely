@@ -1,4 +1,4 @@
-export type ReviewMode = "yolo" | "fast" | "balanced" | "thorough" | "custom";
+export type ReviewMode = "fast" | "careful" | "release" | "custom";
 export interface BackstopOptions { enabled: boolean; landings: number; delay_seconds: number }
 export interface PeriodicOptions {
   enabled: boolean;
@@ -15,7 +15,12 @@ export interface ModeOptions {
   full_backstop: BackstopOptions | null;
   audit_percent: number | null;
   periodic: PeriodicOptions | null;
+  goal_branches: boolean | null;
+  item_review: "off" | "advisory" | "blocking" | null;
+  checkpoint: CheckpointOptions | null;
 }
+/** When a goal branch lands into main: a coherent slice, else after `items` item lands, else daily. */
+export interface CheckpointOptions { items: number; daily: boolean }
 export interface ModePreset { mode: ReviewMode; options: ModeOptions }
 export interface ProjectReviewMode {
   project: string;
@@ -23,17 +28,22 @@ export interface ProjectReviewMode {
   revision: number;
   overrides: ModeOptions;
   presets: ModePreset[];
+  explicit: boolean;
+  /** The retired mode (yolo, fast, balanced, thorough) the migration moved this project from. */
+  migrated_from: string | null;
+  migration_changes: string[];
 }
-export const INHERITED_OPTIONS: ModeOptions = { test_depth: null, pre_review: null, land_batch: null, shared_lanes: null, full_backstop: null, audit_percent: null, periodic: null };
+export const INHERITED_OPTIONS: ModeOptions = { test_depth: null, pre_review: null, land_batch: null, shared_lanes: null, full_backstop: null, audit_percent: null, periodic: null, goal_branches: null, item_review: null, checkpoint: null };
 export interface ModeDraft { mode: ReviewMode; overrides: ModeOptions }
-export const MODE_LABEL: Record<ReviewMode, string> = { yolo: "YOLO", fast: "Fast", balanced: "Balanced", thorough: "Thorough", custom: "Custom" };
+export const MODE_LABEL: Record<ReviewMode, string> = { fast: "Fast", careful: "Careful", release: "Release", custom: "Custom" };
 export const MODE_DESCRIPTION: Record<ReviewMode, string> = {
-  yolo: "No automatic tests or reviews.",
-  fast: "Basic checks. Review main periodically.",
-  balanced: "Risk-based checks and batched reviews.",
-  thorough: "Full checks and review before each merge.",
-  custom: "Choose every setting individually.",
+  fast: "Quick checks before landing. Goals land through a goal branch, with one full run and one review per checkpoint.",
+  careful: "Quick checks, and every change is reviewed. Goal items are reviewed without blocking.",
+  release: "The full suite and a blocking review for every change, landing alone on main.",
+  custom: "Choose every setting. Only Custom can turn a safety net off.",
 };
+/** What the retired modes were called, for the migration notice. */
+export const RETIRED_LABEL: Record<string, string> = { yolo: "YOLO", fast: "Fast", balanced: "Balanced", thorough: "Thorough" };
 export function optionsFor(mode: ReviewMode, presets: ModePreset[], custom: ModeOptions): ModeOptions {
   if (mode === "custom") return structuredClone(custom);
   const preset = presets.find((p) => p.mode === mode);
@@ -55,6 +65,9 @@ export function modeValidation(options: ModeOptions): string | null {
   const b = options.full_backstop;
   if (b && (!positive(b.landings) || b.landings > 1000 || !positive(b.delay_seconds) || b.delay_seconds > 86400))
     return "Full-suite checks need 1–1,000 merges and a time interval greater than zero, up to 1,440 minutes.";
+  const c = options.checkpoint;
+  if (c && (!positive(c.items) || c.items > 100))
+    return "A checkpoint needs between 1 and 100 items.";
   if (options.audit_percent !== null && (!Number.isSafeInteger(options.audit_percent) || (options.audit_percent !== 0 && (options.audit_percent < 10 || options.audit_percent > 100))))
     return "Audit sampling must be off (0%) or between 10% and 100%.";
   return null;

@@ -1,32 +1,37 @@
 import type { ModeOptions, ModePreset, PeriodicStatus, ProjectReviewMode, ReviewMode } from "../reviewModes";
 import { INHERITED_OPTIONS, optionsFor } from "../reviewModes";
 
-const inherited: ModeOptions = { test_depth: null, pre_review: null, land_batch: null, shared_lanes: null, full_backstop: null, audit_percent: null, periodic: null };
-const periodic = { enabled: true, every_landings: 5, max_delay_seconds: 1800, reviewer: "configured", findings_strategy: "reopen_or_create" };
+// Mirrors project_modes::preset in nitely-core.
+const periodic = { enabled: false, every_landings: 5, max_delay_seconds: 1800, reviewer: "configured", findings_strategy: "reopen_or_create" };
 const backstop = { enabled: true, landings: 5, delay_seconds: 1800 };
 const presets: ModePreset[] = [
-  { mode: "yolo", options: { test_depth: "off", pre_review: "off", land_batch: true, shared_lanes: true, full_backstop: { ...backstop, enabled: false }, audit_percent: 0, periodic: { ...periodic, enabled: false } } },
-  { mode: "fast", options: { test_depth: "basic", pre_review: "off", land_batch: false, shared_lanes: true, full_backstop: { ...backstop, enabled: false }, audit_percent: 0, periodic } },
-  { mode: "balanced", options: { test_depth: "risk", pre_review: "batched", land_batch: true, shared_lanes: true, full_backstop: backstop, audit_percent: 10, periodic } },
-  { mode: "thorough", options: { test_depth: "full", pre_review: "individual", land_batch: false, shared_lanes: true, full_backstop: { ...backstop, enabled: false }, audit_percent: 0, periodic: { ...periodic, enabled: false } } },
+  { mode: "fast", options: { test_depth: "risk", pre_review: "batched", land_batch: true, shared_lanes: true, full_backstop: backstop, audit_percent: 10, periodic, goal_branches: true, item_review: "off", checkpoint: { items: 10, daily: true } } },
+  { mode: "careful", options: { test_depth: "risk", pre_review: "individual", land_batch: true, shared_lanes: true, full_backstop: backstop, audit_percent: 10, periodic, goal_branches: true, item_review: "advisory", checkpoint: { items: 5, daily: true } } },
+  { mode: "release", options: { test_depth: "full", pre_review: "individual", land_batch: false, shared_lanes: true, full_backstop: { ...backstop, landings: 1 }, audit_percent: 0, periodic, goal_branches: false, item_review: "blocking", checkpoint: null } },
 ];
+// The sample project shows the notice a project moved from a retired mode sees until it saves.
+const migrated: Record<string, string[]> = {
+  NIT: ["Balanced is now Careful.", "Changes with no goal are reviewed one by one instead of in batches.", "Goals land through a goal branch: each item is reviewed without blocking, and each checkpoint gets one blocking review.", "Periodic review of main is off: the checkpoint review covers it."],
+};
 const values = new Map<string, ProjectReviewMode>();
 const retried = new Set<string>();
 export function reviewMode(project: string): ProjectReviewMode {
-  return structuredClone(values.get(project) ?? { project, mode: "custom", revision: 0, overrides: inherited, presets });
+  return structuredClone(values.get(project) ?? (migrated[project]
+    ? { project, mode: "careful", revision: 2, overrides: INHERITED_OPTIONS, presets, explicit: true, migrated_from: "balanced", migration_changes: migrated[project] }
+    : { project, mode: "custom", revision: 0, overrides: INHERITED_OPTIONS, presets, explicit: false, migrated_from: null, migration_changes: [] }));
 }
 export function saveReviewMode(project: string, mode: ReviewMode, overrides: ModeOptions, revision: number) {
   const before = reviewMode(project);
   if (revision !== before.revision) throw new Error("Review settings changed; reload them before saving.");
   if (mode !== "custom" && JSON.stringify(overrides) !== JSON.stringify(INHERITED_OPTIONS)) throw new Error("Preset controls are fixed; select Custom to override them.");
-  const saved = { ...before, mode, revision: revision + 1, overrides: structuredClone(overrides) };
+  const saved = { ...before, mode, revision: revision + 1, overrides: structuredClone(overrides), explicit: true, migrated_from: null, migration_changes: [] };
   values.set(project, structuredClone(saved));
   return saved;
 }
 export function effectiveModes(project: string) {
   const mode = reviewMode(project);
   const options = optionsFor(mode.mode, mode.presets, mode.overrides);
-  const fallback = { ...presets.find((p) => p.mode === "thorough")!.options, land_batch: true };
+  const fallback = { ...presets.find((p) => p.mode === "release")!.options, land_batch: true };
   const effective = Object.fromEntries(Object.entries(options).map(([key, value]) => [key, value ?? fallback[key as keyof ModeOptions]])) as unknown as ModeOptions;
   return [{ repo: "Sample project", options: effective, warnings: [] }];
 }
