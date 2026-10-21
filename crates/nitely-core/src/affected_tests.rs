@@ -111,7 +111,48 @@ enum TargetKind {
 struct JsSuite {
     /// A trusted whole-component runner; v1 does not invent a filename-filter interface.
     command: String,
+    #[serde(default)]
     test_files: Vec<String>,
+    /// Globs over the candidate's tracked files (`*` within a segment, `**` for any segments), so
+    /// a new test inside the component belongs to the suite without editing the map (NIT-505).
+    #[serde(default)]
+    test_patterns: Vec<String>,
+}
+
+impl JsSuite {
+    /// The listed test files and every candidate source file a pattern matches.
+    fn tests(&self, files: &Snapshot) -> Vec<String> {
+        let mut tests: BTreeSet<String> = self.test_files.iter().cloned().collect();
+        tests.extend(
+            files
+                .keys()
+                .filter(|p| source_path(p) && self.test_patterns.iter().any(|g| glob(g, p)))
+                .cloned(),
+        );
+        tests.into_iter().collect()
+    }
+}
+
+fn glob(pattern: &str, path: &str) -> bool {
+    fn segments(pattern: &[&str], path: &[&str]) -> bool {
+        match pattern.split_first() {
+            None => path.is_empty(),
+            Some((&"**", rest)) => (0..=path.len()).any(|i| segments(rest, &path[i..])),
+            Some((first, rest)) => path
+                .split_first()
+                .is_some_and(|(p, tail)| segment(first.as_bytes(), p.as_bytes()) && segments(rest, tail)),
+        }
+    }
+    fn segment(pattern: &[u8], name: &[u8]) -> bool {
+        match pattern.split_first() {
+            None => name.is_empty(),
+            Some((b'*', rest)) => (0..=name.len()).any(|i| segment(rest, &name[i..])),
+            Some((c, rest)) => name.split_first().is_some_and(|(n, tail)| n == c && segment(rest, tail)),
+        }
+    }
+    let pattern: Vec<_> = pattern.split('/').collect();
+    let path: Vec<_> = path.split('/').collect();
+    segments(&pattern, &path)
 }
 
 #[derive(Debug, Clone)]
@@ -282,8 +323,21 @@ fn validate(policy: &Policy, before: &Snapshot, after: &Snapshot) -> Result<()> 
                 }
             }
             if let Some(js) = &s.javascript {
-                if js.command.trim().is_empty() || js.test_files.is_empty() {
+                if js.command.trim().is_empty() || js.tests(after).is_empty() {
                     bail!("empty JavaScript suite");
+                }
+                for pattern in &js.test_patterns {
+                    // The pattern's literal directories must sit inside the component, and it
+                    // must still match something, like any other approved path.
+                    let literal: Vec<_> = pattern.split('/').take_while(|p| !p.contains('*')).collect();
+                    let prefix = format!("{}/", literal.join("/"));
+                    if !valid_path(pattern)
+                        || literal.is_empty()
+                        || !c.roots.iter().any(|r| under(&prefix, r))
+                        || !after.keys().any(|p| glob(pattern, p))
+                    {
+                        bail!("invalid, stale or out-of-component JavaScript test pattern: {pattern}");
+                    }
                 }
                 for test in &js.test_files {
                     if !valid_path(test)
@@ -328,17 +382,18 @@ fn validate(policy: &Policy, before: &Snapshot, after: &Snapshot) -> Result<()> 
             bail!("unknown component dependency");
         }
         if c.suites.iter().any(|s| s.javascript.is_some()) {
+            let inventory: BTreeSet<String> = c
+                .suites
+                .iter()
+                .filter_map(|s| s.javascript.as_ref())
+                .flat_map(|s| s.tests(after))
+                .collect();
             for path in after.keys().filter(|p| {
                 c.roots.iter().any(|r| under(p, r))
                     && source_path(p)
                     && (p.contains(".test.") || p.contains(".spec."))
             }) {
-                if !c
-                    .suites
-                    .iter()
-                    .filter_map(|s| s.javascript.as_ref())
-                    .any(|s| s.test_files.contains(path))
-                {
+                if !inventory.contains(path) {
                     bail!("JavaScript test missing from inventory: {path}");
                 }
             }
@@ -516,10 +571,9 @@ fn select_inner(repo: &Path, result: &mut Selection, policy_commit:&str) -> Resu
                 let approved =
                     explicit_js && reached.iter().any(|p| s.inputs.iter().any(|i| under(p, i)));
                 let tests: Vec<_> = js
-                    .test_files
-                    .iter()
-                    .filter(|p| dependency || approved || reached.contains(*p))
-                    .cloned()
+                    .tests(&after)
+                    .into_iter()
+                    .filter(|p| dependency || approved || reached.contains(p))
                     .collect();
                 if !tests.is_empty() {
                     result.checks.push(Check {
@@ -548,7 +602,7 @@ fn select_inner(repo: &Path, result: &mut Selection, policy_commit:&str) -> Resu
                 || c.suites
                     .iter()
                     .filter_map(|s| s.javascript.as_ref())
-                    .any(|s| s.test_files.iter().any(|t| reaches(&graph, t, path)));
+                    .any(|s| s.tests(&after).iter().any(|t| reaches(&graph, t, path)));
             if !mapped {
                 bail!("changed input has no test consumer: {path}");
             }
@@ -1011,6 +1065,10 @@ mod tests {
             let commands: Vec<&str> = s.checks.iter().map(|c| c.command.as_str()).collect();
             assert_eq!(commands, ["npm run build", "npm test"], "{path}");
         }
+        // A new test file inside the frontend joins its suite by pattern, with nothing to list.
+        let s = select(&candidate(&[("src/rules/new.test.ts", "export {};\n")]));
+        assert!(!s.full, "{:?}", s.reasons);
+        assert!(s.checks.iter().any(|c| c.required_tests.iter().any(|t| t == "src/rules/new.test.ts")), "{:?}", s.checks);
         // A change only to the CLI, or only to the app: that crate's clippy and tests, not
         // nitely-core's (NIT-484).
         for (path, component, clippy) in [("crates/nitely-cli/src/ui.rs", "cli", "cargo clippy -p nitely-cli -- -D warnings"), ("src-tauri/src/notify.rs", "app", "cargo clippy -p nitely-app -- -D warnings")] {
@@ -1027,14 +1085,16 @@ mod tests {
             assert!(s.full, "{path}: {:?}", s.reasons);
         }
         // Anything the map does not own keeps the full gate: Rust, the map itself, a manifest, a
-        // frontend change that also touches Rust, and a new test file the map does not list.
+        // frontend change that also touches Rust, a test file outside every mapped root, and one
+        // inside the frontend that no pattern matches.
         let rust = "crates/nitely-core/src/lanes.rs";
         for changes in [
             vec![(rust, edited(rust))],
             vec![(POLICY_PATH, edited(POLICY_PATH))],
             vec![("package.json", edited("package.json"))],
             vec![("src/Rules.tsx", edited("src/Rules.tsx")), (rust, edited(rust))],
-            vec![("src/new.test.ts", "export {};\n".to_string())],
+            vec![("docs/new.test.ts", "export {};\n".to_string())],
+            vec![("src/new.spec.ts", "export {};\n".to_string())],
         ] {
             let pairs: Vec<(&str, &str)> = changes.iter().map(|(p, c)| (*p, c.as_str())).collect();
             let s = select(&candidate(&pairs));

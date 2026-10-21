@@ -84,8 +84,14 @@ It follows static imports, re-exports and literal `require()` / `import()` calls
 from changed files. Both graphs are retained, so deleted files and removed imports keep
 their old consumers. Changed tests select themselves; changed helpers select their reverse
 consumers. Test files must exist in the candidate. Conventional `.test.` and `.spec.` files
-inside a component must appear in its inventory. Other naming conventions require an
-explicit inventory too; this is not automatic test-runner discovery.
+inside a component must appear in its inventory. Instead of listing each file, a suite can
+give `test_patterns` (`*` within one path segment, `**` for any number of segments), such as
+`["src/**/*.test.ts", "scripts/*.test.mjs"]`: every tracked source file in the candidate that
+a pattern matches belongs to the suite, so a new test file joins it without editing the map.
+A pattern's literal directories must lie inside the component's roots and it must match at
+least one file. A test file no pattern or list covers, or one outside every mapped root,
+still requires Full. Other naming conventions need a list or pattern too; this is not
+test-runner discovery.
 
 Relative imports resolve only an unambiguous committed path, standard source extension,
 index module or TypeScript source behind a `.js` import. Runtime loaders, aliases without
