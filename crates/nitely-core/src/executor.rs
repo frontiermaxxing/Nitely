@@ -892,6 +892,337 @@ fn checks_result(
     }
 }
 
+// Full suites in GitHub Actions (NIT-493). A suite request pushes the exact commit to a ref of its
+// own, `refs/nitely/ci/<request>`, dispatches the playbook's workflow (`[lanes] ci_workflow`, run
+// from `ci_ref`) with that ref, commit, tree and the commands, and waits for the run: one job per
+// command, each failing unless its checkout is exactly that commit and tree. The result is a
+// `lane_run` row (executor `ci`) at that tree, with the run's address, how long it queued and how
+// long it ran. Anything that keeps the run from starting (no permission, no GitHub origin, no `gh`
+// signed in, a push or dispatch refused) is `Dispatch::Unavailable`, and the caller runs the
+// commands locally instead. Callers: the lane gate (`lanes::gate`, for its `ci_commands`), and
+// checkpoint lands and the backstop through `suite`.
+
+/// What to run in CI: the exact snapshot and the commands, as the playbook writes them.
+pub struct SuiteRequest<'a> {
+    pub project: &'a str,
+    pub issue: Option<&'a str>,
+    pub kind: Kind,
+    pub snapshot: &'a Snapshot,
+    pub commands: &'a [String],
+    /// The branch whose workflow file runs; `[lanes] ci_ref`, else the integration branch. A goal
+    /// branch's checkpoint passes its own, so a workflow change on the goal runs for it.
+    pub workflow_ref: Option<&'a str>,
+}
+
+/// A CI run's result, bound to one tree.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SuiteEvidence {
+    /// The `lane_run` row that records it.
+    pub run: i64,
+    pub request: String,
+    pub commit: String,
+    pub tree: String,
+    /// The workflow run on GitHub, and its page.
+    pub workflow_run: u64,
+    pub url: String,
+    pub passed: bool,
+    /// One per command, in the request's order: the job's time and page, and the end of a failed
+    /// job's log.
+    pub results: Vec<playbook::CommandResult>,
+    /// From the dispatch to the first job starting, and from then to the last job ending.
+    pub queued_seconds: u64,
+    pub run_seconds: u64,
+}
+
+pub enum Dispatch {
+    Started(Pending),
+    /// Why CI cannot take it; the commands run locally instead.
+    Unavailable(String),
+}
+
+pub enum Suite {
+    Ran(SuiteEvidence),
+    Unavailable(String),
+}
+
+/// A dispatched suite, for `wait`.
+pub struct Pending {
+    pub run: i64,
+    pub request: String,
+    slug: String,
+    reference: String,
+    commit: String,
+    tree: String,
+    commands: Vec<String>,
+    workflow_run: u64,
+    dispatched: Instant,
+    timeout: Duration,
+}
+
+/// The gate's commands that go to CI: those `[lanes] ci_commands` names exactly, that are not
+/// skipped, and that name no local path (`{main}`, `{worktree}`, `{base}`).
+pub fn ci_commands(pb: &Playbook, steps: &[(String, Option<String>)]) -> Vec<String> {
+    let Some(rules) = pb.lanes.as_ref() else { return vec![] };
+    steps
+        .iter()
+        .filter(|(c, skip)| {
+            skip.is_none()
+                && rules.ci_commands.iter().any(|x| x == c)
+                && !["{main}", "{worktree}", "{base}"].iter().any(|p| c.contains(p))
+        })
+        .map(|(c, _)| c.clone())
+        .collect()
+}
+
+/// Dispatches the suite and waits for it.
+pub fn suite(db: &Db, root: &Path, pb: &Playbook, req: &SuiteRequest, actor: &Actor) -> Result<Suite> {
+    match dispatch(db, root, pb, req, actor)? {
+        Dispatch::Unavailable(why) => Ok(Suite::Unavailable(why)),
+        Dispatch::Started(pending) => Ok(Suite::Ran(wait(db, pending)?)),
+    }
+}
+
+pub fn dispatch(db: &Db, root: &Path, pb: &Playbook, req: &SuiteRequest, actor: &Actor) -> Result<Dispatch> {
+    dispatch_with(&Settings::load()?, db, root, pb, req, actor)
+}
+
+fn gh(args: &[&str], timeout: Duration) -> Result<String> {
+    let mut cmd = playbook::shell_free_command("gh");
+    cmd.args(args)
+        .env("GH_PROMPT_DISABLED", "1")
+        .env("GH_NO_UPDATE_NOTIFIER", "1")
+        .env("NO_COLOR", "1");
+    Ok(String::from_utf8_lossy(&process(cmd, &[], timeout, MAX_REQUEST)?).into_owned())
+}
+
+fn dispatch_with(settings: &Settings, db: &Db, root: &Path, pb: &Playbook, req: &SuiteRequest, actor: &Actor) -> Result<Dispatch> {
+    let unavailable = |why: String| -> Result<Dispatch> {
+        if let Some(key) = req.issue {
+            db.log_event(actor, Some(key), None, "executor_fallback", &format!("CI cannot run {}: {why}; running it locally", req.commands.join(", ")))?;
+        }
+        Ok(Dispatch::Unavailable(why))
+    };
+    if req.commands.is_empty() || req.commands.len() > 64 {
+        bail!("a CI suite needs 1 to 64 commands");
+    }
+    // A request without an issue (the backstop's) is the repo's project.
+    let project = if req.project.is_empty() {
+        Config::load_read_only().ok().and_then(|c| c.repo_for_main(&root.to_string_lossy()).and_then(|r| r.project.clone())).unwrap_or_default()
+    } else {
+        req.project.to_string()
+    };
+    if !allowed(&settings.ci_projects, &project) {
+        return unavailable(format!("executors.json does not let {} publish source to CI (ci_projects)", if project.is_empty() { "this repo" } else { &project }));
+    }
+    let Some(slug) = crate::git::github_slug(&root.to_string_lossy()) else {
+        return unavailable("the repo's origin is not on GitHub".into());
+    };
+    if let Err(e) = gh(&["auth", "status", "--hostname", "github.com"], Duration::from_secs(30)) {
+        return unavailable(format!("the gh CLI is missing or not signed in to github.com ({e:#})"));
+    }
+    let rules = pb.lanes.clone().unwrap_or_default();
+    let workflow = rules.ci_workflow.clone();
+    let workflow_ref = req.workflow_ref.map(str::to_string).or(rules.ci_ref.clone()).unwrap_or_else(|| pb.integration_branch().to_string());
+    let kind = match req.kind {
+        Kind::Run => "run",
+        Kind::Gate => "gate",
+        Kind::Land => "land",
+    };
+    let command = req.commands.join("\n");
+    db.conn.execute("INSERT INTO lane_run (project,repo,issue_key,requested_by,kind,snapshot,tree,base,command,state,executor,queued_at,pid,pid_started,scheduler)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'running','ci',?10,?11,?12,3)",
+        params![project,root.to_string_lossy(),req.issue,actor.id(),kind,req.snapshot.commit,req.snapshot.tree,req.snapshot.base,command,now(),std::process::id(),crate::procs::me().1])?;
+    let run = db.conn.last_insert_rowid();
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let request = format!("{run}-{:x}", nanos & 0xffff_ffff_ffff);
+    let reference = format!("refs/nitely/ci/{request}");
+    let refuse = |why: String| -> Result<Dispatch> {
+        db.conn.execute("UPDATE lane_run SET state='lane_error',ended_at=?2,error=?3 WHERE id=?1", params![run, now(), why])?;
+        unavailable(why)
+    };
+    if let Err(e) = git(root, &["push", "--quiet", &format!("--force-with-lease={reference}:"), "origin", &format!("{}:{reference}", req.snapshot.commit)], &[], None) {
+        delete_ref(root, &reference, &req.snapshot.commit);
+        return refuse(format!("pushing {reference} failed: {e:#}"));
+    }
+    let commands = serde_json::to_string(req.commands)?;
+    let dispatched = Instant::now();
+    let fields = [
+        format!("nitely_run={request}"),
+        format!("nitely_ref={reference}"),
+        format!("nitely_sha={}", req.snapshot.commit),
+        format!("nitely_tree={}", req.snapshot.tree),
+        format!("nitely_commands={commands}"),
+    ];
+    let mut args = vec!["workflow", "run", workflow.as_str(), "--repo", slug.as_str(), "--ref", workflow_ref.as_str()];
+    for f in &fields {
+        args.push("-f");
+        args.push(f);
+    }
+    let said = match gh(&args, Duration::from_secs(60)) {
+        Ok(said) => said,
+        Err(e) => {
+            delete_ref(root, &reference, &req.snapshot.commit);
+            return refuse(format!("dispatching {workflow} on {workflow_ref} failed: {e:#}"));
+        }
+    };
+    // Newer gh prints the run's address; otherwise the run is found by its name, which carries the
+    // request's id (the workflow's run-name).
+    let mut workflow_run = said.split("/actions/runs/").nth(1).and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next()).and_then(|r| r.parse::<u64>().ok());
+    let title = format!("Nitely suite {request}");
+    while workflow_run.is_none() && dispatched.elapsed() < Duration::from_secs(120) {
+        std::thread::sleep(Duration::from_secs(3));
+        let listed = gh(&["run", "list", "--repo", &slug, "--workflow", &workflow, "--event", "workflow_dispatch", "--limit", "50", "--json", "databaseId,displayTitle"], Duration::from_secs(60)).unwrap_or_default();
+        let runs: serde_json::Value = serde_json::from_str(&listed).unwrap_or_default();
+        workflow_run = runs.as_array().and_then(|a| a.iter().find(|r| r["displayTitle"].as_str() == Some(title.as_str()))).and_then(|r| r["databaseId"].as_u64());
+    }
+    let Some(workflow_run) = workflow_run else {
+        delete_ref(root, &reference, &req.snapshot.commit);
+        return refuse(format!("{workflow} was dispatched on {workflow_ref} but no run named {title:?} appeared within 2 minutes (does the workflow on that branch take nitely_run?)"));
+    };
+    let url = format!("https://github.com/{slug}/actions/runs/{workflow_run}");
+    db.conn.execute("UPDATE lane_run SET output=?2 WHERE id=?1", params![run, format!("CI request {request}: {url}")])?;
+    if let Some(key) = req.issue {
+        db.log_event(actor, Some(key), None, "lane_run", &format!("ci run {run}: {} dispatched to {url}", req.commands.join(", ")))?;
+    }
+    Ok(Dispatch::Started(Pending {
+        run,
+        request,
+        slug,
+        reference,
+        commit: req.snapshot.commit.clone(),
+        tree: req.snapshot.tree.clone(),
+        commands: req.commands.to_vec(),
+        workflow_run,
+        dispatched,
+        timeout: Duration::from_secs((rules.timeout_minutes.clamp(1, 120) + 30) * 60),
+    }))
+}
+
+/// Best effort: removes a request's ref, only while it still points at its commit.
+fn delete_ref(root: &Path, reference: &str, commit: &str) {
+    git(root, &["push", "--quiet", &format!("--force-with-lease={reference}:{commit}"), "origin", &format!(":{reference}")], &[], None).ok();
+}
+
+/// Waits for a dispatched suite, records its result on its `lane_run` row, and removes its ref. A
+/// run that cannot be read (gh failing five times in a row) or runs past the timeout is an error,
+/// and a late run is cancelled; failed tests are a result, not an error.
+pub fn wait(db: &Db, pending: Pending) -> Result<SuiteEvidence> {
+    let root = PathBuf::from(db.lane_run(pending.run)?.context("CI run missing")?.repo);
+    let id = pending.workflow_run.to_string();
+    let outcome = (|| -> Result<SuiteEvidence> {
+        let mut errors = 0;
+        loop {
+            let view = gh(&["run", "view", &id, "--repo", &pending.slug, "--json", "status,conclusion,url,jobs"], Duration::from_secs(60));
+            match view.and_then(|v| Ok(serde_json::from_str::<serde_json::Value>(&v)?)) {
+                Ok(view) => {
+                    errors = 0;
+                    if let Some(done) = suite_result(&view, &pending.commands) {
+                        return Ok(evidence(&pending, &view, done));
+                    }
+                }
+                Err(e) if errors >= 4 => return Err(e.context("gh could not read the CI run five times in a row")),
+                Err(_) => errors += 1,
+            }
+            if pending.dispatched.elapsed() >= pending.timeout {
+                gh(&["run", "cancel", &id, "--repo", &pending.slug], Duration::from_secs(60)).ok();
+                bail!("CI run {id} did not finish within {} minutes; it was cancelled", pending.timeout.as_secs() / 60);
+            }
+            std::thread::sleep(Duration::from_secs(10));
+        }
+    })();
+    delete_ref(&root, &pending.reference, &pending.commit);
+    match outcome {
+        Ok(mut evidence) => {
+            for result in evidence.results.iter_mut().filter(|r| !r.ok) {
+                // The end of the failed job's log, so the gate's output says what failed.
+                let job = result.output.rsplit('/').next().and_then(|j| j.parse::<u64>().ok());
+                if let Some(log) = job.and_then(|j| gh(&["run", "view", "--repo", &pending.slug, "--job", &j.to_string(), "--log-failed"], Duration::from_secs(60)).ok()) {
+                    result.output = format!("{}\n{}", result.output, playbook::tail(&log));
+                }
+            }
+            let summary = evidence.results.iter().map(|r| format!("{} {} ({} s)", if r.ok { "passed" } else { "failed" }, r.command, r.seconds)).collect::<Vec<_>>().join("\n");
+            let output = format!("CI request {}: {} (queued {} s, ran {} s)\n{summary}", pending.request, evidence.url, evidence.queued_seconds, evidence.run_seconds);
+            db.conn.execute(
+                "UPDATE lane_run SET state='done',started_at=?2,ended_at=?3,exit_code=?4,output=?5,timed_out=?6 WHERE id=?1",
+                params![pending.run, now() - evidence.run_seconds as i64, now(), if evidence.passed { 0 } else { 1 }, output, evidence.results.iter().any(|r| r.timed_out)],
+            )?;
+            Ok(evidence)
+        }
+        Err(e) => {
+            db.conn.execute("UPDATE lane_run SET state='lane_error',ended_at=?2,error=?3 WHERE id=?1", params![pending.run, now(), format!("{e:#}")])?;
+            Err(e)
+        }
+    }
+}
+
+/// Stops a dispatched suite whose result no longer matters (the gate failed locally first): cancels
+/// the run, removes its ref, and records the row as abandoned. Best effort.
+pub fn cancel(db: &Db, pending: Pending) {
+    gh(&["run", "cancel", &pending.workflow_run.to_string(), "--repo", &pending.slug], Duration::from_secs(60)).ok();
+    if let Ok(Some(row)) = db.lane_run(pending.run) {
+        delete_ref(Path::new(&row.repo), &pending.reference, &pending.commit);
+    }
+    db.conn.execute("UPDATE lane_run SET state='abandoned',ended_at=?2,error='cancelled: the gate failed locally first' WHERE id=?1", params![pending.run, now()]).ok();
+}
+
+/// One command's job: passed, seconds, its page, timed out or cancelled, started, ended.
+type Job = (bool, u64, String, bool, Option<i64>, Option<i64>);
+
+/// Each command's job, once the run has completed, and whether all passed. A command without a job
+/// of its name never passes.
+fn suite_result(view: &serde_json::Value, commands: &[String]) -> Option<(bool, Vec<Job>)> {
+    if view["status"] != "completed" {
+        return None;
+    }
+    let time = |v: &serde_json::Value| v.as_str().and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()).map(|t| t.timestamp()).filter(|t| *t > 0);
+    let jobs = view["jobs"].as_array().cloned().unwrap_or_default();
+    let mut passed = view["conclusion"] == "success";
+    let results = commands
+        .iter()
+        .map(|command| {
+            let Some(job) = jobs.iter().filter(|j| j["name"].as_str() == Some(command)).max_by_key(|j| j["databaseId"].as_u64().unwrap_or(0)) else {
+                passed = false;
+                return (false, 0, format!("no job ran {command}"), false, None, None);
+            };
+            let ok = job["conclusion"] == "success";
+            passed &= ok;
+            let (start, end) = (time(&job["startedAt"]), time(&job["completedAt"]));
+            let seconds = match (start, end) {
+                (Some(s), Some(e)) if e >= s => (e - s) as u64,
+                _ => 0,
+            };
+            let late = job["conclusion"] == "timed_out" || job["conclusion"] == "cancelled";
+            (ok, seconds, job["url"].as_str().unwrap_or_default().to_string(), late, start, end)
+        })
+        .collect();
+    Some((passed, results))
+}
+
+fn evidence(pending: &Pending, view: &serde_json::Value, (passed, jobs): (bool, Vec<Job>)) -> SuiteEvidence {
+    let first = jobs.iter().filter_map(|j| j.4).min();
+    let last = jobs.iter().filter_map(|j| j.5).max();
+    let run_seconds = match (first, last) {
+        (Some(f), Some(l)) if l >= f => (l - f) as u64,
+        _ => 0,
+    };
+    SuiteEvidence {
+        run: pending.run,
+        request: pending.request.clone(),
+        commit: pending.commit.clone(),
+        tree: pending.tree.clone(),
+        workflow_run: pending.workflow_run,
+        url: view["url"].as_str().map(str::to_string).unwrap_or_else(|| format!("https://github.com/{}/actions/runs/{}", pending.slug, pending.workflow_run)),
+        passed,
+        results: jobs
+            .into_iter()
+            .zip(&pending.commands)
+            .map(|((ok, seconds, url, timed_out, _, _), command)| playbook::CommandResult { command: command.clone(), ok, seconds, output: url, skipped: false, timed_out })
+            .collect(),
+        queued_seconds: pending.dispatched.elapsed().as_secs().saturating_sub(run_seconds),
+        run_seconds,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

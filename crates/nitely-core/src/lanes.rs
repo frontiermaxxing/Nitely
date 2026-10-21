@@ -26,6 +26,16 @@ pub struct LaneRules {
     pub executor: String,
     /// Exact GitHub check names and app identities required for the CI executor.
     pub ci_checks: Vec<crate::executor::RequiredCheck>,
+    /// Gate commands, exactly as the gate writes them, that run in GitHub Actions instead of a
+    /// lane (NIT-493): the full suites. The gate's other commands stay local, at the same time.
+    /// Without executors.json's `ci_projects`, a GitHub origin and a signed-in `gh`, they run
+    /// locally too.
+    pub ci_commands: Vec<String>,
+    /// The workflow those commands dispatch, a file in `.github/workflows` that takes Nitely's
+    /// inputs (this repo's `ci.yml` shows how).
+    pub ci_workflow: String,
+    /// The branch whose copy of that workflow runs; unset, the integration branch.
+    pub ci_ref: Option<String>,
     /// Lanes for this repo on this machine.
     pub count: u32,
     /// Build directories a lane keeps between requests; `target` and `node_modules` unless the
@@ -63,6 +73,9 @@ impl Default for LaneRules {
         LaneRules {
             executor: "local".into(),
             ci_checks: vec![],
+            ci_commands: vec![],
+            ci_workflow: "ci.yml".into(),
+            ci_ref: None,
             count: 1,
             keep: crate::slim::DEFAULT_KEEP.iter().map(|s| s.to_string()).collect(),
             timeout_minutes: 30,
@@ -1055,6 +1068,12 @@ pub(crate) fn gate_fresh_checked(db:&Db,repo_root:&Path,pb:&Playbook,worktree:&P
 
 #[allow(clippy::too_many_arguments)]
 fn gate_inner(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Option<&str>, kind: Kind, steps: &[(String, Option<String>)], actor: &Actor, reuse: bool, yolo_keys: &[&str]) -> Result<GateRun> {
+    gate_on(db, repo_root, pb, worktree, issue, kind, steps, actor, reuse, yolo_keys, true)
+}
+
+/// The gate, with its `ci_commands` in GitHub Actions when `ci` and CI can take them.
+#[allow(clippy::too_many_arguments)]
+fn gate_on(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Option<&str>, kind: Kind, steps: &[(String, Option<String>)], actor: &Actor, reuse: bool, yolo_keys: &[&str], ci: bool) -> Result<GateRun> {
     crate::project_modes::check_playbook_authority(db,yolo_keys,pb)?;
     // What is committed, as land will build it: the branch head, never a commit made for the
     // request, so the gate reports the commit the review sees.
@@ -1096,6 +1115,23 @@ fn gate_inner(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: 
             db.log_event(actor, Some(key), None, "lane_run", &said).ok();
         }
         return Ok(GateRun { yolo_skipped: false, commit: short, results, passed: true, flaked: vec![], run: Some(id), warnings });
+    }
+
+    // The full suites the playbook sends to CI run there while the rest runs here (NIT-493).
+    let to_ci = if ci { crate::executor::ci_commands(pb, steps) } else { vec![] };
+    if !to_ci.is_empty() {
+        let req = crate::executor::SuiteRequest { project: &project, issue, kind, snapshot: &snap, commands: &to_ci, workflow_ref: None };
+        match crate::executor::dispatch(db, repo_root, pb, &req, actor) {
+            Ok(crate::executor::Dispatch::Started(pending)) => {
+                return gate_beside_ci(db, repo_root, pb, worktree, issue, kind, steps, actor, reuse, yolo_keys, pending, &to_ci, short, warnings);
+            }
+            Ok(crate::executor::Dispatch::Unavailable(_)) => {}
+            Err(e) => {
+                if let Some(key) = issue {
+                    db.log_event(actor, Some(key), None, "executor_fallback", &format!("CI could not take {}: {e:#}; running it locally", to_ci.join(", "))).ok();
+                }
+            }
+        }
     }
 
     let mut results: Vec<playbook::CommandResult> = Vec::new();
@@ -1171,6 +1207,67 @@ fn gate_inner(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: 
         results.push(playbook::CommandResult { command: format!("lane {}", run.lane.unwrap_or(0)), ok: false, seconds: 0, output, skipped: false, timed_out });
     }
     Ok(GateRun { yolo_skipped, commit: short, passed: run.passed() && !yolo_skipped, results, flaked, run: Some(run.id), warnings })
+}
+
+/// The gate while CI runs `to_ci`: the other commands in a lane meanwhile, then CI's result in
+/// their places. A local failure ends the gate at once and cancels the CI run. A CI run that
+/// cannot report (gh failing throughout, its timeout) falls back to running those commands in a
+/// lane; failed tests in CI are the gate's result.
+#[allow(clippy::too_many_arguments)]
+fn gate_beside_ci(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Option<&str>, kind: Kind, steps: &[(String, Option<String>)], actor: &Actor, reuse: bool, yolo_keys: &[&str], pending: crate::executor::Pending, to_ci: &[String], short: String, warnings: Vec<String>) -> Result<GateRun> {
+    let ci_run = pending.run;
+    let in_ci = |c: &String, skip: &Option<String>| skip.is_none() && to_ci.contains(c);
+    let local: Vec<(String, Option<String>)> = steps.iter().map(|(c, skip)| (c.clone(), if in_ci(c, skip) { Some(format!("runs in CI (lane run {ci_run})")) } else { skip.clone() })).collect();
+    let here = if local.iter().any(|(_, skip)| skip.is_none()) {
+        match gate_on(db, repo_root, pb, worktree, issue, kind, &local, actor, reuse, yolo_keys, false) {
+            Ok(here) if here.passed && !here.yolo_skipped => Some(here),
+            other => {
+                crate::executor::cancel(db, pending);
+                return other;
+            }
+        }
+    } else {
+        None
+    };
+    let (ci_results, ci_passed, ci_flaked, note) = match crate::executor::wait(db, pending) {
+        Ok(evidence) => (evidence.results, evidence.passed, vec![], format!("{} ran in CI: {} (queued {} s, ran {} s)", to_ci.join(", "), evidence.url, evidence.queued_seconds, evidence.run_seconds)),
+        Err(e) => {
+            if let Some(key) = issue {
+                db.log_event(actor, Some(key), None, "executor_fallback", &format!("CI run {ci_run} did not report: {e:#}; running {} locally", to_ci.join(", "))).ok();
+            }
+            let only: Vec<(String, Option<String>)> = steps.iter().filter(|(c, skip)| in_ci(c, skip)).cloned().collect();
+            let there = gate_on(db, repo_root, pb, worktree, issue, kind, &only, actor, false, yolo_keys, false)?;
+            if there.yolo_skipped {
+                return Ok(GateRun { warnings, ..there });
+            }
+            (there.results, there.passed, there.flaked, format!("CI run {ci_run} did not report ({e:#}); {} ran in a lane instead", to_ci.join(", ")))
+        }
+    };
+    // Each step's result in the gate's order: the local one, or CI's for a command CI ran (in place
+    // of the local gate's placeholder for it).
+    let mut from_ci = ci_results.into_iter();
+    let mut from_here = here.as_ref().map(|h| h.results.clone()).unwrap_or_default().into_iter();
+    let mut results = Vec::new();
+    for (c, skip) in steps {
+        let placeholder = from_here.next();
+        if in_ci(c, skip) {
+            results.extend(from_ci.next());
+        } else if here.is_some() {
+            results.extend(placeholder);
+        } else {
+            results.push(playbook::CommandResult { command: c.clone(), ok: true, seconds: 0, output: format!("skipped: {}", skip.clone().unwrap_or_default()), skipped: true, timed_out: false });
+        }
+    }
+    // A lane problem in a fallback is a result of its own.
+    results.extend(from_ci);
+    let mut warnings = warnings;
+    warnings.push(note);
+    let (local_passed, run, mut flaked) = match here {
+        Some(h) => (h.passed, h.run, h.flaked),
+        None => (true, Some(ci_run), vec![]),
+    };
+    flaked.extend(ci_flaked);
+    Ok(GateRun { yolo_skipped: false, commit: short, results, passed: local_passed && ci_passed, flaked, run, warnings })
 }
 
 /// What `log` gained after byte `from`, its end kept as a command's output is.

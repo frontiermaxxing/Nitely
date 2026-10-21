@@ -3,8 +3,13 @@
 # crates/nitely-core/src/playbook.rs fails when the two differ. The frontend builds first because
 # the Tauri crate embeds dist/ when it compiles.
 
+# A dispatch that names nitely_run is Nitely's CI executor (executor.rs, docs/build-lanes.md): it
+# runs only the suite job below, on Linux, one job per requested command, at the exact commit and
+# tree Nitely pushed to nitely_ref. The gate jobs do not run for it.
+
 # nitely-exact-release-v1: dispatch accepts the final channel on the stamped candidate.
 name: CI
+run-name: ${{ inputs.nitely_run && format('Nitely suite {0}', inputs.nitely_run) || '' }}
 
 on:
   workflow_dispatch:
@@ -12,13 +17,28 @@ on:
       channel:
         description: "Release candidate channel; dev for ordinary manual checks"
         default: dev
+      nitely_run:
+        description: "Nitely's request id; set only by Nitely's CI executor"
+        default: ""
+      nitely_ref:
+        description: "The ref Nitely pushed the tree to (refs/nitely/ci/<run>)"
+        default: ""
+      nitely_sha:
+        description: "The commit that ref must point at"
+        default: ""
+      nitely_tree:
+        description: "The tree that commit must have"
+        default: ""
+      nitely_commands:
+        description: "The commands to run, a JSON array of strings; one job each"
+        default: "[]"
   pull_request:
     branches: [main]
   push:
     branches: [main]
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref }}-${{ inputs.nitely_run || 'gate' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -27,6 +47,7 @@ permissions:
 jobs:
   gate:
     name: Gate (${{ matrix.os }})
+    if: ${{ !inputs.nitely_run }}
     strategy:
       fail-fast: false
       matrix:
@@ -103,3 +124,69 @@ jobs:
           name: mac-bundle
           path: target/release/bundle/dmg/*.dmg
           if-no-files-found: ignore
+
+  # Nitely's full-suite request. The commands come from the person's own playbook through a
+  # dispatch only someone with write access can make; each runs from an environment variable, never
+  # pasted into the script. The job fails unless the checkout is exactly the commit and tree Nitely
+  # asked for, so a pass is evidence for that tree and no other.
+  suite:
+    name: ${{ matrix.command }}
+    if: ${{ inputs.nitely_run }}
+    strategy:
+      fail-fast: false
+      matrix:
+        command: ${{ fromJSON(inputs.nitely_commands) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      NITELY_CHANNEL: dev
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: The exact tree
+        env:
+          NITELY_REF: ${{ inputs.nitely_ref }}
+          NITELY_SHA: ${{ inputs.nitely_sha }}
+          NITELY_TREE: ${{ inputs.nitely_tree }}
+        run: |
+          case "$NITELY_REF" in refs/nitely/ci/*) ;; *) echo "not a Nitely CI ref: $NITELY_REF"; exit 1;; esac
+          git fetch --no-tags --depth=1 origin "+$NITELY_REF:refs/nitely-run"
+          git checkout --force --detach refs/nitely-run
+          test "$(git rev-parse HEAD)" = "$NITELY_SHA" || { echo "ref is not at $NITELY_SHA"; exit 1; }
+          test "$(git rev-parse 'HEAD^{tree}')" = "$NITELY_TREE" || { echo "commit's tree is not $NITELY_TREE"; exit 1; }
+          echo "Running at commit $NITELY_SHA, tree $NITELY_TREE"
+
+      - name: Linux prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev pkg-config
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: nitely-suite
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Git identity
+        run: |
+          git config --global user.name "Nitely CI"
+          git config --global user.email "ci@example.com"
+
+      # The Tauri crate embeds dist/ when it compiles, so every job builds the frontend first.
+      - run: npm ci
+      - run: npm run build
+
+      - name: Run
+        env:
+          NITELY_COMMAND: ${{ matrix.command }}
+        run: bash -c "$NITELY_COMMAND"
