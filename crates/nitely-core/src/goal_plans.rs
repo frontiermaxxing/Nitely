@@ -155,6 +155,10 @@ pub struct GoalPlan {
     pub issues: Vec<PlanItem>,
     #[serde(default)]
     pub existing: Vec<String>,
+    /// What each gathered issue waits for, by its key: refs of this plan or other issue keys, so
+    /// it takes its place in the plan's order (NIT-294).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub existing_blocked_by: std::collections::BTreeMap<String, Vec<String>>,
     /// The "Plan a goal" issue it answers, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub planning_issue: Option<String>,
@@ -271,7 +275,15 @@ fn describe(plan: &GoalPlan, who: &str) -> String {
         out.push_str(&format!("- `{}` {} [{}{p}{size}{level}]{blockers}{touches}\n", i.local_ref, i.title.trim(), i.kind));
     }
     if !plan.existing.is_empty() {
-        out.push_str(&format!("\nExisting issues it would gather: {}\n", plan.existing.join(", ")));
+        let gathered: Vec<String> = plan
+            .existing
+            .iter()
+            .map(|k| match plan.existing_blocked_by.get(k).filter(|b| !b.is_empty()) {
+                Some(b) => format!("{k} (after {})", b.join(", ")),
+                None => k.clone(),
+            })
+            .collect();
+        out.push_str(&format!("\nExisting issues it would gather: {}; a gathered Backlog issue moves to Todo.\n", gathered.join(", ")));
     }
     out.push_str("\nApprove to create the goal and file these (you can edit first in the Inbox); cancel it with a reason to file nothing.");
     out
@@ -286,6 +298,41 @@ fn describe_started(plan: &GoalPlan, who: &str) -> String {
         plan.title.trim(),
         plan.sentence.trim()
     )
+}
+
+/// What is wrong with the order a plan gives the issues it gathers, if anything: a gathered issue
+/// it does not gather, a ref it does not have, or a cycle through the plan's own blockers (a new
+/// issue waiting, directly or not, on the gathered issue that waits on it).
+fn gathered_order_problem(plan: &GoalPlan) -> Option<String> {
+    let item = |r: &str| plan.issues.iter().find(|i| i.local_ref == r);
+    for (key, blockers) in &plan.existing_blocked_by {
+        if !plan.existing.iter().any(|e| e.eq_ignore_ascii_case(key)) {
+            return Some(format!("existing_blocked_by names {key}, which the plan does not gather (existing)"));
+        }
+        for b in blockers {
+            if b.eq_ignore_ascii_case(key) {
+                return Some(format!("{key} cannot wait on itself"));
+            }
+            // Walk the new issue's own blockers: reaching `key` would be a cycle.
+            let mut seen: Vec<String> = Vec::new();
+            let mut stack = vec![b.clone()];
+            while let Some(r) = stack.pop() {
+                if r.eq_ignore_ascii_case(key) {
+                    return Some(format!("{key} waits on {b}, which waits on {key}: a cycle"));
+                }
+                if seen.contains(&r) {
+                    continue;
+                }
+                seen.push(r.clone());
+                if let Some(i) = item(&r) {
+                    stack.extend(i.blocked_by.iter().cloned());
+                } else if let Some(more) = plan.existing_blocked_by.get(&r) {
+                    stack.extend(more.iter().cloned());
+                }
+            }
+        }
+    }
+    None
 }
 
 impl GoalPlan {
@@ -305,6 +352,9 @@ impl GoalPlan {
         }
         let dropped = |r: &str| edit.drop.iter().any(|d| d.trim() == r.trim());
         plan.issues.retain(|i| !dropped(&i.local_ref));
+        for blockers in plan.existing_blocked_by.values_mut() {
+            blockers.retain(|b| !dropped(b));
+        }
         for i in &mut plan.issues {
             i.blocked_by.retain(|b| !dropped(b));
             if let Some(body) = edit.bodies.get(&i.local_ref) { i.body = body.trim().to_string(); }
@@ -390,6 +440,12 @@ impl Db {
             if i.project.as_deref() != Some(p.key.as_str()) {
                 bail!("{} belongs to {}, not {}", i.key, i.project.unwrap_or_default(), p.key);
             }
+        }
+        if let Some(why) = gathered_order_problem(plan) {
+            bail!("{why}");
+        }
+        for b in plan.existing_blocked_by.values().flatten().filter(|b| !plan.issues.iter().any(|i| &i.local_ref == *b)) {
+            self.issue(b)?.with_context(|| format!("existing_blocked_by names {b}: neither a ref of this plan nor an issue"))?;
         }
         let planning = match planning_issue {
             Some(k) => Some(self.issue(k)?.with_context(|| format!("no issue {k}"))?),
@@ -539,6 +595,33 @@ impl Db {
             match self.set_issue_goal(k, Some(goal.id), actor) {
                 Ok(_) => attached.push(k.clone()),
                 Err(e) => not_attached.push(format!("{k}: {e:#}")),
+            }
+        }
+        // Gathered issues take their place in the plan's order, and one in Backlog moves to Todo so
+        // the goal's work reaches it (NIT-294). A ref names the issue filed for it.
+        // On an approval taken up again nothing was filed now: its issues are found by title.
+        let in_goal: Vec<IssueRecord> = if filed.keys.is_empty() { self.list_issues(Some(&v.project), true)?.into_iter().filter(|i| i.goal == Some(goal.id)).collect() } else { vec![] };
+        let filed_key = |r: &str| -> Option<String> {
+            filed.keys.get(r).cloned().or_else(|| {
+                let title = plan.issues.iter().find(|i| i.local_ref == r)?.title.trim().to_string();
+                in_goal.iter().find(|i| i.title.trim() == title).map(|i| i.key.clone())
+            })
+        };
+        let order: Vec<(String, Vec<String>)> = attached
+            .iter()
+            .map(|k| {
+                let refs = plan.existing_blocked_by.get(k).cloned().unwrap_or_default();
+                (k.clone(), refs.iter().filter_map(|r| if plan.issues.iter().any(|i| &i.local_ref == r) { filed_key(r) } else { Some(r.clone()) }).collect())
+            })
+            .collect();
+        for (k, blockers) in &order {
+            if !blockers.is_empty() {
+                if let Err(e) = self.change_blockers(k, blockers, &[], actor) {
+                    not_attached.push(format!("{k}: its place in the order ({}) could not be set: {e:#}", blockers.join(", ")));
+                }
+            }
+            if self.issue(k)?.is_some_and(|i| i.state == "Backlog") {
+                self.move_issue(k, "Todo", None, None, actor)?;
             }
         }
         let new = filed.filed.len().max(already_filed);
@@ -740,8 +823,41 @@ mod tests {
             target_date: Some("2026-12-01".into()),
             issues: vec![item("ci", "Build installers in CI", &[]), item("sign", "Sign the Windows installer", &["ci"]), item("docs", "Install guide in the README", &["ci"])],
             existing: vec![],
+            existing_blocked_by: Default::default(),
             planning_issue: None,
         }
+    }
+
+    /// A gathered issue takes its place in the plan's order: after the refs it names, never in a
+    /// cycle through the plan's own blockers (NIT-294).
+    #[test]
+    fn a_gathered_issue_waits_on_refs_and_never_in_a_cycle() {
+        let mut p = plan();
+        p.existing = vec!["NIT-9".into()];
+        p.existing_blocked_by.insert("NIT-9".into(), vec!["sign".into()]);
+        assert_eq!(gathered_order_problem(&p), None);
+        p.issues[0].blocked_by = vec!["NIT-9".into()];
+        assert!(gathered_order_problem(&p).is_some_and(|e| e.contains("cycle")), "sign waits on ci, which waits on NIT-9");
+        let mut stray = plan();
+        stray.existing_blocked_by.insert("NIT-7".into(), vec!["ci".into()]);
+        assert!(gathered_order_problem(&stray).is_some_and(|e| e.contains("does not gather")));
+    }
+
+    /// Approved, a gathered Backlog issue waits on the issue filed for its ref and moves to Todo,
+    /// so the goal's work reaches it (NIT-294; NIT-155 stayed in Backlog with no blockers).
+    #[test]
+    fn approving_puts_a_gathered_backlog_issue_in_the_plans_order() {
+        let mut db = db();
+        let later = NewIssue { project: "NIT".into(), title: "A beta updates itself".into(), body: "b".into(), kind: "feature".into(), source: "human".into(), evidence: "e".into(), state: Some("Backlog".into()), ..Default::default() };
+        let later = db.create_issue(&later, &Actor::Human).unwrap();
+        let mut p = plan();
+        p.existing = vec![later.key.clone()];
+        p.existing_blocked_by.insert(later.key.clone(), vec!["sign".into()]);
+        let proposed = db.propose_goal("NIT", &p, None, &agent()).unwrap();
+        assert!(proposed.issue.body.contains(&format!("{} (after sign)", later.key)), "{}", proposed.issue.body);
+        let a = db.approve_goal_plan(&proposed.issue.key, &PlanEdit::default(), &Actor::Human).unwrap();
+        let now = db.issue(&later.key).unwrap().unwrap();
+        assert_eq!((now.state.as_str(), now.blocked_by.clone()), ("Todo", vec![a.filed.keys["sign"].clone()]));
     }
 
     /// What starts by itself under each goal_plans setting (NIT-550).

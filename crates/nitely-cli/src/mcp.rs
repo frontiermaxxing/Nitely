@@ -605,6 +605,7 @@ fn tools() -> Value {
                     "review_level": { "type": "string", "enum": ["inert", "contained", "standard", "sensitive"], "description": "How much verification the change needs. Set it on purpose. Path rules can only raise it." }
                 } } },
                 "existing": { "type": "array", "items": { "type": "string" }, "description": "Open issues of the project that belong in the goal." },
+                "existing_blocked_by": { "type": "object", "additionalProperties": { "type": "array", "items": { "type": "string" } }, "description": "What each existing issue waits for, by its key: refs of this plan or other issue keys, so it takes its place in the plan's order. On approval a gathered Backlog issue moves to Todo." },
                 "planning_issue": { "type": "string" },
                 "project": { "type": "string" }
             } }
@@ -1458,6 +1459,7 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
                 target_date: str_arg(args, "target_date").map(str::to_string),
                 issues: serde_json::from_value(args.get("issues").cloned().unwrap_or(json!([]))).context("issues: each needs ref, title, kind, body and evidence")?,
                 existing: keys_arg(args, "existing"),
+                existing_blocked_by: serde_json::from_value(args.get("existing_blocked_by").cloned().unwrap_or(json!({}))).context("existing_blocked_by: an object of issue key to refs or keys")?,
                 planning_issue: None,
             };
             let project = project(&db)?;

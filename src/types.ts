@@ -641,7 +641,7 @@ export interface GoalPlanView {
   id: number;
   issue_key: string;
   project: string;
-  plan: { sentence: string; title: string; outcome: string; target_date: string | null; issues: PlanItem[]; existing: string[] };
+  plan: { sentence: string; title: string; outcome: string; target_date: string | null; issues: PlanItem[]; existing: string[]; existing_blocked_by?: Record<string, string[]> };
   /** `started`: the review mode started it by itself (NIT-550); its issue is the person's notice. */
   status: "pending" | "approved" | "started" | "rejected";
   created_by: string;

@@ -97,7 +97,11 @@ export function GoalPlanDecision(props: {
           </li>
         ))}
       </ul>
-      {p.existing.length > 0 && <p className="decision-why">It also gathers {p.existing.join(", ")}.</p>}
+      {p.existing.length > 0 && (
+        <p className="decision-why">
+          It also gathers {p.existing.map((k) => (p.existing_blocked_by?.[k]?.length ? `${k} (after ${p.existing_blocked_by[k].join(", ")})` : k)).join(", ")}; one in Backlog moves to Todo.
+        </p>
+      )}
       {props.plan.outcome && !pending && <p className="decision-why">{props.plan.outcome}</p>}
       {started && (
         <>
