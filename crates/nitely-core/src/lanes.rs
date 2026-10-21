@@ -147,6 +147,11 @@ fn lane_path(repo_root: &Path, pb: &Playbook, n: u32) -> PathBuf {
 
 // ----- the base commit (NIT-201) -----
 
+/// Whether a base recorded at `recorded_at` (seconds) is due to move at `now`, every `hours`.
+pub(crate) fn base_due(recorded_at: i64, now: i64, hours: u64) -> bool {
+    now - recorded_at >= (hours * 3600) as i64
+}
+
 /// The base commit when the playbook moves it on a schedule (`[lanes] base = "every <n>h"`): the
 /// integration branch's tip as it was when the base last moved, moved to the tip once `n` hours
 /// have passed. None when the base is the tip (the default). Kept in the lanes folder.
@@ -156,8 +161,7 @@ pub fn scheduled_base(pb: &Playbook, repo_root: &Path, tip: &str) -> Result<Opti
     if let Ok(text) = std::fs::read_to_string(&file) {
         let mut lines = text.lines();
         let (commit, at) = (lines.next().unwrap_or("").trim().to_string(), lines.next().and_then(|t| t.trim().parse::<i64>().ok()).unwrap_or(0));
-        let fresh = now() - at < (hours * 3600) as i64;
-        if fresh && !commit.is_empty() && git(repo_root, &["cat-file", "-e", &format!("{commit}^{{commit}}")]).is_ok() {
+        if !base_due(at, now(), hours) && !commit.is_empty() && git(repo_root, &["cat-file", "-e", &format!("{commit}^{{commit}}")]).is_ok() {
             return Ok(Some(commit));
         }
     }
@@ -254,41 +258,71 @@ pub fn hold_checkout(repo_root: &Path, pb: &Playbook) -> Result<Option<LaneLock>
 /// `keep` (build output) do not count. Returns the first such path.
 fn would_overwrite(root: &Path, to: &str, keep: &[String]) -> Result<Option<String>> {
     let added = git(root, &["diff", "--name-only", "-z", "--no-renames", "--diff-filter=A", "HEAD", to])?;
+    let added: Vec<&str> = added.split('\0').filter(|p| !p.is_empty()).collect();
+    let (leaves, parents) = checkout_paths(&added, keep);
+    // What is on disk where `to` puts each file, and under a folder there, whether it holds
+    // anything untracked; then the files where `to` needs a folder, and which of them HEAD tracks.
+    let mut on_disk = Vec::new();
+    for p in &leaves {
+        let Ok(meta) = root.join(p).symlink_metadata() else { continue };
+        let found = if !meta.is_dir() {
+            OnDisk::File
+        } else {
+            OnDisk::Folder { untracked: !git(root, &["ls-files", "-z", "--others", "--", p])?.trim_matches('\0').is_empty() }
+        };
+        on_disk.push((p.clone(), found));
+        // The first leaf found in the way decides, as git would stop there.
+        if overwritten(&on_disk, &[], &[]).is_some() {
+            break;
+        }
+    }
+    let files: Vec<String> = parents.into_iter().filter(|p| root.join(p).symlink_metadata().is_ok_and(|m| !m.is_dir())).collect();
+    let tracked: Vec<String> = if files.is_empty() || overwritten(&on_disk, &[], &[]).is_some() {
+        vec![]
+    } else {
+        let mut args = vec!["ls-files", "-z", "--"];
+        args.extend(files.iter().map(String::as_str));
+        git(root, &args)?.split('\0').filter(|p| !p.is_empty()).map(str::to_string).collect()
+    };
+    Ok(overwritten(&on_disk, &files, &tracked))
+}
+
+/// The paths a checkout adding `added` needs (NIT-533): the files it puts down, outside `keep`
+/// (build output), and every folder on the way, kept ones too: a path into a kept directory deep
+/// down (`assets/target/x.rs`) still needs `assets`, and `assets/target`, to be a folder or free.
+pub(crate) fn checkout_paths(added: &[&str], keep: &[String]) -> (Vec<String>, std::collections::BTreeSet<String>) {
     let mut leaves = Vec::new();
     let mut parents = std::collections::BTreeSet::new();
-    for p in added.split('\0').filter(|p| !p.is_empty()) {
+    for p in added {
         if !in_keep(keep, p) {
             leaves.push(p.to_string());
         }
-        // Every folder on the way, kept ones too: a path into a kept directory deep down
-        // (`assets/target/x.rs`) still needs `assets`, and `assets/target`, to be a folder or free.
-        // A kept folder that is a folder is never flagged below; one that is a file is someone's.
-        let mut at = p;
+        let mut at = *p;
         while let Some((parent, _)) = at.rsplit_once('/') {
             parents.insert(parent.to_string());
             at = parent;
         }
     }
-    for p in &leaves {
-        let Ok(meta) = root.join(p).symlink_metadata() else { continue };
-        if !meta.is_dir() {
-            return Ok(Some(p.clone()));
-        }
-        // A folder where `to` has a file: git removes it rightly when all it holds is tracked.
-        if !git(root, &["ls-files", "-z", "--others", "--", p])?.trim_matches('\0').is_empty() {
-            return Ok(Some(p.clone()));
-        }
-    }
-    // A file where `to` has a directory, unless HEAD tracks it (then git replaces it rightly).
-    let files: Vec<&String> = parents.iter().filter(|p| root.join(p).symlink_metadata().is_ok_and(|m| !m.is_dir())).collect();
-    if files.is_empty() {
-        return Ok(None);
-    }
-    let mut args = vec!["ls-files", "-z", "--"];
-    args.extend(files.iter().map(|p| p.as_str()));
-    let tracked = git(root, &args)?;
-    let tracked: Vec<&str> = tracked.split('\0').collect();
-    Ok(files.into_iter().find(|p| !tracked.contains(&p.as_str())).cloned())
+    (leaves, parents)
+}
+
+/// What is on disk where a checkout would put a file.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum OnDisk {
+    File,
+    /// A folder; git removes it rightly when all it holds is tracked.
+    Folder { untracked: bool },
+}
+
+/// The first of the person's files a checkout would overwrite without asking (NIT-533): a file
+/// where it puts a file, a folder holding untracked files where it puts a file, or a file where it
+/// needs a folder (`files_in_the_way`) that HEAD does not track (then git replaces it rightly).
+pub(crate) fn overwritten(on_disk: &[(String, OnDisk)], files_in_the_way: &[String], tracked: &[String]) -> Option<String> {
+    on_disk
+        .iter()
+        .find(|(_, d)| matches!(d, OnDisk::File | OnDisk::Folder { untracked: true }))
+        .map(|(p, _)| p.clone())
+        .or_else(|| files_in_the_way.iter().find(|p| !tracked.contains(p)).cloned())
 }
 
 /// The branch the main checkout goes back to while a build request has it (large-repo mode), from
@@ -329,9 +363,15 @@ pub fn lends(repo_root: &Path) -> Lends {
 /// always while it is not lent; while it is, only when the request's commit has no playbook, so
 /// the file there is the person's own (untracked) one, which the lend left alone.
 pub fn playbook_on_disk_is_theirs(repo_root: &Path, l: &Lends) -> bool {
+    playbook_source(l, &mut |commit| git(repo_root, &["cat-file", "-e", &format!("{commit}:{}", playbook::PLAYBOOK_PATH)]).is_ok())
+}
+
+/// `playbook_on_disk_is_theirs` over the lend and whether a commit has a playbook (NIT-533), asked
+/// only when it matters.
+pub(crate) fn playbook_source(l: &Lends, commit_has_playbook: &mut dyn FnMut(&str) -> bool) -> bool {
     match (&l.lent, &l.commit) {
         (None, _) => true,
-        (Some(_), Some(commit)) => git(repo_root, &["cat-file", "-e", &format!("{commit}:{}", playbook::PLAYBOOK_PATH)]).is_err(),
+        (Some(_), Some(commit)) => !commit_has_playbook(commit),
         (Some(_), None) => false,
     }
 }
@@ -406,19 +446,44 @@ fn recover_large(root: &Path, keep: &[String]) -> Option<String> {
         return None;
     }
     let detached = git(root, &["symbolic-ref", "--quiet", "HEAD"]).is_err();
+    let status = if detached { git(root, &["status", "--porcelain=v1", "-z", "--untracked-files=all"]).unwrap_or_default() } else { String::new() };
+    let changed: Vec<&str> = status.split('\0').filter(|e| e.len() > 3).map(|e| &e[3..]).collect();
+    match recover_decision(&branch, detached, &changed, keep) {
+        Recover::Forget => {
+            // Put back by hand: no longer lent.
+            count_lend(root, &branch, None).ok();
+            std::fs::remove_file(&mark).ok();
+            None
+        }
+        Recover::Stay(why) => Some(why),
+        Recover::PutBack => match return_large(root, &branch) {
+            Ok(()) => Some(format!("put your checkout back on {branch}, where a request that did not finish had left it detached")),
+            Err(e) => Some(format!("your checkout stays detached: {e:#}")),
+        },
+    }
+}
+
+/// What to do with a checkout a request was lent and did not give back.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Recover {
+    /// It is on a branch again: put back by hand, so it is no longer lent.
+    Forget,
+    /// Left as it is, and why.
+    Stay(String),
+    /// Back onto its branch.
+    PutBack,
+}
+
+/// Whether a checkout lent from `branch` goes back (NIT-533): one on a branch was put back by hand;
+/// one still detached goes back unless something outside `keep` changed since (`changed`, the
+/// paths git reports), which is the person's and stays.
+pub(crate) fn recover_decision(branch: &str, detached: bool, changed: &[&str], keep: &[String]) -> Recover {
     if !detached {
-        // Put back by hand: no longer lent.
-        count_lend(root, &branch, None).ok();
-        std::fs::remove_file(&mark).ok();
-        return None;
+        return Recover::Forget;
     }
-    let status = git(root, &["status", "--porcelain=v1", "-z", "--untracked-files=all"]).unwrap_or_default();
-    if let Some(changed) = status.split('\0').filter(|e| e.len() > 3).map(|e| &e[3..]).find(|p| !in_keep(keep, p)) {
-        return Some(format!("your checkout stays detached at the request's commit: {changed} changed since; put it back on {branch} once that is safe"));
-    }
-    match return_large(root, &branch) {
-        Ok(()) => Some(format!("put your checkout back on {branch}, where a request that did not finish had left it detached")),
-        Err(e) => Some(format!("your checkout stays detached: {e:#}")),
+    match changed.iter().find(|p| !in_keep(keep, p)) {
+        Some(changed) => Recover::Stay(format!("your checkout stays detached at the request's commit: {changed} changed since; put it back on {branch} once that is safe")),
+        None => Recover::PutBack,
     }
 }
 
@@ -1069,20 +1134,55 @@ fn run_with(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Act
 /// it. A run that failed, timed out or never finished, ran elsewhere, or ran other commands, in
 /// another order or joined otherwise (a line break or `;` runs on past a failure), never counts.
 fn passed_on_tree(db: &Db, repo: &str, tree: &str, to_run: &[&str]) -> Result<Option<(i64, String)>> {
-    let gate_key = to_run.join("\n");
-    // Joined, `a && b || c` passes when `a` fails: only commands that keep `&&`'s meaning count.
-    let run_key = to_run.iter().all(|c| joins_safely(c)).then(|| to_run.join(" && "));
-    Ok(db
-        .conn
-        .query_row(
-            "SELECT id, kind FROM lane_run WHERE repo = ?1 AND tree = ?2
-               AND ((kind IN ('gate', 'land') AND command = ?3) OR (kind = 'run' AND command = ?4))
-               AND state = 'done' AND exit_code = 0 AND timed_out = 0 AND error IS NULL AND executor = 'local'
-             ORDER BY id DESC LIMIT 1",
-            params![repo, tree, gate_key, run_key],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?)
+    let mut stmt = db.conn.prepare(
+        "SELECT id, kind, command, state, exit_code, timed_out, error IS NOT NULL, executor FROM lane_run WHERE repo = ?1 AND tree = ?2 ORDER BY id DESC",
+    )?;
+    let rows = stmt.query_map(params![repo, tree], |r| {
+        Ok(PriorRun {
+            id: r.get(0)?,
+            kind: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+            command: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+            state: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+            exit_code: r.get(4)?,
+            timed_out: r.get::<_, Option<bool>>(5)?.unwrap_or(false),
+            errored: r.get(6)?,
+            executor: r.get::<_, Option<String>>(7)?.unwrap_or_default(),
+        })
+    })?;
+    for row in rows {
+        let row = row?;
+        if answers_gate(&row, to_run) {
+            return Ok(Some((row.id, row.kind)));
+        }
+    }
+    Ok(None)
+}
+
+/// An earlier run of the same tree, as `answers_gate` reads it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PriorRun {
+    pub id: i64,
+    pub kind: String,
+    pub command: String,
+    pub state: String,
+    pub exit_code: Option<i32>,
+    pub timed_out: bool,
+    pub errored: bool,
+    pub executor: String,
+}
+
+/// Whether an earlier run of the same tree answers a gate that would run `to_run` (NIT-533): it
+/// passed here, in a local lane, with nothing timed out or gone wrong, and ran exactly those
+/// commands: as a gate or land, one per line; as a run, joined with `&&`, and only when joining
+/// keeps each one's failure (`a && b || c` passes when `a` fails).
+pub(crate) fn answers_gate(row: &PriorRun, to_run: &[&str]) -> bool {
+    let passed = row.state == "done" && row.exit_code == Some(0) && !row.timed_out && !row.errored && row.executor == "local";
+    let same = match row.kind.as_str() {
+        "gate" | "land" => row.command == to_run.join("\n"),
+        "run" => to_run.iter().all(|c| joins_safely(c)) && row.command == to_run.join(" && "),
+        _ => false,
+    };
+    passed && same
 }
 
 /// Whether `command`, joined to others by `&&`, still runs only after the one before it passed and
@@ -3867,6 +3967,53 @@ mod tests {
             assert_eq!((step.events, step.waiting.memory), (vec![Ev::MemoryWaitEnded], false), "{holds:?}");
         }
         assert_eq!(look(Waited::default(), &Look::NoSlot, 1, 10).pause, Some(LOOK_AGAIN));
+    }
+
+    #[test]
+    fn the_decisions_around_the_persons_checkout_and_a_reused_gate() {
+        // Moving the base on its schedule.
+        assert!(!base_due(0, 3599, 1) && base_due(0, 3600, 1) && base_due(100, 100, 0));
+
+        // What a checkout would overwrite (NIT-533: the three overwrite tests' decisions).
+        let keep = vec!["target".to_string(), "node_modules".to_string()];
+        let (leaves, parents) = checkout_paths(&["notes.txt", "assets/target/x.rs", "target/out.bin", "a/b/c.txt"], &keep);
+        assert_eq!(leaves, ["notes.txt", "a/b/c.txt"], "build output, under a kept name at any depth, is never in the way");
+        assert_eq!(parents.into_iter().collect::<Vec<_>>(), ["a", "a/b", "assets", "assets/target", "target"], "every folder on the way, kept ones too");
+        let file = |p: &str| (p.to_string(), OnDisk::File);
+        let folder = |p: &str, untracked| (p.to_string(), OnDisk::Folder { untracked });
+        assert_eq!(overwritten(&[folder("a", false), file("notes.txt")], &[], &[]).as_deref(), Some("notes.txt"), "an ignored or new file where it puts one");
+        assert_eq!(overwritten(&[folder("b", true)], &[], &[]).as_deref(), Some("b"), "a folder with untracked files where it puts a file");
+        assert_eq!(overwritten(&[folder("b", false)], &[], &[]), None, "a folder of tracked files git may replace");
+        assert_eq!(overwritten(&[], &["assets".into()], &[]).as_deref(), Some("assets"), "a file where it needs a folder");
+        assert_eq!(overwritten(&[], &["assets".into()], &["assets".into()]), None, "unless HEAD tracks it");
+
+        // Where the rules come from while the checkout is lent.
+        let lent = |commit: Option<&str>| Lends { count: 1, last: Some("main".into()), lent: Some("main".into()), commit: commit.map(str::to_string) };
+        let mut asked = 0;
+        assert!(playbook_source(&Lends::default(), &mut |_| { asked += 1; true }) && asked == 0, "not lent: theirs, without asking git");
+        assert!(!playbook_source(&lent(Some("abc")), &mut |_| true), "the request's commit has one: the file is the request's");
+        assert!(playbook_source(&lent(Some("abc")), &mut |_| false), "it has none: the file on disk is the person's own");
+        assert!(!playbook_source(&lent(None), &mut |_| false), "lent at an unknown commit: never trusted");
+
+        // A checkout a dead request left.
+        assert_eq!(recover_decision("main", false, &[], &keep), Recover::Forget);
+        assert_eq!(recover_decision("main", true, &["target/a.o"], &keep), Recover::PutBack);
+        assert_eq!(
+            recover_decision("main", true, &["target/a.o", "src/x.rs"], &keep),
+            Recover::Stay("your checkout stays detached at the request's commit: src/x.rs changed since; put it back on main once that is safe".into())
+        );
+
+        // An earlier pass answers a gate only for the same commands, a pass, a local lane.
+        let ran = |kind: &str, command: &str| PriorRun { id: 1, kind: kind.into(), command: command.into(), state: "done".into(), exit_code: Some(0), timed_out: false, errored: false, executor: "local".into() };
+        let gate = ["npm test", "cargo test"];
+        assert!(answers_gate(&ran("gate", "npm test\ncargo test"), &gate) && answers_gate(&ran("land", "npm test\ncargo test"), &gate));
+        assert!(answers_gate(&ran("run", "npm test && cargo test"), &gate));
+        assert!(!answers_gate(&ran("run", "a || b && c"), &["a || b", "c"]), "joining must keep each failure");
+        assert!(!answers_gate(&ran("gate", "npm test"), &gate));
+        assert!(!answers_gate(&PriorRun { exit_code: Some(1), ..ran("gate", "npm test\ncargo test") }, &gate));
+        assert!(!answers_gate(&PriorRun { executor: "ci".into(), ..ran("gate", "npm test\ncargo test") }, &gate));
+        assert!(!answers_gate(&PriorRun { timed_out: true, ..ran("gate", "npm test\ncargo test") }, &gate));
+        assert!(!answers_gate(&PriorRun { errored: true, ..ran("gate", "npm test\ncargo test") }, &gate));
     }
 
     #[test]
