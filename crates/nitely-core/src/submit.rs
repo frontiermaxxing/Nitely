@@ -669,7 +669,8 @@ fn after_failed_gate(gate: &GateResult) -> String {
             r.command
         );
     }
-    let failed = gate.results.last().map(|r| r.command.as_str()).unwrap_or("");
+    // The step that failed: CI runs its steps side by side, so it need not be the last one reported.
+    let failed = gate.results.iter().find(|r| !r.ok && !r.skipped).or(gate.results.last()).map(|r| r.command.as_str()).unwrap_or("");
     format!("The gate failed at `{failed}`. Fix it, commit, and submit again.")
 }
 
