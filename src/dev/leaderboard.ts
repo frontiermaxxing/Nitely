@@ -188,3 +188,44 @@ export function leaderboardSendFixture() {
   sharing = { ...s, last_sent_week: report.week };
   return report;
 }
+
+const BOARD_NAMES = ["nightshift", "kestrel", "mergequeen", "tidepool", "paperplane", "ohm", "quietfork", "saltmarsh", "brightline", "fernwood", "lamplighter", "graywater", "northpaw", "copperleaf", "slowburn", "fieldnotes", "parallax", "driftwood", "bluehour", "keystone", "longshot", "mossgarden", "redwing", "stillwater", "halfmoon", "ironbark", "wildcard", "sandpiper", "overcast", "tinderbox", "underfoot", "goldfinch", "riverbend", "starling", "hollowtree", "cinderpath", "meadowlark", "seaglass"];
+
+/**
+ * The preview's public board, in board.json's shape (server/leaderboard/README.md). With
+ * `?leaderboard=sharing` your own row is on it; `?board=fail` makes the fetch fail.
+ */
+export function leaderboardBoardFixture(args: Record<string, unknown>) {
+  if (new URLSearchParams(location.search).get("board") === "fail") throw "reaching the Leaderboard at https://api.nitely.net: connection refused";
+  const period = String(args.period);
+  const scale = period === "week" ? 1 : period === "30d" ? 4 : 20;
+  const r = seeded(7 + scale);
+  const vendors = ["claude", "codex", "cursor"];
+  const entry = (id: string, name: string, i: number) => {
+    const landed = Math.max(1, Math.round((220 - i * 5 + r() * 30) * scale * 0.5));
+    const mix = vendors.filter((_, k) => k === i % 3 || r() > 0.55);
+    return {
+      id,
+      display_name: name,
+      links: i % 3 === 0 ? { github: `https://github.com/${name}` } : i % 4 === 1 ? { website: `https://${name}.example` } : {},
+      projects: 1 + (i % 3),
+      week: "2026-W43",
+      landed,
+      landed_per_day: landed / (7 * scale),
+      reviewed: Math.round(landed * 0.9),
+      first_pass_rate: Math.round((0.6 + r() * 0.3) * 1000) / 1000,
+      lead_time: { median: Math.round(1800 + r() * 4000), p90: 14400, count: landed },
+      agent_hours: Math.round(landed * (0.3 + r() * 0.2) * 10) / 10,
+      tokens: Math.round(landed * (300_000 + r() * 400_000)),
+      inbox_reply: i % 7 === 6 ? null : { median: Math.round(240 + r() * 2400), p90: 7200, count: 20 },
+      steadiest_week: { landed: Math.round(landed / scale), active_days: 3 + Math.floor(r() * 5) },
+      vendors: mix.map((v) => ({ vendor: v, landed: Math.round(landed / mix.length), share: Math.round(1000 / mix.length) / 1000 })),
+      weekly: Array.from({ length: 26 }, (_, w) => Math.round((w / 26) * (landed / scale) * (0.6 + r() * 0.6))),
+    };
+  };
+  const entries = BOARD_NAMES.map((n, i) => entry(`key-${i}`, n, i));
+  const s = sharingState();
+  if (s.joined && s.last_sent_week) entries.push({ ...entry("preview-key", String(s.profile.display_name), 33), links: { github: "https://github.com/lowtide" } });
+  entries.sort((a, b) => b.landed - a.landed);
+  return { schema: 1, period, week: "2026-W43", generated_at: Math.floor(Date.now() / 1000), entries };
+}

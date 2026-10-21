@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "../backend";
 import { EmptyState, Loading, Segmented } from "../ui";
 import type { Project } from "../types";
+import { Board } from "./Board";
 import { OptIn } from "./OptIn";
 import { sharing, useProfile } from "./profile";
 import { ProfileDialog } from "./EditProfile";
@@ -16,9 +17,9 @@ const PERIODS: PeriodKey[] = ["week", "30d", "all"];
 /** The leaderboard page. Your own numbers read this machine's database; nothing here sends anything. */
 export function Leaderboard(props: { now: number; version: number; projects: Project[] }) {
   const profile = useProfile();
-  // Before you join the page opens on joining; your own numbers are a tab away, joined or not.
-  const [chosen, setTab] = useState<"join" | "you" | null>(null);
-  const tab = chosen ?? (profile ? "you" : "join");
+  // Before you join the page opens on joining, after on the board; your own numbers are a tab away, joined or not.
+  const [chosen, setTab] = useState<"join" | "board" | "you" | null>(null);
+  const tab = chosen === "join" && profile ? "board" : (chosen ?? (profile ? "board" : "join"));
   const joining = profile === null && tab === "join";
   const [period, setPeriod] = useState<PeriodKey>("week");
   const [editing, setEditing] = useState(false);
@@ -55,24 +56,23 @@ export function Leaderboard(props: { now: number; version: number; projects: Pro
             Not sharing
           </span>
         )}
-        {!profile && (
+        {profile !== undefined && (
           <Segmented
             aria-label="Page"
             value={tab}
             onChange={setTab}
-            options={[
-              { value: "join", label: "Join" },
-              { value: "you", label: "You" },
-            ]}
+            options={[...(profile ? [] : [{ value: "join" as const, label: "Join" }]), { value: "board" as const, label: "Board" }, { value: "you" as const, label: "You" }]}
           />
         )}
-        {!joining && <span className="lb-head-note">Your stats are always here, sharing or not</span>}
+        {tab === "you" && <span className="lb-head-note">Your stats are always here, sharing or not</span>}
         {!joining && <Segmented aria-label="Period" value={period} onChange={setPeriod} options={PERIODS.map((p) => ({ value: p, label: PERIOD_LABEL[p] }))} />}
       </div>
       {profile === undefined ? (
         <Loading />
       ) : joining ? (
         <OptIn projects={props.projects} />
+      ) : tab === "board" ? (
+        <Board period={period} profile={profile} onEdit={() => (profile ? setEditing(true) : setTab("join"))} />
       ) : error ? (
         <EmptyState title="Could not read your numbers">{error}</EmptyState>
       ) : !stats ? (

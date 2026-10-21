@@ -19,6 +19,8 @@ export interface Profile {
   last_sent_week: string | null;
   /** Why the last send or delete failed, if it did. */
   last_error: string | null;
+  /** This install's id on the board (its public key), to find your row. */
+  id: string | null;
 }
 
 /** `leaderboard_status`, as much of it as the page reads. */
@@ -28,12 +30,13 @@ interface Status {
   projects: string[];
   last_sent_week?: string | null;
   last_error?: string | null;
+  id?: string | null;
 }
 
 function profileOf(s: Status): Profile | null {
   if (!s.joined) return null;
   const p = s.profile;
-  return { display_name: p.display_name, github: p.github ?? null, x: p.x ?? null, website: p.website ?? null, projects: s.projects, last_sent_week: s.last_sent_week ?? null, last_error: s.last_error ?? null };
+  return { display_name: p.display_name, github: p.github ?? null, x: p.x ?? null, website: p.website ?? null, projects: s.projects, last_sent_week: s.last_sent_week ?? null, last_error: s.last_error ?? null, id: s.id ?? null };
 }
 
 // One copy for the whole app (the sidebar's tag and the page read the same), undefined until read.
@@ -61,7 +64,7 @@ function read(): Promise<void> {
   return reading;
 }
 
-function takeOld(): (Omit<Profile, "last_sent_week" | "last_error"> & { projects?: string[] }) | null {
+function takeOld(): (Omit<Profile, "last_sent_week" | "last_error" | "id"> & { projects?: string[] }) | null {
   try {
     const raw = localStorage.getItem(OLD_KEY);
     localStorage.removeItem(OLD_KEY);
