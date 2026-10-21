@@ -46,8 +46,8 @@
 .gp-title:focus, .gp-outcome:focus, .gp-date input:focus { outline: 2px solid var(--focus); outline-offset: -1px; }
 .gp-date { display: flex; align-items: center; gap: 8px; font-size: var(--text-sm); color: var(--fg-2); }
 .gp-items { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
-.gp-items label { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; padding: 3px 0; cursor: default; }
-.gp-items input { margin: 0; align-self: center; }
+.gp-item { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; padding: 3px 0; }
+.gp-item > .ui-check { align-self: center; }
 .gp-ref { color: var(--fg-3); font-size: 11.5px; }
 .gp-item-title { min-width: 0; overflow-wrap: anywhere; }
 .gp-item-meta { color: var(--fg-3); font-size: var(--text-xs); }

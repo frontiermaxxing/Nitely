@@ -97,7 +97,7 @@ export function ProjectPage(props: {
   const views = tab === "list" || tab === "board";
 
   return (
-    <div className={`page${tab === "board" || tab === "branches" ? " page-wide" : ""}`}>
+    <div className={`page${tab === "board" || tab === "branches" || tab === "rules" || tab === "settings" ? " page-wide" : ""}`}>
       <div className="page-head project-head">
         <h1>
           {props.project?.name ?? props.projectKey} <span className="muted mono">{props.projectKey}</span>
