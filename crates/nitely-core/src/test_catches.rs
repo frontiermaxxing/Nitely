@@ -107,8 +107,11 @@ pub fn failed_of(results: &[CommandResult]) -> Vec<Failed> {
 }
 
 /// The steps of a gate that ran and passed: where its tests were seen to pass.
+/// A step answered from an earlier pass on the same tree (the lane's record, or a reduced gate's
+/// validated pass) is marked skipped but passed all the same: it counts (NIT-557 review). A step
+/// skipped for any other reason (only some paths changed) proves nothing.
 pub fn passed_steps(results: &[CommandResult]) -> Vec<String> {
-    results.iter().filter(|r| r.ok && !r.skipped).map(|r| r.command.clone()).collect()
+    results.iter().filter(|r| r.ok && (!r.skipped || r.output.contains("not run again"))).map(|r| r.command.clone()).collect()
 }
 
 /// A failed test and the revisions between which it was fixed.
@@ -288,5 +291,10 @@ mod tests {
         let failed = |t: &str, step: &str| Failed { test: t.into(), step: step.into() };
         assert_eq!(failed_of(&results), vec![failed("lanes::tests::a", "cargo test"), failed("npm run build", "npm run build")]);
         assert_eq!(passed_steps(&results), vec!["npm test".to_string()]);
+        // A gate answered from an earlier pass on the same tree passed its steps; a step skipped by
+        // the changed paths did not run.
+        let skipped = |command: &str, why: &str| CommandResult { command: command.into(), ok: true, seconds: 0, output: format!("skipped: {why}"), skipped: true, timed_out: false };
+        let reused = [skipped("cargo test", "this tree passed it in lane run 7; not run again"), skipped("cargo clippy", "only paths matching ^src/ changed")];
+        assert_eq!(passed_steps(&reused), vec!["cargo test".to_string()]);
     }
 }
