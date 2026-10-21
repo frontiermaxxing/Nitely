@@ -339,12 +339,7 @@ fn tick(db: &mut Db, root: &Path, project: &str, branch: &str) -> Result<bool> {
             )?;
             // An external integration update or crash between Git and the landing hook still
             // becomes due by time, without inventing issue/landing counts.
-            if head == base
-                || !(count >= policy.every_landings.max(1)
-                    || (policy.max_delay_seconds > 0
-                        && since
-                            .is_some_and(|s| now().saturating_sub(s) >= policy.max_delay_seconds)))
-            {
+            if !review_due(head != base, count, policy.every_landings, since, policy.max_delay_seconds, now()) {
                 return Ok(false);
             }
             db.conn.execute("INSERT OR IGNORE INTO periodic_review_job(repo,project,base,head,created_at) VALUES(?1,?2,?3,?4,?5)",params![repo,project,base,head,now()])?;
@@ -368,7 +363,7 @@ fn tick(db: &mut Db, root: &Path, project: &str, branch: &str) -> Result<bool> {
                 |r| r.get(0),
             )?;
             // The process lock proves a previous owner is gone even if its clock lease remains.
-            if current.attempt >= MAX_ATTEMPTS || retry_at > now() {
+            if !may_run(current.attempt, retry_at, now()) {
                 return Ok(false);
             }
             db.conn.execute("UPDATE periodic_review_job SET state='running',attempt=attempt+1,lease_until=?2,error=NULL WHERE id=?1",params![id,now()+7200])?;
@@ -381,7 +376,7 @@ fn tick(db: &mut Db, root: &Path, project: &str, branch: &str) -> Result<bool> {
                 Ok(review) => record_review(db, &repo, &current, &review)?,
                 Err(e) => {
                     let error = format!("{e:#}");
-                    db.conn.execute("UPDATE periodic_review_job SET state='failed',error=?3,lease_until=NULL,retry_at=?4 WHERE id=?1 AND attempt=?2",params![id,current.attempt,error,now()+300*i64::from(current.attempt)])?;
+                    db.conn.execute("UPDATE periodic_review_job SET state='failed',error=?3,lease_until=NULL,retry_at=?4 WHERE id=?1 AND attempt=?2",params![id,current.attempt,error,retry_at_after(current.attempt, now())])?;
                     bail!("{error}");
                 }
             }
@@ -603,18 +598,9 @@ fn apply_findings(
             (key, "existing")
         } else {
             // Attribution must explicitly name exactly one source card. Never undo a human decision.
-            let named: Vec<_> = sources
-                .iter()
-                .filter(|key| {
-                    f.text
-                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
-                        .any(|word| word == key.as_str())
-                })
-                .collect();
-            let candidate = if named.len() == 1 {
-                db.issue(named[0])?
-            } else {
-                None
+            let candidate = match named_source(&f.text, &sources) {
+                Some(key) => db.issue(key)?,
+                None => None,
             };
             let can_reopen = if let Some(i) = &candidate {
                 policy.findings_strategy == "reopen_or_create"
@@ -704,10 +690,61 @@ fn apply_findings(
     Ok(())
 }
 
+/// Whether a periodic review is due (NIT-539): the integration branch `moved` since the last
+/// reviewed head, and enough landings came, or the oldest has waited `max_delay` seconds (0: no
+/// limit by time). Time alone makes it due too, so an update outside Nitely is still reviewed.
+pub(crate) fn review_due(moved: bool, landings: u32, every: u32, pending_since: Option<i64>, max_delay: i64, now: i64) -> bool {
+    moved && (landings >= every.max(1) || (max_delay > 0 && pending_since.is_some_and(|s| now.saturating_sub(s) >= max_delay)))
+}
+
+/// Whether a review job may run another attempt now: under the attempt limit, and past the
+/// time a failed attempt set for its retry.
+pub(crate) fn may_run(attempt: u32, retry_at: i64, now: i64) -> bool {
+    attempt < MAX_ATTEMPTS && retry_at <= now
+}
+
+/// When a failed attempt may be tried again: five minutes more for each attempt made.
+pub(crate) fn retry_at_after(attempt: u32, now: i64) -> i64 {
+    now + 300 * i64::from(attempt)
+}
+
+/// The one source card a finding names by key, as a word of its text; None when it names none
+/// or several, since attribution must be explicit.
+pub(crate) fn named_source<'a>(text: &str, sources: &'a [String]) -> Option<&'a String> {
+    let named: Vec<&String> = sources.iter().filter(|key| text.split(|c: char| !c.is_ascii_alphanumeric() && c != '-').any(|word| word == key.as_str())).collect();
+    match named.as_slice() {
+        [one] => Some(one),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::project_modes::{Mode, Options, Periodic};
+
+    /// The timing and attribution rules the periodic scenarios reach through lands and ticks.
+    #[test]
+    fn a_review_is_due_by_landings_or_time_retries_later_and_names_one_source() {
+        assert!(!review_due(false, 9, 5, Some(0), 1800, 10_000), "nothing moved: never");
+        assert!(review_due(true, 5, 5, None, 0, 0));
+        assert!(!review_due(true, 4, 5, None, 1800, 10_000));
+        assert!(review_due(true, 4, 5, Some(100), 1800, 1900), "the oldest waited long enough");
+        assert!(!review_due(true, 4, 5, Some(100), 1800, 1899));
+        assert!(!review_due(true, 4, 5, Some(100), 0, 99_999), "no limit by time");
+        assert!(review_due(true, 1, 0, None, 0, 0), "every 0 counts as every landing");
+
+        assert!(may_run(0, 0, 10));
+        assert!(!may_run(MAX_ATTEMPTS, 0, 10), "attempts used up");
+        assert!(!may_run(1, 11, 10), "its retry time has not come");
+        assert_eq!(retry_at_after(2, 1000), 1600);
+
+        let sources = vec!["APP-12".to_string(), "APP-3".to_string()];
+        assert_eq!(named_source("APP-12 drops the last row", &sources).map(String::as_str), Some("APP-12"));
+        assert_eq!(named_source("see APP-120 and xAPP-3", &sources), None, "only whole keys count");
+        assert_eq!(named_source("APP-12 and APP-3 both", &sources), None, "two named: no attribution");
+        assert_eq!(named_source("nothing named", &sources), None);
+    }
     use std::path::PathBuf;
 
     struct Fixture {

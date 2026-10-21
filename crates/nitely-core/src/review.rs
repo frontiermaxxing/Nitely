@@ -877,10 +877,29 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
             printed,
             seconds: started.elapsed().as_secs(),
         };
-        if !status.success() {
-            return Err(if says_signed_out(&reply.printed) { reply.signed_out(self) } else { could_not(&format!("exited with {status}"), tail(&reply.printed)) });
+        match exit_outcome(status.success(), &reply.printed) {
+            Exit::Replied => Ok(reply),
+            Exit::SignedOut => Err(reply.signed_out(self)),
+            Exit::Failed => Err(could_not(&format!("exited with {status}"), tail(&reply.printed))),
         }
-        Ok(reply)
+    }
+}
+
+/// What a reviewer's exit means, before its text is read (NIT-539).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Exit {
+    Replied,
+    SignedOut,
+    Failed,
+}
+
+/// A reviewer that exited 0 replied (a signed-out one that still exits 0 is told apart by
+/// `Reply::only_a_login_message`); one that failed and printed a sign-in message is signed out.
+pub(crate) fn exit_outcome(success: bool, printed: &str) -> Exit {
+    match (success, says_signed_out(printed)) {
+        (true, _) => Exit::Replied,
+        (false, true) => Exit::SignedOut,
+        (false, false) => Exit::Failed,
     }
 }
 
@@ -1278,6 +1297,15 @@ fn with_submodule_code(prompt: String, worktree: &Path, base: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exit rules `runs_a_reviewer_command` checks by starting seven reviewers.
+    #[test]
+    fn a_reviewers_exit_says_whether_it_replied_is_signed_out_or_failed() {
+        assert_eq!(exit_outcome(true, "- [P1] something"), Exit::Replied);
+        assert_eq!(exit_outcome(true, "Please log in"), Exit::Replied, "exit 0 is a reply; its text is judged later");
+        assert_eq!(exit_outcome(false, "Error: not logged in. Run codex login"), Exit::SignedOut);
+        assert_eq!(exit_outcome(false, "panicked at main.rs"), Exit::Failed);
+    }
 
     fn rules() -> ReviewRules {
         ReviewRules {

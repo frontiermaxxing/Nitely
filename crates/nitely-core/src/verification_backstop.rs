@@ -115,17 +115,31 @@ fn observe(db:&Db,repo:&Path,project:&str,head:&str)->Result<()> {
     // CAS retries close the read/check/write window without holding SQLite across Git.
     for _ in 0..8 {
         let old=health(db,repo)?.context("branch health disappeared")?;
-        if old.observed_head==head { return Ok(()); }
-        if git(repo,&["merge-base","--is-ancestor",head,&old.observed_head]).is_ok() {
+        let behind=|| git(repo,&["merge-base","--is-ancestor",head,&old.observed_head]).is_ok();
+        let branch_at_head=|| -> Result<bool> {
             let branch=Playbook::load(repo)?.integration_branch().to_string();
-            let current=git(repo,&["rev-parse",&format!("refs/heads/{branch}")])?;
-            if current.trim()!=head {return Ok(());}
-        }
-        let rewritten=git(repo,&["merge-base","--is-ancestor",&old.observed_head,head]).is_err();
+            Ok(git(repo,&["rev-parse",&format!("refs/heads/{branch}")])?.trim()==head)
+        };
+        let rewritten=match observation(&old.observed_head,head,behind,branch_at_head)? {
+            Observation::Keep => return Ok(()),
+            Observation::Record => git(repo,&["merge-base","--is-ancestor",&old.observed_head,head]).is_err(),
+        };
         let changed=db.conn.execute("UPDATE verification_health SET pending_since=CASE WHEN verified_head=observed_head THEN ?4 ELSE pending_since END,observed_head=?2,status=CASE WHEN ?5 THEN 'paused' WHEN status='green' THEN 'pending' ELSE status END,message=CASE WHEN ?5 THEN 'Integration history changed; a new Full baseline is required' ELSE message END WHERE repo=?1 AND observed_head=?3",params![id,head,old.observed_head,now(),rewritten])?;
         if changed==1 { return Ok(()); }
     }
     bail!("integration observations kept changing; retry verification")
+}
+/// What an observation of the integration branch at `head` does to the recorded one.
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+pub(crate) enum Observation { Keep, Record }
+
+/// Never replace a newer observation with its ancestor (`head_is_behind`), unless the branch
+/// really was reset there (`branch_at_head`: an authoritative backward move). Each fact is read
+/// only when the one before leaves it open (NIT-539).
+pub(crate) fn observation(old:&str,head:&str,head_is_behind:impl FnOnce()->bool,branch_at_head:impl FnOnce()->Result<bool>)->Result<Observation> {
+    if old==head { return Ok(Observation::Keep); }
+    if head_is_behind() && !branch_at_head()? { return Ok(Observation::Keep); }
+    Ok(Observation::Record)
 }
 fn committed_policy(repo:&Path,head:&str)->Result<(Playbook,String)> {
     let object=format!("{head}:{}",playbook::PLAYBOOK_PATH);
@@ -537,6 +551,18 @@ fn recover(db:&mut Db,config:&Config,repo:&Path,project:&str,pb:&Playbook,head:&
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rule `observations_never_regress_and_unrecorded_tip_blocks_reduced_landing` and
+    /// `authoritative_backward_reset_invalidates_the_old_green_baseline` reach with real repos.
+    #[test]
+    fn an_older_observation_never_replaces_a_newer_one_unless_the_branch_was_reset() {
+        let unread=|| -> bool { panic!("not read for the same head") };
+        let unread_branch=|| -> Result<bool> { panic!("read only when the head is behind") };
+        assert_eq!(observation("a","a",unread,unread_branch).unwrap(),Observation::Keep);
+        assert_eq!(observation("a","b",|| false,unread_branch).unwrap(),Observation::Record,"ahead or diverged: recorded");
+        assert_eq!(observation("b","a",|| true,|| Ok(false)).unwrap(),Observation::Keep,"a late, older observation");
+        assert_eq!(observation("b","a",|| true,|| Ok(true)).unwrap(),Observation::Record,"the branch was reset there");
+    }
     fn fixture()->(Db,PathBuf,String) {
         let repo=crate::test_repo::copy("verification-backstop-durability",|p|crate::test_repo::init(p,&[("value.txt","good"),("a.txt","0"),("b.txt","0"),(".nitely/playbook.toml","[verification.backstop]\nenabled=true\n")]));
         let db=Db::open(&crate::paths::unique_temp("nitely-backstop-test",".sqlite")).unwrap();
