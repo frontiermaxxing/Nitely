@@ -1383,6 +1383,8 @@ pub struct Started {
     /// no branch or worktree.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outside_repo: Option<String>,
+    /// The branch the change lands into: its goal's branch, or the integration branch.
+    pub lands_into: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1459,6 +1461,7 @@ pub fn start_task(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, 
             sparse: vec![],
             reference: None,
             outside_repo: Some(crate::overlap::OUTSIDE_REPO.to_string()),
+            lands_into: playbook.integration_branch().to_string(),
         });
     }
 
@@ -1480,6 +1483,7 @@ pub fn start_task(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, 
             sparse: crate::light::sparse_set(&worktree).unwrap_or_default(),
             reference: reference.map(|r| r.to_string_lossy().into_owned()),
             outside_repo: None,
+            lands_into: crate::goal_branch::lands_into(db, repo_root, &playbook, &issue.key)?,
         });
     }
 
@@ -1540,6 +1544,7 @@ pub fn start_task(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, 
         sparse: vec![],
         reference: None,
         outside_repo: None,
+        lands_into: crate::goal_branch::lands_into(db, repo_root, &playbook, &issue.key)?,
     })
 }
 
@@ -1573,7 +1578,8 @@ fn start_light(db: &Db, repo_root: &Path, playbook: &Playbook, issue: &IssueReco
             None
         }
     };
-    Ok(Started { issue: issue.key.clone(), branch, worktree: worktree_str, created: true, setup: vec![], warnings, light: true, sparse, reference, outside_repo: None })
+    let lands_into = crate::goal_branch::lands_into(db, repo_root, playbook, &issue.key)?;
+    Ok(Started { issue: issue.key.clone(), branch, worktree: worktree_str, created: true, setup: vec![], warnings, light: true, sparse, reference, outside_repo: None, lands_into })
 }
 
 /// The ref a branch's changes are measured against: `origin/<base>` when the local `<base>` is

@@ -236,6 +236,22 @@ impl Db {
         Ok(())
     }
 
+    /// How many of the goal's issues are open, besides `except` and the goal's checkpoints.
+    pub fn goal_open_items(&self, goal: i64, except: &str) -> Result<usize> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM issue WHERE goal = ?1 AND state_type NOT IN ('completed', 'canceled') AND key != ?2 COLLATE NOCASE
+                AND key NOT IN (SELECT issue_key FROM goal_checkpoint WHERE goal_id = ?1)",
+            params![goal, except],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
+    }
+
+    /// Whether the goal's branch was turned off by hand: a closed row stays as its history.
+    pub fn goal_branch_turned_off(&self, goal: i64) -> Result<bool> {
+        Ok(self.conn.query_row("SELECT EXISTS(SELECT 1 FROM goal_branch WHERE goal_id = ?1 AND closed_at IS NOT NULL)", [goal], |r| r.get(0))?)
+    }
+
     /// The items on the goal's branch that no checkpoint has landed yet, oldest first.
     pub fn goal_items_waiting(&self, goal: i64) -> Result<Vec<Item>> {
         let mut stmt = self.conn.prepare(
@@ -283,7 +299,7 @@ impl Db {
         let next_checkpoint = match &open {
             Some(cp) => format!("{} is landing it", cp.issue),
             None if items == 0 => format!("at {} items", gb.checkpoint_items),
-            None if due(&gb, &waiting, now()).is_some() => "due now".into(),
+            None if due(&gb, &waiting, now(), self.goal_open_items(goal, "")?).is_some() => "due now".into(),
             None => format!("at {} items ({} to go)", gb.checkpoint_items, gb.checkpoint_items - items),
         };
         let (landed_items, checkpoints, full_runs): (i64, i64, i64) = self.conn.query_row(
@@ -356,12 +372,16 @@ fn item_row(r: &rusqlite::Row) -> rusqlite::Result<Item> {
     Ok(Item { id: r.get(0)?, issue: r.get(1)?, from: r.get(2)?, to: r.get(3)?, landed_at: r.get(4)?, checkpoint: r.get(5)?, reverted_at: r.get(6)? })
 }
 
-/// Why a checkpoint is due now, or None: the goal's item count reached, or its oldest waiting item
-/// a day old.
-pub fn due(gb: &GoalBranch, waiting: &[Item], at: i64) -> Option<String> {
+/// Why a checkpoint is due now, or None: the goal's item count reached, none of its items left
+/// open (`open_items`, the goal's open issues other than its checkpoint and the one landing), or
+/// its oldest waiting item a day old.
+pub fn due(gb: &GoalBranch, waiting: &[Item], at: i64, open_items: usize) -> Option<String> {
     let first = waiting.first()?;
     if waiting.len() as i64 >= gb.checkpoint_items {
         return Some(format!("{} items landed on {} since its last checkpoint", waiting.len(), gb.branch));
+    }
+    if open_items == 0 {
+        return Some(format!("goal {} has no open items left, and {} holds {} of them", gb.goal, gb.branch, waiting.len()));
     }
     (at - first.landed_at >= CHECKPOINT_AGE_SECS).then(|| format!("{} has waited on {} for a day", first.issue, gb.branch))
 }
@@ -414,12 +434,35 @@ pub(crate) fn start_point(db: &Db, root: &Path, pb: &Playbook, issue: &IssueReco
         }
         return Ok(Some((cp.head.clone(), format!("the checkpoint's head {}", short(&cp.head)))));
     }
+    // The project's mode lands goal items through goal branches: a goal's first item turns its
+    // branch on (NIT-561); before, only the goal_branch tool did, so no mode ever engaged one.
+    if let Some(goal) = issue.goal {
+        let options = crate::project_modes::for_issue(db, &issue.key)?.map(|m| m.options()).unwrap_or_default();
+        let active = db.goal(goal)?.is_some_and(|g| g.state == "active");
+        let open = db.goal_branch(goal)?.is_some();
+        if let Some(items) = engage(options.goal_branches, options.checkpoint.as_ref().map(|c| c.items), active, open, db.goal_branch_turned_off(goal)?) {
+            db.enable_goal_branch(goal, root, None, Some(items), actor)?;
+        }
+    }
     let Some(gb) = db.goal_branch_of_issue(&issue.key)? else { return Ok(None) };
     if !same_repo(&gb, root) {
         return Ok(None);
     }
     let gb = prepare(db, root, pb, &gb, actor)?;
     Ok(Some((gb.branch.clone(), gb.branch)))
+}
+
+/// Whether a new item of a goal turns the goal's branch on, and with what checkpoint size: when
+/// the mode lands goal items through goal branches, the goal is active, it has no branch open, and
+/// nobody turned its branch off by hand. None: it lands as it would otherwise.
+pub(crate) fn engage(goal_branches: Option<bool>, checkpoint_items: Option<u32>, active: bool, open: bool, turned_off: bool) -> Option<i64> {
+    (goal_branches == Some(true) && active && !open && !turned_off).then(|| checkpoint_items.map_or(CHECKPOINT_ITEMS, i64::from))
+}
+
+/// The branch `issue`'s change lands into from `root`: its goal's branch, or the integration
+/// branch (a checkpoint, an item of a goal without one, any other issue).
+pub(crate) fn lands_into(db: &Db, root: &Path, pb: &Playbook, issue: &str) -> Result<String> {
+    Ok(db.goal_branch_of_issue(issue)?.filter(|g| same_repo(g, root)).map_or_else(|| pb.integration_branch().to_string(), |g| g.branch))
 }
 
 fn same_repo(gb: &GoalBranch, root: &Path) -> bool {
@@ -566,7 +609,7 @@ pub(crate) fn item_landed(db: &mut Db, gb: &GoalBranch, key: &str, from: &str, t
         return Ok(None);
     }
     let waiting = db.goal_items_waiting(gb.goal)?;
-    let Some(why) = due(gb, &waiting, now()) else { return Ok(None) };
+    let Some(why) = due(gb, &waiting, now(), db.goal_open_items(gb.goal, key)?) else { return Ok(None) };
     let cp = open_checkpoint(db, gb, to, actor)?;
     Ok(Some(format!("{why}, so {} is filed to land it into main: start_task, submit and land it", cp.issue)))
 }
@@ -1021,6 +1064,8 @@ commands = { fake = ["{sh}", "-c", "cat > /dev/null; echo 'Fine.'; echo 'VERDICT
         db: Db,
         actor: Actor,
         goal: i64,
+        /// An item of the goal that stays open, so a checkpoint waits for its count or a day.
+        rest: String,
     }
 
     fn fixture(name: &str, remote: bool) -> Fixture {
@@ -1032,11 +1077,14 @@ commands = { fake = ["{sh}", "-c", "cat > /dev/null; echo 'Fine.'; echo 'VERDICT
         if remote {
             crate::test_repo::add_remote(&repo, &base.join("remote.git"));
         }
-        let db = Db::open(&base.join("t.db")).unwrap();
+        let mut db = Db::open(&base.join("t.db")).unwrap();
         db.create_project("NIT", "Nitely").unwrap();
         let change = crate::goals::GoalChange { title: Some("Slice".into()), outcome: Some("It works.".into()), ..Default::default() };
         let goal = db.save_goal("NIT", None, &change, &Actor::Human).unwrap().id;
-        Fixture { base, repo, db, actor: Actor::Agent("claude:test".into()), goal }
+        let actor = Actor::Agent("claude:test".into());
+        let rest = NewIssue { project: "NIT".into(), title: "The rest of the slice".into(), kind: "feature".into(), body: "b".into(), evidence: "e".into(), source: "human".into(), goal: Some(goal), ..Default::default() };
+        let rest = db.create_issue(&rest, &actor).unwrap().key;
+        Fixture { base, repo, db, actor, goal, rest }
     }
 
     impl Fixture {
@@ -1078,6 +1126,57 @@ commands = { fake = ["{sh}", "-c", "cat > /dev/null; echo 'Fine.'; echo 'VERDICT
             let n: i64 = self.db.conn.query_row("SELECT COUNT(*) FROM event WHERE issue_key = ?1 AND summary LIKE ?2", params![key, format!("%{text}%")], |r| r.get(0)).unwrap();
             n > 0
         }
+    }
+
+    #[test]
+    fn a_mode_with_goal_branches_turns_a_goals_branch_on_unless_it_was_turned_off() {
+        // Fast and Careful land goal items through goal branches; Release does not.
+        assert_eq!(engage(Some(true), Some(10), true, false, false), Some(10));
+        assert_eq!(engage(Some(true), None, true, false, false), Some(CHECKPOINT_ITEMS));
+        assert_eq!(engage(Some(false), Some(10), true, false, false), None);
+        assert_eq!(engage(None, None, true, false, false), None, "no mode set: as before");
+        assert_eq!(engage(Some(true), Some(10), true, true, false), None, "it has one already");
+        assert_eq!(engage(Some(true), Some(10), true, false, true), None, "a person turned it off");
+        assert_eq!(engage(Some(true), Some(10), false, false, false), None, "a goal done or dropped");
+    }
+
+    /// Under Fast, with no goal_branch call: the goal's first item makes its branch and lands into
+    /// it, the next starts from it, and once the goal has nothing left open the checkpoint is filed
+    /// without waiting for a day or the item count.
+    #[test]
+    fn a_goal_under_fast_lands_its_items_through_its_branch_and_checkpoints_when_all_are_in() {
+        let mut f = fixture("nitely-goal-branch-mode", false);
+        crate::project_modes::set_for_test(&mut f.db, "NIT", crate::project_modes::Mode::Fast, Default::default());
+        f.db.move_issue(&f.rest, "Canceled", None, Some("not in this test"), &Actor::Human).unwrap();
+        let main_before = f.head("main");
+        let (a, b) = (f.issue("A", Some(f.goal)), f.issue("B", Some(f.goal)));
+        let none = f.issue("No goal", None);
+
+        let issue = f.db.issue(&a).unwrap().unwrap();
+        let started = playbook::start_task(&f.db, &f.repo, &issue, "claude", &f.actor).unwrap();
+        assert_eq!(started.lands_into, "goal-1", "start_task says where it lands");
+        let gb = f.db.goal_branch(f.goal).unwrap().expect("the mode turned the goal's branch on");
+        assert_eq!((gb.branch.as_str(), gb.checkpoint_items), ("goal-1", 10), "with the mode's checkpoint size");
+        let wt = PathBuf::from(started.worktree);
+        std::fs::write(wt.join("a.txt"), "a\n").unwrap();
+        sh(&wt, &["add", "."]);
+        sh(&wt, &["commit", "-q", "-m", "A"]);
+        assert_eq!(f.land(&a).goal_branch.as_deref(), Some("goal-1"));
+        assert_eq!(f.head("main"), main_before, "main is untouched by an item");
+        assert!(f.db.open_checkpoint(f.goal).unwrap().is_none(), "B is still open");
+
+        let wt = f.work(&b, "b.txt", "b\n");
+        assert!(wt.join("a.txt").exists(), "the next item starts from the goal branch");
+        let landed = f.land(&b);
+        assert!(landed.landed && f.has("goal-1", "b.txt"), "{landed:?}");
+        let cp = f.db.open_checkpoint(f.goal).unwrap().expect("nothing left open: the checkpoint is filed");
+        assert!(landed.goals.iter().any(|g| g.contains("no open items left")), "and says why: {:?}", landed.goals);
+        assert_eq!(f.db.issue(&cp.issue).unwrap().unwrap().goal, Some(f.goal));
+
+        // An issue with no goal still starts from and lands on main.
+        let issue = f.db.issue(&none).unwrap().unwrap();
+        assert_eq!(playbook::start_task(&f.db, &f.repo, &issue, "claude", &f.actor).unwrap().lands_into, "main");
+        std::fs::remove_dir_all(&f.base).ok();
     }
 
     /// The whole goal-branch hop, as goal-19 itself runs by hand: items start from the goal branch
