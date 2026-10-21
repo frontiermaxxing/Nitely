@@ -206,7 +206,7 @@ function HoursSaved(props: { stats: LeaderboardStats; p: PeriodStats; all: Perio
         <div className="lb-saved-chart">
           <span className="lb-label">Developer hours saved, per week</span>
           <WeeklyBars
-            values={weeks.map((w) => developerHours(w.agent_hours))}
+            values={props.stats.weekly_agent_hours.map(developerHours)}
             weekStarts={weeks.map((w) => w.week_start)}
             format={(v) => `≈ ${hours(v)} hours`}
             label={`Developer hours saved per week, the last ${weeks.length} weeks`}

@@ -47,6 +47,11 @@ pub struct Leaderboard {
     pub periods: Vec<PeriodStats>,
     /// Landed changes per week, the last `SERIES_WEEKS` weeks, oldest first, this week last.
     pub weekly: Vec<WeekPoint>,
+    /// Agent hours in each week of `weekly`.
+    pub weekly_agent_hours: Vec<f64>,
+    /// Landed changes per day over the weeks of `weekly`: Monday of the first to Sunday of this
+    /// one, days still to come included.
+    pub daily: Vec<DayCount>,
     /// Personal records, over all time.
     pub records: Records,
 }
@@ -68,17 +73,26 @@ pub struct PeriodStats {
     pub lead_time: Option<Spread>,
     /// Hours agents' sessions ran in the period (every session counts as automated).
     pub agent_hours: f64,
+    /// Agent sessions that ran in the period.
+    pub sessions: u64,
     /// Tokens spent (new input, cache writes and output; `Usage::tokens`).
     pub tokens: u64,
     /// Asked to answered, for Inbox questions answered in the period, in seconds.
     pub inbox_reply: Option<Spread>,
+    /// Those answers by how long they waited: up to `REPLY_BUCKETS` each, then a day or more.
+    pub reply_buckets: Vec<u64>,
     /// The week with landings on the most days.
     pub steadiest_week: Option<WeekPoint>,
     /// Landed changes per vendor, most first.
     pub vendors: Vec<VendorShare>,
     /// Review rounds per reviewed landed change.
     pub review_rounds: Option<Rounds>,
+    /// Reviewed landed changes by their rounds: 1, 2, 3, then 4 or more.
+    pub round_counts: Vec<u64>,
 }
+
+/// Where the Inbox reply buckets end, in seconds: 5 minutes, 30, 2 hours, 8, a day.
+pub const REPLY_BUCKETS: [i64; 5] = [300, 1800, 7200, 28_800, DAY];
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Spread {
@@ -109,6 +123,8 @@ pub struct VendorShare {
     pub landed: u64,
     /// Of all landed in the period (0 to 1).
     pub share: f64,
+    /// Of its reviewed landed changes, the share whose first review passed.
+    pub first_pass_rate: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Default)]
@@ -184,7 +200,8 @@ pub fn stats(db: &Db, inputs: &Inputs) -> Result<Leaderboard> {
         });
         let lead_time = spread(inside.iter().filter_map(|c| c.lead).collect());
         let inbox_reply = spread(asks.iter().filter(|(answered, _)| *answered >= from && *answered <= to).map(|(_, took)| *took).collect());
-        let agent_hours = sessions.iter().map(|(start, end)| (end.min(&to) - start.max(&from)).max(0)).sum::<i64>() as f64 / 3600.0;
+        let agent_hours = hours_between(&sessions, from, to);
+        let session_count = sessions.iter().filter(|(start, end)| *start <= to && *end >= from).count() as u64;
         let tokens = inputs
             .tokens
             .iter()
@@ -192,12 +209,33 @@ pub fn stats(db: &Db, inputs: &Inputs) -> Result<Leaderboard> {
             .filter(|t| projects.is_empty() || t.project.as_deref().is_some_and(|p| projects.contains(&p.to_uppercase())))
             .map(|t| t.usage.tokens())
             .sum();
-        let mut by_vendor: BTreeMap<String, u64> = BTreeMap::new();
+        // Per vendor: landed, reviewed, passed the first review.
+        let mut by_vendor: BTreeMap<String, (u64, u64, u64)> = BTreeMap::new();
         for c in &inside {
-            *by_vendor.entry(c.vendor.clone()).or_default() += 1;
+            let v = by_vendor.entry(c.vendor.clone()).or_default();
+            v.0 += 1;
+            if let Some(first) = c.reviews.first() {
+                v.1 += 1;
+                v.2 += u64::from(first == "pass");
+            }
         }
-        let mut vendors: Vec<VendorShare> =
-            by_vendor.into_iter().map(|(vendor, n)| VendorShare { vendor, landed: n, share: n as f64 / landed.max(1) as f64 }).collect();
+        let mut vendors: Vec<VendorShare> = by_vendor
+            .into_iter()
+            .map(|(vendor, (n, reviewed, passed))| VendorShare {
+                vendor,
+                landed: n,
+                share: n as f64 / landed.max(1) as f64,
+                first_pass_rate: (reviewed > 0).then(|| passed as f64 / reviewed as f64),
+            })
+            .collect();
+        let mut round_counts = vec![0u64; 4];
+        for c in &reviewed {
+            round_counts[c.reviews.len().clamp(1, 4) - 1] += 1;
+        }
+        let mut reply_buckets = vec![0u64; REPLY_BUCKETS.len() + 1];
+        for (_, took) in asks.iter().filter(|(answered, _)| *answered >= from && *answered <= to) {
+            reply_buckets[REPLY_BUCKETS.iter().position(|end| took < end).unwrap_or(REPLY_BUCKETS.len())] += 1;
+        }
         vendors.sort_by(|a, b| b.landed.cmp(&a.landed).then(a.vendor.cmp(&b.vendor)));
         let steadiest_week = weeks(inside.iter().map(|c| c.landed_at), &week_start, &day_start)
             .into_iter()
@@ -212,11 +250,14 @@ pub fn stats(db: &Db, inputs: &Inputs) -> Result<Leaderboard> {
             reviewed: reviewed.len() as u64,
             lead_time,
             agent_hours,
+            sessions: session_count,
             tokens,
             inbox_reply,
+            reply_buckets,
             steadiest_week,
             vendors,
             review_rounds,
+            round_counts,
         });
     }
 
@@ -228,7 +269,8 @@ pub fn stats(db: &Db, inputs: &Inputs) -> Result<Leaderboard> {
             let start = week_start(this_week - back * WEEK + DAY);
             by_start.get(&start).map(|w| (*w).clone()).unwrap_or(WeekPoint { week_start: start, landed: 0, active_days: 0 })
         })
-        .collect();
+        .collect::<Vec<WeekPoint>>();
+    let weekly_agent_hours = weekly.iter().map(|w| hours_between(&sessions, w.week_start, week_start(w.week_start + WEEK + DAY))).collect();
 
     let mut per_day: BTreeMap<i64, u64> = BTreeMap::new();
     for c in &changes {
@@ -252,7 +294,15 @@ pub fn stats(db: &Db, inputs: &Inputs) -> Result<Leaderboard> {
         longest_streak_days: longest,
         fastest_lead: changes.iter().filter_map(|c| c.lead.map(|l| (l, c))).min_by_key(|(l, _)| *l).map(|(l, c)| Fastest { issue: c.issue.clone(), seconds: l }),
     };
-    Ok(Leaderboard { generated_at: inputs.now, projects, periods, weekly, records })
+    // Each day of the series by its local start, so a day across a DST change is still one day.
+    let first_day = weekly.first().map(|w| w.week_start).unwrap_or(this_week);
+    let daily = (0..SERIES_WEEKS as i64 * 7)
+        .map(|n| {
+            let start = day_start(first_day + n * DAY + DAY / 2);
+            DayCount { day_start: start, landed: per_day.get(&start).copied().unwrap_or(0) }
+        })
+        .collect();
+    Ok(Leaderboard { generated_at: inputs.now, projects, periods, weekly, weekly_agent_hours, daily, records })
 }
 
 /// The landed changes of the counted projects, oldest first.
@@ -333,6 +383,11 @@ fn weeks(landed_at: impl Iterator<Item = i64>, week_start: &dyn Fn(i64) -> i64, 
         w.1.insert(day_start(t));
     }
     by_week.into_iter().map(|(week_start, (landed, days))| WeekPoint { week_start, landed, active_days: days.len() as u64 }).collect()
+}
+
+/// Hours `sessions` ran between `from` and `to`.
+fn hours_between(sessions: &[(i64, i64)], from: i64, to: i64) -> f64 {
+    sessions.iter().map(|(start, end)| (end.min(&to) - start.max(&from)).max(0)).sum::<i64>() as f64 / 3600.0
 }
 
 /// The median and p90 of `values`, None for none.
@@ -439,8 +494,14 @@ mod tests {
         assert_eq!(week.tokens, 1_000, "NIT's, cache reads apart");
         assert_eq!(
             week.vendors,
-            [VendorShare { vendor: "claude".into(), landed: 2, share: 2.0 / 3.0 }, VendorShare { vendor: "codex".into(), landed: 1, share: 1.0 / 3.0 }]
+            [
+                VendorShare { vendor: "claude".into(), landed: 2, share: 2.0 / 3.0, first_pass_rate: Some(1.0) },
+                VendorShare { vendor: "codex".into(), landed: 1, share: 1.0 / 3.0, first_pass_rate: Some(0.0) }
+            ]
         );
+        assert_eq!(week.round_counts, [1, 1, 0, 0]);
+        assert_eq!(week.reply_buckets, [0, 1, 0, 0, 0, 0], "15 minutes");
+        assert_eq!(week.sessions, 1);
         assert_eq!(week.steadiest_week, Some(WeekPoint { week_start: MONDAY, landed: 3, active_days: 3 }));
         let month = &b.periods[1];
         assert_eq!(month.landed, 4, "NIT-5 is 40 days back");
@@ -452,6 +513,12 @@ mod tests {
         assert_eq!(b.weekly.last().unwrap(), &WeekPoint { week_start: MONDAY, landed: 3, active_days: 3 });
         assert_eq!(b.weekly[SERIES_WEEKS - 2], WeekPoint { week_start: MONDAY - WEEK, landed: 1, active_days: 1 });
         assert_eq!(b.weekly[0].week_start, MONDAY - 25 * WEEK);
+        assert_eq!(b.weekly_agent_hours.len(), SERIES_WEEKS);
+        assert_eq!(b.weekly_agent_hours[SERIES_WEEKS - 1], 2.0);
+        assert_eq!(b.daily.len(), SERIES_WEEKS * 7);
+        assert_eq!(b.daily[0].day_start, MONDAY - 25 * WEEK);
+        let this_week: Vec<u64> = b.daily[(SERIES_WEEKS - 1) * 7..].iter().map(|d| d.landed).collect();
+        assert_eq!(this_week, [1, 1, 1, 0, 0, 0, 0]);
 
         assert_eq!(b.records.longest_streak_days, 3, "Monday to Wednesday");
         assert_eq!(b.records.best_week, Some(WeekPoint { week_start: MONDAY, landed: 3, active_days: 3 }));

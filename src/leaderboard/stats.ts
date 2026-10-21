@@ -15,8 +15,6 @@ export interface WeekPoint {
   week_start: number;
   landed: number;
   active_days: number;
-  /** Hours agents' sessions ran that week. */
-  agent_hours: number;
 }
 
 export interface DayCount {
@@ -67,6 +65,8 @@ export interface LeaderboardStats {
   periods: PeriodStats[];
   /** The last 26 weeks, oldest first, this week last. */
   weekly: WeekPoint[];
+  /** Hours agents' sessions ran in each week of `weekly`. */
+  weekly_agent_hours: number[];
   /** Every day of those 26 weeks, oldest first: Monday of the first week to Sunday of this one. */
   daily: DayCount[];
   records: Records;

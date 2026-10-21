@@ -32,16 +32,12 @@ export function leaderboardFixture(): LeaderboardStats {
   });
   const weekly: WeekPoint[] = Array.from({ length: 26 }, (_, w) => {
     const days = daily.slice(w * 7, w * 7 + 7);
-    return {
-      week_start: firstMonday + w * 7 * DAY,
-      landed: days.reduce((n, d) => n + d.landed, 0),
-      active_days: days.filter((d) => d.landed > 0).length,
-      agent_hours: empty ? 0 : Math.round((days.reduce((n, d) => n + d.landed, 0) * 0.37 + r() * 3) * 10) / 10,
-    };
+    return { week_start: firstMonday + w * 7 * DAY, landed: days.reduce((n, d) => n + d.landed, 0), active_days: days.filter((d) => d.landed > 0).length };
   });
+  const weeklyHours = weekly.map((w) => (empty ? 0 : Math.round((w.landed * 0.37 + r() * 3) * 10) / 10));
   const period = (key: PeriodKey, from: number, scale: number): PeriodStats => {
     const landed = daily.filter((d) => d.day_start >= from - DAY + 1).reduce((n, d) => n + d.landed, 0);
-    const hours = weekly.filter((w) => w.week_start >= from - 6 * DAY).reduce((n, w) => n + w.agent_hours, 0);
+    const hours = weekly.reduce((n, w, i) => (w.week_start >= from - 6 * DAY ? n + weeklyHours[i] : n), 0);
     if (empty) return { period: key, from, to: now, landed: 0, landed_per_day: 0, first_pass_rate: null, reviewed: 0, lead_time: null, agent_hours: 0, sessions: 0, tokens: 0, inbox_reply: null, reply_buckets: [0, 0, 0, 0, 0, 0], steadiest_week: null, vendors: [], review_rounds: null, round_counts: [0, 0, 0, 0] };
     const reviewed = Math.round(landed * 0.92);
     const claude = Math.round(landed * 0.58);
@@ -77,6 +73,7 @@ export function leaderboardFixture(): LeaderboardStats {
     projects: [],
     periods: [period("week", mondayOf(now), 1), period("30d", now - 30 * DAY, 4), period("all", firstMonday, 20)],
     weekly,
+    weekly_agent_hours: weeklyHours,
     daily,
     records: empty
       ? { best_day: null, best_week: null, longest_streak_days: 0, fastest_lead: null }
