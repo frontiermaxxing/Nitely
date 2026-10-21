@@ -48,7 +48,6 @@ pub struct Submitted {
     pub review: Option<Review>,
     /// Deliberately disabled by project policy, distinct from an ad-hoc skip.
     pub review_disabled: bool,
-    pub review_light: bool,
     /// Its review waits for its land queue batch (review_batch.rs, NIT-509).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub review_batched: bool,
@@ -193,7 +192,6 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         gate,
         review: None,
         review_disabled: false,
-        review_light: false,
         review_batched: false,
         yolo: false,
         approver: "human".into(),
@@ -228,8 +226,6 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     out.reasons = pb.human_reasons(&files)?;
     if crate::project_yolo::enabled_for_issue(db, &issue.key)? {
         out.yolo = true;
-    } else if out.gate.plan.as_ref().is_some_and(|p|p.effective=="inert") && crate::project_modes::for_issue(db, &issue.key)?.is_none_or(|s| s.options().pre_review.is_none()) {
-        out.review_light = true;
     } else if !pb.review.enabled {
         out.review_disabled = true;
     } else if opts.skip_review {
@@ -295,13 +291,13 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
             else if e.is::<crate::review::Disabled>() { out.review_disabled = true; } else { return Err(e); }
         }
     }
-    if out.review_disabled || out.yolo || out.review_light {
+    if out.review_disabled || out.yolo {
         let mut latest = Playbook::load(&root)?;
         crate::project_modes::apply_issue(db, &issue.key, &mut latest)?;
         out.reasons.extend(latest.review.unevaluated_reasons());
     }
     out.approver = if out.reasons.is_empty() { "agent" } else { "human" }.into();
-    let mut verdict = out.review.as_ref().map_or(if out.yolo { "yolo" } else if out.review_batched { crate::review_batch::PENDING } else if out.review_light { "light" } else if out.review_disabled { "disabled" } else { "none" }, |r| r.verdict.as_str()).to_string();
+    let mut verdict = out.review.as_ref().map_or(if out.yolo { "yolo" } else if out.review_batched { crate::review_batch::PENDING } else if out.review_disabled { "disabled" } else { "none" }, |r| r.verdict.as_str()).to_string();
     // Findings the person accepted as they are, signed for this very patch, block nothing: the
     // review is recorded as it asked, and goes on as a passing one (land checks the same).
     let accepted_only = match &out.review {
@@ -435,8 +431,6 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         (Some(r), "human") => format!("Review by {} passed; waits for a human", by(r)),
         (Some(r), _) => format!("Review by {} passed; ready to land", by(r)),
         (None, _) if out.review_batched => "Gate passed; its review waits for its land queue batch, which reviews what waits together, once, before the batch's gate".into(),
-        (None, "human") if out.review_light => "Basic checks: passed; pre-land review is exempt; waits for a human".into(),
-        (None, _) if out.review_light => "Basic checks: passed; pre-land review is exempt; post-merge audit applies".into(),
         (None, "human") if out.yolo => format!("{}; waits for a human under the remaining approval rules", crate::project_yolo::NOTE),
         (None, _) if out.yolo => format!("{}; unverified and ready to land", crate::project_yolo::NOTE),
         (None, "human") if out.review_disabled => format!("{}; waits for a human under the remaining approval rules", crate::review::DISABLED_NOTE),
@@ -476,7 +470,6 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         ("Needs You", "It waits for the human's approval in the Nitely inbox. Nitely already asked them, so do not `ask` for this approval yourself. Pick up other work meanwhile; once it is Approved, call land.")
     } else if out.review_batched {
         ("In Review", "The gate passed; its review waits for its land queue batch. Call land: the queue reviews it with whatever else is waiting, in one reviewer call, before their gate, and nothing lands unreviewed. If the review asks for changes, land says so and the issue is back with you.")
-    } else if out.review_light {
         ("In Review", "Basic checks passed under the committed verification policy; pre-land review is exempt. Call land; post-merge audit applies.")
     } else if out.yolo {
         ("In Review", "YOLO mode: automatic gate and PR review skipped. This revision is unverified. Call land while YOLO remains enabled.")
@@ -542,7 +535,6 @@ fn submit_into_goal(db: &mut Db, config: &crate::Config, issue: &IssueRecord, ro
         solution: None,
         review: None,
         review_disabled: false,
-        review_light: false,
         review_batched: false,
         yolo: false,
         approver: "agent".into(),
@@ -883,7 +875,7 @@ pub fn describe(issue: &IssueRecord, s: &Submitted, land_by: crate::playbook::La
         "**Approval:** a human approved this exact patch in Nitely, and this review raised nothing new, so it stands.".to_string()
     } else if s.approver == "human" {
         "**Approval:** waits for a human. Approve it in Nitely's inbox.".to_string()
-    } else if s.review_disabled || s.yolo || s.review_light {
+    } else if s.review_disabled || s.yolo {
         "**Approval:** no human approval is required under this repo's remaining rules.".to_string()
     } else {
         "**Approval:** the review is enough under this repo's playbook.".to_string()
@@ -915,7 +907,6 @@ pub fn describe(issue: &IssueRecord, s: &Submitted, land_by: crate::playbook::La
             }));
         }
         None if s.review_batched => lines.push(format!("**Review:** {}.", crate::review_batch::PENDING_NOTE)),
-        None if s.review_light => lines.push("**Review:** exempt for mechanically proven Basic change; post-merge audit applies.".into()),
         None if s.yolo => lines.push(format!("**Review:** {}. This revision is unverified.", crate::project_yolo::NOTE)),
         None if s.review_disabled => lines.push(format!("**Review:** {}.", crate::review::DISABLED_NOTE)),
         None => lines.push("**Review:** none ran.".into()),
@@ -933,7 +924,7 @@ pub fn describe(issue: &IssueRecord, s: &Submitted, land_by: crate::playbook::La
     lines.push(format!(
         "`nitely review patch={} verdict={} approver={} reviewer={}`",
         s.patch_id,
-        s.review.as_ref().map_or(if s.yolo { "yolo" } else if s.review_light { "light" } else if s.review_disabled { "disabled" } else { "none" }, |r| r.verdict.as_str()),
+        s.review.as_ref().map_or(if s.yolo { "yolo" } else if s.review_disabled { "disabled" } else { "none" }, |r| r.verdict.as_str()),
         s.approver,
         s.review.as_ref().map_or("none", |r| r.reviewer.as_str())
     ));
@@ -1033,7 +1024,6 @@ impl Db {
         let (reviewer, verdict, findings, flagged, note) = match &s.review {
             Some(r) => (r.reviewer.as_str(), r.verdict.as_str(), to_json(&r.findings), to_json(&r.flagged), r.note.as_str()),
             None if s.review_batched => ("", crate::review_batch::PENDING, "[]".to_string(), "[]".to_string(), crate::review_batch::PENDING_NOTE),
-            None if s.review_light => ("", "light", "[]".to_string(), "[]".to_string(), "Basic verification: pre-land review exempt; post-merge audit applies"),
             None if s.yolo => ("", "yolo", "[]".to_string(), "[]".to_string(), crate::project_yolo::NOTE),
             None if s.review_disabled => ("", "disabled", "[]".to_string(), "[]".to_string(), crate::review::DISABLED_NOTE),
             None => ("", "none", "[]".to_string(), "[]".to_string(), ""),
@@ -1367,6 +1357,10 @@ reason = "money logic"
         assert!(!describe(&issue, &s, Default::default()).contains("**Gate** passed"));
         assert!(!playbook::run_gate(&f.db, &f.repo, &wt, Some(&issue.key), &f.actor).unwrap().passed, "manual checks still execute");
         let pb = Playbook::load(&f.repo).unwrap();
+        // A review recorded under the retired Basic exemption never lands unreviewed (NIT-510).
+        f.db.conn.execute("UPDATE review SET verdict = 'light' WHERE issue_key = ?1", [&issue.key]).unwrap();
+        assert!(crate::land::check_approval(&f.db, &pb, &issue.key, &wt, "main", &s.branch).unwrap_err().to_string().contains("exemption is retired"));
+        f.db.conn.execute("UPDATE review SET verdict = 'yolo' WHERE issue_key = ?1", [&issue.key]).unwrap();
         f.db.set_project_review_mode("NIT", Mode::Release, Options::default(), 1, &Actor::Human).unwrap();
         assert!(crate::land::check_approval(&f.db, &pb, &issue.key, &wt, "main", &s.branch).unwrap_err().to_string().contains("project review mode changed"));
         f.db.set_project_review_mode("NIT", Mode::Custom, off(), 2, &Actor::Human).unwrap();

@@ -1154,16 +1154,12 @@ pub(crate) fn check_approval(db: &Db, pb: &Playbook, key: &str, worktree: &Path,
     let mut accepted = String::new();
     check_yolo_policy(db, key, &review)?;
     check_disabled_policy(pb, &review)?;
-    if review.verdict=="light" && !crate::project_yolo::enabled_for_issue(db,key)? {
-        let root=git(worktree,&["rev-parse","--git-common-dir"])?;
-        let common=std::path::PathBuf::from(root.trim());
-        let common=if common.is_absolute(){common}else{worktree.join(common)};
-        let repo=common.parent().context("missing repository root")?;
-        let plan=crate::verification::execution_plan(db,repo,worktree,key)?.context("Basic review exemption no longer applies; submit for normal review")?;
-        if plan.effective!="inert" {bail!("the change no longer has a Basic proof; submit for normal review");}
+    // The Basic review exemption is retired (NIT-510): a change recorded under it gets a review.
+    if review.verdict == "light" {
+        bail!("the Basic review exemption is retired; submit again for a review");
     }
     match review.verdict.as_str() {
-        "pass" | "none" | "disabled" | "yolo" | "light" => {}
+        "pass" | "none" | "disabled" | "yolo" => {}
         // Never reviewed: its land batch reviews it first (review_batch::review_pending), so nothing
         // lands unreviewed.
         crate::review_batch::PENDING => bail!("its review waits for its land batch, and has not run; land it again"),
@@ -1179,7 +1175,7 @@ pub(crate) fn check_approval(db: &Db, pb: &Playbook, key: &str, worktree: &Path,
     let files: Vec<String> = git(worktree, &["diff", "--name-only", "--no-renames", &format!("{base}...HEAD")])?.lines().map(str::to_string).collect();
     pb.approval.check_blocked(&files)?;
     let mut reasons = pb.human_reasons(&files)?;
-    if matches!(review.verdict.as_str(), "disabled" | "yolo" | "light") {
+    if matches!(review.verdict.as_str(), "disabled" | "yolo") {
         let unanswered = pb.review.unevaluated_reasons();
         reasons.extend(unanswered);
     }
@@ -1195,7 +1191,6 @@ pub(crate) fn check_approval(db: &Db, pb: &Playbook, key: &str, worktree: &Path,
     }
     reasons.dedup();
     if reasons.is_empty() {
-        if review.verdict=="light" {return Ok("Mechanically proven Basic change; pre-land review exempt under current policy".into());}
         if review.verdict == "yolo" { return Ok(format!("{}; no human approval is required", crate::project_yolo::NOTE)); }
         if review.verdict == "disabled" {
             return Ok(format!("{}; no human approval is required", crate::review::DISABLED_NOTE));

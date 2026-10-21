@@ -167,12 +167,11 @@ fn repo_key(root: &Path) -> String {
     crate::paths::normalize(&root.to_string_lossy())
 }
 
-// Explicit project batching replaces a reduced submit gate with a Full combined gate. The
-// legacy Basic review exemption remains individual because the stack has no equivalent proof.
+// Explicit project batching replaces a reduced submit gate with a Full combined gate.
 fn review_requires_individual(db: &Db, key: &str, review: Option<&crate::submit::ReviewRecord>) -> Result<bool> {
     let Some(review) = review else { return Ok(false) };
-    Ok(review.verdict == "light" || (review.gate.as_ref().is_some_and(|g| g.plan.is_some())
-        && crate::project_modes::for_issue(db, key)?.is_none_or(|s| s.options().land_batch != Some(true))))
+    Ok(review.gate.as_ref().is_some_and(|g| g.plan.is_some())
+        && crate::project_modes::for_issue(db, key)?.is_none_or(|s| s.options().land_batch != Some(true)))
 }
 
 /// Why `key` lands alone even though it could wait in a queue, or None when it goes in the queue.
