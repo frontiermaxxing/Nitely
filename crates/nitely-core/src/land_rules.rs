@@ -457,7 +457,7 @@ mod tests {
     /// For every stack up to 9 and every change in it that breaks the gate, with no suspect, the
     /// right suspect, a wrong one, and a suspect whose stack would not build: the search names
     /// the change that broke it, within 1 + ⌈log2 k⌉ gates after the whole one. This is the
-    /// decision `land_queue::tests::a_bad_change_is_bisected_out_of_five` checks with real gates.
+    /// decision `land_queue::tests::a_bad_change_is_bisected_out_of_three` checks with real gates.
     #[test]
     fn bisection_finds_the_change_that_broke_the_stack_within_its_gate_bound() {
         assert_eq!(search(1, 0, None, true), (Found::Only, 0));

@@ -1232,11 +1232,13 @@ reason = "billing"
         std::fs::remove_dir_all(&f.base).ok();
     }
 
-    /// A queue run records each landed change's verification as a single land does, from the
-    /// branch the run gated against, and runs the `[[land.after]]` steps once for the stack, said on
-    /// every change it landed (NIT-469).
+    /// One queue run over what waited: the changes that stack land together on one gate; one that
+    /// conflicts with the change landing just before it goes back with its branch and worktree as
+    /// handed in; one that moved since its review goes back for a new one. Each change it landed
+    /// records its verification as a single land does, and the `[[land.after]]` steps run once for
+    /// the stack, said on every change it landed (NIT-469).
     #[test]
-    fn a_queue_run_records_each_lands_verification_and_runs_the_after_steps_once() {
+    fn what_waits_lands_together_on_one_gate_and_what_cannot_goes_back() {
         use crate::project_modes::{Backstop, Mode, Options};
         let mut f = fixture();
         let installs = f.base.join("installs.txt");
@@ -1246,29 +1248,6 @@ reason = "billing"
         sh(&f.repo, &["commit", "-qam", "an install after landing"]);
         let backstop = Options { full_backstop: Some(Backstop { enabled: true, landings: 5, delay_seconds: 1800 }), land_batch: Some(true), ..Default::default() };
         crate::project_modes::set_for_test(&mut f.db, "NIT", Mode::Custom, backstop);
-        let (a, _) = f.submitted("A", &[("crates/a.rs", "a")]);
-        let (b, _) = f.submitted("B", &[("crates/b.rs", "b")]);
-        f.queue_and_run(&[&a, &b]);
-        for k in [&a, &b] {
-            assert_eq!(f.entry(k).state, "landed", "{k}: {}", f.error(k));
-            let timeline = f.db.timeline(k).unwrap();
-            assert!(!timeline.iter().any(|e| e.kind == "verification_record_failed"), "{k}: {timeline:?}");
-            assert!(timeline.iter().any(|e| e.kind == "land_after" && e.summary.as_deref().is_some_and(|s| s.contains("ran `echo installed"))), "{k}: {timeline:?}");
-        }
-        let recorded: i64 = f.db.conn.query_row("SELECT COUNT(*) FROM verification_landing WHERE issue_key IN (?1, ?2)", rusqlite::params![a, b], |r| r.get(0)).unwrap();
-        assert_eq!(recorded, 2, "both lands' verification records");
-        let ran = std::fs::read_to_string(&installs).unwrap();
-        assert_eq!(ran.lines().filter(|l| l.trim() == "installed").count(), 1, "one install for the run: {ran:?}");
-        assert!(f.db.after_land_failed().unwrap().is_none());
-        std::fs::remove_dir_all(&f.base).ok();
-    }
-
-    /// One queue run over what waited: the changes that stack land together on one gate; one that
-    /// conflicts with the change landing just before it goes back with its branch and worktree as
-    /// handed in; one that moved since its review goes back for a new one.
-    #[test]
-    fn what_waits_lands_together_on_one_gate_and_what_cannot_goes_back() {
-        let mut f = fixture();
         let (a, wa) = f.submitted("A", &[("shared.txt", "from A\n")]);
         let (b, wb) = f.reviewed("B", &[("shared.txt", "from B\n")]);
         let (m, wm) = f.reviewed("M", &[("m.txt", "m")]);
@@ -1291,6 +1270,16 @@ reason = "billing"
         let note = landed.batch.unwrap();
         assert_eq!((note.with, note.gates), (vec![c.clone()], 1));
         assert!(landed.approval.unwrap().contains("no human approval is needed"));
+        for k in [&a, &c] {
+            let timeline = f.db.timeline(k).unwrap();
+            assert!(!timeline.iter().any(|e| e.kind == "verification_record_failed"), "{k}: {timeline:?}");
+            assert!(timeline.iter().any(|e| e.kind == "land_after" && e.summary.as_deref().is_some_and(|s| s.contains("ran `echo installed"))), "{k}: {timeline:?}");
+        }
+        let recorded: i64 = f.db.conn.query_row("SELECT COUNT(*) FROM verification_landing WHERE issue_key IN (?1, ?2)", rusqlite::params![a, c], |r| r.get(0)).unwrap();
+        assert_eq!(recorded, 2, "both lands' verification records");
+        let ran = std::fs::read_to_string(&installs).unwrap();
+        assert_eq!(ran.lines().filter(|l| l.trim() == "installed").count(), 1, "one install for the run: {ran:?}");
+        assert!(f.db.after_land_failed().unwrap().is_none());
 
         assert_eq!(f.entry(&b).state, "sent_back");
         let why = f.error(&b);
@@ -1336,9 +1325,12 @@ reason = "billing"
         std::fs::remove_dir_all(&f.base).ok();
     }
 
+    /// Three changes, the middle one bad: one prefix passes and one fails, so both halving outcomes
+    /// run on real gates. land_rules::bisection_finds_the_change... proves the search for stacks of
+    /// 1 to 9 (NIT-528).
     #[test]
-    fn a_bad_change_is_bisected_out_of_five() {
-        bisects(5, 3);
+    fn a_bad_change_is_bisected_out_of_three() {
+        bisects(3, 1);
     }
 
     #[test]

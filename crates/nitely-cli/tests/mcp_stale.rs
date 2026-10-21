@@ -109,9 +109,32 @@ fn text(reply: &Value) -> String {
     reply["result"]["content"][0]["text"].as_str().unwrap_or_default().to_string()
 }
 
+/// A call, and a submit job started by the same old build, both meet a database a newer build
+/// upgraded: each waits for the install and goes to the new build (NIT-528 merged older_job's
+/// install scenario in here).
 #[test]
 fn a_call_that_meets_a_newer_database_waits_for_the_install_and_goes_to_the_new_build() {
     let (mut mcp, base, exe) = setup("nitely-mcp-stale-install", 30);
+    // A queued submit job, run by the old build too.
+    let conn = rusqlite::Connection::open(base.join("nitely.db")).unwrap();
+    conn.execute(
+        "INSERT INTO submit_job (issue_key, worktree, branch, head, requested_by, skip_review, local_only, state, queued_at)
+         VALUES ('APP-1', ?1, 'claude/app-1-x', 'abc1234', 'claude:test', 0, 1, 'queued', 1)",
+        [base.join("no-such-worktree").to_string_lossy()],
+    )
+    .unwrap();
+    let job = conn.last_insert_rowid();
+    drop(conn);
+    let mut submit_job = spawn(
+        Command::new(&exe)
+            .args(["submit-job", &job.to_string()])
+            .current_dir(&base)
+            .env("NITELY_HOME", &base)
+            .env("NITELY_MCP_INSTALL_WAIT", "30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
     // The install lands a moment after the call: the database is the newer build's already.
     let installer = {
         let (base, exe) = (base.clone(), exe.clone());
@@ -126,6 +149,17 @@ fn a_call_that_meets_a_newer_database_waits_for_the_install_and_goes_to_the_new_
     installer.join().unwrap();
     assert!(reply["result"]["isError"].is_null(), "{reply}");
     assert!(reply["result"]["_meta"]["nitely_forwarded"].is_string(), "answered by the installed build: {reply}");
+    // The job ran in the new build: it got as far as the submit itself, which has no worktree here.
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while submit_job.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "the job's process did not end");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let conn = rusqlite::Connection::open(base.join("nitely.db")).unwrap();
+    let (state, error): (String, String) = conn.query_row("SELECT state, COALESCE(error, '') FROM submit_job WHERE id = ?1", [job], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+    drop(conn);
+    assert_eq!(state, "failed", "{error}");
+    assert!(!error.contains("older than the database") && !error.contains("process ended"), "the submit ran: {error}");
     drop(mcp);
     std::fs::remove_dir_all(base).ok();
 }

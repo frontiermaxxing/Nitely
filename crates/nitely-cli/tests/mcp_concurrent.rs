@@ -141,6 +141,8 @@ fn agents_cannot_invoke_the_human_reviewer_settings_save() {
     std::fs::remove_dir_all(base).ok();
 }
 
+/// A long call holds up none after it and ends at the cap; and one still running when the client
+/// leaves finishes, and answers, before the server exits (NIT-528 merged that test in here).
 #[test]
 fn a_long_call_holds_up_none_after_it_and_ends_at_the_cap() {
     let (mut mcp, run, base) = setup("nitely-mcp-concurrent");
@@ -156,6 +158,16 @@ fn a_long_call_holds_up_none_after_it_and_ends_at_the_cap() {
     let status = text(&second);
     assert_eq!(status["state"], "queued");
     assert!(status["next"].as_str().unwrap().contains("call run_status"), "{status}");
+
+    mcp.call(8, "run_status", json!({ "id": run, "wait_seconds": 600 }));
+    std::thread::sleep(Duration::from_millis(200));
+    let left = Instant::now();
+    mcp.stdin.take();
+    let answered = mcp.next(Duration::from_secs(20)).expect("the call still ends and answers");
+    assert_eq!(answered["id"], 8);
+    let exited = mcp.child.wait().unwrap();
+    assert!(exited.success(), "{exited:?}");
+    assert!(left.elapsed() >= Duration::from_millis(500), "it waited for the call: {:?}", left.elapsed());
     drop(mcp);
     std::fs::remove_dir_all(base).ok();
 }
@@ -182,21 +194,6 @@ fn a_cancel_for_a_call_not_running_does_not_silence_a_later_one() {
     mcp.call(7, "list_issues", json!({ "project": "APP" }));
     assert_eq!(mcp.next(Duration::from_secs(20)).unwrap()["id"], 7, "the id was free again");
     drop(mcp);
-    std::fs::remove_dir_all(base).ok();
-}
-
-#[test]
-fn a_call_still_running_when_the_client_leaves_finishes_before_the_server_exits() {
-    let (mut mcp, run, base) = setup("nitely-mcp-leave");
-    mcp.call(8, "run_status", json!({ "id": run, "wait_seconds": 600 }));
-    std::thread::sleep(Duration::from_millis(200));
-    let left = Instant::now();
-    mcp.stdin.take();
-    let answered = mcp.next(Duration::from_secs(20)).expect("the call still ends and answers");
-    assert_eq!(answered["id"], 8);
-    let status = mcp.child.wait().unwrap();
-    assert!(status.success(), "{status:?}");
-    assert!(left.elapsed() >= Duration::from_millis(500), "it waited for the call: {:?}", left.elapsed());
     std::fs::remove_dir_all(base).ok();
 }
 

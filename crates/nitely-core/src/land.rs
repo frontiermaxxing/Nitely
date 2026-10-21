@@ -2050,42 +2050,6 @@ when_changed = ["billing"]
     }
 
     #[test]
-    fn lands_by_nitely_when_the_playbook_says_so() {
-        let mut f = fixture();
-        set_mode(&f, "auto");
-
-        // A passing review that needs no human lands in the same submit.
-        let (a, wt_a) = f.submitted("Sidebar polish", "sidebar.txt", "x");
-        assert_eq!(state(&f, &a), "Done");
-        assert!(!wt_a.exists() && f.repo.join("sidebar.txt").exists());
-        let said = f.db.timeline(&a).unwrap().into_iter().find(|e| e.summary.as_deref() == Some("Landing it automatically, as the playbook says")).unwrap();
-        assert_eq!(said.actor, AUTO_LANDER, "Nitely's line, not the agent's: it does not put the agent back on the issue");
-        let landed = f.db.timeline(&a).unwrap().into_iter().find(|e| e.kind == "landed").unwrap();
-        assert_eq!(landed.actor, AUTO_LANDER, "submit's automatic land is Nitely's, as an approved one is");
-
-        // One that needs a human waits, and lands as soon as they approve it.
-        let (b, _) = f.submitted("Billing fix", "billing.txt", "x");
-        assert_eq!(state(&f, &b), "Needs You");
-        let dir = f.repo.to_string_lossy().into_owned();
-        let config = crate::Config::default();
-        assert!(land_on_approval(&mut f.db, &config, &b, &dir).unwrap().is_none(), "not approved yet");
-        approve(&mut f.db, &b);
-        // The app approves with no directory: with two repos linked to the project, the one with
-        // the issue's branch lands it. Its after-land step fails, which the issue is told.
-        let other = f.base.join("other");
-        std::fs::create_dir_all(&other).unwrap();
-        sh(&other, &["init", "-q", "-b", "main"]);
-        let two = crate::Config { repos: vec![linked(&other, "other"), linked(&f.repo, "repo")], ..Default::default() };
-        let mut reported = HashMap::new();
-        let r = land_approved(&mut f.db, &two, &mut reported).unwrap();
-        assert!(r.len() == 1 && r[0].landed && r[0].issue == b, "{r:?}");
-        let notes = f.db.timeline(&b).unwrap();
-        assert!(notes.iter().any(|e| e.summary.as_deref().is_some_and(|s| s.contains("with warnings") && s.contains("exit 3"))), "{notes:?}");
-        assert_eq!(state(&f, &b), "Done");
-        std::fs::remove_dir_all(&f.base).ok();
-    }
-
-    #[test]
     fn an_automatic_land_that_stops_on_a_conflict_sends_the_issue_back() {
         let mut f = fixture();
         set_mode(&f, "auto");
@@ -2114,6 +2078,10 @@ when_changed = ["billing"]
         db.sign_approval(key, &SECRET).unwrap();
     }
 
+    /// A reviewed change lands, pushed, with teardown, cleanup and the after-land steps for what
+    /// landed; one that needs a human waits. Then, with `[land] by = "auto"`, a change that needs
+    /// no human lands in its own submit as Nitely, and the waiting one lands as soon as the person
+    /// approves it, from the repo that has its branch (NIT-528 merged lands_by_nitely in here).
     #[test]
     fn lands_reviewed_work_and_waits_for_human_approval() {
         let mut f = pushed_fixture();
@@ -2133,6 +2101,33 @@ when_changed = ["billing"]
         // b needs a human; it was reviewed before a landed, so it also rebases.
         let r = f.land(&b);
         assert!(!r.landed && r.error.as_deref().unwrap().contains("waits for a human"), "{r:?}");
+
+        // Nitely lands: a passing review that needs no human lands in the same submit.
+        set_mode(&f, "auto");
+        let (c, wt_c) = f.submitted("Sidebar spacing", "sidebar-spacing.txt", "x");
+        assert_eq!(state(&f, &c), "Done");
+        assert!(!wt_c.exists() && f.repo.join("sidebar-spacing.txt").exists());
+        let said = f.db.timeline(&c).unwrap().into_iter().find(|e| e.summary.as_deref() == Some("Landing it automatically, as the playbook says")).unwrap();
+        assert_eq!(said.actor, AUTO_LANDER, "Nitely's line, not the agent's: it does not put the agent back on the issue");
+        let landed = f.db.timeline(&c).unwrap().into_iter().find(|e| e.kind == "landed").unwrap();
+        assert_eq!(landed.actor, AUTO_LANDER, "submit's automatic land is Nitely's, as an approved one is");
+
+        // The one that needs a human lands as soon as they approve it.
+        let dir = f.repo.to_string_lossy().into_owned();
+        assert!(land_on_approval(&mut f.db, &crate::Config::default(), &b, &dir).unwrap().is_none(), "not approved yet");
+        approve(&mut f.db, &b);
+        // The app approves with no directory: with two repos linked to the project, the one with
+        // the issue's branch lands it. Its after-land step fails, which the issue is told.
+        let other = f.base.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        sh(&other, &["init", "-q", "-b", "main"]);
+        let two = crate::Config { repos: vec![linked(&other, "other"), linked(&f.repo, "repo")], ..Default::default() };
+        let mut reported = HashMap::new();
+        let r = land_approved(&mut f.db, &two, &mut reported).unwrap();
+        assert!(r.len() == 1 && r[0].landed && r[0].issue == b, "{r:?}");
+        let notes = f.db.timeline(&b).unwrap();
+        assert!(notes.iter().any(|e| e.summary.as_deref().is_some_and(|s| s.contains("with warnings") && s.contains("exit 3"))), "{notes:?}");
+        assert_eq!(state(&f, &b), "Done");
         std::fs::remove_dir_all(&f.base).ok();
     }
 
@@ -2552,8 +2547,28 @@ when_changed = ["billing"]
         crate::test_repo::reviewed(&mut f.db, &wt, &key, &f.actor);
         f.land_elsewhere();
 
+        // First the repo cannot move (NIT-528 merged when_the_repo_cannot_move... in here). The
+        // engine's copy detached at main, as `git submodule update` leaves it: main moves by itself
+        // there, and the checkout follows it. An edit in the main checkout that the change overlaps
+        // makes the repo's fast-forward fail after the engine's went through: both are put back.
+        sh(&f.engine(), &["checkout", "-q", "--detach", "main"]);
+        let (repo_before, engine_before) = (sh(&f.repo, &["rev-parse", "main"]), sh(&f.engine(), &["rev-parse", "main"]));
+        let shared = std::fs::read_to_string(f.repo.join("shared.txt")).unwrap();
+        std::fs::write(f.repo.join("shared.txt"), format!("{shared}mine, not committed\n")).unwrap();
+        let stopped = f.land(&key);
+        assert!(!stopped.landed);
+        let error = stopped.error.unwrap_or_default();
+        assert!(error.contains("refused the fast-forward") && error.contains("put back, so nothing moved"), "{error}");
+        assert_eq!(sh(&f.repo, &["rev-parse", "main"]), repo_before);
+        assert_eq!(sh(&f.engine(), &["rev-parse", "main"]), engine_before, "the engine's main went back");
+        assert_eq!(sh(&f.engine(), &["rev-parse", "HEAD"]), engine_before, "its detached checkout too");
+        assert!(wt.join("engine/.git").exists(), "the task's worktrees stay for another try");
+        std::fs::write(f.repo.join("shared.txt"), shared).unwrap();
+
+        // With the edit gone, the same land goes through.
         let landed = f.land(&key);
         assert!(landed.landed, "{landed:?}");
+        assert_eq!(sh(&f.engine(), &["rev-parse", "HEAD"]), sh(&f.engine(), &["rev-parse", "main"]), "the detached checkout followed main");
         // The engine's main has both changes, its checkout too; the repo points at its tip.
         let engine_main = sh(&f.engine(), &["rev-parse", "main"]);
         assert_eq!(sh(&f.engine(), &["log", "--format=%s", "-2", "main"]), "engine: faster\nengine: other");
@@ -2567,38 +2582,6 @@ when_changed = ["billing"]
         assert!(!wt.exists(), "{:?}", landed.cleanup);
         assert!(sh(&f.engine(), &["branch", "--list", &landed.branch]).is_empty());
         assert!(!sh(&f.engine(), &["worktree", "list"]).contains("wt"));
-        std::fs::remove_dir_all(&f.base).ok();
-    }
-
-    #[test]
-    fn when_the_repo_cannot_move_the_submodule_does_not_either() {
-        let mut f = submodule_fixture();
-        let (key, wt) = f.spanning("Faster engine");
-        crate::test_repo::reviewed(&mut f.db, &wt, &key, &f.actor);
-        // The engine's copy detached at main, as `git submodule update` leaves it: main moves by
-        // itself there, and the checkout follows it.
-        sh(&f.engine(), &["checkout", "-q", "--detach", "main"]);
-        let (repo_before, engine_before) = (sh(&f.repo, &["rev-parse", "main"]), sh(&f.engine(), &["rev-parse", "main"]));
-        // An edit in the main checkout that the change overlaps: the repo's fast-forward fails,
-        // after the engine's went through.
-        std::fs::write(f.repo.join("shared.txt"), "one\nmine, not committed\n").unwrap();
-
-        let stopped = f.land(&key);
-        assert!(!stopped.landed);
-        let error = stopped.error.unwrap_or_default();
-        assert!(error.contains("refused the fast-forward") && error.contains("put back, so nothing moved"), "{error}");
-        assert_eq!(sh(&f.repo, &["rev-parse", "main"]), repo_before);
-        assert_eq!(sh(&f.engine(), &["rev-parse", "main"]), engine_before, "the engine's main went back");
-        assert_eq!(sh(&f.engine(), &["rev-parse", "HEAD"]), engine_before, "its detached checkout too");
-        assert_eq!(std::fs::read_to_string(f.engine().join("core.c")).unwrap().replace('\r', ""), "int core;\n", "and its files with it");
-        assert!(wt.join("engine/.git").exists(), "the task's worktrees stay for another try");
-
-        // With the edit gone, the same land goes through.
-        std::fs::write(f.repo.join("shared.txt"), "one\n").unwrap();
-        assert!(f.land(&key).landed);
-        assert_eq!(sh(&f.engine(), &["log", "--format=%s", "-1", "main"]), "engine: faster");
-        assert_eq!(sh(&f.engine(), &["rev-parse", "HEAD"]), sh(&f.engine(), &["rev-parse", "main"]), "the checkout followed main");
-        assert_eq!(std::fs::read_to_string(f.engine().join("core.c")).unwrap().replace('\r', ""), "int core;\nint faster;\n");
         std::fs::remove_dir_all(&f.base).ok();
     }
 
