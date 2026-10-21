@@ -219,7 +219,9 @@ fn display_name(name: &str) -> Result<String> {
 }
 
 fn links(p: &Profile) -> Result<Links> {
-    let given = |v: &Option<String>| v.as_deref().map(str::trim).filter(|v| !v.is_empty());
+    fn given(v: &Option<String>) -> Option<&str> {
+        v.as_deref().map(str::trim).filter(|v| !v.is_empty())
+    }
     let handle = |v: &str, prefixes: &[&str], max: usize, ok: fn(char) -> bool, what: &str| -> Result<String> {
         let mut h = v.trim_start_matches('@');
         for prefix in prefixes {
