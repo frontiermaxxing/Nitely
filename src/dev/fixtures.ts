@@ -12,6 +12,7 @@ import * as rulesFixture from "./rules";
 import { reviewMode, saveReviewMode, periodicReviews, retryPeriodic, effectiveModes } from "./reviewModes";
 import type { ModeOptions, ReviewMode } from "../reviewModes";
 import { performanceFixture, configurePerformance, clearPerformance } from "./performance";
+import { leaderboardFixture } from "./leaderboard";
 import type {
   LaneRun,
   LanesOverview,
@@ -2315,6 +2316,8 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         throw "The preview has no logs to open; the app opens them.";
       case "lanes_overview":
         return lanesOverview();
+      case "leaderboard_stats":
+        return leaderboardFixture();
       case "performance_query":
         return performanceFixture(args);
       case "set_performance_settings":

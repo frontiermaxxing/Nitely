@@ -11,7 +11,7 @@ import { Now, movingCounts, movingTitle } from "./Now";
 import { Pulse } from "./Pulse";
 import { Activity } from "./Activity";
 import { Performance } from "./Performance";
-import { Leaderboard, leaderboardJoined } from "./leaderboard";
+import { Leaderboard, useProfile } from "./leaderboard";
 import { ProjectPage, isProjectTab, type ProjectTab } from "./Project";
 import type { GoalFocus } from "./GoalRows";
 import { IssuePanel } from "./IssuePanel";
@@ -116,6 +116,7 @@ export function App() {
   const setView = useCallback((v: View) => setViewState(withInboxProject(v)), []);
   const [openIssue, setOpenIssue] = useState<string | null>(() => fromHash(location.hash).issue);
   const [palette, setPalette] = useState(false);
+  const leaderboardProfile = useProfile();
   const openPalette = useCallback(() => setPalette(true), []);
   const [keys, setKeys] = useState(false);
   const openKeys = useCallback(() => setKeys(true), []);
@@ -351,7 +352,7 @@ export function App() {
           >
             <span className="nav-label">Leaderboard</span>
             {/* Until you join, nothing is shared: the tag says so where the entry is. */}
-            {!leaderboardJoined() && <span className="nav-tag">opt in</span>}
+            {!leaderboardProfile && <span className="nav-tag">opt in</span>}
           </button>
           <NavItem active={view.kind === "performance"} onClick={() => setView({ kind: "performance" })} label="Performance" />
           <button
@@ -421,7 +422,7 @@ export function App() {
         )}
         {view.kind === "now" && board && <Now board={board} version={version} needs={inboxCount} now={now} onOpenIssue={setOpenIssue} onChanged={changed} onGo={setView} />}
         {view.kind === "activity" && <Activity now={now} version={version} projects={projects} onOpenIssue={setOpenIssue} />}
-        {view.kind === "leaderboard" && <Leaderboard />}
+        {view.kind === "leaderboard" && <Leaderboard now={now} version={version} />}
         {view.kind === "performance" && <Performance onOpenIssue={setOpenIssue} onSettings={() => setView({ kind: "settings", section: "lanes" })} />}
         {view.kind === "settings" && (
           <Settings
