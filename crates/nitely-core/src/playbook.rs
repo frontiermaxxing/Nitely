@@ -1247,7 +1247,7 @@ pub fn repo_for_issue(config: &crate::Config, project: Option<&str>, dir: &str) 
 /// of several, the caller's; with none linked, the caller's own checkout, unless it holds another
 /// project's work.
 pub(crate) fn choose_repo(repos: &[crate::config::RepoConfig], project: Option<&str>, main: Option<&str>, here: Option<&crate::config::RepoConfig>, dir: &str) -> Result<PathBuf> {
-    let root_here = || main.as_deref().map(|m| here.map_or_else(|| PathBuf::from(m), |r| PathBuf::from(&r.root)));
+    let root_here = || main.map(|m| here.map_or_else(|| PathBuf::from(m), |r| PathBuf::from(&r.root)));
     let Some(project) = project else {
         return root_here().with_context(|| format!("{dir} is not inside a git repo"));
     };
