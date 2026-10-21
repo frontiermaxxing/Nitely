@@ -759,6 +759,9 @@ fn land_prefix(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stack: &Path, 
             landed_from: Some(s.from.clone()),
             after: after.after.clone(),
             warnings: after.warnings.clone(),
+            // The integration branch the run gated against: what the verification record of this
+            // change starts from, as a single land's does (NIT-469).
+            landed_from: Some(before.to_string()),
             batch: Some(BatchNote {
                 entry: s.entry.id,
                 run: Some(run),
@@ -926,6 +929,9 @@ batch = "waiting"
             let started = playbook::start_task(&self.db, &self.repo, &issue, "claude", &self.actor).unwrap();
             let wt = PathBuf::from(&started.worktree);
             for (file, content) in files {
+                if let Some(dir) = wt.join(file).parent() {
+                    std::fs::create_dir_all(dir).unwrap();
+                }
                 std::fs::write(wt.join(file), content).unwrap();
             }
             sh(&wt, &["add", "."]);
@@ -1175,6 +1181,37 @@ batch = "waiting"
         }
         drop(store);
         drop(f.db);
+        std::fs::remove_dir_all(&f.base).ok();
+    }
+
+    /// A queue run records each landed change's verification as a single land does, from the
+    /// branch the run gated against, and runs the `[[land.after]]` steps once for the stack, said on
+    /// every change it landed (NIT-469).
+    #[test]
+    fn a_queue_run_records_each_lands_verification_and_runs_the_after_steps_once() {
+        use crate::project_modes::{Backstop, Mode, Options};
+        let mut f = fixture();
+        let installs = f.base.join("installs.txt");
+        let path = f.repo.join(playbook::PLAYBOOK_PATH);
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, format!("{text}\n[[land.after]]\nrun = \"echo installed>> {}\"\n", installs.to_string_lossy().replace('\\', "/"))).unwrap();
+        sh(&f.repo, &["commit", "-qam", "an install after landing"]);
+        let backstop = Options { full_backstop: Some(Backstop { enabled: true, landings: 5, delay_seconds: 1800 }), ..Default::default() };
+        f.db.set_project_review_mode("NIT", Mode::Custom, backstop, 0, &Actor::Human).unwrap();
+        let (a, _) = f.submitted("A", &[("crates/a.rs", "a")]);
+        let (b, _) = f.submitted("B", &[("crates/b.rs", "b")]);
+        f.queue_and_run(&[&a, &b]);
+        for k in [&a, &b] {
+            assert_eq!(f.entry(k).state, "landed", "{k}: {}", f.error(k));
+            let timeline = f.db.timeline(k).unwrap();
+            assert!(!timeline.iter().any(|e| e.kind == "verification_record_failed"), "{k}: {timeline:?}");
+            assert!(timeline.iter().any(|e| e.kind == "land_after" && e.summary.as_deref().is_some_and(|s| s.contains("ran `echo installed"))), "{k}: {timeline:?}");
+        }
+        let recorded: i64 = f.db.conn.query_row("SELECT COUNT(*) FROM verification_landing WHERE issue_key IN (?1, ?2)", rusqlite::params![a, b], |r| r.get(0)).unwrap();
+        assert_eq!(recorded, 2, "both lands' verification records");
+        let ran = std::fs::read_to_string(&installs).unwrap();
+        assert_eq!(ran.lines().filter(|l| l.trim() == "installed").count(), 1, "one install for the run: {ran:?}");
+        assert!(f.db.after_land_failed().unwrap().is_none());
         std::fs::remove_dir_all(&f.base).ok();
     }
 

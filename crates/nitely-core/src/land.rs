@@ -173,6 +173,33 @@ pub(crate) fn queued_alone(db: &mut Db, root: &Path, key: &str, opts: &LandOptio
     Ok(report)
 }
 
+/// The `[[land.after]]` steps' outcome on the issue, as a single land's or a land queue run's
+/// (one run for the whole stack, said on each change it landed): one line for what ran and what was
+/// skipped and why, and a `land_after_failed` event with the end of a failed step's output, which
+/// Overview shows until a later land's steps pass (NIT-469). Nothing when no step is configured.
+pub(crate) fn log_after_steps(db: &Db, actor: &Actor, key: &str, after: &[playbook::CommandResult]) -> Result<()> {
+    if after.is_empty() {
+        return Ok(());
+    }
+    let said: Vec<String> = after
+        .iter()
+        .map(|r| match (r.skipped, r.ok) {
+            (true, _) => format!("skipped `{}` ({})", r.command, r.output.trim_start_matches("skipped: ")),
+            (false, true) => format!("ran `{}` ({} s)", r.command, r.seconds),
+            (false, false) => format!("`{}` failed after {} s", r.command, r.seconds),
+        })
+        .collect();
+    let ran = after.iter().any(|r| !r.skipped);
+    let kind = if after.iter().any(|r| !r.ok) { "land_after_failed" } else if ran { "land_after" } else { "status" };
+    let mut summary = format!("After landing: {}", said.join("; "));
+    for r in after.iter().filter(|r| !r.ok) {
+        let tail: Vec<&str> = r.output.lines().filter(|l| !l.trim().is_empty()).collect();
+        let tail = tail[tail.len().saturating_sub(3)..].join(" / ");
+        summary.push_str(&format!(". `{}`: {}", r.command, tail));
+    }
+    db.log_event(actor, Some(key), None, kind, &summary)
+}
+
 /// What a land that went through does to its issue: the landed event, Done with the gate as
 /// evidence, and the issues it unblocked.
 pub(crate) fn record_landed(db: &mut Db, root: &Path, issue: &IssueRecord, report: &mut Landed, actor: &Actor) -> Result<()> {
@@ -202,6 +229,7 @@ pub(crate) fn record_landed(db: &mut Db, root: &Path, issue: &IssueRecord, repor
         report.gate.as_ref().map(|g| g.results.iter().map(|r| r.command.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default()
     );
     db.log_event(actor, Some(&issue.key), None, "landed", &format!("Landed {} on {base} at {}", report.branch, report.head.as_deref().unwrap_or("?")))?;
+    log_after_steps(db, actor, &issue.key, &report.after)?;
     if issue.origin == "nitely" && issue.state != "Done" {
         db.move_issue(&issue.key, "Done", Some(&evidence), None, actor)?;
     }

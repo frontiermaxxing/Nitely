@@ -7,7 +7,11 @@ fn main() {
     // Source installs supply HEAD explicitly, invalidating the generated migration manifest even
     // when a checkout/ref update preserved file timestamps.
     println!("cargo:rerun-if-env-changed=NITELY_SOURCE_COMMIT");
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    // Read when the script runs, not when it was compiled: cargo reuses a compiled build script
+    // for another checkout of the same crate (a release build into a shared target folder), and
+    // the folder it was compiled in may be gone by then (NIT-469).
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR");
+    let dir = Path::new(&manifest).join("migrations");
     println!("cargo:rerun-if-changed={}", dir.display());
     let mut names: Vec<String> = std::fs::read_dir(&dir)
         .map(|entries| {

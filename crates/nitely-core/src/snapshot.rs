@@ -4,6 +4,7 @@
 //! main checkout), so a folder is not an agent (NIT-273).
 
 use anyhow::Result;
+use rusqlite::OptionalExtension;
 use serde::Serialize;
 
 use std::collections::{HashMap, HashSet};
@@ -74,6 +75,32 @@ pub struct Board {
     pub remote_sessions: Vec<Session>,
     /// Every agent session seen in the window on this machine, one row each, newest first.
     pub agents: Vec<AgentRow>,
+    /// The latest land whose `[[land.after]]` steps failed, while no later land's ran clean: an
+    /// install that failed leaves the installed nitely behind main and every submit refused (NIT-469).
+    pub after_land_failed: Option<AfterLandFailed>,
+}
+
+/// A land whose after steps failed: the issue, when, and what its event said.
+#[derive(Debug, Clone, Serialize)]
+pub struct AfterLandFailed {
+    pub issue: Option<String>,
+    pub ts: i64,
+    pub summary: String,
+}
+
+impl Db {
+    /// `Board::after_land_failed`: the newest after-steps event, when it is a failure.
+    pub fn after_land_failed(&self) -> Result<Option<AfterLandFailed>> {
+        let latest: Option<(String, Option<String>, i64, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT type, issue_key, ts, summary FROM event WHERE type IN ('land_after', 'land_after_failed') ORDER BY ts DESC, id DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        Ok(latest.filter(|(kind, ..)| kind == "land_after_failed").map(|(_, issue, ts, summary)| AfterLandFailed { issue, ts, summary: summary.unwrap_or_default() }))
+    }
 }
 
 /// A local branch with no worktree: left over after a land, parked, or made by hand.
@@ -468,7 +495,7 @@ fn build(config: &Config, db: &Db, git_state: &GitState) -> Result<Board> {
 
     let remote_sessions = sessions.iter().filter(|s| s.cwd.starts_with("remote:")).cloned().collect();
     let agents = agents(db, config, &sessions, &views, &issues, &aliases, &paths)?;
-    Ok(Board { repos: views, needs_me_issues, asks: db.open_asks()?, sync: db.sync_statuses()?, remote_sessions, agents })
+    Ok(Board { repos: views, needs_me_issues, asks: db.open_asks()?, sync: db.sync_statuses()?, remote_sessions, agents, after_land_failed: db.after_land_failed()? })
 }
 
 /// One row per local session: where it runs, and the issue its own events name.

@@ -181,6 +181,7 @@ export function Pulse(props: {
       {data && (
         <>
           <Glance data={data} board={props.board} decisions={props.decisions} ctx={ctx} onGo={props.onGo} />
+          {props.board?.after_land_failed && <AfterLandFailed failed={props.board.after_land_failed} now={ctx.now} />}
           {data.projects.length === 0 && (
             <EmptyState title="No projects yet." action={<button className="btn" onClick={() => props.onGo({ kind: "add" })}>Add a project</button>}>
               Add a repo and connect your agents; their work shows up here as it moves.
@@ -255,6 +256,19 @@ function openSessions(board: Board | null, now: number): OpenSession[] {
     // Agents on other machines reach the backlog through nitely serve, not a worktree here.
     ...(board?.remote_sessions ?? []).map((s) => ({ s, key: null, issue: null, report: null, repo: null })),
   ].filter(({ s }) => livenessOf(s, now) !== "ended");
+}
+
+/**
+ * A land's `[[land.after]]` steps failed and no later land's have run clean: for Nitely itself that
+ * is the install, so the installed nitely is behind main and submits are refused (NIT-469).
+ */
+function AfterLandFailed({ failed, now }: { failed: NonNullable<Board["after_land_failed"]>; now: number }) {
+  return (
+    <p className="after-land-failed" role="alert">
+      <strong>An after-land step failed</strong>
+      {failed.issue && <> landing {failed.issue}</>} {ago(now, failed.ts)}. {failed.summary.replace(/^After landing: /, "")}
+    </p>
+  );
 }
 
 function Glance({ data, board, decisions, ctx, onGo }: { data: PulseData; board: Board | null; decisions: Decision[] | null; ctx: Context; onGo: (view: View) => void }) {

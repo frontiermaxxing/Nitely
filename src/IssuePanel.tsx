@@ -41,6 +41,8 @@ const KIND_LABEL: Record<string, string> = {
   landed: "landed",
   land_failed: "land stopped",
   land_refused: "land waits",
+  land_after: "after land",
+  land_after_failed: "after-land step failed",
   crew_started: "crew started",
   crew_ended: "crew ended",
   lane_run: "build lane",

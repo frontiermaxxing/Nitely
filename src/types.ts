@@ -296,6 +296,8 @@ export interface Board {
   remote_sessions: Session[];
   /** Every agent session on this machine, one each, newest first (snapshot.rs AgentRow). */
   agents: AgentRow[];
+  /** The latest land whose `[[land.after]]` steps failed, while no later land's ran clean (NIT-469). */
+  after_land_failed?: { issue: string | null; ts: number; summary: string } | null;
 }
 
 /** One agent session, wherever it runs: several often share a folder, so a folder is not an agent. */
