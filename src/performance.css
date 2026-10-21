@@ -87,6 +87,11 @@
 .perf-chart-choice {
   margin-bottom: 12px;
 }
+/* The heading's select sits at the right edge: its menu opens leftward. */
+.perf-heading .select-menu {
+  left: auto;
+  right: 0;
+}
 .perf-chart {
   display: block;
   width: 100%;

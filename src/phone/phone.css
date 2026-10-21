@@ -70,10 +70,9 @@ body { font-family: var(--font); font-size: 16px; line-height: 1.5; -webkit-text
 
 .ph-nav { display: flex; align-items: center; gap: 8px; margin: -6px 0 8px; }
 /* The project filter (NIT-236): the phone's own picker, one line above the decisions. */
-.ph-project {
-  display: block; width: 100%; margin: -6px 0 12px; min-height: 40px; padding: 0 10px; font: inherit; font-size: 15px;
-  color: var(--fg); background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
-}
+.ph-project { display: block; width: 100%; margin: -6px 0 12px; }
+.ph-project .select-trigger { height: 40px; font-size: 15px; border-radius: 10px; }
+.ph-project .select-option { min-height: 40px; font-size: 15px; }
 .ph-count { flex: 1; text-align: center; font-size: 14px; color: var(--fg-2); font-variant-numeric: tabular-nums; }
 .ph-arrow {
   width: 44px; height: 44px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface);

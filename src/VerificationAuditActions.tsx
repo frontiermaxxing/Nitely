@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { invoke, isLive } from "./backend";
 import type { VerificationAuditJob, VerificationAuditReport } from "./types";
+import { Select } from "./ui";
 
 export function VerificationAuditActions({ report, onChange, onOpenIssue }: {
   report: VerificationAuditReport;
@@ -51,11 +52,15 @@ function AuditAction({ job, report, onChange, onOpenIssue }: {
     {job.state === "failed" ? <button className="btn" disabled={busy || isLive} onClick={() => void act("retry_verification_audit")}>{busy ? "Retrying…" : "Retry audit"}</button> :
       <form onSubmit={(event) => { event.preventDefault(); if (rule && evidence.trim() && !confirmed && !isLive && !busy) void act("confirm_verification_escape"); }}>
         <p className="verification-audit-note">Confirm a reproduced defect. This disables the selected lowering rule for this project and requires Full verification for that scope.</p>
-        <label>Rule that lowered this change
-          <select value={rule} onChange={(event) => setRule(event.target.value)} disabled={busy || isLive}>
-            {(job.rules ?? []).map((name) => <option key={name} value={name}>{name}</option>)}
-          </select>
-        </label>
+        <div className="verification-audit-field">Rule that lowered this change
+          <Select
+            aria-label="Rule that lowered this change"
+            value={rule || null}
+            onChange={(v) => setRule(v ?? "")}
+            disabled={busy || isLive}
+            options={(job.rules ?? []).map((name) => ({ value: name, label: name }))}
+          />
+        </div>
         {confirmed ? <p role="status">Escape confirmed. This rule now requires Full verification.</p> :
           <label>Reproduction evidence
             <textarea value={evidence} onChange={(event) => setEvidence(event.target.value)} maxLength={16384} required disabled={busy || isLive} placeholder="What failed, how you reproduced it, and the expected result" rows={3} />

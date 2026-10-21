@@ -10,6 +10,7 @@ import { LastDay } from "./Report";
 import { acceptMessage, answerMessage, approvalMessage, sendBackMessage, sign, type Device } from "./keys";
 import { StationTrack } from "../ui/StationTrack";
 import { SeverityMark } from "../ui/SeverityMark";
+import { Select } from "../ui/Select";
 import { VENDOR_LABEL, vendorOf } from "../ui/agents";
 import { describeTrack, type Track } from "../ui/lifecycle";
 import "../ui/ui.css";
@@ -159,14 +160,16 @@ export function Inbox(props: { device: Device; onGone: (why: string) => void }) 
       )}
       {/* While filtered, always: it is the way back to every project. */}
       {(counts.length > 1 || project !== null) && (
-        <select className="ph-project" aria-label="Project" value={project ?? ""} onChange={(e) => pickProject(e.target.value || null)}>
-          <option value="">Every project ({all.length})</option>
-          {counts.map((c) => (
-            <option key={c.project} value={c.project}>
-              {c.project} ({c.count})
-            </option>
-          ))}
-        </select>
+        <Select
+          className="ph-project"
+          aria-label="Project"
+          value={project ?? ""}
+          onChange={(v) => pickProject(v || null)}
+          options={[
+            { value: "", label: `Every project (${all.length})` },
+            ...counts.map((c) => ({ value: c.project, label: `${c.project} (${c.count})` })),
+          ]}
+        />
       )}
       {current && (
         <>

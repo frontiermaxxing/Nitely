@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "./backend";
 import type { GoalDetail, ProjectFocus as Focus } from "./types";
-import { Loading } from "./ui";
+import { Loading, Select, Switch } from "./ui";
 
 /** The project's work selection policy, independent of the goal row's scroll highlight. */
 export function ProjectFocus(props: { project: string; version: number; goals: GoalDetail[] }) {
@@ -50,19 +50,20 @@ export function ProjectFocus(props: { project: string; version: number; goals: G
   return (
     <section className="project-focus" aria-label="Current focus" aria-busy={busy}>
       <div className="project-focus-controls">
-        <label className="project-focus-choice">
+        <div className="project-focus-choice">
           <span>Current focus</span>
-          <select
+          <Select
             aria-label="Project focus"
-            value={focus?.goal ?? ""}
+            value={focus?.goal == null ? "" : String(focus.goal)}
             disabled={!focus || busy || (!goals.length && !selected)}
-            onChange={(e) => save(e.target.value ? Number(e.target.value) : null, focus?.allow_urgent ?? true)}
-          >
-            <option value="">All work</option>
-            {missing && <option value={focus.goal!}>{focus.goal_title ?? "Previous goal"}{!focus.active ? " (inactive)" : ""}</option>}
-            {goals.map(({ goal }) => <option key={goal.id} value={goal.id}>{goal.title}</option>)}
-          </select>
-        </label>
+            onChange={(v) => save(v ? Number(v) : null, focus?.allow_urgent ?? true)}
+            options={[
+              { value: "", label: "All work" },
+              ...(missing ? [{ value: String(focus.goal), label: focus.goal_title ?? "Previous goal", detail: focus.active ? undefined : "Inactive" }] : []),
+              ...goals.map(({ goal }) => ({ value: String(goal.id), label: goal.title })),
+            ]}
+          />
+        </div>
         {selected && <button className="link" disabled={busy} onClick={() => save(null, focus.allow_urgent)}>Clear focus</button>}
         {busy && <span className="muted small" role="status">Saving…</span>}
       </div>
@@ -77,10 +78,14 @@ export function ProjectFocus(props: { project: string; version: number; goals: G
               ? "Choose a goal to direct the crew and other agents without changing issue priorities."
               : "Start a goal to choose where agents work next."}
         </p>
-        {selected && <label className="project-focus-urgent">
-          <input aria-label="Allow urgent work to interrupt" type="checkbox" checked={focus.allow_urgent} disabled={busy || !focus.active} onChange={(e) => save(focus.goal, e.target.checked)} />
-          <span>Allow urgent (P1) work to interrupt{!focus.active ? " when the goal is active" : ""}</span>
-        </label>}
+        {selected && <div className="project-focus-urgent">
+          <Switch
+            checked={focus.allow_urgent}
+            disabled={busy || !focus.active}
+            onChange={(on) => save(focus.goal, on)}
+            label={`Allow urgent (P1) work to interrupt${!focus.active ? " when the goal is active" : ""}`}
+          />
+        </div>}
       </>}
       {error && <p className="error" role="alert">{error} <button className="link" disabled={busy} onClick={() => setRetry((n) => n + 1)}>Retry</button></p>}
     </section>

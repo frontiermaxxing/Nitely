@@ -11,7 +11,7 @@ import { ProjectSettings } from "./ProjectSettings";
 import { useProjectReviewMode } from "./ProjectReviewMode";
 import { ProjectRules } from "./Rules";
 import { ModeChip } from "./rules/Mode";
-import { EmptyState, Loading } from "./ui";
+import { EmptyState, Loading, Switch } from "./ui";
 import "./project.css";
 
 export const PROJECT_TABS = ["list", "board", "branches", "brief", "rules", "settings"] as const;
@@ -122,10 +122,9 @@ export function ProjectPage(props: {
           ))}
         </div>
         {tab === "list" && (
-          <label className="toggle">
-            <input type="checkbox" checked={showClosed} onChange={(e) => setShowClosed(e.target.checked)} />
-            Show closed
-          </label>
+          <span className="toggle">
+            <Switch checked={showClosed} onChange={setShowClosed} label="Show closed" />
+          </span>
         )}
         {tab === "board" && issues && <BoardFilters issues={issues} board={props.board} filters={filters} onChange={setFilters} />}
       </div>

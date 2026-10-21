@@ -3,12 +3,11 @@
 .project-focus-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; min-width: 0; }
 .project-focus-choice { display: flex; flex: 1 1 300px; flex-wrap: wrap; align-items: center; gap: 8px 12px; min-width: 0; }
 .project-focus-choice > span { font-weight: var(--weight-strong); }
-.project-focus-choice select { flex: 1; min-width: 0; max-width: 460px; width: 100%; font: inherit; color: var(--fg); background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--radius); padding: 6px 9px; }
-.project-focus-choice select:focus { outline: 2px solid var(--focus); outline-offset: -1px; }
+.project-focus-choice .select { flex: 1; max-width: 460px; width: 100%; }
 .project-focus-explanation { margin: 0; color: var(--fg-2); font-size: var(--text-sm); line-height: 1.5; }
 .project-focus-paused { color: var(--attention-ink); }
-.project-focus-urgent { display: flex; align-items: baseline; gap: 8px; color: var(--fg-2); font-size: var(--text-sm); }
-.project-focus-urgent input { margin: 0; accent-color: var(--fg); }
+.project-focus-urgent { display: flex; color: var(--fg-2); }
+.project-focus-urgent .ui-switch { color: inherit; font-size: var(--text-sm); }
 @media (max-width: 550px) { .project-focus-choice { display: grid; grid-template-columns: minmax(0, 1fr); } }
 .goal-rows { display: grid; gap: 14px; margin: 4px 0 22px; }
 .goal-row { display: grid; gap: 8px; padding: 12px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); --mark-bg: var(--surface); }

@@ -25,12 +25,11 @@
 .seg button:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
 
 .board-filters { margin-left: auto; display: flex; gap: 6px; }
-.board-filters select {
-  font: inherit; font-size: var(--text-sm); color: var(--fg-2); background: none;
-  border: 1px solid var(--line); border-radius: 7px; padding: 3px 6px; min-height: 28px; cursor: pointer;
-}
-.board-filters select.set { color: var(--fg); border-color: var(--line-strong); }
-.board-filters select:focus-visible { outline: 2px solid var(--focus); outline-offset: 0; }
+/* Quiet until a filter is set: the shared select, in the secondary ink. */
+.board-filters .select-trigger { min-width: 120px; color: var(--fg-2); }
+.board-filters .select.set .select-trigger { color: var(--fg); }
+/* They sit at the page's right edge, so their menus open leftward. */
+.board-filters .select-menu { left: auto; right: 0; }
 
 /* ----- Board: columns by station, their heads drawn as one track ----- */
 .board {
@@ -201,7 +200,7 @@
 .brief-doc ul, .brief-doc ol { padding-left: 1.4em; }
 .brief-doc li { margin: 2px 0; }
 .brief-doc li.brief-task { list-style: none; margin-left: -1.4em; }
-.brief-task input { margin: 0 7px 0 0; vertical-align: -2px; accent-color: var(--fg-2); }
+.brief-task .ui-check-box { margin: 0 7px 0 0; }
 .brief-doc blockquote { padding-left: 12px; border-left: 2px solid var(--line-strong); color: var(--fg-2); }
 .brief-doc hr { border: 0; border-top: 1px solid var(--line); margin: 20px 0; }
 .brief-doc code { font-family: var(--font-mono); font-size: 0.88em; background: var(--sunken); border-radius: var(--radius-sm); padding: 1px 4px; }

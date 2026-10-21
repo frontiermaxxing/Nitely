@@ -13,6 +13,7 @@ import type { BatchesOverview, Waits } from "./types";
 import {
   AgentMark,
   EmptyState,
+  Switch,
   IssueToken,
   PrMark,
   STATION_LABEL,
@@ -57,10 +58,9 @@ export function Now(props: {
       <div className="page-head">
         <h1>Now</h1>
         <Glance board={board} needs={props.needs} now={now} onInbox={() => props.onGo({ kind: "inbox" })} />
-        <label className="toggle">
-          <input type="checkbox" checked={showMain} onChange={(e) => setShowMain(e.target.checked)} />
-          Show main checkouts
-        </label>
+        <span className="toggle">
+          <Switch checked={showMain} onChange={setShowMain} label="Show main checkouts" />
+        </span>
       </div>
       <LanesStrip version={props.version} now={now} onOpenIssue={props.onOpenIssue} landQueue={landQueueLength(batches)} />
       <BatchesStrip batches={batches} now={now} onOpenIssue={props.onOpenIssue} />

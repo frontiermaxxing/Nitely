@@ -1,6 +1,6 @@
 import { memo, useEffect, useRef, useState } from "react";
 import { invoke, isLive } from "./backend";
-import { Loading, EmptyState } from "./ui";
+import { Loading, EmptyState, Select } from "./ui";
 import { performanceClock, pollPerformance } from "./performancePolling";
 import type { LanesOverview } from "./types";
 import { byteText, chartBounds, chartSegments, chartValue, currentPressure, episodeExtrema, earlierAttributionWindow, incidentWindow, localDateTime, parseWindow, shiftWindow, windowAttribution, freshness, numberText, performanceQuery, sortedWorkloads, timestamp } from "./performanceModel";
@@ -343,13 +343,18 @@ function History({ data }: { data: PerformanceReport }) {
     <div ref={chart}>
       <label className="perf-chart-choice">
         Counter{" "}
-        <select value={metric} onChange={(e) => setMetric(e.target.value as ChartMetric)}>
-          <option value="cpu_percent">CPU</option>
-          <option value="physical_available_bytes">Available physical RAM</option>
-          <option value="commit_bytes">Committed memory</option>
-          <option value="kernel_paged_bytes">Kernel paged memory</option>
-          <option value="kernel_nonpaged_bytes">Kernel nonpaged memory</option>
-        </select>
+        <Select<ChartMetric>
+          aria-label="Counter"
+          value={metric}
+          onChange={(v) => v && setMetric(v)}
+          options={[
+            { value: "cpu_percent", label: "CPU" },
+            { value: "physical_available_bytes", label: "Available physical RAM" },
+            { value: "commit_bytes", label: "Committed memory" },
+            { value: "kernel_paged_bytes", label: "Kernel paged memory" },
+            { value: "kernel_nonpaged_bytes", label: "Kernel nonpaged memory" },
+          ]}
+        />
       </label>
       <div className="perf-chart-legend">
         <span className="perf-legend-last">Last observed values</span>
@@ -492,19 +497,15 @@ function Workloads({ data, fixed, now, onOpenIssue, onWindow }: { data: Performa
         <h2>Workloads</h2>
         <label>
           Recorded at{" "}
-          <select
+          <Select
             aria-label="Workload sample"
             value={selectedSample ? sampleId(selectedSample) : "latest"}
-            onChange={(e) => setSelectedSample(choices.find((s) => sampleId(s) === e.target.value) ?? null)}
-          >
-            <option value="latest">{fixed ? "Last observation in this window" : "Latest sample"}</option>
-            {choices.map((s) => (
-              <option key={sampleId(s)} value={sampleId(s)}>
-                {timestamp(s.wall_ms)}
-                {s.resolution === "minute_peak" ? " · minute peaks" : ""}
-              </option>
-            ))}
-          </select>
+            onChange={(v) => setSelectedSample(choices.find((s) => sampleId(s) === v) ?? null)}
+            options={[
+              { value: "latest", label: fixed ? "Last observation in this window" : "Latest sample" },
+              ...choices.map((s) => ({ value: sampleId(s), label: timestamp(s.wall_ms), detail: s.resolution === "minute_peak" ? "Minute peaks" : undefined })),
+            ]}
+          />
         </label>
       </div>
       {error && <p className="error">{error}</p>}
@@ -558,11 +559,16 @@ function Workloads({ data, fixed, now, onOpenIssue, onWindow }: { data: Performa
           </p>
           <label className="perf-chart-choice">
             Sort workloads by{" "}
-            <select value={sort} onChange={(e) => setSort(e.target.value as typeof sort)}>
-              <option value="cpu_percent">CPU</option>
-              <option value="private_commit_bytes">Private commit</option>
-              <option value="process_read_bytes">Process reads</option>
-            </select>
+            <Select<typeof sort>
+              aria-label="Sort workloads by"
+              value={sort}
+              onChange={(v) => v && setSort(v)}
+              options={[
+                { value: "cpu_percent", label: "CPU" },
+                { value: "private_commit_bytes", label: "Private commit" },
+                { value: "process_read_bytes", label: "Process reads" },
+              ]}
+            />
           </label>
           <div className="perf-table-scroll">
             <table>
@@ -725,29 +731,29 @@ function RecorderSettings({ settings, onChanged }: { settings: PerformanceSettin
       <fieldset disabled={busy || isLive} className="perf-controls">
         <label>
           Detailed history{" "}
-          <select value={hours} onChange={(e) => setHours(+e.target.value)}>
-            {[1, 6, 12, 24, hours]
+          <Select
+            aria-label="Detailed history"
+            value={String(hours)}
+            onChange={(v) => v && setHours(+v)}
+            disabled={busy || isLive}
+            options={[1, 6, 12, 24, hours]
               .filter((v, i, a) => a.indexOf(v) === i)
               .sort((a, b) => a - b)
-              .map((n) => (
-                <option key={n} value={n}>
-                  {n} hours
-                </option>
-              ))}
-          </select>
+              .map((n) => ({ value: String(n), label: `${n} hours` }))}
+          />
         </label>
         <label>
           Minute summaries{" "}
-          <select value={days} onChange={(e) => setDays(+e.target.value)}>
-            {[1, 7, 14, 30, days]
+          <Select
+            aria-label="Minute summaries"
+            value={String(days)}
+            onChange={(v) => v && setDays(+v)}
+            disabled={busy || isLive}
+            options={[1, 7, 14, 30, days]
               .filter((v, i, a) => a.indexOf(v) === i)
               .sort((a, b) => a - b)
-              .map((n) => (
-                <option key={n} value={n}>
-                  {n} days
-                </option>
-              ))}
-          </select>
+              .map((n) => ({ value: String(n), label: `${n} days` }))}
+          />
         </label>
         <button className="btn" onClick={() => save(settings.enabled)}>
           Save retention

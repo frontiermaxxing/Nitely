@@ -15,7 +15,7 @@ import { GoalPlanDecision } from "./GoalPlanDecision";
 import { PlaybookChangeDecision } from "./PlaybookChangeDecision";
 import { MirrorFact } from "./Mirror";
 import { typing } from "./Palette";
-import { AgentMark, IssueToken, Labels, Loading, PrMark, PriorityMark, StationGlyph, StationTrack, VENDOR_LABEL, trackOf, vendorOf } from "./ui";
+import { AgentMark, IssueToken, Labels, Loading, PrMark, PriorityMark, Select, StationGlyph, StationTrack, VENDOR_LABEL, trackOf, vendorOf } from "./ui";
 import "./issue.css";
 
 const KIND_LABEL: Record<string, string> = {
@@ -559,20 +559,14 @@ function ReviewFact(props: { issue: IssueRecord; onChanged: () => void }) {
     <>
       <dt>Review</dt>
       <dd>
-        <select
-          className="panel-goal"
-          value={issue.review_level ?? ""}
-          onChange={(e) => set(e.target.value)}
-          aria-label="How much verification this change needs"
-          title={reviewSource(issue.review_level_source)}
-        >
-          <option value="">Undeclared</option>
-          {REVIEW_LEVELS.map((l) => (
-            <option key={l.id} value={l.id}>
-              {l.label}
-            </option>
-          ))}
-        </select>
+        <span className="panel-goal" title={reviewSource(issue.review_level_source)}>
+          <Select
+            value={issue.review_level ?? ""}
+            onChange={(v) => set(v ?? "")}
+            aria-label="How much verification this change needs"
+            options={[{ value: "", label: "Undeclared" }, ...REVIEW_LEVELS.map((l) => ({ value: l.id, label: l.label }))]}
+          />
+        </span>
         {hint && <span className="muted small">{hint}</span>}
         {error && <span className="error small">{error}</span>}
       </dd>
@@ -608,15 +602,17 @@ function GoalFact(props: { issue: IssueRecord; goals: Goal[]; onChanged: () => v
     <>
       <dt>Goal</dt>
       <dd>
-        <select className="panel-goal" value={issue.goal ?? ""} onChange={(e) => set(e.target.value)} aria-label="The goal this issue serves">
-          <option value="">None</option>
-          {choices.map((g) => (
-            <option key={g.id} value={g.id}>
-              {g.title}
-              {g.state === "active" ? "" : ` (${g.state})`}
-            </option>
-          ))}
-        </select>
+        <span className="panel-goal">
+          <Select
+            value={issue.goal == null ? "" : String(issue.goal)}
+            onChange={(v) => set(v ?? "")}
+            aria-label="The goal this issue serves"
+            options={[
+              { value: "", label: "None" },
+              ...choices.map((g) => ({ value: String(g.id), label: g.title, detail: g.state === "active" ? undefined : `Goal ${g.state}` })),
+            ]}
+          />
+        </span>
         {error && <span className="error small">{error}</span>}
       </dd>
     </>

@@ -5,6 +5,7 @@ import type { Board, IssueDetail, IssueRecord, PrRecord, TaskRow } from "./types
 import {
   AgentMark,
   CountBadge,
+  Select,
   IssueToken,
   LIVENESS_LABEL,
   PrMark,
@@ -85,23 +86,24 @@ export function BoardFilters(props: { issues: IssueRecord[]; board: Board | null
   const { filters } = props;
   return (
     <div className="board-filters">
-      <select aria-label="Kind" className={filters.kind ? "set" : undefined} value={filters.kind} onChange={(e) => props.onChange({ ...filters, kind: e.target.value })}>
-        <option value="">All kinds</option>
-        {kinds.map((k) => (
-          <option key={k} value={k}>
-            {k}
-          </option>
-        ))}
-      </select>
-      <select aria-label="Agent" className={filters.agent ? "set" : undefined} value={filters.agent} onChange={(e) => props.onChange({ ...filters, agent: e.target.value })}>
-        <option value="">All agents</option>
-        {agents.map((v) => (
-          <option key={v} value={v}>
-            {VENDOR_LABEL[v]}
-          </option>
-        ))}
-        <option value="none">No agent</option>
-      </select>
+      <Select
+        aria-label="Kind"
+        className={filters.kind ? "set" : undefined}
+        value={filters.kind}
+        onChange={(v) => props.onChange({ ...filters, kind: v ?? "" })}
+        options={[{ value: "", label: "All kinds" }, ...kinds.map((k) => ({ value: k, label: k }))]}
+      />
+      <Select
+        aria-label="Agent"
+        className={filters.agent ? "set" : undefined}
+        value={filters.agent}
+        onChange={(v) => props.onChange({ ...filters, agent: v ?? "" })}
+        options={[
+          { value: "", label: "All agents" },
+          ...agents.map((v) => ({ value: v, label: VENDOR_LABEL[v], icon: <AgentMark vendor={v} size={16} /> })),
+          { value: "none", label: "No agent" },
+        ]}
+      />
     </div>
   );
 }

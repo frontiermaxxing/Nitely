@@ -3,6 +3,7 @@ import { invoke } from "./backend";
 import type { ProjectBrief as Brief } from "./types";
 import { type Inline, issueKeyOf, parseMarkdown } from "./markdown";
 import { AgentMark, EmptyState, Loading } from "./ui";
+import "./ui/toggles.css";
 import { agentLabel, ago, openExternal } from "./util";
 
 /**
@@ -224,7 +225,7 @@ function Markdown(props: { src: string; onOpenIssue: (key: string) => void }) {
               <L key={i}>
                 {b.items.map((it, j) => (
                   <li key={j} style={it.depth ? { marginLeft: `${it.depth * 1.4}em` } : undefined} className={it.done !== undefined ? "brief-task" : undefined}>
-                    {it.done !== undefined && <input type="checkbox" checked={it.done} readOnly tabIndex={-1} aria-label={it.done ? "done" : "open"} />}
+                    {it.done !== undefined && <span className={`ui-check-box${it.done ? " is-on" : ""}`} role="img" aria-label={it.done ? "done" : "open"} />}
                     {inline(it.text)}
                   </li>
                 ))}

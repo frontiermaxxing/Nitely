@@ -81,9 +81,10 @@
 .verification-audit-action { border: 1px solid var(--line); border-radius: 6px; padding: 12px; min-width: 0; overflow-wrap: anywhere; }
 .verification-audit-job-heading { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
 .verification-audit-action p, .verification-audit-action ul { margin: 8px 0; }
-.verification-audit-action form, .verification-audit-action label { display: grid; gap: 6px; min-width: 0; }
+.verification-audit-action form, .verification-audit-action label, .verification-audit-field { display: grid; gap: 6px; min-width: 0; }
 .verification-audit-action form { gap: 10px; }
-.verification-audit-action textarea, .verification-audit-action select { width: 100%; min-width: 0; box-sizing: border-box; font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 8px; }
+.verification-audit-action .select { width: 100%; }
+.verification-audit-action textarea { width: 100%; min-width: 0; box-sizing: border-box; font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 8px; }
 .verification-audit-action textarea { resize: vertical; }
 .verification-audit-action button { justify-self: start; white-space: normal; }
 .verification-audit-rates { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }

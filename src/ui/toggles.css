@@ -71,6 +71,9 @@
 .ui-check-box:disabled { border-color: var(--line-strong); }
 .ui-check-box:checked:disabled { background-color: var(--line-strong); border-color: var(--line-strong); }
 .ui-check-box:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+/* The same box as a mark, not a control: a done or open item in a rendered task list. */
+span.ui-check-box { display: inline-block; box-sizing: border-box; vertical-align: -3px; }
+span.ui-check-box.is-on { border-color: var(--fg-2); background-color: var(--fg-2); background-image: var(--ui-check-mark); }
 :root {
   /* What the chosen segment and radio card sit on: white on the light page, a step up in dark. */
   --ui-raise: var(--surface);

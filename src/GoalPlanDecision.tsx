@@ -4,6 +4,7 @@ import type { Move } from "./decisions";
 import type { GoalPlanView } from "./types";
 import { reviewLevelLabel } from "./types";
 import { VENDOR_LABEL, vendorOf } from "./ui";
+import "./ui/toggles.css";
 import "./goal-rows.css";
 
 /**
@@ -68,7 +69,7 @@ export function GoalPlanDecision(props: {
         {p.issues.map((i) => (
           <li key={i.ref} className={left.has(i.ref) ? "gp-left" : undefined}>
             <label>
-              {pending && <input type="checkbox" checked={!left.has(i.ref)} onChange={() => toggle(i.ref)} aria-label={`File ${i.title}`} />}
+              {pending && <input type="checkbox" className="ui-check-box" checked={!left.has(i.ref)} onChange={() => toggle(i.ref)} aria-label={`File ${i.title}`} />}
               <span className="mono gp-ref">{i.ref}</span>
               <span className="gp-item-title">{i.title}</span>
               <span className="gp-item-meta">
