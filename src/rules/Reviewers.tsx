@@ -1,8 +1,10 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { invoke } from "../backend";
 import type { ReviewerInfo, ReviewerPreview, ReviewerSaved, ReviewFlag, RuleField, RulesView } from "../types";
-import { AgentMark, Button, Segmented, Select, SettingsRow, SettingsSection, SourceTag, Switch, vendorOf, type ChoiceOption, type SelectOption } from "../ui";
+import { AgentMark, Segmented, Select, SettingsRow, SettingsSection, SourceTag, Switch, vendorOf, type ChoiceOption, type SelectOption } from "../ui";
 import type { RulesDraft } from "./shared";
+import { Loosen } from "./Loosen";
+import { SaveBar } from "./SaveBar";
 import { reviewerName, sourceOf } from "./shared";
 
 /**
@@ -112,7 +114,13 @@ function CommittedReviewer({ view: v, crossVendor, onSaved }: { view: RulesView;
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   useEffect(() => { setReviewer(original); setEnabled(v.review_enabled.value); setPreview(null); }, [v]);
-  const changed = enabled !== v.review_enabled.value || JSON.stringify(reviewer) !== JSON.stringify(original);
+  const changes = [
+    ...(enabled !== v.review_enabled.value ? [`Automated review: ${v.review_enabled.value ? "on → off" : "off → on"}`] : []),
+    ...(JSON.stringify(reviewer) !== JSON.stringify(original) ? ["Who reviews whose work"] : []),
+  ];
+  const changed = changes.length > 0;
+  // The commit's own reasons: the playbook's other rules stay as they are.
+  const loosens = v.review_enabled.value && !enabled ? ["Changes stop being reviewed before they land."] : [];
   const patch = (next: Record<string, string> | null) => { setReviewer(next); setPreview(null); setNote(null); setError(null); };
   const act = async () => {
     setBusy(true);
@@ -149,17 +157,21 @@ function CommittedReviewer({ view: v, crossVendor, onSaved }: { view: RulesView;
         <ReviewerMap map={reviewer ?? v.reviewer.inherited} reviewers={v.reviewers} crossVendor={crossVendor} disabled={busy || !v.reviewer_editable} onChange={patch} />
       </div>
     </SettingsRow>
-    {(changed || note || error) && (
-      <div className="rules-commit">
-        {preview && <div className="rules-review-preview" role="region" aria-label="Review settings change">
-          <p>{preview.destination}</p>
-          <pre>{preview.diff}</pre>
-        </div>}
-        {changed && <div className="settings-row">
-          <Button variant="primary" disabled={busy} onClick={act}>{preview ? "Commit review settings" : "Preview review settings"}</Button>
-          <Button disabled={busy} onClick={() => { patch(original); setEnabled(v.review_enabled.value); }}>Discard changes</Button>
-        </div>}
-        {note && <p className="muted small" role="status">{note}</p>}
+    {note && <p className="muted small rules-saved" role="status">{note}</p>}
+    {(changed || error) && (
+      <div className="rules-save">
+        {preview ? (
+          <Loosen
+            loosens={loosens}
+            diff={{ destination: preview.destination, text: preview.diff }}
+            confirmLabel={loosens.length ? "Loosen and commit" : "Commit"}
+            busy={busy}
+            onConfirm={act}
+            onKeepEditing={() => setPreview(null)}
+          />
+        ) : (
+          <SaveBar label="Save rules" changes={changes} busy={busy} onSave={act} onDiscard={() => { patch(original); setEnabled(v.review_enabled.value); }} />
+        )}
         {error && <p className="error small" role="alert">{error}</p>}
       </div>
     )}

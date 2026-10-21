@@ -38,9 +38,6 @@
 .rules-field + .rules-field { margin-top: 8px; }
 .rules-field textarea { justify-self: stretch; }
 .rules-field > * { max-width: 100%; }
-.rules-review-preview { min-width: 0; width: 100%; padding: 12px; box-sizing: border-box; border: 1px solid var(--line-strong); border-radius: var(--radius); }
-.rules-review-preview p { margin: 0 0 8px; overflow-wrap: anywhere; }
-.rules-review-preview pre { margin: 0; max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--text-sm); }
 .rules-field-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
 .rules-field-head h2, .rules-field-head h3 { margin-bottom: 4px; }
 .rules-from { font-size: var(--text-xs); color: var(--fg-3); }
@@ -58,7 +55,6 @@
 .rules-note p { margin: 0; }
 .rules-note ul { margin: 4px 0 0; padding-left: 18px; }
 .rules-focus { width: 100%; min-height: 84px; }
-.rules-commit { display: grid; gap: 10px; padding: 16px 0; border-bottom: 1px solid var(--line); }
 
 /* Who lands a change: the three cards side by side. */
 .rules-land-by .ui-radio-cards { grid-template-columns: repeat(3, minmax(0, 1fr)); }
@@ -81,7 +77,38 @@
 .btn.btn-quiet { border-color: transparent; color: var(--fg-2); }
 .btn.btn-quiet:hover:not(:disabled) { color: var(--fg); }
 
-.rules-save { position: sticky; bottom: 0; padding: 10px 0; background: var(--bg); }
+/* Unsaved changes: a bar pinned to the bottom of the content (SaveBar.tsx), and in its place the
+   panel that shows what a save loosens and the exact playbook edit (Loosen.tsx). */
+.rules-save { position: sticky; bottom: 24px; z-index: 5; display: grid; gap: 6px; margin-top: 24px; }
+.rules-save > .error { justify-self: start; margin: 0; padding: 6px 12px; border-radius: 8px; background: var(--surface); box-shadow: var(--shadow-float); }
+.rules-saved { margin: 16px 0 0; }
+.rules-savebar {
+  display: flex; align-items: center; gap: 12px; min-height: 52px; padding: 8px 10px 8px 18px; box-sizing: border-box;
+  border: 1px solid var(--line-strong); border-radius: 11px; background: var(--ui-raise); box-shadow: var(--shadow-float);
+}
+.rules-savebar-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--attention); }
+.rules-savebar-count { flex: none; font-size: var(--text-md); font-weight: var(--weight-medium); }
+.rules-savebar-summary { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; color: var(--fg-2); }
+.rules-savebar-gap { flex: 1; }
+.rules-savebar .ui-button { flex: none; }
+
+.rules-loosen.rules-panel {
+  display: grid; gap: 12px; max-height: min(70vh, 560px); overflow: auto; padding: 18px 20px; box-sizing: border-box;
+  border-radius: 11px; background: var(--surface); box-shadow: var(--shadow-float);
+}
+.rules-loosen.rules-panel.is-neutral { border-color: var(--line-strong); }
+.rules-loosen-title { display: flex; align-items: baseline; gap: 10px; font-size: 14px; }
+.rules-loosen-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--fail); transform: translateY(-1px); }
+.rules-panel.is-neutral .rules-loosen-dot { background: var(--fg-3); }
+.rules-loosen.rules-panel .rules-loosen-reasons { margin: 0; padding-left: 18px; display: grid; gap: 4px; font-size: var(--text-md); color: var(--fg-2); line-height: 1.5; list-style: none; }
+.rules-loosen-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.rules-diff { min-width: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; font: 12px/1.7 var(--font-mono); }
+.rules-diff-head { display: flex; justify-content: space-between; gap: 12px; padding: 6px 12px; background: var(--sunken); border-bottom: 1px solid var(--line); color: var(--fg-3); overflow-wrap: anywhere; }
+.rules-diff-head span:last-child { flex: none; }
+.rules-diff-body { margin: 0; padding: 8px 0; max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.rules-diff-body span { display: block; padding: 0 12px; color: var(--fg-3); }
+.rules-diff-body .is-del { background: var(--fail-wash); color: var(--fail); }
+.rules-diff-body .is-add { background: var(--live-wash); color: var(--live); }
 .rules-loosen {
   padding: 12px 14px; border: 1px solid var(--fail); border-radius: var(--radius-lg); background: var(--fail-wash);
   font-size: var(--text-md);

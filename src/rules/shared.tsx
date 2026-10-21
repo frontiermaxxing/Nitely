@@ -65,3 +65,25 @@ export interface RulesDraft {
   crossVendor: boolean;
   patch: (p: Partial<RulesEdit>) => void;
 }
+
+/** What a draft changes against the saved rules, one line each, for the save bar. */
+export function draftChanges(v: RulesView, d: RulesEdit): string[] {
+  const saved = draftOf(v);
+  const out: string[] = [];
+  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+  const onOff = (b: boolean) => (b ? "on" : "off");
+  const was = <T,>(own: T | null, f: RuleField<T>) => own ?? f.inherited;
+  if (d.review_enabled !== saved.review_enabled) out.push(`Automated review: ${onOff(was(saved.review_enabled, v.review_enabled))} → ${onOff(was(d.review_enabled, v.review_enabled))}`);
+  if (d.always_human !== saved.always_human) out.push(`Every change waits for you: ${onOff(saved.always_human)} → ${onOff(d.always_human)}`);
+  if (!same(d.human_paths, saved.human_paths)) out.push("Paths that need you");
+  if (!same(d.flags, saved.flags)) out.push("Questions the reviewer answers");
+  if (!same(d.blocked_paths, saved.blocked_paths)) out.push("Paths no task may change");
+  if (!same(d.reviewer, saved.reviewer)) out.push("Who reviews whose work");
+  if (d.require_cross_vendor !== saved.require_cross_vendor) {
+    const words = (b: boolean) => (b ? "Waits for me" : "Is enough");
+    out.push(`A review by the author's own vendor: ${words(was(saved.require_cross_vendor, v.require_cross_vendor))} → ${words(was(d.require_cross_vendor, v.require_cross_vendor))}`);
+  }
+  if (d.land_by !== saved.land_by) out.push(`Who lands a change: ${LAND_BY[was(saved.land_by, v.land_by)].label} → ${LAND_BY[was(d.land_by, v.land_by)].label}`);
+  if (d.focus !== saved.focus) out.push("What matters most here");
+  return out;
+}

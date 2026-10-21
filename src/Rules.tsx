@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "./backend";
 import type { DefaultsView, LandBy, RuleDefaults, RulesEdit, RulesView } from "./types";
 import { EmptyState, Loading } from "./ui";
@@ -10,7 +10,8 @@ import { Paths } from "./rules/Paths";
 import { ReviewerMap, Reviewers } from "./rules/Reviewers";
 import { SaveBar } from "./rules/SaveBar";
 import type { RulesDraft } from "./rules/shared";
-import { draftOf, From, LAND_BY } from "./rules/shared";
+import { draftChanges, draftOf, From, LAND_BY } from "./rules/shared";
+import { confirmLoosening } from "./rules/save";
 import "./rules.css";
 
 export { LAND_BY } from "./rules/shared";
@@ -30,7 +31,8 @@ function RepoRules(props: { view: RulesView; onSaved: (v: RulesView) => void }) 
   }, [v]);
 
   const ro = !v.editable;
-  const changed = JSON.stringify(draft) !== JSON.stringify(draftOf(v));
+  const changes = draftChanges(v, draft);
+  const changed = changes.length > 0;
   const landBy = draft.land_by ?? v.land_by.inherited;
   const crossVendor = draft.require_cross_vendor ?? v.require_cross_vendor.inherited;
   const patch = (p: Partial<RulesEdit>) => {
@@ -39,22 +41,21 @@ function RepoRules(props: { view: RulesView; onSaved: (v: RulesView) => void }) 
     setNote(null);
   };
 
-  const save = async (confirm: boolean) => {
+  const save = async () => {
     setBusy(true);
     setError(null);
     try {
-      if (!confirm) {
-        const loose = await invoke<string[]>("rules_check", { repo: v.repo, edit: draft });
-        if (loose.length) {
-          setLoosens(loose);
-          setBusy(false);
-          return;
-        }
+      const step = await confirmLoosening(
+        () => invoke<string[]>("rules_check", { repo: v.repo, edit: draft }),
+        (confirm) => invoke<RulesView>("rules_save", { repo: v.repo, edit: draft, confirm }),
+        loosens,
+      );
+      if ("loosens" in step) setLoosens(step.loosens);
+      else {
+        setLoosens(null);
+        setNote("Saved. The next submit and land use these rules.");
+        props.onSaved(step.saved);
       }
-      const saved = await invoke<RulesView>("rules_save", { repo: v.repo, edit: draft, confirm });
-      setLoosens(null);
-      setNote("Saved. The next submit and land use these rules.");
-      props.onSaved(saved);
     } catch (e) {
       setError(String(e));
     }
@@ -69,19 +70,19 @@ function RepoRules(props: { view: RulesView; onSaved: (v: RulesView) => void }) 
       <Reviewers {...rules} onSaved={props.onSaved} />
       <Landing {...rules} />
 
-      {!ro && (
+      <DryRun repo={v.repo} stale={changed} />
+
+      {note && <p className="muted small rules-saved" role="status">{note}</p>}
+      {!ro && (loosens || changes.length > 0 || error) && (
         <div className="rules-save">
           {loosens ? (
-            <Loosen lead={<strong>This sends fewer changes to you.</strong>} loosens={loosens} busy={busy} onLoosen={() => save(true)} onKeepEditing={() => setLoosens(null)} />
+            <Loosen loosens={loosens} confirmLabel="Loosen and save" busy={busy} onConfirm={save} onKeepEditing={() => setLoosens(null)} />
           ) : (
-            <SaveBar label="Save rules" busy={busy} changed={changed} onSave={() => save(false)} onDiscard={() => setDraft(draftOf(v))} />
+            <SaveBar label="Save rules" changes={changes} busy={busy} onSave={save} onDiscard={() => setDraft(draftOf(v))} />
           )}
+          {error && <p className="error small" role="alert">{error}</p>}
         </div>
       )}
-      {note && <p className="muted small">{note}</p>}
-      {error && <p className="error small">{error}</p>}
-
-      <DryRun repo={v.repo} stale={changed} />
     </div>
   );
 }
@@ -139,7 +140,6 @@ export function RuleDefaultsCard({ titled = true }: { titled?: boolean } = {}) {
       })
       .catch((e) => setError(String(e)));
   }, []);
-  const changed = useMemo(() => view !== null && JSON.stringify(draft) !== JSON.stringify(view.defaults), [draft, view]);
   if (error && !view) return <p className="error">{error}</p>;
   if (!view) return <Loading />;
 
@@ -150,28 +150,29 @@ export function RuleDefaultsCard({ titled = true }: { titled?: boolean } = {}) {
     setLoosens(null);
     setNote(null);
   };
-  const save = async (confirm: boolean) => {
+  const save = async () => {
     setBusy(true);
     setError(null);
     try {
-      if (!confirm) {
-        const loose = await invoke<string[]>("rule_defaults_check", { defaults: draft });
-        if (loose.length) {
-          setLoosens(loose);
-          setBusy(false);
-          return;
-        }
+      const step = await confirmLoosening(
+        () => invoke<string[]>("rule_defaults_check", { defaults: draft }),
+        (confirm) => invoke<DefaultsView>("rule_defaults_save", { defaults: draft, confirm }),
+        loosens,
+      );
+      if ("loosens" in step) setLoosens(step.loosens);
+      else {
+        setView(step.saved);
+        setDraft(step.saved.defaults);
+        setLoosens(null);
+        setNote("Saved. Projects that set none of these use them from the next submit.");
       }
-      const saved = await invoke<DefaultsView>("rule_defaults_save", { defaults: draft, confirm });
-      setView(saved);
-      setDraft(saved.defaults);
-      setLoosens(null);
-      setNote("Saved. Projects that set none of these use them from the next submit.");
     } catch (e) {
       setError(String(e));
     }
     setBusy(false);
   };
+  const DEFAULT_NAMES: Record<keyof RuleDefaults, string> = { reviewer: "Who reviews whose work", require_cross_vendor: "A review by the author's own vendor", land_by: "Who lands a change", focus: "What matters most in a review" };
+  const changes = (Object.keys(DEFAULT_NAMES) as (keyof RuleDefaults)[]).filter((k) => JSON.stringify(draft[k]) !== JSON.stringify(view.defaults[k])).map((k) => DEFAULT_NAMES[k]);
 
   return (
     <section className="settings-card rules-defaults">
@@ -217,15 +218,9 @@ export function RuleDefaultsCard({ titled = true }: { titled?: boolean } = {}) {
         <textarea rows={3} value={draft.focus ?? ""} placeholder="Instructions every reviewer gets, unless a project sets its own." onChange={(e) => patch({ focus: e.target.value.trim() ? e.target.value : undefined })} />
       </div>
       {loosens ? (
-        <Loosen
-          lead={<><strong>This sends fewer changes to you</strong> in every project that sets none of these.</>}
-          loosens={loosens}
-          busy={busy}
-          onLoosen={() => save(true)}
-          onKeepEditing={() => setLoosens(null)}
-        />
+        <Loosen lead="in every project that sets none of these." loosens={loosens} confirmLabel="Loosen and save" busy={busy} onConfirm={save} onKeepEditing={() => setLoosens(null)} />
       ) : (
-        <SaveBar label="Save defaults" busy={busy} changed={changed} onSave={() => save(false)} />
+        <SaveBar label="Save defaults" changes={changes} busy={busy} onSave={save} onDiscard={() => setDraft(view.defaults)} />
       )}
       {note && <p className="muted small">{note}</p>}
       {error && <p className="error small">{error}</p>}
