@@ -19,7 +19,7 @@ mode.
 **Policy lives only in the mode.** The playbook holds facts about the repo: the gate commands, the
 quick commands (`[verification] basic`), the test map, protected and human paths, the reviewers
 and lanes. Its old policy keys (`[review] enabled` and `batch`, `[land] batch`, `[verification]
-mode`, `version` and `audit_percent`, and `[verification.backstop] enabled`, `landings` and
+mode` and `audit_percent`, and `[verification.backstop] enabled`, `landings` and
 `delay_seconds`) are retired: Nitely ignores them and says so on the Rules page.
 
 **Custom** exposes each control. A control left unset uses Nitely's default, never the playbook:

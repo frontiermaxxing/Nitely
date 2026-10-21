@@ -236,7 +236,7 @@ modes, two shadow switches, two kinds of batching and a parallel YOLO table.
 | `project_yolo` table and the switch | Dropped by a migration; the app, CLI and MCP no longer read or set it. Custom with tests and review off is what YOLO was. |
 | YOLO, Balanced and Thorough names | Migrated by NIT-491; the old names still parse for stored rows. |
 | Review shadow batches | Gone: `batch = "shadow"` reads as off and submits queue nothing record-only. `nitely batches compare` reads the old rows. |
-| Playbook policy keys | Ignored, with a notice: `[review] enabled` and `batch`, `[land] batch`, `[verification] mode`, `version` and `audit_percent`, `[verification.backstop] enabled`, `landings` and `delay_seconds`. |
+| Playbook policy keys | Ignored, with a notice: `[review] enabled` and `batch`, `[land] batch`, `[verification] mode` and `audit_percent` (`version` stays: it is the policy format), `[verification.backstop] enabled`, `landings` and `delay_seconds`. |
 | Custom falling back to the playbook | Custom's unset values are Nitely's defaults (`project_modes::builtin`): the full gate, a review of each change, landing alone, no goal branches, 10% audits, the full suite on main off. |
 | The land-queue stack for goal items | Nothing to remove: NIT-495 lands items into the goal branch and gates each checkpoint alone. |
 | Periodic review as a default | Off in every preset (NIT-491); Custom only. |
