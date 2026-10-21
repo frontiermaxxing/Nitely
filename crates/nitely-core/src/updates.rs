@@ -64,7 +64,7 @@ impl Digest {
 }
 
 /// The person's own moves, as the event table records them.
-const DECISIONS: &[&str] = &["answer", "issue_moved", "issue_edited", "goal_changed", "note", "project_review_mode_changed", "project_focus_changed", "project_yolo_changed", "owner_changed", "issue_created", "ask_closed"];
+const DECISIONS: &[&str] = &["answer", "issue_moved", "issue_edited", "goal_changed", "note", "project_review_mode_changed", "project_focus_changed", "project_yolo_changed", "reviewer_settings_changed", "owner_changed", "issue_created", "ask_closed"];
 /// Outcomes of work, whoever's they are: lands, sent-backs, a goal done or dropped.
 const OUTCOMES: &[&str] = &["landed", "land_failed", "goal_state"];
 /// Who files the recovery issue when the full check on the integration branch fails
@@ -81,11 +81,13 @@ const QUOTE: usize = 90;
 pub fn digest(events: &[FeedEvent], reader: &str, scope: &Scope, cap: usize) -> Digest {
     let cursor = events.iter().map(|e| e.id).max().unwrap_or(0);
     let relevant = |e: &FeedEvent| -> bool {
-        if e.actor == reader {
+        let sent_back = e.kind == "submit" && e.summary.contains("requested changes");
+        // The reader's own events are not news, except a review's verdict: a background submit
+        // records it under the submitting session, which has moved on by the time it comes.
+        if e.actor == reader && !sent_back {
             return false;
         }
         let decision = e.actor == "human" && DECISIONS.contains(&e.kind.as_str());
-        let sent_back = e.kind == "submit" && e.summary.contains("requested changes");
         let outcome = OUTCOMES.contains(&e.kind.as_str()) || sent_back || (e.actor == BACKSTOP && e.kind == "issue_created");
         // An answer to an ask about no issue: for its asker, and a coordinator; no other agent.
         if let (Some(to), Scope::Mine { .. }) = (&e.for_reader, scope) {
@@ -170,6 +172,7 @@ fn line(e: &FeedEvent) -> String {
             format!("The person edited {what} on {}: read it again", e.issue_key.as_deref().unwrap_or("an issue"))
         }
         "ask_closed" => format!("The person closed the ask{on}"),
+        "reviewer_settings_changed" => format!("The person changed the reviewer settings: {said}"),
         "land_failed" => format!("{} was sent back from landing: {said}", e.issue_key.as_deref().unwrap_or("A change")),
         _ => format!("The person changed{on}: {said}"),
     }
@@ -356,6 +359,21 @@ mod tests {
         let long = format!("Goal 22 \"{}\" is done", "very ".repeat(30));
         let line = &digest(&[ev(3, "human", None, Some("APP"), Some(22), "goal_state", &long)], "claude:coord", &whole, 8).lines[0];
         assert!(line.ends_with(" is done") && line.contains('…'), "{line}");
+    }
+
+    /// What the person sent back from the fifth review: a change to the reviewer settings is one of
+    /// their decisions, and a background review's send-back reaches the session that submitted it.
+    #[test]
+    fn reviewer_settings_and_ones_own_send_back_are_news() {
+        let mine = Scope::Mine { issues: ["APP-7".to_string()].into(), goals: BTreeSet::new(), projects: ["APP".to_string()].into() };
+        let settings = ev(1, "human", None, None, None, "reviewer_settings_changed", "Review settings for app: Saved.");
+        assert_eq!(digest(&[settings], "claude:me", &mine, 8).lines, ["The person changed the reviewer settings: Review settings for app: Saved."]);
+        let own = [
+            ev(2, "claude:me", Some("APP-7"), Some("APP"), None, "submit", "Review by codex requested changes. Pull request: x"),
+            ev(3, "claude:me", Some("APP-7"), Some("APP"), None, "submit", "Review by codex passed; ready to land"),
+            ev(4, "claude:me", Some("APP-7"), Some("APP"), None, "note", "Fixed it"),
+        ];
+        assert_eq!(digest(&own, "claude:me", &mine, 8).lines, ["APP-7: the review asked for changes"], "only the send-back, not its own pass or note");
     }
 
     #[test]
