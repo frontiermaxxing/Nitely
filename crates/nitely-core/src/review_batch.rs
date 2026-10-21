@@ -262,8 +262,8 @@ fn decide(db: &mut Db, rules: &ReviewRules, w: &Waiting, mut review: Review, act
     let verdict = if accepted_only { "pass".to_string() } else { review.verdict.clone() };
     let approver = if reasons.is_empty() { "agent" } else { "human" };
     db.conn.execute(
-        "INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, reasons, findings, flagged, note, ts, batch_id, seconds, tokens, solution, gate, branch)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+        "INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, reasons, findings, flagged, note, ts, batch_id, seconds, tokens, solution, gate, branch, after_event)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, (SELECT COALESCE(MAX(id), 0) FROM event))",
         params![
             key,
             patch,

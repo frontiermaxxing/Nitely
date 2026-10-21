@@ -175,12 +175,15 @@ fn a_long_call_holds_up_none_after_it_and_ends_at_the_cap() {
 #[test]
 fn a_cancelled_call_is_not_answered_and_frees_the_server() {
     let (mut mcp, run, base) = setup("nitely-mcp-cancel");
+    let asked = Instant::now();
     mcp.call(4, "run_status", json!({ "id": run, "wait_seconds": 600 }));
     mcp.send(json!({ "jsonrpc": "2.0", "method": "notifications/cancelled", "params": { "requestId": 4, "reason": "the client gave up" } }));
     mcp.call(5, "list_issues", json!({ "project": "APP" }));
     assert_eq!(mcp.next(Duration::from_secs(20)).unwrap()["id"], 5);
-    // Past the cap, the cancelled call ends without a word.
-    assert!(mcp.next(Duration::from_secs(3)).is_none(), "a cancelled call gets no answer");
+    // Past the server's 1 s cap, when the call would have been answered, it ends without a word:
+    // half a second past it is enough to see that, not a fixed wait (NIT-544).
+    let past_the_cap = Duration::from_millis(1500).saturating_sub(asked.elapsed());
+    assert!(mcp.next(past_the_cap).is_none(), "a cancelled call gets no answer");
     mcp.call(6, "list_issues", json!({ "project": "APP" }));
     assert_eq!(mcp.next(Duration::from_secs(20)).unwrap()["id"], 6);
     drop(mcp);

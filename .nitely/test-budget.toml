@@ -48,3 +48,4 @@ nitely_core = 60
 "light::tests::a_light_worktree_runs_no_setup_and_gets_a_reference_tree_its_gate_sets_up_once" = "a light worktree and its reference tree"
 "a_long_call_holds_up_none_after_it_and_ends_at_the_cap" = "MCP calls in parallel, the wait cap, and a call finishing after the client leaves"
 "a_call_that_meets_a_newer_database_waits_for_the_install_and_goes_to_the_new_build" = "an older build, call and submit job, hands over to the newly installed one"
+"a_running_mcp_server_forwards_to_a_newly_installed_build" = "a real install of the built binary under a running MCP server, which forwards to it"

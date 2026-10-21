@@ -117,6 +117,22 @@ impl Db {
 
     /// When the person last decided a request to accept a finding of `key` (0 when never): their
     /// decision to go on starts a new count of review rounds.
+    /// The latest answer the person gave to one of the issue's findings, as its event; one answered
+    /// without an event (older records) by its time alone.
+    pub fn findings_decided_event(&self, key: &str) -> Result<Option<crate::submit::Decision>> {
+        let at = self.findings_decided_at(key)?;
+        if at == 0 {
+            return Ok(None);
+        }
+        let id: Option<i64> = self.conn.query_row(
+            "SELECT MAX(e.id) FROM event e JOIN ask a ON a.issue_key = e.issue_key COLLATE NOCASE AND e.type = 'answer' AND e.ts = a.answered_at AND e.summary = a.answer
+             WHERE a.issue_key = ?1 COLLATE NOCASE AND a.finding IS NOT NULL AND a.answer IS NOT NULL AND a.answered_at = ?2",
+            rusqlite::params![key, at],
+            |r| r.get(0),
+        )?;
+        Ok(Some(crate::submit::Decision { id, ts: at }))
+    }
+
     pub fn findings_decided_at(&self, key: &str) -> Result<i64> {
         Ok(self.conn.query_row(
             "SELECT COALESCE(MAX(answered_at), 0) FROM ask WHERE issue_key = ?1 COLLATE NOCASE AND finding IS NOT NULL AND answer IS NOT NULL",

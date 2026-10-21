@@ -83,6 +83,9 @@ pub struct ReviewRecord {
     pub reasons: Vec<String>,
     pub findings: Vec<crate::review::Finding>,
     pub ts: i64,
+    /// The newest event when it was recorded (NIT-544): what orders it against a decision's event.
+    /// None for reviews recorded before that.
+    pub after_event: Option<i64>,
     /// As `Review::note`: how independent the review was, e.g. `same vendor: codex not installed`.
     pub note: String,
     /// The review batch it was reviewed in, with other changes in one reviewer call (NIT-216).
@@ -90,6 +93,25 @@ pub struct ReviewRecord {
     /// These fields describe this record’s commit only. Legacy records have neither.
     pub solution: Option<SolutionSummary>,
     pub gate: Option<GateResult>,
+}
+
+/// A decision about an issue (an approval, a hand-back, an answer to a finding): its event, when it
+/// has one, and its time (NIT-544).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Decision {
+    pub id: Option<i64>,
+    pub ts: i64,
+}
+
+impl Decision {
+    /// Whether review `r` came after this decision: it saw the decision's event when both are known
+    /// (so two in the same second are told apart), else by whole seconds as before.
+    pub fn came_before(&self, r: &ReviewRecord) -> bool {
+        match (self.id, r.after_event) {
+            (Some(id), Some(seen)) => seen >= id,
+            _ => r.ts > self.ts,
+        }
+    }
 }
 
 pub struct SubmitOptions<'a> {
@@ -314,8 +336,8 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     // issue's findings or handed it back (their decision to go on starts a new count).
     let mut stalled = match &out.review {
         Some(r) if verdict == "changes" && issue.origin == "nitely" => {
-            let since = db.handed_back_at(&issue.key)?.max(db.findings_decided_at(&issue.key)?);
-            let earlier: Vec<ReviewRecord> = db.reviews(&issue.key)?.into_iter().filter(|r| r.ts > since).collect();
+            let decided = [db.handed_back_event(&issue.key)?, db.findings_decided_event(&issue.key)?].into_iter().flatten().max_by_key(|d| (d.ts, d.id));
+            let earlier: Vec<ReviewRecord> = db.reviews(&issue.key)?.into_iter().filter(|r| decided.is_none_or(|d| d.came_before(r))).collect();
             not_converging(&earlier, r)
         }
         _ => None,
@@ -569,15 +591,17 @@ when it has one): a gap there is a finding like any other, and comes before line
     if !gate.is_empty() {
         c.push_str(&format!("\nThe gate passed on this tree: {}. Do not report what it already checks.\n", gate.join(", ")));
     }
-    let last = db.reviews(&issue.key)?.into_iter().find(|r| !r.reviewer.is_empty()).map(|r| r.ts);
-    if let Some(since) = last {
+    // Notes since the last review: after the event it saw (NIT-544), or, for an older review, from
+    // its second on.
+    let last = db.reviews(&issue.key)?.into_iter().find(|r| !r.reviewer.is_empty()).map(|r| (r.ts, r.after_event));
+    if let Some((since, seen)) = last {
         let notes: Vec<String> = db
             .conn
             .prepare(
-                "SELECT summary FROM event WHERE issue_key = ?1 COLLATE NOCASE AND type IN ('note', 'handoff') AND ts >= ?2 AND actor != 'human'
+                "SELECT summary FROM event WHERE issue_key = ?1 COLLATE NOCASE AND type IN ('note', 'handoff') AND (CASE WHEN ?3 IS NULL THEN ts >= ?2 ELSE id > ?3 END) AND actor != 'human'
                  AND summary IS NOT NULL ORDER BY id DESC LIMIT 5",
             )?
-            .query_map(rusqlite::params![issue.key, since], |r| r.get::<_, String>(0))?
+            .query_map(rusqlite::params![issue.key, since, seen], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<_>>()?;
         if !notes.is_empty() {
             c.push_str("\nThe author's notes since that review, which may answer its findings:\n");
@@ -978,6 +1002,18 @@ fn push(pb: &Playbook, worktree: &Path, branch: &str) -> Result<()> {
 
 impl Db {
     /// When the human last handed the issue back to agents (0 when never).
+    /// The latest time the person handed the issue back to agents, as an event.
+    pub fn handed_back_event(&self, issue_key: &str) -> Result<Option<Decision>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, ts FROM event WHERE issue_key = ?1 COLLATE NOCASE AND type = 'owner_changed' AND summary = 'Handed back to agents' ORDER BY id DESC LIMIT 1",
+                [issue_key],
+                |r| Ok(Decision { id: Some(r.get(0)?), ts: r.get(1)? }),
+            )
+            .optional()?)
+    }
+
     pub fn handed_back_at(&self, issue_key: &str) -> Result<i64> {
         Ok(self.conn.query_row(
             "SELECT COALESCE(MAX(ts), 0) FROM event WHERE issue_key = ?1 COLLATE NOCASE AND type = 'owner_changed' AND summary = 'Handed back to agents'",
@@ -1002,8 +1038,8 @@ impl Db {
         let batch = s.review.as_ref().and_then(|r| r.batch.as_ref()).map(|b| b.id);
         let (seconds, tokens) = (s.review.as_ref().map(|r| r.seconds as i64), s.review.as_ref().and_then(|r| r.tokens).map(|t| t as i64));
         self.conn.execute(
-            "INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, reasons, findings, flagged, note, ts, batch_id, seconds, tokens, solution, gate, branch)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            "INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, reasons, findings, flagged, note, ts, batch_id, seconds, tokens, solution, gate, branch, after_event)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, (SELECT COALESCE(MAX(id), 0) FROM event))",
             rusqlite::params![s.issue, s.patch_id, s.commit, reviewer, verdict, s.approver, to_json(&s.reasons), findings, flagged, note, now(), batch, seconds, tokens, s.solution.as_ref().map(to_json), to_json(&evidence), s.branch],
         )?;
         Ok(())
@@ -1017,7 +1053,7 @@ impl Db {
     /// `reviews`, only those recorded before the review `before` when given.
     pub fn reviews_before(&self, issue_key: &str, before: Option<i64>) -> Result<Vec<ReviewRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT issue_key, patch_id, commit_sha, reviewer, verdict, approver, reasons, findings, ts, note, batch_id, solution, gate, branch
+            "SELECT issue_key, patch_id, commit_sha, reviewer, verdict, approver, reasons, findings, ts, note, batch_id, solution, gate, branch, after_event
              FROM review WHERE issue_key = ?1 COLLATE NOCASE AND (?2 IS NULL OR id < ?2) ORDER BY ts DESC, id DESC",
         )?;
         let rows = stmt.query_map(rusqlite::params![issue_key, before], |r| {
@@ -1032,6 +1068,7 @@ impl Db {
                 reasons: serde_json::from_str(&r.get::<_, String>(6)?).unwrap_or_default(),
                 findings: serde_json::from_str(&r.get::<_, String>(7)?).unwrap_or_default(),
                 ts: r.get(8)?,
+                after_event: r.get(14)?,
                 note: r.get(9)?,
                 batch_id: r.get(10)?,
                 solution: r.get::<_, Option<String>>(11)?.and_then(|s| serde_json::from_str(&s).ok()),
@@ -1064,6 +1101,24 @@ mod tests {
     use crate::test_repo::git as sh;
     use std::path::PathBuf;
 
+    /// A review and a decision in the same second are told apart by the event the review saw
+    /// (NIT-544); an older review, recorded before that was kept, is ordered by whole seconds.
+    #[test]
+    fn a_review_is_after_a_decision_when_it_saw_its_event() {
+        let review = |ts: i64, after_event: Option<i64>| ReviewRecord {
+            issue_key: "APP-7".into(), patch_id: "p".into(), commit_sha: "c".into(), branch: None,
+            reviewer: "codex".into(), verdict: "pass".into(), approver: "agent".into(), reasons: vec![], findings: vec![], ts, after_event,
+            note: String::new(), batch_id: None, solution: None, gate: None,
+        };
+        let decided = Decision { id: Some(40), ts: 100 };
+        assert!(decided.came_before(&review(100, Some(40))), "same second, it saw the decision");
+        assert!(!decided.came_before(&review(100, Some(39))), "same second, before the decision");
+        assert!(!decided.came_before(&review(100, None)), "an older review in the same second: before, as it always was");
+        assert!(decided.came_before(&review(101, None)));
+        let unlinked = Decision { id: None, ts: 100 };
+        assert!(!unlinked.came_before(&review(100, Some(99))), "a decision with no event: seconds");
+    }
+
     #[test]
     fn approval_pr_matches_the_submission_not_recent_comments() {
         let pr = |number: i64, branch: &str, head: &str, updated: &str| crate::db::PrRecord {
@@ -1074,7 +1129,7 @@ mod tests {
         };
         let review = ReviewRecord {
             issue_key: "APP-7".into(), patch_id: "patch".into(), commit_sha: "bbbbbbb".into(), branch: Some("codex/app-7-current".into()),
-            reviewer: "codex".into(), verdict: "pass".into(), approver: "human".into(), reasons: vec![], findings: vec![], ts: 0,
+            reviewer: "codex".into(), verdict: "pass".into(), approver: "human".into(), reasons: vec![], findings: vec![], ts: 0, after_event: None,
             note: String::new(), batch_id: None, solution: None, gate: None,
         };
         // Same issue, newest update first: the older PR just received a comment.
@@ -1103,7 +1158,7 @@ mod tests {
             approver: "agent".into(),
             reasons: vec![],
             findings,
-            ts: 0,
+            ts: 0, after_event: None,
             note: String::new(),
             batch_id: None,
             solution: None,
@@ -1485,9 +1540,7 @@ reason = "money logic"
         let done = f.db.move_issue(&issue.key, "Done", Some("Done by the human, outside Nitely."), None, &Actor::Human).unwrap_err().to_string();
         assert!(done.contains("never landed"), "{done}");
         // Sent back, the count starts over: the next round that carries it is not escalated.
-        std::thread::sleep(std::time::Duration::from_millis(1100));
         f.db.decline_finding(requests[0].id, "fix it properly", "").unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(1100));
         assert_eq!(f.submit(&wt, true).unwrap().state, "In Progress");
     }
 
@@ -1607,7 +1660,6 @@ reason = "money logic"
         let ok = playbook::CommandResult { command: "exit 0".into(), ok: true, seconds: 0, output: String::new(), skipped: false, timed_out: false };
         let gate = GateResult { mode_authority: None, plan: None, skipped: None, passed: true, commit: "c".into(), results: vec![ok], warnings: vec![], flaked: vec![], lane_run: None };
         // Since that round: the author's note, and a finding the person accepted on another issue.
-        std::thread::sleep(std::time::Duration::from_millis(1100));
         f.db.add_note(&issue.key, "The empty line is kept on purpose: the footer needs it.", "note", &f.actor).unwrap();
         // One acceptance the person signed, and one an agent wrote itself, which must not count.
         let secret = [9u8; 32];

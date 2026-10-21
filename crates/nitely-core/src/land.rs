@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::db::{now, Db};
+use rusqlite::OptionalExtension;
 use crate::issues::{Actor, IssueRecord};
 use crate::playbook::{self, git, git_remote, GateResult, Playbook};
 
@@ -1218,9 +1219,15 @@ impl Db {
     /// the approval's second, and reviews from that second count as later ones; only when none is
     /// older is it the first review of that second.
     pub fn standing_approval(&self, key: &str) -> Result<Option<i64>> {
-        let Some(at) = self.human_approval_at(key)? else { return Ok(None) };
+        let Some(approval) = self.human_approval_event(key)? else { return Ok(None) };
+        let at = approval.ts;
         let reviews = self.reviews(key)?; // newest first
-        let approved = reviews.iter().position(|r| r.ts < at).or_else(|| reviews.iter().rposition(|r| r.ts == at));
+        // The newest review the approval saw: by its event when both have one (NIT-544), else by
+        // whole seconds, where a review in the approval's own second counts as seen.
+        let approved = reviews
+            .iter()
+            .position(|r| !approval.came_before(r) && (r.after_event.is_some() || r.ts < at))
+            .or_else(|| reviews.iter().rposition(|r| r.after_event.is_none() && r.ts == at));
         let Some(approved) = approved else {
             return Ok(reviews.is_empty().then_some(at));
         };
@@ -1230,6 +1237,23 @@ impl Db {
             unchanged &= r.patch_id == base.patch_id && self.review_passes(key, r)? && r.reasons.iter().all(|x| base.reasons.contains(x));
         }
         Ok((self.review_passes(key, base)? && unchanged).then_some(at))
+    }
+
+    /// The person's latest move of the issue to Approved, as its event, if it is still Approved.
+    pub fn human_approval_event(&self, key: &str) -> Result<Option<crate::submit::Decision>> {
+        let Some(issue) = self.issue(key)? else { return Ok(None) };
+        if issue.state != "Approved" {
+            return Ok(None);
+        }
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, ts FROM event WHERE issue_key = ?1 COLLATE NOCASE AND type = 'issue_moved' AND actor = 'human'
+                   AND summary LIKE '%→ Approved%' ORDER BY id DESC LIMIT 1",
+                [&issue.key],
+                |r| Ok(crate::submit::Decision { id: Some(r.get(0)?), ts: r.get(1)? }),
+            )
+            .optional()?)
     }
 
     /// When a human last moved the issue to Approved, if it is still Approved.
@@ -2170,7 +2194,6 @@ when_changed = ["billing"]
         f.db.conn.execute("UPDATE issue SET state = 'Needs You' WHERE key = ?1", [&b]).unwrap();
         approve(&mut f.db, &b);
         // Submitting the same patch again (after a clean rebase, say) keeps the approval.
-        std::thread::sleep(std::time::Duration::from_millis(1100));
         f.submit(&wt_b);
         assert_eq!(f.db.issue(&b).unwrap().unwrap().state, "Approved");
         assert!(f.db.standing_approval(&b).unwrap().is_some());
@@ -2180,7 +2203,6 @@ when_changed = ["billing"]
         f.submit(&wt_b);
         assert_eq!(f.db.issue(&b).unwrap().unwrap().state, "Needs You");
         assert!(f.db.standing_approval(&b).unwrap().is_none());
-        std::thread::sleep(std::time::Duration::from_millis(1100));
         approve(&mut f.db, &b);
         let r = f.land(&b);
         assert!(r.landed, "{r:?}");
