@@ -145,12 +145,7 @@ impl<'a> Question<'a> {
             Question::CountRange(a, b) => {
                 let a = resolve(repo, &format!("{a}^{{commit}}"))??.detach();
                 let b = resolve(repo, &format!("{b}^{{commit}}"))??.detach();
-                let mut n = 0usize;
-                for commit in repo.rev_walk([b]).with_hidden([a]).all().ok()? {
-                    commit.ok()?;
-                    n += 1;
-                }
-                Some(Ok(format!("{n}\n")))
+                Some(Ok(format!("{}\n", count(repo, b, a)?)))
             }
             Question::CurrentBranch => match repo.head_name().ok()? {
                 Some(name) => {
@@ -300,6 +295,111 @@ fn open(dir: &Path) -> Option<gix::Repository> {
     Some(repo)
 }
 
+/// `git worktree list --porcelain` in the main checkout `root`, as `git::parse_worktrees` reads
+/// it, or None to ask git: a bare repository, a common folder not named `.git`, a worktree that
+/// git records by a relative path, a branch not born yet, or anything gix cannot read.
+pub(crate) fn worktrees(root: &Path) -> Option<Vec<crate::git::Worktree>> {
+    if env_redirects_git() || !root.join(".git").is_dir() {
+        return None;
+    }
+    let repo = open(root)?;
+    let common = repo.common_dir();
+    if common.file_name()? != ".git" {
+        return None;
+    }
+    let main = realpath(common.parent()?)?;
+    let mut out = vec![worktree_entry(&repo, main, &common.join("HEAD"), true, false, false)?];
+    let linked = common.join("worktrees");
+    let Ok(ids) = std::fs::read_dir(&linked) else { return Some(out) };
+    // In the order the folder lists them, as git reads them.
+    for id in ids {
+        let dir = id.ok()?.path();
+        if !dir.is_dir() {
+            return None;
+        }
+        let gitdir = std::fs::read_to_string(dir.join("gitdir")).ok()?;
+        let gitdir = gitdir.trim_end();
+        let path = gitdir.strip_suffix("/.git").unwrap_or(gitdir);
+        if !Path::new(path).is_absolute() {
+            return None;
+        }
+        let locked = dir.join("locked").exists();
+        let prunable = !locked && !Path::new(gitdir).exists();
+        out.push(worktree_entry(&repo, path.to_string(), &dir.join("HEAD"), false, locked, prunable)?);
+    }
+    Some(out)
+}
+
+/// One worktree's entry: its HEAD file names a branch (`ref: refs/heads/...`) or holds an id.
+fn worktree_entry(repo: &gix::Repository, path: String, head_file: &Path, is_main: bool, locked: bool, prunable: bool) -> Option<crate::git::Worktree> {
+    let head = std::fs::read_to_string(head_file).ok()?;
+    let head = head.trim_end();
+    let (head, branch) = match head.strip_prefix("ref: ") {
+        Some(name) => {
+            let branch = name.strip_prefix("refs/heads/")?;
+            let id = repo.try_find_reference(name).ok()??.into_fully_peeled_id().ok()?;
+            (id.to_string(), Some(branch.to_string()))
+        }
+        None => (gix::ObjectId::from_hex(head.as_bytes()).ok()?.to_string(), None),
+    };
+    Some(crate::git::Worktree { path, head, branch, is_main, locked, prunable })
+}
+
+/// A folder as git prints it: its real path, with forward slashes on Windows.
+fn realpath(p: &Path) -> Option<String> {
+    let real = std::fs::canonicalize(p).ok()?;
+    let real = real.to_str()?;
+    if cfg!(windows) {
+        // Only a plain drive path; a share or a device path is git's to spell.
+        let plain = real.strip_prefix(r"\\?\").filter(|r| r.as_bytes().get(1) == Some(&b':'))?;
+        Some(plain.replace('\\', "/"))
+    } else {
+        Some(real.to_string())
+    }
+}
+
+/// `git::list_branches(root, integration)` read in process: every local branch, most recently
+/// committed first (then by name), with its counts against `integration`, or None to ask git: an
+/// integration branch that names no commit, a branch whose short name git would spell longer
+/// because another ref shares it, a branch not on a commit, or a message that is not UTF-8.
+pub(crate) fn branches(root: &Path, integration: &str) -> Option<Vec<crate::git::BranchRef>> {
+    if env_redirects_git() || !plain_rev(integration) {
+        return None;
+    }
+    let repo = open(root)?;
+    let base = resolve(&repo, &format!("{integration}^{{commit}}"))??.detach();
+    let mut listed = Vec::new();
+    for reference in repo.references().ok()?.local_branches().ok()? {
+        let mut reference = reference.ok()?;
+        let full = reference.name().as_bstr().to_string();
+        let short = full.strip_prefix("refs/heads/")?.to_string();
+        let shared = [format!("refs/{short}"), format!("refs/tags/{short}"), format!("refs/remotes/{short}"), format!("refs/remotes/{short}/HEAD")];
+        if shared.iter().any(|n| !matches!(repo.try_find_reference(n.as_str()), Ok(None))) || repo.git_dir().join(&short).exists() {
+            return None;
+        }
+        let commit = reference.peel_to_id().ok()?.object().ok()?.try_into_commit().ok()?;
+        let at = commit.committer().ok()?.seconds();
+        let message = commit.message_raw().ok()?;
+        let subject = std::str::from_utf8(gix::objs::commit::MessageRef::from_bytes(message).summary().as_ref()).ok()?.trim().to_string();
+        let tip = commit.id;
+        let ahead = count(&repo, tip, base)?;
+        let behind = count(&repo, base, tip)?;
+        listed.push((full, crate::git::BranchRef { name: short, ahead: Some(ahead), behind: Some(behind), last_commit_subject: (!subject.is_empty()).then_some(subject), last_commit_at: Some(at) }));
+    }
+    listed.sort_by(|(an, a), (bn, b)| b.last_commit_at.cmp(&a.last_commit_at).then_with(|| an.cmp(bn)));
+    Some(listed.into_iter().map(|(_, b)| b).collect())
+}
+
+/// How many commits `from` reaches that `not` does not.
+fn count(repo: &gix::Repository, from: gix::ObjectId, not: gix::ObjectId) -> Option<u32> {
+    let mut n = 0u32;
+    for commit in repo.rev_walk([from]).with_hidden([not]).all().ok()? {
+        commit.ok()?;
+        n += 1;
+    }
+    Some(n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -426,6 +526,63 @@ mod tests {
         assert!(answer(&dir, &["rev-parse", "--verify", "nope"]).is_none());
         assert!(answer(&dir, &["cat-file", "-s", "HEAD:nope.txt"]).is_none());
         std::fs::remove_dir_all(&wt).ok();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn lists_worktrees_and_branches_as_the_board_reads_them_from_git() {
+        use crate::test_repo::{git, init};
+        let dir = crate::paths::unique_temp("nitely-git-read-board", "");
+        let root = dir.join("app");
+        init(&root, &[("a.txt", "a\n")]);
+        let cli = |args: &[&str]| {
+            let o = crate::playbook::run_git(crate::playbook::shell_free_command("git").arg("-C").arg(&root).args(args)).unwrap();
+            assert!(o.status.success(), "{args:?}");
+            String::from_utf8_lossy(&o.stdout).into_owned()
+        };
+        let as_git = || {
+            let counted = "--format=%(refname:short)%00%(committerdate:unix)%00%(ahead-behind:main)%00%(subject)";
+            (crate::git::parse_worktrees(&cli(&["worktree", "list", "--porcelain"])), crate::git::parse_branch_refs(&cli(&["for-each-ref", "--sort=-committerdate", counted, "refs/heads"])))
+        };
+        // Worktree ids listed in another order than their paths; one locked, one detached, one
+        // whose folder is gone.
+        let add = |name: &str, args: &[&str]| {
+            let path = dir.join(name).to_string_lossy().into_owned();
+            let (commit, options) = args.split_last().unwrap();
+            let mut all = vec!["worktree", "add", "-q"];
+            all.extend_from_slice(options);
+            all.extend([path.as_str(), commit]);
+            git(&root, &all);
+        };
+        add("z-first", &["-b", "claude/app-2-y", "main"]);
+        add("a-second", &["-b", "claude/app-1-x", "main"]);
+        add("detached", &["--detach", "main"]);
+        add("gone", &["-b", "claude/app-3-gone", "main"]);
+        git(&root, &["worktree", "lock", &dir.join("a-second").to_string_lossy()]);
+        std::fs::remove_dir_all(dir.join("gone")).unwrap();
+        // Branches ahead, behind, both, committed in the same second, with a two-line title.
+        let x = dir.join("a-second");
+        std::fs::write(x.join("b.txt"), "b\n").unwrap();
+        git(&x, &["add", "b.txt"]);
+        git(&x, &["commit", "-q", "-m", "Two lines\nof title\n\nAnd a body"]);
+        std::fs::write(root.join("c.txt"), "c\n").unwrap();
+        git(&root, &["add", "c.txt"]);
+        git(&root, &["commit", "-q", "-m", "main moves"]);
+        git(&root, &["branch", "same-second-b", "main"]);
+        git(&root, &["branch", "same-second-a", "main"]);
+
+        let (worktrees, branches) = as_git();
+        assert_eq!(worktrees.len(), 5);
+        assert!(worktrees.iter().any(|w| w.locked) && worktrees.iter().any(|w| w.prunable) && worktrees.iter().any(|w| w.branch.is_none()));
+        assert_eq!(super::worktrees(&root), Some(worktrees));
+        assert!(branches.iter().any(|b| b.ahead == Some(1) && b.behind == Some(1)));
+        assert_eq!(super::branches(&root, "main"), Some(branches));
+
+        // A tag that shares a branch's name makes git spell the branch longer: left to git.
+        git(&root, &["tag", "same-second-a"]);
+        assert_eq!(super::branches(&root, "main"), None);
+        // No such integration branch: git's listing without counts answers.
+        assert_eq!(super::branches(&root, "develop"), None);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

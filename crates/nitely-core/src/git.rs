@@ -1,10 +1,12 @@
 //! Reads worktree and branch state by running the user's own `git`, so sparse checkouts,
-//! `core.autocrlf` and credential config behave exactly as they do in their terminal.
+//! `core.autocrlf` and credential config behave exactly as they do in their terminal. What
+//! git_read can answer exactly as git would (the worktree list, the branches with their counts,
+//! plain revisions) is read in process instead, without starting git (NIT-518, NIT-530).
 
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Worktree {
     pub path: String,
     pub head: String,
@@ -43,6 +45,9 @@ fn rebase_in(git_dir: &std::path::Path) -> (bool, Option<i64>) {
 }
 
 fn git(dir: &str, args: &[&str]) -> Result<String> {
+    if let Some(answer) = crate::git_read::answer(std::path::Path::new(dir), args) {
+        return answer;
+    }
     let mut cmd = crate::playbook::shell_free_command("git");
     cmd.arg("-C").arg(dir).args(args);
     let out = crate::playbook::run_git(&mut cmd).with_context(|| format!("running git in {dir}"))?;
@@ -59,7 +64,10 @@ fn git(dir: &str, args: &[&str]) -> Result<String> {
 /// The repo's worktrees, without what Nitely keeps beside them for itself (the reference tree and
 /// build lanes under `.nitely-lanes`), which are nobody's work.
 pub fn list_worktrees(repo_root: &str) -> Result<Vec<Worktree>> {
-    let all = parse_worktrees(&git(repo_root, &["worktree", "list", "--porcelain"])?);
+    let all = match crate::git_read::worktrees(std::path::Path::new(repo_root)) {
+        Some(all) => all,
+        None => parse_worktrees(&git(repo_root, &["worktree", "list", "--porcelain"])?),
+    };
     Ok(all.into_iter().filter(|w| !crate::light::is_lane_path(&w.path)).collect())
 }
 
@@ -225,6 +233,9 @@ pub struct BranchRef {
 /// Every local branch, most recently committed first, with ahead/behind counts against
 /// `integration_branch` from one `for-each-ref` call.
 pub fn list_branches(repo_root: &str, integration_branch: &str) -> Result<Vec<BranchRef>> {
+    if let Some(branches) = crate::git_read::branches(std::path::Path::new(repo_root), integration_branch) {
+        return Ok(branches);
+    }
     let counted = format!(
         "--format=%(refname:short)%00%(committerdate:unix)%00%(ahead-behind:{integration_branch})%00%(subject)"
     );
@@ -248,7 +259,7 @@ pub fn list_branches(repo_root: &str, integration_branch: &str) -> Result<Vec<Br
 pub fn parse_branch_refs(text: &str) -> Vec<BranchRef> {
     text.lines()
         .filter_map(|line| {
-            let mut f = line.splitn(4, ' ');
+            let mut f = line.splitn(4, '\0');
             let name = f.next()?.trim();
             if name.is_empty() {
                 return None;
@@ -278,12 +289,29 @@ pub fn main_root(dir: &str) -> Option<String> {
 
 /// `workspace/repo` when the repo's `origin` is on Bitbucket.
 pub fn bitbucket_slug(repo_root: &str) -> Option<String> {
-    parse_bitbucket_url(git(repo_root, &["remote", "get-url", "origin"]).ok()?.trim())
+    parse_bitbucket_url(&origin_url(repo_root)?)
 }
 
 /// `owner/repo` when the repo's `origin` is on GitHub.
 pub fn github_slug(repo_root: &str) -> Option<String> {
-    parse_host_url(git(repo_root, &["remote", "get-url", "origin"]).ok()?.trim(), "github.com")
+    parse_host_url(&origin_url(repo_root)?, "github.com")
+}
+
+/// `git remote get-url origin`, asked again only when the repo's config file moved: the board
+/// asks for both slugs of every repo on each read, and each ask was a git process (NIT-530).
+fn origin_url(repo_root: &str) -> Option<String> {
+    type Memo = std::collections::HashMap<String, (Option<std::time::SystemTime>, u64, Option<String>)>;
+    static MEMO: std::sync::Mutex<Option<Memo>> = std::sync::Mutex::new(None);
+    let meta = std::fs::metadata(std::path::Path::new(repo_root).join(".git").join("config")).ok();
+    let stamp = (meta.as_ref().and_then(|m| m.modified().ok()), meta.as_ref().map_or(0, |m| m.len()));
+    if let Some((at, len, url)) = MEMO.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Memo::new).get(repo_root) {
+        if meta.is_some() && (*at, *len) == stamp {
+            return url.clone();
+        }
+    }
+    let url = git(repo_root, &["remote", "get-url", "origin"]).ok().map(|u| u.trim().to_string());
+    MEMO.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Memo::new).insert(repo_root.to_string(), (stamp.0, stamp.1, url.clone()));
+    url
 }
 
 /// Accepts `https://[user@]bitbucket.org/ws/repo[.git]` and `git@bitbucket.org:ws/repo[.git]`.
@@ -394,9 +422,9 @@ mod tests {
 
     #[test]
     fn parses_branch_refs() {
-        let text = "claude/nit-3-x 1792000000 2 5 Fix the thing
-                    main 1792000100 0 0 Land it
-                    old   
+        let text = "claude/nit-3-x\01792000000\02 5\0Fix the thing
+                    main\01792000100\00 0\0Land it
+                    old\0\0\0
 ";
         let b = parse_branch_refs(text);
         assert_eq!(b.len(), 3);
