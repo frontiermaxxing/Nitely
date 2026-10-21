@@ -1493,6 +1493,7 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
                 tests: &repo.tests,
                 ci_commands: &repo.ci_commands,
                 has_ci: repo.has_ci,
+                has_lanes: repo.has_lanes,
                 playbook: repo.target.as_ref(),
             };
             json!(report.propose(&mut db, &project, str_arg(args, "issue").map(String::from), &classes, &facts, &actor)?)
