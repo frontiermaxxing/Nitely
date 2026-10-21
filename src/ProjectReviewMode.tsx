@@ -125,6 +125,9 @@ export function ProjectReviewModeSettings({ control, version }: { control: Revie
         </SettingsRow>
       </SettingsSection>
       <SettingsSection title="Goals" description="A goal's items land on its goal branch with quick checks. A checkpoint then lands the branch on main with one full run and one review.">
+        <SettingsRow label="Goal plans" why="A plan you asked for is one answering a Plan a goal issue you created. A plan that starts by itself leaves you a notice in the Inbox, with Cancel.">
+          <Choice label="Goal plans" fallback="Approve each" value={options.goal_plans} choices={[["approve", "Approve each"], ["asked", "Start plans I asked for"], ["all", "Start every plan"]]} disabled={off} onChange={(goal_plans) => edit({ goal_plans })} />
+        </SettingsRow>
         <SettingsRow label="Goal branches">
           <Toggle label="Goal branches" value={options.goal_branches} disabled={off} onChange={(goal_branches) => edit({ goal_branches })} />
         </SettingsRow>
@@ -199,6 +202,7 @@ function EffectiveModes({ project, revision }: { project: string; revision: numb
   const tests = { off: "Off", basic: "Basic", risk: "Risk-based", full: "Full" };
   const review = { off: "Off", individual: "Each change", batched: "Each batch" };
   const items = { off: "None", advisory: "Without blocking", blocking: "Blocking" };
+  const plans = { approve: "Approve each", asked: "Start plans I asked for", all: "Start every plan" };
   return <details className="review-mode-effective"><summary>Saved effective settings by repository</summary>
     {error && <p className="error small">{error}</p>}
     {rows?.length === 0 && <p className="muted small">No connected repositories.</p>}
@@ -210,6 +214,7 @@ function EffectiveModes({ project, revision }: { project: string; revision: numb
         <dt>Periodic review</dt><dd>{r.options.periodic?.enabled ? `Every ${r.options.periodic.every_landings} merges${r.options.periodic.max_delay_seconds ? ` or ${r.options.periodic.max_delay_seconds / 60} minutes` : ""}` : "Off"}</dd>
         <dt>Goal branches</dt><dd>{r.options.goal_branches ? `On, checkpoint every ${r.options.checkpoint?.items ?? "?"} items${r.options.checkpoint?.daily ? " or daily" : ""}` : "Off"}</dd>
         <dt>Goal item review</dt><dd>{r.options.goal_branches ? items[r.options.item_review ?? "off"] : "Not used"}</dd>
+        <dt>Goal plans</dt><dd>{plans[r.options.goal_plans ?? "approve"]}</dd>
         <dt>Full-suite checks on main</dt><dd>{r.options.full_backstop?.enabled ? "On" : "Off"}</dd>
         <dt>Audit sampling</dt><dd>{r.options.audit_percent ? `${r.options.audit_percent}% of eligible changes` : "Off"}</dd></dl>
       {r.warnings.map((w, i) => <p key={i} className="settings-hint">{w}</p>)}

@@ -61,6 +61,27 @@ pub fn is_planning(issue: &IssueRecord) -> bool {
     issue.labels.iter().any(|l| l.eq_ignore_ascii_case(PLANNING_LABEL))
 }
 
+/// Where a plan comes from, as Nitely can show it rather than as the drafting agent says: its
+/// `sentence` is the agent's own claim (NIT-550).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// It answers a "Plan a goal" issue the person created in the app.
+    PersonAsked,
+    /// Anything Nitely cannot show the person asked for: an agent's own proposal.
+    AgentInitiative,
+}
+
+/// Whether a plan from `origin` starts at once under the review mode's `goal_plans`, rather than
+/// waiting in the Inbox for the person's approval.
+pub fn starts_by_policy(mode: crate::project_modes::GoalPlans, origin: Origin) -> bool {
+    use crate::project_modes::GoalPlans;
+    match mode {
+        GoalPlans::Approve => false,
+        GoalPlans::Asked => origin == Origin::PersonAsked,
+        GoalPlans::All => true,
+    }
+}
+
 /// Sizes a planned issue may have.
 pub const SIZES: &[&str] = &["S", "M", "L"];
 
@@ -161,7 +182,7 @@ pub struct GoalPlanView {
     pub issue_key: String,
     pub project: String,
     pub plan: GoalPlan,
-    /// pending, approved or rejected.
+    /// pending, approved, started (by the review mode, NIT-550) or rejected.
     pub status: String,
     pub created_by: String,
     pub created_at: i64,
@@ -254,6 +275,17 @@ fn describe(plan: &GoalPlan, who: &str) -> String {
     }
     out.push_str("\nApprove to create the goal and file these (you can edit first in the Inbox); cancel it with a reason to file nothing.");
     out
+}
+
+/// The notice a plan that started by itself leaves the person (NIT-550).
+fn describe_started(plan: &GoalPlan, who: &str) -> String {
+    let drafted = describe(plan, who);
+    let body = drafted.rsplit_once("\n\nApprove to create").map(|(b, _)| b).unwrap_or(&drafted);
+    format!(
+        "Started: {}, from your words \"{}\". The review mode starts plans you asked for, so its goal and issues are filed already.\n\n{body}\n\nCancel this with a reason to drop the goal and cancel its issues not yet started; mark it Done to keep it.",
+        plan.title.trim(),
+        plan.sentence.trim()
+    )
 }
 
 impl GoalPlan {
@@ -363,12 +395,16 @@ impl Db {
             Some(k) => Some(self.issue(k)?.with_context(|| format!("no issue {k}"))?),
             None => None,
         };
+        let mode = self.project_review_mode(&p.key)?;
+        let policy = mode.options().goal_plans.unwrap_or(crate::project_modes::GoalPlans::Approve);
+        let origin = self.plan_origin(planning.as_ref())?;
+        let starts = starts_by_policy(policy, origin);
 
         let issue = self.create_issue(
             &NewIssue {
                 project: p.key.clone(),
-                title: format!("Plan: {}", plan.title.trim()),
-                body: describe(plan, actor.id()),
+                title: if starts { format!("Started: {}", plan.title.trim()) } else { format!("Plan: {}", plan.title.trim()) },
+                body: if starts { describe_started(plan, actor.id()) } else { describe(plan, actor.id()) },
                 kind: "feature".into(),
                 source: source_of(actor),
                 evidence: format!("Drafted with propose_goal from \"{}\".", plan.sentence.trim()),
@@ -389,8 +425,16 @@ impl Db {
             "INSERT INTO goal_plan (issue_key, project, plan, status, created_by, created_at) VALUES (?1, ?2, ?3, 'pending', ?4, ?5)",
             params![issue.key, p.key, serde_json::to_string(&stored)?, actor.id(), now()],
         )?;
-        if let Some(planning) = planning.filter(|i| i.is_open()) {
-            self.move_issue(&planning.key, "Done", Some(&format!("Drafted the plan as {}; the person decides it in the Inbox.", issue.key)), None, actor)?;
+        if let Some(planning) = planning.as_ref().filter(|i| i.is_open()) {
+            let said = if starts {
+                format!("Drafted the plan as {}; it started by itself, as the review mode says.", issue.key)
+            } else {
+                format!("Drafted the plan as {}; the person decides it in the Inbox.", issue.key)
+            };
+            self.move_issue(&planning.key, "Done", Some(&said), None, actor)?;
+        }
+        if starts {
+            return self.start_by_policy(&issue.key, &mode, planning.as_ref().map(|i| i.key.as_str()), actor);
         }
         Ok(PlanProposed {
             url: issue.url.clone(),
@@ -418,7 +462,7 @@ impl Db {
         if claimed == 0 {
             bail!("{key}'s goal plan was decided just now");
         }
-        let result = self.approve_claimed(key, &v, edit, actor);
+        let result = self.approve_claimed(key, &v, edit, actor, false);
         if result.is_err() {
             self.conn
                 .execute("UPDATE goal_plan SET status = 'pending', decided_at = NULL WHERE id = ?1 AND status = 'approving'", [v.id])
@@ -427,7 +471,9 @@ impl Db {
         result
     }
 
-    fn approve_claimed(&mut self, key: &str, v: &GoalPlanView, edit: &PlanEdit, actor: &Actor) -> Result<PlanApproved> {
+    /// `by_policy`: started by the review mode, not the person (NIT-550). The plan is `started`
+    /// and its issue stays in Needs You as the person's notice, with Cancel.
+    fn approve_claimed(&mut self, key: &str, v: &GoalPlanView, edit: &PlanEdit, actor: &Actor, by_policy: bool) -> Result<PlanApproved> {
         for (local_ref, body) in &edit.bodies {
             if !v.plan.issues.iter().any(|i| &i.local_ref == local_ref) || body.trim().is_empty() || body.len() > 50000 { bail!("invalid action-list edit: unknown ref, empty body or more than 50,000 bytes"); }
         }
@@ -505,13 +551,86 @@ impl Db {
             if attached.is_empty() { String::new() } else { format!(" and {} existing", attached.len()) },
             if filed.skipped.is_empty() { String::new() } else { format!("; {} skipped as duplicates", filed.skipped.len()) },
         );
+        let (status, decided_by) = if by_policy { ("started", "policy".to_string()) } else { ("approved", actor.id().to_string()) };
         self.conn.execute(
-            "UPDATE goal_plan SET status = 'approved', outcome = ?2, goal_id = ?3, decided_by = ?4, decided_at = ?5, plan = ?6 WHERE id = ?1",
-            params![v.id, outcome, goal.id, actor.id(), now(), serde_json::to_string(&plan)?],
+            "UPDATE goal_plan SET status = ?7, outcome = ?2, goal_id = ?3, decided_by = ?4, decided_at = ?5, plan = ?6 WHERE id = ?1",
+            params![v.id, outcome, goal.id, decided_by, now(), serde_json::to_string(&plan)?, status],
         )?;
         let goal = self.goal(goal.id)?.context("goal vanished")?;
-        let issue = self.finish_plan_issue(key, &outcome, actor)?;
+        let issue = if by_policy { self.issue(key)?.context("the plan's issue is gone")? } else { self.finish_plan_issue(key, &outcome, actor)? };
         Ok(PlanApproved { goal, filed, attached, not_attached, issue })
+    }
+
+    /// What proves a plan was asked for: it answers a "Plan a goal" issue the person created in the
+    /// app, by that issue's own record of who filed it. Agents never act as the person, so no agent
+    /// can make one; anything else is an agent's initiative (NIT-550).
+    pub(crate) fn plan_origin(&self, planning: Option<&IssueRecord>) -> Result<Origin> {
+        let Some(planning) = planning.filter(|i| is_planning(i)) else { return Ok(Origin::AgentInitiative) };
+        let by: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT actor FROM event WHERE issue_key = ?1 COLLATE NOCASE AND type = 'issue_created' ORDER BY id LIMIT 1",
+                [&planning.key],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(if by.as_deref() == Some(Actor::Human.id()) { Origin::PersonAsked } else { Origin::AgentInitiative })
+    }
+
+    /// Starts a plan the review mode lets start: the goal and its issues are filed at once, as the
+    /// drafting agent, and the plan's issue stays with the person as a notice they can cancel. Its
+    /// timeline says which mode, at which revision, started it.
+    fn start_by_policy(&mut self, key: &str, mode: &crate::project_modes::ProjectReviewMode, asked_in: Option<&str>, actor: &Actor) -> Result<PlanProposed> {
+        let v = self.goal_plan_for_issue(key)?.context("the plan just filed is gone")?;
+        self.conn.execute("UPDATE goal_plan SET status = 'approving', decided_at = ?2 WHERE id = ?1", params![v.id, now()])?;
+        let started = match self.approve_claimed(key, &v, &PlanEdit::default(), actor, true) {
+            Ok(s) => s,
+            Err(e) => {
+                // It could not start (a duplicate filed meanwhile, say): it waits for the person.
+                self.conn.execute("UPDATE goal_plan SET status = 'pending', decided_at = NULL WHERE id = ?1", [v.id])?;
+                self.log_event(actor, Some(key), None, "goal_plan_started", &format!("Could not start by itself ({e:#}); it waits for your approval"))?;
+                return Err(e);
+            }
+        };
+        let label = serde_json::to_value(mode.mode)?.as_str().unwrap_or_default().to_string();
+        let asked = asked_in.map(|k| format!("; you asked for it in {k}")).unwrap_or_default();
+        self.log_event(
+            actor,
+            Some(key),
+            None,
+            "goal_plan_started",
+            &format!(
+                "Started by policy: the {label} review mode (revision {}) starts plans of this kind{asked}. Goal {} \"{}\"",
+                mode.revision, started.goal.id, started.goal.title
+            ),
+        )?;
+        Ok(PlanProposed {
+            url: started.issue.url.clone(),
+            next: format!(
+                "Started at once, as the review mode says: goal {} with its issues filed. {key} stays in the person's Inbox as a notice; canceling it drops the goal and its issues not yet started.",
+                started.goal.id
+            ),
+            issue: started.issue,
+        })
+    }
+
+    /// The person cancels a plan that started by itself: its goal is dropped and its issues not yet
+    /// started are canceled, as rejecting the plan would have filed nothing. Work already under way
+    /// is left as it is.
+    fn cancel_started(&mut self, v: &GoalPlanView, reason: &str, actor: &Actor) -> Result<()> {
+        if let Some(goal) = v.goal_id {
+            for i in self.list_issues(Some(&v.project), false)?.into_iter().filter(|i| i.goal == Some(goal)) {
+                if matches!(i.state_type.as_str(), "unstarted" | "backlog") && i.key != v.issue_key {
+                    self.move_issue(&i.key, "Canceled", None, Some(&format!("Its goal's plan was canceled: {reason}")), actor)?;
+                }
+            }
+            self.save_goal(&v.project, Some(goal), &GoalChange { state: Some("dropped".into()), ..Default::default() }, actor)?;
+        }
+        self.conn.execute(
+            "UPDATE goal_plan SET status = 'rejected', outcome = ?2, decided_by = ?3, decided_at = ?4 WHERE id = ?1",
+            params![v.id, format!("Canceled after it started: {reason}"), actor.id(), now()],
+        )?;
+        Ok(())
     }
 
     /// Moves the plan's issue to Done once its plan is decided.
@@ -526,6 +645,14 @@ impl Db {
     /// Runs before an issue moves (see `proposals::before_move`): approving the issue of a pending
     /// plan approves the plan as drafted; canceling it rejects the plan; marking it Done is refused.
     pub(crate) fn before_plan_move(&mut self, key: &str, state: &str, reason: Option<&str>, actor: &Actor) -> Result<Option<IssueRecord>> {
+        // A plan that started by itself: canceling its notice undoes it; any other move keeps it.
+        if let Some(v) = self.goal_plan_for_issue(key)?.filter(|v| v.status == "started") {
+            if matches!(state, "Canceled" | "Duplicate") {
+                let reason = reason.map(str::trim).filter(|r| !r.is_empty()).unwrap_or("no reason given");
+                self.cancel_started(&v, reason, actor)?;
+            }
+            return Ok(None);
+        }
         let Some(v) = self.goal_plan_for_issue(key)?.filter(|v| v.status == "pending") else { return Ok(None) };
         match state {
             "Approved" if *actor == Actor::Human => Ok(Some(self.approve_goal_plan(key, &PlanEdit::default(), actor)?.issue)),
@@ -616,6 +743,56 @@ mod tests {
             existing: vec![],
             planning_issue: None,
         }
+    }
+
+    /// What starts by itself under each goal_plans setting (NIT-550).
+    #[test]
+    fn a_plan_starts_by_policy_only_when_the_mode_allows_its_origin() {
+        use crate::project_modes::GoalPlans::*;
+        for (mode, asked, initiative) in [(Approve, false, false), (Asked, true, false), (All, true, true)] {
+            assert_eq!(starts_by_policy(mode, Origin::PersonAsked), asked, "{mode:?}, asked for");
+            assert_eq!(starts_by_policy(mode, Origin::AgentInitiative), initiative, "{mode:?}, an agent's own");
+        }
+    }
+
+    /// Fast starts a plan answering the person's own "Plan a goal" issue, leaves them a notice, and
+    /// canceling the notice drops the goal and its issues not yet started. An agent's own plan, or
+    /// one answering a planning issue an agent filed, waits as before.
+    #[test]
+    fn under_fast_a_plan_the_person_asked_for_starts_and_canceling_it_undoes_it() {
+        use crate::project_modes::{set_for_test, Mode, Options};
+        let mut db = db();
+        set_for_test(&mut db, "NIT", Mode::Fast, Options::default());
+
+        let asked = db.start_goal("NIT", "make Nitely installable by strangers", &Actor::Human).unwrap();
+        let p = db.propose_goal("NIT", &plan(), Some(&asked.key), &agent()).unwrap();
+        assert_eq!((p.issue.state.as_str(), p.issue.owner.as_str()), ("Needs You", "human"), "the notice is the person's");
+        assert!(p.issue.title.starts_with("Started: "), "{}", p.issue.title);
+        let v = db.goal_plan_for_issue(&p.issue.key).unwrap().unwrap();
+        assert_eq!(v.status, "started");
+        let goal = v.goal_id.expect("the goal was created");
+        let filed: Vec<_> = db.list_issues(Some("NIT"), false).unwrap().into_iter().filter(|i| i.goal == Some(goal)).collect();
+        assert_eq!(filed.len(), 3, "its issues were filed at once");
+        let said = db.timeline(&p.issue.key).unwrap();
+        assert!(said.iter().any(|e| e.kind == "goal_plan_started" && e.summary.as_deref().unwrap_or("").contains("fast review mode (revision")), "{said:?}");
+
+        // One item is under way; canceling the notice leaves it and cancels the rest.
+        let started = filed[0].key.clone();
+        db.move_issue(&started, "In Progress", None, None, &agent()).unwrap();
+        db.move_issue(&p.issue.key, "Canceled", None, Some("not now"), &Actor::Human).unwrap();
+        assert_eq!(db.goal(goal).unwrap().unwrap().state, "dropped");
+        for i in &filed[1..] {
+            assert_eq!(db.issue(&i.key).unwrap().unwrap().state, "Canceled", "{} was not started", i.key);
+        }
+        assert_eq!(db.issue(&started).unwrap().unwrap().state, "In Progress", "work under way stays");
+        assert_eq!(db.goal_plan_for_issue(&p.issue.key).unwrap().unwrap().status, "rejected");
+
+        // An agent's own plan, and one answering a planning issue an agent filed, wait.
+        let mine = db.propose_goal("NIT", &GoalPlan { title: "Agent's idea".into(), ..plan() }, None, &agent()).unwrap();
+        assert_eq!(db.goal_plan_for_issue(&mine.issue.key).unwrap().unwrap().status, "pending");
+        let filed_by_agent = db.start_goal("NIT", "make Nitely installable by strangers", &agent()).unwrap();
+        let theirs = db.propose_goal("NIT", &GoalPlan { title: "Their idea".into(), ..plan() }, Some(&filed_by_agent.key), &agent()).unwrap();
+        assert_eq!(db.goal_plan_for_issue(&theirs.issue.key).unwrap().unwrap().status, "pending");
     }
 
     #[test]

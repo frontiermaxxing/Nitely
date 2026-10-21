@@ -1,7 +1,7 @@
 //! "How a change lands" (NIT-492): the pipeline a change goes through in one repo, computed from
 //! every layer (the review mode, the playbook, built-in defaults), each value naming where it
 //! came from. Read-only: it decides nothing, and execution never reads it.
-use crate::project_modes::{self, ItemReview, Mode, PreReview, ProjectReviewMode, TestDepth};
+use crate::project_modes::{self, GoalPlans, ItemReview, Mode, PreReview, ProjectReviewMode, TestDepth};
 use crate::playbook::Playbook;
 use anyhow::Result;
 use serde::Serialize;
@@ -103,7 +103,13 @@ pub fn pipeline(repo: &str, settings: &ProjectReviewMode, pb: &Playbook, has_map
         PreReview::Individual => Fact { value: "Each change".into(), why: "A blocking review for each change with no goal".into(), tone: Tone::Agent, source: review_src },
     };
 
-    let goal_src = source(mode, chosen.goal_branches.is_some());
+    let goal_src = source(mode, chosen.goal_branches.is_some() || chosen.goal_plans.is_some());
+    // Which plans an agent drafts start by themselves (NIT-550).
+    let plans = match o.goal_plans.unwrap_or(GoalPlans::Approve) {
+        GoalPlans::Approve => "each plan waits for your approval",
+        GoalPlans::Asked => "plans you asked for start by themselves",
+        GoalPlans::All => "every plan starts by itself",
+    };
     let goals = if o.goal_branches == Some(true) {
         let item = match o.item_review.unwrap_or(ItemReview::Off) {
             ItemReview::Off => "items land on quick checks, unreviewed",
@@ -116,12 +122,12 @@ pub fn pipeline(repo: &str, settings: &ProjectReviewMode, pb: &Playbook, has_map
         };
         Fact {
             value: "Through a goal branch".into(),
-            why: format!("{}; main gets the goal at each checkpoint ({when}): one full run, one review", capital(item)),
+            why: format!("{}; main gets the goal at each checkpoint ({when}): one full run, one review. {}", capital(item), capital(plans)),
             tone: Tone::Agent,
             source: goal_src,
         }
     } else {
-        Fact { value: "Straight to main".into(), why: "Each goal item lands on main like any other change".into(), tone: Tone::Agent, source: goal_src }
+        Fact { value: "Straight to main".into(), why: format!("Each goal item lands on main like any other change. {}", capital(plans)), tone: Tone::Agent, source: goal_src }
     };
 
     let land_src = source(mode, chosen.land_batch.is_some());

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { editMode, modeSave, modeValidation, optionsFor, INHERITED_OPTIONS, type ModeOptions } from "./reviewModes.ts";
 
 test("editing a preset makes Custom without mutating preset policy or losing saved custom choices", () => {
-  const custom: ModeOptions = { test_depth: null, pre_review: "off", land_batch: null, shared_lanes: true, full_backstop: null, audit_percent: null, periodic: { enabled: true, every_landings: 12, max_delay_seconds: 3600, reviewer: "codex", findings_strategy: "create" }, goal_branches: null, item_review: null, checkpoint: null };
+  const custom: ModeOptions = { test_depth: null, pre_review: "off", land_batch: null, shared_lanes: true, full_backstop: null, audit_percent: null, periodic: { enabled: true, every_landings: 12, max_delay_seconds: 3600, reviewer: "codex", findings_strategy: "create" }, goal_branches: null, item_review: null, checkpoint: null, goal_plans: null };
   const fast = { ...structuredClone(custom), test_depth: "basic" as const };
   const presets = [{ mode: "fast" as const, options: fast }];
   const chosen = optionsFor("fast", presets, custom);

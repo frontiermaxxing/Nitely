@@ -106,7 +106,8 @@ export const isOwnWork = (i: IssueRecord) => i.owner === "human" && !["completed
 export type IssueDecision = "playbook" | "goal-plan" | "own" | "approve" | null;
 export function issueDecision(i: IssueRecord, detail?: IssueDetail): IssueDecision {
   if (detail?.proposal?.status === "pending") return "playbook";
-  if (detail?.goal_plan?.status === "pending") return "goal-plan";
+  // A plan the review mode started is shown by its card too, as a notice with Cancel (NIT-550).
+  if (detail?.goal_plan?.status === "pending" || detail?.goal_plan?.status === "started") return "goal-plan";
   if (isOwnWork(i)) return "own";
   return needsHuman(i) ? "approve" : null;
 }

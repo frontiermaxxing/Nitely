@@ -642,7 +642,8 @@ export interface GoalPlanView {
   issue_key: string;
   project: string;
   plan: { sentence: string; title: string; outcome: string; target_date: string | null; issues: PlanItem[]; existing: string[] };
-  status: "pending" | "approved" | "rejected";
+  /** `started`: the review mode started it by itself (NIT-550); its issue is the person's notice. */
+  status: "pending" | "approved" | "started" | "rejected";
   created_by: string;
   created_at: number;
   outcome: string | null;

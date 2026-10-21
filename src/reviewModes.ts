@@ -18,6 +18,8 @@ export interface ModeOptions {
   goal_branches: boolean | null;
   item_review: "off" | "advisory" | "blocking" | null;
   checkpoint: CheckpointOptions | null;
+  /** Whether an agent's goal plan starts by itself (NIT-550): approve each, the ones the person asked for, or all. */
+  goal_plans: "approve" | "asked" | "all" | null;
 }
 /** When a goal branch lands into main: a coherent slice, else after `items` item lands, else daily. */
 export interface CheckpointOptions { items: number; daily: boolean }
@@ -33,7 +35,7 @@ export interface ProjectReviewMode {
   migrated_from: string | null;
   migration_changes: string[];
 }
-export const INHERITED_OPTIONS: ModeOptions = { test_depth: null, pre_review: null, land_batch: null, shared_lanes: null, full_backstop: null, audit_percent: null, periodic: null, goal_branches: null, item_review: null, checkpoint: null };
+export const INHERITED_OPTIONS: ModeOptions = { test_depth: null, pre_review: null, land_batch: null, shared_lanes: null, full_backstop: null, audit_percent: null, periodic: null, goal_branches: null, item_review: null, checkpoint: null, goal_plans: null };
 export interface ModeDraft { mode: ReviewMode; overrides: ModeOptions }
 export const MODE_LABEL: Record<ReviewMode, string> = { fast: "Fast", careful: "Careful", release: "Release", custom: "Custom" };
 export const MODE_DESCRIPTION: Record<ReviewMode, string> = {

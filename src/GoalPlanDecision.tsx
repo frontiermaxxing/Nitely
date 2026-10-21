@@ -20,6 +20,8 @@ export function GoalPlanDecision(props: {
 }) {
   const { plan: p } = props.plan;
   const pending = props.plan.status === "pending" && !props.resolved;
+  // Started by the review mode (NIT-550): already filed; the person keeps it or cancels it.
+  const started = props.plan.status === "started" && !props.resolved;
   const [title, setTitle] = useState(p.title);
   const [outcome, setOutcome] = useState(p.outcome);
   const [target, setTarget] = useState(p.target_date ?? "");
@@ -44,11 +46,13 @@ export function GoalPlanDecision(props: {
   };
   const reject = () =>
     why.trim() && props.onAct("reject", () => invoke("move_issue", { key: props.issueKey, state: "Canceled", evidence: null, reason: why.trim() }), why.trim());
+  const keepStarted = () =>
+    props.onAct("done", () => invoke("move_issue", { key: props.issueKey, state: "Done", evidence: "Kept the goal the review mode started.", reason: null }), "Kept.");
 
   return (
     <div className="gp">
       <p className="decision-matter">
-        {who} drafted a goal from “{p.sentence}”.
+        {props.plan.status === "started" ? <>Started: {p.title}, from your words “{p.sentence}”.</> : <>{who} drafted a goal from “{p.sentence}”.</>}
       </p>
       {pending ? (
         <div className="gp-fields">
@@ -95,6 +99,32 @@ export function GoalPlanDecision(props: {
       </ul>
       {p.existing.length > 0 && <p className="decision-why">It also gathers {p.existing.join(", ")}.</p>}
       {props.plan.outcome && !pending && <p className="decision-why">{props.plan.outcome}</p>}
+      {started && (
+        <>
+          <div className="actions">
+            <button className="btn primary" onClick={keepStarted}>
+              Keep
+            </button>
+            <button className="btn" onClick={() => setRejecting((r) => !r)} aria-expanded={rejecting}>
+              Cancel…
+            </button>
+          </div>
+          {rejecting && (
+            <form
+              className="dd-words"
+              onSubmit={(e) => {
+                e.preventDefault();
+                reject();
+              }}
+            >
+              <input autoFocus value={why} onChange={(e) => setWhy(e.target.value)} placeholder="Why stop it? The agent reads this." aria-label="Why the started goal is canceled" />
+              <button className="btn" type="submit" disabled={!why.trim()}>
+                Cancel the goal
+              </button>
+            </form>
+          )}
+        </>
+      )}
       {pending && (
         <>
           <div className="actions">

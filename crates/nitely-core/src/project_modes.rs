@@ -21,6 +21,12 @@ pub enum PreReview { Off, Individual, Batched }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all="lowercase")]
 pub enum ItemReview { Off, Advisory, Blocking }
+/// Whether a goal plan an agent drafts starts by itself (NIT-550): `approve` waits for the person
+/// as before; `asked` starts a plan the person asked for (a "Plan a goal" issue they created) and
+/// waits on one an agent proposed on its own; `all` starts every plan, for unattended projects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all="lowercase")]
+pub enum GoalPlans { Approve, Asked, All }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Backstop { pub enabled:bool, pub landings:u32, pub delay_seconds:i64 }
@@ -41,6 +47,7 @@ pub struct Options {
  pub test_depth:Option<TestDepth>, pub pre_review:Option<PreReview>, pub land_batch:Option<bool>, pub shared_lanes:Option<bool>,
  pub full_backstop:Option<Backstop>, pub audit_percent:Option<u8>, pub periodic:Option<Periodic>,
  pub goal_branches:Option<bool>, pub item_review:Option<ItemReview>, pub checkpoint:Option<Checkpoint>,
+ pub goal_plans:Option<GoalPlans>,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct Preset {pub mode:Mode,pub options:Options}
@@ -71,6 +78,8 @@ pub fn preset(mode:Mode)->Options {
   goal_branches:Some(!release),
   item_review:Some(match mode {Mode::Fast=>ItemReview::Off,Mode::Careful=>ItemReview::Advisory,_=>ItemReview::Blocking}),
   checkpoint:(!release).then(||Checkpoint{items:if mode==Mode::Fast {10}else{5},daily:true}),
+  // Release approves every plan; only Custom starts plans nobody asked for.
+  goal_plans:Some(if release {GoalPlans::Approve}else{GoalPlans::Asked}),
  }
 }
 /// What Custom uses for a value it leaves unset: Nitely's own default, never the playbook, whose
@@ -83,6 +92,7 @@ pub fn builtin()->Options {
   test_depth:Some(TestDepth::Full),pre_review:Some(PreReview::Individual),land_batch:Some(false),shared_lanes:None,
   full_backstop:Some(Backstop{enabled:false,landings:5,delay_seconds:1800}),audit_percent:Some(10),
   periodic:Some(Periodic::default()),goal_branches:Some(false),item_review:Some(ItemReview::Off),checkpoint:None,
+  goal_plans:Some(GoalPlans::Approve),
  }
 }
 /// What moving from a retired mode to its preset changed.
@@ -121,7 +131,11 @@ impl ProjectReviewMode {
  }
  pub fn authority(&self)->Result<Option<String>> {
   if !self.explicit {return Ok(None);}
-  Ok(Some(format!("{:x}",Sha256::digest(serde_json::to_vec(&(self.mode,self.revision,self.options()))?))))
+  // Which plans start by themselves decides nothing about checking a change, so it is left out:
+  // adding it moved no gate's authority (NIT-550).
+  let mut checked=serde_json::to_value(self.options())?;
+  if let Some(o)=checked.as_object_mut() {o.remove("goal_plans");}
+  Ok(Some(format!("{:x}",Sha256::digest(serde_json::to_vec(&(self.mode,self.revision,checked))?))))
  }
 }
 impl Options {
@@ -130,7 +144,7 @@ impl Options {
   Options {test_depth:self.test_depth.or(d.test_depth),pre_review:self.pre_review.or(d.pre_review),land_batch:self.land_batch.or(d.land_batch),
    shared_lanes:self.shared_lanes.or(d.shared_lanes),full_backstop:self.full_backstop.or(d.full_backstop),audit_percent:self.audit_percent.or(d.audit_percent),
    periodic:self.periodic.or(d.periodic),goal_branches:self.goal_branches.or(d.goal_branches),item_review:self.item_review.or(d.item_review),
-   checkpoint:self.checkpoint.or(d.checkpoint)}
+   checkpoint:self.checkpoint.or(d.checkpoint),goal_plans:self.goal_plans.or(d.goal_plans)}
  }
  /// Whether work checked under these options did at least what `now` asks before landing, so it
  /// may finish under `now` (NIT-487). Values that act only after landing (backstop, periodic
@@ -304,6 +318,17 @@ pub fn effective_repositories(db:&Db,config:&crate::Config,project:&str)->Result
 #[cfg(test)]
 mod tests {
  use super::*;
+ /// Which plans start by themselves decides nothing about checking a change: it never moves a
+ /// gate's authority, and the presets keep it to plans the person asked for (NIT-550).
+ #[test]
+ fn goal_plans_never_move_the_authority_and_presets_start_only_asked_plans() {
+  let mode=|mode:Mode,overrides:Options| ProjectReviewMode {project:"APP".into(),mode,revision:3,overrides,presets:vec![],explicit:true,migrated_from:None,migration_changes:vec![]};
+  let a=mode(Mode::Custom,Options {goal_plans:Some(GoalPlans::Approve),..Default::default()}).authority().unwrap();
+  let b=mode(Mode::Custom,Options {goal_plans:Some(GoalPlans::All),..Default::default()}).authority().unwrap();
+  assert_eq!(a,b);
+  assert_eq!([Mode::Fast,Mode::Careful,Mode::Release].map(|m| preset(m).goal_plans),[Some(GoalPlans::Asked),Some(GoalPlans::Asked),Some(GoalPlans::Approve)]);
+  assert_eq!(builtin().goal_plans,Some(GoalPlans::Approve),"a project with no mode approves each plan");
+ }
  #[test]
  fn retired_modes_migrate_to_the_closest_preset_and_say_what_changed() {
   let dir=crate::paths::unique_temp("nitely-modes","");std::fs::create_dir_all(&dir).unwrap();
