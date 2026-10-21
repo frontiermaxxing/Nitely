@@ -244,6 +244,7 @@ mod tests {
             workers: None,
             working: 0,
             landed_today: 0,
+            branch: None,
         };
         let report = Report {
             since,

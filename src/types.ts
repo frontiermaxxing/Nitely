@@ -359,6 +359,28 @@ export interface Goal {
   working?: number;
   /** Its issues that landed since local midnight. */
   landed_today?: number;
+  /** Its goal branch, when its items land into one (crates/nitely-core/src/goal_branch.rs). */
+  branch?: GoalBranchSummary;
+}
+
+// Mirrors goal_branch::Summary.
+export interface GoalBranchSummary {
+  branch: string;
+  /** Made yet: its first item started. */
+  created: boolean;
+  state: "green" | "red";
+  red_reason?: string | null;
+  red_issue?: string | null;
+  /** Items landed on it since the last checkpoint. */
+  items: number;
+  /** "at 10 items (4 to go)", "due now", or "NIT-612 is landing it". */
+  next_checkpoint: string;
+  checkpoint_issue?: string | null;
+  checkpoint_at?: number | null;
+  landed_items: number;
+  checkpoints: number;
+  full_runs: number;
+  reviews: number;
 }
 
 /** Which goal new agent work follows, without changing issue priority. */

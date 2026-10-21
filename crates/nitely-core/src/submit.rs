@@ -142,6 +142,11 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     if !dirty.trim().is_empty() {
         bail!("{} has uncommitted changes; commit them first:\n{}", worktree.display(), dirty.trim_end());
     }
+    // An item of a goal with a goal branch has no review or pull request of its own: its hop is the
+    // land into the goal branch, with item checks (goal_branch.rs).
+    if db.goal_branch_of_issue(&key)?.is_some_and(|g| g.repo == crate::paths::normalize(&root.to_string_lossy())) {
+        return submit_into_goal(db, config, &issue, &root, &branch, opts.local_only, actor);
+    }
     crate::submodules::check_pointers(&pb, &worktree)?;
     let wt = worktree.to_string_lossy().into_owned();
     let no_origin = !opts.local_only && !playbook::has_origin(&worktree);
@@ -204,6 +209,13 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     };
     if !out.gate.passed && out.gate.skipped.is_none() {
         out.next = after_failed_gate(&out.gate);
+        // A goal's checkpoint: the item at fault is found, reverted on the goal branch and sent
+        // back, and the next checkpoint opened (goal_branch.rs).
+        if let Some(said) = crate::goal_branch::after_failed_gate(db, &root, &issue.key, &out.gate, actor) {
+            db.add_note(&issue.key, &said, "goal_branch", actor)?;
+            out.next = format!("{said}. {}", out.next);
+            out.state = db.issue(&issue.key)?.map(|i| i.state).unwrap_or_default();
+        }
         return Ok(out);
     }
 
@@ -505,6 +517,52 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         out.land = landed.ok();
     }
     Ok(out)
+}
+
+/// `submit` for an item of a goal with a goal branch: it lands into that branch now, as `land`
+/// would, and says so. The goal's checkpoint is what gets reviewed and goes into main.
+fn submit_into_goal(db: &mut Db, config: &crate::Config, issue: &IssueRecord, root: &Path, branch: &str, local_only: bool, actor: &Actor) -> Result<Submitted> {
+    let dir = root.to_string_lossy().into_owned();
+    let landed = crate::land::land(db, config, &crate::land::LandOptions { dir: &dir, issue_key: &issue.key, push: !local_only, keep: false, break_lock: false }, actor)?;
+    let target = landed.goal_branch.clone().unwrap_or_else(|| landed.base.clone());
+    let gate = landed.gate.clone().unwrap_or(GateResult { mode_authority: None, passed: false, plan: None, skipped: None, commit: String::new(), results: vec![], warnings: vec![], flaked: vec![], lane_run: None });
+    let next = if landed.landed {
+        let mut next = format!(
+            "An item of a goal lands into {target} with item checks, with no review or pull request of its own: it landed there at {}. The goal's checkpoint reviews it and lands it into main; nothing is left to do.",
+            landed.head.as_deref().unwrap_or("?")
+        );
+        for said in &landed.goals {
+            next.push_str(&format!(" {said}."));
+        }
+        next
+    } else {
+        format!("The land into {target} stopped: {}. Fix it, commit, and submit again.", landed.error.as_deref().unwrap_or("see the issue's timeline"))
+    };
+    Ok(Submitted {
+        verification: gate.plan.clone(),
+        issue: issue.key.clone(),
+        branch: branch.to_string(),
+        base: target,
+        patch_id: String::new(),
+        commit: gate.commit.clone(),
+        files: 0,
+        gate,
+        solution: None,
+        review: None,
+        review_disabled: false,
+        review_light: false,
+        yolo: false,
+        approver: "agent".into(),
+        reasons: vec![],
+        approval_stands: false,
+        pushed: landed.pushed.unwrap_or(false),
+        pr_url: None,
+        pr_error: None,
+        state: db.issue(&issue.key)?.map(|i| i.state).unwrap_or_default(),
+        land: Some(landed),
+        shadow: None,
+        next,
+    })
 }
 
 /// A review from a batch with the reviewer that ran it, or None, and what a batch found that a

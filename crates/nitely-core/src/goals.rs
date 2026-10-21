@@ -35,6 +35,10 @@ pub struct Goal {
     pub working: i64,
     /// Its issues that landed since local midnight.
     pub landed_today: i64,
+    /// Its goal branch, when its items land into one (goal_branch.rs): green or red, the items
+    /// since the last checkpoint and when the next is due.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<crate::goal_branch::Summary>,
 }
 
 /// How a goal's issues stand: every issue counts once.
@@ -104,6 +108,7 @@ fn goal_from_row(r: &rusqlite::Row) -> rusqlite::Result<Goal> {
         workers: r.get(13)?,
         working: r.get(14)?,
         landed_today: r.get(15)?,
+        branch: None,
     })
 }
 
@@ -139,11 +144,20 @@ impl Db {
             "SELECT {COLUMNS} FROM goal g WHERE g.project = ?1 AND (?2 OR g.state = 'active') ORDER BY {ORDER}"
         ))?;
         let rows = stmt.query_map(params![p.key, include_closed], goal_from_row)?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let mut goals: Vec<Goal> = rows.collect::<rusqlite::Result<_>>()?;
+        for g in &mut goals {
+            g.branch = self.goal_branch_summary(g.id)?;
+        }
+        Ok(goals)
     }
 
     pub fn goal(&self, id: i64) -> Result<Option<Goal>> {
-        Ok(self.conn.query_row(&format!("SELECT {COLUMNS} FROM goal g WHERE g.id = ?1"), [id], goal_from_row).optional()?)
+        let goal = self.conn.query_row(&format!("SELECT {COLUMNS} FROM goal g WHERE g.id = ?1"), [id], goal_from_row).optional()?;
+        goal.map(|mut g| {
+            g.branch = self.goal_branch_summary(g.id)?;
+            Ok(g)
+        })
+        .transpose()
     }
 
     /// A goal and every issue in it, the open ones in the order `list_issues` gives.

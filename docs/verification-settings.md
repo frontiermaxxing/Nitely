@@ -175,6 +175,40 @@ affected-tests map, protected, human and blocked paths, review focus and the rev
 - **Evidence** is recorded for every item hop and every checkpoint (NIT-469). Item evidence never
   counts as full evidence for main.
 
+### How goal branches are built (NIT-495)
+
+`crates/nitely-core/src/goal_branch.rs`, inside the existing hops rather than beside them:
+
+- **Turning it on.** `nitely goal branch <id>` (MCP `goal_branch`) gives a goal its branch,
+  `goal-<id>`, made from main when its first item starts. `--branch <name>` adopts a branch that
+  exists already, which is how a goal run by hand becomes a real goal branch:
+  `nitely goal branch 19 --branch goal-19`. `--items <n>` sets when a checkpoint is due (10). Under
+  Fast, NIT-491's preset turns it on for every goal; until then a goal opts in.
+- **Item hop.** `playbook::start_task` branches an item from the goal branch. `land` sends it to
+  the same `run` as a land on main, with the goal branch as its base: rebase, item checks
+  (`git diff --check`, `[verification] basic`, and the affected-test map's checks; the full gate
+  when the map cannot place a file), then the goal branch's ref moves and is pushed. It takes the
+  goal's own lock, never the repo's land lock, so lands on main never wait for it. `submit` on an
+  item lands it, since there is no review or pull request to wait for. The item plan is recorded as
+  the item's verification evidence, marked as not evidence for main.
+- **Main flows in.** After every land on main (alone or through the queue), `flow_main_in` merges
+  main into each open goal branch, gates the merge at item level and moves the branch; a goal
+  branch that holds nothing since main took it in just moves to main. An item land merges main in
+  first when the branch is behind. A conflict or failed checks turns the branch red, files the fix
+  on the goal and notes the item that last touched the files. A red branch takes only the item that
+  contains the main that turned it red; that land turns it green.
+- **Checkpoint.** A checkpoint is an issue on the goal whose branch starts at the goal branch's
+  head. One is filed by itself when `--items` items are waiting or the oldest has waited a day, and
+  the coordinator opens one for a coherent slice with `nitely goal checkpoint <id>` (MCP
+  `checkpoint`). It is submitted and landed like any issue: one review of the slice, one pull
+  request, one full gate (in CI for the playbook's `ci_commands`, NIT-493). It lands alone through
+  the land queue's lock, merging main in rather than rebasing. When the full gate fails, the land
+  bisects over the items' commits on the goal branch, reverts the one at fault there, sends it back
+  to Todo and opens the next checkpoint without it.
+- **The goal row** shows the branch: items since the last checkpoint, green or red with its fix,
+  and the next checkpoint. Its tooltip counts items landed, checkpoints, full runs and reviews, the
+  before-and-after measure.
+
 ### 4. What gets retired
 
 For removal by NIT-499, each with a migration and a test that the replacement covers its case:

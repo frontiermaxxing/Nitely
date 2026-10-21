@@ -1297,13 +1297,21 @@ pub fn start_task(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, 
     // A new branch starts from the base commit when the playbook moves it on a schedule
     // (`[lanes] base = "every 4h"`), so agents share one starting point between moves; otherwise
     // from the integration branch's tip, as always.
-    let from = match playbook.lanes.as_ref().and_then(|l| l.base_every_hours()) {
-        Some(_) if !branch_exists => crate::light::base_commit(&playbook, repo_root)?,
+    // An item of a goal with a goal branch starts from that branch, and the goal's checkpoint from
+    // the branch's head it lands (goal_branch.rs).
+    let goal_start = if branch_exists { None } else { crate::goal_branch::start_point(db, repo_root, &playbook, issue, actor)? };
+    let from = match (&goal_start, playbook.lanes.as_ref().and_then(|l| l.base_every_hours())) {
+        (Some((at, _)), _) => at.clone(),
+        (None, Some(_)) if !branch_exists => crate::light::base_commit(&playbook, repo_root)?,
         _ => base.to_string(),
     };
-    let from_words = if from == base { base.to_string() } else { format!("{base} at {}", &from[..from.len().min(9)]) };
+    let from_words = match &goal_start {
+        Some((_, words)) => words.clone(),
+        None if from == base => base.to_string(),
+        None => format!("{base} at {}", &from[..from.len().min(9)]),
+    };
     if crate::light::wanted(&playbook) {
-        return start_light(db, repo_root, &playbook, issue, branch, worktree, base, &from, branch_exists, actor);
+        return start_light(db, repo_root, &playbook, issue, branch, worktree, &from_words, &from, branch_exists, actor);
     }
     if branch_exists {
         git(repo_root, &["worktree", "add", &worktree_str, &branch])?;
@@ -1346,7 +1354,7 @@ pub fn start_task(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, 
 /// `start_task` for a playbook that asks for light worktrees: source only, no setup, sparse when the
 /// playbook names directories, and the reference tree made or moved to the base.
 #[allow(clippy::too_many_arguments)]
-fn start_light(db: &Db, repo_root: &Path, playbook: &Playbook, issue: &IssueRecord, branch: String, worktree: PathBuf, base: &str, start: &str, exists: bool, actor: &Actor) -> Result<Started> {
+fn start_light(db: &Db, repo_root: &Path, playbook: &Playbook, issue: &IssueRecord, branch: String, worktree: PathBuf, from_words: &str, start: &str, exists: bool, actor: &Actor) -> Result<Started> {
     let worktree_str = worktree.to_string_lossy().into_owned();
     let from = if exists { format!("refs/heads/{branch}") } else { start.to_string() };
     let mut sparse = crate::light::sparse_dirs(playbook, repo_root, &from, &format!("{}\n{}", issue.title, issue.body));
@@ -1363,7 +1371,6 @@ fn start_light(db: &Db, repo_root: &Path, playbook: &Playbook, issue: &IssueReco
         db.log_event(actor, Some(&issue.key), Some(&worktree_str), "worktree", &format!("Started the submodule branch {line}"))?;
     }
     let shape = if sparse.is_empty() { "light".to_string() } else { format!("light, sparse: {}", sparse.join(", ")) };
-    let from_words = if start == base { base.to_string() } else { format!("{base} at {}", &start[..start.len().min(9)]) };
     db.log_event(actor, Some(&issue.key), Some(&worktree_str), "worktree", &format!("Started {branch} from {from_words} ({shape})"))?;
     let mut warnings = playbook.unknown_warnings();
     // Reading code outside the worktree needs it, but a worktree without it still works.
@@ -1403,6 +1410,12 @@ pub fn run_gate(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<&s
 /// there as a request of that kind, land's first, and never builds in the worktree.
 pub fn run_gate_as(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<&str>, actor: &Actor, kind: crate::lanes::Kind) -> Result<GateResult> {
     run_gate_inner(db, repo_root, worktree, issue_key, actor, kind, &[], None)
+}
+
+/// The gate with `plan`'s commands in place of the playbook's, whatever the project's mode says:
+/// a goal item's checks (goal_branch.rs), checked against the plan's affected-test evidence.
+pub(crate) fn run_planned_gate(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<&str>, actor: &Actor, kind: crate::lanes::Kind, plan: &crate::verification::Plan) -> Result<GateResult> {
+    run_gate_inner(db, repo_root, worktree, issue_key, actor, kind, &[], Some(plan))
 }
 
 pub(crate) fn run_automatic_gate(db: &Db, repo_root: &Path, worktree: &Path, keys: &[&str], actor: &Actor, kind: crate::lanes::Kind) -> Result<GateResult> {

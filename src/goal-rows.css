@@ -19,6 +19,9 @@
 .goal-count { margin-left: auto; color: var(--fg-2); font-size: var(--text-sm); white-space: nowrap; }
 .goal-first { font-size: var(--text-sm); white-space: nowrap; }
 .goal-crew { color: var(--fg-2); font-size: var(--text-sm); white-space: nowrap; font-variant-numeric: tabular-nums; }
+/* The goal branch's line can be long (a red branch says why): it wraps, and red is the fail colour. */
+.goal-branch { color: var(--fg-2); font-size: var(--text-sm); min-width: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.goal-branch.goal-late { color: var(--fail); }
 .goal-issues { display: flex; flex-wrap: wrap; gap: 4px 14px; }
 .goal-risks { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 14px; font-size: var(--text-sm); }
 .goal-risks-label { color: var(--fg-3); font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.04em; }

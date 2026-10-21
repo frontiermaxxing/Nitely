@@ -56,6 +56,17 @@ pub struct Landed {
     /// Landed (or sent back) through the land queue: the run and what it went with.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub batch: Option<crate::land_queue::BatchNote>,
+    /// The goal branch it landed into, for an item of a goal with one (goal_branch.rs); None for a
+    /// land on the integration branch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub goal_branch: Option<String>,
+    /// What the land did to goal branches: main merged into them, one turned red, a checkpoint
+    /// opened or landed, a bisect.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub goals: Vec<String>,
+    /// The new head in full, for the goal branch's record of its items.
+    #[serde(skip)]
+    pub(crate) landed_to: Option<String>,
 }
 
 pub struct LandOptions<'a> {
@@ -76,6 +87,10 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
     let root = playbook::repo_for_issue(config, issue.project.as_deref(), opts.dir)?;
     let mut pb = Playbook::load(&root)?;
     crate::project_modes::apply_issue(db, &issue.key, &mut pb)?;
+    // An item of a goal with a goal branch lands into that branch, with item checks (goal_branch.rs).
+    if let Some(gb) = db.goal_branch_of_issue(&issue.key)?.filter(|g| g.repo == crate::paths::normalize(&root.to_string_lossy())) {
+        return land_into_goal(db, &root, &issue, opts, actor, gb);
+    }
     // With `[land] batch`, a change that may land with others waits in the queue (land_queue.rs).
     // One that is not to be pushed lands alone: a stack is pushed as one.
     if opts.push && crate::land_queue::lands_alone(db, &root, &pb, &issue.key)?.is_none() {
@@ -114,7 +129,12 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
     // Settings may have changed between the initial routing decision and taking the land lock.
     let mut pb = Playbook::load(&root)?;
     crate::project_modes::apply_issue(db, &issue.key, &mut pb)?;
-    let result = run(db, &root, &pb, &issue.key, opts, actor, &mut report);
+    let result = run(db, &root, &pb, &issue.key, opts, actor, &mut report, None);
+    // A checkpoint whose full gate failed: the item at fault is found, reverted on the goal branch
+    // and sent back, still under the lock (as the land queue bisects its stack).
+    if let (Err(_), Some(gate)) = (&result, report.gate.clone()) {
+        report.goals.extend(crate::goal_branch::after_failed_gate(db, &root, &issue.key, &gate, actor));
+    }
     // Still under the lock, so the next land cannot change the main checkout mid-build; and, in
     // large-repo mode, with the checkout held from build requests.
     if result.is_ok() && report.landed {
@@ -142,6 +162,8 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
         let ran = after_land_outside_lock(&root, &pb);
         report.warnings.extend(ran.iter().filter(|r| !r.ok).map(|r| format!("the after-land step `{}` failed; the land stands", r.command)));
         report.after.extend(ran);
+        // Main moved: it flows into each open goal branch (goal_branch.rs).
+        report.goals.extend(crate::goal_branch::flow_main_in(db, &root, actor));
     }
 
     match result {
@@ -158,7 +180,7 @@ pub(crate) fn queued_alone(db: &mut Db, root: &Path, key: &str, opts: &LandOptio
     crate::project_modes::apply_issue(db, key, &mut pb)?;
     let _telemetry = crate::performance_attribution::Scope::new(db, crate::performance_attribution::Context { project: issue.project.clone(), issue: Some(key.into()), ..Default::default() });
     let mut report = Landed { issue: key.into(), base: pb.integration_branch().into(), ..Default::default() };
-    match run(db, root, &pb, key, opts, actor, &mut report) {
+    match run(db, root, &pb, key, opts, actor, &mut report, None) {
         Ok(()) => {
             if report.landed {
                 match crate::lanes::hold_checkout(root, &pb) {
@@ -171,6 +193,39 @@ pub(crate) fn queued_alone(db: &mut Db, root: &Path, key: &str, opts: &LandOptio
         Err(e) => record_stopped(db, key, &format!("{e:#}"), &mut report, actor)?,
     }
     Ok(report)
+}
+
+/// `land` for an item of a goal with a goal branch: the same `run`, into the goal branch, with
+/// item checks, under the goal's own lock. Main's lands and its queue never wait on it, nor it on
+/// them: it moves only the goal branch, never the main checkout.
+fn land_into_goal(db: &mut Db, root: &Path, issue: &IssueRecord, opts: &LandOptions, actor: &Actor, gb: crate::goal_branch::GoalBranch) -> Result<Landed> {
+    let _telemetry = crate::performance_attribution::Scope::new(db, crate::performance_attribution::Context { project: issue.project.clone(), issue: Some(issue.key.clone()), ..Default::default() });
+    let mut report = Landed { issue: issue.key.clone(), base: gb.branch.clone(), goal_branch: Some(gb.branch.clone()), ..Default::default() };
+    let lock = Lock::take(&crate::goal_branch::lock_path(root, gb.goal)?, &issue.key, opts.break_lock)?;
+    if let Some(before) = &lock.took_over {
+        report.warnings.push(format!("took over the lock of {} that {before} left", gb.branch));
+    }
+    let pb = Playbook::load(root)?;
+    let result = item_hop(db, root, &pb, issue, opts, actor, &gb, &mut report);
+    drop(lock);
+    match result {
+        Ok(()) => record_landed(db, root, issue, &mut report, actor)?,
+        Err(e) => record_stopped(db, &issue.key, &format!("{e:#}"), &mut report, actor)?,
+    }
+    Ok(report)
+}
+
+/// The item hop under the goal's lock: main merged into the goal branch first when it moved (or,
+/// on a red branch, only the item that brings that main in), then `run` into it.
+#[allow(clippy::too_many_arguments)]
+fn item_hop(db: &mut Db, root: &Path, pb: &Playbook, issue: &IssueRecord, opts: &LandOptions, actor: &Actor, gb: &crate::goal_branch::GoalBranch, report: &mut Landed) -> Result<()> {
+    if !pb.submodules.is_empty() {
+        bail!("a repo with managed submodules lands goal items on {} for now; turn the goal's branch off", pb.integration_branch());
+    }
+    let (branch, _) = branch_of(root, &issue.key)?;
+    let item_head = rev(root, &branch)?;
+    let gb = crate::goal_branch::before_item_land(db, root, pb, gb, &issue.key, &item_head, actor)?;
+    run(db, root, pb, &issue.key, opts, actor, report, Some(&gb))
 }
 
 /// The `[[land.after]]` steps' outcome on the issue, as a single land's or a land queue run's
@@ -203,6 +258,13 @@ pub(crate) fn log_after_steps(db: &Db, actor: &Actor, key: &str, after: &[playbo
 /// What a land that went through does to its issue: the landed event, Done with the gate as
 /// evidence, and the issues it unblocked.
 pub(crate) fn record_landed(db: &mut Db, root: &Path, issue: &IssueRecord, report: &mut Landed, actor: &Actor) -> Result<()> {
+    if report.goal_branch.is_some() {
+        return record_item_landed(db, issue, report, actor);
+    }
+    match crate::goal_branch::checkpoint_landed(db, root, &issue.key, actor) {
+        Ok(said) => report.goals.extend(said),
+        Err(e) => report.warnings.push(format!("the goal branch's checkpoint record needs recovery: {e:#}")),
+    }
     if let Err(e)=crate::verification_backstop::on_landed(db,root,issue,report) {
         report.warnings.push(format!("post-merge verification record needs recovery: {e:#}"));
         db.log_event(actor,Some(&issue.key),None,"verification_record_failed",&format!("{e:#}"))?;
@@ -241,6 +303,35 @@ pub(crate) fn record_landed(db: &mut Db, root: &Path, issue: &IssueRecord, repor
     if let Err(e)=crate::periodic_review::on_landed(db,root,issue,report) {
         report.warnings.push(format!("periodic review record needs recovery: {e:#}"));
         db.log_event(actor,Some(&issue.key),None,"periodic_review_record_failed",&format!("{e:#}"))?;
+    }
+    Ok(())
+}
+
+/// `record_landed` for an item hop: its item checks as its verification evidence, the goal
+/// branch's record of what it added (which may open the goal's checkpoint), the landed event and
+/// Done. Main's backstop, audits and periodic review wait for the checkpoint, which is what lands
+/// on main.
+fn record_item_landed(db: &mut Db, issue: &IssueRecord, report: &mut Landed, actor: &Actor) -> Result<()> {
+    let branch = report.goal_branch.clone().unwrap_or_default();
+    if let Some(plan) = report.gate.as_ref().and_then(|g| g.plan.as_ref()) {
+        crate::verification::record(db, issue, plan, actor)?;
+    }
+    if let (Some(gb), Some(from), Some(to)) = (db.goal_branch_of_issue(&issue.key)?, report.landed_from.clone(), report.landed_to.clone()) {
+        match crate::goal_branch::item_landed(db, &gb, &issue.key, &from, &to, actor) {
+            Ok(said) => report.goals.extend(said),
+            Err(e) => report.warnings.push(format!("the goal branch's record of this item needs recovery: {e:#}")),
+        }
+    }
+    let checks = report.gate.as_ref().map(|g| g.results.iter().filter(|r| !r.skipped).map(|r| r.command.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+    let evidence = format!("Landed on {branch} at {} with item checks ({checks}); it reaches main with the goal's next checkpoint.", report.head.as_deref().unwrap_or("?"));
+    db.log_event(actor, Some(&issue.key), None, "landed", &format!("Landed {} on {branch} at {}", report.branch, report.head.as_deref().unwrap_or("?")))?;
+    if issue.origin == "nitely" && issue.state != "Done" {
+        db.move_issue(&issue.key, "Done", Some(&evidence), None, actor)?;
+    }
+    for waiting in &issue.blocks {
+        if db.issue(waiting)?.is_some_and(|i| i.blocked_by.is_empty()) {
+            report.unblocked.push(waiting.clone());
+        }
     }
     Ok(())
 }
@@ -744,21 +835,32 @@ pub fn after_steps_running(root: &Path) -> bool {
     after_lock_path(root).ok().and_then(|p| std::fs::read_to_string(p.with_extension("running")).ok()).is_some_and(|t| holder_alive(&t))
 }
 
-fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor: &Actor, report: &mut Landed) -> Result<()> {
+/// One land of `key` into `report.base`: the integration branch, or, with `goal`, the goal branch
+/// an item of that goal lands into (goal_branch.rs). The two hops differ only in their checks and
+/// how the target moves: an item gets item checks and no review, and moves the goal branch's ref;
+/// a land on main checks its review and approval, runs the gate, and fast-forwards the main
+/// checkout.
+#[allow(clippy::too_many_arguments)]
+fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor: &Actor, report: &mut Landed, goal: Option<&crate::goal_branch::GoalBranch>) -> Result<()> {
     let base = report.base.clone();
     // A repo with no origin is local: what lands stays in it.
     let push = opts.push && playbook::has_origin(root);
-    // Large-repo mode: a build request may have the main checkout detached for a moment.
-    let held = crate::lanes::hold_checkout(root, pb)?;
-    let current = git(root, &["branch", "--show-current"])?.trim().to_string();
-    drop(held);
-    if current != base {
-        bail!("the main checkout {} is on {current}, not {base}; land only writes {base}", root.display());
+    if goal.is_none() {
+        // Large-repo mode: a build request may have the main checkout detached for a moment.
+        let held = crate::lanes::hold_checkout(root, pb)?;
+        let current = git(root, &["branch", "--show-current"])?.trim().to_string();
+        drop(held);
+        if current != base {
+            bail!("the main checkout {} is on {current}, not {base}; land only writes {base}", root.display());
+        }
+        // Said before the gate, not after it, when the fast-forward would fail.
+        if let Some(why) = left_index_lock(root, INDEX_LOCK_GRACE_SECS) {
+            bail!("{why}");
+        }
     }
-    // Said before the gate, not after it, when the fast-forward would fail.
-    if let Some(why) = left_index_lock(root, INDEX_LOCK_GRACE_SECS) {
-        bail!("{why}");
-    }
+    // A goal's checkpoint holds the shared goal branch, merges of main included: main is merged
+    // into it, never rebased under it.
+    let checkpoint = goal.is_none() && db.checkpoint_of_issue(key)?.is_some();
 
     let (branch, found) = branch_of(root, key)?;
     report.branch = branch.clone();
@@ -779,7 +881,17 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
     // is rebased onto its own integration branch first (docs/playbooks.md).
     crate::submodules::check_pointers(pb, &worktree)?;
     let moving = crate::submodules::rebase(root, pb, &worktree, &base)?;
-    if git(root, &["merge-base", "--is-ancestor", &base, &branch]).is_err() {
+    if checkpoint && git(root, &["merge-base", "--is-ancestor", &base, &branch]).is_err() {
+        db.log_event(actor, Some(key), Some(&wt), "status", &format!("Merging {base} into the checkpoint {branch}"))?;
+        if git(&worktree, &["merge", "--no-ff", "--no-edit", "-m", &format!("Merge {base} into {branch}"), &base]).is_err() {
+            report.conflicts = git(&worktree, &["diff", "--name-only", "--diff-filter=U"])?.lines().map(str::to_string).collect();
+            git(&worktree, &["merge", "--abort"]).ok();
+            bail!(
+                "{base} conflicts with the checkpoint {branch} in {}; main flows into the goal branch after each land on main, which files the fix on the goal. Land the checkpoint once the goal branch is green",
+                report.conflicts.join(", ")
+            );
+        }
+    } else if git(root, &["merge-base", "--is-ancestor", &base, &branch]).is_err() {
         db.log_event(actor, Some(key), Some(&wt), "status", &format!("Rebasing {branch} onto {base}"))?;
         let rebased = crate::submodules::rebase_repo(&worktree, &base, &moving);
         if let Err(e) = rebased {
@@ -801,13 +913,20 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
     crate::submodules::point(&worktree, &moving)?;
     crate::submodules::follow(pb, &worktree, &moving)?;
     let head = rev(root, &branch)?;
-    report.approval = Some(check_approval(db, pb, key, &worktree, &base, &branch)?);
+    report.approval = Some(match goal {
+        Some(gb) => check_item(pb, &worktree, &base, gb)?,
+        None => check_approval(db, pb, key, &worktree, &base, &branch)?,
+    });
     let project = db.issue(key)?.and_then(|i| i.project);
     crate::private_terms::check(project.as_deref(), &worktree, &base)?;
 
     // In a repo with build lanes, a land request: first in line, and answered from the record when
-    // this same tree passed its gate already (a rebase that changed nothing).
-    let gate = playbook::run_automatic_gate(db, root, &worktree, &[key], actor, crate::lanes::Kind::Land)?;
+    // this same tree passed its gate already (a rebase that changed nothing). An item hop runs the
+    // item checks instead.
+    let gate = match goal {
+        Some(gb) => crate::goal_branch::item_gate(db, root, &worktree, Some(key), &before, &gb.branch, actor)?,
+        None => playbook::run_automatic_gate(db, root, &worktree, &[key], actor, crate::lanes::Kind::Land)?,
+    };
     let passed = gate.passed || gate.skipped.is_some();
     report.gate = Some(gate);
     if !passed {
@@ -825,6 +944,9 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
     }
     if let Some(why) = crate::submodules::unchanged(&worktree, &moving)? {
         bail!("{why}");
+    }
+    if let Some(gb) = goal {
+        return land_item(db, root, pb, key, opts, actor, gb, &worktree, &branch, temporary, &before, &head, report);
     }
     crate::project_modes::check_gate_authority(db, &[key], report.gate.as_ref().expect("gate recorded"))?;
     crate::verification::check_gate_authority(db,root,&worktree,key,report.gate.as_ref().expect("gate recorded"))?;
@@ -896,9 +1018,45 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
         }
     }
 
+    clean_up_landed(db, root, pb, key, opts, actor, &worktree, &branch, temporary, report)?;
+    // The base moved: so does the reference tree light worktrees read code from, when there is one.
+    if crate::light::reference_path(pb, root).join(".git").exists() {
+        if let Err(e) = crate::light::reference_tree(pb, root) {
+            report.warnings.push(format!("the reference tree stayed at the old base: {e:#}"));
+        }
+    }
+    Ok(())
+}
+
+/// The item hop's end, once its checks passed: the goal branch moved to what was checked and
+/// pushed, and the item's worktree cleaned up as a land on main cleans up.
+#[allow(clippy::too_many_arguments)]
+fn land_item(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor: &Actor, gb: &crate::goal_branch::GoalBranch, worktree: &Path, branch: &str, temporary: bool, before: &str, head: &str, report: &mut Landed) -> Result<()> {
+    report.approval = Some(check_item(&Playbook::load(root)?, worktree, &report.base, gb)?);
+    report.commits = git(root, &["log", "--oneline", &format!("{before}..{head}")])?.lines().map(str::to_string).collect();
+    let warning = crate::goal_branch::advance(root, gb, before, head)?;
+    report.landed = true;
+    report.landed_from = Some(before.to_string());
+    report.landed_to = Some(head.to_string());
+    report.head = Some(git(root, &["rev-parse", "--short", head])?.trim().to_string());
+    if playbook::has_origin(root) {
+        report.pushed = Some(warning.is_none());
+        if opts.push {
+            // A task branch the agent pushed itself goes, while it still points at what landed.
+            git_remote(root, &["push", &format!("--force-with-lease=refs/heads/{branch}:{head}"), "origin", &format!(":refs/heads/{branch}")]).ok();
+        }
+    }
+    report.warnings.extend(warning);
+    clean_up_landed(db, root, pb, key, opts, actor, worktree, branch, temporary, report)
+}
+
+/// What a land does with the task's worktree once it landed: kept for a crew worker in it or with
+/// `--keep`, else removed with its branch.
+#[allow(clippy::too_many_arguments)]
+fn clean_up_landed(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor: &Actor, worktree: &Path, branch: &str, temporary: bool, report: &mut Landed) -> Result<()> {
     // A crew worker runs in the worktree until land returns to it; the supervisor removes the
     // worktree once the worker has exited (crew::Supervisor::clean_up_landed).
-    let crew_in_it = !temporary && db.crew_worker_in(&worktree)?;
+    let crew_in_it = !temporary && db.crew_worker_in(worktree)?;
     if !temporary && opts.keep {
         // Said on the issue, so neither a crew supervisor once its worker exits nor a later land
         // (leftovers.rs) removes it.
@@ -909,21 +1067,23 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
     } else if crew_in_it {
         (format!("kept {} whole: the crew worker running in it removes it once it exits", worktree.display()), vec![])
     } else {
-        let (message, held) = cleanup(root, pb, &worktree, &branch, temporary, opts.keep);
-        if !temporary && !opts.keep && made_by_layout(root, pb, &worktree) && worktree.exists() {
-            crate::leftovers::note_held(db, actor, key, &worktree, &message)?;
+        let (message, held) = cleanup(root, pb, worktree, branch, temporary, opts.keep);
+        if !temporary && !opts.keep && made_by_layout(root, pb, worktree) && worktree.exists() {
+            crate::leftovers::note_held(db, actor, key, worktree, &message)?;
         }
         (message, held)
     };
     report.cleanup = Some(cleanup);
     report.held_by = held_by;
-    // The base moved: so does the reference tree light worktrees read code from, when there is one.
-    if crate::light::reference_path(pb, root).join(".git").exists() {
-        if let Err(e) = crate::light::reference_tree(pb, root) {
-            report.warnings.push(format!("the reference tree stayed at the old base: {e:#}"));
-        }
-    }
     Ok(())
+}
+
+/// An item's land into its goal branch: no review and no human approval (both come at the
+/// checkpoint into main), but a blocked path is still refused.
+fn check_item(pb: &Playbook, worktree: &Path, base: &str, gb: &crate::goal_branch::GoalBranch) -> Result<String> {
+    let files: Vec<String> = git(worktree, &["diff", "--name-only", "--no-renames", &format!("{base}...HEAD")])?.lines().map(str::to_string).collect();
+    pb.approval.check_blocked(&files)?;
+    Ok(format!("an item of goal {}: it is reviewed, and approved where a person must, with the goal's checkpoint into {}", gb.goal, pb.integration_branch()))
 }
 
 /// The issue's branch, and the worktree it is checked out in: the one the issue's worktree has,

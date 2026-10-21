@@ -55,6 +55,23 @@ export function crewOnGoal(goal: { working?: number; landed_today?: number }): s
   return parts.length ? parts.join(" · ") : null;
 }
 
+/**
+ * The goal branch on the goal row: "goal-19 · 4 items · next checkpoint at 10 items (6 to go)", red
+ * with what it waits for, or null for a goal whose items land on main.
+ */
+export function goalBranchLine(branch: { branch: string; created: boolean; state: string; red_reason?: string | null; red_issue?: string | null; items: number; next_checkpoint: string } | undefined): { text: string; red: boolean } | null {
+  if (!branch) return null;
+  if (!branch.created) return { text: `${branch.branch} · made when its first item starts`, red: false };
+  if (branch.state === "red") {
+    const fix = branch.red_issue ? `; ${branch.red_issue} fixes it` : "";
+    return { text: `${branch.branch} red: ${branch.red_reason ?? "it cannot take main"}${fix}`, red: true };
+  }
+  const items = `${branch.items} item${branch.items === 1 ? "" : "s"} since the last checkpoint`;
+  // "at 10 items" and "due now" read after "next checkpoint"; "NIT-612 is landing it" alone.
+  const next = /^(at|due)\b/.test(branch.next_checkpoint) ? `next checkpoint ${branch.next_checkpoint}` : `checkpoint: ${branch.next_checkpoint}`;
+  return { text: `${branch.branch} · ${items} · ${next}`, red: false };
+}
+
 /** A risk's colour by the one colour rule: stuck is failed, waiting on you is attention, many rounds is neither. */
 export function riskTone(why: string): "fail" | "attention" | "plain" {
   if (why.startsWith("stuck")) return "fail";

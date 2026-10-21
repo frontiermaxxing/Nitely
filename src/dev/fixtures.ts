@@ -2016,8 +2016,15 @@ function goalRecord(g: (typeof GOALS)[number]): Goal {
     working: issues.filter((i) => i.state_type === "started").length,
     rank: goalRanks.get(g.id) ?? null,
     landed_today: Math.min(done, 2),
+    branch: goalBranches.get(g.id),
   };
 }
+
+/** Goal branches (goal_branch.rs): one green with its next checkpoint, one red waiting on its fix. */
+const goalBranches = new Map<number, Goal["branch"]>([
+  [2, { branch: "goal-2", created: true, state: "green", items: 4, next_checkpoint: "at 10 items (6 to go)", checkpoint_at: NOW - 26 * HOUR, landed_items: 11, checkpoints: 1, full_runs: 1, reviews: 1 }],
+  [3, { branch: "goal-3", created: true, state: "red", red_reason: "main at 8c41f0e conflicts in src/booking/slots.ts", red_issue: "HAR-31", items: 2, next_checkpoint: "at 10 items (8 to go)", landed_items: 2, checkpoints: 0, full_runs: 0, reviews: 0 }],
+]);
 
 /** The person's order of goals (goal_order): rank by goal id. */
 const goalRanks = new Map<number, number>();

@@ -593,6 +593,24 @@ enum GoalCmd {
     },
     /// Put an issue in a goal, or take it out with goal 0.
     Attach { key: String, goal: i64 },
+    /// Give a goal a goal branch its items land into with item checks (--off takes it away).
+    /// --branch adopts one that exists already; --items is how many items make a checkpoint due.
+    Branch {
+        id: i64,
+        #[arg(long)]
+        off: bool,
+        #[arg(long)]
+        branch: Option<String>,
+        #[arg(long)]
+        items: Option<i64>,
+    },
+    /// Open the goal's checkpoint, which lands its branch into main, and start its worktree for
+    /// --agent (claude, codex, ...); then submit and land it as any issue.
+    Checkpoint {
+        id: i64,
+        #[arg(long)]
+        agent: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1288,6 +1306,20 @@ fn run(cmd: Cmd) -> Result<()> {
                     print_json(&db.save_goal(&project, id, &change, &me)?)
                 }
                 GoalCmd::Attach { key, goal } => print_json(&db.set_issue_goal(&key, Some(goal).filter(|g| *g > 0), &me)?),
+                GoalCmd::Branch { id, off, branch, items } => {
+                    if off {
+                        db.disable_goal_branch(id, &me)?;
+                    } else {
+                        let g = db.goal(id)?.ok_or_else(|| anyhow::anyhow!("no goal {id}"))?;
+                        let root = playbook::repo_for_issue(&Config::load()?, Some(&g.project), &cwd()?)?;
+                        db.enable_goal_branch(id, &root, branch.as_deref(), items, &me)?;
+                    }
+                    print_json(&db.goal(id)?)
+                }
+                GoalCmd::Checkpoint { id, agent } => {
+                    let mut db = db;
+                    print_json(&nitely_core::goal_branch::checkpoint(&mut db, &Config::load()?, id, &cwd()?, agent.as_deref(), &me)?)
+                }
             }
         }
         Cmd::Project { command } => {

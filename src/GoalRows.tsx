@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "./backend";
 import type { GoalDetail, GoalRisk } from "./types";
-import { crewOnGoal, finishLine, goalCounts, goalOrder, riskTone, targetLine } from "./goals";
+import { crewOnGoal, finishLine, goalBranchLine, goalCounts, goalOrder, riskTone, targetLine } from "./goals";
 import { IssueToken, Meter } from "./ui";
 import { ProjectFocus } from "./ProjectFocus";
 import "./goal-rows.css";
@@ -81,6 +81,20 @@ function CrewOnGoal(props: { goal: GoalDetail["goal"] }) {
   );
 }
 
+/** The goal's branch, when its items land into one: green with the next checkpoint, or red. */
+function GoalBranchChip(props: { goal: GoalDetail["goal"] }) {
+  const line = goalBranchLine(props.goal.branch);
+  if (!line) return null;
+  const b = props.goal.branch!;
+  const cost = b.checkpoints ? ` ${b.landed_items} items have landed through it, in ${b.checkpoints} checkpoint${b.checkpoints === 1 ? "" : "s"} with ${b.full_runs} full run${b.full_runs === 1 ? "" : "s"} and ${b.reviews} review${b.reviews === 1 ? "" : "s"}.` : "";
+  return (
+    <span className={`goal-branch${line.red ? " goal-late" : ""}`} title={`Its items land into ${b.branch} with item checks; a checkpoint lands the branch into main with one full run and one review.${cost}`}>
+      <span className="mono">{b.branch}</span>
+      {line.text.slice(b.branch.length)}
+    </span>
+  );
+}
+
 /** One goal: its title and date, a meter of whose move its issues are, then the issues in station order. */
 export function GoalRow(props: { detail: GoalDetail; showProject?: boolean; focused?: boolean; onOpenIssue: (key: string) => void; onFirst?: () => void }) {
   const { goal } = props.detail;
@@ -111,6 +125,7 @@ export function GoalRow(props: { detail: GoalDetail; showProject?: boolean; focu
           </span>
         )}
         <CrewOnGoal goal={goal} />
+        <GoalBranchChip goal={goal} />
         {props.onFirst && (
           <button className="link goal-first" onClick={props.onFirst} title="The crew uses this order when no current focus is set">
             Rank first

@@ -2,7 +2,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { byProject, crewOnGoal, finishLine, goalCounts, goalOrder, groupKind, groupNeeded, neededLine, riskTone, targetLine, triagedLine } from "./goals.ts";
+import { byProject, crewOnGoal, finishLine, goalBranchLine, goalCounts, goalOrder, groupKind, groupNeeded, neededLine, riskTone, targetLine, triagedLine } from "./goals.ts";
 import type { IssueRecord } from "./types.ts";
 
 const issue = (key: string, state: string, state_type: string): IssueRecord =>
@@ -47,6 +47,15 @@ test("a goal row says who works on it and what landed today, and nothing when ne
   assert.equal(crewOnGoal({ landed_today: 4 }), "4 landed today");
   assert.equal(crewOnGoal({ working: 0, landed_today: 0 }), null);
   assert.equal(crewOnGoal({}), null);
+});
+
+test("a goal row shows its goal branch: items since the checkpoint, the next one, or red and its fix", () => {
+  const branch = { branch: "goal-7", created: true, state: "green", items: 4, next_checkpoint: "at 10 items (6 to go)" };
+  assert.deepEqual(goalBranchLine(branch), { text: "goal-7 · 4 items since the last checkpoint · next checkpoint at 10 items (6 to go)", red: false });
+  assert.equal(goalBranchLine({ ...branch, items: 1, next_checkpoint: "APP-12 is landing it" })?.text, "goal-7 · 1 item since the last checkpoint · checkpoint: APP-12 is landing it");
+  assert.deepEqual(goalBranchLine({ ...branch, state: "red", red_reason: "main at 1a2b3c conflicts in src/app.ts", red_issue: "APP-14" }), { text: "goal-7 red: main at 1a2b3c conflicts in src/app.ts; APP-14 fixes it", red: true });
+  assert.equal(goalBranchLine({ ...branch, created: false })?.text, "goal-7 · made when its first item starts");
+  assert.equal(goalBranchLine(undefined), null);
 });
 
 test("a goal's finish at its recent pace, late when it passes the target date", () => {

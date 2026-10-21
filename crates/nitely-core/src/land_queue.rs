@@ -183,6 +183,11 @@ pub fn lands_alone(db: &Db, root: &Path, pb: &Playbook, key: &str) -> Result<Opt
     if pb.land.batch == LandBatch::Off {
         return Ok(Some("the playbook lands each change alone".into()));
     }
+    // A goal's slice is already one change with one review: it is gated alone, so a failure
+    // bisects over its own items (goal_branch.rs), not over unrelated changes stacked with it.
+    if db.checkpoint_of_issue(key)?.is_some() {
+        return Ok(Some("a goal's checkpoint lands alone: its slice is gated as one change and bisected over its own items".into()));
+    }
     let Some(lanes) = &pb.lanes else {
         return Ok(Some("a batch is gated in a build lane, and this repo has no [lanes]".into()));
     };
@@ -269,6 +274,10 @@ fn land_waiting(db: &mut Db, root: &Path, key: &str, opts: &LandOptions, actor: 
             let pb = Playbook::load(root)?;
             for r in land::after_land_outside_lock(root, &pb).iter().filter(|r| !r.ok) {
                 eprintln!("the after-land step `{}` failed; the land stands", r.command);
+            }
+            // Main moved: it flows into each open goal branch (goal_branch.rs).
+            for said in crate::goal_branch::flow_main_in(db, root, actor) {
+                db.log_event(actor, Some(key), None, "goal_branch", &said)?;
             }
             continue;
         }

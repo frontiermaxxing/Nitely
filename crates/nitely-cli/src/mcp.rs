@@ -602,6 +602,23 @@ fn tools() -> Value {
             } }
         },
         {
+            "name": "goal_branch",
+            "description": "Give a goal a goal branch (goal-<id>, made from the integration branch when its first item starts), or take it away with on: false. Its items then start from that branch and land into it with item checks only (compile, lint, affected tests; no review, no pull request), and a checkpoint lands the branch into main with one full run and one review of the slice. branch adopts a branch that exists already. checkpoint_items: how many items make a checkpoint due (default 10).",
+            "inputSchema": { "type": "object", "required": ["goal"], "properties": {
+                "goal": { "type": "integer" },
+                "on": { "type": "boolean" },
+                "branch": { "type": "string" },
+                "checkpoint_items": { "type": "integer" }
+            } }
+        },
+        {
+            "name": "checkpoint",
+            "description": "Land a goal branch's slice into main: merges main into the goal branch, files the checkpoint issue (or returns the open one) and starts its worktree at the branch's head. Then submit it (one review of the whole slice, one pull request) and land it (one full verification; on failure it bisects over the items, reverts the one at fault on the goal branch and sends it back). Call it when the goal's items make a coherent slice; one is opened by itself after checkpoint_items items or a day.",
+            "inputSchema": { "type": "object", "required": ["goal"], "properties": {
+                "goal": { "type": "integer" }
+            } }
+        },
+        {
             "name": "get_project",
             "description": "The project's brief (what earlier agents learned about it: vision, state of each area, target order, open questions for the owner) and its setup marker (null until the first-run sweep has run; otherwise the commit it read). Read it before exploring the repo.",
             "inputSchema": { "type": "object", "properties": {
@@ -1413,6 +1430,28 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
                 None => project(&db)?,
             };
             json!(db.save_goal(&project, id, &change, &actor)?)
+        }
+        "goal_branch" => {
+            let goal = args.get("goal").and_then(Value::as_i64).ok_or_else(|| anyhow!("missing goal"))?;
+            if args.get("on").and_then(Value::as_bool) == Some(false) {
+                db.disable_goal_branch(goal, &actor)?;
+                json!({ "goal": goal, "branch": null })
+            } else {
+                let g = db.goal(goal)?.with_context(|| format!("no goal {goal}"))?;
+                let root = playbook::repo_for_issue(&config, Some(&g.project), &server.cwd)?;
+                db.enable_goal_branch(goal, &root, str_arg(args, "branch"), args.get("checkpoint_items").and_then(Value::as_i64), &actor)?;
+                json!(db.goal(goal)?)
+            }
+        }
+        "checkpoint" => {
+            let goal = args.get("goal").and_then(Value::as_i64).ok_or_else(|| anyhow!("missing goal"))?;
+            let opened = nitely_core::goal_branch::checkpoint(&mut db, &config, goal, &server.cwd, None, &actor)?;
+            // Started as start_task starts any issue: held by this agent.
+            if let Actor::Agent(id) = &actor {
+                db.claim_for_start(&opened.checkpoint.issue, id, &[server.agent(), server.vendor.clone()], false)?;
+            }
+            let opened = nitely_core::goal_branch::checkpoint(&mut db, &config, goal, &server.cwd, Some(&server.vendor), &actor)?;
+            json!(opened)
         }
         "get_project" => {
             let project = project(&db)?;
