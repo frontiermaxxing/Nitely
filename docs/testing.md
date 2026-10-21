@@ -265,3 +265,46 @@ summed time: `land_queue` 1,039 s, `submit` 1,037 s, `land` 815 s, `lanes` 428 s
 `release_verification` 328 s, `crew` 264 s, `submit_job` 233 s and `affected_tests` 138 s.
 These are single observations: run 1666 shared the PC with other agents' lanes, and a CI
 runner's speed varies from run to run.
+
+
+### After goal 20's cut, 2026-10-21 (NIT-528)
+
+Andrew approved the deletion list (ask 69: "Approve all three groups"). The old tests that pure
+tests covered are gone: 47 deleted, 5 merged into the scenarios that keep their checks, and the
+bisection scenario cut from five changes to three. Every deleted test and what covers it is listed
+in docs/pure-cut.md, "NIT-528: the deletion list". The kept scenarios are named in
+`.nitely/test-budget.toml`.
+
+The same CI measure as the baseline (GitHub `ubuntu-latest`, 4 threads), on NIT-528's tree,
+workflow run 39681612807:
+
+| | Baseline (run 39638986501) | After (run 39681612807) |
+| --- | ---: | ---: |
+| `nitely_core` wall time | 31 s | **18.9 s** (target 60 s) |
+| `nitely_core` summed test time | 123 s | 75 s |
+| `nitely_core` tests | 552 | 564 |
+| `nitely_core` tests over 2 s | 13 | 5 |
+| Workspace tests over 2 s | 21 | 10 |
+| `performance_recording` | 20.2 s | 1.4 s |
+| `mcp_concurrent` | 6.2 s | 3.1 s |
+
+The core suite has more tests than before: the pure tests added since the baseline outnumber the
+old tests removed. The wall time and the tests over 2 s fell all the same. On Windows the change is
+larger, since the cut removed the git starts that cost 0.6 to 0.9 s each there. It was not
+measured with a full local run (the push runs full suites only in CI); each gate's "Test time"
+line shows it per lane run.
+
+Ten tests are still over 2 s. Four are named scenarios: `goal_branch::...items_land_into_the_goal_branch...`
+(2.6 s), `mcp_stale::a_call_that_meets_a_newer_database...` (2.5 s),
+`mcp_concurrent::a_long_call_holds_up_none...` (2.4 s), and `submit::...a_p1_that_two_rounds...`
+(4.2 s). The others, and what takes them under:
+
+- `land::...lands_only_with_the_apps_signed_approval...` (3.3 s), and the scenario above: 1.1 s
+  sleeps because review and approval times are whole seconds,
+  [NIT-544](http://127.0.0.1:7423/i/NIT-544).
+- `mcp_concurrent::a_cancelled_call_is_not_answered...` (3.2 s): it waits out the 1 s cap and then
+  asserts silence; the bookkeeping is pure since NIT-536, so the wait could be shorter.
+- `submit::...the_fresh_review_is_told...` (2.8 s) and `submit::...the_same_edit_somewhere_else...`
+  (2.4 s): kept on purpose (what the reviewer is told; `diff_id` against real git).
+- `install_and_forward::a_running_mcp_server_forwards...` (2.7 s) and
+  `install_and_forward::install_from_a_file_beside...` (2.2 s): real installs of the binary.
