@@ -85,11 +85,11 @@ test("nothing is told while the Inbox is in view or in quiet hours, nor again af
   const quietHours = async (on) => {
     await page.open("#inbox");
     await page.click({ css: ".inbox-notify-link" });
-    await page.waitFor(`return location.hash === "#settings/notifications" && document.querySelector(".notify-quiet input[type=checkbox]") !== null;`, { what: "Settings on its Notifications" });
+    await page.waitFor(`return location.hash === "#settings/notifications" && document.querySelector('button[role=switch][aria-label="Quiet hours"]') !== null;`, { what: "Settings on its Notifications" });
     // Settings brings the section back into view while the sections above it load; a click while
     // it moves could land elsewhere.
     await sleep(2000);
-    if ((await page.eval(`return document.querySelector(".notify-quiet input[type=checkbox]").checked;`)) !== on) await page.click({ css: ".notify-quiet input[type=checkbox]" });
+    if ((await page.eval(`return document.querySelector('button[role=switch][aria-label="Quiet hours"]').getAttribute("aria-checked") === "true";`)) !== on) await page.click({ css: 'button[role=switch][aria-label="Quiet hours"]' });
     if (on) {
       const hhmm = (d) => d.toTimeString().slice(0, 5);
       const from = hhmm(new Date(Date.now() - 60000));

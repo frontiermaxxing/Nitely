@@ -89,7 +89,7 @@ test("Performance history survives an app restart and only clears through paused
     await app.page.waitFor(`return document.querySelector('.perf-inspect') !== null`, { what: "older incident" });
     await clickControl("Inspect incident");
     await app.page.waitFor(`return document.body.textContent.includes('APP-17') && document.body.textContent.includes('Fixed window')`, { what: "older incident workload detail" });
-    assert.equal(await app.page.eval(`return document.querySelector('[aria-label="Workload sample"]')?.selectedOptions[0].textContent`), "Last observation in this window");
+    assert.equal(await app.page.eval(`return document.querySelector('button[aria-label="Workload sample"] .select-value')?.textContent`), "Last observation in this window");
     const incidentQueries = await app.page.eval(`return window.__perfChecks.reads.filter(q => q.view === 'history')`);
     assert.equal(incidentQueries.at(-1).from_ms, incidentFrom - 30_000);
     assert.equal(incidentQueries.at(-1).to_ms, incidentTo);

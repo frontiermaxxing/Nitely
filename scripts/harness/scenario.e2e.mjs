@@ -112,10 +112,10 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
     // Restore inherited Custom afterwards so the remainder still exercises the repo's rules.
     const originalMode = await page.invoke("project_review_mode", { project: "APP" });
     await page.open("#project/APP/settings");
-    await page.waitFor(`return document.querySelector('input[name="mode-APP"][value="fast"]');`);
-    await page.click({ css: 'input[name="mode-APP"][value="fast"]' });
+    await page.waitFor(`return document.querySelector('[role=radiogroup][aria-label="Review mode"] input[value="fast"]');`);
+    await page.click({ css: '[role=radiogroup][aria-label="Review mode"] input[value="fast"]' });
     await page.click({ css: "button", text: "Save review mode" });
-    await page.waitFor(`return document.querySelector(".review-mode-heading")?.textContent.includes("Current: Fast");`);
+    await page.waitFor(`return document.querySelector(".review-mode-settings")?.textContent.includes("Saved: Fast.");`);
     const fastMode = await page.invoke("project_review_mode", { project: "APP" });
     assert.equal(fastMode.mode, "fast");
     const effectiveModes = await page.invoke("project_review_mode_effective", { project: "APP" });
@@ -132,9 +132,9 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
     assert.match(staleModeSave, /changed|stale|revision/i);
     assert.equal((await page.invoke("project_review_mode", { project: "APP" })).mode, "fast");
     await shot("review-mode");
-    await page.click({ css: 'input[name="mode-APP"][value="custom"]' });
+    await page.click({ css: '[role=radiogroup][aria-label="Review mode"] input[value="custom"]' });
     await page.click({ css: "button", text: "Save review mode" });
-    await page.waitFor(`return document.querySelector(".review-mode-heading")?.textContent.includes("Current: Custom");`);
+    await page.waitFor(`return document.querySelector(".review-mode-settings")?.textContent.includes("Saved: Custom.");`);
     assert.deepEqual((await page.invoke("project_review_mode", { project: "APP" })).overrides, originalMode.overrides);
 
     // Human reviewer settings go through the native commands and commit only the previewed file.
