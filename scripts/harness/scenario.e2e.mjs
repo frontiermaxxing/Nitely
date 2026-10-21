@@ -108,18 +108,20 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
     await page.waitFor(`return document.body.textContent.includes("my-app");`, { what: "the repo on Now" });
     await shot("1-connected");
 
-    // A saved preset crosses the settings UI, native command and durable project policy.
-    // Restore inherited Custom afterwards so the remainder still exercises the repo's rules.
+    // A saved preset crosses the settings UI, native command and durable project policy. A new
+    // project starts on Fast (NIT-511), so Careful is the change; Save stays off for the mode already
+    // shown. Restore inherited Custom afterwards so the remainder still exercises the repo's rules.
     const originalMode = await page.invoke("project_review_mode", { project: "APP" });
     await page.open("#project/APP/settings");
-    await page.waitFor(`return document.querySelector('[role=radiogroup][aria-label="Review mode"] input[value="fast"]') !== null;`, { what: "the review mode cards" });
-    await page.click({ css: '[role=radiogroup][aria-label="Review mode"] input[value="fast"]' });
+    await page.waitFor(`return document.querySelector('[role=radiogroup][aria-label="Review mode"] input[value="careful"]') !== null;`, { what: "the review mode cards" });
+    await page.click({ css: '[role=radiogroup][aria-label="Review mode"] input[value="careful"]' });
     await page.click({ css: "button", text: "Save review mode" });
-    await page.waitFor(`return document.querySelector(".review-mode-settings")?.textContent.includes("Saved: Fast.");`);
-    const fastMode = await page.invoke("project_review_mode", { project: "APP" });
-    assert.equal(fastMode.mode, "fast");
+    await page.waitFor(`return document.querySelector(".review-mode-settings")?.textContent.includes("Saved: Careful.");`);
+    const savedMode = await page.invoke("project_review_mode", { project: "APP" });
+    assert.equal(savedMode.mode, "careful");
+    assert.equal(savedMode.revision, originalMode.revision + 1, "saving a preset moves the revision");
     const effectiveModes = await page.invoke("project_review_mode_effective", { project: "APP" });
-    assert.equal(effectiveModes[0].options.pre_review, "batched", "Fast reviews each no-goal batch");
+    assert.equal(effectiveModes[0].options.pre_review, "individual", "Careful reviews each change");
     assert.equal(effectiveModes[0].options.land_batch, true);
     assert.equal(effectiveModes[0].options.full_backstop.enabled, true, "every preset keeps the backstop on");
     assert.equal(effectiveModes[0].options.periodic.enabled, false);
@@ -130,7 +132,7 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
       } catch (error) { return String(error); }
     `);
     assert.match(staleModeSave, /changed|stale|revision/i);
-    assert.equal((await page.invoke("project_review_mode", { project: "APP" })).mode, "fast");
+    assert.equal((await page.invoke("project_review_mode", { project: "APP" })).mode, "careful");
     await shot("review-mode");
     await page.click({ css: '[role=radiogroup][aria-label="Review mode"] input[value="custom"]' });
     await page.click({ css: "button", text: "Save review mode" });
