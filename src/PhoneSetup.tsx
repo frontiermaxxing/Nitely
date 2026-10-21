@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "./backend";
 import type { PhoneOffer, PhoneStatus, TailscaleState } from "./types";
-import { Loading } from "./ui";
+import { Button, Checkbox, Loading, Notice, RadioCards, RemoveButton, SettingsRow, TextField, type ChoiceOption } from "./ui";
 import { ago } from "./util";
 import "./phone-setup.css";
 
@@ -62,7 +62,7 @@ export function PhoneSetup(props: { now: number }) {
     setBusy(false);
   };
 
-  if (!status) return error ? <p className="error">{error}</p> : <Loading />;
+  if (!status) return error ? <p className="error setting-feedback">{error}</p> : <Loading />;
   const on = status.listening.length > 0;
   const tunnels = status.addresses.filter((a) => a.kind === "tunnel");
   const https = mode !== "none";
@@ -72,24 +72,38 @@ export function PhoneSetup(props: { now: number }) {
   const tls = mode === "none" ? null : { kind: mode, ...files };
   const expired = offer !== null && offer.expires < props.now;
 
+  const modes: ChoiceOption<typeof mode>[] = [
+    { value: "none", label: "Inside Tailscale", why: "Plain HTTP on this PC's Tailscale address; Tailscale on the phone too." },
+    {
+      value: "tailscale",
+      label: "HTTPS with Tailscale's certificate",
+      why: (
+        <>
+          A real certificate for this PC's tailnet name, which phones trust. Turn on MagicDNS and HTTPS Certificates in the Tailscale admin console first.
+          {mode === "tailscale" && tsName && <span className={`phone-ts-name ${tsName.name ? "mono" : "error"}`}>{tsName.name ?? tsName.why}</span>}
+        </>
+      ),
+    },
+    { value: "files", label: "HTTPS with your own certificate", why: "PEM files, for a name the phone resolves to this PC, from a certificate authority the phone trusts." },
+  ];
+
   return (
     <div className="phone-setup">
-      {error && <p className="error">{error}</p>}
+      {error && <p className="error setting-feedback">{error}</p>}
 
-      <section className="settings-card">
-        <h2>Where it listens</h2>
+      <div className="setting-sub">
+        <h3>Where it listens</h3>
         {on ? (
           <>
-            <p className="small">The phone page is on:</p>
-            <ul className="mono small phone-urls">
-              {status.listening.map((u) => (
-                <li key={u}>{u}</li>
-              ))}
-            </ul>
-            {status.awake && <p className="small muted">This PC stays awake while the phone server is on.</p>}
-            <div className="actions">
-              <button
-                className="btn"
+            <SettingsRow label="The phone page" why={status.awake ? "This PC stays awake while the phone server is on." : undefined}>
+              <ul className="setting-value mono phone-urls">
+                {status.listening.map((u) => (
+                  <li key={u}>{u}</li>
+                ))}
+              </ul>
+            </SettingsRow>
+            <div className="setting-actions">
+              <Button
                 disabled={busy}
                 onClick={() =>
                   run(async () => {
@@ -99,97 +113,82 @@ export function PhoneSetup(props: { now: number }) {
                 }
               >
                 Turn off
-              </button>
+              </Button>
             </div>
           </>
         ) : (
           <>
-            <p className="settings-why">
-              The phone page holds the phone's key, so nobody between the PC and the phone may be able to change it: the page goes only inside Tailscale, or over
-              HTTPS with a certificate the phone trusts.
-            </p>
-            <div className="phone-modes" role="radiogroup" aria-label="How the phone reaches it">
-              <label className="phone-mode">
-                <input type="radio" name="phone-mode" checked={mode === "none"} onChange={() => setMode("none")} />
-                <span>
-                  <strong>Inside Tailscale</strong>
-                  <span className="small muted"> Plain HTTP on this PC's Tailscale address; Tailscale on the phone too.</span>
-                </span>
-              </label>
-              <label className="phone-mode">
-                <input type="radio" name="phone-mode" checked={mode === "tailscale"} onChange={() => { setTsName(null); setMode("tailscale"); }} />
-                <span>
-                  <strong>HTTPS with Tailscale's certificate</strong>
-                  <span className="small muted"> A real certificate for this PC's tailnet name, which phones trust. Turn on MagicDNS and HTTPS Certificates in the Tailscale admin console first.</span>
-                  {mode === "tailscale" && tsName && (
-                    <span className={`small ${tsName.name ? "mono" : "error"}`}>{tsName.name ?? tsName.why}</span>
-                  )}
-                </span>
-              </label>
-              <label className="phone-mode">
-                <input type="radio" name="phone-mode" checked={mode === "files"} onChange={() => setMode("files")} />
-                <span>
-                  <strong>HTTPS with your own certificate</strong>
-                  <span className="small muted"> PEM files, for a name the phone resolves to this PC, from a certificate authority the phone trusts.</span>
-                </span>
-              </label>
+            <SettingsRow
+              label="How the phone reaches it"
+              why="The phone page holds the phone's key, so nobody between the PC and the phone may be able to change it: the page goes only inside Tailscale, or over HTTPS with a certificate the phone trusts."
+            >
+              <RadioCards
+                options={modes}
+                value={mode}
+                onChange={(m) => {
+                  if (m === "tailscale") setTsName(null);
+                  setMode(m);
+                }}
+                aria-label="How the phone reaches it"
+              />
               {mode === "files" && (
                 <div className="phone-files">
-                  <input className="mono" placeholder="Certificate file (PEM)" aria-label="Certificate file" value={files.cert} onChange={(e) => setFiles({ ...files, cert: e.target.value })} />
-                  <input className="mono" placeholder="Private key file (PEM)" aria-label="Private key file" value={files.key} onChange={(e) => setFiles({ ...files, key: e.target.value })} />
-                  <input className="mono" placeholder="Name on the certificate" aria-label="Name on the certificate" value={files.host} onChange={(e) => setFiles({ ...files, host: e.target.value })} />
+                  <TextField mono placeholder="Certificate file (PEM)" aria-label="Certificate file" value={files.cert} onChange={(e) => setFiles({ ...files, cert: e.target.value })} />
+                  <TextField mono placeholder="Private key file (PEM)" aria-label="Private key file" value={files.key} onChange={(e) => setFiles({ ...files, key: e.target.value })} />
+                  <TextField mono placeholder="Name on the certificate" aria-label="Name on the certificate" value={files.host} onChange={(e) => setFiles({ ...files, host: e.target.value })} />
                 </div>
               )}
-            </div>
-            <div className="phone-addresses">
-              {status.addresses.map((a) => (
-                <label key={a.ip} className={`phone-address${usable(a) ? "" : " phone-address-no"}`}>
-                  <input
-                    type="checkbox"
-                    disabled={!usable(a)}
-                    checked={usable(a) && picked.includes(a.ip)}
-                    onChange={(e) => setPicked(e.target.checked ? [...picked, a.ip] : picked.filter((p) => p !== a.ip))}
-                  />
-                  <span className="mono">{a.ip}</span>
-                  <span className="small muted">
-                    {a.interface}
-                    {a.kind === "loopback" ? ", for trying it on this PC" : a.kind === "tunnel" ? ", tunnel" : https ? "" : ", ordinary network: HTTPS only"}
-                  </span>
-                </label>
-              ))}
-            </div>
-            {tunnels.length === 0 && mode !== "files" && <p className="small">No Tailscale address yet. Install Tailscale on this PC and on the phone, sign both in, and it shows up here.</p>}
-            <label className="phone-awake">
-              <input type="checkbox" checked={keepAwake} onChange={(e) => setKeepAwake(e.target.checked)} />
-              <span>
-                Keep this PC awake while the phone server is on
-                <span className="small muted"> So your phone finds it away from home. The screen can still turn off; on a laptop it costs battery.</span>
+            </SettingsRow>
+            <SettingsRow
+              label="Addresses"
+              why={tunnels.length === 0 && mode !== "files" ? "No Tailscale address yet. Install Tailscale on this PC and on the phone, sign both in, and it shows up here." : "Where the phone page listens."}
+            >
+              <div className="setting-list">
+                {status.addresses.map((a) => (
+                  <div key={a.ip} className="setting-list-item">
+                    <Checkbox
+                      disabled={!usable(a)}
+                      checked={usable(a) && picked.includes(a.ip)}
+                      onChange={(on) => setPicked(on ? [...picked, a.ip] : picked.filter((p) => p !== a.ip))}
+                      label={<span className="mono">{a.ip}</span>}
+                    />
+                    <span className="setting-unit">
+                      {a.interface}
+                      {a.kind === "loopback" ? ", for trying it on this PC" : a.kind === "tunnel" ? ", tunnel" : https ? "" : ", ordinary network: HTTPS only"}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </SettingsRow>
+            <SettingsRow label="Keep this PC awake" why="So your phone finds it away from home. The screen can still turn off; on a laptop it costs battery.">
+              <span className="setting-inline">
+                <Checkbox checked={keepAwake} onChange={setKeepAwake} label="While the phone server is on" />
               </span>
-            </label>
-            <div className="actions">
-              <button
-                className="btn primary"
+            </SettingsRow>
+            <div className="setting-actions">
+              <Button
+                variant="primary"
                 disabled={busy || !ready || !status.addresses.some((a) => usable(a) && picked.includes(a.ip))}
                 onClick={() => run(() => invoke<PhoneStatus>("phone_start", { ips: picked.filter((ip) => status.addresses.some((a) => a.ip === ip && usable(a))), tls, keepAwake }))}
               >
                 Turn on
-              </button>
+              </Button>
             </div>
           </>
         )}
-      </section>
+      </div>
 
       {on && (
-        <section className="settings-card">
-          <h2>Pair a phone</h2>
+        <div className="setting-sub">
+          <h3>Pair a phone</h3>
           {status.requests.map((r) => (
-            <div className="phone-request" key={r.id} role="alert">
-              <p>
-                Pair <strong>“{r.name}”</strong>? Only if the phone shows <span className="phone-code">{r.code}</span>
-              </p>
-              <div className="actions">
-                <button
-                  className="btn primary"
+            <div className="setting-notice" key={r.id}>
+              <Notice tone="warning" lead={`Pair “${r.name}”?`}>
+                Only if the phone shows <span className="phone-code">{r.code}</span>
+              </Notice>
+              <div className="setting-actions">
+                <Button
+                  variant="primary"
                   disabled={busy}
                   onClick={() =>
                     run(async () => {
@@ -199,10 +198,10 @@ export function PhoneSetup(props: { now: number }) {
                   }
                 >
                   Pair
-                </button>
-                <button className="btn" disabled={busy} onClick={() => run(() => invoke<PhoneStatus>("phone_decide", { id: r.id, accept: false }))}>
+                </Button>
+                <Button disabled={busy} onClick={() => run(() => invoke<PhoneStatus>("phone_decide", { id: r.id, accept: false }))}>
                   Decline
-                </button>
+                </Button>
               </div>
             </div>
           ))}
@@ -213,57 +212,57 @@ export function PhoneSetup(props: { now: number }) {
               <div className="phone-offer-text small">
                 <p>Scan this with the phone's camera. It works once, for ten minutes, and the phone pairs only when you confirm it here.</p>
                 <p className="mono phone-link">{offer.urls[0]}</p>
-                <button className="btn quiet" onClick={() => setOffer(null)}>
+                <Button variant="quiet" onClick={() => setOffer(null)}>
                   Hide the code
-                </button>
+                </Button>
               </div>
             </div>
           ) : (
-            <div className="actions">
-              <button className="btn primary" disabled={busy} onClick={() => run(async () => setOffer(await invoke<PhoneOffer>("phone_pair")))}>
+            <div className="setting-actions">
+              <Button variant="primary" disabled={busy} onClick={() => run(async () => setOffer(await invoke<PhoneOffer>("phone_pair")))}>
                 {expired ? "Make a new code" : "Pair a phone"}
-              </button>
+              </Button>
             </div>
           )}
-          <p className="small muted phone-notify-note">
+          <p className="setting-note">
             {status.listening.some((u) => u.startsWith("https://"))
               ? "For notifications, tap Notify me on the phone once it is paired. On iPhone they come only to the page added to the Home Screen: add it there first and pair from there."
               : "Notifications need HTTPS: turn the phone server off and on with HTTPS chosen, then pair the phone from the new link."}
           </p>
-        </section>
+        </div>
       )}
 
-      <section className="settings-card">
-        <h2>Paired phones</h2>
-        {status.devices_error && <p className="error small">{status.devices_error}</p>}
-        {status.devices.length === 0 && !status.devices_error && <p className="small muted">None yet.</p>}
+      <div className="setting-sub">
+        <h3>Paired phones</h3>
+        {status.devices_error && <p className="error setting-feedback">{status.devices_error}</p>}
+        {status.devices.length === 0 && !status.devices_error && <p className="setting-note">None yet.</p>}
         <div className="phone-devices">
           {status.devices.map((d) => (
-            <div className="phone-device" key={d.id}>
-              <span>{d.name}</span>
-              <span className="small muted">
-                paired {ago(props.now, d.paired_at)}
-                {status.notified.includes(d.id) && " · notifications on"}
+            <div className="setting-item" key={d.id}>
+              <span className="setting-item-main">
+                <span>{d.name}</span>
+                <span className="setting-unit">
+                  paired {ago(props.now, d.paired_at)}
+                  {status.notified.includes(d.id) && " · notifications on"}
+                </span>
               </span>
               {removing === d.id ? (
-                <span className="phone-confirm small">
+                <span className="setting-confirm">
                   Its approvals not landed yet stop counting.
-                  <button className="btn danger" disabled={busy} onClick={() => run(async () => (setRemoving(null), invoke<PhoneStatus>("phone_revoke", { id: d.id })))}>
+                  <Button variant="danger" disabled={busy} onClick={() => run(async () => (setRemoving(null), invoke<PhoneStatus>("phone_revoke", { id: d.id })))}>
                     Remove
-                  </button>
-                  <button className="btn quiet" onClick={() => setRemoving(null)}>
+                  </Button>
+                  <Button variant="quiet" onClick={() => setRemoving(null)}>
                     Keep
-                  </button>
+                  </Button>
                 </span>
               ) : (
-                <button className="btn quiet" onClick={() => setRemoving(d.id)}>
-                  Remove
-                </button>
+                <RemoveButton label={`Remove ${d.name}`} onClick={() => setRemoving(d.id)} />
               )}
             </div>
           ))}
         </div>
-      </section>
+      </div>
 
       <AwayFromHome bound={status.bound} />
     </div>
@@ -290,13 +289,13 @@ function AwayFromHome(props: { bound: string[] }) {
   const viaTailscale = !!ts && props.bound.some((ip) => ts.ips.includes(ip));
 
   return (
-    <section className="settings-card phone-away">
-      <h2>Away from home</h2>
-      <p className="small muted">
+    <div className="setting-sub phone-away">
+      <h3>Away from home</h3>
+      <p className="setting-note">
         A paired phone reaches this PC from anywhere it has internet through Tailscale, a private network you run on your own devices. Nitely runs no server in between.
       </p>
       {ts && (
-        <p className="small phone-away-state" role="status">
+        <p className="setting-note phone-away-state" role="status">
           {!ts.installed
             ? "Tailscale is not on this PC yet."
             : !ts.running
@@ -309,17 +308,17 @@ function AwayFromHome(props: { bound: string[] }) {
           {ts.running && props.bound.length > 0 && (viaTailscale ? " The phone server listens there." : " The phone server does not listen on the Tailscale address: turn it off and on with that address picked.")}
         </p>
       )}
-      <ol className="small phone-away-steps">
+      <ol className="setting-note phone-away-steps">
         <li>Install Tailscale on this PC and on the phone, and sign both in with the same account.</li>
         <li>Turn the phone server on with this PC's Tailscale address, or with HTTPS and Tailscale's certificate.</li>
         <li>Pair the phone: the code it scans carries that address.</li>
         <li>Away from home, keep Tailscale on on the phone. This PC must be awake, with Nitely open: tick "Keep this PC awake" when you turn the phone server on.</li>
       </ol>
-      <div className="actions">
-        <button className="btn quiet" disabled={checking} onClick={check}>
+      <div className="setting-actions">
+        <Button variant="quiet" disabled={checking} onClick={check}>
           {checking ? "Checking…" : "Check again"}
-        </button>
+        </Button>
       </div>
-    </section>
+    </div>
   );
 }

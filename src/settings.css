@@ -1,0 +1,54 @@
+/* ----- Settings and a project's Settings tab, laid out with SettingsSection and SettingsRow
+   (src/ui/SettingsRow.tsx): the pages fill the window, and what goes between the rows is here. ----- */
+.settings-page.page { max-width: none; }
+.settings-page .setting-group { scroll-margin-top: 16px; }
+
+/* A part of a section with a heading of its own: one project's crew, "Paired phones". */
+.setting-sub { padding-top: 22px; scroll-margin-top: 16px; }
+.setting-sub > h3 { display: flex; align-items: baseline; gap: 8px; margin: 0; padding-bottom: 4px; font-size: 14px; font-weight: var(--weight-strong); }
+
+/* Text that explains what follows, between rows; and the small one after them. */
+.setting-note { margin: 10px 0 0; max-width: 760px; font-size: 12.5px; line-height: 1.5; color: var(--fg-2); text-wrap: pretty; }
+.setting-note:first-child { margin-top: 4px; }
+
+/* What sits in a row's control column: a control with its unit, a list of choices, a value. */
+.setting-inline { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; min-height: 32px; }
+.setting-inline .ui-field { flex: 0 1 auto; }
+.setting-unit { font-size: 12.5px; color: var(--fg-3); }
+.setting-number .ui-field-input { width: 96px; }
+.setting-time .ui-field-input { width: 136px; }
+.setting-wide { width: min(100%, 520px); }
+.setting-list { display: flex; flex-direction: column; gap: 8px; }
+.setting-list-item { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; min-height: 20px; }
+.setting-value { display: block; padding-top: 1px; font-size: 13px; line-height: 1.5; color: var(--fg); overflow-wrap: anywhere; }
+.setting-value .muted { color: var(--fg-3); }
+.setting-textarea {
+  display: block; width: min(100%, 640px); box-sizing: border-box; padding: 8px 12px; resize: vertical;
+  border-radius: var(--radius); border: 1px solid var(--line-strong); background: var(--sunken);
+  color: var(--fg); font-family: var(--font-mono); font-size: 12.5px; line-height: 1.5;
+}
+.setting-textarea:focus-visible { outline: 2px solid var(--focus); outline-offset: -1px; }
+.setting-textarea:disabled { opacity: 0.55; }
+
+/* The buttons that act on a whole section (Save, Turn on) and what they answered. */
+.setting-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; padding-top: 16px; }
+.setting-actions .error, .setting-actions .muted { font-size: 12.5px; }
+.setting-feedback { margin: 10px 0 0; font-size: 12.5px; line-height: 1.5; }
+.setting-notice { margin-top: 14px; max-width: 760px; }
+.setting-notice .setting-actions { padding-top: 10px; }
+
+/* Other machines: the list sits in the section as its rows, not as a box in it. */
+.setting-sub .remote-list { background: none; border: 0; border-radius: 0; border-bottom: 1px solid var(--line); }
+.setting-sub .remote-row { padding-left: 0; padding-right: 0; }
+@media (max-width: 640px) {
+  .remote-row > .ui-icon-button, .remote-row > .setting-confirm { grid-area: end; }
+}
+.setting-machine .ui-field-input { width: 160px; }
+.setting-project { width: 240px; }
+.crew-repo { margin: 14px 0 0; font-size: 12.5px; font-weight: var(--weight-medium); color: var(--fg-2); }
+
+/* A row of a list inside a section (a machine, a phone), with its remove button at the end. */
+.setting-item { display: flex; align-items: center; gap: 12px; min-height: 40px; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.setting-item:last-child { border-bottom: 0; }
+.setting-item-main { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; }
+.setting-confirm { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12.5px; color: var(--fg-2); }

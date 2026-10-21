@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { invoke } from "./backend";
 import type { Board, NetworkInfo, NewMachine, Project } from "./types";
 import { ago } from "./util";
-import { AgentMark, EmptyState, Loading, StateDot, livenessLabel, livenessOf } from "./ui";
+import { AgentMark, Button, Notice, EmptyState, Loading, RemoveButton, Select, SettingsRow, StateDot, TextField, livenessLabel, livenessOf } from "./ui";
 
 /**
  * Agents on other machines on this network, reaching this backlog through `nitely serve`. A
@@ -73,33 +73,30 @@ export function Network(props: { board: Board | null; projects: Project[]; now: 
 
   return (
     <div className="network">
-      {error && <p className="error">{error}</p>}
+      {error && <p className="error setting-feedback">{error}</p>}
 
       {made && (
-        <section className="settings-card net-made" aria-live="polite">
-          <h2>{made.name}'s token, shown only now</h2>
-          <p className="small">
-            On {made.name}, run this in a terminal to add this backlog to Claude Code. Copy it before you close this:
-            Nitely keeps only a hash of the token and cannot show it again.
-          </p>
+        <div className="setting-notice" aria-live="polite">
+          <Notice tone="warning" lead={`${made.name}'s token, shown only now.`}>
+            On {made.name}, run this in a terminal to add this backlog to Claude Code. Copy it before you close this: Nitely keeps only a hash of the token and
+            cannot show it again.
+          </Notice>
           {made.commands.map((c) => (
             <div className="net-command" key={c}>
               <pre className="file">{c}</pre>
-              <button className="btn" onClick={() => copy(c)}>
-                {copied === c ? "Copied" : "Copy"}
-              </button>
+              <Button onClick={() => copy(c)}>{copied === c ? "Copied" : "Copy"}</Button>
             </div>
           ))}
-          <div className="actions">
-            <button className="btn primary" onClick={() => setMade(null)}>
+          <div className="setting-actions">
+            <Button variant="primary" onClick={() => setMade(null)}>
               Done
-            </button>
+            </Button>
           </div>
-        </section>
+        </div>
       )}
 
-      <section className="settings-card">
-        <h2>Machines</h2>
+      <div className="setting-sub">
+        <h3>Machines</h3>
         {!info && !error && <Loading />}
         {info && info.tokens.length === 0 && <EmptyState title="No machines yet.">Add one below; it gets a token for its agents.</EmptyState>}
         {info && info.tokens.length > 0 && (
@@ -119,69 +116,66 @@ export function Network(props: { board: Board | null; projects: Project[]; now: 
                   </span>
                   <span className="remote-doing small">{latest?.last_activity ?? <span className="muted">added {ago(now, t.created_at)}</span>}</span>
                   {removing === t.name ? (
-                    <span className="net-confirm small">
-                      Cut {t.name} off?{" "}
-                      <button className="btn" disabled={busy} onClick={() => remove(t.name)}>
+                    <span className="setting-confirm">
+                      Cut {t.name} off?
+                      <Button variant="danger" disabled={busy} onClick={() => remove(t.name)}>
                         Remove
-                      </button>{" "}
-                      <button className="btn quiet" onClick={() => setRemoving(null)}>
+                      </Button>
+                      <Button variant="quiet" onClick={() => setRemoving(null)}>
                         Keep
-                      </button>
+                      </Button>
                     </span>
                   ) : (
-                    <button className="btn quiet" onClick={() => setRemoving(t.name)}>
-                      Remove
-                    </button>
+                    <RemoveButton label={`Remove ${t.name}`} onClick={() => setRemoving(t.name)} />
                   )}
                 </div>
               );
             })}
           </div>
         )}
-      </section>
+      </div>
 
-      <section className="settings-card">
-        <h2>Add a machine</h2>
+      <SettingsRow label="Add a machine" why="A name is lowercase letters, digits or dashes. Adding a name that exists gives it a new token and cuts off the old one.">
         <form
-          className="net-add"
+          className="setting-inline"
           onSubmit={(e) => {
             e.preventDefault();
             if (validName) add();
           }}
         >
-          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="mac" aria-label="Machine name" className="mono" />
-          <select value={project} onChange={(e) => setProject(e.target.value)} aria-label="Default project">
-            <option value="">No default project</option>
-            {props.projects.map((p) => (
-              <option key={p.key} value={p.key}>
-                {p.name} ({p.key})
-              </option>
-            ))}
-          </select>
-          <button className="btn primary" disabled={busy || !validName}>
+          <TextField className="setting-machine" mono value={name} onChange={(e) => setName(e.target.value)} placeholder="mac" aria-label="Machine name" />
+          <Select
+            className="setting-project"
+            value={project}
+            onChange={(v) => setProject(v ?? "")}
+            options={[{ value: "", label: "No default project" }, ...props.projects.map((p) => ({ value: p.key, label: p.name, detail: p.key }))]}
+            aria-label="Default project"
+          />
+          <Button type="submit" variant="primary" disabled={busy || !validName}>
             Add
-          </button>
+          </Button>
         </form>
-        <p className="settings-why net-add-why">
-          A name is lowercase letters, digits or dashes. Adding a name that exists gives it a new token and cuts off the old one.
-        </p>
-      </section>
+      </SettingsRow>
 
-      <section className="settings-card">
-        <h2>Serving</h2>
-        <p className="settings-why">
-          Run <span className="mono">nitely serve</span> on this machine to let them in. It answers only this machine's
-          networks, and announces itself, so <span className="mono">nitely discover</span> (or{" "}
-          <span className="mono">dns-sd -B _nitely._tcp</span> on a Mac) finds it.
-        </p>
-        {info && info.urls.length > 0 && (
-          <ul className="small mono net-urls">
+      <SettingsRow
+        label="Serving"
+        why={
+          <>
+            Run <span className="mono">nitely serve</span> on this machine to let them in. It answers only this machine's networks, and announces itself, so{" "}
+            <span className="mono">nitely discover</span> (or <span className="mono">dns-sd -B _nitely._tcp</span> on a Mac) finds it.
+          </>
+        }
+      >
+        {info && info.urls.length > 0 ? (
+          <ul className="setting-value mono net-urls">
             {info.urls.map((u) => (
               <li key={u}>{u}</li>
             ))}
           </ul>
+        ) : (
+          <span className="setting-value muted">Not serving now.</span>
         )}
-      </section>
+      </SettingsRow>
     </div>
   );
 }

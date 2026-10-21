@@ -3,7 +3,7 @@ import { invoke } from "./backend";
 import { capWords, chipName, chipWords, executorName, laneChips, limitsOf, machineWords, memoryWords, queueWords, remoteRuns, remoteWords, sizeWords, waiting, type LaneChip } from "./lanes";
 import type { LaneRun, LanesOverview, MachineNow } from "./types";
 import { openExternal } from "./util";
-import { StateDot } from "./ui";
+import { Button, SettingsRow, StateDot, TextField } from "./ui";
 import "./styles/lanes.css";
 
 /** Reads every repo's build lanes, again whenever the data changes (`version`). Null until read. */
@@ -157,9 +157,9 @@ function MachineLimits(props: { machine: MachineNow | undefined; slots: LanesOve
     }
   };
   return (
-    <div className="settings-project lanes-settings">
+    <div className="setting-sub">
       <h3>This machine</h3>
-      <p className="settings-why small">
+      <p className="setting-note">
         Builds, gates, reviews and crew workers run at below-normal priority, so your own apps come first. Nothing new starts while free memory is under the floor, and a
         run that goes over its cap is stopped as out of memory in the lane, never taking the machine with it.
         {props.slots && (
@@ -170,31 +170,25 @@ function MachineLimits(props: { machine: MachineNow | undefined; slots: LanesOve
         )}
         {free && <> {free}.</>}
       </p>
-      <div className="crew-grid">
-        <label className="crew-field" htmlFor="machine-floor">
-          <span className="crew-label">Memory floor</span>
-          <span className="crew-hint muted">{words.floor ? `now ${words.floor}; ` : ""}0 turns the wait off</span>
-        </label>
-        <span className="crew-budget">
-          <input id="machine-floor" className="mono crew-number" inputMode="decimal" placeholder={gb(l?.floor)} value={floor} onChange={(e) => setFloor(e.target.value)} />
-          <span className="muted small">GB</span>
+      <SettingsRow label="Memory floor" why={`${words.floor ? `Now ${words.floor}. ` : ""}0 turns the wait off.`} htmlFor="machine-floor">
+        <span className="setting-inline">
+          <TextField id="machine-floor" className="setting-number" mono inputMode="decimal" placeholder={gb(l?.floor)} value={floor} onChange={(e) => setFloor(e.target.value)} />
+          <span className="setting-unit">GB</span>
         </span>
-        <label className="crew-field" htmlFor="machine-cap">
-          <span className="crew-label">Memory cap</span>
-          <span className="crew-hint muted">{words.cap ? `now ${words.cap}; ` : ""}empty is the default</span>
-        </label>
-        <span className="crew-budget">
-          <input id="machine-cap" className="mono crew-number" inputMode="decimal" placeholder={gb(l?.cap)} value={cap} onChange={(e) => setCap(e.target.value)} />
-          <span className="muted small">GB</span>
+      </SettingsRow>
+      <SettingsRow label="Memory cap" why={`${words.cap ? `Now ${words.cap}. ` : ""}Empty is the default.`} htmlFor="machine-cap">
+        <span className="setting-inline">
+          <TextField id="machine-cap" className="setting-number" mono inputMode="decimal" placeholder={gb(l?.cap)} value={cap} onChange={(e) => setCap(e.target.value)} />
+          <span className="setting-unit">GB</span>
         </span>
-      </div>
-      <div className="settings-row crew-save">
-        <button className="btn primary" disabled={busy || typeof parsed === "string"} onClick={save}>
+      </SettingsRow>
+      <div className="setting-actions">
+        <Button variant="primary" disabled={busy || typeof parsed === "string"} onClick={save}>
           Save
-        </button>
-        {typeof parsed === "string" && <span className="error small">{parsed}</span>}
+        </Button>
+        {typeof parsed === "string" && <span className="error">{parsed}</span>}
       </div>
-      {note && <p className="muted small">{note}</p>}
+      {note && <p className="muted setting-feedback">{note}</p>}
     </div>
   );
 }
@@ -210,7 +204,7 @@ export function LanesSettings(props: { version: number }) {
     return (
       <>
         {machine}
-        <p className="muted small">
+        <p className="setting-note">
           No project has build lanes yet. A project gets them when its playbook has a <span className="mono">[lanes]</span> table: builds and tests then run in a few warm
           checkouts instead of in every agent's worktree.
         </p>
@@ -220,53 +214,56 @@ export function LanesSettings(props: { version: number }) {
   return (
     <>
       {machine}
-      <p className="settings-why small">
+      <p className="setting-note">
         Each lane runs one request at a time; requests wait in their project's queue. Change a project's lanes in its playbook's{" "}
         <span className="mono">[lanes]</span> table.
       </p>
       {lanes.projects.map((p) => (
-        <div key={`${p.project}-${p.repo}`} className="settings-project lanes-settings">
+        <div key={`${p.project}-${p.repo}`} className="setting-sub">
           <h3>
             {p.project} <span className="muted mono">{p.repo}</span>
           </h3>
-          <dl className="lanes-facts">
-            <dt>Executor</dt>
-            <dd>{executorName(p.rules.executor)}{p.rules.executor === "ci" ? " for gates; ordinary runs use this machine." : p.rules.executor?.startsWith("machine:") ? " — requires permission in this machine’s executor configuration." : ""}</dd>
-            <dt>Lanes</dt>
+          <Fact label="Executor">
+            {executorName(p.rules.executor)}
+            {p.rules.executor === "ci" ? " for gates; ordinary runs use this machine." : p.rules.executor?.startsWith("machine:") ? ", which needs permission in this machine’s executor configuration." : ""}
+          </Fact>
+          <Fact label="Lanes">
             {p.rules.large_repo ? (
-              <dd>
+              <>
                 Your main checkout (large-repo mode). A build runs there only while it is clean and on its integration branch, and puts it back on that branch after;
                 nothing in it is stashed, committed or cleaned.
-              </dd>
+              </>
             ) : (
-              <dd>
+              <>
                 {p.rules.count} on this machine
                 {p.lanes.some((l) => !l.made) && <span className="muted"> ({p.lanes.filter((l) => l.made).length} made so far)</span>}
-              </dd>
-            )}
-            {p.rules.base && p.rules.base !== "tip" && (
-              <>
-                <dt>New work starts from</dt>
-                <dd>the integration branch as it was when the base last moved; it moves {p.rules.base}</dd>
               </>
             )}
-            <dt>Keeps between runs</dt>
-            <dd className="mono">{p.rules.keep.join(", ") || "nothing"}</dd>
-            <dt>Stops a run after</dt>
-            <dd>{p.rules.timeout_minutes} minutes</dd>
-            <dt>Size cap</dt>
-            <dd>
-              {capWords(p)}
-              <span className="muted">: over it, the incremental caches are emptied; over twice it, the lane builds cold once</span>
-              {sizeWords(p).length > 0 && <div className="muted small">{sizeWords(p).join(" · ")}</div>}
-            </dd>
-            <dt>Runs on</dt>
-            <dd>this machine</dd>
-            <dt>Lives in</dt>
-            <dd className="mono lanes-path">{p.dir}</dd>
-          </dl>
+          </Fact>
+          {p.rules.base && p.rules.base !== "tip" && <Fact label="New work starts from">the integration branch as it was when the base last moved; it moves {p.rules.base}</Fact>}
+          <Fact label="Keeps between runs">
+            <span className="mono">{p.rules.keep.join(", ") || "nothing"}</span>
+          </Fact>
+          <Fact label="Stops a run after">{p.rules.timeout_minutes} minutes</Fact>
+          <Fact label="Size cap" why="Over it, the incremental caches are emptied; over twice it, the lane builds cold once.">
+            {capWords(p)}
+            {sizeWords(p).length > 0 && <span className="muted"> · {sizeWords(p).join(" · ")}</span>}
+          </Fact>
+          <Fact label="Runs on">this machine</Fact>
+          <Fact label="Lives in">
+            <span className="mono">{p.dir}</span>
+          </Fact>
         </div>
       ))}
     </>
+  );
+}
+
+/** One fact of a project's lanes, read from its playbook: changed there, not here. */
+function Fact(props: { label: string; why?: string; children: React.ReactNode }) {
+  return (
+    <SettingsRow label={props.label} why={props.why}>
+      <span className="setting-value">{props.children}</span>
+    </SettingsRow>
   );
 }

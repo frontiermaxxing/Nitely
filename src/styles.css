@@ -90,11 +90,6 @@ input { accent-color: var(--fg); }
 .nav-update.ready { color: var(--fg-2); }
 .nav-update .link { font: inherit; color: var(--fg); text-decoration: underline; text-underline-offset: 2px; }
 .nav-update a { color: inherit; }
-.updates .channel-choice { display: grid; gap: 6px; margin: 0 0 12px; }
-.updates .channel-choice label { display: flex; align-items: baseline; gap: 8px; cursor: pointer; }
-.updates .channel-name { min-width: 64px; font-weight: var(--weight-medium); }
-.updates .channel-warning { margin: 0 0 12px; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--sunken); }
-.updates .channel-warning p { margin: 0 0 8px; }
 .content { overflow-y: auto; min-width: 0; }
 .page { padding: 28px 40px 48px; max-width: 1360px; }
 .page-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 12px; margin-bottom: 18px; }
@@ -196,22 +191,15 @@ a:hover { text-decoration-color: currentColor; }
   .remote-who { grid-area: who; }
   .remote-state { grid-area: state; }
   .remote-doing { grid-area: doing; }
-  .remote-row > .btn, .remote-row > .net-confirm, .remote-end { grid-area: end; }
+  .remote-row > .btn, .remote-end { grid-area: end; }
 }
 .remote-row + .remote-row { border-top: 1px solid var(--line); }
 .remote-doing { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-/* In its settings card the list is the card's rows, not a box in a box. */
-.settings-card .remote-list { background: none; border: 0; border-radius: 0; }
-.settings-card .remote-row { padding-left: 0; padding-right: 0; }
 
-/* Other machines: the one-time token card, and the add form. */
-.net-made { border-color: var(--line-strong); }
+/* Other machines: the one-time token's commands, and where nitely serve answers. */
 .net-command { display: flex; gap: var(--space-2); align-items: flex-start; margin: var(--space-2) 0; }
 .net-command pre { flex: 1; margin: 0; white-space: pre-wrap; word-break: break-all; }
-.net-add { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
-.net-add input { width: 160px; }
 .net-urls { margin: var(--space-2) 0 0; padding-left: var(--space-4); }
-.net-add-why { margin: 10px 0 0; }
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
 tbody tr:last-child td { border-bottom: 0; }
@@ -591,9 +579,6 @@ details summary { cursor: pointer; color: var(--fg-2); }
 .settings-section { scroll-margin-top: 16px; }
 .settings-section-title { margin: 32px 0 6px; font-size: var(--text-lg); }
 .settings-section > .settings-why { max-width: 720px; }
-.settings-project { scroll-margin-top: 16px; }
-.settings-project + .settings-project { margin-top: 18px; }
-.settings-project h3 { display: flex; align-items: baseline; gap: 8px; margin: 14px 0 8px; font-size: var(--text-md); font-weight: var(--weight-medium); }
 .settings > .settings-card + .settings-card { margin-top: 0; }
 .settings-why { margin: 0 0 12px; font-size: var(--text-md); line-height: 1.55; color: var(--fg-2); text-wrap: pretty; }
 .settings-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }

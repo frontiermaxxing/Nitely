@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "./backend";
+import { Button, SettingsRow, SettingsSection } from "./ui";
 
 /** crates/nitely-core/src/private_terms.rs: one term per entry, `re:` for a regular expression. */
 interface Terms {
@@ -62,42 +63,48 @@ export function PrivateTerms(props: { projectKey: string }) {
   };
 
   return (
-    <section className="settings-card">
-      <h2>Private terms</h2>
-      <p className="settings-why">
-        Names, paths or patterns that must never reach {key}'s repos, such as another project, a client or a local folder. Submit and land refuse a
-        branch that adds one to a line, a file path or a commit message, and say only where: agents never see this list. One per line, matched
-        anywhere and ignoring case (<code>\</code> and <code>/</code> match each other); start a line with <code>re:</code> for a regular expression.
-        Kept on this machine only, never in a repo.
-      </p>
+    <SettingsSection
+      title="Private terms"
+      description={`Names, paths or patterns that must never reach ${key}'s repos, such as another project, a client or a local folder. Kept on this machine only, never in a repo.`}
+    >
       <form
-        className="terms"
         onSubmit={(e) => {
           e.preventDefault();
           save();
         }}
       >
-        <label className="terms-list">
-          <span>Kept out of {key}</span>
-          <textarea value={mine} onChange={(e) => setMine(e.target.value)} rows={4} spellCheck={false} placeholder={"Bluebird\nC:\\Work\\client-notes\nre:ACME-\\d+"} disabled={!saved} />
-        </label>
-        <label className="terms-list">
-          <span>Kept out of every project</span>
-          <textarea value={all} onChange={(e) => setAll(e.target.value)} rows={3} spellCheck={false} disabled={!saved} />
-        </label>
-        <div className="settings-row">
-          <button className="btn" disabled={busy || !changed}>
+        <p className="setting-note">
+          Submit and land refuse a branch that adds one to a line, a file path or a commit message, and say only where: agents never see this list. One per line,
+          matched anywhere and ignoring case (<code>\</code> and <code>/</code> match each other); start a line with <code>re:</code> for a regular expression.
+        </p>
+        <SettingsRow label={`Kept out of ${key}`} htmlFor="terms-project">
+          <textarea
+            id="terms-project"
+            className="setting-textarea"
+            value={mine}
+            onChange={(e) => setMine(e.target.value)}
+            rows={4}
+            spellCheck={false}
+            placeholder={"Bluebird\nC:\\Work\\client-notes\nre:ACME-\\d+"}
+            disabled={!saved}
+          />
+        </SettingsRow>
+        <SettingsRow label="Kept out of every project" htmlFor="terms-all">
+          <textarea id="terms-all" className="setting-textarea" value={all} onChange={(e) => setAll(e.target.value)} rows={3} spellCheck={false} disabled={!saved} />
+        </SettingsRow>
+        <div className="setting-actions">
+          <Button type="submit" variant="primary" disabled={busy || !changed}>
             Save terms
-          </button>
+          </Button>
           {changed && (
-            <button type="button" className="btn" disabled={busy} onClick={() => saved && show(saved)}>
+            <Button disabled={busy} onClick={() => saved && show(saved)}>
               Undo
-            </button>
+            </Button>
           )}
         </div>
       </form>
-      {note && <p className="muted small">{note}</p>}
-      {error && <p className="error small">{error}</p>}
-    </section>
+      {note && <p className="muted setting-feedback">{note}</p>}
+      {error && <p className="error setting-feedback">{error}</p>}
+    </SettingsSection>
   );
 }

@@ -7,6 +7,7 @@ import { invoke } from "./backend";
 import type { Decision } from "./decisions";
 import { DEFAULT_SETTINGS, NOTIFY_KINDS, freshDecisions, inQuiet, inView, messageOf, type Fresh, type NotifySettings, type Seen } from "./notify";
 import type { IssueDetail } from "./types";
+import { SettingsRow, Switch, TextField } from "./ui";
 
 /** Decisions that arrive within this long of each other become one notification. */
 const BATCH_MS = 4000;
@@ -123,25 +124,22 @@ function badgePixels(count: number, size: number): number[] | null {
 /** Which decisions notify, and quiet hours: Settings' Notifications section. */
 export function NotifySettingsPanel() {
   const [settings, save] = useNotifySettings();
+  const quiet = (q: Partial<NotifySettings["quiet"]>) => save({ ...settings, quiet: { ...settings.quiet, ...q } });
   return (
-    <section className="settings-card notify-settings" aria-label="Notifications">
-      <p className="settings-why">When a decision starts waiting on you, Nitely tells you once, outside the window. Several at once come as one.</p>
+    <>
       {NOTIFY_KINDS.map(({ kind, label }) => (
-        <label key={kind} className="notify-kind">
-          <input type="checkbox" checked={settings.kinds[kind]} onChange={(e) => save({ ...settings, kinds: { ...settings.kinds, [kind]: e.target.checked } })} />
-          {label}
-        </label>
+        <SettingsRow key={kind} label={label}>
+          <Switch checked={settings.kinds[kind]} onChange={(on) => save({ ...settings, kinds: { ...settings.kinds, [kind]: on } })} aria-label={label} />
+        </SettingsRow>
       ))}
-      <div className="notify-quiet">
-        <label className="notify-kind">
-          <input type="checkbox" checked={settings.quiet.on} onChange={(e) => save({ ...settings, quiet: { ...settings.quiet, on: e.target.checked } })} />
-          Quiet hours, from
-        </label>
-        <input type="time" value={settings.quiet.from} disabled={!settings.quiet.on} onChange={(e) => save({ ...settings, quiet: { ...settings.quiet, from: e.target.value } })} aria-label="Quiet from" />
-        <span className="muted small">to</span>
-        <input type="time" value={settings.quiet.to} disabled={!settings.quiet.on} onChange={(e) => save({ ...settings, quiet: { ...settings.quiet, to: e.target.value } })} aria-label="Quiet until" />
-      </div>
-      <p className="muted small">In quiet hours nothing notifies; the Inbox and its count still update.</p>
-    </section>
+      <SettingsRow label="Quiet hours" why="Nothing notifies in quiet hours; the Inbox and its count still update.">
+        <span className="setting-inline">
+          <Switch checked={settings.quiet.on} onChange={(on) => quiet({ on })} aria-label="Quiet hours" />
+          <TextField className="setting-time" type="time" value={settings.quiet.from} disabled={!settings.quiet.on} onChange={(e) => quiet({ from: e.target.value })} aria-label="Quiet from" />
+          <span className="setting-unit">to</span>
+          <TextField className="setting-time" type="time" value={settings.quiet.to} disabled={!settings.quiet.on} onChange={(e) => quiet({ to: e.target.value })} aria-label="Quiet until" />
+        </span>
+      </SettingsRow>
+    </>
   );
 }

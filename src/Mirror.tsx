@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "./backend";
 import type { IssueMirror, MirrorPreview } from "./types";
+import { Button, RadioCards, SettingsRow, SettingsSection, type ChoiceOption } from "./ui";
 
 const BACKFILL_LABEL: Record<string, string> = {
   none: "Only issues filed from now on",
@@ -39,54 +40,53 @@ export function MirrorSettings(props: { projectKey: string }) {
   const count = p?.counts.find((c) => c.backfill === backfill);
   const kept = count ? count.private + count.held : 0;
 
+  const options: ChoiceOption<string>[] = (p?.counts ?? []).map((c) => ({
+    value: c.backfill,
+    label: BACKFILL_LABEL[c.backfill] ?? c.backfill,
+    why: c.backfill === "none" ? "Nothing is published until one is filed." : `${c.publish} published now.`,
+  }));
+
   return (
-    <section className="settings-card">
-      <h2>Mirror issues to {p?.host ?? "the code host"}</h2>
-      {!p && !error && <p className="settings-why">Checking the repo's tracker…</p>}
+    <SettingsSection
+      title={`Mirror issues to ${p?.host ?? "the code host"}`}
+      description={!p && !error ? "Checking the repo's tracker…" : p && !p.enabled && p.unavailable ? `Not available: ${p.unavailable}` : undefined}
+    >
       {p && p.enabled && (
         <>
-          <p className="settings-why">
-            Issues are mirrored to {where}, one way: Nitely stays where things are decided, and nothing said there is read back. Private
-            issues, the human's own work, urgent bugs and anything labelled security stay off it.
+          <p className="setting-note">
+            Issues are mirrored to {where}, one way: Nitely stays where things are decided, and nothing said there is read back. Private issues, the human's own work,
+            urgent bugs and anything labelled security stay off it.
           </p>
-          <div className="settings-row">
-            <button className="btn" disabled={busy} onClick={() => set(null)}>
+          <div className="setting-actions">
+            <Button disabled={busy} onClick={() => set(null)}>
               Stop mirroring
-            </button>
-            <span className="muted small">Published issues stay on {p.host}; new changes stop going there.</span>
+            </Button>
+            <span className="muted">Published issues stay on {p.host}; new changes stop going there.</span>
           </div>
-          {p.last_error && <p className="error small">Some issues could not be published yet: {p.last_error}</p>}
+          {p.last_error && <p className="error setting-feedback">Some issues could not be published yet: {p.last_error}</p>}
         </>
       )}
-      {p && !p.enabled && p.unavailable && <p className="settings-why">Not available: {p.unavailable}</p>}
       {p && !p.enabled && !p.unavailable && (
         <>
-          <p className="settings-why">
-            Publish this project's issues to {where} so people who look at the repo see why each pull request exists: title, body, labels, and
-            a few timeline entries (handoffs, review outcomes, lands). Local paths and agent names are rewritten, private terms hold an issue
-            back, and private issues, the human's own work, urgent bugs and anything labelled security are never published.
+          <p className="setting-note">
+            Publish this project's issues to {where} so people who look at the repo see why each pull request exists: title, body, labels, and a few timeline entries
+            (handoffs, review outcomes, lands). Local paths and agent names are rewritten, private terms hold an issue back, and private issues, the human's own work,
+            urgent bugs and anything labelled security are never published.
           </p>
-          <div className="mirror-backfill" role="radiogroup" aria-label="Which issues to publish">
-            {p.counts.map((c) => (
-              <label key={c.backfill} className="mirror-option">
-                <input type="radio" name="backfill" checked={backfill === c.backfill} onChange={() => setBackfill(c.backfill)} />
-                <span>{BACKFILL_LABEL[c.backfill] ?? c.backfill}</span>
-                {c.backfill !== "none" && <span className="muted small">{c.publish} published now</span>}
-              </label>
-            ))}
-          </div>
-          {kept > 0 && <p className="muted small">{kept} of those stay off {p.host}: private, sensitive or holding a private term.</p>}
-          {p.sample.length > 0 && backfill !== "none" && (
-            <details className="mirror-sample">
-              <summary>How {p.sample[0].key} would look</summary>
-              <p className="mirror-title">{p.sample[0].title}</p>
-              <pre className="mirror-body">{p.sample[0].body}</pre>
-              {p.sample[0].labels.length > 0 && <p className="muted small">Labels: {p.sample[0].labels.join(", ")}</p>}
-            </details>
-          )}
-          <div className="settings-row">
-            <button
-              className="btn primary"
+          <SettingsRow label="Which issues" why={kept > 0 ? `${kept} of those stay off ${p.host}: private, sensitive or holding a private term.` : undefined}>
+            <RadioCards options={options} value={backfill} onChange={setBackfill} aria-label="Which issues to publish" />
+            {p.sample.length > 0 && backfill !== "none" && (
+              <details className="mirror-sample">
+                <summary>How {p.sample[0].key} would look</summary>
+                <p className="mirror-title">{p.sample[0].title}</p>
+                <pre className="mirror-body">{p.sample[0].body}</pre>
+                {p.sample[0].labels.length > 0 && <p className="muted small">Labels: {p.sample[0].labels.join(", ")}</p>}
+              </details>
+            )}
+          </SettingsRow>
+          <div className="setting-actions">
+            <Button
+              variant="primary"
               disabled={busy}
               onClick={() => {
                 const n = count?.publish ?? 0;
@@ -95,12 +95,12 @@ export function MirrorSettings(props: { projectKey: string }) {
               }}
             >
               Turn on
-            </button>
+            </Button>
           </div>
         </>
       )}
-      {error && <p className="error small">{error}</p>}
-    </section>
+      {error && <p className="error setting-feedback">{error}</p>}
+    </SettingsSection>
   );
 }
 

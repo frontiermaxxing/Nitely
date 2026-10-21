@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "./backend";
+import { SettingsRow, Switch } from "./ui";
 
 /** The listener for issue links at login (crates/nitely-core/src/link_service.rs, NIT-229). */
 export interface LinksStatus {
@@ -45,36 +46,34 @@ export function LinksSettings(props: { version: number }) {
       .finally(() => setBusy(false));
   };
 
-  if (error && !status) return <p className="error small">{error}</p>;
+  if (error && !status) return <p className="error setting-feedback">{error}</p>;
   if (!status) return null;
   const on = status.registered && !status.off;
   const example = `http://127.0.0.1:${status.port}/i/NIT-12`;
+  const why = !status.allowed
+    ? "This copy of Nitely never registers anything at login (test harness)."
+    : on
+      ? status.current
+        ? "A small listener starts at login, with no window. A link opens the issue in Nitely, starting the app first when it is closed."
+        : "Registered with another copy of Nitely; turn it off and on to use this one."
+      : "Off: links open only while Nitely runs.";
   return (
-    <section className="settings-card" aria-label="Issue links">
-      <label className="notify-kind">
-        <input type="checkbox" checked={on} disabled={busy || !status.allowed} onChange={(e) => set(e.target.checked)} />
-        Open issue links even when Nitely is closed
-      </label>
-      <p className="muted small">
-        {!status.allowed
-          ? "This copy of Nitely never registers anything at login (test harness)."
-          : on
-            ? status.current
-              ? "A small listener starts at login, with no window. A link opens the issue in Nitely, starting the app first when it is closed."
-              : "Registered with another copy of Nitely; turn it off and on to use this one."
-            : "Off: links open only while Nitely runs."}{" "}
-        Links look like <span className="mono">{example}</span>.
-      </p>
-      <p className="muted small">
-        Answering now: {status.answering === "service" ? "the listener" : status.answering === "app" ? "this app" : "nothing"}
-        {on && (
-          <>
-            {" "}
-            · registered at <span className="mono path">{status.place}</span>
-          </>
-        )}
-      </p>
-      {error && <p className="error small">{error}</p>}
-    </section>
+    <>
+      <SettingsRow label="Open issue links even when Nitely is closed" why={why}>
+        <Switch checked={on} disabled={busy || !status.allowed} onChange={set} aria-label="Open issue links even when Nitely is closed" />
+      </SettingsRow>
+      <SettingsRow label="Answering now" why={<>Links look like <span className="mono">{example}</span>.</>}>
+        <span className="setting-value">
+          {status.answering === "service" ? "The listener" : status.answering === "app" ? "This app" : "Nothing"}
+          {on && (
+            <>
+              {", registered at "}
+              <span className="mono path">{status.place}</span>
+            </>
+          )}
+        </span>
+      </SettingsRow>
+      {error && <p className="error setting-feedback">{error}</p>}
+    </>
   );
 }

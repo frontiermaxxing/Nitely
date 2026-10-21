@@ -406,6 +406,7 @@ Settings pages fill the window: no max-width column and no stacked cards.
 - **Narrow:** in a section narrower than about 760px (a window of about 1000px, less the sidebar), the control drops under the label and the source tag stays on the label's line.
 - **Labels:** pass `htmlFor` when the control is a single input, so the label focuses it. Without it, the row is a group labelled by its label.
 - **Kit:** the Kit (`#kit`) draws a section with and without sources.
+- **In use:** Settings and a project's Settings tab are built this way. A part of a section with its own heading (one project's crew, "Paired phones") is an `h3` in a `.setting-sub`. Read-only values, a control with its unit, the Save and Turn on buttons, and a list's × rows are styled in `src/settings.css`. A source tag shows only where a value can be this project's own or a default (the crew's daily starts and token budget).
 
 ## Activity lanes
 

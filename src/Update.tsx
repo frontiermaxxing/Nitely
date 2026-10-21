@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke, listen } from "./backend";
+import { Button, Notice, RadioCards, SettingsRow, type ChoiceOption } from "./ui";
 import { ago, nowSecs, openExternal } from "./util";
 
 /** src-tauri/src/update.rs */
@@ -84,8 +85,8 @@ export function ApprovalNotice() {
   );
 }
 
-/** The Updates card in Settings: the version, the channel to follow, and checking now. */
-export function UpdatesCard({ status, onStatus, titled = true }: { status: UpdateStatus | null; onStatus: (s: UpdateStatus) => void; titled?: boolean }) {
+/** Settings' Updates rows: the version and checking now, and the channel to follow. */
+export function UpdatesSettings({ status, onStatus }: { status: UpdateStatus | null; onStatus: (s: UpdateStatus) => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<string | null>(null);
@@ -106,57 +107,53 @@ export function UpdatesCard({ status, onStatus, titled = true }: { status: Updat
   };
   const warning = pending ? status.channels.find((c) => c.name === pending)?.warning : null;
   const a = status.available;
+  const channels: ChoiceOption<string>[] = status.channels.map((c) => ({ value: c.name, label: c.name, why: CHANNEL_WORDS[c.name] }));
 
   return (
-    <section className="settings-card updates">
-      {titled && <h2>Updates</h2>}
-      <p className="settings-why">
-        Nitely {status.version}, {status.build_channel === "dev" ? "built from source" : `from the ${status.build_channel} channel`}. It checks for a
-        newer version every few hours, downloads it in the background, and installs it only when you restart it or quit, never while a land
-        runs. Agents keep working: the new <code>nitely</code> takes over from their next call.
-      </p>
-      {status.disabled ? (
-        <p className="small muted">Not checking: {status.disabled}.</p>
-      ) : (
-        <>
-          <div className="channel-choice" role="radiogroup" aria-label="Release channel">
-            {status.channels.map((c) => (
-              <label key={c.name} className={c.name === status.channel ? "on" : ""}>
-                <input
-                  type="radio"
-                  name="channel"
-                  checked={c.name === status.channel}
-                  disabled={busy}
-                  onChange={() => (c.warning ? setPending(c.name) : choose(c.name))}
-                />
-                <span className="channel-name">{c.name}</span>
-                <span className="small muted">{CHANNEL_WORDS[c.name] ?? ""}</span>
-              </label>
-            ))}
-          </div>
-          {warning && pending && (
-            <div className="channel-warning small" role="alert">
-              <p>{warning}</p>
-              <button className="btn" onClick={() => choose(pending)}>
-                Follow {pending} anyway
-              </button>{" "}
-              <button className="btn" onClick={() => setPending(null)}>
-                Stay on {status.channel}
-              </button>
-            </div>
-          )}
-          <div className="settings-row">
-            <button className="btn" disabled={busy || status.checking} onClick={() => run(() => invoke<UpdateStatus>("check_for_update"))}>
+    <>
+      <SettingsRow
+        label={`Nitely ${status.version}`}
+        why={
+          <>
+            {status.build_channel === "dev" ? "Built from source." : `From the ${status.build_channel} channel.`} It checks for a newer version every few hours,
+            downloads it in the background, and installs it only when you restart it or quit, never while a land runs. Agents keep working: the new{" "}
+            <code>nitely</code> takes over from their next call.
+          </>
+        }
+      >
+        {status.disabled ? (
+          <span className="setting-value muted">Not checking: {status.disabled}.</span>
+        ) : (
+          <span className="setting-inline">
+            <Button disabled={busy || status.checking} onClick={() => run(() => invoke<UpdateStatus>("check_for_update"))}>
               {status.checking ? "Checking…" : "Check now"}
-            </button>
-            <span className="small muted">
+            </Button>
+            <span className="setting-unit">
               {a ? (a.ready ? `${a.version} is ready; restart to update.` : `Downloading ${a.version}…`) : status.checked_at ? `Up to date, checked ${ago(nowSecs(), status.checked_at)}.` : ""}
             </span>
-          </div>
-        </>
+          </span>
+        )}
+      </SettingsRow>
+      {!status.disabled && (
+        <SettingsRow label="Release channel" why="Which releases this copy of Nitely follows.">
+          <RadioCards options={channels} value={status.channel} disabled={busy} onChange={(name) => (status.channels.find((c) => c.name === name)?.warning ? setPending(name) : choose(name))} aria-label="Release channel" />
+          {warning && pending && (
+            <div className="setting-notice">
+              <Notice tone="warning" lead={`Follow ${pending}?`}>
+                {warning}
+              </Notice>
+              <div className="setting-actions">
+                <Button variant="primary" onClick={() => choose(pending)}>
+                  Follow {pending} anyway
+                </Button>
+                <Button onClick={() => setPending(null)}>Stay on {status.channel}</Button>
+              </div>
+            </div>
+          )}
+        </SettingsRow>
       )}
-      {(error ?? status.error) && <p className="error small">{error ?? status.error}</p>}
-    </section>
+      {(error ?? status.error) && <p className="error setting-feedback">{error ?? status.error}</p>}
+    </>
   );
 }
 

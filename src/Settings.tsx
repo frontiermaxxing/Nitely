@@ -8,8 +8,9 @@ import { NotifySettingsPanel } from "./Notifications";
 import { PhoneSetup } from "./PhoneSetup";
 import { RuleDefaultsCard } from "./Rules";
 import type { Board, Project } from "./types";
-import { UpdatesCard, type UpdateStatus } from "./Update";
-import { EmptyState } from "./ui";
+import { UpdatesSettings, type UpdateStatus } from "./Update";
+import { EmptyState, SettingsSection as SettingsGroup } from "./ui";
+import "./settings.css";
 
 /** The sections of Settings, in order: each is `#settings/<id>`. */
 export const SETTINGS_SECTIONS = [
@@ -66,7 +67,7 @@ export function Settings(props: {
   }, [props.asked, props.section, props.project, props.projects.length]);
 
   return (
-    <div className="page page-form settings-page">
+    <div className="page settings-page">
       <div className="page-head">
         <h1>Settings</h1>
       </div>
@@ -79,22 +80,22 @@ export function Settings(props: {
         ))}
       </nav>
 
-      <Section id="notifications" label="Notifications">
+      <Section id="notifications" label="Notifications" why="When a decision starts waiting on you, Nitely tells you once, outside the window. Several at once come as one.">
         <NotifySettingsPanel />
       </Section>
 
       <Section id="updates" label="Updates">
-        <UpdatesCard status={props.update} onStatus={props.onUpdate} titled={false} />
+        <UpdatesSettings status={props.update} onStatus={props.onUpdate} />
       </Section>
 
       <Section id="reviews" label="Review defaults">
         <RuleDefaultsCard titled={false} />
       </Section>
 
-      <Section id="crew" label="Crew" why="The agent workers Nitely runs on each project's Todo issues: how many, which agents, and their limits.">
+      <Section id="crew" label="Crew" why="The agent workers Nitely runs on each project's Todo issues, one issue each, through the same gate and review as any agent. Running workers always finish their issue; the limits only stop new ones.">
         {props.projects.length === 0 && <EmptyState title="No projects yet.">Add one from the sidebar; its crew is set here.</EmptyState>}
         {props.projects.map((p) => (
-          <div key={p.key} className="settings-project" id={`settings-crew-${p.key}`}>
+          <div key={p.key} className="setting-sub" id={`settings-crew-${p.key}`}>
             <h3>
               {p.name} <span className="muted mono">{p.key}</span>
             </h3>
@@ -133,10 +134,8 @@ function MachinesWhy() {
 
 function Section(props: { id: SettingsSection; label: string; why?: React.ReactNode; children: React.ReactNode }) {
   return (
-    <section className="settings-section" id={`settings-${props.id}`} aria-label={props.label}>
-      <h2 className="settings-section-title">{props.label}</h2>
-      {props.why && <p className="settings-why">{props.why}</p>}
+    <SettingsGroup id={`settings-${props.id}`} title={props.label} description={props.why}>
       {props.children}
-    </section>
+    </SettingsGroup>
   );
 }

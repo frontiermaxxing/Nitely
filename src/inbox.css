@@ -200,18 +200,3 @@ button.dd-title:hover { text-decoration: underline; text-decoration-color: var(-
 /* Notification settings (src/Notifications.tsx), opened from the head. */
 .inbox-notify-link { margin-left: auto; font-size: var(--text-sm); color: var(--fg-3); text-decoration: none; }
 .inbox-notify-link:hover, .inbox-notify-link[aria-expanded="true"] { color: var(--fg); }
-/* A settings card (styles.css) that opens in place. */
-.notify-settings { display: flex; flex-direction: column; gap: 8px; max-width: 520px; margin: 14px 0 4px; animation: ui-enter var(--dur) var(--ease); }
-.notify-settings-head { display: flex; align-items: baseline; justify-content: space-between; }
-.notify-settings h2 { margin: 0; }
-.notify-settings p { margin: 0; }
-.notify-kind { display: flex; align-items: center; gap: 8px; font-size: var(--text-sm); color: var(--fg-2); cursor: pointer; }
-.notify-quiet { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
-.notify-quiet input[type="time"] {
-  font: inherit; font-size: var(--text-sm); padding: 3px 6px; border: 1px solid var(--line-strong); border-radius: var(--radius-sm);
-  background: var(--bg); color: var(--fg); color-scheme: light dark;
-}
-.notify-quiet input[type="time"]:disabled { opacity: 0.5; }
-@media (prefers-reduced-motion: reduce) {
-  .notify-settings { animation: none; }
-}

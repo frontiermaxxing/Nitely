@@ -31,7 +31,6 @@
 .lanes-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 16px; margin: 8px 0 0; font-size: var(--text-md); }
 .lanes-facts dt { color: var(--fg-3); }
 .lanes-facts dd { margin: 0; min-width: 0; }
-.lanes-path { overflow-wrap: anywhere; font-size: var(--text-sm); }
 
 @media (max-width: 560px) {
   .lane-chip { width: 100%; }
