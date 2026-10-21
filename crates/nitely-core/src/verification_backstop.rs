@@ -376,13 +376,16 @@ fn execute(db:&Db,repo:&Path,pb:&Playbook,head:&str,commands:&[String],actor:&Ac
     })
 }
 
-/// The Full gate in GitHub Actions through the CI executor (NIT-493, NIT-496): every command,
-/// not only `[lanes] ci_commands`, since nothing waits on the backstop locally. None when CI cannot
-/// take it (no `ci_projects` opt-in, no GitHub origin or gh, the dispatch refused, a run that never
+/// The Full gate in GitHub Actions through the CI executor (NIT-493, NIT-496), when every command
+/// is one of `[lanes] ci_commands`. None when CI cannot take it (a machine's `no_ci_projects`,
+/// no GitHub origin or gh, the dispatch refused, a run that never
 /// reported) or a command names a local path: the gate then runs in a lane as before. Failed tests
 /// in CI are the result, and bisection runs in CI the same way.
 fn in_ci(db:&Db,repo:&Path,pb:&Playbook,head:&str,commands:&[String],actor:&Actor)->Result<Option<crate::lanes::GateRun>> {
-    if commands.iter().any(|c|["{main}","{worktree}","{base}"].iter().any(|p|c.contains(p))) {return Ok(None);}
+    // Only the playbook's full suites go to CI (NIT-515). A gate with other commands goes to its
+    // lane, where `gate_fresh` sends the full suites to CI and runs the rest beside them.
+    let steps:Vec<(String,Option<String>)>=commands.iter().map(|c|(c.clone(),None)).collect();
+    if crate::executor::ci_commands(pb,&steps).len()!=commands.len() {return Ok(None);}
     crate::project_modes::check_playbook_authority(db,&[],pb)?;
     let tree=git(repo,&["rev-parse",&format!("{head}^{{tree}}")])?.trim().to_string();
     let snapshot=crate::lanes::Snapshot{commit:head.into(),tree,base:head.into(),made:false};

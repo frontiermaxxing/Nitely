@@ -27,9 +27,9 @@ pub struct LaneRules {
     /// Exact GitHub check names and app identities required for the CI executor.
     pub ci_checks: Vec<crate::executor::RequiredCheck>,
     /// Gate commands, exactly as the gate writes them, that run in GitHub Actions instead of a
-    /// lane (NIT-493): the full suites. The gate's other commands stay local, at the same time.
-    /// Without executors.json's `ci_projects`, a GitHub origin and a signed-in `gh`, they run
-    /// locally too.
+    /// lane (NIT-493): the full suites, for any request, a plain `run` of exactly one too (NIT-515).
+    /// The gate's other commands stay local, at the same time. With executors.json's
+    /// `no_ci_projects`, or without a GitHub origin and a signed-in `gh`, they run locally too.
     pub ci_commands: Vec<String>,
     /// The workflow those commands dispatch, a file in `.github/workflows` that takes Nitely's
     /// inputs (this repo's `ci.yml` shows how).
@@ -863,6 +863,35 @@ pub fn run_in(config: &crate::Config, db: &Db, dir: &str, issue: Option<&str>, c
 /// is written as the request moves (queued, running, done), so another process can follow it with
 /// `Db::lane_run`. `on_event` is called with the run when it is queued and when it starts.
 pub fn run(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Actor, on_event: &mut dyn FnMut(&Run)) -> Result<Run> {
+    // A run of exactly one of the playbook's full suites goes to CI like a gate's (NIT-515).
+    let to_ci = crate::executor::ci_commands(pb, &[(req.command.to_string(), None)]);
+    if !to_ci.is_empty() {
+        let suite = crate::executor::SuiteRequest { project: req.project, issue: req.issue, kind: req.kind, snapshot: req.snapshot, commands: &to_ci, workflow_ref: None };
+        match crate::executor::dispatch(db, repo_root, pb, &suite, actor) {
+            Ok(crate::executor::Dispatch::Started(pending)) => {
+                let id = pending.run;
+                if let Some(row) = db.lane_run(id)? { on_event(&row); }
+                match crate::executor::wait(db, pending) {
+                    Ok(_) => {
+                        let row = db.lane_run(id)?.context("CI run missing")?;
+                        on_event(&row);
+                        return Ok(row);
+                    }
+                    Err(e) => {
+                        if let Some(key) = req.issue {
+                            db.log_event(actor, Some(key), None, "executor_fallback", &format!("CI run {id} did not report: {e:#}; running `{}` in a lane", req.command)).ok();
+                        }
+                    }
+                }
+            }
+            Ok(crate::executor::Dispatch::Unavailable(_)) => {}
+            Err(e) => {
+                if let Some(key) = req.issue {
+                    db.log_event(actor, Some(key), None, "executor_fallback", &format!("CI could not take `{}`: {e:#}; running it in a lane", req.command)).ok();
+                }
+            }
+        }
+    }
     if let Some(run) = crate::executor::run(db, repo_root, pb, req, actor, on_event)? { return Ok(run); }
     // The machine's share as it is when the command starts, not when it was queued (NIT-291), with
     // the cap it was admitted with (NIT-323).

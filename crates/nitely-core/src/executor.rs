@@ -37,6 +37,10 @@ pub struct Settings {
     pub receive_projects: Vec<String>,
     #[serde(default)]
     pub ci_projects: Vec<String>,
+    /// Projects whose `[lanes] ci_commands` this machine keeps local (NIT-515): the approved
+    /// playbook opts a project into CI suites, and this opts it back out on one machine.
+    #[serde(default)]
+    pub no_ci_projects: Vec<String>,
 }
 #[derive(Deserialize)]
 pub struct Machine {
@@ -983,6 +987,10 @@ pub fn suite(db: &Db, root: &Path, pb: &Playbook, req: &SuiteRequest, actor: &Ac
 }
 
 pub fn dispatch(db: &Db, root: &Path, pb: &Playbook, req: &SuiteRequest, actor: &Actor) -> Result<Dispatch> {
+    // This crate's tests never push or dispatch; the live test calls dispatch_with itself.
+    if cfg!(test) {
+        return Ok(Dispatch::Unavailable("tests never dispatch CI".into()));
+    }
     dispatch_with(&Settings::load()?, db, root, pb, req, actor)
 }
 
@@ -1011,8 +1019,10 @@ fn dispatch_with(settings: &Settings, db: &Db, root: &Path, pb: &Playbook, req: 
     } else {
         req.project.to_string()
     };
-    if !allowed(&settings.ci_projects, &project) {
-        return unavailable(format!("executors.json does not let {} publish source to CI (ci_projects)", if project.is_empty() { "this repo" } else { &project }));
+    // The approved playbook's ci_commands are the opt-in: the push goes to the repo's own origin,
+    // which submit pushes to anyway (NIT-515). A machine can still keep a project local.
+    if allowed(&settings.no_ci_projects, &project) {
+        return unavailable(format!("executors.json keeps {project} local (no_ci_projects)"));
     }
     let Some(slug) = crate::git::github_slug(&root.to_string_lossy()) else {
         return unavailable("the repo's origin is not on GitHub".into());
@@ -1141,7 +1151,11 @@ pub fn wait(db: &Db, pending: Pending) -> Result<SuiteEvidence> {
                 }
             }
             let summary = evidence.results.iter().map(|r| format!("{} {} ({} s)", if r.ok { "passed" } else { "failed" }, r.command, r.seconds)).collect::<Vec<_>>().join("\n");
-            let output = format!("CI request {}: {} (queued {} s, ran {} s)\n{summary}", pending.request, evidence.url, evidence.queued_seconds, evidence.run_seconds);
+            let failed = evidence.results.iter().filter(|r| !r.ok).map(|r| r.output.as_str()).collect::<Vec<_>>().join("
+");
+            let output = playbook::tail(&format!("CI request {}: {} (queued {} s, ran {} s)
+{summary}
+{failed}", pending.request, evidence.url, evidence.queued_seconds, evidence.run_seconds));
             db.conn.execute(
                 "UPDATE lane_run SET state='done',started_at=?2,ended_at=?3,exit_code=?4,output=?5,timed_out=?6 WHERE id=?1",
                 params![pending.run, now() - evidence.run_seconds as i64, now(), if evidence.passed { 0 } else { 1 }, output, evidence.results.iter().any(|r| r.timed_out)],
@@ -1409,7 +1423,7 @@ mod tests {
     }
 
     #[test]
-    fn a_suite_without_ci_permission_is_unavailable_and_touches_nothing() {
+    fn a_suite_a_machine_keeps_local_is_unavailable_and_touches_nothing() {
         let dir = Scratch::new().unwrap();
         let db = Db::open(&dir.0.join("nitely.db")).unwrap();
         let pb = Playbook::parse("[lanes]\nci_commands = [\"cargo test\"]\n").unwrap();
@@ -1417,6 +1431,9 @@ mod tests {
         let commands = vec!["cargo test".to_string()];
         let req = SuiteRequest { project: "APP", issue: None, kind: Kind::Gate, snapshot: &snap, commands: &commands, workflow_ref: None };
         let actor = Actor::Agent("claude:test".into());
+        let local = Settings { no_ci_projects: vec!["app".into()], ..Default::default() };
+        assert!(matches!(dispatch_with(&local, &db, &dir.0, &pb, &req, &actor).unwrap(), Dispatch::Unavailable(_)));
+        // Without the opt-out, a folder that is no GitHub checkout is unavailable too.
         assert!(matches!(dispatch_with(&Settings::default(), &db, &dir.0, &pb, &req, &actor).unwrap(), Dispatch::Unavailable(_)));
         assert_eq!(db.conn.query_row("SELECT COUNT(*) FROM lane_run", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
     }

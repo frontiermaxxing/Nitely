@@ -4,9 +4,9 @@ The backstop is opt-in committed integration policy. The desktop checks once a m
 headless installations can run `nitely verification --tick` from their scheduler. Both
 use one repository lock and durable records, so they do not duplicate a check. The Full
 gate, and the runs that bisect a failure, go to GitHub Actions through the CI executor
-(docs/build-lanes.md, "Full suites in GitHub Actions"): every gate command, at the exact
-commit. When CI cannot take one (this machine's `executors.json` has no `ci_projects` for
-the project, the origin is not on GitHub, gh is not signed in, the dispatch is refused, or a
+(docs/build-lanes.md, "Full suites in GitHub Actions"): the playbook's `ci_commands`, at the
+exact commit, while its other commands run in a lane. When CI cannot take one (this machine's
+`executors.json` keeps the project local with `no_ci_projects`, the origin is not on GitHub, gh is not signed in, the dispatch is refused, or a
 run never reports), it runs in the project's warm lanes under the existing machine
 admission limits, as before.
 

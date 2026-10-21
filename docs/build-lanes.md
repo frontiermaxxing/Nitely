@@ -387,8 +387,12 @@ run completes, each command's result is its job's (time, page, the end of a fail
 CI request is a `lane_run` row with executor `ci` at that tree, its output the run's address and
 how long it queued and ran, and the ref is deleted.
 
-CI runs nothing unless this machine's `executors.json` lists the project in `ci_projects`. Without
-that, without a GitHub origin, without a signed-in gh, or when the push or the dispatch is refused
+The approved playbook's `ci_commands` are the opt-in (NIT-515): the ref goes to the repo's own
+origin, which submit pushes to anyway. Any request whose command is one of them goes to CI,
+whatever its kind: a submit's gate, a land's or a queue batch's, the backstop, or a `run` of
+exactly that command. A machine keeps a project local with `{"no_ci_projects":["APP"]}` in its
+`executors.json`. With that, without a GitHub origin, without a signed-in gh, or when the push or
+the dispatch is refused
 (a workflow on that branch without Nitely's inputs, say), the commands run in a lane as before, one
 full suite at a time, and the issue says why. Unlike a machine executor, a CI run that dispatched
 but cannot report (gh failing five times in a row, or past `timeout_minutes` plus 30 minutes, when
