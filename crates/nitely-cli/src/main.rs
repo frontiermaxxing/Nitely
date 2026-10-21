@@ -266,6 +266,15 @@ enum Cmd {
     /// Runs a queued submit; `nitely submit` starts it in the background.
     #[command(hide = true)]
     SubmitJob { id: i64 },
+    /// Runs a land's outside-the-lock steps (the install of the landed build) once the lands go
+    /// quiet; a land starts it in the background (NIT-560).
+    #[command(hide = true)]
+    LandAfter {
+        #[arg(long)]
+        repo: std::path::PathBuf,
+        #[arg(long)]
+        issue: Option<String>,
+    },
     /// Land a submitted issue: rebase, check its review and approval, gate, fast-forward, push.
     Land {
         key: String,
@@ -1691,6 +1700,10 @@ fn run(cmd: Cmd) -> Result<()> {
             let db = Db::open_default()?;
             let since = nitely_core::db::now() - days as i64 * 86_400;
             print_json(&nitely_crew::triage::inbox_rate(&db, &project, since)?)
+        }
+        Cmd::LandAfter { repo, issue } => {
+            let db = Db::open_default()?;
+            nitely_core::land::run_after_steps(&db, &repo, issue.as_deref(), &me, &mut std::thread::sleep)
         }
         Cmd::SubmitJob { id } => {
             let config = Config::load()?;

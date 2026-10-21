@@ -185,14 +185,19 @@ const NITELY_CODE: &[&str] = &["crates", "Cargo.toml", "Cargo.lock"];
 /// whose push failed to In Review). None for other repos, an up-to-date build, or a build whose
 /// commit this repo does not know.
 pub fn stale_build(root: &Path, base: &str, built_at: &str) -> Option<String> {
+    stale_message(built_at, base, commits_behind(root, base, built_at)?, root)
+}
+
+/// How many commits to Nitely's code `base` has that this build (made from `built_at`) does not,
+/// in Nitely's own repo. None for other repos or a build whose commit this repo does not know.
+fn commits_behind(root: &Path, base: &str, built_at: &str) -> Option<usize> {
     if built_at.is_empty() || !root.join("crates").join("nitely-cli").join("Cargo.toml").is_file() {
         return None;
     }
     let range = format!("{built_at}..{base}");
     let mut args = vec!["rev-list", "--count", range.as_str(), "--"];
     args.extend(NITELY_CODE);
-    let newer: usize = crate::playbook::git(root, &args).ok()?.trim().parse().ok()?;
-    stale_message(built_at, base, newer, root)
+    crate::playbook::git(root, &args).ok()?.trim().parse().ok()
 }
 
 /// What `stale_build` says for a build `newer` commits to Nitely's code behind `base` (NIT-537);
@@ -210,16 +215,50 @@ then try again (a running nitely MCP server forwards to the new build)",
     })
 }
 
-/// `stale_build` for the repo `dir` is in, as an error to refuse with.
+/// Whether submit and land may go with the installed build, in the repo `dir` is in (NIT-560):
+/// they refuse only when it cannot read the person's database; a build merely behind main goes
+/// ahead and says so on stderr.
 pub fn check_current(config: &crate::Config, dir: &str, built_at: &str) -> Result<()> {
     let Some(root) = crate::playbook::repo_root(config, dir) else { return Ok(()) };
     let pb = crate::playbook::Playbook::load(&root)?;
-    match stale_build(&root, pb.integration_branch(), built_at) {
-        // A land's outside-the-lock steps are installing the landed build this moment (NIT-334).
-        Some(why) if crate::land::after_steps_running(&root) => bail!("{why}. A land is installing the newer build right now: try again in a minute"),
-        Some(why) => bail!("{why}"),
-        None => Ok(()),
+    let behind = commits_behind(&root, pb.integration_branch(), built_at).unwrap_or(0);
+    let newer_db = crate::db::refused_by_this_build(&crate::paths::db_path()).ok().flatten();
+    match serve(behind, pb.integration_branch(), newer_db, crate::land::after_steps_running(&root)) {
+        Serve::Go => Ok(()),
+        Serve::Note(note) => {
+            eprintln!("{note}");
+            Ok(())
+        }
+        Serve::Refuse(why) => bail!("{why}"),
     }
+}
+
+/// What submit and land do with the installed build.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Serve {
+    Go,
+    /// Go, and say this.
+    Note(String),
+    Refuse(String),
+}
+
+/// Whether the installed build may serve a submit or land (NIT-560), from how many commits to
+/// Nitely's code `base` has that it does not (`behind`), whether it cannot read the person's
+/// database (`newer_db`: a newer build upgraded it), and whether the landed build is installing now.
+/// Only a database it cannot read stops it: a build behind main acts with the rules it has, and the
+/// land that moved main installs the new one after it, outside the land lock.
+pub fn serve(behind: usize, base: &str, newer_db: Option<String>, installing: bool) -> Serve {
+    if let Some(why) = newer_db {
+        return Serve::Refuse(format!(
+            "this nitely cannot read your Nitely database ({why}): install the landed build with `cargo run --release -p nitely-cli -- install` in Nitely's repo, then try again"
+        ));
+    }
+    if behind == 0 {
+        return Serve::Go;
+    }
+    let commits = if behind == 1 { "1 commit".to_string() } else { format!("{behind} commits") };
+    let then = if installing { "the landed build is installing now" } else { "the next land installs the landed build" };
+    Serve::Note(format!("the installed nitely is {commits} to Nitely's code behind {base}; going ahead, and {then}"))
 }
 
 /// Why a build must not be installed: it says it was built from `built_at`, but the checkout it was
@@ -361,6 +400,20 @@ pub fn without_error_boxes<T>(f: impl FnOnce() -> T) -> T {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Submit and land refuse only a build that cannot read the database (NIT-560).
+    #[test]
+    fn a_build_behind_main_still_serves_and_only_a_newer_database_refuses_it() {
+        assert_eq!(serve(0, "main", None, false), Serve::Go);
+        assert_eq!(serve(3, "main", None, false), Serve::Note("the installed nitely is 3 commits to Nitely's code behind main; going ahead, and the next land installs the landed build".into()));
+        assert_eq!(serve(1, "main", None, true), Serve::Note("the installed nitely is 1 commit to Nitely's code behind main; going ahead, and the landed build is installing now".into()));
+        for behind in [0, 5] {
+            match serve(behind, "main", Some("migration 20991231-later, which this build does not have".into()), true) {
+                Serve::Refuse(why) => assert!(why.contains("cannot read your Nitely database (migration 20991231-later"), "{why}"),
+                other => panic!("{other:?}"),
+            }
+        }
+    }
 
     #[test]
     fn a_build_behind_by_commits_to_nitelys_code_says_how_to_install_the_landed_one() {

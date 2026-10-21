@@ -162,7 +162,7 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
     // The steps that need no lock, now that the next land may go (NIT-334): whenever the
     // integration branch may have moved, by this land or the queue it ran.
     if (result.is_ok() && report.landed) || queue_ran {
-        let ran = after_land_outside_lock(&root, &pb);
+        let ran = after_land_soon(&root, &pb, Some(&issue.key));
         report.warnings.extend(ran.iter().filter(|r| !r.ok).map(|r| format!("the after-land step `{}` failed; the land stands", r.command)));
         report.after.extend(ran);
         // Main moved: it flows into each open goal branch (goal_branch.rs).
@@ -747,6 +747,87 @@ pub(crate) fn after_land_outside_lock(root: &Path, pb: &Playbook) -> Vec<playboo
             return out;
         }
     }
+}
+
+/// The outside-the-lock steps for a land that just let go of the lock (NIT-560): in a `nitely
+/// land-after` process of their own, so the land returns now and a burst of lands builds once
+/// (`run_after_steps`); in the same process where that cannot be started (unit tests, the app, a
+/// spawn that failed). What the background run does goes on `key`'s timeline.
+pub(crate) fn after_land_soon(root: &Path, pb: &Playbook, key: Option<&str>) -> Vec<playbook::CommandResult> {
+    let steps: Vec<&playbook::GateStep> = pb.land.after.iter().filter(|s| s.outside_lock).collect();
+    if steps.is_empty() {
+        return vec![];
+    }
+    let exe = std::env::current_exe().ok();
+    let name = exe.as_ref().and_then(|e| e.file_stem()).map(|s| s.to_string_lossy().to_lowercase());
+    if !in_background(name.as_deref(), cfg!(test) || std::env::var_os("NITELY_AFTER_INLINE").is_some()) {
+        return after_land_outside_lock(root, pb);
+    }
+    let mut args = vec!["land-after".to_string(), "--repo".to_string(), root.to_string_lossy().into_owned()];
+    if let Some(key) = key {
+        args.extend(["--issue".to_string(), key.to_string()]);
+    }
+    let log = crate::paths::data_dir().join("jobs").join("land-after.log");
+    match crate::submit_job::spawn_nitely(exe.as_deref().unwrap_or(Path::new("nitely")), &args, root, &log) {
+        Ok(pid) => vec![playbook::CommandResult {
+            command: steps.iter().map(|s| s.run.as_str()).collect::<Vec<_>>().join("; "),
+            ok: true,
+            seconds: 0,
+            output: format!("running in the background (process {pid}) once no land is waiting; what it does goes on the issue"),
+            skipped: true,
+            timed_out: false,
+        }],
+        Err(_) => after_land_outside_lock(root, pb),
+    }
+}
+
+/// Whether the outside-the-lock steps run in a process of their own: only from the `nitely` binary
+/// itself (which has the `land-after` command), and never when told to run them here.
+pub(crate) fn in_background(exe: Option<&str>, inline: bool) -> bool {
+    !inline && exe == Some("nitely")
+}
+
+/// What the background after-land run does next (NIT-560): wait while another land holds the lock
+/// or changes wait in the land queue, so the lands of a burst build once at the newest commit, but
+/// never longer than `QUIET_AT_MOST`; then run.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum AfterNext {
+    Run,
+    Wait,
+}
+
+pub(crate) fn after_next(land_running: bool, queue_waiting: bool, waited: std::time::Duration) -> AfterNext {
+    if (land_running || queue_waiting) && waited < QUIET_AT_MOST {
+        AfterNext::Wait
+    } else {
+        AfterNext::Run
+    }
+}
+
+/// The longest the background run waits for the lands to go quiet before it builds anyway.
+const QUIET_AT_MOST: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// `nitely land-after`: waits for the lands of `root` to go quiet (`after_next`), runs the
+/// outside-the-lock steps (`after_land_outside_lock`, which a run already going picks up as a mark),
+/// and says what they did on `key`'s timeline.
+pub fn run_after_steps(db: &Db, root: &Path, key: Option<&str>, actor: &Actor, sleep: &mut dyn FnMut(std::time::Duration)) -> Result<()> {
+    let started = std::time::Instant::now();
+    loop {
+        let queue = crate::land_queue::has_waiting(db, root).unwrap_or(false);
+        match after_next(held_by_live_land(root), queue, started.elapsed()) {
+            AfterNext::Wait => sleep(std::time::Duration::from_secs(10)),
+            AfterNext::Run => break,
+        }
+    }
+    let pb = Playbook::load(root)?;
+    let ran = after_land_outside_lock(root, &pb);
+    if let Some(key) = key {
+        log_after_steps(db, actor, key, &ran)?;
+    }
+    for r in ran.iter().filter(|r| !r.ok) {
+        eprintln!("the after-land step `{}` failed; the land stands", r.command);
+    }
+    Ok(())
 }
 
 /// One round of the outside-the-lock steps: their checkout moved to the integration branch's
@@ -1539,6 +1620,20 @@ mod tests {
         assert!(!lock.exists() && !mark.exists());
         assert_eq!(git(&repo, &["rev-parse", "HEAD"]).unwrap().trim(), next);
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// The background after-land run (NIT-560): only the nitely binary starts one, and it waits for
+    /// the lands to go quiet, at most fifteen minutes, so a burst of lands installs once.
+    #[test]
+    fn the_install_after_a_burst_of_lands_waits_for_them_to_go_quiet_and_runs_once() {
+        use std::time::Duration;
+        assert!(in_background(Some("nitely"), false));
+        assert!(!in_background(Some("nitely"), true), "told to run here");
+        assert!(!in_background(Some("nitely-app"), false) && !in_background(None, false), "the app has no land-after command");
+        assert_eq!(after_next(false, false, Duration::ZERO), AfterNext::Run, "quiet: build now");
+        assert_eq!(after_next(true, false, Duration::from_secs(30)), AfterNext::Wait, "another land holds the lock");
+        assert_eq!(after_next(false, true, Duration::from_secs(30)), AfterNext::Wait, "changes wait in the queue");
+        assert_eq!(after_next(true, true, QUIET_AT_MOST), AfterNext::Run, "never waits for ever");
     }
 
     /// The after steps marked `outside_lock` run once the land lock is released, in a checkout of

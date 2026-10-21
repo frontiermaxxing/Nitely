@@ -80,11 +80,12 @@ What still runs in your worktree, so install for it only when you need it:
   so a new icon shows only after a rebuild (restart `npm run tauri dev`), and a pinned taskbar
   shortcut can keep the old one until Windows refreshes its icon cache.
 - Land installs the new `nitely` itself after a change to `crates/`, `Cargo.toml` or `Cargo.lock`
-  (a `[[land.after]]` step in `.nitely/playbook.toml`, run in the main checkout while land still
-  holds its lock), so you do not. It puts the new build where hooks and MCP run it, even while
-  agents run the old one, and running MCP servers forward tool calls to it. Only when submit or land
-  refuses because the installed `nitely` is older than main (the land's install step failed: see
-  its warning) run `cargo run --release -p nitely-cli -- install` in the main checkout yourself.
+  (a `[[land.after]]` step in `.nitely/playbook.toml`, run in the background once the land lock is
+  free, once for a burst of lands), so you do not, and you never wait for it: submit and land go
+  ahead with an installed `nitely` that is behind main and say so. It puts the new build where hooks
+  and MCP run it, even while agents run the old one, and running MCP servers forward tool calls to
+  it. Only when submit or land refuses because the installed `nitely` cannot read the database (a
+  newer build upgraded it) run `cargo run --release -p nitely-cli -- install` in the main checkout.
 - `nitely lanes slim` reclaims the build output of task worktrees whose work is finished (it asks
   first, and keeps any worktree with uncommitted or unpushed work or recent activity).
 - A land that cannot remove its worktree (your shell or dev server still in it) says so on the
