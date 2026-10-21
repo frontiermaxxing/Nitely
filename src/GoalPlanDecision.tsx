@@ -79,6 +79,11 @@ export function GoalPlanDecision(props: {
                   {i.touches.join("  ")}
                 </span>
               )}
+              {i.no_repo_changes && (
+                <span className="gp-item-touches" title="Why it changes no file in the repo">
+                  Changes no repo files: {i.no_repo_changes}
+                </span>
+              )}
             </label>
             <details className="gp-body">
               <summary>Review and edit proposed work</summary>

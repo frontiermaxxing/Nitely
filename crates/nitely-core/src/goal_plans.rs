@@ -36,6 +36,11 @@ pub struct PlanItem {
     /// where the overlap check reads paths.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub touches: Vec<String>,
+    /// Why this agent work changes no file in the repo (a design made in an outside tool,
+    /// research), in place of `touches`. Shown on the filed issue; Crew counts it as colliding with
+    /// nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_repo_changes: Option<String>,
     /// S, M or L: an hour or two, a day, more than a day of one agent's work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<String>,
@@ -60,7 +65,8 @@ pub fn is_planning(issue: &IssueRecord) -> bool {
 pub const SIZES: &[&str] = &["S", "M", "L"];
 
 impl PlanItem {
-    /// A live check or the person's own task changes no files; every other issue names them.
+    /// A live check or the person's own task changes no files; every other issue names them, or
+    /// says why it changes none.
     fn changes_files(&self) -> bool {
         self.kind != "live-check" && self.owner.as_deref() != Some("human")
     }
@@ -71,9 +77,16 @@ impl PlanItem {
         if let Some(s) = self.size.as_deref().filter(|s| !SIZES.contains(s)) {
             return Some(format!("{r}: size is S, M or L, not {s}"));
         }
-        if self.changes_files() && self.touches.is_empty() {
+        if let Some(reason) = &self.no_repo_changes {
+            if !self.touches.is_empty() {
+                return Some(format!("{r}: name the files it will change in touches, or say in no_repo_changes why it changes none, not both"));
+            }
+            if reason.trim().is_empty() {
+                return Some(format!("{r}: no_repo_changes says why the work changes no file in the repo, e.g. \"designs the screens in the design tool\""));
+            }
+        } else if self.changes_files() && self.touches.is_empty() {
             return Some(format!(
-                "{r}: name the files it will change in touches (paths like src/App.tsx), so Crew keeps parallel workers apart; only a live check or the person's own task leaves it empty"
+                "{r}: name the files it will change in touches (paths like src/App.tsx), so Crew keeps parallel workers apart. Work that changes no file in the repo (a design in an outside tool, research) says why in no_repo_changes instead; a live check or the person's own task needs neither"
             ));
         }
         // Any file the repo has (Dockerfile, .gitignore, docs/Release Notes.md), but a path, not a
@@ -97,6 +110,9 @@ impl PlanItem {
         if !self.touches.is_empty() {
             let files: Vec<String> = self.touches.iter().map(|t| format!("`{}`", t.trim())).collect();
             body.push_str(&format!("\n\nTouches: {}", files.join(", ")));
+        }
+        if let Some(reason) = &self.no_repo_changes {
+            body.push_str(&format!("\n\n{} {}", crate::overlap::NO_REPO_CHANGES, reason.trim()));
         }
         if let Some(s) = &self.size {
             body.push_str(&format!("\nSize: {s}"));
@@ -274,7 +290,7 @@ pub const PLANNER: &str = "Draft it with `propose_goal`, passing this issue as p
 
 1. Read the project's brief (`get_project`), then the code the goal is about, enough to name the files each step changes.
 2. The goal: a short title, and a one-paragraph outcome that says what is true once it is reached and how anyone can tell. A target date only if the person gave one.
-3. The issues, in the order to work them (Crew starts them in this order, as blockers and free workers allow). Each one is a change one agent can land on its own, with evidence and blockers, a size (S: an hour or two, M: a day, L: more; split an L when you can), and `touches`: the files it will change. Two issues that touch the same files cannot run at once, so split by file where the work allows, and say so with blockers where it does not. Each one also declares a `review_level`: inert (prose, comments or display copy), contained (one component), standard (the usual change) or sensitive (approval, auth, migrations, landing, release). Leave it off only when you cannot tell. Path rules can only raise it.
+3. The issues, in the order to work them (Crew starts them in this order, as blockers and free workers allow). Each one is a change one agent can land on its own, with evidence and blockers, a size (S: an hour or two, M: a day, L: more; split an L when you can), and `touches`: the files it will change (work that changes no file in the repo, such as a design in an outside tool, says why in `no_repo_changes` instead). Two issues that touch the same files cannot run at once, so split by file where the work allows, and say so with blockers where it does not. Each one also declares a `review_level`: inert (prose, comments or display copy), contained (one component), standard (the usual change) or sensitive (approval, auth, migrations, landing, release). Leave it off only when you cannot tell. Path rules can only raise it.
 4. Existing open issues of the project that belong in the goal (`list_issues`): pass them as existing rather than filing them again.
 5. Keep the person's part to what only they can do (a decision, an account, a live check on their desktop), and say it plainly in that issue.
 
@@ -757,7 +773,7 @@ mod tests {
         let mut p = plan();
         p.issues[1].touches.clear();
         let e = db.propose_goal("NIT", &p, None, &agent()).unwrap_err().to_string();
-        assert!(e.contains("sign: name the files it will change"), "{e}");
+        assert!(e.contains("sign: name the files it will change") && e.contains("no_repo_changes"), "code work still names its files, and the refusal names the way out: {e}");
         p.issues[1].touches = vec!["the installer".into()];
         let e = db.propose_goal("NIT", &p, None, &agent()).unwrap_err().to_string();
         assert!(e.contains("not the installer"), "{e}");
@@ -788,6 +804,34 @@ mod tests {
         let held = crate::overlap::held(&crate::Config::default(), &db, "NIT").unwrap();
         let files = &held.iter().find(|h| h.key == sign.key).unwrap().files;
         assert!(files.contains(&"Dockerfile".to_string()) && files.contains(&"docs/Release Notes.md".to_string()), "{files:?}");
+    }
+
+    /// Agent work done outside the repo (screens in a design tool) is planned by saying so, is
+    /// shown with its reason, and holds no files for Crew (NIT-486).
+    #[test]
+    fn agent_work_that_changes_no_repo_files_says_why_and_collides_with_nothing() {
+        let mut db = db();
+        let mut p = plan();
+        let mut design = item("design", "Design the install screens in the design tool", &[]);
+        design.touches.clear();
+        design.body = "Lay out src/Install.tsx's three steps as screens.".into();
+        design.no_repo_changes = Some("  ".into());
+        p.issues.insert(0, design);
+        let e = db.propose_goal("NIT", &p, None, &agent()).unwrap_err().to_string();
+        assert!(e.contains("design: no_repo_changes says why"), "{e}");
+        p.issues[0].touches = vec!["src/Install.tsx".into()];
+        p.issues[0].no_repo_changes = Some("the screens are drawn in the design tool".into());
+        assert!(db.propose_goal("NIT", &p, None, &agent()).unwrap_err().to_string().contains("not both"));
+        p.issues[0].touches.clear();
+        let proposed = db.propose_goal("NIT", &p, None, &agent()).unwrap();
+        db.move_issue(&proposed.issue.key, "Approved", None, None, &Actor::Human).unwrap();
+        let issues = db.list_issues(Some("NIT"), true).unwrap();
+        let design = issues.iter().find(|i| i.title.starts_with("Design the install screens")).unwrap();
+        assert!(design.body.ends_with("Changes no repo files: the screens are drawn in the design tool\nSize: M"), "{}", design.body);
+        // In flight, it holds nothing, though its body names a file another issue changes.
+        db.move_issue(&design.key, "In Progress", None, None, &agent()).unwrap();
+        let held = crate::overlap::held(&crate::Config::default(), &db, "NIT").unwrap();
+        assert!(held.iter().find(|h| h.key == design.key).unwrap().files.is_empty(), "{held:?}");
     }
 
     #[test]

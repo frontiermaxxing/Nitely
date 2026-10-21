@@ -599,6 +599,8 @@ export interface PlanItem {
   state?: string;
   /** The files it will change, which Crew uses to keep parallel workers apart. */
   touches?: string[];
+  /** Why the work changes no file in the repo (a design in an outside tool), in place of touches. */
+  no_repo_changes?: string;
   /** S, M or L. */
   size?: string;
   /** inert, contained, standard or sensitive. */

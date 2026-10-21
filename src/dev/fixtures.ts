@@ -1448,6 +1448,7 @@ const PLANS = new Map<string, GoalPlanView>([
         outcome: "A guest moves or cancels their own booking from the confirmation email, within the house rules, and the front desk only hears about it.",
         target_date: null,
         issues: [
+          { ref: "screens", title: "Design the manage-booking screens", kind: "feature", body: "Move, cancel and the confirmation, on a phone first.", evidence: "none yet", priority: 2, size: "S", no_repo_changes: "the screens are drawn in the design tool" },
           { ref: "link", title: "Signed manage-booking link in the confirmation email", kind: "feature", body: "Protect the confirmation link contract: a valid signed link opens only its booking; expired or changed tokens fail safely. Reuse the existing booking scenario where practical.", evidence: "The guest flow currently stops at the confirmation email.", priority: 2, size: "M", touches: ["src/email/confirmation.ts", "src/bookings/links.ts"] },
           { ref: "page", title: "Manage-booking page: move to another free date", kind: "feature", body: "b", evidence: "none yet", priority: 2, size: "L", blocked_by: ["link"], touches: ["src/pages/ManageBooking.tsx", "src/bookings/availability.ts"] },
           { ref: "cancel", title: "Cancel within the free-cancellation window", kind: "feature", body: "b", evidence: "none yet", priority: 2, size: "S", blocked_by: ["link"], touches: ["src/bookings/cancel.ts"] },

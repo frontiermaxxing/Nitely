@@ -578,7 +578,8 @@ fn tools() -> Value {
                     "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Refs of this plan or existing issue keys." },
                     "owner": { "type": "string", "enum": OWNERS },
                     "state": { "type": "string", "enum": ["Todo", "Backlog", "Needs You"] },
-                    "touches": { "type": "array", "items": { "type": "string" }, "description": "The files it will change (src/App.tsx), so parallel workers stay apart. Required except for a live check or the person's own task. A human or blocked path among them raises review_level to sensitive." },
+                    "touches": { "type": "array", "items": { "type": "string" }, "description": "The files it will change (src/App.tsx), so parallel workers stay apart. Required except for a live check, the person's own task, or work that sets no_repo_changes. A human or blocked path among them raises review_level to sensitive." },
+                    "no_repo_changes": { "type": "string", "description": "For agent work that changes no file in the repo (a design made in an outside tool, research): why, in one sentence, in place of touches. Shown on the issue; Crew counts it as colliding with nothing." },
                     "size": { "type": "string", "enum": ["S", "M", "L"], "description": "S: an hour or two, M: a day, L: more." },
                     "review_level": { "type": "string", "enum": ["inert", "contained", "standard", "sensitive"], "description": "How much verification the change needs. Set it on purpose. Path rules can only raise it." }
                 } } },
@@ -650,7 +651,8 @@ fn tools() -> Value {
                 "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Issues that must close before this one can start, e.g. [\"NIT-9\"]." },
                 "labels": { "type": "array", "items": { "type": "string" }, "description": "Areas and platforms, e.g. [\"ios\", \"billing\"]: reuse the project's labels (list_issues shows them); kind and priority have their own fields." },
                 "review_level": { "type": "string", "enum": ["inert", "contained", "standard", "sensitive"], "description": "How much verification the change needs: inert (prose, comments or display copy), contained (one component), standard (the usual change), sensitive (approval, auth, migrations, landing, release). Omitting it on a new issue defaults to standard; legacy undeclared issues retain the full gate. A path in paths that matches a human or blocked path raises this to sensitive; you cannot lower that." },
-                "paths": { "type": "array", "items": { "type": "string" }, "description": "Files this change will touch, so a human or blocked path can raise review_level. Not stored on the issue." }
+                "paths": { "type": "array", "items": { "type": "string" }, "description": "Files this change will touch, so a human or blocked path can raise review_level. Not stored on the issue." },
+                "no_repo_changes": { "type": "string", "description": "For work that changes no file in the repo (a design made in an outside tool, research): why, in one sentence. Added to the body; Crew counts the issue as colliding with nothing. Not with paths." }
             } }
         },
         {
@@ -672,7 +674,8 @@ fn tools() -> Value {
                     "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Refs of this batch or existing issue keys." },
                     "labels": { "type": "array", "items": { "type": "string" }, "description": "Areas and platforms; reuse the project's labels." },
                     "review_level": { "type": "string", "enum": ["inert", "contained", "standard", "sensitive"], "description": "How much verification the change needs. A path in paths that matches a human or blocked path raises it to sensitive." },
-                    "paths": { "type": "array", "items": { "type": "string" }, "description": "Files this change will touch. Used only to raise review_level." }
+                    "paths": { "type": "array", "items": { "type": "string" }, "description": "Files this change will touch. Used only to raise review_level." },
+                    "no_repo_changes": { "type": "string", "description": "For work that changes no file in the repo: why, in one sentence. Added to the body; Crew counts the issue as colliding with nothing. Not with paths." }
                 } } }
             } }
         },
@@ -1026,13 +1029,30 @@ fn task_dir(config: &Config, db: &Db, args: &Value, cwd: &str) -> Result<String>
     }
 }
 
-/// A file_issue call, or one item of file_issues, as a new issue in `project`.
+/// The reason `no_repo_changes` gives, if the call or item sets it: a sentence, not a flag, since the
+/// person reads it on the issue.
+fn no_repo_changes_arg(args: &Value) -> Result<Option<&str>> {
+    match args.get("no_repo_changes") {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v.as_str().map(Some).context("no_repo_changes is a sentence saying why the work changes no file in the repo, not true or false"),
+    }
+}
+
+/// A file_issue call, or one item of file_issues, as a new issue in `project`. With
+/// `no_repo_changes`, its body says why the work changes no repo file.
 fn new_issue(args: &Value, project: &str, vendor: &str) -> Result<NewIssue> {
+    let mut body = req(args, "body")?.to_string();
+    if let Some(reason) = no_repo_changes_arg(args)? {
+        if !keys_arg(args, "paths").is_empty() {
+            bail!("name the files it will change in paths, or say in no_repo_changes why it changes none, not both");
+        }
+        body = nitely_core::overlap::with_no_repo_changes(&body, reason)?;
+    }
     Ok(NewIssue {
         project: project.to_string(),
         title: req(args, "title")?.into(),
         kind: req(args, "kind")?.into(),
-        body: req(args, "body")?.into(),
+        body,
         evidence: req(args, "evidence")?.into(),
         source: if SOURCES.contains(&vendor) { vendor.to_string() } else { "claude".into() },
         priority: args.get("priority").and_then(Value::as_i64).unwrap_or(0),
@@ -1332,6 +1352,9 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             None => json!(db.goals(&project(&db)?, args.get("include_closed").and_then(Value::as_bool).unwrap_or(false))?),
         },
         "propose_goal" => {
+            for item in args.get("issues").and_then(Value::as_array).into_iter().flatten() {
+                no_repo_changes_arg(item).with_context(|| format!("item {}", str_arg(item, "ref").unwrap_or("?")))?;
+            }
             let mut plan = nitely_core::goal_plans::GoalPlan {
                 sentence: req(args, "sentence")?.into(),
                 title: req(args, "title")?.into(),

@@ -103,6 +103,26 @@ pub fn touches_in(text: &str) -> Vec<String> {
     out
 }
 
+/// The line that opens an issue body's note that its work changes no file in the repo (a design
+/// made in an outside tool, research, a question for a client), followed by why. Such an issue
+/// expects and holds no files, so it collides with nothing.
+pub const NO_REPO_CHANGES: &str = "Changes no repo files:";
+
+/// Whether `text` (an issue body) says its work changes no repo files.
+pub fn changes_no_repo_files(text: &str) -> bool {
+    text.lines().any(|l| l.trim_start().starts_with(NO_REPO_CHANGES))
+}
+
+/// `body` with the note that the work changes no repo files, and why. Refused without a reason:
+/// the person reads it on the issue.
+pub fn with_no_repo_changes(body: &str, reason: &str) -> Result<String> {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        anyhow::bail!("no_repo_changes says why the work changes no file in the repo, e.g. \"designs the screens in the design tool\"");
+    }
+    Ok(format!("{}\n\n{NO_REPO_CHANGES} {reason}", body.trim_end()))
+}
+
 /// Whether `expected` (a path, a file name, or a label) names `file` (a repo path).
 fn names(expected: &str, file: &str) -> bool {
     let (e, f) = (expected.to_lowercase(), file.to_lowercase());
@@ -152,7 +172,8 @@ pub fn held(config: &crate::Config, db: &Db, project: &str) -> Result<Vec<Held>>
             let mut seen: BTreeSet<String> = files.iter().map(|f| f.to_lowercase()).collect();
             // Files a plan declared count as they are; prose counts when it reads as a real path.
             let declared = touches_in(&i.body);
-            for p in paths_in(&format!("{}\n{}", i.title, i.body)).into_iter().filter(|p| declared.contains(p) || real(p)) {
+            let named = if changes_no_repo_files(&i.body) { vec![] } else { paths_in(&format!("{}\n{}", i.title, i.body)) };
+            for p in named.into_iter().filter(|p| declared.contains(p) || real(p)) {
                 if seen.insert(p.to_lowercase()) {
                     files.push(p);
                 }
@@ -162,8 +183,12 @@ pub fn held(config: &crate::Config, db: &Db, project: &str) -> Result<Vec<Held>>
         .collect())
 }
 
-/// What a candidate expects to touch: paths its title and body name, and its labels.
+/// What a candidate expects to touch: paths its title and body name, and its labels. Nothing, for
+/// work that changes no repo files.
 fn expected(issue: &IssueRecord) -> Vec<String> {
+    if changes_no_repo_files(&issue.body) {
+        return vec![];
+    }
     let mut e = paths_in(&format!("{}\n{}", issue.title, issue.body));
     e.extend(issue.labels.iter().map(|l| l.trim().to_lowercase()).filter(|l| l.len() >= 3));
     e
