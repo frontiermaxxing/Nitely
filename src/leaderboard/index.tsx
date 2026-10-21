@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import { invoke } from "../backend";
 import { EmptyState, Loading, Segmented } from "../ui";
-import { loadProfile, onProfileChange, type Profile } from "./profile";
+import type { Project } from "../types";
+import { OptIn } from "./OptIn";
+import { loadProfile, onProfileChange, saveProfile, type Profile } from "./profile";
 import { PERIOD_LABEL, type LeaderboardStats, type PeriodKey } from "./stats";
 import { You } from "./You";
 import "./leaderboard.css";
@@ -18,8 +20,11 @@ export function useProfile(): Profile | null {
 const PERIODS: PeriodKey[] = ["week", "30d", "all"];
 
 /** The leaderboard page. Your own numbers read this machine's database; nothing here sends anything. */
-export function Leaderboard(props: { now: number; version: number }) {
+export function Leaderboard(props: { now: number; version: number; projects: Project[] }) {
   const profile = useProfile();
+  // Before you join the page opens on joining; your own numbers are a tab away, joined or not.
+  const [tab, setTab] = useState<"join" | "you">(profile ? "you" : "join");
+  const joining = !profile && tab === "join";
   const [period, setPeriod] = useState<PeriodKey>("week");
   const [stats, setStats] = useState<LeaderboardStats | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -51,15 +56,38 @@ export function Leaderboard(props: { now: number; version: number }) {
             Not sharing
           </span>
         )}
-        <span className="lb-head-note">Your stats are always here, sharing or not</span>
-        <Segmented aria-label="Period" value={period} onChange={setPeriod} options={PERIODS.map((p) => ({ value: p, label: PERIOD_LABEL[p] }))} />
+        {!profile && (
+          <Segmented
+            aria-label="Page"
+            value={tab}
+            onChange={setTab}
+            options={[
+              { value: "join", label: "Join" },
+              { value: "you", label: "You" },
+            ]}
+          />
+        )}
+        {!joining && <span className="lb-head-note">Your stats are always here, sharing or not</span>}
+        {!joining && <Segmented aria-label="Period" value={period} onChange={setPeriod} options={PERIODS.map((p) => ({ value: p, label: PERIOD_LABEL[p] }))} />}
       </div>
-      {error ? (
+      {joining ? (
+        <OptIn projects={props.projects} />
+      ) : error ? (
         <EmptyState title="Could not read your numbers">{error}</EmptyState>
       ) : !stats ? (
         <Loading />
       ) : (
-        <You stats={stats} period={period} profile={profile} now={props.now} />
+        <You
+          stats={stats}
+          period={period}
+          profile={profile}
+          now={props.now}
+          onJoin={() => setTab("join")}
+          onLeave={() => {
+            saveProfile(null);
+            setTab("join");
+          }}
+        />
       )}
     </div>
   );

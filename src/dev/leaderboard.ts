@@ -80,3 +80,61 @@ export function leaderboardFixture(): LeaderboardStats {
       : { best_day: best, best_week: bestWeek, longest_streak_days: 11, fastest_lead: { issue: "NIT-52", seconds: 252 } },
   };
 }
+
+/**
+ * The preview's weekly report, in the shape `leaderboard_report` returns (leaderboard_report.rs):
+ * the same checks on the name and links, the same fields copied from the numbers.
+ */
+export function leaderboardReportFixture(args: Record<string, unknown>) {
+  const profile = args.profile as { display_name: string; github: string | null; x: string | null; website: string | null };
+  const projects = (args.projects as string[]) ?? [];
+  const name = profile.display_name.trim();
+  if (!name) throw "choose a display name";
+  if (name.length > 40) throw "a display name has at most 40 characters";
+  if (name.includes("@")) throw "a display name can't hold @: use a name, not an email address";
+  const handle = (v: string | null, prefixes: string[], max: number, ok: RegExp, what: string, base: string) => {
+    if (!v?.trim()) return undefined;
+    let h = v.trim().replace(/^@/, "");
+    for (const p of prefixes) if (h.startsWith(p)) h = h.slice(p.length).replace(/\/+$/, "");
+    if (!h || h.length > max || !ok.test(h)) throw `${what} isn't a valid user name`;
+    return `${base}${h}`;
+  };
+  const github = handle(profile.github, ["https://github.com/", "github.com/"], 39, /^[A-Za-z0-9-]+$/, "the GitHub link", "https://github.com/");
+  const x = handle(profile.x, ["https://x.com/", "x.com/"], 15, /^[A-Za-z0-9_]+$/, "the X link", "https://x.com/");
+  const site = profile.website?.trim();
+  if (site && !/^https:\/\/[^/@\s]+\.[^/@\s]+/.test(site)) throw site.startsWith("https://") ? "the website isn't a valid https address" : "the website must start with https://";
+  const s = leaderboardFixture();
+  const r3 = (n: number) => Math.round(n * 1000) / 1000;
+  const week = new Date((s.periods[0].from + 14 * 3600) * 1000);
+  const thursday = new Date(Date.UTC(week.getUTCFullYear(), week.getUTCMonth(), week.getUTCDate() + 3));
+  const yearStart = new Date(Date.UTC(thursday.getUTCFullYear(), 0, 1));
+  const isoWeek = Math.ceil(((thursday.getTime() - yearStart.getTime()) / 86400000 + 1) / 7);
+  return {
+    schema: 1,
+    display_name: name,
+    links: { ...(github ? { github } : {}), ...(x ? { x } : {}), ...(site ? { website: site } : {}) },
+    week: `${thursday.getUTCFullYear()}-W${String(isoWeek).padStart(2, "0")}`,
+    projects: projects.length || 3,
+    periods: s.periods.map((p) => ({
+      period: p.period,
+      landed: p.landed,
+      landed_per_day: Math.round(p.landed_per_day * 100) / 100,
+      reviewed: p.reviewed,
+      first_pass_rate: p.first_pass_rate === null ? null : r3(p.first_pass_rate),
+      lead_time: p.lead_time,
+      agent_hours: Math.round(p.agent_hours * 10) / 10,
+      tokens: p.tokens,
+      inbox_reply: p.inbox_reply,
+      steadiest_week: p.steadiest_week && { landed: p.steadiest_week.landed, active_days: p.steadiest_week.active_days },
+      vendors: p.vendors.map((v) => ({ vendor: v.vendor, landed: v.landed, share: r3(v.share) })),
+      review_rounds: p.review_rounds,
+    })),
+    weekly: s.weekly.map((w) => w.landed),
+    records: {
+      best_day: s.records.best_day?.landed ?? 0,
+      best_week: s.records.best_week?.landed ?? 0,
+      longest_streak_days: s.records.longest_streak_days,
+      fastest_lead: s.records.fastest_lead?.seconds ?? null,
+    },
+  };
+}

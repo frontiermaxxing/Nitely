@@ -22,14 +22,14 @@ const IN_PERIOD: Record<PeriodKey, string> = { week: "this week", "30d": "in the
 const WORK_YEAR_HOURS = 52 * WORK_WEEK_HOURS;
 
 /** L3: your own numbers, always here, sharing or not. */
-export function You(props: { stats: LeaderboardStats; period: PeriodKey; profile: Profile | null; now: number; onJoin?: () => void; onEdit?: () => void }) {
+export function You(props: { stats: LeaderboardStats; period: PeriodKey; profile: Profile | null; now: number; onJoin?: () => void; onEdit?: () => void; onLeave?: () => void }) {
   const { stats } = props;
   const p = periodOf(stats, props.period);
   const all = periodOf(stats, "all");
   if (!p || !all) return null;
   return (
     <div className="lb-you">
-      <ProfileRow profile={props.profile} onJoin={props.onJoin} onEdit={props.onEdit} />
+      <ProfileRow profile={props.profile} onJoin={props.onJoin} onEdit={props.onEdit} onLeave={props.onLeave} />
       {all.landed === 0 && all.agent_hours === 0 ? (
         <EmptyState title="Nothing landed yet">Your numbers fill in as your agents land changes in the projects that count.</EmptyState>
       ) : (
@@ -98,7 +98,7 @@ export function You(props: { stats: LeaderboardStats; period: PeriodKey; profile
   );
 }
 
-function ProfileRow(props: { profile: Profile | null; onJoin?: () => void; onEdit?: () => void }) {
+function ProfileRow(props: { profile: Profile | null; onJoin?: () => void; onEdit?: () => void; onLeave?: () => void }) {
   const p = props.profile;
   if (!p)
     return (
@@ -148,6 +148,12 @@ function ProfileRow(props: { profile: Profile | null; onJoin?: () => void; onEdi
         </span>
       </div>
       {props.onEdit && <Button onClick={props.onEdit}>Edit profile</Button>}
+      {/* Nothing has been sent yet, so leaving only forgets your choices on this machine. */}
+      {props.onLeave && (
+        <Button variant="quiet" onClick={props.onLeave} title="Forget your leaderboard name and links on this machine">
+          Leave
+        </Button>
+      )}
     </section>
   );
 }
