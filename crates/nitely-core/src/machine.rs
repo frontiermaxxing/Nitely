@@ -157,9 +157,18 @@ fn last_start_file(dir: &Path) -> std::path::PathBuf {
 }
 
 fn since_last_start(dir: &Path) -> Option<Duration> {
+    since_last_start_at(dir, wall_ms())
+}
+
+/// How long before `now_ms` the last run started, from the record in `dir`.
+fn since_last_start_at(dir: &Path, now_ms: u128) -> Option<Duration> {
     let ms: u128 = std::fs::read_to_string(last_start_file(dir)).ok()?.trim().parse().ok()?;
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_millis();
-    Some(Duration::from_millis(now.saturating_sub(ms) as u64))
+    Some(Duration::from_millis(now_ms.saturating_sub(ms) as u64))
+}
+
+/// Milliseconds since the Unix epoch, as the start record keeps them.
+fn wall_ms() -> u128 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)
 }
 
 /// Asks once whether a run may start, under a lock in `dir` (shared by every Nitely process on the
@@ -181,6 +190,22 @@ pub fn admit_once_with(
     check: &mut dyn FnMut() -> Result<Option<String>>,
     commit: &mut dyn FnMut() -> Result<()>,
 ) -> Result<Option<String>> {
+    admit_once_at(dir, limits, need, ramp, read, check, commit, wall_ms())
+}
+
+/// `admit_once_with` at `now_ms` (NIT-533): the start is recorded as then, and the last one is
+/// measured from it, so a test can say what time it is.
+#[allow(clippy::too_many_arguments)]
+pub fn admit_once_at(
+    dir: &Path,
+    limits: Option<&Limits>,
+    need: u64,
+    ramp: bool,
+    read: &mut dyn FnMut() -> Option<Memory>,
+    check: &mut dyn FnMut() -> Result<Option<String>>,
+    commit: &mut dyn FnMut() -> Result<()>,
+    now_ms: u128,
+) -> Result<Option<String>> {
     let Some(limits) = limits else { return Ok(None) };
     std::fs::create_dir_all(dir)?;
     let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("admission.lock"))?;
@@ -188,12 +213,11 @@ pub fn admit_once_with(
     if let Some(why) = check()? {
         return Ok(Some(why));
     }
-    if let Some(why) = admission_for(read(), limits, since_last_start(dir), need, ramp) {
+    if let Some(why) = admission_for(read(), limits, since_last_start_at(dir, now_ms), need, ramp) {
         return Ok(Some(why));
     }
     commit()?;
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
-    std::fs::write(last_start_file(dir), now.to_string()).ok();
+    std::fs::write(last_start_file(dir), now_ms.to_string()).ok();
     Ok(None)
 }
 
@@ -201,9 +225,21 @@ pub fn admit_once_with(
 /// may go. The machine's memory is read every two seconds, and its limits with it (`limits`), so a
 /// floor lowered in Settings lets what waits go at its next look.
 pub fn admit(dir: &Path, limits: &mut dyn FnMut() -> Option<Limits>, read: &mut dyn FnMut() -> Option<Memory>, waiting: &mut dyn FnMut(Option<&str>)) -> Result<()> {
+    admit_with(dir, limits, read, waiting, &mut std::thread::sleep, &mut wall_ms)
+}
+
+/// `admit` with its pause between looks (`sleep`) and its clock (`now_ms`) given (NIT-533).
+pub fn admit_with(
+    dir: &Path,
+    limits: &mut dyn FnMut() -> Option<Limits>,
+    read: &mut dyn FnMut() -> Option<Memory>,
+    waiting: &mut dyn FnMut(Option<&str>),
+    sleep: &mut dyn FnMut(Duration),
+    now_ms: &mut dyn FnMut() -> u128,
+) -> Result<()> {
     let mut said = false;
     loop {
-        match admit_once(dir, limits().as_ref(), read)? {
+        match admit_once_at(dir, limits().as_ref(), 0, true, read, &mut || Ok(None), &mut || Ok(()), now_ms())? {
             None => {
                 if said {
                     waiting(None);
@@ -213,7 +249,7 @@ pub fn admit(dir: &Path, limits: &mut dyn FnMut() -> Option<Limits>, read: &mut 
             Some(why) => {
                 waiting(Some(&why));
                 said = true;
-                std::thread::sleep(Duration::from_secs(2));
+                sleep(Duration::from_secs(2));
             }
         }
     }
@@ -415,13 +451,30 @@ mod tests {
         let l = limits_for(64 * GIB, None, None);
         let mut readings = vec![mem(64, 5.0), mem(64, 9.0), mem(64, 30.0)].into_iter();
         let mut said: Vec<Option<String>> = Vec::new();
-        admit(&dir, &mut || Some(l.clone()), &mut || readings.next().flatten(), &mut |w| said.push(w.map(str::to_string))).unwrap();
+        // A clock that moves only when the loop pauses, and pauses that take no time (NIT-533).
+        let clock = std::cell::Cell::new(1_000_000u128);
+        let mut slept = Vec::new();
+        admit_with(
+            &dir,
+            &mut || Some(l.clone()),
+            &mut || readings.next().flatten(),
+            &mut |w| said.push(w.map(str::to_string)),
+            &mut |d| {
+                slept.push(d);
+                clock.set(clock.get() + d.as_millis());
+            },
+            &mut || clock.get(),
+        )
+        .unwrap();
+        assert_eq!(slept, vec![Duration::from_secs(2); 2], "it looked again every two seconds while it waited");
         assert_eq!(said.len(), 3, "{said:?}");
         assert!(said[0].as_deref().unwrap().starts_with("waiting for memory: 5.0 GB free"));
         assert_eq!(said[2], None, "and says so once it may go");
-        assert!(since_last_start(&dir).is_some_and(|s| s < RAMP), "the start is recorded for the next one to ask");
-        // The next, with 20 GB free, waits for this one to grow.
-        assert!(admit_once(&dir, Some(&l), &mut || mem(64, 20.0)).unwrap().is_some());
+        assert_eq!(since_last_start_at(&dir, clock.get()), Some(Duration::ZERO), "the start is recorded for the next one to ask");
+        // The next, with 20 GB free, waits for this one to grow, and goes once it has had the ramp.
+        let next = |at: u128| admit_once_at(&dir, Some(&l), 0, true, &mut || mem(64, 20.0), &mut || Ok(None), &mut || Ok(()), at).unwrap();
+        assert!(next(clock.get() + 1_000).is_some());
+        assert_eq!(next(clock.get() + RAMP.as_millis()), None);
         std::fs::remove_dir_all(&dir).ok();
     }
 
