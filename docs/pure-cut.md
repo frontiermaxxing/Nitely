@@ -534,6 +534,16 @@ template per kind of fixture they use (plain repo with a bare remote; repo with 
 and Cargo selector repos; the release fixture; the large-repo lane fixture), built once per test
 binary and cloned cheaply, and measures each scenario's setup before and after.
 
+Done (NIT-527): `test_repo::init` is itself a template keyed by its files, built once per test
+binary, so every test that calls it (45 at the time) copies a finished repo instead of starting
+`git init`, `add` and `commit`; `copy` and `init` hardlink git's object files, which git never
+changes in place, and copy the rest. A folder that already holds files is still set up in place.
+Measured with `nitely run` on Windows, the same 23 tests (snapshot, submodules, blobs, review_batch,
+private_terms, batches, test_repo, one playbook test): 5.74 s before, 5.06 s after; per test,
+`snapshot::a_read_after_one_counts_again_only_the_worktrees_that_moved` 1.32 to 0.68 s, the
+submodule scenarios about 0.4 s each less, `private_terms` 0.4 s each less. What remains in each
+scenario is the git its own steps start, which NIT-518's in-process reads cut.
+
 ## Expected result
 
 Run 1666's 245 tests over 2 s become about 50 named scenarios and their PURE replacements, which

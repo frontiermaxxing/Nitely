@@ -11,6 +11,15 @@ use std::sync::{Arc, Mutex, OnceLock};
 /// asked for `name`. Paths to the template in git's config files (a remote's URL) are changed to
 /// the copy's.
 pub fn copy(name: &str, build: fn(&Path)) -> PathBuf {
+    let base = crate::paths::unique_temp(&format!("nitely-{name}"), "");
+    copy_to(name, &base, &|dir: &Path| build(dir));
+    base
+}
+
+/// The template `name` (made by `build` in an empty folder the first time a test asks for it in
+/// this test binary) copied to `to`: its git objects hardlinked, since git never changes one in
+/// place, and everything else copied (NIT-527).
+fn copy_to(name: &str, to: &Path, build: &dyn Fn(&Path)) {
     static TEMPLATES: Mutex<Option<HashMap<String, Arc<OnceLock<PathBuf>>>>> = Mutex::new(None);
     let cell = TEMPLATES.lock().unwrap().get_or_insert_with(HashMap::new).entry(name.to_string()).or_default().clone();
     let template = cell.get_or_init(|| {
@@ -20,9 +29,7 @@ pub fn copy(name: &str, build: fn(&Path)) -> PathBuf {
         build(&dir);
         dir
     });
-    let base = crate::paths::unique_temp(&format!("nitely-{name}"), "");
-    copy_dir(template, &base, template, &base);
-    base
+    copy_dir(template, to, template, to, false);
 }
 
 /// Removes templates made a day or more ago: a test run leaves its own behind, and none runs for
@@ -37,12 +44,19 @@ fn forget_old_templates() {
     }
 }
 
-fn copy_dir(from: &Path, to: &Path, template: &Path, base: &Path) {
+/// `objects` once inside a git directory's `objects` (a folder beside its `HEAD`): those files are
+/// hardlinked, falling back to a copy where the file system cannot link.
+fn copy_dir(from: &Path, to: &Path, template: &Path, base: &Path, objects: bool) {
     std::fs::create_dir_all(to).unwrap();
+    let git_dir = from.join("HEAD").is_file();
     for entry in std::fs::read_dir(from).unwrap().flatten() {
         let (src, dst) = (entry.path(), to.join(entry.file_name()));
         if entry.file_type().unwrap().is_dir() {
-            copy_dir(&src, &dst, template, base);
+            copy_dir(&src, &dst, template, base, objects || (git_dir && entry.file_name() == "objects"));
+        } else if objects {
+            if std::fs::hard_link(&src, &dst).is_err() {
+                std::fs::copy(&src, &dst).unwrap();
+            }
         } else if entry.file_name() == "config" {
             let text = std::fs::read_to_string(&src).unwrap();
             std::fs::write(&dst, re_root(&text, template, base)).unwrap();
@@ -71,7 +85,25 @@ pub fn git(dir: &Path, args: &[&str]) -> String {
 /// A repo at `dir` on `main` with an identity (land and crew commit in their own git calls) and
 /// no background maintenance, its files committed: each `(path, content)` in `files`, or an empty
 /// commit when there are none.
+/// The same files make the same repo, so it is built once per test binary and copied (NIT-527):
+/// three git processes and a commit fewer for each test after the first. A folder that already
+/// holds files is set up in place, since its files are committed too.
 pub fn init(dir: &Path, files: &[(&str, &str)]) {
+    if std::fs::read_dir(dir).map_or(true, |mut d| d.next().is_none()) {
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        files.hash(&mut hash);
+        let owned: Vec<(String, String)> = files.iter().map(|(p, c)| (p.to_string(), c.to_string())).collect();
+        copy_to(&format!("init-{:016x}", hash.finish()), dir, &move |at: &Path| {
+            let files: Vec<(&str, &str)> = owned.iter().map(|(p, c)| (p.as_str(), c.as_str())).collect();
+            init_here(at, &files)
+        });
+        return;
+    }
+    init_here(dir, files)
+}
+
+fn init_here(dir: &Path, files: &[(&str, &str)]) {
     std::fs::create_dir_all(dir).unwrap();
     // No template: every `git init` would write a dozen hook samples for the virus scanner to read
     // (NIT-289).
@@ -146,5 +178,28 @@ mod tests {
         for base in [one, two] {
             std::fs::remove_dir_all(base).ok();
         }
+    }
+
+    /// Repos from one template share their object files by hardlink, so a commit in one must
+    /// leave the other as it was; a folder that already holds files commits them (NIT-527).
+    #[test]
+    fn repos_from_one_template_are_independent_and_a_full_folder_commits_its_files() {
+        let base = crate::paths::unique_temp("nitely-init-template", "");
+        let (a, b) = (base.join("a"), base.join("b"));
+        init(&a, &[("x.txt", "one\n")]);
+        init(&b, &[("x.txt", "one\n")]);
+        let before = git(&b, &["rev-parse", "HEAD"]);
+        std::fs::write(a.join("x.txt"), "two\n").unwrap();
+        git(&a, &["commit", "-q", "-am", "two"]);
+        git(&a, &["gc", "-q", "--prune=now"]);
+        assert_eq!(git(&b, &["rev-parse", "HEAD"]), before);
+        assert_eq!(git(&b, &["status", "--porcelain"]), "");
+        assert_eq!(git(&b, &["show", "HEAD:x.txt"]), "one");
+        let full = base.join("full");
+        std::fs::create_dir_all(&full).unwrap();
+        std::fs::write(full.join("mine.txt"), "m").unwrap();
+        init(&full, &[("x.txt", "one\n")]);
+        assert_eq!(git(&full, &["ls-files"]), "mine.txt\nx.txt");
+        std::fs::remove_dir_all(base).ok();
     }
 }
