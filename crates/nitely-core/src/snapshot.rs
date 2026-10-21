@@ -222,13 +222,27 @@ type Listed = (Result<Vec<git::Worktree>, String>, Vec<git::BranchRef>, Option<S
 /// files when its HEAD or index moved, or after ACTIVE_FRESH where `active` (a session worked in
 /// it lately) and IDLE_FRESH elsewhere. Its counts against the integration branch and its last
 /// commit come from the repo's branches, so they are as current as the refs.
+/// Whether a repo's worktree list and branches read at `listed_at` with refs at `was` still stand
+/// at `now`, its refs now at `fp` (NIT-537): its refs and worktrees did not move, and not for
+/// longer than REPO_FRESH.
+fn reuse_listing(was: u64, listed_at: Instant, fp: u64, now: Instant) -> bool {
+    was == fp && now.saturating_duration_since(listed_at) < REPO_FRESH
+}
+
+/// Whether a worktree's earlier count `c` still stands at `now` (NIT-537): its HEAD and index
+/// (`fp`, None when it cannot be told) and the commit it is on did not move, it was counted, and it
+/// is younger than `fresh`.
+fn reuse_count(c: &Counted, fp: Option<u64>, head: &str, now: Instant, fresh: Duration) -> bool {
+    fp.is_some() && c.fingerprint == fp && c.head == head && c.dirty.is_some() && now.saturating_duration_since(c.at) < fresh
+}
+
 pub fn read_git_from(config: &Config, before: Option<&GitState>, active: &(dyn Fn(&str) -> bool + Sync)) -> GitState {
     let fingerprint = crate::watch::repos_fingerprint(config);
     // Counts against another integration branch are not reused.
     let earlier = |repo: &RepoConfig| before.and_then(|b| b.repos.iter().find(|r| r.root == repo.root && r.integration_branch == repo.integration_branch));
     let heads: Vec<Listed> = par_map(&config.repos, |repo: &RepoConfig| {
         let fp = crate::watch::repo_fingerprint(std::path::Path::new(&repo.root));
-        if let Some(e) = earlier(repo).filter(|e| e.fingerprint == fp && e.listed_at.elapsed() < REPO_FRESH) {
+        if let Some(e) = earlier(repo).filter(|e| reuse_listing(e.fingerprint, e.listed_at, fp, Instant::now())) {
             return (e.worktrees.clone(), e.branches.clone(), e.slug.clone(), fp, e.listed_at);
         }
         let worktrees = git::list_worktrees(&repo.root).map_err(|e| e.to_string());
@@ -259,7 +273,7 @@ pub fn read_git_from(config: &Config, before: Option<&GitState>, active: &(dyn F
         });
         // The commit it is on comes from the repo's listing, which moves with every ref: a branch
         // moved under it (`git update-ref`) leaves its HEAD file and index as they were.
-        let reuse = last.filter(|c| fp.is_some() && c.fingerprint == fp && c.head == wt.head && c.dirty.is_some() && c.at.elapsed() < fresh);
+        let reuse = last.filter(|c| reuse_count(c, fp, &wt.head, Instant::now(), fresh));
         // Not counted by the repo's branches: its counts against the integration branch are its
         // own reads, current while neither it nor the repo's refs moved.
         if !counted_by_repo {
@@ -692,6 +706,23 @@ mod tests {
         }
         drop(db);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// What the reread test below decides, with the clock given (NIT-537).
+    #[test]
+    fn a_listing_and_a_count_stand_only_while_nothing_moved_and_they_are_fresh() {
+        let at = Instant::now();
+        assert!(reuse_listing(7, at, 7, at + REPO_FRESH / 2));
+        assert!(!reuse_listing(7, at, 8, at), "refs or worktrees moved");
+        assert!(!reuse_listing(7, at, 7, at + REPO_FRESH), "too old");
+        let c = Counted { fingerprint: Some(1), head: "abc".into(), at, dirty: Some(0), state: None, integration: 0 };
+        let fresh = Duration::from_secs(10);
+        assert!(reuse_count(&c, Some(1), "abc", at + Duration::from_secs(9), fresh));
+        assert!(!reuse_count(&c, None, "abc", at, fresh), "a worktree whose HEAD and index cannot be read is counted again");
+        assert!(!reuse_count(&c, Some(2), "abc", at, fresh), "its HEAD or index moved");
+        assert!(!reuse_count(&c, Some(1), "def", at, fresh), "a branch moved under it");
+        assert!(!reuse_count(&Counted { dirty: None, ..c.clone() }, Some(1), "abc", at, fresh), "never counted");
+        assert!(!reuse_count(&c, Some(1), "abc", at + fresh, fresh), "too old");
     }
 
     #[test]

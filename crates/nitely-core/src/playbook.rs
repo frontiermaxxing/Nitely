@@ -374,16 +374,20 @@ pub struct Flake {
 /// Runs `command`, and again up to `retries` times while it fails. Returns the last run, with
 /// its time counting every run, and the failures it got past when a later run passed.
 fn run_retrying(command: &str, dir: &Path, retries: u32) -> Result<(bool, String, u64, Option<Flake>)> {
-    let (mut ok, mut output, mut seconds) = run_shell(command, dir)?;
-    let mut failed: Vec<String> = Vec::new();
-    for _ in 0..retries {
-        if ok {
-            break;
-        }
-        failed.push(output);
-        let again = run_shell(command, dir)?;
-        (ok, output, seconds) = (again.0, again.1, seconds + again.2);
+    let mut runs = vec![run_shell(command, dir)?];
+    while !runs.last().expect("one run").0 && runs.len() <= retries as usize {
+        runs.push(run_shell(command, dir)?);
     }
+    Ok(classify_runs(command, runs))
+}
+
+/// A command's runs, in order (each passed, its output and seconds), as one result (NIT-537): the
+/// last run's outcome and output, the time of them all, and, when a later run passed, a flake with
+/// the tests the failed runs named, each once, and the first failure's output.
+fn classify_runs(command: &str, mut runs: Vec<(bool, String, u64)>) -> (bool, String, u64, Option<Flake>) {
+    let seconds = runs.iter().map(|r| r.2).sum();
+    let (ok, output, _) = runs.pop().unwrap_or((false, String::new(), 0));
+    let mut failed: Vec<String> = runs.into_iter().map(|r| r.1).collect();
     let flake = (ok && !failed.is_empty()).then(|| {
         let mut tests: Vec<String> = Vec::new();
         for name in failed.iter().flat_map(|out| failed_tests(out)) {
@@ -393,7 +397,7 @@ fn run_retrying(command: &str, dir: &Path, retries: u32) -> Result<(bool, String
         }
         Flake { command: command.to_string(), tests, output: failed.swap_remove(0) }
     });
-    Ok((ok, output, seconds, flake))
+    (ok, output, seconds, flake)
 }
 
 /// The tests a run's output says failed, each once, in order: cargo's `test x ... FAILED` lines
@@ -1235,12 +1239,20 @@ pub fn repo_for_issue(config: &crate::Config, project: Option<&str>, dir: &str) 
     // Asked of git once: the main checkout `dir` is in, and the repo it is.
     let main = crate::git::main_root(dir);
     let here = main.as_deref().and_then(|m| config.repo_for_main(m));
+    choose_repo(&config.repos, project, main.as_deref(), here, dir)
+}
+
+/// The repo an issue of `project` belongs to (NIT-537), from the linked repos, the main checkout
+/// the caller is in (`main`) and the linked repo that is (`here`): the one linked to the project;
+/// of several, the caller's; with none linked, the caller's own checkout, unless it holds another
+/// project's work.
+pub(crate) fn choose_repo(repos: &[crate::config::RepoConfig], project: Option<&str>, main: Option<&str>, here: Option<&crate::config::RepoConfig>, dir: &str) -> Result<PathBuf> {
     let root_here = || main.as_deref().map(|m| here.map_or_else(|| PathBuf::from(m), |r| PathBuf::from(&r.root)));
     let Some(project) = project else {
         return root_here().with_context(|| format!("{dir} is not inside a git repo"));
     };
     let is_project = |r: &crate::config::RepoConfig| r.project.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(project));
-    let linked: Vec<&crate::config::RepoConfig> = config.repos.iter().filter(|r| is_project(r)).collect();
+    let linked: Vec<&crate::config::RepoConfig> = repos.iter().filter(|r| is_project(r)).collect();
     match linked.as_slice() {
         [one] => return Ok(PathBuf::from(&one.root)),
         [] => {}
@@ -1307,10 +1319,16 @@ pub fn project_review_declaration(
 
 /// The worktree of `root` whose branch names the issue; None when there is none.
 pub fn issue_worktree(root: &Path, key: &str) -> Result<Option<PathBuf>> {
-    let named: Vec<PathBuf> = crate::git::list_worktrees(&root.to_string_lossy())?
-        .into_iter()
+    issue_worktree_in(&crate::git::list_worktrees(&root.to_string_lossy())?, root, key)
+}
+
+/// Of `worktrees`, the one whose branch names the issue `key` (NIT-537): never the main checkout,
+/// and an error when several do.
+pub(crate) fn issue_worktree_in(worktrees: &[crate::git::Worktree], root: &Path, key: &str) -> Result<Option<PathBuf>> {
+    let named: Vec<PathBuf> = worktrees
+        .iter()
         .filter(|w| !w.is_main && w.branch.as_deref().is_some_and(|b| crate::git::parse_branch(b).1.is_some_and(|k| k.eq_ignore_ascii_case(key))))
-        .map(|w| PathBuf::from(w.path))
+        .map(|w| PathBuf::from(&w.path))
         .collect();
     match named.as_slice() {
         [] => Ok(None),
@@ -1537,12 +1555,16 @@ fn start_light(db: &Db, repo_root: &Path, playbook: &Playbook, issue: &IssueReco
 /// behind it (or missing), so a stale local branch doesn't count already-merged work as this change.
 pub fn diff_base(worktree: &Path, base: &str) -> String {
     let remote = format!("origin/{base}");
-    if git(worktree, &["rev-parse", "--verify", "--quiet", &format!("refs/remotes/{remote}")]).is_err() {
-        return base.to_string();
-    }
-    let local_exists = git(worktree, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{base}")]).is_ok();
-    if !local_exists || git(worktree, &["merge-base", "--is-ancestor", base, &remote]).is_ok() {
-        remote
+    let remote_exists = git(worktree, &["rev-parse", "--verify", "--quiet", &format!("refs/remotes/{remote}")]).is_ok();
+    let local_exists = remote_exists && git(worktree, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{base}")]).is_ok();
+    pick_base(base, remote_exists, local_exists, &mut || git(worktree, &["merge-base", "--is-ancestor", base, &remote]).is_ok())
+}
+
+/// The base a branch is measured against (NIT-537): `origin/<base>` when it exists and local
+/// `<base>` is missing or behind it (`local_behind`, asked only then), else local `<base>`.
+pub(crate) fn pick_base(base: &str, remote_exists: bool, local_exists: bool, local_behind: &mut dyn FnMut() -> bool) -> String {
+    if remote_exists && (!local_exists || local_behind()) {
+        format!("origin/{base}")
     } else {
         base.to_string()
     }
@@ -2147,6 +2169,51 @@ mod tests {
         config.repos.push(repo("web-other", &app, "WEB"));
         assert!(project_review_declaration(&config, Some("WEB"), None, Some("inert"), &paths).unwrap_err().to_string().contains("ambiguous"));
         std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn the_playbooks_decisions_over_plain_data() {
+        // A command that failed then passed is a flake; one that kept failing fails (NIT-537).
+        let flaky = classify_runs("cargo test", vec![(false, "test a::b ... FAILED\n".into(), 3), (true, "ok".into(), 2)]);
+        assert_eq!((flaky.0, flaky.1.as_str(), flaky.2), (true, "ok", 5));
+        let flake = flaky.3.unwrap();
+        assert_eq!((flake.tests, flake.output.as_str()), (vec!["a::b".to_string()], "test a::b ... FAILED\n"));
+        let failed = classify_runs("cargo test", vec![(false, "one".into(), 1), (false, "two".into(), 1)]);
+        assert_eq!((failed.0, failed.1.as_str(), failed.2, failed.3.is_none()), (false, "two", 2, true));
+        assert!(classify_runs("x", vec![(true, "ok".into(), 1)]).3.is_none(), "a first pass is no flake");
+
+        // The base: the remote's when local is missing or behind, else local.
+        let never = &mut || -> bool { panic!("asked only when both exist") };
+        assert_eq!(pick_base("main", false, false, never), "main", "no remote");
+        assert_eq!(pick_base("main", true, false, never), "origin/main", "no local branch");
+        assert_eq!(pick_base("main", true, true, &mut || true), "origin/main", "local main is behind");
+        assert_eq!(pick_base("main", true, true, &mut || false), "main", "local main has diverged");
+
+        // The repo of the issue's project, not the caller's.
+        let repo = |name: &str, project: Option<&str>| crate::config::RepoConfig { name: name.into(), root: format!("C:/Code/{name}"), project: project.map(str::to_string), integration_branch: "main".into() };
+        let (app, web, other) = (repo("app", Some("APP")), repo("web", Some("APP")), repo("other", Some("OTH")));
+        assert_eq!(choose_repo(std::slice::from_ref(&app), Some("app"), Some("C:/Code/other"), Some(&other), "C:/Code/other").unwrap(), PathBuf::from("C:/Code/app"));
+        let both = [app.clone(), web.clone(), other.clone()];
+        assert_eq!(choose_repo(&both, Some("APP"), Some("C:/Code/web"), Some(&web), "C:/Code/web").unwrap(), PathBuf::from("C:/Code/web"), "of several, the caller's");
+        assert!(choose_repo(&both, Some("APP"), Some("C:/Code/other"), Some(&other), "x").unwrap_err().to_string().contains("several repos are linked to APP (app, web)"));
+        assert!(choose_repo(std::slice::from_ref(&other), Some("NEW"), Some("C:/Code/other"), Some(&other), "C:/Code/other").unwrap_err().to_string().contains("holds OTH's work"));
+        assert_eq!(choose_repo(&[], Some("NEW"), Some("C:/Code/loose"), None, "C:/Code/loose").unwrap(), PathBuf::from("C:/Code/loose"), "nothing linked: the caller's checkout");
+        assert_eq!(choose_repo(&[], None, Some("C:/Code/loose"), None, "x").unwrap(), PathBuf::from("C:/Code/loose"));
+        assert!(choose_repo(&[], None, None, None, "C:/tmp").unwrap_err().to_string().contains("not inside a git repo"));
+
+        // The worktree whose branch names the issue.
+        let wt = |path: &str, branch: Option<&str>, is_main| crate::git::Worktree { path: path.into(), head: "a".into(), branch: branch.map(str::to_string), is_main, locked: false, prunable: false };
+        let root = Path::new("C:/Code/app");
+        let list = [wt("C:/Code/app", Some("claude/app-3-main-named"), true), wt("C:/w/a", Some("claude/app-3-fix"), false), wt("C:/w/b", None, false)];
+        assert_eq!(issue_worktree_in(&list, root, "APP-3").unwrap(), Some(PathBuf::from("C:/w/a")), "never the main checkout");
+        assert_eq!(issue_worktree_in(&list, root, "APP-4").unwrap(), None);
+        let twice = [wt("C:/w/a", Some("claude/app-3-fix"), false), wt("C:/w/c", Some("codex/app-3-again"), false)];
+        assert!(issue_worktree_in(&twice, root, "APP-3").is_err());
+
+        // What git answers once and for all: questions about full ids only.
+        let id = "a".repeat(40);
+        assert!(settled_query(&["rev-parse", &format!("{id}^{{tree}}")]) && settled_query(&["merge-base", &id, &id]) && settled_query(&["cat-file", "-s", &format!("{id}:a.txt")]));
+        assert!(!settled_query(&["rev-parse", "main^{commit}"]) && !settled_query(&["rev-parse", &format!("{}^{{tree}}", &id[..7])]) && !settled_query(&["merge-base", "main", &id]));
     }
 
     #[test]
