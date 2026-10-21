@@ -903,6 +903,14 @@ fn checked(out: std::process::Output, args: &[&str]) -> Result<String> {
 /// nothing (NIT-116). Nothing ran either way, so running it again is safe; any other failure is
 /// git's own answer and is returned as it is.
 pub fn run_git(cmd: &mut Command) -> std::io::Result<std::process::Output> {
+    let mut real;
+    let cmd = match real_git(cmd) {
+        Some(c) => {
+            real = c;
+            &mut real
+        }
+        None => cmd,
+    };
     no_optional_locks(cmd);
     let mut attempt = 0;
     loop {
@@ -1005,7 +1013,7 @@ pub fn posix_sh() -> String {
 
 pub fn shell_free_command(program: &str) -> Command {
     #[allow(unused_mut)]
-    let mut cmd = Command::new(program);
+    let mut cmd = if program == "git" { Command::new(git_program()) } else { Command::new(program) };
     if program == "git" {
         no_optional_locks(&mut cmd);
     }
@@ -1015,6 +1023,75 @@ pub fn shell_free_command(program: &str) -> Command {
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
     cmd
+}
+
+/// The git to start. On Windows, PATH's git is usually Git for Windows' `cmd\git.exe`, a launcher
+/// that only starts `mingw64\bin\git.exe`: two process starts for every git call, where starting a
+/// process can cost hundreds of milliseconds (NIT-517). The real binary sets up its own environment
+/// (its tools on PATH, MSYSTEM), so it is started directly: found once per process beside the
+/// launcher PATH names, or from `git --exec-path` when PATH's git is some other launcher. PATH's
+/// `git` stays the fallback, and is what every other platform runs.
+pub fn git_program() -> &'static std::ffi::OsStr {
+    static GIT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    GIT.get_or_init(|| if cfg!(windows) { resolve_real_git().unwrap_or_else(|| "git".into()) } else { "git".into() }).as_os_str()
+}
+
+fn resolve_real_git() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    let found = std::env::split_paths(&path).map(|d| d.join("git.exe")).find(|p| p.is_file())?;
+    if let Some(real) = real_git_beside(&found, |p| p.is_file()) {
+        return Some(real);
+    }
+    // Some other launcher (a package manager's shim): ask it where git keeps its programs,
+    // <prefix>/libexec/git-core, whose <prefix>/bin holds the real git. One start, once.
+    let mut cmd = Command::new(&found);
+    cmd.arg("--exec-path");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let out = cmd.output().ok().filter(|o| o.status.success())?;
+    let exec = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    let real = exec.parent()?.parent()?.join("bin").join("git.exe");
+    real.is_file().then_some(real).or(Some(found))
+}
+
+/// The real git for the `git.exe` found on PATH, when that is one of Git for Windows' launchers
+/// (`<root>\cmd\git.exe` or `<root>\bin\git.exe`) and the real one is beside it; the found one
+/// itself when it already is the real one (`<root>\mingw64\bin\git.exe`); None otherwise.
+fn real_git_beside(found: &Path, exists: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    let dir = found.parent()?;
+    let named = |d: &Path, n: &str| d.file_name().is_some_and(|f| f.eq_ignore_ascii_case(n));
+    const BUILDS: [&str; 3] = ["mingw64", "clangarm64", "mingw32"];
+    if named(dir, "bin") && dir.parent().is_some_and(|p| BUILDS.iter().any(|b| named(p, b))) {
+        return Some(found.to_path_buf());
+    }
+    if !(named(dir, "cmd") || named(dir, "bin")) {
+        return None;
+    }
+    let root = dir.parent()?;
+    BUILDS.iter().map(|b| root.join(b).join("bin").join("git.exe")).find(|p| exists(p))
+}
+
+/// `cmd` again with the real git as its program, when it names PATH's `git` and that is not what
+/// git_program resolved to: its arguments, environment and folder copied, without a window.
+fn real_git(cmd: &Command) -> Option<Command> {
+    if cmd.get_program() != "git" || git_program() == "git" {
+        return None;
+    }
+    let mut real = shell_free_command("git");
+    real.args(cmd.get_args());
+    for (k, v) in cmd.get_envs() {
+        match v {
+            Some(v) => real.env(k, v),
+            None => real.env_remove(k),
+        };
+    }
+    if let Some(dir) = cmd.get_current_dir() {
+        real.current_dir(dir);
+    }
+    Some(real)
 }
 
 /// No lock git takes only to save work for later: `git status` and `git diff` otherwise refresh a
@@ -1629,6 +1706,18 @@ mod tests {
         let rules = WorktreeRules { setup: vec!["npm ci".into()], setup_when_changed: vec!["./tools/versions.txt".into()], ..Default::default() };
         let changed = ["Cargo.lock", "package-lock.json", "tools/versions.txt"].map(String::from);
         assert_eq!(setup_files_in(&rules, &changed), ["package-lock.json", "tools/versions.txt"]);
+    }
+
+    #[test]
+    fn git_for_windows_launchers_resolve_to_the_real_git_beside_them() {
+        let installed = |p: &Path| p == Path::new("C:/Git/mingw64/bin/git.exe");
+        let real = Some(PathBuf::from("C:/Git/mingw64/bin/git.exe"));
+        assert_eq!(real_git_beside(Path::new("C:/Git/cmd/git.exe"), installed), real);
+        assert_eq!(real_git_beside(Path::new("C:/Git/bin/git.exe"), installed), real);
+        assert_eq!(real_git_beside(Path::new("C:/Git/mingw64/bin/git.exe"), |_| false), real);
+        // A launcher with no real git beside it, or some other git: left to --exec-path.
+        assert_eq!(real_git_beside(Path::new("D:/Git/cmd/git.exe"), installed), None);
+        assert_eq!(real_git_beside(Path::new("C:/scoop/shims/git.exe"), installed), None);
     }
 
     #[test]

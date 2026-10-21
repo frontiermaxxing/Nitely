@@ -3,7 +3,6 @@
 
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
-use std::process::Command;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Worktree {
@@ -44,14 +43,8 @@ fn rebase_in(git_dir: &std::path::Path) -> (bool, Option<i64>) {
 }
 
 fn git(dir: &str, args: &[&str]) -> Result<String> {
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::playbook::shell_free_command("git");
     cmd.arg("-C").arg(dir).args(args);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
     let out = crate::playbook::run_git(&mut cmd).with_context(|| format!("running git in {dir}"))?;
     if !out.status.success() {
         bail!(
@@ -329,6 +322,7 @@ pub fn parse_branch(branch: &str) -> (Option<String>, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     #[test]
     fn worktree_state_from_the_branch_line_matches_asking_git() {
