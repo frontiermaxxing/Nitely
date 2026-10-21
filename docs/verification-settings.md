@@ -131,12 +131,15 @@ and is the only way to switch a safety net off, shown in red on the "How a chang
 | Checkpoint: checks | one full run | one full run | n/a |
 | Checkpoint: review | one review of the slice, P0/P1 block | one review of the slice, P0/P1 block | n/a |
 | No-goal issues: checks | compile, lint, affected tests | compile, lint, affected tests | full gate |
-| No-goal issues: review | none | each change, blocking | each change, blocking |
+| No-goal issues: review | one review per arrival batch, of its combined diff, peer strength, blocking: nothing lands unreviewed | each change, blocking | each change, blocking |
 | No-goal issues: land | arrival-order batches of up to 5, one full run per batch, bisected | the same | alone |
 | Backstop on main | on, in CI: every 5 lands or 30 min, auto-revert | on, the same | on, every land |
 | Audits of reduced checks | 10% | 10% | n/a (nothing reduced) |
 | Periodic review of main | off (the checkpoint review covers it) | off | off |
 | Human approval | `human_paths` from the playbook, at the hop into main | the same | the same, plus every change |
+
+Confirmed by the person on 2026-10-21, with one change: issues with no goal are still reviewed,
+one review per arrival batch, so nothing lands unreviewed.
 
 Rules every preset keeps:
 
@@ -180,7 +183,7 @@ For removal by NIT-499, each with a migration and a test that the replacement co
 |---|---|
 | `project_yolo` table, the YOLO mode and `tests_off` gate skipping | Fast; Custom for anyone who really wants tests off |
 | Balanced and Thorough mode names | Careful and Release |
-| Review batching: `[review] batch`, `batch_window`, `batch_max`, `small_*`, `max_lines`, and `review_batch.rs` real batches | the checkpoint review of the slice |
+| Review batching as a setting: `[review] batch`, `batch_window`, `batch_max`, `small_*`, `max_lines` | the checkpoint review of the slice; under Fast, one review of each no-goal arrival batch (the land queue's batch, not a separate review window) |
 | Review shadow batches (`batch = "shadow"`) | removed: the measurement is done |
 | Verification shadow: `[verification] mode` and `version` as switches | the preset decides; the classifier always runs |
 | pre_review, land_batch, shared_lanes, full_backstop, audit_percent and periodic as separate mode fields | derived from the preset; Custom keeps them as overrides |
