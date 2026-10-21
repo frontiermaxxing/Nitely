@@ -566,3 +566,87 @@ Run 1666's 245 tests over 2 s become about 50 named scenarios and their PURE rep
 run in milliseconds. The remaining Windows cost is the scenarios' git starts, which NIT-518 (git
 in process) and NIT-527 (templates) cut. No figure is promised until each card measures its own
 module with `nitely run` before and after, the way docs/testing.md records NIT-498's.
+
+## NIT-528: the deletion list
+
+Each test below is now checked twice: by the old test, and by a pure test or a kept scenario
+that checks the same decision. Seconds are the old test's time in Windows lane run 1666, before this push.
+Since then, machine sizing (NIT-519), shared templates (NIT-527) and git in process (NIT-518)
+have made many of these tests faster, so the real saving is measured after the deletion, not
+taken from this table. Nothing is deleted until Andrew approves.
+
+### Delete: the decision is in a pure test, and a kept scenario still runs the git path
+
+| Old test | s | Covered by |
+| --- | ---: | --- |
+| affected_tests::the_repos_own_map_selects_the_frontend_and_keeps_everything_else_full | 64 | affected_tests::tests::decided::the_repos_own_map_decides_in_memory |
+| affected_tests::dynamic_import_missing_consumer_and_candidate_policy_fail_closed | 15 | decided:: test of the same name |
+| affected_tests::a_build_script_reduces_only_with_its_inputs_approved_and_unchanged | 15 | decided:: test of the same name |
+| affected_tests::consumers_outside_component_and_unknown_policy_fields_are_full | 10 | decided:: test of the same name |
+| affected_tests::cargo_explicit_mapping_selects_target_and_shared_helper_consumers | 9 | decided:: test of the same name |
+| affected_tests::declared_component_consumers_run_all_their_suites | 6 | decided:: test of the same name |
+| affected_tests::approved_whole_suite_mapping_handles_opaque_inputs_without_claiming_a_graph | 6 | decided:: test of the same name |
+| affected_tests::deleted_source_keeps_previous_consumers | 4 | decided:: test of the same name |
+| land_queue::approvals_large_repos_and_repos_without_lanes_land_alone | 25 | land_rules::a_change_lands_alone_for_the_first_reason_that_holds |
+| land_queue::changes_wait_again_when_the_branch_moves_during_their_gate | 60 | land_rules::after_a_passed_gate...; requeueing still runs in the bisection scenario |
+| land_queue::a_branch_that_gains_commits_during_the_gate_keeps_them_and_goes_back | 48 | land_rules::after_a_passed_gate...; sending back still runs in the batch scenario |
+| land::warns_when_a_dependency_landed_that_no_after_step_set_up | 4 | land_rules::after_steps_run_for_what_landed... |
+| land::lands_only_what_a_human_approved_when_the_playbook_says_human_and_leaves_it_to_the_agent_by_author | 36 | land_rules::a_verdict_and_the_reasons_for_a_person..., submit_rules::a_submit_goes_where... |
+| submit::a_patch_that_passed_is_not_reviewed_again_and_a_rewritten_one_starts_from_the_pass | 75 | submit_rules::a_pass_is_reused_only... |
+| submit::a_finding_only_the_rounds_carry_is_checked_fresh_before_it_goes_to_a_person | 28 | submit_rules::accepted_findings_block_nothing_and_a_fresh_review_settles... |
+| submit::a_second_round_checks_the_first_rounds_finding | 36 | review::tests::a_re_review_carries_what_is_not_fixed |
+| submit::a_shadow_batch_starts_from_the_round_before_the_review_that_decided | 7 | nothing needed: shadow batches were retired (NIT-499), and only this test uses `before: Some(_)` |
+| submit_job::solution_summary_does_not_follow_a_changed_patch_at_the_same_head | 53 | submit_rules::a_solution_follows_only_its_revision...; solution_summary_is_bound... stays |
+| lanes::a_memory_reason_goes_once_a_request_waits_for_the_checkout | 23 | lanes::a_waiting_request_says_memory_once... (NIT-533) |
+| lanes::a_memory_reason_goes_once_a_request_waits_for_a_slot | 10 | the same |
+| lanes::a_request_waits_for_memory_and_says_so | 12 | the same |
+| lanes::a_floor_lowered_while_a_request_waits_lets_it_go | 11 | the same |
+| lanes::a_request_waits_while_the_main_checkout_has_changes_and_says_why | 19 | lanes::a_checkout_busy_past_the_lanes_timeout_is_given_up_on |
+| lanes::a_commit_that_would_overwrite_an_ignored_file_is_refused | 13 | lanes::the_decisions_around_the_persons_checkout_and_a_reused_gate |
+| lanes::an_ignored_file_where_the_commit_needs_a_folder_is_refused | 15 | the same |
+| lanes::a_file_that_appeared_during_the_request_keeps_the_checkout_from_going_back_over_it | 17 | the same |
+| lanes::a_checkout_a_dead_request_left_detached_goes_back_unless_it_changed | 16 | the same |
+| lanes::the_base_moves_only_on_its_schedule | 8 | the same |
+| lanes::a_snapshots_playbook_never_counts_when_the_branch_has_none | 10 | the same |
+| lanes::while_a_request_has_the_checkout_the_rules_come_from_its_branch | 9 | the same |
+| lanes::the_persons_own_untracked_playbook_stays_in_force_while_lent | 6 | the same |
+| lanes::a_passing_run_of_the_gates_commands_answers_the_gate | 23 | the same |
+| crew::starts_nothing_while_off_paused_ungated_quiet_or_capped | 4 | crew::whether_a_worker_may_start_is_decided_from_what_the_tick_read (NIT-534) |
+| crew::the_daily_cap_counts_every_worker_started_today | 6 | the same |
+| crew::the_daily_token_budget_stops_new_workers | 5 | the same |
+| release_verification::failed_attempt_supersedes_previous_pass_and_cannot_release | 54 | release_verification::a_release_stands_on_its_latest_attempts... (NIT-537) |
+| release_verification::candidate_cannot_replace_release_policy_or_add_unapproved_stamping_paths | 6 | the same |
+| release_verification::release_only_checks_do_not_replace_missing_full_gate | 4 | the same |
+| submodules::a_task_gets_the_submodule_only_when_it_needs_it_and_only_its_cone | 25 | submodules::a_task_and_a_lane_take_only_what_they_need...; the submodule lane scenario stays |
+| submodules::a_sparse_lane_switches_pointers_within_its_cone_and_what_the_snapshot_changes | 20 | the same |
+| snapshot::a_read_after_one_counts_again_only_the_worktrees_that_moved | 23 | snapshot::a_listing_and_a_count_stand_only_while_nothing_moved... |
+| playbook::a_command_that_fails_then_passes_is_a_flake_and_one_that_keeps_failing_fails | 6 | playbook::the_playbooks_decisions_over_plain_data |
+| playbook::finds_the_repo_of_the_issues_project_not_the_callers | 5 | the same |
+| playbook::measures_against_the_newer_of_local_and_remote_base | 4 | the same |
+| private_terms::another_projects_list_does_not_apply | 10 | private_terms::hits_name_the_place_and_entry_and_the_refusal_never_the_term |
+| private_terms::refuses_a_branch_with_a_term_and_never_echoes_it | 9 | the same |
+| light::a_sparse_worktree_holds_the_playbook_s_and_the_issue_s_directories_and_widens | 13 | light::the_cone_holds... (NIT-538); the light scenario keeps a real sparse worktree |
+
+That is 47 tests, about 887 s summed on Windows before the push.
+
+### Merge: the assertions move into a kept scenario, then the test goes
+
+| Old test | s | Into |
+| --- | ---: | --- |
+| land_queue::a_queue_run_records_each_lands_verification_and_runs_the_after_steps_once | 76 | land_queue::what_waits_lands_together_on_one_gate_and_what_cannot_goes_back |
+| land::lands_by_nitely_when_the_playbook_says_so | 50 | land::lands_reviewed_work_and_waits_for_human_approval (approve, then land) |
+| land::when_the_repo_cannot_move_the_submodule_does_not_either | 54 | land::a_change_that_spans_a_submodule_lands_both_branches_together |
+| mcp_concurrent::a_call_still_running_when_the_client_leaves_finishes_before_the_server_exits | 3 | mcp_concurrent::a_long_call_holds_up_none_after_it_and_ends_at_the_cap |
+| older_job::a_job_that_meets_a_newer_database_runs_in_the_build_installed_meanwhile | 4 | mcp_stale::a_call_that_meets_a_newer_database_waits_for_the_install... |
+
+Also: cut `land_queue::a_bad_change_is_bisected_out_of_five` (111 s) to three changes, since
+`land_rules::bisection_finds_the_change...` proves the search for stacks of 1 to 9.
+
+### Keep: the old test still checks something no pure test does
+
+- land_queue::a_failure_that_names_one_changes_file_costs_one_more_gate: matching the failing output to a change's files (`suspect`).
+- submit::the_same_edit_somewhere_else_is_reviewed_though_its_patch_id_is_the_same: `diff_id` against real git.
+- submit::a_failed_push_hands_nothing_in_and_a_repo_without_origin_is_local: a real push that fails.
+- submit::the_fresh_review_is_told_what_the_person_accepted...: what the reviewer is told.
+- submit_job::solution_summary_is_bound_to_the_revision_handed_in, land::a_land_after_another_waits..., land::a_dead_lands_lock... and land::a_killed_lands_index_lock...: the file, lock and job handling around the decisions.
+- Every scenario named in `.nitely/test-budget.toml`.
