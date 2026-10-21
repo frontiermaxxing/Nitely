@@ -29,6 +29,18 @@ function parseLog(text, run, revision, source) {
   const count = new Map(); for (const r of rows) count.set(r.id, (count.get(r.id) || 0) + 1);
   return rows.map(r => ({ ...r, ambiguous: count.get(r.id) > 1 }));
 }
+// A command's output with stdout and stderr in the order it wrote them (cargo prints each test
+// binary's `Running` header on stderr and its results on stdout), through one file for both.
+function merged(command, args, options) {
+  const dir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'nitely-sweep-run-')); const file = path.join(dir, 'out.log');
+  const fd = fs.openSync(file, 'w');
+  try {
+    const out = cp.spawnSync(command, args, { ...options, stdio: ['ignore', fd, fd] });
+    fs.closeSync(fd);
+    const size = fs.statSync(file).size;
+    return { ...out, text: size > MAX ? '' : fs.readFileSync(file, 'utf8'), error: out.error || (size > MAX ? Error('output exceeds 16 MiB') : undefined) };
+  } finally { try { fs.closeSync(fd); } catch {} fs.rmSync(dir, { recursive: true, force: true }); }
+}
 function bodies(text, ext) {
   // Conservatively extract named test bodies, balancing braces while masking comments/strings.
   const masked = text.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`/g, x => x.replace(/[^\n]/g, ' '));
@@ -68,7 +80,9 @@ function classify(observations, tests, revision) {
   for (const [id, all] of by) {
     const rows = [...new Map(all.map(o => [o.run, o])).values()]; const pass = rows.filter(o => o.outcome === 'pass').length, fail = rows.filter(o => o.outcome === 'fail').length;
     const t = attach(rows[0].name);
+    const retried = rows.filter(o => o.flaky).length;
     if (pass && fail) push('fix', 'Flaky: ' + id, `${pass} passing and ${fail} failing distinct runs at ${revision}. Sources: ${rows.map(o=>o.source).join(', ')}`, t, id);
+    else if (retried) push('fix', 'Flaky: ' + id, `${retried} run(s) at ${revision} passed only after a failed attempt (the runner's retry). Sources: ${rows.filter(o => o.flaky).map(o=>o.source).join(', ')}`, t, id);
     else if (fail >= 2) push('fix', 'Repeated failure: ' + id, `${fail} failing runs and no passing run at ${revision}. Repair or explicitly justify retirement; failure alone is not evidence to delete. Sources: ${rows.map(o=>o.source).join(', ')}`, t, id);
     const durations = rows.map(o => o.duration_ms).filter(Number.isFinite).sort((a,b) => a-b); if (durations.length) times.push({ id, t, ms: durations[Math.floor(durations.length / 2)], n: durations.length });
   }
@@ -116,9 +130,9 @@ function main(args) {
         const exe = process.platform === 'win32' && runner === 'node' ? 'cmd.exe' : command;
         const actual = exe === 'cmd.exe' ? ['/d', '/s', '/c', 'npm test'] : runner === 'node' ? ['test'] : argv;
         const started=performance.now();
-        const out = cp.spawnSync(exe, actual, { cwd: root, encoding: 'utf8', timeout: Math.max(1, end-Date.now()), maxBuffer: MAX, windowsHide: true });
+        const out = merged(exe, actual, { cwd: root, timeout: Math.max(1, end-Date.now()), windowsHide: true });
         runs.push({runner,run:`fresh-${run}-${runner}`,revision,duration_ms:performance.now()-started,exit_code:out.status,partial:!!out.error||!!out.signal});
-        const text = (out.stdout || '') + '\n' + (out.stderr || '');
+        const text = out.text;
         observations.push(...parseLog(text, `fresh-${run}-${runner}`, revision, `bounded ${runner} run ${run + 1}`));
         if (out.error || out.signal || out.status !== 0) warnings.push(`${runner} run ${run + 1}: exit ${out.status}, signal ${out.signal || 'none'}, incomplete/error ${!!out.error}; missing tests remain unknown.`);
       }
@@ -133,5 +147,5 @@ function main(args) {
   fs.writeFileSync(opts.output, JSON.stringify(report, null, 2), { flag: 'wx' });
   console.log(JSON.stringify({ report: opts.output, revision, observed: observations.length, inventoried: inv.tests.length, candidates: candidates.length, truncated: report.truncated }));
 }
-module.exports = { parseLog, bodies, classify };
+module.exports = { merged, parseLog, bodies, classify };
 if (require.main === module) main(process.argv.slice(2));

@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { parseLog, classify, bodies } = require('./test_sweep.cjs');
+const { merged, parseLog, classify, bodies } = require('./test_sweep.cjs');
 const revision = 'a'.repeat(40);
 test('same-revision distinct runs distinguish flakes from repeats and ambiguous names', () => {
  const passed = parseLog('test parser::roundtrip ... ok', '1', revision, 'lane 1');
@@ -44,4 +44,11 @@ test('fresh runs name tests as imported logs do, so a pass and a failure of one 
   assert.deepEqual(rust.map(r => [r.id, r.duration_ms]), [['shop::cart::adds', 250]]);
   const tap = parseLog('TAP version 13\n    ok 1 - child\n    1..1\nnot ok 1 - parent\n1..1', '1', revision, 'lane 1');
   assert.deepEqual(tap.map(r => [r.id, r.outcome]), [['child', 'pass'], ['parent', 'fail']]);
+});
+test('a fresh run keeps stderr and stdout in order, and a pass only on retry is a flake', () => {
+  // Cargo's `Running` header goes to stderr and its results to stdout: read in order, the binary names the test.
+  const out = merged(process.execPath, ['-e', "console.error('     Running unittests src/lib.rs (target/debug/deps/shop-0a1b2c3d4e5f6789)'); console.log('test cart::adds ... ok')"], {});
+  assert.deepEqual(parseLog(out.text, '1', revision, 'lane 1').map(r => r.id), ['shop::cart::adds']);
+  const retried = { id: 'cart::adds', name: 'adds', outcome: 'pass', run: 'ci-1', revision, source: 'CI 1', flaky: true, ambiguous: false };
+  assert.match(classify([retried], [], revision)[0].title, /^Flaky: cart::adds/);
 });
