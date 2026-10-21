@@ -165,6 +165,27 @@ impl Report {
                 ..Default::default()
             });
         }
+        // The gates' own record (NIT-557): modules whose failures were only ever the tests' own.
+        let counts = db.catches_by_module()?;
+        let noisy = crate::test_catches::false_alarm_modules(&counts);
+        if !noisy.is_empty() {
+            let mut body = format!("These modules' tests failed gates {} times in all, and every fix changed only tests: none of their failures caught a product defect. Rewrite them to check behaviour, or propose removing them with what covers them, for a separate human decision.\n\n", noisy.iter().map(|m| m.false_alarms).sum::<i64>());
+            for m in &noisy {
+                body.push_str(&format!("- {}: {} false alarms, no catch\n", m.module, m.false_alarms));
+            }
+            items.push(PlanItem {
+                local_ref: "false-alarms".into(),
+                title: format!("Rewrite or remove tests that only raise false alarms ({} modules)", noisy.len()),
+                body,
+                evidence: "Recorded at each gate failure and the fix that followed (test_catch).".into(),
+                kind: "live-check".into(),
+                priority: 3,
+                labels: vec!["test-hygiene".into()],
+                size: Some("M".into()),
+                review_level: Some("standard".into()),
+                ..Default::default()
+            });
+        }
         if items.is_empty() {
             bail!("no candidates: retain the report and note its unknowns; no empty approval is needed");
         }

@@ -9,3 +9,5 @@ Read the project's brief and docs/testing.md first. This is a report and proposa
 5. Record counts, warm execution time where measured, flakes and unknowns in the sweep issue. After approved changes land, record the same before/after measures in docs/testing.md; do not invent improvements without measurement. A report without candidates needs only a handoff noting its coverage and limitations.
 
 `[schedule] test_sweep = "nightly"` (or `weekly`, default `off`) asks a running Crew to create a report-only sweep task once per UTC period. It respects Crew pause/draining and never changes the playbook itself. A pending sweep prevents duplicate jobs. No schedule enables automatic test deletion.
+
+The gates keep their own record of each failure: whether its fix changed product code (a catch) or only tests (a false alarm), per test and module. Proposing reads it: modules whose tests have only ever raised false alarms, at least twice, become one more action list, to rewrite or to propose for removal with what covers them.

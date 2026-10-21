@@ -74,19 +74,40 @@ pub fn module_of(test: &str) -> String {
     test.split(['.', ' ']).next().unwrap_or(test).to_string()
 }
 
-/// The tests a gate's failed steps name; a failed step that names none counts as its command.
-pub fn failed_of(results: &[CommandResult]) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
+/// A failed test and the gate step that ran it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct Failed {
+    pub test: String,
+    pub step: String,
+}
+
+/// One failed gate: its revision, its failed tests, and the steps that ran and passed there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Failure {
+    pub commit: String,
+    pub tests: Vec<Failed>,
+    pub passed_steps: Vec<String>,
+}
+
+/// The tests a gate's failed steps name, each with its step; a failed step that names none counts
+/// as its command.
+pub fn failed_of(results: &[CommandResult]) -> Vec<Failed> {
+    let mut out: Vec<Failed> = Vec::new();
     for r in results.iter().filter(|r| !r.ok && !r.skipped) {
         let tests = crate::playbook::failed_tests(&r.output);
         let names = if tests.is_empty() { vec![r.command.clone()] } else { tests };
         for n in names {
-            if !out.contains(&n) {
-                out.push(n);
+            if !out.iter().any(|f| f.test == n) {
+                out.push(Failed { test: n, step: r.command.clone() });
             }
         }
     }
     out
+}
+
+/// The steps of a gate that ran and passed: where its tests were seen to pass.
+pub fn passed_steps(results: &[CommandResult]) -> Vec<String> {
+    results.iter().filter(|r| r.ok && !r.skipped).map(|r| r.command.clone()).collect()
 }
 
 /// A failed test and the revisions between which it was fixed.
@@ -97,23 +118,24 @@ pub struct FixSpan {
     pub fixed: String,
 }
 
-/// Each test of the failures since the last pass (oldest first), with the revision where it last
-/// failed and the next gate's revision, where it no longer did: its fix lies between them, even
-/// when that gate failed on other tests. `passed` is the passing revision that ends the run. A
-/// test that failed and passed on one revision was a flake, not fixed, and has no span.
-pub fn fix_spans(failures: &[(String, Vec<String>)], passed: &str) -> Vec<FixSpan> {
+/// Each test of the failures since the last pass (oldest first), from the revision where it last
+/// failed to the first later gate where it was seen to pass: one where its step ran and passed, or
+/// the passing gate (`passed`) that ends the run. A gate stops at its first failed step, so a test
+/// merely absent from a later failure may not have run there, and says nothing. A test that failed
+/// and passed on one revision was a flake, not fixed, and has no span.
+pub fn fix_spans(failures: &[Failure], passed: &str) -> Vec<FixSpan> {
     let mut spans = Vec::new();
-    for (i, (commit, tests)) in failures.iter().enumerate() {
-        let (next_commit, next_tests) = match failures.get(i + 1) {
-            Some((c, t)) => (c.as_str(), t.as_slice()),
-            None => (passed, &[][..]),
-        };
-        for t in tests {
-            // Still failing at the next gate: its span starts there.
-            if next_tests.contains(t) || next_commit == commit {
+    for (i, failure) in failures.iter().enumerate() {
+        let later = &failures[i + 1..];
+        for f in &failure.tests {
+            // A later failure of the same test holds its last failure; that record speaks for it.
+            if later.iter().any(|l| l.tests.iter().any(|t| t.test == f.test)) {
                 continue;
             }
-            spans.push(FixSpan { test: t.clone(), failed: commit.clone(), fixed: next_commit.to_string() });
+            let fixed = later.iter().find(|l| l.passed_steps.contains(&f.step)).map(|l| l.commit.as_str()).unwrap_or(passed);
+            if fixed != failure.commit {
+                spans.push(FixSpan { test: f.test.clone(), failed: failure.commit.clone(), fixed: fixed.to_string() });
+            }
         }
     }
     spans
@@ -128,6 +150,12 @@ pub struct ModuleCatches {
     pub false_alarms: i64,
 }
 
+/// Modules whose tests have only ever raised false alarms, at least twice, and caught nothing: the
+/// tests to rewrite or remove first, by evidence (NIT-557).
+pub fn false_alarm_modules(counts: &[ModuleCatches]) -> Vec<&ModuleCatches> {
+    counts.iter().filter(|m| m.catches == 0 && m.false_alarms >= 2).collect()
+}
+
 impl Db {
     /// Records a gate's outcome for its issue: a failure's tests wait for the fix; a pass after a
     /// failure diffs the two revisions in `worktree` and records each failed test's verdict. Best
@@ -137,16 +165,19 @@ impl Db {
             let tests = failed_of(results);
             if !tests.is_empty() {
                 self.conn.execute(
-                    "INSERT INTO gate_failure (issue_key, commit_sha, tests, failed_at) VALUES (?1, ?2, ?3, ?4)",
-                    params![issue, commit, serde_json::to_string(&tests)?, now()],
+                    "INSERT INTO gate_failure (issue_key, commit_sha, tests, passed_steps, failed_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![issue, commit, serde_json::to_string(&tests)?, serde_json::to_string(&passed_steps(results))?, now()],
                 )?;
             }
             return Ok(());
         }
-        let failures: Vec<(String, Vec<String>)> = {
-            let mut stmt = self.conn.prepare("SELECT commit_sha, tests FROM gate_failure WHERE issue_key = ?1 AND resolved_at IS NULL ORDER BY id")?;
-            let rows = stmt.query_map([issue], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()?.into_iter().map(|(c, t)| (c, serde_json::from_str(&t).unwrap_or_default())).collect()
+        let failures: Vec<Failure> = {
+            let mut stmt = self.conn.prepare("SELECT commit_sha, tests, passed_steps FROM gate_failure WHERE issue_key = ?1 AND resolved_at IS NULL ORDER BY id")?;
+            let rows = stmt.query_map([issue], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+                .into_iter()
+                .map(|(commit, tests, steps)| Failure { commit, tests: serde_json::from_str(&tests).unwrap_or_default(), passed_steps: serde_json::from_str(&steps).unwrap_or_default() })
+                .collect()
         };
         if failures.is_empty() {
             return Ok(());
@@ -197,14 +228,34 @@ mod tests {
     }
 
     /// A fails, its fix exposes B, B is fixed: both are recorded, each against its own fix (NIT-557
-    /// review). A test still failing at the next gate is judged by the gate where it stopped.
+    /// review). A test is fixed only where it was seen to pass: absent from a later failure whose
+    /// gate stopped before its step ran, it waits for the pass.
     #[test]
-    fn successive_failures_each_keep_their_own_fix() {
-        let f = |c: &str, t: &[&str]| (c.to_string(), t.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    fn a_test_is_fixed_where_it_was_seen_to_pass() {
+        let failure = |c: &str, tests: &[(&str, &str)], passed: &[&str]| Failure {
+            commit: c.into(),
+            tests: tests.iter().map(|(t, s)| Failed { test: t.to_string(), step: s.to_string() }).collect(),
+            passed_steps: passed.iter().map(|s| s.to_string()).collect(),
+        };
         let span = |t: &str, a: &str, b: &str| FixSpan { test: t.into(), failed: a.into(), fixed: b.into() };
-        assert_eq!(fix_spans(&[f("c1", &["A"]), f("c2", &["B"])], "c3"), vec![span("A", "c1", "c2"), span("B", "c2", "c3")]);
-        assert_eq!(fix_spans(&[f("c1", &["A", "B"]), f("c2", &["B"])], "c3"), vec![span("A", "c1", "c2"), span("B", "c2", "c3")]);
-        assert_eq!(fix_spans(&[f("c1", &["A"])], "c1"), vec![], "the same revision passing is a flake");
+        // A's step (cargo) ran and passed at c2, where npm failed on B.
+        let seen = [failure("c1", &[("A", "cargo")], &["npm"]), failure("c2", &[("B", "npm")], &["cargo"])];
+        assert_eq!(fix_spans(&seen, "c3"), vec![span("A", "c1", "c2"), span("B", "c2", "c3")]);
+        // c2 failed on B in an earlier step, so A's step never ran there: A is judged up to the pass.
+        let unseen = [failure("c1", &[("A", "cargo")], &["npm"]), failure("c2", &[("B", "npm")], &[])];
+        assert_eq!(fix_spans(&unseen, "c3"), vec![span("A", "c1", "c3"), span("B", "c2", "c3")]);
+        // Failing again later: only its last failure counts.
+        let again = [failure("c1", &[("A", "cargo")], &[]), failure("c2", &[("A", "cargo")], &[])];
+        assert_eq!(fix_spans(&again, "c3"), vec![span("A", "c2", "c3")]);
+        assert_eq!(fix_spans(&[failure("c1", &[("A", "cargo")], &[])], "c1"), vec![], "the same revision passing is a flake");
+    }
+
+    #[test]
+    fn only_modules_with_repeated_false_alarms_and_no_catch_are_flagged() {
+        let m = |module: &str, catches: i64, false_alarms: i64| ModuleCatches { module: module.into(), catches, false_alarms };
+        let counts = [m("lanes", 0, 3), m("land", 1, 4), m("notify", 0, 1)];
+        let flagged: Vec<&str> = false_alarm_modules(&counts).iter().map(|m| m.module.as_str()).collect();
+        assert_eq!(flagged, vec!["lanes"], "one catch keeps a module's tests; one false alarm is not a pattern");
     }
 
     #[test]
@@ -224,6 +275,8 @@ mod tests {
             r("cargo test", false, "test lanes::tests::a ... FAILED\ntest lanes::tests::b ... ok\nfailures:\n    lanes::tests::a\n"),
             r("npm run build", false, "error TS2304"),
         ];
-        assert_eq!(failed_of(&results), vec!["lanes::tests::a".to_string(), "npm run build".to_string()]);
+        let failed = |t: &str, step: &str| Failed { test: t.into(), step: step.into() };
+        assert_eq!(failed_of(&results), vec![failed("lanes::tests::a", "cargo test"), failed("npm run build", "npm run build")]);
+        assert_eq!(passed_steps(&results), vec!["npm test".to_string()]);
     }
 }

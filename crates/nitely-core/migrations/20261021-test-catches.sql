@@ -1,9 +1,12 @@
 -- A failed gate's tests, kept until the issue's next passing gate says what fixed them (NIT-557).
+-- `tests` holds each failed test with the step that ran it; `passed_steps` the steps that ran and
+-- passed, so a later failure shows which earlier failures it saw pass.
 CREATE TABLE gate_failure (
  id INTEGER PRIMARY KEY,
  issue_key TEXT NOT NULL,
  commit_sha TEXT NOT NULL,
  tests TEXT NOT NULL,
+ passed_steps TEXT NOT NULL DEFAULT '[]',
  failed_at INTEGER NOT NULL,
  resolved_at INTEGER
 );
