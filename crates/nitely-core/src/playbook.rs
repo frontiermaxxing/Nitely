@@ -1009,7 +1009,7 @@ pub(crate) fn run_shell(command: &str, dir: &Path) -> Result<(bool, String, u64)
 pub(crate) fn run_shell_kind(command: &str, dir: &Path, kind: &str) -> Result<(bool, String, u64)> {
     use std::io::Read;
     let share = crate::lanes::share();
-    let command = crate::lanes::node_tests_share(command, share.jobs);
+    let command = crate::lanes::tests_share(command, share.jobs);
     let mut cmd = shell_command(&command);
     cmd.current_dir(dir).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     crate::lanes::share_env(&mut cmd, share.jobs);

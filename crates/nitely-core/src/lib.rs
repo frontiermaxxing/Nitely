@@ -48,6 +48,7 @@ pub mod paths;
 pub mod performance;
 pub mod performance_attribution;
 pub mod performance_events;
+pub mod pace;
 pub mod phone;
 pub mod playbook;
 pub mod private_terms;

@@ -34,6 +34,27 @@ pub fn metrics() -> ProcessSnapshot {
 pub(crate) fn recorder_cost() -> Option<(u64,u64)> {win::recorder_cost()}
 #[cfg(all(test,windows))]
 pub(crate) fn recorder_io() -> Option<[u64;6]> {win::recorder_io()}
+/// The median milliseconds, over `samples` tries, to start a trivial process and see it end
+/// (NIT-519): `whoami` on Windows, `true` elsewhere. What every build tool and test that starts a
+/// process pays, so a machine where it has grown slow is told apart from one that is busy. None when
+/// none started.
+pub fn start_cost(samples: usize) -> Option<f64> {
+    let program = if cfg!(windows) { "whoami" } else { "true" };
+    let mut times: Vec<f64> = (0..samples.max(1))
+        .filter_map(|_| {
+            let mut cmd = crate::playbook::shell_free_command(program);
+            cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+            let at = std::time::Instant::now();
+            cmd.status().ok()?;
+            Some(at.elapsed().as_secs_f64() * 1000.0)
+        })
+        .collect();
+    if times.is_empty() {
+        return None;
+    }
+    times.sort_by(f64::total_cmp);
+    Some(times[times.len() / 2])
+}
 pub fn child_started(child: &std::process::Child) -> Option<String> {
     #[cfg(windows)] {
         use std::os::windows::io::AsRawHandle;

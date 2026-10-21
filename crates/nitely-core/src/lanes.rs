@@ -1383,7 +1383,8 @@ pub struct Budget {
     pub cores: u32,
     pub memory_gb: Option<u64>,
     /// Where `slots` comes from: `machine` (cores and memory), `settings` (`build_slots` in
-    /// Nitely's config) or `NITELY_BUILD_SLOTS`.
+    /// Nitely's config), `NITELY_BUILD_SLOTS`, or `pace` when slow process starts held the
+    /// machine's own number down (NIT-519).
     pub from: String,
 }
 
@@ -1420,13 +1421,23 @@ pub fn budget_for(cores: u32, limits: Option<&machine::Limits>, set: Option<(u32
 }
 
 /// This machine's budget: `NITELY_BUILD_SLOTS`, else `build_slots` in Nitely's config, else from
-/// its cores and memory.
+/// its cores and memory, held to the heavy runs its pace allows at once (NIT-519).
 pub fn machine_budget() -> Budget {
     let cores = std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1);
     let env = std::env::var("NITELY_BUILD_SLOTS").ok().and_then(|v| v.trim().parse::<u32>().ok());
     let settings = crate::Config::load_read_only().ok().and_then(|c| c.build_slots);
     let set = env.map(|n| (n, "NITELY_BUILD_SLOTS")).or(settings.map(|n| (n, "settings")));
-    budget_for(cores, machine::limits().as_ref(), set)
+    paced(budget_for(cores, machine::limits().as_ref(), set), &crate::pace::current())
+}
+
+/// `budget` held to `pace` when the machine decided its slots (one the person set stays): fewer
+/// slots while processes start slowly, each with the cores the others left (NIT-519).
+pub fn paced(budget: Budget, pace: &crate::pace::Pace) -> Budget {
+    let slots = pace.slots_for(budget.slots);
+    if budget.from != "machine" || slots >= budget.slots {
+        return budget;
+    }
+    Budget { slots, jobs: (build_cores(budget.cores) / slots).max(1), from: "pace".to_string(), ..budget }
 }
 
 /// What one request gets of the machine: cores for its build tools, and the memory it and all it
@@ -1453,10 +1464,20 @@ pub fn cap_for(limits: &machine::Limits, slots: u32) -> u64 {
 
 /// Holds a build command to its share of cores: the build tools that read one get it from the
 /// environment (`NITELY_JOBS`, `CARGO_BUILD_JOBS`, `MAKEFLAGS`, and `RUST_TEST_THREADS` for the
-/// tests cargo runs).
+/// tests cargo runs, fewer while the machine starts processes slowly, NIT-519).
 pub fn share_env(cmd: &mut std::process::Command, jobs: u32) {
+    let tests = crate::pace::current().test_threads_for(jobs).to_string();
     let jobs = jobs.to_string();
-    cmd.env("NITELY_JOBS", &jobs).env("CARGO_BUILD_JOBS", &jobs).env("RUST_TEST_THREADS", &jobs).env("MAKEFLAGS", format!("-j{jobs}"));
+    cmd.env("NITELY_JOBS", &jobs).env("CARGO_BUILD_JOBS", &jobs).env("RUST_TEST_THREADS", &tests).env("MAKEFLAGS", format!("-j{jobs}"));
+}
+
+/// `command` held to the test threads of a share of `jobs` cores at the machine's pace (NIT-519):
+/// `node --test` gets that concurrency, and a `--test-threads` over it comes down to it.
+pub fn tests_share(command: &str, jobs: u32) -> String {
+    let pace = crate::pace::current();
+    let threads = pace.test_threads_for(jobs);
+    let command = node_tests_share(command, threads);
+    if pace.test_threads.is_some() { crate::pace::cap_test_threads(&command, threads) } else { command }
 }
 
 /// `command` with `--test-concurrency=<jobs>` after a `node --test` that sets none: node runs a
@@ -3256,7 +3277,7 @@ fn switch(lane: &Path, commit: &str, keep: &[String]) -> Result<()> {
 /// of memory in the lane, a lane problem rather than the command's. Returns how it ended.
 fn run_logged(command: &str, dir: &Path, log: &Path, limit: Duration, share: Share, temp: Option<&Path>) -> Result<Ended> {
     use std::io::Write;
-    let command = node_tests_share(command, share.jobs);
+    let command = tests_share(command, share.jobs);
     let command = command.as_str();
     let mut file = std::fs::OpenOptions::new().create(true).append(true).open(log)?;
     writeln!(file, "$ {command}")?;
@@ -4373,6 +4394,12 @@ let id = db.conn.last_insert_rowid();
         let set = budget_for(32, Some(&gb(64)), Some((6, "settings")));
         assert_eq!((set.slots, set.jobs, set.from.as_str()), (6, 5, "settings"));
         assert_eq!(budget_for(32, Some(&gb(64)), Some((0, "settings"))).from, "machine", "0 is not a setting");
+        // Slow process starts (NIT-519): one heavy run at once with all 30 build cores; a number
+        // the person set stays theirs.
+        let slow = crate::pace::pace_for(&crate::pace::Measured { start_ms: Some(330.0), memory: None }, None, &Default::default());
+        let held = paced(budget_for(32, Some(&gb(64)), None), &slow);
+        assert_eq!((held.slots, held.jobs, held.from.as_str()), (1, 30, "pace"));
+        assert_eq!(paced(set.clone(), &slow).slots, 6);
     }
 
     /// Every slot at its cap still leaves the floor free (the NIT-291 review): on 64 GB, 5 slots

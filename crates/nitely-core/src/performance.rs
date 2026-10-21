@@ -121,6 +121,7 @@ impl Store {
             CREATE INDEX IF NOT EXISTS samples_time ON samples(wall_ms);
             CREATE INDEX IF NOT EXISTS minutes_time ON minutes(wall_ms);")?;
         crate::performance_events::schema(&db)?;
+        crate::pace::schema(&db)?;
         db.execute("INSERT INTO recorder_version VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET version=excluded.version WHERE excluded.version>version", [RECORDER_VERSION])?;
         crate::performance_attribution::schema(&db)?;
         Ok(Self { db })
@@ -228,7 +229,7 @@ impl Store {
         let tx = rusqlite::Transaction::new_unchecked(&self.db, rusqlite::TransactionBehavior::Immediate)?;
         if !self.current_version()? { bail!("use the newer Nitely to clear performance history"); }
         if self.settings()?.enabled { bail!("pause performance recording before deleting history"); }
-        tx.execute_batch("DELETE FROM samples; DELETE FROM minutes; DELETE FROM sessions; DELETE FROM attribution; DELETE FROM attribution_minutes; DELETE FROM workloads; DELETE FROM performance_event;")?;
+        tx.execute_batch("DELETE FROM samples; DELETE FROM minutes; DELETE FROM sessions; DELETE FROM attribution; DELETE FROM attribution_minutes; DELETE FROM workloads; DELETE FROM performance_event; DELETE FROM pace_adjustment;")?;
         tx.commit()?;
         self.db.execute_batch("VACUUM;")?;
         Ok(())
