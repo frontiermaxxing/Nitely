@@ -838,9 +838,6 @@ pub fn run_in(config: &crate::Config, db: &Db, dir: &str, issue: Option<&str>, c
     if command.trim().is_empty() {
         bail!("say which command to run");
     }
-    if let Some(why) = playbook::unsupported_command(command, cfg!(windows)) {
-        bail!("{why}");
-    }
     let (worktree, branch_key) = playbook::current_worktree(dir)?;
     let key = issue.map(str::to_string).or(branch_key);
     let record = match key.as_deref() {
@@ -866,6 +863,10 @@ pub fn run_in(config: &crate::Config, db: &Db, dir: &str, issue: Option<&str>, c
 /// is written as the request moves (queued, running, done), so another process can follow it with
 /// `Db::lane_run`. `on_event` is called with the run when it is queued and when it starts.
 pub fn run(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Actor, on_event: &mut dyn FnMut(&Run)) -> Result<Run> {
+    // On the machine that runs it, which a remote executor's request reaches here too (NIT-392).
+    if let Some(why) = playbook::unsupported_command(req.command, cfg!(windows)) {
+        bail!("{why}");
+    }
     // A run of one of the playbook's full suites goes to CI like a gate's (NIT-515), and so does a
     // whole Rust suite with no filter (NIT-514). Why CI could not take it goes on the run.
     let mut fallback: Option<String> = None;

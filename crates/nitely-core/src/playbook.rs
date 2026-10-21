@@ -1143,7 +1143,8 @@ pub(crate) fn sh_script(command: &str) -> String {
 /// the first line break, and joining the lines would change what `rem` and `%VAR%` mean, so on
 /// Windows a command of several lines is refused instead of passing on its first line (NIT-392).
 pub(crate) fn unsupported_command(command: &str, windows: bool) -> Option<String> {
-    (windows && command.trim().contains('\n')).then(|| {
+    // Any break before the end counts: cmd stops at a leading one too, running nothing.
+    (windows && command.trim_end_matches(['\r', '\n']).contains(['\r', '\n'])).then(|| {
         "on Windows a command runs through cmd, which stops at the first line break: send each line as its own run, or join them with && on one line".to_string()
     })
 }
@@ -1770,7 +1771,8 @@ mod tests {
         assert_eq!(sh_script("cd app\nnpm test\n"), "set -e\ncd app\nnpm test");
         assert_eq!(sh_script("npm test\n"), "npm test\n");
         assert!(unsupported_command("rem check\r\ncargo test\nnpm test", true).is_some());
-        assert_eq!(unsupported_command("cargo test\n", true), None);
+        assert!(unsupported_command("\nexit /b 7", true).is_some(), "a leading break runs nothing in cmd");
+        assert_eq!(unsupported_command("cargo test\r\n", true), None);
         assert_eq!(unsupported_command("cargo test\nnpm test", false), None);
     }
 
