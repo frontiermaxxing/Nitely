@@ -28,6 +28,7 @@ pub mod land;
 pub mod land_job;
 pub mod leaderboard;
 pub mod leaderboard_report;
+pub mod leaderboard_send;
 pub mod land_queue;
 pub mod lanes;
 mod lane_clone;

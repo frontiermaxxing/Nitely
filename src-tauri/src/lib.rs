@@ -17,6 +17,8 @@ const LAND_APPROVED_EVERY: Duration = Duration::from_secs(15);
 const WATCH_EVERY: Duration = Duration::from_millis(500);
 /// How often the app checks that every project with a crew has a supervisor running.
 const KEEP_CREWS_EVERY: Duration = Duration::from_secs(20);
+/// How often the app checks whether the Leaderboard's weekly send is due.
+const LEADERBOARD_EVERY: Duration = Duration::from_secs(3600);
 /// A supervisor the app started gets this long to show its heartbeat before it is started again.
 const CREW_START_GRACE: Duration = Duration::from_secs(90);
 /// Sent to the frontend when anything it shows may have changed.
@@ -406,6 +408,43 @@ async fn issue_spend(key: String) -> Result<nitely_core::usage::IssueSpend, Stri
 #[tauri::command]
 async fn leaderboard_stats(projects: Vec<String>) -> Result<nitely_core::leaderboard::Leaderboard, String> {
     nitely_core::leaderboard::stats_now(&Config::load().map_err(err)?, &db()?, &projects).map_err(err)
+}
+
+/// The weekly report exactly as it would be shared, for the opt-in page's preview. Sends nothing.
+#[tauri::command]
+async fn leaderboard_report(projects: Vec<String>, profile: nitely_core::leaderboard_report::Profile) -> Result<nitely_core::leaderboard_report::Report, String> {
+    nitely_core::leaderboard_report::report_now(&Config::load().map_err(err)?, &db()?, &projects, &profile).map_err(err)
+}
+
+/// Whether this install shares on the Leaderboard, its id and the last send. No network.
+#[tauri::command]
+async fn leaderboard_status() -> Result<nitely_core::leaderboard_send::Status, String> {
+    nitely_core::leaderboard_send::Sharing::default_dir().status(nitely_core::db::now()).map_err(err)
+}
+
+/// Joins, or saves a changed profile or project choice. Sends nothing.
+#[tauri::command]
+async fn leaderboard_join(profile: nitely_core::leaderboard_report::Profile, projects: Vec<String>) -> Result<nitely_core::leaderboard_send::Status, String> {
+    nitely_core::leaderboard_send::Sharing::default_dir().join(&profile, &projects, None).map_err(err)
+}
+
+/// Sends this week's report now, by the person's own hand.
+#[tauri::command]
+async fn leaderboard_send() -> Result<nitely_core::leaderboard_report::Report, String> {
+    nitely_core::leaderboard_send::Sharing::default_dir().send(&Config::load().map_err(err)?, &db()?).map_err(err)
+}
+
+/// The public board for `period`, fetched only when the person opens it.
+#[tauri::command]
+async fn leaderboard_board(period: String) -> Result<serde_json::Value, String> {
+    nitely_core::leaderboard_send::Sharing::default_dir().board(&period).map_err(err)
+}
+
+/// Deletes what this install sent; `leave` also stops sharing and forgets the key.
+#[tauri::command]
+async fn leaderboard_delete(leave: bool) -> Result<u64, String> {
+    let sharing = nitely_core::leaderboard_send::Sharing::default_dir();
+    if leave { sharing.leave() } else { sharing.delete() }.map_err(err)
 }
 
 /// A project's tokens per day and by agent and model, and what landed, over `days` days.
@@ -896,6 +935,14 @@ pub fn run() {
     });
 
     std::thread::spawn(keep_crews);
+    // The Leaderboard's weekly send: only once the person joined and sent by hand (leaderboard_send).
+    std::thread::spawn(|| loop {
+        std::thread::sleep(LEADERBOARD_EVERY);
+        let sent = Config::load().and_then(|config| nitely_core::leaderboard_send::Sharing::default_dir().send_if_due(&config, &nitely_core::db::Db::open_default()?));
+        if let Err(e) = sent {
+            eprintln!("leaderboard: {e:#}");
+        }
+    });
     // Tauri exits the process without unwinding this stack. The Exit callback must stop and
     // join the collector explicitly so ordinary quits leave a durable clean-stop marker.
     let mut performance_recording = Some(nitely_core::performance::background(nitely_core::performance::directory()));
@@ -1034,6 +1081,12 @@ pub fn run() {
             crew_status,
             issue_spend,
             leaderboard_stats,
+            leaderboard_report,
+            leaderboard_status,
+            leaderboard_join,
+            leaderboard_send,
+            leaderboard_board,
+            leaderboard_delete,
             project_spend,
             crew_pause,
             crew_settings,

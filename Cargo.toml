@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/nitely-core", "crates/nitely-cli", "src-tauri"]
+members = ["crates/nitely-core", "crates/nitely-cli", "src-tauri", "server/leaderboard"]
 
 [workspace.package]
 version = "0.1.0"

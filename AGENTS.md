@@ -153,6 +153,8 @@ once came just before a hard freeze (NIT-188), so:
 - `crates/nitely-cli`: the `nitely` binary, including `nitely mcp` (`src/mcp.rs`)
 - `src-tauri`: the desktop shell and its commands; `src`: the React frontend, with the shared visual
   primitives in `src/ui` and design tokens in `src/styles/tokens.css`
+- `server/leaderboard`: the Leaderboard service (its README). The person hosts it; agents build and
+  test it against a local instance only, and never deploy it
 - `docs/vision.md` is the end state and build order; `docs/design.md` is milestone 1; `docs/visualization.md` is
   the visual language every view follows; `docs/crew.md` is how Nitely runs agent workers itself;
   `docs/build-lanes.md` is the design, with measurements, for many agents per machine (light

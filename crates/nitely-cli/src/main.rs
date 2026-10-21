@@ -487,6 +487,39 @@ enum LeaderboardCmd {
         #[arg(long)]
         website: Option<String>,
     },
+    /// Join the Leaderboard, or change your display name, links or counted projects: makes this
+    /// install's signing key the first time. Sends nothing; `send` does.
+    Join {
+        /// The display name the board shows (not your name or email).
+        #[arg(long)]
+        name: String,
+        /// A project to count (repeat for more); without one, every project.
+        #[arg(long)]
+        project: Vec<String>,
+        #[arg(long)]
+        github: Option<String>,
+        #[arg(long)]
+        x: Option<String>,
+        #[arg(long)]
+        website: Option<String>,
+        /// The service's address (default: NITELY_LEADERBOARD_URL, else Nitely's own).
+        #[arg(long)]
+        url: Option<String>,
+    },
+    /// Send this week's report now (after that, the app sends it once a week).
+    Send,
+    /// Whether you share, your id, the service's address and the last send.
+    Status,
+    /// Fetch the public board.
+    Board {
+        /// week, 30d or all.
+        #[arg(long, default_value = "week")]
+        period: String,
+    },
+    /// Delete everything you sent from the board, and keep sharing.
+    Delete,
+    /// Stop sharing: delete what you sent and forget this install's key.
+    Leave,
 }
 
 #[derive(Subcommand)]
@@ -1713,6 +1746,19 @@ fn run(cmd: Cmd) -> Result<()> {
             let profile = nitely_core::leaderboard_report::Profile { display_name: name, github, x, website };
             print_json(&nitely_core::leaderboard_report::report_now(&config, &db, &project, &profile)?)
         }
+        Cmd::Leaderboard { command: LeaderboardCmd::Join { name, project, github, x, website, url } } => {
+            let profile = nitely_core::leaderboard_report::Profile { display_name: name, github, x, website };
+            print_json(&nitely_core::leaderboard_send::Sharing::default_dir().join(&profile, &project, url.as_deref())?)
+        }
+        Cmd::Leaderboard { command: LeaderboardCmd::Send } => {
+            let config = Config::load()?;
+            let db = Db::open_default()?;
+            print_json(&nitely_core::leaderboard_send::Sharing::default_dir().send(&config, &db)?)
+        }
+        Cmd::Leaderboard { command: LeaderboardCmd::Status } => print_json(&nitely_core::leaderboard_send::Sharing::default_dir().status(nitely_core::db::now())?),
+        Cmd::Leaderboard { command: LeaderboardCmd::Board { period } } => print_json(&nitely_core::leaderboard_send::Sharing::default_dir().board(&period)?),
+        Cmd::Leaderboard { command: LeaderboardCmd::Delete } => print_json(&serde_json::json!({ "deleted": nitely_core::leaderboard_send::Sharing::default_dir().delete()? })),
+        Cmd::Leaderboard { command: LeaderboardCmd::Leave } => print_json(&serde_json::json!({ "deleted": nitely_core::leaderboard_send::Sharing::default_dir().leave()? })),
         Cmd::Spend { issue, project, days } => {
             let config = Config::load()?;
             let db = Db::open_default()?;
