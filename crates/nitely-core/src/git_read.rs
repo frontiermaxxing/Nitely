@@ -18,11 +18,10 @@ pub(crate) fn answer(dir: &Path, args: &[&str]) -> Option<Result<String>> {
     }
     let question = Question::parse(args)?;
     let repo = open(dir)?;
-    // Below the top of a checkout, ls-tree lists that folder's part of the tree.
-    if matches!(question, Question::LsTree(_)) && repo.workdir().is_some() && !dir.join(".git").exists() {
-        return None;
-    }
-    question.answer(&repo, args)
+    // At the top of a checkout or in a bare repository; below the top, git answers some questions
+    // relative to the folder (ls-tree's listing, a relative git path).
+    let at_top = repo.workdir().is_none() || dir.join(".git").exists();
+    question.answer(&repo, args, at_top)
 }
 
 /// What this module answers, by the arguments git was given.
@@ -42,6 +41,23 @@ enum Question<'a> {
     CountRange(&'a str, &'a str),
     /// `branch --show-current`.
     CurrentBranch,
+    /// `rev-parse` asked where things are: each answer on its own line, in order.
+    Where(Vec<Place<'a>>),
+    /// `config --bool KEY`, for a key the repository's own config sets.
+    ConfigBool(&'a str),
+}
+
+/// One `rev-parse` question about where the repository is. `absolute` is
+/// `--path-format=absolute` before it.
+#[derive(Debug, PartialEq, Clone, Copy)]
+enum Place<'a> {
+    TopLevel,
+    AbsoluteGitDir,
+    GitDir { absolute: bool },
+    CommonDir { absolute: bool },
+    GitPath { name: &'a str, absolute: bool },
+    /// `--abbrev-ref HEAD`.
+    HeadBranch,
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -55,6 +71,28 @@ enum CatFile {
 impl<'a> Question<'a> {
     fn parse(args: &[&'a str]) -> Option<Question<'a>> {
         match args {
+            ["rev-parse", rest @ ..] if rest.first().is_some_and(|a| a.starts_with("--") && !matches!(*a, "--verify" | "--quiet")) => {
+                let mut places = Vec::new();
+                let mut absolute = false;
+                let mut rest = rest.iter();
+                while let Some(a) = rest.next() {
+                    places.push(match *a {
+                        "--path-format=absolute" => {
+                            absolute = true;
+                            continue;
+                        }
+                        "--show-toplevel" => Place::TopLevel,
+                        "--absolute-git-dir" => Place::AbsoluteGitDir,
+                        "--git-dir" => Place::GitDir { absolute },
+                        "--git-common-dir" => Place::CommonDir { absolute },
+                        "--git-path" => Place::GitPath { name: rest.next().filter(|n| own_git_path(n))?, absolute },
+                        "--abbrev-ref" if rest.next() == Some(&"HEAD") => Place::HeadBranch,
+                        _ => return None,
+                    });
+                }
+                (!places.is_empty()).then_some(Question::Where(places))
+            }
+            ["config", "--bool", key] if key.split('.').count() == 2 && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.') => Some(Question::ConfigBool(key)),
             ["rev-parse", rest @ ..] => {
                 let mut verify = false;
                 let mut quiet = false;
@@ -95,8 +133,26 @@ impl<'a> Question<'a> {
         }
     }
 
-    fn answer(&self, repo: &gix::Repository, args: &[&str]) -> Option<Result<String>> {
+    fn answer(&self, repo: &gix::Repository, args: &[&str], at_top: bool) -> Option<Result<String>> {
         match self {
+            Question::Where(places) => {
+                let mut out = String::new();
+                for place in places {
+                    out.push_str(&place.answer(repo, at_top)?);
+                    out.push('\n');
+                }
+                Some(Ok(out))
+            }
+            Question::ConfigBool(key) => {
+                let config = repo.config_snapshot();
+                // An include could set it again; git reads those, this does not.
+                if config.sections().any(|s| s.header().name().eq_ignore_ascii_case(b"include") || s.header().name().eq_ignore_ascii_case(b"includeIf")) {
+                    return None;
+                }
+                // Unset here, global or system config may still set it: git answers.
+                let value = config.try_boolean(*key).ok()??;
+                Some(Ok(format!("{value}\n")))
+            }
             Question::RevParse { revs, verify, quiet } => {
                 let mut out = String::new();
                 for rev in revs {
@@ -136,6 +192,7 @@ impl<'a> Question<'a> {
                 let yes = a == b || repo.merge_bases_many(a, &[b]).ok()?.iter().any(|m| m.detach() == a);
                 Some(if yes { Ok(String::new()) } else { Err(said_nothing(args, 1)) })
             }
+            Question::LsTree(_) if !at_top => None,
             Question::LsTree(t) => {
                 let tree = resolve(repo, &format!("{t}^{{tree}}"))??.detach();
                 let mut out = Vec::new();
@@ -174,6 +231,61 @@ impl<'a> Question<'a> {
             }
         }
     }
+}
+
+impl Place<'_> {
+    /// git's answer to this place question, or None to ask git: relative paths below the top of
+    /// a checkout, a bare repository's top level, an unborn or ambiguous HEAD branch.
+    fn answer(&self, repo: &gix::Repository, at_top: bool) -> Option<String> {
+        let git_dir = repo.git_dir();
+        let common = repo.common_dir();
+        // git's relative spelling: `.git` itself at a main checkout's top, the absolute folder in
+        // a linked worktree (its git folder is elsewhere).
+        let relative = |dir: &Path| -> Option<String> {
+            if !at_top || repo.workdir().is_none() {
+                return None;
+            }
+            if git_dir == common {
+                return (dir == common && common.file_name()? == ".git").then(|| ".git".to_string());
+            }
+            realpath(dir)
+        };
+        let spelled = |dir: &Path, absolute: bool| if absolute { realpath(dir) } else { relative(dir) };
+        match *self {
+            Place::TopLevel => realpath(repo.workdir()?),
+            Place::AbsoluteGitDir => realpath(git_dir),
+            Place::GitDir { absolute } => spelled(git_dir, absolute),
+            Place::CommonDir { absolute } => spelled(common, absolute),
+            Place::GitPath { name, absolute } => Some(format!("{}/{name}", spelled(git_dir, absolute)?)),
+            Place::HeadBranch => match repo.head_name().ok()? {
+                Some(name) => {
+                    repo.try_find_reference(name.as_ref()).ok()??;
+                    let branch = std::str::from_utf8(name.as_bstr().strip_prefix(b"refs/heads/")?).ok()?;
+                    (!shared_short_name(repo, branch)).then(|| branch.to_string())
+                }
+                None => Some("HEAD".to_string()),
+            },
+        }
+    }
+}
+
+/// A `--git-path` name git keeps in the worktree's own git folder: one that is none of the
+/// shared ones (config, refs, objects, hooks, ...) git maps to the common folder, nor the index
+/// GIT_INDEX_FILE can move.
+fn own_git_path(name: &str) -> bool {
+    const SHARED: [&str; 17] = ["branches", "common", "config", "description", "hooks", "info", "logs", "lost-found", "objects", "refs", "remotes", "worktrees", "rr-cache", "svn", "packed-refs", "shallow", "index"];
+    let first = name.split('/').next().unwrap_or("");
+    !name.is_empty()
+        && !SHARED.contains(&first)
+        && first != "HEAD"
+        && name.split('/').all(|c| !c.is_empty() && c != "." && c != "..")
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'/'))
+}
+
+/// Whether another ref shares `branch`'s short name, so git would spell it longer (`heads/x`).
+fn shared_short_name(repo: &gix::Repository, short: &str) -> bool {
+    let shared = [format!("refs/{short}"), format!("refs/tags/{short}"), format!("refs/remotes/{short}"), format!("refs/remotes/{short}/HEAD")];
+    shared.iter().any(|n| !matches!(repo.try_find_reference(n.as_str()), Ok(None))) || repo.git_dir().join(short).exists()
 }
 
 /// Appends `ls-tree -r -z`'s entries for the files below `tree`, whose path is `prefix`. None for a
@@ -377,8 +489,7 @@ pub(crate) fn branches(root: &Path, integration: &str) -> Option<Vec<crate::git:
         let mut reference = reference.ok()?;
         let full = reference.name().as_bstr().to_string();
         let short = full.strip_prefix("refs/heads/")?.to_string();
-        let shared = [format!("refs/{short}"), format!("refs/tags/{short}"), format!("refs/remotes/{short}"), format!("refs/remotes/{short}/HEAD")];
-        if shared.iter().any(|n| !matches!(repo.try_find_reference(n.as_str()), Ok(None))) || repo.git_dir().join(&short).exists() {
+        if shared_short_name(&repo, &short) {
             return None;
         }
         let commit = reference.peel_to_id().ok()?.object().ok()?.try_into_commit().ok()?;
@@ -427,8 +538,10 @@ mod tests {
             &["rev-parse", ":/Port the change"],
             &["rev-parse", "main..HEAD"],
             &["rev-parse", "--short", "HEAD"],
-            &["rev-parse", "--abbrev-ref", "HEAD"],
-            &["rev-parse", "--show-toplevel"],
+            &["rev-parse", "--abbrev-ref", "main"],
+            &["rev-parse", "--git-path", "config"],
+            &["rev-parse", "--git-path", "../x"],
+            &["rev-parse", "--show-toplevel", "HEAD"],
             &["rev-parse", "--verify", "HEAD", "main"],
             &["rev-parse", "--quiet", "HEAD"],
             &["rev-parse", "-q"],
@@ -588,6 +701,51 @@ mod tests {
         assert_eq!(super::branches(&root, "main"), None);
         // No such integration branch: git's listing without counts answers.
         assert_eq!(super::branches(&root, "develop"), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn says_where_the_repository_is_as_git_does_at_the_top_of_each_checkout() {
+        use crate::test_repo::{git, init};
+        let dir = crate::paths::unique_temp("nitely-git-read-where", "");
+        let root = dir.join("app");
+        init(&root, &[("src/a.txt", "a\n")]);
+        let wt = dir.join("wt");
+        git(&root, &["worktree", "add", "-q", "-b", "claude/app-1-x", &wt.to_string_lossy(), "main"]);
+        let sparse = dir.join("sparse");
+        git(&root, &["worktree", "add", "-q", "--detach", &sparse.to_string_lossy(), "main"]);
+        git(&sparse, &["config", "extensions.worktreeConfig", "true"]);
+        git(&sparse, &["config", "--worktree", "core.sparseCheckout", "yes"]);
+
+        let questions: [&[&str]; 9] = [
+            &["rev-parse", "--show-toplevel"],
+            &["rev-parse", "--absolute-git-dir"],
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            &["rev-parse", "--path-format=absolute", "--git-dir"],
+            &["rev-parse", "--git-dir"],
+            &["rev-parse", "--git-common-dir"],
+            &["rev-parse", "--git-path", "rebase-merge", "--git-path", "nitely-setup"],
+            &["rev-parse", "--path-format=absolute", "--git-path", "rebase-merge", "--git-path", "rebase-apply"],
+            &["rev-parse", "--abbrev-ref", "HEAD", "--path-format=absolute", "--git-path", "rebase-merge/head-name", "--show-toplevel"],
+        ];
+        for at in [&root, &wt, &sparse] {
+            for args in questions {
+                let ours = answer(at, args).unwrap_or_else(|| panic!("{args:?} in {at:?} went to git")).unwrap();
+                let o = crate::playbook::run_git(crate::playbook::shell_free_command("git").arg("-C").arg(at).args(args)).unwrap();
+                assert!(o.status.success(), "{args:?} in {at:?}");
+                assert_eq!(ours, String::from_utf8_lossy(&o.stdout), "{args:?} in {at:?}");
+            }
+        }
+        // The worktree's own setting, read as git normalises it.
+        assert_eq!(answer(&sparse, &["config", "--bool", "core.sparseCheckout"]).unwrap().unwrap(), "true\n");
+        // Unset in the repository: global or system config may set it, so git answers.
+        assert!(answer(&root, &["config", "--bool", "core.sparseCheckout"]).is_none());
+        // Below the top, relative paths are relative to the folder: git answers; absolute ones
+        // are the same anywhere.
+        let below = root.join("src");
+        assert!(answer(&below, &["rev-parse", "--git-path", "rebase-merge"]).is_none());
+        let o = crate::playbook::run_git(crate::playbook::shell_free_command("git").arg("-C").arg(&below).args(["rev-parse", "--show-toplevel"])).unwrap();
+        assert_eq!(answer(&below, &["rev-parse", "--show-toplevel"]).unwrap().unwrap(), String::from_utf8_lossy(&o.stdout));
         std::fs::remove_dir_all(&dir).ok();
     }
 }
