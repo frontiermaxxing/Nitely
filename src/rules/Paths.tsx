@@ -1,6 +1,6 @@
 import { useRef, type ReactNode } from "react";
 import type { PathRule } from "../types";
-import { Button, Checkbox, RemoveButton } from "../ui";
+import { Button, Checkbox, RemoveButton, SettingsRow, SettingsSection, SourceTag } from "../ui";
 import { Questions } from "./Questions";
 import type { RulesDraft } from "./shared";
 import { waitsSummary } from "./shared";
@@ -26,19 +26,13 @@ export function EmptyRules(props: { text: string; add?: ReactNode }) {
   );
 }
 
-/** One rule of the page: its name with the count beside it (amber unless `quiet`: amber is for what sends a change to you), why, then its table. */
-export function RuleRow(props: { title: string; count?: number; quiet?: boolean; why: string; section?: string; children: ReactNode }) {
+/** A rule's name with its count beside it: amber for what sends a change to you, grey otherwise. */
+function Counted(props: { title: string; count: number; quiet?: boolean }) {
   return (
-    <div className="rules-row" data-rules-section={props.section}>
-      <div className="rules-row-label">
-        <h3>
-          {props.title}
-          {!!props.count && <span className={`rules-count${props.quiet ? " rules-count-quiet" : ""}`}>{props.count}</span>}
-        </h3>
-        <p className="settings-why">{props.why}</p>
-      </div>
-      <div className="rules-row-control">{props.children}</div>
-    </div>
+    <span className="rules-counted">
+      {props.title}
+      {props.count > 0 && <span className={`rules-count${props.quiet ? " rules-count-quiet" : ""}`}>{props.count}</span>}
+    </span>
   );
 }
 
@@ -114,23 +108,26 @@ function Tile(props: { title: string; value: string; items?: { key: string; labe
 const count = (n: number, one: string) => (n === 0 ? "None" : `${n} ${one}${n === 1 ? "" : "s"}`);
 const paths = (rules: PathRule[]) => rules.map((r) => ({ key: r.pattern, label: r.pattern, detail: r.reason }));
 
+const LOCK = (
+  <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+    <rect x="2.5" y="5.5" width="7" height="5" rx="1" fill="none" stroke="currentColor" strokeWidth="1.2" />
+    <path d="M4 5.5V4a2 2 0 0 1 4 0v1.5" fill="none" stroke="currentColor" strokeWidth="1.2" />
+  </svg>
+);
+
+/** A list's own value is this project's; an empty one is Nitely's default of none. */
+const listSource = (n: number) => <SourceTag source={n ? "project" : "nitely"} />;
+
 /** What waits for you: every change, the paths and questions that send one to you, and paths no task may change. */
 export function Paths({ draft, ro, landBy, crossVendor, patch }: RulesDraft) {
   const summary = waitsSummary(draft, landBy, crossVendor);
   if (ro)
     return (
-      <section className="settings-card">
-        <div className="rules-section-head">
-          <h2>What waits for you</h2>
-          <span className="rules-lock">
-            <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
-              <rect x="2.5" y="5.5" width="7" height="5" rx="1" fill="none" stroke="currentColor" strokeWidth="1.2" />
-              <path d="M4 5.5V4a2 2 0 0 1 4 0v1.5" fill="none" stroke="currentColor" strokeWidth="1.2" />
-            </svg>
-            Set in the committed playbook. An agent can propose a change for you to approve.
-          </span>
-        </div>
-        <p className="settings-why">{summary}</p>
+      <SettingsSection title="What waits for you" description={summary}>
+        <p className="rules-lock">
+          {LOCK}
+          Set in the committed playbook. An agent can propose a change for you to approve.
+        </p>
         <div className="rules-tiles">
           <Tile title="Every change waits for me" value={draft.always_human ? "On" : "Off"} />
           <Tile title="Paths that need you" value={count(draft.human_paths.length, "path")} items={paths(draft.human_paths)} />
@@ -139,18 +136,18 @@ export function Paths({ draft, ro, landBy, crossVendor, patch }: RulesDraft) {
             <Tile title="Paths no task may change" value={count(draft.blocked_paths.length, "path")} items={paths(draft.blocked_paths)} />
           </div>
         </div>
-      </section>
+      </SettingsSection>
     );
   return (
-    <section className="settings-card">
-      <div className="rules-section-head">
-        <h2>What waits for you</h2>
-      </div>
-      <p className="settings-why">{summary}</p>
-      <RuleRow title="Every change waits for me" why="Overrides the lists below.">
+    <SettingsSection title="What waits for you" description={summary}>
+      <SettingsRow label="Every change waits for me" why="Overrides the lists below." source={draft.always_human ? <SourceTag source="project" /> : undefined}>
         <Checkbox checked={draft.always_human} onChange={(always_human) => patch({ always_human })} label={draft.always_human ? "On" : "Off"} aria-label="Every change waits for me" />
-      </RuleRow>
-      <RuleRow title="Paths that need you" count={draft.human_paths.length} why="A change that touches a matching path waits for you. Patterns are regular expressions over repo paths.">
+      </SettingsRow>
+      <SettingsRow
+        label={<Counted title="Paths that need you" count={draft.human_paths.length} />}
+        why="A change that touches a matching path waits for you. Patterns are regular expressions over repo paths."
+        source={listSource(draft.human_paths.length)}
+      >
         <PathRules
           label="Paths that need you"
           rules={draft.human_paths}
@@ -161,22 +158,28 @@ export function Paths({ draft, ro, landBy, crossVendor, patch }: RulesDraft) {
           tone="you"
           empty="None. No path sends a change to you."
         />
-      </RuleRow>
-      <RuleRow title="Questions the reviewer answers" count={draft.flags.length} why="For what a path cannot show. The reviewer ends with a yes or no for each; a yes sends the change to you.">
+      </SettingsRow>
+      <SettingsRow
+        label={<Counted title="Questions the reviewer answers" count={draft.flags.length} />}
+        why="For what a path cannot show. The reviewer ends with a yes or no for each; a yes sends the change to you."
+        source={listSource(draft.flags.length)}
+      >
         <Questions flags={draft.flags} onChange={(flags) => patch({ flags })} />
-      </RuleRow>
-      <RuleRow title="Paths no task may change" count={draft.blocked_paths.length} quiet why="Submit and land refuse a branch that touches these." section="refused">
-        <PathRules
-          label="Paths no task may change"
-          rules={draft.blocked_paths}
-          onChange={(blocked_paths) => patch({ blocked_paths })}
-          patternHint="^vendor/"
-          reasonHint="updated by its own process"
-          reasonHead="Why"
-          tone="refused"
-          empty="None. Every path can be changed."
-        />
-      </RuleRow>
-    </section>
+      </SettingsRow>
+      <div data-rules-section="refused">
+        <SettingsRow label={<Counted title="Paths no task may change" count={draft.blocked_paths.length} quiet />} why="Submit and land refuse a branch that touches these." source={listSource(draft.blocked_paths.length)}>
+          <PathRules
+            label="Paths no task may change"
+            rules={draft.blocked_paths}
+            onChange={(blocked_paths) => patch({ blocked_paths })}
+            patternHint="^vendor/"
+            reasonHint="updated by its own process"
+            reasonHead="Why"
+            tone="refused"
+            empty="None. Every path can be changed."
+          />
+        </SettingsRow>
+      </div>
+    </SettingsSection>
   );
 }
