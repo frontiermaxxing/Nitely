@@ -150,6 +150,11 @@ once came just before a hard freeze (NIT-188), so:
   GitHub/Bitbucket/Linear sync, snapshot, `connect.rs` (adding a repo and wiring up its agents).
   A schema change is a new file in `crates/nitely-core/migrations/` (its README), never an edit of
   `SCHEMA` in `db.rs`
+- `crates/nitely-crew`: the crew (`crew.rs`) and what is built on the core without the core
+  needing it: token usage, the leaderboard, waits, triage, the pulse, performance reads, reports.
+  Nothing in nitely-core may depend on it, so a change there skips nitely-core's tests. Its
+  methods on `Db` are extension traits (`CrewDb`, `TriageDb`, `UsageDb`): import the trait to call
+  one
 - `crates/nitely-cli`: the `nitely` binary, including `nitely mcp` (`src/mcp.rs`)
 - `src-tauri`: the desktop shell and its commands; `src`: the React frontend, with the shared visual
   primitives in `src/ui` and design tokens in `src/styles/tokens.css`
