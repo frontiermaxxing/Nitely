@@ -11,6 +11,18 @@
   ],
   "cases": [
     {
+      "name": "an answer to an agent that has gone waits in Todo until someone takes it",
+      "state": "Todo",
+      "events": [["ask", "Asked: which way?"], ["issue_moved", "In Progress → Needs You: waiting for the answer to ask 1"], ["answer", "Answered: this way", "human"], ["issue_moved", "Needs You → Todo: answered; it waits for the next agent, with the answer on its timeline", "human"]],
+      "expect": { "station": "todo", "stuck": "Answered, waiting for an agent", "asking": false }
+    },
+    {
+      "name": "the next agent taking an answered issue clears its wait",
+      "state": "In Progress",
+      "events": [["ask", "Asked: which way?"], ["issue_moved", "In Progress → Needs You: waiting for the answer to ask 1"], ["answer", "Answered: this way", "human"], ["issue_moved", "Needs You → Todo: answered; it waits for the next agent, with the answer on its timeline", "human"], ["claimed", "Took the issue"]],
+      "expect": { "stuck": null }
+    },
+    {
       "name": "YOLO skip clears an earlier gate failure without a review round",
       "state": "In Review",
       "events": [["gate_failed", "Gate failed"], ["gate_skipped", "YOLO mode: automatic gate skipped"], ["submit", "YOLO mode: automatic gate and PR review skipped"]],

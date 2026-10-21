@@ -296,6 +296,12 @@ pub struct Ask {
     /// The review finding the agent asks the person to accept as it is (`request_acceptance`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finding: Option<crate::accept::AskedFinding>,
+    /// When the answer reached an agent, and which (NIT-547): the one that asked, or the one that
+    /// took the issue up after it had gone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivered_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivered_to: Option<String>,
 }
 
 impl Ask {
@@ -618,6 +624,23 @@ fn issue_from_row(r: &Row) -> rusqlite::Result<IssueRecord> {
 }
 
 /// 0 (none) sorts after 4 (low).
+/// Where a ready issue goes in `next_task`'s order, first to last (NIT-547): one answered while its
+/// agent was gone first, whatever its priority, since a person is waiting on it to move; then by
+/// urgency, a goal's planning issue, its goal's place and target date, and its number.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct PickOrder {
+    not_answered: bool,
+    pub(crate) urgency: i64,
+    planning: i64,
+    goal: i64,
+    target: Option<String>,
+    pub(crate) number: i64,
+}
+
+pub(crate) fn pick_order(answered: bool, urgency: i64, planning: i64, goal: i64, target: Option<String>, number: i64) -> PickOrder {
+    PickOrder { not_answered: !answered, urgency, planning, goal, target, number }
+}
+
 fn rank(priority: i64) -> i64 {
     if priority == 0 { 5 } else { priority }
 }
@@ -1442,24 +1465,28 @@ impl Db {
         // date, 1 for one without, 2 for no active goal; then the target date.
         // An In Progress issue comes back only when no live claim holds it and it shows no work
         // (`idle_since`).
-        let candidates: Vec<Candidate> = {
+        // And whether it waits with an answer its asker never took (NIT-547): its latest move or
+        // claim is the move back to Todo that an answer to a gone agent makes.
+        let candidates: Vec<(Candidate, bool)> = {
             let mut stmt = tx.prepare(
                 "SELECT i.key, i.priority, i.number,
                         CASE WHEN i.labels LIKE '%\"planning\"%' THEN 0 ELSE 1 END,
-                        CASE WHEN g.id IS NULL THEN 2 WHEN g.target_date IS NULL THEN 1 ELSE 0 END, g.target_date, i.state
+                        CASE WHEN g.id IS NULL THEN 2 WHEN g.target_date IS NULL THEN 1 ELSE 0 END, g.target_date, i.state,
+                        i.state = 'Todo' AND COALESCE((SELECT e.summary FROM event e WHERE e.issue_key = i.key AND e.type IN ('issue_moved', 'claimed') ORDER BY e.id DESC LIMIT 1), '') LIKE ?3
                  FROM issue i LEFT JOIN goal g ON g.id = i.goal AND g.state = 'active'
                  WHERE i.project = ?1 COLLATE NOCASE AND i.origin = 'nitely' AND i.owner != 'human'
                    AND (i.state = 'Todo' OR (i.state = 'In Progress' AND (i.claimed_at IS NULL OR i.claimed_at < ?2)))",
             )?;
-            let rows = stmt.query_map(params![project, ts - CLAIM_TTL_SECS], |r| {
-                Ok(((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?), r.get::<_, String>(6)?))
+            let answered = format!("%{}%", crate::track::ANSWERED_WAITING_MOVE);
+            let rows = stmt.query_map(params![project, ts - CLAIM_TTL_SECS, answered], |r| {
+                Ok(((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?), r.get::<_, String>(6)?, r.get::<_, bool>(7)?))
             })?;
-            let rows: Vec<(Candidate, String)> = rows.collect::<rusqlite::Result<_>>()?;
+            let rows: Vec<(Candidate, String, bool)> = rows.collect::<rusqlite::Result<_>>()?;
             let sessions = recent_sessions(&tx, ts)?;
             let mut kept = Vec::new();
-            for (c, state) in rows {
+            for (c, state, answered) in rows {
                 if state == "Todo" || idle_since(&tx, &c.0, &sessions, ts)?.is_some() {
-                    kept.push(c);
+                    kept.push((c, answered));
                 }
             }
             kept
@@ -1467,11 +1494,11 @@ impl Db {
         let deps = Deps::load(&tx)?;
         let mut ready: Vec<_> = candidates
             .into_iter()
-            .filter(|(k, ..)| deps.blocked_by(k).is_empty() && !except.iter().any(|e| e.eq_ignore_ascii_case(k)))
-            .map(|(k, priority, number, planning, goal, target)| ((rank(deps.urgency(&k, priority)), planning, goal, target, number), k))
+            .filter(|((k, ..), _)| deps.blocked_by(k).is_empty() && !except.iter().any(|e| e.eq_ignore_ascii_case(k)))
+            .map(|((k, priority, number, planning, goal, target), answered)| (pick_order(answered, rank(deps.urgency(&k, priority)), planning, goal, target, number), k))
             .collect();
         ready.sort();
-        let ready: Vec<(String, i64, i64)> = ready.into_iter().map(|((r, _, _, _, number), k)| (k, r, number)).collect();
+        let ready: Vec<(String, i64, i64)> = ready.into_iter().map(|(o, k)| (k, o.urgency, o.number)).collect();
         let ready = crate::focus::filter_candidates(&tx, project, ready, default_goal_workers)?;
         let key = choose(&ready).filter(|k| ready.iter().any(|(r, _, _)| r == k));
         let Some(key) = key else {
@@ -2155,12 +2182,23 @@ impl Db {
     }
 
     /// Notes that these asks' answers reached the agents that asked.
-    pub fn mark_answers_delivered(&self, ids: &[i64]) -> Result<()> {
+    pub fn mark_answers_delivered(&self, ids: &[i64], to: &str) -> Result<()> {
         let ts = now();
         for id in ids {
-            self.conn.execute("UPDATE ask SET delivered_at = ?2 WHERE id = ?1 AND delivered_at IS NULL", params![id, ts])?;
+            self.conn.execute("UPDATE ask SET delivered_at = ?2, delivered_to = ?3 WHERE id = ?1 AND delivered_at IS NULL", params![id, ts, to])?;
         }
         Ok(())
+    }
+
+    /// Answers on issue `key` that reached no agent yet (NIT-547): what the agent that takes the
+    /// issue up next is told when its asker has gone.
+    pub fn answers_waiting_on(&self, key: &str) -> Result<Vec<Ask>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {ASK_COLUMNS} FROM ask a LEFT JOIN issue i ON i.key = a.issue_key COLLATE NOCASE
+             WHERE a.issue_key = ?1 COLLATE NOCASE AND a.answer IS NOT NULL AND a.delivered_at IS NULL ORDER BY a.answered_at"
+        ))?;
+        let rows = stmt.query_map([key], ask_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 }
 
@@ -2179,7 +2217,7 @@ fn latest_needs_you_entry(conn: &rusqlite::Connection, key: &str) -> Result<Opti
 /// closing an issue closed its asks (NIT-181) reads as closed with it, as one closed since does.
 const ASK_COLUMNS: &str = "a.id, a.issue_key, a.asked_by, a.question, a.options, a.answer, a.asked_at, a.answered_at,
     COALESCE(a.closed, CASE WHEN a.answer IS NULL AND i.state_type IN ('completed', 'canceled')
-                            THEN 'closed with ' || i.key || ' (' || i.state || ')' END), a.finding";
+                            THEN 'closed with ' || i.key || ' (' || i.state || ')' END), a.finding, a.delivered_at, a.delivered_to";
 
 fn ask_from_row(r: &Row) -> rusqlite::Result<Ask> {
     Ok(Ask {
@@ -2193,12 +2231,29 @@ fn ask_from_row(r: &Row) -> rusqlite::Result<Ask> {
         answered_at: r.get(7)?,
         closed: r.get(8)?,
         finding: r.get::<_, Option<String>>(9)?.and_then(|f| serde_json::from_str(&f).ok()),
+        delivered_at: r.get(10)?,
+        delivered_to: r.get(11)?,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// next_task's order (NIT-547): an issue answered while its agent was gone goes first, whatever
+    /// its priority; the rest by urgency, then planning, goal place, target date and number.
+    #[test]
+    fn an_answer_waiting_for_an_agent_is_picked_first() {
+        let mut order = vec![
+            (pick_order(false, 1, 1, 2, None, 3), "urgent"),
+            (pick_order(true, 4, 1, 2, None, 9), "answered, low priority"),
+            (pick_order(false, 1, 1, 0, Some("2026-11-01".into()), 5), "urgent in a dated goal"),
+            (pick_order(false, 3, 0, 2, None, 1), "a planning issue"),
+        ];
+        order.sort();
+        let picked: Vec<&str> = order.iter().map(|(_, n)| *n).collect();
+        assert_eq!(picked, ["answered, low priority", "urgent in a dated goal", "urgent", "a planning issue"]);
+    }
 
     fn db() -> (Db, std::path::PathBuf) {
         let dir = crate::paths::unique_temp("nitely-issues", "");
@@ -2838,7 +2893,7 @@ mod tests {
         assert_eq!((i.state.as_str(), i.claimed_by.as_deref()), ("In Progress", Some("claude:s")), "back to the live asker");
         let told = db.undelivered_answers(&["claude:s", "claude:c:/code/app"]).unwrap();
         assert_eq!(told.iter().map(Ask::outcome).collect::<Vec<_>>(), [format!("NIT-1: the person answered ask {} (\"EUR or USD?\"): EUR", a.id)]);
-        db.mark_answers_delivered(&[a.id]).unwrap();
+        db.mark_answers_delivered(&[a.id], "claude:test").unwrap();
         assert!(db.undelivered_answers(&["claude:s"]).unwrap().is_empty(), "told once");
 
         // Two questions: the first answer leaves it waiting on the second.

@@ -8,6 +8,11 @@ use std::collections::BTreeMap;
 
 use crate::issues::{IssueRecord, TimelineEntry};
 
+/// What the move of an answered issue whose asker is gone says (issues.rs `answer_ask`), and what
+/// the track says of it until an agent takes it (NIT-547).
+pub const ANSWERED_WAITING_MOVE: &str = "answered; it waits for the next agent";
+pub const ANSWERED_WAITING: &str = "Answered, waiting for an agent";
+
 pub const STATIONS: [&str; 8] = ["todo", "started", "working", "gate", "review", "needs", "landing", "done"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -117,12 +122,17 @@ pub fn track_of(issue: &IssueRecord, timeline: &[TimelineEntry], change_reviews:
     let mut w = Walk { current: "todo", since: None, arrived: BTreeMap::new() };
     let (mut gate_failed, mut review_failed, mut land_failed, mut push_failed) = (false, false, false, false);
     let (mut open_asks, mut rounds) = (0i64, 0i64);
+    // Answered while its agent was gone: back in Todo with the answer, until someone takes it (NIT-547).
+    let mut answered_waiting = false;
 
     for e in timeline {
         let summary = e.summary.as_deref().unwrap_or("");
         match e.kind.as_str() {
             "issue_created" => reach(&mut t, &mut w, "todo", e.ts),
-            "claimed" | "worktree" => reach(&mut t, &mut w, "started", e.ts),
+            "claimed" | "worktree" => {
+                answered_waiting = false;
+                reach(&mut t, &mut w, "started", e.ts)
+            }
             "status" | "note" | "handoff" => {
                 if t.reached.contains_key("started") && index(w.current) <= index("working") {
                     reach(&mut t, &mut w, "working", e.ts);
@@ -174,6 +184,7 @@ pub fn track_of(issue: &IssueRecord, timeline: &[TimelineEntry], change_reviews:
             }
             "issue_moved" => {
                 let Some(to) = moved_to(e.summary.as_deref()) else { continue };
+                answered_waiting = to == "Todo" && summary.contains(ANSWERED_WAITING_MOVE);
                 // Someone moving the issue has taken it from wherever it stopped. A failed push
                 // is the exception unless a person moves it: submit itself moves the issue back
                 // to In Progress after one, and the branch is still unseen.
@@ -221,6 +232,8 @@ pub fn track_of(issue: &IssueRecord, timeline: &[TimelineEntry], change_reviews:
             t.stuck = Some("Push failed".into());
         } else if review_failed {
             t.stuck = Some("Review did not finish".into());
+        } else if answered_waiting {
+            t.stuck = Some(ANSWERED_WAITING.into());
         }
     }
     t.since = if t.station == w.current { w.since } else { w.arrived.get(t.station).or(t.reached.get(t.station)).copied() };

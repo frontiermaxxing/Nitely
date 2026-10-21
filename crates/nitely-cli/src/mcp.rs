@@ -1234,6 +1234,12 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
                     if let Some(why) = why {
                         out["why"] = json!(why);
                     }
+                    // Answers its asker never took, now this agent's to act on (NIT-547).
+                    let answers = db.answers_waiting_on(&issue.key)?;
+                    if !answers.is_empty() {
+                        db.mark_answers_delivered(&answers.iter().map(|a| a.id).collect::<Vec<_>>(), actor.id())?;
+                        out["answers"] = json!(answers.iter().map(|a| a.outcome()).collect::<Vec<_>>());
+                    }
                     out
                 }
                 None => {
@@ -1724,12 +1730,14 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             let ask = db.ask(id)?.with_context(|| format!("no ask {id}"))?;
             // Read by its asker here, so it is not told again as a notice.
             if ask.answer.is_some() && [actor.id(), server.agent().as_str()].contains(&ask.asked_by.as_str()) {
-                db.mark_answers_delivered(&[ask.id])?;
+                db.mark_answers_delivered(&[ask.id], actor.id())?;
             }
+            let ask = db.ask(id)?.with_context(|| format!("no ask {id}"))?;
             match &ask.closed {
                 // Its issue closed first: nothing to wait for.
                 Some(why) => json!({ "id": ask.id, "question": ask.question, "answer": null, "closed": why }),
-                None => json!({ "id": ask.id, "question": ask.question, "answer": ask.answer }),
+                // Who the answer reached, and when (NIT-547).
+                None => json!({ "id": ask.id, "question": ask.question, "answer": ask.answer, "answered_at": ask.answered_at, "delivered_to": ask.delivered_to, "delivered_at": ask.delivered_at }),
             }
         }
         "triage" => {
@@ -1775,7 +1783,7 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
         let me = server.agent();
         let answers = db.undelivered_answers(&[actor.id(), me.as_str()])?;
         if !answers.is_empty() {
-            db.mark_answers_delivered(&answers.iter().map(|a| a.id).collect::<Vec<_>>())?;
+            db.mark_answers_delivered(&answers.iter().map(|a| a.id).collect::<Vec<_>>(), actor.id())?;
             let mut notices = out.get("notices").and_then(Value::as_array).cloned().unwrap_or_default();
             notices.extend(answers.iter().map(|a| json!(a.outcome())));
             out["notices"] = json!(notices);

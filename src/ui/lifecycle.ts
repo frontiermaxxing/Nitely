@@ -138,6 +138,7 @@ export function computeTrack(issue: IssueRecord, timeline?: TimelineEntry[], rev
   let pushFailed = false;
   let openAsks = 0;
   let rounds = 0;
+  let answeredWaiting = false;
 
   for (const e of timeline) {
     switch (e.kind) {
@@ -146,6 +147,7 @@ export function computeTrack(issue: IssueRecord, timeline?: TimelineEntry[], rev
         break;
       case "claimed":
       case "worktree":
+        answeredWaiting = false;
         reach("started", e.ts);
         break;
       case "status":
@@ -206,6 +208,7 @@ export function computeTrack(issue: IssueRecord, timeline?: TimelineEntry[], rev
       case "issue_moved": {
         const to = movedTo(e.summary);
         if (!to) break;
+        answeredWaiting = to === "Todo" && !!e.summary?.includes("answered; it waits for the next agent");
         // A person moving the issue after a stopped land or review has taken it from there.
         landFailed = false;
         reviewFailed = false;
@@ -241,6 +244,8 @@ export function computeTrack(issue: IssueRecord, timeline?: TimelineEntry[], rev
   else if (open && gateFailed) track.stuck = "Gate failed";
   else if (open && pushFailed) track.stuck = "Push failed";
   else if (open && reviewFailed) track.stuck = "Review did not finish";
+  // Answered while its agent was gone: in Todo with the answer until someone takes it (NIT-547).
+  else if (open && answeredWaiting) track.stuck = "Answered, waiting for an agent";
   return track;
 }
 
