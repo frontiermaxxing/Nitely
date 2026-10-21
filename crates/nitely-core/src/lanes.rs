@@ -961,7 +961,7 @@ fn run_with(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Act
     // Until it runs, a failure here (a lock that cannot be opened, a log folder that cannot be made)
     // closes the request's row: a queued row left behind would hold up the requests after it.
     let started = (|| -> Result<_> {
-        let quick = matches!(req.kind, Kind::Run) && quick_class(db, &root, req.command)?.is_some();
+        let quick = quick_request(db, &root, req.kind.as_str(), req.command)?.is_some();
         let (n, lock, slot) = take_turn(db, id, repo_root, pb, &rules, quick, &mut slots_now(), &mut read_memory, &mut memory_limits, yolo_keys)?;
         let logs = logs_dir(db, req.project);
         std::fs::create_dir_all(&logs)?;
@@ -1924,17 +1924,43 @@ const QUICK_SECS: i64 = 120;
 /// its last five finished runs, under `QUICK_SECS`; with none, `QUICK_SECS` when the command names
 /// a test filter (`names_test_filter`). None for a run that is not quick.
 fn quick_class(db: &Db, repo: &str, command: &str) -> Result<Option<i64>> {
+    Ok(match median_took(db, repo, "run", command)? {
+        None => names_test_filter(command).then_some(QUICK_SECS),
+        Some(median) => (median < QUICK_SECS).then_some(median),
+    })
+}
+
+/// Whether a request of `kind` is quick, and how many seconds it usually takes (NIT-480): a run
+/// by `quick_class`; a gate or land gate when every step it resolved to is light
+/// (`light_command`: `npm test`, `npm run build`, …) and its last ones took under `QUICK_SECS` at
+/// the median, or it has none. A quick request may take its repo's quick lane.
+fn quick_request(db: &Db, repo: &str, kind: &str, command: &str) -> Result<Option<i64>> {
+    if kind == "run" {
+        return quick_class(db, repo, command);
+    }
+    let steps: Vec<&str> = command.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    if steps.is_empty() || !steps.iter().all(|step| light_command(step)) {
+        return Ok(None);
+    }
+    Ok(match median_took(db, repo, kind, command)? {
+        None => Some(QUICK_SECS),
+        Some(median) => (median < QUICK_SECS).then_some(median),
+    })
+}
+
+/// The median seconds of the last five finished local requests of `kind` running `command` in
+/// `repo`, None with none.
+fn median_took(db: &Db, repo: &str, kind: &str, command: &str) -> Result<Option<i64>> {
     let mut stmt = db.conn.prepare(
-        "SELECT ended_at - started_at FROM lane_run WHERE repo = ?1 AND command = ?2 AND kind = 'run' AND state = 'done' AND executor = 'local'
+        "SELECT ended_at - started_at FROM lane_run WHERE repo = ?1 AND command = ?2 AND kind = ?3 AND state = 'done' AND executor = 'local'
          AND started_at IS NOT NULL AND ended_at IS NOT NULL ORDER BY id DESC LIMIT 5",
     )?;
-    let mut took: Vec<i64> = stmt.query_map(params![repo, command], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    let mut took: Vec<i64> = stmt.query_map(params![repo, command, kind], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
     if took.is_empty() {
-        return Ok(names_test_filter(command).then_some(QUICK_SECS));
+        return Ok(None);
     }
     took.sort_unstable();
-    let median = took[took.len() / 2].max(1);
-    Ok((median < QUICK_SECS).then_some(median))
+    Ok(Some(took[took.len() / 2].max(1)))
 }
 
 /// Whether `command` runs only some tests: `cargo test` with a test name or `--test <target>`
@@ -2194,7 +2220,9 @@ fn turns(rows: Vec<QueueRow>, slots: u32, served: &std::collections::HashMap<Str
             // First in its repo with a lane free, it simply takes that lane: the quick lane is
             // made only for a quick run that would wait (NIT-347).
             let would_wait = *n > 0 || lanes_for(&repo, &w.kind) <= 0;
-            if would_wait && w.kind == "run" && quick_of.contains_key(&w.id) && has_quick_lane.contains(&repo) && !quick_lane_busy.contains(&repo) && !lane_pick.contains_key(&repo) {
+            // A light gate as much as a quick run: an npm-only gate never waits out full gates
+            // while the quick lane stands empty (NIT-480).
+            if would_wait && quick_of.contains_key(&w.id) && has_quick_lane.contains(&repo) && !quick_lane_busy.contains(&repo) && !lane_pick.contains_key(&repo) {
                 lane_pick.insert(repo.clone(), (w.id, *n));
             }
             *n += 1;
@@ -2225,18 +2253,23 @@ fn turns(rows: Vec<QueueRow>, slots: u32, served: &std::collections::HashMap<Str
             // Its own lane: a free slot of the machine's, past what is kept for a land, or the one
             // slot beyond them that only a quick run takes.
             let ahead_of = if n == 0 { String::new() } else { format!(", ahead of {n} {} of its repo", if n == 1 { "request" } else { "requests" }) };
+            let what = match w.kind.as_str() {
+                "run" => "quick run",
+                "land" => "light land gate",
+                _ => "light gate",
+            };
             if (ahead.len() as i64) < free_slots - kept_slots {
                 ahead.push(w.id);
-                out.insert(w.id, Turn::QuickLane(format!("quick run: on its repo's quick lane{ahead_of}")));
+                out.insert(w.id, Turn::QuickLane(format!("{what}: on its repo's quick lane{ahead_of}")));
             } else if !quick_slot_given && (ahead.len() as i64) >= free_slots {
                 // Only with no slot of the machine's free: one kept for a land would be the one
                 // its lock takes.
                 quick_slot_given = true;
-                out.insert(w.id, Turn::QuickLane(format!("quick run: on its repo's quick lane and the machine's quick slot{ahead_of}")));
+                out.insert(w.id, Turn::QuickLane(format!("{what}: on its repo's quick lane and the machine's quick slot{ahead_of}")));
             } else if (ahead.len() as i64) < free_slots {
-                out.insert(w.id, Turn::Wait(format!("quick run{ahead_of}, waiting: a machine slot is kept for the land in progress")));
+                out.insert(w.id, Turn::Wait(format!("{what}{ahead_of}, waiting: a machine slot is kept for the land in progress")));
             } else {
-                out.insert(w.id, Turn::Wait(format!("quick run{ahead_of}, waiting: {} of {slots} machine slots and the quick slot in use ({})", running.len(), busy())));
+                out.insert(w.id, Turn::Wait(format!("{what}{ahead_of}, waiting: {} of {slots} machine slots and the quick slot in use ({})", running.len(), busy())));
             }
             continue;
         }
@@ -2350,18 +2383,19 @@ fn queue_rows(db: &Db, me: Option<i64>, alive: &mut dyn FnMut(&Requester) -> boo
         })?
         .collect::<rusqlite::Result<_>>()?;
     let now = now();
-    // Each run's quick class, once per command (NIT-347).
-    let mut classes: std::collections::HashMap<(String, String), Option<i64>> = std::collections::HashMap::new();
+    // Each request's quick class, once per kind and command (NIT-347, NIT-480).
+    let mut classes: std::collections::HashMap<(String, String, String), Option<i64>> = std::collections::HashMap::new();
     for (w, .., command, _) in &raw {
-        if w.kind == "run" && !classes.contains_key(&(w.repo.clone(), command.clone())) {
-            let class = quick_class(db, &w.repo, command)?;
-            classes.insert((w.repo.clone(), command.clone()), class);
+        let key = (w.repo.clone(), w.kind.clone(), command.clone());
+        if !classes.contains_key(&key) {
+            let class = quick_request(db, &w.repo, &w.kind, command)?;
+            classes.insert(key, class);
         }
     }
     let rows = raw
         .into_iter()
         .map(|(w, state, requester, lane_count, waits_for_checkout, issue, started_at, polled_at, scheduler, command, (lane, quick_lane, quick_slot))| {
-            let quick = if w.kind == "run" { classes.get(&(w.repo.clone(), command)).copied().flatten() } else { None };
+            let quick = classes.get(&(w.repo.clone(), w.kind.clone(), command)).copied().flatten();
             // A queued request whose requester has stopped looking for its turn (hung, suspended)
             // would never take it: it holds nobody up until it looks again (NIT-270).
             let stopped_looking = state == "queued" && polled_at.is_some_and(|t| now - t > STOPPED_LOOKING_SECS);
@@ -5179,6 +5213,52 @@ wanted {shown}", ran.output);
         let large = LaneRules { large_repo: true, ..Default::default() };
         assert!(!large.quick_lane(), "a Chromium-sized lane is too much disk for it");
         assert_eq!(lane_name(QUICK_LANE), "lane-quick");
+    }
+
+    /// Three full gates hold the lanes and a run waits at the head of the queue: an npm-only gate
+    /// takes the quick lane at once (NIT-480).
+    #[test]
+    fn a_light_gate_takes_the_quick_lane_while_full_gates_hold_the_lanes() {
+        let none = std::collections::HashMap::new();
+        let now = 10_000;
+        let nit = |w: Waiting| QueueRow { lane_count: 3, quick_lane: true, ..queued(w) };
+        let gate_running = |id: i64, lane: i64| QueueRow { lane_count: 3, quick_lane: true, lane: Some(lane), ..running(waiting(id, "NIT", "gate", now - 900), "NIT-1", now - 300) };
+        // Three full gates hold the lanes; a run waits for one at the head of the queue; then an
+        // npm-only gate (NIT-480).
+        let rows = vec![
+            gate_running(1, 1),
+            gate_running(2, 2),
+            gate_running(3, 3),
+            nit(waiting(10, "NIT", "run", now - 600)),
+            QueueRow { quick: Some(20), ..nit(waiting(14, "NIT", "gate", now - 30)) },
+        ];
+        let t = turns(rows, 5, &none, now, &Default::default());
+        assert_eq!(t[&14], Turn::QuickLane("light gate: on its repo's quick lane, ahead of 1 request of its repo".into()), "{t:?}");
+        assert_eq!(t[&10], Turn::LanesBusy("waiting: all 3 of its repo's lanes are busy".into()));
+    }
+
+    /// Which gates are light: every step it resolved to, with a short or no history (NIT-480).
+    #[test]
+    fn a_gate_of_light_steps_is_a_quick_request() {
+        let base = crate::paths::unique_temp("nitely-lane-light-gate", "");
+        std::fs::create_dir_all(&base).unwrap();
+        let db = Db::open(&base.join("t.db")).unwrap();
+        let repo = "C:/Code/app";
+        assert_eq!(quick_request(&db, repo, "gate", "npm test\nnpm run build").unwrap(), Some(QUICK_SECS), "no history: light by its steps");
+        assert_eq!(quick_request(&db, repo, "land", "npm test\nnpm run build").unwrap(), Some(QUICK_SECS));
+        assert_eq!(quick_request(&db, repo, "gate", "cargo test --workspace\nnpm test").unwrap(), None, "one heavy step");
+        assert_eq!(quick_request(&db, repo, "gate", "").unwrap(), None);
+        for seconds in [400, 380, 390] {
+            db.conn
+                .execute(
+                    "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, started_at, ended_at)
+                     VALUES ('APP', ?1, 'x', 'gate', 's', 't', 'b', 'npm test\nnpm run build', 'done', 'local', 100, 100, ?2)",
+                    params![repo, 100 + seconds],
+                )
+                .unwrap();
+        }
+        assert_eq!(quick_request(&db, repo, "gate", "npm test\nnpm run build").unwrap(), None, "light steps, but its gates have taken minutes");
+        std::fs::remove_dir_all(base).ok();
     }
 
     /// With every lane of its repo busy, a quick run takes the repo's quick lane at once; one at a
