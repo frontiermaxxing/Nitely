@@ -2556,7 +2556,8 @@ when_changed = ["billing"]
         std::fs::write(&lock, "NIT-9 pid 4000000000 since 2026-10-18T05:06:53Z\n").unwrap();
         let (a, _) = f.reviewed("Dead lock", "dead.txt", "x");
         let r = f.land(&a);
-        assert!(r.landed, "{r:?}");
+        // With no origin, the land is local: nothing is pushed.
+        assert!(r.landed && r.pushed.is_none(), "{r:?}");
         assert!(r.warnings.iter().any(|w| w.contains("took over the land lock NIT-9")), "{r:?}");
         assert!(!lock.exists(), "released after the land");
 

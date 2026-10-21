@@ -117,8 +117,12 @@ What changed, with no check dropped:
   - lands-together, conflict-in-the-middle and moved-since-review: one queue run
     instead of three.
 
-Three deletions were put to the person (ask 68 on NIT-498). They are not applied
-and not measured here.
+Three deletions were put to the person (ask 68 on NIT-498), approved, and applied
+after the measurements below, so they are not in them: the bisection of three
+(the bisection of five runs the same helper), the no-origin land at the end of
+the failed-push submit test (every land.rs land has no origin; the pushed-is-none
+check moved there), and the last two synchronous submits of the solution-summary
+job test.
 
 **Measurements.** Whole core suite, `cargo test -p nitely-core --lib --
 --test-threads=12` with `--report-time`, warm lane 1, once at the start and once

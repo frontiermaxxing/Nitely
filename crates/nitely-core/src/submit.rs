@@ -1591,17 +1591,13 @@ reason = "money logic"
         assert_eq!(s.state, "In Progress");
         assert!(s.next.contains("push failed"), "{}", s.next);
 
-        // A repo with no origin at all is local: submit hands the change in without a push, and
-        // land lands it without one.
+        // A repo with no origin at all is local: submit hands the change in without a push (land
+        // without one is land.rs's fixture, which has no remote).
         sh(&f.repo, &["remote", "remove", "origin"]);
-        let (issue, wt) = f.committed("Local tweak", "local.txt");
+        let (_, wt) = f.committed("Local tweak", "local.txt");
         let s = f.submit(&wt, false).unwrap();
         assert!(!s.pushed && s.pr_error.is_none(), "{s:?}");
         assert_eq!(s.state, "In Review", "{s:?}");
-        let dir = f.repo.to_string_lossy().into_owned();
-        let land = crate::land::LandOptions { dir: &dir, issue_key: &issue.key, push: true, keep: false, break_lock: false };
-        let landed = crate::land::land(&mut f.db, &f.config, &land, &f.actor).unwrap();
-        assert!(landed.landed && landed.pushed.is_none(), "{landed:?}");
     }
 
     /// Under a mode that reviews each land batch (NIT-509), submit gates a change and leaves its

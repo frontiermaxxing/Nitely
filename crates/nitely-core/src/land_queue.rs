@@ -1321,11 +1321,6 @@ reason = "billing"
     }
 
     #[test]
-    fn a_bad_change_is_bisected_out_of_three() {
-        bisects(3, 1);
-    }
-
-    #[test]
     fn a_bad_change_is_bisected_out_of_five() {
         bisects(5, 3);
     }

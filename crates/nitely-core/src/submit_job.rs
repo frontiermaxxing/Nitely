@@ -582,14 +582,6 @@ mod tests {
         assert_ne!(latest.commit_sha, first.commit_sha);
         assert!(latest.solution.is_none());
         assert_eq!(latest.gate.as_ref().unwrap().commit, latest.commit_sha);
-
-        // A fresh synchronous submission can explain this revision. Omitting text on a later
-        // submission stays missing; neither the prior round nor an issue note fills it in.
-        let fresh = crate::submit::submit(&mut db, &config, &opts, &actor).unwrap();
-        assert_eq!(fresh.solution.as_ref(), Some(&solution));
-        let legacy = SubmitOptions { solution: None, ..opts };
-        crate::submit::submit(&mut db, &config, &legacy, &actor).unwrap();
-        assert!(db.reviews(&key).unwrap()[0].solution.is_none());
         drop(db);
         std::fs::remove_dir_all(base).ok();
     }
