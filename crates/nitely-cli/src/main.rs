@@ -1515,6 +1515,14 @@ fn run(cmd: Cmd) -> Result<()> {
                 // A key from before its project changed key names the same issue.
                 IssueCmd::Move { key, state, evidence, reason } => {
                     let key = db.current_key(&key)?;
+                    // Recorded as landed when it reached the integration branch another way (NIT-361).
+                    if let (true, Some(evidence)) = (nitely_core::issues::parse_state(&state)?.0 == "Done", evidence.as_deref()) {
+                        let project = db.issue(&key)?.and_then(|i| i.project);
+                        let here = std::env::current_dir()?.to_string_lossy().into_owned();
+                        if let Ok(root) = nitely_core::playbook::repo_for_issue(&nitely_core::Config::load().unwrap_or_default(), project.as_deref(), &here) {
+                            nitely_core::landed_elsewhere::record(&db, &root, &key, evidence, &me)?;
+                        }
+                    }
                     db.check_open_asks(&key, &state)?;
                     print_json(&db.move_issue(&key, &state, evidence.as_deref(), reason.as_deref(), &me)?)
                 }

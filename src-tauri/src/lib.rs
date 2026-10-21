@@ -491,6 +491,13 @@ async fn move_issue(key: String, state: String, evidence: Option<String>, reason
     // The key first: an approval the app cannot sign would not let anything land.
     let secret = if approving { Some(approval_key(&db)?) } else { None };
     db.check_open_asks(&key, &state).map_err(err)?;
+    // Recorded as landed when it reached the integration branch another way (NIT-361).
+    if let (Ok(("Done", _)), Some(evidence)) = (nitely_core::issues::parse_state(&state), evidence.as_deref()) {
+        let project = db.issue(&key).map_err(err)?.and_then(|i| i.project);
+        if let Ok(root) = nitely_core::playbook::repo_for_issue(&nitely_core::Config::load().unwrap_or_default(), project.as_deref(), ".") {
+            nitely_core::landed_elsewhere::record(&db, &root, &key, evidence, &ME).map_err(err)?;
+        }
+    }
     let moved = db.move_issue(&key, &state, evidence.as_deref(), reason.as_deref(), &ME).map_err(err)?;
     // Approving a playbook proposal applies it and closes its issue at once: nothing to land.
     if let Some(secret) = secret.filter(|_| moved.state == "Approved") {
