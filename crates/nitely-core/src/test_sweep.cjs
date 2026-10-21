@@ -14,7 +14,7 @@ function parseLog(text, run, revision, source) {
     const line = raw.trimEnd();
     const binary = line.match(/^\s*Running .*\((?:.*[\\/])?([^\\/()]+?)-[0-9a-f]{6,}(?:\.exe)?\)$/);
     if (binary) { suite = binary[1]; continue; }
-    const rust = line.match(/^test (\S+) \.\.\. (ok|FAILED|ignored)(?:, [^<]*)?(?: <(\d+(?:\.\d+)?)s>)?$/);
+    const rust = line.match(/^test (\S+)(?: - should panic)? \.\.\. (ok|FAILED|ignored)(?:, [^<]*)?(?: <(\d+(?:\.\d+)?)s>)?$/);
     if (rust) { rows.push({ id: suite ? suite + '::' + rust[1] : rust[1], name: rust[1], runner: 'rust', outcome: rust[2] === 'ok' ? 'pass' : rust[2] === 'FAILED' ? 'fail' : 'skip', run, revision, source, ...(rust[3] ? { duration_ms: Number(rust[3]) * 1000 } : {}) }); continue; }
     const tap = line.match(/^( *)(not )?ok \d+(?: - (.+?))?(?: # (SKIP|TODO|skip|todo)\b.*)?$/);
     if (tap) {
@@ -80,9 +80,10 @@ function classify(observations, tests, revision) {
   for (const [id, all] of by) {
     const rows = [...new Map(all.map(o => [o.run, o])).values()]; const pass = rows.filter(o => o.outcome === 'pass').length, fail = rows.filter(o => o.outcome === 'fail').length;
     const t = attach(rows[0].name);
-    const retried = rows.filter(o => o.flaky).length;
+    // A pass that needed a retry; a retry that failed too is a failure like any other.
+    const retried = rows.filter(o => o.flaky && o.outcome === 'pass').length;
     if (pass && fail) push('fix', 'Flaky: ' + id, `${pass} passing and ${fail} failing distinct runs at ${revision}. Sources: ${rows.map(o=>o.source).join(', ')}`, t, id);
-    else if (retried) push('fix', 'Flaky: ' + id, `${retried} run(s) at ${revision} passed only after a failed attempt (the runner's retry). Sources: ${rows.filter(o => o.flaky).map(o=>o.source).join(', ')}`, t, id);
+    else if (retried) push('fix', 'Flaky: ' + id, `${retried} run(s) at ${revision} passed only after a failed attempt (the runner's retry). Sources: ${rows.filter(o => o.flaky && o.outcome === 'pass').map(o=>o.source).join(', ')}`, t, id);
     else if (fail >= 2) push('fix', 'Repeated failure: ' + id, `${fail} failing runs and no passing run at ${revision}. Repair or explicitly justify retirement; failure alone is not evidence to delete. Sources: ${rows.map(o=>o.source).join(', ')}`, t, id);
     const durations = rows.map(o => o.duration_ms).filter(Number.isFinite).sort((a,b) => a-b); if (durations.length) times.push({ id, t, ms: durations[Math.floor(durations.length / 2)], n: durations.length });
   }

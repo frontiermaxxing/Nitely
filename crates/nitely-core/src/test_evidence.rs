@@ -82,7 +82,6 @@ pub fn detect(text: &str) -> Vec<Format> {
     let mut found = Vec::new();
     if lines().any(|l| {
         (l.starts_with("test ") && l.contains(" ... "))
-            || l.starts_with("running ")
             || l.contains("\"type\": \"test\"")
             || l.contains("\"type\":\"test\"")
     }) {
@@ -172,6 +171,8 @@ pub fn junit(text: &str) -> Run {
     let mut case: Option<Observation> = None;
     // The run's time: `<testsuites time>` when it is there, else the sum of the outermost suites'.
     let (mut root_time, mut suite_time) = (None, None::<f64>);
+    // `<testsuites>` still open (a file cut between suites), and the names that may say the runner.
+    let (mut root_open, mut root_name, mut suite_name) = (false, None, None);
     let case_from = |e: &BytesStart, suites: &[(Option<String>, Option<String>)]| {
         let name = attr(e, "name").unwrap_or_default();
         let suite = attr(e, "classname").or_else(|| suites.last().and_then(|s| s.0.clone()));
@@ -196,6 +197,7 @@ pub fn junit(text: &str) -> Run {
                     "testsuite" => {
                         suites.pop();
                     }
+                    "testsuites" => root_open = false,
                     _ => {}
                 }
                 continue;
@@ -214,10 +216,12 @@ pub fn junit(text: &str) -> Run {
         match e.local_name().as_ref() {
             "testsuites" => {
                 root_time = attr(&e, "time").as_deref().and_then(seconds);
-                run.runner = attr(&e, "name").filter(|n| !n.is_empty());
+                root_name = attr(&e, "name");
+                root_open = !empty;
             }
             "testsuite" => {
                 if suites.is_empty() {
+                    suite_name = suite_name.or_else(|| attr(&e, "name"));
                     if let Some(s) = attr(&e, "time").as_deref().and_then(seconds) {
                         suite_time = Some(suite_time.unwrap_or(0.0) + s);
                     }
@@ -240,7 +244,8 @@ pub fn junit(text: &str) -> Run {
         }
     }
     run.seconds = root_time.or(suite_time);
-    if case.is_some() || !suites.is_empty() {
+    run.runner = Some(runner_named([root_name, suite_name]));
+    if case.is_some() || !suites.is_empty() || root_open {
         run.complete = false;
         run.warnings.push("the XML ends inside a test suite: the file was cut, and the tests after it are unknown".into());
     }
@@ -252,6 +257,37 @@ pub fn junit(text: &str) -> Run {
     run
 }
 
+/// The runner a JUnit file names: `<testsuites name>` or the first `<testsuite name>` when it is
+/// one of the runners that sign their files (pytest's `pytest`, jest's `jest tests`,
+/// cargo-nextest's `nextest-run`, ...), else plain `junit`: Surefire, Gradle and .NET name suites
+/// after classes, and the evidence's descriptor can say which it was.
+fn runner_named(names: [Option<String>; 2]) -> String {
+    const KNOWN: &[&str] = &[
+        "pytest",
+        "jest",
+        "vitest",
+        "nextest",
+        "gotestsum",
+        "mocha",
+        "karma",
+        "playwright",
+        "cypress",
+        "phpunit",
+        "rspec",
+    ];
+    names
+        .into_iter()
+        .flatten()
+        .find_map(|n| {
+            let lower = n.to_lowercase();
+            KNOWN
+                .iter()
+                .find(|k| lower.starts_with(*k))
+                .map(|k| k.to_string())
+        })
+        .unwrap_or_else(|| "junit".into())
+}
+
 /// Rust's libtest, as `cargo test` prints it: `test name ... ok` (with ` <1.234s>` under
 /// `--report-time`) under each `Running … (…/deps/<binary>-<hash>)`, or its `--format json` lines.
 /// A binary that started (`running N tests`) and never printed its `test result:` was cut short.
@@ -260,7 +296,7 @@ pub fn libtest(text: &str) -> Run {
     static RUNNING: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let line = LINE.get_or_init(|| {
         regex::Regex::new(
-            r"^test (\S+) \.\.\. (ok|FAILED|ignored)(?:, [^<]*)?(?: <(\d+(?:\.\d+)?)s>)?\s*$",
+            r"^test (\S+)(?: - should panic)? \.\.\. (ok|FAILED|ignored)(?:, [^<]*)?(?: <(\d+(?:\.\d+)?)s>)?\s*$",
         )
         .unwrap()
     });
@@ -482,6 +518,8 @@ mod tests {
         let r = junit(pytest);
         assert!(r.complete, "{:?}", r.warnings);
         assert_eq!(r.seconds, Some(1.204));
+        // pytest signs its one <testsuite>, not <testsuites>.
+        assert_eq!(r.runner.as_deref(), Some("pytest"));
         assert_eq!(
             summary(&r),
             [
@@ -588,6 +626,8 @@ mod tests {
 </testsuite>"#;
         let r = junit(surefire);
         assert_eq!(r.seconds, Some(1234.5));
+        // Surefire names suites after classes: the runner is plain JUnit unless the descriptor says.
+        assert_eq!(r.runner.as_deref(), Some("junit"));
         assert_eq!(
             (r.tests[1].outcome, r.tests[1].flaky),
             (Outcome::Fail, true)
@@ -620,6 +660,9 @@ mod tests {
         );
         let broken = "<testsuites><testsuite name=\"s\"><testcase name=\"a\" time=\"1\"></testsuite></testcase>";
         assert!(!junit(broken).complete);
+        // Cut between suites: every suite closed, <testsuites> not.
+        let between = r#"<testsuites><testsuite name="s"><testcase name="a"/></testsuite>"#;
+        assert!(!junit(between).complete);
         let empty = "<testsuites></testsuites>";
         assert!(!junit(empty).complete);
         assert!(!read("Build failed: no tests ran").complete);
@@ -656,6 +699,12 @@ mod tests {
         let cut = "running 5 tests\ntest a ... ok\ntest b ... ok\n";
         let r = read(cut);
         assert!(!r.complete && r.tests.len() == 2, "{r:?}");
+        // A #[should_panic] test prints its name with ` - should panic`.
+        let panics = "running 1 test\ntest rejects - should panic ... FAILED\n\ntest result: FAILED. 0 passed; 1 failed; finished in 0.01s\n";
+        assert_eq!(
+            summary(&read(panics)),
+            [("rejects".to_string(), Outcome::Fail, None)]
+        );
     }
 
     /// node:test's TAP: leaves only, skips, times, the run's time, and a run short of its plan.

@@ -51,4 +51,8 @@ test('a fresh run keeps stderr and stdout in order, and a pass only on retry is 
   assert.deepEqual(parseLog(out.text, '1', revision, 'lane 1').map(r => r.id), ['shop::cart::adds']);
   const retried = { id: 'cart::adds', name: 'adds', outcome: 'pass', run: 'ci-1', revision, source: 'CI 1', flaky: true, ambiguous: false };
   assert.match(classify([retried], [], revision)[0].title, /^Flaky: cart::adds/);
+  // Every attempt failed in two runs: a repeated failure, not a flake.
+  const failedRetry = (run) => ({ ...retried, run, outcome: 'fail' });
+  assert.match(classify([failedRetry('ci-1'), failedRetry('ci-2')], [], revision)[0].title, /^Repeated failure: cart::adds/);
+  assert.deepEqual(parseLog('test rejects - should panic ... FAILED', '1', revision, 'lane 1').map(r => [r.id, r.outcome]), [['rejects', 'fail']]);
 });

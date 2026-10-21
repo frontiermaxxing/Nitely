@@ -7,7 +7,7 @@ use std::path::PathBuf;
 pub enum Command {
     /// Read-only source inventory and imported logs by default. --execute uses a build lane.
     Collect {
-        /// JSON array of {path,revision,run,source} evidence descriptors. No suites run by default.
+        /// JSON array of {path,revision,run,source,runner?} evidence descriptors. No suites run by default.
         #[arg(long)]
         logs: Option<PathBuf>,
         #[arg(long)]
@@ -149,6 +149,13 @@ pub fn run(command: Command) -> Result<()> {
                     log["revision"].as_str().unwrap_or_default(),
                     &source,
                 );
+                // The descriptor may name the runner a JUnit file does not (Surefire, Gradle, .NET).
+                let (mut rows, mut run) = (rows, run);
+                if let Some(runner) = log["runner"].as_str() {
+                    for row in rows.iter_mut().chain(std::iter::once(&mut run)) {
+                        row["runner"] = runner.into();
+                    }
+                }
                 observations.extend(rows);
                 imported_runs.push(run);
             }
