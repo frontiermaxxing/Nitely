@@ -1,4 +1,4 @@
-// The real app on the large board (crates/nitely-core/src/perf.rs, seeded by `nitely perf-seed`:
+// The real app on the large board (crates/nitely-crew/src/perf.rs, seeded by `nitely perf-seed`:
 // 4 projects, 800 issues, 30 worktrees, 5,000 events): start-up, the Inbox and an issue opening, and
 // the page's memory over many live updates, each within its budget (NIT-255). `npm run app:test`;
 // CI runs it on Windows. The harness app is a debug Rust build, so its times are slower than a

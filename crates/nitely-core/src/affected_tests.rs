@@ -1159,6 +1159,14 @@ mod tests {
             assert!(s.checks.iter().filter(|c| c.discovery.is_some()).all(|c| c.command.contains(&format!("-p nitely-{}", if component == "cli" { "cli" } else { "app" }))), "{path}: {:?}", s.checks);
             assert!(!s.checks.iter().any(|c| c.command.contains("nitely-core")), "{path}");
         }
+        // A change only to the crew: its own clippy and tests, and the two crates above it, not
+        // nitely-core's (NIT-497).
+        let path = "crates/nitely-crew/src/waits.rs";
+        let s = select(&candidate(&[(path, &edited(path))]));
+        assert!(!s.full, "{path}: {:?}", s.reasons);
+        assert_eq!(s.components, ["crew", "cli", "app"], "{path}");
+        assert!(s.checks.iter().any(|c| c.command == "cargo clippy -p nitely-crew -- -D warnings"), "{:?}", s.checks);
+        assert!(!s.checks.iter().any(|c| c.command.contains("nitely-core")), "{:?}", s.checks);
         // A build script or what it reads keeps the full gate.
         for path in ["src-tauri/tauri.conf.json", "src-tauri/capabilities/default.json", "crates/nitely-cli/build.rs"] {
             let s = select(&candidate(&[(path, &edited(path))]));

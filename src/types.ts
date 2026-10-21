@@ -35,7 +35,7 @@ export interface CrewWorker {
   phase: string;
 }
 
-/** Tokens one model used (crates/nitely-core/src/usage.rs). Tokens are new input, cache writes and output. */
+/** Tokens one model used (crates/nitely-crew/src/usage.rs). Tokens are new input, cache writes and output. */
 export interface ModelTokens {
   vendor: string;
   model: string;
@@ -113,7 +113,7 @@ export interface CrewStatus {
   recent: CrewWorker[];
 }
 
-/** One repo's crew as the Crew section edits it (crates/nitely-core/src/crew_settings.rs). */
+/** One repo's crew as the Crew section edits it (crates/nitely-crew/src/crew_settings.rs). */
 export interface CrewView {
   repo: string;
   root: string;
@@ -742,7 +742,7 @@ export interface Applied {
   failed: string[];
 }
 
-// The Pulse home view (crates/nitely-core/src/pulse.rs).
+// The Pulse home view (crates/nitely-crew/src/pulse.rs).
 
 export interface GateRun {
   ts: number;

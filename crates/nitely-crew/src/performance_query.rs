@@ -1,6 +1,6 @@
 //! Bounded cached machine-history queries shared by the app, CLI and MCP.
-use crate::performance::{self, Metrics, Minute, Sample, Session, Settings, Store};
-use crate::performance_attribution::{AttributionSample, Workload};
+use nitely_core::performance::{self, Metrics, Minute, Sample, Session, Settings, Store};
+use nitely_core::performance_attribution::{AttributionSample, Workload};
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -85,10 +85,10 @@ pub struct Report {
     pub latest: Option<Sample>,
     pub settings: Settings,
     /// Current configuration using the cached machine total, not historical policy or permission to start work.
-    pub admission_limits: Option<crate::machine::Limits>,
+    pub admission_limits: Option<nitely_core::machine::Limits>,
     pub points: Vec<Point>,
     pub episodes: Vec<Episode>,
-    pub events: Vec<crate::performance_events::Event>,
+    pub events: Vec<nitely_core::performance_events::Event>,
     pub attribution_latest: Option<AttributionSample>,
     pub attribution_age_ms: Option<i64>,
     pub attribution: Vec<AttributionSample>,
@@ -172,8 +172,8 @@ pub fn query_at(dir: &Path, request: &Query, now: i64) -> Result<Report> {
     let selected_sessions: Vec<Session> = sessions.into_iter().filter(|s| same_boot(s.boot.as_deref()) && s.started_ms <= to && s.stopped_ms.is_none_or(|end| end >= from)).collect();
     let sessions_truncated = selected_sessions.len() > 200;
     let gaps_truncated = gaps.len() > 200;
-    let admission_limits = latest.as_ref().and_then(|s| s.metrics.physical_total_bytes).map(crate::machine::limits_for_recorded_total);
-    let (events, events_truncated) = store.as_ref().map(|s| crate::performance_events::read_for_boot(s, from, to, request.project.as_deref(), request.limit, selected_boot.as_deref())).transpose()?.unwrap_or_default();
+    let admission_limits = latest.as_ref().and_then(|s| s.metrics.physical_total_bytes).map(nitely_core::machine::limits_for_recorded_total);
+    let (events, events_truncated) = store.as_ref().map(|s| nitely_core::performance_events::read_for_boot(s, from, to, request.project.as_deref(), request.limit, selected_boot.as_deref())).transpose()?.unwrap_or_default();
     let attribution_latest = store.as_ref().map(|s| s.attribution_latest(request.project.as_deref())).transpose()?.flatten();
     let attribution_age_ms = attribution_latest.as_ref().map(|s| now.saturating_sub(s.wall_ms));
     let attribution_limit = request.limit.min(200);
@@ -189,7 +189,7 @@ pub fn query_at(dir: &Path, request: &Query, now: i64) -> Result<Report> {
     let related_issues = events.iter().filter_map(|e| e.issue.as_ref())
         .chain(workloads.iter().filter_map(|w| w.context.issue.as_ref()))
         .chain(attribution.iter().chain(attribution_latest.iter()).flat_map(|s| s.workloads.iter().filter_map(|w| w.context.issue.as_ref())))
-        .map(|key| (key.clone(), crate::links::issue_url(key))).collect();
+        .map(|key| (key.clone(), nitely_core::links::issue_url(key))).collect();
     if attribution_truncated { notes.push(format!("Attribution is limited to the latest {attribution_limit} observations in the selected range; earlier machine-chart peaks may have contributors outside this response. Narrow the range to inspect those intervals.")); }
     notes.push("Process working-set sums can overlap and are not physical RAM. Process I/O includes nondisk activity; minute attribution values are per-metric peaks with interval I/O totals, not simultaneous readings.".into());
     Ok(Report { as_of_ms: now, from_ms: from, to_ms: to, range_anchor: anchor, range_boot: selected_boot, project: request.project.clone(), status: status.into(), age_ms: age, latest, settings, admission_limits,
@@ -304,7 +304,7 @@ mod tests {
     const NOW: i64 = 1_800_000_000_000;
     struct Fixture { dir: std::path::PathBuf, store: Store }
     impl Fixture {
-        fn new() -> Self { let dir = crate::paths::unique_temp("performance-query", ""); let store = Store::open(&dir).unwrap(); Self { dir, store } }
+        fn new() -> Self { let dir = nitely_core::paths::unique_temp("performance-query", ""); let store = Store::open(&dir).unwrap(); Self { dir, store } }
         fn sample(&self, at: i64, boot: Option<&str>, session: &str, cpu: Option<f64>) -> Sample {
             let sample = Sample { wall_ms: at, monotonic_ms: at.max(0) as u64, boot: boot.map(str::to_string), session: session.into(),
                 metrics: Metrics { cpu_percent: cpu, physical_total_bytes: Some(100), physical_available_bytes: Some(50), ..Metrics::default() }, collection_ms: 1 };
@@ -316,7 +316,7 @@ mod tests {
     impl Drop for Fixture { fn drop(&mut self) { let db = std::mem::replace(&mut self.store.db, rusqlite::Connection::open_in_memory().unwrap()); drop(db); let _ = std::fs::remove_dir_all(&self.dir); } }
     #[test]
     fn reads_do_not_create_a_recorder_or_store_and_validate_bounds() {
-        let dir = crate::paths::unique_temp("performance-read-only", "");
+        let dir = nitely_core::paths::unique_temp("performance-read-only", "");
         let report = query_at(&dir, &Query::default(), NOW).unwrap();
         assert_eq!(report.status, "unavailable");
         assert!(!dir.exists());
@@ -456,7 +456,7 @@ mod tests {
     }
     #[test]
     fn restart_queries_keep_exited_workload_context_and_filter_projects_without_changing_totals() {
-        use crate::performance_attribution::{Context, Coverage, Identity, Usage, WorkloadUsage};
+        use nitely_core::performance_attribution::{Context, Coverage, Identity, Usage, WorkloadUsage};
         let mut fixture = Fixture::new();
         fixture.store.start_session("old", Some("boot-a"), NOW-700_000).unwrap();
         fixture.sample(NOW-60_000, Some("boot-a"), "old", Some(95.0));
@@ -479,7 +479,7 @@ mod tests {
         assert_eq!(app.attribution[0].workloads[0].context.project.as_deref(), Some("APP"));
         assert_eq!(app.attribution[0].nitely.cpu_percent, demo.attribution[0].nitely.cpu_percent);
         assert_eq!(app.latest.unwrap().metrics, demo.latest.unwrap().metrics);
-        assert_eq!(app.related_issues["APP-1"], crate::links::issue_url("APP-1"));
+        assert_eq!(app.related_issues["APP-1"], nitely_core::links::issue_url("APP-1"));
         assert!(!app.related_issues.contains_key("DEMO-1"));
         assert_eq!(app.attribution_age_ms, Some(60_000));
     }
@@ -498,8 +498,8 @@ mod tests {
     }
     #[test]
     fn before_restart_isolates_boot_identity_when_wall_times_overlap() {
-        use crate::performance_attribution::{Context, Coverage, Identity, Usage};
-        use crate::performance_events::{self, Event, Kind};
+        use nitely_core::performance_attribution::{Context, Coverage, Identity, Usage};
+        use nitely_core::performance_events::{self, Event, Kind};
         let mut fixture = Fixture::new();
         for (boot, session, offset, cpu) in [("a", "old", 90_000, 95.0), ("b", "new", 150_000, 10.0)] {
             fixture.store.start_session(session, Some(boot), NOW-700_000).unwrap();

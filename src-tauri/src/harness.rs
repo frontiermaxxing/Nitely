@@ -190,8 +190,8 @@ mod tests {
             ("crates/nitely-core/src/approval.rs", "keyring::", 0, "under the harness the key and every entry live in the process (use_ephemeral_key)"),
             ("crates/nitely-core/src/paths.rs", "dirs::", 0, "the real data folder and home, which harness::check and check_agents refuse"),
             ("crates/nitely-core/src/connect.rs", "dirs::", 1, "agent_home: NITELY_AGENT_HOME, which the harness must set (check_agents)"),
-            ("crates/nitely-core/src/usage.rs", "CLAUDE_CONFIG_DIR", 1, "only inside NITELY_AGENT_HOME under the harness (check_agents); app.mjs clears it"),
-            ("crates/nitely-core/src/usage.rs", "CODEX_HOME", 1, "only inside NITELY_AGENT_HOME under the harness (check_agents); app.mjs clears it"),
+            ("crates/nitely-crew/src/usage.rs", "CLAUDE_CONFIG_DIR", 1, "only inside NITELY_AGENT_HOME under the harness (check_agents); app.mjs clears it"),
+            ("crates/nitely-crew/src/usage.rs", "CODEX_HOME", 1, "only inside NITELY_AGENT_HOME under the harness (check_agents); app.mjs clears it"),
             ("crates/nitely-core/src/connect.rs", "CLAUDE_CONFIG_DIR", 1, "removed from an agent's own command (run_in), which gets the agents' home as its home"),
             ("crates/nitely-core/src/connect.rs", "CODEX_HOME", 1, "as CLAUDE_CONFIG_DIR"),
             ("crates/nitely-core/src/install.rs", "dirs::", 0, "`nitely install`, the CLI's; the app never runs it"),
@@ -205,7 +205,7 @@ mod tests {
             ("src-tauri/src/notify.rs", "notify_rust::", 0, "as Toast::new"),
             ("src-tauri/src/notify.rs", "UNUserNotificationCenter", 0, "as Toast::new; init() skips the Mac's center under the harness"),
             ("src-tauri/src/update.rs", "updater_builder", 0, "base_status disables updates under the harness"),
-            ("crates/nitely-core/src/crew.rs", "nitely_on_path", 1, "the installed nitely, for a crew's supervisor; the app asks harness::nitely instead under the harness"),
+            ("crates/nitely-crew/src/crew.rs", "nitely_on_path", 1, "the installed nitely, for a crew's supervisor; the app asks harness::nitely instead under the harness"),
             ("src-tauri/src/lib.rs", "nitely_on_path", 1, "keep_crews_once uses harness::nitely under the harness"),
         ];
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();

@@ -1427,7 +1427,7 @@ impl Db {
 
     /// The shared picker with a playbook's default per-goal worker budget. Explicit goal budgets
     /// apply even without a playbook; focus and capacity are checked inside the claim transaction.
-    pub(crate) fn next_task_choosing_with_goal_budget(
+    pub fn next_task_choosing_with_goal_budget(
         &mut self,
         project: &str,
         agent: &str,

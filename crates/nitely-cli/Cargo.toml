@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 nitely-core.workspace = true
+nitely-crew.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
 serde.workspace = true

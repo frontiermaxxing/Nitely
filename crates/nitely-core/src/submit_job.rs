@@ -241,7 +241,7 @@ pub fn fail_unopened(path: &Path, id: i64, why: &str) -> Result<()> {
 
 /// Whether a process runs: asked of the OS directly, since a job's status is read often and a
 /// wrong "gone" fails a job that is about to finish.
-pub(crate) fn process_runs(pid: u32) -> bool {
+pub fn process_runs(pid: u32) -> bool {
     #[cfg(windows)]
     {
         #[link(name = "kernel32")]

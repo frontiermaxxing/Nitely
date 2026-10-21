@@ -8,8 +8,8 @@ use rusqlite::params;
 use serde::Serialize;
 use std::path::Path;
 
-use crate::db::Db;
-use crate::lanes::{self, Run};
+use nitely_core::db::Db;
+use nitely_core::lanes::{self, Run};
 
 /// One request that waits now.
 #[derive(Debug, Clone, Serialize)]
@@ -150,7 +150,7 @@ fn project_of(key: &str) -> Option<String> {
 /// The holder of `repo`'s land lock, as land writes it ("<holder> pid <n> since <time>"), and when
 /// the lock was taken.
 fn land_lock(repo: &str) -> Option<(String, Option<i64>)> {
-    let path = crate::land::lock_path(Path::new(repo)).ok()?;
+    let path = nitely_core::land::lock_path(Path::new(repo)).ok()?;
     let text = std::fs::read_to_string(&path).ok()?;
     let holder = text.lines().next()?.split(" pid ").next()?.trim().to_string();
     let since = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64);
@@ -161,7 +161,7 @@ fn land_lock(repo: &str) -> Option<(String, Option<i64>)> {
 /// (a queue run has its own row on the board), what it lands and since when, with its gate's run.
 fn landing_now(db: &Db, repo: &str) -> Result<Option<Waiting>> {
     let Some((holder, since)) = land_lock(repo) else { return Ok(None) };
-    if holder.ends_with("(land queue)") || !crate::batches::land_running(repo) {
+    if holder.ends_with("(land queue)") || !nitely_core::batches::land_running(repo) {
         return Ok(None);
     }
     let key = holder.split_whitespace().next().map(str::to_string);
@@ -186,7 +186,7 @@ fn landing_now(db: &Db, repo: &str) -> Result<Option<Waiting>> {
         kind: "landing".into(),
         project: key.as_deref().and_then(project_of),
         issue: key,
-        since: since.unwrap_or_else(crate::db::now),
+        since: since.unwrap_or_else(nitely_core::db::now),
         why: "landing now: it holds the land lock, so other lands of this repo wait".into(),
         place: None,
         behind,
@@ -215,7 +215,7 @@ fn refused_waits(db: &Db) -> Result<Vec<Waiting>> {
             continue;
         }
         let lock = repo.as_deref().and_then(land_lock);
-        let live = repo.as_deref().is_some_and(crate::batches::land_running);
+        let live = repo.as_deref().is_some_and(nitely_core::batches::land_running);
         let holds = |holder: &str| holder.split_whitespace().next().is_some_and(|k| k.eq_ignore_ascii_case(&key));
         let (why, behind) = match lock {
             Some((holder, _)) if holds(&holder) => continue,
@@ -229,7 +229,7 @@ fn refused_waits(db: &Db) -> Result<Vec<Waiting>> {
                 vec![Behind { what: format!("{holder}, a land lock whose process is gone"), issue: holder.split_whitespace().next().map(str::to_string), since }],
             ),
             // Free a long while: its agent was told to land again, and the row has said so.
-            None if crate::db::now() - at > REFUSED_FOR_SECS => continue,
+            None if nitely_core::db::now() - at > REFUSED_FOR_SECS => continue,
             None => ("its land was refused while another land held the lock; the lock is free now: land it again".to_string(), vec![]),
         };
         out.push(Waiting { kind: "land_refused".into(), project: project_of(&key), issue: Some(key), since: at, why, place: None, behind });
@@ -269,7 +269,7 @@ fn submit_waits(db: &Db) -> Result<Vec<Waiting>> {
 
 /// Whether the process `pid` runs (this one does).
 fn alive(pid: i64) -> bool {
-    pid as u32 == std::process::id() || crate::submit_job::process_runs(pid as u32)
+    pid as u32 == std::process::id() || nitely_core::submit_job::process_runs(pid as u32)
 }
 
 /// Changes waiting in a review queue for a batch to form, each with the others of its own queue (a
@@ -355,7 +355,7 @@ fn land_waits(db: &Db) -> Result<Vec<Waiting>> {
         // A run whose process died stays unended in its row until the next run: a run is landing
         // now only while the queue itself holds the lock and its process runs.
         let lock = land_lock(repo);
-        let lock_alive = crate::batches::land_running(repo);
+        let lock_alive = nitely_core::batches::land_running(repo);
         let queue_holds = lock_alive && lock.as_ref().is_some_and(|(holder, _)| holder.ends_with("(land queue)"));
         let mut behind = Vec::new();
         for run in runs.into_iter().filter(|_| queue_holds) {
@@ -404,7 +404,7 @@ pub fn waits(db: &Db, lane_runs: Vec<Waiting>, repos: &[String]) -> Result<Waits
 }
 
 /// `waits` for the app: the lanes overview read here too.
-pub fn overview(config: &crate::Config, db: &Db) -> Result<Waits> {
+pub fn overview(config: &nitely_core::Config, db: &Db) -> Result<Waits> {
     let queues = lanes::queues(config, db)?;
     let repos: Vec<String> = config.repos.iter().map(|r| r.root.clone()).collect();
     waits(db, lane_waits(&queues), &repos)
@@ -482,8 +482,8 @@ mod tests {
 
     #[test]
     fn a_refused_land_waits_behind_the_land_holding_the_lock_and_that_land_has_its_row() {
-        use crate::issues::{Actor, NewIssue};
-        let dir = crate::paths::unique_temp("nitely-waits-refused", "");
+        use nitely_core::issues::{Actor, NewIssue};
+        let dir = nitely_core::paths::unique_temp("nitely-waits-refused", "");
         std::fs::create_dir_all(&dir).unwrap();
         let mut db = Db::open(&dir.join("t.db")).unwrap();
         db.create_project("APP", "Acme").unwrap();
@@ -493,9 +493,9 @@ mod tests {
         let refused = db.create_issue(&new("Refused"), &actor).unwrap().key;
         db.conn.execute("UPDATE issue SET state = 'In Review', state_type = 'started' WHERE key = ?1", [&refused]).unwrap();
         let root = dir.join("my-app");
-        crate::test_repo::init(&root, &[("a.txt", "a")]);
+        nitely_core::test_repo::init(&root, &[("a.txt", "a")]);
         let repo = root.to_string_lossy().into_owned();
-        let lock = crate::land::lock_path(&root).unwrap();
+        let lock = nitely_core::land::lock_path(&root).unwrap();
         std::fs::write(&lock, format!("{landing} pid {} since now\n", std::process::id())).unwrap();
         db.conn
             .execute(
@@ -535,17 +535,17 @@ mod tests {
 
     #[test]
     fn submits_reviews_and_lands_say_what_they_wait_behind() {
-        let dir = crate::paths::unique_temp("nitely-waits", "");
+        let dir = nitely_core::paths::unique_temp("nitely-waits", "");
         std::fs::create_dir_all(&dir).unwrap();
         let db = Db::open(&dir.join("t.db")).unwrap();
         let exec = |sql: &str| db.conn.execute_batch(sql).unwrap();
         // A repo whose land lock a live process (this test) holds for a queue run.
         let root = dir.join("my-app");
-        crate::test_repo::init(&root, &[("a.txt", "a")]);
-        let lock = crate::land::lock_path(&root).unwrap();
+        nitely_core::test_repo::init(&root, &[("a.txt", "a")]);
+        let lock = nitely_core::land::lock_path(&root).unwrap();
         let hold = |holder: &str| std::fs::write(&lock, format!("{holder} pid {} since now\n", std::process::id())).unwrap();
         hold("APP-5 (land queue)");
-        let repo = crate::paths::normalize(&root.to_string_lossy());
+        let repo = nitely_core::paths::normalize(&root.to_string_lossy());
         let pid = std::process::id();
         exec(&format!(
             r#"INSERT INTO submit_job (id, issue_key, worktree, branch, head, requested_by, skip_review, local_only, state, queued_at, started_at) VALUES

@@ -174,7 +174,7 @@ fn runs(pid: i64) -> bool {
 /// Whether a land queue run of `repo` can be going: a land holds the repo's lock, and the process
 /// that took it still runs. A run whose process died stays unended in its row until the next run
 /// puts its changes back in the queue, so its row alone does not say.
-pub(crate) fn land_running(repo: &str) -> bool {
+pub fn land_running(repo: &str) -> bool {
     let Ok(lock) = crate::land::lock_path(std::path::Path::new(repo)) else { return false };
     let Ok(held) = std::fs::read_to_string(lock) else { return false };
     // "<holder> pid <n> since <time>", as land.rs writes it.

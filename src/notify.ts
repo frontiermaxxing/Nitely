@@ -42,7 +42,7 @@ export const FORGET_SECS = 10 * 60;
  */
 export const seenId = (d: Decision) => (d.issue && (d.kind === "approve" || d.kind === "own") ? `waits-${d.issue.key}` : d.id);
 
-/** True when the issue reached Needs You because the crew stopped trying (crates/nitely-core/src/crew.rs). */
+/** True when the issue reached Needs You because the crew stopped trying (crates/nitely-crew/src/crew.rs). */
 function crewGaveUp(detail: IssueDetail | undefined): boolean {
   const moved = detail?.timeline.filter((e) => e.kind === "issue_moved" && e.summary?.includes("→ Needs You")).pop();
   return !!moved?.summary && /the crew (tried it|could not)/.test(moved.summary);

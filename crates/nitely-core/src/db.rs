@@ -460,7 +460,9 @@ pub fn now() -> i64 {
 }
 
 pub struct Db {
-    pub(crate) conn: Connection,
+    /// Public for nitely-crew's reads of its own tables.
+    #[doc(hidden)]
+    pub conn: Connection,
 }
 
 #[derive(Debug, Clone, Serialize)]

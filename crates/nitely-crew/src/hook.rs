@@ -4,7 +4,7 @@
 use anyhow::{bail, Result};
 use serde_json::Value;
 
-use crate::db::NewEvent;
+use nitely_core::db::NewEvent;
 
 const SUMMARY_MAX: usize = 160;
 

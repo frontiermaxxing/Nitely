@@ -312,7 +312,7 @@ impl Store {
     pub fn attribution(&self, from: i64, to: i64, limit: usize, project: Option<&str>) -> Result<Vec<AttributionSample>> {
         self.attribution_for_boot(from, to, limit, project, None)
     }
-    pub(crate) fn attribution_for_boot(&self, from: i64, to: i64, limit: usize, project: Option<&str>, boot: Option<&str>) -> Result<Vec<AttributionSample>> {
+    pub fn attribution_for_boot(&self, from: i64, to: i64, limit: usize, project: Option<&str>, boot: Option<&str>) -> Result<Vec<AttributionSample>> {
         if from > to || limit == 0 || limit > 1000 {
             bail!("invalid attribution range or limit (1–1000)");
         }
@@ -356,7 +356,7 @@ impl Store {
     pub fn attribution_bounds(&self) -> Result<Option<(i64, i64)>> {
         self.attribution_bounds_for_boot(None)
     }
-    pub(crate) fn attribution_bounds_for_boot(&self, boot: Option<&str>) -> Result<Option<(i64, i64)>> {
+    pub fn attribution_bounds_for_boot(&self, boot: Option<&str>) -> Result<Option<(i64, i64)>> {
         let exists: bool = self.db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='attribution')", [], |r| r.get(0))?;
         if !exists {
             return Ok(None);
@@ -390,7 +390,7 @@ impl Store {
     pub fn recent_workloads(&self, from: i64, to: i64, limit: usize, project: Option<&str>) -> Result<Vec<Workload>> {
         self.recent_workloads_for_boot(from, to, limit, project, None)
     }
-    pub(crate) fn recent_workloads_for_boot(&self, from: i64, to: i64, limit: usize, project: Option<&str>, boot: Option<&str>) -> Result<Vec<Workload>> {
+    pub fn recent_workloads_for_boot(&self, from: i64, to: i64, limit: usize, project: Option<&str>, boot: Option<&str>) -> Result<Vec<Workload>> {
         if from > to || limit == 0 || limit > 1000 {
             bail!("invalid workload range or limit (1–1000)");
         }
@@ -424,7 +424,7 @@ impl Store {
         }
         Ok(roots)
     }
-    pub(crate) fn append_attribution(&mut self, sample: &mut AttributionSample, minute: bool) -> Result<()> {
+    pub fn append_attribution(&mut self, sample: &mut AttributionSample, minute: bool) -> Result<()> {
         let json = bounded_json(sample)?;
         let settings = self.settings()?;
         let previous: Option<String> =

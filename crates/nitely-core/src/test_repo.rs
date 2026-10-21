@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 /// A new folder holding a copy of what `build` made in an empty folder, the first time a test
 /// asked for `name`. Paths to the template in git's config files (a remote's URL) are changed to
 /// the copy's.
-pub(crate) fn copy(name: &str, build: fn(&Path)) -> PathBuf {
+pub fn copy(name: &str, build: fn(&Path)) -> PathBuf {
     static TEMPLATES: Mutex<Option<HashMap<String, Arc<OnceLock<PathBuf>>>>> = Mutex::new(None);
     let cell = TEMPLATES.lock().unwrap().get_or_insert_with(HashMap::new).entry(name.to_string()).or_default().clone();
     let template = cell.get_or_init(|| {
@@ -62,7 +62,7 @@ fn re_root(text: &str, template: &Path, base: &Path) -> String {
 }
 
 /// Runs git in `dir` as user `t`, and returns its output; panics if it fails.
-pub(crate) fn git(dir: &Path, args: &[&str]) -> String {
+pub fn git(dir: &Path, args: &[&str]) -> String {
     let o = crate::playbook::run_git(Command::new("git").arg("-C").arg(dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args)).unwrap();
     assert!(o.status.success(), "git {args:?}: {} {}", o.status, String::from_utf8_lossy(&o.stderr));
     String::from_utf8_lossy(&o.stdout).trim().to_string()
@@ -71,7 +71,7 @@ pub(crate) fn git(dir: &Path, args: &[&str]) -> String {
 /// A repo at `dir` on `main` with an identity (land and crew commit in their own git calls) and
 /// no background maintenance, its files committed: each `(path, content)` in `files`, or an empty
 /// commit when there are none.
-pub(crate) fn init(dir: &Path, files: &[(&str, &str)]) {
+pub fn init(dir: &Path, files: &[(&str, &str)]) {
     std::fs::create_dir_all(dir).unwrap();
     // No template: every `git init` would write a dozen hook samples for the virus scanner to read
     // (NIT-289).

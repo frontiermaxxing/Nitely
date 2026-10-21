@@ -64,7 +64,7 @@ gate could land anything that builds. `nitely crew run` says why and waits.
 
 `max_tokens_per_day` counts every agent working in the project's repo today, crew workers and
 people's own sessions alike: new input, cache writes and output (cache reads are cheap and counted
-apart). Nitely reads the counts from the agents' own session files (`crates/nitely-core/src/usage.rs`):
+apart). Nitely reads the counts from the agents' own session files (`crates/nitely-crew/src/usage.rs`):
 Claude Code's transcripts and Codex's session logs, counts and model names only, never the text.
 Once the budget is used, running workers finish and no new one starts until the next local day;
 the project header says `token budget used: 5.2M of 5.0M today`. It is in tokens, not money: plans
@@ -358,7 +358,7 @@ When a worker exits, the supervisor reads its issue:
   20 today", "no gate", "claude can't start: <reason>", or "not running: start `nitely crew run`"
   when no supervisor heartbeat is fresh. A playbook with `workers = 0` shows "Crew off". Either
   opens the Crew section of the project's Settings.
-- **Project Settings, Crew** (`src/CrewSettings.tsx`, `crates/nitely-core/src/crew_settings.rs`):
+- **Project Settings, Crew** (`src/CrewSettings.tsx`, `crates/nitely-crew/src/crew_settings.rs`):
   workers, agents in preference order (and which are installed), starts a day, the token budget in
   millions and quiet hours, one card per repo of the project. Only the app saves it, as you, and
   turning a crew on asks first. The playbook Nitely keeps is written in place, keeping its comments;

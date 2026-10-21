@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use anyhow::Result;
 use serde::Serialize;
 
-use crate::db::Db;
+use nitely_core::db::Db;
 use crate::usage::Attributed;
 
 const DAY: i64 = 86_400;
@@ -402,10 +402,10 @@ fn spread(mut values: Vec<i64>) -> Option<Spread> {
 
 /// The numbers now, over `projects` (empty: every project): tokens from the agents' own session
 /// files on this machine (`usage::scan`, counts only), sessions' projects from `config`.
-pub fn stats_now(config: &crate::Config, db: &Db, projects: &[String]) -> Result<Leaderboard> {
+pub fn stats_now(config: &nitely_core::Config, db: &Db, projects: &[String]) -> Result<Leaderboard> {
     let tokens = crate::usage::scan(config, db, 0);
     let project_of_dir = |dir: &str| config.repo_for_dir(dir).and_then(|r| r.project.clone());
-    stats(db, &Inputs { now: crate::db::now(), utc_offset: local_offset(), projects, tokens: &tokens, project_of_dir: &project_of_dir })
+    stats(db, &Inputs { now: nitely_core::db::now(), utc_offset: local_offset(), projects, tokens: &tokens, project_of_dir: &project_of_dir })
 }
 
 /// The local time's offset from UTC now, in seconds.
@@ -423,7 +423,7 @@ mod tests {
     const MONDAY: i64 = 1_791_763_200;
 
     fn db() -> (Db, std::path::PathBuf) {
-        let base = crate::paths::unique_temp("nitely-leaderboard", "");
+        let base = nitely_core::paths::unique_temp("nitely-leaderboard", "");
         std::fs::create_dir_all(&base).unwrap();
         (Db::open(&base.join("t.db")).unwrap(), base)
     }

@@ -2,7 +2,7 @@
 
 use anyhow::{bail, Context, Result};
 use clap::Subcommand;
-use nitely_core::crew::{self, Moment, Supervisor, SystemAgents};
+use nitely_crew::crew::{self, CrewDb, Moment, Supervisor, SystemAgents};
 use nitely_core::playbook::{self, Playbook};
 use nitely_core::{paths, resolve_project, Actor, Config, Db};
 use std::path::PathBuf;
@@ -107,7 +107,7 @@ pub fn run(cmd: CrewCmd, me: &Actor) -> Result<()> {
         CrewCmd::Status { project, repo } => {
             let (project, root) = crew_repo(&config, &db, project.as_deref(), repo.as_deref(), &cwd)?;
             let moment = Moment::now();
-            let tokens = nitely_core::usage::project_tokens_since(&nitely_core::usage::scan(&config, &db, moment.day_start), &project, moment.day_start);
+            let tokens = nitely_crew::usage::project_tokens_since(&nitely_crew::usage::scan(&config, &db, moment.day_start), &project, moment.day_start);
             let status = crew::status(&db, &project, &Playbook::load(&root)?, &moment, tokens)?;
             println!("{}", serde_json::to_string_pretty(&status)?);
             Ok(())

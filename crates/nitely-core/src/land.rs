@@ -358,7 +358,7 @@ pub(crate) fn held_by_live_land(root: &Path) -> bool {
 }
 
 /// The repo's land lock file, in its common git dir.
-pub(crate) fn lock_path(root: &Path) -> Result<PathBuf> {
+pub fn lock_path(root: &Path) -> Result<PathBuf> {
     let common = PathBuf::from(git(root, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?.trim());
     Ok(common.join(LOCK_FILE))
 }
@@ -560,7 +560,7 @@ fn clear_dead(path: &Path) -> Option<String> {
     let mut words = text.split_whitespace();
     let holder = words.next()?.to_string();
     let pid: u32 = words.skip_while(|w| *w != "pid").nth(1)?.parse().ok()?;
-    if pid == std::process::id() || crate::crew::pid_alive(pid) {
+    if pid == std::process::id() || crate::procs::alive(pid) {
         return None;
     }
     // Moved aside first, then checked: when the dead land's lock was released and a new land took
@@ -1269,7 +1269,7 @@ impl Db {
 /// it, and git then stops halfway: the worktree unregistered, part of it deleted. So a worktree in
 /// use is kept whole, with the processes named; and when git still stops halfway, what is left is
 /// retried and then said plainly, with how to delete it.
-pub(crate) fn cleanup(root: &Path, pb: &Playbook, worktree: &Path, branch: &str, temporary: bool, keep: bool) -> (String, Vec<crate::procs::Holder>) {
+pub fn cleanup(root: &Path, pb: &Playbook, worktree: &Path, branch: &str, temporary: bool, keep: bool) -> (String, Vec<crate::procs::Holder>) {
     if !(temporary || (made_by_layout(root, pb, worktree) && !keep)) {
         return (format!("kept {} (not made by start_task, or --keep)", worktree.display()), vec![]);
     }

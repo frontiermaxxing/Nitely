@@ -1171,7 +1171,7 @@ fn nitely_servers(json: &str) -> Vec<String> {
 }
 
 /// Variables that make a CLI think it runs inside another agent's session.
-pub(crate) fn is_session_marker(name: &str) -> bool {
+pub fn is_session_marker(name: &str) -> bool {
     name == "CLAUDECODE"
         || name == "CLAUDE_PID"
         || name.starts_with("CLAUDE_CODE_SESSION")
@@ -1189,7 +1189,7 @@ const KNOWN_VENDORS: [&str; 3] = ["claude", "codex", "cursor"];
 /// The program to start for a reviewer command's first word. On Windows a CLI installed with npm
 /// is a `.cmd` file, which is started by its full path, and the Codex CLI that ships inside the
 /// Codex Store app is not on PATH at all.
-pub(crate) fn resolve_program(program: &str) -> String {
+pub fn resolve_program(program: &str) -> String {
     #[cfg(windows)]
     if Path::new(program).extension().is_none() && Path::new(program).components().count() == 1 && which(program).is_none() {
         if let Some(script) = which_with(program, &["cmd", "bat"]) {

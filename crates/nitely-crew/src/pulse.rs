@@ -8,11 +8,11 @@ use anyhow::Result;
 use serde::Serialize;
 use std::collections::HashMap;
 
-use crate::db::{now, Db, PrRecord, Session};
-use crate::git;
-use crate::issues::{iso, Ask, IssueRecord};
-use crate::paths::is_within;
-use crate::submit::ReviewRecord;
+use nitely_core::db::{now, Db, PrRecord, Session};
+use nitely_core::git;
+use nitely_core::issues::{iso, Ask, IssueRecord};
+use nitely_core::paths::is_within;
+use nitely_core::submit::ReviewRecord;
 
 /// An issue at one of the agent's stations with no event and no session activity for this long
 /// counts as quiet, which Pulse shows with the stuck ones.
@@ -44,13 +44,13 @@ pub struct Pulse {
     pub landed_today: i64,
     /// Since `since`, per active goal: what landed, what is at risk, when it will be done; and
     /// every place the person was needed (NIT-247).
-    pub report: crate::goal_report::Report,
+    pub report: nitely_core::goal_report::Report,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ProjectFlow {
-    pub verification_health: Vec<crate::verification_backstop::Health>,
-    pub verification_audits: Option<crate::verification_audit::Report>,
+    pub verification_health: Vec<nitely_core::verification_backstop::Health>,
+    pub verification_audits: Option<nitely_core::verification_audit::Report>,
     pub key: String,
     pub name: String,
     /// Open issues, most urgent first.
@@ -142,7 +142,7 @@ pub fn pulse(db: &Db, since: i64, day_start: i64) -> Result<Pulse> {
     let aliases = db.project_aliases()?;
     for pr in db.prs()? {
         if let (_, Some(key)) = git::parse_branch(&pr.branch) {
-            prs_by_key.entry(crate::projects::current_key(&aliases, &key)).or_default().push(pr);
+            prs_by_key.entry(nitely_core::projects::current_key(&aliases, &key)).or_default().push(pr);
         }
     }
     let today = iso(day_start);
@@ -186,8 +186,8 @@ pub fn pulse(db: &Db, since: i64, day_start: i64) -> Result<Pulse> {
                 done_today.push(flow(i)?);
             }
         }
-        let verification_health=crate::verification_backstop::project_health(db,&p.key)?;
-        let audits=crate::verification_audit::report(db,&p.key,10)?;
+        let verification_health=nitely_core::verification_backstop::project_health(db,&p.key)?;
+        let audits=nitely_core::verification_audit::report(db,&p.key,10)?;
         let verification_audits=(!audits.jobs.is_empty() || !audits.rules.is_empty()).then_some(audits);
         projects.push(ProjectFlow { key: p.key, name: p.name, issues: open, done_today, verification_health, verification_audits });
     }
@@ -221,10 +221,27 @@ pub fn pulse(db: &Db, since: i64, day_start: i64) -> Result<Pulse> {
     })
 }
 
-impl Db {
+/// Reads of the events and issues for the pulse, as methods on [`Db`].
+trait PulseDb {
     /// One pass over the events of open issues. Matched to the open issues here rather than
     /// joined in SQL, as in `fill_tracks`: a case-insensitive join compares every event with
     /// every issue.
+    fn open_issue_facts(&self) -> Result<HashMap<String, Facts>>;
+
+    /// (ts, type) of the events of these types since `since`.
+    fn events_of(&self, kinds: &[&str], since: i64) -> Result<Vec<(i64, String)>>;
+
+    /// Landings, new issues, failures, review rounds and questions since `since`, newest first.
+    fn happened_since(&self, since: i64) -> Result<Vec<Happening>>;
+
+    /// The issues (upper-cased keys) whose gate failed, land stopped or review did not finish since `since`.
+    fn stuck_since(&self, since: i64) -> Result<std::collections::HashSet<String>>;
+
+    /// Every happening since `since` counted by kind, past the list's limit.
+    fn happened_counts(&self, since: i64) -> Result<HappenedCounts>;
+}
+
+impl PulseDb for Db {
     fn open_issue_facts(&self) -> Result<HashMap<String, Facts>> {
         let open: std::collections::HashSet<String> = {
             let mut stmt = self.conn.prepare("SELECT key FROM issue WHERE state_type NOT IN ('completed', 'canceled')")?;
@@ -254,7 +271,7 @@ impl Db {
             let f = facts.entry(key).or_default();
             f.last = f.last.max(ts);
             match kind.as_str() {
-                "gate_passed" | "gate_failed" | "gate_skipped" => f.gate = Some(GateRun { ts, passed: kind == "gate_passed", skipped: (kind == "gate_skipped").then(|| summary.clone().unwrap_or_else(|| crate::project_yolo::NOTE.into())), summary }),
+                "gate_passed" | "gate_failed" | "gate_skipped" => f.gate = Some(GateRun { ts, passed: kind == "gate_passed", skipped: (kind == "gate_skipped").then(|| summary.clone().unwrap_or_else(|| nitely_core::project_yolo::NOTE.into())), summary }),
                 "worktree" => {
                     f.worktree = cwd;
                     f.starter.get_or_insert(actor);
@@ -268,7 +285,6 @@ impl Db {
         Ok(facts)
     }
 
-    /// (ts, type) of the events of these types since `since`.
     fn events_of(&self, kinds: &[&str], since: i64) -> Result<Vec<(i64, String)>> {
         let mut stmt = self.conn.prepare("SELECT ts, type FROM event WHERE ts >= ?1 ORDER BY ts")?;
         let rows = stmt.query_map([since], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
@@ -282,7 +298,6 @@ impl Db {
         Ok(out)
     }
 
-    /// Landings, new issues, failures, review rounds and questions since `since`, newest first.
     fn happened_since(&self, since: i64) -> Result<Vec<Happening>> {
         let mut stmt = self.conn.prepare(&format!("SELECT ts, kind, issue_key, actor, summary FROM ({HAPPENINGS}) ORDER BY ts DESC, id DESC LIMIT ?2"))?;
         let rows = stmt.query_map(rusqlite::params![since, HAPPENED_LIMIT], |r| {
@@ -297,7 +312,6 @@ impl Db {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// The issues (upper-cased keys) whose gate failed, land stopped or review did not finish since `since`.
     fn stuck_since(&self, since: i64) -> Result<std::collections::HashSet<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT DISTINCT upper(issue_key) FROM event WHERE ts >= ?1 AND issue_key IS NOT NULL AND type IN ('gate_failed', 'land_failed', 'review_failed')",
@@ -306,7 +320,6 @@ impl Db {
         Ok(keys)
     }
 
-    /// Every happening since `since` counted by kind, past the list's limit.
     fn happened_counts(&self, since: i64) -> Result<HappenedCounts> {
         let mut stmt = self.conn.prepare(&format!("SELECT kind, COUNT(*) FROM ({HAPPENINGS}) GROUP BY kind"))?;
         let rows = stmt.query_map([since], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
@@ -351,10 +364,10 @@ fn kind_name(kind: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::issues::{Actor, NewIssue};
+    use nitely_core::issues::{Actor, NewIssue};
 
     fn db() -> (Db, std::path::PathBuf) {
-        let dir = crate::paths::unique_temp("nitely-pulse", "");
+        let dir = nitely_core::paths::unique_temp("nitely-pulse", "");
         let db = Db::open(&dir.join("t.db")).unwrap();
         db.create_project("NIT", "Nitely").unwrap();
         (db, dir)
@@ -430,7 +443,7 @@ mod tests {
                 file(&mut db, "The issue a question is about");
             }
             let ask = db.create_ask("Which port should the preview use?", &[], key, None, &me).unwrap();
-            db.record(&crate::db::NewEvent {
+            db.record(&nitely_core::db::NewEvent {
                 session_id: "codex:1".into(),
                 vendor: "codex".into(),
                 cwd: "c:/x".into(),

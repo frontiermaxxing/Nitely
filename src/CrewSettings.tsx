@@ -8,7 +8,7 @@ import { Button, Checkbox, Notice, SettingsRow, SourceTag, TextField } from "./u
  * A project's crew (docs/crew.md): how many agent workers Nitely runs on its Todo issues, which
  * agents, and the limits on them. One card per repo of the project. A playbook Nitely keeps is
  * written in place; a repo that commits its own gets a commit on its integration branch
- * (crates/nitely-core/src/crew_settings.rs). Shown in Settings, under each project's heading.
+ * (crates/nitely-crew/src/crew_settings.rs). Shown in Settings, under each project's heading.
  */
 export function CrewSettings(props: { projectKey: string; onSaved?: () => void; /** Bumped to scroll the section into view. */ focus?: number }) {
   const [views, setViews] = useState<CrewView[] | null>(null);

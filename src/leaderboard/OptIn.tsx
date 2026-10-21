@@ -5,7 +5,7 @@ import { Button, Checkbox, TextField } from "../ui";
 import { saveProfile } from "./profile";
 
 // L1: joining the leaderboard. The right side is the report exactly as it would be sent, built
-// by the same code that will send it (`leaderboard_report`, crates/nitely-core/src/leaderboard_report.rs),
+// by the same code that will send it (`leaderboard_report`, crates/nitely-crew/src/leaderboard_report.rs),
 // so what it shows is the disclaimer. Joining keeps your choices on this machine and sends
 // nothing: sending is a step of its own, turned on later.
 

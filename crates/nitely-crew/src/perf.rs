@@ -5,9 +5,9 @@
 //! own budgets (start-up, memory over live updates) are in scripts/harness/perf.e2e.mjs, on the same
 //! board, seeded by `nitely perf-seed`.
 
-use crate::db::{now, NewEvent};
-use crate::issues::{Actor, NewIssue};
-use crate::{Config, Db, RepoConfig};
+use nitely_core::db::{now, NewEvent};
+use nitely_core::issues::{Actor, NewIssue};
+use nitely_core::{Config, Db, RepoConfig};
 use anyhow::{bail, Result};
 use std::path::Path;
 
@@ -19,7 +19,7 @@ pub const EVENTS: usize = 5_000;
 /// git in `dir` as a made-up author, for the seeded repos.
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
     let all: Vec<&str> = ["-c", "user.name=Seed", "-c", "user.email=seed@example.com", "-c", "maintenance.auto=false"].into_iter().chain(args.iter().copied()).collect();
-    crate::playbook::git(dir, &all)
+    nitely_core::playbook::git(dir, &all)
 }
 
 /// Seeds a new database at `db_path` with the large board, its repos made in a new folder
@@ -164,11 +164,11 @@ mod tests {
     }
 
     fn large_board() -> LargeBoard {
-        let base = crate::paths::unique_temp("nitely-perf", "");
+        let base = nitely_core::paths::unique_temp("nitely-perf", "");
         std::fs::create_dir_all(&base).unwrap();
         // CI's Windows TEMP uses 8.3 names. Exercise that spelling on other machines too:
         // comparing a hook's short cwd with git's long paths must stay within the same budget.
-        let base = PathBuf::from(crate::paths::short_path(&base.to_string_lossy()));
+        let base = PathBuf::from(nitely_core::paths::short_path(&base.to_string_lossy()));
         let db_path = base.join("nitely.db");
         let config = seed(&db_path, &base.join("repos")).unwrap();
         LargeBoard { base, db_path, config }
@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn seeding_refuses_a_database_or_a_folder_that_exists() {
-        let base = crate::paths::unique_temp("nitely-perf-refuse", "");
+        let base = nitely_core::paths::unique_temp("nitely-perf-refuse", "");
         std::fs::create_dir_all(&base).unwrap();
         // A profile with no issues but its own history: the seed would rewrite its events' times.
         let db_path = base.join("nitely.db");
@@ -216,15 +216,15 @@ mod tests {
         let mut measured = vec![];
         eprintln!("issues alone: {:.1} ms", median(9, || drop(db.issues().unwrap())).as_secs_f64() * 1000.0);
         measured.push(("open the database", median(9, || drop(Db::open(&board.db_path).unwrap()))));
-        measured.push(("snapshot, git read again", median(5, || drop(crate::snapshot::snapshot(&board.config, &db).unwrap()))));
-        let cache = crate::snapshot::GitCache::new();
-        crate::snapshot::snapshot_cached(&board.config, &db, &cache).unwrap();
-        measured.push(("snapshot, git cached", median(9, || drop(crate::snapshot::snapshot_cached(&board.config, &db, &cache).unwrap()))));
+        measured.push(("snapshot, git read again", median(5, || drop(nitely_core::snapshot::snapshot(&board.config, &db).unwrap()))));
+        let cache = nitely_core::snapshot::GitCache::new();
+        nitely_core::snapshot::snapshot_cached(&board.config, &db, &cache).unwrap();
+        measured.push(("snapshot, git cached", median(9, || drop(nitely_core::snapshot::snapshot_cached(&board.config, &db, &cache).unwrap()))));
         let day_start = now() - 6 * 3600;
         measured.push(("pulse", median(9, || drop(crate::pulse(&db, now() - 24 * 3600, day_start).unwrap()))));
         // What the Inbox reads on each refresh: the detail of every issue a decision could name
         // (decisions.ts, detailKeys), each through its own call and connection, as the app does.
-        let snap = crate::snapshot::snapshot(&board.config, &db).unwrap();
+        let snap = nitely_core::snapshot::snapshot(&board.config, &db).unwrap();
         assert_eq!(snap.repos.iter().flat_map(|r| &r.rows).filter(|r| !r.is_main).count(), WORKTREES, "every seeded worktree is on the board");
         let keys = inbox_keys(&snap);
         assert!(keys.len() >= 30, "the board has decisions to read: {}", keys.len());
@@ -255,7 +255,7 @@ mod tests {
     }
 
     /// The issues the Inbox reads details of, as decisions.ts's `detailKeys` picks them.
-    fn inbox_keys(board: &crate::Board) -> Vec<String> {
+    fn inbox_keys(board: &nitely_core::Board) -> Vec<String> {
         let mut keys: Vec<String> = board.asks.iter().filter_map(|a| a.issue_key.clone()).collect();
         keys.extend(board.needs_me_issues.iter().map(|i| i.key.clone()));
         for row in board.repos.iter().flat_map(|r| &r.rows) {

@@ -33,12 +33,28 @@ inputs = ["crates/nitely-core/src/test_sweep.cjs", "crates/nitely-core/src/test_
 command = "node --test crates/nitely-core/src/test_sweep.test.cjs"
 test_files = ["crates/nitely-core/src/test_sweep.test.cjs"]
 
+# The crew and the reports on top of the core (NIT-497): nitely-core does not build on it, so a
+# change only to it runs its own tests and clippy and the two crates above it, not nitely-core's.
+[[components]]
+id = "crew"
+roots = ["crates/nitely-crew/"]
+checks = ["cargo clippy -p nitely-crew -- -D warnings"]
+
+[[components.suites]]
+id = "lib"
+inputs = ["crates/nitely-crew/"]
+[components.suites.cargo]
+manifest = "crates/nitely-crew/Cargo.toml"
+package = "nitely-crew"
+target_kind = "lib"
+
 # The CLI, a leaf crate: nothing else builds on it, so a change only to it runs its own tests and
 # clippy, not nitely-core's. Its build script reads only git's refs (the commit stamp), outside the
 # tree; a change to the script keeps the full gate (NIT-484).
 [[components]]
 id = "cli"
 roots = ["crates/nitely-cli/"]
+depends_on = ["crew"]
 build_inputs = ["crates/nitely-cli/build.rs"]
 checks = ["cargo clippy -p nitely-cli -- -D warnings"]
 
@@ -147,6 +163,7 @@ target = "preview"
 [[components]]
 id = "app"
 roots = ["src-tauri/"]
+depends_on = ["crew"]
 build_inputs = ["src-tauri/build.rs", "src-tauri/icons/", "src-tauri/capabilities/", "src-tauri/windows/", "src-tauri/tauri.conf.json", "src-tauri/tauri.macos.conf.json", "src-tauri/tauri.release.json", "src-tauri/tauri.windows.conf.json"]
 checks = ["npm run build", "cargo clippy -p nitely-app -- -D warnings"]
 

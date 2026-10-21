@@ -6,118 +6,20 @@
 
 use anyhow::{bail, Context, Result};
 use rusqlite::params;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-use crate::db::{now, Db};
-use crate::issues::{Actor, IssueRecord};
-use crate::playbook::{self, Playbook};
-
-/// Workers a crew may start per project per local day when the playbook does not say.
-pub const DEFAULT_MAX_PER_DAY: u32 = 20;
+use nitely_core::db::{now, Db};
+use nitely_core::issues::{Actor, IssueRecord};
+use nitely_core::playbook::{self, Playbook};
+pub use nitely_core::crew_rules::{CrewRules, DEFAULT_MAX_PER_DAY};
 
 /// A supervisor whose heartbeat is older than this is gone.
 pub const HEARTBEAT_STALE_SECS: i64 = 60;
 
 /// Kept per project; older worker logs are deleted.
 const LOGS_KEPT: usize = 200;
-
-/// The playbook's `[crew]` section. `workers = 0`, the default, is off.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct CrewRules {
-    /// How many workers run at once.
-    pub workers: u32,
-    /// Agents in preference order; the ones not installed are skipped.
-    pub agents: Vec<String>,
-    /// Workers started per local day; `DEFAULT_MAX_PER_DAY` when unset.
-    pub max_per_day: Option<u32>,
-    /// Tokens the project's agents may use per local day before no new worker starts (crew
-    /// workers and everyone else, as `usage` reads them); unset, the default, is no budget.
-    pub max_tokens_per_day: Option<u64>,
-    /// `HH:MM-HH:MM` local time when no new worker starts; it may wrap midnight.
-    pub quiet_hours: Option<String>,
-    /// A worker running longer is stopped, never while it lands.
-    pub timeout_minutes: u64,
-    /// A worktree setup running longer is stopped, and its issue goes to a person.
-    pub setup_timeout_minutes: u64,
-    /// Failed workers on one issue before it goes to a human.
-    pub attempts: u32,
-    /// Files nearly every change touches (registries, shared types): holding one counts for a
-    /// quarter when `next_task` keeps new work out of files in flight (overlap.rs).
-    pub shared_files: Vec<String>,
-    /// A worker with no output in its log and no report for this long is stopped as hung, and its
-    /// issue handed on; 0 is off.
-    pub idle_minutes: u64,
-    /// No new worker starts while less than this is free where worktrees go (GB); 0 is off. Memory
-    /// is the machine's own admission (NIT-266, machine.rs).
-    pub min_free_disk_gb: u64,
-    /// How many workers may work on one goal at once (a goal's own `workers` wins); 0, the
-    /// default, is no cap below `workers`.
-    pub goal_workers: u32,
-    /// Replaces the default command for an agent. `{worktree}`, `{repo}`, `{git_dir}`,
-    /// `{mcp_config}`, `{nitely}` and `{nitely_env}` are filled in; the brief goes on stdin.
-    pub commands: BTreeMap<String, Vec<String>>,
-}
-
-impl Default for CrewRules {
-    fn default() -> Self {
-        CrewRules {
-            workers: 0,
-            agents: vec!["claude".into(), "codex".into()],
-            max_per_day: None,
-            max_tokens_per_day: None,
-            quiet_hours: None,
-            timeout_minutes: 180,
-            setup_timeout_minutes: 30,
-            attempts: 3,
-            shared_files: vec![],
-            idle_minutes: 30,
-            min_free_disk_gb: 10,
-            goal_workers: 0,
-            commands: BTreeMap::new(),
-        }
-    }
-}
-
-impl CrewRules {
-    pub fn max_per_day(&self) -> u32 {
-        self.max_per_day.unwrap_or(DEFAULT_MAX_PER_DAY)
-    }
-
-    /// The command that starts `agent`: the playbook's, else the default, else None.
-    pub fn command_for(&self, agent: &str) -> Option<Vec<String>> {
-        if let Some(c) = self.commands.get(agent).filter(|c| !c.is_empty()) {
-            return Some(c.clone());
-        }
-        let args = |v: &[&str]| Some(v.iter().map(|s| s.to_string()).collect());
-        match agent {
-            // auto: edits, builds and commits go ahead without a person; prompts none: anything that
-            // would still ask is refused instead of waiting for an answer nobody gives.
-            "claude" => args(&[
-                "claude", "-p", "--mcp-config", "{mcp_config}", "--permission-mode", "auto", "--permission-prompts", "none",
-                "--output-format", "stream-json", "--verbose",
-            ]),
-            // Without default_tools_approval_mode, exec refuses every MCP call under approval_policy
-            // never. No sandbox: workspace-write never lets git write under a `.git` folder (not with
-            // --add-dir, not with writable_roots), so a worker could not commit in its worktree; this
-            // is the trust Claude's auto mode gets. Seen in the live check of NIT-118.
-            "codex" => args(&[
-                "codex", "exec", "--sandbox", "danger-full-access",
-                "-c", "approval_policy=\"never\"",
-                "-c", "mcp_servers.nitely.command={nitely}",
-                "-c", "mcp_servers.nitely.args=[\"mcp\"]",
-                // Codex starts MCP servers with a cleared environment: without this, a crew on
-                // its own data folder (NITELY_HOME) would have workers on the real one.
-                "-c", "mcp_servers.nitely.env={nitely_env}",
-                "-c", "mcp_servers.nitely.default_tools_approval_mode=\"approve\"",
-                "-",
-            ]),
-            _ => None,
-        }
-    }
-}
 
 /// A point in local time, as the daily cap and quiet hours read it.
 #[derive(Debug, Clone, Copy)]
@@ -205,7 +107,7 @@ pub trait Agents {
     }
     /// Runs a submit job again (`nitely submit-job <id>`) whose process died before it finished, as
     /// submit starts one; returns its process id.
-    fn run_submit_job(&self, nitely: &str, job: &crate::submit_job::Job) -> Result<Option<u32>>;
+    fn run_submit_job(&self, nitely: &str, job: &nitely_core::submit_job::Job) -> Result<Option<u32>>;
 }
 
 /// What `Agents::land` needs: `nitely land <issue>` in the repo, output to `log`.
@@ -238,12 +140,12 @@ pub struct CleanUp {
 /// land's last resort deletes what git would not. Returns what it did, in words.
 pub fn clean_up_worktree(repo: &Path, worktree: &Path, branch: &str) -> Result<String> {
     let listed = playbook::git(repo, &["worktree", "list", "--porcelain"])?;
-    let wanted = crate::paths::normalize(&worktree.to_string_lossy());
+    let wanted = nitely_core::paths::normalize(&worktree.to_string_lossy());
     let mut on: Option<String> = None;
     let mut path_matches = false;
     for line in listed.lines().chain(std::iter::once("")) {
         if let Some(p) = line.strip_prefix("worktree ") {
-            path_matches = crate::paths::normalize(p) == wanted;
+            path_matches = nitely_core::paths::normalize(p) == wanted;
         } else if let Some(b) = line.strip_prefix("branch refs/heads/") {
             if path_matches {
                 on = Some(b.trim().to_string());
@@ -256,7 +158,7 @@ pub fn clean_up_worktree(repo: &Path, worktree: &Path, branch: &str) -> Result<S
         bail!("{} is not a worktree of {} on {branch}, so it is left alone", worktree.display(), repo.display());
     }
     let pb = Playbook::load(repo)?;
-    Ok(crate::land::cleanup(repo, &pb, worktree, branch, false, false).0)
+    Ok(nitely_core::land::cleanup(repo, &pb, worktree, branch, false, false).0)
 }
 
 /// Runs `clean_up_worktree` for the crew, stopping waiting after `timeout_minutes` (a teardown that
@@ -459,7 +361,7 @@ impl Supervisor {
             clock: Box::new(Moment::now),
             interrupted: Box::new(|| false),
             tokens: Box::new(|project, since| {
-                let config = crate::Config::load().unwrap_or_default();
+                let config = nitely_core::Config::load().unwrap_or_default();
                 let Ok(db) = Db::open_default() else { return 0 };
                 crate::usage::project_tokens_since(&crate::usage::scan(&config, &db, since), project, since)
             }),
@@ -556,7 +458,7 @@ impl Supervisor {
         self.reap(db, &rules, &mut tick)?;
         // A land that died with the machine left its lock: nothing would land again until a person
         // broke it.
-        if let Some(holder) = crate::land::clear_dead_lock(&self.repo_root) {
+        if let Some(holder) = nitely_core::land::clear_dead_lock(&self.repo_root) {
             // The holder is the issue the land was for, when it names one.
             let key = db.issue(&holder)?.map(|i| i.key);
             db.log_event(&self.actor(), key.as_deref(), None, "status", &format!("Removed the land lock {holder} left: the land that took it is gone"))?;
@@ -588,7 +490,7 @@ impl Supervisor {
         tick.status = match status {
             Some(why) => why,
             None => {
-                crate::test_sweep::schedule(db, &self.project, &playbook.as_ref().unwrap().schedule, &self.actor(), crate::db::now())?;
+                nitely_core::test_sweep::schedule(db, &self.project, &playbook.as_ref().unwrap().schedule, &self.actor(), nitely_core::db::now())?;
                 self.fill(db, playbook.as_ref().unwrap(), &mut tick)?
             },
         };
@@ -631,7 +533,7 @@ impl Supervisor {
         }
         // A disk filling up is worse than an idle slot (memory waits in the machine's admission).
         let worktrees = playbook.worktrees_folder(&self.repo_root).unwrap_or_else(|| self.repo_root.clone());
-        if let Some(why) = crate::machine::disk_short(&worktrees, rules.min_free_disk_gb) {
+        if let Some(why) = nitely_core::machine::disk_short(&worktrees, rules.min_free_disk_gb) {
             return Ok(Some(format!("{why}; no new worker starts")));
         }
         Ok(None)
@@ -684,13 +586,13 @@ impl Supervisor {
             let order = self.goal_order(db, rules)?;
             let picked = if self.avoid_overlap {
                 // Read fresh: repos and their playbooks change while a crew runs.
-                let config = crate::Config::load()?;
-                crate::overlap::next_task_ordered(&config, db, &self.project, self.actor().id(), &skipped, Some(&order))?
+                let config = nitely_core::Config::load()?;
+                nitely_core::overlap::next_task_ordered(&config, db, &self.project, self.actor().id(), &skipped, Some(&order))?
             } else {
                 db.next_task_choosing_with_goal_budget(&self.project, self.actor().id(), &skipped, rules.goal_workers, |c| order.arrange(c).first().map(|(k, _, _)| k.clone()))?
-                    .map(|issue| crate::overlap::Picked { issue, why: None })
+                    .map(|issue| nitely_core::overlap::Picked { issue, why: None })
             };
-            let Some(crate::overlap::Picked { issue, why }) = picked else {
+            let Some(nitely_core::overlap::Picked { issue, why }) = picked else {
                 return Ok(db.project_focus_wait_reason(&self.project)?.unwrap_or_else(|| self.nothing_ready()));
             };
             if let Some(why) = why {
@@ -717,11 +619,11 @@ impl Supervisor {
     /// The project's active goals in the person's order, and which have room for another worker:
     /// a goal's own `workers`, else the playbook's `goal_workers`, counts the workers running or
     /// setting up on its issues.
-    fn goal_order(&self, db: &Db, rules: &CrewRules) -> Result<crate::overlap::GoalOrder> {
+    fn goal_order(&self, db: &Db, rules: &CrewRules) -> Result<nitely_core::overlap::GoalOrder> {
         let goals = db.goals(&self.project, false)?;
         let active: std::collections::HashSet<i64> = goals.iter().map(|g| g.id).collect();
         let open = db.list_issues(Some(&self.project), false)?;
-        let first = open.iter().filter(|i| crate::goal_plans::is_planning(i)).map(|i| i.key.clone()).collect();
+        let first = open.iter().filter(|i| nitely_core::goal_plans::is_planning(i)).map(|i| i.key.clone()).collect();
         let goal_of: HashMap<String, i64> = open.into_iter().filter_map(|i| i.goal.filter(|g| active.contains(g)).map(|g| (i.key, g))).collect();
         let busy = self.running.iter().map(|r| r.issue.as_str()).chain(self.preparing.iter().map(|p| p.issue.key.as_str()));
         let mut working: HashMap<i64, i64> = HashMap::new();
@@ -730,7 +632,7 @@ impl Supervisor {
                 *working.entry(*g).or_default() += 1;
             }
         }
-        let mut order = crate::overlap::GoalOrder { goal_of, first, ..Default::default() };
+        let mut order = nitely_core::overlap::GoalOrder { goal_of, first, ..Default::default() };
         for g in goals {
             let budget = g.workers.or((rules.goal_workers > 0).then_some(rules.goal_workers as i64));
             if budget.is_some_and(|b| working.get(&g.id).copied().unwrap_or(0) >= b) {
@@ -783,7 +685,7 @@ impl Supervisor {
     fn begin(&mut self, db: &mut Db, playbook: &Playbook, issue: &IssueRecord, agent: &str) -> Result<Start> {
         let worktree = playbook.worktree_for(&self.repo_root, agent, issue);
         // The id the worker's own MCP server will use, so its reports keep the claim fresh.
-        let agent_id = format!("{agent}:{}", crate::paths::normalize(&worktree.to_string_lossy()));
+        let agent_id = format!("{agent}:{}", nitely_core::paths::normalize(&worktree.to_string_lossy()));
         db.reassign_claim(&issue.key, &agent_id)?;
         if worktree.join(".git").exists() {
             if let Some(why) = other_branch(&worktree, &playbook.branch_for(agent, issue), agent, &issue.key) {
@@ -810,9 +712,9 @@ impl Supervisor {
     /// Starts `nitely start` for `issue` and records its pid on the worker's row.
     fn prepare(&self, db: &Db, id: i64, issue: &IssueRecord, agent: &str, log: &Path) -> Result<Box<dyn Process>> {
         let prep = Prepare { nitely: self.nitely.clone(), repo: self.repo_root.clone(), key: issue.key.clone(), vendor: agent.into(), log: log.to_path_buf() };
-        let _telemetry = crate::performance_attribution::Scope::new(db, crate::performance_attribution::Context { project: Some(self.project.clone()), issue: Some(issue.key.clone()), worker_id: Some(id), ..Default::default() });
+        let _telemetry = nitely_core::performance_attribution::Scope::new(db, nitely_core::performance_attribution::Context { project: Some(self.project.clone()), issue: Some(issue.key.clone()), worker_id: Some(id), ..Default::default() });
         let process = self.agents.prepare(&prep).with_context(|| format!("starting `{} start {}`", self.nitely, issue.key))?;
-        crate::performance_attribution::track(process.pid(), "setup");
+        nitely_core::performance_attribution::track(process.pid(), "setup");
         db.crew_worker_pid(id, process.pid())?;
         Ok(process)
     }
@@ -821,7 +723,7 @@ impl Supervisor {
     /// person, and, when `start` is false (the crew is stopping), hands finished ones back.
     fn advance(&mut self, db: &mut Db, playbook: &Playbook, start: bool, tick: &mut Tick) -> Result<()> {
         let worktrees = playbook.worktrees_folder(&self.repo_root).unwrap_or_else(|| self.repo_root.clone());
-        let disk_short = start && !self.preparing.is_empty() && crate::machine::disk_short(&worktrees, playbook.crew.min_free_disk_gb).is_some();
+        let disk_short = start && !self.preparing.is_empty() && nitely_core::machine::disk_short(&worktrees, playbook.crew.min_free_disk_gb).is_some();
         let deadline = playbook.crew.setup_timeout_minutes.max(1) as i64 * 60;
         let now = (self.clock)().ts;
         let mut i = 0;
@@ -947,7 +849,7 @@ impl Supervisor {
             log: log.clone(),
             env,
         };
-        let _telemetry = crate::performance_attribution::Scope::new(db, crate::performance_attribution::Context { project: Some(self.project.clone()), issue: Some(issue.key.clone()), worker_id: Some(id), ..Default::default() });
+        let _telemetry = nitely_core::performance_attribution::Scope::new(db, nitely_core::performance_attribution::Context { project: Some(self.project.clone()), issue: Some(issue.key.clone()), worker_id: Some(id), ..Default::default() });
         let process = match self.agents.start(&launch) {
             Ok(p) => p,
             Err(e) => {
@@ -1207,7 +1109,7 @@ impl Supervisor {
         let tracked = listed.as_deref().is_ok_and(|l| {
             l.lines()
                 .filter_map(|line| line.strip_prefix("worktree "))
-                .any(|p| crate::paths::normalize(p) == crate::paths::normalize(&w.worktree.to_string_lossy()))
+                .any(|p| nitely_core::paths::normalize(p) == nitely_core::paths::normalize(&w.worktree.to_string_lossy()))
         });
         if !tracked {
             return Ok(());
@@ -1232,9 +1134,9 @@ impl Supervisor {
             agent: w.agent.clone(),
             timeout_minutes,
         };
-        let _telemetry = crate::performance_attribution::Scope::new(db, crate::performance_attribution::Context { project: Some(self.project.clone()), issue: Some(w.issue.clone()), ..Default::default() });
+        let _telemetry = nitely_core::performance_attribution::Scope::new(db, nitely_core::performance_attribution::Context { project: Some(self.project.clone()), issue: Some(w.issue.clone()), ..Default::default() });
         match self.agents.clean_up(&job) {
-            Ok(process) => { crate::performance_attribution::track(process.pid(), "setup"); self.cleaning.push(Cleaning { issue: w.issue.clone(), agent: w.agent.clone(), worktree: w.worktree.clone(), since: ts, process }); },
+            Ok(process) => { nitely_core::performance_attribution::track(process.pid(), "setup"); self.cleaning.push(Cleaning { issue: w.issue.clone(), agent: w.agent.clone(), worktree: w.worktree.clone(), since: ts, process }); },
             Err(e) => db.log_event(&self.actor(), Some(&w.issue), None, "crew_cleaned", &format!("Could not start removing {}: {e:#}", w.worktree.display()))?,
         }
         Ok(())
@@ -1273,7 +1175,7 @@ impl Supervisor {
 
     /// The submit `agent_id` handed `key` in with since `since`: the issue's latest submit job, when
     /// that worker queued it.
-    fn handed_in(&self, db: &Db, key: &str, agent_id: &str, since: i64) -> Result<Option<crate::submit_job::Job>> {
+    fn handed_in(&self, db: &Db, key: &str, agent_id: &str, since: i64) -> Result<Option<nitely_core::submit_job::Job>> {
         Ok(db.latest_submit_job(key)?.filter(|j| j.requested_by == agent_id && j.queued_at >= since))
     }
 
@@ -1310,7 +1212,7 @@ impl Supervisor {
             });
             // A submit whose process died with the machine (its gate or review cut short) runs again
             // as it was handed in, once, while the branch is still at what was handed in.
-            let interrupted = job.state == "failed" && job.error.as_deref().is_some_and(|e| e.contains(crate::submit_job::ABANDONED));
+            let interrupted = job.state == "failed" && job.error.as_deref().is_some_and(|e| e.contains(nitely_core::submit_job::ABANDONED));
             if issue.state == "In Progress" && interrupted && unclaimed && self.resubmit(db, &issue.key, &worker, &job)? {
                 continue;
             }
@@ -1331,7 +1233,7 @@ impl Supervisor {
                 // Whoever lands: the author's land is this worker's, gone; Nitely's own land in the
                 // submit may have found the lock held, and the app retries only approvals. Where
                 // only the app can verify an approval (macOS), an approved one is the app's to land.
-                "Approved" if !crate::approval::agents_can_verify() => {}
+                "Approved" if !nitely_core::approval::agents_can_verify() => {}
                 "In Review" | "Approved" if self.land_after.get(&issue.key).is_none_or(|t| now >= *t) => {
                     self.start_land(db, &issue.key)?;
                 }
@@ -1344,23 +1246,23 @@ impl Supervisor {
     /// Hands `job`'s change in again for the worker that handed it in, when its branch is still at
     /// the commit handed in and it was not handed in again already for that commit. Returns
     /// whether it did.
-    fn resubmit(&mut self, db: &mut Db, key: &str, worker: &CrewWorker, job: &crate::submit_job::Job) -> Result<bool> {
+    fn resubmit(&mut self, db: &mut Db, key: &str, worker: &CrewWorker, job: &nitely_core::submit_job::Job) -> Result<bool> {
         let head = playbook::git(Path::new(&job.worktree), &["rev-parse", "HEAD"]).map(|h| h.trim().to_string()).unwrap_or_default();
         if head != job.head {
             return Ok(false);
         }
         let tries: i64 = db.conn.query_row(
             "SELECT COUNT(*) FROM submit_job WHERE issue_key = ?1 COLLATE NOCASE AND head = ?2 AND state = 'failed' AND error LIKE '%' || ?3 || '%'",
-            params![key, job.head, crate::submit_job::ABANDONED],
+            params![key, job.head, nitely_core::submit_job::ABANDONED],
             |r| r.get(0),
         )?;
         if tries > 1 {
             return Ok(false);
         }
-        let opts = crate::submit::SubmitOptions { dir: &job.worktree, issue_key: Some(key), skip_review: job.skip_review, local_only: job.local_only, batch: true, solution: job.solution.as_ref(), solution_commit: Some(&job.head), solution_patch_id: job.solution_patch_id.as_deref() };
+        let opts = nitely_core::submit::SubmitOptions { dir: &job.worktree, issue_key: Some(key), skip_review: job.skip_review, local_only: job.local_only, batch: true, solution: job.solution.as_ref(), solution_commit: Some(&job.head), solution_patch_id: job.solution_patch_id.as_deref() };
         // One that cannot be handed in as it is (uncommitted changes since) goes to a new worker
         // instead, with its handoff; it never holds up the rest of the pass.
-        let Ok(again) = crate::submit_job::enqueue(db, &opts, &Actor::Agent(worker.agent_id.clone())) else {
+        let Ok(again) = nitely_core::submit_job::enqueue(db, &opts, &Actor::Agent(worker.agent_id.clone())) else {
             return Ok(false);
         };
         db.mark_submit_jobs_delivered(&[job.id])?;
@@ -1370,7 +1272,7 @@ impl Supervisor {
             }
             Ok(None) => {}
             Err(e) => {
-                db.conn.execute("UPDATE submit_job SET state = 'failed', ended_at = ?2, error = ?3 WHERE id = ?1", params![again.id, crate::db::now(), format!("could not start it again: {e:#}")])?;
+                db.conn.execute("UPDATE submit_job SET state = 'failed', ended_at = ?2, error = ?3 WHERE id = ?1", params![again.id, nitely_core::db::now(), format!("could not start it again: {e:#}")])?;
                 return Ok(false);
             }
         }
@@ -1386,10 +1288,10 @@ impl Supervisor {
         std::fs::create_dir_all(&logs).with_context(|| format!("creating {}", logs.display()))?;
         let log = logs.join(format!("{ts}-{}-land.log", key.to_lowercase()));
         let job = LandJob { nitely: self.nitely.clone(), repo: self.repo_root.clone(), issue: key.to_string(), log: log.clone() };
-        let _telemetry = crate::performance_attribution::Scope::new(db, crate::performance_attribution::Context { project: Some(self.project.clone()), issue: Some(key.to_string()), ..Default::default() });
+        let _telemetry = nitely_core::performance_attribution::Scope::new(db, nitely_core::performance_attribution::Context { project: Some(self.project.clone()), issue: Some(key.to_string()), ..Default::default() });
         match self.agents.land(&job) {
             Ok(process) => {
-                crate::performance_attribution::track(process.pid(), "land");
+                nitely_core::performance_attribution::track(process.pid(), "land");
                 db.log_event(&self.actor(), Some(key), None, "status", &format!("Landing it for the worker that handed it in, log: {}", log.display()))?;
                 self.landings.push(Landing { issue: key.to_string(), since: ts, log, process });
             }
@@ -1424,7 +1326,7 @@ impl Supervisor {
             // Not the change's fault: the lock was held, or the approval is for the app to sign
             // (land itself sends that one back to the person). Only a land that stopped on the change
             // itself goes to a new worker; one that now needs a person's approval goes to them.
-            let not_the_change = |why: &str| why.contains("another land holds") || why.contains(crate::approval::UNSIGNED);
+            let not_the_change = |why: &str| why.contains("another land holds") || why.contains(nitely_core::approval::UNSIGNED);
             match stopped {
                 Some(why) if why.contains("waits for a human") => {
                     db.move_issue(&l.issue, "Needs You", None, Some("its land waits for a person's approval"), &self.actor())?;
@@ -1465,7 +1367,7 @@ impl Supervisor {
     /// Whether the repo's land lock names `issue`: that worker must not be stopped now.
     fn landing(&self, issue: &str) -> bool {
         let Ok(common) = playbook::git(&self.repo_root, &["rev-parse", "--path-format=absolute", "--git-common-dir"]) else { return false };
-        let lock = Path::new(common.trim()).join(crate::land::LOCK_FILE);
+        let lock = Path::new(common.trim()).join(nitely_core::land::LOCK_FILE);
         std::fs::read_to_string(lock).is_ok_and(|held| held.split_whitespace().next().is_some_and(|k| k.eq_ignore_ascii_case(issue)))
     }
 
@@ -1516,15 +1418,15 @@ impl Supervisor {
 
 /// The brief every worker gets on stdin.
 pub fn brief(issue: &IssueRecord, project: &str, worktree: &Path, branch: &str, repo: &Path, port: Option<u16>) -> String {
-    if issue.labels.iter().any(|l| l == crate::test_sweep::LABEL) {
-        return format!("Read-only test sweep for [{}]({}) in {}. Worktree: {}.\n{}", issue.key, issue.url, project, worktree.display(), crate::test_sweep::GUIDE);
+    if issue.labels.iter().any(|l| l == nitely_core::test_sweep::LABEL) {
+        return format!("Read-only test sweep for [{}]({}) in {}. Worktree: {}.\n{}", issue.key, issue.url, project, worktree.display(), nitely_core::test_sweep::GUIDE);
     }
-    if crate::goal_plans::is_planning(issue) {
+    if nitely_core::goal_plans::is_planning(issue) {
         return planner_brief(issue, project, worktree, repo);
     }
     // A light worktree with lanes builds through `run` (docs/build-lanes.md).
     let lanes = Playbook::load(repo).ok().is_some_and(|pb| pb.lanes.is_some());
-    let mut light = if lanes && crate::light::is_light(worktree) { format!("\n{}\n", crate::light::RUN_LINE) } else { String::new() };
+    let mut light = if lanes && nitely_core::light::is_light(worktree) { format!("\n{}\n", nitely_core::light::RUN_LINE) } else { String::new() };
     if let Some(p) = port {
         light.push_str(&format!("\nFor a browser preview (`npm run dev`), use port {p} (also in NITELY_PREVIEW_PORT): other workers preview at the same time on theirs.\n"));
     }
@@ -1573,7 +1475,7 @@ Do not commit, submit or file issues yourself: the person approves the plan in t
 fn other_branch(worktree: &Path, wanted: &str, agent: &str, key: &str) -> Option<String> {
     let on = current_branch(worktree)?;
     let on = on.as_str();
-    let same = on == wanted || crate::git::parse_branch(on) == (Some(agent.to_string()), Some(key.to_uppercase()));
+    let same = on == wanted || nitely_core::git::parse_branch(on) == (Some(agent.to_string()), Some(key.to_uppercase()));
     (!same).then(|| format!("its worktree {} is on {on}, not {wanted}", worktree.display()))
 }
 
@@ -1622,7 +1524,7 @@ fn branch_vendors(repo: &Path, key: &str) -> Vec<String> {
     let refs = playbook::git(repo, &["for-each-ref", "--format=%(refname:short)", "refs/heads/"]).unwrap_or_default();
     let mut vendors: Vec<String> = Vec::new();
     for branch in refs.lines() {
-        if let (Some(vendor), Some(k)) = crate::git::parse_branch(branch.trim()) {
+        if let (Some(vendor), Some(k)) = nitely_core::git::parse_branch(branch.trim()) {
             if k.eq_ignore_ascii_case(key) && !vendors.contains(&vendor) {
                 vendors.push(vendor);
             }
@@ -1768,7 +1670,7 @@ fn worker_row(r: &rusqlite::Row) -> rusqlite::Result<CrewWorker> {
 
 /// The projects whose crew should be running, each with the repo whose playbook it follows: the
 /// first repo of the project whose playbook has `workers > 0`.
-pub fn supervisors_wanted(config: &crate::Config) -> Vec<(String, PathBuf)> {
+pub fn supervisors_wanted(config: &nitely_core::Config) -> Vec<(String, PathBuf)> {
     let mut wanted: Vec<(String, PathBuf)> = Vec::new();
     for repo in &config.repos {
         let Some(project) = repo.project.as_deref().map(str::to_uppercase) else { continue };
@@ -1793,7 +1695,7 @@ pub fn unsupervised(db: &Db, project: &str) -> Result<bool> {
 /// builds, so a supervisor that leaves for a new build is replaced by that build. Never one in
 /// Cargo's build folders, which `cargo run` puts first on PATH (NIT-193).
 pub fn nitely_on_path() -> Option<PathBuf> {
-    crate::install::installed_on_path()
+    nitely_core::install::installed_on_path()
 }
 
 /// Starts `nitely crew run --managed` for `project` in the background, apart from the caller: no
@@ -1813,7 +1715,7 @@ pub fn start_supervisor(nitely: &Path, project: &str, repo: &Path, dir: &Path, t
     }
     cmd.stdin(Stdio::null()).stdout(Stdio::from(log.try_clone()?)).stderr(Stdio::from(log));
     for (name, _) in std::env::vars() {
-        if crate::review::is_session_marker(&name) {
+        if nitely_core::review::is_session_marker(&name) {
             cmd.env_remove(name);
         }
     }
@@ -1834,7 +1736,7 @@ pub fn start_supervisor(nitely: &Path, project: &str, repo: &Path, dir: &Path, t
 /// The crew of a project as the app shows it: the crew of the first of its repos whose playbook
 /// has one. None when no repo has a crew, none is running and no supervisor is there, so a project
 /// that never used a crew shows nothing.
-pub fn project_status(db: &Db, config: &crate::Config, project: &str, moment: &Moment) -> Result<Option<CrewStatus>> {
+pub fn project_status(db: &Db, config: &nitely_core::Config, project: &str, moment: &Moment) -> Result<Option<CrewStatus>> {
     let roots: Vec<&str> = config
         .repos
         .iter()
@@ -1847,7 +1749,7 @@ pub fn project_status(db: &Db, config: &crate::Config, project: &str, moment: &M
     let followed = db
         .crew_control(project)?
         .repo
-        .filter(|r| live && roots.iter().any(|root| crate::paths::normalize(root) == crate::paths::normalize(r)));
+        .filter(|r| live && roots.iter().any(|root| nitely_core::paths::normalize(root) == nitely_core::paths::normalize(r)));
     let playbooks: Vec<Playbook> = followed
         .iter()
         .map(String::as_str)
@@ -1863,44 +1765,70 @@ pub fn project_status(db: &Db, config: &crate::Config, project: &str, moment: &M
 
 const WORKER_COLUMNS: &str = "id, project, issue_key, agent, pid, worktree, log_path, started_at, ended_at, exit_code, outcome, reason, agent_id, phase, port";
 
-impl Db {
-    /// Marks the sessions a crew worker runs: in its worktree, started once the worker had. A
-    /// database without the crew tables (an older one, read-only) marks none.
-    pub(crate) fn mark_crew(&self, sessions: &mut [crate::db::Session]) {
-        let Some(oldest) = sessions.iter().map(|s| s.started_at).min() else { return };
-        let workers: Vec<(String, i64, Option<i64>, String)> = (|| -> rusqlite::Result<_> {
-            let mut stmt = self.conn.prepare("SELECT worktree, started_at, ended_at, agent_id FROM crew_worker WHERE ended_at IS NULL OR ended_at >= ?1")?;
-            let rows = stmt.query_map([oldest - 60], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
-            rows.collect()
-        })()
-        .unwrap_or_default();
-        if workers.is_empty() {
-            return;
-        }
-        let workers: Vec<(String, i64, Option<i64>, String)> = workers.into_iter().map(|(w, s, e, a)| (crate::paths::normalize(&w), s, e, a)).collect();
-        for s in sessions.iter_mut() {
-            let cwd = crate::paths::normalize(&s.cwd);
-            s.crew = workers.iter().any(|(wt, started, ended, agent_id)| {
-                let inside = cwd == *wt || cwd.strip_prefix(wt.as_str()).is_some_and(|rest| rest.starts_with('/'));
-                // A minute's slack: the worker's row is written just before its process starts.
-                let began_in_it = s.started_at >= started - 60 && ended.is_none_or(|e| s.started_at <= e);
-                // A worker's reports go to a session named after its agent id, which an earlier
-                // session in the same worktree may already have started: it counts while the worker
-                // is there.
-                let reports_in_it = s.id == *agent_id && s.last_seen_at >= started - 60 && ended.is_none_or(|e| s.last_seen_at <= e + 60);
-                inside && (began_in_it || reports_in_it)
-            });
-        }
-    }
-
+/// The crew's tables (its control row and workers) and its claims, as methods on [`Db`].
+pub trait CrewDb {
     /// Moves a claim to another agent id: the supervisor claims an issue, then hands it to the
     /// worker's own id once it knows where the worker will run.
-    pub fn reassign_claim(&self, key: &str, agent: &str) -> Result<()> {
+    fn reassign_claim(&self, key: &str, agent: &str) -> Result<()>;
+
+    fn crew_control(&self, project: &str) -> Result<CrewControl>;
+
+    /// Pauses (no new workers; running ones finish) or resumes a project's crew.
+    fn crew_pause(&self, project: &str, paused: bool, actor: &Actor) -> Result<()>;
+
+    /// Fails when another supervisor's heartbeat for `project` is fresh.
+    /// In one statement, so two supervisors starting at once (the app's and one handing over to a
+    /// new build) cannot both win.
+    fn crew_claim_supervisor(&self, project: &str, pid: u32) -> Result<()>;
+
+    /// `crew_claim_supervisor`, also taking the crew from the live supervisor `from`: the one
+    /// handing over to this newer build.
+    fn crew_take_over(&self, project: &str, pid: u32, from: Option<u32>) -> Result<()>;
+
+    fn crew_heartbeat(&self, project: &str, pid: u32, status: &str) -> Result<()>;
+
+    /// Moves only the heartbeat, from a thread that keeps it fresh while a pass runs long (a
+    /// worktree's setup can take minutes).
+    fn crew_heartbeat_touch(&self, project: &str, pid: u32) -> Result<()>;
+
+    /// What the crew says when no supervisor is there to say it, e.g. why the app could not start
+    /// one. A running supervisor overwrites it on its next pass.
+    fn crew_set_status(&self, project: &str, status: &str) -> Result<()>;
+
+    /// Records the repo whose playbook `project`'s supervisor follows, for the app's crew status.
+    fn crew_follows(&self, project: &str, repo: &Path) -> Result<()>;
+
+    fn crew_leave(&self, project: &str, pid: u32) -> Result<()>;
+
+    /// Crew workers on `key` that failed and ended after `since`.
+    fn crew_failures_since(&self, key: &str, since: i64) -> Result<u32>;
+
+    /// When each of `asked_by`'s asks about `key` was answered (None while open).
+    fn crew_ask_answers(&self, key: &str, asked_by: &str) -> Result<Vec<Option<i64>>>;
+
+    /// Issues of `project` in Needs You whose newest ask is the crew's, answered "Try again" since
+    /// the issue last went to Needs You.
+    fn crew_retries(&self, project: &str, asked_by: &str) -> Result<Vec<String>>;
+
+    /// The crew's workers on one issue, newest first.
+    fn crew_workers_for(&self, key: &str) -> Result<Vec<CrewWorker>>;
+
+    fn crew_started_since(&self, project: &str, since: i64) -> Result<u32>;
+
+    /// A project's workers, newest first.
+    fn crew_workers(&self, project: &str, limit: usize) -> Result<Vec<CrewWorker>>;
+
+    /// A project's workers that have not ended, however old.
+    fn crew_running(&self, project: &str) -> Result<Vec<CrewWorker>>;
+}
+
+impl CrewDb for Db {
+    fn reassign_claim(&self, key: &str, agent: &str) -> Result<()> {
         self.conn.execute("UPDATE issue SET claimed_by = ?2, claimed_at = ?3 WHERE key = ?1", rusqlite::params![key, agent, now()])?;
         Ok(())
     }
 
-    pub fn crew_control(&self, project: &str) -> Result<CrewControl> {
+    fn crew_control(&self, project: &str) -> Result<CrewControl> {
         use rusqlite::OptionalExtension;
         let row = self
             .conn
@@ -1923,8 +1851,7 @@ impl Db {
         Ok(row.unwrap_or_default())
     }
 
-    /// Pauses (no new workers; running ones finish) or resumes a project's crew.
-    pub fn crew_pause(&self, project: &str, paused: bool, actor: &Actor) -> Result<()> {
+    fn crew_pause(&self, project: &str, paused: bool, actor: &Actor) -> Result<()> {
         let project = project.to_uppercase();
         self.conn.execute(
             "INSERT INTO crew_control (project, paused, changed_by, changed_at) VALUES (?1, ?2, ?3, ?4)
@@ -1934,16 +1861,11 @@ impl Db {
         self.log_event(actor, None, None, if paused { "crew_paused" } else { "crew_resumed" }, &format!("{} the {project} crew", if paused { "Paused" } else { "Resumed" }))
     }
 
-    /// Fails when another supervisor's heartbeat for `project` is fresh.
-    /// In one statement, so two supervisors starting at once (the app's and one handing over to a
-    /// new build) cannot both win.
-    pub fn crew_claim_supervisor(&self, project: &str, pid: u32) -> Result<()> {
+    fn crew_claim_supervisor(&self, project: &str, pid: u32) -> Result<()> {
         self.crew_take_over(project, pid, None)
     }
 
-    /// `crew_claim_supervisor`, also taking the crew from the live supervisor `from`: the one
-    /// handing over to this newer build.
-    pub fn crew_take_over(&self, project: &str, pid: u32, from: Option<u32>) -> Result<()> {
+    fn crew_take_over(&self, project: &str, pid: u32, from: Option<u32>) -> Result<()> {
         let ts = now();
         let claimed = self.conn.execute(
             "INSERT INTO crew_control (project, supervisor_pid, heartbeat_at, status) VALUES (?1, ?2, ?3, 'starting')
@@ -1960,7 +1882,7 @@ impl Db {
         Ok(())
     }
 
-    pub fn crew_heartbeat(&self, project: &str, pid: u32, status: &str) -> Result<()> {
+    fn crew_heartbeat(&self, project: &str, pid: u32, status: &str) -> Result<()> {
         self.conn.execute(
             "INSERT INTO crew_control (project, supervisor_pid, heartbeat_at, status) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT (project) DO UPDATE SET supervisor_pid = ?2, heartbeat_at = ?3, status = ?4",
@@ -1969,9 +1891,7 @@ impl Db {
         Ok(())
     }
 
-    /// Moves only the heartbeat, from a thread that keeps it fresh while a pass runs long (a
-    /// worktree's setup can take minutes).
-    pub fn crew_heartbeat_touch(&self, project: &str, pid: u32) -> Result<()> {
+    fn crew_heartbeat_touch(&self, project: &str, pid: u32) -> Result<()> {
         self.conn.execute(
             "UPDATE crew_control SET heartbeat_at = ?3 WHERE project = ?1 COLLATE NOCASE AND supervisor_pid = ?2",
             rusqlite::params![project, pid, now()],
@@ -1979,9 +1899,7 @@ impl Db {
         Ok(())
     }
 
-    /// What the crew says when no supervisor is there to say it, e.g. why the app could not start
-    /// one. A running supervisor overwrites it on its next pass.
-    pub fn crew_set_status(&self, project: &str, status: &str) -> Result<()> {
+    fn crew_set_status(&self, project: &str, status: &str) -> Result<()> {
         self.conn.execute(
             "INSERT INTO crew_control (project, status) VALUES (?1, ?2) ON CONFLICT (project) DO UPDATE SET status = ?2",
             rusqlite::params![project.to_uppercase(), status],
@@ -1989,8 +1907,7 @@ impl Db {
         Ok(())
     }
 
-    /// Records the repo whose playbook `project`'s supervisor follows, for the app's crew status.
-    pub fn crew_follows(&self, project: &str, repo: &Path) -> Result<()> {
+    fn crew_follows(&self, project: &str, repo: &Path) -> Result<()> {
         self.conn.execute(
             "UPDATE crew_control SET repo = ?2 WHERE project = ?1 COLLATE NOCASE",
             rusqlite::params![project, repo.to_string_lossy()],
@@ -1998,15 +1915,7 @@ impl Db {
         Ok(())
     }
 
-    /// Whether a crew worker is running in `worktree` now.
-    pub fn crew_worker_in(&self, worktree: &Path) -> Result<bool> {
-        let mut stmt = self.conn.prepare("SELECT worktree FROM crew_worker WHERE ended_at IS NULL")?;
-        let rows: Vec<String> = stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
-        let wanted = crate::paths::normalize(&worktree.to_string_lossy());
-        Ok(rows.iter().any(|w| crate::paths::normalize(w) == wanted))
-    }
-
-    pub fn crew_leave(&self, project: &str, pid: u32) -> Result<()> {
+    fn crew_leave(&self, project: &str, pid: u32) -> Result<()> {
         self.conn.execute(
             "UPDATE crew_control SET supervisor_pid = NULL, heartbeat_at = NULL, status = 'not running'
              WHERE project = ?1 COLLATE NOCASE AND supervisor_pid = ?2",
@@ -2015,22 +1924,7 @@ impl Db {
         Ok(())
     }
 
-    /// When a worker's row was written, in real time (its `started_at` follows the supervisor's
-    /// clock, which tests move).
-    fn crew_worker_logged_at(&self, id: i64) -> Result<i64> {
-        use rusqlite::OptionalExtension;
-        let key: Option<String> = self.conn.query_row("SELECT issue_key FROM crew_worker WHERE id = ?1", [id], |r| r.get(0)).optional()?;
-        let Some(key) = key else { return Ok(0) };
-        let ts: Option<i64> = self.conn.query_row(
-            "SELECT MAX(ts) FROM event WHERE issue_key = ?1 COLLATE NOCASE AND type = 'crew_started'",
-            [key],
-            |r| r.get(0),
-        )?;
-        Ok(ts.unwrap_or(0))
-    }
-
-    /// Crew workers on `key` that failed and ended after `since`.
-    pub fn crew_failures_since(&self, key: &str, since: i64) -> Result<u32> {
+    fn crew_failures_since(&self, key: &str, since: i64) -> Result<u32> {
         let n: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM crew_worker WHERE issue_key = ?1 COLLATE NOCASE AND outcome = 'failed' AND ended_at > ?2",
             rusqlite::params![key, since],
@@ -2039,16 +1933,13 @@ impl Db {
         Ok(n as u32)
     }
 
-    /// When each of `asked_by`'s asks about `key` was answered (None while open).
-    pub fn crew_ask_answers(&self, key: &str, asked_by: &str) -> Result<Vec<Option<i64>>> {
+    fn crew_ask_answers(&self, key: &str, asked_by: &str) -> Result<Vec<Option<i64>>> {
         let mut stmt = self.conn.prepare("SELECT answered_at FROM ask WHERE issue_key = ?1 COLLATE NOCASE AND asked_by = ?2")?;
         let rows = stmt.query_map(rusqlite::params![key, asked_by], |r| r.get(0))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Issues of `project` in Needs You whose newest ask is the crew's, answered "Try again" since
-    /// the issue last went to Needs You.
-    pub fn crew_retries(&self, project: &str, asked_by: &str) -> Result<Vec<String>> {
+    fn crew_retries(&self, project: &str, asked_by: &str) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT i.key, a.answered_at FROM issue i JOIN ask a ON a.issue_key = i.key
              WHERE i.project = ?1 COLLATE NOCASE AND i.state = 'Needs You' AND a.asked_by = ?2 AND a.answer = ?3
@@ -2072,14 +1963,13 @@ impl Db {
         Ok(keys)
     }
 
-    /// The crew's workers on one issue, newest first.
-    pub fn crew_workers_for(&self, key: &str) -> Result<Vec<CrewWorker>> {
+    fn crew_workers_for(&self, key: &str) -> Result<Vec<CrewWorker>> {
         let mut stmt = self.conn.prepare(&format!("SELECT {WORKER_COLUMNS} FROM crew_worker WHERE issue_key = ?1 COLLATE NOCASE ORDER BY id DESC"))?;
         let rows = stmt.query_map([key], worker_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    pub fn crew_started_since(&self, project: &str, since: i64) -> Result<u32> {
+    fn crew_started_since(&self, project: &str, since: i64) -> Result<u32> {
         let n: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM crew_worker WHERE project = ?1 COLLATE NOCASE AND started_at >= ?2",
             rusqlite::params![project, since],
@@ -2088,7 +1978,57 @@ impl Db {
         Ok(n as u32)
     }
 
+    fn crew_workers(&self, project: &str, limit: usize) -> Result<Vec<CrewWorker>> {
+        self.crew_worker_rows("", project, limit)
+    }
+
+    fn crew_running(&self, project: &str) -> Result<Vec<CrewWorker>> {
+        self.crew_worker_rows("AND ended_at IS NULL", project, 1 << 30)
+    }
+}
+
+/// The supervisor's own writes to its worker rows.
+trait WorkerRows {
+    /// When a worker's row was written, in real time (its `started_at` follows the supervisor's
+    /// clock, which tests move).
+    fn crew_worker_logged_at(&self, id: i64) -> Result<i64>;
+
     #[allow(clippy::too_many_arguments)]
+    fn crew_worker_started(&self, project: &str, issue: &str, agent: &str, agent_id: &str, worktree: &Path, log: &Path, ts: i64, phase: &str) -> Result<i64>;
+
+    /// A worker's setup passed and its agent starts: its log is the agent's from now on.
+    /// Its time limit counts from here, not from the setup.
+    fn crew_worker_working(&self, id: i64, log: &Path, ts: i64) -> Result<()>;
+
+    fn crew_worker_pid(&self, id: i64, pid: u32) -> Result<()>;
+
+    /// Resuming setup and automatic reclamation compete for the same issue claim. Renew only
+    /// while this unclosed setup still owns it; a new claimant closes the row atomically too.
+    /// This also protects a supervisor that read the setup before another agent reclaimed it.
+    fn crew_resume_setup(&self, id: i64, key: &str, agent_id: &str) -> Result<bool>;
+
+    fn crew_worker_ended(&self, id: i64, code: Option<i32>, outcome: &str, reason: &str) -> Result<()>;
+
+    /// The two nonterminal dispositions Crew can choose, within its encompassing transaction.
+    /// Unlike a general move, these never apply a proposal, approve a plan, or close blockers.
+    fn crew_move_issue(&self, key: &str, to: &str, reason: &str, actor: &Actor) -> Result<()>;
+
+    fn crew_worker_rows(&self, filter: &str, project: &str, limit: usize) -> Result<Vec<CrewWorker>>;
+}
+
+impl WorkerRows for Db {
+    fn crew_worker_logged_at(&self, id: i64) -> Result<i64> {
+        use rusqlite::OptionalExtension;
+        let key: Option<String> = self.conn.query_row("SELECT issue_key FROM crew_worker WHERE id = ?1", [id], |r| r.get(0)).optional()?;
+        let Some(key) = key else { return Ok(0) };
+        let ts: Option<i64> = self.conn.query_row(
+            "SELECT MAX(ts) FROM event WHERE issue_key = ?1 COLLATE NOCASE AND type = 'crew_started'",
+            [key],
+            |r| r.get(0),
+        )?;
+        Ok(ts.unwrap_or(0))
+    }
+
     fn crew_worker_started(&self, project: &str, issue: &str, agent: &str, agent_id: &str, worktree: &Path, log: &Path, ts: i64, phase: &str) -> Result<i64> {
         self.conn.execute(
             "INSERT INTO crew_worker (project, issue_key, agent, agent_id, worktree, log_path, started_at, phase) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -2097,8 +2037,6 @@ impl Db {
         Ok(self.conn.last_insert_rowid())
     }
 
-    /// A worker's setup passed and its agent starts: its log is the agent's from now on.
-    /// Its time limit counts from here, not from the setup.
     fn crew_worker_working(&self, id: i64, log: &Path, ts: i64) -> Result<()> {
         self.conn.execute(
             "UPDATE crew_worker SET phase = 'work', log_path = ?2, started_at = ?3 WHERE id = ?1",
@@ -2112,9 +2050,6 @@ impl Db {
         Ok(())
     }
 
-    /// Resuming setup and automatic reclamation compete for the same issue claim. Renew only
-    /// while this unclosed setup still owns it; a new claimant closes the row atomically too.
-    /// This also protects a supervisor that read the setup before another agent reclaimed it.
     fn crew_resume_setup(&self, id: i64, key: &str, agent_id: &str) -> Result<bool> {
         let renewed = self.conn.execute(
             "UPDATE issue SET claimed_at = ?4 WHERE key = ?2 AND state = 'In Progress' AND claimed_by = ?3
@@ -2154,8 +2089,6 @@ impl Db {
         Ok(())
     }
 
-    /// The two nonterminal dispositions Crew can choose, within its encompassing transaction.
-    /// Unlike a general move, these never apply a proposal, approve a plan, or close blockers.
     fn crew_move_issue(&self, key: &str, to: &str, reason: &str, actor: &Actor) -> Result<()> {
         if self.conn.is_autocommit() || !matches!(to, "Todo" | "Needs You") {
             bail!("Crew disposition requires a write transaction and Todo or Needs You");
@@ -2165,20 +2098,10 @@ impl Db {
         let ts = now();
         self.conn.execute(
             "UPDATE issue SET state = ?2, state_type = ?3, updated_at = ?4, claimed_by = NULL, claimed_at = NULL WHERE key = ?1",
-            params![issue.key, to, if to == "Todo" { "unstarted" } else { "started" }, crate::issues::iso(ts)],
+            params![issue.key, to, if to == "Todo" { "unstarted" } else { "started" }, nitely_core::issues::iso(ts)],
         )?;
         self.log_event(actor, Some(&issue.key), None, "issue_moved", &format!("{} → {to}: {reason}", issue.state))?;
         Ok(())
-    }
-
-    /// A project's workers, newest first.
-    pub fn crew_workers(&self, project: &str, limit: usize) -> Result<Vec<CrewWorker>> {
-        self.crew_worker_rows("", project, limit)
-    }
-
-    /// A project's workers that have not ended, however old.
-    pub fn crew_running(&self, project: &str) -> Result<Vec<CrewWorker>> {
-        self.crew_worker_rows("AND ended_at IS NULL", project, 1 << 30)
     }
 
     fn crew_worker_rows(&self, filter: &str, project: &str, limit: usize) -> Result<Vec<CrewWorker>> {
@@ -2202,7 +2125,7 @@ impl Agents for SystemAgents {
             return Some(found.to_string_lossy().into_owned());
         }
         // On Windows the Codex CLI ships inside the Codex Store app and is not on PATH.
-        let resolved = crate::review::resolve_program(program);
+        let resolved = nitely_core::review::resolve_program(program);
         (resolved != program && Path::new(&resolved).is_file()).then_some(resolved)
     }
 
@@ -2215,7 +2138,7 @@ impl Agents for SystemAgents {
         cmd.stdin(Stdio::piped()).stdout(Stdio::from(log.try_clone()?)).stderr(Stdio::from(log));
         // A worker started from inside an agent session must not think it is that session.
         for (name, _) in std::env::vars() {
-            if crate::review::is_session_marker(&name) {
+            if nitely_core::review::is_session_marker(&name) {
                 cmd.env_remove(name);
             }
         }
@@ -2224,9 +2147,9 @@ impl Agents for SystemAgents {
         }
         // Held as a build is (NIT-266): below-normal priority, and it and what it starts to a run's
         // memory cap; it outlives this supervisor all the same.
-        let share = crate::lanes::share();
-        crate::lanes::share_env(&mut cmd, share.jobs);
-        let guard = crate::procs::TreeGuard::with(crate::procs::Contain { memory_cap: share.cap, low_priority: true, end_with_guard: false });
+        let share = nitely_core::lanes::share();
+        nitely_core::lanes::share_env(&mut cmd, share.jobs);
+        let guard = nitely_core::procs::TreeGuard::with(nitely_core::procs::Contain { memory_cap: share.cap, low_priority: true, end_with_guard: false });
         // No console window, and its own process group: Ctrl+C in the supervisor's console must not
         // reach a worker that may be landing.
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
@@ -2256,7 +2179,7 @@ impl Agents for SystemAgents {
             use std::io::Write;
             stdin.write_all(brief.as_bytes()).ok();
         });
-        let tracked = crate::performance_attribution::track_child(&child, "worker");
+        let tracked = nitely_core::performance_attribution::track_child(&child, "worker");
         Ok(Box::new(Capped { process: SystemProcess(child), guard, tracked, log: launch.log.clone(), cap }))
     }
 
@@ -2265,11 +2188,11 @@ impl Agents for SystemAgents {
     }
 
     fn memory_wait(&self) -> Option<String> {
-        crate::machine::would_wait()
+        nitely_core::machine::would_wait()
     }
 
     fn memory_turn(&self) -> Option<String> {
-        crate::machine::admit_here_once()
+        nitely_core::machine::admit_here_once()
     }
 
     fn prepare(&self, prep: &Prepare) -> Result<Box<dyn Process>> {
@@ -2339,10 +2262,10 @@ impl Agents for SystemAgents {
         Ok(Box::new(SystemProcess(cmd.spawn().with_context(|| format!("starting {} land {}", job.nitely, job.issue))?)))
     }
 
-    fn run_submit_job(&self, nitely: &str, job: &crate::submit_job::Job) -> Result<Option<u32>> {
-        use crate::submit_job::Runner;
+    fn run_submit_job(&self, nitely: &str, job: &nitely_core::submit_job::Job) -> Result<Option<u32>> {
+        use nitely_core::submit_job::Runner;
         let program = self.resolve(nitely).unwrap_or_else(|| nitely.to_string());
-        crate::submit_job::DetachedProcess { nitely: PathBuf::from(program) }.start(job)
+        nitely_core::submit_job::DetachedProcess { nitely: PathBuf::from(program) }.start(job)
     }
 }
 
@@ -2405,7 +2328,7 @@ impl Process for Adopted {
 
 /// Whether process `pid` is running (`procs::alive`: the system's own answer, no process started).
 pub(crate) fn pid_alive(pid: u32) -> bool {
-    crate::procs::alive(pid)
+    nitely_core::procs::alive(pid)
 }
 
 struct SystemProcess(std::process::Child);
@@ -2447,8 +2370,8 @@ impl Process for SystemProcess {
 /// and off Windows it is the only thing that holds it.
 struct Capped {
     process: SystemProcess,
-    tracked: Option<crate::performance_attribution::Tracked>,
-    guard: Option<crate::procs::TreeGuard>,
+    tracked: Option<nitely_core::performance_attribution::Tracked>,
+    guard: Option<nitely_core::procs::TreeGuard>,
     log: PathBuf,
     cap: Option<u64>,
 }
@@ -2464,7 +2387,7 @@ impl Process for Capped {
             return Ok(Some(code));
         }
         if self.guard.as_ref().is_some_and(|g| g.over_memory()) {
-            let cap = self.cap.map(crate::machine::gb).unwrap_or_default();
+            let cap = self.cap.map(nitely_core::machine::gb).unwrap_or_default();
             if let Ok(mut log) = std::fs::OpenOptions::new().append(true).open(&self.log) {
                 use std::io::Write;
                 writeln!(log, "
@@ -2499,7 +2422,7 @@ fn on_path(program: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::NewIssue;
+    use nitely_core::NewIssue;
     use std::cell::RefCell;
     use std::process::Command;
     use std::rc::Rc;
@@ -2660,14 +2583,14 @@ mod tests {
                     db.move_issue(&job.issue, "Done", Some("landed"), None, &cli)?;
                 }
                 "conflict" => db.log_event(&cli, Some(&job.issue), None, "land_failed", "Land stopped: the rebase stopped on conflicts in a.txt")?,
-                "unsigned" => db.log_event(&cli, Some(&job.issue), None, "land_failed", &format!("Land stopped: the approval {}", crate::approval::UNSIGNED))?,
+                "unsigned" => db.log_event(&cli, Some(&job.issue), None, "land_failed", &format!("Land stopped: the approval {}", nitely_core::approval::UNSIGNED))?,
                 "human" => db.log_event(&cli, Some(&job.issue), None, "land_failed", "Land stopped: this change waits for a human (billing); it lands once they approve it in Nitely, after the review")?,
                 _ => db.log_event(&cli, Some(&job.issue), None, "land_failed", "Land stopped: another land holds the lock")?,
             }
             self.exits.borrow_mut().insert(pid, 0);
             Ok(Box::new(FakeProcess { pid, exits: self.exits.clone(), stopped: self.stopped.clone() }))
         }
-        fn run_submit_job(&self, _nitely: &str, job: &crate::submit_job::Job) -> Result<Option<u32>> {
+        fn run_submit_job(&self, _nitely: &str, job: &nitely_core::submit_job::Job) -> Result<Option<u32>> {
             self.resubmits.borrow_mut().push(job.id);
             // No process to record: a made-up pid would read as a job whose process died.
             Ok(None)
@@ -2699,7 +2622,7 @@ mod tests {
     }
 
     fn fixture(crew: &str) -> Fixture {
-        let base = crate::test_repo::copy("crew", |base| crate::test_repo::init(&base.join("repo"), &[]));
+        let base = nitely_core::test_repo::copy("crew", |base| nitely_core::test_repo::init(&base.join("repo"), &[]));
         let repo = base.join("repo");
         std::fs::create_dir_all(repo.join(".nitely")).unwrap();
         std::fs::write(repo.join(playbook::PLAYBOOK_PATH), format!("[worktree]\ndir = \"../wt/{{key}}\"\n{crew}")).unwrap();
@@ -2896,7 +2819,7 @@ workers = 1
         h.db.move_issue("NIT-1", "Approved", None, None, &Actor::Human).unwrap();
         sup.tick(&mut h.db, false).unwrap();
         // Where only the app can verify an approval (macOS), landing it is the app's.
-        let want: &[&str] = if crate::approval::agents_can_verify() { &["NIT-1"] } else { &[] };
+        let want: &[&str] = if nitely_core::approval::agents_can_verify() { &["NIT-1"] } else { &[] };
         assert_eq!(*fake.lands.borrow(), want);
     }
 
@@ -2914,7 +2837,7 @@ workers = 1
         sup.tick(&mut f.db, false).unwrap();
         // The app lands it once approved (its own lander, not the supervisor's), and that land stops
         // on a conflict: the issue is back In Progress with nobody's claim.
-        let app = Actor::Agent(crate::land::AUTO_LANDER.into());
+        let app = Actor::Agent(nitely_core::land::AUTO_LANDER.into());
         f.db.log_event(&app, Some("NIT-1"), None, "land_failed", "Land stopped: the rebase stopped on conflicts in a.txt").unwrap();
         f.db.move_issue("NIT-1", "In Progress", None, None, &app).unwrap();
         f.db.conn.execute("UPDATE issue SET claimed_by = NULL WHERE key = 'NIT-1'", []).unwrap();
@@ -2928,13 +2851,13 @@ workers = 1
     fn a_worktree_left_mid_rebase_is_still_its_branchs() {
         let f = fixture("");
         let wt = f.base.join("wt").join("nit-1");
-        crate::test_repo::git(&f.repo, &["worktree", "add", "-q", "-b", "claude/nit-1-first", &wt.to_string_lossy()]);
+        nitely_core::test_repo::git(&f.repo, &["worktree", "add", "-q", "-b", "claude/nit-1-first", &wt.to_string_lossy()]);
         std::fs::write(wt.join("a.txt"), "the branch's\n").unwrap();
-        crate::test_repo::git(&wt, &["add", "."]);
-        crate::test_repo::git(&wt, &["commit", "-q", "-m", "branch"]);
+        nitely_core::test_repo::git(&wt, &["add", "."]);
+        nitely_core::test_repo::git(&wt, &["commit", "-q", "-m", "branch"]);
         std::fs::write(f.repo.join("a.txt"), "main's\n").unwrap();
-        crate::test_repo::git(&f.repo, &["add", "a.txt"]);
-        crate::test_repo::git(&f.repo, &["commit", "-q", "-m", "main"]);
+        nitely_core::test_repo::git(&f.repo, &["add", "a.txt"]);
+        nitely_core::test_repo::git(&f.repo, &["commit", "-q", "-m", "main"]);
         // A land's rebase that stopped on the conflict, left for the next worker to resolve.
         assert!(playbook::git(&wt, &["rebase", "main"]).is_err());
         assert_eq!(current_branch(&wt).as_deref(), Some("claude/nit-1-first"));
@@ -2966,7 +2889,7 @@ workers = 1
 
     /// A clock the test moves: real time ahead, so the events a test writes (at real now) are older.
     fn moving_clock(sup: Supervisor) -> (Supervisor, Rc<std::cell::Cell<i64>>) {
-        let at = Rc::new(std::cell::Cell::new(crate::db::now() + 10_000));
+        let at = Rc::new(std::cell::Cell::new(nitely_core::db::now() + 10_000));
         let clock = at.clone();
         let sup = sup.with_clock(move || Moment { ts: clock.get(), minute_of_day: 12 * 60, day_start: clock.get() - 12 * 3600 });
         (sup, at)
@@ -3031,7 +2954,7 @@ workers = 1
                 .execute(
                     "INSERT INTO submit_job (issue_key, worktree, branch, head, requested_by, skip_review, local_only, state, queued_at, ended_at, error)
                      VALUES ('NIT-1', ?1, ?2, ?3, ?4, 0, 0, 'failed', ?5, ?5, ?6)",
-                    rusqlite::params![wt.to_string_lossy(), branch, head, by, NOON.ts + 1, format!("{} (the machine restarted, or it was stopped); submit again", crate::submit_job::ABANDONED)],
+                    rusqlite::params![wt.to_string_lossy(), branch, head, by, NOON.ts + 1, format!("{} (the machine restarted, or it was stopped); submit again", nitely_core::submit_job::ABANDONED)],
                 )
                 .unwrap();
         };
@@ -3077,7 +3000,7 @@ min_free_disk_gb = 100000000
     #[test]
     fn a_land_lock_left_by_a_land_that_died_is_removed_and_the_machine_guard_holds_new_workers() {
         let mut f = fixture(&format!("{GATE}[crew]\nworkers = 1\nmin_free_disk_gb = 100000000\n"));
-        let lock = crate::land::lock_path(&f.repo).unwrap();
+        let lock = nitely_core::land::lock_path(&f.repo).unwrap();
         std::fs::write(&lock, "NIT-2 pid 999999 since 2026-10-16T23:27:00Z\n").unwrap();
         let fake = Fake { installed: vec!["claude"], ..Default::default() };
         let mut sup = supervisor(&f, &fake);
@@ -3087,7 +3010,7 @@ min_free_disk_gb = 100000000
         assert!(tick.started.is_empty() && tick.status.starts_with("disk low:"), "{tick:?}");
         // A live land's lock stays.
         std::fs::write(&lock, format!("NIT-2 pid {} since now\n", std::process::id())).unwrap();
-        assert_eq!(crate::land::clear_dead_lock(&f.repo), None);
+        assert_eq!(nitely_core::land::clear_dead_lock(&f.repo), None);
         assert!(lock.exists());
     }
 
@@ -3101,7 +3024,7 @@ min_free_disk_gb = 100000000
             f.db.create_issue(&new, &human).unwrap();
         }
         let goal = |title: &str, rank: i64| {
-            let change = crate::goals::GoalChange { title: Some(title.into()), outcome: Some("o".into()), rank: Some(rank), ..Default::default() };
+            let change = nitely_core::goals::GoalChange { title: Some(title.into()), outcome: Some("o".into()), rank: Some(rank), ..Default::default() };
             f.db.save_goal("NIT", None, &change, &human).unwrap().id
         };
         let (first, second) = (goal("Ranked first", 1), goal("Ranked second", 2));
@@ -3137,7 +3060,7 @@ min_free_disk_gb = 100000000
     fn a_goal_with_nothing_ready_yields_its_slots_and_a_goals_own_budget_wins() {
         let mut f = fixture(&format!("{GATE}[crew]\nworkers = 2\ngoal_workers = 1\n"));
         let human = Actor::Human;
-        let change = |title: &str, rank: i64, workers: Option<i64>| crate::goals::GoalChange { title: Some(title.into()), outcome: Some("o".into()), rank: Some(rank), workers, ..Default::default() };
+        let change = |title: &str, rank: i64, workers: Option<i64>| nitely_core::goals::GoalChange { title: Some(title.into()), outcome: Some("o".into()), rank: Some(rank), workers, ..Default::default() };
         // The first goal's only issue is blocked; the second may take two workers at once.
         let blocked = f.db.save_goal("NIT", None, &change("Blocked", 1, None), &human).unwrap().id;
         let wide = f.db.save_goal("NIT", None, &change("Wide", 2, Some(2)), &human).unwrap().id;
@@ -3157,7 +3080,7 @@ min_free_disk_gb = 100000000
     fn project_focus_limits_crew_and_external_claims_without_interrupting_workers() {
         let mut f = fixture(&format!("{GATE}[crew]\nworkers = 4\ngoal_workers = 1\n"));
         let human = Actor::Human;
-        let goal = f.db.save_goal("NIT", None, &crate::goals::GoalChange {
+        let goal = f.db.save_goal("NIT", None, &nitely_core::goals::GoalChange {
             title: Some("Focused feature".into()), outcome: Some("Ship the feature".into()), ..Default::default()
         }, &human).unwrap().id;
         f.db.set_issue_goal("NIT-3", Some(goal), &human).unwrap();
@@ -3179,7 +3102,7 @@ min_free_disk_gb = 100000000
         let tick = sup.tick(&mut f.db, false).unwrap();
         assert_eq!(tick.started.iter().map(|w| w.issue.as_str()).collect::<Vec<_>>(), ["NIT-1"]);
         assert_eq!(sup.running(), 2, "changing focus leaves existing workers running");
-        f.db.save_goal("NIT", Some(goal), &crate::goals::GoalChange { state: Some("done".into()), ..Default::default() }, &human).unwrap();
+        f.db.save_goal("NIT", Some(goal), &nitely_core::goals::GoalChange { state: Some("done".into()), ..Default::default() }, &human).unwrap();
         let tick = sup.tick(&mut f.db, false).unwrap();
         assert!(tick.started.is_empty());
         assert!(tick.status.contains("no longer active"));
@@ -3250,7 +3173,7 @@ max_tokens_per_day = 1000000
     fn a_second_attempt_keeps_the_first_attempts_agent() {
         let mut f = fixture(&format!("{GATE}[crew]\nworkers = 1\n"));
         // NIT-1 already has a codex branch from an earlier attempt.
-        let git = |args: &[&str]| assert!(crate::playbook::run_git(Command::new("git").arg("-C").arg(&f.repo).args(args)).unwrap().status.success());
+        let git = |args: &[&str]| assert!(nitely_core::playbook::run_git(Command::new("git").arg("-C").arg(&f.repo).args(args)).unwrap().status.success());
         git(&["branch", "codex/nit-1-first"]);
         let fake = Fake { installed: vec!["claude", "codex"], ..Default::default() };
         let tick = supervisor(&f, &fake).tick(&mut f.db, false).unwrap();
@@ -3261,7 +3184,7 @@ max_tokens_per_day = 1000000
     #[test]
     fn never_puts_an_agent_on_another_vendors_branch() {
         let mut f = fixture(&format!("{GATE}[crew]\nworkers = 3\n"));
-        let git = |args: &[&str]| assert!(crate::playbook::run_git(Command::new("git").arg("-C").arg(&f.repo).args(args)).unwrap().status.success(), "{args:?}");
+        let git = |args: &[&str]| assert!(nitely_core::playbook::run_git(Command::new("git").arg("-C").arg(&f.repo).args(args)).unwrap().status.success(), "{args:?}");
         // NIT-1 has a claude branch, but only codex is installed.
         git(&["branch", "claude/nit-1-first"]);
         // NIT-2's worktree folder is on a branch a person started by hand.
@@ -3296,7 +3219,7 @@ max_tokens_per_day = 1000000
         let mut sup = supervisor(&f, &fake);
         sup.tick(&mut f.db, false).unwrap();
         // NIT-2's worker holds the land lock.
-        std::fs::write(f.repo.join(".git").join(crate::land::LOCK_FILE), "NIT-2 pid 1 since now").unwrap();
+        std::fs::write(f.repo.join(".git").join(nitely_core::land::LOCK_FILE), "NIT-2 pid 1 since now").unwrap();
         // NIT-3's worker had submitted: stopping it must not requeue reviewed work.
         let three = f.db.issue("NIT-3").unwrap().unwrap().claimed_by.unwrap();
         f.db.move_issue("NIT-3", "In Review", None, None, &Actor::Agent(three)).unwrap();
@@ -3420,7 +3343,7 @@ workers = 2
         let c = clock.clone();
         let mut sup = Supervisor::new("NIT", &f.repo, &f.base.join("crew"), "nitely", Box::new(Fake { db: Some(f.base.join("t.db")), ..fake.clone() })).with_clock(move || c.get());
         sup.tick(&mut f.db, false).unwrap();
-        std::fs::write(f.repo.join(".git").join(crate::land::LOCK_FILE), "NIT-2 pid 1 since now").unwrap();
+        std::fs::write(f.repo.join(".git").join(nitely_core::land::LOCK_FILE), "NIT-2 pid 1 since now").unwrap();
         clock.set(Moment { ts: NOON.ts + 31 * 60, ..NOON });
         let tick = sup.tick(&mut f.db, false).unwrap();
         assert_eq!(*fake.stopped.borrow(), [1001], "NIT-2 is landing");
@@ -3437,7 +3360,7 @@ workers = 2
         let wt = fake.launches.borrow()[0].cwd.to_string_lossy().replace('/', "\\");
         let repo = f.repo.to_string_lossy().into_owned();
         let mut record = |id: &str, cwd: &str| {
-            let e = crate::db::NewEvent { session_id: id.into(), vendor: "claude".into(), cwd: cwd.into(), kind: "session_start".into(), summary: None, state: "working".into() };
+            let e = nitely_core::db::NewEvent { session_id: id.into(), vendor: "claude".into(), cwd: cwd.into(), kind: "session_start".into(), summary: None, state: "working".into() };
             f.db.record(&e).unwrap();
         };
         record("claude:worker", &format!("{wt}\\src"));
@@ -3449,7 +3372,7 @@ workers = 2
         // A worker's reports go to the session named after its agent id, which may have started
         // before it, in an earlier attempt or a person's session: it counts while the worker runs.
         let agent_id = f.db.crew_running("NIT").unwrap()[0].agent_id.clone();
-        let reused = crate::db::NewEvent { session_id: agent_id.clone(), vendor: "claude".into(), cwd: wt.clone(), kind: "status".into(), summary: None, state: "working".into() };
+        let reused = nitely_core::db::NewEvent { session_id: agent_id.clone(), vendor: "claude".into(), cwd: wt.clone(), kind: "status".into(), summary: None, state: "working".into() };
         f.db.record(&reused).unwrap();
         f.db.conn.execute("UPDATE session SET started_at = started_at - 86400 WHERE id = ?1", [&agent_id]).unwrap();
         assert!(f.db.session(&agent_id).unwrap().unwrap().crew);
@@ -3458,7 +3381,7 @@ workers = 2
 
         // The worker exits without a session end of its own (as `codex exec` does): its sessions
         // end with it, the person's does not (NIT-189).
-        f.db.record(&crate::db::NewEvent { session_id: "claude:worker".into(), vendor: "claude".into(), cwd: format!("{wt}\\src"), kind: "ask".into(), summary: None, state: "waiting".into() }).unwrap();
+        f.db.record(&nitely_core::db::NewEvent { session_id: "claude:worker".into(), vendor: "claude".into(), cwd: format!("{wt}\\src"), kind: "ask".into(), summary: None, state: "waiting".into() }).unwrap();
         fake.exits.borrow_mut().insert(1001, 0);
         supervisor(&f, &fake).tick(&mut f.db, false).unwrap();
         let state = |id: &str| f.db.session(id).unwrap().unwrap().state;
@@ -3470,13 +3393,13 @@ workers = 2
         let off = fixture(GATE);
         let on = fixture(&format!("{GATE}[crew]\nworkers = 1\n"));
         let other = fixture(&format!("{GATE}[crew]\nworkers = 2\n"));
-        let repo = |name: &str, root: &Path, project: Option<&str>| crate::RepoConfig {
+        let repo = |name: &str, root: &Path, project: Option<&str>| nitely_core::RepoConfig {
             name: name.into(),
             root: root.to_string_lossy().into_owned(),
             integration_branch: "main".into(),
             project: project.map(str::to_string),
         };
-        let config = crate::Config {
+        let config = nitely_core::Config {
             repos: vec![repo("off", &off.repo, Some("OFF")), repo("on", &on.repo, Some("nit")), repo("second", &other.repo, Some("NIT")), repo("loose", &other.repo, None)],
             ..Default::default()
         };
@@ -3564,7 +3487,7 @@ workers = 1
         // An interrupted setup and an interrupted worker must both be retired by reclamation.
         for phase in ["setup", "work"] {
             let mut f = fixture(&format!("{GATE}[crew]\nworkers = 1\n"));
-            let goal = f.db.save_goal("NIT", None, &crate::goals::GoalChange {
+            let goal = f.db.save_goal("NIT", None, &nitely_core::goals::GoalChange {
                 title: Some("Focused feature".into()), outcome: Some("Ship it".into()), workers: Some(1), ..Default::default()
             }, &Actor::Human).unwrap().id;
             f.db.set_issue_goal("NIT-1", Some(goal), &Actor::Human).unwrap();
@@ -3613,7 +3536,7 @@ workers = 1
         use std::sync::{mpsc, Arc, Barrier};
         use std::time::Duration;
         let mut f = fixture(&format!("{GATE}[crew]\nworkers = 1\n"));
-        let goal = f.db.save_goal("NIT", None, &crate::goals::GoalChange {
+        let goal = f.db.save_goal("NIT", None, &nitely_core::goals::GoalChange {
             title: Some("Focused feature".into()), outcome: Some("Ship it".into()), workers: Some(1), ..Default::default()
         }, &Actor::Human).unwrap().id;
         f.db.set_issue_goal("NIT-1", Some(goal), &Actor::Human).unwrap();
@@ -3677,13 +3600,13 @@ workers = 1
     fn the_status_reads_the_repo_the_supervisor_follows() {
         let first = fixture(&format!("{GATE}[crew]\nworkers = 1\n"));
         let second = fixture(&format!("{GATE}[crew]\nworkers = 3\nmax_per_day = 7\n"));
-        let repo = |name: &str, root: &Path| crate::RepoConfig {
+        let repo = |name: &str, root: &Path| nitely_core::RepoConfig {
             name: name.into(),
             root: root.to_string_lossy().into_owned(),
             integration_branch: "main".into(),
             project: Some("NIT".into()),
         };
-        let config = crate::Config { repos: vec![repo("first", &first.repo), repo("second", &second.repo)], ..Default::default() };
+        let config = nitely_core::Config { repos: vec![repo("first", &first.repo), repo("second", &second.repo)], ..Default::default() };
         let db = &first.db;
         db.crew_heartbeat("NIT", 9, "working").unwrap();
         assert_eq!(project_status(db, &config, "NIT", &NOON).unwrap().unwrap().cap, 1, "the first repo with a crew");
@@ -3775,7 +3698,7 @@ workers = 1
     #[test]
     fn clean_up_touches_only_a_listed_worktree_on_its_branch() {
         let f = fixture(GATE);
-        let git = |args: &[&str]| assert!(crate::playbook::run_git(Command::new("git").arg("-C").arg(&f.repo).args(args)).unwrap().status.success(), "{args:?}");
+        let git = |args: &[&str]| assert!(nitely_core::playbook::run_git(Command::new("git").arg("-C").arg(&f.repo).args(args)).unwrap().status.success(), "{args:?}");
         let wt = f.base.join("wt").join("nit-1");
         git(&["worktree", "add", "-q", "-b", "claude/nit-1-first", &wt.to_string_lossy()]);
         let stray = f.base.join("wt").join("not-a-worktree");
@@ -3816,7 +3739,7 @@ workers = 1
 
     #[test]
     fn a_real_agent_gets_the_brief_on_stdin_and_writes_its_log() {
-        let dir = crate::paths::unique_temp("nitely-crew-proc", "");
+        let dir = nitely_core::paths::unique_temp("nitely-crew-proc", "");
         std::fs::create_dir_all(&dir).unwrap();
         let sh = playbook::posix_sh();
         let launch = Launch {

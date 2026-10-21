@@ -58,7 +58,7 @@ pub fn lane(db: &crate::Db, run: i64, kind: Kind) {
 pub fn read(store: &Store, from: i64, to: i64, project: Option<&str>, limit: usize) -> Result<(Vec<Event>, bool)> {
     read_for_boot(store, from, to, project, limit, None)
 }
-pub(crate) fn read_for_boot(store: &Store, from: i64, to: i64, project: Option<&str>, limit: usize, boot: Option<&str>) -> Result<(Vec<Event>, bool)> {
+pub fn read_for_boot(store: &Store, from: i64, to: i64, project: Option<&str>, limit: usize, boot: Option<&str>) -> Result<(Vec<Event>, bool)> {
     if limit == 0 || limit > 2000 { bail!("event limit must be 1–2000"); }
     let exists: bool = store.db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='performance_event')", [], |r| r.get(0))?;
     if !exists { return Ok((vec![], false)); }

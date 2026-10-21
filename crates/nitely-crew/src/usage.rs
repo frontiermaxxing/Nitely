@@ -18,9 +18,9 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use crate::config::Config;
-use crate::db::Db;
-use crate::paths::normalize;
+use nitely_core::config::Config;
+use nitely_core::db::Db;
+use nitely_core::paths::normalize;
 
 /// One model response (Claude) or turn step (Codex): what it cost in tokens.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -134,7 +134,7 @@ fn read_claude_lines(text: &str, state: &mut FileState) {
         let record = Usage {
             vendor: "claude",
             session: l.session.unwrap_or_default(),
-            ts: l.timestamp.as_deref().and_then(crate::linear_import::parse_iso).unwrap_or(0),
+            ts: l.timestamp.as_deref().and_then(nitely_core::linear_import::parse_iso).unwrap_or(0),
             model,
             input: u.input_tokens,
             output: u.output_tokens,
@@ -191,7 +191,7 @@ fn read_codex_lines(text: &str, state: &mut FileState) {
                 state.records.push(Usage {
                     vendor: "codex",
                     session: s.session.clone(),
-                    ts: v["timestamp"].as_str().and_then(crate::linear_import::parse_iso).unwrap_or(0),
+                    ts: v["timestamp"].as_str().and_then(nitely_core::linear_import::parse_iso).unwrap_or(0),
                     model: s.model.clone(),
                     // OpenAI counts cached input inside input.
                     input: input.saturating_sub(cached),
@@ -262,11 +262,11 @@ fn read_file(path: &Path, codex: bool, wanted: &dyn Fn(&str) -> bool, files: &mu
 /// Where Claude Code and Codex keep their sessions: as they do, their own variable first, then
 /// the agents' home (connect::agent_home, the person's home unless NITELY_AGENT_HOME says else).
 fn claude_home() -> Option<PathBuf> {
-    Some(std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).unwrap_or_else(|| crate::connect::agent_home().join(".claude")))
+    Some(std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).unwrap_or_else(|| nitely_core::connect::agent_home().join(".claude")))
 }
 
 fn codex_home() -> Option<PathBuf> {
-    Some(std::env::var_os("CODEX_HOME").map(PathBuf::from).unwrap_or_else(|| crate::connect::agent_home().join(".codex")))
+    Some(std::env::var_os("CODEX_HOME").map(PathBuf::from).unwrap_or_else(|| nitely_core::connect::agent_home().join(".codex")))
 }
 
 /// Claude Code's folder name for a working directory: every character that is not a letter or a
@@ -308,8 +308,8 @@ fn places(config: &Config) -> Vec<Place> {
         .iter()
         .filter_map(|r| {
             let project = r.project.clone()?;
-            let pb = crate::playbook::Playbook::load_with(Path::new(&r.root), config).unwrap_or_default();
-            let probe = crate::IssueRecord { key: "X-1".into(), title: "x".into(), ..Default::default() };
+            let pb = nitely_core::playbook::Playbook::load_with(Path::new(&r.root), config).unwrap_or_default();
+            let probe = nitely_core::IssueRecord { key: "X-1".into(), title: "x".into(), ..Default::default() };
             let worktrees = pb.worktree_for(Path::new(&r.root), "x", &probe).parent().map(|p| normalize(&p.to_string_lossy()));
             Some(Place { project, root: normalize(&r.root), worktrees })
         })
@@ -381,11 +381,19 @@ pub type Touches = HashMap<String, Vec<(i64, String)>>;
 /// move the session onto it (a coordinator reads and moves many).
 const NOT_WORK_TOOLS: &[&str] = &["get_issue", "list_issues", "file_issue", "file_issues", "update_issue", "get_answer", "get_project"];
 
-impl Db {
+/// What sessions worked on and what landed, as methods on [`Db`].
+pub trait UsageDb {
     /// The issues each session named since `since`: the issue of an event it wrote (a report, a
     /// note), else the one issue a tool call names (`start_task: NIT-3`, a path in its worktree).
     /// A call that names several, or only reads about or triages one, says nothing.
-    pub fn session_touches(&self, since: i64) -> Result<Touches> {
+    fn session_touches(&self, since: i64) -> Result<Touches>;
+
+    /// Issues of `project` that landed since `since`, with when (the last land of each).
+    fn landed_since(&self, project: &str, since: i64) -> Result<Vec<(String, i64)>>;
+}
+
+impl UsageDb for Db {
+    fn session_touches(&self, since: i64) -> Result<Touches> {
         let mut keys: std::collections::HashSet<String> = {
             let mut stmt = self.conn.prepare("SELECT key FROM issue")?;
             let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
@@ -413,8 +421,8 @@ impl Db {
             let key = match issue {
                 Some(k) => Some(k),
                 None if NOT_WORK_TOOLS.iter().any(|t| tool.ends_with(t)) => None,
-                None => match crate::activity::issue_keys(&summary, &prefixes, &keys)[..] {
-                    [ref k] => Some(crate::projects::current_key(&aliases, k)),
+                None => match nitely_core::activity::issue_keys(&summary, &prefixes, &keys)[..] {
+                    [ref k] => Some(nitely_core::projects::current_key(&aliases, k)),
                     _ => None,
                 },
             };
@@ -423,6 +431,15 @@ impl Db {
             }
         }
         Ok(out)
+    }
+
+    fn landed_since(&self, project: &str, since: i64) -> Result<Vec<(String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT issue_key, MAX(ts) FROM event WHERE type = 'landed' AND ts >= ?2
+               AND issue_key LIKE ?1 || '-%' COLLATE NOCASE GROUP BY issue_key ORDER BY 2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![project, since], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 }
 
@@ -497,8 +514,8 @@ fn issue_of(u: &Usage, project: &str, aliases: &HashMap<String, String>) -> Opti
     let folder = normalize(&u.cwd).rsplit('/').next().unwrap_or_default().to_string();
     let found = [u.branch.as_str(), folder.as_str()]
         .into_iter()
-        .filter_map(|s| crate::git::parse_branch(s).1)
-        .map(|k| crate::projects::current_key(aliases, &k))
+        .filter_map(|s| nitely_core::git::parse_branch(s).1)
+        .map(|k| nitely_core::projects::current_key(aliases, &k))
         .find(|k| k.split('-').next().is_some_and(|p| p.eq_ignore_ascii_case(project)));
     found
 }
@@ -656,7 +673,7 @@ pub fn project_spend(db: &Db, records: &[Attributed], project: &str, today_start
 /// An issue's spend, reading usage from a day before it was filed.
 pub fn spend_of_issue(config: &Config, db: &Db, key: &str) -> Result<IssueSpend> {
     let issue = db.issue(key)?.ok_or_else(|| anyhow::anyhow!("no issue {key}"))?;
-    let since = crate::linear_import::parse_iso(&issue.created_at).unwrap_or(0) - 86_400;
+    let since = nitely_core::linear_import::parse_iso(&issue.created_at).unwrap_or(0) - 86_400;
     Ok(issue_spend(&scan(config, db, since.max(0)), &issue.key))
 }
 
@@ -667,23 +684,11 @@ pub fn spend_of_project(config: &Config, db: &Db, project: &str, today_start: i6
     let from = today_start - (days as i64 - 1) * 86_400;
     let mut since = from;
     for (key, _) in db.landed_since(project, from)? {
-        if let Some(created) = db.issue(&key)?.and_then(|i| crate::linear_import::parse_iso(&i.created_at)) {
+        if let Some(created) = db.issue(&key)?.and_then(|i| nitely_core::linear_import::parse_iso(&i.created_at)) {
             since = since.min(created - 86_400);
         }
     }
     project_spend(db, &scan(config, db, since.max(0)), project, today_start, days)
-}
-
-impl Db {
-    /// Issues of `project` that landed since `since`, with when (the last land of each).
-    pub fn landed_since(&self, project: &str, since: i64) -> Result<Vec<(String, i64)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT issue_key, MAX(ts) FROM event WHERE type = 'landed' AND ts >= ?2
-               AND issue_key LIKE ?1 || '-%' COLLATE NOCASE GROUP BY issue_key ORDER BY 2",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![project, since], |r| Ok((r.get(0)?, r.get(1)?)))?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    }
 }
 
 #[cfg(test)]
@@ -745,7 +750,7 @@ mod tests {
 
     #[test]
     fn scans_watched_repos_attributes_issues_and_sums_a_project() {
-        let base = crate::paths::unique_temp("nitely-usage", "");
+        let base = nitely_core::paths::unique_temp("nitely-usage", "");
         let (claude, codex) = (base.join("claude"), base.join("codex"));
         let root = r"C:\dev\app";
         let folder = claude.join("projects").join(claude_folder(r"C:\dev\app-worktrees\nit-3-x"));
@@ -767,7 +772,7 @@ mod tests {
 "#,
         )
         .unwrap();
-        let config = Config { repos: vec![crate::RepoConfig { name: "app".into(), root: root.into(), integration_branch: "main".into(), project: Some("NIT".into()) }], ..Default::default() };
+        let config = Config { repos: vec![nitely_core::RepoConfig { name: "app".into(), root: root.into(), integration_branch: "main".into(), project: Some("NIT".into()) }], ..Default::default() };
         let none = HashMap::new();
         let records = scan_in(&config, &none, 0, Some(&claude), Some(&codex));
         assert_eq!(records.len(), 2, "the other repo's session is not read");
@@ -782,13 +787,13 @@ mod tests {
         assert_eq!(issue_spend(&records, "NIT-3").tokens, 85);
 
         // After a re-key, the old branch's usage belongs to the issue under its new key.
-        let renamed = Config { repos: vec![crate::RepoConfig { project: Some("APP".into()), ..config.repos[0].clone() }], ..Default::default() };
+        let renamed = Config { repos: vec![nitely_core::RepoConfig { project: Some("APP".into()), ..config.repos[0].clone() }], ..Default::default() };
         let aliases = HashMap::from([("NIT".to_string(), "APP".to_string())]);
         assert_eq!(issue_spend(&scan_in(&renamed, &aliases, 0, Some(&claude), Some(&codex)), "APP-3").tokens, 85);
 
         let db = Db::open(&base.join("t.db")).unwrap();
-        db.conn.execute("INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, 'a', 'NIT-3', 'landed', 'x')", [crate::linear_import::parse_iso("2026-10-16T13:00:00Z").unwrap()]).unwrap();
-        let today = crate::linear_import::parse_iso("2026-10-16T00:00:00Z").unwrap();
+        db.conn.execute("INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, 'a', 'NIT-3', 'landed', 'x')", [nitely_core::linear_import::parse_iso("2026-10-16T13:00:00Z").unwrap()]).unwrap();
+        let today = nitely_core::linear_import::parse_iso("2026-10-16T00:00:00Z").unwrap();
         let p = project_spend(&db, &records, "NIT", today, 3).unwrap();
         assert_eq!(p.days.iter().map(|d| (d.tokens, d.landed)).collect::<Vec<_>>(), [(0, 0), (0, 0), (405, 1)]);
         assert_eq!((p.tokens, p.landed, p.per_landed), (405, 1, Some(85)));
@@ -801,11 +806,11 @@ mod tests {
 
     #[test]
     fn a_main_checkout_session_works_on_the_issue_it_named_last() {
-        let base = crate::paths::unique_temp("nitely-usage-touch", "");
+        let base = nitely_core::paths::unique_temp("nitely-usage-touch", "");
         let mut db = Db::open(&base.join("t.db")).unwrap();
         db.create_project("NIT", "Nitely").unwrap();
-        let new = |title: &str| crate::NewIssue { project: "NIT".into(), title: title.into(), body: "b".into(), kind: "feature".into(), source: "claude".into(), evidence: "e".into(), priority: 3, allow_similar: true, ..Default::default() };
-        let human = crate::Actor::Human;
+        let new = |title: &str| nitely_core::NewIssue { project: "NIT".into(), title: title.into(), body: "b".into(), kind: "feature".into(), source: "claude".into(), evidence: "e".into(), priority: 3, allow_similar: true, ..Default::default() };
+        let human = nitely_core::Actor::Human;
         let (a, b) = (db.create_issue(&new("One"), &human).unwrap().key, db.create_issue(&new("Two"), &human).unwrap().key);
         let tool = |ts: i64, actor: &str, summary: &str| {
             db.conn.execute("INSERT INTO event (ts, actor, type, summary) VALUES (?1, ?2, 'tool', ?3)", rusqlite::params![ts, actor, summary]).unwrap();

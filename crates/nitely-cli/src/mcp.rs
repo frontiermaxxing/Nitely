@@ -14,6 +14,7 @@ use nitely_core::db::NewEvent;
 use nitely_core::issues::{branch_name, BatchItem, KINDS, OWNERS, SOURCES, STATES};
 use nitely_core::playbook::{self, Playbook};
 use nitely_core::{paths, resolve_project, Actor, Config, Db, NewIssue};
+use nitely_crew::triage::TriageDb;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Write};
@@ -1156,7 +1157,7 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
         None
     };
     let mut out = match name {
-        "performance" => json!(nitely_core::performance_query::query(&nitely_core::performance::directory(), &serde_json::from_value(args.clone())?)?),
+        "performance" => json!(nitely_crew::performance_query::query(&nitely_core::performance::directory(), &serde_json::from_value(args.clone())?)?),
         "next_task" if returned.is_some() => {
             let job = returned.as_ref().unwrap();
             db.mark_submit_jobs_delivered(&[job.id])?;
@@ -1373,7 +1374,7 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
                 "verification": nitely_core::verification::recent(&db, &issue.key)?,
                 "verification_timing": if server.remote.is_some() { None } else {
                     playbook::repo_for_issue(&config,issue.project.as_deref(),&server.cwd).ok()
-                        .map(|root|nitely_core::verification_timing::report(&db,&root,&issue.key)).transpose()?
+                        .map(|root|nitely_crew::verification_timing::report(&db,&root,&issue.key)).transpose()?
                 },
                 "verification_health": issue.project.as_deref().map(|p|nitely_core::verification_backstop::project_health(&db,p)).transpose()?,
                 "verification_audits": issue.project.as_deref().map(|p|nitely_core::verification_audit::report(&db,p,10)).transpose()?,
@@ -1685,14 +1686,14 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             }
         }
         "triage" => {
-            let q = nitely_core::triage::ask(&db, req(args, "question")?, str_arg(args, "key"), Some(&server.place()), &actor)?;
-            let q = nitely_core::triage::start(&mut db, &config, &q, &std::env::current_exe()?)?;
+            let q = nitely_crew::triage::ask(&db, req(args, "question")?, str_arg(args, "key"), Some(&server.place()), &actor)?;
+            let q = nitely_crew::triage::start(&mut db, &config, &q, &std::env::current_exe()?)?;
             triage_json(&db, &q, &actor)?
         }
         "get_triage" => {
             let id = args.get("id").and_then(Value::as_i64).ok_or_else(|| anyhow!("missing id"))?;
             let seconds = args.get("wait_seconds").and_then(Value::as_u64).unwrap_or(0).min(600);
-            let q = nitely_core::triage::wait(&db, id, std::time::Duration::from_secs(seconds))?;
+            let q = nitely_crew::triage::wait(&db, id, std::time::Duration::from_secs(seconds))?;
             triage_json(&db, &q, &actor)?
         }
         other => bail!("unknown tool {other}"),
@@ -1738,14 +1739,14 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
 
 /// A triage question as triage and get_triage return it. An answered one is told to its asker
 /// here, so it is not repeated as a notice.
-fn triage_json(db: &Db, q: &nitely_core::triage::Question, actor: &nitely_core::issues::Actor) -> Result<Value> {
+fn triage_json(db: &Db, q: &nitely_crew::triage::Question, actor: &nitely_core::issues::Actor) -> Result<Value> {
     if q.finished() && q.asked_by == actor.id() {
         db.mark_triage_delivered(&[q.id])?;
     }
     let mut v = json!(q);
     v["outcome"] = json!(q.outcome());
     if !q.finished() {
-        v["next"] = json!(nitely_core::triage::ASKED_NEXT);
+        v["next"] = json!(nitely_crew::triage::ASKED_NEXT);
     }
     Ok(v)
 }

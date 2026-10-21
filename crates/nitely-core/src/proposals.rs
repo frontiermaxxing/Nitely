@@ -401,7 +401,7 @@ fn commit_playbook(root: &Path, branch: &str, steps: &[Step], message: &str) -> 
 }
 
 /// `commit_playbook` with the change as a function of the playbook committed at the branch's tip.
-pub(crate) fn commit_playbook_edit(root: &Path, branch: &str, edit: &dyn Fn(&str) -> Result<String>, message: &str) -> Result<String> {
+pub fn commit_playbook_edit(root: &Path, branch: &str, edit: &dyn Fn(&str) -> Result<String>, message: &str) -> Result<String> {
     let git = |args: &[&str]| crate::playbook::git(root, args).map(|s| s.trim().to_string());
     let tip = git(&["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")])
         .map_err(|_| anyhow::anyhow!("{branch}, the integration branch the changed playbook names, is not a branch in {}", root.display()))?;

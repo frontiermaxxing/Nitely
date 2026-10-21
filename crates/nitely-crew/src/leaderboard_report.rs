@@ -144,7 +144,7 @@ pub fn build(board: &Leaderboard, projects: u64, profile: &Profile) -> Result<Re
 }
 
 /// The report now, over `projects` (empty: every project), as `profile`.
-pub fn report_now(config: &crate::Config, db: &crate::db::Db, projects: &[String], profile: &Profile) -> Result<Report> {
+pub fn report_now(config: &nitely_core::Config, db: &nitely_core::db::Db, projects: &[String], profile: &Profile) -> Result<Report> {
     let board = crate::leaderboard::stats_now(config, db, projects)?;
     let counted = if projects.is_empty() { db.projects()?.len() } else { board.projects.len() };
     build(&board, counted as u64, profile)
@@ -259,7 +259,7 @@ pub fn website(v: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::Db;
+    use nitely_core::db::Db;
     use crate::leaderboard::{stats, Inputs};
     use crate::usage::{Attributed, Usage};
     use rusqlite::params;
@@ -276,7 +276,7 @@ mod tests {
     /// counts and rates do.
     #[test]
     fn nothing_private_gets_in() {
-        let base = crate::paths::unique_temp("nitely-leaderboard-report", "");
+        let base = nitely_core::paths::unique_temp("nitely-leaderboard-report", "");
         std::fs::create_dir_all(&base).unwrap();
         let db = Db::open(&base.join("t.db")).unwrap();
         db.create_project("QZX", "Quokkazebra Secret Project").unwrap();

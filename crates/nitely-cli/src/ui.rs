@@ -66,7 +66,7 @@ pub fn run(command: &str, args: &Value) -> Result<Value> {
     }
     let db = || Db::open_read_only(&nitely_core::paths::db_path());
     Ok(match command {
-        "performance_query" => json!(nitely_core::performance_query::query(&nitely_core::performance::directory(), &serde_json::from_value(args.get("query").cloned().unwrap_or_else(|| json!({})))?)?),
+        "performance_query" => json!(nitely_crew::performance_query::query(&nitely_core::performance::directory(), &serde_json::from_value(args.get("query").cloned().unwrap_or_else(|| json!({})))?)?),
         "snapshot" => json!(nitely_core::snapshot(&Config::load_read_only()?, &db()?)?),
         "projects" => json!(db()?.projects()?),
         "project_brief" => json!(db()?.project_brief(str_arg(args, "project")?)?),
@@ -80,18 +80,18 @@ pub fn run(command: &str, args: &Value) -> Result<Value> {
         "lands_dry_run" => json!(nitely_core::lands_pipeline::dry_run_for(&db()?, &Config::load_read_only()?, str_arg(args, "project")?, str_arg(args, "repo")?, str_arg(args, "path")?)?),
         "periodic_review_status" => json!(nitely_core::periodic_review::status(&db()?, str_arg(args, "project")?)?),
         "crew_status" => {
-            let moment = nitely_core::crew::Moment::now();
-            json!(nitely_core::crew::project_status(&db()?, &Config::load_read_only()?, str_arg(args, "project")?, &moment)?)
+            let moment = nitely_crew::crew::Moment::now();
+            json!(nitely_crew::crew::project_status(&db()?, &Config::load_read_only()?, str_arg(args, "project")?, &moment)?)
         }
-        "crew_settings" => json!(nitely_core::crew_settings::crew_for_project(&Config::load_read_only()?, &db()?, str_arg(args, "project")?)?),
-        "issue_spend" => json!(nitely_core::usage::spend_of_issue(&Config::load_read_only()?, &db()?, str_arg(args, "key")?)?),
+        "crew_settings" => json!(nitely_crew::crew_settings::crew_for_project(&Config::load_read_only()?, &db()?, str_arg(args, "project")?)?),
+        "issue_spend" => json!(nitely_crew::usage::spend_of_issue(&Config::load_read_only()?, &db()?, str_arg(args, "key")?)?),
         "lanes_overview" => json!(nitely_core::lanes::overview(&Config::load_read_only()?, &db()?)?),
         // A database a newer schema has not reached yet has no batches to show.
-        "waits_overview" => json!(nitely_core::waits::overview(&Config::load_read_only()?, &db()?)?),
+        "waits_overview" => json!(nitely_crew::waits::overview(&Config::load_read_only()?, &db()?)?),
         "batches_overview" => json!(nitely_core::batches::overview(&Config::load_read_only()?, &db()?).unwrap_or_default()),
         "project_spend" => {
             let days = args.get("days").and_then(Value::as_u64).unwrap_or(14) as usize;
-            json!(nitely_core::usage::spend_of_project(&Config::load_read_only()?, &db()?, str_arg(args, "project")?, int_arg(args, "dayStart")?, days)?)
+            json!(nitely_crew::usage::spend_of_project(&Config::load_read_only()?, &db()?, str_arg(args, "project")?, int_arg(args, "dayStart")?, days)?)
         }
         "mirror_preview" => json!(nitely_core::mirror::preview(&Config::load_read_only()?, &db()?, str_arg(args, "project")?, false)?),
         "issue_mirror" => json!(nitely_core::mirror::issue_state(&Config::load_read_only()?, &db()?, str_arg(args, "key")?)?),
@@ -103,7 +103,7 @@ pub fn run(command: &str, args: &Value) -> Result<Value> {
             let key = str_arg(args, "key")?;
             json!(db()?.issue_detail(key)?.ok_or_else(|| anyhow!("no issue {key}"))?)
         }
-        "pulse" => json!(nitely_core::pulse(&db()?, int_arg(args, "since")?, int_arg(args, "dayStart")?)?),
+        "pulse" => json!(nitely_crew::pulse(&db()?, int_arg(args, "since")?, int_arg(args, "dayStart")?)?),
         "activity" => {
             let to = nitely_core::db::now();
             let hours = int_arg(args, "hours")?.clamp(1, 24 * 7);

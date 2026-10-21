@@ -17,7 +17,8 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use nitely_core::issues::{branch_name, BatchItem};
 use nitely_core::playbook::{self, Playbook};
-use nitely_core::{db::NewEvent, hook, paths, resolve_project, Actor, Config, Db, NewIssue, RepoConfig};
+use nitely_core::{db::NewEvent, paths, resolve_project, Actor, Config, Db, NewIssue, RepoConfig};
+use nitely_crew::hook;
 use std::io::Read;
 
 /// Nitely: what your coding agents are doing.
@@ -996,7 +997,7 @@ fn run(cmd: Cmd) -> Result<()> {
             if let Some(key)=issue {
                 let issue=db.issue(&key)?.with_context(||format!("no issue {key}"))?;
                 let root=playbook::repo_for_issue(&config,issue.project.as_deref(),&cwd()?)?;
-                return print_json(&nitely_core::verification_timing::report(&db,&root,&issue.key)?);
+                return print_json(&nitely_crew::verification_timing::report(&db,&root,&issue.key)?);
             }
             if tick { nitely_core::verification_backstop::tick_all(&mut db, &config)?; }
             if now { nitely_core::verification_backstop::tick_all_now(&mut db, &config)?; }
@@ -1019,9 +1020,9 @@ fn run(cmd: Cmd) -> Result<()> {
             if paths::config_path().exists() {
                 bail!("{} has a config already; perf-seed seeds only a new data folder", home.display());
             }
-            let seeded = nitely_core::perf::seed(&paths::db_path(), &home.join("perf-repos"))?;
+            let seeded = nitely_crew::perf::seed(&paths::db_path(), &home.join("perf-repos"))?;
             seeded.save()?;
-            println!("seeded {}: {} projects, {} issues, {} worktrees, {} events", home.display(), nitely_core::perf::PROJECTS.len(), nitely_core::perf::ISSUES, nitely_core::perf::WORKTREES, nitely_core::perf::EVENTS);
+            println!("seeded {}: {} projects, {} issues, {} worktrees, {} events", home.display(), nitely_crew::perf::PROJECTS.len(), nitely_crew::perf::ISSUES, nitely_crew::perf::WORKTREES, nitely_crew::perf::EVENTS);
             Ok(())
         }
         Cmd::Serve { listen, no_advertise } => serve::serve(Some(&listen), !no_advertise),
@@ -1286,7 +1287,7 @@ fn run(cmd: Cmd) -> Result<()> {
             if json {
                 return print_json(&report);
             }
-            print!("{}", nitely_core::report_text::local(&report, all));
+            print!("{}", nitely_crew::report_text::local(&report, all));
             Ok(())
         }
         Cmd::Goal { command } => {
@@ -1674,12 +1675,12 @@ fn run(cmd: Cmd) -> Result<()> {
                 }
                 Err(e) => return Err(e),
             };
-            print_json(&nitely_core::triage::answer(&mut db, &config, id)?)
+            print_json(&nitely_crew::triage::answer(&mut db, &config, id)?)
         }
         Cmd::InboxRate { project, days } => {
             let db = Db::open_default()?;
             let since = nitely_core::db::now() - days as i64 * 86_400;
-            print_json(&nitely_core::triage::inbox_rate(&db, &project, since)?)
+            print_json(&nitely_crew::triage::inbox_rate(&db, &project, since)?)
         }
         Cmd::SubmitJob { id } => {
             let config = Config::load()?;
@@ -1770,37 +1771,37 @@ fn run(cmd: Cmd) -> Result<()> {
         Cmd::Leaderboard { command: LeaderboardCmd::Stats { project } } => {
             let config = Config::load()?;
             let db = Db::open_default()?;
-            print_json(&nitely_core::leaderboard::stats_now(&config, &db, &project)?)
+            print_json(&nitely_crew::leaderboard::stats_now(&config, &db, &project)?)
         }
         Cmd::Leaderboard { command: LeaderboardCmd::Report { project, name, github, x, website } } => {
             let config = Config::load()?;
             let db = Db::open_default()?;
-            let profile = nitely_core::leaderboard_report::Profile { display_name: name, github, x, website };
-            print_json(&nitely_core::leaderboard_report::report_now(&config, &db, &project, &profile)?)
+            let profile = nitely_crew::leaderboard_report::Profile { display_name: name, github, x, website };
+            print_json(&nitely_crew::leaderboard_report::report_now(&config, &db, &project, &profile)?)
         }
         Cmd::Leaderboard { command: LeaderboardCmd::Join { name, project, github, x, website, url } } => {
-            let profile = nitely_core::leaderboard_report::Profile { display_name: name, github, x, website };
-            print_json(&nitely_core::leaderboard_send::Sharing::default_dir().join(&profile, &project, url.as_deref())?)
+            let profile = nitely_crew::leaderboard_report::Profile { display_name: name, github, x, website };
+            print_json(&nitely_crew::leaderboard_send::Sharing::default_dir().join(&profile, &project, url.as_deref())?)
         }
         Cmd::Leaderboard { command: LeaderboardCmd::Send } => {
             let config = Config::load()?;
             let db = Db::open_default()?;
-            print_json(&nitely_core::leaderboard_send::Sharing::default_dir().send(&config, &db)?)
+            print_json(&nitely_crew::leaderboard_send::Sharing::default_dir().send(&config, &db)?)
         }
-        Cmd::Leaderboard { command: LeaderboardCmd::Status } => print_json(&nitely_core::leaderboard_send::Sharing::default_dir().status(nitely_core::db::now())?),
-        Cmd::Leaderboard { command: LeaderboardCmd::Board { period } } => print_json(&nitely_core::leaderboard_send::Sharing::default_dir().board(&period)?),
-        Cmd::Leaderboard { command: LeaderboardCmd::Delete } => print_json(&serde_json::json!({ "deleted": nitely_core::leaderboard_send::Sharing::default_dir().delete()? })),
-        Cmd::Leaderboard { command: LeaderboardCmd::Leave } => print_json(&serde_json::json!({ "deleted": nitely_core::leaderboard_send::Sharing::default_dir().leave()? })),
+        Cmd::Leaderboard { command: LeaderboardCmd::Status } => print_json(&nitely_crew::leaderboard_send::Sharing::default_dir().status(nitely_core::db::now())?),
+        Cmd::Leaderboard { command: LeaderboardCmd::Board { period } } => print_json(&nitely_crew::leaderboard_send::Sharing::default_dir().board(&period)?),
+        Cmd::Leaderboard { command: LeaderboardCmd::Delete } => print_json(&serde_json::json!({ "deleted": nitely_crew::leaderboard_send::Sharing::default_dir().delete()? })),
+        Cmd::Leaderboard { command: LeaderboardCmd::Leave } => print_json(&serde_json::json!({ "deleted": nitely_crew::leaderboard_send::Sharing::default_dir().leave()? })),
         Cmd::Spend { issue, project, days } => {
             let config = Config::load()?;
             let db = Db::open_default()?;
             match issue {
-                Some(key) => print_json(&nitely_core::usage::spend_of_issue(&config, &db, &db.current_key(&key)?)?),
+                Some(key) => print_json(&nitely_crew::usage::spend_of_issue(&config, &db, &db.current_key(&key)?)?),
                 None => {
                     let project = resolve_project(&config, &db, project.as_deref(), &cwd()?)?;
                     // Days in UTC here; the app passes local midnight.
                     let today = nitely_core::db::now().div_euclid(86_400) * 86_400;
-                    print_json(&nitely_core::usage::spend_of_project(&config, &db, &project, today, days)?)
+                    print_json(&nitely_crew::usage::spend_of_project(&config, &db, &project, today, days)?)
                 }
             }
         }
@@ -1957,12 +1958,12 @@ dry run: would create {} issue(s) ({} to {}) and {} comment(s) in {} {}; run aga
             // Titles come from this machine's issues when it has them; CI has none and uses the
             // commits' own subjects. Read-only: notes never change the board.
             let Some(since) = since else {
-                print!("{}", nitely_core::release_notes::first_release(&version));
+                print!("{}", nitely_crew::release_notes::first_release(&version));
                 return Ok(());
             };
             let db = paths::db_path().exists().then(|| Db::open_read_only(&paths::db_path()).ok()).flatten();
-            let (entries, other) = nitely_core::release_notes::entries(std::path::Path::new(&repo), Some(&since), &until, db.as_ref())?;
-            print!("{}", nitely_core::release_notes::markdown(&version, &entries, &other, github.as_deref()));
+            let (entries, other) = nitely_crew::release_notes::entries(std::path::Path::new(&repo), Some(&since), &until, db.as_ref())?;
+            print!("{}", nitely_crew::release_notes::markdown(&version, &entries, &other, github.as_deref()));
             Ok(())
         }
         Cmd::Where => {

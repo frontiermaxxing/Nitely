@@ -9,8 +9,8 @@ use anyhow::Result;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::db::Db;
-use crate::playbook::git;
+use nitely_core::db::Db;
+use nitely_core::playbook::git;
 
 /// One issue in a release: its key, title and the commits that carried it.
 #[derive(Debug, Clone, PartialEq)]
@@ -109,9 +109,9 @@ mod tests {
         assert_eq!(key_of("Add goals", "[APP-41](http://127.0.0.1:7423/i/APP-41)").as_deref(), Some("APP-41"));
         assert_eq!(key_of("Use UTF-8 everywhere", "No link"), None);
 
-        let dir = crate::paths::unique_temp("nitely-notes", "");
+        let dir = nitely_core::paths::unique_temp("nitely-notes", "");
         std::fs::create_dir_all(&dir).unwrap();
-        let sh = |args: &[&str]| assert!(crate::playbook::run_git(Command::new("git").arg("-C").arg(&dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args)).unwrap().status.success());
+        let sh = |args: &[&str]| assert!(nitely_core::playbook::run_git(Command::new("git").arg("-C").arg(&dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args)).unwrap().status.success());
         sh(&["init", "-q", "-b", "main"]);
         sh(&["commit", "-q", "--allow-empty", "-m", "Start"]);
         sh(&["tag", "v0.1.0"]);

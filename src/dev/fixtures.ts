@@ -972,7 +972,7 @@ function heldFiles(project: string): Held[] {
 
 let crewPaused = false;
 
-// Each repo's [crew] as the Crew section edits it (crates/nitely-core/src/crew_settings.rs): Nitely
+// Each repo's [crew] as the Crew section edits it (crates/nitely-crew/src/crew_settings.rs): Nitely
 // commits its own playbook and runs a crew, Orbit's playbook is kept by Nitely with the crew off,
 // and Harbor has no playbook (so no gate) yet.
 const CREW_CHOICES = [{ name: "claude", installed: true }, { name: "codex", installed: true }];
@@ -1294,7 +1294,7 @@ function snapshot(): Board {
   };
 }
 
-// ----- Pulse: the same shape crates/nitely-core/src/pulse.rs returns -----
+// ----- Pulse: the same shape crates/nitely-crew/src/pulse.rs returns -----
 
 const QUIET_SECS = 3600;
 const HAPPENING: Record<string, Happening["kind"]> = {

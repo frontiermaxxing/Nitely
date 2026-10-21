@@ -42,7 +42,7 @@ pub struct Playbook {
     pub land: LandRules,
     /// Agent workers Nitely starts itself (docs/crew.md); off unless `workers` is set.
     #[serde(default)]
-    pub crew: crate::crew::CrewRules,
+    pub crew: crate::crew_rules::CrewRules,
     #[serde(default)]
     pub schedule: crate::test_sweep::Schedule,
     /// Build lanes (docs/build-lanes.md); none unless the playbook has a `[lanes]` table.
@@ -732,7 +732,7 @@ pub(crate) fn normalize_lexically(p: &Path) -> PathBuf {
     out
 }
 
-pub(crate) fn git(dir: &Path, args: &[&str]) -> Result<String> {
+pub fn git(dir: &Path, args: &[&str]) -> Result<String> {
     let key = if settled_query(args) {
         Some(format!("{}\0{}", dir.to_string_lossy(), args.join("\0")))
     } else {
@@ -935,8 +935,8 @@ pub(crate) fn is_bitbucket_https(url: &str) -> bool {
 /// ships (found from `git --exec-path`, since its folder is often not on PATH). Its folder, which
 /// holds `cat`, `sleep` and the other tools the fake reviewers use, is put on this process's PATH
 /// once, so the commands they run are found too.
-#[cfg(test)]
-pub(crate) fn posix_sh() -> String {
+#[cfg(any(test, feature = "test-support"))]
+pub fn posix_sh() -> String {
     if !cfg!(windows) {
         return "sh".into();
     }
@@ -959,7 +959,7 @@ pub(crate) fn posix_sh() -> String {
     .clone()
 }
 
-pub(crate) fn shell_free_command(program: &str) -> Command {
+pub fn shell_free_command(program: &str) -> Command {
     #[allow(unused_mut)]
     let mut cmd = Command::new(program);
     if program == "git" {

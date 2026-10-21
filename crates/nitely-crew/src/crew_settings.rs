@@ -11,10 +11,10 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 use crate::crew::{CrewRules, DEFAULT_MAX_PER_DAY};
-use crate::db::Db;
-use crate::issues::Actor;
-use crate::playbook::{Playbook, PLAYBOOK_PATH};
-use crate::proposals::Target;
+use nitely_core::db::Db;
+use nitely_core::issues::Actor;
+use nitely_core::playbook::{Playbook, PLAYBOOK_PATH};
+use nitely_core::proposals::Target;
 
 /// Most workers the app lets a project run at once.
 pub const MAX_WORKERS: u32 = 8;
@@ -72,11 +72,11 @@ pub struct CrewSaved {
     pub done: String,
 }
 
-fn repos<'a>(config: &'a crate::Config, project: &str) -> Vec<&'a crate::RepoConfig> {
+fn repos<'a>(config: &'a nitely_core::Config, project: &str) -> Vec<&'a nitely_core::RepoConfig> {
     config.repos.iter().filter(|r| r.project.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(project))).collect()
 }
 
-fn repo<'a>(config: &'a crate::Config, name: &str) -> Result<&'a crate::RepoConfig> {
+fn repo<'a>(config: &'a nitely_core::Config, name: &str) -> Result<&'a nitely_core::RepoConfig> {
     config.repos.iter().find(|r| r.name == name).with_context(|| format!("no repo {name} in Nitely's config"))
 }
 
@@ -89,7 +89,7 @@ fn read(path: &Path) -> Result<String> {
 }
 
 /// The crew of every repo linked to `project`.
-pub fn crew_for_project(config: &crate::Config, db: &Db, project: &str) -> Result<Vec<CrewView>> {
+pub fn crew_for_project(config: &nitely_core::Config, db: &Db, project: &str) -> Result<Vec<CrewView>> {
     repos(config, project).into_iter().map(|r| view(db, r, &installed)).collect()
 }
 
@@ -99,7 +99,7 @@ fn installed(program: &str) -> bool {
     crate::crew::SystemAgents.resolve(program).is_some()
 }
 
-fn view(db: &Db, repo: &crate::RepoConfig, installed: &dyn Fn(&str) -> bool) -> Result<CrewView> {
+fn view(db: &Db, repo: &nitely_core::RepoConfig, installed: &dyn Fn(&str) -> bool) -> Result<CrewView> {
     let root = Path::new(&repo.root);
     let target = Target::of(&repo.name, root);
     let text = read(&target.path)?;
@@ -125,7 +125,7 @@ fn view(db: &Db, repo: &crate::RepoConfig, installed: &dyn Fn(&str) -> bool) -> 
             AgentChoice { installed: installed(&program), name }
         })
         .collect();
-    let scope = crate::paths::normalize(&repo.root);
+    let scope = nitely_core::paths::normalize(&repo.root);
     let pending_proposal = db
         .conn
         .query_row("SELECT issue_key FROM playbook_proposal WHERE scope = ?1 AND status = 'pending'", [&scope], |r| r.get::<_, String>(0))
@@ -243,11 +243,11 @@ fn describe(edit: &CrewEdit) -> String {
 }
 
 /// Saves `edit` as `repo`'s crew, as the person. Only the app calls this.
-pub fn save_crew(config: &crate::Config, db: &Db, repo_name: &str, edit: &CrewEdit) -> Result<CrewSaved> {
+pub fn save_crew(config: &nitely_core::Config, db: &Db, repo_name: &str, edit: &CrewEdit) -> Result<CrewSaved> {
     save_with(config, db, repo_name, edit, &installed)
 }
 
-fn save_with(config: &crate::Config, db: &Db, repo_name: &str, edit: &CrewEdit, installed: &dyn Fn(&str) -> bool) -> Result<CrewSaved> {
+fn save_with(config: &nitely_core::Config, db: &Db, repo_name: &str, edit: &CrewEdit, installed: &dyn Fn(&str) -> bool) -> Result<CrewSaved> {
     let edit = check(edit)?;
     let repo = repo(config, repo_name)?;
     let root = Path::new(&repo.root);
@@ -267,13 +267,13 @@ fn save_with(config: &crate::Config, db: &Db, repo_name: &str, edit: &CrewEdit, 
         let branch = Playbook::parse(&read(&target.path)?)?.integration_branch().to_string();
         // Nitely reads the playbook from the main checkout: committed to a branch it is not on, the
         // change would be saved and never followed.
-        let on = crate::playbook::git(root, &["branch", "--show-current"]).map(|b| b.trim().to_string()).unwrap_or_default();
+        let on = nitely_core::playbook::git(root, &["branch", "--show-current"]).map(|b| b.trim().to_string()).unwrap_or_default();
         if on != branch {
             let on = if on.is_empty() { "a detached HEAD".to_string() } else { on };
             bail!("{} is on {on}, and Nitely follows the playbook there; switch it to {branch} first, or change the crew on {on}'s playbook", root.display());
         }
         let message = format!("Crew: {what}\n\nSet in the Nitely app.");
-        let commit = crate::proposals::commit_playbook_edit(root, &branch, &|at_tip| edited(at_tip, &edit), &message)?;
+        let commit = nitely_core::proposals::commit_playbook_edit(root, &branch, &|at_tip| edited(at_tip, &edit), &message)?;
         format!("Committed {} to {PLAYBOOK_PATH} on {branch}; it is pushed with the next land", &commit[..commit.len().min(9)])
     } else {
         let new_text = edited(&read(&target.path)?, &edit)?;
@@ -332,10 +332,10 @@ mod tests {
 
     #[test]
     fn saves_a_stored_playbook_in_place_and_commits_a_repos_own() {
-        let base = crate::paths::unique_temp("nitely-crew-settings", "");
+        let base = nitely_core::paths::unique_temp("nitely-crew-settings", "");
         let db = Db::open(&base.join("t.db")).unwrap();
         let git = |dir: &Path, args: &[&str]| {
-            let out = crate::playbook::run_git(Command::new("git").arg("-C").arg(dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args)).unwrap();
+            let out = nitely_core::playbook::run_git(Command::new("git").arg("-C").arg(dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args)).unwrap();
             assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         };
@@ -347,8 +347,8 @@ mod tests {
         std::fs::write(shop.join(PLAYBOOK_PATH), "[gate]\n# must pass\ncommands = [\"npm test\"]\n").unwrap();
         git(&shop, &["add", "."]);
         git(&shop, &["commit", "-q", "-m", "init"]);
-        let mut config = crate::Config::default();
-        config.repos.push(crate::RepoConfig { name: "shop".into(), root: shop.to_string_lossy().into_owned(), integration_branch: "main".into(), project: Some("SHOP".into()) });
+        let mut config = nitely_core::Config::default();
+        config.repos.push(nitely_core::RepoConfig { name: "shop".into(), root: shop.to_string_lossy().into_owned(), integration_branch: "main".into(), project: Some("SHOP".into()) });
         let agents = |p: &str| p == "codex";
 
         // Not while the checkout is on another branch: the crew would never see it.
@@ -376,7 +376,7 @@ commands = [\"npm test\"]
 ").unwrap();
         git(&site, &["add", "."]);
         git(&site, &["commit", "-q", "-m", "init"]);
-        config.repos.push(crate::RepoConfig { name: "site".into(), root: site.to_string_lossy().into_owned(), integration_branch: "main".into(), project: Some("SHOP".into()) });
+        config.repos.push(nitely_core::RepoConfig { name: "site".into(), root: site.to_string_lossy().into_owned(), integration_branch: "main".into(), project: Some("SHOP".into()) });
         assert!(save_with(&config, &db, "site", &turn_on(), &agents).unwrap_err().to_string().contains("already runs its crew from shop"));
         let off = CrewEdit { agents: vec!["codex".into()], ..Default::default() };
         assert!(save_with(&config, &db, "site", &off, &agents).is_ok(), "settings with the crew off are fine");

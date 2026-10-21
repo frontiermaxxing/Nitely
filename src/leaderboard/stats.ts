@@ -1,4 +1,4 @@
-// The Leaderboard's numbers, as `leaderboard_stats` returns them (crates/nitely-core/src/leaderboard.rs).
+// The Leaderboard's numbers, as `leaderboard_stats` returns them (crates/nitely-crew/src/leaderboard.rs).
 // Read from this machine's database only: reading them sends nothing.
 
 export type PeriodKey = "week" | "30d" | "all";

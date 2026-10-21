@@ -6,6 +6,7 @@ mod update;
 mod phone;
 use nitely_core::issues::{Ask, Project, Relations};
 use nitely_core::{remote, rules, Actor, Board, Config, Db, IssueRecord};
+use nitely_crew::crew::CrewDb;
 use serde::Serialize;
 use std::time::Duration;
 
@@ -57,8 +58,8 @@ async fn snapshot() -> Result<Board, String> {
 /// The Pulse home view in one read. `since` is when the person last looked and `day_start` the
 /// start of their local day, both in seconds.
 #[tauri::command]
-async fn pulse(since: i64, day_start: i64) -> Result<nitely_core::Pulse, String> {
-    nitely_core::pulse(&db()?, since, day_start).map_err(err)
+async fn pulse(since: i64, day_start: i64) -> Result<nitely_crew::Pulse, String> {
+    nitely_crew::pulse(&db()?, since, day_start).map_err(err)
 }
 
 /// What happened since `since`, per goal, and every place the person was needed (NIT-247).
@@ -370,29 +371,29 @@ async fn set_project_brief(project: String, brief: String, revision: i64) -> Res
 /// The project's crew (docs/crew.md): running workers, cap, today's count, paused, and what the
 /// supervisor last said. None when the project has no crew.
 #[tauri::command]
-async fn crew_status(project: String) -> Result<Option<nitely_core::crew::CrewStatus>, String> {
+async fn crew_status(project: String) -> Result<Option<nitely_crew::crew::CrewStatus>, String> {
     let config = Config::load().map_err(err)?;
-    nitely_core::crew::project_status(&db()?, &config, &project, &nitely_core::crew::Moment::now()).map_err(err)
+    nitely_crew::crew::project_status(&db()?, &config, &project, &nitely_crew::crew::Moment::now()).map_err(err)
 }
 
 /// Pauses the project's crew (running workers finish, none start) or resumes it.
 #[tauri::command]
-async fn crew_pause(project: String, paused: bool) -> Result<Option<nitely_core::crew::CrewStatus>, String> {
+async fn crew_pause(project: String, paused: bool) -> Result<Option<nitely_crew::crew::CrewStatus>, String> {
     let db = db()?;
     db.crew_pause(&project, paused, &ME).map_err(err)?;
-    nitely_core::crew::project_status(&db, &Config::load().map_err(err)?, &project, &nitely_core::crew::Moment::now()).map_err(err)
+    nitely_crew::crew::project_status(&db, &Config::load().map_err(err)?, &project, &nitely_crew::crew::Moment::now()).map_err(err)
 }
 
 /// The crew settings of each repo in a project (the Crew section): workers, agents, limits.
 #[tauri::command]
-async fn crew_settings(project: String) -> Result<Vec<nitely_core::crew_settings::CrewView>, String> {
-    nitely_core::crew_settings::crew_for_project(&Config::load().map_err(err)?, &db()?, &project).map_err(err)
+async fn crew_settings(project: String) -> Result<Vec<nitely_crew::crew_settings::CrewView>, String> {
+    nitely_crew::crew_settings::crew_for_project(&Config::load().map_err(err)?, &db()?, &project).map_err(err)
 }
 
 /// Saves a repo's crew settings. Only the app saves them: a person, never an agent.
 #[tauri::command]
-async fn crew_save(repo: String, edit: nitely_core::crew_settings::CrewEdit) -> Result<nitely_core::crew_settings::CrewSaved, String> {
-    nitely_core::crew_settings::save_crew(&Config::load().map_err(err)?, &db()?, &repo, &edit).map_err(err)
+async fn crew_save(repo: String, edit: nitely_crew::crew_settings::CrewEdit) -> Result<nitely_crew::crew_settings::CrewSaved, String> {
+    nitely_crew::crew_settings::save_crew(&Config::load().map_err(err)?, &db()?, &repo, &edit).map_err(err)
 }
 
 #[tauri::command]
@@ -400,59 +401,59 @@ async fn issues(project: String, include_closed: bool) -> Result<Vec<IssueRecord
     db()?.list_issues(Some(&project), include_closed).map_err(err)
 }
 
-/// Tokens an issue's agents used (crates/nitely-core/src/usage.rs): counts only.
+/// Tokens an issue's agents used (crates/nitely-crew/src/usage.rs): counts only.
 #[tauri::command]
-async fn issue_spend(key: String) -> Result<nitely_core::usage::IssueSpend, String> {
-    nitely_core::usage::spend_of_issue(&Config::load().map_err(err)?, &db()?, &key).map_err(err)
+async fn issue_spend(key: String) -> Result<nitely_crew::usage::IssueSpend, String> {
+    nitely_crew::usage::spend_of_issue(&Config::load().map_err(err)?, &db()?, &key).map_err(err)
 }
 
 /// The Leaderboard's numbers over `projects` (empty: every project), read from this machine only.
 #[tauri::command]
-async fn leaderboard_stats(projects: Vec<String>) -> Result<nitely_core::leaderboard::Leaderboard, String> {
-    nitely_core::leaderboard::stats_now(&Config::load().map_err(err)?, &db()?, &projects).map_err(err)
+async fn leaderboard_stats(projects: Vec<String>) -> Result<nitely_crew::leaderboard::Leaderboard, String> {
+    nitely_crew::leaderboard::stats_now(&Config::load().map_err(err)?, &db()?, &projects).map_err(err)
 }
 
 /// The weekly report exactly as it would be shared, for the opt-in page's preview. Sends nothing.
 #[tauri::command]
-async fn leaderboard_report(projects: Vec<String>, profile: nitely_core::leaderboard_report::Profile) -> Result<nitely_core::leaderboard_report::Report, String> {
-    nitely_core::leaderboard_report::report_now(&Config::load().map_err(err)?, &db()?, &projects, &profile).map_err(err)
+async fn leaderboard_report(projects: Vec<String>, profile: nitely_crew::leaderboard_report::Profile) -> Result<nitely_crew::leaderboard_report::Report, String> {
+    nitely_crew::leaderboard_report::report_now(&Config::load().map_err(err)?, &db()?, &projects, &profile).map_err(err)
 }
 
 /// Whether this install shares on the Leaderboard, its id and the last send. No network.
 #[tauri::command]
-async fn leaderboard_status() -> Result<nitely_core::leaderboard_send::Status, String> {
-    nitely_core::leaderboard_send::Sharing::default_dir().status(nitely_core::db::now()).map_err(err)
+async fn leaderboard_status() -> Result<nitely_crew::leaderboard_send::Status, String> {
+    nitely_crew::leaderboard_send::Sharing::default_dir().status(nitely_core::db::now()).map_err(err)
 }
 
 /// Joins, or saves a changed profile or project choice. Sends nothing.
 #[tauri::command]
-async fn leaderboard_join(profile: nitely_core::leaderboard_report::Profile, projects: Vec<String>) -> Result<nitely_core::leaderboard_send::Status, String> {
-    nitely_core::leaderboard_send::Sharing::default_dir().join(&profile, &projects, None).map_err(err)
+async fn leaderboard_join(profile: nitely_crew::leaderboard_report::Profile, projects: Vec<String>) -> Result<nitely_crew::leaderboard_send::Status, String> {
+    nitely_crew::leaderboard_send::Sharing::default_dir().join(&profile, &projects, None).map_err(err)
 }
 
 /// Sends this week's report now, by the person's own hand.
 #[tauri::command]
-async fn leaderboard_send() -> Result<nitely_core::leaderboard_report::Report, String> {
-    nitely_core::leaderboard_send::Sharing::default_dir().send(&Config::load().map_err(err)?, &db()?).map_err(err)
+async fn leaderboard_send() -> Result<nitely_crew::leaderboard_report::Report, String> {
+    nitely_crew::leaderboard_send::Sharing::default_dir().send(&Config::load().map_err(err)?, &db()?).map_err(err)
 }
 
 /// The public board for `period`, fetched only when the person opens it.
 #[tauri::command]
 async fn leaderboard_board(period: String) -> Result<serde_json::Value, String> {
-    nitely_core::leaderboard_send::Sharing::default_dir().board(&period).map_err(err)
+    nitely_crew::leaderboard_send::Sharing::default_dir().board(&period).map_err(err)
 }
 
 /// Deletes what this install sent; `leave` also stops sharing and forgets the key.
 #[tauri::command]
 async fn leaderboard_delete(leave: bool) -> Result<u64, String> {
-    let sharing = nitely_core::leaderboard_send::Sharing::default_dir();
+    let sharing = nitely_crew::leaderboard_send::Sharing::default_dir();
     if leave { sharing.leave() } else { sharing.delete() }.map_err(err)
 }
 
 /// A project's tokens per day and by agent and model, and what landed, over `days` days.
 #[tauri::command]
-async fn project_spend(project: String, day_start: i64, days: usize) -> Result<nitely_core::usage::ProjectSpend, String> {
-    nitely_core::usage::spend_of_project(&Config::load().map_err(err)?, &db()?, &project, day_start, days).map_err(err)
+async fn project_spend(project: String, day_start: i64, days: usize) -> Result<nitely_crew::usage::ProjectSpend, String> {
+    nitely_crew::usage::spend_of_project(&Config::load().map_err(err)?, &db()?, &project, day_start, days).map_err(err)
 }
 
 #[tauri::command]
@@ -769,7 +770,7 @@ fn keep_crews() {
 }
 
 fn keep_crews_once(started: &mut std::collections::HashMap<String, std::time::Instant>, children: &mut Vec<std::process::Child>) -> anyhow::Result<()> {
-    use nitely_core::crew;
+    use nitely_crew::crew;
     let wanted = crew::supervisors_wanted(&Config::load()?);
     if wanted.is_empty() {
         return Ok(());
@@ -812,8 +813,8 @@ async fn open_crew_log(app: tauri::AppHandle, path: String) -> Result<(), String
 
 /// Reads cached recorder data; this command never starts a sampler.
 #[tauri::command]
-async fn performance_query(query: nitely_core::performance_query::Query) -> Result<nitely_core::performance_query::Report, String> {
-    tauri::async_runtime::spawn_blocking(move || nitely_core::performance_query::query(&nitely_core::performance::directory(), &query).map_err(err)).await.map_err(|e| e.to_string())?
+async fn performance_query(query: nitely_crew::performance_query::Query) -> Result<nitely_crew::performance_query::Report, String> {
+    tauri::async_runtime::spawn_blocking(move || nitely_crew::performance_query::query(&nitely_core::performance::directory(), &query).map_err(err)).await.map_err(|e| e.to_string())?
 }
 
 /// Human controls from the desktop app, separate from read-only agent query APIs.
@@ -855,8 +856,8 @@ async fn set_machine_limits(floor_gb: Option<f64>, cap_gb: Option<f64>) -> Resul
 
 /// Every request waiting now, why, and what it waits behind (NIT-322).
 #[tauri::command]
-async fn waits_overview() -> Result<nitely_core::waits::Waits, String> {
-    nitely_core::waits::overview(&Config::load().map_err(err)?, &db()?).map_err(err)
+async fn waits_overview() -> Result<nitely_crew::waits::Waits, String> {
+    nitely_crew::waits::overview(&Config::load().map_err(err)?, &db()?).map_err(err)
 }
 
 /// Review batches and land queues going now, for the board (docs/batching.md, NIT-218).
@@ -940,7 +941,7 @@ pub fn run() {
     // The Leaderboard's weekly send: only once the person joined and sent by hand (leaderboard_send).
     std::thread::spawn(|| loop {
         std::thread::sleep(LEADERBOARD_EVERY);
-        let sent = Config::load().and_then(|config| nitely_core::leaderboard_send::Sharing::default_dir().send_if_due(&config, &nitely_core::db::Db::open_default()?));
+        let sent = Config::load().and_then(|config| nitely_crew::leaderboard_send::Sharing::default_dir().send_if_due(&config, &nitely_core::db::Db::open_default()?));
         if let Err(e) = sent {
             eprintln!("leaderboard: {e:#}");
         }

@@ -1,7 +1,9 @@
 //! Shared core for the Nitely app and the `nitely` CLI: configuration, the SQLite
-//! event store, the git worktree reader, and agent hook parsing.
+//! event store, the git worktree reader, and agent hook parsing. The crew and the reports built
+//! on it are in nitely-crew.
 
 pub mod accept;
+pub mod crew_rules;
 pub mod activity;
 pub mod approval;
 pub mod awake;
@@ -9,8 +11,6 @@ pub mod batches;
 pub mod brief;
 pub mod config;
 pub mod connect;
-pub mod crew;
-pub mod crew_settings;
 pub mod instructions;
 pub mod credentials;
 pub mod db;
@@ -23,14 +23,10 @@ pub mod goals;
 pub mod goal_branch;
 pub mod http;
 pub mod github;
-pub mod hook;
 pub mod install;
 pub mod land;
 pub mod land_job;
 pub mod lands_pipeline;
-pub mod leaderboard;
-pub mod leaderboard_report;
-pub mod leaderboard_send;
 pub mod land_queue;
 pub mod lanes;
 mod lane_clone;
@@ -48,10 +44,8 @@ pub mod issues;
 pub mod paths;
 /// The large sample board and its performance budgets (NIT-255).
 #[doc(hidden)]
-pub mod perf;
 pub mod performance;
 pub mod performance_attribution;
-pub mod performance_query;
 pub mod performance_events;
 pub mod phone;
 pub mod playbook;
@@ -62,8 +56,6 @@ pub mod projects;
 pub mod project_yolo;
 pub mod project_modes;
 pub mod relay;
-pub mod report_text;
-pub mod release_notes;
 pub mod remote;
 pub mod similar;
 pub mod slim;
@@ -73,33 +65,30 @@ pub mod sessions;
 pub mod snapshot;
 pub mod track;
 pub mod update;
-pub mod usage;
 pub mod verification;
-pub mod verification_timing;
 pub mod verification_backstop;
 pub mod verification_audit;
 pub mod affected_tests;
 pub mod release_verification;
-pub mod waits;
-pub mod pulse;
 pub mod push;
 pub mod watch;
 pub mod submit;
 mod test_command_merge;
 pub mod submit_job;
-pub mod triage;
 pub mod unlink;
 pub mod submodules;
 pub mod review_batch;
 pub mod review_compare;
-#[cfg(test)]
-pub(crate) mod test_repo;
+/// Test fixtures, for nitely-crew's tests too (its `test-support` dev-dependency).
+#[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(not(test), allow(dead_code))]
+#[doc(hidden)]
+pub mod test_repo;
 
 pub use config::{resolve_project, Config, RepoConfig};
 pub use db::Db;
 pub use issues::{Actor, IssueRecord, NewIssue};
 pub use snapshot::{snapshot, Board, RepoView, TaskRow};
-pub use pulse::{pulse, Pulse};
 pub use track::Track;
 
 pub mod test_sweep;

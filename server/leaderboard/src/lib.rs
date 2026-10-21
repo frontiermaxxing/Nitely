@@ -6,7 +6,7 @@
 //! with one (`CF-Connecting-IP`, `X-Forwarded-For`): a request is its method, path, the three
 //! signing headers and its body, and that is all the handler looks at.
 //!
-//! The wire format (the client's side is `nitely_core::leaderboard_send`):
+//! The wire format (the client's side is `nitely_crew::leaderboard_send`):
 //! - `X-Nitely-Key`: the public key, base64url without padding;
 //! - `X-Nitely-Time`: Unix milliseconds, within `WINDOW` of the service's clock and later than the
 //!   last request the key made, so a request can't be replayed;
@@ -46,7 +46,7 @@ const MAX_HEAD: usize = 8 << 10;
 const MAX_CONNECTIONS: usize = 64;
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 
-// ---- The report, exactly as the client builds it (nitely_core::leaderboard_report) ----
+// ---- The report, exactly as the client builds it (nitely_crew::leaderboard_report) ----
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

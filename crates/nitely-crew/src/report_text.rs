@@ -9,7 +9,7 @@ use std::fmt::Write;
 
 use chrono::{DateTime, Datelike, TimeZone};
 
-use crate::goal_report::{Finish, Landed, Needed, Report};
+use nitely_core::goal_report::{Finish, Landed, Needed, Report};
 
 /// Landings shown per goal, and needed issues shown, before "+N more" (unless `all`).
 const SHOWN: usize = 3;
@@ -212,7 +212,7 @@ pub fn local(r: &Report, all: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::goal_report::{GoalReport, Risk, Triaged};
+    use nitely_core::goal_report::{GoalReport, Risk, Triaged};
     use chrono::FixedOffset;
 
     fn landed(key: &str, ts: i64) -> Landed {
@@ -229,7 +229,7 @@ mod tests {
         // 2026-10-18 08:00 in that zone, and the night before from 21:00.
         let now = tz.with_ymd_and_hms(2026, 10, 18, 8, 0, 0).unwrap().timestamp();
         let since = now - 11 * 3600;
-        let goal = crate::goals::Goal {
+        let goal = nitely_core::goals::Goal {
             id: 1,
             project: "APP".into(),
             title: "Invoices people can trust".into(),
@@ -239,7 +239,7 @@ mod tests {
             created_by: "human".into(),
             created_at: 0,
             updated_at: 0,
-            progress: crate::goals::Progress { total: 9, done: 5, dropped: 1, open: 3 },
+            progress: nitely_core::goals::Progress { total: 9, done: 5, dropped: 1, open: 3 },
             rank: None,
             workers: None,
             working: 0,

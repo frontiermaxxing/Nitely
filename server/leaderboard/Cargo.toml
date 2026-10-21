@@ -20,4 +20,5 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 [dev-dependencies]
 # The client's own report builder and signer, so the tests prove the two sides agree.
 nitely-core.workspace = true
+nitely-crew.workspace = true
 ureq = { version = "3", features = ["json"] }

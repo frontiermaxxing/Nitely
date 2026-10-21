@@ -1,4 +1,4 @@
-// Spend in words (crates/nitely-core/src/usage.rs): tokens, never dollars. Pure, so node:test
+// Spend in words (crates/nitely-crew/src/usage.rs): tokens, never dollars. Pure, so node:test
 // can load it.
 
 import type { IssueDetail, IssueSpend, ModelTokens, ProjectSpend } from "./types";

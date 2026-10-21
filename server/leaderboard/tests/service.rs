@@ -7,8 +7,8 @@ use std::sync::Arc;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey};
-use nitely_core::leaderboard_report::{self, Profile};
-use nitely_core::leaderboard_send::{self, Sharing};
+use nitely_crew::leaderboard_report::{self, Profile};
+use nitely_crew::leaderboard_send::{self, Sharing};
 use nitely_leaderboard::{handle, Request, Store};
 
 fn now() -> i64 {
@@ -25,8 +25,8 @@ fn report(name: &str) -> leaderboard_report::Report {
     std::fs::create_dir_all(&base).unwrap();
     let db = nitely_core::db::Db::open(&base.join("t.db")).unwrap();
     let project_of = |_: &str| None;
-    let inputs = nitely_core::leaderboard::Inputs { now: now(), utc_offset: 0, projects: &[], tokens: &[], project_of_dir: &project_of };
-    let board = nitely_core::leaderboard::stats(&db, &inputs).unwrap();
+    let inputs = nitely_crew::leaderboard::Inputs { now: now(), utc_offset: 0, projects: &[], tokens: &[], project_of_dir: &project_of };
+    let board = nitely_crew::leaderboard::stats(&db, &inputs).unwrap();
     drop(db);
     std::fs::remove_dir_all(base).ok();
     leaderboard_report::build(&board, 2, &Profile { display_name: name.into(), github: Some("octocat".into()), ..Default::default() }).unwrap()

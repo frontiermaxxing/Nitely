@@ -4,7 +4,7 @@ use rusqlite::OptionalExtension;
 use serde::Serialize;
 use std::path::Path;
 
-use crate::{playbook::{git, CommandResult, GateResult, PLAYBOOK_PATH}, Db};
+use nitely_core::{playbook::{git, CommandResult, GateResult, PLAYBOOK_PATH}, Db};
 
 #[derive(Debug, Serialize)]
 pub struct Comparison {
@@ -41,7 +41,7 @@ fn local(db:&Db, id:i64)->Result<bool> {
 /// Compare only actual successful local executions on the same immutable candidate and
 /// committed policy. A later failed attempt hides an older pass. No tests are launched.
 pub fn report(db:&Db, repo:&Path, key:&str)->Result<Report> {
-    let id=crate::verification_audit::repository_id(repo)?;
+    let id=nitely_core::verification_audit::repository_id(repo)?;
     let json=db.conn.prepare("SELECT gate FROM review WHERE issue_key=?1 COLLATE NOCASE AND gate IS NOT NULL ORDER BY id DESC LIMIT 20")?
         .query_map([key],|r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
     let mut comparisons=Vec::new();
@@ -75,21 +75,21 @@ pub fn report(db:&Db, repo:&Path, key:&str)->Result<Report> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{issues::Actor, test_repo::git as g, NewIssue};
+    use nitely_core::{issues::Actor, test_repo::git as g, NewIssue};
 
     #[test]
     fn comparisons_require_the_same_candidate_policy_and_latest_successful_execution() {
-        let repo=crate::test_repo::copy("verification-timing",|p|crate::test_repo::init(p,&[
+        let repo=nitely_core::test_repo::copy("verification-timing",|p|nitely_core::test_repo::init(p,&[
             (PLAYBOOK_PATH,"[verification]\nversion=1\nmode='active'\ncomments=['math[.]rs']\nbasic=['echo basic']\n"),
             ("math.rs","// old\nfn value()->i32 { 1 }")]));
-        let mut db=Db::open(&crate::paths::unique_temp("nitely-timing",".sqlite")).unwrap();
+        let mut db=Db::open(&nitely_core::paths::unique_temp("nitely-timing",".sqlite")).unwrap();
         db.create_project("APP","Example").unwrap();
         let issue=db.create_issue(&NewIssue{project:"APP".into(),title:"Clarify source comment".into(),body:"Explain calculation".into(),
             kind:"feature".into(),source:"codex".into(),evidence:"test".into(),review_level:Some("inert".into()),..Default::default()},&Actor::Human).unwrap();
         let base=g(&repo,&["rev-parse","HEAD"]).trim().to_string();
         std::fs::write(repo.join("math.rs"),"// clearer\nfn value()->i32 { 1 }").unwrap();
         g(&repo,&["commit","-qam","comment"]);
-        let plan=crate::verification::assess(&repo,&base,"HEAD",&issue).unwrap();
+        let plan=nitely_core::verification::assess(&repo,&base,"HEAD",&issue).unwrap();
         let result=|command:&str,seconds|CommandResult{command:command.into(),ok:true,seconds,output:"executed".into(),skipped:false,timed_out:false};
         let gate=GateResult{mode_authority:None,passed:true,skipped:None,commit:plan.head.clone(),
             results:plan.commands.iter().map(|c|result(c,1)).collect(),plan:Some(plan.clone()),
@@ -103,7 +103,7 @@ mod tests {
         assert!(report(&db,&repo,&issue.key).unwrap().comparisons.is_empty());
         let policy=g(&repo,&["rev-parse",&format!("{base}:{PLAYBOOK_PATH}")]).trim().to_string();
         db.conn.execute("INSERT INTO verification_backstop_run(repo,head,policy,commands,started_at,state,lane_run,evidence) VALUES(?1,?2,'wrong','[\"echo full\"]',1,'passed',2,?3)",
-            rusqlite::params![crate::verification_audit::repository_id(&repo).unwrap(),base,serde_json::to_string(&vec![result("echo full",20)]).unwrap()]).unwrap();
+            rusqlite::params![nitely_core::verification_audit::repository_id(&repo).unwrap(),base,serde_json::to_string(&vec![result("echo full",20)]).unwrap()]).unwrap();
         assert!(report(&db,&repo,&issue.key).unwrap().comparisons.is_empty(),"unlike revisions are not a speedup");
         db.conn.execute("UPDATE verification_backstop_run SET head=?1",[&plan.head]).unwrap();
         assert!(report(&db,&repo,&issue.key).unwrap().comparisons.is_empty(),"policy changes invalidate comparisons");

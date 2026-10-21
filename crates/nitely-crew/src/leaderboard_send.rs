@@ -68,7 +68,7 @@ impl Sharing {
 
     /// The person's own, in Nitely's data folder.
     pub fn default_dir() -> Sharing {
-        Sharing::new(&crate::paths::data_dir())
+        Sharing::new(&nitely_core::paths::data_dir())
     }
 
     pub fn state(&self) -> Result<State> {
@@ -118,7 +118,7 @@ impl Sharing {
         }
         if self.secret()?.is_none() {
             std::fs::create_dir_all(&self.dir)?;
-            let secret = crate::approval::new_secret()?;
+            let secret = nitely_core::approval::new_secret()?;
             let hex: String = secret.iter().map(|b| format!("{b:02x}")).collect();
             std::fs::write(self.dir.join(KEY_FILE), hex).context("saving the leaderboard key")?;
         }
@@ -130,12 +130,12 @@ impl Sharing {
             state.url = url.map(str::to_string);
         }
         self.save(&state)?;
-        self.status(crate::db::now())
+        self.status(nitely_core::db::now())
     }
 
     /// Sends this week's report now (the first send is always by hand), replacing any sent
     /// earlier this week.
-    pub fn send(&self, config: &crate::Config, db: &crate::db::Db) -> Result<Report> {
+    pub fn send(&self, config: &nitely_core::Config, db: &nitely_core::db::Db) -> Result<Report> {
         let state = self.state()?;
         if !state.joined {
             bail!("join the Leaderboard first: nothing is sent before you do");
@@ -147,9 +147,9 @@ impl Sharing {
 
     /// The weekly send: sends only when joined, sent by hand once before, and `due`. Returns the
     /// week sent, if it sent.
-    pub fn send_if_due(&self, config: &crate::Config, db: &crate::db::Db) -> Result<Option<String>> {
+    pub fn send_if_due(&self, config: &nitely_core::Config, db: &nitely_core::db::Db) -> Result<Option<String>> {
         let state = self.state()?;
-        if !due(&state, crate::db::now(), crate::leaderboard::local_offset()) {
+        if !due(&state, nitely_core::db::now(), crate::leaderboard::local_offset()) {
             return Ok(None);
         }
         Ok(Some(self.send(config, db)?.week))
@@ -166,7 +166,7 @@ impl Sharing {
         state.last_error = result.as_ref().err().map(|e| format!("{e:#}"));
         if result.is_ok() {
             state.last_sent_week = Some(report.week.clone());
-            state.last_sent_at = Some(crate::db::now());
+            state.last_sent_at = Some(nitely_core::db::now());
         }
         self.save(&state)?;
         result.map(|_| ())
@@ -305,7 +305,7 @@ mod tests {
 
     #[test]
     fn nothing_goes_out_before_joining() {
-        let dir = crate::paths::unique_temp("nitely-leaderboard-send", "");
+        let dir = nitely_core::paths::unique_temp("nitely-leaderboard-send", "");
         let sharing = Sharing::new(&dir);
         let report = crate::leaderboard_report::Report {
             schema: 1,

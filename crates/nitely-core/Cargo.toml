@@ -34,5 +34,9 @@ rustls-pki-types = { version = "1", features = ["std"] }
 # Web push to paired phones (push.rs): VAPID signing, RFC 8291 encryption.
 ring = "0.17"
 
+[features]
+# test_repo, for nitely-crew's tests (NIT-497).
+test-support = []
+
 [dev-dependencies]
 rcgen = "0.13"

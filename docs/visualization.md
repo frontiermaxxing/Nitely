@@ -354,7 +354,7 @@ It is the reference for a whole view built from these parts. It answers, in orde
    hours. The last-seen time is saved when you leave the Overview (`localStorage`), not while you
    read it.
 
-Its data is one `pulse` command (`crates/nitely-core/src/pulse.rs`), which reads only the database;
+Its data is one `pulse` command (`crates/nitely-crew/src/pulse.rs`), which reads only the database;
 its `report` is `goal_report` (`crates/nitely-core/src/goal_report.rs`), which the phone reads too
 and `nitely report --hours 12` prints as text shaped like the phone's (`report_text.rs`, NIT-358;
 `--all` folds nothing, `--json` is the report as it is).

@@ -106,7 +106,7 @@ pub fn acquire(dir: &Path) -> Result<Option<std::fs::File>> {
     }
 }
 
-pub struct Store { pub(crate) db: Connection }
+pub struct Store { pub db: Connection }
 impl Store {
     pub fn open(dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(dir)?;

@@ -11,8 +11,8 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crate::db::{now, Db};
-use crate::issues::Actor;
+use nitely_core::db::{now, Db};
+use nitely_core::issues::Actor;
 
 /// A question put to triage, and what came of it.
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -77,12 +77,22 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<Question> {
     })
 }
 
-impl Db {
+/// Triage questions and their answers, as methods on [`Db`].
+pub trait TriageDb {
     /// A triage question. One whose process died before it answered reads as failed.
-    pub fn triage_question(&self, id: i64) -> Result<Option<Question>> {
+    fn triage_question(&self, id: i64) -> Result<Option<Question>>;
+
+    /// Answers `asked_by` has not heard yet, oldest first.
+    fn undelivered_triage(&self, asked_by: &str) -> Result<Vec<Question>>;
+
+    fn mark_triage_delivered(&self, ids: &[i64]) -> Result<()>;
+}
+
+impl TriageDb for Db {
+    fn triage_question(&self, id: i64) -> Result<Option<Question>> {
         let q = self.conn.query_row(&format!("SELECT {COLUMNS} FROM triage WHERE id = ?1"), [id], row).optional()?;
         match q {
-            Some(q) if q.state == "open" && q.pid.is_some_and(|p| p as u32 != std::process::id() && !crate::submit_job::process_runs(p as u32)) => {
+            Some(q) if q.state == "open" && q.pid.is_some_and(|p| p as u32 != std::process::id() && !nitely_core::submit_job::process_runs(p as u32)) => {
                 let why = "the process answering it stopped before it finished; ask again";
                 self.conn.execute("UPDATE triage SET state = 'failed', error = ?2, answered_at = ?3 WHERE id = ?1 AND state = 'open'", params![q.id, why, now()])?;
                 self.triage_question(q.id)
@@ -91,8 +101,7 @@ impl Db {
         }
     }
 
-    /// Answers `asked_by` has not heard yet, oldest first.
-    pub fn undelivered_triage(&self, asked_by: &str) -> Result<Vec<Question>> {
+    fn undelivered_triage(&self, asked_by: &str) -> Result<Vec<Question>> {
         let ids: Vec<i64> = self
             .conn
             .prepare("SELECT id FROM triage WHERE asked_by = ?1 AND delivered_at IS NULL ORDER BY id")?
@@ -107,7 +116,7 @@ impl Db {
         Ok(out)
     }
 
-    pub fn mark_triage_delivered(&self, ids: &[i64]) -> Result<()> {
+    fn mark_triage_delivered(&self, ids: &[i64]) -> Result<()> {
         for id in ids {
             self.conn.execute("UPDATE triage SET delivered_at = ?2 WHERE id = ?1 AND delivered_at IS NULL", params![id, now()])?;
         }
@@ -143,7 +152,7 @@ trade-off; a task only they can do (signing a CLI in, granting access, a check o
 /// Answers question `id`: the board's facts and the question to a read-only reviewer agent in the
 /// repository, then a note on the issue, or an ask in the person's Inbox when the reply says the
 /// question is theirs.
-pub fn answer(db: &mut Db, config: &crate::Config, id: i64) -> Result<Question> {
+pub fn answer(db: &mut Db, config: &nitely_core::Config, id: i64) -> Result<Question> {
     let q = db.triage_question(id)?.with_context(|| format!("no triage question {id}"))?;
     if q.state != "open" {
         return Ok(q);
@@ -182,37 +191,37 @@ fn settle(db: &mut Db, q: &Question, answer: &str, theirs: Option<&str>) -> Resu
 }
 
 /// Asks the triage agent: the playbook's reviewer for the asker's vendor, read-only, in the repo.
-fn look(db: &Db, config: &crate::Config, q: &Question) -> Result<(String, Option<String>)> {
+fn look(db: &Db, config: &nitely_core::Config, q: &Question) -> Result<(String, Option<String>)> {
     let issue = match &q.issue {
         Some(k) => db.issue(k)?,
         None => None,
     };
     let place = q.place.clone().unwrap_or_default();
     let root = match &issue {
-        Some(i) => crate::playbook::repo_for_issue(config, i.project.as_deref(), &place)?,
-        None => crate::playbook::repo_root(config, &place).context("triage needs the issue the question is about, or a place in a repo to look")?,
+        Some(i) => nitely_core::playbook::repo_for_issue(config, i.project.as_deref(), &place)?,
+        None => nitely_core::playbook::repo_root(config, &place).context("triage needs the issue the question is about, or a place in a repo to look")?,
     };
     // Read the issue's own worktree, where its branch is; without one, the repository (never the
     // folder the agent's tools started in, which may be another branch or main). A question about
     // no issue is read where it was asked.
     let dir = match &issue {
-        Some(i) => crate::playbook::issue_worktree(&root, &i.key).ok().flatten().filter(|w| w.is_dir()).unwrap_or_else(|| root.clone()),
+        Some(i) => nitely_core::playbook::issue_worktree(&root, &i.key).ok().flatten().filter(|w| w.is_dir()).unwrap_or_else(|| root.clone()),
         None => Some(PathBuf::from(&place)).filter(|p| p.is_dir()).unwrap_or_else(|| root.clone()),
     };
-    let rules = crate::playbook::Playbook::load(&root)?.review;
+    let rules = nitely_core::playbook::Playbook::load(&root)?.review;
     let vendor = q.asked_by.split(':').next().unwrap_or("");
     let choice = rules.choose(vendor, &|r| rules.is_installed(r, &dir))?;
     // Without an issue, the project of the repo it was asked in: the work in flight is still known.
     let project = match &issue {
         Some(i) => i.project.clone(),
-        None => crate::config::resolve_project(config, db, None, &place).ok(),
+        None => nitely_core::config::resolve_project(config, db, None, &place).ok(),
     };
     let reply = rules.run_prompt(&choice.reviewer, &dir, &prompt(db, config, q, issue.as_ref(), project.as_deref())?)?;
     parse(&reply.text)
 }
 
 /// The triage agent's instructions: the question, what the board knows, and the closed list.
-fn prompt(db: &Db, config: &crate::Config, q: &Question, issue: Option<&crate::issues::IssueRecord>, project: Option<&str>) -> Result<String> {
+fn prompt(db: &Db, config: &nitely_core::Config, q: &Question, issue: Option<&nitely_core::issues::IssueRecord>, project: Option<&str>) -> Result<String> {
     let mut facts = String::new();
     if let Some(i) = issue {
         let body: String = i.body.chars().take(1500).collect();
@@ -234,7 +243,7 @@ fn prompt(db: &Db, config: &crate::Config, q: &Question, issue: Option<&crate::i
         }
     }
     if let Some(p) = project {
-        let held = crate::overlap::held(config, db, p).unwrap_or_default();
+        let held = nitely_core::overlap::held(config, db, p).unwrap_or_default();
         if !held.is_empty() {
             facts.push_str("\nWork in flight, and the files each holds:\n");
             for h in held.iter().take(40) {
@@ -301,10 +310,10 @@ pub fn wait(db: &Db, id: i64, limit: Duration) -> Result<Question> {
 }
 
 /// Starts `nitely triage-job <id>` as a process of its own; when none can be started, answers here.
-pub fn start(db: &mut Db, config: &crate::Config, q: &Question, nitely: &Path) -> Result<Question> {
+pub fn start(db: &mut Db, config: &nitely_core::Config, q: &Question, nitely: &Path) -> Result<Question> {
     let cwd = q.place.clone().filter(|p| Path::new(p).is_dir()).map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    let log = crate::paths::data_dir().join("jobs").join(format!("triage-{}.log", q.id));
-    match crate::submit_job::spawn_nitely(nitely, &["triage-job".into(), q.id.to_string()], &cwd, &log) {
+    let log = nitely_core::paths::data_dir().join("jobs").join(format!("triage-{}.log", q.id));
+    match nitely_core::submit_job::spawn_nitely(nitely, &["triage-job".into(), q.id.to_string()], &cwd, &log) {
         Ok(pid) => {
             db.conn.execute("UPDATE triage SET pid = ?2 WHERE id = ?1 AND state = 'open'", params![q.id, pid])?;
             db.triage_question(q.id)?.context("the question's record went missing")
@@ -352,10 +361,10 @@ mod tests {
     /// A repo whose triage agent (the playbook's claude reviewer) answers from a script: a question
     /// about the SDK's license is the person's, anything else it answers itself.
     fn repo_with_triage() -> (PathBuf, Db, PathBuf, Actor) {
-        let base = crate::test_repo::copy("triage", |base| {
+        let base = nitely_core::test_repo::copy("triage", |base| {
             let script = "prompt=$(cat)\ncase \"$prompt\" in\n  *SDK*) echo 'Which license is a product decision.'; echo 'ANSWER: Nothing in the repo decides it.'; echo 'PERSON: yes, a product question';;\n  *) echo 'ANSWER: APP-2 holds crates/a.rs on its branch: wait for it to land, then rebase.'; echo 'PERSON: no';;\nesac\n";
-            let playbook = format!("[review]\nreviewer = {{ \"*\" = \"claude\" }}\ncommands = {{ claude = [\"{}\", \"triage.sh\"] }}\n", crate::playbook::posix_sh());
-            crate::test_repo::init(&base.join("repo"), &[("triage.sh", script), (crate::playbook::PLAYBOOK_PATH, &playbook)]);
+            let playbook = format!("[review]\nreviewer = {{ \"*\" = \"claude\" }}\ncommands = {{ claude = [\"{}\", \"triage.sh\"] }}\n", nitely_core::playbook::posix_sh());
+            nitely_core::test_repo::init(&base.join("repo"), &[("triage.sh", script), (nitely_core::playbook::PLAYBOOK_PATH, &playbook)]);
         });
         let db = Db::open(&base.join("t.db")).unwrap();
         db.create_project("APP", "App").unwrap();
@@ -365,10 +374,10 @@ mod tests {
     #[test]
     fn disabled_pr_review_still_allows_triage_answers_and_escalation() {
         let (base, mut db, repo, actor) = repo_with_triage();
-        let file = repo.join(crate::playbook::PLAYBOOK_PATH);
+        let file = repo.join(nitely_core::playbook::PLAYBOOK_PATH);
         let playbook = std::fs::read_to_string(&file).unwrap().replace("[review]\n", "[review]\nenabled = false\n");
         std::fs::write(&file, playbook).unwrap();
-        let config = crate::Config::default();
+        let config = nitely_core::Config::default();
         let place = repo.to_string_lossy().into_owned();
         let q = ask(&db, "Who holds crates/a.rs?", None, Some(&place), &actor).unwrap();
         let done = answer(&mut db, &config, q.id).unwrap();
@@ -385,10 +394,10 @@ mod tests {
     #[test]
     fn triage_answers_the_routine_and_puts_only_the_persons_in_their_inbox() {
         let (base, mut db, repo, actor) = repo_with_triage();
-        let config = crate::Config::default();
+        let config = nitely_core::Config::default();
         let issue = db
             .create_issue(
-                &crate::issues::NewIssue { project: "APP".into(), title: "Footer".into(), kind: "feature".into(), body: "b".into(), evidence: "e".into(), source: "human".into(), allow_similar: true, ..Default::default() },
+                &nitely_core::issues::NewIssue { project: "APP".into(), title: "Footer".into(), kind: "feature".into(), body: "b".into(), evidence: "e".into(), source: "human".into(), allow_similar: true, ..Default::default() },
                 &actor,
             )
             .unwrap();

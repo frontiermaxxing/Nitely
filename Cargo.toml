@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/nitely-core", "crates/nitely-cli", "src-tauri", "server/leaderboard"]
+members = ["crates/nitely-core", "crates/nitely-crew", "crates/nitely-cli", "src-tauri", "server/leaderboard"]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,6 +9,7 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 nitely-core = { path = "crates/nitely-core" }
+nitely-crew = { path = "crates/nitely-crew" }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }

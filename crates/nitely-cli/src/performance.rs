@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::{Args, Subcommand};
 use nitely_core::performance::{self, Store};
-use nitely_core::performance_query::{self, Query, View};
+use nitely_crew::performance_query::{self, Query, View};
 
 #[derive(Args)]
 pub struct Range {
