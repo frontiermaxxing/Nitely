@@ -107,7 +107,7 @@ fn seed(path: &std::path::Path) -> anyhow::Result<()> {
         let s = submit::Submitted {
             solution: Some(submit::SolutionSummary { title: "Validate access before returning account data".into(), summary: "Reject requests without an active session before loading account data.".into() }),
             issue: key.clone(), branch: format!("claude/{}", key.to_lowercase()), base: "main".into(), patch_id: format!("patch-{}", key.to_lowercase()),
-            commit: "abc1234".into(), files: 3, gate, review: Some(review), review_disabled: false, yolo: false, approver: "human".into(), reasons, approval_stands: false,
+            commit: "abc1234".into(), files: 3, gate, review: Some(review), review_disabled: false, review_batched: false, yolo: false, approver: "human".into(), reasons, approval_stands: false,
             pushed: true, pr_url: None, pr_error: None, land: None, verification: None, state: "Needs You".into(), next: String::new(),
         };
         db.record_review(&s)?;
