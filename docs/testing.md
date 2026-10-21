@@ -87,3 +87,75 @@ measurement used a different warm lane. No new whole-suite test count, warm-suit
 time, or flake rate was measured. Historical gate 1306 had 632 passing Rust tests,
 five ignored Rust tests, and 165 passing Node tests on an older source revision;
 those counts must not be presented as today's suite or mixed into this comparison.
+
+
+## Test diet: seed what a test is not about (NIT-498)
+
+[NIT-498](http://127.0.0.1:7423/i/NIT-498) worked through the slowest core tests
+after [NIT-458](http://127.0.0.1:7423/i/NIT-458), which found that git process
+starts are about 83% of a land or submit test.
+
+What changed, with no check dropped:
+
+- **Seeded submissions.** `test_repo::reviewed` records what a submit that passed
+  leaves for land: a pass review of the branch's real patch at its head, and the
+  issue In Review. Land and queue tests about landing use it. Tests about submit
+  itself, approval reasons, or project-mode evidence still run a real submit, and
+  `lands_reviewed_work_and_waits_for_human_approval` and the queue's
+  lands-together test keep the real submit-to-land path.
+- **Seeded review rounds.** Finding, request and round tests record the
+  reviewer's findings or earlier rounds directly. They no longer rewrite the
+  fake reviewer and submit once per round.
+- **Plain functions.** The dependency-file warning calls `after_land` on a plain
+  repo instead of two lands. slim's "an agent is at work here" rule is a
+  function with its own test. `review_context` is read from the database alone.
+- **Merged scenarios**, each one fixture and fewer lands or queue runs:
+  - the kept, process-held and linked worktree tests: one tidying land instead
+    of three;
+  - a changed patch needing a new approval, inside the signed-approval test;
+  - author mode, inside the human mode test;
+  - lands-together, conflict-in-the-middle and moved-since-review: one queue run
+    instead of three.
+
+Three deletions were put to the person (ask 68 on NIT-498). They are not applied
+and not measured here.
+
+**Measurements.** Whole core suite, `cargo test -p nitely-core --lib --
+--test-threads=12` with `--report-time`, warm lane 1, once at the start and once
+at the end:
+
+| | Before (run 1601, a1f4241) | After (run 1666, e67b215) |
+| --- | ---: | ---: |
+| Wall time | 818 s | 449 s |
+| Summed test time | 9,585 s | 5,320 s |
+| Tests passed / failed / ignored | 654 / 1 / 5 | 658 / 0 / 6 |
+| Changed modules, summed (land, land_queue, submit, submit_job, slim) | 6,541 s | 3,193 s |
+| Untouched modules, summed | 3,044 s | 2,127 s |
+
+The PC was shared with other agents' lanes, and the load was lighter at the end:
+the modules this work did not touch also fell by 30%. Against that, the changed
+modules fell by 51%, so about 30% is this work and the rest is load. Individual
+module runs of the same tests varied up to twofold within an hour.
+
+A load-independent count agrees. Every git process the changed modules start,
+counted per test with a temporary trace in `run_git` (runs 1663 and 1665, same
+filter, baseline and branch):
+
+| Module | Git processes before | After |
+| --- | ---: | ---: |
+| land_queue | 3,359 | 2,283 |
+| land | 2,875 | 1,922 |
+| submit | 1,753 | 1,536 |
+| submit_job | 267 | 252 |
+| slim | 150 | 123 |
+| Total | 8,542 | 6,251 (-27%) |
+
+The 2-minute target was not reached, and test changes alone will not reach it.
+A seeded five-change bisection test still starts 249 git processes, and about 90%
+of them come from land, land_queue and lanes code: 30 `land::rev` calls, 18
+checkouts in the stack worktree, and 15 patch-id ranges. Every real land pays the
+same cost. Cutting those calls is
+[NIT-508](http://127.0.0.1:7423/i/NIT-508). The between-lane timings above are
+single observations; the base commits differ by other goal-19 work, which added
+tests and fixed the one failure. This work removed six tests by merging and added
+two plain-function tests.
