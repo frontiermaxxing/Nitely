@@ -23,6 +23,8 @@ pub struct FeedEvent {
     pub goal: Option<i64>,
     pub kind: String,
     pub summary: String,
+    /// The one agent an event is for, when it names no issue: the asker of an ask about none.
+    pub for_reader: Option<String>,
 }
 
 /// What a reader is told about.
@@ -83,7 +85,12 @@ pub fn digest(events: &[FeedEvent], reader: &str, scope: &Scope, cap: usize) -> 
             return false;
         }
         let decision = e.actor == "human" && DECISIONS.contains(&e.kind.as_str());
-        let outcome = OUTCOMES.contains(&e.kind.as_str()) || (e.actor == BACKSTOP && e.kind == "issue_created");
+        let sent_back = e.kind == "submit" && e.summary.contains("requested changes");
+        let outcome = OUTCOMES.contains(&e.kind.as_str()) || sent_back || (e.actor == BACKSTOP && e.kind == "issue_created");
+        // An answer to an ask about no issue: for its asker, and a coordinator; no other agent.
+        if let (Some(to), Scope::Mine { .. }) = (&e.for_reader, scope) {
+            return decision && to == reader;
+        }
         if !decision && !outcome {
             return false;
         }
@@ -150,7 +157,12 @@ fn line(e: &FeedEvent) -> String {
             format!("The full check on the integration branch failed; {} tracks it", e.issue_key.as_deref().unwrap_or("a recovery issue"))
         }
         "issue_created" => format!("The person filed {}", e.issue_key.as_deref().unwrap_or("an issue")),
-        "goal_state" => said,
+        // The goal's title may be long: it is cut, never its new state.
+        "goal_state" => match e.summary.rsplit_once(" is ") {
+            Some((goal, state)) => format!("{} is {state}", quote(goal)),
+            None => said,
+        },
+        "submit" => format!("{}: the review asked for changes", e.issue_key.as_deref().unwrap_or("A change")),
         "issue_edited" => {
             // `edit_issue` records what it was: "Title was: ...", "Body was: ...".
             let parts: Vec<&str> = [("Title was", "title"), ("Body was", "requirements")].iter().filter(|(mark, _)| e.summary.contains(mark)).map(|(_, part)| *part).collect();
@@ -189,6 +201,7 @@ pub fn read(db: &Db, reader: &str, projects: &[String], whole: bool, cap: usize)
     };
     let mut stmt = db.conn.prepare(
         "SELECT e.id, e.actor, e.issue_key, e.type, COALESCE(e.summary, ''),
+                CASE WHEN json_valid(e.payload) THEN json_extract(e.payload, '$.asked_by') END,
                 COALESCE(i.project, CASE WHEN json_valid(e.payload) THEN json_extract(e.payload, '$.project') END),
                 COALESCE(i.goal, CASE WHEN json_valid(e.payload) THEN json_extract(e.payload, '$.goal') END)
          FROM event e LEFT JOIN issue i ON i.key = e.issue_key COLLATE NOCASE
@@ -196,7 +209,7 @@ pub fn read(db: &Db, reader: &str, projects: &[String], whole: bool, cap: usize)
     )?;
     let events: Vec<FeedEvent> = stmt
         .query_map([after], |r| {
-            Ok(FeedEvent { id: r.get(0)?, actor: r.get(1)?, issue_key: r.get(2)?, kind: r.get(3)?, summary: r.get(4)?, project: r.get(5)?, goal: r.get(6)? })
+            Ok(FeedEvent { id: r.get(0)?, actor: r.get(1)?, issue_key: r.get(2)?, kind: r.get(3)?, summary: r.get(4)?, for_reader: r.get(5)?, project: r.get(6)?, goal: r.get(7)? })
         })?
         .collect::<rusqlite::Result<_>>()?;
     let projects: BTreeSet<String> = projects.iter().map(|p| p.to_uppercase()).collect();
@@ -239,7 +252,7 @@ mod tests {
     use super::*;
 
     fn ev(id: i64, actor: &str, key: Option<&str>, project: Option<&str>, goal: Option<i64>, kind: &str, summary: &str) -> FeedEvent {
-        FeedEvent { id, actor: actor.into(), issue_key: key.map(str::to_string), project: project.map(str::to_string), goal, kind: kind.into(), summary: summary.into() }
+        FeedEvent { id, actor: actor.into(), issue_key: key.map(str::to_string), project: project.map(str::to_string), goal, kind: kind.into(), summary: summary.into(), for_reader: None }
     }
 
     fn feed() -> Vec<FeedEvent> {
@@ -327,6 +340,22 @@ mod tests {
         assert!(read(&db, "claude:s1", &["APP".into()], false, HOOK_CAP).unwrap().block().unwrap().contains("Prefer the left one"));
         drop(db);
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// What the fourth review found missing: an answer to an ask about no issue reaches its asker
+    /// only, a review that sent a change back is news, and a long goal title never hides its state.
+    #[test]
+    fn issue_less_answers_send_backs_and_long_goal_titles() {
+        let answer = FeedEvent { for_reader: Some("claude:me".into()), ..ev(1, "human", None, None, None, "answer", "Left") };
+        let mine = |_: &str| Scope::Mine { issues: BTreeSet::new(), goals: BTreeSet::new(), projects: ["APP".to_string()].into() };
+        assert_eq!(digest(std::slice::from_ref(&answer), "claude:me", &mine("claude:me"), 8).lines, ["The person answered the ask: \"Left\""]);
+        assert!(digest(std::slice::from_ref(&answer), "claude:other", &mine("claude:other"), 8).lines.is_empty(), "not another agent's news");
+        let sent_back = ev(2, "codex:x", Some("APP-7"), Some("APP"), None, "submit", "Review by claude at its land requested changes: [P1] ...");
+        let whole = Scope::Project(["APP".to_string()].into());
+        assert_eq!(digest(&[sent_back], "claude:coord", &whole, 8).lines, ["APP-7: the review asked for changes"]);
+        let long = format!("Goal 22 \"{}\" is done", "very ".repeat(30));
+        let line = &digest(&[ev(3, "human", None, Some("APP"), Some(22), "goal_state", &long)], "claude:coord", &whole, 8).lines[0];
+        assert!(line.ends_with(" is done") && line.contains('…'), "{line}");
     }
 
     #[test]

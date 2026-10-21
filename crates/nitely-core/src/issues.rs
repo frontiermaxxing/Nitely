@@ -2082,6 +2082,14 @@ impl Db {
             "UPDATE ask SET answer = ?2, answered_at = ?3 WHERE id = ?1",
             params![id, answer.trim(), ts],
         )?;
+        if ask.issue_key.is_none() {
+            // An ask about no issue: its answer is still news to its asker (the updates feed,
+            // NIT-562), so the event says whose ask it was.
+            tx.execute(
+                "INSERT INTO event (ts, actor, issue_key, type, summary, payload) VALUES (?1, 'human', NULL, 'answer', ?2, ?3)",
+                params![ts, answer.trim(), serde_json::json!({ "ask": id, "asked_by": ask.asked_by }).to_string()],
+            )?;
+        }
         if let Some(k) = &ask.issue_key {
             tx.execute(
                 "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, 'human', ?2, 'answer', ?3)",
