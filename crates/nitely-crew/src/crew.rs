@@ -1434,7 +1434,9 @@ pub fn brief(issue: &IssueRecord, project: &str, worktree: &Path, branch: &str, 
     if nitely_core::goal_plans::is_planning(issue) {
         return planner_brief(issue, project, worktree, repo);
     }
-    if nitely_core::overlap::changes_no_repo_files(&issue.body) {
+    // As start_task decides it: a worktree it made means the work has a branch of its own, and
+    // goes the usual way through submit.
+    if nitely_core::overlap::outside_repo(&issue.body, worktree.join(".git").exists()) {
         return outside_brief(issue, project, repo);
     }
     // A light worktree with lanes builds through `run` (docs/build-lanes.md).
@@ -2814,6 +2816,21 @@ max_per_day = 5
             assert!(b.contains(part), "missing {part:?} in {b}");
         }
         assert!(!b.contains("submit (without wait)"));
+    }
+
+    #[test]
+    fn work_outside_the_repo_is_closed_with_evidence_unless_its_branch_was_started() {
+        let body = nitely_core::overlap::with_no_repo_changes("Design the screens.", "designs them in the design tool").unwrap();
+        let issue = IssueRecord { key: "NIT-8".into(), title: "Design the screens".into(), body, ..Default::default() };
+        let dir = nitely_core::paths::unique_temp("nitely-outside-brief", "");
+        let b = brief(&issue, "NIT", &dir.join("nit-8"), "claude/nit-8-design", Path::new("/r"), None);
+        assert!(b.contains("has no worktree") && b.contains("update_issue Done") && !b.contains("call submit"), "{b}");
+        // Started before it was marked: its worktree is there, and it goes through submit.
+        std::fs::create_dir_all(dir.join("nit-8")).unwrap();
+        std::fs::write(dir.join("nit-8").join(".git"), "gitdir: x").unwrap();
+        let b = brief(&issue, "NIT", &dir.join("nit-8"), "claude/nit-8-design", Path::new("/r"), None);
+        assert!(b.contains("call submit"), "{b}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

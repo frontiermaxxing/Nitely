@@ -1227,7 +1227,7 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
                         None => branch_name(&server.vendor, &issue.key, &issue.title),
                     };
                     let next = if nitely_core::overlap::changes_no_repo_files(&issue.body) {
-                        format!("Call start_task with this key: it claims the issue and makes no branch or worktree. {} Report as you go, and leave a handoff note before you stop.", nitely_core::overlap::OUTSIDE_REPO)
+                        format!("Call start_task with this key: it claims the issue and, unless a branch for it was started before, makes no branch or worktree. Then: {} If start_task did make a worktree, work there and submit as usual. Report as you go, and leave a handoff note before you stop.", nitely_core::overlap::OUTSIDE_REPO)
                     } else {
                         "Call start_task with this key for the branch and worktree, work there, report as you go, call submit when it is committed, and leave a handoff note before you stop.".to_string()
                     };
