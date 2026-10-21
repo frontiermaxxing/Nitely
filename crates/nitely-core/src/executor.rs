@@ -981,6 +981,52 @@ pub fn ci_commands(pb: &Playbook, steps: &[(String, Option<String>)]) -> Vec<Str
         .collect()
 }
 
+/// The command a plain `run` sends to CI (NIT-514): one of `ci_commands`, or, once the playbook has
+/// any, a whole Rust suite with no test filter (`cargo test -p nitely-core`, `cargo test
+/// --workspace --lib -- --test-threads=4`). None for a filtered or joined command, which stays local.
+pub fn run_in_ci(pb: &Playbook, command: &str) -> Option<String> {
+    let listed = ci_commands(pb, &[(command.to_string(), None)]);
+    if !listed.is_empty() {
+        return listed.into_iter().next();
+    }
+    let any = pb.lanes.as_ref().is_some_and(|l| !l.ci_commands.is_empty());
+    (any && whole_suite(command)).then(|| command.trim().to_string())
+}
+
+/// `cargo test` that runs every test of what it selects: no name filter before or after `--`, no
+/// single integration test (`--test x`), and nothing joined to it or redirected.
+pub fn whole_suite(command: &str) -> bool {
+    let command = command.trim();
+    if command.contains(['\n', '\r', ';', '|', '&', '<', '>', '`', '$']) {
+        return false;
+    }
+    let words: Vec<&str> = command.split_whitespace().collect();
+    if words.len() < 2 || words[0] != "cargo" || words[1] != "test" {
+        return false;
+    }
+    // Cargo's options that take a value as the next word, and libtest's.
+    const CARGO: &[&str] = &["-p", "--package", "--exclude", "-F", "--features", "--target", "--target-dir", "--manifest-path", "-j", "--jobs", "--profile", "--color", "--config", "-Z", "--message-format"];
+    const LIBTEST: &[&str] = &["--test-threads", "--skip", "--format", "--color", "--logfile", "-Z", "--shuffle-seed"];
+    let mut rest = words[2..].iter();
+    let mut harness = false;
+    while let Some(w) = rest.next() {
+        if *w == "--" && !harness {
+            harness = true;
+            continue;
+        }
+        let takes = if harness { LIBTEST } else { CARGO };
+        if !harness && (matches!(*w, "--test" | "--bench" | "--bin" | "--example") || w.starts_with("--test=")) {
+            return false;
+        }
+        if takes.contains(w) {
+            rest.next();
+        } else if !w.starts_with('-') {
+            return false;
+        }
+    }
+    true
+}
+
 /// Dispatches the suite and waits for it.
 pub fn suite(db: &Db, root: &Path, pb: &Playbook, req: &SuiteRequest, actor: &Actor) -> Result<Suite> {
     match dispatch(db, root, pb, req, actor)? {
@@ -1405,6 +1451,27 @@ mod tests {
         assert!(!safe_id("../escape"));
         assert!(!allowed(&["APP".into()], "OTHER"));
     }
+    #[test]
+    fn a_run_of_a_whole_rust_suite_goes_to_ci_and_a_filtered_or_joined_one_stays_local() {
+        let pb = Playbook::parse("[lanes]\nci_commands = [\"cargo test --workspace -- --test-threads=12\", \"npm test\"]\n").unwrap();
+        for whole in ["cargo test --workspace -- --test-threads=12", "cargo test -p nitely-core", "cargo test -p nitely-core --lib -- --test-threads 4", "cargo test --workspace --features x -- --include-ignored", "npm test"] {
+            assert_eq!(run_in_ci(&pb, whole).as_deref(), Some(whole), "{whole}");
+        }
+        for local in [
+            "cargo test -p nitely-core lanes::tests::x",
+            "cargo test -p nitely-core --lib -- lanes:: procs::",
+            "cargo test -p nitely-core --test scenario",
+            "cargo test -p nitely-core && cargo clippy --workspace -- -D warnings",
+            "cargo test -p nitely-core\ncargo test -p nitely-crew",
+            "cargo clippy -p nitely-core",
+            "npm run build",
+        ] {
+            assert_eq!(run_in_ci(&pb, local), None, "{local}");
+        }
+        // Without ci_commands, the project has not opted in: nothing goes to CI.
+        assert_eq!(run_in_ci(&Playbook::parse("[lanes]\n").unwrap(), "cargo test -p nitely-core"), None);
+    }
+
     #[test]
     fn a_suite_goes_to_ci_only_for_named_commands_and_passes_only_when_every_job_did() {
         let pb = Playbook::parse("[lanes]\nci_commands = [\"cargo test --workspace\", \"cargo test {worktree}\", \"npm test\"]\n").unwrap();

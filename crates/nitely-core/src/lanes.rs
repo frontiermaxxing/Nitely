@@ -863,9 +863,11 @@ pub fn run_in(config: &crate::Config, db: &Db, dir: &str, issue: Option<&str>, c
 /// is written as the request moves (queued, running, done), so another process can follow it with
 /// `Db::lane_run`. `on_event` is called with the run when it is queued and when it starts.
 pub fn run(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Actor, on_event: &mut dyn FnMut(&Run)) -> Result<Run> {
-    // A run of exactly one of the playbook's full suites goes to CI like a gate's (NIT-515).
-    let to_ci = crate::executor::ci_commands(pb, &[(req.command.to_string(), None)]);
-    if !to_ci.is_empty() {
+    // A run of one of the playbook's full suites goes to CI like a gate's (NIT-515), and so does a
+    // whole Rust suite with no filter (NIT-514). Why CI could not take it goes on the run.
+    let mut fallback: Option<String> = None;
+    if let Some(command) = crate::executor::run_in_ci(pb, req.command) {
+        let to_ci = [command];
         let suite = crate::executor::SuiteRequest { project: req.project, issue: req.issue, kind: req.kind, snapshot: req.snapshot, commands: &to_ci, workflow_ref: None };
         match crate::executor::dispatch(db, repo_root, pb, &suite, actor) {
             Ok(crate::executor::Dispatch::Started(pending)) => {
@@ -878,20 +880,35 @@ pub fn run(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Acto
                         return Ok(row);
                     }
                     Err(e) => {
+                        let why = format!("CI run {id} did not report: {e:#}; running `{}` in a lane", req.command);
                         if let Some(key) = req.issue {
-                            db.log_event(actor, Some(key), None, "executor_fallback", &format!("CI run {id} did not report: {e:#}; running `{}` in a lane", req.command)).ok();
+                            db.log_event(actor, Some(key), None, "executor_fallback", &why).ok();
                         }
+                        fallback = Some(why);
                     }
                 }
             }
-            Ok(crate::executor::Dispatch::Unavailable(_)) => {}
+            // dispatch said so on the issue already.
+            Ok(crate::executor::Dispatch::Unavailable(why)) => fallback = Some(format!("CI cannot run `{}`: {why}; ran it in a lane instead", req.command)),
             Err(e) => {
+                let why = format!("CI could not take `{}`: {e:#}; running it in a lane", req.command);
                 if let Some(key) = req.issue {
-                    db.log_event(actor, Some(key), None, "executor_fallback", &format!("CI could not take `{}`: {e:#}; running it in a lane", req.command)).ok();
+                    db.log_event(actor, Some(key), None, "executor_fallback", &why).ok();
                 }
+                fallback = Some(why);
             }
         }
     }
+    let mut run = local_run(db, repo_root, pb, req, actor, on_event)?;
+    if let Some(why) = fallback {
+        run.output = format!("{why}
+{}", run.output);
+        db.conn.execute("UPDATE lane_run SET output = ?2 WHERE id = ?1", params![run.id, run.output])?;
+    }
+    Ok(run)
+}
+
+fn local_run(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Actor, on_event: &mut dyn FnMut(&Run)) -> Result<Run> {
     if let Some(run) = crate::executor::run(db, repo_root, pb, req, actor, on_event)? { return Ok(run); }
     // The machine's share as it is when the command starts, not when it was queued (NIT-291), with
     // the cap it was admitted with (NIT-323).
@@ -1160,17 +1177,21 @@ fn gate_on(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Opt
 
     // The full suites the playbook sends to CI run there while the rest runs here (NIT-493).
     let to_ci = if ci { crate::executor::ci_commands(pb, steps) } else { vec![] };
+    // Why CI did not take them, at the head of their results (NIT-514).
+    let mut fallback: Option<String> = None;
     if !to_ci.is_empty() {
         let req = crate::executor::SuiteRequest { project: &project, issue, kind, snapshot: &snap, commands: &to_ci, workflow_ref: None };
         match crate::executor::dispatch(db, repo_root, pb, &req, actor) {
             Ok(crate::executor::Dispatch::Started(pending)) => {
                 return gate_beside_ci(db, repo_root, pb, worktree, issue, kind, steps, actor, reuse, yolo_keys, pending, &to_ci, short, warnings);
             }
-            Ok(crate::executor::Dispatch::Unavailable(_)) => {}
+            // dispatch said so on the issue already.
+            Ok(crate::executor::Dispatch::Unavailable(why)) => fallback = Some(format!("CI cannot run this: {why}; it ran locally instead")),
             Err(e) => {
                 if let Some(key) = issue {
                     db.log_event(actor, Some(key), None, "executor_fallback", &format!("CI could not take {}: {e:#}; running it locally", to_ci.join(", "))).ok();
                 }
+                fallback = Some(format!("CI could not take this: {e:#}; it ran locally instead"));
             }
         }
     }
@@ -1252,6 +1273,11 @@ fn gate_on(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Opt
         results.push(playbook::CommandResult { command: format!("lane {}", run.lane.unwrap_or(0)), ok: false, seconds: 0, output, skipped: false, timed_out });
     }
     warnings.extend(budget_warnings(db, worktree, issue, actor, &timings));
+    if let Some(why) = &fallback {
+        for r in results.iter_mut().filter(|r| !r.skipped && to_ci.iter().any(|c| c == &r.command)) {
+            r.output = format!("{why}\n{}", r.output);
+        }
+    }
     Ok(GateRun { yolo_skipped, commit: short, passed: run.passed() && !yolo_skipped, results, flaked, run: Some(run.id), warnings })
 }
 

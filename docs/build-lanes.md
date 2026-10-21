@@ -398,6 +398,14 @@ full suite at a time, and the issue says why. Unlike a machine executor, a CI ru
 but cannot report (gh failing five times in a row, or past `timeout_minutes` plus 30 minutes, when
 it is cancelled) also falls back to a lane: a second run of a test suite on a throwaway runner
 has no side effect to fear. Failed tests in CI are the gate's result and never run again locally.
+When a command falls back, the reason heads that command's output in the gate's result or the run's.
+
+Two more go to CI once a playbook has any `ci_commands` (NIT-514). A `run` of a whole Rust suite
+with no test filter (`cargo test -p nitely-core`, `cargo test --workspace --lib`) goes there too; a
+filtered one (`cargo test -p nitely-core lanes::`), one test target (`--test x`) or a joined command
+(`a && b`) stays local. And in a mode whose lands batch (Fast, Careful), a submit that runs the
+whole gate (a change that is Full by path) skips its `ci_commands` steps, saying they run when it
+lands: the land always gates in full, so the full suite runs once, in CI, and never at submit.
 
 GitHub runs a dispatched workflow only when the file is on the default branch, and runs the copy on
 the branch it is dispatched on: a new input works once that branch has it. For other callers

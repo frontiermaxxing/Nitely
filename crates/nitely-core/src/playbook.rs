@@ -1548,6 +1548,18 @@ pub(crate) fn run_planned_gate(db: &Db, repo_root: &Path, worktree: &Path, issue
     run_gate_inner(db, repo_root, worktree, issue_key, actor, kind, &[], Some(plan))
 }
 
+/// Marks the gate's full suites (`ci_commands`) skipped for a submit (`Kind::Gate`) that runs the
+/// whole gate (no reduced plan) in a project whose lands batch: the land gates them once, in CI
+/// when CI can take them, so they never run twice, nor on this machine at submit.
+pub(crate) fn leave_full_suites_to_land(steps: &mut [(String, Option<String>)], ci_commands: &[String], kind: crate::lanes::Kind, planned: bool, batched: bool) {
+    if kind != crate::lanes::Kind::Gate || planned || !batched {
+        return;
+    }
+    for (_, skip) in steps.iter_mut().filter(|(c, skip)| skip.is_none() && ci_commands.contains(c)) {
+        *skip = Some("the full suite runs once, when this lands (in CI when CI can take it)".into());
+    }
+}
+
 pub(crate) fn run_automatic_gate(db: &Db, repo_root: &Path, worktree: &Path, keys: &[&str], actor: &Actor, kind: crate::lanes::Kind) -> Result<GateResult> {
     let authority=keys.first().map(|k|crate::project_modes::authority_for_issue(db,k)).transpose()?.flatten();
     for key in keys {if crate::project_modes::authority_for_issue(db,key)?!=authority {bail!("batch members have incompatible project review modes; land individually");}}
@@ -1583,6 +1595,11 @@ fn run_gate_inner(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<
     for step in &playbook.gate.steps {
         steps.push((step.run.clone(), step.skip_reason(&files)?));
     }
+    // A submit's full gate under a mode that lands in batches: the full suites run once, at the
+    // land, which always gates in full (NIT-514). Only the issue's own submit, never `run_gate`.
+    let batched = !yolo_keys.is_empty() && playbook.land.batch != LandBatch::Off;
+    let ci = playbook.lanes.as_ref().map(|l| l.ci_commands.as_slice()).unwrap_or_default();
+    leave_full_suites_to_land(&mut steps, ci, kind, plan.is_some(), batched);
 
     if playbook.lanes.is_some() {
         // In a lane: a full checkout of the worktree's snapshot, set up there. The worktree itself
@@ -1727,6 +1744,23 @@ mod tests {
         // A launcher with no real git beside it, or some other git: left to --exec-path.
         assert_eq!(real_git_beside(Path::new("D:/Git/cmd/git.exe"), installed), None);
         assert_eq!(real_git_beside(Path::new("C:/scoop/shims/git.exe"), installed), None);
+    }
+
+    #[test]
+    fn a_batched_submit_leaves_its_full_suites_to_the_land_and_nothing_else_does() {
+        use crate::lanes::Kind;
+        let ci = vec!["cargo test --workspace".to_string()];
+        let gate = || vec![("npm test".to_string(), None), ("cargo test --workspace".to_string(), None)];
+        let mut submit = gate();
+        leave_full_suites_to_land(&mut submit, &ci, Kind::Gate, false, true);
+        assert_eq!(submit[0].1, None, "the quick checks still run at submit");
+        assert!(submit[1].1.as_deref().is_some_and(|w| w.contains("when this lands")));
+        // The land itself, a reduced plan, a project that lands one at a time: all run it.
+        for (kind, planned, batched) in [(Kind::Land, false, true), (Kind::Gate, true, true), (Kind::Gate, false, false)] {
+            let mut steps = gate();
+            leave_full_suites_to_land(&mut steps, &ci, kind, planned, batched);
+            assert_eq!(steps, gate(), "{kind:?} planned={planned} batched={batched}");
+        }
     }
 
     #[test]
