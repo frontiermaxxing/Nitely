@@ -111,9 +111,15 @@ test("Performance history survives an app restart and only clears through paused
     await clickControl("1h");
 
     assert.equal(await app.page.eval(`return [...document.querySelectorAll('button')].find(b => b.textContent === 'Clear history…')?.disabled`), true);
+    // Visible again before the change: the page reads nothing while hidden, and the test hid it
+    // above, so whether it saw the pause depended on the runner's window (NIT-545). The pause is
+    // then followed through what causes it, not a clock: the native call's own confirmation, the
+    // recorder's saved setting, and the page's next read.
+    await showPage();
     await clickControl("Pause collection");
-    await app.page.waitFor(`return document.querySelector('.perf-freshness')?.textContent.includes('paused')`, { what: "paused collection" });
-    assert.equal((await query()).settings.enabled, false);
+    await app.page.waitFor(`return document.body.textContent.includes('Collection paused.')`, { what: "the pause confirmed" });
+    assert.equal((await query()).settings.enabled, false, "the recorder's setting is paused");
+    await app.page.waitFor(`return document.querySelector('.perf-freshness')?.textContent.includes('paused')`, { what: "paused collection shown" });
     await app.restart();
     await showPage();
     await app.page.open("#performance");
