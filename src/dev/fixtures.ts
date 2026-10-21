@@ -9,7 +9,7 @@
 
 import * as phoneFixture from "./phone";
 import * as rulesFixture from "./rules";
-import { reviewMode, saveReviewMode, periodicReviews, retryPeriodic, effectiveModes } from "./reviewModes";
+import { reviewMode, saveReviewMode, periodicReviews, retryPeriodic, effectiveModes, landsPipeline, landsDryRun } from "./reviewModes";
 import type { ModeOptions, ReviewMode } from "../reviewModes";
 import { performanceFixture, configurePerformance, clearPerformance } from "./performance";
 import { leaderboardFixture, leaderboardReportFixture } from "./leaderboard";
@@ -2229,6 +2229,10 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return reviewMode(String(args.project).toUpperCase());
       case "project_review_mode_effective":
         return effectiveModes(String(args.project).toUpperCase());
+      case "lands_pipeline":
+        return landsPipeline(String(args.project).toUpperCase(), rulesFixture.rules(String(args.project)).map((v) => v.repo));
+      case "lands_dry_run":
+        return landsDryRun(String(args.project).toUpperCase(), String(args.path));
       case "set_project_review_mode":
         return saveReviewMode(String(args.project).toUpperCase(), args.mode as ReviewMode, args.overrides as ModeOptions, Number(args.expectedRevision));
       case "periodic_review_status":

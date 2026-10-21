@@ -22,6 +22,8 @@ pub const READ_ONLY: &[&str] = &[
     "project_yolo",
     "project_review_mode",
     "project_review_mode_effective",
+    "lands_pipeline",
+    "lands_dry_run",
     "periodic_review_status",
     "crew_status",
     "crew_settings",
@@ -76,6 +78,8 @@ pub fn run(command: &str, args: &Value) -> Result<Value> {
         "project_yolo" => json!(db()?.project_yolo(str_arg(args, "project")?)?),
         "project_review_mode" => json!(db()?.project_review_mode(str_arg(args, "project")?)?),
         "project_review_mode_effective" => json!(nitely_core::project_modes::effective_repositories(&db()?, &Config::load_read_only()?, str_arg(args, "project")?)?),
+        "lands_pipeline" => json!(nitely_core::lands_pipeline::for_project(&db()?, &Config::load_read_only()?, str_arg(args, "project")?)?),
+        "lands_dry_run" => json!(nitely_core::lands_pipeline::dry_run_for(&db()?, &Config::load_read_only()?, str_arg(args, "project")?, str_arg(args, "repo")?, str_arg(args, "path")?)?),
         "periodic_review_status" => json!(nitely_core::periodic_review::status(&db()?, str_arg(args, "project")?)?),
         "crew_status" => {
             let moment = nitely_core::crew::Moment::now();

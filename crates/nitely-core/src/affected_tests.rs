@@ -1019,10 +1019,90 @@ fn imports_node(
     Ok(())
 }
 
+/// What the map says a change to one path would run, for the "How a change lands" dry run
+/// (NIT-492). It reads only the map's text: owners by root, then every component that depends
+/// on them. The real selection also follows imports and checks the commit, so it can only run
+/// more, never less, and a path no component owns keeps the full gate.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PathPreview {
+    pub full: bool,
+    pub components: Vec<String>,
+    pub commands: Vec<String>,
+    pub why: String,
+}
+
+pub fn preview(policy: &str, path: &str) -> PathPreview {
+    let full = |why: String| PathPreview { full: true, components: vec![], commands: vec![], why };
+    let path = path.trim().replace('\\', "/");
+    if !valid_path(&path) {
+        return full("Not a path in the repo".into());
+    }
+    if protected(&path) || path == POLICY_PATH {
+        return full("A build, lock or policy file keeps the full gate".into());
+    }
+    let policy: Policy = match toml::from_str(policy) {
+        Ok(p) => p,
+        Err(_) => return full("The test map is missing or does not parse".into()),
+    };
+    let mut affected: BTreeSet<&str> = policy
+        .components
+        .iter()
+        .filter(|c| c.roots.iter().any(|r| under(&path, r)))
+        .map(|c| c.id.as_str())
+        .collect();
+    if affected.is_empty() {
+        return full("No component in the test map owns it".into());
+    }
+    if policy.components.iter().any(|c| affected.contains(c.id.as_str()) && c.build_inputs.iter().any(|i| under(&path, i))) {
+        return full("A build-script input keeps the full gate".into());
+    }
+    let owners = affected.len();
+    loop {
+        let old = affected.len();
+        for c in &policy.components {
+            if c.depends_on.iter().any(|id| affected.contains(id.as_str())) {
+                affected.insert(c.id.as_str());
+            }
+        }
+        if old == affected.len() {
+            break;
+        }
+    }
+    let mut commands: Vec<String> = vec![];
+    let mut add = |c: String| if !commands.contains(&c) { commands.push(c) };
+    for c in policy.components.iter().filter(|c| affected.contains(c.id.as_str())) {
+        c.checks.iter().cloned().for_each(&mut add);
+        for s in &c.suites {
+            if let Some(js) = &s.javascript {
+                add(js.command.clone());
+            }
+            if let Some(cargo) = &s.cargo {
+                add(format!("cargo test -p {}", cargo.package));
+            }
+        }
+    }
+    let components: Vec<String> = policy.components.iter().filter(|c| affected.contains(c.id.as_str())).map(|c| c.id.clone()).collect();
+    let why = if components.len() > owners { format!("{} and what depends on it", components[0]) } else { format!("Owned by {}", components.join(", ")) };
+    PathPreview { full: false, components, commands, why }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_repo::{git as g, init};
+
+    /// The dry run reads this repo's own map: a frontend file gets the web checks, a lock file
+    /// and a file no component owns keep the full gate.
+    #[test]
+    fn preview_reads_the_map() {
+        let map = include_str!("../../../.nitely/affected-tests.toml");
+        let web = preview(map, "src/rules/LandsStrip.tsx");
+        assert!(!web.full, "{web:?}");
+        assert!(web.commands.contains(&"npm test".to_string()) && web.commands.contains(&"npm run build".to_string()), "{web:?}");
+        assert!(preview(map, "Cargo.lock").full);
+        assert!(preview(map, "nowhere/else.txt").full);
+        assert!(preview("not toml [", "src/App.tsx").full);
+    }
 
     /// This repo's own map (.nitely/affected-tests.toml) against candidate commits made on a
     /// shared clone of it, without a checkout: which changes get the frontend's checks and which

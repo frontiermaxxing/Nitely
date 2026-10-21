@@ -4,7 +4,7 @@ import type { DefaultsView, LandBy, RuleDefaults, RulesEdit, RulesView } from ".
 import { Button, EmptyState, Loading, RadioCards, SettingsRow, SourceTag, type ChoiceOption } from "./ui";
 import { DryRun } from "./rules/DryRun";
 import { Landing } from "./rules/Landing";
-import { LandsStrip, type ModeFacts, type RulesSection } from "./rules/LandsStrip";
+import { LandsStrip, type RulesSection } from "./rules/LandsStrip";
 import { Loosen } from "./rules/Loosen";
 import { Mode } from "./rules/Mode";
 import { Paths } from "./rules/Paths";
@@ -13,14 +13,14 @@ import { SaveBar } from "./rules/SaveBar";
 import type { RulesDraft } from "./rules/shared";
 import { draftChanges, draftOf, LAND_BY } from "./rules/shared";
 import { confirmLoosening } from "./rules/save";
-import { optionsFor, type EffectiveRepository, type ProjectReviewMode } from "./reviewModes";
+import type { Pipeline } from "./rules/pipeline";
 import "./rules.css";
 
 export { LAND_BY } from "./rules/shared";
 export { ReviewerMap } from "./rules/Reviewers";
 
 /** One repo's rules: what waits for you, who reviews, who lands, and a dry run. The draft lives here; each section edits it. */
-function RepoRules(props: { view: RulesView; mode: ModeFacts | null; onSaved: (v: RulesView) => void }) {
+function RepoRules(props: { project: string; view: RulesView; pipeline: Pipeline | null; onSaved: (v: RulesView) => void }) {
   const v = props.view;
   const page = useRef<HTMLDivElement>(null);
   const [draft, setDraft] = useState<RulesEdit>(() => draftOf(v));
@@ -69,7 +69,7 @@ function RepoRules(props: { view: RulesView; mode: ModeFacts | null; onSaved: (v
   const go = (section: RulesSection) => page.current?.querySelector(`[data-rules-section="${section}"]`)?.scrollIntoView({ behavior: "smooth", block: "start" });
   return (
     <div className="settings rules" ref={page}>
-      <LandsStrip view={v} draft={draft} landBy={landBy} crossVendor={crossVendor} mode={props.mode} onGo={go} />
+      <LandsStrip project={props.project} view={v} draft={draft} landBy={landBy} crossVendor={crossVendor} pipeline={props.pipeline} onGo={go} />
       <Mode view={v} />
       <div data-rules-section="waits">
         <Paths {...rules} />
@@ -101,24 +101,19 @@ function RepoRules(props: { view: RulesView; mode: ModeFacts | null; onSaved: (v
 /** The project's Rules tab: each linked repo's review and landing rules. */
 export function ProjectRules(props: { projectKey: string }) {
   const [views, setViews] = useState<RulesView[] | null>(null);
-  const [mode, setMode] = useState<ModeFacts | null>(null);
+  const [pipelines, setPipelines] = useState<Pipeline[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [saves, setSaves] = useState(0);
   useEffect(() => {
-    // The review mode decides whether the gate and the review run; without it the strip shows the playbook's own.
+    // The pipeline reads the review mode and the playbook together, so it is read again after a save.
     let current = true;
-    setMode(null);
-    invoke<ProjectReviewMode>("project_review_mode", { project: props.projectKey })
-      .then(async (m) => {
-        const options = optionsFor(m.mode, m.presets, m.overrides);
-        // Custom may leave the full suite on main to each repo's playbook: read what it resolves to.
-        const rows = options.full_backstop ? [] : await invoke<EffectiveRepository[]>("project_review_mode_effective", { project: props.projectKey }).catch(() => []);
-        if (current) setMode({ mode: m.mode, options, backstop: Object.fromEntries(rows.map((r) => [r.repo, r.options.full_backstop])) });
-      })
-      .catch(() => undefined);
+    invoke<Pipeline[]>("lands_pipeline", { project: props.projectKey })
+      .then((p) => current && setPipelines(p))
+      .catch(() => current && setPipelines([]));
     return () => {
       current = false;
     };
-  }, [props.projectKey]);
+  }, [props.projectKey, saves]);
   useEffect(() => {
     // A late answer for the project left behind must not show (and then save) under this one.
     let current = true;
@@ -145,7 +140,15 @@ export function ProjectRules(props: { projectKey: string }) {
       {views.map((v) => (
         <div key={v.repo}>
           {views.length > 1 && <h2 className="rules-repo">{v.repo}</h2>}
-          <RepoRules view={v} mode={mode} onSaved={(saved) => setViews((current) => current && current.map((x) => (x.repo === saved.repo ? saved : x)))} />
+          <RepoRules
+            project={props.projectKey}
+            view={v}
+            pipeline={pipelines?.find((p) => p.repo === v.repo) ?? null}
+            onSaved={(saved) => {
+              setViews((current) => current && current.map((x) => (x.repo === saved.repo ? saved : x)));
+              setSaves((n) => n + 1);
+            }}
+          />
         </div>
       ))}
     </>

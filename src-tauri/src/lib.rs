@@ -303,6 +303,18 @@ async fn project_review_mode_effective(project: String) -> Result<Vec<nitely_cor
     nitely_core::project_modes::effective_repositories(&db()?, &Config::load_read_only().map_err(err)?, &project).map_err(err)
 }
 
+/// "How a change lands": each repo's pipeline, every value with its source (NIT-492).
+#[tauri::command]
+async fn lands_pipeline(project: String) -> Result<Vec<nitely_core::lands_pipeline::Pipeline>, String> {
+    nitely_core::lands_pipeline::for_project(&db()?, &Config::load_read_only().map_err(err)?, &project).map_err(err)
+}
+
+/// What a change to one path would run, for the strip's dry run.
+#[tauri::command]
+async fn lands_dry_run(project: String, repo: String, path: String) -> Result<nitely_core::lands_pipeline::DryRun, String> {
+    nitely_core::lands_pipeline::dry_run_for(&db()?, &Config::load_read_only().map_err(err)?, &project, &repo, &path).map_err(err)
+}
+
 #[tauri::command]
 async fn set_project_review_mode(project: String, mode: nitely_core::project_modes::Mode, overrides: nitely_core::project_modes::Options, expected_revision: i64) -> Result<nitely_core::project_modes::ProjectReviewMode, String> {
     db()?.set_project_review_mode(&project, mode, overrides, expected_revision, &ME).map_err(err)
@@ -1063,6 +1075,8 @@ pub fn run() {
             project_yolo,
             project_review_mode,
             project_review_mode_effective,
+            lands_pipeline,
+            lands_dry_run,
             set_project_review_mode,
             periodic_review_status,
             retry_periodic_review,

@@ -26,6 +26,7 @@ pub mod hook;
 pub mod install;
 pub mod land;
 pub mod land_job;
+pub mod lands_pipeline;
 pub mod leaderboard;
 pub mod leaderboard_report;
 pub mod leaderboard_send;

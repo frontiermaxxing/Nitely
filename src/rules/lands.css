@@ -1,4 +1,4 @@
-/* "How a change lands" at the top of Rules (LandsStrip.tsx): five stations on one line, each with
+/* "How a change lands" at the top of Rules (LandsStrip.tsx): six stations on one line, each with
    its value and a line of why. Teal when an agent or Nitely handles it, amber when it waits for you,
    red when it is off or skipped, a dashed ring when nothing is set. */
 .lands {
@@ -8,7 +8,7 @@
 .lands-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
 .lands-head h2 { margin: 0; font-size: 14px; font-weight: var(--weight-strong); }
 .lands-head .muted { font-size: var(--text-sm); }
-.lands-track { --stations: 5; position: relative; display: grid; grid-template-columns: repeat(var(--stations), minmax(0, 1fr)); margin: 0; padding: 0; list-style: none; }
+.lands-track { --stations: 6; position: relative; display: grid; grid-template-columns: repeat(var(--stations), minmax(0, 1fr)); margin: 0; padding: 0; list-style: none; }
 .lands-track::before { content: ""; position: absolute; left: calc(50% / var(--stations)); right: calc(50% / var(--stations)); top: 13px; height: 1.5px; background: var(--line-strong); }
 .lands-station { position: relative; min-width: 0; }
 .lands-go {
@@ -31,7 +31,28 @@ button.lands-go:focus-visible { outline: 2px solid var(--focus); outline-offset:
 .lands-value { font-size: 13.5px; font-weight: var(--weight-strong); color: var(--fg); overflow-wrap: anywhere; }
 .lands-value-you { color: var(--attention-ink); }
 .lands-value-off { color: var(--fail); }
-.lands-why { font-size: 11.5px; line-height: 1.45; color: var(--fg-2); text-wrap: pretty; overflow-wrap: anywhere; }
+.lands-why { font-variant-ligatures: none; font-size: 11.5px; line-height: 1.45; color: var(--fg-2); text-wrap: pretty; overflow-wrap: anywhere; }
+
+/* The layer a value comes from (a preset, Custom, the playbook, built-in): a small outlined tag. */
+.lands-source {
+  margin-top: 2px; padding: 0 6px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  font-size: 10.5px; line-height: 16px; color: var(--fg-3); white-space: nowrap;
+}
+
+/* Goals and full suites: facts under the track, each with its source. */
+.lands-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 24px; margin: 0; padding-top: 12px; border-top: 1px solid var(--line); }
+.lands-fact { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 2px 12px; align-items: baseline; }
+.lands-fact dt { font-size: 11.5px; color: var(--fg-3); }
+.lands-fact dd { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; margin: 0; }
+.lands-fact .lands-source { margin-top: 0; }
+
+.lands-warnings { margin: 0; padding-left: 18px; font-size: var(--text-sm); color: var(--attention-ink); }
+
+/* The dry run: "A change to [path] [Try it]" and the answer under it. */
+.lands-dry { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; padding-top: 12px; border-top: 1px solid var(--line); }
+.lands-dry-ask { font-size: var(--text-sm); color: var(--fg-2); }
+.lands-dry .ui-field { flex: 0 1 320px; min-width: 160px; }
+.lands-dry-out { font-variant-ligatures: none; flex-basis: 100%; margin: 0; font-size: var(--text-sm); line-height: 1.5; color: var(--fg); overflow-wrap: anywhere; }
 
 /* A station's section, when the strip scrolls to it. */
 [data-rules-section] { scroll-margin-top: 16px; }
@@ -40,10 +61,11 @@ div[data-rules-section] > .settings-card + .settings-card { margin-top: 0; }
 /* A settings section is first in its wrapper, so it loses its 28px; the page's 14px gap and these make it up. */
 div[data-rules-section] > .setting-group:first-child { padding-top: 14px; }
 
-@media (max-width: 760px) {
+@media (max-width: 900px) {
   .lands-track { grid-template-columns: 1fr; gap: 10px; }
   .lands-track::before { left: 15px; right: auto; top: 14px; bottom: 14px; width: 1.5px; height: auto; }
   .lands-go { display: grid; grid-template-columns: 12px 120px minmax(0, 1fr); align-items: baseline; gap: 2px 12px; text-align: left; padding: 0 0 0 9px; }
   .lands-dot { margin-top: 0; align-self: center; grid-row: span 2; }
-  .lands-why { grid-column: 3; }
+  .lands-why, .lands-go .lands-source { grid-column: 3; justify-self: start; }
+  .lands-facts { grid-template-columns: 1fr; }
 }

@@ -1,5 +1,6 @@
 import type { ModeOptions, ModePreset, PeriodicStatus, ProjectReviewMode, ReviewMode } from "../reviewModes";
 import { INHERITED_OPTIONS, optionsFor } from "../reviewModes";
+import type { PathDryRun, Pipeline, PipelineFact, PipelineSource } from "../rules/pipeline";
 
 // Mirrors project_modes::preset in nitely-core.
 const periodic = { enabled: false, every_landings: 5, max_delay_seconds: 1800, reviewer: "configured", findings_strategy: "reopen_or_create" };
@@ -50,4 +51,55 @@ export function periodicReviews(project: string): PeriodicStatus[] {
 export function retryPeriodic(project: string, repo: string, id: number) {
   if (!periodicReviews(project).some((r) => r.repo === repo && r.jobs.some((j) => j.id === id && j.state === "failed"))) throw new Error("Failed review not found");
   retried.add(project);
+}
+
+/** Mirrors lands_pipeline::pipeline for the sample data: each value from the mode, else the sample playbook. */
+export function landsPipeline(project: string, repos: string[]): Pipeline[] {
+  const mode = reviewMode(project);
+  const chosen = optionsFor(mode.mode, mode.presets, mode.overrides);
+  const src = (set: boolean, inPlaybook: boolean): PipelineSource =>
+    mode.mode !== "custom" ? { kind: "preset", mode: mode.mode } : set ? { kind: "custom" } : inPlaybook ? { kind: "playbook" } : { kind: "builtin" };
+  const depth = chosen.test_depth ?? "risk";
+  const audit = chosen.audit_percent ?? 10;
+  const audited = audit > 0 ? `; ${audit}% audited` : "";
+  const checks: PipelineFact =
+    depth === "off" ? { value: "Skipped", why: "No automatic tests run before landing", tone: "off", source: src(true, false) }
+    : depth === "full" ? { value: "Full gate", why: "Every command in the playbook's gate", tone: "agent", source: src(chosen.test_depth !== null, true) }
+    : { value: "Quick checks", why: `Compile, lint and the affected tests; protected or unmapped changes get the full gate${audited}`, tone: "agent", source: src(chosen.test_depth !== null, true) };
+  const pre = chosen.pre_review ?? "individual";
+  const review: PipelineFact =
+    pre === "off" ? { value: "Off", why: "Changes with no goal land unreviewed", tone: "off", source: src(true, false) }
+    : pre === "batched" ? { value: "One per batch", why: "One blocking review per batch of changes with no goal", tone: "agent", source: src(chosen.pre_review !== null, false) }
+    : { value: "Each change", why: "A blocking review for each change with no goal", tone: "agent", source: src(chosen.pre_review !== null, false) };
+  const item = { off: "Items land on quick checks, unreviewed", advisory: "Each item is reviewed without blocking", blocking: "Each item gets a blocking review" }[chosen.item_review ?? "off"];
+  const cp = chosen.checkpoint;
+  const goals: PipelineFact = chosen.goal_branches
+    ? { value: "Through a goal branch", why: `${item}; main gets the goal at each checkpoint (a coherent slice${cp ? `, ${cp.items} items${cp.daily ? " or a day" : ""}` : ""}): one full run, one review`, tone: "agent", source: src(chosen.goal_branches !== null, false) }
+    : { value: "Straight to main", why: "Each goal item lands on main like any other change", tone: "agent", source: src(chosen.goal_branches !== null, false) };
+  const lands: PipelineFact = chosen.land_batch ?? true
+    ? { value: "Batches of up to 5", why: "What waits lands on one full run, bisected if it fails", tone: "agent", source: src(chosen.land_batch !== null, true) }
+    : { value: "Each change alone", why: "One gate and one push per change", tone: "agent", source: src(true, true) };
+  const b = chosen.full_backstop;
+  const after: PipelineFact = b?.enabled
+    ? { value: "Full suite on main", why: `Runs ${b.landings === 1 ? "after every land" : `every ${b.landings} lands or ${Math.ceil(b.delay_seconds / 60)} min`}; a failure is reverted`, tone: "agent", source: src(true, false) }
+    : { value: "Nothing", why: "The full suite on main is off", tone: "off", source: src(b !== null, false) };
+  const suites: PipelineFact = { value: "In CI", why: "cargo test --workspace on GitHub Actions, the rest in a build lane; local when CI is down", tone: "agent", source: { kind: "playbook" } };
+  const warnings = b?.enabled ? [] : ["The full suite on main is off: nothing checks main after reduced checks land."];
+  return repos.map((repo) => ({ repo, mode: mode.mode, checks, review, goals, lands, suites, after, warnings }));
+}
+
+/** Mirrors lands_pipeline::dry_run on the sample map: src/ is the web component, Cargo files keep the full gate. */
+export function landsDryRun(project: string, path: string): PathDryRun {
+  const mode = reviewMode(project);
+  const depth = optionsFor(mode.mode, mode.presets, mode.overrides).test_depth ?? "risk";
+  const p = path.trim().split(String.fromCharCode(92)).join("/");
+  const full = ["npm test", "npm run build", "cargo test --workspace", "cargo clippy --workspace -- -D warnings"];
+  if (p.startsWith("vendor/")) return { path: p, checks: "refused", commands: [], why: "the branch changes " + p + ", which task branches may not change: third-party code", waits: [] };
+  const waits = p.startsWith("crates/nitely-core/migrations/") ? ["a schema change: " + p] : [];
+  if (depth === "off") return { path: p, checks: "none", commands: [], why: "Automatic tests are off", waits };
+  if (depth === "full") return { path: p, checks: "full", commands: full, why: "The mode runs the full gate on every change", waits };
+  if (waits.length) return { path: p, checks: "full", commands: full, why: "A path that needs you keeps the full gate", waits };
+  if (/^src\//.test(p)) return { path: p, checks: "quick", commands: ["node node_modules/typescript/bin/tsc --noEmit", "npm run build", "npm test"], why: "Owned by web, from the test map; a larger change can run more", waits };
+  if (/^crates\/nitely-cli\//.test(p)) return { path: p, checks: "quick", commands: ["node node_modules/typescript/bin/tsc --noEmit", "cargo test -p nitely-cli"], why: "Owned by cli, from the test map; a larger change can run more", waits };
+  return { path: p, checks: "full", commands: full, why: /(^|\/)(Cargo\.(toml|lock)|package(-lock)?\.json)$/.test(p) ? "A build, lock or policy file keeps the full gate" : "No component in the test map owns it", waits };
 }
