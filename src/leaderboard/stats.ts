@@ -70,6 +70,20 @@ export interface LeaderboardStats {
   /** Every day of those 26 weeks, oldest first: Monday of the first week to Sunday of this one. */
   daily: DayCount[];
   records: Records;
+  hours_saved: HoursSaved;
+}
+
+/**
+ * What the agents' hours would have taken one average developer: agent hours times a multiplier
+ * (a placeholder, set in one place: DEVELOPER_MULTIPLIER in crates/nitely-crew/src/leaderboard.rs).
+ */
+export interface HoursSaved {
+  multiplier: number;
+  work_week_hours: number;
+  /** In the order of `periods`; `all` is the all-time total. */
+  periods: { period: PeriodKey; agent_hours: number; developer_hours: number; work_weeks: number }[];
+  /** Developer hours in each week of `weekly`. */
+  weekly: number[];
 }
 
 /** Where each reply-time bucket ends, in seconds; the last runs on from a day. */
@@ -85,16 +99,6 @@ export const REPLY_BUCKETS: { label: string; upTo: number }[] = [
 export const ROUND_LABELS = ["1 round", "2 rounds", "3 rounds", "4+"];
 
 export const PERIOD_LABEL: Record<PeriodKey, string> = { week: "This week", "30d": "30 days", all: "All time" };
-
-/**
- * Hours one average developer would need for what the agents did: agent hours times a multiplier.
- * ×10.8 is a placeholder until the formula is decided (NIT-442); this is the one place it changes.
- */
-export const DEVELOPER_MULTIPLIER = 10.8;
-export function developerHours(agentHours: number): number {
-  return agentHours * DEVELOPER_MULTIPLIER;
-}
-export const WORK_WEEK_HOURS = 40;
 
 export function periodOf(stats: LeaderboardStats, key: PeriodKey): PeriodStats | null {
   return stats.periods.find((p) => p.period === key) ?? null;

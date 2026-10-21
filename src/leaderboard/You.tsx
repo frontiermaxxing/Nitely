@@ -3,11 +3,8 @@ import { Button, EmptyState } from "../ui";
 import { CompareBars, Heatmap, ReplyHistogram, RoundsBars, VendorSplit, WeeklyBars } from "./charts";
 import type { Profile } from "./profile";
 import {
-  DEVELOPER_MULTIPLIER,
   PERIOD_LABEL,
-  WORK_WEEK_HOURS,
   compact,
-  developerHours,
   duration,
   hours,
   percent,
@@ -19,7 +16,6 @@ import {
 } from "./stats";
 
 const IN_PERIOD: Record<PeriodKey, string> = { week: "this week", "30d": "in the last 30 days", all: "since you started" };
-const WORK_YEAR_HOURS = 52 * WORK_WEEK_HOURS;
 
 /** L3: your own numbers, always here, sharing or not. */
 export function You(props: { stats: LeaderboardStats; period: PeriodKey; profile: Profile | null; now: number; onJoin?: () => void; onEdit?: () => void; onLeave?: () => Promise<void> }) {
@@ -191,8 +187,13 @@ function ProfileRow(props: { profile: Profile | null; onJoin?: () => void; onEdi
 function HoursSaved(props: { stats: LeaderboardStats; p: PeriodStats; all: PeriodStats; period: PeriodKey }) {
   const { p, all } = props;
   const [how, setHow] = useState(false);
-  const dev = developerHours(p.agent_hours);
-  const allDev = developerHours(all.agent_hours);
+  // The formula and its multiplier live in the stats engine (leaderboard.rs, developer_hours).
+  const saved = props.stats.hours_saved;
+  const multiplier = saved.multiplier;
+  const workWeek = saved.work_week_hours;
+  const workYear = 52 * workWeek;
+  const dev = saved.periods.find((s) => s.period === p.period)?.developer_hours ?? 0;
+  const allDev = saved.periods.find((s) => s.period === "all")?.developer_hours ?? 0;
   const weeks = props.stats.weekly;
   return (
     <section className="lb-card lb-saved">
@@ -206,7 +207,7 @@ function HoursSaved(props: { stats: LeaderboardStats; p: PeriodStats; all: Perio
       {how && (
         <p className="lb-note lb-how-text">
           Agent hours are how long your agents' sessions ran in the projects that count. One average developer is assumed to
-          need {DEVELOPER_MULTIPLIER} times as long for the same work. That multiplier is a placeholder until the estimate is
+          need {multiplier} times as long for the same work. That multiplier is a placeholder until the estimate is
           settled, so read these as a rough scale, not a measurement.
         </p>
       )}
@@ -223,7 +224,7 @@ function HoursSaved(props: { stats: LeaderboardStats; p: PeriodStats; all: Perio
         <div>
           <span className="lb-label">One average developer would need</span>
           <span className="lb-figure">
-            ≈ {hours(dev)} <span className="lb-unit">hours</span> <span className="lb-mult">×{DEVELOPER_MULTIPLIER}</span>
+            ≈ {hours(dev)} <span className="lb-unit">hours</span> <span className="lb-mult">×{multiplier}</span>
           </span>
           <span className="lb-sub">
             for the same {p.landed.toLocaleString("en-US")} change{p.landed === 1 ? "" : "s"}
@@ -232,9 +233,9 @@ function HoursSaved(props: { stats: LeaderboardStats; p: PeriodStats; all: Perio
         <div>
           <span className="lb-label">That is</span>
           <span className="lb-figure">
-            {hours(dev / WORK_WEEK_HOURS)} <span className="lb-unit">work weeks</span>
+            {hours(dev / workWeek)} <span className="lb-unit">work weeks</span>
           </span>
-          <span className="lb-sub">at {WORK_WEEK_HOURS} hours a week</span>
+          <span className="lb-sub">at {workWeek} hours a week</span>
         </div>
       </div>
       <CompareBars agents={p.agent_hours} developer={dev} format={(h) => `${hours(h)}h`} />
@@ -242,7 +243,7 @@ function HoursSaved(props: { stats: LeaderboardStats; p: PeriodStats; all: Perio
         <div className="lb-saved-chart">
           <span className="lb-label">Developer hours saved, per week</span>
           <WeeklyBars
-            values={props.stats.weekly_agent_hours.map(developerHours)}
+            values={saved.weekly}
             weekStarts={weeks.map((w) => w.week_start)}
             format={(v) => `≈ ${hours(v)} hours`}
             label={`Developer hours saved per week, the last ${weeks.length} weeks`}
@@ -253,7 +254,7 @@ function HoursSaved(props: { stats: LeaderboardStats; p: PeriodStats; all: Perio
           <span className="lb-total">≈ {hours(allDev)} hours</span>
           <span className="lb-sub">
             from {hours(all.agent_hours)} agent hours ·{" "}
-            {allDev >= WORK_YEAR_HOURS ? `about ${hours(allDev / WORK_YEAR_HOURS)} work years` : `about ${hours(allDev / WORK_WEEK_HOURS)} work weeks`}
+            {allDev >= workYear ? `about ${hours(allDev / workYear)} work years` : `about ${hours(allDev / workWeek)} work weeks`}
           </span>
         </div>
       </div>

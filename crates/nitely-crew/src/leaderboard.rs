@@ -54,6 +54,55 @@ pub struct Leaderboard {
     pub daily: Vec<DayCount>,
     /// Personal records, over all time.
     pub records: Records,
+    /// What the agents' hours would have taken one developer (`developer_hours`).
+    pub hours_saved: HoursSaved,
+}
+
+/// How many hours one average developer is taken to need per agent hour. A placeholder until the
+/// estimate is settled (NIT-442): this is the one place it is set.
+pub const DEVELOPER_MULTIPLIER: f64 = 10.8;
+/// A work week, in hours.
+pub const WORK_WEEK_HOURS: f64 = 40.0;
+
+/// The hours one average developer would need for `agent_hours` of agents' work: the one formula
+/// for hours saved.
+pub fn developer_hours(agent_hours: f64) -> f64 {
+    agent_hours * DEVELOPER_MULTIPLIER
+}
+
+/// Hours saved, per period and per week, with the multiplier and work week they assume.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct HoursSaved {
+    pub multiplier: f64,
+    pub work_week_hours: f64,
+    /// In the order of `Leaderboard::periods`; `all` is the all-time total.
+    pub periods: Vec<SavedHours>,
+    /// Developer hours in each week of `Leaderboard::weekly`.
+    pub weekly: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct SavedHours {
+    pub period: String,
+    pub agent_hours: f64,
+    pub developer_hours: f64,
+    /// `developer_hours` in work weeks.
+    pub work_weeks: f64,
+}
+
+fn hours_saved(periods: &[PeriodStats], weekly_agent_hours: &[f64]) -> HoursSaved {
+    HoursSaved {
+        multiplier: DEVELOPER_MULTIPLIER,
+        work_week_hours: WORK_WEEK_HOURS,
+        periods: periods
+            .iter()
+            .map(|p| {
+                let developer = developer_hours(p.agent_hours);
+                SavedHours { period: p.period.clone(), agent_hours: p.agent_hours, developer_hours: developer, work_weeks: developer / WORK_WEEK_HOURS }
+            })
+            .collect(),
+        weekly: weekly_agent_hours.iter().copied().map(developer_hours).collect(),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -302,7 +351,8 @@ pub fn stats(db: &Db, inputs: &Inputs) -> Result<Leaderboard> {
             DayCount { day_start: start, landed: per_day.get(&start).copied().unwrap_or(0) }
         })
         .collect();
-    Ok(Leaderboard { generated_at: inputs.now, projects, periods, weekly, weekly_agent_hours, daily, records })
+    let hours_saved = hours_saved(&periods, &weekly_agent_hours);
+    Ok(Leaderboard { generated_at: inputs.now, projects, periods, weekly, weekly_agent_hours, daily, records, hours_saved })
 }
 
 /// The landed changes of the counted projects, oldest first.
@@ -515,6 +565,12 @@ mod tests {
         assert_eq!(b.weekly[0].week_start, MONDAY - 25 * WEEK);
         assert_eq!(b.weekly_agent_hours.len(), SERIES_WEEKS);
         assert_eq!(b.weekly_agent_hours[SERIES_WEEKS - 1], 2.0);
+        // Hours saved: NIT's 2 agent hours this week, at the multiplier, in 40-hour weeks.
+        let saved = &b.hours_saved;
+        assert_eq!((saved.periods[0].period.as_str(), saved.periods[0].developer_hours), ("week", 2.0 * DEVELOPER_MULTIPLIER));
+        assert!((saved.periods[0].work_weeks - 2.0 * DEVELOPER_MULTIPLIER / 40.0).abs() < 1e-9);
+        assert_eq!(saved.weekly.len(), SERIES_WEEKS);
+        assert_eq!(saved.weekly[SERIES_WEEKS - 1], 2.0 * DEVELOPER_MULTIPLIER);
         assert_eq!(b.daily.len(), SERIES_WEEKS * 7);
         assert_eq!(b.daily[0].day_start, MONDAY - 25 * WEEK);
         let this_week: Vec<u64> = b.daily[(SERIES_WEEKS - 1) * 7..].iter().map(|d| d.landed).collect();

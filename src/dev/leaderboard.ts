@@ -66,18 +66,27 @@ export function leaderboardFixture(): LeaderboardStats {
       round_counts: [0.74, 0.2, 0.05, 0.01].map((f) => Math.round(reviewed * f)),
     };
   };
+  const periods = [period("week", mondayOf(now), 1), period("30d", now - 30 * DAY, 4), period("all", firstMonday, 20)];
+  // As leaderboard.rs's developer_hours: agent hours times its multiplier, in 40-hour weeks.
+  const multiplier = 10.8;
   const best = daily.reduce((a, b) => (b.landed > a.landed ? b : a), daily[0]);
   const bestWeek = weekly.reduce((a, b) => (b.landed > a.landed ? b : a), weekly[0]);
   return {
     generated_at: now,
     projects: [],
-    periods: [period("week", mondayOf(now), 1), period("30d", now - 30 * DAY, 4), period("all", firstMonday, 20)],
+    periods,
     weekly,
     weekly_agent_hours: weeklyHours,
     daily,
     records: empty
       ? { best_day: null, best_week: null, longest_streak_days: 0, fastest_lead: null }
       : { best_day: best, best_week: bestWeek, longest_streak_days: 11, fastest_lead: { issue: "NIT-52", seconds: 252 } },
+    hours_saved: {
+      multiplier,
+      work_week_hours: 40,
+      periods: periods.map((p) => ({ period: p.period, agent_hours: p.agent_hours, developer_hours: p.agent_hours * multiplier, work_weeks: (p.agent_hours * multiplier) / 40 })),
+      weekly: weeklyHours.map((h) => h * multiplier),
+    },
   };
 }
 
