@@ -52,7 +52,10 @@ impl Job {
             "done" if landed => format!("{}: landed after {}.", self.issue, self.after.join(", ")),
             "done" => format!("{}: the land after {} stopped: {}", self.issue, self.after.join(", "), stopped.unwrap_or_default()),
             "failed" => format!("{}: the land after {} did not run: {}", self.issue, self.after.join(", "), self.error.clone().unwrap_or_default()),
-            "replaced" => format!("{}: a newer land replaced the one waiting for {}.", self.issue, self.after.join(", ")),
+            "replaced" => match &self.error {
+                Some(why) => format!("{}: the land waiting for {} ended: {why}.", self.issue, self.after.join(", ")),
+                None => format!("{}: a newer land replaced the one waiting for {}.", self.issue, self.after.join(", ")),
+            },
             "landing" => format!("{}: {} landed; landing it now.", self.issue, self.after.join(", ")),
             _ => format!("{}: waits for {} to land, then lands by itself.", self.issue, self.after.join(", ")),
         }
@@ -192,6 +195,16 @@ pub fn enqueue(db: &Db, key: &str, after: &[String], dir: &str, actor: &Actor) -
     db.land_job(id)?.context("the land job's record went missing")
 }
 
+/// Ends every job of `key` still waiting, saying `why`: the issue was landed another way (`land`
+/// itself, `--now`) or closed, so a waiting job has nothing left to land (NIT-513). Their processes
+/// see it on their next look and exit. How many it ended.
+pub fn end_waiting(db: &Db, key: &str, why: &str) -> Result<usize> {
+    Ok(db.conn.execute(
+        "UPDATE land_job SET state = 'replaced', ended_at = ?2, error = ?3 WHERE issue_key = ?1 COLLATE NOCASE AND state = 'waiting'",
+        params![key, now(), why],
+    )?)
+}
+
 /// Records the process that runs job `id`.
 pub fn set_pid(db: &Db, id: i64, pid: u32) -> Result<()> {
     db.conn.execute("UPDATE land_job SET pid = ?2 WHERE id = ?1", params![id, pid])?;
@@ -219,6 +232,12 @@ pub fn wait_for_blockers(db: &Db, id: i64) -> Result<Ready> {
         let job = db.land_job(id)?.with_context(|| format!("no land job {id}"))?;
         if job.state != "waiting" {
             return Ok(if job.state == "landing" { Ready::Go(job) } else { Ready::Over(job) });
+        }
+        // Its own issue landed or closed meanwhile (by hand, or another land): nothing to wait for.
+        let own = db.issue(&job.issue)?.with_context(|| format!("no issue {}", job.issue))?;
+        if !own.is_open() {
+            end_waiting(db, &job.issue, &format!("{} is {} already", own.key, own.state))?;
+            return Ok(Ready::Over(db.land_job(id)?.context("the land job's record went missing")?));
         }
         let mut open = false;
         for key in &job.after {

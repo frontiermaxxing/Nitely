@@ -87,6 +87,9 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
     let root = playbook::repo_for_issue(config, issue.project.as_deref(), opts.dir)?;
     let mut pb = Playbook::load(&root)?;
     crate::project_modes::apply_issue(db, &issue.key, &mut pb)?;
+    // This land is the issue's land now: a `land --after` job still waiting for it ends (NIT-513).
+    // A job's own land runs with its row `landing`, so it is not one of them.
+    crate::land_job::end_waiting(db, &issue.key, "landed directly instead")?;
     // An item of a goal with a goal branch lands into that branch, with item checks (goal_branch.rs).
     if let Some(gb) = db.goal_branch_of_issue(&issue.key)?.filter(|g| g.repo == crate::paths::normalize(&root.to_string_lossy())) {
         return land_into_goal(db, &root, &issue, opts, actor, gb);
@@ -2311,6 +2314,30 @@ when_changed = ["billing"]
     /// A land handed in after another issue waits until that issue is Done, then lands as `land`
     /// does; one whose rebase conflicts stops with the conflict said and its issue still open; and
     /// a blocker closed without landing ends the wait (NIT-456).
+    /// A land run directly (`--now`, or `land` by hand) ends the issue's waiting `land --after`
+    /// jobs, and a waiting job whose own issue is closed meanwhile ends too (NIT-513).
+    #[test]
+    fn a_direct_land_or_a_closed_issue_ends_its_waiting_land_jobs() {
+        let mut f = fixture();
+        let dir = f.repo.to_string_lossy().into_owned();
+        let (blocker, _) = f.submitted("Blocker", "blocker.txt", "x");
+        let (a, _) = f.submitted("A", "a.txt", "x");
+        let job = crate::land_job::enqueue(&f.db, &a, std::slice::from_ref(&blocker), &dir, &f.actor).unwrap();
+        assert!(f.land(&a).landed, "landed directly, its blocker still open");
+        let ended = f.db.land_job(job.id).unwrap().unwrap();
+        assert_eq!(ended.state, "replaced");
+        assert!(ended.outcome().contains("landed directly instead"), "{}", ended.outcome());
+
+        let (b, _) = f.submitted("B", "b.txt", "x");
+        let job = crate::land_job::enqueue(&f.db, &b, std::slice::from_ref(&blocker), &dir, &f.actor).unwrap();
+        f.db.move_issue(&b, "Canceled", None, Some("not needed"), &f.actor).unwrap();
+        match crate::land_job::wait_for_blockers(&f.db, job.id).unwrap() {
+            crate::land_job::Ready::Over(j) => assert_eq!(j.state, "replaced", "{j:?}"),
+            crate::land_job::Ready::Go(_) => panic!("a closed issue does not land"),
+        }
+        std::fs::remove_dir_all(&f.base).ok();
+    }
+
     #[test]
     fn a_land_after_another_waits_for_it_then_lands_or_stops_cleanly() {
         std::env::set_var("NITELY_LAND_JOB_POLL_MS", "50");
