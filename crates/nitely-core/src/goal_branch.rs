@@ -440,7 +440,8 @@ pub(crate) fn start_point(db: &Db, root: &Path, pb: &Playbook, issue: &IssueReco
         let options = crate::project_modes::for_issue(db, &issue.key)?.map(|m| m.options()).unwrap_or_default();
         let active = db.goal(goal)?.is_some_and(|g| g.state == "active");
         let open = db.goal_branch(goal)?.is_some();
-        if let Some(items) = engage(options.goal_branches, options.checkpoint.as_ref().map(|c| c.items), active, open, db.goal_branch_turned_off(goal)?) {
+        let routes = goal_items_route(options.goal_branches, options.item_review, !pb.submodules.is_empty()).is_ok();
+        if let Some(items) = engage(routes, options.checkpoint.as_ref().map(|c| c.items), active, open, db.goal_branch_turned_off(goal)?) {
             db.enable_goal_branch(goal, root, None, Some(items), actor)?;
         }
     }
@@ -452,11 +453,28 @@ pub(crate) fn start_point(db: &Db, root: &Path, pb: &Playbook, issue: &IssueReco
     Ok(Some((gb.branch.clone(), gb.branch)))
 }
 
+/// Whether a mode's goal items go through goal branches in a repo, or why they land on main: the
+/// mode must say so, and with no item review, since an item lands into its goal branch without a
+/// reviewer (a mode asking for item reviews gets them on main); a repo with managed submodules
+/// lands its goal items on main for now (land.rs, item_hop).
+pub fn goal_items_route(goal_branches: Option<bool>, item_review: Option<crate::project_modes::ItemReview>, submodules: bool) -> Result<(), &'static str> {
+    if goal_branches != Some(true) {
+        return Err("Each goal item lands on main like any other change");
+    }
+    if item_review.is_some_and(|r| r != crate::project_modes::ItemReview::Off) {
+        return Err("The mode reviews each goal item, and a goal branch lands items unreviewed, so they land on main");
+    }
+    if submodules {
+        return Err("A repo with managed submodules lands goal items on main for now");
+    }
+    Ok(())
+}
+
 /// Whether a new item of a goal turns the goal's branch on, and with what checkpoint size: when
-/// the mode lands goal items through goal branches, the goal is active, it has no branch open, and
-/// nobody turned its branch off by hand. None: it lands as it would otherwise.
-pub(crate) fn engage(goal_branches: Option<bool>, checkpoint_items: Option<u32>, active: bool, open: bool, turned_off: bool) -> Option<i64> {
-    (goal_branches == Some(true) && active && !open && !turned_off).then(|| checkpoint_items.map_or(CHECKPOINT_ITEMS, i64::from))
+/// the mode's goal items go through goal branches here (`routes`), the goal is active, it has no
+/// branch open, and nobody turned its branch off by hand. None: it lands as it would otherwise.
+pub(crate) fn engage(routes: bool, checkpoint_items: Option<u32>, active: bool, open: bool, turned_off: bool) -> Option<i64> {
+    (routes && active && !open && !turned_off).then(|| checkpoint_items.map_or(CHECKPOINT_ITEMS, i64::from))
 }
 
 /// The branch `issue`'s change lands into from `root`: its goal's branch, or the integration
@@ -1130,14 +1148,24 @@ commands = { fake = ["{sh}", "-c", "cat > /dev/null; echo 'Fine.'; echo 'VERDICT
 
     #[test]
     fn a_mode_with_goal_branches_turns_a_goals_branch_on_unless_it_was_turned_off() {
-        // Fast and Careful land goal items through goal branches; Release does not.
-        assert_eq!(engage(Some(true), Some(10), true, false, false), Some(10));
-        assert_eq!(engage(Some(true), None, true, false, false), Some(CHECKPOINT_ITEMS));
-        assert_eq!(engage(Some(false), Some(10), true, false, false), None);
-        assert_eq!(engage(None, None, true, false, false), None, "no mode set: as before");
-        assert_eq!(engage(Some(true), Some(10), true, true, false), None, "it has one already");
-        assert_eq!(engage(Some(true), Some(10), true, false, true), None, "a person turned it off");
-        assert_eq!(engage(Some(true), Some(10), false, false, false), None, "a goal done or dropped");
+        use crate::project_modes::{preset, ItemReview, Mode};
+        let route = |m: Mode, submodules: bool| goal_items_route(preset(m).goal_branches, preset(m).item_review, submodules);
+        // Fast lands goal items through goal branches; Careful reviews each item, which a goal
+        // branch does not, and Release has none.
+        assert_eq!(route(Mode::Fast, false), Ok(()));
+        assert!(route(Mode::Careful, false).unwrap_err().contains("reviews each goal item"));
+        assert!(route(Mode::Release, false).is_err());
+        assert!(route(Mode::Fast, true).unwrap_err().contains("managed submodules"));
+        assert_eq!(goal_items_route(Some(true), Some(ItemReview::Blocking), false).is_err(), true);
+        assert_eq!(goal_items_route(Some(true), None, false), Ok(()));
+        assert_eq!(goal_items_route(None, None, false).is_err(), true, "no mode set: as before");
+
+        assert_eq!(engage(true, Some(10), true, false, false), Some(10));
+        assert_eq!(engage(true, None, true, false, false), Some(CHECKPOINT_ITEMS));
+        assert_eq!(engage(false, Some(10), true, false, false), None);
+        assert_eq!(engage(true, Some(10), true, true, false), None, "it has one already");
+        assert_eq!(engage(true, Some(10), true, false, true), None, "a person turned it off");
+        assert_eq!(engage(true, Some(10), false, false, false), None, "a goal done or dropped");
     }
 
     /// Under Fast, with no goal_branch call: the goal's first item makes its branch and lands into
