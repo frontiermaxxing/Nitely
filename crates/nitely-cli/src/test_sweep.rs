@@ -125,6 +125,33 @@ pub fn run(command: Command) -> Result<()> {
                     bail!("each log needs an absolute path, distinct run ID, and actual 40-character revision");
                 }
             }
+            // Every log is read here, whatever its runner wrote (JUnit XML, libtest, TAP), into
+            // the observations the collector classifies (NIT-553).
+            let (mut observations, mut imported_runs, mut bytes, mut truncated) =
+                (vec![], vec![], 0, false);
+            for log in descriptors {
+                let file = std::path::Path::new(log["path"].as_str().unwrap_or_default());
+                bytes += file.metadata()?.len();
+                if bytes > 16 * 1024 * 1024 || observations.len() >= 30000 {
+                    truncated = true;
+                    break;
+                }
+                let source = log["source"].as_str().map(String::from).unwrap_or_else(|| {
+                    file.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned()
+                });
+                let text = String::from_utf8_lossy(&std::fs::read(file)?).into_owned();
+                let (rows, run) = test_sweep::import(
+                    &text,
+                    log["run"].as_str().unwrap_or_default(),
+                    log["revision"].as_str().unwrap_or_default(),
+                    &source,
+                );
+                observations.extend(rows);
+                imported_runs.push(run);
+            }
             let scratch = nitely_core::paths::unique_temp("nitely-test-sweep", "");
             std::fs::create_dir_all(&scratch)?;
             let script = scratch.join("collector.cjs");
@@ -133,7 +160,7 @@ pub fn run(command: Command) -> Result<()> {
             std::fs::write(
                 &options,
                 serde_json::to_vec(
-                    &serde_json::json!({"logs":logs,"output":output,"execute":execute,"runs":runs,"seconds":seconds,"revision":revision.trim(),"rust_timings":rust_timings,"known_failures":known_failures}),
+                    &serde_json::json!({"imported":{"observations":observations,"runs":imported_runs,"truncated":truncated},"output":output,"execute":execute,"runs":runs,"seconds":seconds,"revision":revision.trim(),"rust_timings":rust_timings,"known_failures":known_failures}),
                 )?,
             )?;
             if execute {

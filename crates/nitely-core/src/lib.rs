@@ -97,5 +97,6 @@ pub use snapshot::{snapshot, Board, RepoView, TaskRow};
 pub use track::Track;
 
 pub mod test_budget;
+pub mod test_evidence;
 pub mod test_sweep;
 pub mod periodic_review;

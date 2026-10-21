@@ -75,9 +75,11 @@ function classify(observations, tests, revision) {
 }
 function main(args) {
   const opts = JSON.parse(read(args[0])); const root = process.cwd(); const revision = opts.revision || cp.execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root }).toString().trim();
-  const inv = inventory(root); const observations = []; const runs = []; const warnings = ['Static duplicates and mocks are review leads, never proof that deletion is safe.', 'Rust aggregate logs do not contain per-test timing. Missing observations/timing are unknown, not passing.', 'Tests with duplicate display names are excluded from outcome classification.', 'Source extraction is conservative: macro-generated, parameterized and non-arrow JavaScript tests may be absent. Inventoried bodies are not a suite count.'];
-  let logBytes=0; let evidenceTruncated=false;
-  for (const log of opts.logs || []) { logBytes+=fs.statSync(log.path).size; if(logBytes>MAX || observations.length>=30000) { evidenceTruncated=true; break; } const data = read(log.path); observations.push(...parseLog(data, log.run, log.revision, log.source || path.basename(log.path))); }
+  const inv = inventory(root); const observations = []; const runs = []; const warnings = ['Static duplicates and mocks are review leads, never proof that deletion is safe.', 'A log without per-test times (libtest without --report-time) leaves timing unknown. Missing observations/timing are unknown, not passing.', 'Tests with duplicate display names are excluded from outcome classification.', 'Source extraction is conservative: macro-generated, parameterized and non-arrow JavaScript tests may be absent. Inventoried bodies are not a suite count.'];
+  // Imported logs (JUnit XML, libtest, TAP) arrive already read by `nitely test-sweep collect`.
+  const imported = opts.imported || {}; let evidenceTruncated = !!imported.truncated;
+  observations.push(...(imported.observations || [])); runs.push(...(imported.runs || []));
+  for (const r of runs.filter(r => r.partial)) warnings.push(`${r.source} (${r.run}) was not read whole: ${(r.warnings || []).join(' ')}`);
   if (opts.execute) {
     const end = Date.now() + Math.min(opts.seconds || 600, 3600) * 1000;
     for (let run = 0; run < Math.min(opts.runs || 2, 3); run++) {

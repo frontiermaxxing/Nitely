@@ -30,6 +30,10 @@ pub struct Report {
     pub revision: String,
     pub generated_at: String,
     pub report_only: bool,
+    /// Each run the evidence came from: its runner, run ID, revision, source (the machine or CI
+    /// job), duration, and whether it was read whole (`partial`).
+    #[serde(default)]
+    pub runs: Vec<serde_json::Value>,
     pub observations: Vec<serde_json::Value>,
     pub tests: Vec<serde_json::Value>,
     pub candidates: Vec<Candidate>,
@@ -216,6 +220,38 @@ pub fn schedule(
     Ok(())
 }
 
+/// One imported log (JUnit XML, libtest or TAP: `test_evidence::read`) as the collector's
+/// observations and its run. A test named twice in one log is ambiguous, not a repeat; a log not
+/// read whole is a partial run, and the tests it did not report stay unobserved.
+pub fn import(
+    text: &str,
+    run: &str,
+    revision: &str,
+    source: &str,
+) -> (Vec<serde_json::Value>, serde_json::Value) {
+    let evidence = crate::test_evidence::read(text);
+    let runner = evidence.runner.clone().unwrap_or_else(|| "unknown".into());
+    let mut seen = std::collections::HashMap::new();
+    for t in &evidence.tests {
+        *seen.entry(t.id.as_str()).or_insert(0) += 1;
+    }
+    let observations = evidence
+        .tests
+        .iter()
+        .map(|t| {
+            let mut o = serde_json::json!({"id": t.id, "name": t.name, "runner": runner, "outcome": t.outcome, "run": run, "revision": revision, "source": source, "ambiguous": seen[t.id.as_str()] > 1});
+            for (key, value) in [("suite", t.suite.clone().map(Into::into)), ("file", t.file.clone().map(Into::into)), ("duration_ms", t.seconds.map(|s| (s * 1000.0).into())), ("flaky", t.flaky.then_some(true.into()))] {
+                if let Some(v) = value {
+                    o[key] = v;
+                }
+            }
+            o
+        })
+        .collect();
+    let summary = serde_json::json!({"runner": runner, "run": run, "revision": revision, "source": source, "format": evidence.format, "duration_ms": evidence.seconds.map(|s| s * 1000.0), "partial": !evidence.complete, "tests": evidence.tests.len(), "warnings": evidence.warnings});
+    (observations, summary)
+}
+
 /// A clean source revision keeps imported outcomes and extracted bodies comparable.
 pub fn revision(root: &Path) -> Result<String> {
     if !crate::playbook::git(root, &["status", "--porcelain", "--untracked-files=no"])?
@@ -258,6 +294,27 @@ mod tests {
         schedule(&mut db, "APP", &rules, &actor, 300000).unwrap();
         assert_eq!(db.list_issues(Some("APP"), true).unwrap().len(), 2);
     }
+    /// A JUnit file imports as the same observations the collector classifies from libtest and
+    /// TAP; a cut one is a partial run.
+    #[test]
+    fn imported_junit_becomes_observations_and_a_cut_file_a_partial_run() {
+        let xml = r#"<testsuites name="pytest" time="1.5"><testsuite name="pytest"><testcase classname="tests.test_cart" name="test_total" time="1.25"/><testcase classname="tests.test_cart" name="test_tax"><failure/></testcase></testsuite></testsuites>"#;
+        let (rows, run) = import(xml, "ci-1", "abc", "CI job 7");
+        assert_eq!(rows[0]["id"], "tests.test_cart::test_total");
+        assert_eq!(rows[0]["duration_ms"], 1250.0);
+        assert_eq!(
+            (rows[1]["outcome"].as_str(), rows[1]["runner"].as_str()),
+            (Some("fail"), Some("pytest"))
+        );
+        assert_eq!(
+            (run["partial"].as_bool(), run["duration_ms"].as_f64()),
+            (Some(false), Some(1500.0))
+        );
+        let (rows, run) = import(&xml[..xml.len() - 40], "ci-2", "abc", "CI job 8");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(run["partial"], true);
+    }
+
     #[test]
     fn sweep_action_lists_require_human_approval_and_keep_edits() {
         let mut db =
@@ -269,6 +326,7 @@ mod tests {
             revision: "a".repeat(40),
             generated_at: "now".into(),
             report_only: true,
+            runs: vec![],
             observations: vec![],
             tests: vec![],
             truncated: false,

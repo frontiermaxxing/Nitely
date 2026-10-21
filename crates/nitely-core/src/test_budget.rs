@@ -78,7 +78,7 @@ fn re(cell: &'static OnceLock<regex::Regex>, pattern: &str) -> &'static regex::R
 
 /// A line without its colours (which `gh run view --log` spells `^[[1m`), and without what GitHub's job log puts before each one: the job
 /// and step names and a timestamp (`gh run view --log`), or the timestamp alone.
-fn plain_line(line: &str) -> std::borrow::Cow<'_, str> {
+pub(crate) fn plain_line(line: &str) -> std::borrow::Cow<'_, str> {
     static PREFIX: OnceLock<regex::Regex> = OnceLock::new();
     static COLOUR: OnceLock<regex::Regex> = OnceLock::new();
     let prefix = re(&PREFIX, r"^(?:[^\t]*\t[^\t]*\t)?\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z ?");

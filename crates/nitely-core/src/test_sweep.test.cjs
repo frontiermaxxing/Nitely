@@ -31,11 +31,10 @@ test('report-only collection inventories sources and imports evidence without ex
    fs.writeFileSync(path.join(root,'package.json'),JSON.stringify({scripts:{test:'exit 99'}}));
    fs.writeFileSync(path.join(root,'contracts.test.js'),"test('keeps contract', () => { assert.equal(actual(), expected); });");
    cp.execFileSync('git',['-C',root,'add','.']);
-   const log=path.join(root,'prior.log'); fs.writeFileSync(log,'# Subtest: keeps contract\nok 1 - keeps contract\n  ---\n  duration_ms: 17\n  ...');
    const output=path.join(root,'report.json'); const options=path.join(root,'options.json');
-   fs.writeFileSync(options,JSON.stringify({revision,logs:[{path:log,revision,run:'lane 10'}],output}));
+   fs.writeFileSync(options,JSON.stringify({revision,imported:{observations:[{id:'keeps contract',name:'keeps contract',runner:'node',outcome:'pass',run:'lane 10',revision,source:'prior.log',ambiguous:false,duration_ms:17}],runs:[{runner:'node',run:'lane 10',revision,source:'prior.log',partial:true,warnings:['cut']}]},output}));
    cp.execFileSync(process.execPath,[path.join(__dirname,'test_sweep.cjs'),options],{cwd:root});
    const report=JSON.parse(fs.readFileSync(output,'utf8'));
-   assert.equal(report.report_only,true); assert.equal(report.tests.length,1); assert.equal(report.observations.length,1); assert.equal(report.observations[0].duration_ms,17); assert.equal(report.runs.length,0);
+   assert.equal(report.report_only,true); assert.equal(report.tests.length,1); assert.equal(report.observations.length,1); assert.equal(report.observations[0].duration_ms,17); assert.equal(report.runs.length,1); assert.ok(report.warnings.some(w=>w.includes('prior.log (lane 10) was not read whole')));
  } finally { fs.rmSync(root,{recursive:true,force:true}); }
 });
