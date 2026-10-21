@@ -30,6 +30,7 @@ const VIEWS: { label: string; view: View }[] = [
   { label: "Inbox", view: { kind: "inbox" } },
   { label: "Now", view: { kind: "now" } },
   { label: "Activity", view: { kind: "activity" } },
+  { label: "Leaderboard", view: { kind: "leaderboard" } },
   { label: "Performance", view: { kind: "performance" } },
   { label: "Settings", view: { kind: "settings" } },
   // Each section of Settings by its own name too ("phone", "crew"), as the sidebar once had some.
