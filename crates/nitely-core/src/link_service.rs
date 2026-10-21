@@ -369,9 +369,10 @@ fn forget_cached() {
     *REGISTERED.lock().unwrap_or_else(|p| p.into_inner()) = None;
 }
 
-/// Opens `nitely://issue/KEY` the way the OS opens any link: in the running app, or by starting it.
-pub fn open_in_app(key: &str) {
-    let url = crate::issues::issue_link(key);
+/// Opens `nitely://issue/KEY` (or `nitely://ask/N`) the way the OS opens any link: in the running
+/// app, or by starting it.
+pub fn open_in_app(target: &crate::links::Target) {
+    let url = target.app_link();
     let os = Os::current();
     let words = match os {
         Os::Windows => sv(&["rundll32", "url.dll,FileProtocolHandler", &url]),
@@ -460,7 +461,7 @@ pub fn serve() -> Result<()> {
     loop {
         match links::bind() {
             Ok(listener) => {
-                links::serve(listener, Role::Service, |key| open_in_app(&key), keep);
+                links::serve(listener, Role::Service, |target| open_in_app(&target), keep);
                 return Ok(());
             }
             Err(_) if links::probe() == Some(Role::Service) => return Ok(()),

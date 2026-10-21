@@ -118,3 +118,50 @@ button.journey-toggle:focus-visible { outline: 2px solid var(--focus); outline-o
 @media (prefers-reduced-motion: reduce) {
   .panel-moving { animation: none; }
 }
+
+/* An ask opened from its link (NIT-546). */
+.ask-body {
+  display: grid;
+  gap: 12px;
+  padding: 4px 0 16px;
+}
+.ask-question {
+  font-size: 18px;
+  line-height: 1.4;
+  margin: 0;
+  font-weight: 560;
+}
+.ask-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ask-options li {
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 13px;
+  color: var(--fg-2);
+}
+.ask-options li.chosen {
+  border-color: var(--live);
+  color: var(--fg);
+}
+.ask-answer {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 12px;
+  background: var(--sunken);
+  border-radius: 6px;
+}
+.ask-answer p {
+  margin: 0;
+}
+.ask-issue,
+.ask-meta {
+  margin: 0;
+}

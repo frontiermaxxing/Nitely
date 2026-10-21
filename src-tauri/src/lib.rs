@@ -86,18 +86,20 @@ fn opened_link(pending: tauri::State<'_, PendingLink>) -> Option<String> {
 /// for the page, tells it at once if it is listening, and brings the window forward. Anything else
 /// is ignored.
 fn open_link(app: &tauri::AppHandle, url: &str) {
-    let Some(key) = nitely_core::issues::key_from_link(url) else { return };
-    open_issue(app, key);
+    let Some(target) = nitely_core::issues::target_from_link(url) else { return };
+    open_target(app, target);
 }
 
-fn open_issue(app: &tauri::AppHandle, key: String) {
+/// Shows what a link names: the page is told the issue's key, or `ask:<n>` for an ask (NIT-546).
+fn open_target(app: &tauri::AppHandle, target: nitely_core::links::Target) {
     use tauri::{Emitter, Manager};
+    let token = target.token();
     if let Some(pending) = app.try_state::<PendingLink>() {
         if let Ok(mut slot) = pending.0.lock() {
-            *slot = Some(key.clone());
+            *slot = Some(token.clone());
         }
     }
-    app.emit(OPEN_ISSUE_EVENT, &key).ok();
+    app.emit(OPEN_ISSUE_EVENT, &token).ok();
     focus_main(app);
 }
 
@@ -123,7 +125,7 @@ fn answer_links(app: tauri::AppHandle) {
                 Ok(listener) => {
                     told = false;
                     let open = app.clone();
-                    links::serve(listener, links::Role::App, move |key| open_issue(&open, key), || !hand_over());
+                    links::serve(listener, links::Role::App, move |target| open_target(&open, target), || !hand_over());
                     continue;
                 }
                 Err(e) if !told && links::probe().is_none() => {
@@ -459,6 +461,12 @@ async fn project_spend(project: String, day_start: i64, days: usize) -> Result<n
 #[tauri::command]
 async fn issue_detail(key: String) -> Result<nitely_core::issues::IssueDetail, String> {
     db()?.issue_detail(&key).map_err(err)?.ok_or_else(|| format!("no issue {key}"))
+}
+
+/// One ask as its link shows it (NIT-546): its question, options, answer and issue, answered or not.
+#[tauri::command]
+async fn ask_detail(id: i64) -> Result<nitely_core::issues::Ask, String> {
+    db()?.ask(id).map_err(err)?.ok_or_else(|| format!("no ask {id}"))
 }
 
 /// Adds (`blocked` true) or removes a blocker of an issue.
@@ -1105,6 +1113,7 @@ pub fn run() {
             open_lane_log,
             issues,
             issue_detail,
+            ask_detail,
             set_blocker,
             move_issue,
             phone::phone_status,

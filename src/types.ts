@@ -328,6 +328,9 @@ export interface Ask {
   closed?: string | null;
   /** The review finding the agent asks the person to accept as it is (crates/nitely-core/src/accept.rs). */
   finding?: { priority: number; text: string } | null;
+  /** When the answer reached an agent, and which (NIT-547). */
+  delivered_at?: number | null;
+  delivered_to?: string | null;
 }
 
 export interface Project {
@@ -489,6 +492,8 @@ export interface IssueDetail {
   goal_plan?: GoalPlanView | null;
   /** Its review batches and trips through a land queue (crates/nitely-core/src/batches.rs). */
   batches?: IssueBatches;
+  /** The asks about it, answered or not, so its timeline can link each one (NIT-546). */
+  asks?: Ask[];
 }
 
 /** A review batch: changes of one repository reviewed in one reviewer call (batches.rs `ReviewBatch`). */

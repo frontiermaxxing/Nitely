@@ -19,6 +19,46 @@ use std::time::{Duration, Instant};
 pub const PORT: u16 = 7423;
 /// The path an issue's key follows.
 pub const PATH: &str = "/i/";
+/// The path an ask's number follows (NIT-546).
+pub const ASK_PATH: &str = "/a/";
+
+/// What a link opens: an issue, or an ask with its question, answer and issue (NIT-546).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    Issue(String),
+    Ask(i64),
+}
+
+impl Target {
+    /// The app's own link: `nitely://issue/NIT-12` or `nitely://ask/69`.
+    pub fn app_link(&self) -> String {
+        match self {
+            Target::Issue(key) => crate::issues::issue_link(key),
+            Target::Ask(id) => format!("{}://ask/{id}", crate::issues::LINK_SCHEME),
+        }
+    }
+
+    /// What the app's page is told to open: the issue's key, or `ask:69`.
+    pub fn token(&self) -> String {
+        match self {
+            Target::Issue(key) => key.clone(),
+            Target::Ask(id) => format!("ask:{id}"),
+        }
+    }
+
+    /// How a page names it: `NIT-12`, `ask 69`.
+    fn label(&self) -> String {
+        match self {
+            Target::Issue(key) => key.clone(),
+            Target::Ask(id) => format!("ask {id}"),
+        }
+    }
+}
+
+/// The web link to an ask: `http://127.0.0.1:7423/a/69` (NIT-546).
+pub fn ask_url(id: i64) -> String {
+    format!("http://127.0.0.1:{PORT}{ASK_PATH}{id}")
+}
 /// What a listener answers on `/health`, followed by its role: how one finds another.
 const HEALTH: &str = "nitely-links";
 
@@ -46,9 +86,19 @@ pub fn issue_url(key: &str) -> String {
 /// The issue key a link names, in either form: `nitely://issue/NIT-12` or a loopback
 /// `http://127.0.0.1:<port>/i/NIT-12` (`localhost` too), with or without a trailing slash.
 pub fn key_from_url(link: &str) -> Option<String> {
+    match target_from_url(link)? {
+        Target::Issue(key) => Some(key),
+        Target::Ask(_) => None,
+    }
+}
+
+/// What a link opens, in either form: `nitely://issue/NIT-12`, `nitely://ask/69`, or the loopback
+/// web forms `http://127.0.0.1:<port>/i/NIT-12` and `/a/69` (`localhost` too).
+pub fn target_from_url(link: &str) -> Option<Target> {
     let link = link.trim();
-    let rest = if let Some(rest) = link.strip_prefix(&format!("{}://issue/", crate::issues::LINK_SCHEME)) {
-        rest
+    let scheme = format!("{}://", crate::issues::LINK_SCHEME);
+    let (issue, ask) = if let Some(rest) = link.strip_prefix(&scheme) {
+        (rest.strip_prefix("issue/"), rest.strip_prefix("ask/"))
     } else {
         let after = link.strip_prefix("http://")?;
         let (host, path) = after.split_once('/')?;
@@ -56,9 +106,18 @@ pub fn key_from_url(link: &str) -> Option<String> {
         if !matches!(name, "127.0.0.1" | "localhost") || port.parse::<u16>().is_err() {
             return None;
         }
-        path.strip_prefix(PATH.trim_start_matches('/'))?
+        (path.strip_prefix(PATH.trim_start_matches('/')), path.strip_prefix(ASK_PATH.trim_start_matches('/')))
     };
-    valid_key(rest.trim_end_matches('/'))
+    match (issue, ask) {
+        (Some(key), _) => valid_key(key.trim_end_matches('/')).map(Target::Issue),
+        (_, Some(id)) => valid_ask(id.trim_end_matches('/')).map(Target::Ask),
+        _ => None,
+    }
+}
+
+/// An ask's number: digits only, not too many.
+fn valid_ask(s: &str) -> Option<i64> {
+    (!s.is_empty() && s.len() <= 12 && s.chars().all(|c| c.is_ascii_digit())).then(|| s.parse().ok()).flatten()
 }
 
 /// `NIT-12`, upper-cased, when `s` is a project key, a dash and a number; nothing else.
@@ -100,9 +159,9 @@ fn probe_port(port: u16) -> Option<Role> {
     }
 }
 
-/// Answers issue links on `listener` as `role` while `keep` says so (asked about once a second),
-/// calling `open` with each key a link names. One short-lived thread per request.
-pub fn serve(listener: TcpListener, role: Role, open: impl Fn(String) + Send + Sync + 'static, keep: impl Fn() -> bool) {
+/// Answers issue and ask links on `listener` as `role` while `keep` says so (asked about once a
+/// second), calling `open` with what each link names. One short-lived thread per request.
+pub fn serve(listener: TcpListener, role: Role, open: impl Fn(Target) + Send + Sync + 'static, keep: impl Fn() -> bool) {
     let open = std::sync::Arc::new(open);
     let port = listener.local_addr().map(|a| a.port()).unwrap_or(PORT);
     if listener.set_nonblocking(true).is_err() {
@@ -131,7 +190,7 @@ pub fn serve(listener: TcpListener, role: Role, open: impl Fn(String) + Send + S
 }
 
 /// Reads one request and answers it (`respond`). Only GET and HEAD, only for a loopback host name.
-fn answer(mut stream: TcpStream, port: u16, role: Role, open: impl Fn(String)) -> Result<()> {
+fn answer(mut stream: TcpStream, port: u16, role: Role, open: impl Fn(Target)) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(3)))?;
     let mut buf = Vec::new();
     let mut chunk = [0u8; 1024];
@@ -156,7 +215,7 @@ fn answer(mut stream: TcpStream, port: u16, role: Role, open: impl Fn(String)) -
 
 /// The status line and page for a request's head; calls `open` for an issue link. `/health` says
 /// which role answers, for `probe`.
-fn respond(head: &str, port: u16, role: Role, open: impl Fn(String)) -> (&'static str, String) {
+fn respond(head: &str, port: u16, role: Role, open: impl Fn(Target)) -> (&'static str, String) {
     let mut lines = head.lines();
     let mut first = lines.next().unwrap_or("").split_whitespace();
     let (method, target) = (first.next().unwrap_or(""), first.next().unwrap_or(""));
@@ -173,20 +232,22 @@ fn respond(head: &str, port: u16, role: Role, open: impl Fn(String)) -> (&'stati
     if target == "/health" {
         return ("200 OK", format!("{HEALTH} {}", role.name()));
     }
-    let Some(key) = target.strip_prefix(PATH).map(|k| k.split(['?', '#']).next().unwrap_or("").trim_end_matches('/')).and_then(valid_key) else {
-        return ("404 Not Found", page("Nitely", "This is not an issue link. They look like /i/NIT-12."));
+    let path = target.split(['?', '#']).next().unwrap_or("").trim_end_matches('/');
+    let opened = path.strip_prefix(PATH).and_then(valid_key).map(Target::Issue).or_else(|| path.strip_prefix(ASK_PATH).and_then(valid_ask).map(Target::Ask));
+    let Some(opened) = opened else {
+        return ("404 Not Found", page("Nitely", "This is not an issue or ask link. They look like /i/NIT-12 and /a/69."));
     };
     if method == "GET" {
-        open(key.clone());
+        open(opened.clone());
     }
-    let app = crate::issues::issue_link(&key);
+    let (app, label) = (opened.app_link(), opened.label());
     let done = match role {
-        Role::App => format!("Opened <b>{key}</b> in Nitely. You can close this tab."),
-        Role::Service => format!("Opening <b>{key}</b> in Nitely… You can close this tab."),
+        Role::App => format!("Opened <b>{label}</b> in Nitely. You can close this tab."),
+        Role::Service => format!("Opening <b>{label}</b> in Nitely… You can close this tab."),
     };
     (
         "200 OK",
-        page(&format!("{key} · Nitely"), &format!("{done} <span class=\"m\">Nothing came up? Open it with <a href=\"{app}\">the app's own link</a>.</span>")),
+        page(&format!("{label} · Nitely"), &format!("{done} <span class=\"m\">Nothing came up? Open it with <a href=\"{app}\">the app's own link</a>.</span>")),
     )
 }
 
@@ -212,12 +273,23 @@ mod tests {
         for link in ["http://example.com:7423/i/NIT-14", "http://127.0.0.1/i/NIT-14", "https://127.0.0.1:7423/i/NIT-14", "http://127.0.0.1:7423/x/NIT-14", "http://127.0.0.1:7423/i/NIT-", "nitely://project/NIT"] {
             assert_eq!(key_from_url(link), None, "{link}");
         }
+        // Asks have links of their own (NIT-546).
+        for link in ["nitely://ask/69", "http://127.0.0.1:7423/a/69", "http://localhost:7423/a/69/"] {
+            assert_eq!(target_from_url(link), Some(Target::Ask(69)), "{link}");
+            assert_eq!(key_from_url(link), None, "an ask is no issue: {link}");
+        }
+        for link in ["http://127.0.0.1:7423/a/", "http://127.0.0.1:7423/a/x9", "nitely://ask/-1", "http://127.0.0.1:7423/a/1234567890123"] {
+            assert_eq!(target_from_url(link), None, "{link}");
+        }
+        assert_eq!(ask_url(69), "http://127.0.0.1:7423/a/69");
+        assert_eq!((Target::Ask(69).app_link(), Target::Ask(69).token()), ("nitely://ask/69".to_string(), "ask:69".to_string()));
+        assert_eq!((Target::Issue("NIT-3".into()).app_link(), Target::Issue("NIT-3".into()).token()), ("nitely://issue/NIT-3".to_string(), "NIT-3".to_string()));
     }
 
     #[test]
     fn answers_an_issue_link_by_opening_it_and_nothing_else() {
         let opened = std::cell::RefCell::new(Vec::new());
-        let ask = |head: &str| respond(head, 7423, Role::App, |k| opened.borrow_mut().push(k));
+        let ask = |head: &str| respond(head, 7423, Role::App, |t| opened.borrow_mut().push(t.token()));
         let (status, page) = ask("GET /i/nit-228 HTTP/1.1\r\nHost: 127.0.0.1:7423\r\n\r\n");
         assert_eq!(status, "200 OK");
         assert!(page.contains("Opened <b>NIT-228</b>") && page.contains("nitely://issue/NIT-228"), "{page}");
@@ -236,6 +308,11 @@ mod tests {
         assert!(page.contains("Opening <b>NIT-7</b>"), "{page}");
         assert_eq!(respond("GET /health HTTP/1.1\r\nHost: 127.0.0.1:7423\r\n\r\n", 7423, Role::Service, |_| {}).1, "nitely-links service");
         assert_eq!(opened.borrow().len(), 2, "health opens nothing");
+        // An ask's link opens the ask (NIT-546).
+        let (status, page) = ask("GET /a/69 HTTP/1.1\r\nHost: 127.0.0.1:7423\r\n\r\n");
+        assert_eq!(status, "200 OK");
+        assert!(page.contains("Opened <b>ask 69</b>") && page.contains("nitely://ask/69"), "{page}");
+        assert_eq!(opened.borrow().last().map(String::as_str), Some("ask:69"));
     }
 
     #[test]
@@ -247,7 +324,7 @@ mod tests {
         let tx = Mutex::new(tx);
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stopping = stop.clone();
-        let served = std::thread::spawn(move || serve(listener, Role::App, move |k| tx.lock().unwrap().send(k).unwrap(), move || !stopping.load(std::sync::atomic::Ordering::SeqCst)));
+        let served = std::thread::spawn(move || serve(listener, Role::App, move |t| tx.lock().unwrap().send(t.token()).unwrap(), move || !stopping.load(std::sync::atomic::Ordering::SeqCst)));
         assert_eq!(probe_port(port), Some(Role::App), "a listener finds another by its health");
         let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
         write!(s, "GET /i/APP-3 HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").unwrap();

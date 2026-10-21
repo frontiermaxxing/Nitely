@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "./backend";
 import { issueSpendLine } from "./spend";
 import { laneRunId } from "./lanes";
+import { askOfEntry } from "./askLinks";
 import type { Goal, IssueDetail, IssueRecord, IssueSpend, LinkedIssue } from "./types";
 import { REVIEW_LEVELS } from "./types";
 import { agentLabel, agentTitle, ago, openExternal, PRIORITY } from "./util";
@@ -53,7 +54,7 @@ const KIND_LABEL: Record<string, string> = {
 };
 
 /** One event of the issue's timeline. */
-function EventLine({ event: t, now }: { event: IssueDetail["timeline"][number]; now: number }) {
+function EventLine({ event: t, now, askId, onOpenAsk }: { event: IssueDetail["timeline"][number]; now: number; askId?: number | null; onOpenAsk?: (id: number) => void }) {
   return (
     <li className={`tl-${t.kind}`}>
       <span className="tl-mark">
@@ -63,6 +64,13 @@ function EventLine({ event: t, now }: { event: IssueDetail["timeline"][number]; 
         <span className="tl-kind">{KIND_LABEL[t.kind] ?? t.kind}</span> <span title={agentTitle(t.actor, t.place)}>{agentLabel(t.actor)}</span> · {ago(now, t.ts)}
       </div>
       {t.summary && <div className="tl-text">{t.summary}</div>}
+      {askId != null && onOpenAsk && (
+        <div className="tl-text">
+          <button className="link small" onClick={() => onOpenAsk(askId)}>
+            ask {askId}
+          </button>
+        </div>
+      )}
       {crewLog(t) && <CrewLogLink path={crewLog(t)!} />}
       {laneRunId(t) !== null && <LaneLogLink id={laneRunId(t)!} />}
     </li>
@@ -346,7 +354,7 @@ export function IssuePanel(props: {
                 </summary>
                 <ol className="timeline">
                   {timelineItems(detail).map((item, n) =>
-                    item.batch ? <BatchLine key={n} line={item.batch} now={props.now} /> : <EventLine key={n} event={item.event!} now={props.now} />,
+                    item.batch ? <BatchLine key={n} line={item.batch} now={props.now} /> : <EventLine key={n} event={item.event!} now={props.now} askId={askOfEntry(item.event!, detail?.asks)} onOpenAsk={props.onOpenIssue && ((id) => props.onOpenIssue!(`ask:${id}`))} />,
                   )}
                   {detail.timeline.length === 0 && <li className="muted small">Nothing recorded yet.</li>}
                 </ol>

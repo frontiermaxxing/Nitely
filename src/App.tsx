@@ -15,6 +15,7 @@ import { Leaderboard, useProfile } from "./leaderboard";
 import { ProjectPage, isProjectTab, type ProjectTab } from "./Project";
 import type { GoalFocus } from "./GoalRows";
 import { IssuePanel } from "./IssuePanel";
+import { AskPanel, askIdOf } from "./AskPanel";
 import { AddProject } from "./AddProject";
 import { HOME_LABEL, nowSecs } from "./util";
 import { KeysSheet, Palette, useKeys } from "./Palette";
@@ -475,7 +476,10 @@ export function App() {
 
       {palette && <Palette projects={projects} onGo={setView} onOpenIssue={setOpenIssue} onChanged={changed} onClose={() => setPalette(false)} />}
       {keys && <KeysSheet onClose={closeKeys} />}
-      {openIssue && (
+      {openIssue && askIdOf(openIssue) != null && (
+        <AskPanel id={askIdOf(openIssue)!} now={now} version={version} onClose={() => setOpenIssue(null)} onOpenIssue={setOpenIssue} />
+      )}
+      {openIssue && askIdOf(openIssue) == null && (
         <IssuePanel
           issueKey={openIssue}
           now={now}

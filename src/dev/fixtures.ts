@@ -1432,6 +1432,7 @@ function detail(key: string): IssueDetail {
     proposal: PROPOSALS.get(issue.key) ?? null,
     goal_plan: PLANS.get(issue.key) ?? null,
     batches: issueBatches(issue.key),
+    asks: world.asks.filter((a) => a.issue_key === issue.key),
   };
 }
 
@@ -1695,6 +1696,26 @@ function setOwner(args: Record<string, unknown>) {
   retrack(world, issue);
   recount(world);
   return issue;
+}
+
+/** An ask as its link shows it (NIT-546): one the preview has, or ask 69, answered and taken up. */
+function askDetail(id: number): Ask {
+  const ask = world.asks.find((a) => a.id === id);
+  if (ask) return ask;
+  if (id !== 69) throw `no ask ${id}`;
+  const at = Math.floor(Date.now() / 1000) - 3 * 3600;
+  return {
+    id: 69,
+    issue_key: "NIT-29",
+    asked_by: "claude:c:/code/worktrees/nit-29",
+    question: "Delete the three groups of slow tests their pure replacements now cover?",
+    options: ["Approve all three groups", "Keep them for now"],
+    answer: "Approve all three groups",
+    asked_at: at,
+    answered_at: at + 1800,
+    delivered_to: "codex:c:/code/worktrees/nit-29",
+    delivered_at: at + 2400,
+  };
 }
 
 function answerAsk(args: Record<string, unknown>) {
@@ -2348,6 +2369,8 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return issues(args);
       case "issue_detail":
         return detail(String(args.key));
+      case "ask_detail":
+        return askDetail(Number(args.id));
       case "move_issue":
         return moveIssue(args);
       case "set_blocker":

@@ -430,7 +430,7 @@ fn remote_instructions(r: &Remote) -> String {
 `get_project` first, use `next_task` to claim work, `report` what you are doing, `file_issue` what you find (it refuses likely duplicates), `note` with handoff: true \
 before you stop, and `ask` when only the human can decide. Starting worktrees, the gate, submit and land run on the \
 machine that holds the repo, so they are not available here: do the work in your own checkout and say in your \
-handoff note what branch it is on. Link every issue you name with the `url` the tools return. Never set Approved: \
+handoff note what branch it is on. Link every issue and ask you name with the `url` the tools return. Never set Approved: \
 only the human approves.",
         name = r.name
     )
@@ -1711,7 +1711,10 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
                 summary: Some(format!("Asked: {}", ask.question)),
                 state: "waiting".into(),
             })?;
-            json!(ask)
+            // Its own link, which opens the question, the answer and the issue (NIT-546).
+            let mut out = json!(ask);
+            out["url"] = json!(nitely_core::links::ask_url(ask.id));
+            out
         }
         "request_acceptance" => {
             let ask = db.request_acceptance(req(args, "key")?, req(args, "finding")?, req(args, "why")?, Some(&server.place()), &actor)?;
@@ -1735,9 +1738,9 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             let ask = db.ask(id)?.with_context(|| format!("no ask {id}"))?;
             match &ask.closed {
                 // Its issue closed first: nothing to wait for.
-                Some(why) => json!({ "id": ask.id, "question": ask.question, "answer": null, "closed": why }),
-                // Who the answer reached, and when (NIT-547).
-                None => json!({ "id": ask.id, "question": ask.question, "answer": ask.answer, "answered_at": ask.answered_at, "delivered_to": ask.delivered_to, "delivered_at": ask.delivered_at }),
+                Some(why) => json!({ "id": ask.id, "url": nitely_core::links::ask_url(ask.id), "question": ask.question, "answer": null, "closed": why }),
+                // Its link (NIT-546), and who the answer reached and when (NIT-547).
+                None => json!({ "id": ask.id, "url": nitely_core::links::ask_url(ask.id), "question": ask.question, "answer": ask.answer, "answered_at": ask.answered_at, "delivered_to": ask.delivered_to, "delivered_at": ask.delivered_at }),
             }
         }
         "triage" => {

@@ -31,7 +31,8 @@ up other work or stop. `submit` with wait: true blocks until the result instead.
 7. Before you stop, `note` with handoff: true: what is done, what is left, what you were unsure about.
 8. Link every issue you name, in replies, commit messages, pull requests and notes: \
 [NIT-14](http://127.0.0.1:7423/i/NIT-14), the `url` the tools return. It opens the issue in the Nitely app, \
-from a chat, a pull request or a terminal alike.
+from a chat, a pull request or a terminal alike. Link an ask the same way, with the `url` that `ask` and \
+`get_answer` return: [ask 69](http://127.0.0.1:7423/a/69) opens its question, its answer and its issue.
 
 Priority when you file: 1 exploitable today, data loss or a leak, a production job silently stopped, \
 or a broken release; 2 a user-visible bug, a blocker for shipping, or a missing safety net (CI, \

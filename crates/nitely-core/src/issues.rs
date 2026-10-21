@@ -251,6 +251,8 @@ pub struct IssueDetail {
     pub goal_plan: Option<crate::goal_plans::GoalPlanView>,
     /// Its review batches and trips through a land queue (NIT-218).
     pub batches: crate::batches::IssueBatches,
+    /// The asks about it, answered or not, so its timeline can link each one (NIT-546).
+    pub asks: Vec<Ask>,
 }
 
 /// Both directions of an issue's blocked-by relations, closed issues included.
@@ -582,6 +584,11 @@ pub fn issue_link(key: &str) -> String {
 /// `http://127.0.0.1:7423/i/NIT-14` (`links::key_from_url`).
 pub fn key_from_link(link: &str) -> Option<String> {
     crate::links::key_from_url(link)
+}
+
+/// What a `nitely://` or loopback link opens: an issue or an ask (NIT-546).
+pub fn target_from_link(link: &str) -> Option<crate::links::Target> {
+    crate::links::target_from_url(link)
 }
 
 fn issue_from_row(r: &Row) -> rusqlite::Result<IssueRecord> {
@@ -1941,8 +1948,18 @@ impl Db {
             goal_plan: self.goal_plan_for_issue(&issue.key)?,
             // A database a newer schema has not reached yet (the read-only preview) shows none.
             batches: self.issue_batches(&issue.key).unwrap_or_default(),
+            asks: self.asks_about(&issue.key)?,
             issue,
         }))
+    }
+
+    /// Every ask about issue `key`, oldest first.
+    pub fn asks_about(&self, key: &str) -> Result<Vec<Ask>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {ASK_COLUMNS} FROM ask a LEFT JOIN issue i ON i.key = a.issue_key COLLATE NOCASE WHERE a.issue_key = ?1 COLLATE NOCASE ORDER BY a.id"
+        ))?;
+        let rows = stmt.query_map([key], ask_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn timeline(&self, key: &str) -> Result<Vec<TimelineEntry>> {
