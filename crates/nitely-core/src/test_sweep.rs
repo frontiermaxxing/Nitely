@@ -279,8 +279,21 @@ impl Report {
             *counts.entry(method_of(o)).or_default() += 1;
         }
         let method = counts.into_iter().max_by_key(|(_, n)| *n).map(|(m, _)| m);
-        // Each observed test: its name, times by that method, and outcomes, at this revision.
-        let mut seen: BTreeMap<String, (String, Vec<f64>, bool, bool)> = BTreeMap::new();
+        // Each run's outcome for the test: one workflow run's jobs and reports are one execution,
+        // where a failure outweighs a pass, and a pass after a failed retry is both.
+        #[derive(Default)]
+        struct InRun {
+            passed: bool,
+            failed: bool,
+        }
+        // Each observed test at this revision: its name, and by run its times (by that method)
+        // and outcome.
+        struct Seen {
+            name: String,
+            times: BTreeMap<String, Vec<f64>>,
+            runs: BTreeMap<String, InRun>,
+        }
+        let mut seen: BTreeMap<String, Seen> = BTreeMap::new();
         for o in self
             .observations
             .iter()
@@ -289,17 +302,30 @@ impl Report {
             let (Some(id), Some(name)) = (o["id"].as_str(), o["name"].as_str()) else {
                 continue;
             };
-            let entry = seen
-                .entry(id.to_string())
-                .or_insert_with(|| (name.to_string(), vec![], false, false));
+            let run = o["run"].as_str().unwrap_or_default().to_string();
+            let entry = seen.entry(id.to_string()).or_insert_with(|| Seen {
+                name: name.to_string(),
+                times: BTreeMap::new(),
+                runs: BTreeMap::new(),
+            });
             if Some(method_of(o)) == method {
                 entry
-                    .1
+                    .times
+                    .entry(run.clone())
+                    .or_default()
                     .extend(o["duration_ms"].as_f64().map(|ms| ms / 1000.0));
             }
-            entry.2 |= o["outcome"] == "pass";
-            // A pass only after a failed attempt (a runner's retry) failed once too.
-            entry.3 |= o["outcome"] == "fail" || o["flaky"] == true;
+            let state = entry.runs.entry(run).or_default();
+            if o["outcome"] == "fail" {
+                *state = InRun {
+                    passed: false,
+                    failed: true,
+                };
+            } else if o["outcome"] == "pass" && (state.passed || !state.failed) {
+                state.passed = true;
+                // A pass only after a failed attempt (a runner's retry) failed once too.
+                state.failed |= o["flaky"] == true;
+            }
         }
         let source = |name: &str| {
             let found: Vec<_> = self
@@ -337,7 +363,22 @@ impl Report {
                 entry.seconds = entry.seconds.or(seconds);
                 entry.why.push(why);
             };
-        for (id, (name, mut times, passed, failed)) in seen {
+        for (
+            id,
+            Seen {
+                name,
+                times: timed,
+                runs,
+            },
+        ) in seen
+        {
+            // One time per run: the longest any of its reports gave.
+            let mut times: Vec<f64> = timed
+                .values()
+                .filter_map(|t| t.iter().copied().reduce(f64::max))
+                .collect();
+            let passed = runs.values().any(|r| r.passed);
+            let failed = runs.values().any(|r| r.failed);
             let t = source(&name);
             let test = t.map(key).unwrap_or(id);
             times.sort_by(f64::total_cmp);
@@ -613,6 +654,23 @@ mod tests {
             ]
         );
         assert_eq!(flagged[1].hints["git"], 4);
+        // One run failing on one platform and passing on another is failing, not flaky.
+        let matrix = Report {
+            observations: vec![
+                obs("core::cart::adds", "ci-7", "fail", 10.0, "ci-log"),
+                obs("core::cart::adds", "ci-7", "pass", 10.0, "ci-log"),
+            ],
+            ..report.clone()
+        };
+        assert_eq!(
+            matrix
+                .flagged(2.0)
+                .iter()
+                .find(|f| f.test == "src/cart.rs::adds")
+                .unwrap()
+                .why,
+            ["failing"]
+        );
 
         let classes: Vec<Classified> = serde_json::from_value(serde_json::json!([
             {"test": "src/land.rs::batches", "class": "decision", "decision": "which changes land in one batch", "module": "land_rules"},
