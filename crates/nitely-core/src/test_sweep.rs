@@ -501,6 +501,9 @@ pub struct OptimizeFacts<'a> {
     pub tests: &'a [String],
     pub ci_commands: &'a [String],
     pub has_ci: bool,
+    /// The playbook has `[lanes]`, where `ci_commands` lives; a repo without build lanes gets no
+    /// CI-routing proposal, which would turn lanes on.
+    pub has_lanes: bool,
     /// The repo's playbook, for the CI-routing proposal; none in a repo Nitely does not keep.
     pub playbook: Option<&'a crate::proposals::Target>,
 }
@@ -526,6 +529,9 @@ pub fn optimize_plan(
 ) -> Result<OptimizePlan> {
     use std::collections::BTreeMap;
     let by_test = check_classes(flagged, classes)?;
+    if flagged.is_empty() {
+        bail!("nothing is flagged: keep the report and its unknowns; no goal is needed");
+    }
     let short = &revision[..revision.len().min(12)];
     let time = |f: &Flagged| {
         f.seconds
@@ -708,18 +714,20 @@ pub fn optimize_plan(
         ));
     }
     // CI runs every test command where the repo has CI: the full suites leave the person's machine.
-    let ci_commands = (facts.has_ci && facts.tests.iter().any(|t| !facts.ci_commands.contains(t)))
-        .then(|| {
-            let mut all = facts.ci_commands.to_vec();
-            all.extend(
-                facts
-                    .tests
-                    .iter()
-                    .filter(|t| !facts.ci_commands.contains(t))
-                    .cloned(),
-            );
-            all
-        });
+    let ci_commands = (facts.has_ci
+        && facts.has_lanes
+        && facts.tests.iter().any(|t| !facts.ci_commands.contains(t)))
+    .then(|| {
+        let mut all = facts.ci_commands.to_vec();
+        all.extend(
+            facts
+                .tests
+                .iter()
+                .filter(|t| !facts.ci_commands.contains(t))
+                .cloned(),
+        );
+        all
+    });
     let saving: f64 = flagged
         .iter()
         .filter(|f| {
@@ -1101,6 +1109,7 @@ pub struct RepoFacts {
     pub tests: Vec<String>,
     pub ci_commands: Vec<String>,
     pub has_ci: bool,
+    pub has_lanes: bool,
     pub target: Option<crate::proposals::Target>,
 }
 
@@ -1136,6 +1145,7 @@ pub fn repo_facts(config: &crate::Config, root: &Path) -> Result<RepoFacts> {
                         .extension()
                         .is_some_and(|e| e == "yml" || e == "yaml")
                 }),
+        has_lanes: pb.lanes.is_some(),
         target: repo.map(|r| crate::proposals::Target::of(&r.name, root)),
         project,
     })
@@ -1516,6 +1526,7 @@ mod tests {
             tests: &["cargo test".into(), "npm test".into()],
             ci_commands: &["cargo test".into()],
             has_ci: true,
+            has_lanes: true,
             playbook: None,
         };
         // A deletion must name what covers the test.
