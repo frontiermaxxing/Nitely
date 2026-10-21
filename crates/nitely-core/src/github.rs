@@ -73,6 +73,18 @@ pub fn open_pr(slug: &str, branch: &str, base: &str, title: &str, body: &str) ->
     pr.get("html_url").and_then(Value::as_str).map(str::to_string).context("GitHub returned no pull request URL")
 }
 
+/// Closes the branch's open pull request with `comment`, for a change that reached its base
+/// another way (landed_elsewhere.rs). Returns its URL, or None when it has none open.
+pub fn close_pr(slug: &str, branch: &str, comment: &str) -> Result<Option<String>> {
+    let client = Client::new();
+    let owner = slug.split('/').next().unwrap_or("");
+    let open = client.get(&format!("{API}/repos/{slug}/pulls?state=open&head={owner}:{branch}"))?;
+    let Some(n) = open.as_array().and_then(|a| a.first()).and_then(|p| p.get("number")).and_then(Value::as_i64) else { return Ok(None) };
+    client.send("POST", &format!("{API}/repos/{slug}/issues/{n}/comments"), &serde_json::json!({ "body": comment }))?;
+    let pr = client.send("PATCH", &format!("{API}/repos/{slug}/pulls/{n}"), &serde_json::json!({ "state": "closed" }))?;
+    Ok(pr.get("html_url").and_then(Value::as_str).map(str::to_string))
+}
+
 pub(crate) struct Client {
     token: Option<String>,
     agent: ureq::Agent,

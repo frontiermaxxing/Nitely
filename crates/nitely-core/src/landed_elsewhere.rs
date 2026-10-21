@@ -11,11 +11,12 @@ use crate::db::Db;
 use crate::issues::Actor;
 use crate::playbook::{self, Playbook};
 
-/// Whether `git cherry <base> <head>` says every commit of `head` is on the integration branch:
-/// `head` is an ancestor (no lines), or each commit is there as an equivalent patch (`-`), as a
-/// rebase or a fold into another change keeps them. A `+` line is a commit that is not.
-pub fn all_on_base(cherry: &str) -> bool {
-    cherry.lines().filter(|l| !l.trim().is_empty()).all(|l| l.starts_with('-'))
+/// Whether the work is on the integration branch: `git cherry <base> <tip>` says every commit is
+/// there, the tip itself (no lines) or each one as an equivalent patch (`-`, as a rebase or a fold
+/// into another change keeps them), and `merges`, `git rev-list --merges <base>..<tip>`, is empty:
+/// cherry passes over merge commits, whose own resolution changes it cannot see.
+pub fn all_on_base(cherry: &str, merges: &str) -> bool {
+    merges.trim().is_empty() && cherry.lines().filter(|l| !l.trim().is_empty()).all(|l| l.starts_with('-'))
 }
 
 /// Before Done: when `key`'s last submitted change has not landed by itself, but every commit of
@@ -41,14 +42,28 @@ pub fn record(db: &Db, root: &Path, key: &str, actor: &Actor) -> Result<Option<S
         .optional()?;
     let Some((branch, head)) = last else { return Ok(None) };
     let base = Playbook::load(root)?.integration_branch().to_string();
-    let Ok(cherry) = playbook::git(root, &["cherry", &base, &head]) else { return Ok(None) };
-    if !all_on_base(&cherry) {
+    // The branch as it is now, which holds anything committed or submitted after that job (a
+    // `submit --wait` leaves no job of its own); the job's head when the branch is gone.
+    let tip = playbook::git(root, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).map(|t| t.trim().to_string()).unwrap_or(head);
+    let (Ok(cherry), Ok(merges)) = (playbook::git(root, &["cherry", &base, &tip]), playbook::git(root, &["rev-list", "--merges", &format!("{base}..{tip}")])) else { return Ok(None) };
+    if !all_on_base(&cherry, &merges) {
         return Ok(None);
     }
     let at = playbook::git(root, &["rev-parse", &base])?.trim().to_string();
-    let said = format!("Landed {branch} on {base} without a land of its own: its submitted commits are there at {at}");
+    let said = format!("Landed {branch} on {base} without a land of its own: its commits are there at {at}");
     db.log_event(actor, Some(&issue.key), None, "landed", &said)?;
-    Ok(Some(said))
+    // Its own submit is superseded, and its pull request closed with why (GitHub).
+    db.conn.execute("UPDATE submit_job SET state = 'superseded', ended_at = ?2 WHERE issue_key = ?1 COLLATE NOCASE AND state = 'queued'", rusqlite::params![issue.key, crate::db::now()])?;
+    let mut told = said.clone();
+    if let Some(slug) = crate::git::github_slug(&root.to_string_lossy()) {
+        let why = format!("{} reached {base} without a land of its own: its commits are there at {at}. Closed by Nitely.", issue.key);
+        match crate::github::close_pr(&slug, &branch, &why) {
+            Ok(Some(url)) => told.push_str(&format!("; closed {url}")),
+            Ok(None) => {}
+            Err(e) => told.push_str(&format!("; its pull request is still open: {e:#}")),
+        }
+    }
+    Ok(Some(told))
 }
 
 #[cfg(test)]
@@ -57,9 +72,10 @@ mod tests {
 
     #[test]
     fn a_change_counts_as_landed_only_when_every_submitted_commit_is_on_the_branch() {
-        assert!(all_on_base(""), "the submitted head is on the branch: merged by hand");
-        assert!(all_on_base("- 1f3a9c\n- 7be210\n"), "rebased or folded into another change: equivalent patches");
-        assert!(!all_on_base("- 1f3a9c\n+ 7be210\n"), "one commit is not there: Done stays refused");
-        assert!(!all_on_base("+ 7be210"));
+        assert!(all_on_base("", ""), "the branch is on the integration branch: merged by hand");
+        assert!(all_on_base("- 1f3a9c\n- 7be210\n", ""), "rebased or folded into another change: equivalent patches");
+        assert!(!all_on_base("- 1f3a9c\n+ 7be210\n", ""), "one commit is not there: Done stays refused");
+        assert!(!all_on_base("+ 7be210", ""));
+        assert!(!all_on_base("- 1f3a9c\n", "9c01de\n"), "a merge on the branch may hold changes cherry cannot see");
     }
 }
