@@ -89,6 +89,12 @@ pub struct Report {
     pub points: Vec<Point>,
     pub episodes: Vec<Episode>,
     pub events: Vec<nitely_core::performance_events::Event>,
+    /// How hard Nitely lets builds and tests push now, and why, as last measured (NIT-519); None
+    /// before the first measurement. Reading it measures nothing.
+    pub pace: Option<nitely_core::pace::Pace>,
+    pub pace_measured_ms: Option<i64>,
+    /// Each change of pace in the range, newest first, with what was said about it.
+    pub adjustments: Vec<nitely_core::pace::Adjustment>,
     pub attribution_latest: Option<AttributionSample>,
     pub attribution_age_ms: Option<i64>,
     pub attribution: Vec<AttributionSample>,
@@ -174,6 +180,8 @@ pub fn query_at(dir: &Path, request: &Query, now: i64) -> Result<Report> {
     let gaps_truncated = gaps.len() > 200;
     let admission_limits = latest.as_ref().and_then(|s| s.metrics.physical_total_bytes).map(nitely_core::machine::limits_for_recorded_total);
     let (events, events_truncated) = store.as_ref().map(|s| nitely_core::performance_events::read_for_boot(s, from, to, request.project.as_deref(), request.limit, selected_boot.as_deref())).transpose()?.unwrap_or_default();
+    let adjustments = store.as_ref().map(|s| nitely_core::pace::adjustments(s, from, to, request.limit.min(200))).transpose()?.unwrap_or_default();
+    let (pace_measured_ms, pace) = nitely_core::pace::cached_beside(dir).map_or((None, None), |(at, p)| (Some(at), Some(p)));
     let attribution_latest = store.as_ref().map(|s| s.attribution_latest(request.project.as_deref())).transpose()?.flatten();
     let attribution_age_ms = attribution_latest.as_ref().map(|s| now.saturating_sub(s.wall_ms));
     let attribution_limit = request.limit.min(200);
@@ -193,7 +201,7 @@ pub fn query_at(dir: &Path, request: &Query, now: i64) -> Result<Report> {
     if attribution_truncated { notes.push(format!("Attribution is limited to the latest {attribution_limit} observations in the selected range; earlier machine-chart peaks may have contributors outside this response. Narrow the range to inspect those intervals.")); }
     notes.push("Process working-set sums can overlap and are not physical RAM. Process I/O includes nondisk activity; minute attribution values are per-metric peaks with interval I/O totals, not simultaneous readings.".into());
     Ok(Report { as_of_ms: now, from_ms: from, to_ms: to, range_anchor: anchor, range_boot: selected_boot, project: request.project.clone(), status: status.into(), age_ms: age, latest, settings, admission_limits,
-        points, episodes, events, attribution_latest, attribution_age_ms, attribution, workloads, related_issues, sessions: selected_sessions.into_iter().take(200).collect(),
+        points, episodes, events, pace, pace_measured_ms, adjustments, attribution_latest, attribution_age_ms, attribution, workloads, related_issues, sessions: selected_sessions.into_iter().take(200).collect(),
         coverage: Coverage { gaps: gaps.into_iter().take(200).collect(), bounded: source_points > request.limit, gaps_truncated, sessions_truncated, events_truncated, attribution_truncated, workloads_truncated, attribution_retained_bounds_ms, attribution_first_returned_ms, source_points, returned_points, boundary_points, resolution: if use_minutes { "minute" } else { "sample" }.into(), notes },
         units: serde_json::json!({ "wall_time": "UTC milliseconds since Unix epoch", "memory": "bytes", "cpu": "percent of machine capacity", "paging": "pages/second", "disk_throughput": "bytes/second", "disk_latency": "seconds/transfer", "disk_queue": "requests", "monotonic": "milliseconds; boot-relative on Windows, collector-relative elsewhere" }) })
 }

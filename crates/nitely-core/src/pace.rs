@@ -223,6 +223,13 @@ fn current_in(dir: &Path, history: &Path) -> Pace {
     next
 }
 
+/// The pace last measured, and when, read beside the performance history in `performance_dir`
+/// (Nitely's data folder): never measures, so a query of the history starts nothing.
+pub fn cached_beside(performance_dir: &Path) -> Option<(i64, Pace)> {
+    let c = read_cached(&performance_dir.parent()?.join("lanes"))?;
+    Some((c.at_ms, c.pace))
+}
+
 fn try_lock(dir: &Path) -> Option<std::fs::File> {
     std::fs::create_dir_all(dir).ok()?;
     let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("pace.lock")).ok()?;

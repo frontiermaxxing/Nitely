@@ -11,7 +11,7 @@ import * as phoneFixture from "./phone";
 import * as rulesFixture from "./rules";
 import { reviewMode, saveReviewMode, periodicReviews, retryPeriodic, effectiveModes, landsPipeline, landsDryRun } from "./reviewModes";
 import type { ModeOptions, ReviewMode } from "../reviewModes";
-import { performanceFixture, configurePerformance, clearPerformance } from "./performance";
+import { performanceFixture, configurePerformance, clearPerformance, paceFixture } from "./performance";
 import { leaderboardBoardFixture, leaderboardDeleteFixture, leaderboardSendFixture, leaderboardFixture, leaderboardJoinFixture, leaderboardReportFixture, leaderboardStatusFixture } from "./leaderboard";
 import type {
   LaneRun,
@@ -812,7 +812,7 @@ function lanesOverview(): LanesOverview {
   // `?memory=low` shows a request waiting for the machine's memory (NIT-266).
   const low = new URLSearchParams(location.search).get("memory") === "low";
   const GB = 1024 ** 3;
-  const machine = { memory: { total: 64 * GB, available: (low ? 6.2 : 38.4) * GB }, limits: { total: 64 * GB, floor: 12.8 * GB, cap: 16 * GB, floor_from: "default", cap_from: "default" }, below_normal: true };
+  const machine = { memory: { total: 64 * GB, available: (low ? 6.2 : 38.4) * GB }, limits: { total: 64 * GB, floor: 12.8 * GB, cap: 16 * GB, floor_from: "default", cap_from: "default" }, below_normal: true, pace: paceFixture(location.search) };
   const waiting_for_memory = low ? "waiting for memory: 6.2 GB free, new work starts above 12.8 GB" : null;
   const projects = new URLSearchParams(location.search).has("executors") ? BUILD_LANES.map((p, index) => index ? p : {
     ...p, rules: { ...p.rules, executor: "machine:builder" },

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "./backend";
-import { capWords, chipName, chipWords, executorName, laneChips, limitsOf, machineWords, memoryWords, queueWords, remoteRuns, remoteWords, sizeWords, waiting, type LaneChip } from "./lanes";
+import { capWords, chipName, chipWords, executorName, laneChips, limitsOf, machineWords, memoryWords, paceHeadline, queueWords, remoteRuns, remoteWords, sizeWords, waiting, type LaneChip } from "./lanes";
 import type { LaneRun, LanesOverview, MachineNow } from "./types";
 import { openExternal } from "./util";
 import { Button, SettingsRow, StateDot, TextField } from "./ui";
@@ -35,7 +35,7 @@ export function LanesStrip(props: { version: number; now: number; onOpenIssue: (
         {machineWords(lanes).length > 0 && (
           <span
             className={`head-note${lanes.waiting_for_memory ? " memory-wait" : ""}`}
-            title={[lanes.waiting_for_memory, lanes.machine?.below_normal && "Builds, gates, reviews and crew workers run below your own apps."].filter(Boolean).join("\n")}
+            title={[lanes.waiting_for_memory, lanes.machine?.below_normal && "Builds, gates, reviews and crew workers run below your own apps.", paceHeadline(lanes.machine?.pace)].filter(Boolean).join("\n")}
           >
             {machineWords(lanes).join(" · ")}
           </span>

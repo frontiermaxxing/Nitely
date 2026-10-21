@@ -1,3 +1,5 @@
+import type { MachinePace, PaceAdjustment } from "./types";
+
 /** Cached recorder DTOs. Null means unavailable, never zero. All timestamps are UTC ms. */
 export interface PerformanceMetrics {
   cpu_percent: number | null;
@@ -129,6 +131,10 @@ export interface PerformanceReport {
   points: PerformancePoint[];
   episodes: PerformanceEpisode[];
   events: { wall_ms: number; boot?: string | null; kind: string; project: string; issue: string | null; run: number; memory_cap_bytes: number | null }[];
+  /** The machine's pace as last measured, when, and each change of it in the range (NIT-519). */
+  pace?: MachinePace | null;
+  pace_measured_ms?: number | null;
+  adjustments?: PaceAdjustment[];
   sessions: { session: string; boot: string | null; started_ms: number; stopped_ms: number | null }[];
   coverage: {
     gaps: PerformanceGap[];

@@ -2,7 +2,8 @@ import { memo, useEffect, useRef, useState } from "react";
 import { invoke, isLive } from "./backend";
 import { Loading, EmptyState, Select } from "./ui";
 import { performanceClock, pollPerformance } from "./performancePolling";
-import type { LanesOverview } from "./types";
+import type { LanesOverview, MachinePace, PaceAdjustment } from "./types";
+import { HEALTHY_START_MS, paceHeadline } from "./lanes";
 import { byteText, chartBounds, chartSegments, chartValue, currentPressure, episodeExtrema, earlierAttributionWindow, incidentWindow, localDateTime, parseWindow, shiftWindow, windowAttribution, freshness, numberText, performanceQuery, sortedWorkloads, timestamp } from "./performanceModel";
 import type {
   AttributionSample,
@@ -70,6 +71,8 @@ export function Performance(props: { onOpenIssue: (key: string) => void; onSetti
               settings: current.settings,
               status: current.status,
               admission_limits: current.admission_limits,
+              pace: current.pace ?? history.pace,
+              pace_measured_ms: current.pace_measured_ms ?? history.pace_measured_ms,
               attribution_latest: current.attribution_latest,
               attribution_age_ms: current.attribution_age_ms,
             }
@@ -166,6 +169,7 @@ export function Performance(props: { onOpenIssue: (key: string) => void; onSetti
             Counters are measured when supported. Disk activity is transfer traffic, not free disk space. Kernel memory: {byteText(metrics?.kernel_paged_bytes)}{" "}
             paged · {byteText(metrics?.kernel_nonpaged_bytes)} nonpaged.
           </p>
+          <Pace pace={data.pace ?? lanes?.machine?.pace} measuredMs={data.pace_measured_ms} nonpaged={metrics?.kernel_nonpaged_bytes} adjustments={history?.adjustments ?? []} />
         </>
       )}
       <section className="perf-section" id="performance-history">
@@ -307,6 +311,60 @@ function HistoryWindow({ window, fixed, onChoose, onRefresh }: {
     <p className="small muted">Times use your local timezone. Explicit windows include all recorded boots at those wall-clock times. {fixed ? "Fixed window · does not move with time." : "Rolling window · follows current time."}
       {" "}Inspect an incident to open up to ten minutes from its start; step through longer incidents with Next window. Retention and result limits still apply.</p>
   </div>;
+}
+
+/** Why the machine is slow and what Nitely did about it (NIT-520), from the pace it measured
+ * (NIT-519). Plain words and the numbers behind them; the guide to the cause never makes restarting
+ * the answer and needs no administrator rights. */
+function Pace({ pace, measuredMs, nonpaged, adjustments }: { pace: MachinePace | null | undefined; measuredMs: number | null | undefined; nonpaged: number | null | undefined; adjustments: PaceAdjustment[] }) {
+  if (!pace) return null;
+  const headline = paceHeadline(pace);
+  const start = pace.start_ms == null ? "Unmeasured" : `${Math.round(pace.start_ms)} ms`;
+  return (
+    <section className="perf-section" aria-labelledby="perf-pace-title">
+      <h2 id="perf-pace-title">How Nitely paces builds</h2>
+      {headline ? (
+        <div className="perf-pressure perf-pace-note" role="status">
+          <p>{headline}</p>
+        </div>
+      ) : (
+        <p className="muted">Programs start in {start} and memory is not short, so builds and tests use the machine's full share.</p>
+      )}
+      <div className="perf-metrics">
+        <Metric label="Program start" value={start} detail={measuredMs ? `median of 5, ${timestamp(measuredMs)} · healthy is about ${HEALTHY_START_MS} ms` : `median of 5 · healthy is about ${HEALTHY_START_MS} ms`} />
+        <Metric label="Kernel nonpaged" value={byteText(nonpaged)} detail="memory drivers hold, which no app owns" />
+        <Metric
+          label="Test threads per suite"
+          value={pace.test_threads == null ? "Full share" : String(pace.test_threads)}
+          detail={pace.suites == null ? "builds at once: every slot" : `${pace.suites} ${pace.suites === 1 ? "build" : "builds"} at once`}
+        />
+      </div>
+      {adjustments.length > 0 && (
+        <ul className="perf-pace-log" aria-label="What Nitely changed">
+          {adjustments.map((a) => (
+            <li key={a.wall_ms}>
+              <span className="muted">{timestamp(a.wall_ms)}</span> {a.said.join(" ")}
+            </li>
+          ))}
+        </ul>
+      )}
+      {(headline || adjustments.some((a) => a.pace.starts !== "normal" || a.pace.memory_short)) && (
+        <details className="perf-pace-cause">
+          <summary>Find the cause</summary>
+          <p>
+            Programs start slowly when something inspects each new program before it runs: security or antivirus software, endpoint monitoring, VPN or
+            network filter drivers, and backup or sync tools that watch files. See whether the slowdown began when one of them was installed or updated,
+            and look in its own settings or log for what it checks.
+          </p>
+          <p>
+            Kernel nonpaged memory that keeps growing while no app grows is held by a driver. The tool that installed that driver is the likely cause, and
+            updating it or reporting it to its maker is the lasting fix.
+          </p>
+          <p>Task Manager's Startup apps and Details tabs show what runs here, without administrator rights. Nitely keeps adapting in the meantime.</p>
+        </details>
+      )}
+    </section>
+  );
 }
 
 function Metric({ label, value, detail }: { label: string; value: string; detail: string }) {

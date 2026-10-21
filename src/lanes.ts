@@ -1,7 +1,7 @@
 // What the app says about build lanes (docs/build-lanes.md, "What the app shows"): one chip per
 // lane on Now and Overview, and each run on its issue's timeline. Pure, so its tests run alone.
 
-import type { LaneRun, LanesOverview, MachineNow, ProjectLanes } from "./types";
+import type { LaneRun, LanesOverview, MachineNow, MachinePace, ProjectLanes } from "./types";
 
 export function executorName(executor = "local"): string {
   return executor === "ci" ? "CI" : executor.startsWith("machine:") ? `Machine ${executor.slice(8)}` : "This machine";
@@ -149,7 +149,43 @@ export function machineWords(o: LanesOverview): string[] {
   if (o.slots) words.push(`builds ${o.slots.used} of ${o.slots.total}`);
   if (o.waiting_for_memory) words.push("waiting for memory");
   if (o.machine?.below_normal) words.push("below normal priority");
+  words.push(...paceWords(o.machine?.pace));
   return words;
+}
+
+/** What a healthy machine takes to start a program and see it end, in ms (pace.rs). */
+export const HEALTHY_START_MS = 25;
+
+const times = (ms: number) => `${Math.max(2, Math.round(ms / HEALTHY_START_MS))}×`;
+const builds = (n: number | null) => (n === 1 ? "one build" : `${n ?? "fewer"} builds`);
+
+/** The strip's words for the machine's pace (NIT-519): "programs start 13× slower, one build at
+ * once", "memory short". Nothing while nothing is held back. */
+export function paceWords(p: MachinePace | null | undefined): string[] {
+  if (!p) return [];
+  const words: string[] = [];
+  if (p.starts !== "normal" && p.start_ms != null) words.push(`programs start ${times(p.start_ms)} slower, ${builds(p.suites)} at once`);
+  if (p.memory_short) words.push("memory short");
+  return words;
+}
+
+/** One plain account of why the machine is slow and what Nitely did about it, or null when
+ * nothing is held back (NIT-520). It never tells the person to restart anything. */
+export function paceHeadline(p: MachinePace | null | undefined): string | null {
+  if (!p) return null;
+  const said: string[] = [];
+  if (p.starts !== "normal" && p.start_ms != null) {
+    const ci = p.prefer_ci ? " and sends full test suites to CI where the project allows" : "";
+    said.push(
+      `Starting a program on this machine takes ${Math.round(p.start_ms)} ms, about ${times(p.start_ms)} a healthy machine's ${HEALTHY_START_MS} ms. ` +
+        `Test suites start many programs and slow each other down, so Nitely runs ${builds(p.suites)} at once with at most ${p.test_threads ?? "fewer"} test threads each${ci}.`,
+    );
+  }
+  if (p.memory_short) {
+    const free = p.available != null ? bytesWords(p.available) : "Little";
+    said.push(`${free} of memory is free, so Nitely starts new builds by the memory running ones use now, not what they set aside.`);
+  }
+  return said.length ? said.join(" ") : null;
 }
 
 /** Settings' words for the machine's memory: free now, and each limit with where it comes from. */

@@ -1,4 +1,37 @@
 import type { AttributionSample, PerformanceMetrics, PerformanceReport, PerformanceSettings, PerformanceUsage } from "../performanceModel";
+import type { MachinePace, PaceAdjustment } from "../types";
+
+/** The machine's pace in the preview (NIT-519/520): `?pace=slow` shows process starts 13 times
+ * slower than healthy, `?pace=memory` short memory, anything else a healthy machine. */
+export function paceFixture(search: string): MachinePace {
+  const mode = new URLSearchParams(search).get("pace");
+  const slow = mode === "slow";
+  const short = mode === "memory";
+  return {
+    starts: slow ? "very_slow" : "normal",
+    start_ms: slow ? 330 : 18,
+    memory_short: short,
+    available: (short ? 9.6 : 38.4) * GiB,
+    test_threads: slow ? 4 : null,
+    suites: slow ? 1 : null,
+    prefer_ci: slow,
+    reasons: slow
+      ? ["Starting a process takes 330 ms here, about 13 times a healthy machine's 25 ms. Test suites start many processes, and several at once slow each other down far more than their number, so each suite gets at most 4 test threads, at most 1 heavy run at once, and full suites go to CI where the playbook allows."]
+      : short
+        ? ["9.6 GB of memory is free, under the 12.8 GB kept free plus one run's 16.0 GB: new runs start by the memory the running ones use now, not what they set aside when they started."]
+        : [],
+  };
+}
+
+function paceAdjustments(search: string, now: number): PaceAdjustment[] {
+  const pace = paceFixture(search);
+  if (pace.starts === "normal" && !pace.memory_short) return [];
+  const healthy = paceFixture("");
+  return [
+    { wall_ms: now - 4 * 60_000, pace, said: pace.reasons },
+    { wall_ms: now - 50 * 60_000, pace: healthy, said: ["Starting a process takes 21 ms again: test threads and heavy runs at once are back to the machine's share."] },
+  ];
+}
 
 const GiB = 1024 ** 3;
 let settings: PerformanceSettings = { enabled: true, detailed_hours: 24, summary_days: 30 };
@@ -171,6 +204,9 @@ export function performanceFixture(args: Record<string, unknown>, env = { search
             },
           ]
         : [],
+    pace: noData ? null : paceFixture(env.search),
+    pace_measured_ms: noData ? null : now - 70_000,
+    adjustments: noData ? [] : paceAdjustments(env.search, now),
     events: noData ? [] : [{ wall_ms: to - 30_000, boot: rangeBoot, kind: "waiting_for_memory", project: "NIT", issue: "NIT-4", run: 42, memory_cap_bytes: 12 * GiB }],
     sessions: noData ? [] : [{ session: query.before_last_restart ? "preview-before-restart" : "preview", boot: rangeBoot, started_ms: from, stopped_ms: query.before_last_restart ? to : null }],
     coverage: {

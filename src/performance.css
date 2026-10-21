@@ -222,6 +222,28 @@
   margin-bottom: 16px;
   font-size: 13px;
 }
+.perf-pace-log {
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--fg-2);
+}
+.perf-pace-cause {
+  margin-top: 12px;
+  font-size: 13px;
+  color: var(--fg-2);
+}
+.perf-pace-cause summary {
+  cursor: pointer;
+  color: var(--fg);
+}
+.perf-pace-cause p {
+  margin: 8px 0 0;
+  max-width: 72ch;
+}
 .perf-pressure p {
   color: var(--fg-2);
   margin: 5px 0 0;

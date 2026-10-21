@@ -271,12 +271,15 @@ pub struct Now {
     pub run_cap: Option<u64>,
     /// Builds, gates, reviews and crew workers run at below-normal priority (nice 10 off Windows).
     pub below_normal: bool,
+    /// How hard builds and tests may push now, from the machine's measured process starts and
+    /// memory, and why (NIT-519).
+    pub pace: crate::pace::Pace,
 }
 
 pub fn now() -> Now {
     let limits = limits();
     let run_cap = limits.as_ref().map(|l| crate::lanes::cap_for(l, crate::lanes::machine_budget().slots));
-    Now { memory: memory(), limits, run_cap, below_normal: true }
+    Now { memory: memory(), limits, run_cap, below_normal: true, pace: crate::pace::current() }
 }
 
 #[cfg(windows)]

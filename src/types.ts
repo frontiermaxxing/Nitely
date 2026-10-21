@@ -1143,6 +1143,31 @@ export interface MachineNow {
   run_cap?: number | null;
   /** Builds, gates, reviews and crew workers run at below-normal priority. */
   below_normal: boolean;
+  /** How hard builds and tests may push, from the machine's measured process starts and memory
+   * (NIT-519); absent from an older backend. */
+  pace?: MachinePace;
+}
+
+/** How hard Nitely lets builds and tests push, and why (pace.rs `Pace`). */
+export interface MachinePace {
+  starts: "normal" | "slow" | "very_slow";
+  /** Median milliseconds to start a trivial program and see it end. */
+  start_ms: number | null;
+  /** Less memory free than the floor and one run's cap: builds start by live use. */
+  memory_short: boolean;
+  available: number | null;
+  /** The most test threads one suite gets, and heavy runs at once; null when not held back. */
+  test_threads: number | null;
+  suites: number | null;
+  prefer_ci: boolean;
+  reasons: string[];
+}
+
+/** One change of pace, with what was said about it. */
+export interface PaceAdjustment {
+  wall_ms: number;
+  pace: MachinePace;
+  said: string[];
 }
 
 /** One repo's build lanes, as `nitely lanes status` shows them (lanes.rs `Lanes`). */

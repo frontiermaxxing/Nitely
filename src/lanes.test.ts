@@ -2,7 +2,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { bytesWords, capWords, chipName, chipWords, executorName, forHowLong, laneChips, laneRunId, limitsOf, machineWords, memoryWords, queueWords, remoteRuns, remoteWords, sizeWords, waiting } from "./lanes.ts";
+import { bytesWords, capWords, chipName, chipWords, executorName, forHowLong, laneChips, laneRunId, limitsOf, machineWords, memoryWords, paceHeadline, paceWords, queueWords, remoteRuns, remoteWords, sizeWords, waiting } from "./lanes.ts";
 import type { LaneRun, ProjectLanes } from "./types.ts";
 
 const run = (id: number, state: string, lane: number | null, more: Partial<LaneRun> = {}): LaneRun =>
@@ -124,6 +124,23 @@ test("durations and the run a timeline entry names", () => {
   assert.equal(laneRunId({ kind: "lane_run", summary: "Lane 1 could not run `x`: busy" }), null);
   assert.equal(laneRunId({ kind: "lane_run", summary: "The gate for 1a2b3c4 passed in lane run 12 already; not run again" }), 12);
   assert.equal(laneRunId({ kind: "crew_started", summary: "(run 3)" }), null);
+});
+
+test("a slow machine is said plainly with what Nitely did, and a healthy one says nothing (NIT-520)", () => {
+  const GB = 1024 ** 3;
+  const healthy = { starts: "normal" as const, start_ms: 18, memory_short: false, available: 38 * GB, test_threads: null, suites: null, prefer_ci: false, reasons: [] };
+  assert.deepEqual(paceWords(healthy), []);
+  assert.equal(paceHeadline(healthy), null);
+  assert.deepEqual(paceWords(undefined), [], "an older backend has no pace");
+  const slow = { ...healthy, starts: "very_slow" as const, start_ms: 330, test_threads: 4, suites: 1, prefer_ci: true };
+  assert.deepEqual(paceWords(slow), ["programs start 13× slower, one build at once"]);
+  const said = paceHeadline(slow)!;
+  assert.match(said, /takes 330 ms, about 13× a healthy machine's 25 ms/);
+  assert.match(said, /one build at once with at most 4 test threads each and sends full test suites to CI/);
+  assert.doesNotMatch(said, /restart|reboot|administrator/i);
+  const short = { ...healthy, memory_short: true, available: 9.6 * GB };
+  assert.deepEqual(paceWords(short), ["memory short"]);
+  assert.match(paceHeadline(short)!, /^9\.6 GB of memory is free, so Nitely starts new builds by the memory running ones use now/);
 });
 
 test("the strip's heading says how many build, that one waits for memory, and that they run below normal", () => {
