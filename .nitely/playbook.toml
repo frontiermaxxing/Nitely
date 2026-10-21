@@ -12,7 +12,7 @@ setup = ["npm ci"]
 mode = "light"
 
 [gate]
-commands = ["cargo test --workspace", "cargo clippy --workspace -- -D warnings", "npm test", "npm run build"]
+commands = ["cargo test --workspace -- --test-threads=12", "cargo clippy --workspace -- -D warnings", "npm test", "npm run build"]
 
 [review]
 # The defaults: Codex reviews Claude's branches, Claude reviews everyone else's.
@@ -58,6 +58,7 @@ keep = ["target", "node_modules"]
 # Reminded to use `run` instead when run in a light worktree (never blocked). npm ci stays local:
 # the browser preview needs node_modules in the worktree, and it costs 2 s and ~100 MB.
 heavy = ["^cargo (build|test|clippy|check)\\b", "^npm (test|run build)\\b"]
+timeout_minutes = 75
 
 [review.reviewer]
 claude = "codex"
@@ -82,3 +83,11 @@ tag = "v*"
 exclude_tags = ["*-*"]
 stamp_paths = ["Cargo.toml", "Cargo.lock", "package.json", "package-lock.json", "src-tauri/tauri.conf.json"]
 commands = ["node scripts/version.mjs"]
+
+[[gate.steps]]
+run = "cargo test --workspace"
+unless_only = ['^src/', '^scripts/', '^public/', '^index\.html$', '^docs/.*\.md$']
+
+[[gate.steps]]
+run = "cargo clippy --workspace -- -D warnings"
+unless_only = ['^src/', '^scripts/', '^public/', '^index\.html$', '^docs/.*\.md$']
