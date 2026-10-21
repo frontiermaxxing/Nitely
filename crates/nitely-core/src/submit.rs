@@ -132,6 +132,15 @@ pub struct SubmitOptions<'a> {
     pub solution_patch_id: Option<&'a str>,
 }
 
+/// Refuses to submit work the issue marks as outside the repo while it has no commits of its own
+/// (NIT-551): there is no change to gate or review.
+pub fn refuse_outside_repo(issue: &IssueRecord, has_commits: bool) -> Result<()> {
+    if crate::overlap::outside_repo(&issue.body, has_commits) {
+        bail!("{} changes no repo files, so there is nothing to submit. {}", issue.key, crate::overlap::OUTSIDE_REPO);
+    }
+    Ok(())
+}
+
 pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: &Actor) -> Result<Submitted> {
     let (worktree, branch) = playbook::worktree_and_branch(opts.dir)?;
     let (_, branch_key) = crate::git::parse_branch(&branch);
@@ -153,6 +162,10 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     }
     let key = opts.issue_key.map(str::to_string).or(branch_key).context("the branch names no issue; pass the issue key")?;
     let issue = db.issue(&key)?.with_context(|| format!("no issue {key}"))?;
+    if crate::overlap::changes_no_repo_files(&issue.body) {
+        let ahead = git(&worktree, &["rev-list", "--count", &format!("{}..HEAD", playbook::diff_base(&worktree, &base))])?;
+        refuse_outside_repo(&issue, ahead.trim() != "0")?;
+    }
     crate::project_modes::apply_issue(db, &key, &mut pb)?;
     let _telemetry = crate::performance_attribution::Scope::new(db, crate::performance_attribution::Context { project: issue.project.clone(), issue: Some(key.clone()), ..Default::default() });
     if rebase_in_progress(&worktree) {

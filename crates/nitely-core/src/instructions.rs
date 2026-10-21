@@ -13,7 +13,9 @@ and when you learn something about the project as a whole that the next agent ne
 `set_project_brief`.
 
 1. `next_task` claims the most urgent Todo issue. Then `start_task` with its key creates the issue's \
-branch and worktree from the integration branch and runs setup. Work only in that worktree.
+branch and worktree from the integration branch and runs setup. Work only in that worktree. An issue \
+whose body says \"Changes no repo files:\" (a design in an outside tool, research) gets no branch or worktree: \
+do the work, then close it with `update_issue` Done and evidence, with no submit or land.
 2. `report` one line on what you are doing at each step; it shows live on the human's board.
 3. `file_issue` anything you find but will not fix now (it refuses likely duplicates); `file_issues` \
 files up to 10 at once, their blockers naming each other by ref (a later batch names earlier ones by key). When the playbook itself is wrong \

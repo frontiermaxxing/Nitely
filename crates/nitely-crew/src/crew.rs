@@ -875,7 +875,8 @@ impl Supervisor {
             agent: agent.into(),
             program,
             args: command[1..].iter().map(|a| fill(a)).collect(),
-            cwd: worktree.clone(),
+            // Work outside the repo has no worktree: the worker starts in a folder of its own.
+            cwd: if worktree.exists() { worktree.clone() } else { scratch(&logs, &issue.key)? },
             brief: brief(issue, &self.project, &worktree, &branch, &self.repo_root, port),
             log: log.clone(),
             env,
@@ -1433,6 +1434,9 @@ pub fn brief(issue: &IssueRecord, project: &str, worktree: &Path, branch: &str, 
     if nitely_core::goal_plans::is_planning(issue) {
         return planner_brief(issue, project, worktree, repo);
     }
+    if nitely_core::overlap::changes_no_repo_files(&issue.body) {
+        return outside_brief(issue, project, repo);
+    }
     // A light worktree with lanes builds through `run` (docs/build-lanes.md).
     let lanes = Playbook::load(repo).ok().is_some_and(|pb| pb.lanes.is_some());
     let mut light = if lanes && nitely_core::light::is_light(worktree) { format!("\n{}\n", nitely_core::light::RUN_LINE) } else { String::new() };
@@ -1457,6 +1461,25 @@ Work only there; never edit or commit in {repo}.
 
 Then end. Do not take another issue: Nitely starts a new worker for it.
 {light}"
+    )
+}
+
+/// The brief of a worker whose issue changes no repo files (NIT-551): it has no worktree, works in
+/// the outside tool the issue names, and closes the issue with evidence.
+fn outside_brief(issue: &IssueRecord, project: &str, repo: &Path) -> String {
+    let (key, title, repo) = (&issue.key, &issue.title, repo.display());
+    format!(
+        "You are a Nitely crew worker: Nitely started you to work on one issue, {key}, \"{title}\", in project {project}. \
+Nobody is watching this session; nobody will answer a question here.
+
+The issue is claimed for you. Its body says it changes no repo files, so it has no worktree: never edit or commit in {repo}. {}
+
+1. Read the issue with get_issue {key}. Call report with key {key} at each step, one line.
+2. If only the human can decide something, ask it, move {key} to Needs You, leave a handoff note and stop.
+3. When it is done, update_issue {key} to Done with the evidence. Before you stop, for any reason, leave a note on {key} with handoff: true.
+
+Then end. Do not take another issue.",
+        nitely_core::overlap::OUTSIDE_REPO
     )
 }
 
@@ -1723,6 +1746,13 @@ fn branch_vendors(branches: &[String], key: &str) -> Vec<String> {
         }
     }
     vendors
+}
+
+/// A folder of its own for a worker with no worktree (work outside the repo), beside its logs.
+fn scratch(logs: &Path, key: &str) -> Result<PathBuf> {
+    let dir = logs.join(format!("{}-outside", key.to_lowercase()));
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    Ok(dir)
 }
 
 /// `s` as a TOML string, for a `-c key=value` override.

@@ -113,6 +113,16 @@ pub fn changes_no_repo_files(text: &str) -> bool {
     text.lines().any(|l| l.trim_start().starts_with(NO_REPO_CHANGES))
 }
 
+/// What an agent does with work outside the repo (NIT-551): start_task, submit, next_task and the
+/// crew's brief all say it.
+pub const OUTSIDE_REPO: &str = "This work is outside the repo: do it, then close it with update_issue Done and evidence (links to the design, what was decided). It needs no branch, worktree, submit or land. If it turns out to need repo changes after all, take the \"Changes no repo files:\" line out of its body with update_issue and call start_task again.";
+
+/// Whether work on an issue goes on outside the repo: its body says it changes no repo files, and it
+/// has no commits of its own. A branch with commits changed files after all, and goes the usual way.
+pub fn outside_repo(body: &str, has_commits: bool) -> bool {
+    changes_no_repo_files(body) && !has_commits
+}
+
 /// `body` with the note that the work changes no repo files, and why. Refused without a reason:
 /// the person reads it on the issue.
 pub fn with_no_repo_changes(body: &str, reason: &str) -> Result<String> {
@@ -365,6 +375,18 @@ impl Drop for PickLock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn work_outside_the_repo_gets_no_worktree_and_no_submit_until_it_has_commits() {
+        let marked = with_no_repo_changes("Design the settings screens.", "designs them in the design tool").unwrap();
+        assert!(outside_repo(&marked, false), "marked, nothing committed: outside the repo");
+        assert!(!outside_repo(&marked, true), "a branch with commits changed files after all: the usual way");
+        assert!(!outside_repo("Fix the settings screen.", false), "not marked: the usual way");
+        let issue = crate::issues::IssueRecord { key: "APP-3".into(), body: marked, ..Default::default() };
+        let refused = crate::submit::refuse_outside_repo(&issue, false).unwrap_err().to_string();
+        assert!(refused.contains("APP-3 changes no repo files") && refused.contains("update_issue Done"), "{refused}");
+        assert!(crate::submit::refuse_outside_repo(&issue, true).is_ok());
+    }
 
     #[test]
     fn finds_paths_in_prose() {

@@ -1379,6 +1379,10 @@ pub struct Started {
     /// The read-only reference tree at the project's base commit, for reading code outside it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reference: Option<String>,
+    /// Set for work outside the repo (overlap::outside_repo): what to do instead, and then there is
+    /// no branch or worktree.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outside_repo: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1439,6 +1443,25 @@ pub fn start_task(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, 
     let worktree = playbook.worktree_for(repo_root, vendor, issue);
     let worktree_str = worktree.to_string_lossy().into_owned();
 
+    // Work the issue marks as outside the repo gets no branch or worktree (NIT-551): a design in an
+    // outside tool, research. A branch started before the mark keeps the usual flow.
+    let started_before = worktree.join(".git").exists() || git(repo_root, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_ok();
+    if crate::overlap::outside_repo(&issue.body, started_before) {
+        db.log_event(actor, Some(&issue.key), None, "status", "Started outside the repo: its body says it changes no repo files, so it has no branch or worktree")?;
+        return Ok(Started {
+            issue: issue.key.clone(),
+            branch: String::new(),
+            worktree: String::new(),
+            created: false,
+            setup: vec![],
+            warnings: vec![],
+            light: false,
+            sparse: vec![],
+            reference: None,
+            outside_repo: Some(crate::overlap::OUTSIDE_REPO.to_string()),
+        });
+    }
+
     if worktree.join(".git").exists() {
         // A start that failed at the submodules (one not checked out yet) finishes them now.
         for line in crate::submodules::start(repo_root, &playbook, &worktree, &branch, &format!("{}\n{}", issue.title, issue.body))? {
@@ -1456,6 +1479,7 @@ pub fn start_task(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, 
             light,
             sparse: crate::light::sparse_set(&worktree).unwrap_or_default(),
             reference: reference.map(|r| r.to_string_lossy().into_owned()),
+            outside_repo: None,
         });
     }
 
@@ -1515,6 +1539,7 @@ pub fn start_task(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, 
         light: false,
         sparse: vec![],
         reference: None,
+        outside_repo: None,
     })
 }
 
@@ -1548,7 +1573,7 @@ fn start_light(db: &Db, repo_root: &Path, playbook: &Playbook, issue: &IssueReco
             None
         }
     };
-    Ok(Started { issue: issue.key.clone(), branch, worktree: worktree_str, created: true, setup: vec![], warnings, light: true, sparse, reference })
+    Ok(Started { issue: issue.key.clone(), branch, worktree: worktree_str, created: true, setup: vec![], warnings, light: true, sparse, reference, outside_repo: None })
 }
 
 /// The ref a branch's changes are measured against: `origin/<base>` when the local `<base>` is

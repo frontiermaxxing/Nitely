@@ -1226,10 +1226,15 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
                         Some(root) => Playbook::load(&root)?.branch_for(&server.vendor, &issue),
                         None => branch_name(&server.vendor, &issue.key, &issue.title),
                     };
+                    let next = if nitely_core::overlap::changes_no_repo_files(&issue.body) {
+                        format!("Call start_task with this key: it claims the issue and makes no branch or worktree. {} Report as you go, and leave a handoff note before you stop.", nitely_core::overlap::OUTSIDE_REPO)
+                    } else {
+                        "Call start_task with this key for the branch and worktree, work there, report as you go, call submit when it is committed, and leave a handoff note before you stop.".to_string()
+                    };
                     let mut out = json!({
                         "issue": issue,
                         "branch": branch,
-                        "next": "Call start_task with this key for the branch and worktree, work there, report as you go, call submit when it is committed, and leave a handoff note before you stop."
+                        "next": next
                     });
                     // Why this one: work in flight holds files a more urgent issue would touch.
                     if let Some(why) = why {
@@ -1342,7 +1347,16 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             None => json!(db.lane_runs_by(actor.id(), 5)?),
         },
         "submit" => {
-            let dir = task_dir(&config, &db, args, &server.cwd)?;
+            let dir = match task_dir(&config, &db, args, &server.cwd) {
+                Ok(dir) => dir,
+                Err(e) => {
+                    // Work outside the repo has no worktree to submit from: say what to do instead.
+                    if let Some(issue) = str_arg(args, "key").map(|k| db.issue(k)).transpose()?.flatten() {
+                        nitely_core::submit::refuse_outside_repo(&issue, false)?;
+                    }
+                    return Err(e);
+                }
+            };
             nitely_core::install::check_current(&config, &dir, env!("NITELY_COMMIT"))?;
             let solution = nitely_core::submit::SolutionSummary::from_fields(str_arg(args, "solution_title"), str_arg(args, "solution_summary"))?;
             let opts = nitely_core::submit::SubmitOptions { dir: &dir, issue_key: str_arg(args, "key"), skip_review: false, local_only: false, batch: false, solution: solution.as_ref(), solution_commit: None, solution_patch_id: None };
