@@ -150,6 +150,12 @@ pub fn report_now(config: &crate::Config, db: &crate::db::Db, projects: &[String
     build(&board, counted as u64, profile)
 }
 
+/// Why `profile` can't be shared as it is, if it can't.
+pub fn check_profile(profile: &Profile) -> Result<()> {
+    display_name(&profile.display_name)?;
+    links(profile).map(|_| ())
+}
+
 fn period(p: &PeriodStats) -> Period {
     let durations = |s: &Option<Spread>| s.as_ref().map(|s| Durations { median: s.median, p90: s.p90, count: s.count });
     let mut vendors: Vec<Vendor> = Vec::new();
@@ -378,7 +384,7 @@ mod tests {
         let with = |f: fn(&mut Profile)| {
             let mut p = profile();
             f(&mut p);
-            links(&p).and_then(|_| display_name(&p.display_name))
+            check_profile(&p)
         };
         assert!(with(|p| p.display_name = "  ".into()).is_err());
         assert!(with(|p| p.display_name = "me@example.com".into()).is_err());
