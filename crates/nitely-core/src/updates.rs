@@ -95,8 +95,23 @@ pub fn digest(events: &[FeedEvent], reader: &str, scope: &Scope, cap: usize) -> 
     let mut lines: Vec<String> = Vec::new();
     let mut landed: Vec<String> = Vec::new();
     let mut goal_moves: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for e in events.iter().filter(|e| relevant(e)) {
+    let relevant: Vec<&FeedEvent> = events.iter().filter(|e| relevant(e)).collect();
+    // Past the cap, the cursor stops just before the first update not told, so the next read
+    // (the `updates` the block points to) starts with it: nothing is skipped.
+    let mut cursor = cursor;
+    let mut more = 0;
+    for (n, e) in relevant.iter().enumerate() {
         let key = e.issue_key.clone().unwrap_or_default();
+        let adds_line = match e.kind.as_str() {
+            "landed" => landed.is_empty(),
+            "goal_changed" => !goal_moves.contains_key(&quote(&e.summary)),
+            _ => true,
+        };
+        if adds_line && lines.len() + usize::from(!landed.is_empty()) + goal_moves.len() >= cap {
+            cursor = e.id - 1;
+            more = relevant.len() - n;
+            break;
+        }
         match e.kind.as_str() {
             "landed" => landed.push(key),
             "goal_changed" => goal_moves.entry(quote(&e.summary)).or_default().push(key),
@@ -109,9 +124,15 @@ pub fn digest(events: &[FeedEvent], reader: &str, scope: &Scope, cap: usize) -> 
     if !landed.is_empty() {
         lines.push(format!("Landed: {}", landed.join(", ")));
     }
-    let more = lines.len().saturating_sub(cap);
-    lines.truncate(cap);
     Digest { lines, more, cursor }
+}
+
+/// The cursor a reader keeps for a scope (NIT-562): one per reader, scope and projects, so reading
+/// one project's updates never uses up another's.
+pub fn cursor_key(reader: &str, projects: &[String], whole: bool) -> String {
+    let mut projects: Vec<String> = projects.iter().map(|p| p.to_uppercase()).collect();
+    projects.sort();
+    format!("{reader} {} {}", if whole { "project" } else { "mine" }, projects.join(","))
 }
 
 /// One event in words.
@@ -147,7 +168,8 @@ pub const HOOK_CAP: usize = 8;
 /// Reads `reader`'s unread updates in `projects` (whole projects when `whole`), at most `cap`
 /// lines, and moves its cursor past them.
 pub fn read(db: &Db, reader: &str, projects: &[String], whole: bool, cap: usize) -> Result<Digest> {
-    let cursor: Option<i64> = db.conn.query_row("SELECT event_id FROM update_cursor WHERE reader = ?1", [reader], |r| r.get(0)).optional()?;
+    let key = cursor_key(reader, projects, whole);
+    let cursor: Option<i64> = db.conn.query_row("SELECT event_id FROM update_cursor WHERE reader = ?1", [&key], |r| r.get(0)).optional()?;
     let after = match cursor {
         Some(c) => c,
         None => db.conn.query_row("SELECT COALESCE(MAX(id), 0) FROM event WHERE ts < ?1", [now() - FIRST_WINDOW_SECS], |r| r.get(0))?,
@@ -169,7 +191,7 @@ pub fn read(db: &Db, reader: &str, projects: &[String], whole: bool, cap: usize)
     db.conn.execute(
         "INSERT INTO update_cursor (reader, event_id, read_at) VALUES (?1, ?2, ?3)
          ON CONFLICT(reader) DO UPDATE SET event_id = excluded.event_id, read_at = excluded.read_at",
-        params![reader, digest.cursor, now()],
+        params![key, digest.cursor, now()],
     )?;
     Ok(digest)
 }
@@ -245,9 +267,16 @@ mod tests {
     fn the_block_is_capped_and_says_how_to_read_the_rest_and_nothing_new_adds_nothing() {
         let whole = Scope::Project(["APP".to_string()].into());
         let d = digest(&feed(), "claude:coord", &whole, 2);
-        assert_eq!((d.lines.len(), d.more), (2, 3));
+        assert_eq!((d.lines.len(), d.more), (2, 5), "the five updates after the first two are left for the next read");
         let block = d.block().unwrap();
-        assert!(block.starts_with("Nitely, since you last looked:\n- The person answered the ask on APP-70") && block.ends_with("- and 3 more: call `updates`"), "{block}");
+        assert!(block.starts_with("Nitely, since you last looked:\n- The person answered the ask on APP-70") && block.ends_with("- and 5 more: call `updates`"), "{block}");
+        // The cursor stops before the first update not told: the next read starts there, so the
+        // rest are told and none is lost (the review of NIT-562).
+        assert_eq!(d.cursor, 11);
+        let rest: Vec<FeedEvent> = feed().into_iter().filter(|e| e.id > d.cursor).collect();
+        let next = digest(&rest, "claude:coord", &whole, 8);
+        assert_eq!(next.lines.len(), 3, "{:?}", next.lines);
+        assert_eq!((next.more, next.cursor), (0, 18));
         let quiet = digest(&[ev(20, "claude:other", Some("APP-9"), Some("APP"), None, "status", "Working")], "claude:coord", &whole, 8);
         assert_eq!((quiet.block(), quiet.cursor), (None, 20), "nothing to say, but the cursor still moves");
         assert_eq!(digest(&[], "r", &whole, 8).block(), None);
@@ -274,6 +303,13 @@ mod tests {
         assert!(read(&db, "claude:s1", &["APP".into()], false, HOOK_CAP).unwrap().block().unwrap().contains("Prefer the left one"));
         drop(db);
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn each_scope_and_project_keeps_its_own_cursor() {
+        assert_ne!(cursor_key("cli", &["APP".into()], false), cursor_key("cli", &["WEB".into()], false));
+        assert_ne!(cursor_key("cli", &["APP".into()], false), cursor_key("cli", &["APP".into()], true));
+        assert_eq!(cursor_key("cli", &["web".into(), "APP".into()], true), cursor_key("cli", &["APP".into(), "WEB".into()], true));
     }
 
     #[test]
