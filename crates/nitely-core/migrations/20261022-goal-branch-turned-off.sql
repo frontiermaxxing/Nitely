@@ -1,0 +1,1 @@
+ALTER TABLE goal_branch ADD COLUMN turned_off INTEGER NOT NULL DEFAULT 0;

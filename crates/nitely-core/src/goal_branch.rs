@@ -231,7 +231,7 @@ impl Db {
                 waiting.iter().map(|i| i.issue.as_str()).collect::<Vec<_>>().join(", ")
             );
         }
-        self.conn.execute("UPDATE goal_branch SET closed_at = ?2 WHERE goal_id = ?1 AND closed_at IS NULL", params![goal, now()])?;
+        self.conn.execute("UPDATE goal_branch SET closed_at = ?2, turned_off = 1 WHERE goal_id = ?1 AND closed_at IS NULL", params![goal, now()])?;
         self.log_event(actor, None, None, "goal_branch", &format!("Goal {goal}'s items land on main again; {} is closed", gb.branch))?;
         Ok(())
     }
@@ -247,9 +247,10 @@ impl Db {
         Ok(n as usize)
     }
 
-    /// Whether the goal's branch was turned off by hand: a closed row stays as its history.
+    /// Whether the goal's branch was turned off by hand (disable_goal_branch), not closed by its
+    /// goal's last checkpoint: the closed row stays as its history.
     pub fn goal_branch_turned_off(&self, goal: i64) -> Result<bool> {
-        Ok(self.conn.query_row("SELECT EXISTS(SELECT 1 FROM goal_branch WHERE goal_id = ?1 AND closed_at IS NOT NULL)", [goal], |r| r.get(0))?)
+        Ok(self.conn.query_row("SELECT EXISTS(SELECT 1 FROM goal_branch WHERE goal_id = ?1 AND closed_at IS NOT NULL AND turned_off = 1)", [goal], |r| r.get(0))?)
     }
 
     /// The items on the goal's branch that no checkpoint has landed yet, oldest first.
