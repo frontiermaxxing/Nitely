@@ -983,7 +983,7 @@ fn run_with(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Act
     // closes the request's row: a queued row left behind would hold up the requests after it.
     let started = (|| -> Result<_> {
         let quick = quick_request(db, &root, req.kind.as_str(), req.command)?.is_some();
-        let (n, lock, slot) = take_turn(db, id, repo_root, pb, &rules, quick, &mut slots_now(), &mut read_memory, &mut memory_limits, yolo_keys)?;
+        let (n, lock, slot) = take_turn(db, id, repo_root, pb, &rules, quick, &mut slots_now(), &mut read_memory, &mut memory_limits, yolo_keys, &mut pause)?;
         let logs = logs_dir(db, req.project);
         std::fs::create_dir_all(&logs)?;
         let log = logs.join(format!("{id}.log"));
@@ -2636,6 +2636,136 @@ fn waiting_reasons(db: &Db) -> Result<std::collections::HashMap<i64, String>> {
         .collect())
 }
 
+/// What one look at a waiting request found (NIT-533): not its turn yet (or no slot, or no lane
+/// free), the person's checkout busy, memory short, or admitted.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Look {
+    NotMyTurn,
+    NoSlot,
+    NoLane,
+    CheckoutBusy(String),
+    Memory(String),
+    Admitted,
+}
+
+/// What a waiting request carries from one look to the next: whether its row says it waits for
+/// memory, and since when (seconds) it has waited for the person's checkout.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct Waited {
+    pub memory: bool,
+    pub checkout_since: Option<i64>,
+}
+
+/// A change to the request's row a look asks for.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum RowUpdate {
+    /// `waiting_memory`: why it waits for memory, or cleared.
+    WaitingMemory(Option<String>),
+    /// `waiting_for`: why it waits for the person's checkout.
+    WaitingFor(String),
+}
+
+/// What the loop does after one look: the rows and performance events to write, then either stop
+/// waiting (`pause` None), give up with a reason, or look again after `pause`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Step {
+    pub waiting: Waited,
+    pub rows: Vec<RowUpdate>,
+    pub events: Vec<crate::performance_events::Kind>,
+    pub pause: Option<Duration>,
+    pub give_up: Option<String>,
+}
+
+/// How long a request waits before it looks again: after memory or the checkout said no, and after
+/// its turn, a slot or a lane did.
+const LOOK_AGAIN_SLOW: Duration = Duration::from_secs(2);
+const LOOK_AGAIN: Duration = Duration::from_millis(300);
+
+/// One look of a waiting request (NIT-533), from what it carried (`prev`), what it found (`obs`),
+/// the time now in seconds and the lane's timeout. A memory reason is written once with its event
+/// and cleared, with its end event, as soon as the request waits for anything else or goes (NIT-360,
+/// NIT-368); a busy checkout is said, and given up on past the timeout: a checkout left dirty all
+/// afternoon is not one to build in.
+pub(crate) fn look(prev: Waited, obs: &Look, now: i64, timeout_minutes: u64) -> Step {
+    use crate::performance_events::Kind as Ev;
+    let mut step = Step { waiting: prev, rows: vec![], events: vec![], pause: None, give_up: None };
+    let forget_memory = |step: &mut Step| {
+        if std::mem::take(&mut step.waiting.memory) {
+            step.rows.push(RowUpdate::WaitingMemory(None));
+            step.events.push(Ev::MemoryWaitEnded);
+        }
+    };
+    match obs {
+        Look::Admitted => forget_memory(&mut step),
+        Look::NotMyTurn | Look::NoSlot | Look::NoLane => {
+            forget_memory(&mut step);
+            step.pause = Some(LOOK_AGAIN);
+        }
+        Look::Memory(why) => {
+            step.rows.push(RowUpdate::WaitingMemory(Some(why.clone())));
+            if !prev.memory {
+                step.events.push(Ev::WaitingForMemory);
+            }
+            step.waiting.memory = true;
+            step.pause = Some(LOOK_AGAIN_SLOW);
+        }
+        Look::CheckoutBusy(why) => {
+            forget_memory(&mut step);
+            step.rows.push(RowUpdate::WaitingFor(why.clone()));
+            let since = *step.waiting.checkout_since.get_or_insert(now);
+            step.give_up = checkout_wait(since, now, timeout_minutes)
+                .map(|long| format!("{why}, for over {long}, so the request was not run; it runs only while your checkout is clean and on its integration branch"));
+            step.pause = Some(LOOK_AGAIN_SLOW);
+        }
+    }
+    step
+}
+
+/// Whether a request that has waited for the person's checkout since `since` (seconds) gives up at
+/// `now`: past the lane's timeout it does, and this says for how long ("a minute", "5 minutes").
+pub(crate) fn checkout_wait(since: i64, now: i64, timeout_minutes: u64) -> Option<String> {
+    let minutes = timeout_minutes.max(1);
+    (now.saturating_sub(since) > (minutes * 60) as i64).then(|| if minutes == 1 { "a minute".to_string() } else { format!("{minutes} minutes") })
+}
+
+/// Writes what a look asked for on request `id`'s row and in the performance history.
+fn apply_look(db: &Db, id: i64, step: &Step) -> Result<()> {
+    for row in &step.rows {
+        match row {
+            RowUpdate::WaitingMemory(why) => db.conn.execute("UPDATE lane_run SET waiting_memory = ?2 WHERE id = ?1", params![id, why])?,
+            RowUpdate::WaitingFor(why) => db.conn.execute("UPDATE lane_run SET waiting_for = ?2 WHERE id = ?1", params![id, why])?,
+        };
+    }
+    for &kind in &step.events {
+        crate::performance_events::lane(db, id, kind);
+    }
+    Ok(())
+}
+
+/// Applies one look and, unless it gives up or is done, waits out its pause through `sleep`.
+/// Returns whether the request was admitted.
+fn after_look(db: &Db, id: i64, waiting: &mut Waited, obs: &Look, timeout_minutes: u64, sleep: &mut dyn FnMut(Duration)) -> Result<bool> {
+    let step = look(*waiting, obs, now(), timeout_minutes);
+    apply_look(db, id, &step)?;
+    *waiting = step.waiting;
+    if let Some(why) = step.give_up {
+        bail!(why);
+    }
+    match step.pause {
+        None => Ok(true),
+        Some(d) => {
+            sleep(d);
+            Ok(false)
+        }
+    }
+}
+
+/// The waiting loops' pause: the real one, or in unit tests a short one, so a test that waits on
+/// memory or a checkout looks again in milliseconds rather than seconds (NIT-533).
+fn pause(d: Duration) {
+    std::thread::sleep(if cfg!(test) { d.min(Duration::from_millis(20)) } else { d });
+}
+
 /// Waits for request `id`'s turn, then holds a machine slot and one of the repo's lanes, and starts
 /// only once the machine's memory admits it (`machine::admit_once` with `limits`, read again on
 /// every look so a change in Settings counts at once, reading `memory`): until then it lets both go
@@ -2652,6 +2782,7 @@ fn take_turn(
     memory: &mut dyn FnMut() -> Option<machine::Memory>,
     limits: &mut dyn FnMut() -> Option<machine::Limits>,
     yolo_keys: &[&str],
+    sleep: &mut dyn FnMut(Duration),
 ) -> Result<(u32, LaneLock, SlotLock)> {
     db.conn.execute("UPDATE lane_run SET lane_count = ?2, quick_lane = ?3 WHERE id = ?1", params![id, rules.lanes(), rules.quick_lane()])?;
     // The lanes it may take: the repo's, or for a quick run the scheduler sends there, its quick
@@ -2659,8 +2790,8 @@ fn take_turn(
     let repo_lanes: Vec<u32> = (1..=rules.lanes()).collect();
     // Whether a requester's process still runs (asked through settle's short cache).
     let mut alive = |r: &Requester| !r.gone();
-    let mut busy_since = None;
-    let mut waits_for_memory = false;
+    let mut waiting = Waited::default();
+    let timeout = rules.timeout_minutes;
     'turn: loop {
         crate::project_yolo::check_queued_gate(db, id, yolo_keys)?;
         crate::project_modes::check_playbook_authority(db,yolo_keys,pb)?;
@@ -2674,8 +2805,7 @@ fn take_turn(
             if rules.large_repo && lent_to_request(repo_root).is_none() {
                 if let Some(why) = checkout_busy(repo_root, pb, &rules.keep)? {
                     // Waiting for the checkout now, not memory (NIT-368).
-                    forget_memory_wait(db, id, &mut waits_for_memory)?;
-                    wait_for_checkout(db, id, &why, &mut busy_since, rules)?;
+                    after_look(db, id, &mut waiting, &Look::CheckoutBusy(why), timeout, sleep)?;
                     continue 'turn;
                 }
             }
@@ -2691,7 +2821,11 @@ fn take_turn(
             if quick_slot {
                 slot = try_slot_named(db, QUICK_SLOT)?;
             }
-            if let Some(slot) = slot {
+            let Some(slot) = slot else {
+                after_look(db, id, &mut waiting, &Look::NoSlot, timeout, sleep)?;
+                continue 'turn;
+            };
+            {
                 for &n in &lanes {
                     if let Some(lock) = try_lock(repo_root, pb, n)? {
                         // The person's checkout: checked again under the lock, right before use.
@@ -2700,8 +2834,7 @@ fn take_turn(
                             if let Some(why) = checkout_busy(repo_root, pb, &rules.keep)? {
                                 drop(lock);
                                 drop(slot);
-                                forget_memory_wait(db, id, &mut waits_for_memory)?;
-                                wait_for_checkout(db, id, &why, &mut busy_since, rules)?;
+                                after_look(db, id, &mut waiting, &Look::CheckoutBusy(why), timeout, sleep)?;
                                 continue 'turn;
                             }
                             db.conn.execute("UPDATE lane_run SET waiting_for = NULL WHERE id = ?1", [id])?;
@@ -2712,36 +2845,22 @@ fn take_turn(
                             // Held while it waits, the slot and lane would keep the rest waiting too.
                             drop(lock);
                             drop(slot);
-                            db.conn.execute("UPDATE lane_run SET waiting_memory = ?2 WHERE id = ?1", params![id, why])?;
-                            if !waits_for_memory { crate::performance_events::lane(db, id, crate::performance_events::Kind::WaitingForMemory); }
-                            waits_for_memory = true;
-                            std::thread::sleep(Duration::from_secs(2));
+                            after_look(db, id, &mut waiting, &Look::Memory(why), timeout, sleep)?;
                             continue 'turn;
                         }
-                        if waits_for_memory {
-                            db.conn.execute("UPDATE lane_run SET waiting_memory = NULL WHERE id = ?1", [id])?;
-                            crate::performance_events::lane(db, id, crate::performance_events::Kind::MemoryWaitEnded);
-                        }
+                        after_look(db, id, &mut waiting, &Look::Admitted, timeout, sleep)?;
                         db.conn.execute("UPDATE lane_run SET quick_slot = ?2 WHERE id = ?1", params![id, quick_slot])?;
                         return Ok((n, lock, slot));
                     }
                 }
             }
+            // This look did not reach admission: what holds it now is a lane, so an earlier memory
+            // reason would say the wrong thing (NIT-360).
+            after_look(db, id, &mut waiting, &Look::NoLane, timeout, sleep)?;
+            continue 'turn;
         }
-        // This look did not reach admission: what holds it now is its turn, a slot or a lane, so
-        // an earlier memory reason would say the wrong thing (NIT-360).
-        forget_memory_wait(db, id, &mut waits_for_memory)?;
-        std::thread::sleep(Duration::from_millis(300));
+        after_look(db, id, &mut waiting, &Look::NotMyTurn, timeout, sleep)?;
     }
-}
-
-/// Clears request `id`'s memory reason (`waiting_memory`) once it waits for something else.
-fn forget_memory_wait(db: &Db, id: i64, waits_for_memory: &mut bool) -> Result<()> {
-    if std::mem::take(waits_for_memory) {
-        db.conn.execute("UPDATE lane_run SET waiting_memory = NULL WHERE id = ?1", [id])?;
-        crate::performance_events::lane(db, id, crate::performance_events::Kind::MemoryWaitEnded);
-    }
-    Ok(())
 }
 
 /// A gate that runs in a worktree, outside lanes (a repo without `[lanes]`), holding one of the
@@ -2813,7 +2932,7 @@ pub(crate) fn hold_machine_checked<'a>(db: &'a Db, repo_root: &Path, worktree: &
     )?;
     let id = db.conn.last_insert_rowid();
     let authorities=yolo_keys.iter().map(|key|crate::project_modes::authority_for_issue(db,key)).collect::<Result<Vec<_>>>()?;
-    let mut waits_for_memory = false;
+    let mut waiting = Waited::default();
     let taken = (|| -> Result<SlotLock> {
         let mut alive = |r: &Requester| !r.gone();
         loop {
@@ -2826,21 +2945,22 @@ pub(crate) fn hold_machine_checked<'a>(db: &'a Db, repo_root: &Path, worktree: &
                     let limits = memory_limits();
                     let why = admit_run(db, id, limits.as_ref(), slots, false, &mut read_memory)?;
                     match why {
-                        None => return Ok(slot),
+                        None => {
+                            after_look(db, id, &mut waiting, &Look::Admitted, 0, &mut pause)?;
+                            return Ok(slot);
+                        }
                         Some(why) => {
                             drop(slot);
-                            db.conn.execute("UPDATE lane_run SET waiting_memory = ?2 WHERE id = ?1", params![id, why])?;
-                            if !waits_for_memory { crate::performance_events::lane(db, id, crate::performance_events::Kind::WaitingForMemory); }
-                            waits_for_memory = true;
-                            std::thread::sleep(Duration::from_secs(2));
+                            after_look(db, id, &mut waiting, &Look::Memory(why), 0, &mut pause)?;
                             continue;
                         }
                     }
                 }
+                // Waiting for a slot now, not for memory (NIT-360).
+                after_look(db, id, &mut waiting, &Look::NoSlot, 0, &mut pause)?;
+                continue;
             }
-            // Waiting for its turn or a slot now, not for memory (NIT-360).
-            forget_memory_wait(db, id, &mut waits_for_memory)?;
-            std::thread::sleep(Duration::from_millis(300));
+            after_look(db, id, &mut waiting, &Look::NotMyTurn, 0, &mut pause)?;
         }
     })();
     let slot = match taken {
@@ -2855,30 +2975,15 @@ pub(crate) fn hold_machine_checked<'a>(db: &'a Db, repo_root: &Path, worktree: &
             return Err(e);
         }
     };
-    let clear = if waits_for_memory { ", waiting_memory = NULL" } else { "" };
     if db.conn.execute(
-        &format!("UPDATE lane_run SET state = 'running', started_at = ?2, memory_cap = COALESCE(memory_cap, ?3){clear} WHERE id = ?1 AND state = 'queued'"),
+        "UPDATE lane_run SET state = 'running', started_at = ?2, memory_cap = COALESCE(memory_cap, ?3) WHERE id = ?1 AND state = 'queued'",
         params![id, now(), run_cap().map(|c| c as i64)],
     )? == 0
     {
         bail!("run {id} was taken out of the queue before it started");
     }
-    if waits_for_memory { crate::performance_events::lane(db, id, crate::performance_events::Kind::MemoryWaitEnded); }
     crate::performance_events::lane(db, id, crate::performance_events::Kind::Started);
     Ok(MachineTurn { db, id, _slot: slot, finished: false })
-}
-
-/// Records why request `id` waits for the person's checkout, and gives up after the lane's
-/// timeout: a checkout left dirty all afternoon is not one to build in.
-fn wait_for_checkout(db: &Db, id: i64, why: &str, since: &mut Option<Instant>, rules: &LaneRules) -> Result<()> {
-    db.conn.execute("UPDATE lane_run SET waiting_for = ?2 WHERE id = ?1", params![id, why])?;
-    let minutes = rules.timeout_minutes.max(1);
-    if since.get_or_insert_with(Instant::now).elapsed() > Duration::from_secs(minutes * 60) {
-        let long = if minutes == 1 { "a minute".to_string() } else { format!("{minutes} minutes") };
-        bail!("{why}, for over {long}, so the request was not run; it runs only while your checkout is clean and on its integration branch");
-    }
-    std::thread::sleep(Duration::from_secs(2));
-    Ok(())
 }
 
 struct Outcome {
@@ -3735,6 +3840,45 @@ pub fn reset(repo_root: &Path, pb: &Playbook) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The waiting request's looks (NIT-533), with no clock or database: what replaces the 2 s
+    /// sleeps of the memory and checkout tests below.
+    #[test]
+    fn a_waiting_request_says_memory_once_and_drops_it_for_whatever_holds_it_next() {
+        use crate::performance_events::Kind as Ev;
+        let memory = Look::Memory("waiting for memory: 6.0 GB free".into());
+        let first = look(Waited::default(), &memory, 100, 10);
+        assert_eq!(first.rows, vec![RowUpdate::WaitingMemory(Some("waiting for memory: 6.0 GB free".into()))]);
+        assert_eq!((first.events.clone(), first.pause, first.waiting.memory), (vec![Ev::WaitingForMemory], Some(LOOK_AGAIN_SLOW), true));
+        // Still short: the reason again (it may have changed), no second event.
+        assert_eq!(look(first.waiting, &memory, 102, 10).events, vec![]);
+
+        // Once the checkout holds it instead, the memory reason goes with its end event (what
+        // a_memory_reason_goes_once_a_request_waits_for_the_checkout waited 4 s to see).
+        let busy = look(first.waiting, &Look::CheckoutBusy("your checkout has a change: a.txt".into()), 104, 10);
+        assert_eq!(busy.rows, vec![RowUpdate::WaitingMemory(None), RowUpdate::WaitingFor("your checkout has a change: a.txt".into())]);
+        assert_eq!((busy.events.clone(), busy.waiting.memory, busy.waiting.checkout_since, busy.give_up.clone()), (vec![Ev::MemoryWaitEnded], false, Some(104), None));
+        let done = look(busy.waiting, &Look::Admitted, 106, 10);
+        assert_eq!((done.rows.len(), done.events.len(), done.pause), (0, 0, None), "nothing left to clear: it goes");
+
+        // Its turn, a slot or a lane holding it also clears the reason (NIT-360), and admission does.
+        for holds in [Look::NotMyTurn, Look::NoSlot, Look::NoLane, Look::Admitted] {
+            let step = look(first.waiting, &holds, 104, 10);
+            assert_eq!((step.events, step.waiting.memory), (vec![Ev::MemoryWaitEnded], false), "{holds:?}");
+        }
+        assert_eq!(look(Waited::default(), &Look::NoSlot, 1, 10).pause, Some(LOOK_AGAIN));
+    }
+
+    #[test]
+    fn a_checkout_busy_past_the_lanes_timeout_is_given_up_on() {
+        let busy = Look::CheckoutBusy("your checkout has a change: a.txt".into());
+        let at = |since: i64, now: i64, minutes: u64| look(Waited { memory: false, checkout_since: Some(since) }, &busy, now, minutes).give_up;
+        assert_eq!(at(0, 60, 1), None, "a minute exactly still waits");
+        assert_eq!(at(0, 61, 1).as_deref(), Some("your checkout has a change: a.txt, for over a minute, so the request was not run; it runs only while your checkout is clean and on its integration branch"));
+        assert!(at(0, 301, 5).unwrap().contains("for over 5 minutes"));
+        assert_eq!(at(0, 301, 0), at(0, 301, 1), "a timeout of 0 counts as one minute");
+        assert_eq!(checkout_wait(100, 100, 1), None);
+    }
 
     #[test]
     fn a_joined_run_stands_for_a_gate_only_when_joining_keeps_each_failure() {
@@ -5884,8 +6028,9 @@ wanted {shown}", ran.output);
 
         // A checkout that stays busy past the lane's timeout: the request gives up, saying why.
         let rules = pb.lanes.clone().unwrap();
-        let mut since = Instant::now().checked_sub(Duration::from_secs(120));
-        let e = wait_for_checkout(&db, ran.id, "your checkout has a change: notes.txt", &mut since, &rules).unwrap_err().to_string();
+        let mut waiting = Waited { memory: false, checkout_since: Some(now() - 120) };
+        let busy = Look::CheckoutBusy("your checkout has a change: notes.txt".into());
+        let e = after_look(&db, ran.id, &mut waiting, &busy, rules.timeout_minutes, &mut |_| {}).unwrap_err().to_string();
         assert!(e.contains("notes.txt, for over a minute"), "{e}");
         std::fs::remove_dir_all(base).ok();
     }
