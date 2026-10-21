@@ -1765,6 +1765,10 @@ fn record_gate(db: &Db, issue_key: Option<&str>, worktree: &Path, actor: &Actor,
         format!("Gate failed at {commit}: {}", results.last().map(|r| r.command.as_str()).unwrap_or(""))
     };
     db.log_event(actor, issue_key, at.as_deref(), if passed { "gate_passed" } else { "gate_failed" }, &summary)?;
+    // Whether the fix of a failure changed product code or only tests (NIT-557); never fails a gate.
+    if let Some(key) = issue_key {
+        db.record_gate_catches(key, worktree, commit, &results, passed).ok();
+    }
     Ok(GateResult { mode_authority: None, passed, plan: None, skipped: None, commit: commit.to_string(), results, warnings, flaked, lane_run: None })
 }
 
