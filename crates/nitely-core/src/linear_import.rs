@@ -494,6 +494,7 @@ pub fn apply(db: &mut Db, issues: &[LinearIssue], plan: &ImportPlan, actor: &Act
     tx.execute("DELETE FROM issue WHERE origin = 'linear' AND key LIKE ?1 || '-%'", [&project])?;
     if !plan.project_exists {
         tx.execute("INSERT INTO project (key, name, created_at) VALUES (?1, ?2, ?3)", params![project, plan.project_name, now])?;
+        crate::project_modes::start_on_fast(&tx, &project)?;
     }
     let mut created = 0;
     let mut comments = 0;

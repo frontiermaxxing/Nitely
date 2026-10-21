@@ -191,7 +191,8 @@ pub fn apply(db: &mut Db, config: &mut Config, plan: &ConnectPlan, actor: &crate
     let mut failed = Vec::new();
     if !plan.project_exists {
         db.create_project(&plan.project_key, &plan.project_name)?;
-        done.push(format!("created project {} ({})", plan.project_key, plan.project_name));
+        crate::project_modes::start_on_fast(&db.conn, &plan.project_key)?;
+        done.push(format!("created project {} ({}) on the Fast review mode", plan.project_key, plan.project_name));
     }
     config.upsert_repo(RepoConfig {
         name: plan.repo_name.clone(),

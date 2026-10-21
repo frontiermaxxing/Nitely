@@ -210,6 +210,14 @@ pub(crate) fn set_for_test(db:&mut Db,project:&str,mode:Mode,o:Options)->Project
  let rev=db.project_review_mode(project).unwrap().revision;
  db.set_project_review_mode(project,mode,o,rev,&Actor::Human).unwrap()
 }
+/// A project the person adds starts on Fast, the default preset (NIT-511), as a mode not yet saved:
+/// Settings shows Fast, and saving any mode makes it explicit. A project that already has a mode
+/// keeps it. Only the paths a person creates projects through call this; `create_project` alone
+/// leaves the mode unset, which reads as Custom with Nitely's defaults.
+pub fn start_on_fast(conn:&Connection,project:&str)->Result<()> {
+ conn.execute("INSERT OR IGNORE INTO project_review_mode(project,mode,overrides,revision,explicit,updated_by) SELECT key,'fast','{}',0,0,'new project' FROM project WHERE key=?1 COLLATE NOCASE",[project])?;
+ Ok(())
+}
 pub fn for_issue(db:&Db,key:&str)->Result<Option<ProjectReviewMode>> {
  db.issue(key)?.context("mode issue disappeared")?.project.as_deref().map(|p|db.project_review_mode(p)).transpose()
 }
@@ -343,6 +351,21 @@ mod tests {
   let pb=Playbook::parse("[review]\nbatch_window='20s'\nbatch_max=4\n").unwrap();
   assert!(pb.unknown.is_empty(),"still parse: {:?}",pb.unknown);
   assert_eq!(ignored_policy(&builtin(),&pb),["The playbook's [review] batch_window, batch_max are retired and ignored: a review batch is the land queue's batch, so [land] decides its size and wait."]);
+ }
+ #[test]
+ fn a_project_the_person_adds_starts_on_fast_and_keeps_a_mode_it_has() {
+  let file=crate::paths::unique_temp("mode-new-project",".sqlite");let mut db=Db::open(&file).unwrap();
+  db.create_project("APP","Example").unwrap();db.create_project("OLD","Older").unwrap();
+  start_on_fast(&db.conn,"app").unwrap();
+  let app=db.project_review_mode("APP").unwrap();
+  assert_eq!((app.mode,app.explicit,app.revision),(Mode::Fast,false,0));
+  assert_eq!(app.authority().unwrap(),None,"not saved yet: nothing queued loses its authority");
+  assert_eq!(app.options(),preset(Mode::Fast));
+  db.set_project_review_mode("OLD",Mode::Release,Options::default(),0,&Actor::Human).unwrap();
+  start_on_fast(&db.conn,"OLD").unwrap();
+  assert_eq!(db.project_review_mode("OLD").unwrap().mode,Mode::Release,"a mode the project has stays");
+  db.set_project_review_mode("APP",Mode::Careful,Options::default(),0,&Actor::Human).unwrap();
+  drop(db);std::fs::remove_file(file).ok();
  }
  #[test]
  fn queued_work_finishes_under_a_looser_mode_but_not_a_stricter_one() {

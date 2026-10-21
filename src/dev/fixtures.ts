@@ -1760,7 +1760,7 @@ function connectPlan(args: Record<string, unknown>): ConnectPlan {
 function connectApply(args: Record<string, unknown>): Applied {
   const plan = connectPlan(args);
   if (!world.projects.some((p) => p.key === plan.project_key)) world.projects.push({ key: plan.project_key, name: plan.project_name, open_issues: 0 });
-  const done = [`created project ${plan.project_key} (${plan.project_name})`, `watching ${plan.root} for project ${plan.project_key}`];
+  const done = [`created project ${plan.project_key} (${plan.project_name}) on the Fast review mode`, `watching ${plan.root} for project ${plan.project_key}`];
   if (!plan.project_exists) done.push(`filed ${plan.project_key}-1: an agent sweeps the repo, seeds the board and drafts the review rules`);
   return { project: plan.project_key, repo: plan.root, done, failed: [] };
 }

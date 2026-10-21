@@ -1326,7 +1326,11 @@ fn run(cmd: Cmd) -> Result<()> {
         Cmd::Project { command } => {
             let mut db = Db::open_default()?;
             match command {
-                ProjectCmd::Create { key, name } => print_json(&db.create_project(&key, &name)?),
+                ProjectCmd::Create { key, name } => {
+                    let project = db.create_project(&key, &name)?;
+                    nitely_core::project_modes::start_on_fast(&db.conn, &project.key)?;
+                    print_json(&project)
+                }
                 ProjectCmd::List => print_json(&db.projects()?),
                 ProjectCmd::Rename { key, name } => print_json(&db.rename_project(&key, &name)?),
                 ProjectCmd::Rekey { key, new_key } => print_json(&nitely_core::projects::rekey(&mut db, &key, &new_key)?),
