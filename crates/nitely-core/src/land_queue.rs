@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 use crate::db::{now, Db};
 use crate::issues::Actor;
 use crate::land::{self, Landed, LandOptions};
+use crate::land_rules::{self, AfterGate, Bisect, Found, Next, Probe};
 use crate::playbook::{self, git, git_remote, GateResult, LandBatch, Playbook};
 
 /// How long `land` waits for its change before it says the change is still in the queue.
@@ -364,20 +365,23 @@ pub fn run_queue(db: &mut Db, root: &Path) -> Result<()> {
         }
         // With a window, the run waits for more; the lock is held meanwhile, so nothing lands
         // around it.
-        let window = pb.land.batch_window();
-        let ready_at = oldest.queued_at + window.as_secs() as i64;
-        if now() < ready_at {
+        if land_rules::waits_until(oldest.queued_at, pb.land.batch_window().as_secs(), now()).is_some() {
             std::thread::sleep(Duration::from_millis(500));
             continue; // Reload human settings while the batching window is open.
         }
-        let mut batch = Vec::new();
-        for entry in db.land_queue(root)?.into_iter().take(pb.land.batch_max()) {
-            if crate::project_modes::authority_for_issue(db, &entry.issue)? != pb.mode_authority
-                || lands_alone(db, root, &pb, &entry.issue)?.is_some() {
-                break; // Another policy gets its own run on the next iteration.
+        // What each waiting change is, read until the first that cannot join: another policy
+        // gets its own run on the next iteration.
+        let mut batch = db.land_queue(root)?.into_iter().take(pb.land.batch_max()).collect::<Vec<_>>();
+        let mut seen = Vec::new();
+        for entry in &batch {
+            let authority = crate::project_modes::authority_for_issue(db, &entry.issue)?;
+            let alone = authority == pb.mode_authority && lands_alone(db, root, &pb, &entry.issue)?.is_some();
+            seen.push(land_rules::Candidate { authority, alone });
+            if land_rules::batch_len(&seen, &pb.mode_authority) < seen.len() {
+                break;
             }
-            batch.push(entry);
         }
+        batch.truncate(land_rules::batch_len(&seen, &pb.mode_authority));
         if batch.is_empty() { continue; }
         let ids: Vec<i64> = batch.iter().map(|e| e.id).collect();
         if let Err(e) = run_batch(db, root, &pb, batch) {
@@ -499,68 +503,85 @@ fn gate_and_land(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stack: &Path
     if full.passed || full.skipped.is_some() {
         return land_prefix(db, root, pb, run, stack, stacked, before, &full, *gates);
     }
-    if k == 1 {
-        let only = stacked.into_iter().next().unwrap();
-        return send_back(db, run, &only.entry, &gate_failed(&full, "its gate failed"), Some(&full), pb);
-    }
-
-    // One cheap guess first: the only change touching a file the failing output names. The others
-    // are stacked again without it and gated; if they pass, it was that one.
-    if let Some(suspect) = suspect(&stacked, &full) {
-        let mut others: Vec<Stacked> = Vec::new();
-        let mut restacked = true;
-        for s in stacked.iter().enumerate().filter(|(i, _)| *i != suspect).map(|(_, s)| s) {
-            let onto = others.last().map(|o| o.tip.clone()).unwrap_or_else(|| before.to_string());
-            let below: Vec<String> = others.iter().map(|o| o.entry.issue.clone()).collect();
-            match stack_one(db, root, pb, stack, &s.entry, &onto, pb.integration_branch(), &below) {
-                Ok(o) => others.push(o),
-                Err(_) => {
-                    restacked = false;
-                    break;
-                }
-            }
-        }
-        if restacked {
-            step(db, run, &format!("bisecting: gating without {}", stacked[suspect].entry.issue))?;
-            let without = gate_prefix(db, root, stack, &others, others.len(), gates, false)?;
-            if without.passed {
-                let bad = &stacked[suspect];
-                let why = gate_failed(&full, &format!("the stacked gate failed on a file only {} changes, and passed without it", bad.entry.issue));
-                send_back(db, run, &bad.entry, &why, Some(&full), pb)?;
-                return land_prefix(db, root, pb, run, stack, others, before, &without, *gates);
-            }
-        }
-    }
-
-    // Halving: the shortest failing prefix ends with the change that broke it (one bad change).
-    let (mut lo, mut hi) = (0usize, k);
+    // The search for the change that broke it (land_rules::Bisect): one cheap guess first, the
+    // only change touching a file the failing output names, gated without it; then halving.
+    let mut search = Bisect::new(k, suspect(&stacked, &full));
     let mut failing = full;
     let mut passing: Option<GateResult> = None;
-    while hi - lo > 1 {
-        let mid = (lo + hi) / 2;
-        step(db, run, &format!("bisecting: gating {mid} of {k}"))?;
-        let g = gate_prefix(db, root, stack, &stacked, mid, gates, false)?;
-        if g.passed {
-            lo = mid;
-            passing = Some(g);
-        } else {
-            hi = mid;
-            failing = g;
+    let mut without: Option<(Vec<Stacked>, GateResult)> = None;
+    let mut next = search.first();
+    let found = loop {
+        let probe = match next {
+            Next::Done(found) => break found,
+            Next::Gate(probe) => probe,
+        };
+        next = match probe {
+            Probe::Without(i) => {
+                // The others, stacked again without it.
+                let mut others: Vec<Stacked> = Vec::new();
+                let mut restacked = true;
+                for s in stacked.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, s)| s) {
+                    let onto = others.last().map(|o| o.tip.clone()).unwrap_or_else(|| before.to_string());
+                    let below: Vec<String> = others.iter().map(|o| o.entry.issue.clone()).collect();
+                    match stack_one(db, root, pb, stack, &s.entry, &onto, pb.integration_branch(), &below) {
+                        Ok(o) => others.push(o),
+                        Err(_) => {
+                            restacked = false;
+                            break;
+                        }
+                    }
+                }
+                if restacked {
+                    step(db, run, &format!("bisecting: gating without {}", stacked[i].entry.issue))?;
+                    let g = gate_prefix(db, root, stack, &others, others.len(), gates, false)?;
+                    let passed = g.passed;
+                    without = Some((others, g));
+                    search.next(Some(passed))
+                } else {
+                    search.next(None)
+                }
+            }
+            Probe::Prefix(mid) => {
+                step(db, run, &format!("bisecting: gating {mid} of {k}"))?;
+                let g = gate_prefix(db, root, stack, &stacked, mid, gates, false)?;
+                let passed = g.passed;
+                if passed {
+                    passing = Some(g);
+                } else {
+                    failing = g;
+                }
+                search.next(Some(passed))
+            }
+        };
+    };
+    match found {
+        Found::Only => {
+            let only = stacked.into_iter().next().unwrap();
+            send_back(db, run, &only.entry, &gate_failed(&failing, "its gate failed"), Some(&failing), pb)
         }
-    }
-    let mut stacked = stacked;
-    let rest: Vec<Stacked> = stacked.split_off(hi);
-    let bad = stacked.pop().expect("the prefix ends with the bad change");
-    let why = gate_failed(&failing, "bisecting the stack found that its change is the one that fails the gate");
-    send_back(db, run, &bad.entry, &why, Some(&failing), pb)?;
-    // The changes after it wait for the next run, stacked again without it.
-    for s in &rest {
-        db.conn.execute("UPDATE land_queue SET state = 'queued', run_id = NULL WHERE id = ?1", [s.entry.id])?;
-        db.log_event(&s.entry.actor(), Some(&s.entry.issue), None, "status", &format!("Back in the land queue: {} broke the stacked gate before it", bad.entry.issue))?;
-    }
-    match passing {
-        Some(g) if lo > 0 => land_prefix(db, root, pb, run, stack, stacked, before, &g, *gates),
-        _ => Ok(()),
+        Found::Suspect(i) => {
+            let (others, gate) = without.expect("the suspect was gated without");
+            let bad = &stacked[i];
+            let why = gate_failed(&failing, &format!("the stacked gate failed on a file only {} changes, and passed without it", bad.entry.issue));
+            send_back(db, run, &bad.entry, &why, Some(&failing), pb)?;
+            land_prefix(db, root, pb, run, stack, others, before, &gate, *gates)
+        }
+        Found::Bad(at) => {
+            let mut stacked = stacked;
+            let rest: Vec<Stacked> = stacked.split_off(at + 1);
+            let bad = stacked.pop().expect("the prefix ends with the bad change");
+            let why = gate_failed(&failing, "bisecting the stack found that its change is the one that fails the gate");
+            send_back(db, run, &bad.entry, &why, Some(&failing), pb)?;
+            // The changes after it wait for the next run, stacked again without it.
+            for s in &rest {
+                db.conn.execute("UPDATE land_queue SET state = 'queued', run_id = NULL WHERE id = ?1", [s.entry.id])?;
+                db.log_event(&s.entry.actor(), Some(&s.entry.issue), None, "status", &format!("Back in the land queue: {} broke the stacked gate before it", bad.entry.issue))?;
+            }
+            match passing {
+                Some(g) if at > 0 => land_prefix(db, root, pb, run, stack, stacked, before, &g, *gates),
+                _ => Ok(()),
+            }
+        }
     }
 }
 
@@ -701,27 +722,30 @@ fn land_prefix(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stack: &Path, 
     let base = pb.integration_branch().to_string();
     step(db, run, "landing")?;
     let tip = stacked.last().expect("something to land").tip.clone();
-    if land::rev(root, &base)? != before {
-        // Something else wrote the integration branch meanwhile: they wait for the next run.
-        for s in &stacked {
-            db.conn.execute("UPDATE land_queue SET state = 'queued', run_id = NULL WHERE id = ?1", [s.entry.id])?;
-        }
-        bail!("{base} moved during the gate");
-    }
-    // A branch that gained commits during the gate: what it holds now was not reviewed or gated,
-    // so it goes back; the others wait for the next run, stacked again without it.
-    let now_at = heads(root, &stacked)?;
-    let gained: Vec<usize> = stacked.iter().enumerate().filter(|(_, s)| now_at.get(&s.branch) != Some(&s.head)).map(|(i, _)| i).collect();
-    if !gained.is_empty() {
-        for (i, s) in stacked.iter().enumerate() {
-            if gained.contains(&i) {
-                let why = format!("{} gained commits during the gate, after its review was checked; submit again", s.branch);
-                send_back(db, run, &s.entry, &why, None, pb)?;
-            } else {
+    // Main moving sends all back to the queue; a branch that gained commits during the gate holds
+    // what was not reviewed or gated, so it goes back and the others wait for the next run.
+    let base_moved = land::rev(root, &base)? != before;
+    let now_at = if base_moved { Default::default() } else { heads(root, &stacked)? };
+    let gained: Vec<bool> = stacked.iter().map(|s| now_at.get(&s.branch) != Some(&s.head)).collect();
+    match land_rules::after_gate(base_moved, &gained) {
+        AfterGate::RequeueAll => {
+            for s in &stacked {
                 db.conn.execute("UPDATE land_queue SET state = 'queued', run_id = NULL WHERE id = ?1", [s.entry.id])?;
             }
+            bail!("{base} moved during the gate");
         }
-        return Ok(());
+        AfterGate::SendBack(gained) => {
+            for (i, s) in stacked.iter().enumerate() {
+                if gained.contains(&i) {
+                    let why = format!("{} gained commits during the gate, after its review was checked; submit again", s.branch);
+                    send_back(db, run, &s.entry, &why, None, pb)?;
+                } else {
+                    db.conn.execute("UPDATE land_queue SET state = 'queued', run_id = NULL WHERE id = ?1", [s.entry.id])?;
+                }
+            }
+            return Ok(());
+        }
+        AfterGate::Authorize => {}
     }
     // Every change in a queue pushes (one that does not lands alone), so the stack pushes when
     // the repo has a remote.
