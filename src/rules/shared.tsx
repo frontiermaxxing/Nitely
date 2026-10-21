@@ -1,5 +1,5 @@
 import type { LandBy, RuleField, RulesEdit, RulesView } from "../types";
-import { VENDOR_LABEL, vendorOf } from "../ui";
+import { VENDOR_LABEL, vendorOf, type ValueSource } from "../ui";
 
 /** Who lands a change, in the words the playbook docs use. */
 export const LAND_BY: Record<LandBy, { label: string; why: string }> = {
@@ -13,6 +13,11 @@ const FROM: Record<RuleField<unknown>["from"], string> = { project: "this projec
 /** Where a value comes from, beside the value. */
 export function From(props: { from: RuleField<unknown>["from"] }) {
   return <span className={`rules-from rules-from-${props.from}`}>{FROM[props.from]}</span>;
+}
+
+/** The source tag for where a rule's value comes from. */
+export function sourceOf(from: RuleField<unknown>["from"]): ValueSource {
+  return from === "built-in" ? "nitely" : from;
 }
 
 /** "Codex" for "codex", the reviewer name as the playbook has it otherwise. */

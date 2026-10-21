@@ -182,7 +182,7 @@ export function RuleDefaultsCard({ titled = true }: { titled?: boolean } = {}) {
           <h3>Who reviews whose work</h3>
           <From from={draft.reviewer ? "app" : "built-in"} />
         </div>
-        <ReviewerMap map={draft.reviewer ?? view.built_in_reviewer} reviewers={view.reviewers} disabled={false} onChange={(reviewer) => patch({ reviewer })} />
+        <ReviewerMap map={draft.reviewer ?? view.built_in_reviewer} reviewers={view.reviewers} crossVendor={draft.require_cross_vendor ?? false} disabled={false} onChange={(reviewer) => patch({ reviewer })} />
         {draft.reviewer && (
           <button className="btn btn-quiet" onClick={() => patch({ reviewer: undefined })}>
             Use Nitely's

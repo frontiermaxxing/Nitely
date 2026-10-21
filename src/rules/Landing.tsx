@@ -1,6 +1,8 @@
+import type { ReactNode } from "react";
 import type { Batching, LandBy } from "../types";
+import { RadioCards, SettingsRow, SettingsSection, SourceTag, type ChoiceOption } from "../ui";
 import type { RulesDraft } from "./shared";
-import { From, LAND_BY } from "./shared";
+import { LAND_BY, sourceOf } from "./shared";
 
 const REVIEW_BATCH: Record<Batching["review"], string> = {
   off: "Each change alone",
@@ -27,68 +29,97 @@ function windowWords(text: string): string {
   return secs % 3600 === 0 ? `${secs / 3600} h` : secs % 60 === 0 ? `${secs / 60} min` : `${secs} s`;
 }
 
+/** Three changes, apart when each goes alone and joined when they go together. */
+function BatchGlyph(props: { together: boolean; muted?: boolean }) {
+  return (
+    <span className={`rules-batch-glyph${props.together ? " is-together" : ""}${props.muted ? " is-muted" : ""}`} aria-hidden="true">
+      <span />
+      <span />
+      <span />
+    </span>
+  );
+}
+
+/** One read-only batching fact: what it does, the playbook key that sets it, and its details. */
+function BatchTile(props: { title: string; together: boolean; muted?: boolean; value: string; toml: string; children?: ReactNode }) {
+  return (
+    <div className="rules-batch-tile">
+      <span className="rules-batch-title">{props.title}</span>
+      <span className="rules-batch-value">
+        <BatchGlyph together={props.together} muted={props.muted} />
+        {props.value}
+      </span>
+      <span className="rules-batch-toml mono">{props.toml}</span>
+      {props.children}
+    </div>
+  );
+}
+
 /**
  * How the project batches reviews and lands (docs/batching.md): read here, changed in the playbook's
  * `[review]` and `[land]` tables, since a batch changes what a reviewer reads and what one gate covers.
  */
-export function BatchingCard({ batching: b, reviewEnabled }: { batching: Batching; reviewEnabled: boolean }) {
+export function BatchingRow({ batching: b, reviewEnabled }: { batching: Batching; reviewEnabled: boolean }) {
   return (
-    <section className="settings-card">
-      <h2>Batching</h2>
-      <p className="settings-why">
-        Set in the playbook's <span className="mono">[review]</span> and <span className="mono">[land]</span> tables. A change that needs your approval never batches:
-        you approve each one on its own.
-      </p>
-      <dl className="lanes-facts">
-        <dt>Reviews</dt>
-        <dd>
-          {reviewEnabled ? REVIEW_BATCH[b.review] ?? b.review : "Disabled; configuration retained"} <span className="muted mono">batch = "{b.review}"</span>
+    <SettingsRow label="Batching" why="Set in the playbook's [review] and [land] tables. A change that needs your approval never batches: you approve each one on its own." source={<SourceTag source="playbook" />}>
+      <div className="rules-batch">
+        <BatchTile
+          title="Reviews"
+          together={reviewEnabled && b.review !== "off" && b.review !== "shadow"}
+          muted={!reviewEnabled}
+          value={reviewEnabled ? REVIEW_BATCH[b.review] ?? b.review : "Disabled; configuration retained"}
+          toml={`[review] batch = "${b.review}"`}
+        >
           {b.review !== "off" && (
-            <div className="muted small">
+            <span className="rules-batch-detail">
               Up to {b.review_max} per review call, waiting {windowWords(b.review_window)} for others
               {b.review === "all" ? `; up to ${b.max_lines} changed lines a batch` : `; small is at most ${b.small_lines} lines and ${b.small_files} files`}.
               {b.review === "shadow" && " The batch's reviews are only recorded, to compare with the single reviews that decided."}
-            </div>
+            </span>
           )}
-        </dd>
-        <dt>Lands</dt>
-        <dd>
-          {LAND_BATCH[b.land] ?? b.land} <span className="muted mono">batch = "{b.land}"</span>
+        </BatchTile>
+        <BatchTile title="Lands" together={b.land !== "off" && !b.land_alone} value={LAND_BATCH[b.land] ?? b.land} toml={`[land] batch = "${b.land}"`}>
           {b.land !== "off" && (
-            <div className="muted small">
+            <span className="rules-batch-detail">
               Up to {b.land_max} a run, gated once at the stack's tip
-              {b.land === "all" && b.land_window_seconds > 0 && `, waiting ${windowWords(String(b.land_window_seconds))} for more`}. A change that breaks the stack's gate is found
-              by bisection and sent back; the others land.
-            </div>
+              {b.land === "all" && b.land_window_seconds > 0 && `, waiting ${windowWords(String(b.land_window_seconds))} for more`}. A change that breaks the stack's gate is found by
+              bisection and sent back; the others land.
+            </span>
           )}
-          {b.land_alone && <div className="small attention-ink">Each change lands alone all the same: {b.land_alone}.</div>}
-        </dd>
-      </dl>
-    </section>
+          {b.land_alone && <span className="rules-batch-detail attention-ink">Each change lands alone all the same: {b.land_alone}.</span>}
+        </BatchTile>
+      </div>
+    </SettingsRow>
   );
 }
 
 /** Who lands a change, then how reviews and lands batch. */
 export function Landing({ view: v, draft, ro, landBy, patch }: RulesDraft) {
+  const reviewOff = draft.review_enabled === false;
+  const options: ChoiceOption<LandBy>[] = (Object.keys(LAND_BY) as LandBy[]).map((b) => ({
+    value: b,
+    label: LAND_BY[b].label,
+    // With review off, the cards say what happens without one.
+    why: reviewOff ? (b === "author" ? "After the gate and any required approval, the author agent calls land." : b === "auto" ? "After the gate and any required approval, Nitely lands the change." : LAND_BY[b].why) : LAND_BY[b].why,
+    isDefault: b === v.land_by.inherited,
+  }));
   return (
-    <>
-      <section className="settings-card">
-        <div className="rules-field-head">
-          <h2>Who lands a change</h2>
-          <From from={draft.land_by !== null ? "project" : v.land_by.inherited_from} />
+    <SettingsSection title="Landing" description="Who puts a reviewed change on the integration branch, and whether changes go together.">
+      <SettingsRow
+        label="Who lands a change"
+        source={<SourceTag source={sourceOf(draft.land_by !== null ? "project" : v.land_by.inherited_from)} onReset={ro ? undefined : () => patch({ land_by: null })} />}
+      >
+        <div className="rules-land-by">
+          <RadioCards
+            aria-label="Who lands a change"
+            options={options}
+            value={landBy}
+            disabled={ro}
+            onChange={(b) => patch({ land_by: b === v.land_by.inherited ? null : b })}
+          />
         </div>
-        <select value={draft.land_by ?? "inherit"} disabled={ro} onChange={(e) => patch({ land_by: e.target.value === "inherit" ? null : (e.target.value as LandBy) })}>
-          <option value="inherit">Inherit ({LAND_BY[v.land_by.inherited].label})</option>
-          {(Object.keys(LAND_BY) as LandBy[]).map((b) => (
-            <option key={b} value={b}>
-              {LAND_BY[b].label}
-            </option>
-          ))}
-        </select>
-        <p className="settings-why rules-land-why">{draft.review_enabled === false ? (landBy === "author" ? "After the gate and any required approval, the author agent calls land." : "After the gate and any required approval, Nitely lands the change.") : LAND_BY[landBy].why}</p>
-      </section>
-
-      {v.batching && <BatchingCard batching={v.batching} reviewEnabled={draft.review_enabled ?? v.review_enabled.inherited} />}
-    </>
+      </SettingsRow>
+      {v.batching && <BatchingRow batching={v.batching} reviewEnabled={draft.review_enabled ?? v.review_enabled.inherited} />}
+    </SettingsSection>
   );
 }

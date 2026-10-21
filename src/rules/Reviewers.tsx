@@ -1,67 +1,109 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { invoke } from "../backend";
 import type { ReviewerInfo, ReviewerPreview, ReviewerSaved, ReviewFlag, RuleField, RulesView } from "../types";
+import { AgentMark, Button, Segmented, Select, SettingsRow, SettingsSection, SourceTag, Switch, vendorOf, type ChoiceOption, type SelectOption } from "../ui";
 import type { RulesDraft } from "./shared";
-import { From, reviewerName } from "./shared";
+import { reviewerName, sourceOf } from "./shared";
 
-/** Who reviews whose branches: one row per author, a reviewer for each. */
-export function ReviewerMap(props: { map: Record<string, string>; reviewers: ReviewerInfo[]; disabled: boolean; onChange: (map: Record<string, string>) => void }) {
+/**
+ * Who reviews whose branches: one row per author, its vendor mark, an arrow, and the reviewer in the
+ * shared select. The menu marks a reviewer of the author's own vendor (it waits for you when own-vendor
+ * reviews do) and one that is not installed here.
+ */
+export function ReviewerMap(props: { map: Record<string, string>; reviewers: ReviewerInfo[]; disabled: boolean; crossVendor: boolean; onChange: (map: Record<string, string>) => void }) {
   const names = props.reviewers.map((r) => r.name);
   const rows = Object.keys(props.map).sort((a, b) => (a === "*" ? 1 : b === "*" ? -1 : a.localeCompare(b)));
   return (
     <div className="rules-map">
-      {rows.map((author) => (
-        <label className="rules-map-row" key={author}>
-          <span>{author === "*" ? "Anyone else's" : `${reviewerName(author)}'s`} work</span>
-          <select value={props.map[author]} disabled={props.disabled} onChange={(e) => props.onChange({ ...props.map, [author]: e.target.value })}>
-            {[...new Set([...names, props.map[author]])].map((n) => {
-              const info = props.reviewers.find((r) => r.name === n);
-              return (
-                <option key={n} value={n}>
-                  {reviewerName(n)}
-                  {info && !info.installed ? " (not installed)" : ""}
-                </option>
-              );
-            })}
-          </select>
-        </label>
-      ))}
+      {rows.map((author) => {
+        const label = `${author === "*" ? "Anyone else" : reviewerName(author)}'s work`;
+        const options: SelectOption[] = [...new Set([...names, props.map[author]])].map((n) => {
+          const info = props.reviewers.find((r) => r.name === n);
+          const absent = info !== undefined && !info.installed;
+          const same = author !== "*" && vendorOf(n) !== "other" && vendorOf(n) === vendorOf(author);
+          return {
+            value: n,
+            label: reviewerName(n),
+            icon: <AgentMark vendor={n} size={16} />,
+            // The current one stays as it is, so a playbook naming an absent reviewer still reads.
+            disabled: absent && n !== props.map[author] ? "Not installed on this machine" : undefined,
+            detail: absent ? "Not installed on this machine" : same ? (props.crossVendor ? "Same vendor as the author: waits for you" : "Same vendor as the author") : undefined,
+            tone: same && props.crossVendor ? "warn" : undefined,
+          };
+        });
+        return (
+          <div className="rules-map-row" key={author}>
+            <span className="rules-map-author">
+              {author !== "*" && <AgentMark vendor={author} size={16} />}
+              {label}
+            </span>
+            <svg className="rules-map-arrow" width="22" height="10" viewBox="0 0 22 10" aria-hidden="true">
+              <path d="M1 5h18M15 1.5 19 5l-4 3.5" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            <Select
+              className="rules-map-select"
+              aria-label={`Reviewer of ${label}`}
+              value={props.map[author]}
+              options={options}
+              disabled={props.disabled}
+              onChange={(n) => n && props.onChange({ ...props.map, [author]: n })}
+            />
+          </div>
+        );
+      })}
     </div>
   );
 }
 
-/** A yes/no setting that can also be left to the level above. */
-function Tri(props: { value: boolean | null; inherited: boolean; disabled: boolean; yes: string; no: string; onChange: (v: boolean | null) => void }) {
+/** Whether a review by the author's own vendor is enough. Picking the default's side clears the project's value. */
+export function OwnVendor(props: { value: boolean | null; inherited: boolean; disabled: boolean; onChange: (v: boolean | null) => void }) {
+  const options: ChoiceOption<"no" | "yes">[] = [
+    { value: "no", label: "Is enough", isDefault: !props.inherited },
+    { value: "yes", label: "Waits for me", isDefault: props.inherited },
+  ];
   return (
-    <select
-      value={props.value === null ? "inherit" : props.value ? "yes" : "no"}
+    <Segmented
+      aria-label="A review by the author's own vendor"
+      options={options}
+      value={(props.value ?? props.inherited) ? "yes" : "no"}
       disabled={props.disabled}
-      onChange={(e) => props.onChange(e.target.value === "inherit" ? null : e.target.value === "yes")}
-    >
-      <option value="inherit">Inherit ({props.inherited ? props.yes : props.no})</option>
-      <option value="yes">{props.yes}</option>
-      <option value="no">{props.no}</option>
-    </select>
+      onChange={(v) => props.onChange((v === "yes") === props.inherited ? null : v === "yes")}
+    />
   );
 }
 
-function ReviewEnabled(props: { enabled: boolean; from: RuleField<boolean>["from"]; repo: string; flags: ReviewFlag[]; crossVendor: boolean; disabled: boolean; onChange: (enabled: boolean) => void }) {
-  return <div className="rules-field">
-    <div className="rules-field-head"><h3>Automated PR review</h3><From from={props.from} /></div>
-    <label className="rules-check"><input type="checkbox" checked={props.enabled} disabled={props.disabled} onChange={(e) => props.onChange(e.target.checked)} />Run automated review for {props.repo}</label>
-    <p className="settings-why small">Applies to this repository. Build/test gates, PR creation and independent human approval rules still apply. GitHub and Bitbucket branch protections stay in effect. Reviewer settings are kept while off.</p>
-    {!props.enabled && <>
-      <p className="small">Review disabled for this project. New and queued reviews skip the reviewer; a review already running finishes. Turning this back on requires review before an unreviewed change can land.</p>
-      {(props.flags.length > 0 || props.crossVendor) && <div className="small attention-ink"><p>These conditions are unevaluated while review is off, so changes still wait for your decision:</p><ul>
-        {props.flags.map((flag) => <li key={flag.name}>{flag.name}: {flag.question}</li>)}
-        {props.crossVendor && <li>A review by another vendor is required.</li>}
-      </ul></div>}
-    </>}
-  </div>;
+function ReviewEnabled(props: { enabled: boolean; source: ReactNode; repo: string; flags: ReviewFlag[]; crossVendor: boolean; disabled: boolean; onChange: (enabled: boolean) => void }) {
+  return (
+    <SettingsRow
+      label="Automated review"
+      why="Build and test gates, PR creation and approval rules still apply when off, and so do GitHub and Bitbucket branch protections. Reviewer settings are kept."
+      source={props.source}
+    >
+      <div className="rules-stack">
+        <Switch checked={props.enabled} disabled={props.disabled} onChange={props.onChange} label={`${props.enabled ? "On" : "Off"} for ${props.repo}`} />
+        {!props.enabled && <p className="rules-note">New and queued reviews skip the reviewer; a review already running finishes. Turning this back on requires review before an unreviewed change can land.</p>}
+        {!props.enabled && (props.flags.length > 0 || props.crossVendor) && (
+          <div className="rules-note attention-ink">
+            <p>These conditions are unevaluated while review is off, so changes still wait for your decision:</p>
+            <ul>
+              {props.flags.map((flag) => (
+                <li key={flag.name}>
+                  {flag.name}: {flag.question}
+                </li>
+              ))}
+              {props.crossVendor && <li>A review by another vendor is required.</li>}
+            </ul>
+          </div>
+        )}
+      </div>
+    </SettingsRow>
+  );
 }
 
+const FALLBACK = "When the named reviewer is not installed, another installed vendor reviews, and only then the author's own vendor, in a fresh read-only session.";
+
 /** Human review of the exact committed-playbook edit before saving. */
-function CommittedReviewer({ view: v, onSaved }: { view: RulesView; onSaved: (v: RulesView) => void }) {
+function CommittedReviewer({ view: v, crossVendor, onSaved }: { view: RulesView; crossVendor: boolean; onSaved: (v: RulesView) => void }) {
   const original = v.reviewer.from === "project" ? v.reviewer.value : null;
   const [reviewer, setReviewer] = useState<Record<string, string> | null>(original);
   const [enabled, setEnabled] = useState(v.review_enabled.value);
@@ -89,78 +131,97 @@ function CommittedReviewer({ view: v, onSaved }: { view: RulesView; onSaved: (v:
     setBusy(false);
   };
   return <>
-    <ReviewEnabled enabled={enabled} from={enabled === v.review_enabled.value ? v.review_enabled.from : "project"} repo={v.repo} flags={v.flags} crossVendor={v.require_cross_vendor.value} disabled={busy} onChange={(next) => { setEnabled(next); setPreview(null); setNote(null); setError(null); }} />
-    <div className="rules-field">
-    <div className="rules-field-head"><h3>Who reviews whose work</h3><From from={reviewer ? "project" : v.reviewer.inherited_from} /></div>
-    <ReviewerMap map={reviewer ?? v.reviewer.inherited} reviewers={v.reviewers} disabled={busy || !v.reviewer_editable} onChange={patch} />
-    <p className="settings-why small">When the named reviewer is unavailable, another installed vendor reviews, then the author's vendor in a fresh read-only session.</p>
-    <p className="settings-why small">Saving commits review settings for <strong>{v.repo}</strong> to its playbook on <strong>{v.integration}</strong>. It is pushed with the next land.</p>
-    {reviewer && <button className="btn btn-quiet" disabled={busy} onClick={() => patch(null)}>Use the default</button>}
-    {preview && <div className="rules-review-preview" role="region" aria-label="Review settings change">
-      <p>{preview.destination}</p>
-      <pre>{preview.diff}</pre>
-    </div>}
-    {changed && <div className="settings-row">
-      <button className="btn primary" disabled={busy} onClick={act}>{preview ? "Commit review settings" : "Preview review settings"}</button>
-      <button className="btn" disabled={busy} onClick={() => { patch(original); setEnabled(v.review_enabled.value); }}>Discard changes</button>
-    </div>}
-    {note && <p className="muted small" role="status">{note}</p>}
-    {error && <p className="error small" role="alert">{error}</p>}
-  </div></>;
+    <ReviewEnabled
+      enabled={enabled}
+      source={<SourceTag source={sourceOf(enabled === v.review_enabled.value ? v.review_enabled.from : "project")} />}
+      repo={v.repo}
+      flags={v.flags}
+      crossVendor={v.require_cross_vendor.value}
+      disabled={busy}
+      onChange={(next) => { setEnabled(next); setPreview(null); setNote(null); setError(null); }}
+    />
+    <SettingsRow
+      label="Who reviews whose work"
+      why={enabled ? FALLBACK : "Kept while review is off."}
+      source={<SourceTag source={sourceOf(reviewer ? "project" : v.reviewer.inherited_from)} onReset={busy || !v.reviewer_editable ? undefined : () => patch(null)} />}
+    >
+      <div className={enabled ? undefined : "rules-dim"}>
+        <ReviewerMap map={reviewer ?? v.reviewer.inherited} reviewers={v.reviewers} crossVendor={crossVendor} disabled={busy || !v.reviewer_editable} onChange={patch} />
+      </div>
+    </SettingsRow>
+    {(changed || note || error) && (
+      <div className="rules-commit">
+        {preview && <div className="rules-review-preview" role="region" aria-label="Review settings change">
+          <p>{preview.destination}</p>
+          <pre>{preview.diff}</pre>
+        </div>}
+        {changed && <div className="settings-row">
+          <Button variant="primary" disabled={busy} onClick={act}>{preview ? "Commit review settings" : "Preview review settings"}</Button>
+          <Button disabled={busy} onClick={() => { patch(original); setEnabled(v.review_enabled.value); }}>Discard changes</Button>
+        </div>}
+        {note && <p className="muted small" role="status">{note}</p>}
+        {error && <p className="error small" role="alert">{error}</p>}
+      </div>
+    )}
+  </>;
 }
 
 /** Review: whether it runs, who reviews whose work, own-vendor reviews and what matters most. */
 export function Reviewers({ view: v, draft, ro, busy, crossVendor, patch, onSaved }: RulesDraft & { onSaved: (v: RulesView) => void }) {
+  const enabled = draft.review_enabled ?? v.review_enabled.inherited;
+  // This project's own value has a Reset that clears it; an inherited one says where it comes from.
+  const tag = (set: boolean, inherited: RuleField<unknown>["inherited_from"], reset: () => void) => (
+    <SourceTag source={sourceOf(set ? "project" : inherited)} onReset={ro ? undefined : reset} />
+  );
+  const committed = v.source === "repo";
   return (
-    <section className="settings-card">
-      <h2>Review</h2>
-      {v.source === "repo" ? <CommittedReviewer view={v} onSaved={onSaved} /> : <>
-        <ReviewEnabled enabled={draft.review_enabled ?? v.review_enabled.inherited} from={draft.review_enabled === null ? v.review_enabled.inherited_from : "project"} repo={v.repo} flags={draft.flags} crossVendor={crossVendor} disabled={busy || ro} onChange={(review_enabled) => patch({ review_enabled })} />
-        <div className="rules-field">
-        <div className="rules-field-head">
-          <h3>Who reviews whose work</h3>
-          <From from={draft.reviewer ? "project" : v.reviewer.inherited_from} />
-        </div>
-        <ReviewerMap map={draft.reviewer ?? v.reviewer.inherited} reviewers={v.reviewers} disabled={ro} onChange={(reviewer) => patch({ reviewer })} />
-        <p className="settings-why small">When the reviewer named here is not installed, another installed vendor reviews, and only then the author's own vendor, in a fresh read-only session.</p>
-        {draft.reviewer && !ro && (
-          <button className="btn btn-quiet" onClick={() => patch({ reviewer: null })}>
-            Use the default
-          </button>
-        )}
-      </div></>}
-      <div className="rules-field">
-        <div className="rules-field-head">
-          <h3>A review by the author's own vendor</h3>
-          <From from={draft.require_cross_vendor !== null ? "project" : v.require_cross_vendor.inherited_from} />
-        </div>
-        <Tri
-          value={draft.require_cross_vendor}
-          inherited={v.require_cross_vendor.inherited}
-          disabled={ro}
-          yes="waits for me"
-          no="is enough"
-          onChange={(require_cross_vendor) => patch({ require_cross_vendor })}
-        />
-      </div>
-      <div className="rules-field">
-        <div className="rules-field-head">
-          <h3>What matters most here</h3>
-          <From from={draft.focus !== null ? "project" : v.focus.inherited_from} />
-        </div>
+    <SettingsSection
+      title="Review"
+      description={committed ? <>Saving commits these to the playbook on <span className="mono">{v.integration}</span>. It is pushed with the next land.</> : "Another vendor's agent reads every change before it lands."}
+    >
+      {committed ? (
+        <CommittedReviewer view={v} crossVendor={crossVendor} onSaved={onSaved} />
+      ) : (
+        <>
+          <ReviewEnabled
+            enabled={enabled}
+            source={tag(draft.review_enabled !== null, v.review_enabled.inherited_from, () => patch({ review_enabled: null }))}
+            repo={v.repo}
+            flags={draft.flags}
+            crossVendor={crossVendor}
+            disabled={busy || ro}
+            onChange={(review_enabled) => patch({ review_enabled })}
+          />
+          <SettingsRow label="Who reviews whose work" why={enabled ? FALLBACK : "Kept while review is off."} source={tag(draft.reviewer !== null, v.reviewer.inherited_from, () => patch({ reviewer: null }))}>
+            <div className={enabled ? undefined : "rules-dim"}>
+              <ReviewerMap map={draft.reviewer ?? v.reviewer.inherited} reviewers={v.reviewers} crossVendor={crossVendor} disabled={ro} onChange={(reviewer) => patch({ reviewer })} />
+            </div>
+          </SettingsRow>
+        </>
+      )}
+      <SettingsRow
+        label="A review by the author's own vendor"
+        why="When no other vendor could review, is that enough, or does the change wait for you?"
+        source={tag(draft.require_cross_vendor !== null, v.require_cross_vendor.inherited_from, () => patch({ require_cross_vendor: null }))}
+      >
+        <OwnVendor value={draft.require_cross_vendor} inherited={v.require_cross_vendor.inherited} disabled={ro} onChange={(require_cross_vendor) => patch({ require_cross_vendor })} />
+      </SettingsRow>
+      <SettingsRow
+        label="What matters most here"
+        why="Extra instructions every reviewer reads for this project."
+        htmlFor={`rules-focus-${v.repo}`}
+        source={tag(draft.focus !== null, v.focus.inherited_from, () => patch({ focus: null }))}
+      >
         <textarea
+          id={`rules-focus-${v.repo}`}
+          className="rules-focus"
           rows={3}
           disabled={ro}
           value={draft.focus ?? v.focus.inherited}
-          placeholder="Extra instructions for the reviewer, e.g. what is a P0 in this codebase."
+          placeholder="What is a P0 in this codebase, which rules a change must never break."
           onChange={(e) => patch({ focus: e.target.value })}
         />
-        {draft.focus !== null && !ro && (
-          <button className="btn btn-quiet" onClick={() => patch({ focus: null })}>
-            Use the default
-          </button>
-        )}
-      </div>
-    </section>
+      </SettingsRow>
+    </SettingsSection>
   );
 }

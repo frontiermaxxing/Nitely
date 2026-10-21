@@ -1,4 +1,6 @@
 /* ----- Rules: a project's review and landing rules, and the app-wide defaults ----- */
+/* The Rules page fills the window, as settings pages do (SettingsRow). */
+.settings.rules { max-width: none; }
 .rules h3, .rules-defaults h3 { margin: 14px 0 4px; font-size: var(--text-md); font-weight: var(--weight-medium); }
 .rules-repo { margin: 18px 0 8px; }
 .rules-source { margin: 0; font-size: var(--text-sm); color: var(--fg-3); overflow-wrap: anywhere; }
@@ -44,11 +46,38 @@
 .rules-field-head h2, .rules-field-head h3 { margin-bottom: 4px; }
 .rules-from { font-size: var(--text-xs); color: var(--fg-3); }
 .rules-from-project { color: var(--fg-2); font-weight: var(--weight-medium); }
-.rules-land-why { margin: 8px 0 0; }
 
-.rules-map { display: grid; gap: 6px; }
-.rules-map-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; font-size: var(--text-md); }
-.rules-map-row span { min-width: 150px; color: var(--fg-2); }
+/* Who reviews whose work: author, arrow, reviewer, one row each. */
+.rules-map { display: grid; gap: 8px; max-width: 520px; }
+.rules-map-row { display: grid; grid-template-columns: 150px 30px minmax(0, 220px); align-items: center; font-size: var(--text-md); }
+.rules-map-author { display: flex; align-items: center; gap: 8px; min-width: 0; overflow-wrap: anywhere; }
+.rules-map-arrow { color: var(--fg-3); }
+.rules-map-select { width: 100%; }
+.rules-dim { opacity: 0.55; }
+.rules-stack { display: grid; gap: 10px; justify-items: start; }
+.rules-note { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--fg-2); }
+.rules-note p { margin: 0; }
+.rules-note ul { margin: 4px 0 0; padding-left: 18px; }
+.rules-focus { width: 100%; min-height: 84px; }
+.rules-commit { display: grid; gap: 10px; padding: 16px 0; border-bottom: 1px solid var(--line); }
+
+/* Who lands a change: the three cards side by side. */
+.rules-land-by .ui-radio-cards { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+/* Batching: two read-only tiles, what each does and the playbook key that sets it. */
+.rules-batch { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; }
+.rules-batch-tile { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.rules-batch-title { font-size: 11.5px; color: var(--fg-3); }
+.rules-batch-value { display: flex; align-items: center; gap: 10px; font-size: var(--text-md); font-weight: var(--weight-medium); }
+.rules-batch-toml { font-size: 11.5px; color: var(--fg-3); overflow-wrap: anywhere; }
+.rules-batch-detail { font-size: 12px; line-height: 1.45; color: var(--fg-2); }
+.rules-batch-glyph { display: flex; flex: none; gap: 4px; }
+.rules-batch-glyph span { width: 14px; height: 10px; border-radius: 2px; background: var(--fg-2); }
+.rules-batch-glyph.is-together { gap: 1px; }
+.rules-batch-glyph.is-together span { border-radius: 0; }
+.rules-batch-glyph.is-together span:first-child { border-radius: 2px 0 0 2px; }
+.rules-batch-glyph.is-together span:last-child { border-radius: 0 2px 2px 0; }
+.rules-batch-glyph.is-muted span { background: var(--line-strong); }
 
 .btn.btn-quiet { border-color: transparent; color: var(--fg-2); }
 .btn.btn-quiet:hover:not(:disabled) { color: var(--fg); }
@@ -72,4 +101,6 @@
   .rules-item .btn { justify-self: start; }
   .rules-dry dl { grid-template-columns: 1fr; }
   .rules-dry dd { margin-bottom: 6px; }
+  .rules-map-row { grid-template-columns: minmax(0, 1fr) 30px minmax(0, 1.4fr); }
+  .rules-land-by .ui-radio-cards { grid-template-columns: 1fr; }
 }
