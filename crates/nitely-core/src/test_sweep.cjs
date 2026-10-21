@@ -7,16 +7,23 @@ const hash = s => crypto.createHash('sha256').update(s).digest('hex');
 const MAX = 16 * 1024 * 1024;
 function read(file) { if (fs.statSync(file).size > MAX) throw Error('Evidence file exceeds 16 MiB'); return fs.readFileSync(file, 'utf8'); }
 function parseLog(text, run, revision, source) {
-  const rows = []; let suite = 'unknown Rust target'; let subtest; let last;
-  for (const line of text.split(/\r?\n/)) {
-    const binary = line.match(/^\s*Running (.+?) \((?:.*[\\/])?([^\\/()]+)\)/);
-    if (binary) suite = binary[1] + ' ' + binary[2].replace(/-[a-f0-9]{16}(?:\.exe)?$/, '');
-    const rust = line.match(/^test (.+?) \.\.\. (ok|FAILED|ignored)(?:\s|$)/);
-    if (rust) rows.push({ id: suite + '::' + rust[1], name: rust[1], runner: 'rust', outcome: rust[2] === 'ok' ? 'pass' : rust[2] === 'FAILED' ? 'fail' : 'skip', run, revision, source });
-    const sub = line.match(/^# Subtest: (.+)/); if (sub) subtest = sub[1];
-    const tap = line.match(/^(not ok|ok) \d+ - (.+?)(?: # (SKIP|TODO).*)?$/);
-    if (tap) { last = { id: 'node::' + (subtest || tap[2]), name: subtest || tap[2], runner: 'node', outcome: tap[3] ? 'skip' : tap[1] === 'ok' ? 'pass' : 'fail', run, revision, source }; rows.push(last); subtest = undefined; }
-    const duration = line.match(/^\s+duration_ms: ([\d.]+)/); if (duration && last) last.duration_ms = Number(duration[1]);
+  // The tests and ids test_evidence.rs reads from the same text: libtest's `<binary>::<name>`, and
+  // TAP's leaf tests by name, with a parent counted only when it failed on its own (a hook threw).
+  const rows = []; let suite; let lastIndent; let leaf;
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trimEnd();
+    const binary = line.match(/^\s*Running .*\((?:.*[\\/])?([^\\/()]+?)-[0-9a-f]{6,}(?:\.exe)?\)$/);
+    if (binary) { suite = binary[1]; continue; }
+    const rust = line.match(/^test (\S+) \.\.\. (ok|FAILED|ignored)(?:, [^<]*)?(?: <(\d+(?:\.\d+)?)s>)?$/);
+    if (rust) { rows.push({ id: suite ? suite + '::' + rust[1] : rust[1], name: rust[1], runner: 'rust', outcome: rust[2] === 'ok' ? 'pass' : rust[2] === 'FAILED' ? 'fail' : 'skip', run, revision, source, ...(rust[3] ? { duration_ms: Number(rust[3]) * 1000 } : {}) }); continue; }
+    const tap = line.match(/^( *)(not )?ok \d+(?: - (.+?))?(?: # (SKIP|TODO|skip|todo)\b.*)?$/);
+    if (tap) {
+      const indent = tap[1].length; const parent = lastIndent !== undefined && lastIndent > indent; lastIndent = indent; leaf = undefined;
+      if (parent && !(tap[2] && !tap[4])) continue;
+      const name = (tap[3] || '').trim();
+      leaf = { id: name, name, runner: 'node', outcome: tap[4] ? 'skip' : tap[2] ? 'fail' : 'pass', run, revision, source }; rows.push(leaf); continue;
+    }
+    const duration = line.match(/^\s+duration_ms: ([\d.]+)/); if (duration && leaf) { leaf.duration_ms = Number(duration[1]); leaf = undefined; }
   }
   // Identical test display names are ambiguous, not repeated evidence of a flake.
   const count = new Map(); for (const r of rows) count.set(r.id, (count.get(r.id) || 0) + 1);
@@ -98,7 +105,7 @@ function main(args) {
               const started=performance.now();
               const measured=cp.spawnSync(artifact.executable,['--exact',name,'--nocapture','--test-threads=1'],{cwd:root,encoding:'utf8',timeout:Math.max(1,end-Date.now()),maxBuffer:MAX,windowsHide:true});
               const rows=parseLog(measured.stdout || '',`fresh-${run}-rust`,revision,`bounded Rust timing run ${run+1}`);
-              for(const row of rows) { row.id=path.relative(root,artifact.manifest_path || artifact.target.src_path).replaceAll('\\','/')+'::'+artifact.target.name+'::'+row.name; row.duration_ms=performance.now()-started; row.timing='isolated wall time including process startup'; }
+              for(const row of rows) { row.id=artifact.target.name.replaceAll('-','_')+'::'+row.name; row.duration_ms=performance.now()-started; row.timing='isolated wall time including process startup'; }
               observations.push(...rows);
               if(measured.error) warnings.push(`Rust timing incomplete for ${name}; remaining observations unknown.`);
             }

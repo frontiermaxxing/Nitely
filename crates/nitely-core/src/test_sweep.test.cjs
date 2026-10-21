@@ -38,3 +38,10 @@ test('report-only collection inventories sources and imports evidence without ex
    assert.equal(report.report_only,true); assert.equal(report.tests.length,1); assert.equal(report.observations.length,1); assert.equal(report.observations[0].duration_ms,17); assert.equal(report.runs.length,1); assert.ok(report.warnings.some(w=>w.includes('prior.log (lane 10) was not read whole')));
  } finally { fs.rmSync(root,{recursive:true,force:true}); }
 });
+test('fresh runs name tests as imported logs do, so a pass and a failure of one test meet', () => {
+  // The same samples test_evidence.rs reads: its ids are `shop::cart::adds`, `child` and `parent`.
+  const rust = parseLog('     Running unittests src/lib.rs (target/debug/deps/shop-0a1b2c3d4e5f6789)\nrunning 1 test\ntest cart::adds ... ok <0.250s>', '1', revision, 'lane 1');
+  assert.deepEqual(rust.map(r => [r.id, r.duration_ms]), [['shop::cart::adds', 250]]);
+  const tap = parseLog('TAP version 13\n    ok 1 - child\n    1..1\nnot ok 1 - parent\n1..1', '1', revision, 'lane 1');
+  assert.deepEqual(tap.map(r => [r.id, r.outcome]), [['child', 'pass'], ['parent', 'fail']]);
+});

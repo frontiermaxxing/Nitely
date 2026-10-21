@@ -361,8 +361,10 @@ pub fn libtest(text: &str) -> Run {
 
 /// node:test's TAP (and other TAP producers): `ok N - name` / `not ok N - name`, `# SKIP` and
 /// `# TODO`, YAML `duration_ms`, and subtests indented under their parent. A test whose line comes
-/// right after a deeper one's is the parent of those and is not counted as a test of its own. The
-/// plan line (`1..N`) at the top level says how many to expect.
+/// right after a deeper one's is the parent of those and is not counted as a test of its own,
+/// unless it failed while they did not show it (its own hook threw): then its failure is one. The
+/// plan line (`1..N`) at the top level says how many to expect. Test ids are the names alone, as
+/// the collector's `parseLog` writes them.
 pub fn tap(text: &str) -> Run {
     static OK: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let ok = OK.get_or_init(|| {
@@ -391,7 +393,8 @@ pub fn tap(text: &str) -> Run {
             let parent = last_indent.is_some_and(|d| d > indent);
             last_indent = Some(indent);
             last_leaf = None;
-            if parent {
+            let failed = c.get(2).is_some() && c.get(4).is_none();
+            if parent && !failed {
                 continue;
             }
             let name = c
@@ -673,6 +676,16 @@ mod tests {
         assert_eq!(r.seconds, Some(3.40025));
         let short = "TAP version 13\nok 1 - a\n1..3\n";
         assert!(!read(short).complete);
+        // A parent whose own hook threw fails though its subtests passed: that failure stands.
+        let hook = "TAP version 13\n    ok 1 - child\n    1..1\nnot ok 1 - parent\n1..1\n";
+        let r = read(hook);
+        assert_eq!(
+            r.tests
+                .iter()
+                .map(|t| (t.id.as_str(), t.outcome))
+                .collect::<Vec<_>>(),
+            [("child", Outcome::Pass), ("parent", Outcome::Fail)]
+        );
     }
 
     /// A CI job's log (`gh run view --log`) of a gate that ran `cargo test` and then `npm test`:
