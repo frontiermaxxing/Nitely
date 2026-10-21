@@ -112,7 +112,7 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
     // Restore inherited Custom afterwards so the remainder still exercises the repo's rules.
     const originalMode = await page.invoke("project_review_mode", { project: "APP" });
     await page.open("#project/APP/settings");
-    await page.waitFor(`return document.querySelector('[role=radiogroup][aria-label="Review mode"] input[value="fast"]');`);
+    await page.waitFor(`return document.querySelector('[role=radiogroup][aria-label="Review mode"] input[value="fast"]') !== null;`, { what: "the review mode cards" });
     await page.click({ css: '[role=radiogroup][aria-label="Review mode"] input[value="fast"]' });
     await page.click({ css: "button", text: "Save review mode" });
     await page.waitFor(`return document.querySelector(".review-mode-settings")?.textContent.includes("Saved: Fast.");`);
