@@ -85,8 +85,9 @@ pub(crate) fn finish_rebase(worktree: &Path) -> Result<bool> {
 }
 
 /// Prove that only the surrounding test list changed. The review's original patch id is
-/// recomputed before trusting its source commit; signatures remain bound to that original id.
-pub(crate) fn equivalent(worktree: &Path, base: &str, review: &crate::submit::ReviewRecord) -> Result<bool> {
+/// recomputed before trusting its source commit; signatures remain bound to that original id. The
+/// candidate is `head` (`HEAD` for the worktree's own).
+pub(crate) fn equivalent(worktree: &Path, base: &str, head: &str, review: &crate::submit::ReviewRecord) -> Result<bool> {
     let old_base = git(worktree, &["merge-base", base, &review.commit_sha])?;
     let old_base = old_base.trim();
     if crate::submit::patch_id_range(worktree, old_base, &review.commit_sha)? != review.patch_id {
@@ -100,7 +101,7 @@ pub(crate) fn equivalent(worktree: &Path, base: &str, review: &crate::submit::Re
         Ok(serde_json::from_str(&git(worktree, &["show", &format!("{at}:package.json")])?).ok())
     };
     let (Some(old), Some(reviewed), Some(current), Some(candidate)) =
-        (read(old_base)?, read(&review.commit_sha)?, read(base)?, read("HEAD")?) else { return Ok(false) };
+        (read(old_base)?, read(&review.commit_sha)?, read(base)?, read(head)?) else { return Ok(false) };
     let Some(expected) = additions(&old, &reviewed) else { return Ok(false) };
     if additions(&current, &candidate).as_ref() != Some(&expected) {
         return Ok(false);
@@ -109,7 +110,7 @@ pub(crate) fn equivalent(worktree: &Path, base: &str, review: &crate::submit::Re
         let diff = git(worktree, &["diff", "-U0", "--no-ext-diff", "--no-renames", from, to, "--", ".", ":(exclude)package.json"])?;
         crate::submit::patch_id_of(worktree, diff)
     };
-    Ok(other_patch(old_base, &review.commit_sha)? == other_patch(base, "HEAD")?)
+    Ok(other_patch(old_base, &review.commit_sha)? == other_patch(base, head)?)
 }
 
 #[cfg(test)]

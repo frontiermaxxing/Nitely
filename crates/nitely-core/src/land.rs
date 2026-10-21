@@ -12,7 +12,6 @@ use std::path::{Path, PathBuf};
 use crate::db::{now, Db};
 use crate::issues::{Actor, IssueRecord};
 use crate::playbook::{self, git, git_remote, GateResult, Playbook};
-use crate::submit::patch_id;
 
 /// A lock older than this probably belongs to a land that died.
 const LOCK_STALE_SECS: u64 = 60 * 60;
@@ -1139,12 +1138,19 @@ pub(crate) fn check_worktree(worktree: &Path, branch: &str) -> Result<()> {
 /// approve, with that approval given in Nitely after the review. `worktree` holds the change at
 /// HEAD on top of `base`; `branch` is the issue's branch, whose name says its vendor.
 pub(crate) fn check_approval(db: &Db, pb: &Playbook, key: &str, worktree: &Path, base: &str, branch: &str) -> Result<String> {
+    check_approval_at(db, pb, key, worktree, base, "HEAD", branch)
+}
+
+/// `check_approval` for the change at `head` in `worktree`'s repository, wherever `worktree` is
+/// checked out: the land queue checks each change of a stack at its own tip without moving the
+/// stack worktree to it (NIT-508).
+pub(crate) fn check_approval_at(db: &Db, pb: &Playbook, key: &str, worktree: &Path, base: &str, head: &str, branch: &str) -> Result<String> {
     let mut current = pb.clone();
     crate::project_modes::apply_issue(db, key, &mut current)?;
     let pb = &current;
-    let patch = patch_id(worktree, base)?;
+    let patch = crate::submit::patch_id_range(worktree, base, head)?;
     let review = db.reviews(key)?.into_iter().next().with_context(|| format!("{key} has no review; submit it first"))?;
-    if review.patch_id != patch && !crate::test_command_merge::equivalent(worktree, base, &review).unwrap_or(false) {
+    if review.patch_id != patch && !crate::test_command_merge::equivalent(worktree, base, head, &review).unwrap_or(false) {
         bail!(
             "the branch changed since its review (reviewed {}, now {}); submit again",
             short(&review.patch_id),
@@ -1172,7 +1178,7 @@ pub(crate) fn check_approval(db: &Db, pb: &Playbook, key: &str, worktree: &Path,
             accepted = format!("; its P0/P1 findings were accepted by a human, signed for this patch ({})", review.findings.iter().filter(|f| f.priority <= 1).count());
         }
     }
-    let files: Vec<String> = git(worktree, &["diff", "--name-only", "--no-renames", &format!("{base}...HEAD")])?.lines().map(str::to_string).collect();
+    let files: Vec<String> = git(worktree, &["diff", "--name-only", "--no-renames", &format!("{base}...{head}")])?.lines().map(str::to_string).collect();
     pb.approval.check_blocked(&files)?;
     let mut reasons = pb.human_reasons(&files)?;
     if matches!(review.verdict.as_str(), "disabled" | "yolo") {
@@ -2272,10 +2278,10 @@ when_changed = ["billing"]
         f.db.conn.execute("DELETE FROM approval WHERE issue_key = ?1", [&key]).unwrap();
         let refused = f.land(&key);
         assert!(!refused.landed && refused.error.as_deref().unwrap().contains("not signed"), "{refused:?}");
-        assert_ne!(patch_id(&wt, "main").unwrap(), reviewed_patch, "the textual patch changed");
+        assert_ne!(crate::submit::patch_id(&wt, "main").unwrap(), reviewed_patch, "the textual patch changed");
         let pb = Playbook::load(&f.repo).unwrap();
         let branch = branch_of(&f.repo, &key).unwrap().0;
-        assert!(crate::test_command_merge::equivalent(&wt, "main", &f.db.reviews(&key).unwrap()[0]).unwrap());
+        assert!(crate::test_command_merge::equivalent(&wt, "main", "HEAD", &f.db.reviews(&key).unwrap()[0]).unwrap());
         // Equivalence does not forgive any additional implementation change.
         std::fs::write(wt.join("unreviewed.txt"), "not reviewed").unwrap();
         sh(&wt, &["add", "."]);

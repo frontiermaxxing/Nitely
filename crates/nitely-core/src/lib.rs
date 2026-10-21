@@ -7,6 +7,7 @@ pub mod crew_rules;
 pub mod activity;
 pub mod approval;
 pub mod awake;
+mod blobs;
 pub mod batches;
 pub mod brief;
 pub mod config;

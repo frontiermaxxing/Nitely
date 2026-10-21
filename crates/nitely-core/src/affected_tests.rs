@@ -13,6 +13,7 @@ pub const POLICY_PATH: &str = ".nitely/affected-tests.toml";
 pub const SELECTOR: &str = "affected-v1-ts0271-ts0232-js0250";
 const MAX_FILES: usize = 10_000;
 const MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_FILE_BYTES: usize = 512 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Selection {
@@ -193,11 +194,12 @@ fn read(repo: &Path, files: &Snapshot, path: &str) -> Result<String> {
     if !matches!(e.mode.as_str(), "100644" | "100755") {
         bail!("nonregular input {path}");
     }
-    let size: usize = git(repo, &["cat-file", "-s", &e.oid])?.trim().parse()?;
-    if size > 512 * 1024 {
+    // One git, the size checked on what it read: the inputs are manifests and sources (NIT-508).
+    let text = git(repo, &["cat-file", "blob", &e.oid])?;
+    if text.len() > MAX_FILE_BYTES {
         bail!("input exceeds selector file limit: {path}");
     }
-    git(repo, &["cat-file", "blob", &e.oid])
+    Ok(text)
 }
 
 fn source_path(path: &str) -> bool {
@@ -247,21 +249,16 @@ pub fn select(repo: &Path, base: &str, head: &str) -> Result<Selection> {
 }
 
 pub fn select_with_policy(repo: &Path, base: &str, head: &str, policy_commit:&str) -> Result<Selection> {
-    let base = git(
-        repo,
-        &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
-    )?
-    .trim()
-    .to_owned();
-    let head = git(
-        repo,
-        &["rev-parse", "--verify", &format!("{head}^{{commit}}")],
-    )?
-    .trim()
-    .to_owned();
-    let tree = git(repo, &["rev-parse", &format!("{head}^{{tree}}")])?
-        .trim()
-        .to_owned();
+    let policy_is_base = policy_commit == base;
+    // One git for the three, as verification reads them (NIT-508). git fails the whole call when
+    // any of them names nothing, as --verify did for each.
+    let ids = git(repo, &["rev-parse", &format!("{base}^{{commit}}"), &format!("{head}^{{commit}}"), &format!("{head}^{{tree}}")])?;
+    let [base, head, tree]: [String; 3] = ids
+        .lines()
+        .map(|l| l.trim().to_string())
+        .collect::<Vec<_>>()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("git rev-parse gave {ids:?}"))?;
     let mut selection = Selection {
         base,
         head,
@@ -273,7 +270,7 @@ pub fn select_with_policy(repo: &Path, base: &str, head: &str, policy_commit:&st
         checks: vec![],
         reasons: vec![],
     };
-    if let Err(e) = select_inner(repo, &mut selection, policy_commit) {
+    if let Err(e) = select_inner(repo, &mut selection, policy_commit, policy_is_base) {
         selection.full = true;
         selection.checks.clear();
         selection.reasons.push(format!("Full fallback: {e:#}"));
@@ -421,10 +418,11 @@ fn owner<'a>(policy: &'a Policy, path: &str) -> Option<&'a Component> {
         .find(|c| c.roots.iter().any(|r| under(path, r)))
 }
 
-fn select_inner(repo: &Path, result: &mut Selection, policy_commit:&str) -> Result<()> {
+fn select_inner(repo: &Path, result: &mut Selection, policy_commit:&str, policy_is_base: bool) -> Result<()> {
     let before = snapshot(repo, &result.base)?;
     let after = snapshot(repo, &result.head)?;
-    let policy_files=snapshot(repo,policy_commit)?;
+    // The policy is usually the base's own: the same tree, not listed again.
+    let policy_files = if policy_is_base || policy_commit == result.base { before.clone() } else { snapshot(repo, policy_commit)? };
     result.policy_blob = policy_files.get(POLICY_PATH).map(|e| e.oid.clone());
     let policy: Policy = toml::from_str(&read(repo, &policy_files, POLICY_PATH)?)?;
     validate(&policy, &before, &after)?;
@@ -798,11 +796,26 @@ fn js_graph(
                 }
             }
         }
+        // The sources not read yet, in two git processes rather than two per file (NIT-508).
+        let regular = |e: &Entry| matches!(e.mode.as_str(), "100644" | "100755");
+        let wanted: Vec<String> = files
+            .iter()
+            .filter(|(p, e)| source_path(p) && regular(e) && !cache.contains_key(&e.oid))
+            .map(|(_, e)| e.oid.clone())
+            .collect();
+        let Some(fetched) = crate::blobs::read(repo, &wanted, MAX_FILE_BYTES, MAX_SOURCE_BYTES - bytes)? else {
+            bail!("JavaScript inventory exceeds byte limit");
+        };
         for (path, entry) in files.iter().filter(|(p, _)| source_path(p)) {
             let source = if let Some(source) = cache.get(&entry.oid) {
                 source.clone()
             } else {
-                let source = read(repo, files, path)?;
+                let source = match fetched.get(&entry.oid) {
+                    Some(crate::blobs::Blob::Text(text)) => String::from_utf8_lossy(text).into_owned(),
+                    Some(crate::blobs::Blob::TooLarge(_)) => bail!("input exceeds selector file limit: {path}"),
+                    // Says why as reading it alone does: not a regular file, or not there.
+                    _ => read(repo, files, path)?,
+                };
                 bytes += source.len();
                 if bytes > MAX_SOURCE_BYTES {
                     bail!("JavaScript inventory exceeds byte limit");

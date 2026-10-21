@@ -185,10 +185,10 @@ fn prove(path: &str, old: &str, new: &str, rules: &Rules) -> Result<String> {
 
 fn blob(repo: &Path, revision: &str, path: &str) -> Result<String> {
     let object = format!("{revision}:{path}");
-    let size: usize = git(repo, &["cat-file", "-s", &object])?.trim().parse()?;
-    if size > MAX_FILE { bail!("file exceeds 512 KiB classifier limit"); }
+    // One git, the size checked on what it read (NIT-508).
     let out = crate::playbook::run_git(Command::new("git").current_dir(repo).args(["cat-file", "blob", &object]))?;
     if !out.status.success() { bail!("cannot read revision blob"); }
+    if out.stdout.len() > MAX_FILE { bail!("file exceeds 512 KiB classifier limit"); }
     String::from_utf8(out.stdout).context("non-UTF8 source")
 }
 

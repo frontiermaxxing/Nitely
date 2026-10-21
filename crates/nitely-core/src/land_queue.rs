@@ -639,6 +639,20 @@ fn stack_worktree(root: &Path, pb: &Playbook, at: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Where each stacked change's branch is now, in one git (NIT-508); a branch that is gone is missing.
+fn heads(root: &Path, stacked: &[Stacked]) -> Result<std::collections::HashMap<String, String>> {
+    let mut args = vec!["for-each-ref".to_string(), "--format=%(refname) %(objectname)".to_string()];
+    args.extend(stacked.iter().map(|s| format!("refs/heads/{}", s.branch)));
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    // A pattern also lists the refs under it (refs/heads/a/b for a): only the exact names count.
+    Ok(git(root, &args)?
+        .lines()
+        .filter_map(|l| l.split_once(' '))
+        .filter_map(|(name, id)| name.strip_prefix("refs/heads/").map(|b| (b.to_string(), id.trim().to_string())))
+        .filter(|(b, _)| stacked.iter().any(|s| &s.branch == b))
+        .collect())
+}
+
 fn checkout(stack: &Path, commit: &str) -> Result<()> {
     git(stack, &["checkout", "--quiet", "--force", "--detach", commit]).map(|_| ()).context("moving the land queue's stack worktree")
 }
@@ -696,7 +710,8 @@ fn land_prefix(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stack: &Path, 
     }
     // A branch that gained commits during the gate: what it holds now was not reviewed or gated,
     // so it goes back; the others wait for the next run, stacked again without it.
-    let gained: Vec<usize> = stacked.iter().enumerate().filter(|(_, s)| land::rev(root, &s.branch).ok().as_deref() != Some(s.head.as_str())).map(|(i, _)| i).collect();
+    let now_at = heads(root, &stacked)?;
+    let gained: Vec<usize> = stacked.iter().enumerate().filter(|(_, s)| now_at.get(&s.branch) != Some(&s.head)).map(|(i, _)| i).collect();
     if !gained.is_empty() {
         for (i, s) in stacked.iter().enumerate() {
             if gained.contains(&i) {
@@ -724,20 +739,21 @@ fn land_prefix(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stack: &Path, 
     crate::project_modes::check_gate_authority(db, &keys, gate)?;
     crate::project_modes::check_playbook_authority(db, &keys, pb)?;
     let current = Playbook::load(root)?;
+    let now_at = heads(root, &stacked)?;
     let mut refused = false;
     for s in &stacked {
         // Each authorization covers only its own delta, not the combined stack. A revoked
         // signature, changed review, or newly required human approval cannot ride a green gate.
-        checkout(stack, &s.tip)?;
+        // Checked at its own tip, which the stack worktree's repository has (NIT-508).
         let authorization = (|| -> Result<()> {
             anyhow::ensure!(!review_requires_individual(db, &s.entry.issue, db.reviews(&s.entry.issue)?.first())?,
                 "reduced verification is bound to this individual patch; it must land alone");
             anyhow::ensure!(unchanged_submodules(root, &current, &s.from, &s.tip)?,
                 "the managed submodule baseline changed; this change must land alone");
-            anyhow::ensure!(land::rev(root, &s.branch)? == s.head, "the branch changed after the gate; submit again");
+            anyhow::ensure!(now_at.get(&s.branch) == Some(&s.head), "the branch changed after the gate; submit again");
             // Report the exact revoked/missing approval before the batching eligibility check,
             // which also rejects unsigned changes but cannot explain their authorization failure.
-            land::check_approval(db, &current, &s.entry.issue, stack, &s.from, &s.branch)?;
+            land::check_approval_at(db, &current, &s.entry.issue, stack, &s.from, &s.tip, &s.branch)?;
             anyhow::ensure!(lands_alone(db, root, &current, &s.entry.issue)?.is_none(),
                 "the current project policy requires this change to land individually");
             Ok(())
@@ -747,7 +763,6 @@ fn land_prefix(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stack: &Path, 
             refused = true;
         }
     }
-    checkout(stack, &tip)?;
     if refused {
         db.conn.execute("UPDATE land_queue SET state = 'queued', run_id = NULL WHERE run_id = ?1 AND state = 'running'", [run])?;
         return Ok(());

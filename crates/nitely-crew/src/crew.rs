@@ -688,7 +688,7 @@ impl Supervisor {
         let agent_id = format!("{agent}:{}", nitely_core::paths::normalize(&worktree.to_string_lossy()));
         db.reassign_claim(&issue.key, &agent_id)?;
         if worktree.join(".git").exists() {
-            if let Some(why) = other_branch(&worktree, &playbook.branch_for(agent, issue), agent, &issue.key) {
+            if let Some(why) = other_branch(current_branch(&worktree).as_deref(), &worktree, &playbook.branch_for(agent, issue), agent, &issue.key) {
                 return Ok(Start::Wait(why));
             }
         }
@@ -802,10 +802,11 @@ impl Supervisor {
     fn launch(&mut self, db: &mut Db, playbook: &Playbook, id: i64, issue: &IssueRecord, agent: &str, agent_id: &str) -> Result<Start> {
         let worktree = playbook.worktree_for(&self.repo_root, agent, issue);
         let wanted = playbook.branch_for(agent, issue);
-        if let Some(why) = other_branch(&worktree, &wanted, agent, &issue.key) {
+        let on = current_branch(&worktree);
+        if let Some(why) = other_branch(on.as_deref(), &worktree, &wanted, agent, &issue.key) {
             return Ok(Start::Wait(why));
         }
-        let branch = current_branch(&worktree).unwrap_or(wanted);
+        let branch = on.unwrap_or(wanted);
         let agent_id = agent_id.to_string();
 
         let ts = (self.clock)().ts;
@@ -1470,11 +1471,11 @@ Do not commit, submit or file issues yourself: the person approves the plan in t
     )
 }
 
-/// Why `agent` may not work in `worktree`: it is on another branch than `wanted` (the folder pattern
-/// need not name the vendor). The same agent's branch for the issue under an older title is fine.
-fn other_branch(worktree: &Path, wanted: &str, agent: &str, key: &str) -> Option<String> {
-    let on = current_branch(worktree)?;
-    let on = on.as_str();
+/// Why `agent` may not work in `worktree`, which is `on` its current branch: it is on another branch
+/// than `wanted` (the folder pattern need not name the vendor). The same agent's branch for the
+/// issue under an older title is fine.
+fn other_branch(on: Option<&str>, worktree: &Path, wanted: &str, agent: &str, key: &str) -> Option<String> {
+    let on = on?;
     let same = on == wanted || nitely_core::git::parse_branch(on) == (Some(agent.to_string()), Some(key.to_uppercase()));
     (!same).then(|| format!("its worktree {} is on {on}, not {wanted}", worktree.display()))
 }
@@ -1482,12 +1483,14 @@ fn other_branch(worktree: &Path, wanted: &str, agent: &str, key: &str) -> Option
 /// The branch a worktree is on, or, while a rebase of a branch is in progress there (a land that
 /// stopped on a conflict), the branch being rebased.
 fn current_branch(worktree: &Path) -> Option<String> {
-    let on = playbook::git(worktree, &["rev-parse", "--abbrev-ref", "HEAD"]).ok()?.trim().to_string();
+    // The branch and where a rebase keeps the one it rebases, in one git (NIT-508).
+    let out = playbook::git(worktree, &["rev-parse", "--abbrev-ref", "HEAD", "--path-format=absolute", "--git-path", "rebase-merge/head-name", "--git-path", "rebase-apply/head-name"]).ok()?;
+    let mut lines = out.lines();
+    let on = lines.next()?.trim().to_string();
     if on != "HEAD" {
         return Some(on);
     }
-    let paths = playbook::git(worktree, &["rev-parse", "--path-format=absolute", "--git-path", "rebase-merge/head-name", "--git-path", "rebase-apply/head-name"]).ok()?;
-    let rebasing = paths.lines().find_map(|p| std::fs::read_to_string(p.trim()).ok()).map(|h| h.trim().trim_start_matches("refs/heads/").to_string());
+    let rebasing = lines.find_map(|p| std::fs::read_to_string(p.trim()).ok()).map(|h| h.trim().trim_start_matches("refs/heads/").to_string());
     Some(rebasing.filter(|b| !b.is_empty()).unwrap_or(on))
 }
 
@@ -2861,8 +2864,8 @@ workers = 1
         // A land's rebase that stopped on the conflict, left for the next worker to resolve.
         assert!(playbook::git(&wt, &["rebase", "main"]).is_err());
         assert_eq!(current_branch(&wt).as_deref(), Some("claude/nit-1-first"));
-        assert_eq!(other_branch(&wt, "claude/nit-1-first", "claude", "NIT-1"), None);
-        assert!(other_branch(&wt, "codex/nit-1-first", "codex", "NIT-1").is_some());
+        assert_eq!(other_branch(current_branch(&wt).as_deref(), &wt, "claude/nit-1-first", "claude", "NIT-1"), None);
+        assert!(other_branch(current_branch(&wt).as_deref(), &wt, "codex/nit-1-first", "codex", "NIT-1").is_some());
     }
 
     #[test]

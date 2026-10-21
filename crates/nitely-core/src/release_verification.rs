@@ -61,19 +61,26 @@ fn clean(repo: &Path) -> Result<()> {
 fn prepare(db: &Db, req: &Request<'_>) -> Result<Candidate> {
     clean(req.worktree)?;
     let root = PathBuf::from(crate::git::main_root(&req.worktree.to_string_lossy()).context("release candidate has no main repository")?);
-    let source = commit(req.worktree, req.source)?;
-    let candidate = commit(req.worktree, "HEAD")?;
-    let policy = commit(req.worktree, req.integration_ref)?;
+    // One git for what prepare reads by name (NIT-508); it fails when any of them names no
+    // commit, as --verify did for each.
+    let names = git(req.worktree, &[
+        "rev-parse", "--is-shallow-repository", "--end-of-options",
+        &format!("{}^{{commit}}", req.source), "HEAD^{commit}", &format!("{}^{{commit}}", req.integration_ref), "HEAD^{tree}",
+    ])?;
+    let [shallow, source, candidate, policy, tree]: [String; 5] = names.lines().map(|l| l.trim().to_string()).collect::<Vec<_>>().try_into()
+        .map_err(|_| anyhow::anyhow!("git rev-parse gave {names:?}"))?;
     git(req.worktree, &["merge-base", "--is-ancestor", &source, &policy]).context("release source must already belong to the trusted integration history")?;
     let text = git(req.worktree, &["show", &format!("{policy}:{}", playbook::PLAYBOOK_PATH)])?;
     let pb = Playbook::parse(&text)?;
     if !pb.unknown.is_empty() { bail!("release policy has unknown fields: {}", pb.unknown.join(", ")); }
     let rules = pb.release.as_ref().context("integration policy has no [release] configuration; release verification is not ready")?;
     if rules.tag.trim().is_empty() { bail!("release.tag must name the release baseline tag pattern"); }
+    // Each commit with its parents, the candidate's and the source's in one git.
+    let listed = git(req.worktree, &["rev-list", "--no-walk=unsorted", "--parents", &candidate, &source])?;
+    let parents_of = |of: &str| listed.lines().map(|l| l.split_whitespace().collect::<Vec<_>>()).find(|l| l.first() == Some(&of)).map(|l| l[1..].iter().map(|p| p.to_string()).collect::<Vec<_>>()).unwrap_or_default();
     if candidate != source {
-        let parents = git(req.worktree, &["rev-list", "--parents", "-n", "1", &candidate])?;
-        let parents: Vec<_> = parents.split_whitespace().skip(1).collect();
-        if parents != [source.as_str()] { bail!("stamped release candidate must be a single commit directly on its original source"); }
+        let parents = parents_of(&candidate);
+        if parents != [source.clone()] { bail!("stamped release candidate must be a single commit directly on its original source"); }
         let changed = git(req.worktree, &["diff", "--name-only", "-z", "--no-renames", &source, &candidate])?;
         for path in changed.split('\0').filter(|s| !s.is_empty()) {
             if !rules.stamp_paths.iter().any(|allowed| allowed == path) {
@@ -83,12 +90,11 @@ fn prepare(db: &Db, req: &Request<'_>) -> Result<Candidate> {
     }
     // Start at the parent to exclude the release tag already placed on SOURCE. Missing history
     // is an error, not an apparent first release: shallow clones must fetch their full history.
-    if git(req.worktree, &["rev-parse", "--is-shallow-repository"])?.trim() != "false" {
+    if shallow != "false" {
         bail!("release verification requires complete history and release tags");
     }
-    let parents = git(req.worktree, &["rev-list", "--parents", "-n", "1", &source])?;
-    let parent = parents.split_whitespace().nth(1);
-    let base = if let Some(parent) = parent {
+    let parents = parents_of(&source);
+    let base = if let Some(parent) = parents.first().map(String::as_str) {
         let mut args = vec!["describe", "--tags", "--abbrev=0", "--match", rules.tag.as_str()];
         for pattern in &rules.exclude_tags {
             args.extend(["--exclude", pattern.as_str()]);
@@ -113,7 +119,7 @@ fn prepare(db: &Db, req: &Request<'_>) -> Result<Candidate> {
     crate::verification_backstop::release_ready(db, &root, &source)?;
     let identity = Identity {
         repo: root.to_string_lossy().into_owned(), candidate,
-        tree: git(req.worktree, &["rev-parse", "HEAD^{tree}"])?.trim().into(), source, policy, base,
+        tree, source, policy, base,
         author_vendor: req.author_vendor.into(), commands, platform: std::env::consts::OS.into(),
     };
     Ok(Candidate { identity, playbook: pb, root })
