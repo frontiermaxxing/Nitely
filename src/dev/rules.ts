@@ -2,7 +2,7 @@
 // playbook (read-only), one whose playbook Nitely keeps (editable, with rules that send changes to
 // a person), and one with no playbook yet. Saves change the data until reload; the loosening check
 // follows crates/nitely-core/src/rules.rs.
-import type { Batching, DefaultsView, DryRun, LandBy, ReviewerPreview, ReviewerSaved, RuleDefaults, RuleField, RulesEdit, RulesView } from "../types";
+import type { Batching, DefaultsView, DryRun, DryRunBranch, LandBy, ReviewerPreview, ReviewerSaved, RuleDefaults, RuleField, RulesEdit, RulesView } from "../types";
 
 const BUILT_IN_REVIEWER: Record<string, string> = { "*": "claude", claude: "codex", codex: "claude" };
 const REVIEWERS = [
@@ -175,10 +175,11 @@ export function reviewerSave(args: Record<string, unknown>): ReviewerSaved {
   return { view: view(s), done: `Committed review settings on ${s.integration}; pushed with the next land. New review launches use these settings.` };
 }
 
-export function rulesBranches(args: Record<string, unknown>): string[] {
+export function rulesBranches(args: Record<string, unknown>): DryRunBranch[] {
   const s = stored(args.repo);
   const key = s.project.toLowerCase();
-  return [`claude/${key}-31-pulse-home`, `codex/${key}-30-review-rounds`, `claude/${key}-44-tray-count`, "spike/try-sqlite-fts"];
+  const task = (vendor: string, n: number, slug: string, ahead: number): DryRunBranch => ({ name: `${vendor}/${key}-${n}-${slug}`, vendor, key: `${s.project}-${n}`, ahead });
+  return [task("claude", 31, "pulse-home", 3), task("codex", 30, "review-rounds", 5), task("claude", 44, "tray-count", 1), { name: "spike/try-sqlite-fts", vendor: "spike", key: null, ahead: 2 }];
 }
 
 export function rulesDryRun(args: Record<string, unknown>): DryRun {

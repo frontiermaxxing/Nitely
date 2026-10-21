@@ -994,6 +994,16 @@ export interface DefaultsView {
   reviewers: ReviewerInfo[];
 }
 
+/** A branch the dry run can try (rules.rs `DryRunBranch`). */
+export interface DryRunBranch {
+  name: string;
+  /** From a task branch name, `claude/nit-12-...`. */
+  vendor: string | null;
+  key: string | null;
+  /** Commits ahead of the integration branch; null when git cannot count them. */
+  ahead: number | null;
+}
+
 /** What submit would decide for a branch under the rules as they are now. */
 export interface DryRun {
   branch: string;

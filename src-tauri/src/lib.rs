@@ -616,7 +616,7 @@ async fn reviewer_settings_save(repo: String, edit: rules::ReviewerEdit, preview
 }
 
 #[tauri::command]
-async fn rules_branches(repo: String) -> Result<Vec<String>, String> {
+async fn rules_branches(repo: String) -> Result<Vec<rules::DryRunBranch>, String> {
     rules::recent_branches(&Config::load().map_err(err)?, &repo).map_err(err)
 }
 

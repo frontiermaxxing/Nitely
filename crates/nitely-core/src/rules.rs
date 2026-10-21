@@ -596,12 +596,30 @@ pub struct DryRun {
 }
 
 /// The branches of `repo` a dry run can try, most recently committed first.
-pub fn recent_branches(config: &crate::Config, repo_name: &str) -> Result<Vec<String>> {
+pub fn recent_branches(config: &crate::Config, repo_name: &str) -> Result<Vec<DryRunBranch>> {
     let repo = repo(config, repo_name)?;
-    let root = Path::new(&repo.root);
-    let base = Playbook::load(root)?.integration_branch().to_string();
-    let out = git(root, &["branch", "--sort=-committerdate", "--format=%(refname:short)"])?;
-    Ok(out.lines().map(str::trim).filter(|b| !b.is_empty() && *b != base).take(20).map(str::to_string).collect())
+    let base = Playbook::load(Path::new(&repo.root))?.integration_branch().to_string();
+    Ok(crate::git::list_branches(&repo.root, &base)?
+        .into_iter()
+        .filter(|b| b.name != base)
+        .take(20)
+        .map(|b| {
+            let (vendor, key) = crate::git::parse_branch(&b.name);
+            DryRunBranch { name: b.name, vendor, key, ahead: b.ahead }
+        })
+        .collect())
+}
+
+/// A branch the dry run can try: its name, and what the name and git say about it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DryRunBranch {
+    pub name: String,
+    /// The agent's vendor from a task branch name (`claude/nit-12-...`), as submit reads it.
+    pub vendor: Option<String>,
+    /// The issue key from a task branch name, `NIT-12`.
+    pub key: Option<String>,
+    /// Commits ahead of the integration branch; `None` when git cannot count them.
+    pub ahead: Option<u32>,
 }
 
 /// What submit would decide for `branch` of `repo` under the rules as they are now. The review
