@@ -255,9 +255,12 @@ mod tests {
         s.read_to_string(&mut reply).unwrap();
         assert!(reply.starts_with("HTTP/1.1 200 OK") && reply.contains("Opened <b>APP-3</b>"), "{reply}");
         assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), "APP-3");
-        // Asked to stop (the listener at login took over), it lets the port go.
+        // Asked to stop (the listener at login took over), it closes its listener: nothing answers
+        // on the port. Binding it again at once is not the promise: macOS refuses that while one of
+        // the port's own connections is still closing, and whoever takes over retries its bind.
         stop.store(true, std::sync::atomic::Ordering::SeqCst);
         served.join().unwrap();
-        assert!(TcpListener::bind(("127.0.0.1", port)).is_ok(), "the port is free again");
+        let refused = TcpStream::connect(("127.0.0.1", port)).unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::ConnectionRefused, "the listener is closed");
     }
 }
