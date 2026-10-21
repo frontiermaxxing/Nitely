@@ -1,7 +1,11 @@
-//! What the land queue decides, as plain functions over plain data (NIT-524): when a run takes
-//! its batch and which changes it takes, how a failed stacked gate finds the change that broke
-//! it, and what a gate that passed lets land. land_queue.rs gathers the facts with git and the
-//! database and does what these say; their tests need neither.
+//! What land and the land queue decide, as plain functions over plain data (NIT-524): when a run
+//! takes its batch and which changes it takes, how a failed stacked gate finds the change that
+//! broke it, what a gate that passed lets land, whose lock a land may take over, which git
+//! `index.lock` was left behind, and when a land waiting for others goes. land.rs, land_queue.rs
+//! and land_job.rs gather the facts with git, the file system and the database and do what these
+//! say; their tests need none of them.
+
+use std::time::{Duration, SystemTime};
 
 /// When the run may take its batch: None now, or the time the oldest change's window closes.
 pub fn waits_until(oldest_queued_at: i64, window_secs: u64, now: i64) -> Option<i64> {
@@ -137,9 +141,84 @@ pub fn after_gate(base_moved: bool, gained: &[bool]) -> AfterGate {
     }
 }
 
+/// The land that holds a land lock with this text (`<holder> pid <n> since <time>`), when that
+/// process is gone and is not `me`: a lock a dead land left, for the next land to take over.
+pub fn dead_holder(text: &str, me: u32, alive: impl Fn(u32) -> bool) -> Option<String> {
+    let mut words = text.split_whitespace();
+    let holder = words.next()?.to_string();
+    let pid: u32 = words.skip_while(|w| *w != "pid").nth(1)?.parse().ok()?;
+    (pid != me && !alive(pid)).then_some(holder)
+}
+
+/// A git `index.lock` made more than `grace` before the land began: no running git holds it, so
+/// one that ended without removing it left it (NIT-280).
+pub fn index_lock_left(made: SystemTime, land_began: SystemTime, grace: Duration) -> bool {
+    made + grace < land_began
+}
+
+/// A killed land's own `index.lock`: taken during its fast-forward, from `slack` before the mark
+/// it wrote to `takes` after it (NIT-341). One taken outside that is someone else's.
+pub fn killed_fast_forwards_lock(mark: SystemTime, lock: SystemTime, slack: Duration, takes: Duration) -> bool {
+    lock + slack >= mark && lock <= mark + takes
+}
+
+/// What a land waiting for other issues does, from their states in the order it named them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Blockers {
+    Wait,
+    Go,
+    /// One was closed without landing: what it waited for will not come.
+    Over(String),
+}
+
+pub fn blockers(states: &[(&str, &str)]) -> Blockers {
+    if let Some((key, state)) = states.iter().find(|(_, s)| matches!(*s, "Canceled" | "Duplicate")) {
+        return Blockers::Over(format!("{key} was closed as {state} without landing; land again without waiting for it"));
+    }
+    if states.iter().all(|(_, s)| *s == "Done") {
+        Blockers::Go
+    } else {
+        Blockers::Wait
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rules `a_dead_lands_lock_is_taken_over_and_a_left_index_lock_is_named`,
+    /// `a_killed_lands_index_lock_is_cleared_and_anyone_elses_named` and
+    /// `a_land_after_another_waits_for_it_then_lands_or_stops_cleanly` check through real locks,
+    /// processes and a waiting thread.
+    #[test]
+    fn a_dead_lands_lock_a_left_or_killed_index_lock_and_a_wait_for_blockers() {
+        let alive = |pid: u32| pid == 7;
+        assert_eq!(dead_holder("claude:a pid 9 since 2026-10-21T10:00:00Z", 1, alive).as_deref(), Some("claude:a"));
+        assert_eq!(dead_holder("claude:a pid 7 since x", 1, alive), None, "its process runs");
+        assert_eq!(dead_holder("claude:a pid 1 since x", 1, alive), None, "it is this process");
+        assert_eq!(dead_holder("claude:a since x", 1, alive), None, "it names no process");
+        assert_eq!(dead_holder("", 1, alive), None);
+
+        let t = |s: u64| SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000 + s);
+        let minute = Duration::from_secs(60);
+        assert!(index_lock_left(t(0), t(61), minute), "made before the land's minute: left");
+        assert!(!index_lock_left(t(0), t(60), minute), "within the minute: maybe a git still running");
+        assert!(!index_lock_left(t(100), t(60), minute), "made after the land began");
+
+        let (slack, takes) = (Duration::from_secs(2), Duration::from_secs(120));
+        assert!(killed_fast_forwards_lock(t(10), t(9), slack, takes), "a coarse clock may read it as a little older");
+        assert!(killed_fast_forwards_lock(t(10), t(130), slack, takes));
+        assert!(!killed_fast_forwards_lock(t(10), t(7), slack, takes), "before the fast-forward: someone else's");
+        assert!(!killed_fast_forwards_lock(t(10), t(131), slack, takes), "long after: someone else's");
+
+        assert_eq!(blockers(&[("APP-1", "Done"), ("APP-2", "In Review")]), Blockers::Wait);
+        assert_eq!(blockers(&[("APP-1", "Done"), ("APP-2", "Done")]), Blockers::Go);
+        assert_eq!(blockers(&[]), Blockers::Go);
+        assert_eq!(
+            blockers(&[("APP-1", "In Progress"), ("APP-2", "Canceled")]),
+            Blockers::Over("APP-2 was closed as Canceled without landing; land again without waiting for it".into())
+        );
+    }
 
     /// Runs a search against a stack whose change `bad` breaks the gate: a prefix passes while it
     /// stops before `bad`, and the stack without one change passes only without `bad`.

@@ -391,7 +391,7 @@ pub(crate) fn left_index_lock(root: &Path, grace_secs: u64) -> Option<String> {
     let path = index_lock(root)?;
     let made = std::fs::metadata(&path).and_then(|m| m.modified()).ok()?;
     let began = std::fs::metadata(lock_path(root).ok()?).and_then(|m| m.modified()).ok()?;
-    if made + std::time::Duration::from_secs(grace_secs) >= began {
+    if !crate::land_rules::index_lock_left(made, began, std::time::Duration::from_secs(grace_secs)) {
         return None;
     }
     let at = made.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64;
@@ -568,12 +568,7 @@ pub fn clear_dead_lock(root: &Path) -> Option<String> {
 /// `clear_dead_lock` for the lock file at `path`.
 fn clear_dead(path: &Path) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
-    let mut words = text.split_whitespace();
-    let holder = words.next()?.to_string();
-    let pid: u32 = words.skip_while(|w| *w != "pid").nth(1)?.parse().ok()?;
-    if pid == std::process::id() || crate::procs::alive(pid) {
-        return None;
-    }
+    let holder = crate::land_rules::dead_holder(&text, std::process::id(), crate::procs::alive)?;
     // Moved aside first, then checked: when the dead land's lock was released and a new land took
     // the lock in between, what was moved is the new land's, and it goes straight back.
     let aside = path.with_extension(format!("dead-{}", std::process::id()));
@@ -664,7 +659,7 @@ pub(crate) fn clear_killed_fast_forward(root: &Path) {
     }
     let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
     if let (Some(since), Some(t)) = (modified(&mark), modified(&index_lock)) {
-        if t + FF_SLACK >= since && t <= since + FF_TAKES {
+        if crate::land_rules::killed_fast_forwards_lock(since, t, FF_SLACK, FF_TAKES) {
             std::fs::remove_file(&index_lock).ok();
         }
     }
@@ -1462,8 +1457,7 @@ impl Drop for Lock {
 /// no pid, is not.
 fn held_by_dead(path: &Path) -> bool {
     let Ok(text) = std::fs::read_to_string(path) else { return false };
-    let pid = text.split_whitespace().skip_while(|w| *w != "pid").nth(1).and_then(|p| p.parse::<u32>().ok());
-    pid.is_some_and(|pid| pid != std::process::id() && !crate::procs::alive(pid))
+    crate::land_rules::dead_holder(&text, std::process::id(), crate::procs::alive).is_some()
 }
 
 /// (path, branch) for every worktree, the main checkout first.

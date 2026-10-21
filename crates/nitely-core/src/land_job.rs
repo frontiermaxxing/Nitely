@@ -239,24 +239,23 @@ pub fn wait_for_blockers(db: &Db, id: i64) -> Result<Ready> {
             end_waiting(db, &job.issue, &format!("{} is {} already", own.key, own.state))?;
             return Ok(Ready::Over(db.land_job(id)?.context("the land job's record went missing")?));
         }
-        let mut open = false;
+        let mut states = Vec::new();
         for key in &job.after {
             let other = db.issue(key)?.with_context(|| format!("no issue {key}"))?;
-            match other.state.as_str() {
-                "Done" => {}
-                "Canceled" | "Duplicate" => {
-                    let why = format!("{} was closed as {} without landing; land again without waiting for it", other.key, other.state);
-                    fail(db, id, &why)?;
-                    return Ok(Ready::Over(db.land_job(id)?.context("the land job's record went missing")?));
-                }
-                _ => open = true,
+            states.push((other.key, other.state));
+        }
+        let states: Vec<(&str, &str)> = states.iter().map(|(k, s)| (k.as_str(), s.as_str())).collect();
+        match crate::land_rules::blockers(&states) {
+            crate::land_rules::Blockers::Over(why) => {
+                fail(db, id, &why)?;
+                return Ok(Ready::Over(db.land_job(id)?.context("the land job's record went missing")?));
             }
+            crate::land_rules::Blockers::Go => {
+                db.conn.execute("UPDATE land_job SET state = 'landing', started_at = ?2 WHERE id = ?1 AND state = 'waiting'", params![id, now()])?;
+                continue;
+            }
+            crate::land_rules::Blockers::Wait => std::thread::sleep(poll()),
         }
-        if !open {
-            db.conn.execute("UPDATE land_job SET state = 'landing', started_at = ?2 WHERE id = ?1 AND state = 'waiting'", params![id, now()])?;
-            continue;
-        }
-        std::thread::sleep(poll());
     }
 }
 
