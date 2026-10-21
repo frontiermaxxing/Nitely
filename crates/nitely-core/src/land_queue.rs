@@ -427,6 +427,23 @@ fn run_batch(db: &mut Db, root: &Path, pb: &Playbook, batch: Vec<Entry>) -> Resu
         let with = if others.is_empty() { String::new() } else { format!(" with {}", others.join(", ")) };
         db.log_event(&e.actor(), Some(&e.issue), None, "status", &format!("Landing in queue run {run}{with}"))?;
     }
+    // The batch's review (review_batch.rs, NIT-509): every change in it whose review waits for its
+    // land batch is reviewed now, in one reviewer call, before the gate. One the review sends back
+    // or hands to a person leaves the run.
+    let mut batch = batch;
+    if batch.iter().any(|e| db.reviews(&e.issue).ok().and_then(|r| r.into_iter().next()).is_some_and(|r| r.verdict == crate::review_batch::PENDING)) {
+        step(db, run, "reviewing the batch")?;
+        let actor = batch.first().map(Entry::actor).unwrap_or(Actor::Agent(land::AUTO_LANDER.into()));
+        let reviewed = crate::review_batch::review_pending(db, root, &issues, &actor)?;
+        let mut stays = Vec::new();
+        for e in batch {
+            match reviewed.iter().find(|(k, _)| *k == e.issue).map(|(_, o)| o.clone()) {
+                Some(Err(why)) => send_back(db, run, &e, &why, None, pb)?,
+                _ => stays.push(e),
+            }
+        }
+        batch = stays;
+    }
     let mut gates = 0u32;
     let outcome = stack_and_land(db, root, pb, run, batch, &base, &mut gates);
     // Ended however it ended, so a run that stopped early is not shown landing.
@@ -1466,6 +1483,62 @@ reason = "billing"
         let runs = f.runs();
         assert_eq!((runs.len(), runs[0].landed.len(), runs[1].landed.len()), (2, 0, 2), "the second run landed both");
         assert!(sh(&f.repo, &["log", "--oneline", "-5"]).contains("moved"));
+        std::fs::remove_dir_all(&f.base).ok();
+    }
+
+    /// Under a mode that reviews each land batch (Fast, NIT-509): submit only gates; the queue run
+    /// reviews what waits in it in one reviewer call before its gate, sends back the change the
+    /// review asks to fix, and lands the others on one gate. A change landing by itself is reviewed
+    /// at its land, and land refuses a change whose review has not run.
+    #[test]
+    fn a_land_batch_is_reviewed_once_before_its_gate_and_nothing_lands_unreviewed() {
+        let mut f = fixture();
+        // A reviewer that logs each call and, for a batch of three, finds a P1 in the second.
+        let calls = f.base.join("calls.txt");
+        let script = format!(
+            "prompt=$(cat)\necho call >> '{}'\ncase \"$prompt\" in *\"CHANGE 3:\"*)\n  echo '- [P1] CHANGE 2: Wrong total: shared.txt, the second line'\n  printf 'VERDICT 1: clean\\nVERDICT 2: findings\\nVERDICT 3: clean\\n'\n  exit 0;;\nesac\necho 'VERDICT: clean'\n",
+            calls.to_string_lossy().replace('\\', "/")
+        );
+        std::fs::write(f.repo.join("review.sh"), script).unwrap();
+        let text = PLAYBOOK
+            .replace(r#"["{sh}", "-c", "cat > /dev/null; echo 'Fine.'; echo 'VERDICT: clean'"]"#, r#"["{sh}", "review.sh"]"#)
+            .replace("{sh}", &playbook::posix_sh())
+            .replace("{gate}", "\"exit 0\"");
+        std::fs::write(f.repo.join(playbook::PLAYBOOK_PATH), text).unwrap();
+        sh(&f.repo, &["add", "."]);
+        sh(&f.repo, &["commit", "-q", "-m", "a reviewer that reviews batches"]);
+        f.db.conn.execute(r#"UPDATE project_review_mode SET overrides = '{"land_batch":true,"pre_review":"batched"}' WHERE project = 'NIT'"#, []).unwrap();
+        let called = || std::fs::read_to_string(&calls).unwrap_or_default().lines().count();
+
+        let (a, _) = f.submitted("Totals", &[("a.txt", "a\n")]);
+        let (b, _) = f.submitted("Totals again", &[("b.txt", "b\n")]);
+        let (c, _) = f.submitted("Labels", &[("c.txt", "c\n")]);
+        assert_eq!(called(), 0, "submit reviews nothing");
+        for k in [&a, &b, &c] {
+            assert_eq!(f.db.reviews(k).unwrap()[0].verdict, crate::review_batch::PENDING);
+        }
+        // Land refuses a review that has not run, whatever path reaches it.
+        let (branch, wt) = land::branch_of(&f.repo, &a).unwrap();
+        let refused = land::check_approval(&f.db, &Playbook::load(&f.repo).unwrap(), &a, &wt.unwrap(), "main", &branch).unwrap_err();
+        assert!(format!("{refused:#}").contains("waits for its land batch"), "{refused:#}");
+
+        f.queue_and_run(&[&a, &b, &c]);
+        assert_eq!(called(), 1, "one reviewer call for the batch");
+        assert_eq!((f.entry(&a).state.as_str(), f.entry(&b).state.as_str(), f.entry(&c).state.as_str()), ("landed", "sent_back", "landed"), "{}", f.error(&b));
+        let (ra, rb, rc) = (f.db.reviews(&a).unwrap().remove(0), f.db.reviews(&b).unwrap().remove(0), f.db.reviews(&c).unwrap().remove(0));
+        assert!(ra.batch_id.is_some() && ra.batch_id == rb.batch_id && rb.batch_id == rc.batch_id, "{ra:?} {rb:?}");
+        assert_eq!((ra.verdict.as_str(), rb.verdict.as_str(), rc.verdict.as_str()), ("pass", "changes", "pass"));
+        assert_eq!(rb.findings[0].text, "Wrong total: shared.txt, the second line");
+        assert_eq!(f.db.issue(&b).unwrap().unwrap().state, "In Progress", "back to its agent");
+        assert!(f.error(&b).contains("asked for changes"), "{}", f.error(&b));
+        let run = f.runs().into_iter().find(|r| r.landed.contains(&a)).unwrap();
+        assert_eq!((run.gates, run.landed.len()), (1, 2), "the others land on one gate");
+
+        // Alone, a change is reviewed at its land, by itself.
+        let (d, _) = f.submitted("Lone", &[("d.txt", "d\n")]);
+        f.queue_and_run(&[&d]);
+        assert_eq!((called(), f.entry(&d).state.as_str()), (2, "landed"), "{}", f.error(&d));
+        assert!(f.db.reviews(&d).unwrap()[0].batch_id.is_none());
         std::fs::remove_dir_all(&f.base).ok();
     }
 

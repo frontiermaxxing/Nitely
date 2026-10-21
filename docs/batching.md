@@ -148,17 +148,18 @@ The gate and land go together: gating a stack that is not then landed as gated p
 
 ### Forming a batch
 
-A submitted change waits in the review queue when its project batches reviews. A batch closes when
-it reaches `max` changes, when its oldest change has waited `window`, or, with `window = "busy"`,
-when a reviewer slot frees up (the machine's reviewer slots, as for lanes' build slots, NIT-199).
-A batch holds changes from one repository only (a project can span several), so the reviewer works
-in one checkout that has every change's commits.
+Since NIT-509 a review batch is the land queue's batch: there is no review queue or window of its
+own. Under a mode that reviews in batches (Fast), `submit` gates a change with no goal and records
+its review as `batched`, waiting; the change is In Review and its agent calls land. The land queue
+run that takes it (whatever arrived while the last land ran, up to `[land] batch_max`) reviews every
+change of the run whose review waits, in one reviewer call per reviewer, before the run's gate. A
+change that lands by itself is reviewed by itself at its land. Land refuses a `batched` row, so
+nothing lands unreviewed. One batch holds one repository's changes, as a land queue run does.
 
-**Small** means at most `small_lines` lines and `small_files` files changed against the base
-(default 100 and 5: 15% of this repo's reviews). With `batch = "all"`, any size can join, up to a
-total of `max_lines` (default 1,500) per batch, because a reviewer's attention is the limit.
+The old `[review] batch_window`, `batch_max`, `small_lines`, `small_files` and `max_lines` are retired:
+a playbook that still sets them parses, and the app says they are ignored.
 
-**What never batches** (it is reviewed alone, at once):
+**What never waits for its land batch** (it is reviewed alone, at submit):
 
 - a change that will need a human's approval anyway: the playbook's `[approval]` paths, a flag a
   previous review of it raised, or a project with `require_cross_vendor` whose only reviewer is
@@ -168,7 +169,7 @@ total of `max_lines` (default 1,500) per batch, because a reviewer's attention i
   re-checked alone against them (NIT-161's rounds). One with only accepted findings (NIT-191) may
   batch;
 - a project in large-repo mode (build-lanes.md), whose reviewer works in the person's own checkout;
-- a resubmission of a change already in the queue: it replaces the queued one.
+- a goal's checkpoint, whose whole slice is reviewed as one change (verification-settings.md).
 
 ### What the reviewer gets
 
@@ -211,30 +212,26 @@ whose diff introduces it, and that a problem that only appears when two changes 
 - A batch whose reviewer fails to run or finish goes back to the queue as single reviews, so no
   batch ever leaves a change without a review.
 
-### How it runs (NIT-216)
+### How it runs (NIT-509; first built as a review queue in NIT-216)
 
-- **Only a submit in the background waits for a batch.** `submit` hands the change to a job of its
-  own (NIT-212), and that job waits in the queue after its gate passes; nobody is held by the
-  wait. `submit` with `wait: true` (`nitely submit --wait`) always reviews alone, at once.
-- **No resident process.** Each waiting job polls its row in `review_queue`. The first one to find
-  its queue's batch due takes it under the queue's file lock, runs the reviewer once, and writes each
-  change's review into its row; each job then goes on with its own change exactly as after a single
-  review (recording the review row, the pull request, the issue's move, the land by Nitely).
-- **A queue is a repository and a reviewer.** Codex's changes and Claude's are reviewed by
-  different reviewers, so they queue apart. `busy` closes a batch as soon as no batch of that queue
-  is under review: changes collect only while one is.
+- **The land queue reviews its run.** Once a run has its changes (`land_queue::run_batch`), it
+  reviews those whose review is `batched` (`review_batch::review_pending`), then stacks and gates
+  what passed. A change the review sends back leaves the run: its issue is back In Progress with the
+  findings, or in Needs You when a flag or rule now wants a person. The others go on to the gate as
+  before.
+- **One call per reviewer.** Codex's changes and Claude's are reviewed by different reviewers, so a
+  run with both makes two calls. A run of one change makes an ordinary single review.
 - **The reviewer runs in the first change's worktree** and reads the others with `git diff` and
-  `git show <head>:<path>`; every worktree of a repository sees every branch's commits. Its tokens
-  count toward that first change's issue.
+  `git show <head>:<path>`; every worktree of a repository sees every branch's commits. A change
+  whose worktree is gone is read from a scratch clone at its head.
+- **Each change's review is its own row**, bound to the patch it reviewed, with the gate evidence and
+  solution summary it was handed in with, so rounds, accepted findings and land's check of the
+  reviewed patch work as for a single review. What the reply cannot attribute to a change, or a
+  batch whose reviewer does not finish, is reviewed alone.
 - **An interaction** becomes a P1 finding on the second change ("Interacts with NIT-x, reviewed in
   the same batch: ... (the files both touch). Once NIT-x has landed, rebase onto it and submit
-  again"), and a note on both; when the second change's own part of the reply could not be used,
-  its single review carries the finding. Its next submit has an open P1, so it is reviewed alone,
-  and the finding stays open, whatever that review says, until NIT-x is Done and the branch holds
-  the commit it landed at.
-- **What waits stops being waited for:** a job that dies while waiting leaves the queue
-  (`abandoned`), a batch whose reviewing process dies sends its changes back alone, and a newer
-  submit of the issue replaces its waiting change (`superseded`; its job ends as superseded).
+  again"), and a note on both. The finding stays open, whatever a later review says, until NIT-x is
+  Done and the branch holds the commit it landed at.
 - Each review row carries `batch_id`; `review_batch` holds the batch (its issues in prompt order,
   reviewer, seconds, and the error when it failed).
 
@@ -429,14 +426,11 @@ identical patch. Reusing a pass for the same patch and reviewing only the differ
 Whether a project batches is the review mode's now, not the playbook's (NIT-499,
 [verification-settings.md](verification-settings.md)): Fast and Careful land changes with no goal in
 batches, Fast also reviews each batch as one, and Release lands each change alone. The playbook's
-`[review] batch` and `[land] batch` are retired and ignored with a notice. These stay, as tuning:
+`[review] batch` and `[land] batch` are retired and ignored with a notice, and so are `[review]
+batch_window`, `batch_max`, `small_lines`, `small_files` and `max_lines` (NIT-509: a review batch is
+the land queue's batch). These stay, as tuning of that batch:
 
 ```toml
-[review]
-batch_window = "5m"    # how long the oldest change waits for others; "busy": until a reviewer frees up
-batch_max = 3          # changes per review call
-max_lines = 1500       # lines per batch
-
 [land]
 batch_window = "0"     # how long a queue run waits for more
 batch_max = 5          # changes per queue run

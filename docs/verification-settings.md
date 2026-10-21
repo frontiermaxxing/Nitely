@@ -244,9 +244,9 @@ modes, two shadow switches, two kinds of batching and a parallel YOLO table.
 
 Kept for now, as follow-ups:
 
-- `[review] batch_window`, `batch_max` and `max_lines` (and `[land] batch_window`, `batch_max`) still
-  tune the batch review and the land queue, until Fast's batch review moves into the land queue's
-  own batch.
+- Done in NIT-509: Fast's batch review is the land queue's batch, reviewed once before the run's
+  gate, and `[review] batch_window`, `batch_max`, `small_lines`, `small_files` and `max_lines` are
+  retired (ignored with a notice). `[land] batch_window` and `batch_max` still tune the land queue.
 - The "light" review exemption for inert changes needed the review left to the playbook; no
   project has that now, so the exemption no longer applies, and its code can go.
 

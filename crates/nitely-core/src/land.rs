@@ -132,7 +132,7 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
     // Settings may have changed between the initial routing decision and taking the land lock.
     let mut pb = Playbook::load(&root)?;
     crate::project_modes::apply_issue(db, &issue.key, &mut pb)?;
-    let result = run(db, &root, &pb, &issue.key, opts, actor, &mut report, None);
+    let result = reviewed_first(db, &root, &issue.key, actor).and_then(|()| run(db, &root, &pb, &issue.key, opts, actor, &mut report, None));
     // A checkpoint whose full gate failed: the item at fault is found, reverted on the goal branch
     // and sent back, still under the lock (as the land queue bisects its stack).
     if let (Err(_), Some(gate)) = (&result, report.gate.clone()) {
@@ -183,7 +183,7 @@ pub(crate) fn queued_alone(db: &mut Db, root: &Path, key: &str, opts: &LandOptio
     crate::project_modes::apply_issue(db, key, &mut pb)?;
     let _telemetry = crate::performance_attribution::Scope::new(db, crate::performance_attribution::Context { project: issue.project.clone(), issue: Some(key.into()), ..Default::default() });
     let mut report = Landed { issue: key.into(), base: pb.integration_branch().into(), ..Default::default() };
-    match run(db, root, &pb, key, opts, actor, &mut report, None) {
+    match reviewed_first(db, root, key, actor).and_then(|()| run(db, root, &pb, key, opts, actor, &mut report, None)) {
         Ok(()) => {
             if report.landed {
                 match crate::lanes::hold_checkout(root, &pb) {
@@ -196,6 +196,15 @@ pub(crate) fn queued_alone(db: &mut Db, root: &Path, key: &str, opts: &LandOptio
         Err(e) => record_stopped(db, key, &format!("{e:#}"), &mut report, actor)?,
     }
     Ok(report)
+}
+
+/// A change whose review waits for its land batch, landing by itself: reviewed now, as a batch of
+/// one (review_batch.rs). Stops the land when the review asks for changes or a person must approve.
+fn reviewed_first(db: &mut Db, root: &Path, key: &str, actor: &Actor) -> Result<()> {
+    for (_, outcome) in crate::review_batch::review_pending(db, root, &[key.to_string()], actor)? {
+        outcome.map_err(|why| anyhow::anyhow!(why))?;
+    }
+    Ok(())
 }
 
 /// `land` for an item of a goal with a goal branch: the same `run`, into the goal branch, with
@@ -1155,6 +1164,9 @@ pub(crate) fn check_approval(db: &Db, pb: &Playbook, key: &str, worktree: &Path,
     }
     match review.verdict.as_str() {
         "pass" | "none" | "disabled" | "yolo" | "light" => {}
+        // Never reviewed: its land batch reviews it first (review_batch::review_pending), so nothing
+        // lands unreviewed.
+        crate::review_batch::PENDING => bail!("its review waits for its land batch, and has not run; land it again"),
         _ => {
             // Findings the person accepted as they are, signed for this patch, block nothing.
             let open = db.unaccepted_blockers(key, &review)?;

@@ -134,11 +134,6 @@ pub struct RulesView {
 pub struct Batching {
     /// off | small | all | shadow
     pub review: crate::review::BatchMode,
-    pub review_window: String,
-    pub review_max: usize,
-    pub small_lines: usize,
-    pub small_files: usize,
-    pub max_lines: usize,
     /// off | waiting | all
     pub land: crate::playbook::LandBatch,
     pub land_window_seconds: u64,
@@ -157,11 +152,6 @@ fn batching(pb: &Playbook) -> Batching {
     };
     Batching {
         review: pb.review.batch,
-        review_window: pb.review.batch_window.clone(),
-        review_max: pb.review.batch_max.max(2),
-        small_lines: pb.review.small_lines,
-        small_files: pb.review.small_files,
-        max_lines: pb.review.max_lines,
         land: pb.land.batch,
         land_window_seconds: pb.land.batch_window().as_secs(),
         land_max: pb.land.batch_max(),

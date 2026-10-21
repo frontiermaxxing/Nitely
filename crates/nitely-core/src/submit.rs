@@ -49,6 +49,9 @@ pub struct Submitted {
     /// Deliberately disabled by project policy, distinct from an ad-hoc skip.
     pub review_disabled: bool,
     pub review_light: bool,
+    /// Its review waits for its land queue batch (review_batch.rs, NIT-509).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub review_batched: bool,
     /// Project YOLO bypass; neither a gate nor review pass.
     pub yolo: bool,
     /// `agent` when the review is enough, `human` when it waits for approval.
@@ -191,6 +194,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         review: None,
         review_disabled: false,
         review_light: false,
+        review_batched: false,
         yolo: false,
         approver: "human".into(),
         reasons: vec![],
@@ -245,19 +249,16 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
             // The single review knows what the change is for (NIT-282).
             let mut rules = pb.review.clone();
             rules.context = review_context(db, &issue, &out.gate)?;
-            // From a batch: the review, or what its review found for this change that its single review
-            // must carry (an interaction with another change).
-            let (batched, extra) = if reused.is_some() {
-                (reused, vec![])
-            } else if opts.batch && matches!(pb.review.batch, crate::review::BatchMode::Small | crate::review::BatchMode::All) {
-                in_a_batch(db, &pb, &issue, &root, &worktree, &branch, &since, &files, &vendor, &out.reasons, previous.as_ref(), actor)?
-            } else {
-                (None, vec![])
-            };
+            // Under a mode that reviews in batches, its review waits for its land queue batch
+            // (review_batch.rs): nothing is reviewed now, and land refuses it until it is.
+            if reused.is_none() && waits_for_land_batch(db, &pb, &issue, &worktree, &files, &vendor, &out.reasons, previous.as_ref(), actor)? {
+                out.review_batched = true;
+                return Ok(());
+            }
             // A reviewer that cannot run (not signed in, say) is passed over for the next candidate;
             // one that ran and did not finish its review stops the submit.
             let mut failed: Vec<crate::review::CouldNotRun> = vec![];
-            let (choice, mut review) = if let Some(done) = batched { done } else { loop {
+            let (choice, mut review) = if let Some(done) = reused { done } else { loop {
                 rules.require_enabled()?;
                 let choice = pb.review.choose_after(&vendor, &|r| pb.review.is_installed(r, &worktree), &failed)?;
                 let reviewer = choice.reviewer.clone();
@@ -278,7 +279,6 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
                     },
                 }
             } };
-            review.findings.extend(extra);
             crate::review_batch::hold_interactions(db, &worktree, &mut review)?;
             let reviewer = choice.reviewer.clone();
             review.note = choice.note.clone();
@@ -301,7 +301,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         out.reasons.extend(latest.review.unevaluated_reasons());
     }
     out.approver = if out.reasons.is_empty() { "agent" } else { "human" }.into();
-    let mut verdict = out.review.as_ref().map_or(if out.yolo { "yolo" } else if out.review_light { "light" } else if out.review_disabled { "disabled" } else { "none" }, |r| r.verdict.as_str()).to_string();
+    let mut verdict = out.review.as_ref().map_or(if out.yolo { "yolo" } else if out.review_batched { crate::review_batch::PENDING } else if out.review_light { "light" } else if out.review_disabled { "disabled" } else { "none" }, |r| r.verdict.as_str()).to_string();
     // Findings the person accepted as they are, signed for this very patch, block nothing: the
     // review is recorded as it asked, and goes on as a passing one (land checks the same).
     let accepted_only = match &out.review {
@@ -434,6 +434,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         (Some(r), "human") if out.approval_stands => format!("Review by {} passed; the human's approval of this patch stands", by(r)),
         (Some(r), "human") => format!("Review by {} passed; waits for a human", by(r)),
         (Some(r), _) => format!("Review by {} passed; ready to land", by(r)),
+        (None, _) if out.review_batched => "Gate passed; its review waits for its land queue batch, which reviews what waits together, once, before the batch's gate".into(),
         (None, "human") if out.review_light => "Basic checks: passed; pre-land review is exempt; waits for a human".into(),
         (None, _) if out.review_light => "Basic checks: passed; pre-land review is exempt; post-merge audit applies".into(),
         (None, "human") if out.yolo => format!("{}; waits for a human under the remaining approval rules", crate::project_yolo::NOTE),
@@ -473,6 +474,8 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         ("Needs You", "It waits for the human's approval in the Nitely inbox, and Nitely lands it as soon as they approve it; you do not call land. Nitely already asked them, so do not `ask` for this approval yourself. Pick up other work meanwhile.")
     } else if out.approver == "human" {
         ("Needs You", "It waits for the human's approval in the Nitely inbox. Nitely already asked them, so do not `ask` for this approval yourself. Pick up other work meanwhile; once it is Approved, call land.")
+    } else if out.review_batched {
+        ("In Review", "The gate passed; its review waits for its land queue batch. Call land: the queue reviews it with whatever else is waiting, in one reviewer call, before their gate, and nothing lands unreviewed. If the review asks for changes, land says so and the issue is back with you.")
     } else if out.review_light {
         ("In Review", "Basic checks passed under the committed verification policy; pre-land review is exempt. Call land; post-merge audit applies.")
     } else if out.yolo {
@@ -540,6 +543,7 @@ fn submit_into_goal(db: &mut Db, config: &crate::Config, issue: &IssueRecord, ro
         review: None,
         review_disabled: false,
         review_light: false,
+        review_batched: false,
         yolo: false,
         approver: "agent".into(),
         reasons: vec![],
@@ -553,49 +557,38 @@ fn submit_into_goal(db: &mut Db, config: &crate::Config, issue: &IssueRecord, ro
     })
 }
 
-/// A review from a batch with the reviewer that ran it, or None, and what a batch found that a
-/// single review must carry.
-type FromBatch = (Option<(crate::review::Choice, Review)>, Vec<Finding>);
-
-/// The change's review from a review batch, when its project batches reviews and it may join one;
-/// otherwise None (the timeline says why), with what a batch found for it that its single review
-/// must carry.
+/// Whether the change's review waits for its land queue batch (review_batch.rs): its project
+/// reviews in batches and nothing makes it a change reviewed alone. The timeline says which.
 #[allow(clippy::too_many_arguments)]
-fn in_a_batch(
+fn waits_for_land_batch(
     db: &Db,
     pb: &Playbook,
     issue: &IssueRecord,
-    root: &Path,
     worktree: &Path,
-    branch: &str,
-    since: &str,
     files: &[String],
     vendor: &str,
     reasons: &[String],
     previous: Option<&PreviousRound>,
     actor: &Actor,
-) -> Result<FromBatch> {
+) -> Result<bool> {
+    if pb.review.batch == crate::review::BatchMode::Off {
+        return Ok(false);
+    }
     let wt = worktree.to_string_lossy().into_owned();
     pb.review.require_enabled()?;
     let choice = pb.review.choose(vendor, &|r| pb.review.is_installed(r, worktree))?;
-    let lines = crate::review_batch::changed_lines(worktree, since)?;
     let large_repo = pb.lanes.as_ref().is_some_and(|l| l.large_repo);
     let moves_submodule = pb.submodules.iter().find(|s| files.iter().any(|f| f == s.path())).map(|s| format!("it moves the submodule {}, whose code is reviewed with it", s.path()));
     let why_alone = match moves_submodule {
         Some(why) => Some(why),
-        None => crate::review_batch::why_alone(db, &pb.review, vendor, &choice, reasons, files, lines, previous, large_repo, &issue.key)?,
+        None => crate::review_batch::why_alone(db, &pb.review, vendor, &choice, reasons, files, previous, large_repo, &issue.key)?,
     };
-    if let Some(why) = why_alone {
-        db.log_event(actor, Some(&issue.key), Some(&wt), "status", &format!("Reviewed alone, not in a batch: {why}"))?;
-        return Ok((None, vec![]));
-    }
-    let candidate = crate::review_batch::Candidate { issue, repo: root, worktree, branch, base: since, files, lines, choice: &choice };
-    match crate::review_batch::review_in_batch(db, &pb.review, &candidate, actor)? {
-        crate::review_batch::Outcome::Reviewed(review) => Ok((Some((choice, review)), vec![])),
-        crate::review_batch::Outcome::Alone(why, carried) => {
-            db.log_event(actor, Some(&issue.key), Some(&wt), "status", &format!("Reviewed alone after all: {why}"))?;
-            Ok((None, carried))
+    match why_alone {
+        Some(why) => {
+            db.log_event(actor, Some(&issue.key), Some(&wt), "status", &format!("Reviewed now, alone, not with its land batch: {why}"))?;
+            Ok(false)
         }
+        None => Ok(true),
     }
 }
 
@@ -921,6 +914,7 @@ pub fn describe(issue: &IssueRecord, s: &Submitted, land_by: crate::playbook::La
                 format!("- [P{}] {}{carried}", f.priority, f.text)
             }));
         }
+        None if s.review_batched => lines.push(format!("**Review:** {}.", crate::review_batch::PENDING_NOTE)),
         None if s.review_light => lines.push("**Review:** exempt for mechanically proven Basic change; post-merge audit applies.".into()),
         None if s.yolo => lines.push(format!("**Review:** {}. This revision is unverified.", crate::project_yolo::NOTE)),
         None if s.review_disabled => lines.push(format!("**Review:** {}.", crate::review::DISABLED_NOTE)),
@@ -1038,6 +1032,7 @@ impl Db {
     pub fn record_review(&self, s: &Submitted) -> Result<()> {
         let (reviewer, verdict, findings, flagged, note) = match &s.review {
             Some(r) => (r.reviewer.as_str(), r.verdict.as_str(), to_json(&r.findings), to_json(&r.flagged), r.note.as_str()),
+            None if s.review_batched => ("", crate::review_batch::PENDING, "[]".to_string(), "[]".to_string(), crate::review_batch::PENDING_NOTE),
             None if s.review_light => ("", "light", "[]".to_string(), "[]".to_string(), "Basic verification: pre-land review exempt; post-merge audit applies"),
             None if s.yolo => ("", "yolo", "[]".to_string(), "[]".to_string(), crate::project_yolo::NOTE),
             None if s.review_disabled => ("", "disabled", "[]".to_string(), "[]".to_string(), crate::review::DISABLED_NOTE),
@@ -1615,90 +1610,30 @@ reason = "money logic"
         assert!(landed.landed && landed.pushed.is_none(), "{landed:?}");
     }
 
-    /// Turns on batched review in the fixture's playbook.
-    fn batching(f: &Fixture, window: &str) {
-        let pb_path = f.repo.join(playbook::PLAYBOOK_PATH);
-        let pb = std::fs::read_to_string(&pb_path).unwrap();
-        let on = format!("[review]\nbatch_window = \"{window}\"\nbatch_max = 2\n");
-        std::fs::write(&pb_path, pb.replacen("[review]\n", &on, 1)).unwrap();
-        // Whether to review in batches is the review mode's (NIT-499): a migrated project's mode,
-        // not yet saved, so queued work has no authority to lose.
+    /// Under a mode that reviews each land batch (NIT-509), submit gates a change and leaves its
+    /// review to its land batch, unless something makes it a change reviewed alone, at once.
+    #[test]
+    fn a_batched_projects_submit_leaves_the_review_to_the_land_batch_unless_it_must_be_reviewed_alone() {
+        let mut f = fixture();
+        // A migrated project's mode, not yet saved, so queued work has no authority to lose.
         f.db.conn.execute("INSERT OR REPLACE INTO project_review_mode(project,mode,overrides,explicit) VALUES('NIT','custom','{\"pre_review\":\"batched\"}',0)", []).unwrap();
-    }
+        let (waits, wt) = f.committed("Small tweak", "tweak.txt");
+        let s = f.submit(&wt, true).unwrap();
+        assert!(s.review_batched && s.review.is_none() && s.state == "In Review", "{s:?}");
+        assert!(s.next.contains("Call land"), "{}", s.next);
+        let row = &f.db.reviews(&waits.key).unwrap()[0];
+        assert_eq!((row.verdict.as_str(), row.approver.as_str(), row.patch_id.as_str()), (crate::review_batch::PENDING, "agent", s.patch_id.as_str()));
+        assert!(!f.db.timeline(&waits.key).unwrap().iter().any(|t| t.kind == "review_started"), "no reviewer ran");
 
-    /// A background submit, as a submit job runs it: it may wait for a review batch.
-    fn submit_in_background(db_path: &Path, config: &crate::Config, actor: &Actor, wt: &Path) -> Result<Submitted> {
-        let mut db = Db::open(db_path)?;
-        let dir = wt.to_string_lossy().into_owned();
-        let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: true, solution: None, solution_commit: None, solution_patch_id: None };
-        submit(&mut db, config, &opts, actor)
-    }
-
-    #[test]
-    fn small_changes_handed_in_together_are_reviewed_in_one_batch() {
-        let mut f = fixture();
-        batching(&f, "60s");
-        // Two small changes to one file, handed in at once: one reviewer call, a verdict each.
-        let (a, wa) = f.committed("Totals", "shared.txt");
-        let (b, wb) = f.committed("Totals again", "shared.txt");
-        let db_path = f.base.join("t.db");
-        let started = std::time::Instant::now();
-        let threads: Vec<_> = [wa, wb]
-            .into_iter()
-            .map(|wt| {
-                let (db_path, config, actor) = (db_path.clone(), f.config.clone(), f.actor.clone());
-                std::thread::spawn(move || submit_in_background(&db_path, &config, &actor, &wt).map_err(|e| format!("{e:#}")))
-            })
-            .collect();
-        let done: Vec<Submitted> = threads.into_iter().map(|t| t.join().unwrap().unwrap()).collect();
-        assert!(started.elapsed() < std::time::Duration::from_secs(50), "the batch closed when full, not at its window");
-
-        // The reviewer saw both; the P1 it named for change 2 stays on change 2.
-        let order: String = f.db.conn.query_row("SELECT issues FROM review_batch", [], |r| r.get(0)).unwrap();
-        let order: Vec<String> = serde_json::from_str(&order).unwrap();
-        assert_eq!(order.iter().filter(|k| [&a.key, &b.key].contains(k)).count(), 2, "{order:?}");
-        let by_key = |k: &str| done.iter().find(|s| s.issue == k).unwrap();
-        let (first, second) = (by_key(&order[0]), by_key(&order[1]));
-        let (r1, r2) = (first.review.as_ref().unwrap(), second.review.as_ref().unwrap());
-        assert_eq!((r1.verdict.as_str(), first.state.as_str()), ("pass", "In Review"), "{first:?}");
-        assert_eq!((r2.verdict.as_str(), second.state.as_str()), ("changes", "In Progress"), "{second:?}");
-        assert_eq!(r2.findings[0].text, "Wrong total: shared.txt, the second line");
-        assert_eq!(r1.batch.as_ref().unwrap().with, [order[1].clone()]);
-        assert_eq!(r1.note, "same vendor: codex not installed");
-        // One row per change, as a single review writes, with the batch's id on both.
-        let batches: Vec<Option<i64>> = order.iter().map(|k| f.db.conn.query_row("SELECT batch_id FROM review WHERE issue_key = ?1", [k], |r| r.get(0)).unwrap()).collect();
-        assert!(batches[0].is_some() && batches[0] == batches[1], "{batches:?}");
-        assert_eq!(f.db.reviews(&order[0]).unwrap()[0].patch_id, first.patch_id);
-        let said: Vec<String> = f.db.timeline(&order[1]).unwrap().into_iter().filter_map(|t| t.summary).collect();
-        assert!(said.iter().any(|s| s.contains(&format!("in a batch with {}, requested changes", order[0]))), "{said:?}");
-        assert!(said.iter().any(|s| s.starts_with("Review by claude (same vendor: codex not installed) started in a batch with")), "{said:?}");
-    }
-
-    #[test]
-    fn a_change_that_cannot_join_a_batch_is_reviewed_alone() {
-        let mut f = fixture();
-        batching(&f, "0");
-        let db_path = f.base.join("t.db");
-        // Nobody else in the queue when its window ends: reviewed alone, and the timeline says why.
-        let (lone, wt) = f.committed("Lone tweak", "lone.txt");
-        let s = submit_in_background(&db_path, &f.config, &f.actor, &wt).unwrap();
-        assert!(s.review.as_ref().is_some_and(|r| r.batch.is_none() && r.verdict == "pass"), "{s:?}");
-        let said: Vec<String> = f.db.timeline(&lone.key).unwrap().into_iter().filter_map(|t| t.summary).collect();
-        assert!(said.iter().any(|s| s == "Reviewed alone after all: no other change joined it in time"), "{said:?}");
-
-        // A change larger than a batch may be is reviewed alone at once, without waiting.
-        let (big, wt) = f.started("Big change");
-        std::fs::write(wt.join("big.txt"), "line\n".repeat(1600)).unwrap();
-        sh(&wt, &["add", "."]);
-        sh(&wt, &["commit", "-q", "-m", "big"]);
-        submit_in_background(&db_path, &f.config, &f.actor, &wt).unwrap();
-        let said: Vec<String> = f.db.timeline(&big.key).unwrap().into_iter().filter_map(|t| t.summary).collect();
-        assert!(said.iter().any(|s| s.starts_with("Reviewed alone, not in a batch: it is larger than a batch may be (1600 lines")), "{said:?}");
-        // A foreground submit never waits for a batch.
-        let (fg, wt) = f.committed("Foreground", "fg.txt");
-        f.submit(&wt, true).unwrap();
-        let said: Vec<String> = f.db.timeline(&fg.key).unwrap().into_iter().filter_map(|t| t.summary).collect();
-        assert!(!said.iter().any(|s| s.contains("batch")), "{said:?}");
+        // A change to the playbook is reviewed now, alone, and the timeline says why.
+        let (alone, wt) = f.started("Playbook tweak");
+        let pb = std::fs::read_to_string(wt.join(playbook::PLAYBOOK_PATH)).unwrap();
+        std::fs::write(wt.join(playbook::PLAYBOOK_PATH), format!("{pb}\n# a note\n")).unwrap();
+        sh(&wt, &["commit", "-q", "-am", "playbook"]);
+        let s = f.submit(&wt, true).unwrap();
+        assert!(s.review.is_some() && !s.review_batched, "{s:?}");
+        let said: Vec<String> = f.db.timeline(&alone.key).unwrap().into_iter().filter_map(|t| t.summary).collect();
+        assert!(said.iter().any(|s| s == "Reviewed now, alone, not with its land batch: it changes the playbook"), "{said:?}");
     }
 
     #[test]

@@ -243,7 +243,16 @@ pub fn ignored_policy(_o:&Options,pb:&Playbook)->Vec<String> {
   ("[verification.backstop] enabled, landings and delay_seconds",(b.enabled,b.landings,b.delay_seconds)!=(d.enabled,d.landings,d.delay_seconds))]
   .into_iter().filter(|(_,set)|*set)
   .map(|(key,_)|format!("The playbook's {key} is retired and ignored: the review mode decides it."))
+  .chain(retired_review_batching(pb))
   .collect()
+}
+/// `[review] batch_window`, `batch_max`, `small_lines`, `small_files` and `max_lines` (NIT-509):
+/// a review batch is the land queue's batch now, so `[land]` decides its size and wait.
+fn retired_review_batching(pb:&Playbook)->Option<String> {
+ let (r,d)=(&pb.review,&crate::review::ReviewRules::default());
+ let set=[("batch_window",r.batch_window!=d.batch_window),("batch_max",r.batch_max!=d.batch_max),("small_lines",r.small_lines!=d.small_lines),("small_files",r.small_files!=d.small_files),("max_lines",r.max_lines!=d.max_lines)];
+ let keys:Vec<&str>=set.iter().filter(|(_,s)|*s).map(|(k,_)|*k).collect();
+ (!keys.is_empty()).then(||format!("The playbook's [review] {} {} retired and ignored: a review batch is the land queue's batch, so [land] decides its size and wait.",keys.join(", "),if keys.len()==1 {"is"} else {"are"}))
 }
 pub fn apply_issue(db:&Db,key:&str,pb:&mut Playbook)->Result<()> {
  if let Some(s)=for_issue(db,key)? {apply_project(db,&s.project,pb)?;} Ok(())
@@ -330,6 +339,10 @@ mod tests {
   let mut applied=pb.clone();apply_options(&builtin(),&mut applied);
   assert!(applied.review.enabled&&applied.land.batch==LandBatch::Off&&applied.verification.audit_percent==10,"Custom's unset values are Nitely's defaults");
   assert!(ignored_policy(&builtin(),&Playbook::default()).is_empty());
+  // The review batch's own size and window (NIT-509): the land queue's batch decides them.
+  let pb=Playbook::parse("[review]\nbatch_window='20s'\nbatch_max=4\n").unwrap();
+  assert!(pb.unknown.is_empty(),"still parse: {:?}",pb.unknown);
+  assert_eq!(ignored_policy(&builtin(),&pb),["The playbook's [review] batch_window, batch_max are retired and ignored: a review batch is the land queue's batch, so [land] decides its size and wait."]);
  }
  #[test]
  fn queued_work_finishes_under_a_looser_mode_but_not_a_stricter_one() {

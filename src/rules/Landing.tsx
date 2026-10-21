@@ -6,8 +6,8 @@ import { LAND_BY, sourceOf } from "./shared";
 
 const REVIEW_BATCH: Record<Batching["review"], string> = {
   off: "Each change alone",
-  small: "Small changes together",
-  all: "Changes of any size together",
+  small: "Each land batch together",
+  all: "Each land batch together",
   shadow: "Each change alone, and measured in batches",
 };
 const LAND_BATCH: Record<Batching["land"], string> = {
@@ -72,9 +72,7 @@ export function BatchingRow({ batching: b, reviewEnabled }: { batching: Batching
         >
           {b.review !== "off" && (
             <span className="rules-batch-detail">
-              Up to {b.review_max} per review call, waiting {windowWords(b.review_window)} for others
-              {b.review === "all" ? `; up to ${b.max_lines} changed lines a batch` : `; small is at most ${b.small_lines} lines and ${b.small_files} files`}.
-              {b.review === "shadow" && " The batch's reviews are only recorded, to compare with the single reviews that decided."}
+              Reviewed with its land batch: what waits to land together is reviewed in one reviewer call, before the batch's gate, and nothing lands unreviewed. A change that lands alone is reviewed at its land.
             </span>
           )}
         </BatchTile>

@@ -979,11 +979,6 @@ export interface ReviewerSaved {
 /** The playbook's `[review] batch` and `[land] batch` settings (docs/batching.md). */
 export interface Batching {
   review: "off" | "small" | "all" | "shadow";
-  review_window: string;
-  review_max: number;
-  small_lines: number;
-  small_files: number;
-  max_lines: number;
   land: "off" | "waiting" | "all";
   land_window_seconds: number;
   land_max: number;

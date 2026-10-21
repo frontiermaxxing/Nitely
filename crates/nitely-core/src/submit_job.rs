@@ -407,8 +407,6 @@ pub fn enqueue(db: &Db, opts: &SubmitOptions, actor: &Actor) -> Result<Job> {
         "UPDATE submit_job SET state = 'superseded', ended_at = ?2 WHERE issue_key = ?1 COLLATE NOCASE AND state = 'queued'",
         params![issue.key, now()],
     )?;
-    // One that already waits for a review batch is replaced too: its job then ends as superseded.
-    crate::review_batch::supersede_waiting(db, &issue.key)?;
     db.conn.execute(
         "INSERT INTO submit_job (issue_key, worktree, branch, head, requested_by, skip_review, local_only, state, queued_at, solution, solution_patch_id)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', ?8, ?9, ?10)",
@@ -484,9 +482,6 @@ fn run_job(db: &mut Db, config: &crate::Config, id: i64, detached: bool) -> Resu
                 "UPDATE submit_job SET state = 'done', ended_at = ?2, result = ?3 WHERE id = ?1",
                 params![id, now(), serde_json::to_string(s)?],
             )?;
-        }
-        Err(e) if e.downcast_ref::<crate::review_batch::Superseded>().is_some() => {
-            db.conn.execute("UPDATE submit_job SET state = 'superseded', ended_at = ?2, error = ?3 WHERE id = ?1", params![id, now(), e.to_string()])?;
         }
         Err(e) => {
             let why = format!("{e:#}");

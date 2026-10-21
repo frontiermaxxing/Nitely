@@ -89,10 +89,10 @@ function view(s: Stored): RulesView {
   };
 }
 
-// How each sample repo batches (docs/batching.md): Nitely reviews small changes together and lands
+// How each sample repo batches (docs/batching.md): Nitely reviews each land batch together and lands
 // what waits together; Orbit measures batched review in shadow and asks for a queue it cannot run.
 const OFF: Batching = {
-  review: "off", review_window: "5m", review_max: 3, small_lines: 100, small_files: 5, max_lines: 1500,
+  review: "off",
   land: "off", land_window_seconds: 0, land_max: 5, land_alone: null,
 };
 const BATCHING: Record<string, Batching> = {

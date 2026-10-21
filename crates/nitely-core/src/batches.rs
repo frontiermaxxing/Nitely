@@ -315,6 +315,30 @@ impl Db {
                 batch: b,
             });
         }
+        // A land batch's reviews (NIT-509) are the issue's own review rows, with their batch.
+        let rows: Vec<(i64, String, String)> = self
+            .conn
+            .prepare("SELECT batch_id, verdict, findings FROM review WHERE issue_key = ?1 COLLATE NOCASE AND batch_id IS NOT NULL ORDER BY id DESC LIMIT 20")?
+            .query_map([key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (batch, verdict, findings) in rows {
+            if reviews.iter().any(|r| r.batch.id == batch) {
+                continue;
+            }
+            let Some(b) = self.conn.query_row(&format!("SELECT {BATCH_COLUMNS} FROM review_batch WHERE id = ?1"), [batch], batch_row).optional()? else { continue };
+            let findings: Vec<crate::review::Finding> = serde_json::from_str(&findings).unwrap_or_default();
+            let review = Review { reviewer: b.reviewer.clone(), verdict: verdict.clone(), findings, flagged: vec![], summary: String::new(), seconds: 0, previous: vec![], note: String::new(), batch: None, tokens: None, reused: None };
+            reviews.push(IssueReview {
+                sent_back: review_sent_back(&review),
+                blocking: review.findings.iter().filter(|f| f.priority <= 1).count(),
+                minor: review.findings.iter().filter(|f| f.priority > 1).count(),
+                verdict: Some(verdict),
+                why: None,
+                state: "done".into(),
+                batch: b,
+            });
+        }
+        reviews.sort_by_key(|r| std::cmp::Reverse(r.batch.id));
         let mut lands = Vec::new();
         let rows: Vec<LandRow> = self
             .conn

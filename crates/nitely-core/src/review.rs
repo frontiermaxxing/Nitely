@@ -44,19 +44,18 @@ pub struct ReviewRules {
     /// A review by the author's own vendor (because no other reviewer is installed, or the
     /// `reviewer` map says so) sends the change to a human instead of approving it.
     pub require_cross_vendor: bool,
-    /// Review several changes in one reviewer call (docs/batching.md): `off` (each alone, the
-    /// default), `small` (changes of at most `small_lines` and `small_files`), or `all`. Only a
-    /// submit that runs in the background waits for a batch. Set by the review mode (Fast reviews
-    /// each batch of changes with no goal as one); the playbook's own `[review] batch` is retired.
+    /// Review the changes of a land queue batch in one reviewer call (docs/batching.md,
+    /// review_batch.rs): `off` reviews each change at its submit; `small` and `all` both leave a
+    /// change's review to its land batch. Set by the review mode (Fast); the playbook's own
+    /// `[review] batch` is retired.
     pub batch: BatchMode,
-    /// How long the oldest change in the queue waits for others ("5m", "30s", "0"), or `busy`:
-    /// until no batch of the repository is being reviewed.
+    /// Retired (NIT-509): the land queue's batch is the review batch, so its `[land] batch_max`
+    /// and window decide. Still read, so a playbook that sets them parses; ignored, with a notice
+    /// (`project_modes::ignored_policy`).
     pub batch_window: String,
-    /// Changes per review call.
     pub batch_max: usize,
     pub small_lines: usize,
     pub small_files: usize,
-    /// With `all`: changed lines per batch.
     pub max_lines: usize,
 }
 

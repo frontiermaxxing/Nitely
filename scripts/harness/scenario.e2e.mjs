@@ -47,8 +47,6 @@ commands = ["node check.mjs"]
 [review]
 reviewer = { "*" = "fake" }
 commands = { fake = ["${node}", "${slash(join(HERE, "fake-reviewer.mjs"))}"] }
-batch_window = "20s"
-batch_max = 3
 
 [lanes]
 count = 1
@@ -230,9 +228,10 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
     await page.invoke("crew_pause", { project: "APP", paused: false });
     await page.open("#now");
 
-    // 4. Batched review: the crew goes off (the rest is the agent's here) and the playbook now
-    // reviews small changes together. The agent makes three changes and submits them; one touches
-    // risky.txt, which the reviewer finds a P1 in.
+    // 4. Batched review: the crew goes off (the rest is the agent's here) and the mode reviews each
+    // land batch once (NIT-509). The agent makes three changes and submits them; one touches
+    // risky.txt, which the reviewer finds a P1 in. Submit only gates them: their reviews wait for
+    // their land batch.
     writeFileSync(join(repo, ".nitely", "playbook.toml"), playbook({ workers: 0 }));
     git(repo, "commit", "-q", "-am", "Crew off");
     // Batching is the review mode's, not the playbook's (NIT-499): the person turns it on in Custom.
@@ -255,48 +254,16 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
       await there.call("submit", { key, solution_title: "Add a greeting variant", solution_summary: "Add the requested greeting file while retaining the existing greetings." });
       await there.close();
     }
-    // While its reviewer runs, the batch is one row on the board, each issue's station says so.
-    await page.waitFor(`return [...document.querySelectorAll(".batch-row")].some((r) => r.textContent.includes("Review batch · 3 changes"));`, { timeoutMs: 120000, what: "the review batch on the board" });
-    await shot("4-review-batch");
-    await until("the batched reviews", async () => (await state(B)) === "In Review" && (await state(D)) === "In Review" && (await detail(C)).reviews.length > 0);
-    const [d2, d3, d4] = [await detail(B), await detail(C), await detail(D)];
-    assert.ok(d2.reviews[0].batch_id && d2.reviews[0].batch_id === d3.reviews[0].batch_id && d3.reviews[0].batch_id === d4.reviews[0].batch_id, "one batch reviewed all three");
-    assert.equal(d2.reviews[0].solution.title, "Add a greeting variant");
-    assert.equal(d2.reviews[0].gate.commit, d2.reviews[0].commit_sha);
-    assert.equal(d2.reviews[0].verdict, "pass");
-    assert.equal(d4.reviews[0].verdict, "pass");
-    assert.equal(d3.reviews[0].verdict, "changes", "its own P1, from the same batch");
-    assert.match(d3.reviews[0].findings[0].text, /Risky default/);
-    assert.ok(d2.timeline.some((t) => t.kind === "review_started" && /in a batch with /.test(t.summary ?? "") && (t.summary ?? "").includes(C) && (t.summary ?? "").includes(D)), "the timeline says which batch");
-    assert.equal(d3.batches.reviews[0].sent_back?.why, "own", "and why the batch sent it back");
-    assert.equal(d3.issue.state, "In Progress", "back to its agent");
+    await until("the submits", async () => (await Promise.all([B, C, D].map(state))).every((s) => s === "In Review"));
+    for (const key of [B, C, D]) {
+      const d = await detail(key);
+      assert.equal(d.reviews[0].verdict, "batched", `${key}'s review waits for its land batch`);
+      assert.ok(!d.timeline.some((t) => t.kind === "review_started"), `${key} was not reviewed at submit`);
+    }
 
-    // 5. The agent asks the person to accept the finding: a decision, told as a notification
-    // (the app is not in front), and decided in the Inbox with a signed Accept.
-    const asked = await agent.call("request_acceptance", { key: C, finding: "1", why: "The default greeting is the person's call; the reviewer cannot know it." });
-    await until("the decision's notification", async () => notifications(home).find((n) => `${n.title} ${n.body}`.includes(C)));
-    await page.open("#inbox");
-    await page.click({ css: ".inbox-row", text: C });
-    await page.waitFor(`return document.querySelector(".dd-decide-finding input") !== null;`, { what: "the finding's Accept" });
-    await page.click({ css: ".dd-decide-finding input" });
-    await page.type("Hello, stranger is the default we want");
-    await shot("5-accept");
-    await page.click({ css: ".dd-decide-finding button", text: "Accept" });
-    await page.waitFor(`return document.querySelector(".dd-outcome.done")?.textContent;`, { what: "the Accept's outcome" });
-    const answer = await agent.call("get_answer", { id: asked.id });
-    assert.match(JSON.stringify(answer), /Accepted: Hello, stranger is the default we want/);
-    // The agent reads the answer and goes on, as a real one does.
-    await agent.call("report", { key: C, text: "The person accepted the finding; the change can land." });
-
-    // 6. Accepted, the finding no longer holds the change back: it is in review again, to land.
-    // (Landing it is left out: nothing the harness app's throwaway key signed may land, NIT-157.)
-    await until(`${C} back in review`, async () => (await state(C)) === "In Review");
-    const accepted = await detail(C);
-    assert.equal(accepted.issue.track.station, "review");
-    assert.ok(accepted.timeline.some((t) => t.kind === "note" && /Accepted .*Risky default/.test(t.summary ?? "")), "the Accept is on its timeline");
-
-    // 7. The land queue: ${B} and ${D} land together, stacked and gated once in the lane; the
-    // board shows the run while it waits for more.
+    // 5. The land queue: all three wait for the queue's window and go in one run. The run reviews
+    // them in one reviewer call before its gate: the batch is one row on the board while its
+    // reviewer runs. ${C}'s own P1 sends it back; ${B} and ${D} land together on one gate.
     const land = (key) => {
       const child = spawn(nitelyExe, ["land", key], { cwd: repo, env, stdio: ["ignore", "pipe", "pipe"] });
       let out = "";
@@ -306,16 +273,54 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
       lands.push(child);
       return done;
     };
-    const both = Promise.all([land(B), sleep(2000).then(() => land(D))]);
+    const all = Promise.all([land(B), sleep(1000).then(() => land(C)), sleep(2000).then(() => land(D))]);
     await page.open("#now");
     await page.waitFor(`return document.body.textContent.includes("in the land queue");`, { timeoutMs: 60000, what: "the land queue's length by the lanes" });
-    await shot("7-land-queue");
-    for (const r of await both) assert.equal(r.code, 0, `${r.key} landed:\n${r.out}`);
-    const l1 = (await detail(B)).batches.lands[0];
+    await shot("5-land-queue");
+    await page.waitFor(`return [...document.querySelectorAll(".batch-row")].some((r) => r.textContent.includes("Review batch · 3 changes"));`, { timeoutMs: 120000, what: "the land batch's review on the board" });
+    await shot("5-review-batch");
+    const landed = await all;
+    for (const r of landed.filter((r) => r.key !== C)) assert.equal(r.code, 0, `${r.key} landed:\n${r.out}`);
+    const [d2, d3, d4] = [await detail(B), await detail(C), await detail(D)];
+    assert.ok(d2.reviews[0].batch_id && d2.reviews[0].batch_id === d3.reviews[0].batch_id && d3.reviews[0].batch_id === d4.reviews[0].batch_id, "one batch reviewed all three");
+    assert.equal(d2.reviews[0].solution.title, "Add a greeting variant", "the review keeps what was handed in");
+    assert.equal(d2.reviews[0].gate.commit, d2.reviews[0].commit_sha);
+    assert.equal(d2.reviews[0].verdict, "pass");
+    assert.equal(d4.reviews[0].verdict, "pass");
+    assert.equal(d3.reviews[0].verdict, "changes", "its own P1, from the same batch");
+    assert.match(d3.reviews[0].findings[0].text, /Risky default/);
+    assert.ok(d2.timeline.some((t) => t.kind === "review_started" && /in a batch with /.test(t.summary ?? "") && (t.summary ?? "").includes(C) && (t.summary ?? "").includes(D)), "the timeline says which batch");
+    assert.equal(d3.batches.reviews[0].sent_back?.why, "own", "and why the batch sent it back");
+    assert.equal(d3.issue.state, "In Progress", "back to its agent");
+    const l1 = d2.batches.lands[0];
     assert.equal(l1.state, "landed", JSON.stringify(l1));
     assert.deepEqual([...l1.run.landed].sort(), [B, D].sort(), "one queue run landed both");
     assert.equal(l1.run.gates, 1, "on one gate");
     for (const key of [B, D]) assert.equal(await state(key), "Done");
+
+    // 6. The agent asks the person to accept the finding: a decision, told as a notification
+    // (the app is not in front), and decided in the Inbox with a signed Accept.
+    const asked = await agent.call("request_acceptance", { key: C, finding: "1", why: "The default greeting is the person's call; the reviewer cannot know it." });
+    await until("the decision's notification", async () => notifications(home).find((n) => `${n.title} ${n.body}`.includes(C)));
+    await page.open("#inbox");
+    await page.click({ css: ".inbox-row", text: C });
+    await page.waitFor(`return document.querySelector(".dd-decide-finding input") !== null;`, { what: "the finding's Accept" });
+    await page.click({ css: ".dd-decide-finding input" });
+    await page.type("Hello, stranger is the default we want");
+    await shot("6-accept");
+    await page.click({ css: ".dd-decide-finding button", text: "Accept" });
+    await page.waitFor(`return document.querySelector(".dd-outcome.done")?.textContent;`, { what: "the Accept's outcome" });
+    const answer = await agent.call("get_answer", { id: asked.id });
+    assert.match(JSON.stringify(answer), /Accepted: Hello, stranger is the default we want/);
+    // The agent reads the answer and goes on, as a real one does.
+    await agent.call("report", { key: C, text: "The person accepted the finding; the change can land." });
+
+    // 7. Accepted, the finding no longer holds the change back: it is in review again, to land.
+    // (Landing it is left out: nothing the harness app's throwaway key signed may land, NIT-157.)
+    await until(`${C} back in review`, async () => (await state(C)) === "In Review");
+    const accepted = await detail(C);
+    assert.equal(accepted.issue.track.station, "review");
+    assert.ok(accepted.timeline.some((t) => t.kind === "note" && /Accepted .*Risky default/.test(t.summary ?? "")), "the Accept is on its timeline");
 
     // 8. What landed is on main; every track says where it ended.
     const files = git(repo, "ls-files");
