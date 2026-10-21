@@ -1049,7 +1049,8 @@ fn run_with(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Act
 /// another order or joined otherwise (a line break or `;` runs on past a failure), never counts.
 fn passed_on_tree(db: &Db, repo: &str, tree: &str, to_run: &[&str]) -> Result<Option<(i64, String)>> {
     let gate_key = to_run.join("\n");
-    let run_key = to_run.join(" && ");
+    // Joined, `a && b || c` passes when `a` fails: only commands that keep `&&`'s meaning count.
+    let run_key = to_run.iter().all(|c| joins_safely(c)).then(|| to_run.join(" && "));
     Ok(db
         .conn
         .query_row(
@@ -1061,6 +1062,13 @@ fn passed_on_tree(db: &Db, repo: &str, tree: &str, to_run: &[&str]) -> Result<Op
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?)
+}
+
+/// Whether `command`, joined to others by `&&`, still runs only after the one before it passed and
+/// fails the whole when it fails (NIT-472): no `||`, `;`, lone `&` or line break, any of which
+/// would run on past a failure or hide it.
+fn joins_safely(command: &str) -> bool {
+    !command.contains("||") && !command.contains([';', '\n', '\r']) && !command.replace("&&", "").contains('&')
 }
 
 /// A gate that ran in a lane (or was answered from one), for `playbook::run_gate` to record the way
@@ -3625,6 +3633,14 @@ pub fn reset(repo_root: &Path, pb: &Playbook) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_joined_run_stands_for_a_gate_only_when_joining_keeps_each_failure() {
+        assert!(joins_safely("npm test") && joins_safely("cargo test -p a | tee out.txt"));
+        for unsafe_ in ["npm run optional || echo optional-failed", "a; b", "a & b", "a\nb"] {
+            assert!(!joins_safely(unsafe_), "{unsafe_}");
+        }
+    }
     use std::process::Command;
 
     type Readings = Box<dyn FnMut() -> Option<machine::Memory>>;
