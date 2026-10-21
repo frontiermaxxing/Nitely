@@ -142,25 +142,34 @@ pub fn plan(config: &crate::Config, db: Option<&crate::Db>, project: Option<&str
 
 /// Why a worktree keeps its build output: its agent's work is not finished or something uses it.
 fn why_kept(worktree: &Path, branch: Option<&str>, head: &str, base: &str) -> Option<String> {
-    match git(worktree, &["status", "--porcelain", "--untracked-files=normal"]) {
-        Ok(s) if !s.trim().is_empty() => return Some("it has uncommitted changes".into()),
-        Err(e) => return Some(format!("git could not read it: {}", e.to_string().lines().next().unwrap_or(""))),
-        Ok(_) => {}
-    }
-    let Some(branch) = branch else { return Some("it is not on a branch".into()) };
+    let status = git(worktree, &["status", "--porcelain", "--untracked-files=normal"])
+        .map(|s| !s.trim().is_empty())
+        .map_err(|e| e.to_string().lines().next().unwrap_or("").to_string());
     let within = |rev: &str| git(worktree, &["merge-base", "--is-ancestor", head, rev]).is_ok();
     let exists = |rev: &str| git(worktree, &["rev-parse", "--verify", "--quiet", rev]).is_ok();
-    let landed = [base.to_string(), format!("origin/{base}")].iter().any(|b| exists(b) && within(b));
-    let pushed = exists(&format!("refs/remotes/origin/{branch}")) && within(&format!("refs/remotes/origin/{branch}"));
-    if !landed && !pushed {
+    let finished = |branch: &str| {
+        let landed = [base.to_string(), format!("origin/{base}")].iter().any(|b| exists(b) && within(b));
+        landed || (exists(&format!("refs/remotes/origin/{branch}")) && within(&format!("refs/remotes/origin/{branch}")))
+    };
+    let users = || crate::procs::holders(worktree).iter().map(|h| format!("{} ({})", h.name, h.pid)).collect();
+    kept_because(status, branch, finished, users)
+}
+
+/// Why slim keeps a worktree's build output, or None to reclaim it: its status (`Ok(dirty)`, or
+/// why git could not read it), its branch, whether that branch is landed or pushed (read only for
+/// a clean worktree on a branch), and what uses it (read last).
+fn kept_because(status: Result<bool, String>, branch: Option<&str>, finished: impl FnOnce(&str) -> bool, users: impl FnOnce() -> Vec<String>) -> Option<String> {
+    match status {
+        Ok(true) => return Some("it has uncommitted changes".into()),
+        Err(e) => return Some(format!("git could not read it: {e}")),
+        Ok(false) => {}
+    }
+    let Some(branch) = branch else { return Some("it is not on a branch".into()) };
+    if !finished(branch) {
         return Some(format!("{branch} is neither pushed nor landed"));
     }
-    let held = crate::procs::holders(worktree);
-    if !held.is_empty() {
-        let names: Vec<String> = held.iter().map(|h| format!("{} ({})", h.name, h.pid)).collect();
-        return Some(format!("in use by {}", names.join(", ")));
-    }
-    None
+    let users = users();
+    (!users.is_empty()).then(|| format!("in use by {}", users.join(", ")))
 }
 
 /// Removes the build directories of the candidates slim may reclaim. Pass a plan made just now
@@ -327,6 +336,20 @@ mod tests {
         assert_eq!(human(3 * 4096), "12 KB");
         assert_eq!(human(7_000_000_000), "6.5 GB");
         std::fs::remove_dir_all(repo).ok();
+    }
+
+    /// The keep rules `reclaims_only_finished_worktrees_and_says_why_it_keeps_the_rest` checks with
+    /// six real worktrees, and the order their facts are read in.
+    #[test]
+    fn a_worktree_keeps_its_build_output_until_it_is_clean_finished_and_unused() {
+        let unread = |_: &str| -> bool { panic!("read only for a clean worktree on a branch") };
+        let nobody = || -> Vec<String> { panic!("read last") };
+        assert_eq!(kept_because(Ok(true), Some("b"), unread, nobody).as_deref(), Some("it has uncommitted changes"));
+        assert_eq!(kept_because(Err("locked".into()), Some("b"), unread, nobody).as_deref(), Some("git could not read it: locked"));
+        assert_eq!(kept_because(Ok(false), None, unread, nobody).as_deref(), Some("it is not on a branch"));
+        assert_eq!(kept_because(Ok(false), Some("b"), |_| false, nobody).as_deref(), Some("b is neither pushed nor landed"));
+        assert_eq!(kept_because(Ok(false), Some("b"), |_| true, || vec!["node (12)".into()]).as_deref(), Some("in use by node (12)"));
+        assert_eq!(kept_because(Ok(false), Some("b"), |_| true, Vec::new), None);
     }
 
     /// An agent at work in a worktree (its session's folder, or one inside it), or on its issue,

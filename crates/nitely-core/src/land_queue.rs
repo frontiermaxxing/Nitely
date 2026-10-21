@@ -180,39 +180,31 @@ pub fn lands_alone(db: &Db, root: &Path, pb: &Playbook, key: &str) -> Result<Opt
     let mut current = pb.clone();
     crate::project_modes::apply_issue(db, key, &mut current)?;
     let pb = &current;
-    if pb.land.batch == LandBatch::Off {
-        return Ok(Some("the review mode lands each change alone".into()));
-    }
-    // A goal's slice is already one change with one review: it is gated alone, so a failure
-    // bisects over its own items (goal_branch.rs), not over unrelated changes stacked with it.
-    if db.checkpoint_of_issue(key)?.is_some() {
-        return Ok(Some("a goal's checkpoint lands alone: its slice is gated as one change and bisected over its own items".into()));
-    }
-    let Some(lanes) = &pb.lanes else {
-        return Ok(Some("a batch is gated in a build lane, and this repo has no [lanes]".into()));
+    let batching = land_rules::Batching {
+        batch_off: pb.land.batch == LandBatch::Off,
+        checkpoint: pb.land.batch != LandBatch::Off && db.checkpoint_of_issue(key)?.is_some(),
+        lanes: pb.lanes.is_some(),
+        large_repo: pb.lanes.as_ref().is_some_and(|l| l.large_repo),
     };
-    if lanes.large_repo {
-        return Ok(Some("large-repo mode lands each change alone".into()));
-    }
-    if !pb.submodules.is_empty() {
+    let submodules_unchanged = || -> Result<Option<bool>> {
+        if pb.submodules.is_empty() {
+            return Ok(None);
+        }
         let (branch, _) = land::branch_of(root, key)?;
-        if !unchanged_submodules(root, pb, pb.integration_branch(), &branch)? {
-            return Ok(Some("a change with a different managed submodule baseline lands alone".into()));
-        }
-    }
-    let Some(review) = db.reviews(key)?.into_iter().next() else {
-        return Ok(Some("it has no review yet".into()));
+        Ok(Some(unchanged_submodules(root, pb, pb.integration_branch(), &branch)?))
     };
-    if review_requires_individual(db, key, Some(&review))? {
-        return Ok(Some("reduced verification is bound to this individual patch".into()));
-    }
-    if review.approver == "human" || !review.reasons.is_empty() || db.issue(key)?.is_some_and(|i| i.state == "Approved") {
-        let signed = db.standing_approval(key)?.is_some_and(|at| db.check_signed_approval(key, &review.patch_id, at).is_ok());
-        if !signed {
-            return Ok(Some("it still needs a signed approval, checked separately for this change".into()));
-        }
-    }
-    Ok(None)
+    let reviewed = || -> Result<Option<land_rules::Reviewed>> {
+        let Some(review) = db.reviews(key)?.into_iter().next() else { return Ok(None) };
+        Ok(Some(land_rules::Reviewed {
+            individual: review_requires_individual(db, key, Some(&review))?,
+            needs_signature: review.approver == "human" || !review.reasons.is_empty() || db.issue(key)?.is_some_and(|i| i.state == "Approved"),
+        }))
+    };
+    let signed = || -> Result<bool> {
+        let patch = db.reviews(key)?.into_iter().next().map(|r| r.patch_id).unwrap_or_default();
+        Ok(db.standing_approval(key)?.is_some_and(|at| db.check_signed_approval(key, &patch, at).is_ok()))
+    };
+    Ok(land_rules::alone_reason(batching, submodules_unchanged, reviewed, signed)?.map(str::to_string))
 }
 
 /// A batch never updates a managed submodule or adopts a new baseline during rebase. Its original

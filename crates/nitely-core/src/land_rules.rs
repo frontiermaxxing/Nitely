@@ -182,9 +182,217 @@ pub fn blockers(states: &[(&str, &str)]) -> Blockers {
     }
 }
 
+/// What a review's verdict lets land: Ok with what the approval note adds (findings the person
+/// accepted), or why not. `blockers` reads (open P0/P1 findings not accepted, P0/P1 findings in
+/// all) only for a review that asked for changes.
+pub fn verdict_lets_land(verdict: &str, reviewer: &str, blockers: impl FnOnce() -> anyhow::Result<(usize, usize)>) -> anyhow::Result<String> {
+    match verdict {
+        // The Basic review exemption is retired (NIT-510): a change recorded under it gets a review.
+        "light" => anyhow::bail!("the Basic review exemption is retired; submit again for a review"),
+        "pass" | "none" | "disabled" | "yolo" => Ok(String::new()),
+        // Never reviewed: its land batch reviews it first (review_batch::review_pending), so nothing
+        // lands unreviewed.
+        crate::review_batch::PENDING => anyhow::bail!("its review waits for its land batch, and has not run; land it again"),
+        _ => {
+            // Findings the person accepted as they are, signed for this patch, block nothing.
+            let (open, all) = blockers()?;
+            if open > 0 {
+                anyhow::bail!("the {reviewer} review asked for changes; fix them, commit, and submit again");
+            }
+            Ok(format!("; its P0/P1 findings were accepted by a human, signed for this patch ({all})"))
+        }
+    }
+}
+
+/// Why a change may land without a person, when nothing (`reasons`) asks for one: None when one
+/// must approve it.
+pub fn lands_without_a_person(reasons: &[String], verdict: &str, reviewer: &str, accepted: &str) -> Option<String> {
+    if !reasons.is_empty() {
+        return None;
+    }
+    Some(match verdict {
+        "yolo" => format!("{}; no human approval is required", crate::project_yolo::NOTE),
+        "disabled" => format!("{}; no human approval is required", crate::review::DISABLED_NOTE),
+        _ => format!("the {reviewer} review passed and no human approval is needed{accepted}"),
+    })
+}
+
+/// The approval note of a change a person approved, signed by the app.
+pub fn approved_by_a_person(reasons: &[String]) -> String {
+    format!("approved by a human in Nitely after the review, signed by the app ({})", reasons.join("; "))
+}
+
+/// Why a change that needs a person and has no approval waits.
+pub fn waits_for_a_person(reasons: &[String]) -> String {
+    format!("this change waits for a human ({}); it lands once they approve it in Nitely, after the review", reasons.join("; "))
+}
+
+/// What a `[[land.after]]` step does for what landed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AfterStep {
+    /// It does not run, and why.
+    Skip(String),
+    /// It runs once the land lock is released (`after_land_outside_lock`).
+    Outside,
+    Run,
+}
+
+/// The step for the files that landed, or None when they cannot be told: then every step runs,
+/// since skipping a needed one silently is worse than running one more.
+pub fn after_step(step: &crate::playbook::GateStep, landed: Option<&[String]>) -> AfterStep {
+    let skip = match landed.map(|f| step.skip_reason(f)) {
+        None => None,
+        Some(Ok(skip)) => skip,
+        Some(Err(e)) => Some(format!("its patterns do not parse: {}", format!("{e:#}").lines().next().unwrap_or(""))),
+    };
+    match skip {
+        Some(why) => AfterStep::Skip(why),
+        None if step.outside_lock => AfterStep::Outside,
+        None => AfterStep::Run,
+    }
+}
+
+/// The dependency files that landed and that no after step which ran and passed (`covered`) names
+/// by pattern: the main checkout's setup is stale for them.
+pub fn stale_setup(changed_setup_files: Vec<String>, covered: &[&crate::playbook::GateStep]) -> Vec<String> {
+    let names = |step: &crate::playbook::GateStep, file: &str| step.when_changed.iter().any(|p| regex::Regex::new(p).is_ok_and(|r| r.is_match(file)));
+    changed_setup_files.into_iter().filter(|f| !covered.iter().any(|s| names(s, f))).collect()
+}
+
+/// What a change's project allows its land, for `alone_reason`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Batching {
+    pub batch_off: bool,
+    /// It is a goal's checkpoint.
+    pub checkpoint: bool,
+    pub lanes: bool,
+    pub large_repo: bool,
+}
+
+/// A change's review, for `alone_reason`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reviewed {
+    /// Reduced verification is bound to this patch alone.
+    pub individual: bool,
+    /// A person must approve it (or did).
+    pub needs_signature: bool,
+}
+
+/// Why a change lands alone rather than in a batch, or None. The later facts are read only when
+/// the earlier ones leave it open, in this order: whether a managed submodule's baseline is
+/// unchanged (None: the repo manages none), the review (None: none yet), and whether a signed
+/// approval stands.
+pub fn alone_reason(
+    b: Batching,
+    submodules_unchanged: impl FnOnce() -> anyhow::Result<Option<bool>>,
+    review: impl FnOnce() -> anyhow::Result<Option<Reviewed>>,
+    signed: impl FnOnce() -> anyhow::Result<bool>,
+) -> anyhow::Result<Option<&'static str>> {
+    if b.batch_off {
+        return Ok(Some("the review mode lands each change alone"));
+    }
+    // A goal's slice is already one change with one review: it is gated alone, so a failure
+    // bisects over its own items (goal_branch.rs), not over unrelated changes stacked with it.
+    if b.checkpoint {
+        return Ok(Some("a goal's checkpoint lands alone: its slice is gated as one change and bisected over its own items"));
+    }
+    if !b.lanes {
+        return Ok(Some("a batch is gated in a build lane, and this repo has no [lanes]"));
+    }
+    if b.large_repo {
+        return Ok(Some("large-repo mode lands each change alone"));
+    }
+    if submodules_unchanged()? == Some(false) {
+        return Ok(Some("a change with a different managed submodule baseline lands alone"));
+    }
+    let Some(r) = review()? else { return Ok(Some("it has no review yet")) };
+    if r.individual {
+        return Ok(Some("reduced verification is bound to this individual patch"));
+    }
+    if r.needs_signature && !signed()? {
+        return Ok(Some("it still needs a signed approval, checked separately for this change"));
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What `lands_reviewed_work_and_waits_for_human_approval`,
+    /// `lands_only_what_a_human_approved_when_the_playbook_says_human...`,
+    /// `a_finding_the_person_accepted_does_not_block_the_land` and
+    /// `tests_and_review_off_skip_automatic_checks...` decide with real submits and lands.
+    #[test]
+    fn a_verdict_and_the_reasons_for_a_person_decide_whether_a_change_lands() {
+        let never = || -> anyhow::Result<(usize, usize)> { panic!("read only for a review that asked for changes") };
+        assert_eq!(verdict_lets_land("pass", "codex", never).unwrap(), "");
+        for v in ["none", "disabled", "yolo"] {
+            assert!(verdict_lets_land(v, "codex", never).is_ok(), "{v}");
+        }
+        assert!(verdict_lets_land("light", "codex", never).unwrap_err().to_string().contains("retired"));
+        assert!(verdict_lets_land(crate::review_batch::PENDING, "codex", never).unwrap_err().to_string().contains("land batch"));
+        assert_eq!(verdict_lets_land("changes", "codex", || Ok((1, 2))).unwrap_err().to_string(), "the codex review asked for changes; fix them, commit, and submit again");
+        assert_eq!(verdict_lets_land("changes", "codex", || Ok((0, 2))).unwrap(), "; its P0/P1 findings were accepted by a human, signed for this patch (2)");
+
+        assert_eq!(lands_without_a_person(&[], "pass", "codex", "").as_deref(), Some("the codex review passed and no human approval is needed"));
+        assert!(lands_without_a_person(&[], "yolo", "", "").unwrap().ends_with("no human approval is required"));
+        assert!(lands_without_a_person(&[], "disabled", "", "").unwrap().ends_with("no human approval is required"));
+        let reasons = vec!["touches billing/".to_string(), "the reviewer flagged MONEY".to_string()];
+        assert_eq!(lands_without_a_person(&reasons, "pass", "codex", ""), None);
+        assert_eq!(waits_for_a_person(&reasons), "this change waits for a human (touches billing/; the reviewer flagged MONEY); it lands once they approve it in Nitely, after the review");
+        assert!(approved_by_a_person(&reasons).starts_with("approved by a human in Nitely after the review, signed by the app ("));
+    }
+
+    /// What `steps_outside_the_lock_build_the_newest_commit...` and
+    /// `warns_when_a_dependency_landed_that_no_after_step_set_up` check by landing.
+    #[test]
+    fn after_steps_run_for_what_landed_and_setup_is_stale_for_what_none_covered() {
+        let step = |when: &[&str], outside: bool| crate::playbook::GateStep {
+            run: "x".into(),
+            when_changed: when.iter().map(|s| s.to_string()).collect(),
+            unless_only: vec![],
+            outside_lock: outside,
+        };
+        let npm = step(&["^package(-lock)?\\.json$"], false);
+        let install = step(&["^crates/"], true);
+        let landed = ["src/App.tsx".to_string()];
+        assert!(matches!(after_step(&npm, Some(&landed)), AfterStep::Skip(why) if why.contains("nothing matching")));
+        assert_eq!(after_step(&npm, Some(&["package.json".to_string()])), AfterStep::Run);
+        assert_eq!(after_step(&install, Some(&["crates/a.rs".to_string()])), AfterStep::Outside);
+        assert_eq!(after_step(&npm, None), AfterStep::Run, "what landed cannot be told: every step runs");
+        assert!(matches!(after_step(&step(&["("], false), Some(&landed)), AfterStep::Skip(why) if why.contains("do not parse")));
+
+        let changed = vec!["package-lock.json".to_string(), "Cargo.lock".to_string()];
+        assert_eq!(stale_setup(changed.clone(), &[&npm]), ["Cargo.lock"]);
+        assert_eq!(stale_setup(changed, &[]), ["package-lock.json", "Cargo.lock"]);
+    }
+
+    /// The reasons `approvals_large_repos_and_repos_without_lanes_land_alone` and
+    /// `approved_changes_with_an_unchanged_managed_submodule_share_one_gate` reach with real
+    /// repos, and the order they are read in.
+    #[test]
+    fn a_change_lands_alone_for_the_first_reason_that_holds() {
+        let open = Batching { lanes: true, ..Default::default() };
+        let none = || -> anyhow::Result<Option<bool>> { Ok(None) };
+        let reviewed = |individual, needs_signature| move || -> anyhow::Result<Option<Reviewed>> { Ok(Some(Reviewed { individual, needs_signature })) };
+        let unread = || -> anyhow::Result<bool> { panic!("not read") };
+        let reason = |b, s: Option<bool>, r: Option<Reviewed>, signed: bool| alone_reason(b, || Ok(s), || Ok(r), || Ok(signed)).unwrap();
+        assert_eq!(alone_reason(open, none, reviewed(false, false), unread).unwrap(), None);
+        assert!(reason(Batching { batch_off: true, ..open }, None, None, false).unwrap().contains("each change alone"));
+        assert!(reason(Batching { checkpoint: true, ..open }, None, None, false).unwrap().contains("checkpoint"));
+        assert!(reason(Batching { lanes: false, ..open }, None, None, false).unwrap().contains("no [lanes]"));
+        assert!(reason(Batching { large_repo: true, ..open }, None, None, false).unwrap().contains("large-repo"));
+        assert!(reason(open, Some(false), None, false).unwrap().contains("submodule baseline"));
+        assert_eq!(reason(open, None, None, false), Some("it has no review yet"));
+        assert!(reason(open, Some(true), Some(Reviewed { individual: true, needs_signature: true }), true).unwrap().contains("individual patch"));
+        assert!(reason(open, None, Some(Reviewed { individual: false, needs_signature: true }), false).unwrap().contains("signed approval"));
+        assert_eq!(reason(open, None, Some(Reviewed { individual: false, needs_signature: true }), true), None);
+        // The earlier reasons are read before any later fact.
+        let gone = || -> anyhow::Result<Option<bool>> { panic!("not read") };
+        let no_review = || -> anyhow::Result<Option<Reviewed>> { panic!("not read") };
+        assert!(alone_reason(Batching { batch_off: true, ..open }, gone, no_review, unread).unwrap().is_some());
+    }
 
     /// The rules `a_dead_lands_lock_is_taken_over_and_a_left_index_lock_is_named`,
     /// `a_killed_lands_index_lock_is_cleared_and_anyone_elses_named` and

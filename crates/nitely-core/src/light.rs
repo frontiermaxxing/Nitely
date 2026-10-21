@@ -89,12 +89,15 @@ pub fn sparse_dirs(pb: &Playbook, repo_root: &Path, base: &str, text: &str) -> V
     if pb.worktree.sparse.is_empty() {
         return vec![];
     }
-    let mut dirs: Vec<String> = pb.worktree.sparse.iter().map(|d| d.trim().trim_matches('/').to_string()).filter(|d| !d.is_empty()).collect();
-    for path in crate::overlap::paths_in(text) {
-        if let Some(dir) = dir_of(repo_root, base, &path) {
-            dirs.push(dir);
-        }
-    }
+    let named: Vec<Option<String>> = crate::overlap::paths_in(text).iter().map(|p| dir_of(repo_root, base, p)).collect();
+    cone(&pb.worktree.sparse, named.into_iter().flatten())
+}
+
+/// The cone a sparse worktree starts with: the playbook's directories, then those of the paths an
+/// issue names, without repeats or a directory another one holds.
+pub(crate) fn cone(sparse: &[String], named: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut dirs: Vec<String> = sparse.iter().map(|d| d.trim().trim_matches('/').to_string()).filter(|d| !d.is_empty()).collect();
+    dirs.extend(named);
     dedupe(dirs)
 }
 
@@ -103,11 +106,23 @@ pub fn sparse_dirs(pb: &Playbook, repo_root: &Path, base: &str, text: &str) -> V
 pub(crate) fn dir_of(repo_root: &Path, rev: &str, path: &str) -> Option<String> {
     let path = path.trim().trim_start_matches("./").trim_matches('/');
     let kind = git(repo_root, &["cat-file", "-t", &format!("{rev}:{path}")]).ok()?;
-    match kind.trim() {
+    dir_for(path, kind.trim())
+}
+
+/// The directory for `path` given what git says it is (`tree` or `blob`): itself, its parent, or
+/// nothing for a file at the root or anything else.
+pub(crate) fn dir_for(path: &str, kind: &str) -> Option<String> {
+    let path = path.trim().trim_start_matches("./").trim_matches('/');
+    match kind {
         "tree" => Some(path.to_string()),
         "blob" => path.rsplit_once('/').map(|(dir, _)| dir.to_string()),
         _ => None,
     }
+}
+
+/// The directories of `dirs` the cone `before` does not hold yet.
+pub(crate) fn not_yet_in(before: &[String], dirs: Vec<String>) -> Vec<String> {
+    dedupe(dirs).into_iter().filter(|d| !before.iter().any(|b| d == b || d.starts_with(&format!("{b}/")))).collect()
 }
 
 /// Without repeats, and without a directory another one in the list already holds.
@@ -216,7 +231,7 @@ pub fn widen(worktree: &Path, paths: &[String]) -> Result<Widened> {
     if !missing.is_empty() {
         bail!("not in this branch: {} (paths are relative to the repo root)", missing.join(", "));
     }
-    let added: Vec<String> = dedupe(dirs).into_iter().filter(|d| !before.iter().any(|b| d == b || d.starts_with(&format!("{b}/")))).collect();
+    let added = not_yet_in(&before, dirs);
     if !added.is_empty() {
         let mut args = vec!["sparse-checkout", "add"];
         args.extend(added.iter().map(String::as_str));
@@ -345,6 +360,20 @@ pub fn wanted(pb: &Playbook) -> bool {
 mod tests {
     use super::*;
     use crate::issues::{Actor, IssueRecord};
+
+    /// The cone rules `a_sparse_worktree_holds_the_playbook_s_and_the_issue_s_directories_and_widens`
+    /// checks with a real sparse worktree.
+    #[test]
+    fn the_cone_holds_the_playbook_s_and_the_named_directories_and_widening_adds_only_new_ones() {
+        assert_eq!(dir_for("./src/billing/", "tree").as_deref(), Some("src/billing"));
+        assert_eq!(dir_for("src/billing/invoice.rs", "blob").as_deref(), Some("src/billing"));
+        assert_eq!(dir_for("README.md", "blob"), None, "a root file: cone mode always has it");
+        assert_eq!(dir_for("src/missing.rs", ""), None);
+        let sparse = vec!["/crates/core/".to_string(), " ".to_string()];
+        assert_eq!(cone(&sparse, ["crates/core/src".to_string(), "src/billing".to_string()]), ["crates/core", "src/billing"]);
+        let before = vec!["crates/core".to_string()];
+        assert_eq!(not_yet_in(&before, vec!["crates/core/src".into(), "src".into(), "src/billing".into()]), ["src"]);
+    }
     use crate::playbook::{run_gate, start_task, PLAYBOOK_PATH};
     use crate::Db;
     use std::process::Command;

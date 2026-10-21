@@ -602,19 +602,17 @@ pub(crate) fn after_land(root: &Path, pb: &Playbook, report: &mut Landed) {
     let mut covered: Vec<&playbook::GateStep> = Vec::new();
     for step in &pb.land.after {
         let command = playbook::expand(&step.run, root, root, &report.base);
-        let skip = match files.as_deref().map(|f| step.skip_reason(f)) {
-            None => None,
-            Some(Ok(skip)) => skip,
-            Some(Err(e)) => Some(format!("its patterns do not parse: {}", first_line(&e))),
-        };
-        if let Some(why) = skip {
-            report.after.push(playbook::CommandResult { command, ok: true, seconds: 0, output: format!("skipped: {why}"), skipped: true, timed_out: false });
-            continue;
-        }
-        // Run once the lock is released (`after_land_outside_lock`); it covers what it names.
-        if step.outside_lock {
-            covered.push(step);
-            continue;
+        match crate::land_rules::after_step(step, files.as_deref()) {
+            crate::land_rules::AfterStep::Skip(why) => {
+                report.after.push(playbook::CommandResult { command, ok: true, seconds: 0, output: format!("skipped: {why}"), skipped: true, timed_out: false });
+                continue;
+            }
+            // Run once the lock is released (`after_land_outside_lock`); it covers what it names.
+            crate::land_rules::AfterStep::Outside => {
+                covered.push(step);
+                continue;
+            }
+            crate::land_rules::AfterStep::Run => {}
         }
         let result = match playbook::run_shell_kind(&command, root, "install") {
             Ok((ok, output, seconds)) => playbook::CommandResult { command, ok, seconds, output, skipped: false, timed_out: false },
@@ -633,8 +631,7 @@ pub(crate) fn after_land(root: &Path, pb: &Playbook, report: &mut Landed) {
     }
     let Some(files) = files else { return };
     // A dependency file counts as handled when an after step that names it by pattern ran and passed.
-    let names = |step: &playbook::GateStep, file: &str| step.when_changed.iter().any(|p| regex::Regex::new(p).is_ok_and(|r| r.is_match(file)));
-    let stale: Vec<String> = playbook::setup_files_in(&pb.worktree, &files).into_iter().filter(|f| !covered.iter().any(|s| names(s, f))).collect();
+    let stale = crate::land_rules::stale_setup(playbook::setup_files_in(&pb.worktree, &files), &covered);
     if !stale.is_empty() {
         report.warnings.push(format!(
             "{} changed, and the main checkout {} has not run setup since; run `{}` there before using it (a [[land.after]] step can do it for you)",
@@ -1152,27 +1149,11 @@ pub(crate) fn check_approval_at(db: &Db, pb: &Playbook, key: &str, worktree: &Pa
             short(&patch)
         );
     }
-    let mut accepted = String::new();
     check_yolo_policy(db, key, &review)?;
     check_disabled_policy(pb, &review)?;
-    // The Basic review exemption is retired (NIT-510): a change recorded under it gets a review.
-    if review.verdict == "light" {
-        bail!("the Basic review exemption is retired; submit again for a review");
-    }
-    match review.verdict.as_str() {
-        "pass" | "none" | "disabled" | "yolo" => {}
-        // Never reviewed: its land batch reviews it first (review_batch::review_pending), so nothing
-        // lands unreviewed.
-        crate::review_batch::PENDING => bail!("its review waits for its land batch, and has not run; land it again"),
-        _ => {
-            // Findings the person accepted as they are, signed for this patch, block nothing.
-            let open = db.unaccepted_blockers(key, &review)?;
-            if !open.is_empty() {
-                bail!("the {} review asked for changes; fix them, commit, and submit again", review.reviewer);
-            }
-            accepted = format!("; its P0/P1 findings were accepted by a human, signed for this patch ({})", review.findings.iter().filter(|f| f.priority <= 1).count());
-        }
-    }
+    let accepted = crate::land_rules::verdict_lets_land(&review.verdict, &review.reviewer, || {
+        Ok((db.unaccepted_blockers(key, &review)?.len(), review.findings.iter().filter(|f| f.priority <= 1).count()))
+    })?;
     let files: Vec<String> = git(worktree, &["diff", "--name-only", "--no-renames", &format!("{base}...{head}")])?.lines().map(str::to_string).collect();
     pb.approval.check_blocked(&files)?;
     let mut reasons = pb.human_reasons(&files)?;
@@ -1191,12 +1172,8 @@ pub(crate) fn check_approval_at(db: &Db, pb: &Playbook, key: &str, worktree: &Pa
         }
     }
     reasons.dedup();
-    if reasons.is_empty() {
-        if review.verdict == "yolo" { return Ok(format!("{}; no human approval is required", crate::project_yolo::NOTE)); }
-        if review.verdict == "disabled" {
-            return Ok(format!("{}; no human approval is required", crate::review::DISABLED_NOTE));
-        }
-        return Ok(format!("the {} review passed and no human approval is needed{accepted}", review.reviewer));
+    if let Some(note) = crate::land_rules::lands_without_a_person(&reasons, &review.verdict, &review.reviewer, &accepted) {
+        return Ok(note);
     }
     match db.standing_approval(key)? {
         Some(at) => {
@@ -1204,12 +1181,9 @@ pub(crate) fn check_approval_at(db: &Db, pb: &Playbook, key: &str, worktree: &Pa
             // A structured test-list reconciliation above proves the same reviewed operation;
             // its existing signature still names the original patch, never a new unsigned id.
             db.check_signed_approval(key, &review.patch_id, at)?;
-            Ok(format!("approved by a human in Nitely after the review, signed by the app ({})", reasons.join("; ")))
+            Ok(crate::land_rules::approved_by_a_person(&reasons))
         }
-        _ => bail!(
-            "this change waits for a human ({}); it lands once they approve it in Nitely, after the review",
-            reasons.join("; ")
-        ),
+        _ => bail!("{}", crate::land_rules::waits_for_a_person(&reasons)),
     }
 }
 

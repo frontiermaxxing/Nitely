@@ -189,15 +189,21 @@ fn remove_folder(root: &Path, folder: &Path, branch: &str, empty: bool) -> Strin
 /// Why a closed issue's worktree stays, before asking which processes use it.
 fn why_it_stays(worktree: &Path, branch: &str, base: &str) -> Option<String> {
     let git = |args: &[&str]| playbook::git(worktree, args);
-    match git(&["status", "--porcelain", "--untracked-files=normal"]) {
-        Ok(s) if !s.trim().is_empty() => return Some("it has uncommitted changes".into()),
-        Err(e) => return Some(format!("git could not read it: {}", e.to_string().lines().next().unwrap_or(""))),
-        Ok(_) => {}
+    let status = git(&["status", "--porcelain", "--untracked-files=normal"])
+        .map(|s| !s.trim().is_empty())
+        .map_err(|e| e.to_string().lines().next().unwrap_or("").to_string());
+    stays_because(status, branch, base, || git(&["merge-base", "--is-ancestor", "HEAD", base]).is_ok())
+}
+
+/// Why a leftover worktree stays, or None to remove it: its status (`Ok(dirty)`, or why git could
+/// not read it), then (read only for a clean one) whether its head is on `base`.
+fn stays_because(status: Result<bool, String>, branch: &str, base: &str, on_base: impl FnOnce() -> bool) -> Option<String> {
+    match status {
+        Ok(true) => Some("it has uncommitted changes".into()),
+        Err(e) => Some(format!("git could not read it: {e}")),
+        Ok(false) if !on_base() => Some(format!("{branch} has commits {base} does not")),
+        Ok(false) => None,
     }
-    if git(&["merge-base", "--is-ancestor", "HEAD", base]).is_err() {
-        return Some(format!("{branch} has commits {base} does not"));
-    }
-    None
 }
 
 #[cfg(test)]
@@ -217,6 +223,17 @@ mod tests {
         assert!(said.starts_with("could not delete"), "{said}");
         assert!(dir.join("work.txt").exists() && dir.join(".git").exists());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// What land's tidying (`later_lands_tidy_what_earlier_ones_left...`) decides for a
+    /// leftover worktree from git's answers.
+    #[test]
+    fn a_leftover_stays_while_dirty_unreadable_or_ahead_of_its_base() {
+        let unread = || -> bool { panic!("read only for a clean worktree") };
+        assert_eq!(stays_because(Ok(true), "b", "main", unread).as_deref(), Some("it has uncommitted changes"));
+        assert_eq!(stays_because(Err("not a git repository".into()), "b", "main", unread).as_deref(), Some("git could not read it: not a git repository"));
+        assert_eq!(stays_because(Ok(false), "b", "main", || false).as_deref(), Some("b has commits main does not"));
+        assert_eq!(stays_because(Ok(false), "b", "main", || true), None);
     }
 
     #[test]
