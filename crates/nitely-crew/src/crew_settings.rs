@@ -242,6 +242,35 @@ fn describe(edit: &CrewEdit) -> String {
     out
 }
 
+/// How a crew edit is saved.
+#[derive(Debug, PartialEq)]
+enum Save {
+    /// A commit of the repo's own playbook on its integration branch.
+    Commit { branch: String },
+    /// Written over the playbook Nitely keeps for the repo.
+    InPlace,
+}
+
+/// Where `project`'s crew edit for the repo at `root` goes, or why it may not: `elsewhere` names
+/// another of the project's repos that runs a crew already (asked only when the edit turns the
+/// crew on), and `place` is the repo's own playbook's integration branch and the branch its
+/// checkout is on (empty when detached), or None when Nitely keeps the playbook.
+fn save_target(project: &str, elsewhere: Option<&str>, place: Option<(String, String)>, root: &Path) -> Result<Save> {
+    // A project runs one crew, from the first of its repos whose playbook has one (crew.rs,
+    // supervisors_wanted): a second would be saved and never run.
+    if let Some(other) = elsewhere {
+        bail!("{project} already runs its crew from {other}; a project runs one crew, so turn that one off first");
+    }
+    let Some((branch, on)) = place else { return Ok(Save::InPlace) };
+    // Nitely reads the playbook from the main checkout: committed to a branch it is not on, the
+    // change would be saved and never followed.
+    if on != branch {
+        let on = if on.is_empty() { "a detached HEAD".to_string() } else { on };
+        bail!("{} is on {on}, and Nitely follows the playbook there; switch it to {branch} first, or change the crew on {on}'s playbook", root.display());
+    }
+    Ok(Save::Commit { branch })
+}
+
 /// Saves `edit` as `repo`'s crew, as the person. Only the app calls this.
 pub fn save_crew(config: &nitely_core::Config, db: &Db, repo_name: &str, edit: &CrewEdit) -> Result<CrewSaved> {
     save_with(config, db, repo_name, edit, &installed)
@@ -252,26 +281,22 @@ fn save_with(config: &nitely_core::Config, db: &Db, repo_name: &str, edit: &Crew
     let repo = repo(config, repo_name)?;
     let root = Path::new(&repo.root);
     let target = Target::of(&repo.name, root);
-    // A project runs one crew, from the first of its repos whose playbook has one (crew.rs,
-    // supervisors_wanted): a second would be saved and never run.
-    if edit.workers > 0 {
-        let project = repo.project.as_deref().unwrap_or_default();
-        for other in repos(config, project).into_iter().filter(|r| r.name != repo.name) {
-            if Playbook::load_with(Path::new(&other.root), config).is_ok_and(|p| p.crew.workers > 0) {
-                bail!("{project} already runs its crew from {}; a project runs one crew, so turn that one off first", other.name);
-            }
-        }
-    }
-    let what = describe(&edit);
-    let done = if target.in_repo {
+    let project = repo.project.as_deref().unwrap_or_default();
+    // Read only what the decision needs: the other repos' playbooks when the crew is turned on, the
+    // checkout's branch when the playbook is the repo's own.
+    let elsewhere = (edit.workers > 0)
+        .then(|| repos(config, project).into_iter().filter(|r| r.name != repo.name).find(|other| Playbook::load_with(Path::new(&other.root), config).is_ok_and(|p| p.crew.workers > 0)).map(|r| r.name.clone()))
+        .flatten();
+    let place = if target.in_repo {
         let branch = Playbook::parse(&read(&target.path)?)?.integration_branch().to_string();
-        // Nitely reads the playbook from the main checkout: committed to a branch it is not on, the
-        // change would be saved and never followed.
         let on = nitely_core::playbook::git(root, &["branch", "--show-current"]).map(|b| b.trim().to_string()).unwrap_or_default();
-        if on != branch {
-            let on = if on.is_empty() { "a detached HEAD".to_string() } else { on };
-            bail!("{} is on {on}, and Nitely follows the playbook there; switch it to {branch} first, or change the crew on {on}'s playbook", root.display());
-        }
+        Some((branch, on))
+    } else {
+        None
+    };
+    let save = save_target(project, elsewhere.as_deref(), place, root)?;
+    let what = describe(&edit);
+    let done = if let Save::Commit { branch } = save {
         let message = format!("Crew: {what}\n\nSet in the Nitely app.");
         let commit = nitely_core::proposals::commit_playbook_edit(root, &branch, &|at_tip| edited(at_tip, &edit), &message)?;
         format!("Committed {} to {PLAYBOOK_PATH} on {branch}; it is pushed with the next land", &commit[..commit.len().min(9)])
@@ -331,6 +356,20 @@ mod tests {
     }
 
     #[test]
+    fn a_crew_edit_is_committed_on_the_branch_nitely_follows_and_one_crew_runs_per_project() {
+        let root = Path::new("/c/shop");
+        let commit = save_target("SHOP", None, Some(("main".into(), "main".into())), root).unwrap();
+        assert_eq!(commit, Save::Commit { branch: "main".into() });
+        assert_eq!(save_target("SHOP", None, None, root).unwrap(), Save::InPlace, "a playbook Nitely keeps");
+        let refused = |place: Option<(String, String)>, elsewhere: Option<&str>| save_target("SHOP", elsewhere, place, root).unwrap_err().to_string();
+        // Not while the checkout is on another branch: the crew would never see it.
+        assert!(refused(Some(("main".into(), "side".into())), None).contains("is on side, and Nitely follows the playbook there; switch it to main"));
+        assert!(refused(Some(("main".into(), String::new())), None).contains("is on a detached HEAD"));
+        // A second repo of the project cannot run a crew of its own.
+        assert!(refused(None, Some("shop")).contains("SHOP already runs its crew from shop"));
+    }
+
+    #[test]
     fn saves_a_stored_playbook_in_place_and_commits_a_repos_own() {
         let base = nitely_core::paths::unique_temp("nitely-crew-settings", "");
         let db = Db::open(&base.join("t.db")).unwrap();
@@ -351,11 +390,6 @@ mod tests {
         config.repos.push(nitely_core::RepoConfig { name: "shop".into(), root: shop.to_string_lossy().into_owned(), integration_branch: "main".into(), project: Some("SHOP".into()) });
         let agents = |p: &str| p == "codex";
 
-        // Not while the checkout is on another branch: the crew would never see it.
-        git(&shop, &["checkout", "-q", "-b", "side"]);
-        assert!(save_with(&config, &db, "shop", &turn_on(), &agents).unwrap_err().to_string().contains("is on side"));
-        git(&shop, &["checkout", "-q", "main"]);
-
         let saved = save_with(&config, &db, "shop", &turn_on(), &agents).unwrap();
         assert!(saved.done.starts_with("Committed ") && saved.done.contains("on main"), "{}", saved.done);
         assert_eq!(git(&shop, &["log", "-1", "--format=%s"]), "Crew: 2 workers (codex, claude), 10 a day, 5.0M tokens a day, quiet 01:00-07:00");
@@ -367,20 +401,6 @@ mod tests {
         let installed: Vec<(&str, bool)> = v.choices.iter().map(|c| (c.name.as_str(), c.installed)).collect();
         assert_eq!(installed, [("codex", true), ("claude", false)]);
 
-        // A second repo of the project cannot run a crew of its own.
-        let site = base.join("site");
-        std::fs::create_dir_all(site.join(".nitely")).unwrap();
-        git(&site, &["init", "-q", "-b", "main"]);
-        std::fs::write(site.join(PLAYBOOK_PATH), "[gate]
-commands = [\"npm test\"]
-").unwrap();
-        git(&site, &["add", "."]);
-        git(&site, &["commit", "-q", "-m", "init"]);
-        config.repos.push(nitely_core::RepoConfig { name: "site".into(), root: site.to_string_lossy().into_owned(), integration_branch: "main".into(), project: Some("SHOP".into()) });
-        assert!(save_with(&config, &db, "site", &turn_on(), &agents).unwrap_err().to_string().contains("already runs its crew from shop"));
-        let off = CrewEdit { agents: vec!["codex".into()], ..Default::default() };
-        assert!(save_with(&config, &db, "site", &off, &agents).is_ok(), "settings with the crew off are fine");
-
         // A repo whose playbook Nitely keeps: written in place.
         let kept = base.join("kept.toml");
         let target = Target { repo: "notes".into(), root: base.join("notes"), in_repo: false, path: kept.clone() };
@@ -389,7 +409,7 @@ commands = [\"npm test\"]
         assert!(text.contains("# kept by Nitely") && Playbook::parse(&text).unwrap().crew.workers == 2, "{text}");
 
         let events: Vec<String> = db.conn.prepare("SELECT summary FROM event WHERE type = 'crew_changed'").unwrap().query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
-        assert_eq!(events, ["Crew for SHOP (shop): 2 workers (codex, claude), 10 a day, 5.0M tokens a day, quiet 01:00-07:00", "Crew for SHOP (site): off"]);
+        assert_eq!(events, ["Crew for SHOP (shop): 2 workers (codex, claude), 10 a day, 5.0M tokens a day, quiet 01:00-07:00"]);
         std::fs::remove_dir_all(base).ok();
     }
 }

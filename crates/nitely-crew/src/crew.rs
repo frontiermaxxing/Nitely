@@ -1,8 +1,11 @@
 //! The crew: Nitely starting and keeping up to N headless agent workers on a project's backlog,
 //! one issue each (docs/crew.md). The supervisor claims the issue and makes its worktree itself,
 //! then starts the agent there with the standard brief; everything the agent does after that goes
-//! through the same MCP tools a person's agent uses. Starting a process is behind [`Agents`], so
-//! tests run the supervisor with a fake agent.
+//! through the same MCP tools a person's agent uses. Starting a process is behind [`Agents`] and
+//! reading the repository behind [`Repo`], so tests run the supervisor with a fake agent and,
+//! for all but a few scenarios, without git (NIT-534). The tick's decisions are plain functions
+//! over what it read: `why_not_starting`, `goal_order`, `setup_end`, `adopt_setup`, `end_of`,
+//! `disposition`, `after_land`, `preview_port`, `branch_vendors`, `current_branch`.
 
 use anyhow::{bail, Context, Result};
 use rusqlite::params;
@@ -108,6 +111,62 @@ pub trait Agents {
     /// Runs a submit job again (`nitely submit-job <id>`) whose process died before it finished, as
     /// submit starts one; returns its process id.
     fn run_submit_job(&self, nitely: &str, job: &nitely_core::submit_job::Job) -> Result<Option<u32>>;
+    /// Whether `port` is free on this machine, for a worker's browser preview.
+    fn port_free(&self, port: u16) -> bool {
+        std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+    }
+}
+
+/// What the tick reads from the repository and its worktrees. [`GitRepo`] asks git (in process
+/// where git_read can); tests give the supervisor a fake, so its decisions run without git.
+pub trait Repo {
+    /// What HEAD names in `worktree` (`HEAD` when detached), and the branch a rebase stopped there
+    /// is rebasing, if one is. None when it is no worktree git can read.
+    fn head(&self, worktree: &Path) -> Option<(String, Option<String>)>;
+    /// The repository's local branch names.
+    fn branches(&self, repo: &Path) -> Vec<String>;
+    /// Whether a rebase is stopped in `worktree`, and how many files it has uncommitted.
+    fn changes(&self, worktree: &Path) -> (bool, usize);
+    /// The repository's common git folder.
+    fn common_dir(&self, repo: &Path) -> Option<PathBuf>;
+    /// The worktrees git lists for the repository, or None when it cannot list them.
+    fn worktrees(&self, repo: &Path) -> Option<Vec<String>>;
+    /// Whether `worktree`'s setup ran and passed (`playbook::setup_passed`).
+    fn setup_passed(&self, worktree: &Path) -> bool;
+}
+
+/// The repository as git has it.
+pub struct GitRepo;
+
+impl Repo for GitRepo {
+    fn head(&self, worktree: &Path) -> Option<(String, Option<String>)> {
+        // The branch and where a rebase keeps the one it rebases, in one git (NIT-508).
+        let out = playbook::git(worktree, &["rev-parse", "--abbrev-ref", "HEAD", "--path-format=absolute", "--git-path", "rebase-merge/head-name", "--git-path", "rebase-apply/head-name"]).ok()?;
+        let mut lines = out.lines();
+        let on = lines.next()?.trim().to_string();
+        let rebasing = lines.find_map(|p| std::fs::read_to_string(p.trim()).ok());
+        Some((on, rebasing))
+    }
+    fn branches(&self, repo: &Path) -> Vec<String> {
+        let refs = playbook::git(repo, &["for-each-ref", "--format=%(refname:short)", "refs/heads/"]).unwrap_or_default();
+        refs.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect()
+    }
+    fn changes(&self, worktree: &Path) -> (bool, usize) {
+        let rebasing = playbook::git(worktree, &["rev-parse", "--path-format=absolute", "--git-path", "rebase-merge", "--git-path", "rebase-apply"])
+            .is_ok_and(|paths| paths.lines().any(|p| !p.trim().is_empty() && Path::new(p.trim()).exists()));
+        let changed = playbook::git(worktree, &["status", "--porcelain"]).map(|s| s.lines().count()).unwrap_or(0);
+        (rebasing, changed)
+    }
+    fn common_dir(&self, repo: &Path) -> Option<PathBuf> {
+        playbook::git(repo, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).ok().map(|s| PathBuf::from(s.trim()))
+    }
+    fn worktrees(&self, repo: &Path) -> Option<Vec<String>> {
+        let listed = playbook::git(repo, &["worktree", "list", "--porcelain"]).ok()?;
+        Some(listed.lines().filter_map(|line| line.strip_prefix("worktree ")).map(str::to_string).collect())
+    }
+    fn setup_passed(&self, worktree: &Path) -> bool {
+        playbook::setup_passed(worktree)
+    }
 }
 
 /// What `Agents::land` needs: `nitely land <issue>` in the repo, output to `log`.
@@ -232,7 +291,7 @@ pub struct WorkerLine {
 }
 
 /// How a worker ended.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum End {
     Exited(i32),
     /// Stopped by the supervisor at `timeout_minutes`.
@@ -313,6 +372,7 @@ pub struct Supervisor {
     /// How agents start the nitely MCP server.
     pub nitely: String,
     agents: Box<dyn Agents>,
+    repo: Box<dyn Repo>,
     clock: Box<dyn Fn() -> Moment>,
     /// True once the person asked to stop: checked before each start, since a worktree's setup
     /// can take minutes.
@@ -358,6 +418,7 @@ impl Supervisor {
             dir: dir.to_path_buf(),
             nitely: nitely.into(),
             agents,
+            repo: Box::new(GitRepo),
             clock: Box::new(Moment::now),
             interrupted: Box::new(|| false),
             tokens: Box::new(|project, since| {
@@ -382,6 +443,16 @@ impl Supervisor {
     pub fn with_clock(mut self, clock: impl Fn() -> Moment + 'static) -> Supervisor {
         self.clock = Box::new(clock);
         self
+    }
+
+    pub fn with_repo(mut self, repo: impl Repo + 'static) -> Supervisor {
+        self.repo = Box::new(repo);
+        self
+    }
+
+    /// The branch `worktree` is on, as [`current_branch`] reads it.
+    fn branch_of(&self, worktree: &Path) -> Option<String> {
+        current_branch(self.repo.head(worktree))
     }
 
     /// Looks for workers again on the next pass, as a new supervisor does: after a newer build held
@@ -502,41 +573,24 @@ impl Supervisor {
     /// Why no worker may start now, or None when slots may be filled.
     fn why_not_starting(&self, db: &Db, playbook: &Playbook, moment: &Moment, draining: bool) -> Result<Option<String>> {
         let rules = &playbook.crew;
-        if draining {
-            return Ok(Some("stopping: waiting for running workers".into()));
-        }
-        if rules.workers == 0 {
-            return Ok(Some("off: the playbook's crew.workers is 0".into()));
-        }
-        if db.crew_control(&self.project)?.paused {
-            return Ok(Some("paused".into()));
-        }
-        if playbook.gate.commands.is_empty() && playbook.gate.steps.is_empty() {
-            return Ok(Some("no gate: the playbook has no [gate] commands, so the crew does not run".into()));
-        }
-        if let Some(spec) = &rules.quiet_hours {
-            match quiet_until(spec, moment.minute_of_day) {
-                Ok(Some(until)) => return Ok(Some(format!("quiet hours until {until}"))),
-                Ok(None) => {}
-                Err(e) => return Ok(Some(format!("{e:#}"))),
-            }
-        }
-        let today = db.crew_started_since(&self.project, moment.day_start)?;
-        if today >= rules.max_per_day() {
-            return Ok(Some(format!("{today} of {} started today", rules.max_per_day())));
-        }
-        if let Some(why) = self.over_budget(rules, moment) {
-            return Ok(Some(why));
-        }
-        if self.running() >= rules.workers as usize {
-            return Ok(Some("working".into()));
-        }
-        // A disk filling up is worse than an idle slot (memory waits in the machine's admission).
-        let worktrees = playbook.worktrees_folder(&self.repo_root).unwrap_or_else(|| self.repo_root.clone());
-        if let Some(why) = nitely_core::machine::disk_short(&worktrees, rules.min_free_disk_gb) {
-            return Ok(Some(format!("{why}; no new worker starts")));
-        }
-        Ok(None)
+        // Read only as far as the decision gets: the database, the token scan and the disk cost.
+        let paused = || db.crew_control(&self.project).map(|c| c.paused);
+        let started_today = || db.crew_started_since(&self.project, moment.day_start);
+        let disk = || {
+            let worktrees = playbook.worktrees_folder(&self.repo_root).unwrap_or_else(|| self.repo_root.clone());
+            nitely_core::machine::disk_short(&worktrees, rules.min_free_disk_gb)
+        };
+        why_not_starting(&StartCheck {
+            draining,
+            rules,
+            has_gate: !(playbook.gate.commands.is_empty() && playbook.gate.steps.is_empty()),
+            moment,
+            running: self.running(),
+            paused: &paused,
+            started_today: &started_today,
+            over_budget: &|| self.over_budget(rules, moment),
+            disk_short: &disk,
+        })
     }
 
     /// Starts workers until the slots are full, the daily cap is reached or nothing is ready.
@@ -600,7 +654,7 @@ impl Supervisor {
             }
             // A second attempt continues the first one's branch, with the first one's agent: the
             // branch's prefix picks the reviewer, so another agent on it would review itself.
-            let vendors = branch_vendors(&self.repo_root, &issue.key);
+            let vendors = branch_vendors(&self.repo.branches(&self.repo_root), &issue.key);
             let earlier = vendors.iter().find(|v| installed.contains(v)).or(vendors.first()).cloned();
             let agent = match earlier {
                 Some(v) if installed.contains(&v) => v,
@@ -620,28 +674,10 @@ impl Supervisor {
     /// a goal's own `workers`, else the playbook's `goal_workers`, counts the workers running or
     /// setting up on its issues.
     fn goal_order(&self, db: &Db, rules: &CrewRules) -> Result<nitely_core::overlap::GoalOrder> {
-        let goals = db.goals(&self.project, false)?;
-        let active: std::collections::HashSet<i64> = goals.iter().map(|g| g.id).collect();
+        let goals: Vec<(i64, Option<i64>)> = db.goals(&self.project, false)?.into_iter().map(|g| (g.id, g.workers)).collect();
         let open = db.list_issues(Some(&self.project), false)?;
-        let first = open.iter().filter(|i| nitely_core::goal_plans::is_planning(i)).map(|i| i.key.clone()).collect();
-        let goal_of: HashMap<String, i64> = open.into_iter().filter_map(|i| i.goal.filter(|g| active.contains(g)).map(|g| (i.key, g))).collect();
-        let busy = self.running.iter().map(|r| r.issue.as_str()).chain(self.preparing.iter().map(|p| p.issue.key.as_str()));
-        let mut working: HashMap<i64, i64> = HashMap::new();
-        for key in busy {
-            if let Some(g) = goal_of.get(key) {
-                *working.entry(*g).or_default() += 1;
-            }
-        }
-        let mut order = nitely_core::overlap::GoalOrder { goal_of, first, ..Default::default() };
-        for g in goals {
-            let budget = g.workers.or((rules.goal_workers > 0).then_some(rules.goal_workers as i64));
-            if budget.is_some_and(|b| working.get(&g.id).copied().unwrap_or(0) >= b) {
-                order.full.insert(g.id);
-            } else {
-                order.open.push(g.id);
-            }
-        }
-        Ok(order)
+        let busy: Vec<&str> = self.running.iter().map(|r| r.issue.as_str()).chain(self.preparing.iter().map(|p| p.issue.key.as_str())).collect();
+        Ok(goal_order(&goals, &open, &busy, rules))
     }
 
     /// A port for a new worker's browser preview: the first of `PREVIEW_PORTS` that no running
@@ -652,7 +688,7 @@ impl Supervisor {
         if let Ok(mut stmt) = db.conn.prepare("SELECT port FROM crew_worker WHERE ended_at IS NULL AND port IS NOT NULL") {
             taken.extend(stmt.query_map([], |r| r.get::<_, i64>(0)).into_iter().flatten().flatten().map(|p| p as u16));
         }
-        PREVIEW_PORTS.clone().find(|p| !taken.contains(p) && std::net::TcpListener::bind(("127.0.0.1", *p)).is_ok())
+        preview_port(&taken, |p| self.agents.port_free(p))
     }
 
     /// What follows an attempt to start a worker on `key`.
@@ -688,7 +724,7 @@ impl Supervisor {
         let agent_id = format!("{agent}:{}", nitely_core::paths::normalize(&worktree.to_string_lossy()));
         db.reassign_claim(&issue.key, &agent_id)?;
         if worktree.join(".git").exists() {
-            if let Some(why) = other_branch(current_branch(&worktree).as_deref(), &worktree, &playbook.branch_for(agent, issue), agent, &issue.key) {
+            if let Some(why) = other_branch(self.branch_of(&worktree).as_deref(), &worktree, &playbook.branch_for(agent, issue), agent, &issue.key) {
                 return Ok(Start::Wait(why));
             }
         }
@@ -735,23 +771,19 @@ impl Supervisor {
                 self.preparing.remove(i).process.stop();
                 continue;
             }
-            let exited = match self.preparing[i].process.exited() {
-                // A setup taken over from an earlier supervisor has no exit code: its record says.
-                Ok(Some(code)) if code < 0 => {
-                    let worktree = Path::new(self.preparing[i].agent_id.split_once(':').map_or("", |(_, w)| w));
-                    Some(if playbook::setup_passed(worktree) { Ok(0) } else { Err("its setup ended without passing".to_string()) })
+            let ended = self.preparing[i].process.exited();
+            // A setup taken over from an earlier supervisor has no exit code: its record says.
+            let worktree = Path::new(self.preparing[i].agent_id.split_once(':').map_or("", |(_, w)| w));
+            let exited = match setup_end(ended, || self.repo.setup_passed(worktree), now - self.preparing[i].since, deadline) {
+                SetupEnd::Running => {
+                    i += 1;
+                    continue;
                 }
-                Ok(Some(code)) => Some(Ok(code)),
-                Ok(None) if now - self.preparing[i].since > deadline => {
+                SetupEnd::Stop(why) => {
                     self.preparing[i].process.stop();
-                    Some(Err(format!("it ran past {} minutes (crew.setup_timeout_minutes) and was stopped", deadline / 60)))
+                    Err(why)
                 }
-                Ok(None) => None,
-                Err(e) => Some(Err(format!("{e:#}"))),
-            };
-            let Some(exited) = exited else {
-                i += 1;
-                continue;
+                SetupEnd::Ended(how) => how,
             };
             // Set up and ready, a worker still launches only while the machine has memory for it
             // (NIT-266) and the disk room (NIT-246); until then it waits here, its setup done, and is
@@ -802,7 +834,7 @@ impl Supervisor {
     fn launch(&mut self, db: &mut Db, playbook: &Playbook, id: i64, issue: &IssueRecord, agent: &str, agent_id: &str) -> Result<Start> {
         let worktree = playbook.worktree_for(&self.repo_root, agent, issue);
         let wanted = playbook.branch_for(agent, issue);
-        let on = current_branch(&worktree);
+        let on = self.branch_of(&worktree);
         if let Some(why) = other_branch(on.as_deref(), &worktree, &wanted, agent, &issue.key) {
             return Ok(Start::Wait(why));
         }
@@ -815,9 +847,7 @@ impl Supervisor {
         prune_logs(&logs, LOGS_KEPT);
         let log = logs.join(format!("{ts}-{}-{agent}.log", issue.key.to_lowercase()));
         let mcp_config = self.write_mcp_config()?;
-        let git_dir = playbook::git(&self.repo_root, &["rev-parse", "--path-format=absolute", "--git-common-dir"])
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|_| self.repo_root.join(".git").to_string_lossy().into_owned());
+        let git_dir = self.repo.common_dir(&self.repo_root).unwrap_or_else(|| self.repo_root.join(".git")).to_string_lossy().into_owned();
         let command = playbook.crew.command_for(agent).with_context(|| format!("the playbook has no command for {agent} (add crew.commands.{agent})"))?;
         let fill = |a: &str| {
             a.replace("{worktree}", &worktree.to_string_lossy())
@@ -895,11 +925,12 @@ impl Supervisor {
                     continue;
                 }
                 let worktree = Path::new(&w.worktree);
-                let process = match w.pid.and_then(|pid| self.agents.adopt(pid)) {
-                    Some(p) => p,
-                    None if playbook::setup_passed(worktree) => Box::new(Done(0)),
-                    None if worktree.join(".git").exists() => Box::new(Done(1)),
-                    None => match self.prepare(db, w.id, &issue, &w.agent, Path::new(&w.log)) {
+                let alive = w.pid.and_then(|pid| self.agents.adopt(pid));
+                let found = if alive.is_some() { AdoptSetup::Watch } else { adopt_setup(self.repo.setup_passed(worktree), worktree.join(".git").exists()) };
+                let process = match (alive, found) {
+                    (Some(p), _) => p,
+                    (None, AdoptSetup::Ended(code)) => Box::new(Done(code)),
+                    (None, _) => match self.prepare(db, w.id, &issue, &w.agent, Path::new(&w.log)) {
                         Ok(p) => p,
                         Err(e) => {
                             db.crew_worker_ended(w.id, None, "launch_failed", &format!("{e:#}"))?;
@@ -943,19 +974,12 @@ impl Supervisor {
         let ts = (self.clock)().ts;
         let mut i = 0;
         while i < self.running.len() {
-            let end = match self.running[i].process.exited() {
-                Ok(Some(code)) => Some(End::Exited(code)),
-                Ok(None) if ts - self.running[i].started_at > deadline && !self.landing(&self.running[i].issue) => {
-                    self.running[i].process.stop();
-                    Some(End::TimedOut)
-                }
-                Ok(None) if idle > 0 && ts - self.last_sign(db, &self.running[i])? > idle && !self.landing(&self.running[i].issue) => {
-                    self.running[i].process.stop();
-                    Some(End::Silent)
-                }
-                Ok(None) => None,
-                Err(_) => Some(End::Exited(-1)),
-            };
+            let exited = self.running[i].process.exited();
+            let w = &self.running[i];
+            let end = end_of(exited, ts - w.started_at, || Ok(ts - self.last_sign(db, w)?), deadline, idle, || self.landing(&w.issue))?;
+            if matches!(end, Some(End::TimedOut | End::Silent)) {
+                self.running[i].process.stop();
+            }
             match end {
                 None => i += 1,
                 Some(end) => {
@@ -994,7 +1018,12 @@ impl Supervisor {
         // Git can be slow; gather only descriptive worktree information before taking the write
         // lock. All authoritative decisions and database effects happen inside that lock.
         let inspect: bool = db.conn.query_row("SELECT EXISTS(SELECT 1 FROM issue WHERE key = ?1 AND state IN ('In Progress', 'Todo'))", [&w.issue], |r| r.get(0))?;
-        let worktree = if inspect { worktree_state(&w.worktree) } else { String::new() };
+        let worktree = if inspect && w.worktree.join(".git").exists() {
+            let (rebasing, changed) = self.repo.changes(&w.worktree);
+            worktree_state(rebasing, changed)
+        } else {
+            String::new()
+        };
         let tx = rusqlite::Transaction::new_unchecked(&db.conn, rusqlite::TransactionBehavior::Immediate)?;
         let (outcome, clean_up) = self.settle_database(db, rules, w, end, &worktree)?;
         tx.commit()?;
@@ -1030,18 +1059,7 @@ impl Supervisor {
         // A worker hands its change in and leaves (NIT-212): a submit it made is still running, or
         // came back after it left, and the claim stays until the supervisor acts on the result.
         let handed_in = state == "In Progress" && still_mine && self.handed_in(db, &w.issue, &w.agent_id, w.started_at)?.is_some();
-        let mut outcome = match state.as_str() {
-            "Done" => "landed",
-            "In Review" | "Approved" => "submitted",
-            "Needs You" => "asked",
-            "In Progress" if handed_in => "submitted",
-            "In Progress" if still_mine => "failed",
-            "Todo" => "failed",
-            _ => "stopped",
-        };
-        if outcome == "failed" && matches!(end, End::Exited(c) if c != 0) && elapsed < LAUNCH_FAILURE_SECS && !reported {
-            outcome = "launch_failed";
-        }
+        let outcome = disposition(&state, still_mine, handed_in, end, elapsed, reported);
         let how = match end {
             End::Exited(c) => format!("exit code {c} after {} min", elapsed / 60),
             End::TimedOut => format!("stopped after {} min (crew.timeout_minutes)", elapsed / 60),
@@ -1106,12 +1124,8 @@ impl Supervisor {
     /// the playbook's teardown, `git worktree remove` without force (a dirty worktree stays), and
     /// `git branch -d` (an unmerged branch stays). Only a worktree git still tracks is touched.
     fn clean_up_landed(&mut self, db: &Db, w: &Running) -> Result<()> {
-        let listed = playbook::git(&self.repo_root, &["worktree", "list", "--porcelain"]);
-        let tracked = listed.as_deref().is_ok_and(|l| {
-            l.lines()
-                .filter_map(|line| line.strip_prefix("worktree "))
-                .any(|p| nitely_core::paths::normalize(p) == nitely_core::paths::normalize(&w.worktree.to_string_lossy()))
-        });
+        let listed = self.repo.worktrees(&self.repo_root);
+        let tracked = listed.is_some_and(|l| l.iter().any(|p| nitely_core::paths::normalize(p) == nitely_core::paths::normalize(&w.worktree.to_string_lossy())));
         if !tracked {
             return Ok(());
         }
@@ -1120,7 +1134,7 @@ impl Supervisor {
         if db.timeline(&w.issue)?.iter().any(|t| t.kind == "land_kept" && t.ts >= since) {
             return Ok(());
         }
-        let Ok(branch) = playbook::git(&w.worktree, &["rev-parse", "--abbrev-ref", "HEAD"]) else { return Ok(()) };
+        let Some((branch, _)) = self.repo.head(&w.worktree) else { return Ok(()) };
         let ts = (self.clock)().ts;
         let log = self.dir.join(&self.project).join(format!("{ts}-{}-cleanup.log", w.issue.to_lowercase()));
         let timeout_minutes = Playbook::load(&self.repo_root).map(|p| p.crew.setup_timeout_minutes).unwrap_or(30);
@@ -1324,24 +1338,18 @@ impl Supervisor {
                 continue;
             }
             let stopped = db.timeline(&l.issue)?.into_iter().rev().find(|t| t.kind == "land_failed" && t.ts >= l.since).and_then(|t| t.summary);
-            // Not the change's fault: the lock was held, or the approval is for the app to sign
-            // (land itself sends that one back to the person). Only a land that stopped on the change
-            // itself goes to a new worker; one that now needs a person's approval goes to them.
-            let not_the_change = |why: &str| why.contains("another land holds") || why.contains(nitely_core::approval::UNSIGNED);
-            match stopped {
-                Some(why) if why.contains("waits for a human") => {
+            match after_land(stopped.as_deref()) {
+                AfterLand::ToPerson => {
                     db.move_issue(&l.issue, "Needs You", None, Some("its land waits for a person's approval"), &self.actor())?;
                     self.land_after.remove(&l.issue);
                 }
-                Some(why) if !not_the_change(&why) => {
-                    let note = format!("The land stopped: {}. A new crew worker takes it from here (its land log: {}).", why.trim_start_matches("Land stopped: "), l.log.display());
+                AfterLand::ToNewWorker(why) => {
+                    let note = format!("The land stopped: {why}. A new crew worker takes it from here (its land log: {}).", l.log.display());
                     db.add_note(&l.issue, &note, "handoff", &self.actor())?;
                     db.move_issue(&l.issue, "Todo", None, Some("its land stopped; a new crew worker takes it"), &self.actor())?;
                     self.land_after.remove(&l.issue);
                 }
-                // Another land held the lock, it is still waiting in the land queue, or the land
-                // process ended without a word: later.
-                _ => {
+                AfterLand::Later => {
                     self.land_after.insert(l.issue.clone(), now + LAND_RETRY_SECS);
                 }
             }
@@ -1367,8 +1375,8 @@ impl Supervisor {
 
     /// Whether the repo's land lock names `issue`: that worker must not be stopped now.
     fn landing(&self, issue: &str) -> bool {
-        let Ok(common) = playbook::git(&self.repo_root, &["rev-parse", "--path-format=absolute", "--git-common-dir"]) else { return false };
-        let lock = Path::new(common.trim()).join(nitely_core::land::LOCK_FILE);
+        let Some(common) = self.repo.common_dir(&self.repo_root) else { return false };
+        let lock = common.join(nitely_core::land::LOCK_FILE);
         std::fs::read_to_string(lock).is_ok_and(|held| held.split_whitespace().next().is_some_and(|k| k.eq_ignore_ascii_case(issue)))
     }
 
@@ -1471,6 +1479,197 @@ Do not commit, submit or file issues yourself: the person approves the plan in t
     )
 }
 
+/// Where a worktree setup stands.
+#[derive(Debug, PartialEq)]
+enum SetupEnd {
+    Running,
+    /// Past its deadline: stop it, and it failed for this reason.
+    Stop(String),
+    /// It ended: its exit code, or why it failed.
+    Ended(std::result::Result<i32, String>),
+}
+
+/// How a setup stands, from its process (`exited`), whether its worktree's record says it passed
+/// (`passed`, read only for a setup taken over from an earlier supervisor, whose exit code is
+/// lost: a negative one), how long it has run and its deadline, both in seconds.
+fn setup_end(exited: Result<Option<i32>>, passed: impl FnOnce() -> bool, ran: i64, deadline: i64) -> SetupEnd {
+    match exited {
+        Ok(Some(code)) if code < 0 => SetupEnd::Ended(if passed() { Ok(0) } else { Err("its setup ended without passing".to_string()) }),
+        Ok(Some(code)) => SetupEnd::Ended(Ok(code)),
+        Ok(None) if ran > deadline => SetupEnd::Stop(format!("it ran past {} minutes (crew.setup_timeout_minutes) and was stopped", deadline / 60)),
+        Ok(None) => SetupEnd::Running,
+        Err(e) => SetupEnd::Ended(Err(format!("{e:#}"))),
+    }
+}
+
+/// What a new supervisor does with a setup an earlier one started.
+#[derive(Debug, PartialEq)]
+enum AdoptSetup {
+    /// Its process still runs: watch it.
+    Watch,
+    /// It is gone, and its worktree says how it ended: this exit code.
+    Ended(i32),
+    /// It is gone before it made a worktree: set it up again.
+    Again,
+}
+
+/// For a setup whose process is gone: its worktree's record passed, or the worktree exists without
+/// one (`nitely start` would not set an existing worktree up again), or there is none yet.
+fn adopt_setup(passed: bool, worktree_exists: bool) -> AdoptSetup {
+    if passed {
+        AdoptSetup::Ended(0)
+    } else if worktree_exists {
+        AdoptSetup::Ended(1)
+    } else {
+        AdoptSetup::Again
+    }
+}
+
+/// How a running worker ended, or None while it runs: it exited (`exited`; an error reading it is
+/// exit -1), or it ran (`ran` seconds) past `deadline`, or showed no sign of life for longer than
+/// `idle` (when set; `silent` reads how long), and is not landing (`landing`, read last). A worker
+/// past the deadline or silent is stopped by the caller.
+fn end_of(exited: Result<Option<i32>>, ran: i64, silent: impl FnOnce() -> Result<i64>, deadline: i64, idle: i64, landing: impl Fn() -> bool) -> Result<Option<End>> {
+    Ok(match exited {
+        Ok(Some(code)) => Some(End::Exited(code)),
+        Err(_) => Some(End::Exited(-1)),
+        Ok(None) if ran > deadline && !landing() => Some(End::TimedOut),
+        Ok(None) if idle > 0 && silent()? > idle && !landing() => Some(End::Silent),
+        Ok(None) => None,
+    })
+}
+
+/// How a worker that ended counts, from its issue's `state`, whether the claim is still its own,
+/// whether it handed the issue in (a submit it queued), how it ended, how long it ran and whether
+/// it ever reported: one that failed fast with no report never got going (`launch_failed`).
+fn disposition(state: &str, still_mine: bool, handed_in: bool, end: End, ran: i64, reported: bool) -> &'static str {
+    let outcome = match state {
+        "Done" => "landed",
+        "In Review" | "Approved" => "submitted",
+        "Needs You" => "asked",
+        "In Progress" if handed_in => "submitted",
+        "In Progress" if still_mine => "failed",
+        "Todo" => "failed",
+        _ => "stopped",
+    };
+    if outcome == "failed" && matches!(end, End::Exited(c) if c != 0) && ran < LAUNCH_FAILURE_SECS && !reported {
+        return "launch_failed";
+    }
+    outcome
+}
+
+/// What follows a land the supervisor started that ended with its issue still In Review or
+/// Approved.
+#[derive(Debug, PartialEq)]
+enum AfterLand {
+    /// Its land waits for a person's approval.
+    ToPerson,
+    /// It stopped on the change itself (a conflict, a failed gate, a change since its review): a
+    /// new worker takes it, told why.
+    ToNewWorker(String),
+    /// Not the change's fault (the lock was held, the app has the approval to sign), still in the
+    /// land queue, or ended without a word: try again later.
+    Later,
+}
+
+/// From why the land stopped, as its `land_failed` event says, if it did.
+fn after_land(stopped: Option<&str>) -> AfterLand {
+    let Some(why) = stopped else { return AfterLand::Later };
+    if why.contains("waits for a human") {
+        AfterLand::ToPerson
+    } else if why.contains("another land holds") || why.contains(nitely_core::approval::UNSIGNED) {
+        AfterLand::Later
+    } else {
+        AfterLand::ToNewWorker(why.trim_start_matches("Land stopped: ").to_string())
+    }
+}
+
+/// What `why_not_starting` decides over: the rules and what the supervisor knows, and the reads
+/// that cost something (the database, the token scan, the disk), asked only when the decision
+/// gets to them.
+struct StartCheck<'a> {
+    draining: bool,
+    rules: &'a CrewRules,
+    has_gate: bool,
+    moment: &'a Moment,
+    /// Workers running and being set up.
+    running: usize,
+    paused: &'a dyn Fn() -> Result<bool>,
+    started_today: &'a dyn Fn() -> Result<u32>,
+    over_budget: &'a dyn Fn() -> Option<String>,
+    disk_short: &'a dyn Fn() -> Option<String>,
+}
+
+/// Why no worker may start now, or None when slots may be filled.
+fn why_not_starting(c: &StartCheck) -> Result<Option<String>> {
+    let rules = c.rules;
+    if c.draining {
+        return Ok(Some("stopping: waiting for running workers".into()));
+    }
+    if rules.workers == 0 {
+        return Ok(Some("off: the playbook's crew.workers is 0".into()));
+    }
+    if (c.paused)()? {
+        return Ok(Some("paused".into()));
+    }
+    if !c.has_gate {
+        return Ok(Some("no gate: the playbook has no [gate] commands, so the crew does not run".into()));
+    }
+    if let Some(spec) = &rules.quiet_hours {
+        match quiet_until(spec, c.moment.minute_of_day) {
+            Ok(Some(until)) => return Ok(Some(format!("quiet hours until {until}"))),
+            Ok(None) => {}
+            Err(e) => return Ok(Some(format!("{e:#}"))),
+        }
+    }
+    let today = (c.started_today)()?;
+    if today >= rules.max_per_day() {
+        return Ok(Some(format!("{today} of {} started today", rules.max_per_day())));
+    }
+    if let Some(why) = (c.over_budget)() {
+        return Ok(Some(why));
+    }
+    if c.running >= rules.workers as usize {
+        return Ok(Some("working".into()));
+    }
+    // A disk filling up is worse than an idle slot (memory waits in the machine's admission).
+    if let Some(why) = (c.disk_short)() {
+        return Ok(Some(format!("{why}; no new worker starts")));
+    }
+    Ok(None)
+}
+
+/// The project's active `goals` (id, own worker budget) in the person's order, and which have
+/// room for another worker: a goal's own budget, else the playbook's `goal_workers`, counts the
+/// `busy` issues (running or setting up) among the `open` ones in it. Planning issues come first.
+fn goal_order(goals: &[(i64, Option<i64>)], open: &[IssueRecord], busy: &[&str], rules: &CrewRules) -> nitely_core::overlap::GoalOrder {
+    let active: std::collections::HashSet<i64> = goals.iter().map(|g| g.0).collect();
+    let first = open.iter().filter(|i| nitely_core::goal_plans::is_planning(i)).map(|i| i.key.clone()).collect();
+    let goal_of: HashMap<String, i64> = open.iter().filter_map(|i| i.goal.filter(|g| active.contains(g)).map(|g| (i.key.clone(), g))).collect();
+    let mut working: HashMap<i64, i64> = HashMap::new();
+    for key in busy {
+        if let Some(g) = goal_of.get(*key) {
+            *working.entry(*g).or_default() += 1;
+        }
+    }
+    let mut order = nitely_core::overlap::GoalOrder { goal_of, first, ..Default::default() };
+    for &(id, workers) in goals {
+        let budget = workers.or((rules.goal_workers > 0).then_some(rules.goal_workers as i64));
+        if budget.is_some_and(|b| working.get(&id).copied().unwrap_or(0) >= b) {
+            order.full.insert(id);
+        } else {
+            order.open.push(id);
+        }
+    }
+    order
+}
+
+/// A port for a new worker's browser preview: the first of `PREVIEW_PORTS` not `taken` by a
+/// running worker that `free` says the machine has free.
+fn preview_port(taken: &[u16], free: impl Fn(u16) -> bool) -> Option<u16> {
+    PREVIEW_PORTS.clone().find(|p| !taken.contains(p) && free(*p))
+}
+
 /// Why `agent` may not work in `worktree`, which is `on` its current branch: it is on another branch
 /// than `wanted` (the folder pattern need not name the vendor). The same agent's branch for the
 /// issue under an older title is fine.
@@ -1480,33 +1679,24 @@ fn other_branch(on: Option<&str>, worktree: &Path, wanted: &str, agent: &str, ke
     (!same).then(|| format!("its worktree {} is on {on}, not {wanted}", worktree.display()))
 }
 
-/// The branch a worktree is on, or, while a rebase of a branch is in progress there (a land that
-/// stopped on a conflict), the branch being rebased.
-fn current_branch(worktree: &Path) -> Option<String> {
-    // The branch and where a rebase keeps the one it rebases, in one git (NIT-508).
-    let out = playbook::git(worktree, &["rev-parse", "--abbrev-ref", "HEAD", "--path-format=absolute", "--git-path", "rebase-merge/head-name", "--git-path", "rebase-apply/head-name"]).ok()?;
-    let mut lines = out.lines();
-    let on = lines.next()?.trim().to_string();
+/// The branch a worktree is on, from what [`Repo::head`] read: HEAD's branch, or, while a rebase
+/// of a branch is in progress there (a land that stopped on a conflict), the branch being rebased.
+fn current_branch(head: Option<(String, Option<String>)>) -> Option<String> {
+    let (on, rebasing) = head?;
     if on != "HEAD" {
         return Some(on);
     }
-    let rebasing = lines.find_map(|p| std::fs::read_to_string(p.trim()).ok()).map(|h| h.trim().trim_start_matches("refs/heads/").to_string());
+    let rebasing = rebasing.map(|h| h.trim().trim_start_matches("refs/heads/").to_string());
     Some(rebasing.filter(|b| !b.is_empty()).unwrap_or(on))
 }
 
 /// What a worker left in its worktree that the next one must see first: a rebase in progress, or
-/// uncommitted changes. Empty when neither (or the worktree is gone).
-fn worktree_state(worktree: &Path) -> String {
-    if !worktree.join(".git").exists() {
-        return String::new();
-    }
+/// uncommitted changes. Empty when neither.
+fn worktree_state(rebasing: bool, changed: usize) -> String {
     let mut said = String::new();
-    let rebasing = playbook::git(worktree, &["rev-parse", "--path-format=absolute", "--git-path", "rebase-merge", "--git-path", "rebase-apply"])
-        .is_ok_and(|paths| paths.lines().any(|p| !p.trim().is_empty() && Path::new(p.trim()).exists()));
     if rebasing {
         said.push_str(" A rebase is in progress there: finish it (git rebase --continue) or abort it first.");
     }
-    let changed = playbook::git(worktree, &["status", "--porcelain"]).map(|s| s.lines().count()).unwrap_or(0);
     if changed > 0 {
         said.push_str(&format!(" It has {changed} uncommitted file{} there, kept as they are: look at them before anything else.", if changed == 1 { "" } else { "s" }));
     }
@@ -1522,11 +1712,10 @@ fn log_tail(log: &Path) -> String {
     format!("{}\n(full log: {})", &tail[start..], log.display())
 }
 
-/// The vendors of the local branches that name `key` (`claude/nit-3-...` is claude's NIT-3).
-fn branch_vendors(repo: &Path, key: &str) -> Vec<String> {
-    let refs = playbook::git(repo, &["for-each-ref", "--format=%(refname:short)", "refs/heads/"]).unwrap_or_default();
+/// The vendors of the local `branches` that name `key` (`claude/nit-3-...` is claude's NIT-3).
+fn branch_vendors(branches: &[String], key: &str) -> Vec<String> {
     let mut vendors: Vec<String> = Vec::new();
-    for branch in refs.lines() {
+    for branch in branches {
         if let (Some(vendor), Some(k)) = nitely_core::git::parse_branch(branch.trim()) {
             if k.eq_ignore_ascii_case(key) && !vendors.contains(&vendor) {
                 vendors.push(vendor);
@@ -2470,6 +2659,119 @@ mod tests {
     }
 
     #[test]
+    fn whether_a_worker_may_start_is_decided_from_what_the_tick_read() {
+        /// What the tick read: running workers, paused, started today, over budget, disk short.
+        #[derive(Clone, Copy)]
+        struct Read { draining: bool, gate: bool, running: usize, paused: bool, today: u32, budget: Option<&'static str>, disk: Option<&'static str> }
+        const FREE: Read = Read { draining: false, gate: true, running: 1, paused: false, today: 1, budget: None, disk: None };
+        let decide = |rules: &CrewRules, r: Read| {
+            let (paused, today, budget, disk) = (move || Ok(r.paused), move || Ok(r.today), move || r.budget.map(String::from), move || r.disk.map(String::from));
+            why_not_starting(&StartCheck { draining: r.draining, rules, has_gate: r.gate, moment: &NOON, running: r.running, paused: &paused, started_today: &today, over_budget: &budget, disk_short: &disk }).unwrap()
+        };
+        let rules = |extra: &str| Playbook::parse(&format!("[crew]
+workers = 2
+max_per_day = 5
+{extra}")).unwrap().crew;
+        let two = rules("");
+        assert_eq!(decide(&two, FREE), None, "a free slot, nothing in the way");
+        assert_eq!(decide(&two, Read { draining: true, ..FREE }).as_deref(), Some("stopping: waiting for running workers"));
+        assert_eq!(decide(&two, Read { running: 2, ..FREE }).as_deref(), Some("working"));
+        assert_eq!(decide(&two, Read { gate: false, ..FREE }).unwrap().split(':').next(), Some("no gate"));
+        assert_eq!(decide(&two, Read { paused: true, ..FREE }).as_deref(), Some("paused"));
+        assert_eq!(decide(&rules("quiet_hours = \"11:00-13:00\"
+"), FREE).as_deref(), Some("quiet hours until 13:00"));
+        assert_eq!(decide(&two, Read { today: 5, ..FREE }).as_deref(), Some("5 of 5 started today"));
+        assert_eq!(decide(&two, Read { budget: Some("token budget used: 2M of 1M today"), ..FREE }).as_deref(), Some("token budget used: 2M of 1M today"));
+        assert_eq!(decide(&two, Read { disk: Some("1.0 GB free on C:"), ..FREE }).as_deref(), Some("1.0 GB free on C:; no new worker starts"));
+        // Off reads nothing: a database that fails is never asked.
+        let off = Playbook::parse("").unwrap().crew;
+        let failing = || -> Result<bool> { bail!("not asked") };
+        let (today, budget, disk) = (|| Ok(0u32), || None, || None);
+        let c = StartCheck { draining: false, rules: &off, has_gate: true, moment: &NOON, running: 0, paused: &failing, started_today: &today, over_budget: &budget, disk_short: &disk };
+        assert_eq!(why_not_starting(&c).unwrap().as_deref(), Some("off: the playbook's crew.workers is 0"));
+    }
+
+    #[test]
+    fn goals_are_filled_in_order_within_their_budgets_and_planning_comes_first() {
+        let issue = |key: &str, goal: Option<i64>, labels: &[&str]| IssueRecord { key: key.into(), goal, labels: labels.iter().map(|l| l.to_string()).collect(), ..Default::default() };
+        let open = [issue("NIT-1", Some(7), &[]), issue("NIT-2", Some(7), &[]), issue("NIT-3", Some(8), &[]), issue("NIT-4", Some(99), &[]), issue("NIT-5", None, &["goal", "planning"])];
+        let rules = Playbook::parse("[crew]\nworkers = 4\ngoal_workers = 1\n").unwrap().crew;
+        // Goal 7 uses its one worker; goal 8 has a budget of its own; 99 is no active goal.
+        let order = goal_order(&[(7, None), (8, Some(2))], &open, &["NIT-1"], &rules);
+        assert_eq!(order.open, [8]);
+        assert!(order.full.contains(&7));
+        assert_eq!(order.goal_of.get("NIT-4"), None, "an issue of no active goal");
+        assert_eq!(order.first, ["NIT-5".to_string()].into_iter().collect());
+        let order = goal_order(&[(7, None), (8, Some(2))], &open, &[], &rules);
+        assert_eq!(order.open, [7, 8], "the person's order");
+    }
+
+    #[test]
+    fn a_preview_port_is_one_no_worker_holds_and_the_machine_has_free() {
+        assert_eq!(preview_port(&[], |_| true), Some(5190));
+        assert_eq!(preview_port(&[5190, 5192], |p| p != 5191), Some(5193));
+        assert_eq!(preview_port(&[], |_| false), None);
+    }
+
+    #[test]
+    fn the_branch_a_worktree_is_on_and_the_vendors_of_an_issues_branches() {
+        assert_eq!(current_branch(Some(("claude/nit-1-x".into(), None))).as_deref(), Some("claude/nit-1-x"));
+        // Mid-rebase HEAD is detached: the branch being rebased is the worktree's.
+        assert_eq!(current_branch(Some(("HEAD".into(), Some("refs/heads/claude/nit-1-x\n".into())))).as_deref(), Some("claude/nit-1-x"));
+        assert_eq!(current_branch(Some(("HEAD".into(), None))).as_deref(), Some("HEAD"));
+        assert_eq!(current_branch(None), None);
+        let branches = ["main", "claude/nit-1-first", "codex/nit-1-again", "claude/nit-1-older-title", "claude/nit-12-other"].map(String::from);
+        assert_eq!(branch_vendors(&branches, "NIT-1"), ["claude", "codex"]);
+        assert!(branch_vendors(&branches, "NIT-2").is_empty());
+        assert_eq!(worktree_state(true, 1), " A rebase is in progress there: finish it (git rebase --continue) or abort it first. It has 1 uncommitted file there, kept as they are: look at them before anything else.");
+        assert_eq!(worktree_state(false, 0), "");
+    }
+
+    #[test]
+    fn setups_and_workers_end_as_their_processes_and_clocks_say() {
+        assert_eq!(setup_end(Ok(Some(0)), || unreachable!(), 10, 60), SetupEnd::Ended(Ok(0)));
+        assert_eq!(setup_end(Ok(Some(2)), || unreachable!(), 10, 60), SetupEnd::Ended(Ok(2)));
+        // Taken over, no exit code: the worktree's record says.
+        assert_eq!(setup_end(Ok(Some(-1)), || true, 10, 60), SetupEnd::Ended(Ok(0)));
+        assert_eq!(setup_end(Ok(Some(-1)), || false, 10, 60), SetupEnd::Ended(Err("its setup ended without passing".into())));
+        assert_eq!(setup_end(Ok(None), || unreachable!(), 10, 60), SetupEnd::Running);
+        assert!(matches!(setup_end(Ok(None), || unreachable!(), 61, 60), SetupEnd::Stop(why) if why.contains("ran past 1 minutes")));
+        assert_eq!(adopt_setup(true, true), AdoptSetup::Ended(0));
+        assert_eq!(adopt_setup(false, true), AdoptSetup::Ended(1));
+        assert_eq!(adopt_setup(false, false), AdoptSetup::Again);
+
+        let not_landing = || false;
+        let quiet = |s: i64| move || -> Result<i64> { Ok(s) };
+        assert_eq!(end_of(Ok(Some(3)), 10, quiet(0), 60, 30, not_landing).unwrap(), Some(End::Exited(3)));
+        assert_eq!(end_of(Err(anyhow::anyhow!("gone")), 10, quiet(0), 60, 30, not_landing).unwrap(), Some(End::Exited(-1)));
+        assert_eq!(end_of(Ok(None), 61, quiet(0), 60, 30, not_landing).unwrap(), Some(End::TimedOut));
+        assert_eq!(end_of(Ok(None), 61, quiet(0), 60, 30, || true).unwrap(), None, "a landing worker runs on");
+        assert_eq!(end_of(Ok(None), 10, quiet(31), 60, 30, not_landing).unwrap(), Some(End::Silent));
+        assert_eq!(end_of(Ok(None), 10, || -> Result<i64> { unreachable!() }, 60, 0, not_landing).unwrap(), None, "no idle limit, no read");
+    }
+
+    #[test]
+    fn an_ended_worker_counts_by_its_issue_and_a_stopped_land_by_why() {
+        let exited = End::Exited(1);
+        assert_eq!(disposition("Done", false, false, exited, 10, false), "landed");
+        assert_eq!(disposition("Approved", false, false, exited, 10, false), "submitted");
+        assert_eq!(disposition("Needs You", true, false, exited, 10, false), "asked");
+        assert_eq!(disposition("In Progress", true, true, exited, 10, false), "submitted", "handed in and left");
+        assert_eq!(disposition("In Progress", true, false, exited, 10, false), "launch_failed", "failed fast, no report");
+        assert_eq!(disposition("In Progress", true, false, exited, 10, true), "failed", "it reported: it got going");
+        assert_eq!(disposition("In Progress", true, false, End::Exited(0), 10, false), "failed");
+        assert_eq!(disposition("In Progress", true, false, exited, LAUNCH_FAILURE_SECS, false), "failed");
+        assert_eq!(disposition("In Progress", false, false, exited, 10, false), "stopped", "someone else holds it");
+        assert_eq!(disposition("Todo", false, false, End::TimedOut, 10, false), "failed");
+
+        assert_eq!(after_land(None), AfterLand::Later);
+        assert_eq!(after_land(Some("Land stopped: another land holds the lock")), AfterLand::Later);
+        assert_eq!(after_land(Some(&format!("Land stopped: the approval {}", nitely_core::approval::UNSIGNED))), AfterLand::Later);
+        assert_eq!(after_land(Some("Land stopped: this change waits for a human (billing)")), AfterLand::ToPerson);
+        assert_eq!(after_land(Some("Land stopped: the rebase stopped on conflicts in a.txt")), AfterLand::ToNewWorker("the rebase stopped on conflicts in a.txt".into()));
+    }
+
+    #[test]
     fn a_planning_issue_gets_the_planners_brief() {
         let issue = IssueRecord {
             key: "NIT-9".into(),
@@ -2493,9 +2795,15 @@ mod tests {
         }
     }
 
-    /// A fake agent: records launches; each process exits when the test says so.
+    /// A fake agent: records launches; each process exits when the test says so. Unless
+    /// `real_git`, it is the supervisor's repository too: a setup makes the worktree's folder and
+    /// records its branch, a removal forgets them, and nothing runs git (NIT-534).
     #[derive(Clone, Default)]
     struct Fake {
+        /// Setups run `start_task` and removals run land's cleanup, on the fixture's real repo,
+        /// and the supervisor reads it with git: for the scenarios that check those end to end.
+        real_git: bool,
+        git: Rc<RefCell<FakeGit>>,
         installed: Vec<&'static str>,
         launches: Rc<RefCell<Vec<Launch>>>,
         /// Exit codes by pid; a pid not here is still running.
@@ -2509,6 +2817,8 @@ mod tests {
         prepares: Rc<RefCell<Vec<String>>>,
         /// Setups never finish.
         hang_setup: bool,
+        /// Setups fail, as a setup command that fails would.
+        setup_fails: bool,
         /// Worktrees whose removal was started.
         cleanups: Rc<RefCell<Vec<PathBuf>>>,
         /// Removals never finish.
@@ -2521,6 +2831,80 @@ mod tests {
         short_to_launch: Rc<std::cell::Cell<bool>>,
         /// Submit jobs started again.
         resubmits: Rc<RefCell<Vec<i64>>>,
+    }
+
+    /// The repository as a fake setup left it: each worktree's branch, the local branches, the
+    /// worktrees made.
+    #[derive(Default)]
+    struct FakeGit {
+        heads: BTreeMap<PathBuf, String>,
+        branches: Vec<String>,
+        worktrees: Vec<PathBuf>,
+    }
+
+    impl Fake {
+        /// A local branch, as a test's `git branch` would make one.
+        fn branch(&self, name: &str) {
+            self.git.borrow_mut().branches.push(name.to_string());
+        }
+
+        /// What a setup does, in the fake's repository: the worktree's folder, on its branch.
+        fn set_up(&self, prep: &Prepare) -> Result<()> {
+            let db = Db::open(self.db.as_ref().expect("the fixture sets the database"))?;
+            let issue = db.issue(&prep.key)?.context("no such issue")?;
+            let pb = Playbook::load(&prep.repo)?;
+            let worktree = pb.worktree_for(&prep.repo, &prep.vendor, &issue);
+            let branch = pb.branch_for(&prep.vendor, &issue);
+            std::fs::create_dir_all(&worktree)?;
+            std::fs::write(worktree.join(".git"), "gitdir: (a fake setup's worktree)\n")?;
+            let mut git = self.git.borrow_mut();
+            let on = git.heads.entry(worktree.clone()).or_insert(branch).clone();
+            if !git.branches.contains(&on) {
+                git.branches.push(on.clone());
+            }
+            if !git.worktrees.contains(&worktree) {
+                git.worktrees.push(worktree.clone());
+            }
+            db.log_event(&Actor::Agent("cli".into()), Some(&prep.key), Some(&worktree.to_string_lossy()), "worktree", &format!("Started {on} (a fake setup)"))?;
+            Ok(())
+        }
+
+        /// What a removal does, in the fake's repository, recorded on the issue as land's would be.
+        fn remove(&self, job: &CleanUp) -> Result<()> {
+            let mut git = self.git.borrow_mut();
+            git.heads.remove(&job.worktree);
+            git.worktrees.retain(|w| w != &job.worktree);
+            git.branches.retain(|b| b != &job.branch);
+            std::fs::remove_dir_all(&job.worktree).ok();
+            let db = Db::open(self.db.as_ref().expect("the fixture sets the database"))?;
+            let said = format!("removed {} and its branch {}", job.worktree.display(), job.branch);
+            db.log_event(&Actor::Agent(job.actor.clone()), Some(&job.issue), None, "crew_cleaned", &format!("After the {} worker left: {said}", job.agent))?;
+            Ok(())
+        }
+    }
+
+    impl Repo for Fake {
+        fn head(&self, worktree: &Path) -> Option<(String, Option<String>)> {
+            self.git.borrow().heads.get(worktree).map(|b| (b.clone(), None))
+        }
+        fn branches(&self, _repo: &Path) -> Vec<String> {
+            self.git.borrow().branches.clone()
+        }
+        /// Every file in the worktree but `.git` counts as uncommitted: a fake setup leaves none.
+        fn changes(&self, worktree: &Path) -> (bool, usize) {
+            let files = std::fs::read_dir(worktree).map(|d| d.flatten().filter(|e| e.file_name() != ".git").count()).unwrap_or(0);
+            (false, files)
+        }
+        fn common_dir(&self, repo: &Path) -> Option<PathBuf> {
+            Some(repo.join(".git"))
+        }
+        fn worktrees(&self, repo: &Path) -> Option<Vec<String>> {
+            let made = self.git.borrow().worktrees.iter().map(|w| w.to_string_lossy().into_owned()).collect::<Vec<_>>();
+            Some(std::iter::once(repo.to_string_lossy().into_owned()).chain(made).collect())
+        }
+        fn setup_passed(&self, worktree: &Path) -> bool {
+            self.git.borrow().heads.contains_key(worktree)
+        }
     }
 
     struct FakeProcess {
@@ -2563,13 +2947,21 @@ mod tests {
             let alive = (1001..=1000 + self.launches.borrow().len() as u32).contains(&pid) && !self.exits.borrow().contains_key(&pid);
             alive.then(|| Box::new(FakeProcess { pid, exits: self.exits.clone(), stopped: self.stopped.clone() }) as Box<dyn Process>)
         }
+        /// Every port is free: workers get theirs from the taken ones alone.
+        fn port_free(&self, _port: u16) -> bool {
+            true
+        }
         /// Removes the worktree here and now, as `nitely crew clean-up` would, unless removals hang.
         fn clean_up(&self, job: &CleanUp) -> Result<Box<dyn Process>> {
             let pid = 7000 + self.cleanups.borrow().len() as u32;
             self.cleanups.borrow_mut().push(job.worktree.clone());
             if !self.hang_cleanup {
-                let db = Db::open(self.db.as_ref().expect("the fixture sets the database")).unwrap();
-                assert!(!clean_up_and_report(&db, job)?.1);
+                if self.real_git {
+                    let db = Db::open(self.db.as_ref().expect("the fixture sets the database")).unwrap();
+                    assert!(!clean_up_and_report(&db, job)?.1);
+                } else {
+                    self.remove(job)?;
+                }
                 self.exits.borrow_mut().insert(pid, 0);
             }
             Ok(Box::new(FakeProcess { pid, exits: self.exits.clone(), stopped: self.stopped.clone() }))
@@ -2598,11 +2990,16 @@ mod tests {
             // No process to record: a made-up pid would read as a job whose process died.
             Ok(None)
         }
-        /// Runs start_task here and now, as `nitely start` would, unless setups hang.
+        /// Sets the worktree up here and now, as `nitely start` would, unless setups hang.
         fn prepare(&self, prep: &Prepare) -> Result<Box<dyn Process>> {
             let pid = 5000 + self.prepares.borrow().len() as u32;
             self.prepares.borrow_mut().push(prep.key.clone());
-            if !self.hang_setup {
+            if !self.hang_setup && !self.real_git {
+                if !self.setup_fails {
+                    self.set_up(prep)?;
+                }
+                self.exits.borrow_mut().insert(pid, if self.setup_fails { 1 } else { 0 });
+            } else if !self.hang_setup {
                 let db = Db::open(self.db.as_ref().expect("the fixture sets the database")).unwrap();
                 let issue = db.issue(&prep.key).unwrap().unwrap();
                 let started = playbook::start_task(&db, &prep.repo, &issue, &prep.vendor, &Actor::Agent("cli".into()))?;
@@ -2641,7 +3038,13 @@ mod tests {
     const NOON: Moment = Moment { ts: 1_000_000, minute_of_day: 12 * 60, day_start: 1_000_000 - 12 * 3600 };
 
     fn supervisor(f: &Fixture, fake: &Fake) -> Supervisor {
-        Supervisor::new("NIT", &f.repo, &f.base.join("crew"), "nitely", Box::new(Fake { db: Some(f.base.join("t.db")), ..fake.clone() })).with_clock(|| NOON).with_tokens(|_, _| 0)
+        let fake = Fake { db: Some(f.base.join("t.db")), ..fake.clone() };
+        let sup = Supervisor::new("NIT", &f.repo, &f.base.join("crew"), "nitely", Box::new(fake.clone())).with_clock(|| NOON).with_tokens(|_, _| 0);
+        if fake.real_git {
+            sup
+        } else {
+            sup.with_repo(fake)
+        }
     }
 
     const GATE: &str = "[gate]\ncommands = [\"echo ok\"]\n";
@@ -2649,7 +3052,7 @@ mod tests {
     #[test]
     fn keeps_the_cap_and_starts_the_next_when_a_slot_frees() {
         let mut f = fixture(&format!("{GATE}[crew]\nworkers = 2\n"));
-        let fake = Fake { installed: vec!["claude", "codex"], ..Default::default() };
+        let fake = Fake { installed: vec!["claude", "codex"], real_git: true, ..Default::default() };
         let mut sup = supervisor(&f, &fake);
 
         let tick = sup.tick(&mut f.db, false).unwrap();
@@ -2863,9 +3266,9 @@ workers = 1
         nitely_core::test_repo::git(&f.repo, &["commit", "-q", "-m", "main"]);
         // A land's rebase that stopped on the conflict, left for the next worker to resolve.
         assert!(playbook::git(&wt, &["rebase", "main"]).is_err());
-        assert_eq!(current_branch(&wt).as_deref(), Some("claude/nit-1-first"));
-        assert_eq!(other_branch(current_branch(&wt).as_deref(), &wt, "claude/nit-1-first", "claude", "NIT-1"), None);
-        assert!(other_branch(current_branch(&wt).as_deref(), &wt, "codex/nit-1-first", "codex", "NIT-1").is_some());
+        assert_eq!(current_branch(GitRepo.head(&wt)).as_deref(), Some("claude/nit-1-first"));
+        assert_eq!(other_branch(current_branch(GitRepo.head(&wt)).as_deref(), &wt, "claude/nit-1-first", "claude", "NIT-1"), None);
+        assert!(other_branch(current_branch(GitRepo.head(&wt)).as_deref(), &wt, "codex/nit-1-first", "codex", "NIT-1").is_some());
     }
 
     #[test]
@@ -2945,7 +3348,7 @@ workers = 1
     #[test]
     fn a_submit_cut_short_by_a_restart_runs_again_once_while_the_branch_is_unchanged() {
         let mut f = fixture(&format!("{GATE}[crew]\nworkers = 1\n"));
-        let fake = Fake { installed: vec!["claude"], ..Default::default() };
+        let fake = Fake { installed: vec!["claude"], real_git: true, ..Default::default() };
         let mut sup = supervisor(&f, &fake);
         sup.tick(&mut f.db, false).unwrap();
         let wt = fake.launches.borrow()[0].cwd.clone();
@@ -3176,9 +3579,8 @@ max_tokens_per_day = 1000000
     fn a_second_attempt_keeps_the_first_attempts_agent() {
         let mut f = fixture(&format!("{GATE}[crew]\nworkers = 1\n"));
         // NIT-1 already has a codex branch from an earlier attempt.
-        let git = |args: &[&str]| assert!(nitely_core::playbook::run_git(Command::new("git").arg("-C").arg(&f.repo).args(args)).unwrap().status.success());
-        git(&["branch", "codex/nit-1-first"]);
         let fake = Fake { installed: vec!["claude", "codex"], ..Default::default() };
+        fake.branch("codex/nit-1-first");
         let tick = supervisor(&f, &fake).tick(&mut f.db, false).unwrap();
         assert_eq!(tick.started[0].agent, "codex");
         assert_eq!(fake.launches.borrow()[0].args.last().unwrap(), "-");
@@ -3187,12 +3589,11 @@ max_tokens_per_day = 1000000
     #[test]
     fn never_puts_an_agent_on_another_vendors_branch() {
         let mut f = fixture(&format!("{GATE}[crew]\nworkers = 3\n"));
-        let git = |args: &[&str]| assert!(nitely_core::playbook::run_git(Command::new("git").arg("-C").arg(&f.repo).args(args)).unwrap().status.success(), "{args:?}");
-        // NIT-1 has a claude branch, but only codex is installed.
-        git(&["branch", "claude/nit-1-first"]);
-        // NIT-2's worktree folder is on a branch a person started by hand.
-        git(&["worktree", "add", "-q", "-b", "cli/nit-2-second", "../wt/nit-2"]);
         let fake = Fake { installed: vec!["codex"], ..Default::default() };
+        // NIT-1 has a claude branch, but only codex is installed.
+        fake.branch("claude/nit-1-first");
+        // NIT-2's worktree folder is on a branch a person started by hand.
+        fake.branch("cli/nit-2-second");
         let mut sup = supervisor(&f, &fake);
         let tick = sup.tick(&mut f.db, false).unwrap();
         assert_eq!(tick.started.iter().map(|w| w.issue.as_str()).collect::<Vec<_>>(), ["NIT-3"], "{tick:?}");
@@ -3243,7 +3644,7 @@ max_tokens_per_day = 1000000
 {GATE}[crew]
 workers = 1
 "));
-        let fake = Fake { installed: vec!["claude"], ..Default::default() };
+        let fake = Fake { installed: vec!["claude"], setup_fails: true, ..Default::default() };
         let tick = supervisor(&f, &fake).tick(&mut f.db, false).unwrap();
         assert!(tick.started.is_empty() && fake.launches.borrow().is_empty(), "{tick:?}");
         // Every issue's setup fails the same way: each goes to Needs You once, nothing loops.
@@ -3344,7 +3745,7 @@ workers = 2
         let fake = Fake { installed: vec!["claude"], ..Default::default() };
         let clock = Rc::new(std::cell::Cell::new(NOON));
         let c = clock.clone();
-        let mut sup = Supervisor::new("NIT", &f.repo, &f.base.join("crew"), "nitely", Box::new(Fake { db: Some(f.base.join("t.db")), ..fake.clone() })).with_clock(move || c.get());
+        let mut sup = Supervisor::new("NIT", &f.repo, &f.base.join("crew"), "nitely", Box::new(Fake { db: Some(f.base.join("t.db")), ..fake.clone() })).with_clock(move || c.get()).with_repo(fake.clone());
         sup.tick(&mut f.db, false).unwrap();
         std::fs::write(f.repo.join(".git").join(nitely_core::land::LOCK_FILE), "NIT-2 pid 1 since now").unwrap();
         clock.set(Moment { ts: NOON.ts + 31 * 60, ..NOON });
@@ -3426,7 +3827,7 @@ setup_timeout_minutes = 30
         let fake = Fake { installed: vec!["claude"], hang_setup: true, db: Some(f.base.join("t.db")), ..Default::default() };
         let clock = Rc::new(std::cell::Cell::new(NOON));
         let c = clock.clone();
-        let mut sup = Supervisor::new("NIT", &f.repo, &f.base.join("crew"), "nitely", Box::new(fake.clone())).with_clock(move || c.get());
+        let mut sup = Supervisor::new("NIT", &f.repo, &f.base.join("crew"), "nitely", Box::new(fake.clone())).with_clock(move || c.get()).with_repo(fake.clone());
 
         // Both setups hang: the tick returns, and their slots stay taken.
         let tick = sup.tick(&mut f.db, false).unwrap();
@@ -3501,7 +3902,7 @@ workers = 1
             let mut old = supervisor(&f, &fake);
             old.tick(&mut f.db, false).unwrap();
             let worker = f.db.crew_running("NIT").unwrap().remove(0);
-            assert!(playbook::setup_passed(Path::new(&worker.worktree)));
+            assert!(Repo::setup_passed(&fake, Path::new(&worker.worktree)));
             let launches_before = fake.launches.borrow().len();
             assert_eq!(launches_before, usize::from(phase == "work"));
             if phase == "work" {
@@ -3626,7 +4027,7 @@ workers = 1
     #[test]
     fn a_landed_workers_worktree_and_branch_are_removed_once_it_exits() {
         let mut f = fixture(&format!("{GATE}[crew]\nworkers = 1\n"));
-        let fake = Fake { installed: vec!["claude"], ..Default::default() };
+        let fake = Fake { installed: vec!["claude"], real_git: true, ..Default::default() };
         let mut sup = supervisor(&f, &fake);
         sup.tick(&mut f.db, false).unwrap();
         let worktree = fake.launches.borrow()[0].cwd.clone();
@@ -3638,13 +4039,13 @@ workers = 1
         let tick = sup.tick(&mut f.db, false).unwrap();
         assert_eq!(tick.ended[0].outcome, "landed");
         assert!(!worktree.exists(), "the worktree is gone");
-        assert!(branch_vendors(&f.repo, "NIT-1").is_empty(), "and the merged branch");
+        assert!(branch_vendors(&GitRepo.branches(&f.repo), "NIT-1").is_empty(), "and the merged branch");
         let note = f.db.timeline("NIT-1").unwrap().into_iter().find(|t| t.kind == "crew_cleaned").unwrap();
         assert!(note.summary.unwrap().contains("removed the worktree and the merged branch"));
 
         // A dirty worktree stays, as land would leave it; one git does not track is never touched.
         let mut f = fixture(&format!("{GATE}[crew]\nworkers = 2\n"));
-        let fake = Fake { installed: vec!["claude"], ..Default::default() };
+        let fake = Fake { installed: vec!["claude"], real_git: true, ..Default::default() };
         let mut sup = supervisor(&f, &fake);
         sup.tick(&mut f.db, false).unwrap();
         let (dirty, loose) = (fake.launches.borrow()[0].cwd.clone(), fake.launches.borrow()[1].cwd.clone());
@@ -3672,7 +4073,7 @@ workers = 1
         let fake = Fake { installed: vec!["claude"], hang_cleanup: true, db: Some(f.base.join("t.db")), ..Default::default() };
         let clock = Rc::new(std::cell::Cell::new(NOON));
         let c = clock.clone();
-        let mut sup = Supervisor::new("NIT", &f.repo, &f.base.join("crew"), "nitely", Box::new(fake.clone())).with_clock(move || c.get());
+        let mut sup = Supervisor::new("NIT", &f.repo, &f.base.join("crew"), "nitely", Box::new(fake.clone())).with_clock(move || c.get()).with_repo(fake.clone());
         sup.tick(&mut f.db, false).unwrap();
         let worktree = fake.launches.borrow()[0].cwd.clone();
         land_and_exit(&mut f, "NIT-1", 1001, &fake);
