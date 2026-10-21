@@ -227,7 +227,7 @@ const PYTHON_FILES: &[&str] = &["requirements.txt", "poetry.lock", "uv.lock", "P
 /// The dependency files `setup`'s commands read (NIT-287): `npm ci` reads package.json and the JS
 /// lockfiles, not Cargo.lock, so a lane serving branches that differ only in Cargo.lock does not
 /// install node_modules again for each. A command whose tool it does not know (`make`, a script)
-/// may read any of them; `cd`, `echo` and `git` read none.
+/// may read any of them, as does a setup with no tool at all; `cd` and `set` count for nothing.
 pub(crate) fn setup_files_for(setup: &[String]) -> Vec<&'static str> {
     let mut files: Vec<&'static str> = Vec::new();
     for part in setup.iter().flat_map(|c| c.split(['&', '|', ';', '\n'])) {
@@ -236,7 +236,7 @@ pub(crate) fn setup_files_for(setup: &[String]) -> Vec<&'static str> {
         let name = first.rsplit(['/', '\\']).next().unwrap_or(first).to_ascii_lowercase();
         let name = name.strip_suffix(".exe").or_else(|| name.strip_suffix(".cmd")).unwrap_or(&name);
         let these: &[&'static str] = match name {
-            "cd" | "echo" | "git" | "set" => continue,
+            "cd" | "set" => continue,
             "npm" | "npx" | "pnpm" | "yarn" | "bun" | "node" | "corepack" => JS_FILES,
             "cargo" | "rustup" => &["Cargo.lock"],
             "pip" | "pip3" | "python" | "python3" | "py" | "poetry" | "uv" | "pipenv" => PYTHON_FILES,
@@ -249,6 +249,9 @@ pub(crate) fn setup_files_for(setup: &[String]) -> Vec<&'static str> {
                 files.push(f);
             }
         }
+    }
+    if files.is_empty() {
+        return SETUP_FILES.to_vec();
     }
     files.sort_by_key(|f| SETUP_FILES.iter().position(|s| s == f));
     files
@@ -1621,7 +1624,8 @@ mod tests {
         assert_eq!(s(&["cd app && CI=1 pnpm install", "cargo fetch"]).len(), JS_FILES.len() + 1);
         assert_eq!(s(&["C:\\Tools\\uv.exe sync"]), PYTHON_FILES);
         assert_eq!(s(&["./setup.sh"]), SETUP_FILES, "a tool it does not know may read any");
-        assert!(s(&["git submodule update --init"]).is_empty());
+        assert_eq!(s(&["echo {base} > setup.txt"]), SETUP_FILES, "echo writes what it is given: any file may matter");
+        assert_eq!(s(&["cd app"]), SETUP_FILES, "no tool at all reads as unknown");
         let rules = WorktreeRules { setup: vec!["npm ci".into()], setup_when_changed: vec!["./tools/versions.txt".into()], ..Default::default() };
         let changed = ["Cargo.lock", "package-lock.json", "tools/versions.txt"].map(String::from);
         assert_eq!(setup_files_in(&rules, &changed), ["package-lock.json", "tools/versions.txt"]);
