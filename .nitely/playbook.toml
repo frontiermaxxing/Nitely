@@ -12,7 +12,7 @@ setup = ["npm ci"]
 mode = "light"
 
 [gate]
-commands = ["cargo test --workspace -- --test-threads=12", "cargo clippy --workspace -- -D warnings", "npm test", "npm run build"]
+commands = ["npm test", "npm run build"]
 
 [review]
 # The defaults: Codex reviews Claude's branches, Claude reviews everyone else's.
@@ -85,7 +85,7 @@ stamp_paths = ["Cargo.toml", "Cargo.lock", "package.json", "package-lock.json", 
 commands = ["node scripts/version.mjs"]
 
 [[gate.steps]]
-run = "cargo test --workspace"
+run = "cargo test --workspace -- --test-threads=12"
 unless_only = ['^src/', '^scripts/', '^public/', '^index\.html$', '^docs/.*\.md$']
 
 [[gate.steps]]
