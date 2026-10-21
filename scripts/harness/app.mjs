@@ -16,7 +16,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Page } from "./cdp.mjs";
+import { Page, gpuInfo } from "./cdp.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const TARGET = join(ROOT, "target", "harness");
@@ -231,6 +231,13 @@ async function start({ seed, env, keepHome, unlock }) {
       })();
       app.page = await Promise.race([up, exited.then((code) => Promise.reject(new Error(`the app exited (${code}) before its page came up`)))]);
       await app.page.waitFor(`return document.querySelector(".sidebar") !== null;`, { timeoutMs: 30000, what: "the app's sidebar" });
+      // The app draws without the GPU (tauri.harness.conf.json, NIT-188), on every launch: its
+      // browser says GPU compositing and rasterization are off. (A WebGL renderer string cannot
+      // tell: with no graphics card, as in CI, it names Microsoft's software driver either way.)
+      const gpu = (await gpuInfo(app.port)).featureStatus;
+      for (const feature of ["gpu_compositing", "rasterization"]) {
+        if (!/^disabled/.test(String(gpu[feature]))) throw new Error(`the harness app draws with the GPU: ${feature} is ${gpu[feature]}`);
+      }
     } catch (e) {
       app.page?.close();
       await stop();

@@ -107,6 +107,17 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
     await page.open("#now");
     await shot("1-connected");
 
+    // Agent setup plans only inside the run's own agents' home, never the person's (NIT-548, from
+    // the Agent setup test): Claude Code "installed" there, its plan read through the app.
+    const agentsHome = join(home, "agents");
+    mkdirSync(join(agentsHome, ".claude"), { recursive: true });
+    const plans = await page.invoke("agent_setup");
+    assert.ok(plans.find((p) => p.agent === "Claude Code")?.found, `Claude Code is found in the run's agents' home: ${JSON.stringify(plans.map((p) => [p.agent, p.found]))}`);
+    const targets = plans.flatMap((p) => p.changes ?? []).filter((c) => c.action !== "run").map((c) => c.target);
+    assert.ok(targets.length > 0, "Agent setup plans files to write");
+    const inside = (p) => slash(p).toLowerCase();
+    for (const target of targets) assert.ok(inside(target).startsWith(`${inside(agentsHome)}/`), `${target} is inside the run's agents' home`);
+
     // A saved preset crosses the native command and durable project policy. A new project starts
     // on Fast (NIT-511), so Careful is the change. Restore inherited Custom afterwards so the
     // remainder still exercises the repo's rules.

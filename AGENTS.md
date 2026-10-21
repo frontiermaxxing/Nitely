@@ -107,7 +107,7 @@ once came just before a hard freeze (NIT-188), so:
   one run at a time, and never while the person is likely using the PC for something else.
 - Even then the window never maximizes, restores or minimizes off CI (window.e2e.mjs leaves those
   steps to CI), and the harness app's WebView2 draws without the GPU (`--disable-gpu
-  --disable-gpu-compositing` in `scripts/harness/tauri.harness.conf.json`; inbox.e2e.mjs checks it).
+  --disable-gpu-compositing` in `scripts/harness/tauri.harness.conf.json`; every harness launch checks it).
 - `npm run app:build` (a few minutes; it builds into `target/harness`, apart from the dev build) is
   safe anywhere: it only compiles. The tests are `scripts/harness/*.e2e.mjs`; they need Node 22 (the
   driver uses its built-in WebSocket). One harness app runs at a time on a machine; a second launch,
