@@ -344,6 +344,16 @@ fn overlay_verification(settings:Option<&crate::project_modes::ProjectReviewMode
     }
     if let Some(n)=o.audit_percent {pb.verification.audit_percent=n;}
 }
+/// The floor every mode keeps (docs/verification-settings.md): a protected or flagged change runs
+/// the full gate, so Basic can never check a sensitive file with only the quick commands.
+fn risk_floor(repo:&Path,plan:&Plan,pb:&Playbook)->Result<Option<String>> {
+    if !pb.review.flags.is_empty() {return Ok(Some("reviewer-only conditions are configured".into()));}
+    for path in git(repo,&["diff","--name-only","--no-renames",&plan.base,&plan.head,"--"])?.lines().filter(|l|!l.is_empty()) {
+        if let Some(hit)=pb.approval.protected_hit(&[path.to_string()])? {return Ok(Some(format!("{path}: {hit}")));}
+        if built_in_protected(path) || matches(&pb.verification.protected,path)? {return Ok(Some(format!("{path}: protected path")));}
+    }
+    Ok(None)
+}
 fn project_plan(db:&Db,repo:&Path,base:&str,head:&str,issue:&IssueRecord)->Result<Plan> {
     let settings=issue.project.as_deref().map(|p|db.project_review_mode(p)).transpose()?;
     let mut plan=assess_with_mode(repo,base,head,issue,settings.as_ref())?;
@@ -361,6 +371,9 @@ fn project_plan(db:&Db,repo:&Path,base:&str,head:&str,issue:&IssueRecord)->Resul
                 let pb=Playbook::parse(&blob(repo,&plan.policy_commit,PLAYBOOK_PATH)?)?;
                 if pb.verification.basic.is_empty() {
                     plan.commands.clear();plan.depth="Full".into();plan.reasons.push("Basic commands are not configured; Full gate required.".into());
+                }else if let Some(hit)=risk_floor(repo,&plan,&pb)? {
+                    plan.commands.clear();plan.effective="sensitive".into();plan.depth="Full".into();
+                    plan.reasons.push(format!("The risk floor keeps the full gate under Basic: {hit}"));
                 }else{
                     plan.commands=pb.verification.basic;
                     plan.commands.insert(0,format!("git diff --check {} {}",plan.base,plan.head));

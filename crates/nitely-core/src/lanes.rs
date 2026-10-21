@@ -2470,7 +2470,7 @@ pub(crate) fn hold_machine_checked<'a>(db: &'a Db, repo_root: &Path, worktree: &
         let mut alive = |r: &Requester| !r.gone();
         loop {
             crate::project_yolo::check_queued_gate(db, id, yolo_keys)?;
-            for (key,authority) in yolo_keys.iter().zip(&authorities) {if &crate::project_modes::authority_for_issue(db,key)?!=authority {bail!("project review mode changed while waiting for memory; submit again");}}
+            for (key,authority) in yolo_keys.iter().zip(&authorities) {if !crate::project_modes::covers_issue(db,key,authority)? {bail!("project review mode changed while waiting for memory; submit again");}}
             let slots = slots_now();
             if my_turn(db, id, slots, &mut alive)? {
                 if let Some(slot) = (1..=slots.max(1)).find_map(|k| try_slot(db, k).ok().flatten()) {

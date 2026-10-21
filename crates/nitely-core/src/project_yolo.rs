@@ -16,14 +16,16 @@ pub struct ProjectYolo {
 
 fn read(conn: &Connection, project: &str) -> Result<ProjectYolo> {
     let s=crate::project_modes::read(conn,project)?;
-    Ok(ProjectYolo{project:s.project,enabled:s.mode==crate::project_modes::Mode::Yolo,revision:s.revision})
+    let o=s.options();
+    Ok(ProjectYolo{project:s.project,enabled:o.test_depth==Some(crate::project_modes::TestDepth::Off)&&o.pre_review==Some(crate::project_modes::PreReview::Off),revision:s.revision})
 }
 impl Db {
     pub fn project_yolo(&self,project:&str)->Result<ProjectYolo> {read(&self.conn,project)}
     pub fn set_project_yolo(&mut self,project:&str,enabled:bool,expected_revision:i64,actor:&Actor)->Result<ProjectYolo> {
         let before=self.project_yolo(project)?;
-        let mode=if enabled {crate::project_modes::Mode::Yolo}else{crate::project_modes::Mode::Custom};
-        self.set_project_review_mode(project,mode,Default::default(),expected_revision,actor)?;
+        // YOLO is retired (NIT-491): the switch sets Custom with tests and review off.
+        let overrides=if enabled {crate::project_modes::Options{test_depth:Some(crate::project_modes::TestDepth::Off),pre_review:Some(crate::project_modes::PreReview::Off),..Default::default()}}else{Default::default()};
+        self.set_project_review_mode(project,crate::project_modes::Mode::Custom,overrides,expected_revision,actor)?;
         if before.enabled!=enabled {self.log_event(actor,None,None,"project_yolo_changed",&format!("{project} YOLO mode {}",if enabled {"enabled"}else{"disabled"}))?;}
         self.project_yolo(project)
     }
@@ -66,9 +68,9 @@ impl ReviewGuard {
         let conn = Connection::open_with_flags(&self.database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         let mode=crate::project_modes::read(&conn,&self.project)?;
         if mode.options().pre_review==Some(crate::project_modes::PreReview::Off) {
-            if mode.mode==crate::project_modes::Mode::Yolo {bail!(SkipReview);} else {bail!(crate::review::Disabled);}
+            if mode.options().test_depth==Some(crate::project_modes::TestDepth::Off) {bail!(SkipReview);} else {bail!(crate::review::Disabled);}
         }
-        if mode.authority()?!=self.authority {bail!("project review mode changed before reviewer launch; submit again");}
+        if !crate::project_modes::covers_authority(&conn,&self.project,&self.authority)? {bail!("project review mode changed before reviewer launch; submit again");}
         Ok(())
     }
 }

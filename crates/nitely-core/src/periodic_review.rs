@@ -175,7 +175,7 @@ pub fn status(db: &Db, project: &str) -> Result<Vec<RepositoryStatus>> {
 }
 fn rules(db: &Db, project: &str) -> Result<Option<crate::project_modes::Periodic>> {
     let mode = db.project_review_mode(project)?;
-    if mode.mode == crate::project_modes::Mode::Yolo || db.project_yolo(project)?.enabled {
+    if db.project_yolo(project)?.enabled {
         return Ok(None);
     }
     Ok(mode.options().periodic.filter(|p| p.enabled))
@@ -691,8 +691,7 @@ fn apply_findings(
         .conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let mode = crate::project_modes::read(&tx, project)?;
-    if mode.mode == crate::project_modes::Mode::Yolo
-        || !mode.options().periodic.is_some_and(|p| p.enabled)
+    if !mode.options().periodic.is_some_and(|p| p.enabled)
     {
         return Ok(());
     }
@@ -893,7 +892,7 @@ mod tests {
         let mode = f.db.project_review_mode("APP").unwrap();
         f.db.set_project_review_mode(
             "APP",
-            Mode::Yolo,
+            Mode::Fast,
             Options::default(),
             mode.revision,
             &Actor::Human,
@@ -904,7 +903,7 @@ mod tests {
         assert_eq!(
             f.status().jobs.len(),
             3,
-            "YOLO does not enqueue automatic reviews"
+            "Fast does not enqueue periodic reviews"
         );
     }
 
@@ -930,7 +929,7 @@ mod tests {
         let settings = f.db.project_review_mode("APP").unwrap();
         f.db.set_project_review_mode(
             "APP",
-            Mode::Yolo,
+            Mode::Fast,
             Options::default(),
             settings.revision,
             &Actor::Human,
@@ -1020,7 +1019,8 @@ mod tests {
         assert!(tick(&mut f.db, &f.root, "APP", "main").unwrap());
         assert_eq!(f.status().cursor.as_deref(), Some(head.as_str()));
         f.db.create_project("WEB", "Another project").unwrap();
-        f.db.set_project_review_mode("WEB", Mode::Fast, Options::default(), 0, &Actor::Human)
+        let periodic = Options { periodic: Some(Periodic { enabled: true, ..Default::default() }), ..Default::default() };
+        f.db.set_project_review_mode("WEB", Mode::Custom, periodic, 0, &Actor::Human)
             .unwrap();
         assert!(tick(&mut f.db, &f.root, "WEB", "main")
             .unwrap_err()

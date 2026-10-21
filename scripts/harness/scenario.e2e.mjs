@@ -123,12 +123,13 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
     const fastMode = await page.invoke("project_review_mode", { project: "APP" });
     assert.equal(fastMode.mode, "fast");
     const effectiveModes = await page.invoke("project_review_mode_effective", { project: "APP" });
-    assert.equal(effectiveModes[0].options.pre_review, "off");
-    assert.equal(effectiveModes[0].options.land_batch, false, "Fast keeps Basic changes out of Full combined gates");
-    assert.equal(effectiveModes[0].options.periodic.enabled, true);
+    assert.equal(effectiveModes[0].options.pre_review, "batched", "Fast reviews each no-goal batch");
+    assert.equal(effectiveModes[0].options.land_batch, true);
+    assert.equal(effectiveModes[0].options.full_backstop.enabled, true, "every preset keeps the backstop on");
+    assert.equal(effectiveModes[0].options.periodic.enabled, false);
     const staleModeSave = await page.eval(`
       try {
-        await window.__TAURI_INTERNALS__.invoke("set_project_review_mode", ${JSON.stringify({ project: "APP", mode: "yolo", overrides: {}, expectedRevision: originalMode.revision })});
+        await window.__TAURI_INTERNALS__.invoke("set_project_review_mode", ${JSON.stringify({ project: "APP", mode: "release", overrides: {}, expectedRevision: originalMode.revision })});
         return "unexpected success";
       } catch (error) { return String(error); }
     `);
