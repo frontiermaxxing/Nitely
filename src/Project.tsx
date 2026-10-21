@@ -9,8 +9,8 @@ import { ProjectBrief } from "./ProjectBrief";
 import { GoalRows, type GoalFocus } from "./GoalRows";
 import { ProjectSettings } from "./ProjectSettings";
 import { useProjectReviewMode } from "./ProjectReviewMode";
-import { MODE_LABEL, MODE_DESCRIPTION } from "./reviewModes";
 import { ProjectRules } from "./Rules";
+import { ModeChip } from "./rules/Mode";
 import { EmptyState, Loading } from "./ui";
 import "./project.css";
 
@@ -113,6 +113,7 @@ export function ProjectPage(props: {
           now={props.now}
           onSettings={props.onCrewSettings}
         />
+        <ModeChip projectKey={props.projectKey} control={reviewMode} onChangeMode={() => pick("settings")} />
         <div className="seg" role="tablist" aria-label="Project view">
           {PROJECT_TABS.map((t) => (
             <button key={t} role="tab" aria-selected={tab === t} className={tab === t ? "on" : undefined} onClick={() => pick(t)}>
@@ -128,7 +129,6 @@ export function ProjectPage(props: {
         )}
         {tab === "board" && issues && <BoardFilters issues={issues} board={props.board} filters={filters} onChange={setFilters} />}
       </div>
-      {reviewMode.value && tab !== "settings" && <p className="settings-hint" role="status"><strong>{MODE_LABEL[reviewMode.value.mode]} mode.</strong> {MODE_DESCRIPTION[reviewMode.value.mode]} <button className="link" onClick={() => pick("settings")}>Manage in Settings</button></p>}
       {views && issues && issues.length > 0 && <Summary issues={issues} projectKey={props.projectKey} version={props.version} />}
       {views && <GoalRows project={props.projectKey} version={props.version} focus={props.goal} onOpenIssue={props.onOpenIssue} />}
       {tab !== "brief" && error && <p className="error">{error}</p>}
