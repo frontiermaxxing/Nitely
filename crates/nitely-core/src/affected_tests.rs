@@ -1011,6 +1011,21 @@ mod tests {
             let commands: Vec<&str> = s.checks.iter().map(|c| c.command.as_str()).collect();
             assert_eq!(commands, ["npm run build", "npm test"], "{path}");
         }
+        // A change only to the CLI, or only to the app: that crate's clippy and tests, not
+        // nitely-core's (NIT-484).
+        for (path, component, clippy) in [("crates/nitely-cli/src/ui.rs", "cli", "cargo clippy -p nitely-cli -- -D warnings"), ("src-tauri/src/notify.rs", "app", "cargo clippy -p nitely-app -- -D warnings")] {
+            let s = select(&candidate(&[(path, &edited(path))]));
+            assert!(!s.full, "{path}: {:?}", s.reasons);
+            assert_eq!(s.components, [component], "{path}");
+            assert!(s.checks.iter().any(|c| c.command == clippy), "{path}");
+            assert!(s.checks.iter().filter(|c| c.discovery.is_some()).all(|c| c.command.contains(&format!("-p nitely-{}", if component == "cli" { "cli" } else { "app" }))), "{path}: {:?}", s.checks);
+            assert!(!s.checks.iter().any(|c| c.command.contains("nitely-core")), "{path}");
+        }
+        // A build script or what it reads keeps the full gate.
+        for path in ["src-tauri/tauri.conf.json", "src-tauri/capabilities/default.json", "crates/nitely-cli/build.rs"] {
+            let s = select(&candidate(&[(path, &edited(path))]));
+            assert!(s.full, "{path}: {:?}", s.reasons);
+        }
         // Anything the map does not own keeps the full gate: Rust, the map itself, a manifest, a
         // frontend change that also touches Rust, and a new test file the map does not list.
         let rust = "crates/nitely-core/src/lanes.rs";

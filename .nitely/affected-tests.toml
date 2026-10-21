@@ -64,3 +64,128 @@ inputs = ["crates/nitely-core/src/test_sweep.cjs", "crates/nitely-core/src/test_
 [components.suites.javascript]
 command = "node --test crates/nitely-core/src/test_sweep.test.cjs"
 test_files = ["crates/nitely-core/src/test_sweep.test.cjs"]
+
+# The CLI, a leaf crate: nothing else builds on it, so a change only to it runs its own tests and
+# clippy, not nitely-core's. Its build script reads only git's refs (the commit stamp), outside the
+# tree; a change to the script keeps the full gate (NIT-484).
+[[components]]
+id = "cli"
+roots = ["crates/nitely-cli/"]
+build_inputs = ["crates/nitely-cli/build.rs"]
+checks = ["cargo clippy -p nitely-cli -- -D warnings"]
+
+[[components.suites]]
+id = "bin"
+inputs = ["crates/nitely-cli/"]
+[components.suites.cargo]
+manifest = "crates/nitely-cli/Cargo.toml"
+package = "nitely-cli"
+target_kind = "bin"
+target = "nitely"
+
+[[components.suites]]
+id = "async_submit"
+inputs = ["crates/nitely-cli/"]
+[components.suites.cargo]
+manifest = "crates/nitely-cli/Cargo.toml"
+package = "nitely-cli"
+target_kind = "test"
+target = "async_submit"
+
+[[components.suites]]
+id = "executor"
+inputs = ["crates/nitely-cli/"]
+[components.suites.cargo]
+manifest = "crates/nitely-cli/Cargo.toml"
+package = "nitely-cli"
+target_kind = "test"
+target = "executor"
+
+[[components.suites]]
+id = "install_and_forward"
+inputs = ["crates/nitely-cli/"]
+[components.suites.cargo]
+manifest = "crates/nitely-cli/Cargo.toml"
+package = "nitely-cli"
+target_kind = "test"
+target = "install_and_forward"
+
+[[components.suites]]
+id = "issue_edit"
+inputs = ["crates/nitely-cli/"]
+[components.suites.cargo]
+manifest = "crates/nitely-cli/Cargo.toml"
+package = "nitely-cli"
+target_kind = "test"
+target = "issue_edit"
+
+[[components.suites]]
+id = "mcp_concurrent"
+inputs = ["crates/nitely-cli/"]
+[components.suites.cargo]
+manifest = "crates/nitely-cli/Cargo.toml"
+package = "nitely-cli"
+target_kind = "test"
+target = "mcp_concurrent"
+
+[[components.suites]]
+id = "mcp_stale"
+inputs = ["crates/nitely-cli/"]
+[components.suites.cargo]
+manifest = "crates/nitely-cli/Cargo.toml"
+package = "nitely-cli"
+target_kind = "test"
+target = "mcp_stale"
+
+[[components.suites]]
+id = "older_job"
+inputs = ["crates/nitely-cli/"]
+[components.suites.cargo]
+manifest = "crates/nitely-cli/Cargo.toml"
+package = "nitely-cli"
+target_kind = "test"
+target = "older_job"
+
+[[components.suites]]
+id = "performance"
+inputs = ["crates/nitely-cli/"]
+[components.suites.cargo]
+manifest = "crates/nitely-cli/Cargo.toml"
+package = "nitely-cli"
+target_kind = "test"
+target = "performance"
+
+[[components.suites]]
+id = "performance_recording"
+inputs = ["crates/nitely-cli/"]
+[components.suites.cargo]
+manifest = "crates/nitely-cli/Cargo.toml"
+package = "nitely-cli"
+target_kind = "test"
+target = "performance_recording"
+
+[[components.suites]]
+id = "preview"
+inputs = ["crates/nitely-cli/"]
+[components.suites.cargo]
+manifest = "crates/nitely-cli/Cargo.toml"
+package = "nitely-cli"
+target_kind = "test"
+target = "preview"
+
+# The desktop app, a leaf crate. tauri-build reads the configs, capabilities, icons and Windows
+# installer hooks, so a change to any of them keeps the full gate. It embeds the built frontend,
+# so its checks build that first.
+[[components]]
+id = "app"
+roots = ["src-tauri/"]
+build_inputs = ["src-tauri/build.rs", "src-tauri/icons/", "src-tauri/capabilities/", "src-tauri/windows/", "src-tauri/tauri.conf.json", "src-tauri/tauri.macos.conf.json", "src-tauri/tauri.release.json", "src-tauri/tauri.windows.conf.json"]
+checks = ["npm run build", "cargo clippy -p nitely-app -- -D warnings"]
+
+[[components.suites]]
+id = "lib"
+inputs = ["src-tauri/src/"]
+[components.suites.cargo]
+manifest = "src-tauri/Cargo.toml"
+package = "nitely-app"
+target_kind = "lib"
