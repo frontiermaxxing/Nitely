@@ -728,6 +728,8 @@ mod tests {
         });
         let mut db=Db::open(&crate::paths::unique_temp("nitely-active-policy",".sqlite")).unwrap();
         db.create_project("APP","Example").unwrap();
+        // Risk-matched checks are the mode's choice; the playbook's mode='active' is retired (NIT-499).
+        crate::project_modes::set_for_test(&mut db,"APP",crate::project_modes::Mode::Custom,crate::project_modes::Options{test_depth:Some(crate::project_modes::TestDepth::Risk),full_backstop:Some(crate::project_modes::Backstop{enabled:true,landings:5,delay_seconds:1800}),..Default::default()});
         let issue=db.create_issue(&crate::NewIssue{project:"APP".into(),title:"Clarify math comment".into(),body:"Explain the calculation".into(),kind:"feature".into(),source:"codex".into(),evidence:"test".into(),review_level:Some("inert".into()),..Default::default()},&Actor::Human).unwrap();
         let base=g(&repo,&["rev-parse","HEAD"]).trim().to_string();
         g(&repo,&["checkout","-b","codex/app-1-comment"]);

@@ -228,3 +228,34 @@ For removal by NIT-499, each with a migration and a test that the replacement co
 
 When the goal ends there are three presets, one landing path and two hops. That replaces five
 modes, two shadow switches, two kinds of batching and a parallel YOLO table.
+
+### Where the retirement stands (NIT-499)
+
+| Retired | State |
+|---|---|
+| `project_yolo` table and the switch | Dropped by a migration; the app, CLI and MCP no longer read or set it. Custom with tests and review off is what YOLO was. |
+| YOLO, Balanced and Thorough names | Migrated by NIT-491; the old names still parse for stored rows. |
+| Review shadow batches | Gone: `batch = "shadow"` reads as off and submits queue nothing record-only. `nitely batches compare` reads the old rows. |
+| Playbook policy keys | Ignored, with a notice: `[review] enabled` and `batch`, `[land] batch`, `[verification] mode`, `version` and `audit_percent`, `[verification.backstop] enabled`, `landings` and `delay_seconds`. |
+| Custom falling back to the playbook | Custom's unset values are Nitely's defaults (`project_modes::builtin`): the full gate, a review of each change, landing alone, no goal branches, 10% audits, the full suite on main off. |
+| The land-queue stack for goal items | Nothing to remove: NIT-495 lands items into the goal branch and gates each checkpoint alone. |
+| Periodic review as a default | Off in every preset (NIT-491); Custom only. |
+| `docs/yolo.md`, `docs/verification-shadow.md` | Deleted; `docs/review-modes.md` and `docs/batching.md` describe the presets. |
+
+Kept for now, as follow-ups:
+
+- `[review] batch_window`, `batch_max` and `max_lines` (and `[land] batch_window`, `batch_max`) still
+  tune the batch review and the land queue, until Fast's batch review moves into the land queue's
+  own batch.
+- The "light" review exemption for inert changes needed the review left to the playbook; no
+  project has that now, so the exemption no longer applies, and its code can go.
+
+Concepts before and after:
+
+| Before | After |
+|---|---|
+| Five modes (YOLO, Fast, Balanced, Thorough, Custom) and a separate YOLO switch | Three presets and Custom |
+| Policy in the mode and in the playbook, each overruling the other per key | Policy in the mode only; the playbook states facts |
+| Review batching as a playbook setting, plus a shadow measurement | One review per arrival batch under Fast; the checkpoint review for goals |
+| Verification shadow and active switches in the playbook | The preset decides; the classifier always runs |
+| A backstop that some presets switched off | On in every preset; off only by an explicit Custom choice |

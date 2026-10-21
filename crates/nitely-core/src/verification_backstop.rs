@@ -152,7 +152,8 @@ fn optional_policy(db:&Db,repo:&Path,head:&str)->Result<Option<(Playbook,String)
 }
 fn automatic_policy(db:&Db,repo:&Path,head:&str,project:&str)->Result<Option<(Playbook,String)>> {
     let settings=db.project_review_mode(project)?;
-    let policy=if settings.options().full_backstop.is_some() {Some(committed_policy(repo,head)?)}else{optional_policy(db,repo,head)?};
+    let chosen=settings.mode!=crate::project_modes::Mode::Custom || settings.overrides.full_backstop.is_some();
+    let policy=if chosen {Some(committed_policy(repo,head)?)}else{optional_policy(db,repo,head)?};
     let Some((mut pb,mut identity))=policy else{return Ok(None);};
     crate::project_modes::apply_project(db,project,&mut pb)?;
     if let Some(authority)=settings.authority()? {identity.push_str(&format!(":{authority}"));}

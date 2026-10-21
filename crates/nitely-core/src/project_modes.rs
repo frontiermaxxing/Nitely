@@ -73,6 +73,18 @@ pub fn preset(mode:Mode)->Options {
   checkpoint:(!release).then(||Checkpoint{items:if mode==Mode::Fast {10}else{5},daily:true}),
  }
 }
+/// What Custom uses for a value it leaves unset: Nitely's own default, never the playbook, whose
+/// policy keys are retired (NIT-499). The full checks and a review of each change, landing alone.
+/// Nothing reduced lands, so the full suite on main stays off unless asked for: turning it on here
+/// would start full runs in every repo whose project never chose a mode. Shared lanes stay the
+/// repo's own fact.
+pub fn builtin()->Options {
+ Options {
+  test_depth:Some(TestDepth::Full),pre_review:Some(PreReview::Individual),land_batch:Some(false),shared_lanes:None,
+  full_backstop:Some(Backstop{enabled:false,landings:5,delay_seconds:1800}),audit_percent:Some(10),
+  periodic:Some(Periodic::default()),goal_branches:Some(false),item_review:Some(ItemReview::Off),checkpoint:None,
+ }
+}
 /// What moving from a retired mode to its preset changed.
 fn migration_changes(from:&str)->Vec<String> {
  let lines:&[&str]=match from {
@@ -100,15 +112,12 @@ fn migration_changes(from:&str)->Vec<String> {
  lines.iter().map(|l|l.to_string()).collect()
 }
 impl ProjectReviewMode {
- pub fn options(&self)->Options {if self.mode==Mode::Custom {self.overrides.clone()}else{preset(self.mode)}}
+ /// Every value the mode decides: the preset's, or Custom's own over the built-in defaults.
+ pub fn options(&self)->Options {if self.mode==Mode::Custom {self.overrides.clone().or(builtin())}else{preset(self.mode)}}
+ /// `options`, with whether the repo has build lanes when the mode leaves that to it.
  pub fn effective_options(&self,pb:&Playbook)->Options {
   let o=self.options();
-  Options {test_depth:o.test_depth.or(Some(if pb.verification.mode=="active" {TestDepth::Risk}else{TestDepth::Full})),
-   pre_review:o.pre_review.or(Some(if !pb.review.enabled {PreReview::Off}else if matches!(pb.review.batch,BatchMode::All|BatchMode::Small) {PreReview::Batched}else{PreReview::Individual})),
-   land_batch:o.land_batch.or(Some(pb.land.batch!=LandBatch::Off)),shared_lanes:o.shared_lanes.or(Some(pb.lanes.is_some())),
-   full_backstop:o.full_backstop.or(Some(Backstop{enabled:pb.verification.backstop.enabled,landings:pb.verification.backstop.landings,delay_seconds:pb.verification.backstop.delay_seconds})),
-   audit_percent:o.audit_percent.or(Some(pb.verification.audit_percent)),periodic:Some(o.periodic.unwrap_or_default()),
-   goal_branches:o.goal_branches.or(Some(false)),item_review:o.item_review.or(Some(ItemReview::Off)),checkpoint:o.checkpoint}
+  Options {shared_lanes:o.shared_lanes.or(Some(pb.lanes.is_some())),..o}
  }
  pub fn authority(&self)->Result<Option<String>> {
   if !self.explicit {return Ok(None);}
@@ -116,6 +125,13 @@ impl ProjectReviewMode {
  }
 }
 impl Options {
+ /// Each value of `self`, else the one in `d`.
+ pub fn or(self,d:Options)->Options {
+  Options {test_depth:self.test_depth.or(d.test_depth),pre_review:self.pre_review.or(d.pre_review),land_batch:self.land_batch.or(d.land_batch),
+   shared_lanes:self.shared_lanes.or(d.shared_lanes),full_backstop:self.full_backstop.or(d.full_backstop),audit_percent:self.audit_percent.or(d.audit_percent),
+   periodic:self.periodic.or(d.periodic),goal_branches:self.goal_branches.or(d.goal_branches),item_review:self.item_review.or(d.item_review),
+   checkpoint:self.checkpoint.or(d.checkpoint)}
+ }
  /// Whether work checked under these options did at least what `now` asks before landing, so it
  /// may finish under `now` (NIT-487). Values that act only after landing (backstop, periodic
  /// review, batching, lanes, checkpoints) do not matter here. A value one side leaves to the
@@ -188,6 +204,12 @@ impl Db {
   let after=read(&tx,project)?;remember(&tx,&after)?;tx.commit()?;Ok(after)
  }
 }
+/// For tests: the person sets `mode` at whatever revision the project is at now.
+#[cfg(test)]
+pub(crate) fn set_for_test(db:&mut Db,project:&str,mode:Mode,o:Options)->ProjectReviewMode {
+ let rev=db.project_review_mode(project).unwrap().revision;
+ db.set_project_review_mode(project,mode,o,rev,&Actor::Human).unwrap()
+}
 pub fn for_issue(db:&Db,key:&str)->Result<Option<ProjectReviewMode>> {
  db.issue(key)?.context("mode issue disappeared")?.project.as_deref().map(|p|db.project_review_mode(p)).transpose()
 }
@@ -197,7 +219,8 @@ pub fn review_off(db:&Db,key:&str)->Result<bool> {Ok(for_issue(db,key)?.is_some_
 /// Writes the mode's decisions over the playbook's policy keys.
 fn apply_options(o:&Options,pb:&mut Playbook) {
  if let Some(r)=o.pre_review {pb.review.enabled=r!=PreReview::Off;pb.review.batch=if r==PreReview::Batched {BatchMode::All}else{BatchMode::Off};}
- if let Some(batch)=o.land_batch {pb.land.batch=if batch {LandBatch::Waiting}else{LandBatch::Off};}
+ // The playbook's batch_window stays tuning: with one set, a queue run also waits that long.
+ if let Some(batch)=o.land_batch {pb.land.batch=if !batch {LandBatch::Off} else if pb.land.batch_window.as_deref().is_some_and(|w|w.trim()!="0") {LandBatch::All} else {LandBatch::Waiting};}
  if let Some(shared)=o.shared_lanes {if shared {if pb.lanes.is_none() {pb.lanes=Some(Default::default());}}else{pb.lanes=None;}}
  if let Some(b)=&o.full_backstop {pb.verification.backstop.enabled=b.enabled;pb.verification.backstop.landings=b.landings;pb.verification.backstop.delay_seconds=b.delay_seconds;}
  if let Some(n)=o.audit_percent {pb.verification.audit_percent=n;}
@@ -207,20 +230,19 @@ pub fn apply_project(db:&Db,project:&str,pb:&mut Playbook)->Result<()> {
  apply_options(&settings.options(),pb);
  Ok(())
 }
-/// The playbook's policy keys the mode overrules: each one set away from its default and
-/// replaced by a different value from the mode.
-pub fn ignored_policy(o:&Options,pb:&Playbook)->Vec<String> {
- let default=Playbook::default();let mut applied=pb.clone();apply_options(o,&mut applied);
- let (b,d,a)=(&pb.verification.backstop,&default.verification.backstop,&applied.verification.backstop);
- let depth_mode=o.test_depth.map(|t|if matches!(t,TestDepth::Basic|TestDepth::Risk) {"active"}else{"shadow"});
- [("[review] enabled",pb.review.enabled!=default.review.enabled,pb.review.enabled!=applied.review.enabled),
-  ("[review] batch",pb.review.batch!=default.review.batch,pb.review.batch!=applied.review.batch),
-  ("[land] batch",pb.land.batch!=default.land.batch,pb.land.batch!=applied.land.batch),
-  ("[verification] mode",!pb.verification.mode.is_empty(),depth_mode.is_some_and(|m|m!=pb.verification.mode)),
-  ("[verification] audit_percent",pb.verification.audit_percent!=default.verification.audit_percent,pb.verification.audit_percent!=applied.verification.audit_percent),
-  ("[verification.backstop] enabled, landings and delay_seconds",(b.enabled,b.landings,b.delay_seconds)!=(d.enabled,d.landings,d.delay_seconds),(b.enabled,b.landings,b.delay_seconds)!=(a.enabled,a.landings,a.delay_seconds))]
-  .into_iter().filter(|(_,set,overruled)|*set&&*overruled)
-  .map(|(key,_,_)|format!("The playbook's {key} is ignored: the review mode decides it."))
+/// The retired playbook policy keys this playbook still sets (NIT-499): the review mode decides
+/// each of them, so they are ignored, with a notice until someone removes them.
+pub fn ignored_policy(_o:&Options,pb:&Playbook)->Vec<String> {
+ let default=Playbook::default();
+ let (b,d)=(&pb.verification.backstop,&default.verification.backstop);
+ [("[review] enabled",pb.review.enabled!=default.review.enabled),
+  ("[review] batch",pb.review.batch!=default.review.batch),
+  ("[land] batch",pb.land.batch!=default.land.batch),
+  ("[verification] mode",!pb.verification.mode.is_empty()),
+  ("[verification] audit_percent",pb.verification.audit_percent!=default.verification.audit_percent),
+  ("[verification.backstop] enabled, landings and delay_seconds",(b.enabled,b.landings,b.delay_seconds)!=(d.enabled,d.landings,d.delay_seconds))]
+  .into_iter().filter(|(_,set)|*set)
+  .map(|(key,_)|format!("The playbook's {key} is retired and ignored: the review mode decides it."))
   .collect()
 }
 pub fn apply_issue(db:&Db,key:&str,pb:&mut Playbook)->Result<()> {
@@ -281,7 +303,7 @@ mod tests {
   assert!(app.migration_changes.iter().any(|c|c.contains("Automatic checks run again")));
   let web=db.project_review_mode("WEB").unwrap();assert_eq!(web.mode,Mode::Careful);assert!(web.migration_changes[0].contains("Careful"));
   assert_eq!(db.project_review_mode("OPS").unwrap().mode,Mode::Release);
-  let doc=db.project_review_mode("DOC").unwrap();assert_eq!((doc.mode,doc.options()),(Mode::Custom,Options::default()));assert!(doc.migration_changes.is_empty());
+  let doc=db.project_review_mode("DOC").unwrap();assert_eq!((doc.mode,&doc.overrides,doc.options()),(Mode::Custom,&Options::default(),builtin()));assert!(doc.migration_changes.is_empty());
   assert!(db.set_project_review_mode("APP",Mode::Release,Options::default(),3,&Actor::Agent("cli".into())).is_err());
   let changed=db.set_project_review_mode("app",Mode::Release,Options::default(),3,&Actor::Human).unwrap();
   assert_eq!(changed.revision,4);assert!(changed.authority().unwrap().is_some());assert!(changed.migrated_from.is_none()&&changed.migration_changes.is_empty());
@@ -298,12 +320,16 @@ mod tests {
   drop(db);std::fs::remove_dir_all(dir).ok();
  }
  #[test]
- fn playbook_policy_keys_the_mode_decides_are_ignored_with_a_notice() {
+ fn retired_playbook_policy_keys_are_ignored_with_a_notice() {
   let pb=Playbook::parse("[review]\nenabled=false\n[land]\nbatch='waiting'\n[verification]\naudit_percent=0\n[verification.backstop]\nlandings=2\n").unwrap();
-  let notices=ignored_policy(&preset(Mode::Fast),&pb);
-  for key in ["[review] enabled","[verification] audit_percent","[verification.backstop]"] {assert!(notices.iter().any(|n|n.contains(key)),"{key}: {notices:?}");}
-  assert!(!notices.iter().any(|n|n.contains("[land] batch")),"a key the mode agrees with is not overruled");
-  assert!(ignored_policy(&Options::default(),&pb).is_empty(),"Custom with nothing set leaves the playbook in charge");
+  // Every one is retired (NIT-499), whatever the mode, Custom with nothing set included.
+  for o in [preset(Mode::Fast),builtin()] {
+   let notices=ignored_policy(&o,&pb);
+   for key in ["[review] enabled","[land] batch","[verification] audit_percent","[verification.backstop]"] {assert!(notices.iter().any(|n|n.contains(key)),"{key}: {notices:?}");}
+  }
+  let mut applied=pb.clone();apply_options(&builtin(),&mut applied);
+  assert!(applied.review.enabled&&applied.land.batch==LandBatch::Off&&applied.verification.audit_percent==10,"Custom's unset values are Nitely's defaults");
+  assert!(ignored_policy(&builtin(),&Playbook::default()).is_empty());
  }
  #[test]
  fn queued_work_finishes_under_a_looser_mode_but_not_a_stricter_one() {

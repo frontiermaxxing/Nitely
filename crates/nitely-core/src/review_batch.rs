@@ -681,6 +681,9 @@ mod tests {
             std::fs::create_dir_all(&base).unwrap();
             let db = Db::open(&base.join("t.db")).unwrap();
             db.create_project("NIT", "Nitely").unwrap();
+            // A project whose mode reviews in batches, as a migrated one is (not yet saved, so no
+            // authority for the batch to check against): batching is the mode's, not the playbook's.
+            db.conn.execute("INSERT INTO project_review_mode(project,mode,overrides,explicit) VALUES('NIT','custom','{\"pre_review\":\"batched\"}',0)", []).unwrap();
             Queue { base, db, actor: Actor::Agent("claude:test".into()) }
         }
 
@@ -718,23 +721,6 @@ mod tests {
         let mut rules = ReviewRules { batch: BatchMode::Small, batch_max: 2, ..Default::default() };
         rules.commands.insert("claude".into(), reviewer.iter().map(|a| a.to_string()).collect());
         rules
-    }
-
-    #[test]
-    fn disabled_policy_prevents_a_claimed_batch_from_launching() {
-        let mut q = Queue::new();
-        let (_, a) = q.waiting("repo-disabled", "One");
-        let (_, b) = q.waiting("repo-disabled", "Two");
-        let mut rules = rules(&["nitely-test-do-not-launch"]);
-        let (batch, rows) = close_if_due(&q.db, &rules, Window::After(Duration::ZERO), "repo-disabled", "claude").unwrap().unwrap();
-        rules.enabled = false;
-        run_batch(&q.db, &rules, batch, &rows).unwrap();
-        for id in [a, b] {
-            let row = q.row(id);
-            assert_eq!(row.state, "alone");
-            assert_eq!(row.why.as_deref(), Some(crate::review::DISABLED_NOTE));
-            assert!(row.result.is_none());
-        }
     }
 
     #[test]

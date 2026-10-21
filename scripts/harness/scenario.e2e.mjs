@@ -33,7 +33,7 @@ const git = (cwd, ...args) => execFileSync("git", args, { cwd, encoding: "utf8",
  * lane, the land queue waiting 15 s for more changes, and a crew of fake claude workers (none until
  * it is turned on, as Nitely's default is).
  */
-function playbook({ batch, workers }) {
+function playbook({ workers }) {
   const node = slash(process.execPath);
   return `[branch]
 integration = "main"
@@ -47,7 +47,6 @@ commands = ["node check.mjs"]
 [review]
 reviewer = { "*" = "fake" }
 commands = { fake = ["${node}", "${slash(join(HERE, "fake-reviewer.mjs"))}"] }
-batch = "${batch}"
 batch_window = "20s"
 batch_max = 3
 
@@ -56,7 +55,6 @@ count = 1
 keep = []
 
 [land]
-batch = "all"
 batch_window = "15s"
 
 [crew]
@@ -75,7 +73,7 @@ function seedRepo(home) {
   git(repo, "init", "-q", "-b", "main");
   writeFileSync(join(repo, "README.md"), "# my-app\n\nA throwaway repo for the harness's end-to-end scenario.\n");
   writeFileSync(join(repo, "check.mjs"), `import { existsSync } from "node:fs";\nif (existsSync("broken.txt")) { console.error("broken.txt is in the tree"); process.exit(1); }\nconsole.log("checked");\n`);
-  writeFileSync(join(repo, ".nitely", "playbook.toml"), playbook({ batch: "off", workers: 0 }));
+  writeFileSync(join(repo, ".nitely", "playbook.toml"), playbook({ workers: 0 }));
   git(repo, "add", ".");
   git(repo, "commit", "-q", "-m", "Start my-app");
   nitely(home, "connect", repo, "--project", "APP", "--name", "Acme", "--yes");
@@ -199,7 +197,7 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
     await page.invoke("set_issue_goal", { key: A, goal: focusedGoal.id });
 
     // The person turns the crew on: one worker.
-    writeFileSync(join(repo, ".nitely", "playbook.toml"), playbook({ batch: "off", workers: 1 }));
+    writeFileSync(join(repo, ".nitely", "playbook.toml"), playbook({ workers: 1 }));
     git(repo, "commit", "-q", "-am", "Turn the crew on");
 
     // 3. The crew: the app keeps a supervisor for a playbook with workers (this build's own nitely,
@@ -218,7 +216,7 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
     }
     assert.equal(one.issue.track.station, "done");
     assert.equal(one.reviews[0].verdict, "pass");
-    assert.equal(one.reviews[0].batch_id ?? null, null, "reviewed alone: the playbook batches nothing yet");
+    assert.equal(one.reviews[0].batch_id ?? null, null, "reviewed alone: the mode batches nothing yet");
     assert.equal(await state(urgent.key), "Todo", "Crew respected focus even with an unrelated urgent issue ready");
     assert.equal((await agent.call("next_task", {})).issue, null, "finished focused work still does not spill over");
     // Pause Crew before testing the external agent's urgent selection, so it cannot race the claim.
@@ -235,8 +233,11 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
     // 4. Batched review: the crew goes off (the rest is the agent's here) and the playbook now
     // reviews small changes together. The agent makes three changes and submits them; one touches
     // risky.txt, which the reviewer finds a P1 in.
-    writeFileSync(join(repo, ".nitely", "playbook.toml"), playbook({ batch: "small", workers: 0 }));
-    git(repo, "commit", "-q", "-am", "Crew off; review small changes together");
+    writeFileSync(join(repo, ".nitely", "playbook.toml"), playbook({ workers: 0 }));
+    git(repo, "commit", "-q", "-am", "Crew off");
+    // Batching is the review mode's, not the playbook's (NIT-499): the person turns it on in Custom.
+    const custom = await page.invoke("project_review_mode", { project: "APP" });
+    await page.invoke("set_project_review_mode", { project: "APP", mode: "custom", overrides: { pre_review: "batched", land_batch: true }, expectedRevision: custom.revision });
     const change = async (key, files) => {
       await agent.call("update_issue", { key, state: "In Progress" });
       const started = await agent.call("start_task", { key });

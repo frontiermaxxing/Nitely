@@ -1334,6 +1334,7 @@ reason = "money logic"
         std::fs::write(f.repo.join("math.rs"),"// old\nfn value()->i32 { 1 }").unwrap();
         sh(&f.repo,&["add","."]);sh(&f.repo,&["commit","-m","approved policy"]);
         let head=sh(&f.repo,&["rev-parse","HEAD"]).trim().to_string();
+        crate::project_modes::set_for_test(&mut f.db,"NIT",crate::project_modes::Mode::Custom,crate::project_modes::Options{test_depth:Some(crate::project_modes::TestDepth::Risk),pre_review:Some(crate::project_modes::PreReview::Off),audit_percent:Some(100),full_backstop:Some(crate::project_modes::Backstop{enabled:true,landings:5,delay_seconds:1800}),..Default::default()});
         let (issue,wt)=f.started("Clarify an ordinary source comment");
         f.db.set_review_level(&issue.key,Some("inert"),Some("Comment-only candidate"),&Actor::Human).unwrap();
         crate::verification_backstop::record_landing(&f.db,&f.repo,"NIT",&issue.key,&head,&head,false).unwrap();
@@ -1341,10 +1342,10 @@ reason = "money logic"
         std::fs::write(wt.join("math.rs"),"// explained\nfn value()->i32 { 1 }").unwrap();
         sh(&wt,&["add","math.rs"]);sh(&wt,&["commit","-m","comment"]);
         let s=f.submit(&wt,true).unwrap();
-        assert!(s.gate.passed && s.review_light && s.review.is_none(),"{s:?}");
+        assert!(s.gate.passed && s.review_disabled && s.review.is_none(),"{s:?}");
         assert_eq!(s.gate.plan.as_ref().unwrap().depth,"Basic");
         assert!(s.gate.results.iter().all(|r|r.command!="exit 37"));
-        assert_eq!(f.db.reviews(&issue.key).unwrap()[0].verdict,"light");
+        assert_eq!(f.db.reviews(&issue.key).unwrap()[0].verdict,"disabled");
         let report=crate::land::land(&mut f.db,&f.config,&crate::land::LandOptions{dir:&f.repo.to_string_lossy(),issue_key:&issue.key,push:false,keep:true,break_lock:false},&f.actor).unwrap();
         assert!(report.landed,"{report:?}");
         assert!(report.warnings.is_empty(),"{report:?}");
@@ -1411,6 +1412,7 @@ reason = "money logic"
         // All modes operate on one real change. Each submit still runs the gate and checks
         // authoritative policy; rebuilding the repository adds no coverage to this matrix.
         let mut f = fixture();
+        crate::project_modes::set_for_test(&mut f.db, "NIT", crate::project_modes::Mode::Custom, crate::project_modes::Options { pre_review: Some(crate::project_modes::PreReview::Off), ..Default::default() });
         let (issue, wt) = f.committed("Unreviewed change", "feature.txt");
         let mut branch = String::new();
         for mode in ["off", "small", "all", "shadow"] {
@@ -1433,9 +1435,10 @@ reason = "money logic"
         // batching mode. Exercise it once, followed by a complete real land.
         let pb = Playbook::load(&f.repo).unwrap();
         assert!(crate::land::check_approval(&f.db, &pb, &issue.key, &wt, "main", &branch).unwrap().contains(crate::review::DISABLED_NOTE));
-        let mut enabled = pb.clone();
-        enabled.review.enabled = true;
-        assert!(crate::land::check_approval(&f.db, &enabled, &issue.key, &wt, "main", &branch).unwrap_err().to_string().contains("enabled again"));
+        // Turning review back on (the mode's, now) leaves the unreviewed change unable to land.
+        crate::project_modes::set_for_test(&mut f.db, "NIT", crate::project_modes::Mode::Release, Default::default());
+        assert!(crate::land::check_approval(&f.db, &pb, &issue.key, &wt, "main", &branch).is_err());
+        crate::project_modes::set_for_test(&mut f.db, "NIT", crate::project_modes::Mode::Custom, crate::project_modes::Options { pre_review: Some(crate::project_modes::PreReview::Off), ..Default::default() });
         std::fs::write(wt.join("feature.txt"), "changed").unwrap();
         sh(&wt, &["commit", "-qam", "change after submit"]);
         assert!(crate::land::check_approval(&f.db, &pb, &issue.key, &wt, "main", &branch).unwrap_err().to_string().contains("branch changed"));
@@ -1449,27 +1452,9 @@ reason = "money logic"
     }
 
     #[test]
-    fn disabled_policy_during_a_failed_review_prevents_fallback_launch() {
-        let mut f = fixture();
-        let policy = "[worktree]\ndir = \"../wt/{key}\"\n[gate]\ncommands = [\"exit 0\"]\n[review]\nreviewer = { \"*\" = \"first\" }\ncommands = { first = [\"node\", \"first.js\"], second = [\"node\", \"second.js\"] }\n";
-        let disabled = policy.replace("[review]\n", "[review]\nenabled = false\n");
-        let script = format!("const fs=require('fs'); process.stdin.resume(); process.stdin.on('end',()=>{{fs.writeFileSync({},{}); process.exit(1);}});",
-            serde_json::to_string(&f.repo.join(playbook::PLAYBOOK_PATH).to_string_lossy()).unwrap(), serde_json::to_string(&disabled).unwrap());
-        std::fs::write(f.repo.join(playbook::PLAYBOOK_PATH), policy).unwrap();
-        std::fs::write(f.repo.join("first.js"), script).unwrap();
-        std::fs::write(f.repo.join("second.js"), "require('fs').writeFileSync('fallback-ran', 'bad'); console.log('VERDICT: clean');").unwrap();
-        sh(&f.repo, &["add", "."]);
-        sh(&f.repo, &["commit", "-qm", "fake policy toggle reviewer"]);
-        let (issue, wt) = f.committed("Disable during fallback", "feature.txt");
-        let s = f.submit(&wt, true).unwrap();
-        assert!(s.review_disabled && s.review.is_none());
-        assert!(!wt.join("fallback-ran").exists());
-        assert_eq!(f.db.timeline(&issue.key).unwrap().iter().filter(|t| t.kind == "review_started").count(), 1);
-    }
-
-    #[test]
     fn disabled_review_leaves_reviewer_conditions_unevaluated_and_other_approvals_intact() {
         let mut f = fixture();
+        crate::project_modes::set_for_test(&mut f.db, "NIT", crate::project_modes::Mode::Custom, crate::project_modes::Options { pre_review: Some(crate::project_modes::PreReview::Off), ..Default::default() });
         let policy = PLAYBOOK.replace("{sh}", &playbook::posix_sh()).replace("[review]\n", "[review]\nenabled = false\nrequire_cross_vendor = true\n");
         std::fs::write(f.repo.join(playbook::PLAYBOOK_PATH), format!("{policy}\n[approval]\nalways_human = true\n")).unwrap();
         sh(&f.repo, &["commit", "-qam", "disable review"]);
@@ -1634,8 +1619,11 @@ reason = "money logic"
     fn batching(f: &Fixture, window: &str) {
         let pb_path = f.repo.join(playbook::PLAYBOOK_PATH);
         let pb = std::fs::read_to_string(&pb_path).unwrap();
-        let on = format!("[review]\nbatch = \"small\"\nbatch_window = \"{window}\"\nbatch_max = 2\n");
+        let on = format!("[review]\nbatch_window = \"{window}\"\nbatch_max = 2\n");
         std::fs::write(&pb_path, pb.replacen("[review]\n", &on, 1)).unwrap();
+        // Whether to review in batches is the review mode's (NIT-499): a migrated project's mode,
+        // not yet saved, so queued work has no authority to lose.
+        f.db.conn.execute("INSERT OR REPLACE INTO project_review_mode(project,mode,overrides,explicit) VALUES('NIT','custom','{\"pre_review\":\"batched\"}',0)", []).unwrap();
     }
 
     /// A background submit, as a submit job runs it: it may wait for a review batch.
@@ -1698,14 +1686,14 @@ reason = "money logic"
         let said: Vec<String> = f.db.timeline(&lone.key).unwrap().into_iter().filter_map(|t| t.summary).collect();
         assert!(said.iter().any(|s| s == "Reviewed alone after all: no other change joined it in time"), "{said:?}");
 
-        // A change that is not small is reviewed alone at once, without waiting.
+        // A change larger than a batch may be is reviewed alone at once, without waiting.
         let (big, wt) = f.started("Big change");
-        std::fs::write(wt.join("big.txt"), "line\n".repeat(150)).unwrap();
+        std::fs::write(wt.join("big.txt"), "line\n".repeat(1600)).unwrap();
         sh(&wt, &["add", "."]);
         sh(&wt, &["commit", "-q", "-m", "big"]);
         submit_in_background(&db_path, &f.config, &f.actor, &wt).unwrap();
         let said: Vec<String> = f.db.timeline(&big.key).unwrap().into_iter().filter_map(|t| t.summary).collect();
-        assert!(said.iter().any(|s| s.starts_with("Reviewed alone, not in a batch: it is not small (150 lines in 1 files")), "{said:?}");
+        assert!(said.iter().any(|s| s.starts_with("Reviewed alone, not in a batch: it is larger than a batch may be (1600 lines")), "{said:?}");
         // A foreground submit never waits for a batch.
         let (fg, wt) = f.committed("Foreground", "fg.txt");
         f.submit(&wt, true).unwrap();

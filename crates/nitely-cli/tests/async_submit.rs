@@ -115,15 +115,11 @@ fn tool(s: &Setup, name: &str, arguments: Value) -> Value {
 
 #[test]
 fn disabled_review_async_mcp_submission_still_gates_and_lands() {
-    let s = setup("nitely-disabled-review-async");
-    let repo = s.base.join("repo");
-    let path = repo.join(playbook::PLAYBOOK_PATH);
-    let initial = std::fs::read_to_string(&path).unwrap();
-    let disabled = initial.replace("[review]\n", "[review]\nenabled = false\nbatch = \"all\"\n");
-    std::fs::write(&path, &disabled).unwrap();
-    git(&repo, &["commit", "-qam", "Disable automated review"]);
-    // The task still has the old enabled playbook; authoritative settings win. Its fake reviewer
-    // is never released, so accidentally starting it cannot yield a passing submission.
+    let mut s = setup("nitely-disabled-review-async");
+    // Review is the review mode's to turn off, not the playbook's (NIT-499). Its fake reviewer is
+    // never released, so accidentally starting it cannot yield a passing submission.
+    let off = nitely_core::project_modes::Options { pre_review: Some(nitely_core::project_modes::PreReview::Off), ..Default::default() };
+    s.db.set_project_review_mode("APP", nitely_core::project_modes::Mode::Custom, off.clone(), 0, &Actor::Human).unwrap();
     let job = tool(&s, "submit", json!({}));
     let id = job["id"].as_i64().unwrap().to_string();
     let done = nitely(&s, &["submit-status", &id, "--wait", "600"]);
@@ -134,17 +130,15 @@ fn disabled_review_async_mcp_submission_still_gates_and_lands() {
     assert_eq!(done["result"]["state"], "In Review");
     assert_eq!(s.db.reviews(&s.key).unwrap()[0].verdict, "disabled");
 
-    std::fs::write(&path, &initial).unwrap();
-    git(&repo, &["commit", "-qam", "Enable automated review"]);
+    // Review back on: the unreviewed change cannot land.
+    s.db.set_project_review_mode("APP", nitely_core::project_modes::Mode::Release, Default::default(), 1, &Actor::Human).unwrap();
     let refused_out = Command::new(env!("CARGO_BIN_EXE_nitely")).args(["land", &s.key, "--no-push", "--keep"])
         .current_dir(&s.worktree).env("NITELY_HOME", &s.home).env("NITELY_MEMORY_FLOOR_GB", "0").output().unwrap();
     assert!(!refused_out.status.success());
     let refused: Value = serde_json::from_slice(&refused_out.stdout).unwrap();
     assert_eq!(refused["landed"], false, "{refused}");
-    assert!(refused.to_string().contains("enabled again"), "{refused}");
 
-    std::fs::write(&path, &disabled).unwrap();
-    git(&repo, &["commit", "-qam", "Disable automated review again"]);
+    s.db.set_project_review_mode("APP", nitely_core::project_modes::Mode::Custom, off, 2, &Actor::Human).unwrap();
     let landed = nitely(&s, &["land", &s.key, "--no-push", "--keep"]);
     assert_eq!(landed["landed"], true, "{landed}");
     assert_eq!(s.db.issue(&s.key).unwrap().unwrap().state, "Done");

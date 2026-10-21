@@ -59,13 +59,12 @@ pub struct Pipeline {
 }
 
 /// The source of a mode-decided value: the preset, a Custom override, or (left unset in Custom)
-/// the playbook when it states one, else the built-in default.
-fn source(mode: Mode, set: bool, in_playbook: bool) -> Source {
-    match (mode, set, in_playbook) {
-        (Mode::Custom, true, _) => Source::Custom,
-        (Mode::Custom, false, true) => Source::Playbook,
-        (Mode::Custom, false, false) => Source::Builtin,
-        (mode, _, _) => Source::Preset { mode },
+/// the built-in default. The playbook's policy keys are retired (NIT-499).
+fn source(mode: Mode, set: bool) -> Source {
+    match (mode, set) {
+        (Mode::Custom, true) => Source::Custom,
+        (Mode::Custom, false) => Source::Builtin,
+        (mode, _) => Source::Preset { mode },
     }
 }
 
@@ -76,13 +75,12 @@ fn minutes(seconds: i64) -> String {
 /// The pipeline for one repo under `settings`. `has_map` says whether the integration branch
 /// has a test map.
 pub fn pipeline(repo: &str, settings: &ProjectReviewMode, pb: &Playbook, has_map: bool) -> Pipeline {
-    let chosen = settings.options();
+    let chosen = &settings.overrides;
     let o = settings.effective_options(pb);
-    let d = Playbook::default();
     let mode = settings.mode;
-    let mut warnings = project_modes::ignored_policy(&chosen, pb);
+    let mut warnings = project_modes::ignored_policy(&o, pb);
 
-    let depth_src = source(mode, chosen.test_depth.is_some(), !pb.verification.mode.is_empty());
+    let depth_src = source(mode, chosen.test_depth.is_some());
     let audit = o.audit_percent.unwrap_or(0);
     let audited = if audit > 0 { format!("; {audit}% audited") } else { String::new() };
     let checks = match o.test_depth.unwrap_or(TestDepth::Full) {
@@ -98,14 +96,14 @@ pub fn pipeline(repo: &str, settings: &ProjectReviewMode, pb: &Playbook, has_map
         TestDepth::Risk => Fact { value: "Full gate".into(), why: "No test map on the integration branch".into(), tone: Tone::Agent, source: depth_src },
     };
 
-    let review_src = source(mode, chosen.pre_review.is_some(), pb.review.enabled != d.review.enabled || pb.review.batch != d.review.batch);
+    let review_src = source(mode, chosen.pre_review.is_some());
     let review = match o.pre_review.unwrap_or(PreReview::Individual) {
         PreReview::Off => Fact { value: "Off".into(), why: "Changes with no goal land unreviewed".into(), tone: Tone::Off, source: review_src },
         PreReview::Batched => Fact { value: "One per batch".into(), why: "One blocking review per batch of changes with no goal".into(), tone: Tone::Agent, source: review_src },
         PreReview::Individual => Fact { value: "Each change".into(), why: "A blocking review for each change with no goal".into(), tone: Tone::Agent, source: review_src },
     };
 
-    let goal_src = source(mode, chosen.goal_branches.is_some(), false);
+    let goal_src = source(mode, chosen.goal_branches.is_some());
     let goals = if o.goal_branches == Some(true) {
         let item = match o.item_review.unwrap_or(ItemReview::Off) {
             ItemReview::Off => "items land on quick checks, unreviewed",
@@ -126,7 +124,7 @@ pub fn pipeline(repo: &str, settings: &ProjectReviewMode, pb: &Playbook, has_map
         Fact { value: "Straight to main".into(), why: "Each goal item lands on main like any other change".into(), tone: Tone::Agent, source: goal_src }
     };
 
-    let land_src = source(mode, chosen.land_batch.is_some(), pb.land.batch != d.land.batch);
+    let land_src = source(mode, chosen.land_batch.is_some());
     let lanes = o.shared_lanes != Some(false);
     let lands = if o.land_batch == Some(true) && lanes {
         Fact {
@@ -146,13 +144,13 @@ pub fn pipeline(repo: &str, settings: &ProjectReviewMode, pb: &Playbook, has_map
     let suites = if !ci.is_empty() {
         Fact { value: "In CI".into(), why: format!("{} on GitHub Actions, the rest in a build lane; local when CI is down", ci.join(", ")), tone: Tone::Agent, source: Source::Playbook }
     } else if lanes {
-        Fact { value: "In a build lane".into(), why: "On this machine, one full suite at a time".into(), tone: Tone::Agent, source: if pb.lanes.is_some() { Source::Playbook } else { source(mode, chosen.shared_lanes.is_some(), false) } }
+        Fact { value: "In a build lane".into(), why: "On this machine, one full suite at a time".into(), tone: Tone::Agent, source: if pb.lanes.is_some() { Source::Playbook } else { source(mode, chosen.shared_lanes.is_some()) } }
     } else {
-        Fact { value: "In the task's worktree".into(), why: "Build lanes are off".into(), tone: Tone::Agent, source: source(mode, chosen.shared_lanes.is_some(), pb.lanes.is_some()) }
+        Fact { value: "In the task's worktree".into(), why: "Build lanes are off".into(), tone: Tone::Agent, source: source(mode, chosen.shared_lanes.is_some()) }
     };
 
     let b = &pb.verification.backstop;
-    let backstop_src = source(mode, chosen.full_backstop.is_some(), (b.enabled, b.landings, b.delay_seconds) != (d.verification.backstop.enabled, d.verification.backstop.landings, d.verification.backstop.delay_seconds));
+    let backstop_src = source(mode, chosen.full_backstop.is_some());
     let after = match &o.full_backstop {
         Some(s) if s.enabled => {
             let every = if s.landings == 1 { "after every land".to_string() } else { format!("every {} lands or {}", s.landings, minutes(s.delay_seconds)) };
@@ -270,8 +268,8 @@ mod tests {
         db.set_project_review_mode("APP", m, o, rev, &Actor::Human).unwrap()
     }
 
-    /// Each value names its layer: a preset, a Custom override, a playbook fact, or the built-in
-    /// default; and the dry run follows the test map, the protected paths and the paths that need
+    /// Each value names its layer: a preset, a Custom override, a playbook fact (where full suites
+    /// run), or the built-in default; and the dry run follows the test map, the protected paths and the paths that need
     /// the person, the way the gate would.
     #[test]
     fn values_name_their_source_and_the_dry_run_follows_the_floors() {
@@ -298,9 +296,10 @@ mod tests {
         let custom = mode(&mut db, Mode::Custom, Options { test_depth: Some(TestDepth::Full), ..Default::default() });
         let p = pipeline("app", &custom, &pb, true);
         assert_eq!((p.checks.value.as_str(), &p.checks.source), ("Full gate", &Source::Custom));
-        assert_eq!(p.lands.source, Source::Playbook);
+        // What Custom leaves unset is Nitely's default, never the playbook's retired keys (NIT-499).
+        assert_eq!((p.lands.value.as_str(), &p.lands.source), ("Each change alone", &Source::Builtin));
         assert_eq!(p.review.source, Source::Builtin);
-        assert_eq!((p.after.why.split(';').next(), &p.after.source), (Some("Runs every 7 lands or 30 min"), &Source::Playbook));
+        assert_eq!((p.after.tone, &p.after.source), (Tone::Off, &Source::Builtin), "the playbook's enabled = true no longer turns it on");
         let off = mode(&mut db, Mode::Custom, Options { full_backstop: Some(project_modes::Backstop { enabled: false, landings: 5, delay_seconds: 1800 }), ..Default::default() });
         let p = pipeline("app", &off, &pb, true);
         assert_eq!((p.after.tone, &p.after.source), (Tone::Off, &Source::Custom), "only Custom turns it off, and it shows red");

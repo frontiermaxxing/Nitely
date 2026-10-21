@@ -42,17 +42,17 @@ export function useProjectReviewMode(project: string, version: number, onChanged
 }
 export type ReviewModeControl = ReturnType<typeof useProjectReviewMode>;
 
-/** A setting a mode can leave to each repository: its choices, plus "Repository settings" (null). */
-function Choice<T extends string>(props: { label: string; value: T | null; choices: [T, string][]; disabled: boolean; onChange: (value: T | null) => void }) {
+/** A setting Custom can leave unset: its choices, plus "Nitely's default" (null), which `fallback` describes. */
+function Choice<T extends string>(props: { label: string; value: T | null; choices: [T, string][]; fallback: string; disabled: boolean; onChange: (value: T | null) => void }) {
   const options: SelectOption<T | "repo">[] = [
-    { value: "repo", label: "Repository settings", detail: "Each repository keeps its own rules" },
+    { value: "repo", label: "Nitely's default", detail: props.fallback },
     ...props.choices.map(([value, label]) => ({ value, label })),
   ];
   return <Select<T | "repo"> aria-label={props.label} value={props.value ?? "repo"} options={options} disabled={props.disabled} onChange={(v) => props.onChange(v === "repo" || v === null ? null : v)} />;
 }
-/** On, off, or left to each repository. */
-function Toggle(props: { label: string; value: boolean | null; disabled: boolean; onChange: (value: boolean | null) => void }) {
-  const options: ChoiceOption<"repo" | "on" | "off">[] = [{ value: "repo", label: "Repository" }, { value: "on", label: "On" }, { value: "off", label: "Off" }];
+/** On, off, or unset: Nitely's default, or (shared lanes) whatever the repository has. */
+function Toggle(props: { label: string; value: boolean | null; unset?: string; disabled: boolean; onChange: (value: boolean | null) => void }) {
+  const options: ChoiceOption<"repo" | "on" | "off">[] = [{ value: "repo", label: props.unset ?? "Default" }, { value: "on", label: "On" }, { value: "off", label: "Off" }];
   return <Segmented aria-label={props.label} options={options} value={props.value === null ? "repo" : props.value ? "on" : "off"} disabled={props.disabled} onChange={(v) => props.onChange(v === "repo" ? null : v === "on")} />;
 }
 function Count({ id, value, min = 1, max, disabled, onChange }: { id: string; value: number; min?: number; max?: number; disabled: boolean; onChange: (n: number) => void }) {
@@ -110,18 +110,18 @@ export function ProjectReviewModeSettings({ control, version }: { control: Revie
       </div>}
     </SettingsSection>
     {saved && draft && options && <>
-      <SettingsSection title="Before merging" description="Repository settings keeps each repository's own rules for that check.">
+      <SettingsSection title="Before merging" description="Nitely's default runs the full suite and reviews each change, landing it alone. The playbook's own policy keys no longer decide these.">
         <SettingsRow label="Automatic tests" why="Basic and risk-based checks use the repository's configured commands. Without that configuration the full checks run.">
-          <Choice label="Automatic tests" value={options.test_depth} choices={[["off", "Off"], ["basic", "Basic checks"], ["risk", "Match the change's risk"], ["full", "Full suite"]]} disabled={off} onChange={(test_depth) => edit({ test_depth })} />
+          <Choice label="Automatic tests" fallback="Full suite" value={options.test_depth} choices={[["off", "Off"], ["basic", "Basic checks"], ["risk", "Match the change's risk"], ["full", "Full suite"]]} disabled={off} onChange={(test_depth) => edit({ test_depth })} />
         </SettingsRow>
         <SettingsRow label="PR review">
-          <Choice label="PR review" value={options.pre_review} choices={[["off", "Off"], ["individual", "Review each change"], ["batched", "Review changes in batches"]]} disabled={off} onChange={(pre_review) => edit({ pre_review })} />
+          <Choice label="PR review" fallback="Review each change" value={options.pre_review} choices={[["off", "Off"], ["individual", "Review each change"], ["batched", "Review changes in batches"]]} disabled={off} onChange={(pre_review) => edit({ pre_review })} />
         </SettingsRow>
         <SettingsRow label="Batch merges" why={options.land_batch && options.test_depth !== "off" ? "When changes land together, the combined result runs the full checks." : undefined}>
           <Toggle label="Batch merges" value={options.land_batch} disabled={off} onChange={(land_batch) => edit({ land_batch })} />
         </SettingsRow>
         <SettingsRow label="Shared build lanes">
-          <Toggle label="Shared build lanes" value={options.shared_lanes} disabled={off} onChange={(shared_lanes) => edit({ shared_lanes })} />
+          <Toggle label="Shared build lanes" unset="Repository" value={options.shared_lanes} disabled={off} onChange={(shared_lanes) => edit({ shared_lanes })} />
         </SettingsRow>
       </SettingsSection>
       <SettingsSection title="Goals" description="A goal's items land on its goal branch with quick checks. A checkpoint then lands the branch on main with one full run and one review.">
@@ -130,7 +130,7 @@ export function ProjectReviewModeSettings({ control, version }: { control: Revie
         </SettingsRow>
         {options.goal_branches !== false && <>
           <SettingsRow label="Review of each goal item" why="The checkpoint review of the whole slice blocks in every mode.">
-            <Choice label="Review of each goal item" value={options.item_review} choices={[["off", "None"], ["advisory", "Review without blocking"], ["blocking", "Review and block"]]} disabled={off} onChange={(item_review) => edit({ item_review })} />
+            <Choice label="Review of each goal item" fallback="None" value={options.item_review} choices={[["off", "None"], ["advisory", "Review without blocking"], ["blocking", "Review and block"]]} disabled={off} onChange={(item_review) => edit({ item_review })} />
           </SettingsRow>
           <SettingsRow label="Checkpoint after this many items" why="Sooner when the coordinator calls a coherent slice." htmlFor="review-mode-checkpoint">
             <Count id="review-mode-checkpoint" value={checkpoint.items} max={100} disabled={off} onChange={(items) => edit({ checkpoint: { ...checkpoint, items } })} />
@@ -171,7 +171,7 @@ export function ProjectReviewModeSettings({ control, version }: { control: Revie
           </SettingsRow>
         </>}
         <SettingsRow label="Sampled audits of light changes">
-          <Choice label="Sampled audits of light changes" value={options.audit_percent === null ? null : String(options.audit_percent)} choices={audits} disabled={off} onChange={(v) => edit({ audit_percent: v === null ? null : Number(v) })} />
+          <Choice label="Sampled audits of light changes" fallback="10%" value={options.audit_percent === null ? null : String(options.audit_percent)} choices={audits} disabled={off} onChange={(v) => edit({ audit_percent: v === null ? null : Number(v) })} />
         </SettingsRow>
       </SettingsSection>
       <div className="review-mode-save">
@@ -203,8 +203,8 @@ function EffectiveModes({ project, revision }: { project: string; revision: numb
     {error && <p className="error small">{error}</p>}
     {rows?.length === 0 && <p className="muted small">No connected repositories.</p>}
     {rows?.map((r) => <div key={r.repo}><p className="small mono periodic-repo-name">{r.repo}</p>
-      <dl><dt>Tests</dt><dd>{r.options.test_depth ? tests[r.options.test_depth] : "Repository settings"}</dd>
-        <dt>PR review</dt><dd>{r.options.pre_review ? review[r.options.pre_review] : "Repository settings"}</dd>
+      <dl><dt>Tests</dt><dd>{r.options.test_depth ? tests[r.options.test_depth] : "Nitely's default"}</dd>
+        <dt>PR review</dt><dd>{r.options.pre_review ? review[r.options.pre_review] : "Nitely's default"}</dd>
         <dt>Merge batches</dt><dd>{r.options.land_batch ? "On" : "Off"}</dd>
         <dt>Shared lanes</dt><dd>{r.options.shared_lanes ? "On" : "Off"}</dd>
         <dt>Periodic review</dt><dd>{r.options.periodic?.enabled ? `Every ${r.options.periodic.every_landings} merges${r.options.periodic.max_delay_seconds ? ` or ${r.options.periodic.max_delay_seconds / 60} minutes` : ""}` : "Off"}</dd>

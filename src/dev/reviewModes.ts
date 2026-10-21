@@ -32,7 +32,8 @@ export function saveReviewMode(project: string, mode: ReviewMode, overrides: Mod
 export function effectiveModes(project: string) {
   const mode = reviewMode(project);
   const options = optionsFor(mode.mode, mode.presets, mode.overrides);
-  const fallback = { ...presets.find((p) => p.mode === "release")!.options, land_batch: true };
+  // Mirrors project_modes::builtin: what Custom leaves unset is Nitely's default, not the playbook's.
+  const fallback: ModeOptions = { ...presets.find((p) => p.mode === "release")!.options, full_backstop: { enabled: false, landings: 5, delay_seconds: 1800 }, audit_percent: 10, goal_branches: false, item_review: "off", checkpoint: null };
   const effective = Object.fromEntries(Object.entries(options).map(([key, value]) => [key, value ?? fallback[key as keyof ModeOptions]])) as unknown as ModeOptions;
   return [{ repo: "Sample project", options: effective, warnings: [], backstop_off: effective.full_backstop?.enabled === false }];
 }
@@ -57,9 +58,9 @@ export function retryPeriodic(project: string, repo: string, id: number) {
 export function landsPipeline(project: string, repos: string[]): Pipeline[] {
   const mode = reviewMode(project);
   const chosen = optionsFor(mode.mode, mode.presets, mode.overrides);
-  const src = (set: boolean, inPlaybook: boolean): PipelineSource =>
-    mode.mode !== "custom" ? { kind: "preset", mode: mode.mode } : set ? { kind: "custom" } : inPlaybook ? { kind: "playbook" } : { kind: "builtin" };
-  const depth = chosen.test_depth ?? "risk";
+  const src = (set: boolean, _inPlaybook?: boolean): PipelineSource =>
+    mode.mode !== "custom" ? { kind: "preset", mode: mode.mode } : set ? { kind: "custom" } : { kind: "builtin" };
+  const depth = chosen.test_depth ?? "full";
   const audit = chosen.audit_percent ?? 10;
   const audited = audit > 0 ? `; ${audit}% audited` : "";
   const checks: PipelineFact =
@@ -76,13 +77,13 @@ export function landsPipeline(project: string, repos: string[]): Pipeline[] {
   const goals: PipelineFact = chosen.goal_branches
     ? { value: "Through a goal branch", why: `${item}; main gets the goal at each checkpoint (a coherent slice${cp ? `, ${cp.items} items${cp.daily ? " or a day" : ""}` : ""}): one full run, one review`, tone: "agent", source: src(chosen.goal_branches !== null, false) }
     : { value: "Straight to main", why: "Each goal item lands on main like any other change", tone: "agent", source: src(chosen.goal_branches !== null, false) };
-  const lands: PipelineFact = chosen.land_batch ?? true
+  const lands: PipelineFact = chosen.land_batch ?? false
     ? { value: "Batches of up to 5", why: "What waits lands on one full run, bisected if it fails", tone: "agent", source: src(chosen.land_batch !== null, true) }
     : { value: "Each change alone", why: "One gate and one push per change", tone: "agent", source: src(true, true) };
-  const b = chosen.full_backstop;
+  const b = chosen.full_backstop ?? { enabled: false, landings: 5, delay_seconds: 1800 };
   const after: PipelineFact = b?.enabled
     ? { value: "Full suite on main", why: `Runs ${b.landings === 1 ? "after every land" : `every ${b.landings} lands or ${Math.ceil(b.delay_seconds / 60)} min`}; a failure is reverted`, tone: "agent", source: src(true, false) }
-    : { value: "Nothing", why: "The full suite on main is off", tone: "off", source: src(b !== null, false) };
+    : { value: "Nothing", why: "The full suite on main is off", tone: "off", source: src(chosen.full_backstop !== null) };
   const suites: PipelineFact = { value: "In CI", why: "cargo test --workspace on GitHub Actions, the rest in a build lane; local when CI is down", tone: "agent", source: { kind: "playbook" } };
   const warnings = b?.enabled ? [] : ["The full suite on main is off: nothing checks main after reduced checks land."];
   return repos.map((repo) => ({ repo, mode: mode.mode, checks, review, goals, lands, suites, after, warnings }));
@@ -91,7 +92,7 @@ export function landsPipeline(project: string, repos: string[]): Pipeline[] {
 /** Mirrors lands_pipeline::dry_run on the sample map: src/ is the web component, Cargo files keep the full gate. */
 export function landsDryRun(project: string, path: string): PathDryRun {
   const mode = reviewMode(project);
-  const depth = optionsFor(mode.mode, mode.presets, mode.overrides).test_depth ?? "risk";
+  const depth = optionsFor(mode.mode, mode.presets, mode.overrides).test_depth ?? "full";
   const p = path.trim().split(String.fromCharCode(92)).join("/");
   const full = ["npm test", "npm run build", "cargo test --workspace", "cargo clippy --workspace -- -D warnings"];
   if (p.startsWith("vendor/")) return { path: p, checks: "refused", commands: [], why: "the branch changes " + p + ", which task branches may not change: third-party code", waits: [] };

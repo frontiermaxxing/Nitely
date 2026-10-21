@@ -181,7 +181,7 @@ pub fn lands_alone(db: &Db, root: &Path, pb: &Playbook, key: &str) -> Result<Opt
     crate::project_modes::apply_issue(db, key, &mut current)?;
     let pb = &current;
     if pb.land.batch == LandBatch::Off {
-        return Ok(Some("the playbook lands each change alone".into()));
+        return Ok(Some("the review mode lands each change alone".into()));
     }
     // A goal's slice is already one change with one review: it is gated alone, so a failure
     // bisects over its own items (goal_branch.rs), not over unrelated changes stacked with it.
@@ -890,7 +890,7 @@ mod tests {
         actor: Actor,
     }
 
-    /// A repo with build lanes and `[land] batch = "waiting"`, a gate that passes, a fake reviewer
+    /// A repo with build lanes, a Custom mode that lands in batches, a gate that passes, a fake reviewer
     /// that passes everything, and `billing` paths that need a person.
     fn fixture() -> Fixture {
         let base = crate::test_repo::copy("land-queue", |base| {
@@ -900,6 +900,9 @@ mod tests {
         let repo = base.join("repo");
         let db = Db::open(&base.join("t.db")).unwrap();
         db.create_project("NIT", "Nitely").unwrap();
+        // Landing in batches is the review mode's to decide, not the playbook's (NIT-499): a migrated
+        // project's mode, not yet saved, so the reviews the tests seed carry no authority to check.
+        db.conn.execute(r#"INSERT INTO project_review_mode(project,mode,overrides,explicit) VALUES('NIT','custom','{"land_batch":true}',0)"#, []).unwrap();
         Fixture { base, repo, db, actor: Actor::Agent("claude:test".into()) }
     }
 
@@ -915,8 +918,6 @@ commands = { fake = ["{sh}", "-c", "cat > /dev/null; echo 'Fine.'; echo 'VERDICT
 pattern = "billing"
 reason = "billing"
 [lanes]
-[land]
-batch = "waiting"
 "#;
 
     impl Fixture {
@@ -1097,7 +1098,7 @@ batch = "waiting"
         sh(&f.repo, &["commit", "-qam", "separate Basic and Full checks"]);
         // Fast deliberately lands individually; this scenario explicitly opts into batching.
         let options = Options { test_depth: Some(crate::project_modes::TestDepth::Basic), pre_review: Some(crate::project_modes::PreReview::Off), land_batch: Some(true), shared_lanes: Some(true), ..Default::default() };
-        f.db.set_project_review_mode("NIT", Mode::Custom, options, 0, &Actor::Human).unwrap();
+        crate::project_modes::set_for_test(&mut f.db, "NIT", Mode::Custom, options);
         let (a, _) = f.submitted("First Basic change", &[("first.txt", "one")]);
         let (b, _) = f.submitted("Second Basic change", &[("second.txt", "two")]);
         for key in [&a, &b] {
@@ -1121,7 +1122,7 @@ batch = "waiting"
         let mut f = fixture();
         let (a, _) = f.submitted("Queued change", &[("queued.txt", "queued")]);
         enqueue(&f.db, &f.repo, &a, &f.opts(), &f.actor).unwrap();
-        f.db.set_project_review_mode("NIT", Mode::Custom, Options { land_batch: Some(false), ..Default::default() }, 0, &Actor::Human).unwrap();
+        crate::project_modes::set_for_test(&mut f.db, "NIT", Mode::Custom, Options { land_batch: Some(false), ..Default::default() });
         run_queue(&mut f.db, &f.repo).unwrap();
         assert_eq!(f.entry(&a).state, "sent_back");
         assert!(!f.on_main("queued.txt"));
@@ -1133,9 +1134,8 @@ batch = "waiting"
     fn yolo_batch_lands_without_a_gate_pass_or_cached_success() {
         let mut f = fixture();
         f.strict_gate();
-        let off = crate::project_modes::Options { test_depth: Some(crate::project_modes::TestDepth::Off), pre_review: Some(crate::project_modes::PreReview::Off), ..Default::default() };
-        let rev = f.db.project_review_mode("NIT").unwrap().revision;
-        f.db.set_project_review_mode("NIT", crate::project_modes::Mode::Custom, off, rev, &Actor::Human).unwrap();
+        let off = crate::project_modes::Options { test_depth: Some(crate::project_modes::TestDepth::Off), pre_review: Some(crate::project_modes::PreReview::Off), land_batch: Some(true), ..Default::default() };
+        crate::project_modes::set_for_test(&mut f.db, "NIT", crate::project_modes::Mode::Custom, off);
         let (a, _) = f.submitted("Unchecked first", &[("bad.txt", "fails the configured gate")]);
         let (b, _) = f.submitted("Unchecked second", &[("second.txt", "second")]);
         f.queue_and_run(&[&a, &b]);
@@ -1197,8 +1197,8 @@ batch = "waiting"
         let text = std::fs::read_to_string(&path).unwrap();
         std::fs::write(&path, format!("{text}\n[[land.after]]\nrun = \"echo installed>> {}\"\n", installs.to_string_lossy().replace('\\', "/"))).unwrap();
         sh(&f.repo, &["commit", "-qam", "an install after landing"]);
-        let backstop = Options { full_backstop: Some(Backstop { enabled: true, landings: 5, delay_seconds: 1800 }), ..Default::default() };
-        f.db.set_project_review_mode("NIT", Mode::Custom, backstop, 0, &Actor::Human).unwrap();
+        let backstop = Options { full_backstop: Some(Backstop { enabled: true, landings: 5, delay_seconds: 1800 }), land_batch: Some(true), ..Default::default() };
+        crate::project_modes::set_for_test(&mut f.db, "NIT", Mode::Custom, backstop);
         let (a, _) = f.submitted("A", &[("crates/a.rs", "a")]);
         let (b, _) = f.submitted("B", &[("crates/b.rs", "b")]);
         f.queue_and_run(&[&a, &b]);
@@ -1391,15 +1391,15 @@ batch = "waiting"
         let opts = SubmitOptions { dir: &dir, issue_key: None, skip_review: false, local_only: true, batch: false, solution: None, solution_commit: None, solution_patch_id: None };
         submit(&mut f.db, &crate::Config::default(), &opts, &f.actor).unwrap();
         assert!(lands_alone(&f.db, &f.repo, &pb, &issue.key).unwrap().unwrap().contains("approval"));
-        // The playbook decides the rest.
-        for (text, why) in [
-            ("[land]\n", "alone"),
-            ("[land]\nbatch = \"waiting\"\n", "[lanes]"),
-            ("[lanes]\nlarge_repo = true\n[land]\nbatch = \"waiting\"\n", "large-repo"),
-        ] {
+        // Lanes and large-repo mode are the repo's facts; a batch needs lanes.
+        for (text, why) in [("[land]\nbatch = \"waiting\"\n", "[lanes]"), ("[lanes]\nlarge_repo = true\n", "large-repo")] {
             let pb = Playbook::parse(text).unwrap();
             assert!(lands_alone(&f.db, &f.repo, &pb, &a).unwrap().unwrap().contains(why), "{text}");
         }
+        // Whether to batch at all is the review mode's, whatever the playbook's retired key says.
+        crate::project_modes::set_for_test(&mut f.db, "NIT", crate::project_modes::Mode::Release, Default::default());
+        let pb = Playbook::parse("[lanes]\n[land]\nbatch = \"waiting\"\n").unwrap();
+        assert!(lands_alone(&f.db, &f.repo, &pb, &a).unwrap().unwrap().contains("alone"));
         std::fs::remove_dir_all(&f.base).ok();
     }
 

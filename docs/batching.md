@@ -1,8 +1,8 @@
 # Batching review and landing
 
-How a project can review and land changes together instead of one at a time: each change alone,
-small changes batched, or all of them batched. This is the design, measured against Nitely's own
-history before anything changes in the product. Back to the [README](../README.md); the warm checkouts
+How a project can review and land changes together instead of one at a time. This is the design,
+measured against Nitely's own history; the review mode now decides whether a project batches (see
+"The playbook" below and [verification-settings.md](verification-settings.md)). Back to the [README](../README.md); the warm checkouts
 the gate moves into are in [build-lanes.md](build-lanes.md), and asynchronous submit is
 [NIT-212](nitely://issue/NIT-212).
 
@@ -426,23 +426,24 @@ identical patch. Reusing a pass for the same patch and reviewing only the differ
 
 ## The playbook
 
+Whether a project batches is the review mode's now, not the playbook's (NIT-499,
+[verification-settings.md](verification-settings.md)): Fast and Careful land changes with no goal in
+batches, Fast also reviews each batch as one, and Release lands each change alone. The playbook's
+`[review] batch` and `[land] batch` are retired and ignored with a notice. These stay, as tuning:
+
 ```toml
 [review]
-batch = "off"          # "off": each change alone. "small": small changes together. "all": any size. "shadow": alone, and measured in batches.
 batch_window = "5m"    # how long the oldest change waits for others; "busy": until a reviewer frees up
 batch_max = 3          # changes per review call
-small_lines = 100      # what counts as small
-small_files = 5
-max_lines = 1500       # with "all": lines per batch
+max_lines = 1500       # lines per batch
 
 [land]
-batch = "off"          # "off": each change lands alone. "waiting": a queue that takes what waits. "all": a time window too.
-batch_window = "0"     # with "all": how long a queue run waits for more
+batch_window = "0"     # how long a queue run waits for more
 batch_max = 5          # changes per queue run
 ```
 
-`"off"` is the default for both, and a playbook without these keys behaves as today. A project can
-batch landing without batching review, and the reverse.
+The shadow measurement (`batch = "shadow"`) is done and gone; a playbook that still says it reads as
+off. `nitely batches compare` still reads the batches it recorded.
 
 ## GitHub and Bitbucket
 
