@@ -911,7 +911,7 @@ mod win {
 
     /// PROCESS_MEMORY_COUNTERS_EX.
     #[repr(C)]
-    struct MemoryCounters {
+    struct ProcessMemoryEx {
         cb: u32,
         page_faults: u32,
         peak_working_set: usize,
@@ -1090,7 +1090,7 @@ mod win {
         pub fn current_memory(&self) -> Option<u64> {
             #[link(name = "kernel32")]
             extern "system" {
-                fn K32GetProcessMemoryInfo(process: Handle, counters: *mut MemoryCounters, size: u32) -> i32;
+                fn K32GetProcessMemoryInfo(process: Handle, counters: *mut ProcessMemoryEx, size: u32) -> i32;
             }
             const JOB_OBJECT_BASIC_PROCESS_ID_LIST: u32 = 3;
             // Room for 1024 processes: two u32 counts, then the ids.
@@ -1110,9 +1110,9 @@ mod win {
                 if process.is_null() {
                     continue;
                 }
-                // SAFETY: all zeros is a valid MemoryCounters, `cb` says its size.
-                let mut counters: MemoryCounters = unsafe { std::mem::zeroed() };
-                counters.cb = std::mem::size_of::<MemoryCounters>() as u32;
+                // SAFETY: all zeros is a valid ProcessMemoryEx, `cb` says its size.
+                let mut counters: ProcessMemoryEx = unsafe { std::mem::zeroed() };
+                counters.cb = std::mem::size_of::<ProcessMemoryEx>() as u32;
                 // SAFETY: the open handle and the struct the call fills, of the size it says.
                 if unsafe { K32GetProcessMemoryInfo(process, &mut counters, counters.cb) } != 0 {
                     total += counters.private_usage as u64;

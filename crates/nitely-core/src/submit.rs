@@ -470,7 +470,6 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         ("Needs You", "It waits for the human's approval in the Nitely inbox. Nitely already asked them, so do not `ask` for this approval yourself. Pick up other work meanwhile; once it is Approved, call land.")
     } else if out.review_batched {
         ("In Review", "The gate passed; its review waits for its land queue batch. Call land: the queue reviews it with whatever else is waiting, in one reviewer call, before their gate, and nothing lands unreviewed. If the review asks for changes, land says so and the issue is back with you.")
-        ("In Review", "Basic checks passed under the committed verification policy; pre-land review is exempt. Call land; post-merge audit applies.")
     } else if out.yolo {
         ("In Review", "YOLO mode: automatic gate and PR review skipped. This revision is unverified. Call land while YOLO remains enabled.")
     } else if out.review_disabled && out.gate.skipped.is_some() {
