@@ -37,6 +37,7 @@ import type {
   Applied,
   Ask,
   Board,
+  Notice,
   AgentRow,
   BranchRow,
   BranchState,
@@ -150,6 +151,8 @@ interface IssueSpec {
   ask?: { question: string; options: string[]; finding?: { priority: number; text: string } };
   /** More questions on the same issue, asked after `ask`, still open (NIT-172). */
   moreAsks?: string[];
+  /** Further requests to accept a finding, made after the first (the Inbox puts them on one card, NIT-571). */
+  moreFindings?: { question: string; finding: { priority: number; text: string } }[];
   /** The agent session in the issue's worktree, if one is open. */
   live?: Live;
   branch?: Partial<BranchState>;
@@ -345,6 +348,10 @@ const ISSUES: IssueSpec[] = [
       options: [],
       finding: { priority: 1, text: "No migration for existing sites: src/settings.ts, load: a site set up before this starts with empty settings" },
     },
+    moreFindings: [{
+      question: "The old behaviour shared one cache across sites on purpose, to keep the first load fast; splitting it is a separate change.",
+      finding: { priority: 1, text: "Shared cache still mixes sites: src/cache.ts, get: a site reads another site's cached settings until the cache expires" },
+    }],
     live: { state: "waiting", seen: 0.6, activity: "Asked to accept a finding" }, branch: { ahead: 4, dirty_files: 0 },
   },
   {
@@ -452,6 +459,8 @@ const FINDINGS = [
 ];
 
 interface World {
+  /** What the person is told and nothing waits on (NIT-570). */
+  notices: Notice[];
   issues: IssueRecord[];
   timelines: Map<string, TimelineEntry[]>;
   reviews: Map<string, ReviewRecord[]>;
@@ -501,7 +510,10 @@ function fakeSession(seed: string): string {
 }
 
 function build(): World {
-  const world: World = { issues: [], timelines: new Map(), reviews: new Map(), prs: new Map(), asks: [], projects: [], repos: REPOS };
+  const world: World = {
+    // A goal item whose review rounds stalled under `stalled_reviews = "fix"` (NIT-570).
+    notices: [{ id: 9001, issue_key: "ORB-261", ts: NOW - 25 * 60, summary: "ORB-261: the review rounds are not converging (5 review rounds in a row asked for changes). Its agent splits the change: what the reviews agree on lands, and the open findings become a follow-up issue in the same goal. Nothing waits on you." }],
+    issues: [], timelines: new Map(), reviews: new Map(), prs: new Map(), asks: [], projects: [], repos: REPOS };
   for (const spec of ISSUES) {
     const repo = repoOf(spec.key);
     const vendor = spec.vendor ?? "claude";
@@ -654,6 +666,11 @@ function build(): World {
         const at = open.asked_at + 60 * (n + 1);
         world.asks.push({ ...open, id: askId++, question, options: [], asked_at: at });
         timeline.push({ ts: at, actor: open.asked_by, kind: "ask", summary: question });
+      }
+      for (const [n, more] of (spec.moreFindings ?? []).entries()) {
+        const at = open.asked_at + 90 * (n + 1);
+        world.asks.push({ ...open, id: askId++, question: more.question, options: [], asked_at: at, finding: more.finding });
+        timeline.push({ ts: at, actor: open.asked_by, kind: "ask", summary: more.question });
       }
     }
     timeline.sort((a, b) => a.ts - b.ts);
@@ -1283,6 +1300,7 @@ function snapshot(): Board {
     // Only those without a worktree row, as in nitely-core: the others are flagged on their row.
     needs_me_issues: world.issues.filter((i) => (i.state === "Needs You" || isOwnWork(i)) && !repos.some((r) => r.rows.some((row) => row.issue_key === i.key))),
     asks: world.asks.filter((a) => a.answer === null),
+    notices: world.notices,
     sync: [
       { source: "github", last_attempt: NOW - 95, last_ok: NOW - 95, last_error: null },
       { source: "bitbucket", last_attempt: NOW - 95, last_ok: NOW - 95, last_error: null },
@@ -2379,6 +2397,9 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return setOwner(args);
       case "answer_ask":
         return answerAsk(args);
+      case "dismiss_notice":
+        world.notices = world.notices.filter((n) => n.id !== args.id);
+        return null;
       case "accept_finding":
         return answerAsk({ id: args.id, answer: `Accepted: ${String(args.reason)}` });
       case "decline_finding":
