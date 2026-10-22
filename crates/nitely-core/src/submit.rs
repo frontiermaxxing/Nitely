@@ -270,7 +270,8 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     crate::project_modes::check_gate_authority(db, &[&issue.key], &out.gate)?;
     pb.approval.check_blocked(&files)?;
     out.reasons = pb.human_reasons(&files)?;
-    if crate::project_yolo::enabled_for_issue(db, &issue.key)? {
+    // A blocking item review is never skipped, YOLO or not (NIT-597 review, round 2).
+    if !item_blocking && crate::project_yolo::enabled_for_issue(db, &issue.key)? {
         out.yolo = true;
     } else if !pb.review.enabled {
         out.review_disabled = true;
