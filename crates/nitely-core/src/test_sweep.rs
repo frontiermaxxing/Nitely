@@ -555,13 +555,24 @@ pub enum BudgetReads {
     Timed,
     /// It would with this flag.
     Add(String),
-    /// An npm script: if it runs node:test.
-    IfNode,
     Not,
 }
 
-pub fn budget_reads(command: &str) -> BudgetReads {
+/// `npm test` and `npm run <script>` are read through `package` (package.json) as the script
+/// they run.
+pub fn budget_reads(command: &str, package: Option<&serde_json::Value>) -> BudgetReads {
     let words: Vec<&str> = command.split_whitespace().collect();
+    let script = match words.as_slice() {
+        ["npm", "test" | "t", ..] => Some("test"),
+        ["npm", "run" | "run-script", name, ..] => Some(*name),
+        _ => None,
+    };
+    if let Some(name) = script {
+        return match package.and_then(|p| p["scripts"][name].as_str()) {
+            Some(body) if !body.split_whitespace().any(|w| w == "npm") => budget_reads(body, None),
+            _ => BudgetReads::Not,
+        };
+    }
     let has = |w: &str| words.contains(&w);
     if words.first() == Some(&"cargo") && words.get(1) == Some(&"test")
         || has("node") && has("--test")
@@ -572,7 +583,8 @@ pub fn budget_reads(command: &str) -> BudgetReads {
         return if words.iter().any(|w| w.starts_with("--durations")) {
             BudgetReads::Timed
         } else {
-            BudgetReads::Add("--durations=0 --durations-min=0".into())
+            // The parser reads pytest's verbose lines: -v, and no -q to cancel it.
+            BudgetReads::Add("-v --durations=0 --durations-min=0, without -q".into())
         };
     }
     if words.first() == Some(&"go") && words.get(1) == Some(&"test") {
@@ -581,9 +593,6 @@ pub fn budget_reads(command: &str) -> BudgetReads {
         } else {
             BudgetReads::Add("-v".into())
         };
-    }
-    if matches!(words.as_slice(), ["npm", "test" | "t" | "run", ..]) {
-        return BudgetReads::IfNode;
     }
     BudgetReads::Not
 }
@@ -603,6 +612,8 @@ pub struct OptimizeFacts<'a> {
     /// The project's gate record per test (`Db::catches_by_test`), which flags the tests whose
     /// failures were only ever their own.
     pub record: &'a [crate::test_catches::TestCatches],
+    /// The repo's package.json, to read `npm test` as the script it runs.
+    pub package: Option<&'a serde_json::Value>,
 }
 
 /// The goal a classified map proposes (NIT-556), and the `ci_commands` the playbook should list
@@ -829,8 +840,11 @@ pub fn optimize_plan(
     }
     // The budget works only where a gate's output carries per-test times: say which commands do,
     // what to add where a flag would, and leave the card out when none can.
-    let reads: Vec<(&String, BudgetReads)> =
-        facts.tests.iter().map(|t| (t, budget_reads(t))).collect();
+    let reads: Vec<(&String, BudgetReads)> = facts
+        .tests
+        .iter()
+        .map(|t| (t, budget_reads(t, facts.package)))
+        .collect();
     if reads.iter().any(|(_, r)| !matches!(r, BudgetReads::Not)) {
         let mut how = String::new();
         let mut touches = vec![".nitely/test-budget.toml".to_string()];
@@ -838,7 +852,6 @@ pub fn optimize_plan(
             how.push_str(&match r {
                 BudgetReads::Timed => format!("- `{t}`: gates read its per-test times.\n"),
                 BudgetReads::Add(flag) => format!("- `{t}`: add `{flag}` to it in the playbook's gate, or gates see no per-test times.\n"),
-                BudgetReads::IfNode => format!("- `{t}`: gates read its times if its script runs node:test; a jest or vitest script prints none.\n"),
                 BudgetReads::Not => format!("- `{t}`: prints no per-test times a gate reads (its runner writes them only to JUnit or TRX), so the budget cannot flag its tests.\n"),
             });
             if matches!(r, BudgetReads::Add(_))
@@ -1291,6 +1304,8 @@ pub fn ancestor_revision(dir: &Path, at: &str) -> Result<String> {
 /// runs, whether CI is reachable from here, and the playbook a CI-routing proposal changes.
 pub struct RepoFacts {
     pub project: String,
+    /// The repo's package.json, when it has one.
+    pub package: Option<serde_json::Value>,
     pub tests: Vec<String>,
     pub ci_commands: Vec<String>,
     pub has_ci: bool,
@@ -1337,6 +1352,9 @@ pub fn repo_facts(config: &crate::Config, root: &Path) -> Result<RepoFacts> {
         .is_ok_and(|w| w.contains("nitely_commands")),
         has_lanes: pb.lanes.is_some(),
         target: repo.map(|r| crate::proposals::Target::of(&r.name, root)),
+        package: std::fs::read(root.join("package.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok()),
         project,
     })
 }
@@ -1826,6 +1844,7 @@ mod tests {
             has_lanes: true,
             playbook: None,
             record: &[],
+            package: None,
         };
         // A deletion must name what covers the test.
         let err = report
@@ -1881,10 +1900,14 @@ mod tests {
             planned.plan.issues[1].body
         );
         assert_eq!(
-            budget_reads("pytest -q"),
-            BudgetReads::Add("--durations=0 --durations-min=0".into())
+            budget_reads("pytest -q", None),
+            BudgetReads::Add("-v --durations=0 --durations-min=0, without -q".into())
         );
-        assert_eq!(budget_reads("dotnet test"), BudgetReads::Not);
+        assert_eq!(budget_reads("dotnet test", None), BudgetReads::Not);
+        let jest = serde_json::json!({"scripts": {"test": "jest --ci"}});
+        let node = serde_json::json!({"scripts": {"test": "tsc && node --test dist"}});
+        assert_eq!(budget_reads("npm test", Some(&jest)), BudgetReads::Not);
+        assert_eq!(budget_reads("npm test", Some(&node)), BudgetReads::Timed);
         // A failing scenario gets a repair card even when nothing else is planned for it.
         let mut broken = report.clone();
         broken.observations = vec![obs("core::land::pushes", 4000.0)];

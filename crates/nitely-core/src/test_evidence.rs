@@ -848,12 +848,12 @@ pub fn report_command(
         let body = package
             .and_then(|p| p["scripts"][name].as_str())
             .ok_or_else(|| format!("`{command}`: package.json has no script `{name}`"))?;
+        let (env, flags) = report_flags(body, package)?;
         // Flags after `--` reach the script's last command only: in `vitest run && tsc` they
         // would reach tsc. Such a script needs its runner in a script of its own.
-        if ["&&", "||", ";", "|"].iter().any(|op| body.contains(op)) {
+        if !flags.is_empty() && ["&&", "||", ";", "|"].iter().any(|op| body.contains(op)) {
             return Err(format!("`{command}`: its script runs more than one command (`{body}`), so a report flag cannot reach its runner; give the runner a script of its own"));
         }
-        let (env, flags) = report_flags(body, package)?;
         if flags.is_empty() {
             return Ok(format!("{env}{command}"));
         }
@@ -1302,6 +1302,11 @@ mod tests {
         // A compound script's flags would reach its last command, not its runner.
         let compound = serde_json::json!({"scripts": {"test": "vitest run && tsc --noEmit"}});
         assert!(report_command("npm test", Some(&compound))
+            .unwrap_err()
+            .contains("more than one command"));
+        // A compound script whose runner needs no flag (node:test prints TAP) is not refused.
+        let node = serde_json::json!({"scripts": {"test": "tsc && node --test dist/tests"}});
+        assert!(!report_command("npm test", Some(&node))
             .unwrap_err()
             .contains("more than one command"));
         let bare_jest = serde_json::json!({"scripts": {"test": "jest"}});
