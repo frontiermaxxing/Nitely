@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nitely: one person, a team of coding agents</title>
+  <meta name="description" content="Nitely gives Claude Code, Codex and Cursor one backlog and one set of rules for branches, tests, reviews and merging, and gives you one place to see the work. Only the decisions that are yours reach you.">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#141413">
+  <meta property="og:title" content="Nitely: one person, a team of coding agents">
+  <meta property="og:description" content="One backlog, one set of rules and one inbox for Claude Code, Codex and Cursor. Free and open source.">
+  <meta property="og:image" content="https://nitely.net/assets/overview-dark.webp">
+  <meta property="og:url" content="https://nitely.net/">
+  <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
+  <link rel="preload" href="assets/geist.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="styles.css?v=2">
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="/" aria-label="Nitely home">
+      <svg class="mark" width="26" height="12" viewBox="0 0 22 10" aria-hidden="true"><path d="M3 5H19" stroke="var(--fg-3)" stroke-width="1.5" stroke-linecap="round"/><circle cx="3.5" cy="5" r="2.5" fill="var(--fg-3)"/><circle cx="11" cy="5" r="3.5" fill="var(--fg)"/><circle cx="18.5" cy="5" r="2.5" fill="var(--bg)" stroke="var(--fg-3)" stroke-width="1.5"/></svg>
+      Nitely
+    </a>
+    <nav class="top-links">
+      <a href="#night">How it works</a>
+      <a href="#inbox">Inbox</a>
+      <a href="/leaderboard/">Leaderboard</a>
+      <a href="https://github.com/frontiermaxxing/Nitely">GitHub</a>
+      <a class="btn btn-small" href="https://github.com/frontiermaxxing/Nitely/releases">Download</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero">
+      <p class="eyebrow">For Claude Code, Codex and Cursor</p>
+      <h1>One person.<br>A team of coding agents.</h1>
+      <p class="lede">Nitely gives your agents one backlog to take work from and one set of rules for branches, tests, reviews and merging. It shows you what each one is doing right now, and only the decisions that are yours reach you.</p>
+      <div class="actions">
+        <a class="btn" href="https://github.com/frontiermaxxing/Nitely/releases">Download for Windows</a>
+        <a class="btn btn-quiet" href="https://github.com/frontiermaxxing/Nitely">View on GitHub</a>
+      </div>
+      <p class="fine">Free and open source. Windows today, macOS next.</p>
+
+      <ol class="track" aria-label="The life of an issue in Nitely">
+        <li>Todo</li>
+        <li class="agent">Started</li>
+        <li class="agent">Working</li>
+        <li class="agent">Gate</li>
+        <li class="agent">Review</li>
+        <li class="you">Needs you</li>
+        <li class="agent">Landing</li>
+        <li>Done</li>
+      </ol>
+    </section>
+
+    <figure class="shot shot-hero">
+      <picture>
+        <source srcset="assets/overview-light.webp" media="(prefers-color-scheme: light)">
+        <img src="assets/overview-dark.webp" width="2880" height="1330" alt="Nitely's Overview: 18 decisions need you, 6 agents moving, 7 stuck, and every agent with a session open, each with its issue and where it is on the track.">
+      </picture>
+    </figure>
+
+    <section class="night" id="night">
+      <h2>How a night goes</h2>
+      <p class="section-lede">You set the goal and the rules. The agents do the rest, the same way every time, whichever vendor they come from.</p>
+      <ol class="timeline">
+        <li>
+          <time>23:40</time>
+          <div>
+            <h3>You approve a goal</h3>
+            <p>An agent drafts the plan as issues in order. You approve it once. Each issue carries its evidence and the files it will touch, so agents working in parallel stay apart.</p>
+          </div>
+        </li>
+        <li>
+          <time>23:42</time>
+          <div>
+            <h3>Agents take the work</h3>
+            <p>Each claims the most urgent issue, so two never start the same one, and works in its own light worktree. Builds run in a few shared warm lanes sized to your machine. Full test suites go to CI.</p>
+          </div>
+        </li>
+        <li>
+          <time>01:15</time>
+          <div>
+            <h3>They review each other</h3>
+            <p>Codex reviews Claude's change, Claude reviews Codex's. Serious findings send the work back to its agent, which keeps fixing without waiting on you.</p>
+          </div>
+        </li>
+        <li>
+          <time>02:30</time>
+          <div>
+            <h3>One merge at a time</h3>
+            <p>Landing is the only thing that writes your main branch. It rebases, checks the review covers exactly this change, runs the gate once for a batch, and pushes. A bad change is found by bisecting and sent back.</p>
+          </div>
+        </li>
+        <li class="morning">
+          <time>07:00</time>
+          <div>
+            <h3>You wake to decisions, not noise</h3>
+            <p>A report of what landed per goal, what is at risk, and every place you were needed. The Inbox holds the three questions and two approvals that are actually yours.</p>
+          </div>
+        </li>
+      </ol>
+    </section>
+
+    <section class="split" id="inbox">
+      <div class="split-text">
+        <h2>Only real decisions reach you</h2>
+        <p>Questions an agent can't answer, changes that touch paths you care about, findings that are a trade-off rather than a bug. Each one comes with what you need to decide it, and keyboard keys to decide fast.</p>
+        <p>Approving and answering happen only in the app. No command or tool an agent can run does either.</p>
+      </div>
+      <figure class="shot">
+        <picture>
+          <source srcset="assets/inbox-light.webp" media="(prefers-color-scheme: light)">
+          <img src="assets/inbox-dark.webp" width="2880" height="1330" loading="lazy" alt="Nitely's Inbox: questions, approvals and conflicts, with two review findings open to accept or send back.">
+        </picture>
+      </figure>
+    </section>
+
+    <section class="points">
+      <div>
+        <h3>One backlog</h3>
+        <p>Projects with their own issue keys, kinds, priorities, evidence and a full timeline. Agents file what they find, with a duplicate check.</p>
+      </div>
+      <div>
+        <h3>A playbook per repo</h3>
+        <p>Branches, worktrees, the gate, who reviews whom and what waits for you, in one file, run the same way for every agent.</p>
+      </div>
+      <div>
+        <h3>Presets you can read</h3>
+        <p>Fast, Careful or Release. A strip shows exactly what happens to a change before it lands and where each rule comes from.</p>
+      </div>
+      <div>
+        <h3>Fits your machine</h3>
+        <p>Light worktrees, shared build lanes and heavy suites in CI, paced to what your PC can actually do. No special drives or admin rights.</p>
+      </div>
+      <div>
+        <h3>A live view</h3>
+        <p>Overview, Now and Activity show which agent works on what, what it last did and what is stuck, across every project.</p>
+      </div>
+      <div>
+        <h3>Local and private</h3>
+        <p>It runs on your machine. Hooks report tool calls, commands and paths, never your prompts or file contents.</p>
+      </div>
+    </section>
+
+    <section class="vendors" aria-label="Works with">
+      <p>Connects in one step to</p>
+      <ul>
+        <li><span class="tile claude">Cl</span>Claude Code</li>
+        <li><span class="tile codex">Cx</span>Codex</li>
+        <li><span class="tile cursor">Cu</span>Cursor</li>
+      </ul>
+    </section>
+
+    <section class="board-teaser">
+      <div>
+        <h2>How agent teams ship</h2>
+        <p>An opt-in board of landed changes, first-pass reviews, lead time and agent hours. It holds weekly counts and rates only: no code, paths, repos or prompts ever leave your machine.</p>
+      </div>
+      <a class="btn btn-quiet" href="/leaderboard/">See the leaderboard</a>
+    </section>
+
+    <section class="closing">
+      <h2>Built with itself</h2>
+      <p>Nitely's own repo runs on Nitely: its issues, reviews and every merge go through the backlog, playbook and landing described here. The code is open under Apache-2.0.</p>
+      <div class="actions">
+        <a class="btn" href="https://github.com/frontiermaxxing/Nitely/releases">Download for Windows</a>
+        <a class="btn btn-quiet" href="https://github.com/frontiermaxxing/Nitely">Read the code</a>
+      </div>
+      <p class="fine">The installer isn't code-signed yet, so Windows asks once before it runs. The README shows how to verify a download.</p>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <span class="brand small"><svg class="mark" width="26" height="12" viewBox="0 0 22 10" aria-hidden="true"><path d="M3 5H19" stroke="var(--fg-3)" stroke-width="1.5" stroke-linecap="round"/><circle cx="3.5" cy="5" r="2.5" fill="var(--fg-3)"/><circle cx="11" cy="5" r="3.5" fill="var(--fg)"/><circle cx="18.5" cy="5" r="2.5" fill="var(--bg)" stroke="var(--fg-3)" stroke-width="1.5"/></svg>Nitely</span>
+    <nav>
+      <a href="https://github.com/frontiermaxxing/Nitely">GitHub</a>
+      <a href="https://github.com/frontiermaxxing/Nitely/releases">Releases</a>
+      <a href="/leaderboard/">Leaderboard</a>
+      <a href="https://github.com/frontiermaxxing/Nitely/blob/main/LICENSE">Apache-2.0</a>
+    </nav>
+  </footer>
+</body>
+</html>
