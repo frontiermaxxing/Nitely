@@ -523,7 +523,11 @@ pub fn save_reviewer(config: &crate::Config, db: &crate::Db, repo_name: &str, ed
         std::fs::write(&target.path, &current.after)?;
         format!("Saved to {}. New review launches use these settings; running reviewers finish.", target.path.display())
     };
-    db.log_event(&crate::Actor::Human, None, Some(&repo.root), "reviewer_settings_changed", &format!("Review settings for {}: {done}", repo.name))?;
+    // With its repo's project, so the updates feed tells only that project's readers (NIT-566).
+    db.conn.execute(
+        "INSERT INTO event (ts, actor, cwd, issue_key, type, summary, payload) VALUES (?1, ?2, ?3, NULL, 'reviewer_settings_changed', ?4, ?5)",
+        rusqlite::params![crate::db::now(), crate::Actor::Human.id(), repo.root, format!("Review settings for {}: {done}", repo.name), serde_json::json!({ "project": repo.project }).to_string()],
+    )?;
     Ok(ReviewerSaved { view: view(config, repo)?, done })
 }
 

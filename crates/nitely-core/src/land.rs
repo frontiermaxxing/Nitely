@@ -111,7 +111,8 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
     // A job's own land runs with its row `landing`, so it is not one of them.
     crate::land_job::end_waiting(db, &issue.key, "landed directly instead")?;
     // An item of a goal with a goal branch lands into that branch, with item checks (goal_branch.rs).
-    if let Some(gb) = db.goal_branch_of_issue(&issue.key)?.filter(|g| g.repo == crate::paths::normalize(&root.to_string_lossy())) {
+    let branch = branch_of(&root, &issue.key).ok().map(|(b, _)| b);
+    if let Some(gb) = crate::goal_branch::route_of_issue(db, &root, &issue.key, branch.as_deref())? {
         return land_into_goal(db, &root, &issue, opts, actor, gb);
     }
     // With `[land] batch`, a change that may land with others waits in the queue (land_queue.rs).
@@ -1084,7 +1085,7 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
     crate::submodules::follow(pb, &worktree, &moving)?;
     let head = rev(root, &branch)?;
     report.approval = Some(match goal {
-        Some(gb) => check_item(pb, &worktree, &base, gb)?,
+        Some(gb) => check_item(db, key, pb, &worktree, &base, gb)?,
         None => check_approval(db, pb, key, &worktree, &base, &branch)?,
     });
     let project = db.issue(key)?.and_then(|i| i.project);
@@ -1202,7 +1203,7 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
 /// pushed, and the item's worktree cleaned up as a land on main cleans up.
 #[allow(clippy::too_many_arguments)]
 fn land_item(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor: &Actor, gb: &crate::goal_branch::GoalBranch, worktree: &Path, branch: &str, temporary: bool, before: &str, head: &str, report: &mut Landed) -> Result<()> {
-    report.approval = Some(check_item(&Playbook::load(root)?, worktree, &report.base, gb)?);
+    report.approval = Some(check_item(db, key, &Playbook::load(root)?, worktree, &report.base, gb)?);
     report.commits = git(root, &["log", "--oneline", &format!("{before}..{head}")])?.lines().map(str::to_string).collect();
     let warning = crate::goal_branch::advance(root, gb, before, head)?;
     report.landed = true;
@@ -1263,9 +1264,20 @@ fn already_landed(done: bool, ahead: Option<bool>, event: Option<&str>) -> Optio
 
 /// An item's land into its goal branch: no review and no human approval (both come at the
 /// checkpoint into main), but a blocked path is still refused.
-fn check_item(pb: &Playbook, worktree: &Path, base: &str, gb: &crate::goal_branch::GoalBranch) -> Result<String> {
+fn check_item(db: &Db, key: &str, pb: &Playbook, worktree: &Path, base: &str, gb: &crate::goal_branch::GoalBranch) -> Result<String> {
     let files: Vec<String> = git(worktree, &["diff", "--name-only", "--no-renames", &format!("{base}...HEAD")])?.lines().map(str::to_string).collect();
     pb.approval.check_blocked(&files)?;
+    // A blocking item review holds a direct land as it holds a submit (NIT-563).
+    let mode = crate::submit::item_review_of(db, key)?;
+    if mode == crate::project_modes::ItemReview::Blocking {
+        let patch = crate::submit::patch_id_range(worktree, base, "HEAD")?;
+        let latest = db.reviews(key)?.into_iter().find(|r| !r.reviewer.is_empty());
+        let seen = match latest {
+            Some(r) => Some((r.patch_id == patch, db.review_passes(key, &r)?)),
+            None => None,
+        };
+        crate::submit_rules::item_land_check(mode, seen).map_err(|why| anyhow::anyhow!("{key}: {why}"))?;
+    }
     Ok(format!("an item of goal {}: it is reviewed, and approved where a person must, with the goal's checkpoint into {}", gb.goal, pb.integration_branch()))
 }
 

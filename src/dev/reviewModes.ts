@@ -75,12 +75,11 @@ export function landsPipeline(project: string, repos: string[]): Pipeline[] {
   const item = { off: "Items land on quick checks, unreviewed", advisory: "Each item is reviewed without blocking", blocking: "Each item gets a blocking review" }[chosen.item_review ?? "off"];
   const cp = chosen.checkpoint;
   const plans = { approve: "Each plan waits for your approval", asked: "Plans you asked for start by themselves", all: "Every plan starts by itself" }[chosen.goal_plans ?? "approve"];
-  // As goal_branch::goal_items_route: a goal branch lands items unreviewed, so a mode that reviews
-  // each item keeps them on main.
-  const throughBranch = chosen.goal_branches && (chosen.item_review ?? "off") === "off";
+  // As goal_branch::goal_items_route: an item gets its item review on the way into the goal branch.
+  const throughBranch = chosen.goal_branches;
   const goals: PipelineFact = throughBranch
     ? { value: "Through a goal branch", why: `${item}; main gets the goal at each checkpoint (a coherent slice${cp ? `, ${cp.items} items${cp.daily ? " or a day" : ""}` : ""}): one full run, one review. ${plans}`, tone: "agent", source: src(chosen.goal_branches !== null || chosen.goal_plans !== null, false) }
-    : { value: "Straight to main", why: `${chosen.goal_branches ? "The mode reviews each goal item, and a goal branch lands items unreviewed, so they land on main" : "Each goal item lands on main like any other change"}. ${plans}`, tone: "agent", source: src(chosen.goal_branches !== null || chosen.goal_plans !== null, false) };
+    : { value: "Straight to main", why: `Each goal item lands on main like any other change. ${plans}`, tone: "agent", source: src(chosen.goal_branches !== null || chosen.goal_plans !== null, false) };
   const lands: PipelineFact = chosen.land_batch ?? false
     ? { value: "Batches of up to 5", why: "What waits lands on one full run, bisected if it fails", tone: "agent", source: src(chosen.land_batch !== null, true) }
     : { value: "Each change alone", why: "One gate and one push per change", tone: "agent", source: src(true, true) };
