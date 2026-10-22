@@ -1359,7 +1359,7 @@ mod tests {
 
         // A component that depends on it runs its tests, so they still decide: the full gate, as
         // before, never its own check alone.
-        const DEPENDENT: &str = "version = 1\n[[components]]\nid = 'web'\nroots = ['src/']\nchecks = ['npm run build']\n[[components.suites]]\nid = 'unit'\ninputs = ['src/lib/']\n[components.suites.javascript]\ncommand = 'npm test'\ntest_files = ['src/lib/a.test.ts']\n[[components]]\nid = 'app'\nroots = ['app/']\ndepends_on = ['web']\nchecks = []\n[[components.suites]]\nid = 'app'\ninputs = ['app/']\n[components.suites.javascript]\ncommand = 'npm test'\ntest_files = ['app/b.test.ts']\n";
+        const DEPENDENT: &str = "version = 1\n[[components]]\nid = 'web'\nroots = ['src/']\nchecks = ['npm run build']\n[[components.suites]]\nid = 'unit'\ninputs = ['src/lib/']\n[components.suites.javascript]\ncommand = 'npm test'\ntest_files = ['src/lib/a.test.ts']\n[[components]]\nid = 'app'\nroots = ['app/']\ndepends_on = ['web']\nchecks = ['npm run build']\n[[components.suites]]\nid = 'app'\ninputs = ['app/']\n[components.suites.javascript]\ncommand = 'npm test'\ntest_files = ['app/b.test.ts']\n";
         let repo = crate::test_repo::copy("affected-small-dependent", |dir| {
             init(dir, &[(POLICY_PATH, DEPENDENT), ("src/lib/a.ts", "export const a = 1;"), ("src/lib/a.test.ts", "import {a} from './a';"), ("app/b.test.ts", "export const b = 1;"), ("src/tools/gen.py", "print(1)\n")]);
         });
@@ -1368,6 +1368,7 @@ mod tests {
         g(&repo, &["commit", "-qam", "tools"]);
         let s = select_small(&repo, &base, "HEAD", &base, &BTreeMap::new(), &[]).unwrap();
         assert!(s.full && s.checks.is_empty(), "{s:?}");
+        assert!(s.reasons.join(" ").contains("no affected tests in component web"), "the map was read and decided: {:?}", s.reasons);
     }
 
     #[test]
