@@ -108,3 +108,9 @@ test('a report on an earlier commit reads that commit\'s tests, not the checkout
     assert.deepEqual(inventory(root).tests.map(t => t.name), ['totals']);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+test('a test written inside a string is a fixture, not a test', () => {
+  const js = "test('real', () => { const fixture = \"test('fake', () => { waitFor(x); })\"; expect(run(fixture)).toBe(1); });";
+  assert.deepEqual(bodies(js, '.js').map(t => t.name), ['real']);
+  const py = 'def test_real():\n    src = """\ndef test_fake():\n    time.sleep(1)\n"""\n    assert run(src)\n';
+  assert.deepEqual(bodies(py, '.py').map(t => t.name), ['test_real']);
+});

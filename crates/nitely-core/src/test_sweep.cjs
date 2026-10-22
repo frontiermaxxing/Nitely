@@ -64,7 +64,7 @@ function hints(body) {
 // Where named test bodies start, by language: a pattern whose last character opens the body, and the group holding the name.
 const STARTS = [
   [/\.rs$/, /#\[(?:test|tokio::test[^\]]*)\][\s\S]{0,180}?\bfn\s+(\w+)\s*\([^)]*\)[^{]*\{/g, 1],
-  [/\.[cm]?[jt]sx?$/, /\b(?:test|it)\s*\(\s*(['"`])([^\n]*?)\1[\s\S]{0,120}?=>\s*\{/g, 2],
+  [/\.[cm]?[jt]sx?$/, /\b(?:test|it)\s*\(\s*(['"`])((?:\\.|(?!\1)[^\\\n])*)\1[\s\S]{0,120}?=>\s*\{/g, 2],
   [/\.go$/, /\bfunc\s+(Test\w*)\s*\([^)]*\)\s*\{/g, 1],
   [/\.(?:java|kt)$/, /@(?:Test|ParameterizedTest)\b[\s\S]{0,240}?\b(?:void|fun)\s+(\w+)\s*\([^)]*\)[^{]*\{/g, 1],
   [/\.cs$/, /\[(?:Fact|Theory|Test|TestMethod)\b[^\]]*\][\s\S]{0,240}?\b(?:void|Task)\s+(\w+)\s*\([^)]*\)[^{]*\{/g, 1],
@@ -77,20 +77,27 @@ function bodies(text, ext) {
   const masked = text.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`/g, x => x.replace(/[^\n]/g, ' '));
   const out = []; let m;
   while ((m = pattern.exec(text))) {
+    // A match that starts inside a string or comment is a fixture's text, not a test (NIT-594).
+    if (masked[m.index] !== text[m.index]) continue;
     const open = pattern.lastIndex - 1; let depth = 1, end = open + 1;
     for (; end < masked.length && depth; end++) { if (masked[end] === '{') depth++; else if (masked[end] === '}') depth--; }
     if (depth) continue;
     const body = text.slice(open + 1, end - 1);
     if (body.length > 50000) continue;
-    out.push(record(m[group], text.slice(0, m.index).split('\n').length, body));
+    // Hints skip long string literals, a fixture's source text (its waits are not the test's), and
+    // keep short ones such as the "git" a test runs.
+    const code = body.replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`/g, x => x.length > 32 ? x.replace(/[^\n]/g, ' ') : x);
+    out.push(record(m[group].replace(/\\(.)/g, '$1'), text.slice(0, m.index).split('\n').length, body, code));
   }
   return out;
 }
 // pytest's `def test_...` (top level or in a class), its body the lines indented under it.
 function pythonBodies(text) {
   const lines = text.split('\n'); const out = [];
+  // A `def test_` inside a triple-quoted string is a fixture's text, not a test (NIT-594).
+  const quoted = text.replace(/"""[\s\S]*?"""|'''[\s\S]*?'''/g, x => x.replace(/[^\n]/g, ' ')).split('\n');
   lines.forEach((line, i) => {
-    const m = line.match(/^(\s*)(?:async\s+)?def\s+(test\w*)\s*\(/); if (!m) return;
+    const m = line.match(/^(\s*)(?:async\s+)?def\s+(test\w*)\s*\(/); if (!m || !quoted[i].trim()) return;
     let end = i + 1;
     while (end < lines.length && (!lines[end].trim() || lines[end].match(/^\s*/)[0].length > m[1].length)) end++;
     const body = lines.slice(i + 1, end).join('\n');
@@ -98,9 +105,9 @@ function pythonBodies(text) {
   });
   return out;
 }
-function record(name, line, body) {
+function record(name, line, body, code = body) {
   const normalized = body.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*|#[^\n]*/g, '').replace(/\s+/g, ' ').trim();
-  return { name, line, hash: hash(body), signature: normalized.length >= 100 ? hash(normalized) : undefined, mocks: (body.match(/\b(?:mock|spyOn|mockImplementation|mockReturnValue|expect_call|withf|Mock|patch)\s*[.(]/g) || []).length, hints: hints(body) };
+  return { name, line, hash: hash(body), signature: normalized.length >= 100 ? hash(normalized) : undefined, mocks: (body.match(/\b(?:mock|spyOn|mockImplementation|mockReturnValue|expect_call|withf|Mock|patch)\s*[.(]/g) || []).length, hints: hints(code) };
 }
 // Test files by name, in the languages `bodies` reads.
 const TEST_FILE = /(?:\.rs|(?:test|spec)\.[cm]?[jt]sx?|_test\.go|(?:^|\/)test_\w+\.py|_test\.py|Tests?\.(?:java|kt|cs))$/;
