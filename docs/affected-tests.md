@@ -120,6 +120,29 @@ future filtered runner must discover actual test IDs and prove they executed bef
 can become reduced execution evidence. A passing command alone does not prove nonzero
 JavaScript tests ran.
 
+## Small changes to files no test reaches
+
+A file no component owns, or a build script's input, normally sends the change to Full. Under
+Fast and Careful, a small change (`quick_limits`: at most 30 changed lines in at most 2 files,
+off protected paths) checks each such file with its own check instead. Nitely tries these in
+order and uses the first that applies:
+
+1. The playbook's `[checks.files]` command for it. Each key is a glob, and `{path}` is filled in:
+
+   ```toml
+   [checks.files]
+   "scripts/*.ps1" = "pwsh -NoProfile -File scripts/lint.ps1 {path}"
+   ```
+
+2. A built-in check by kind. `nitely check-file` parses JSON and TOML. It asks PowerShell,
+   `bash -n`, `python -m py_compile` or `node --check` to check a script's syntax without
+   running it. TypeScript runs the playbook's `basic` type check.
+3. The `checks` of the component whose build reads the file.
+
+A file with none of these, a protected file, or a change over the limits keeps Full. Files the
+map does reach keep their mapped tests. The full suite still runs after landing, through the
+backstop on main.
+
 ## Cross-component impact and evidence
 
 Use `depends_on = ["arithmetic"]` on a consumer component to record approved edges not

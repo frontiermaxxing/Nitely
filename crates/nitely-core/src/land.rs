@@ -67,6 +67,10 @@ pub struct Landed {
     /// The new head in full, for the goal branch's record of its items.
     #[serde(skip)]
     pub(crate) landed_to: Option<String>,
+    /// In a stacked batch, this change's own tip: `landed_from..own_tip` is what it landed, where
+    /// `head` is the whole batch's (NIT-636 review).
+    #[serde(skip)]
+    pub(crate) own_tip: Option<String>,
 }
 
 pub struct LandOptions<'a> {
@@ -372,6 +376,10 @@ pub(crate) fn record_landed(db: &mut Db, root: &Path, issue: &IssueRecord, repor
     if let Err(e)=crate::periodic_review::on_landed(db,root,issue,report) {
         report.warnings.push(format!("periodic review record needs recovery: {e:#}"));
         db.log_event(actor,Some(&issue.key),None,"periodic_review_record_failed",&format!("{e:#}"))?;
+    }
+    // A quick change waits for its review after landing (NIT-625).
+    if let Err(e)=crate::quick_review::on_landed(db,root,issue,report) {
+        report.warnings.push(format!("the quick change's review after landing was not recorded: {e:#}"));
     }
     Ok(())
 }
@@ -1364,7 +1372,7 @@ pub(crate) fn check_approval_at(db: &Db, pb: &Playbook, key: &str, worktree: &Pa
     let files: Vec<String> = git(worktree, &["diff", "--name-only", "--no-renames", &format!("{base}...{head}")])?.lines().map(str::to_string).collect();
     pb.approval.check_blocked(&files)?;
     let mut reasons = pb.human_reasons(&files)?;
-    if matches!(review.verdict.as_str(), "disabled" | "yolo") {
+    if matches!(review.verdict.as_str(), "disabled" | "yolo" | crate::quick::VERDICT) {
         let unanswered = pb.review.unevaluated_reasons();
         reasons.extend(unanswered);
     }
@@ -1399,6 +1407,10 @@ pub(crate) fn check_yolo_policy(db: &Db, key: &str, review: &crate::submit::Revi
         crate::project_modes::check_gate_authority(db, &[key], gate)?;
     } else if crate::project_modes::authority_for_issue(db, key)?.is_some() {
         bail!("the submission has no project-mode evidence; submit again under the current settings");
+    }
+    // A quick change lands unreviewed only while the mode still has the quick path (NIT-624).
+    if review.verdict == crate::quick::VERDICT && crate::quick::limits_for_issue(db, key)?.is_none() {
+        bail!("the quick path is off under the project's review mode now; submit this change for review before landing");
     }
     if review.verdict == "yolo" && !crate::project_yolo::enabled_for_issue(db, key)? {
         bail!("YOLO mode is disabled; submit this unchecked revision for the normal gate and PR review before landing");
