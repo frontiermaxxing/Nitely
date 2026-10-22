@@ -93,6 +93,14 @@ pub fn after_answer(accepted: bool, state: &str, blocking_left: usize, needs_app
     }
 }
 
+/// Where submit moves the issue at its end, from where it is now (`now_in`): nowhere when it is
+/// there already, or when the person accepted every blocking finding while the submit ran
+/// (`decided_meanwhile`): that acceptance moved it from the review as it now stands, and submit's
+/// own verdict, read before it, must not undo it (NIT-575).
+pub fn final_move<'a>(computed: &'a str, now_in: &str, decided_meanwhile: bool) -> Option<&'a str> {
+    (!decided_meanwhile && computed != now_in).then_some(computed)
+}
+
 /// The P0 and P1 findings the person has not accepted as they are, as `[P1] text`: what still
 /// blocks the change, whichever review says it.
 pub fn blocking(findings: &[Finding], accepted: &[String]) -> Vec<String> {
@@ -202,6 +210,14 @@ mod tests {
         assert_eq!(after_answer(true, "In Progress", 0, true), "Needs You", "it waits for the person's approval");
         assert_eq!(after_answer(true, "In Progress", 0, false), "In Review");
         assert!(stalled_notice("APP-7", "6 review rounds in a row asked for changes").contains("Nothing waits on you"));
+    }
+
+    /// NIT-575: an acceptance made while the submit ran stands.
+    #[test]
+    fn submit_never_undoes_an_acceptance_made_while_it_ran() {
+        assert_eq!(final_move("In Progress", "In Review", true), None, "accepted meanwhile: it stays where the acceptance put it");
+        assert_eq!(final_move("In Progress", "In Review", false), Some("In Progress"));
+        assert_eq!(final_move("In Review", "In Review", false), None, "already there");
     }
 
     fn finding(priority: u8, text: &str) -> Finding {

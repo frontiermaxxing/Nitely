@@ -499,11 +499,20 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         }
     }
     let now_in = db.issue(&issue.key)?.map(|i| i.state).unwrap_or_else(|| issue.state.clone());
+    // The person may have accepted its blocking findings while it was pushed (NIT-575): that
+    // acceptance moved the issue itself, from the review as it now stands.
+    let decided_meanwhile = verdict == "changes"
+        && match db.reviews(&issue.key)?.into_iter().find(|r| !r.reviewer.is_empty()) {
+            Some(r) => db.review_passes(&issue.key, &r)?,
+            None => false,
+        };
     out.state = now_in.clone();
-    if now_in != state && issue.origin == "nitely" {
-        out.state = db.move_issue(&issue.key, state, None, None, actor)?.state;
-    }
     out.next = next.into();
+    match crate::submit_rules::final_move(state, &now_in, decided_meanwhile) {
+        Some(to) if issue.origin == "nitely" => out.state = db.move_issue(&issue.key, to, None, None, actor)?.state,
+        _ if decided_meanwhile => out.next = format!("The person accepted the review's blocking findings while this submit ran, so it goes on as their acceptance moved it ({now_in})."),
+        _ => {}
+    }
 
     // In a project that lands by Nitely, what is ready to land lands now, in this submit. An
     // approved change waits for the app where only the app can check approvals (macOS).
