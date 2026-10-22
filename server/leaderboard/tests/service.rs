@@ -200,3 +200,25 @@ fn no_address_is_kept() {
     }
     std::fs::remove_dir_all(dir).ok();
 }
+
+/// NIT-629: sends go daily and each replaces the week's entry, until Sunday evening's closes the
+/// week: a later send that week changes nothing. Every row says when it came and whether it closed.
+#[test]
+fn a_weeks_closing_report_is_its_last_word() {
+    let dir = nitely_core::paths::unique_temp("nitely-lb-close", "");
+    let store = store(&dir);
+    let parse = |r: &leaderboard_report::Report| serde_json::from_value::<nitely_leaderboard::Report>(serde_json::to_value(r).unwrap()).unwrap();
+    let mut closing = report("Closer");
+    closing.closes_week = true;
+    store.put("k1", &parse(&closing), now()).unwrap();
+    store.put("k1", &parse(&report("Too late")), now() + 60).unwrap();
+    store.put("k2", &parse(&report("Open")), now()).unwrap();
+    store.put("k2", &parse(&report("Open again")), now() + 60).unwrap();
+    let board: serde_json::Value = serde_json::from_str(&store.board("week").unwrap().unwrap()).unwrap();
+    let row = |id: &str| board["entries"].as_array().unwrap().iter().find(|e| e["id"] == id).unwrap().clone();
+    assert_eq!((row("k1")["display_name"].as_str(), row("k1")["closed"].as_bool()), (Some("Closer"), Some(true)), "the closed week kept its report");
+    assert_eq!((row("k2")["display_name"].as_str(), row("k2")["closed"].as_bool()), (Some("Open again"), Some(false)), "an open week takes the newest");
+    assert!(row("k2")["updated_at"].as_i64().unwrap() >= row("k1")["updated_at"].as_i64().unwrap());
+    drop(store);
+    std::fs::remove_dir_all(dir).ok();
+}

@@ -63,6 +63,10 @@ pub struct Report {
     pub periods: Vec<Period>,
     pub weekly: Vec<u64>,
     pub records: Records,
+    /// Sent on Sunday evening: the week's final report, which the board keeps as the week's
+    /// (NIT-629). Left out when false, so a report that does not close its week reads as before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub closes_week: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -260,11 +264,13 @@ impl Store {
         Ok(key.clone())
     }
 
-    /// Keeps `report` as `key`'s for its week, replacing one sent earlier that week.
+    /// Keeps `report` as `key`'s for its week, replacing one sent earlier that week, unless that
+    /// one closed the week (NIT-629: Sunday evening's send is the week's last word).
     pub fn put(&self, key: &str, report: &Report, now: i64) -> Result<()> {
         self.conn().execute(
             "INSERT INTO entry (key, week, report, received_at) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT (key, week) DO UPDATE SET report = ?3, received_at = ?4",
+             ON CONFLICT (key, week) DO UPDATE SET report = ?3, received_at = ?4
+             WHERE COALESCE(json_extract(entry.report, '$.closes_week'), 0) = 0",
             params![key, report.week, serde_json::to_string(report)?, now],
         )?;
         self.rebuild(now)
@@ -308,7 +314,7 @@ impl Store {
                 "30d" => latest.values().copied().filter(|r| r.1 >= month_ago).collect(),
                 _ => latest.values().copied().collect(),
             };
-            let mut entries: Vec<Value> = chosen.iter().filter_map(|(key, _, r, _)| entry(key, r, period)).collect();
+            let mut entries: Vec<Value> = chosen.iter().filter_map(|(key, _, r, at)| entry(key, r, period, *at)).collect();
             entries.sort_by(|a, b| {
                 let landed = |v: &Value| v["landed"].as_u64().unwrap_or(0);
                 landed(b).cmp(&landed(a)).then_with(|| a["display_name"].as_str().cmp(&b["display_name"].as_str()))
@@ -326,8 +332,9 @@ impl Store {
     }
 }
 
-/// One row of a board: who (the key, the name and links they chose) and the period's numbers.
-fn entry(key: &str, r: &Report, period: &str) -> Option<Value> {
+/// One row of a board: who (the key, the name and links they chose), the period's numbers, when
+/// the report came, and whether it closed its week.
+fn entry(key: &str, r: &Report, period: &str, received_at: i64) -> Option<Value> {
     let p = r.periods.iter().find(|p| p.period == period)?;
     let mut v = serde_json::to_value(p).ok()?;
     let o = v.as_object_mut()?;
@@ -342,6 +349,8 @@ fn entry(key: &str, r: &Report, period: &str) -> Option<Value> {
     o.insert("week".into(), json!(r.week));
     o.insert("weekly".into(), json!(r.weekly));
     o.insert("records".into(), serde_json::to_value(&r.records).ok()?);
+    o.insert("updated_at".into(), json!(received_at));
+    o.insert("closed".into(), json!(r.closes_week));
     Some(v)
 }
 

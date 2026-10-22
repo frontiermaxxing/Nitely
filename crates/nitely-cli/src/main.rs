@@ -538,7 +538,8 @@ enum LeaderboardCmd {
         #[arg(long)]
         url: Option<String>,
     },
-    /// Send this week's report now (after that, the app sends it once a week).
+    /// Send this week's report now (after that, the app sends it once a day; Sunday evening's
+    /// closes the week).
     Send,
     /// Whether you share, your id, the service's address and the last send.
     Status,

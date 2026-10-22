@@ -105,7 +105,7 @@ export function OptIn(props: { projects: Project[] }) {
           <section className="lb-list">
             <h2>
               <span className="lb-list-dot lb-list-shared" aria-hidden="true" />
-              Shared, once a week
+              Shared, once a day
             </h2>
             <ul>
               {SHARED.map((s) => (
@@ -190,7 +190,7 @@ export function OptIn(props: { projects: Project[] }) {
             <Checkbox
               checked={consent}
               onChange={setConsent}
-              label="Once I turn sending on, send this report to the leaderboard once a week. I can pause it or leave at any time."
+              label="Once I turn sending on, send this report to the leaderboard once a day. I can pause it or leave at any time."
             />
           </div>
           <div className="lb-join">

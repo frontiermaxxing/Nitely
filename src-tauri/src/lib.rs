@@ -18,7 +18,7 @@ const LAND_APPROVED_EVERY: Duration = Duration::from_secs(15);
 const WATCH_EVERY: Duration = Duration::from_millis(500);
 /// How often the app checks that every project with a crew has a supervisor running.
 const KEEP_CREWS_EVERY: Duration = Duration::from_secs(20);
-/// How often the app checks whether the Leaderboard's weekly send is due.
+/// How often the app checks whether the Leaderboard's daily send is due.
 const LEADERBOARD_EVERY: Duration = Duration::from_secs(3600);
 /// A supervisor the app started gets this long to show its heartbeat before it is started again.
 const CREW_START_GRACE: Duration = Duration::from_secs(90);

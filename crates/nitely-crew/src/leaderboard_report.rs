@@ -58,6 +58,10 @@ pub struct Report {
     /// Landed changes per week, the 26 weeks up to `week`, oldest first.
     pub weekly: Vec<u64>,
     pub records: Records,
+    /// Sent on Sunday evening: the week's final report, which the board keeps as the week's
+    /// (NIT-629). Left out when false, so a report that does not close its week reads as before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub closes_week: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -148,6 +152,7 @@ pub fn build(board: &Leaderboard, projects: u64, profile: &Profile) -> Result<Re
             longest_streak_days: board.records.longest_streak_days,
             fastest_lead: board.records.fastest_lead.as_ref().map(|f| f.seconds),
         },
+        closes_week: false,
     })
 }
 

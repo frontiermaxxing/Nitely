@@ -289,3 +289,4 @@
 .lb-row-name .lb-avatar { margin-right: 8px; }
 .lb-picture-form { display: flex; align-items: flex-start; gap: 12px; }
 .lb-picture-choice { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.lb-row-name .lb-updated { display: block; font-size: var(--text-xs); }

@@ -5,6 +5,8 @@ import { Button, Checkbox, RemoveButton, Segmented, Switch, TextField } from "..
 import { Avatar, type AvatarChoice } from "./Avatar";
 import { Json, LinkField, fieldOf, type Field } from "./OptIn";
 import { join, leave, sendNow, sharing, stopSharing, type Profile } from "./profile";
+import { when } from "./when";
+import { nowSecs } from "../util";
 
 // L4: your leaderboard profile, from the sharing chip or Edit profile. The name, links and
 // projects are saved together; the sharing switch applies at once, because turning it on sends
@@ -183,7 +185,7 @@ export function ProfileDialog(props: { profile: Profile; projects: Project[]; on
                       ? "Deleting what you sent…"
                       : "Sending this week's report…"
                     : on
-                      ? `On · last report ${p.last_sent_week}, then every Sunday`
+                      ? `On · last report ${p.last_sent_week}${p.next_send_at !== null ? `, next ${when(nowSecs(), p.next_send_at)}` : ""}, then daily`
                       : "Off · nothing is sent"
                 }
               />
@@ -192,7 +194,7 @@ export function ProfileDialog(props: { profile: Profile; projects: Project[]; on
                   ? "Save your changes first."
                   : on
                     ? "Turning it off deletes every report you sent from the board."
-                    : "Turning it on sends this week's report now, then one every Sunday."}
+                    : "Turning it on sends this week's report now, then one a day; Sunday evening's closes the week."}
               </span>
               {p.last_error && <span className="ui-field-error">The last send failed: {p.last_error}</span>}
               <button className="link lb-see-report" aria-expanded={showReport} onClick={() => setShowReport(!showReport)}>

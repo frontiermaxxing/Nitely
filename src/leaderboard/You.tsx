@@ -2,6 +2,8 @@ import { useState } from "react";
 import { Button, EmptyState } from "../ui";
 import { CompareBars, Heatmap, ReplyHistogram, RoundsBars, VendorSplit, WeeklyBars } from "./charts";
 import type { Profile } from "./profile";
+import { when } from "./when";
+import { nowSecs } from "../util";
 import {
   PERIOD_LABEL,
   compact,
@@ -130,7 +132,11 @@ function ProfileRow(props: { profile: Profile | null; onJoin?: () => void; onEdi
       <div className="lb-profile-text">
         <span className="lb-profile-name">
           {p.display_name}
-          <span className="lb-sub">{p.last_sent_week ? `last report sent for ${p.last_sent_week}` : "joined · nothing sent yet"}</span>
+          <span className="lb-sub">
+            {p.last_sent_week ? `last report sent for ${p.last_sent_week}` : "joined · nothing sent yet"}
+            {p.last_sent_week && p.next_send_at !== null && ` · next send ${when(nowSecs(), p.next_send_at)}`}
+            {p.last_sent_week && p.week_closes_at !== null && ` · the week closes ${when(nowSecs(), p.week_closes_at)}`}
+          </span>
         </span>
         <span className="lb-links">
           {links.map(([k, v]) =>

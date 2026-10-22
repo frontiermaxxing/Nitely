@@ -169,7 +169,13 @@ function sharingState() {
 }
 
 export function leaderboardStatusFixture() {
-  return { ...sharingState(), id: sharingState().joined ? "preview-key" : null, url: "https://api.nitely.net", due: false };
+  // The next send at 18:00 today or tomorrow, and the week closing Sunday at 18:00 (NIT-629).
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 18).getTime() / 1000;
+  const next = today > now.getTime() / 1000 ? today : today + 86_400;
+  const sunday = today + ((7 - now.getDay()) % 7) * 86_400;
+  const sent = sharingState().last_sent_week !== null;
+  return { ...sharingState(), id: sharingState().joined ? "preview-key" : null, url: "https://api.nitely.net", due: false, next_send_at: sent ? next : null, week_closes_at: sunday };
 }
 
 export function leaderboardJoinFixture(args: Record<string, unknown>) {
@@ -228,6 +234,8 @@ export function leaderboardBoardFixture(args: Record<string, unknown>) {
       steadiest_week: { landed: Math.round(landed / scale), active_days: 3 + Math.floor(r() * 5) },
       vendors: mix.map((v) => ({ vendor: v, landed: Math.round(landed / mix.length), share: Math.round(1000 / mix.length) / 1000 })),
       weekly: Array.from({ length: 26 }, (_, w) => Math.round((w / 26) * (landed / scale) * (0.6 + r() * 0.6))),
+      updated_at: Math.floor(Date.now() / 1000) - Math.round(r() * 20) * 3600,
+      closed: i % 9 === 4,
     };
   };
   const entries = BOARD_NAMES.map((n, i) => entry(`key-${i}`, n, i));

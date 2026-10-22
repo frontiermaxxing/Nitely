@@ -24,6 +24,10 @@ export interface Profile {
   last_error: string | null;
   /** This install's id on the board (its public key), to find your row. */
   id: string | null;
+  /** When the next send goes (seconds); null before the first send by hand. */
+  next_send_at: number | null;
+  /** When this week's entry closes: its Sunday-evening send (seconds). */
+  week_closes_at: number | null;
 }
 
 /** `leaderboard_status`, as much of it as the page reads. */
@@ -34,12 +38,14 @@ interface Status {
   last_sent_week?: string | null;
   last_error?: string | null;
   id?: string | null;
+  next_send_at?: number | null;
+  week_closes_at?: number | null;
 }
 
 function profileOf(s: Status): Profile | null {
   if (!s.joined) return null;
   const p = s.profile;
-  return { display_name: p.display_name, github: p.github ?? null, x: p.x ?? null, website: p.website ?? null, avatar: p.avatar ?? null, projects: s.projects, last_sent_week: s.last_sent_week ?? null, last_error: s.last_error ?? null, id: s.id ?? null };
+  return { display_name: p.display_name, github: p.github ?? null, x: p.x ?? null, website: p.website ?? null, avatar: p.avatar ?? null, projects: s.projects, last_sent_week: s.last_sent_week ?? null, last_error: s.last_error ?? null, id: s.id ?? null, next_send_at: s.next_send_at ?? null, week_closes_at: s.week_closes_at ?? null };
 }
 
 // One copy for the whole app (the sidebar's tag and the page read the same), undefined until read.
@@ -113,13 +119,14 @@ export async function leave(): Promise<number> {
   return deleted;
 }
 
-/** Whether this install is on the board: it sent a report, so the weekly send goes on. */
+/** Whether this install is on the board: it sent a report, so the daily send goes on. */
 export function sharing(p: Profile): boolean {
   return p.last_sent_week !== null;
 }
 
 /**
- * Sends this week's report now, by your hand; after the first, it goes once a week on its own.
+ * Sends this week's report now, by your hand; after the first, it goes once a day on its own, and
+ * Sunday evening's closes the week.
  * A request to the leaderboard's service.
  */
 export async function sendNow(): Promise<void> {

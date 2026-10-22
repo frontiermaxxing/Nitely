@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "../backend";
 import { AgentMark, Button, EmptyState, Loading, Sparkline } from "../ui";
-import { openExternal } from "../util";
+import { ago, nowSecs, openExternal } from "../util";
 import { Avatar, type AvatarChoice } from "./Avatar";
 import type { Profile } from "./profile";
 import { compact, duration, hours, percent, type PeriodKey } from "./stats";
@@ -35,6 +35,9 @@ export interface BoardEntry {
   steadiest_week: { landed: number; active_days: number } | null;
   vendors: { vendor: string; landed: number; share: number }[];
   weekly: number[];
+  /** When the service took this report (seconds), and whether it closed its week. */
+  updated_at?: number;
+  closed?: boolean;
 }
 
 export interface BoardData {
@@ -132,7 +135,7 @@ export function Board(props: { period: PeriodKey; profile: Profile | null; onEdi
   const myIndex = mine ? rows.findIndex((e) => e.id === mine) : -1;
   const m = METRICS.find((x) => x.key === metric)!;
   if (!rows.length)
-    return <EmptyState title="Nobody is on this board yet">Reports arrive once a week; the first ones show here.</EmptyState>;
+    return <EmptyState title="Nobody is on this board yet">Reports arrive once a day; the first ones show here.</EmptyState>;
 
   return (
     <div className="lb-board">
@@ -146,7 +149,7 @@ export function Board(props: { period: PeriodKey; profile: Profile | null; onEdi
           ))}
         </div>
         <span className="lb-sub lb-ranked-count">
-          {rows.length.toLocaleString("en-US")} {rows.length === 1 ? "person" : "people"} · {board.data.week} · updates Sunday
+          {rows.length.toLocaleString("en-US")} {rows.length === 1 ? "person" : "people"} · {board.data.week} · updates daily, closes Sunday evening
         </span>
       </div>
 
@@ -253,6 +256,7 @@ function Row(props: { entry: BoardEntry; rank: number; me: boolean; onEdit: () =
           e.display_name
         )}
         {props.me && <span className="lb-me-tag">you</span>}
+        {e.updated_at !== undefined && <span className="lb-sub lb-updated">{e.closed ? "final" : `updated ${ago(nowSecs(), e.updated_at)}`}</span>}
       </td>
       <td>
         <Crew entry={e} />
