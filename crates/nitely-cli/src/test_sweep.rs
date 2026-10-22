@@ -131,6 +131,9 @@ impl Where {
             CiState::Ready(_) => test_sweep::CiFact::Ready {
                 workflow: self.workflow,
             },
+            // Workflows mean the repo has CI, even where this machine keeps it local or the
+            // origin is elsewhere: CI that cannot be reached, never a reason to run here.
+            CiState::Absent(why) if workflows => test_sweep::CiFact::Blocked(why),
             CiState::Absent(why) => test_sweep::CiFact::Absent(why),
             CiState::Blocked(why) => test_sweep::CiFact::Blocked(why),
         }

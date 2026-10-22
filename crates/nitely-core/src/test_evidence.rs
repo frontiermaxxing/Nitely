@@ -575,6 +575,14 @@ pub fn pytest(text: &str) -> Run {
                 "FAILED" | "ERROR" => Outcome::Fail,
                 _ => Outcome::Skip,
             };
+            // A test's phases report under one id (PASSED, then ERROR at teardown): one test,
+            // failed if any phase failed.
+            if let Some(seen) = run.tests.iter_mut().find(|t| t.id == id) {
+                if outcome == Outcome::Fail {
+                    seen.outcome = Outcome::Fail;
+                }
+                continue;
+            }
             run.tests.push(Observation {
                 id,
                 name,
@@ -1018,6 +1026,12 @@ mod tests {
         assert!(
             !read("tests/test_cart.py::test_total PASSED [ 50%]\n").complete,
             "no summary: cut"
+        );
+        // A teardown error after a pass is the same test, failed.
+        let teardown = "t.py::test_a PASSED [ 50%]\nt.py::test_a ERROR [ 50%]\n===== 1 passed, 1 error in 0.10s =====\n";
+        assert_eq!(
+            summary(&read(teardown)),
+            [("t.py::test_a".to_string(), Outcome::Fail, None)]
         );
         let go = "=== RUN   TestTotal\n=== RUN   TestTotal/empty\n    --- PASS: TestTotal/empty (0.00s)\n--- PASS: TestTotal (0.81s)\n=== RUN   TestHangs\n";
         let r = read(go);
