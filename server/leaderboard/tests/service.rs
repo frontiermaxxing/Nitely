@@ -9,7 +9,7 @@ use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey};
 use nitely_crew::leaderboard_report::{self, Profile};
 use nitely_crew::leaderboard_send::{self, Sharing};
-use nitely_leaderboard::{check, handle, Request, Store};
+use nitely_leaderboard::{check, handle, handle_page, Request, Store};
 
 fn now() -> i64 {
     chrono::Utc::now().timestamp()
@@ -82,12 +82,58 @@ fn join_send_view_and_leave_against_a_local_instance() {
     std::fs::remove_dir_all(dir).ok();
 }
 
+/// NIT-632: a sharer's page at /u/<id> tells a link preview who they are and where they stand,
+/// with what they chose escaped, and its card is a 1200x630 PNG; leaving takes both away.
+#[test]
+fn a_sharers_page_and_card_come_and_go_with_their_reports() {
+    let dir = nitely_core::paths::unique_temp("nitely-lb-page", "");
+    let store = store(&dir);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    {
+        let store = store.clone();
+        std::thread::spawn(move || nitely_leaderboard::serve(listener, store, String::new()));
+    }
+    let get = |path: &str| {
+        let req = Request { method: "GET".into(), path: path.into(), key: None, time: None, signature: None, body: vec![] };
+        handle_page(&store, &req, "https://example.com").expect("a page path")
+    };
+    let me = Sharing::new(&dir.join("me"));
+    let name = "Night <Owl> & \"co\"";
+    let id = me.join(&Profile { display_name: name.into(), ..Default::default() }, &[], Some(&url)).unwrap().id.unwrap();
+    assert_eq!(get(&format!("/u/{id}")).0, 404, "joined, nothing sent: no page yet");
+    me.send_report(&report(name)).unwrap();
+    Sharing::new(&dir.join("other")).join(&Profile { display_name: "Early Bird".into(), ..Default::default() }, &[], Some(&url)).unwrap();
+
+    let (status, kind, html) = get(&format!("/u/{id}"));
+    let html = String::from_utf8(html).unwrap();
+    assert_eq!((status, kind), (200, "text/html; charset=utf-8"));
+    assert!(html.contains("<title>Night &lt;Owl&gt; &amp; &quot;co&quot; · Nitely Leaderboard</title>"), "{html}");
+    assert!(html.contains(&format!("<meta property=\"og:image\" content=\"https://example.com/u/{id}/card.png?v=")), "{html}");
+    assert!(html.contains("of 1 on the Nitely Leaderboard"), "{html}");
+    assert!(!html.contains("<Owl>") && !html.contains("{{"), "nothing from a report lands raw, and no marker is left");
+
+    let (status, kind, png) = get(&format!("/u/{id}/card.png"));
+    assert_eq!((status, kind), (200, "image/png"));
+    assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+    let size = |at: usize| u32::from_be_bytes(png[at..at + 4].try_into().unwrap());
+    assert_eq!((size(16), size(20)), (1200, 630), "the IHDR's width and height");
+    assert_eq!(get(&format!("/u/{id}/card.png")).2, png, "drawn once per report");
+
+    assert_eq!(get("/u/not-an-id").0, 404);
+    assert!(handle_page(&store, &Request { method: "GET".into(), path: "/v1/leaderboard/health".into(), key: None, time: None, signature: None, body: vec![] }, "").is_none());
+    me.leave().unwrap();
+    assert_eq!(get(&format!("/u/{id}")).0, 404, "leaving takes the page away");
+    assert_eq!(get(&format!("/u/{id}/card.png")).0, 404, "and its card");
+    std::fs::remove_dir_all(dir).ok();
+}
+
 /// The picture is only the choice of a link the report gives, which the board passes on (NIT-630).
 #[test]
 fn the_picture_is_the_choice_of_a_given_link() {
     let server = |r: &leaderboard_report::Report| -> nitely_leaderboard::Report { serde_json::from_value(serde_json::to_value(r).unwrap()).unwrap() };
     let mut r = report("Night Owl");
-    assert!(serde_json::to_string(&r).unwrap().find("avatar").is_none(), "no choice, no field: the report is as before");
+    assert!(!serde_json::to_string(&r).unwrap().contains("avatar"), "no choice, no field: the report is as before");
     r.avatar = Some("github".into());
     assert_eq!(check(&server(&r), now()), Ok(()));
     r.avatar = Some("x".into());

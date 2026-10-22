@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Button, EmptyState } from "../ui";
+import { Avatar } from "./Avatar";
 import { CompareBars, Heatmap, ReplyHistogram, RoundsBars, VendorSplit, WeeklyBars } from "./charts";
 import type { Profile } from "./profile";
 import { when } from "./when";
@@ -18,6 +19,8 @@ import {
 } from "./stats";
 
 const IN_PERIOD: Record<PeriodKey, string> = { week: "this week", "30d": "in the last 30 days", all: "since you started" };
+/** Where people's pages live: the Leaderboard service serves them there (NIT-632). */
+const PAGES = "https://nitely.net/u/";
 
 /** L3: your own numbers, always here, sharing or not. */
 export function You(props: { stats: LeaderboardStats; period: PeriodKey; profile: Profile | null; now: number; onJoin?: () => void; onEdit?: () => void; onLeave?: () => Promise<void> }) {
@@ -126,9 +129,7 @@ function ProfileRow(props: { profile: Profile | null; onJoin?: () => void; onEdi
   ];
   return (
     <section className="lb-profile">
-      <span className="lb-avatar" aria-hidden="true">
-        {p.display_name.slice(0, 1).toUpperCase()}
-      </span>
+      <Avatar name={p.display_name} choice={p.avatar} links={{ github: p.github, x: p.x }} size={40} />
       <div className="lb-profile-text">
         <span className="lb-profile-name">
           {p.display_name}
@@ -153,6 +154,7 @@ function ProfileRow(props: { profile: Profile | null; onJoin?: () => void; onEdi
           )}
         </span>
       </div>
+      {p.id && p.last_sent_week && <CopyLink url={PAGES + p.id} />}
       {props.onEdit && <Button onClick={props.onEdit}>Edit profile</Button>}
       {props.onLeave &&
         (confirming ? (
@@ -187,6 +189,32 @@ function ProfileRow(props: { profile: Profile | null; onJoin?: () => void; onEdi
         </span>
       )}
     </section>
+  );
+}
+
+/** Your page on nitely.net, once a report is there: your numbers, ranks and series, with a card for link previews. */
+function CopyLink(props: { url: string }) {
+  const [copied, setCopied] = useState<"yes" | "failed" | null>(null);
+  useEffect(() => {
+    if (copied !== "yes") return;
+    const t = setTimeout(() => setCopied(null), 2000);
+    return () => clearTimeout(t);
+  }, [copied]);
+  return (
+    <>
+      {/* Without the clipboard, the link stays here to copy by hand. */}
+      {copied === "failed" && <span className="lb-sub lb-copy-url">{props.url}</span>}
+      <Button
+        onClick={() =>
+          navigator.clipboard.writeText(props.url).then(
+            () => setCopied("yes"),
+            () => setCopied("failed"),
+          )
+        }
+      >
+        {copied === "yes" ? "Link copied" : "Copy your link"}
+      </Button>
+    </>
   );
 }
 

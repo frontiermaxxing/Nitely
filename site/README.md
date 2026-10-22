@@ -27,3 +27,9 @@ at once.
 `leaderboard/index.html` (its script is inline, so the repo's test map has no loose JavaScript to own) reads the public board from `/v1/leaderboard/board/{week,30d,all}.json` on this
 same site, so the web server proxies that one path (GET only) to the Leaderboard service
 (`server/leaderboard`). It renders every value as text and shows a link only when it is https.
+
+`u/index.html` is the page for one person, `/u/<id>`. The Leaderboard service serves it, not
+this folder: it is compiled into the service, which fills in `{{head}}` (title, summary and link
+preview tags) and `{{person}}` (their numbers), so the web server sends `/u/` to the service
+(server/leaderboard/README.md, "Deploying people's pages"). Its links are absolute (`/styles.css`)
+because it is served from `/u/<id>`; raise its `?v=` with the other pages'.

@@ -299,3 +299,4 @@
 .lb-picture-form { display: flex; align-items: flex-start; gap: 12px; }
 .lb-picture-choice { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .lb-row-name .lb-updated { display: block; font-size: var(--text-xs); }
+.lb-copy-url { user-select: all; font-family: var(--font-mono); font-size: var(--text-xs); overflow-wrap: anywhere; }

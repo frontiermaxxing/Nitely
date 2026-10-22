@@ -315,3 +315,32 @@ main { max-width: var(--wrap); margin: 0 auto; padding: 0 24px; }
 @media (max-width: 860px) {
   .lb-podium, .lb-how { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* A person's page, /u/<id> (NIT-632). Its parts start hidden and the script shows the ones it fills. */
+.u [hidden] { display: none; }
+.u-head { padding: 72px 0 0; display: flex; align-items: center; gap: 22px; min-width: 0; }
+.u-head .avatar { width: 72px; height: 72px; font-size: 28px; }
+.u-who { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.u-who h1 { font-size: clamp(32px, 5vw, 48px); letter-spacing: -0.035em; overflow-wrap: anywhere; }
+.u-rank { color: var(--fg-2); font-size: 17px; font-variant-numeric: tabular-nums; }
+.u .lb-controls { margin-top: 36px; }
+.u-body { margin-top: 28px; padding: 28px; border-radius: 12px; background: var(--surface); box-shadow: 0 0 0 1px var(--line); display: flex; flex-direction: column; gap: 28px; }
+.u-figure .big { font-size: clamp(56px, 9vw, 88px); line-height: 1; }
+.u-figure .unit { font-size: 16px; }
+.u-stats { margin: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 18px 24px; }
+.u-stats dt { color: var(--fg-3); font-size: 13px; }
+.u-stats dd { margin: 4px 0 0; font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.u-records { padding-top: 22px; border-top: 1px solid var(--line); }
+.u-records dd { font-size: 17px; font-weight: 500; }
+.u-bars { height: 72px; }
+.u-bars i.now { background: var(--live); opacity: 1; }
+.u-caption { margin-top: 8px; color: var(--fg-3); font-size: 13px; }
+.u-more { margin-top: 64px; padding-top: 32px; border-top: 1px solid var(--line); max-width: 640px; }
+.u-more p { color: var(--fg-2); font-size: 15px; }
+.u-actions { margin-top: 20px; display: flex; flex-wrap: wrap; gap: 10px; }
+
+@media (max-width: 560px) {
+  .u-head { padding-top: 48px; gap: 16px; align-items: flex-start; }
+  .u-head .avatar { width: 56px; height: 56px; font-size: 22px; }
+  .u-body { padding: 20px; }
+}
