@@ -477,7 +477,17 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
 
     let push_failed = !local_only && !out.pushed;
     let by_nitely = pb.land.by.by_nitely();
-    let stalled_reviews = crate::project_modes::for_issue(db, &issue.key)?.map(|m| m.options()).unwrap_or_else(crate::project_modes::builtin).stalled_reviews;
+    // An open P0 covers a part that must not land without the person, whatever the mode says.
+    let open_p0 = match &out.review {
+        Some(r) => {
+            let accepted: Vec<String> = db.accepted_for(&issue.key, &out.patch_id)?.into_iter().map(|a| a.finding).collect();
+            r.findings.iter().any(|f| f.priority == 0 && !accepted.contains(&f.text))
+        }
+        None => false,
+    };
+    let mode_stalled = crate::project_modes::for_issue(db, &issue.key)?.map(|m| m.options()).unwrap_or_else(crate::project_modes::builtin).stalled_reviews;
+    let route = crate::submit_rules::stalled_route(mode_stalled, open_p0);
+    let stalled_reviews = Some(route);
     let (state, next) = crate::submit_rules::next_state(&crate::submit_rules::Outcome {
         stalled: stalled.is_some(),
         stalled_reviews,
@@ -494,7 +504,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     // Stalled rounds never hold the agent (NIT-568): under `ask` the person decides each open
     // finding while it goes on fixing; under `fix` they are told it splits the change.
     if let Some(why) = &stalled {
-        match stalled_reviews.unwrap_or(crate::project_modes::StalledReviews::Ask) {
+        match route {
             crate::project_modes::StalledReviews::Ask => {
                 db.ask_to_decide_findings(&issue.key, why, actor)?;
             }
@@ -645,9 +655,12 @@ fn submit_into_goal(db: &mut Db, config: &crate::Config, issue: &IssueRecord, ro
         if !crate::submit_rules::item_lands(mode, &review.findings, &accepted) {
             // Rounds that stop converging go as a change's do (NIT-568): never held, and the mode's
             // `stalled_reviews` says whether the person decides each finding or the agent splits.
-            let stalled_reviews = crate::project_modes::for_issue(db, &issue.key)?.map(|m| m.options()).unwrap_or_else(crate::project_modes::builtin).stalled_reviews;
+            let mode_stalled = crate::project_modes::for_issue(db, &issue.key)?.map(|m| m.options()).unwrap_or_else(crate::project_modes::builtin).stalled_reviews;
+            let open_p0 = review.findings.iter().any(|f| f.priority == 0 && !accepted.contains(&f.text));
+            let route = crate::submit_rules::stalled_route(mode_stalled, open_p0);
+            let stalled_reviews = Some(route);
             if let Some(why) = &stalled {
-                match stalled_reviews.unwrap_or(crate::project_modes::StalledReviews::Ask) {
+                match route {
                     crate::project_modes::StalledReviews::Ask => {
                         db.ask_to_decide_findings(&issue.key, why, actor)?;
                     }
@@ -870,7 +883,8 @@ pub const MAX_ROUNDS: usize = 5;
 /// (newest first) and this one, which asks for changes: a P0 or P1 finding still open after two
 /// rounds that tried to fix it (carried a second time), or the `MAX_ROUNDS`th round in a row that
 /// asks for changes. A passing review ends a run: rounds after it (a rebase, a land that stopped)
-/// are not a loop. The text is the short summary the person reads.
+/// are not a loop. The text is the one line the person reads: what happened and how many findings
+/// are open, by priority; the findings themselves are on the review and its follow-up (NIT-633).
 pub fn not_converging(earlier: &[ReviewRecord], review: &Review) -> Option<String> {
     let earlier: Vec<&ReviewRecord> = earlier.iter().filter(|r| !r.reviewer.is_empty()).collect();
     let round = 1 + earlier.iter().take_while(|r| r.verdict == "changes").count();
@@ -884,21 +898,20 @@ pub fn not_converging(earlier: &[ReviewRecord], review: &Review) -> Option<Strin
     if twice.is_empty() && round < MAX_ROUNDS {
         return None;
     }
-    let open: Vec<String> = review
-        .findings
-        .iter()
-        .filter(|f| f.priority <= 1)
-        .map(|f| match &f.now {
-            Some(now) => format!("[P{}] {} (the reviewer says it is still open: {now})", f.priority, f.text),
-            None => format!("[P{}] {}", f.priority, f.text),
-        })
-        .collect();
     let why = if twice.is_empty() {
         format!("{round} review rounds in a row asked for changes")
     } else {
         format!("{} still open after two rounds that tried to fix {}", plural(twice.len(), "P0/P1 finding"), if twice.len() == 1 { "it" } else { "them" })
     };
-    Some(format!("{why}. Open: {}", open.join("; ")))
+    Some(format!("{why}; {}", open_count(&review.findings)))
+}
+
+/// How many P0/P1 findings are open, and of which priority: `3 open findings (1 P0, 2 P1)`.
+pub(crate) fn open_count(findings: &[crate::review::Finding]) -> String {
+    let p0 = findings.iter().filter(|f| f.priority == 0).count();
+    let p1 = findings.iter().filter(|f| f.priority == 1).count();
+    let by: Vec<String> = [(p0, "P0"), (p1, "P1")].iter().filter(|(n, _)| *n > 0).map(|(n, p)| format!("{n} {p}")).collect();
+    format!("{} ({})", plural(p0 + p1, "open finding"), by.join(", "))
 }
 
 fn plural(n: usize, what: &str) -> String {
@@ -1378,8 +1391,8 @@ mod tests {
         // Round 3 carrying it a second time goes to a person, and says what is open.
         let second = record(vec![f(1, "Drops the last row: a.rs", true)]);
         let why = not_converging(&[second.clone(), first.clone()], &review(vec![f(1, "Drops the last row: a.rs", true), f(0, "Leaks the token: b.rs", false)])).unwrap();
-        assert!(why.starts_with("1 P0/P1 finding still open after two rounds that tried to fix it. Open:"), "{why}");
-        assert!(why.contains("[P1] Drops the last row: a.rs; [P0] Leaks the token: b.rs"), "{why}");
+        // One line: what happened and how many are open, never the findings themselves (NIT-633).
+        assert_eq!(why, "1 P0/P1 finding still open after two rounds that tried to fix it; 2 open findings (1 P0, 1 P1)");
         // A finding carried at P2 (its code gone) or a new one does not count as carried twice.
         assert_eq!(not_converging(&[second.clone(), first.clone()], &review(vec![f(2, "Drops the last row: a.rs", true), f(1, "New: c.rs", false)])), None);
         // The fifth round in a row asking for changes goes to a person whatever was carried; a
@@ -1388,7 +1401,7 @@ mod tests {
         let four = vec![record(vec![]), record(vec![]), none.clone(), record(vec![]), record(vec![])];
         let new = || review(vec![f(1, "Off by one: d.rs", false)]);
         let why = not_converging(&four, &new()).unwrap();
-        assert!(why.starts_with("5 review rounds in a row asked for changes. Open: [P1] Off by one: d.rs"), "{why}");
+        assert_eq!(why, "5 review rounds in a row asked for changes; 1 open finding (1 P1)");
         assert_eq!(not_converging(&four[1..], &new()), None, "the fourth");
         let passed = ReviewRecord { verdict: "pass".into(), ..record(vec![]) };
         let after_a_pass = vec![record(vec![]), record(vec![]), passed, record(vec![]), record(vec![]), record(vec![])];
@@ -1723,7 +1736,8 @@ reason = "money logic"
             .conn
             .query_row("SELECT summary FROM event WHERE issue_key = ?1 AND type = 'submit' ORDER BY id DESC LIMIT 1", [&issue.key], |r| r.get(0))
             .unwrap();
-        assert!(last.contains("not converging") && last.contains("[P1] Stuck: stuck.txt"), "{last}");
+        // The note says how many are open, not the findings themselves (NIT-633).
+        assert!(last.contains("not converging") && last.contains("1 open finding (1 P1)") && !last.contains("Stuck: stuck.txt"), "{last}");
         // A decision about the change, not the person's own work (NIT-220): the owner stays the agent,
         // and the open finding waits in the Inbox as a request to accept it, or send it back.
         let stuck = f.db.issue(&issue.key).unwrap().unwrap();
