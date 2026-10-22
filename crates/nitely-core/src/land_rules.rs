@@ -189,7 +189,7 @@ pub fn verdict_lets_land(verdict: &str, reviewer: &str, blockers: impl FnOnce() 
     match verdict {
         // The Basic review exemption is retired (NIT-510): a change recorded under it gets a review.
         "light" => anyhow::bail!("the Basic review exemption is retired; submit again for a review"),
-        "pass" | "none" | "disabled" | "yolo" => Ok(String::new()),
+        "pass" | "none" | "disabled" | "yolo" | crate::quick::VERDICT => Ok(String::new()),
         // Never reviewed: its land batch reviews it first (review_batch::review_pending), so nothing
         // lands unreviewed.
         crate::review_batch::PENDING => anyhow::bail!("its review waits for its land batch, and has not run; land it again"),
@@ -213,6 +213,7 @@ pub fn lands_without_a_person(reasons: &[String], verdict: &str, reviewer: &str,
     Some(match verdict {
         "yolo" => format!("{}; no human approval is required", crate::project_yolo::NOTE),
         "disabled" => format!("{}; no human approval is required", crate::review::DISABLED_NOTE),
+        crate::quick::VERDICT => format!("{}; no human approval is required", crate::quick::NOTE),
         _ => format!("the {reviewer} review passed and no human approval is needed{accepted}"),
     })
 }

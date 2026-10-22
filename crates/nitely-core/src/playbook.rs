@@ -1488,11 +1488,21 @@ pub struct GateResult {
 /// Creates the issue's branch and worktree from the integration branch and runs the setup
 /// commands. Calling it again for the same issue returns the existing worktree.
 pub fn start_task(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, actor: &Actor) -> Result<Started> {
+    start_task_with(db, repo_root, issue, vendor, actor, Playbook::load(repo_root)?)
+}
+
+/// `start_task` with a light worktree whatever the playbook asks: the quick path's (quick.rs).
+pub fn start_task_light(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, actor: &Actor) -> Result<Started> {
+    let mut playbook = Playbook::load(repo_root)?;
+    playbook.worktree.mode = WorktreeMode::Light;
+    start_task_with(db, repo_root, issue, vendor, actor, playbook)
+}
+
+fn start_task_with(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, actor: &Actor, playbook: Playbook) -> Result<Started> {
     let _telemetry = crate::performance_attribution::Scope::new(db,crate::performance_attribution::Context {project:issue.project.clone(),issue:Some(issue.key.clone()),..Default::default()});
     if issue.is_humans() && *actor != Actor::Human {
         bail!("{} is the human's own work (owner: human), so agents do not start it; `ask` the human if an agent should take it", issue.key);
     }
-    let playbook = Playbook::load(repo_root)?;
     let branch = playbook.branch_for(vendor, issue);
     let worktree = playbook.worktree_for(repo_root, vendor, issue);
     let worktree_str = worktree.to_string_lossy().into_owned();

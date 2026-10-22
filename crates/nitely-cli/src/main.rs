@@ -198,6 +198,12 @@ enum Cmd {
         #[arg(long)]
         take_over: bool,
     },
+    /// The quick path: a small change made by whoever is already there, landed with its own checks
+    /// and reviewed after landing.
+    Quick {
+        #[command(subcommand)]
+        command: QuickCmd,
+    },
     /// Add paths to the current sparse light worktree (each file's directory, or the directory); a
     /// path in a declared submodule makes or widens that submodule's worktree.
     Widen {
@@ -454,6 +460,30 @@ enum Cmd {
         /// Seconds to listen for announcements.
         #[arg(long, default_value_t = 3)]
         wait: u64,
+    },
+}
+
+#[derive(Subcommand)]
+enum QuickCmd {
+    /// File an issue for a small change (or take --key's) and make its light worktree.
+    Start {
+        /// What the change does, as the issue's title.
+        title: Option<String>,
+        /// An issue that exists already, instead of filing one.
+        #[arg(long)]
+        key: Option<String>,
+        /// The project to file the issue in.
+        #[arg(long)]
+        project: Option<String>,
+        /// Who the branch is for, e.g. claude or cursor.
+        #[arg(long, default_value = "claude")]
+        agent: String,
+    },
+    /// In the quick worktree: commit, and land the change when it is small; else say why.
+    Land {
+        /// The commit message; defaults to the issue's title and key.
+        #[arg(long)]
+        message: Option<String>,
     },
 }
 
@@ -1632,6 +1662,41 @@ fn run(cmd: Cmd) -> Result<()> {
                     bail!("ask {} {why}, unanswered", ask.id);
                 }
             }
+        }
+        Cmd::Quick { command: QuickCmd::Start { title, key, project, agent } } => {
+            let config = Config::load()?;
+            let mut db = Db::open_default()?;
+            let cwd = cwd()?;
+            let issue = match (key, title) {
+                (Some(key), _) => db.issue(&key)?.ok_or_else(|| anyhow::anyhow!("no issue {key}"))?,
+                (None, Some(title)) => {
+                    let project = project.as_deref().context("pass --project for the new issue, or --key for one that exists")?;
+                    let source = if nitely_core::issues::SOURCES.contains(&agent.as_str()) { agent.as_str() } else { "human" };
+                    db.create_issue(&nitely_core::quick::new_issue(project, &title, source), &me)?
+                }
+                (None, None) => anyhow::bail!("pass the change's title, or --key for its issue"),
+            };
+            let root = playbook::repo_for_issue(&config, issue.project.as_deref(), &cwd)?;
+            let started = nitely_core::quick::start(&db, &root, &issue, &agent, &me)?;
+            for w in &started.warnings {
+                eprintln!("warning: {w}");
+            }
+            println!("{} started in {}", started.issue, started.worktree);
+            println!("Make the change there, then run `nitely quick land` in it.");
+            Ok(())
+        }
+        Cmd::Quick { command: QuickCmd::Land { message } } => {
+            let config = Config::load()?;
+            let mut db = Db::open_default()?;
+            let cwd = cwd()?;
+            nitely_core::install::check_current(&config, &cwd, env!("NITELY_COMMIT"))?;
+            let out = nitely_core::quick::land(&mut db, &config, &cwd, message.as_deref(), &me)?;
+            println!("{}: {}", out.issue, out.reason);
+            println!("{}", out.next);
+            if !out.landed {
+                exit(1);
+            }
+            Ok(())
         }
         Cmd::Start { key, agent, take_over } => {
             let config = Config::load()?;
