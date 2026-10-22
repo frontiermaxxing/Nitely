@@ -200,3 +200,10 @@ button.dd-title:hover { text-decoration: underline; text-decoration-color: var(-
 /* Notification settings (src/Notifications.tsx), opened from the head. */
 .inbox-notify-link { margin-left: auto; font-size: var(--text-sm); color: var(--fg-3); text-decoration: none; }
 .inbox-notify-link:hover, .inbox-notify-link[aria-expanded="true"] { color: var(--fg); }
+
+/* Notices nothing waits on (NIT-570): quieter than a decision. */
+.inbox-notices { margin: 10px 0 4px; }
+.inbox-notices-head { font-size: var(--text-xs); font-weight: 600; color: var(--fg-3); margin: 0 0 6px; text-transform: none; }
+.inbox-notices ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.inbox-notice { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); font-size: var(--text-sm); }
+.inbox-notice-text { flex: 1 1 16rem; min-width: 0; }
