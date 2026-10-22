@@ -260,11 +260,13 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     crate::project_modes::apply_issue(db, &issue.key, &mut pb)?;
     // A goal item on main still gets the blocking item review its mode asks for, though changes
     // with no goal land unreviewed (NIT-563).
-    if issue.goal.is_some() && item_review_of(db, &issue.key)? == ItemReview::Blocking {
+    let item_blocking = issue.goal.is_some() && item_review_of(db, &issue.key)? == ItemReview::Blocking;
+    if item_blocking {
         pb.review.enabled = true;
     }
     pb.review.policy_root = Some(root.clone());
-    pb.review.yolo_guards = crate::project_yolo::ReviewGuard::for_issue(db, &issue.key)?.into_iter().collect();
+    // Guarded by that item review then, not by the review of changes with no goal (NIT-597 review).
+    pb.review.yolo_guards = crate::project_yolo::ReviewGuard::for_issue(db, &issue.key)?.map(|g| crate::project_yolo::ReviewGuard { item: item_blocking, ..g }).into_iter().collect();
     crate::project_modes::check_gate_authority(db, &[&issue.key], &out.gate)?;
     pb.approval.check_blocked(&files)?;
     out.reasons = pb.human_reasons(&files)?;
@@ -577,10 +579,24 @@ fn review_item(db: &mut Db, root: &Path, worktree: &Path, issue: &IssueRecord, b
     let previous = previous_round(db, &issue.key, worktree)?;
     let mut rules = pb.review.clone();
     rules.context = review_context(db, issue, &gate)?;
-    let choice = pb.review.choose_after(&vendor, &|r| pb.review.is_installed(r, worktree), &[])?;
     let wt = worktree.to_string_lossy().into_owned();
-    db.log_event(actor, Some(&issue.key), Some(&wt), "review_started", &format!("Item review by {}{} started", choice.reviewer, noted(&choice.note)))?;
-    let mut review = rules.run(&choice.reviewer, worktree, &since, previous.as_ref())?;
+    // A reviewer that cannot run (not signed in, say) is passed over for the next one, as for a
+    // change to main; one that ran and did not finish stops the submit.
+    let mut failed: Vec<crate::review::CouldNotRun> = vec![];
+    let (choice, mut review) = loop {
+        let choice = pb.review.choose_after(&vendor, &|r| pb.review.is_installed(r, worktree), &failed)?;
+        db.log_event(actor, Some(&issue.key), Some(&wt), "review_started", &format!("Item review by {}{} started", choice.reviewer, noted(&choice.note)))?;
+        match rules.run(&choice.reviewer, worktree, &since, previous.as_ref()) {
+            Ok(r) => break (choice, r),
+            Err(e) => match e.downcast::<crate::review::CouldNotRun>() {
+                Ok(out) => {
+                    db.log_event(actor, Some(&issue.key), Some(&wt), "review_failed", &format!("Item review by {} could not run ({}); trying another reviewer", choice.reviewer, out.why))?;
+                    failed.push(out);
+                }
+                Err(e) => return Err(e),
+            },
+        }
+    };
     review.note = choice.note.clone();
     let patch = patch_id_range(worktree, &since, &head)?;
     let stalled = if review.verdict == "changes" && issue.origin == "nitely" { stalled_rounds(db, &issue.key, &review)? } else { None };

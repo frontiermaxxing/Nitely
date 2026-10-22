@@ -111,7 +111,7 @@ mod tests {
         db.create_project("APP", "App").unwrap();
         let guard = ReviewGuard { database: path, project: "APP".into(), authority: None, item: false };
         // NIT-563: an item review runs on the mode's item review, whatever its pre-merge review.
-        use crate::project_modes::{ItemReview, PreReview};
+        use crate::project_modes::ItemReview;
         assert!(review_on(Some(PreReview::Off), Some(ItemReview::Blocking), true));
         assert!(!review_on(Some(PreReview::Individual), Some(ItemReview::Off), true));
         assert!(!review_on(Some(PreReview::Off), Some(ItemReview::Blocking), false));

@@ -1292,6 +1292,16 @@ commands = { fake = ["{sh}", "-c", "cat > /dev/null; case \"$(git diff --name-on
         sh(&wt, &["commit", "-q", "-m", "safe"]);
         let s = f.submit(&wt);
         assert!(s.land.as_ref().is_some_and(|l| l.landed) && f.has("goal-1", "safe.txt"), "{:?}", s.next);
+        // A goal item that lands on main (the mode no longer routes through the branch) still gets
+        // its blocking item review with the pre-merge review off (NIT-597 review).
+        let to_main = Options { goal_branches: Some(false), pre_review: Some(crate::project_modes::PreReview::Off), item_review: Some(ItemReview::Blocking), ..Default::default() };
+        crate::project_modes::set_for_test(&mut f.db, "NIT", Mode::Custom, to_main);
+        let c = f.issue("C", Some(f.goal));
+        let wt = f.work(&c, "risky.txt", "on main
+");
+        let s = f.submit(&wt);
+        assert_eq!(s.base, "main", "{s:?}");
+        assert!(s.review.as_ref().is_some_and(|r| r.verdict == "changes") && s.state == "In Progress", "reviewed and sent back: {s:?}");
         std::fs::remove_dir_all(&f.base).ok();
     }
 
