@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { merged, parseLog, classify, bodies, hints } = require('./test_sweep.cjs');
+const { merged, parseLog, classify, bodies, hints, timingMethod, inventory } = require('./test_sweep.cjs');
 const revision = 'a'.repeat(40);
 test('same-revision distinct runs distinguish flakes from repeats and ambiguous names', () => {
  const passed = parseLog('test parser::roundtrip ... ok', '1', revision, 'lane 1');
@@ -68,4 +68,39 @@ test('test bodies in each language carry hints of waits, UI presence and real I/
   const js = bodies("test('shows the board', () => { expect(screen.getByText('Board')).toBeInTheDocument(); });", '.tsx');
   assert.deepEqual(js.map(t => [t.name, t.hints]), [['shows the board', { ui: 2 }]]);
   assert.deepEqual(hints('assert_eq!(decide(&a, &b), Verdict::Land);'), {});
+});
+test('one CI run is one execution, and its failure on one platform outweighs a pass on another', () => {
+  const at = (run, outcome, source) => ({ id: 'cart::adds', name: 'adds', outcome, run, revision, source, method: 'ci-log', ambiguous: false });
+  // Two workflow runs, each failing on Windows and passing on Linux: a repeated failure, not a flake.
+  const rows = [at('ci-1-1', 'fail', 'windows'), at('ci-1-1', 'pass', 'linux'), at('ci-2-1', 'pass', 'linux'), at('ci-2-1', 'fail', 'windows')];
+  assert.match(classify(rows, [], revision)[0].title, /^Repeated failure: cart::adds/);
+  // A console without times after JUnit with them leaves the run timed.
+  const many = Array.from({ length: 19 }, (_, i) => ({ ...at('ci-9-1', 'pass', 'junit'), id: 'q' + i, name: 'q' + i, duration_ms: 5 }));
+  const slow = classify([...many, { ...at('ci-9-1', 'pass', 'junit'), duration_ms: 9000 }, at('ci-9-1', 'pass', 'console')], [], revision).filter(c => c.kind === 'speedup');
+  assert.deepEqual(slow.map(c => c.title), ['Slow tail: cart::adds']);
+  // JUnit and the console of one run report one failure once.
+  assert.equal(classify([at('ci-3-1', 'fail', 'junit'), at('ci-3-1', 'fail', 'console')], [], revision).length, 0);
+});
+test('times from CI and from a lane are never compared with each other', () => {
+  // Twenty tests timed in CI, one far slower test timed only in a lane: the lane's time is not ranked against CI's.
+  const ci = Array.from({ length: 20 }, (_, i) => ({ id: 't' + i, name: 't' + i, outcome: 'pass', run: 'ci-1', revision, source: 'CI', method: 'ci-log', duration_ms: 10 + i }));
+  const lane = { id: 'slow', name: 'slow', outcome: 'pass', run: 'lane-1', revision, source: 'lane 1', method: 'lane', duration_ms: 99999 };
+  assert.equal(timingMethod([...ci, lane], revision), 'ci-log');
+  const slow = classify([...ci, lane], [], revision).filter(c => c.kind === 'speedup');
+  assert.deepEqual(slow.map(c => c.title), ['Slow tail: t19']);
+  assert.match(slow[0].evidence, /timed by ci-log/);
+});
+test('a report on an earlier commit reads that commit\'s tests, not the checkout\'s', () => {
+  const fs = require('node:fs'), os = require('node:os'), path = require('node:path'), cp = require('node:child_process');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nitely-sweep-at-'));
+  const git = (...a) => cp.execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...a], { cwd: root }).toString().trim();
+  try {
+    git('init', '-q');
+    fs.writeFileSync(path.join(root, 'cart.test.js'), "test('adds', () => { setTimeout(done, 10); });");
+    git('add', '.'); git('commit', '-qm', 'one'); const first = git('rev-parse', 'HEAD');
+    fs.writeFileSync(path.join(root, 'cart.test.js'), "test('totals', () => { expect(1).toBe(1); });");
+    git('commit', '-qam', 'two');
+    assert.deepEqual(inventory(root, first).tests.map(t => [t.name, t.hints]), [['adds', { waits: 1 }]]);
+    assert.deepEqual(inventory(root).tests.map(t => t.name), ['totals']);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

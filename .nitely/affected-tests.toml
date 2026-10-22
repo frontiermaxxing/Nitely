@@ -6,7 +6,9 @@ version = 1
 # The frontend and the repo's scripts: `npm test` runs every src/ test and scripts/*.test.mjs, and
 # `npm run build` type-checks and bundles. Whole-suite mapping (inputs), since vite and tsconfig
 # resolve imports in ways the static graph does not claim. No Rust code reads these paths. Its
-# tests are found by pattern (NIT-505), so a new test file there needs no edit here.
+# tests are found by pattern (NIT-505), so a new test file there needs no edit here. Two of the
+# core's files are inputs too: src/ui/lifecycle.test.ts reads track_cases.json, which track.rs
+# also runs, and scripts/test-sweep.test.mjs imports the sweep's node test (NIT-583 review).
 [[components]]
 id = "web"
 roots = ["src/", "scripts/", "public/", "vite.config.ts", "index.html", "phone.html"]
@@ -14,17 +16,31 @@ checks = ["npm run build"]
 
 [[components.suites]]
 id = "npm-test"
-inputs = ["src/", "scripts/", "public/", "vite.config.ts", "index.html", "phone.html"]
+inputs = ["src/", "scripts/", "public/", "vite.config.ts", "index.html", "phone.html", "crates/nitely-core/src/track_cases.json", "crates/nitely-core/src/test_sweep.cjs", "crates/nitely-core/src/test_sweep.test.cjs"]
 [components.suites.javascript]
 command = "npm test"
 test_patterns = ["scripts/*.test.mjs", "src/**/*.test.ts"]
 
-# The test-sweep script Nitely embeds (include_str!) and its own node test. Its paths name "test",
-# so verification keeps any change to it on Full; it is mapped so every JavaScript file has an owner.
+# The core (NIT-581): every crate builds on it, so a change to it runs its own tests and clippy
+# and every suite of crew, cli, app and the leaderboard (their depends_on), but not the
+# whole-workspace fallback. Its build script lists migrations/, so a schema change keeps the full
+# gate, as does anything it reads from outside its folder (include_str! of .github/, .nitely/ and
+# docs/ files, which no component owns). The test-sweep script it embeds (include_str!) is part of
+# it, with its own node test; its paths name "test", so verification keeps a change to it on Full.
+# The examples are built by `cargo test --workspace`, so a change to core checks they still build.
 [[components]]
-id = "test-sweep"
-roots = ["crates/nitely-core/src/test_sweep.cjs", "crates/nitely-core/src/test_sweep.test.cjs"]
-checks = ["node --check crates/nitely-core/src/test_sweep.cjs"]
+id = "core"
+roots = ["crates/nitely-core/"]
+build_inputs = ["crates/nitely-core/build.rs", "crates/nitely-core/migrations/"]
+checks = ["cargo clippy -p nitely-core -- -D warnings", "cargo check -p nitely-core --examples", "node --check crates/nitely-core/src/test_sweep.cjs"]
+
+[[components.suites]]
+id = "lib"
+inputs = ["crates/nitely-core/src/", "crates/nitely-core/examples/"]
+[components.suites.cargo]
+manifest = "crates/nitely-core/Cargo.toml"
+package = "nitely-core"
+target_kind = "lib"
 
 [[components.suites]]
 id = "node-test"
@@ -34,10 +50,11 @@ command = "node --test crates/nitely-core/src/test_sweep.test.cjs"
 test_files = ["crates/nitely-core/src/test_sweep.test.cjs"]
 
 # The crew and the reports on top of the core (NIT-497): nitely-core does not build on it, so a
-# change only to it runs its own tests and clippy and the two crates above it, not nitely-core's.
+# change only to it runs its own tests and clippy and the crates above it, not nitely-core's.
 [[components]]
 id = "crew"
 roots = ["crates/nitely-crew/"]
+depends_on = ["core"]
 checks = ["cargo clippy -p nitely-crew -- -D warnings"]
 
 [[components.suites]]
@@ -54,7 +71,7 @@ target_kind = "lib"
 [[components]]
 id = "cli"
 roots = ["crates/nitely-cli/"]
-depends_on = ["crew"]
+depends_on = ["core", "crew"]
 build_inputs = ["crates/nitely-cli/build.rs"]
 checks = ["cargo clippy -p nitely-cli -- -D warnings"]
 
@@ -157,13 +174,22 @@ package = "nitely-cli"
 target_kind = "test"
 target = "preview"
 
+[[components.suites]]
+id = "updates_hook"
+inputs = ["crates/nitely-cli/"]
+[components.suites.cargo]
+manifest = "crates/nitely-cli/Cargo.toml"
+package = "nitely-cli"
+target_kind = "test"
+target = "updates_hook"
+
 # The desktop app, a leaf crate. tauri-build reads the configs, capabilities, icons and Windows
 # installer hooks, so a change to any of them keeps the full gate. It embeds the built frontend,
 # so its checks build that first.
 [[components]]
 id = "app"
 roots = ["src-tauri/"]
-depends_on = ["crew"]
+depends_on = ["core", "crew"]
 build_inputs = ["src-tauri/build.rs", "src-tauri/icons/", "src-tauri/capabilities/", "src-tauri/windows/", "src-tauri/tauri.conf.json", "src-tauri/tauri.macos.conf.json", "src-tauri/tauri.release.json", "src-tauri/tauri.windows.conf.json"]
 checks = ["npm run build", "cargo clippy -p nitely-app -- -D warnings"]
 
@@ -174,3 +200,21 @@ inputs = ["src-tauri/src/"]
 manifest = "src-tauri/Cargo.toml"
 package = "nitely-app"
 target_kind = "lib"
+
+# The Leaderboard service, a leaf crate. Only its tests build on the core and the crew (the
+# client's report builder and signer), so a change to either runs them; its lib and binary have no
+# tests of their own.
+[[components]]
+id = "leaderboard"
+roots = ["server/leaderboard/"]
+depends_on = ["core", "crew"]
+checks = ["cargo clippy -p nitely-leaderboard -- -D warnings"]
+
+[[components.suites]]
+id = "service"
+inputs = ["server/leaderboard/"]
+[components.suites.cargo]
+manifest = "server/leaderboard/Cargo.toml"
+package = "nitely-leaderboard"
+target_kind = "test"
+target = "service"
