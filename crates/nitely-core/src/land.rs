@@ -708,13 +708,13 @@ pub(crate) fn after_land_outside_lock(root: &Path, pb: &Playbook) -> Vec<playboo
     let (Ok(lock), Ok(pending)) = (after_lock_path(root), after_pending_path(root)) else { return vec![] };
     let mut out = Vec::new();
     loop {
-        let held = match take_after_lock(&lock) {
+        let held = match take_after_lock_settled(&lock, root) {
             Some(held) => held,
             None => {
                 // The mark first, then one more try: the holder looks for marks after it lets go,
                 // so either it sees this one or this land finds the lock free.
                 std::fs::write(&pending, "").ok();
-                match take_after_lock(&lock) {
+                match take_after_lock_settled(&lock, root) {
                     Some(held) => held,
                     None => {
                         out.push(playbook::CommandResult {
@@ -912,6 +912,33 @@ fn take_after_lock(path: &Path) -> Option<AfterHold> {
     let running = path.with_extension("running");
     std::fs::write(&running, format!("after-land-steps pid {}", std::process::id())).ok();
     Some(AfterHold { _file: file, running })
+}
+
+/// The outside-the-lock steps' lock once it is free, or None while a land that names itself holds
+/// it. A lock no land names is only on its way to free: a process another thread of this one
+/// started a moment ago keeps the lock's file until it starts its program (NIT-579), and a land
+/// that took it that moment would leave its mark for a holder already gone. So it is waited for,
+/// for at most `SETTLE`.
+fn take_after_lock_settled(lock: &Path, root: &Path) -> Option<AfterHold> {
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(held) = take_after_lock(lock) {
+            return Some(held);
+        }
+        if !keep_waiting(after_steps_running(root), started.elapsed()) {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// How long a lock no land names may stay taken before it counts as held.
+const SETTLE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Whether to try a taken lock again: only while no running land names itself its holder, and
+/// for at most `SETTLE`.
+fn keep_waiting(holder_named: bool, waited: std::time::Duration) -> bool {
+    !holder_named && waited < SETTLE
 }
 
 /// Whether the outside-the-lock steps of a land are running now for `root` (an install of the
@@ -1704,7 +1731,7 @@ mod tests {
         assert!(after_tree_path(&pb, &repo).join("a.txt").exists());
         // Another land's steps are running: this one leaves its mark and returns at once.
         let lock = after_lock_path(&repo).unwrap();
-        let other = take_after_lock(&lock).expect("free");
+        let other = take_after_lock_settled(&lock, &repo).expect("free");
         assert!(after_steps_running(&repo));
         let ran = after_land_outside_lock(&repo, &pb);
         assert!(ran.len() == 1 && ran[0].skipped && ran[0].output.contains("another land"), "{ran:?}");
@@ -1737,6 +1764,17 @@ mod tests {
         assert!(ran.iter().all(|r| r.ok && !r.skipped), "{ran:?}");
         assert_eq!(built().last(), Some(&head(&repo)));
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// NIT-579: a lock no land names is on its way to free (a child another test thread just started
+    /// still has its file), so it is tried again for a while; one a running land names is held.
+    #[test]
+    fn a_lock_no_land_names_is_waited_for_and_a_named_one_is_not() {
+        use std::time::Duration;
+        assert!(keep_waiting(false, Duration::ZERO));
+        assert!(keep_waiting(false, SETTLE - Duration::from_millis(1)));
+        assert!(!keep_waiting(false, SETTLE), "bounded");
+        assert!(!keep_waiting(true, Duration::ZERO), "a running land holds it: leave the mark at once");
     }
 
     /// The lanes keep a lane for a land only while the process that took its lock lives (NIT-332).
