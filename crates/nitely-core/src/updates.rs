@@ -131,12 +131,29 @@ pub fn digest(events: &[FeedEvent], reader: &str, scope: &Scope, cap: usize) -> 
         }
     }
     for (goal, keys) in goal_moves {
-        lines.push(format!("The person put {} in {}", keys.join(", "), goal.trim_start_matches("Goal: ")));
+        lines.push(format!("The person put {} in {}", keys_line(&keys), goal.trim_start_matches("Goal: ")));
     }
     if !landed.is_empty() {
-        lines.push(format!("Landed: {}", landed.join(", ")));
+        lines.push(format!("Landed: {}", keys_line(&landed)));
     }
     Digest { lines, more, cursor }
+}
+
+/// The most issue keys one grouped line names; the rest are counted (NIT-566).
+const GROUP_KEYS: usize = 6;
+
+/// The keys of a grouped line: the first `GROUP_KEYS`, then how many more.
+fn keys_line(keys: &[String]) -> String {
+    if keys.len() <= GROUP_KEYS {
+        return keys.join(", ");
+    }
+    format!("{} and {} more", keys[..GROUP_KEYS].join(", "), keys.len() - GROUP_KEYS)
+}
+
+/// Whether `read` reads the next page of events (NIT-566): this page was full and told nothing, so
+/// an update may come after it. A page that told something, or ran out of events, ends the read.
+fn read_on(told: bool, read: usize, page: usize) -> bool {
+    !told && read == page
 }
 
 /// The cursor a reader keeps for a scope (NIT-562): one per reader, scope and projects, so reading
@@ -196,6 +213,17 @@ pub const HOOK_CAP: usize = 8;
 /// Reads `reader`'s unread updates in `projects` (whole projects when `whole`), at most `cap`
 /// lines, and moves its cursor past them.
 pub fn read(db: &Db, reader: &str, projects: &[String], whole: bool, cap: usize) -> Result<Digest> {
+    read_paged(db, reader, projects, whole, cap, PAGE)
+}
+
+/// How many events `read` takes at a time.
+const PAGE: usize = 5000;
+
+/// `read`, `page` events at a time: past pages that tell nothing (tool calls, statuses) to the first
+/// that does, so an update after many quiet events is told now, not on the next read.
+fn read_paged(db: &Db, reader: &str, projects: &[String], whole: bool, cap: usize, page: usize) -> Result<Digest> {
+    // At least one line: a cap of 0 would tell nothing and never move past an update (NIT-597 review).
+    let cap = cap.max(1);
     let key = cursor_key(reader, projects, whole);
     let cursor: Option<i64> = db.conn.query_row("SELECT event_id FROM update_cursor WHERE reader = ?1", [&key], |r| r.get(0)).optional()?;
     let after = match cursor {
@@ -208,17 +236,25 @@ pub fn read(db: &Db, reader: &str, projects: &[String], whole: bool, cap: usize)
                 COALESCE(i.project, CASE WHEN json_valid(e.payload) THEN json_extract(e.payload, '$.project') END),
                 COALESCE(i.goal, CASE WHEN json_valid(e.payload) THEN json_extract(e.payload, '$.goal') END)
          FROM event e LEFT JOIN issue i ON i.key = e.issue_key COLLATE NOCASE
-         WHERE e.id > ?1 ORDER BY e.id LIMIT 5000",
+         WHERE e.id > ?1 ORDER BY e.id LIMIT ?2",
     )?;
-    let events: Vec<FeedEvent> = stmt
-        .query_map([after], |r| {
-            Ok(FeedEvent { id: r.get(0)?, actor: r.get(1)?, issue_key: r.get(2)?, kind: r.get(3)?, summary: r.get(4)?, for_reader: r.get(5)?, project: r.get(6)?, goal: r.get(7)? })
-        })?
-        .collect::<rusqlite::Result<_>>()?;
     let projects: BTreeSet<String> = projects.iter().map(|p| p.to_uppercase()).collect();
     let scope = if whole { Scope::Project(projects) } else { mine(db, reader, projects)? };
-    let mut digest = digest(&events, reader, &scope, cap);
-    digest.cursor = digest.cursor.max(after);
+    let mut from = after;
+    let digest = loop {
+        let events: Vec<FeedEvent> = stmt
+            .query_map(params![from, page as i64], |r| {
+                Ok(FeedEvent { id: r.get(0)?, actor: r.get(1)?, issue_key: r.get(2)?, kind: r.get(3)?, summary: r.get(4)?, for_reader: r.get(5)?, project: r.get(6)?, goal: r.get(7)? })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut digest = digest(&events, reader, &scope, cap);
+        digest.cursor = digest.cursor.max(from);
+        // A page that did not move the cursor is read once: reading it again would end the same.
+        if !read_on(!digest.lines.is_empty(), events.len(), page) || digest.cursor == from {
+            break digest;
+        }
+        from = digest.cursor;
+    };
     db.conn.execute(
         "INSERT INTO update_cursor (reader, event_id, read_at) VALUES (?1, ?2, ?3)
          ON CONFLICT(reader) DO UPDATE SET event_id = excluded.event_id, read_at = excluded.read_at",
@@ -374,6 +410,36 @@ mod tests {
             ev(4, "claude:me", Some("APP-7"), Some("APP"), None, "note", "Fixed it"),
         ];
         assert_eq!(digest(&own, "claude:me", &mine, 8).lines, ["APP-7: the review asked for changes"], "only the send-back, not its own pass or note");
+    }
+
+    /// NIT-566: a grouped line names a few keys and counts the rest; a settings change in one
+    /// project reaches no reader of another; a read pages past quiet events to the first update.
+    #[test]
+    fn grouped_lines_are_capped_settings_stay_in_their_project_and_quiet_pages_are_read_past() {
+        let whole = Scope::Project(["APP".to_string()].into());
+        let lands: Vec<FeedEvent> = (1..=9).map(|n| ev(n, "codex:x", Some(&format!("APP-{n}")), Some("APP"), None, "landed", "Landed")).collect();
+        assert_eq!(digest(&lands, "claude:coord", &whole, 8).lines, ["Landed: APP-1, APP-2, APP-3, APP-4, APP-5, APP-6 and 3 more"]);
+
+        let mine = Scope::Mine { issues: BTreeSet::new(), goals: BTreeSet::new(), projects: ["APP".to_string()].into() };
+        let elsewhere = ev(1, "human", None, Some("WEB"), None, "reviewer_settings_changed", "Review settings for web: Saved.");
+        assert!(digest(std::slice::from_ref(&elsewhere), "claude:me", &mine, 8).lines.is_empty(), "another project's settings");
+
+        assert!(read_on(false, 3, 3), "a full page that told nothing: read on");
+        assert!(!read_on(true, 3, 3) && !read_on(false, 2, 3), "something told, or the events ran out");
+        let dir = crate::paths::unique_temp("nitely-updates-pages", "");
+        let db = Db::open(&dir.join("t.db")).unwrap();
+        for _ in 0..5 {
+            db.log_event(&crate::issues::Actor::Agent("codex:x".into()), None, None, "status", "Working").unwrap();
+        }
+        db.log_event(&crate::issues::Actor::Human, None, None, "project_focus_changed", "Focus on APP").unwrap();
+        let read = read_paged(&db, "claude:coord", &["APP".into()], true, 8, 3).unwrap();
+        assert_eq!(read.lines.len(), 1, "told now, past two quiet pages: {read:?}");
+        assert!(read_paged(&db, "claude:coord", &["APP".into()], true, 8, 3).unwrap().lines.is_empty(), "and only once");
+        // A cap of 0 still tells the update and ends (NIT-597 review).
+        db.log_event(&crate::issues::Actor::Human, None, None, "project_focus_changed", "Focus on APP again").unwrap();
+        assert_eq!(read_paged(&db, "claude:coord", &["APP".into()], true, 0, 3).unwrap().lines.len(), 1);
+        drop(db);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

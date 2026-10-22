@@ -245,6 +245,17 @@ The same text for every agent, with the blanks filled in:
 >
 > Then end. Do not take another issue: Nitely starts a new worker for it.
 
+### Work outside the repo
+
+An issue marked "Changes no repo files:" (NIT-551) has no worktree. Its worker starts at once, with
+no setup, in a scratch folder of its own under the crew's folder (`<data>/crew/<project>/outside/<key>`),
+which the supervisor makes an empty git repository so agents that refuse to run outside one (Codex)
+start there too. The issue is claimed as `<agent>:<that folder>`, the id the worker's MCP server takes
+from its working folder, so its reports keep the claim. Its brief (`outside_brief`) says to do the
+work, close the issue with `update_issue` Done and evidence, and never submit; if the work turns out
+to change repo files, to give the issue its paths (which takes the mark away) and `start_task` it.
+A second attempt finds the first one's files in the same folder (NIT-564).
+
 ## Stop, pause, resume
 
 - **Pause** (app or `nitely crew pause`): no new workers start; running ones finish their issue.

@@ -133,12 +133,22 @@ pub trait Repo {
     fn worktrees(&self, repo: &Path) -> Option<Vec<String>>;
     /// Whether `worktree`'s setup ran and passed (`playbook::setup_passed`).
     fn setup_passed(&self, worktree: &Path) -> bool;
+    /// Makes `folder` an empty repository of its own, for a worker on work outside the repo
+    /// (NIT-564): agents that refuse to run outside a git repository (Codex) run there.
+    fn init(&self, folder: &Path) -> Result<()>;
 }
 
 /// The repository as git has it.
 pub struct GitRepo;
 
 impl Repo for GitRepo {
+    fn init(&self, folder: &Path) -> Result<()> {
+        if !folder.join(".git").exists() {
+            playbook::git(folder, &["init", "-q"])?;
+        }
+        Ok(())
+    }
+
     fn head(&self, worktree: &Path) -> Option<(String, Option<String>)> {
         // The branch and where a rebase keeps the one it rebases, in one git (NIT-508).
         let out = playbook::git(worktree, &["rev-parse", "--abbrev-ref", "HEAD", "--path-format=absolute", "--git-path", "rebase-merge/head-name", "--git-path", "rebase-apply/head-name"]).ok()?;
@@ -652,13 +662,14 @@ impl Supervisor {
             if let Some(why) = why {
                 db.log_event(&self.actor(), Some(&issue.key), None, "picked", &format!("The crew picked {}: {why}", issue.key))?;
             }
-            // Work outside the repo (NIT-551) has no worktree for a worker to start in: a person, or
-            // an agent they start for it, does it and closes it with evidence. One whose branch was
-            // started before it was marked goes the usual way.
+            // Work outside the repo (NIT-551) has no worktree: its worker starts in a scratch folder of
+            // its own, does it and closes it with evidence (NIT-564). One whose branch was started
+            // before it was marked goes the usual way.
             let worktree = playbook.worktree_for(&self.repo_root, &installed[0], &issue);
             let started = worktree.join(".git").exists() || !branch_vendors(&self.repo.branches(&self.repo_root), &issue.key).is_empty();
             if nitely_core::overlap::outside_repo(&issue.body, started) {
-                self.wait(db, &issue.key, "its work is outside the repo, and crew workers work in worktrees".to_string())?;
+                let started = self.begin_outside(db, playbook, &issue, &installed[0]);
+                self.handle_start(db, &issue.key, &installed[0], started, tick)?;
                 continue;
             }
             // A second attempt continues the first one's branch, with the first one's agent: the
@@ -754,6 +765,31 @@ impl Supervisor {
         }
     }
 
+    /// The scratch folder a worker on `key`'s outside-the-repo work runs in (NIT-564): under the
+    /// crew's own folder, outside every repository, one per issue so a second attempt finds the
+    /// first one's files.
+    fn outside_folder(&self, key: &str) -> PathBuf {
+        self.dir.join(&self.project).join("outside").join(key.to_lowercase())
+    }
+
+    /// Starts a worker on work outside the repo (NIT-564): in its scratch folder, made a repository
+    /// of its own, claimed under the id its MCP server takes from that folder, so its reports keep
+    /// the claim and it can start_task its own issue if the work turns out to change repo files.
+    /// There is no worktree to set up, so it launches at once.
+    fn begin_outside(&mut self, db: &mut Db, playbook: &Playbook, issue: &IssueRecord, agent: &str) -> Result<Start> {
+        let folder = self.outside_folder(&issue.key);
+        std::fs::create_dir_all(&folder).with_context(|| format!("creating {}", folder.display()))?;
+        self.repo.init(&folder)?;
+        let agent_id = outside_id(agent, &folder);
+        db.reassign_claim(&issue.key, &agent_id)?;
+        let ts = (self.clock)().ts;
+        let logs = self.dir.join(&self.project);
+        std::fs::create_dir_all(&logs).with_context(|| format!("creating {}", logs.display()))?;
+        let log = logs.join(format!("{ts}-{}-setup.log", issue.key.to_lowercase()));
+        let id = db.crew_worker_started(&self.project, &issue.key, agent, &agent_id, &folder, &log, ts, "setup")?;
+        self.launch_in(db, playbook, id, issue, agent, &agent_id, Some(&folder))
+    }
+
     /// Starts `nitely start` for `issue` and records its pid on the worker's row.
     fn prepare(&self, db: &Db, id: i64, issue: &IssueRecord, agent: &str, log: &Path) -> Result<Box<dyn Process>> {
         let prep = Prepare { nitely: self.nitely.clone(), repo: self.repo_root.clone(), key: issue.key.clone(), vendor: agent.into(), log: log.to_path_buf() };
@@ -841,13 +877,23 @@ impl Supervisor {
 
     /// Starts the agent in `issue`'s worktree, which its setup has made.
     fn launch(&mut self, db: &mut Db, playbook: &Playbook, id: i64, issue: &IssueRecord, agent: &str, agent_id: &str) -> Result<Start> {
-        let worktree = playbook.worktree_for(&self.repo_root, agent, issue);
-        let wanted = playbook.branch_for(agent, issue);
-        let on = self.branch_of(&worktree);
-        if let Some(why) = other_branch(on.as_deref(), &worktree, &wanted, agent, &issue.key) {
-            return Ok(Start::Wait(why));
-        }
-        let branch = on.unwrap_or(wanted);
+        self.launch_in(db, playbook, id, issue, agent, agent_id, None)
+    }
+
+    /// `launch`, or with `outside` in that scratch folder, for work outside the repo (NIT-564).
+    #[allow(clippy::too_many_arguments)]
+    fn launch_in(&mut self, db: &mut Db, playbook: &Playbook, id: i64, issue: &IssueRecord, agent: &str, agent_id: &str, outside: Option<&Path>) -> Result<Start> {
+        let worktree = outside.map(Path::to_path_buf).unwrap_or_else(|| playbook.worktree_for(&self.repo_root, agent, issue));
+        let branch = if outside.is_some() {
+            String::new()
+        } else {
+            let wanted = playbook.branch_for(agent, issue);
+            let on = self.branch_of(&worktree);
+            if let Some(why) = other_branch(on.as_deref(), &worktree, &wanted, agent, &issue.key) {
+                return Ok(Start::Wait(why));
+            }
+            on.unwrap_or(wanted)
+        };
         let agent_id = agent_id.to_string();
 
         let ts = (self.clock)().ts;
@@ -885,7 +931,7 @@ impl Supervisor {
             program,
             args: command[1..].iter().map(|a| fill(a)).collect(),
             cwd: worktree.clone(),
-            brief: brief(issue, &self.project, &worktree, &branch, &self.repo_root, port),
+            brief: if outside.is_some() { outside_brief(issue, &self.project, &worktree, &self.repo_root) } else { brief(issue, &self.project, &worktree, &branch, &self.repo_root, port) },
             log: log.clone(),
             env,
         };
@@ -1466,6 +1512,36 @@ Work only there; never edit or commit in {repo}.
 
 Then end. Do not take another issue: Nitely starts a new worker for it.
 {light}"
+    )
+}
+
+/// The id a worker in `folder` runs under: what its MCP server takes from its working folder.
+fn outside_id(agent: &str, folder: &Path) -> String {
+    format!("{agent}:{}", nitely_core::paths::normalize(&folder.to_string_lossy()))
+}
+
+/// The brief of a worker on work outside the repo (NIT-564): it does the work where it lives (a
+/// design tool, a document, an account), and closes the issue with evidence; it never submits.
+pub fn outside_brief(issue: &IssueRecord, project: &str, folder: &Path, repo: &Path) -> String {
+    let (key, title, folder, repo) = (&issue.key, &issue.title, folder.display(), repo.display());
+    format!(
+        "You are a Nitely crew worker: Nitely started you to work on one issue, {key}, \"{title}\", in project {project}. \
+Nobody is watching this session; nobody will answer a question here.
+
+{key} changes no repo files: its work is done outside the repository (a design, a document, a decision written up). \
+The issue is claimed for you. Your working directory is a scratch folder of its own, {folder}: keep notes and drafts there. \
+Never edit or commit in {repo}.
+
+1. Read the issue with get_issue {key}.
+2. Do the work. Call report with key {key} at each step, one line.
+3. File anything you find but will not do with file_issue.
+4. If only the human can decide something, ask it, move {key} to Needs You, leave a handoff note and stop: do not wait for the answer.
+5. When it is done, close it: update_issue {key} with state Done and evidence (links to what you made, what was decided). Never submit: there is no change to hand in.
+6. If it turns out to need repo changes after all, update_issue {key} with the paths it touches (that takes the outside-repo mark away), then start_task {key}, and work on as a change: commit, submit (without wait), and leave the handoff note.
+7. Before you stop, for any reason, leave a note on {key} with handoff: true: what is done, what is left, what you were unsure about.
+
+Then end. Do not take another issue: Nitely starts a new worker for it.
+"
     )
 }
 
@@ -2796,15 +2872,21 @@ max_per_day = 5
     }
 
     #[test]
-    fn the_crew_passes_over_work_outside_the_repo() {
+    fn the_crew_starts_work_outside_the_repo_in_a_scratch_folder_under_its_own_id() {
         let mut f = fixture(&format!("{GATE}[crew]\nworkers = 1\n"));
         let body = nitely_core::overlap::with_no_repo_changes("wanted", "designs it in the design tool").unwrap();
         f.db.edit_issue("NIT-1", None, Some(&body), &Actor::Human).unwrap();
-        let fake = Fake { installed: vec!["claude"], ..Default::default() };
+        let fake = Fake { installed: vec!["codex"], ..Default::default() };
         let tick = supervisor(&f, &fake).tick(&mut f.db, false).unwrap();
-        assert_eq!(tick.started.iter().map(|w| w.issue.as_str()).collect::<Vec<_>>(), ["NIT-2"], "{tick:?}");
+        assert_eq!(tick.started.iter().map(|w| w.issue.as_str()).collect::<Vec<_>>(), ["NIT-1"], "launched at once, with no setup: {tick:?}");
+        assert!(fake.prepares.borrow().is_empty(), "no worktree to set up");
+        let launch = fake.launches.borrow()[0].clone();
+        assert!(launch.cwd.ends_with("outside/nit-1") && launch.cwd.join(".git").exists(), "a scratch folder that is a repository of its own: {:?}", launch.cwd);
+        assert!(!launch.cwd.starts_with(&f.repo), "outside the repo");
+        assert!(launch.brief.contains("changes no repo files") && launch.brief.contains("Never submit"), "{}", launch.brief);
+        // Claimed under the id its MCP server takes from that folder, so its reports keep the claim.
         let one = f.db.issue("NIT-1").unwrap().unwrap();
-        assert_eq!((one.state.as_str(), one.claimed_by), ("Todo", None), "handed back, unclaimed");
+        assert_eq!(one.claimed_by, Some(outside_id("codex", &launch.cwd)));
     }
 
     #[test]
@@ -2925,6 +3007,10 @@ max_per_day = 5
         }
         fn setup_passed(&self, worktree: &Path) -> bool {
             self.git.borrow().heads.contains_key(worktree)
+        }
+        fn init(&self, folder: &Path) -> Result<()> {
+            std::fs::create_dir_all(folder.join(".git"))?;
+            Ok(())
         }
     }
 
