@@ -51,6 +51,11 @@ pub struct CargoDiscovery {
 #[serde(deny_unknown_fields)]
 struct Policy {
     version: u32,
+    /// Suites every reduced selection runs, whatever changed (NIT-648): the repo's rule tests,
+    /// which read the whole tree (a git run outside run_git, a keychain opened elsewhere, this
+    /// map out of date), so no change reaches them through its own files. As `component/suite`.
+    #[serde(default)]
+    always: Vec<String>,
     components: Vec<Component>,
 }
 
@@ -418,6 +423,10 @@ pub fn select_small(repo: &Path, base: &str, head: &str, policy_commit: &str, fi
         // A deleted file has nothing left to check; what used it is checked where the map reaches it.
         let present: Vec<String> = untested.into_iter().filter(|p| after.contains_key(p)).collect();
         let own = own_checks(&present, |_| false, files, |p| build_input(p).map(|c| c.checks.clone()), basic).map_err(anyhow::Error::msg)?;
+        // Run when the map decided nothing too: the own-file checks never stand alone (NIT-648).
+        if let Some(policy) = &policy {
+            add_always(policy, &after, &objects, &mut small)?;
+        }
         small.full = false;
         for command in own {
             small.checks.push(Check { component: "own-file".into(), suite: None, command, required_tests: vec![], discovery: None, whole_suite: false });
@@ -561,6 +570,11 @@ fn validate(policy: &Policy, before: &Snapshot, after: &Snapshot) -> Result<()> 
                     bail!("invalid Cargo test inventory");
                 }
             }
+        }
+    }
+    for name in &policy.always {
+        if always_suite(policy, name).is_none() {
+            bail!("unknown always suite: {name}");
         }
     }
     for c in &policy.components {
@@ -826,8 +840,33 @@ fn decide(policy_files: &Snapshot, before: &Snapshot, after: &Snapshot, objects:
             }
         }
     }
+    add_always(&policy, after, objects, result)?;
     result.full = false;
     result.reasons.push("Approved input mappings or static JavaScript reverse imports; JavaScript runs whole suites. Discovery is required before Cargo execution. Risk floors and the existing gate still apply.".into());
+    Ok(())
+}
+
+/// The component and suite an `always` entry (`component/suite`) names.
+fn always_suite<'a>(policy: &'a Policy, name: &str) -> Option<(&'a Component, &'a Suite)> {
+    let (component, suite) = name.split_once('/')?;
+    let c = policy.components.iter().find(|c| c.id == component)?;
+    Some((c, c.suites.iter().find(|s| s.id == suite)?))
+}
+
+/// Adds to `result` the checks of the map's `always` suites it does not run already (NIT-648).
+fn add_always(policy: &Policy, after: &Snapshot, objects: &dyn Objects, result: &mut Selection) -> Result<()> {
+    for name in &policy.always {
+        let (c, s) = always_suite(policy, name).with_context(|| format!("unknown always suite: {name}"))?;
+        if result.checks.iter().any(|k| k.component == c.id && k.suite.as_deref() == Some(s.id.as_str())) {
+            continue;
+        }
+        if let Some(cargo) = &s.cargo {
+            result.checks.push(cargo_check(objects, after, c, s, cargo)?);
+        }
+        if let Some(js) = &s.javascript {
+            result.checks.push(Check { component: c.id.clone(), suite: Some(s.id.clone()), command: js.command.clone(), required_tests: js.tests(after), discovery: None, whole_suite: true });
+        }
+    }
     Ok(())
 }
 
@@ -1341,6 +1380,29 @@ mod tests {
         assert!(checks(&["tools/Cargo.toml"]).unwrap_err().contains("build, lock or policy"));
     }
 
+    /// NIT-648: the map's `always` suites run with every reduced selection, the mapped one and a
+    /// small change's own-file checks alike, whatever the change touched.
+    #[test]
+    fn the_always_suites_run_whatever_a_change_touches() {
+        const MAP: &str = "version = 1\nalways = ['web/rules']\n[[components]]\nid = 'web'\nroots = ['src/', 'tools/']\nchecks = ['npm run build']\n[[components.suites]]\nid = 'unit'\ninputs = ['src/lib/']\n[components.suites.javascript]\ncommand = 'npm test'\ntest_files = ['src/lib/a.test.ts']\n[[components.suites]]\nid = 'rules'\ninputs = ['src/rules.test.ts']\n[components.suites.javascript]\ncommand = 'node --test src/rules.test.ts'\ntest_files = ['src/rules.test.ts']\n";
+        let repo = crate::test_repo::copy("affected-always", |dir| {
+            init(dir, &[(POLICY_PATH, MAP), ("src/lib/a.ts", "export const a = 1;"), ("src/lib/a.test.ts", "import {a} from './a';"), ("src/rules.test.ts", "export const rules = 1;"), ("tools/gen.py", "print(1)\n")]);
+        });
+        let base = g(&repo, &["rev-parse", "HEAD"]);
+        let rules = |s: &Selection| s.checks.iter().any(|c| c.suite.as_deref() == Some("rules") && c.command == "node --test src/rules.test.ts");
+        // A mapped change: its own suite, and the rules.
+        std::fs::write(repo.join("src/lib/a.ts"), "export const a = 2;").unwrap();
+        g(&repo, &["commit", "-qam", "a"]);
+        let mapped = select(&repo, &base, "HEAD").unwrap();
+        assert!(!mapped.full && rules(&mapped), "{mapped:?}");
+        // A small change only its own check covers: that check, and the rules.
+        g(&repo, &["reset", "-q", "--hard", &base]);
+        std::fs::write(repo.join("tools/gen.py"), "print(2)\n").unwrap();
+        g(&repo, &["commit", "-qam", "gen"]);
+        let own = select_small(&repo, &base, "HEAD", &base, &BTreeMap::new(), &[]).unwrap();
+        assert!(!own.full && rules(&own) && own.checks.iter().any(|c| c.command == "nitely check-file \"tools/gen.py\""), "{own:?}");
+    }
+
     /// NIT-645: a file outside every component's roots that a suite's inputs name is that suite's,
     /// so a small change to it never runs only its own check.
     #[test]
@@ -1704,7 +1766,7 @@ test_ids = ["adds"]
         /// As `the_repos_own_map_selects_the_frontend_and_keeps_everything_else_full`, on this
         /// checkout's own tree and map, with each candidate made in memory.
         #[test]
-        fn the_repos_own_map_decides_in_memory() {
+        fn repo_rule_the_repos_own_map_decides_in_memory() {
             let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
             let base = snapshot(&repo, "HEAD").unwrap();
             let paths = base.iter().map(|(p, e)| (e.oid.clone(), p.clone())).collect();
@@ -1747,11 +1809,15 @@ test_ids = ["adds"]
 "))]),
             ];
 
+            // The rule tests run with every reduced selection (NIT-648); the asserts below about
+            // what else a change runs set them apart.
+            const RULES: &str = "cargo test --manifest-path crates/nitely-core/Cargo.toml -p nitely-core --lib repo_rule";
+            let rules = |c: &&Check| c.suite.as_deref() == Some("repo-rules");
             for (path, after) in frontend.iter().zip(&fronts) {
                 let s = reduced(&base, after, &m);
                 assert_eq!(s.components, ["web"], "{path}");
                 let commands: Vec<&str> = s.checks.iter().map(|c| c.command.as_str()).collect();
-                assert_eq!(commands, ["npm run build", "npm test"], "{path}");
+                assert_eq!(commands, ["npm run build", "npm test", RULES], "{path}");
             }
             let s = reduced(&base, &new_test, &m);
             assert!(s.checks.iter().any(|c| c.required_tests.iter().any(|t| t == "src/rules/new.test.ts")), "{:?}", s.checks);
@@ -1765,13 +1831,14 @@ test_ids = ["adds"]
                 let s = reduced(&base, after, &m);
                 assert_eq!(s.components, [component], "{path}");
                 assert!(s.checks.iter().any(|c| c.command == clippy), "{path}");
-                assert!(s.checks.iter().filter(|c| c.discovery.is_some()).all(|c| c.command.contains(&format!("-p {package}"))), "{path}: {:?}", s.checks);
-                assert!(!s.checks.iter().any(|c| c.command.contains("nitely-core")), "{path}");
+                assert!(s.checks.iter().filter(|c| c.discovery.is_some() && !rules(c)).all(|c| c.command.contains(&format!("-p {package}"))), "{path}: {:?}", s.checks);
+                assert!(!s.checks.iter().filter(|c| !rules(c)).any(|c| c.command.contains("nitely-core")), "{path}");
+                assert!(s.checks.iter().any(|c| c.command == RULES), "{path}");
             }
             let s = reduced(&base, &crate_changes[2], &m);
             assert_eq!(s.components, ["crew", "cli", "app", "leaderboard"]);
             assert!(s.checks.iter().any(|c| c.command == "cargo clippy -p nitely-crew -- -D warnings"), "{:?}", s.checks);
-            assert!(!s.checks.iter().any(|c| c.command.contains("nitely-core")), "{:?}", s.checks);
+            assert!(!s.checks.iter().filter(|c| !rules(c)).any(|c| c.command.contains("nitely-core")), "{:?}", s.checks);
             // A core change runs the core and every crate above it, with clippy per crate, instead
             // of the whole-workspace fallback (NIT-581).
             let s = reduced(&base, &core, &m);

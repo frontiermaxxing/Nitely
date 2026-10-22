@@ -579,7 +579,7 @@ taken from this table. Nothing is deleted until Andrew approves.
 
 | Old test | s | Covered by |
 | --- | ---: | --- |
-| affected_tests::the_repos_own_map_selects_the_frontend_and_keeps_everything_else_full | 64 | affected_tests::tests::decided::the_repos_own_map_decides_in_memory |
+| affected_tests::the_repos_own_map_selects_the_frontend_and_keeps_everything_else_full | 64 | affected_tests::tests::decided::repo_rule_the_repos_own_map_decides_in_memory |
 | affected_tests::dynamic_import_missing_consumer_and_candidate_policy_fail_closed | 15 | decided:: test of the same name |
 | affected_tests::a_build_script_reduces_only_with_its_inputs_approved_and_unchanged | 15 | decided:: test of the same name |
 | affected_tests::consumers_outside_component_and_unknown_policy_fields_are_full | 10 | decided:: test of the same name |
