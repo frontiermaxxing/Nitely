@@ -151,6 +151,34 @@ pub fn blocking(findings: &[Finding], accepted: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Whether a goal item lands into its goal branch after its item review (NIT-563): an advisory
+/// review never holds it, and a blocking one does while a P0/P1 finding is not accepted.
+pub fn item_lands(mode: crate::project_modes::ItemReview, findings: &[Finding], accepted: &[String]) -> bool {
+    mode != crate::project_modes::ItemReview::Blocking || blocking(findings, accepted).is_empty()
+}
+
+/// What the agent of a goal item its blocking item review sent back is told (NIT-563): fix and
+/// submit again, or, once the rounds stopped converging, what `stalled_reviews` says (NIT-568).
+pub fn item_sent_back(stalled: bool, stalled_reviews: Option<StalledReviews>) -> &'static str {
+    next_state(&Outcome { stalled, stalled_reviews, changes: true, ..Default::default() }).1
+}
+
+/// Whether a goal item may land into its goal branch, given its mode's item review and its latest
+/// review, when there is one: whether it reviewed this very patch, and whether it passes (its P0/P1
+/// findings fixed or accepted). A blocking item review holds a direct `land` as it holds a submit
+/// (NIT-563); an advisory one never holds it.
+pub fn item_land_check(mode: crate::project_modes::ItemReview, latest: Option<(bool, bool)>) -> Result<(), &'static str> {
+    if mode != crate::project_modes::ItemReview::Blocking {
+        return Ok(());
+    }
+    match latest {
+        None => Err("its blocking item review has not run: submit it, and it lands when the review passes"),
+        Some((false, _)) => Err("its item review was of another version of the change: submit it again"),
+        Some((true, false)) => Err("its blocking item review asked for changes that are neither fixed nor accepted"),
+        Some((true, true)) => Ok(()),
+    }
+}
+
 /// A review that asked for changes only in findings the person accepted passes.
 pub fn accepted_only(findings: &[Finding], accepted: &[String]) -> bool {
     blocking(findings, accepted).is_empty()
@@ -273,6 +301,33 @@ mod tests {
         assert_eq!(land_state("In Progress", "In Review", Meanwhile::Accepted), Some("In Review"), "the kept state lands");
         assert_eq!(land_state("In Progress", "Needs You", Meanwhile::Unverified), None, "the app lands what only it can check");
         assert_eq!(land_state("In Review", "In Progress", Meanwhile::No), Some("In Review"));
+    }
+
+    /// NIT-563: what an item review does to a goal item's land into its goal branch.
+    #[test]
+    fn an_advisory_item_review_never_holds_an_item_and_a_blocking_one_holds_it_for_its_p1s() {
+        use crate::project_modes::ItemReview::*;
+        let found = [finding(1, "Drops a row: rows.rs"), finding(2, "Wordy: rows.rs")];
+        assert!(item_lands(Advisory, &found, &[]), "advisory: noted, and it lands");
+        assert!(!item_lands(Blocking, &found, &[]), "blocking: the P1 sends it back");
+        assert!(item_lands(Blocking, &found, &["Drops a row: rows.rs".to_string()]), "accepted as it is");
+        assert!(item_lands(Blocking, &found[1..], &[]), "a P2 never holds it");
+        assert!(item_lands(Off, &found, &[]));
+    }
+
+    /// NIT-563's rework: a direct land meets the blocking item review a submit does, and a sent-back
+    /// item whose rounds stalled is told what the mode says, as a change is.
+    #[test]
+    fn a_blocking_item_review_holds_a_direct_land_and_stalled_item_rounds_go_as_a_changes_do() {
+        use crate::project_modes::ItemReview::*;
+        assert!(item_land_check(Advisory, None).is_ok() && item_land_check(Off, Some((false, false))).is_ok());
+        assert!(item_land_check(Blocking, None).unwrap_err().contains("has not run"));
+        assert!(item_land_check(Blocking, Some((false, true))).unwrap_err().contains("another version"));
+        assert!(item_land_check(Blocking, Some((true, false))).is_err());
+        assert!(item_land_check(Blocking, Some((true, true))).is_ok());
+        assert_eq!(item_sent_back(true, Some(StalledReviews::Fix)), SPLIT);
+        assert_eq!(item_sent_back(true, Some(StalledReviews::Ask)), ASKED_KEEP_FIXING);
+        assert!(item_sent_back(false, Some(StalledReviews::Fix)).contains("Fix them, commit, and submit again"));
     }
 
     fn finding(priority: u8, text: &str) -> Finding {
