@@ -23,6 +23,7 @@ const FG_3: Rgb = [0x7c, 0x7b, 0x75];
 const LIVE: Rgb = [0x3e, 0xc9, 0xa7];
 
 /// What the card shows, already worded.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Card {
     pub name: String,
     /// Up to two letters, for the picture's place: the card never fetches the picture itself.
@@ -35,6 +36,19 @@ pub struct Card {
     pub stats: Vec<(String, String)>,
     pub weekly: Vec<u64>,
     pub footer: String,
+}
+
+impl Card {
+    /// A fingerprint of everything the card shows: it changes when their rank, period or numbers
+    /// do, whoever's send moved them, so links to the card can name the drawing they want.
+    pub fn version(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        // SipHash with fixed keys: the same card has the same version across restarts.
+        #[allow(deprecated)]
+        let mut h = std::hash::SipHasher::new();
+        self.hash(&mut h);
+        h.finish()
+    }
 }
 
 struct Canvas {

@@ -28,6 +28,8 @@ export interface Profile {
   next_send_at: number | null;
   /** When this week's entry closes: its Sunday-evening send (seconds). */
   week_closes_at: number | null;
+  /** Your public page (NIT-632), once a report is on the board; null before. */
+  page: string | null;
 }
 
 /** `leaderboard_status`, as much of it as the page reads. */
@@ -40,12 +42,40 @@ interface Status {
   id?: string | null;
   next_send_at?: number | null;
   week_closes_at?: number | null;
+  /** The Leaderboard service this install sends to. */
+  url?: string;
+}
+
+/** The public service; its people's pages are on nitely.net, which passes /u/ on to it. */
+const PUBLIC_SERVICE = "https://api.nitely.net";
+
+/**
+ * Where your page is: nitely.net/u/<id> on the public service, and on a service of your own its
+ * own /u/<id>, which it serves itself. Null until a report of yours is on the board.
+ */
+export function pageOf(url: string | undefined, id: string | null | undefined, sent: boolean): string | null {
+  if (!id || !sent) return null;
+  const service = (url ?? PUBLIC_SERVICE).trim().replace(/\/+$/, "");
+  return service === PUBLIC_SERVICE ? `https://nitely.net/u/${id}` : `${service}/u/${id}`;
 }
 
 function profileOf(s: Status): Profile | null {
   if (!s.joined) return null;
   const p = s.profile;
-  return { display_name: p.display_name, github: p.github ?? null, x: p.x ?? null, website: p.website ?? null, avatar: p.avatar ?? null, projects: s.projects, last_sent_week: s.last_sent_week ?? null, last_error: s.last_error ?? null, id: s.id ?? null, next_send_at: s.next_send_at ?? null, week_closes_at: s.week_closes_at ?? null };
+  return {
+    display_name: p.display_name,
+    github: p.github ?? null,
+    x: p.x ?? null,
+    website: p.website ?? null,
+    avatar: p.avatar ?? null,
+    projects: s.projects,
+    last_sent_week: s.last_sent_week ?? null,
+    last_error: s.last_error ?? null,
+    id: s.id ?? null,
+    next_send_at: s.next_send_at ?? null,
+    week_closes_at: s.week_closes_at ?? null,
+    page: pageOf(s.url, s.id, !!s.last_sent_week),
+  };
 }
 
 // One copy for the whole app (the sidebar's tag and the page read the same), undefined until read.
@@ -55,7 +85,26 @@ const listeners = new Set<() => void>();
 const changed = (p: Profile | null) => {
   current = p;
   listeners.forEach((l) => l());
+  readAgainLater(p);
 };
+
+// The app sends on its own once a send is due (src-tauri's hourly check), and nothing tells this
+// page: so the status is read again a few minutes after the next send is due, and every few
+// minutes while it stays due, and "next send" moves on once it went.
+let again: ReturnType<typeof setTimeout> | undefined;
+function readAgainLater(p: Profile | null) {
+  clearTimeout(again);
+  if (!p?.next_send_at) return;
+  const wait = Math.max(p.next_send_at * 1000 - Date.now(), 0) + 5 * 60_000;
+  again = setTimeout(
+    () => {
+      // Nobody is looking: the next look reads it fresh.
+      if (listeners.size) read();
+      else current = undefined;
+    },
+    Math.min(wait, 2 ** 31 - 1),
+  );
+}
 
 /** Where an earlier build of this page kept your choices; moved into the data folder once. */
 const OLD_KEY = "nitely.leaderboard.profile";

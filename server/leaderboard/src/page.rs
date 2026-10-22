@@ -33,7 +33,8 @@ pub fn render(person: Option<&Value>, id: &str, site: &str) -> String {
                 percent(h.entry["first_pass_rate"].as_f64()),
                 hours(h.entry["agent_hours"].as_f64().unwrap_or(0.0)),
             );
-            let image = format!("{url}/card.png?v={}", p["updated_at"].as_i64().unwrap_or(0));
+            // Named by what it shows, so a preview fetches a new card once their rank or numbers move.
+            let image = format!("{url}/card.png?v={:x}", card(p, site).map_or(0, |c| c.version()));
             [
                 format!("<title>{}</title>", escape(&title)),
                 meta("name", "description", &description),
@@ -58,7 +59,11 @@ pub fn render(person: Option<&Value>, id: &str, site: &str) -> String {
     };
     // Inside <script type="application/json">: only `<` could end it early, so none is left raw.
     let data = person.map_or("null".to_string(), |p| p.to_string()).replace('<', "\\u003c");
-    TEMPLATE.replacen("{{head}}", &head, 1).replacen("{{person}}", &data, 1)
+    // One pass over the template's own markers: nothing filled in is searched again, so a name
+    // that reads like a marker stays text.
+    let (before, rest) = TEMPLATE.split_once("{{head}}").expect("site/u/index.html has {{head}}");
+    let (middle, after) = rest.split_once("{{person}}").expect("site/u/index.html has {{person}} after {{head}}");
+    format!("{before}{head}{middle}{data}{after}")
 }
 
 /// The card for `person`, worded from its headline period.
