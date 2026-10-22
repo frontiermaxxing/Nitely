@@ -74,8 +74,13 @@ pub const ASKED_KEEP_FIXING: &str = "The review rounds are not converging, so Ni
 /// What the person reads when an issue's review rounds stalled under `stalled_reviews = "fix"`:
 /// a notice, which nothing waits on.
 pub fn stalled_notice(key: &str, why: &str) -> String {
-    format!("{key}: the review rounds are not converging ({why}). Its agent splits the change: what the reviews agree on lands, and the open findings become a follow-up issue in the same goal. Nothing waits on you.")
+    format!("{key}{STALLED_NOTICE_START}{why}). Its agent splits the change: what the reviews agree on lands, and the open findings become a follow-up issue in the same goal.{STALLED_NOTICE_END}")
 }
+
+/// How a stalled-rounds notice starts after its issue's key and ends (`stalled_notice`): the Inbox
+/// finds the notices by them (`Db::notices`, NIT-570).
+pub const STALLED_NOTICE_START: &str = ": the review rounds are not converging (";
+pub const STALLED_NOTICE_END: &str = " Nothing waits on you.";
 
 /// Where an issue goes when the person answers a question about one of its findings (NIT-568):
 /// `accepted`, with `blocking_left` other P0/P1 findings of the latest review not accepted; else
