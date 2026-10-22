@@ -1725,12 +1725,12 @@ mod tests {
         devices_in_tests(Some(sign_list(&app, vec![])));
         assert!(db.signed_acceptances(&c, &public).unwrap().is_empty(), "unpaired: its acceptances no longer count");
         devices_in_tests(Some(list.clone()));
-        // Sent back from the phone: it stays a defect, and the issue goes back to the agents.
+        // Sent back from the phone: it stays a defect, and the agent fixing it goes on as it was.
         let other = db.request_acceptance(&c, "2", "It always worked that way.", None, &agent).unwrap();
         let t = now();
         let (status, _) = p.post(&base, "/phone/api/decline", json!({ "ask": other.id, "why": "a real bug", "time": t, "signature": p.sign(&answer_message(other.id, "a real bug", t)) }));
         assert_eq!(status, 200);
-        assert_eq!(db.issue(&c).unwrap().unwrap().state, "Todo");
+        assert_eq!(db.issue(&c).unwrap().unwrap().state, "In Progress");
 
         // Another key under this device's id can do none of it.
         p.key = ed25519_dalek::SigningKey::from_bytes(&new_secret().unwrap());

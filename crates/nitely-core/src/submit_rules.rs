@@ -5,6 +5,7 @@
 //! job's process is gone. submit.rs and submit_job.rs gather the facts with git, the reviewer and
 //! the database and do what these say; their tests need none of them.
 
+use crate::project_modes::StalledReviews;
 use crate::review::{Finding, Review};
 
 /// What a submit came to, for where its issue goes next.
@@ -12,6 +13,8 @@ use crate::review::{Finding, Review};
 pub struct Outcome {
     /// The review rounds are not converging.
     pub stalled: bool,
+    /// What the mode makes of that (NIT-568); either way the agent goes on.
+    pub stalled_reviews: Option<StalledReviews>,
     /// The review asked for changes (P0 or P1 findings not accepted).
     pub changes: bool,
     /// It was to be pushed and the push failed.
@@ -32,10 +35,12 @@ pub struct Outcome {
 /// The issue's next state, and what its agent should do now.
 pub fn next_state(o: &Outcome) -> (&'static str, &'static str) {
     if o.stalled {
-        // Another round would cost as much again and likely end the same: a person decides each open
-        // finding (accept it as it is, signed, or send it back). The issue stays the agents' work: a
-        // change that failed review is never the person's own task to mark done.
-        ("Needs You", "The review rounds are not converging, so Nitely asked the human to decide each open P0/P1 finding in the Inbox: accept it as it is, or send it back to be fixed. Stop working on it and pick up other work. If you have reasoning for a finding (a trade-off they decided, say), add it in a `note` on the issue: they read it beside the finding.")
+        // Another round would cost as much again and likely end the same. The agent is never held
+        // for it (NIT-568): an open question holds the land, not the work.
+        match o.stalled_reviews.unwrap_or(StalledReviews::Ask) {
+            StalledReviews::Fix => ("In Progress", SPLIT),
+            StalledReviews::Ask => ("In Progress", ASKED_KEEP_FIXING),
+        }
     } else if o.changes {
         ("In Progress", "The review found P0 or P1 problems. Fix them, commit, and submit again. If one is a trade-off the human decided or should decide, not a defect (they ruled out what it asks for), call request_acceptance with it and your reasoning instead of looping on it.")
     } else if o.push_failed {
@@ -57,6 +62,34 @@ pub fn next_state(o: &Outcome) -> (&'static str, &'static str) {
         ("In Review", "Review disabled for this project. The gate passed and no human approval is needed. Call land to put it on the integration branch.")
     } else {
         ("In Review", "The review passed and no human approval is needed. Call land to put it on the integration branch.")
+    }
+}
+
+/// What an agent is told when its review rounds stalled under `stalled_reviews = "fix"`.
+pub const SPLIT: &str = "The review rounds are not converging, so split the change: keep what the reviews agree on, take out what the open P0/P1 findings are about, and file those findings as a follow-up issue in the same goal (file_issue, with the findings as its body). Then commit and submit the smaller change. The person is told, and nothing waits on them.";
+
+/// What an agent is told when its review rounds stalled under `stalled_reviews = "ask"`.
+pub const ASKED_KEEP_FIXING: &str = "The review rounds are not converging, so Nitely asked the human to decide each open P0/P1 finding in the Inbox: accept it as it is, or send it back. Keep fixing meanwhile: a finding a later review no longer raises closes its question by itself, and land waits only until each one is fixed or accepted. If you have reasoning for a finding (a trade-off they decided, say), add it in a `note` on the issue: they read it beside the finding.";
+
+/// What the person reads when an issue's review rounds stalled under `stalled_reviews = "fix"`:
+/// a notice, which nothing waits on.
+pub fn stalled_notice(key: &str, why: &str) -> String {
+    format!("{key}: the review rounds are not converging ({why}). Its agent splits the change: what the reviews agree on lands, and the open findings become a follow-up issue in the same goal. Nothing waits on you.")
+}
+
+/// Where an issue goes when the person answers a question about one of its findings (NIT-568):
+/// `accepted`, with `blocking_left` other P0/P1 findings of the latest review not accepted; else
+/// sent back. A send-back leaves an issue its agent is working on (`state`, In Progress) as it is,
+/// since it was already fixing; one nobody holds goes to Todo for the next agent. An acceptance
+/// with findings left keeps it with the agent; with none, it goes on as a passed review does:
+/// `needs_approval` when a person must approve it (or only the app can check the acceptance).
+pub fn after_answer(accepted: bool, state: &str, blocking_left: usize, needs_approval: bool) -> &'static str {
+    match (accepted, blocking_left, needs_approval) {
+        (false, _, _) if state == "In Progress" => "In Progress",
+        (false, _, _) => "Todo",
+        (true, 1.., _) => "In Progress",
+        (true, 0, true) => "Needs You",
+        (true, 0, false) => "In Review",
     }
 }
 
@@ -139,7 +172,10 @@ mod tests {
         let state = |o: Outcome| next_state(&o).0;
         let base = Outcome::default();
         assert_eq!(state(base), "In Review");
-        assert_eq!(state(Outcome { stalled: true, changes: true, push_failed: true, ..base }), "Needs You", "stalled rounds go to a person first");
+        let stalled = Outcome { stalled: true, changes: true, push_failed: true, ..base };
+        assert_eq!(state(stalled), "In Progress", "stalled rounds never hold the agent");
+        assert_eq!(next_state(&Outcome { stalled_reviews: Some(StalledReviews::Fix), ..stalled }).1, SPLIT);
+        assert_eq!(next_state(&Outcome { stalled_reviews: Some(StalledReviews::Ask), ..stalled }).1, ASKED_KEEP_FIXING);
         assert_eq!(state(Outcome { changes: true, push_failed: true, human: true, ..base }), "In Progress");
         assert!(next_state(&Outcome { changes: true, ..base }).1.contains("request_acceptance"));
         let failed_push = next_state(&Outcome { push_failed: true, approval_stands: true, human: true, ..base });
@@ -155,6 +191,17 @@ mod tests {
         assert!(next_state(&Outcome { review_disabled: true, gate_skipped: true, ..base }).1.contains("unverified"));
         assert!(next_state(&Outcome { review_disabled: true, ..base }).1.starts_with("Review disabled"));
         assert!(next_state(&base).1.starts_with("The review passed"));
+    }
+
+    /// NIT-568: an answer about a finding never takes the issue from an agent fixing it.
+    #[test]
+    fn an_answer_keeps_a_working_agent_on_its_issue_and_an_acceptance_goes_on_when_nothing_is_left() {
+        assert_eq!(after_answer(false, "In Progress", 2, false), "In Progress", "sent back: it was already fixing");
+        assert_eq!(after_answer(false, "In Review", 0, false), "Todo", "sent back, nobody on it: for the next agent");
+        assert_eq!(after_answer(true, "In Progress", 1, false), "In Progress", "another finding still to fix or decide");
+        assert_eq!(after_answer(true, "In Progress", 0, true), "Needs You", "it waits for the person's approval");
+        assert_eq!(after_answer(true, "In Progress", 0, false), "In Review");
+        assert!(stalled_notice("APP-7", "6 review rounds in a row asked for changes").contains("Nothing waits on you"));
     }
 
     fn finding(priority: u8, text: &str) -> Finding {

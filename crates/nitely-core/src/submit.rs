@@ -464,7 +464,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     };
     let outcome = if pb.land.by.by_nitely() && verdict != "changes" { format!("{outcome}; it {}", pb.land.by.describe()) } else { outcome };
     let outcome = match &stalled {
-        Some(why) => format!("{outcome}. The review rounds are not converging, so it is handed to you: {why}"),
+        Some(why) => format!("{outcome}. The review rounds are not converging: {why}"),
         None => outcome,
     };
     // The full description is on the pull request and in the app's review section.
@@ -472,8 +472,10 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
 
     let push_failed = !local_only && !out.pushed;
     let by_nitely = pb.land.by.by_nitely();
+    let stalled_reviews = crate::project_modes::for_issue(db, &issue.key)?.map(|m| m.options()).unwrap_or_else(crate::project_modes::builtin).stalled_reviews;
     let (state, next) = crate::submit_rules::next_state(&crate::submit_rules::Outcome {
         stalled: stalled.is_some(),
+        stalled_reviews,
         changes: verdict == "changes",
         push_failed,
         approval_stands: out.approval_stands,
@@ -484,9 +486,21 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         review_disabled: out.review_disabled,
         gate_skipped: out.gate.skipped.is_some(),
     });
+    // Stalled rounds never hold the agent (NIT-568): under `ask` the person decides each open
+    // finding while it goes on fixing; under `fix` they are told it splits the change.
     if let Some(why) = &stalled {
-        out.state = db.ask_to_decide_findings(&issue.key, why, actor)?;
-    } else if issue.state != state && issue.origin == "nitely" {
+        match stalled_reviews.unwrap_or(crate::project_modes::StalledReviews::Ask) {
+            crate::project_modes::StalledReviews::Ask => {
+                db.ask_to_decide_findings(&issue.key, why, actor)?;
+            }
+            crate::project_modes::StalledReviews::Fix => {
+                db.add_note(&issue.key, &crate::submit_rules::stalled_notice(&issue.key, why), "note", actor)?;
+            }
+        }
+    }
+    let now_in = db.issue(&issue.key)?.map(|i| i.state).unwrap_or_else(|| issue.state.clone());
+    out.state = now_in.clone();
+    if now_in != state && issue.origin == "nitely" {
         out.state = db.move_issue(&issue.key, state, None, None, actor)?.state;
     }
     out.next = next.into();
@@ -1243,6 +1257,7 @@ files=$(git diff main...HEAD --name-only)
 money=no; case "$files" in *billing*) money=yes;; esac
 case "$prompt" in
   *"PREVIOUS <n>"*) case "$files" in
+       *unstuck*) echo "PREVIOUS 1: fixed"; echo "VERDICT: clean";;
        *stuck*) echo "PREVIOUS 1: open stuck.txt:1 \`let stuck = 1;\` is still never read"; echo "VERDICT: clean";;
        *stale*) echo "PREVIOUS 1: open stale.txt:1 \`let stale = 1;\` is still never read"; echo "VERDICT: clean";;
        *worded*) echo "PREVIOUS 1: open worded.txt:1 \`let worded = 1;\` is still never read"; echo "VERDICT: clean";;
@@ -1527,8 +1542,8 @@ reason = "money logic"
     #[test]
     fn a_p1_that_two_rounds_leave_open_goes_to_a_person() {
         let mut f = fixture();
-        // A P1 that two rounds of fixes leave open sends the issue to a person instead of a
-        // fourth round.
+        // A P1 that two rounds of fixes leave open goes to a person instead of a fourth round, and
+        // its agent goes on (NIT-568: a project with no mode asks, as Release does).
         let (issue, wt) = f.started("Stuck fix");
         std::fs::write(wt.join("stuck.txt"), "let stuck = 1;").unwrap();
         sh(&wt, &["add", "."]);
@@ -1537,7 +1552,7 @@ reason = "money logic"
         let stuck = "Stuck: stuck.txt, the x is never read";
         round(&f, &issue.key, &wt, "changes", &[(1, stuck, false)], 2);
         round(&f, &issue.key, &wt, "changes", &[(1, stuck, true)], 1);
-        assert_eq!(f.submit(&wt, true).unwrap().state, "Needs You");
+        assert_eq!(f.submit(&wt, true).unwrap().state, "In Progress");
         let last: String = f
             .db
             .conn
@@ -1547,7 +1562,7 @@ reason = "money logic"
         // A decision about the change, not the person's own work (NIT-220): the owner stays the agent,
         // and the open finding waits in the Inbox as a request to accept it, or send it back.
         let stuck = f.db.issue(&issue.key).unwrap().unwrap();
-        assert_eq!((stuck.owner.as_str(), stuck.state.as_str()), ("agent", "Needs You"));
+        assert_eq!((stuck.owner.as_str(), stuck.state.as_str()), ("agent", "In Progress"));
         let requests: Vec<crate::issues::Ask> = f.db.open_asks().unwrap().into_iter().filter(|a| a.issue_key.as_deref() == Some(issue.key.as_str())).collect();
         assert_eq!(requests.len(), 1, "{requests:?}");
         assert!(requests[0].finding.as_ref().is_some_and(|f| f.priority == 1 && f.text.starts_with("Stuck: stuck.txt")), "{requests:?}");
@@ -1558,6 +1573,30 @@ reason = "money logic"
         // Sent back, the count starts over: the next round that carries it is not escalated.
         f.db.decline_finding(requests[0].id, "fix it properly", "").unwrap();
         assert_eq!(f.submit(&wt, true).unwrap().state, "In Progress");
+    }
+
+    /// NIT-568: the question about a finding holds the land, never the agent, and a fix closes it.
+    #[test]
+    fn a_fix_closes_the_question_about_its_finding_without_an_answer() {
+        let mut f = fixture();
+        let (issue, wt) = f.started("Stuck once");
+        std::fs::write(wt.join("stuck.txt"), "let stuck = 1;").unwrap();
+        sh(&wt, &["add", "."]);
+        sh(&wt, &["commit", "-q", "-m", "stuck"]);
+        assert_eq!(f.submit(&wt, true).unwrap().state, "In Progress");
+        // The agent asks to have it accepted; the issue stays with it, and the review still blocks.
+        let ask = f.db.request_acceptance(&issue.key, "1", "The x is read by the next change.", None, &f.actor).unwrap();
+        assert_eq!(f.db.issue(&issue.key).unwrap().unwrap().state, "In Progress", "the question holds the land, not the agent");
+        let latest = f.db.reviews(&issue.key).unwrap().remove(0);
+        assert!(!f.db.review_passes(&issue.key, &latest).unwrap(), "land waits for a fix or an acceptance");
+        // It fixes it meanwhile; the next round no longer raises it, and the question closes unanswered.
+        std::fs::write(wt.join("unstuck.txt"), "read(stuck);").unwrap();
+        sh(&wt, &["add", "."]);
+        sh(&wt, &["commit", "-q", "-m", "read it"]);
+        assert_eq!(f.submit(&wt, true).unwrap().state, "In Review");
+        let closed = f.db.ask(ask.id).unwrap().unwrap();
+        assert_eq!((closed.answer, closed.closed.as_deref()), (None, Some(crate::accept::FIXED)));
+        assert!(f.db.open_asks().unwrap().iter().all(|a| a.issue_key.as_deref() != Some(issue.key.as_str())), "it left the Inbox");
     }
 
     #[test]
