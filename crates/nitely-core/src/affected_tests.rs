@@ -196,6 +196,17 @@ pub(crate) trait Objects {
     fn texts(&self, oids: &[String], max: usize, total: usize) -> Result<Option<HashMap<String, crate::blobs::Blob>>>;
 }
 
+/// Changed files a component owns that none of its tests reach: why `decide` keeps the full gate,
+/// in a form `select_small` can act on (NIT-636 review).
+#[derive(Debug)]
+struct Untested(Vec<String>, String);
+impl std::fmt::Display for Untested {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.1)
+    }
+}
+impl std::error::Error for Untested {}
+
 /// A repo's objects. Each text is read once per selection, however many suites share a manifest.
 struct GitObjects<'a> {
     repo: &'a Path,
@@ -369,20 +380,41 @@ pub fn select_small(repo: &Path, base: &str, head: &str, policy_commit: &str, fi
             None => None,
         };
         let build_input = |p: &str| policy.iter().flat_map(|pol| &pol.components).find(|c| c.build_inputs.iter().any(|i| under(p, i)));
-        let mapped = |p: &str| policy.as_ref().is_some_and(|pol| owner(pol, p).is_some()) && build_input(p).is_none();
         let changed: Vec<String> = before.keys().chain(after.keys())
             .filter(|p| before.get(*p).map(|e| (&e.oid, &e.mode)) != after.get(*p).map(|e| (&e.oid, &e.mode)))
             .cloned().collect::<BTreeSet<_>>().into_iter().collect();
-        let own = own_checks(&changed, mapped, files, |p| build_input(p).map(|c| c.checks.clone()), basic).map_err(anyhow::Error::msg)?;
+        // A protected file keeps the full gate, deleted or not.
+        if let Some(p) = changed.iter().find(|p| protected(p)) {
+            bail!("{p} is a build, lock or policy file");
+        }
+        // What no test reaches: files no component owns and build inputs, then whatever the map
+        // says none of its tests reach, until it decides the rest (NIT-636 review).
+        let mut untested: BTreeSet<String> = changed.iter()
+            .filter(|p| policy.as_ref().is_none_or(|pol| owner(pol, p).is_none()) || build_input(p).is_some())
+            .cloned().collect();
         let mut small = Selection { full: true, components: vec![], checks: vec![], reasons: vec![], ..selection.clone() };
-        if changed.iter().any(|p| mapped(p)) {
+        while changed.iter().any(|p| !untested.contains(p)) {
             // The mapped files alone: the others as they were, so the map decides only what it owns.
             let mut rest = after.clone();
-            for p in changed.iter().filter(|p| !mapped(p)) {
+            for p in &untested {
                 match before.get(p) { Some(e) => { rest.insert(p.clone(), e.clone()); } None => { rest.remove(p); } }
             }
-            decide(&policy_files, &before, &rest, &objects, &mut small)?;
+            small = Selection { full: true, components: vec![], checks: vec![], reasons: vec![], ..selection.clone() };
+            match decide(&policy_files, &before, &rest, &objects, &mut small) {
+                Ok(()) => break,
+                Err(e) => match e.downcast_ref::<Untested>() {
+                    Some(Untested(paths, _)) if paths.iter().any(|p| !untested.contains(p)) => {
+                        untested.extend(paths.iter().cloned());
+                        // What the failed decision chose so far does not stand.
+                        small = Selection { full: true, components: vec![], checks: vec![], reasons: vec![], ..selection.clone() };
+                    }
+                    _ => return Err(e),
+                },
+            }
         }
+        // A deleted file has nothing left to check; what used it is checked where the map reaches it.
+        let present: Vec<String> = untested.into_iter().filter(|p| after.contains_key(p)).collect();
+        let own = own_checks(&present, |_| false, files, |p| build_input(p).map(|c| c.checks.clone()), basic).map_err(anyhow::Error::msg)?;
         small.full = false;
         for command in own {
             small.checks.push(Check { component: "own-file".into(), suite: None, command, required_tests: vec![], discovery: None, whole_suite: false });
@@ -743,6 +775,10 @@ fn decide(policy_files: &Snapshot, before: &Snapshot, after: &Snapshot, objects:
             }
         }
         if selected == 0 {
+            let own: Vec<String> = changed.iter().filter(|p| owner(&policy, p).is_some_and(|o| o.id == c.id)).cloned().collect();
+            if !own.is_empty() {
+                return Err(Untested(own, format!("no affected tests in component {}", c.id)).into());
+            }
             bail!("no affected tests in component {}", c.id);
         }
         for path in changed
@@ -758,7 +794,7 @@ fn decide(policy_files: &Snapshot, before: &Snapshot, after: &Snapshot, objects:
                     .filter_map(|s| s.javascript.as_ref())
                     .any(|s| s.tests(after).iter().any(|t| reaches(&graph, t, path)));
             if !mapped {
-                bail!("changed input has no test consumer: {path}");
+                return Err(Untested(vec![path.clone()], format!("changed input has no test consumer: {path}")).into());
             }
         }
     }
@@ -1275,6 +1311,26 @@ mod tests {
         assert_eq!(checks(&["src/App.tsx", "tools/x.py"]).unwrap(), ["nitely check-file \"tools/x.py\""], "a mapped file keeps its tests and adds nothing");
         assert!(checks(&["docs/diagram.svg"]).unwrap_err().contains("no check of its own"));
         assert!(checks(&["tools/Cargo.toml"]).unwrap_err().contains("build, lock or policy"));
+    }
+
+    /// NIT-636 review: a small change to an untested file inside a mapped component runs that
+    /// file's own check, and a deleted one runs none.
+    #[test]
+    fn an_untested_file_inside_a_component_runs_its_own_check_and_a_deleted_one_none() {
+        const MAP: &str = "version = 1\n[[components]]\nid = 'web'\nroots = ['src/']\nchecks = ['npm run build']\n[[components.suites]]\nid = 'unit'\ninputs = ['src/lib/']\n[components.suites.javascript]\ncommand = 'npm test'\ntest_files = ['src/lib/a.test.ts']\n";
+        let repo = crate::test_repo::copy("affected-small-untested", |dir| {
+            init(dir, &[(POLICY_PATH, MAP), ("src/lib/a.ts", "export const a = 1;"), ("src/lib/a.test.ts", "import {a} from './a';"), ("src/tools/gen.py", "print(1)\n"), ("src/tools/old.py", "print(0)\n")]);
+        });
+        let base = g(&repo, &["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("src/tools/gen.py"), "print(2)\n").unwrap();
+        std::fs::remove_file(repo.join("src/tools/old.py")).unwrap();
+        g(&repo, &["add", "-A"]);
+        g(&repo, &["commit", "-qm", "tools"]);
+        assert!(select(&repo, &base, "HEAD").unwrap().full, "the map alone keeps the full gate");
+        let s = select_small(&repo, &base, "HEAD", &base, &BTreeMap::new(), &[]).unwrap();
+        assert!(!s.full, "{:?}", s.reasons);
+        let commands: Vec<&str> = s.checks.iter().map(|c| c.command.as_str()).collect();
+        assert_eq!(commands, ["nitely check-file \"src/tools/gen.py\""], "{:?}", s.reasons);
     }
 
     #[test]

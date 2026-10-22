@@ -67,6 +67,10 @@ pub struct Landed {
     /// The new head in full, for the goal branch's record of its items.
     #[serde(skip)]
     pub(crate) landed_to: Option<String>,
+    /// In a stacked batch, this change's own tip: `landed_from..own_tip` is what it landed, where
+    /// `head` is the whole batch's (NIT-636 review).
+    #[serde(skip)]
+    pub(crate) own_tip: Option<String>,
 }
 
 pub struct LandOptions<'a> {

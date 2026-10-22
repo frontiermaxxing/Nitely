@@ -139,7 +139,8 @@ pub fn small_change(repo: &Path, base: &str, head: &str, limits: Option<crate::p
     }
     for path in git(repo, &["diff", "--name-only", "--diff-filter=A", "--no-renames", &base, head, "--"])?.lines().filter(|l| !l.is_empty()) {
         let dir = path.rsplit_once('/').map(|(d, _)| d);
-        let existed = dir.is_some_and(|d| git(repo, &["rev-parse", "--verify", "-q", &format!("{base}:{d}^{{tree}}")]).is_ok());
+        // `<rev>:<dir>^{tree}` reads as a path, so ask the object's type instead (NIT-636 review).
+        let existed = dir.is_some_and(|d| git(repo, &["cat-file", "-t", &format!("{base}:{d}")]).is_ok_and(|t| t.trim() == "tree"));
         if let Some(f) = files.iter_mut().find(|f| f.path == path) { f.added_file = true; f.dir_existed = existed; }
     }
     small_verdict(&files, limits, |path| {
@@ -604,6 +605,25 @@ pub fn recent(db: &Db, key: &str) -> Result<Vec<Plan>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// NIT-636 review: a new file beside others in a directory that existed is small; one in a new
+    /// directory is not.
+    #[test]
+    fn a_new_file_beside_others_is_small_and_one_in_a_new_directory_is_not() {
+        use crate::test_repo::git as g;
+        let repo = crate::test_repo::copy("verification-small-dirs", |dir| crate::test_repo::init(dir, &[("scripts/build.txt", "one\n")]));
+        let base = g(&repo, &["rev-parse", "HEAD"]);
+        let limits = Some(crate::project_modes::QuickLimits::default());
+        std::fs::write(repo.join("scripts/extra.txt"), "two\n").unwrap();
+        g(&repo, &["add", "-A"]);
+        g(&repo, &["commit", "-qm", "beside"]);
+        let beside = small_change(&repo, &base, "HEAD", limits).unwrap();
+        assert!(beside.small, "{beside:?}");
+        std::fs::create_dir_all(repo.join("tools")).unwrap();
+        std::fs::write(repo.join("tools/new.txt"), "three\n").unwrap();
+        g(&repo, &["add", "-A"]);
+        g(&repo, &["commit", "-qm", "new dir"]);
+        assert!(!small_change(&repo, "HEAD~1", "HEAD", limits).unwrap().small);
+    }
     /// NIT-622: what makes a change small, as pure cases over the diff.
     #[test]
     fn a_change_is_small_only_within_the_limits_and_off_protected_paths() {

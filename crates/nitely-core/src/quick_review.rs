@@ -57,7 +57,7 @@ pub struct Waiting {
 /// Records a quick change that just landed, for the review after landing. Called where every
 /// land records itself; a change that did not take the quick path is left alone.
 pub(crate) fn on_landed(db: &Db, root: &Path, issue: &crate::IssueRecord, land: &crate::land::Landed) -> Result<()> {
-    let (Some(project), Some(head), Some(base)) = (issue.project.as_deref(), land.head.as_deref(), land.landed_from.as_deref()) else { return Ok(()) };
+    let (Some(project), Some((base, head))) = (issue.project.as_deref(), landed_range(land)) else { return Ok(()) };
     if db.reviews(&issue.key)?.first().is_none_or(|r| r.verdict != crate::quick::VERDICT) {
         return Ok(());
     }
@@ -71,6 +71,12 @@ pub(crate) fn on_landed(db: &Db, root: &Path, issue: &crate::IssueRecord, land: 
         params![issue.key, project, repo_id(root)?, commit(base)?, commit(head)?, now()],
     )?;
     Ok(())
+}
+
+/// What a land put on the branch for its change alone: from where it started to its own tip, not
+/// the tip of a batch it landed with (NIT-636 review).
+fn landed_range(land: &crate::land::Landed) -> Option<(&str, &str)> {
+    Some((land.landed_from.as_deref()?, land.own_tip.as_deref().or(land.head.as_deref())?))
 }
 
 fn periodic_on(db: &Db, project: &str) -> Result<bool> {
@@ -230,6 +236,14 @@ pub fn escape_rate(db: &Db, project: &str) -> Result<(usize, usize)> {
 mod tests {
     use super::*;
     use crate::project_modes::{Mode, Options};
+
+    #[test]
+    fn a_change_in_a_batch_is_reviewed_by_its_own_range() {
+        let alone = crate::land::Landed { landed_from: Some("a".into()), head: Some("b".into()), ..Default::default() };
+        assert_eq!(landed_range(&alone), Some(("a", "b")));
+        let batched = crate::land::Landed { own_tip: Some("b".into()), head: Some("tip".into()), ..alone };
+        assert_eq!(landed_range(&batched), Some(("a", "b")), "not the batch's tip");
+    }
 
     /// NIT-625: when the review after landing is due, and what each finding does.
     #[test]
