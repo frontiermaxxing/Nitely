@@ -459,7 +459,7 @@ mod tests {
     /// else in the crate may open one, or a process on another data folder could reach the
     /// person's approval key.
     #[test]
-    fn only_entry_opens_the_keychain() {
+    fn repo_rule_only_entry_opens_the_keychain() {
         let mut folders = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
         let mut opened = Vec::new();
         while let Some(folder) = folders.pop() {
