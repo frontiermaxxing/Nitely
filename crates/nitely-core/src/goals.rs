@@ -172,13 +172,19 @@ impl Db {
     /// Every active goal with its issues, of one project or of all of them (projects in key order,
     /// goals as `goals` orders them): what the goal rows draw.
     pub fn active_goals(&self, project: Option<&str>) -> Result<Vec<GoalDetail>> {
+        self.goal_rows(project, false)
+    }
+
+    /// `active_goals`, and with `include_closed` the completed and dropped goals too ("Show
+    /// completed", NIT-611).
+    pub fn goal_rows(&self, project: Option<&str>, include_closed: bool) -> Result<Vec<GoalDetail>> {
         let projects: Vec<String> = match project {
             Some(p) => vec![self.project(p)?.with_context(|| format!("no project {p}"))?.key],
             None => self.projects()?.into_iter().map(|p| p.key).collect(),
         };
         let mut out = Vec::new();
         for key in projects {
-            let goals = self.goals(&key, false)?;
+            let goals = self.goals(&key, include_closed)?;
             if goals.is_empty() {
                 continue;
             }
@@ -326,10 +332,106 @@ impl Db {
     }
 }
 
+/// Whether a goal is finished (NIT-611): it has issues, none of them is open (each is Done,
+/// Canceled or Duplicate), and its goal branch holds no item still waiting for a checkpoint.
+pub fn goal_finished(issues: usize, open: usize, waiting_items: usize) -> bool {
+    issues > 0 && open == 0 && waiting_items == 0
+}
+
+/// The project's focus once goal `completed` is finished: cleared when it was that goal (agents
+/// then work by priority), else as it was.
+pub fn focus_after_completion(focused: Option<i64>, completed: i64) -> Option<i64> {
+    focused.filter(|g| *g != completed)
+}
+
+/// The event kinds that tell the person, as notices in the Inbox, that a goal finished by itself
+/// and that the focus it held went back to none (snapshot.rs `notices`).
+pub const GOAL_COMPLETED: &str = "goal_completed";
+pub const FOCUS_CLEARED: &str = "focus_cleared";
+
+impl Db {
+    /// Completes goal `id` when it is active and finished (`goal_finished`), recording why and
+    /// telling the person, and clears the project's focus when it was on it (`focus_after_completion`,
+    /// keeping whether urgent work may interrupt). Returns what it said, or None when nothing changed.
+    pub fn complete_goal_if_finished(&self, id: i64, actor: &Actor) -> Result<Option<String>> {
+        let Some(goal) = self.goal(id)? else { return Ok(None) };
+        if goal.state != "active" {
+            return Ok(None);
+        }
+        let (issues, open): (i64, i64) = self.conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(state_type NOT IN ('completed', 'canceled')), 0) FROM issue WHERE goal = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let waiting = self.goal_items_waiting(id)?.len();
+        if !goal_finished(issues as usize, open as usize, waiting) {
+            return Ok(None);
+        }
+        let ts = now();
+        let checkpoint: Option<String> = self.conn.query_row("SELECT checkpoint_head FROM goal_branch WHERE goal_id = ?1", [id], |r| r.get(0)).optional()?.flatten();
+        let at = checkpoint.map(|h| format!(", last checkpoint at {}", &h[..h.len().min(8)])).unwrap_or_default();
+        let said = format!("Goal {id} \"{}\" completed: {issues} issue{}, all closed{at}", goal.title, if issues == 1 { "" } else { "s" });
+        let payload = serde_json::json!({ "project": goal.project, "goal": id }).to_string();
+        self.conn.execute("UPDATE goal SET state = 'done', updated_at = ?2 WHERE id = ?1", params![id, ts])?;
+        self.conn.execute(
+            "INSERT INTO event (ts, actor, issue_key, type, summary, payload) VALUES (?1, ?2, NULL, 'goal_state', ?3, ?4)",
+            params![ts, actor.id(), format!("Goal {id} \"{}\" is done: every issue is closed and nothing waits for a checkpoint", goal.title), payload],
+        )?;
+        self.conn.execute(
+            "INSERT INTO event (ts, actor, issue_key, type, summary, payload) VALUES (?1, ?2, NULL, ?3, ?4, ?5)",
+            params![ts, actor.id(), GOAL_COMPLETED, said, payload],
+        )?;
+        let focused: Option<i64> = self.conn.query_row("SELECT goal FROM project_focus WHERE project = ?1", [&goal.project], |r| r.get(0)).optional()?.flatten();
+        if focused.is_some() && focus_after_completion(focused, id).is_none() {
+            self.conn.execute("UPDATE project_focus SET goal = NULL, updated_at = ?2, updated_by = ?3 WHERE project = ?1", params![goal.project, ts, actor.id()])?;
+            self.conn.execute(
+                "INSERT INTO event (ts, actor, issue_key, type, summary, payload) VALUES (?1, ?2, NULL, ?3, ?4, ?5)",
+                params![ts, actor.id(), FOCUS_CLEARED, format!("{}'s focus on goal {id} \"{}\" ended with the goal: agents work by priority until you set another", goal.project, goal.title), payload],
+            )?;
+        }
+        Ok(Some(said))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::NewIssue;
+
+    /// NIT-611: when a goal is finished, and what its completion does to the project's focus.
+    #[test]
+    fn a_goal_finishes_when_its_issues_are_closed_and_nothing_waits_and_its_focus_goes_with_it() {
+        assert!(goal_finished(3, 0, 0));
+        assert!(!goal_finished(3, 1, 0), "an issue still open");
+        assert!(!goal_finished(3, 0, 2), "items wait on the goal branch for a checkpoint");
+        assert!(!goal_finished(0, 0, 0), "a goal with no issues yet is not done");
+        assert_eq!(focus_after_completion(Some(7), 7), None, "focus goes back to none");
+        assert_eq!(focus_after_completion(Some(8), 7), Some(8), "another goal's focus stays");
+        assert_eq!(focus_after_completion(None, 7), None);
+    }
+
+    /// One goal through to the end: its last issue closes, the goal completes, the person is told,
+    /// and the focus on it clears, keeping whether urgent work may interrupt.
+    #[test]
+    fn closing_a_goals_last_issue_completes_it_and_clears_its_focus() {
+        let mut db = db();
+        let human = Actor::Human;
+        let g = db.save_goal("NIT", None, &GoalChange { title: Some("Ship it".into()), outcome: Some("It ships.".into()), ..Default::default() }, &human).unwrap();
+        let new = |title: &str| crate::issues::NewIssue { project: "NIT".into(), title: title.into(), kind: "feature".into(), body: "b".into(), evidence: "e".into(), source: "human".into(), allow_similar: true, goal: Some(g.id), ..Default::default() };
+        let a = db.create_issue(&new("A"), &human).unwrap().key;
+        let b = db.create_issue(&new("B"), &human).unwrap().key;
+        db.set_project_focus("NIT", Some(g.id), false, &human).unwrap();
+        db.move_issue(&a, "Done", Some("shipped"), None, &human).unwrap();
+        assert_eq!(db.goal(g.id).unwrap().unwrap().state, "active", "B is still open");
+        db.move_issue(&b, "Canceled", None, Some("not needed"), &human).unwrap();
+        assert_eq!(db.goal(g.id).unwrap().unwrap().state, "done");
+        let focus = db.project_focus("NIT").unwrap();
+        assert_eq!((focus.goal, focus.allow_urgent), (None, false), "focus cleared, the urgent choice kept");
+        let notices = db.notices().unwrap();
+        assert!(notices.iter().any(|n| n.summary.contains("completed: 2 issues")), "{notices:?}");
+        assert!(notices.iter().any(|n| n.summary.contains("focus on goal")), "{notices:?}");
+        assert!(db.goals("NIT", false).unwrap().iter().all(|x| x.id != g.id), "hidden unless closed goals are asked for");
+    }
 
     fn db() -> Db {
         let dir = crate::paths::unique_temp("nitely-goals", "");

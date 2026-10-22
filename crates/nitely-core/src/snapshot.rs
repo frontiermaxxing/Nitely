@@ -111,12 +111,14 @@ impl Db {
         let end = format!("%{}", crate::submit_rules::STALLED_NOTICE_END);
         let mut stmt = self.conn.prepare(
             "SELECT e.id, e.issue_key, e.ts, e.summary FROM event e
-             WHERE e.type = 'note' AND e.summary LIKE ?1 AND e.summary LIKE ?2 AND e.ts >= ?3
-               AND NOT EXISTS (SELECT 1 FROM notice_dismissed d WHERE d.event_id = e.id)
-               AND e.id = (SELECT MAX(x.id) FROM event x WHERE x.issue_key = e.issue_key AND x.type = 'note' AND x.summary LIKE ?1 AND x.summary LIKE ?2)
+             WHERE e.ts >= ?3 AND NOT EXISTS (SELECT 1 FROM notice_dismissed d WHERE d.event_id = e.id)
+               AND ((e.type = 'note' AND e.summary LIKE ?1 AND e.summary LIKE ?2
+                     AND e.id = (SELECT MAX(x.id) FROM event x WHERE x.issue_key = e.issue_key AND x.type = 'note' AND x.summary LIKE ?1 AND x.summary LIKE ?2))
+                    OR e.type IN (?4, ?5))
              ORDER BY e.id DESC",
         )?;
-        let rows = stmt.query_map(rusqlite::params![start, end, crate::db::now() - NOTICE_DAYS * 86400], |r| {
+        // And a goal that finished by itself, and the focus that went with it (NIT-611).
+        let rows = stmt.query_map(rusqlite::params![start, end, crate::db::now() - NOTICE_DAYS * 86400, crate::goals::GOAL_COMPLETED, crate::goals::FOCUS_CLEARED], |r| {
             Ok(Notice { id: r.get(0)?, issue_key: r.get(1)?, ts: r.get(2)?, summary: r.get::<_, Option<String>>(3)?.unwrap_or_default() })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
