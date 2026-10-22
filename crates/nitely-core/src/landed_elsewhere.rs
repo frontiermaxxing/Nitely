@@ -57,7 +57,7 @@ fn last_submitted(db: &Db, key: &str) -> Result<Option<(String, String)>> {
 /// and says what it recorded. None: nothing to record, and Done stays refused. It records nothing
 /// for a Done that would be refused anyway (no `evidence`, an open question), and refuses while a
 /// submit of the issue runs: it could reopen it.
-pub fn record(db: &Db, root: &Path, key: &str, evidence: Option<&str>, actor: &Actor) -> Result<Option<String>> {
+pub fn record(db: &mut Db, root: &Path, key: &str, evidence: Option<&str>, actor: &Actor) -> Result<Option<String>> {
     let Some(issue) = db.issue(key)? else { return Ok(None) };
     if issue.origin != "nitely" || evidence.is_none_or(|e| e.trim().is_empty()) {
         return Ok(None);
@@ -95,6 +95,17 @@ pub fn record(db: &Db, root: &Path, key: &str, evidence: Option<&str>, actor: &A
     db.conn.execute("UPDATE submit_job SET state = 'superseded', ended_at = ?2 WHERE issue_key = ?1 COLLATE NOCASE AND state = 'queued'", rusqlite::params![issue.key, crate::db::now()])?;
     let why = format!("{} reached {base} without a land of its own: its commits are there at {at}. Closed by Nitely.", issue.key);
     let mut told = said.clone();
+    // A goal's checkpoint closes as its land would have closed it: one that reached main another
+    // way, or whose land died after pushing main (NIT-600), would otherwise stay open for good.
+    match crate::goal_branch::checkpoint_landed(db, root, &issue.key, actor) {
+        Ok(Some(closed)) => told.push_str(&format!("; {closed}")),
+        Ok(None) => {}
+        Err(e) => {
+            let left = format!("The goal's checkpoint record could not be closed: {e:#}");
+            db.log_event(actor, Some(&issue.key), None, "note", &left)?;
+            told.push_str(&format!("; {left}"));
+        }
+    }
     match crate::remote::close_pr(&root.to_string_lossy(), &branch, &why) {
         Ok(Some(url)) => told.push_str(&format!("; closed {url}")),
         Ok(None) => {}
