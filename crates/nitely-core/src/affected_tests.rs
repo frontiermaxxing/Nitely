@@ -688,6 +688,28 @@ fn decide(policy_files: &Snapshot, before: &Snapshot, after: &Snapshot, objects:
     } else {
         BTreeMap::new()
     };
+    // Whether a test of another component reaches `path` of component `home`: a suite whose inputs
+    // cover it or whose JavaScript tests import it, or a component that depends on `home` (and so
+    // runs its suites). Only a file no test anywhere reaches is `Untested` (NIT-636 review).
+    let tested_elsewhere = |path: &str, home: &str| -> bool {
+        let mut dependents = BTreeSet::from([home.to_string()]);
+        loop {
+            let old = dependents.len();
+            for c in &policy.components {
+                if c.depends_on.iter().any(|d| dependents.contains(d)) {
+                    dependents.insert(c.id.clone());
+                }
+            }
+            if old == dependents.len() {
+                break;
+            }
+        }
+        policy.components.iter().filter(|o| o.id != home).any(|o| {
+            (dependents.contains(&o.id) && !o.suites.is_empty())
+                || o.suites.iter().any(|s| s.inputs.iter().any(|i| under(path, i)))
+                || o.suites.iter().filter_map(|s| s.javascript.as_ref()).any(|s| s.tests(after).iter().any(|t| reaches(&graph, t, path)))
+        })
+    };
     let mut reached = changed.clone();
     loop {
         let old = reached.len();
@@ -775,7 +797,7 @@ fn decide(policy_files: &Snapshot, before: &Snapshot, after: &Snapshot, objects:
             }
         }
         if selected == 0 {
-            let own: Vec<String> = changed.iter().filter(|p| owner(&policy, p).is_some_and(|o| o.id == c.id)).cloned().collect();
+            let own: Vec<String> = changed.iter().filter(|p| owner(&policy, p).is_some_and(|o| o.id == c.id) && !tested_elsewhere(p, &c.id)).cloned().collect();
             if !own.is_empty() {
                 return Err(Untested(own, format!("no affected tests in component {}", c.id)).into());
             }
@@ -793,8 +815,11 @@ fn decide(policy_files: &Snapshot, before: &Snapshot, after: &Snapshot, objects:
                     .iter()
                     .filter_map(|s| s.javascript.as_ref())
                     .any(|s| s.tests(after).iter().any(|t| reaches(&graph, t, path)));
-            if !mapped {
+            if !mapped && !tested_elsewhere(path, &c.id) {
                 return Err(Untested(vec![path.clone()], format!("changed input has no test consumer: {path}")).into());
+            }
+            if !mapped {
+                bail!("changed input has no test consumer: {path}");
             }
         }
     }
@@ -1331,6 +1356,18 @@ mod tests {
         assert!(!s.full, "{:?}", s.reasons);
         let commands: Vec<&str> = s.checks.iter().map(|c| c.command.as_str()).collect();
         assert_eq!(commands, ["nitely check-file \"src/tools/gen.py\""], "{:?}", s.reasons);
+
+        // A component that depends on it runs its tests, so they still decide: the full gate, as
+        // before, never its own check alone.
+        const DEPENDENT: &str = "version = 1\n[[components]]\nid = 'web'\nroots = ['src/']\nchecks = ['npm run build']\n[[components.suites]]\nid = 'unit'\ninputs = ['src/lib/']\n[components.suites.javascript]\ncommand = 'npm test'\ntest_files = ['src/lib/a.test.ts']\n[[components]]\nid = 'app'\nroots = ['app/']\ndepends_on = ['web']\nchecks = []\n[[components.suites]]\nid = 'app'\ninputs = ['app/']\n[components.suites.javascript]\ncommand = 'npm test'\ntest_files = ['app/b.test.ts']\n";
+        let repo = crate::test_repo::copy("affected-small-dependent", |dir| {
+            init(dir, &[(POLICY_PATH, DEPENDENT), ("src/lib/a.ts", "export const a = 1;"), ("src/lib/a.test.ts", "import {a} from './a';"), ("app/b.test.ts", "export const b = 1;"), ("src/tools/gen.py", "print(1)\n")]);
+        });
+        let base = g(&repo, &["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("src/tools/gen.py"), "print(2)\n").unwrap();
+        g(&repo, &["commit", "-qam", "tools"]);
+        let s = select_small(&repo, &base, "HEAD", &base, &BTreeMap::new(), &[]).unwrap();
+        assert!(s.full && s.checks.is_empty(), "{s:?}");
     }
 
     #[test]
