@@ -1139,17 +1139,19 @@ pub fn repo_facts(config: &crate::Config, root: &Path) -> Result<RepoFacts> {
             .map(|l| l.ci_commands.clone())
             .unwrap_or_default(),
         // CI that can run ci_commands: a GitHub repo holding the playbook's suite workflow.
-        has_ci: crate::git::github_slug(&root.to_string_lossy()).is_some()
-            && root
-                .join(".github")
-                .join("workflows")
-                .join(
-                    pb.lanes
-                        .as_ref()
-                        .map(|l| l.ci_workflow.as_str())
-                        .unwrap_or("ci.yml"),
-                )
-                .is_file(),
+        has_ci: matches!(
+            crate::executor::ci_state(root, &project),
+            crate::executor::CiState::Ready(_)
+        ) && root
+            .join(".github")
+            .join("workflows")
+            .join(
+                pb.lanes
+                    .as_ref()
+                    .map(|l| l.ci_workflow.as_str())
+                    .unwrap_or("ci.yml"),
+            )
+            .is_file(),
         has_lanes: pb.lanes.is_some(),
         target: repo.map(|r| crate::proposals::Target::of(&r.name, root)),
         project,
