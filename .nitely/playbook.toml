@@ -44,7 +44,7 @@ heavy = ["^cargo (build|test|clippy|check)\\b", "^npm (test|run build)\\b"]
 timeout_minutes = 75
 # The full suites run in GitHub Actions (free for a public repo, in parallel), so this PC runs
 # only quick checks and never two full suites at once (NIT-493).
-ci_commands = ["cargo test --workspace -- --test-threads=12", "cargo clippy --workspace -- -D warnings"]
+ci_commands = ["cargo test --workspace -- --test-threads=12","cargo clippy --workspace -- -D warnings","npm test"]
 
 [review.reviewer]
 claude = "codex"
