@@ -272,7 +272,9 @@ that code still causes the problem the finding describes. The code a finding cit
 may have replaced it: check the problem itself, not the old line or its wording. If it no longer happens, it is \
 fixed, even if code nearby could be better (raise that as a new defect if it is one). An open answer that quotes no \
 code at the line it cites, or does not say how that code still causes the problem, is not counted as open. Do not \
-list an open one again as a defect: it stays on record by itself.\n";
+list an open one again as a defect: it stays on record by itself. If it is the base's own, already there as it is and \
+neither caused nor worsened by this change, answer `PREVIOUS <n>: base`: it is then listed to fix on the base and holds \
+nothing here.\n";
 
 /// What the person accepted, before the list (NIT-191).
 const ACCEPTED_INTRO: &str = "The person who owns this change accepted these findings as they are: a trade-off they decided, not a \
@@ -594,7 +596,7 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
             }
         }
         let mut findings = parse_findings(text);
-        let base_findings = parse_base_findings(text);
+        let mut base_findings = parse_base_findings(text);
         let code = worktree.map(CurrentCode::new);
         // A P0 or P1 that points at no file names no concrete failure: it counts as P2, and keeps
         // the priority it was raised at, which a later round can restore by citing the code (NIT-282).
@@ -614,7 +616,7 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
                         // Open needs the reviewer's own pointer at current code, and its reason (NIT-214);
                         // unchecked, the finding's own citation.
                         let confirmed = match (&code, status.as_str()) {
-                            (_, "fixed") => true,
+                            (_, "fixed" | "base") => true,
                             (Some(code), "open") => code.confirms_open(&said),
                             (Some(code), _) => code.confirms(&f.text),
                             (None, _) => true,
@@ -631,7 +633,11 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
         if verdict == "findings" && findings.is_empty() && base_findings.is_empty() && !previous.iter().any(|r| r.status == "open") {
             bail!("the {reviewer} review says it has findings but lists none as `- [Pn] ...`:\n{}", tail_lines(text));
         }
-        for r in previous.iter().filter(|r| r.status != "fixed") {
+        // A carried finding the reviewer calls the base's own goes with the base's (NIT-646).
+        for r in previous.iter().filter(|r| r.status == "base") {
+            base_findings.push(Finding { priority: r.priority, text: r.text.clone(), carried: true, raised_as: None, now: None });
+        }
+        for r in previous.iter().filter(|r| r.status != "fixed" && r.status != "base") {
             let finding = if r.status == "unconfirmed" {
                 let priority = r.priority.max(2);
                 Finding { priority, text: format!("{}{UNCONFIRMED}", r.text), carried: true, raised_as: (priority != r.priority).then_some(r.priority), now: None }
@@ -1147,15 +1153,15 @@ fn brought_in_by_merges(worktree: &Path, base: &str, head: &str) -> Option<std::
 /// by a merge, which the change did not touch since). A citation without a line, or of a file the
 /// branch does not have, is about the change.
 fn only_merged_code(text: &str, code: &CurrentCode, worktree: &Path, head: &str, brought: &std::collections::HashSet<String>) -> bool {
-    let cited = citations(text);
+    let cited = cited_spans(text);
     !cited.is_empty()
-        && cited.iter().all(|(path, line)| {
-            let (Some(file), Some(n)) = (code.resolve(path), line) else { return false };
-            let range = format!("{n},{n}");
-            crate::playbook::git(worktree, &["blame", "--porcelain", "-L", &range, head, "--", &file])
-                .ok()
-                .and_then(|o| o.split_whitespace().next().map(str::to_string))
-                .is_some_and(|commit| brought.contains(&commit))
+        && cited.iter().all(|(path, span)| {
+            let (Some(file), Some((from, to))) = (code.resolve(path), span) else { return false };
+            let range = format!("{from},{to}");
+            let Ok(blame) = crate::playbook::git(worktree, &["blame", "--porcelain", "-L", &range, head, "--", &file]) else { return false };
+            // Each line's header starts with the commit that last wrote it.
+            let commits: Vec<&str> = blame.lines().filter_map(|l| l.split(' ').next()).filter(|w| w.len() == 40 && w.bytes().all(|b| b.is_ascii_hexdigit())).collect();
+            !commits.is_empty() && commits.iter().all(|c| brought.contains(*c))
         })
 }
 
@@ -1178,11 +1184,22 @@ pub(crate) fn set_aside_outside(review: &mut Review, worktree: &Path, base: &str
 
 /// `path/to/file.rs:120` and `file.rs` mentions in a text, with their line when given.
 pub(crate) fn citations(text: &str) -> Vec<(String, Option<usize>)> {
+    cited_spans(text).into_iter().map(|(path, span)| (path, span.map(|(from, _)| from))).collect()
+}
+
+/// `citations`, with the lines each covers: `file.rs:12` is (12, 12), `file.rs:12-15` or
+/// `file.rs:12–15` is (12, 15).
+fn cited_spans(text: &str) -> Vec<(String, Option<(usize, usize)>)> {
     let mut out = Vec::new();
     for word in text.split(|c: char| c.is_whitespace() || "`,;()[]\"'".contains(c)) {
         let word = word.trim_end_matches(['.', ':']);
+        let span = |n: &str| -> Option<(usize, usize)> {
+            let (a, b) = n.split_once(['-', '\u{2013}']).unwrap_or((n, n));
+            let (a, b): (usize, usize) = (a.parse().ok()?, b.parse().ok()?);
+            (a <= b).then_some((a, b))
+        };
         let (path, line) = match word.rsplit_once(':') {
-            Some((p, n)) if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) => (p, n.parse().ok()),
+            Some((p, n)) if !n.is_empty() && span(n).is_some() => (p, span(n)),
             _ => (word, None),
         };
         // A file name: a dot, then a short extension of letters; with a line number, any name
@@ -1217,7 +1234,7 @@ fn parse_previous(text: &str) -> BTreeMap<usize, (String, String)> {
         let Ok(n) = n.trim().trim_start_matches('#').parse::<usize>() else { continue };
         let status = status.trim().trim_start_matches('`');
         let word: String = status.chars().take_while(|c| c.is_ascii_alphabetic()).collect::<String>().to_lowercase();
-        if matches!(word.as_str(), "fixed" | "open") {
+        if matches!(word.as_str(), "fixed" | "open" | "base") {
             out.insert(n, (word.clone(), status[word.len()..].to_string()));
         }
     }
@@ -1598,7 +1615,7 @@ mod tests {
         let reviewed = git(&["rev-parse", "HEAD"]);
         // Main moves on in another file, and in goal.rs far from the change, and comes in by a merge.
         git(&["checkout", "-q", "main"]);
-        write("src/quick.rs", lines(20, "quick").replace("quick 5\n", "quick five, from main\n"));
+        write("src/quick.rs", lines(20, "quick").replace("quick 5\n", "quick five, from main\n").replace("quick 6\n", "quick six, from main\n"));
         write("src/goal.rs", lines(20, "goal").replace("goal 19\n", "goal nineteen, from main\n"));
         git(&["commit", "-qam", "main moves on"]);
         git(&["checkout", "-q", "goal"]);
@@ -1634,6 +1651,11 @@ VERDICT: findings\nMONEY_OR_RELEASE: no";
         let r = rules().parse("codex", "- [BASE] Old overflow: src/quick.rs:2, parse\nVERDICT: findings\nMONEY_OR_RELEASE: no", 1, None, Some(&dir)).unwrap();
         assert_eq!((r.verdict.as_str(), r.findings.len(), texts(&r.outside)), ("pass", 0, vec!["Old overflow".to_string()]));
 
+        // A range wholly from main's merged code is set aside too; one that reaches the change is not.
+        let mut r = rules().parse("codex", "- [P1] Main's block: src/quick.rs:5-6, start\n- [P1] Spans the change: src/goal.rs:9\u{2013}10, parse\nVERDICT: findings\nMONEY_OR_RELEASE: no", 1, None, Some(&dir)).unwrap();
+        set_aside_outside(&mut r, &dir, "main", "HEAD");
+        assert_eq!((texts(&r.findings), texts(&r.outside)), (vec!["Spans the change".to_string()], vec!["Main's block".to_string()]));
+
         // A carried finding the reviewer confirmed open stays, whatever its first citation says now.
         let carried = PreviousRound {
             findings: vec![Finding { priority: 1, text: "Quick start loses the flag: src/quick.rs:5, start".into(), carried: false, raised_as: None, now: None }],
@@ -1642,6 +1664,10 @@ VERDICT: findings\nMONEY_OR_RELEASE: no";
         let mut review = rules().parse("codex", "PREVIOUS 1: open src/quick.rs:5 `quick five, from main` still drops it\nVERDICT: clean\nMONEY_OR_RELEASE: no", 1, Some(&carried), Some(&dir)).unwrap();
         set_aside_outside(&mut review, &dir, "main", "HEAD");
         assert_eq!((review.findings.len(), review.outside.len(), review.verdict.as_str()), (1, 0, "changes"));
+        // Unless the reviewer says it is the base's own: then it holds nothing.
+        let mut review = rules().parse("codex", "PREVIOUS 1: base\nVERDICT: clean\nMONEY_OR_RELEASE: no", 1, Some(&carried), Some(&dir)).unwrap();
+        set_aside_outside(&mut review, &dir, "main", "HEAD");
+        assert_eq!((review.findings.len(), review.outside.len(), review.verdict.as_str()), (0, 1, "pass"));
 
         // With only main's code to object to, the change passes.
         let mut review = rules().parse("codex", "- [P1] Quick start loses the flag: src/quick.rs:5, start\nVERDICT: findings\nMONEY_OR_RELEASE: no", 1, None, Some(&dir)).unwrap();
