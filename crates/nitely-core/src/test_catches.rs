@@ -96,10 +96,10 @@ pub fn failed_of(results: &[CommandResult]) -> Vec<Failed> {
     let mut out: Vec<Failed> = Vec::new();
     for r in results.iter().filter(|r| !r.ok && !r.skipped) {
         let tests = crate::playbook::failed_tests(&r.output);
-        let names = if tests.is_empty() { vec![r.command.clone()] } else { tests };
+        let names = if tests.is_empty() { vec![r.step_id().to_string()] } else { tests };
         for n in names {
-            if !out.iter().any(|f| f.test == n) {
-                out.push(Failed { test: n, step: r.command.clone() });
+            if !out.iter().any(|f| f.test == n && f.step == r.step_id()) {
+                out.push(Failed { test: n, step: r.step_id().to_string() });
             }
         }
     }
@@ -111,7 +111,7 @@ pub fn failed_of(results: &[CommandResult]) -> Vec<Failed> {
 /// validated pass) is marked skipped but passed all the same: it counts (NIT-557 review). A step
 /// skipped for any other reason (only some paths changed) proves nothing.
 pub fn passed_steps(results: &[CommandResult]) -> Vec<String> {
-    results.iter().filter(|r| r.ok && (!r.skipped || r.output.contains("not run again"))).map(|r| r.command.clone()).collect()
+    results.iter().filter(|r| r.ok && (!r.skipped || r.output.contains("not run again"))).map(|r| r.step_id().to_string()).collect()
 }
 
 /// A failed test and the revisions between which it was fixed.
@@ -137,9 +137,10 @@ pub fn settle(failures: &[Failure], passed: &str, passed_steps: &[String]) -> (V
         let mut found = Vec::new();
         let mut all = true;
         for f in &failure.tests {
-            let next = later.iter().find(|l| l.tests.iter().any(|t| t.test == f.test) || l.passed_steps.contains(&f.step));
+            let next = later.iter().find(|l| l.tests.contains(f) || l.passed_steps.contains(&f.step));
             let fixed = match next {
-                Some(l) if l.tests.iter().any(|t| t.test == f.test) => continue,
+                // The same test of the same step: two steps may each have a test of that name.
+                Some(l) if l.tests.contains(f) => continue,
                 Some(l) => l.commit.as_str(),
                 None if passed_steps.contains(&f.step) => passed,
                 None => {
@@ -267,6 +268,9 @@ mod tests {
         // Two episodes of A: each keeps its own fix.
         let twice = [failure("c1", &[("A", "cargo")], &[]), failure("c2", &[("B", "npm")], &["cargo"]), failure("c3", &[("A", "cargo")], &["npm"])];
         assert_eq!(settle(&twice, "c4", &all).0, vec![span("A", "c1", "c2"), span("B", "c2", "c3"), span("A", "c3", "c4")]);
+        // Two steps with a test of one name are two tests: beta's failure is not alpha's episode.
+        let named = [failure("c1", &[("tests::roundtrip", "cargo test -p alpha")], &[]), failure("c2", &[("tests::roundtrip", "cargo test -p beta")], &["cargo test -p alpha"])];
+        assert_eq!(settle(&named, "c3", &["cargo test -p alpha".to_string(), "cargo test -p beta".to_string()]).0, vec![span("tests::roundtrip", "c1", "c2"), span("tests::roundtrip", "c2", "c3")]);
         // The same revision passing is a flake: settled, no span.
         assert_eq!(settle(&[failure("c1", &[("A", "cargo")], &[])], "c1", &all), (vec![], vec![0]));
     }
@@ -282,7 +286,7 @@ mod tests {
 
     #[test]
     fn a_failed_step_names_its_tests_or_else_its_command() {
-        let r = |command: &str, ok: bool, output: &str| CommandResult { command: command.into(), ok, seconds: 1, output: output.into(), skipped: false, timed_out: false };
+        let r = |command: &str, ok: bool, output: &str| CommandResult { step: None, command: command.into(), ok, seconds: 1, output: output.into(), skipped: false, timed_out: false };
         let results = [
             r("npm test", true, ""),
             r("cargo test", false, "test lanes::tests::a ... FAILED\ntest lanes::tests::b ... ok\nfailures:\n    lanes::tests::a\n"),
@@ -293,8 +297,12 @@ mod tests {
         assert_eq!(passed_steps(&results), vec!["npm test".to_string()]);
         // A gate answered from an earlier pass on the same tree passed its steps; a step skipped by
         // the changed paths did not run.
-        let skipped = |command: &str, why: &str| CommandResult { command: command.into(), ok: true, seconds: 0, output: format!("skipped: {why}"), skipped: true, timed_out: false };
+        let skipped = |command: &str, why: &str| CommandResult { step: None, command: command.into(), ok: true, seconds: 0, output: format!("skipped: {why}"), skipped: true, timed_out: false };
         let reused = [skipped("cargo test", "this tree passed it in lane run 7; not run again"), skipped("cargo clippy", "only paths matching ^src/ changed")];
         assert_eq!(passed_steps(&reused), vec!["cargo test".to_string()]);
+        // A step's identity is its template: an executed run (expanded) and a cached pass match.
+        let ran = CommandResult { step: Some("cargo test --jobs {jobs}".into()), command: "cargo test --jobs 6".into(), ok: false, seconds: 9, output: "test a::tests::x ... FAILED".into(), skipped: false, timed_out: false };
+        let cached = CommandResult { step: None, command: "cargo test --jobs {jobs}".into(), ok: true, seconds: 0, output: "skipped: this tree passed it in lane run 9; not run again".into(), skipped: true, timed_out: false };
+        assert_eq!(failed_of(std::slice::from_ref(&ran))[0].step, passed_steps(&[cached])[0]);
     }
 }

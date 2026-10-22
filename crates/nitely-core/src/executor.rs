@@ -675,7 +675,7 @@ fn receive_new(config: &Config, db: &Db, root: &Path, request: &WireRequest) -> 
     for (command, skip) in &request.steps {
         if let Some(why) = skip {
             reply.results.push(playbook::CommandResult {
-                command: command.clone(),
+                step: None, command: command.clone(),
                 ok: true,
                 seconds: 0,
                 output: format!("skipped: {why}"),
@@ -722,7 +722,7 @@ fn receive_new(config: &Config, db: &Db, root: &Path, request: &WireRequest) -> 
         reply.exit_code = row.exit_code;
         reply.timed_out = row.timed_out;
         reply.results.push(playbook::CommandResult {
-            command: command.clone(),
+            step: None, command: command.clone(),
             ok: row.passed(),
             seconds: row
                 .ended_at
@@ -836,7 +836,7 @@ fn ci(root: &Path, pb: &Playbook, req: &Request, nonce: &str) -> Result<Reply> {
                     exit_code: Some(if passed { 0 } else { 1 }),
                     timed_out: false,
                     results: vec![playbook::CommandResult {
-                        command: "CI required checks".into(),
+                        step: None, command: "CI required checks".into(),
                         ok: passed,
                         seconds: started.elapsed().as_secs(),
                         output: url,
@@ -1321,7 +1321,7 @@ fn evidence(pending: &Pending, view: &serde_json::Value, (passed, jobs): (bool, 
         results: jobs
             .into_iter()
             .zip(&pending.commands)
-            .map(|((ok, seconds, url, timed_out, _, _), command)| playbook::CommandResult { command: command.clone(), ok, seconds, output: url, skipped: false, timed_out })
+            .map(|((ok, seconds, url, timed_out, _, _), command)| playbook::CommandResult { step: None, command: command.clone(), ok, seconds, output: url, skipped: false, timed_out })
             .collect(),
         queued_seconds: pending.dispatched.elapsed().as_secs().saturating_sub(run_seconds),
         run_seconds,
@@ -1509,7 +1509,7 @@ mod tests {
         reply.exit_code = Some(0);
         assert!(validate_reply(&r, &reply).is_err());
         reply.results.push(playbook::CommandResult {
-            command: "test".into(),
+            step: None, command: "test".into(),
             ok: true,
             seconds: 0,
             output: "".into(),

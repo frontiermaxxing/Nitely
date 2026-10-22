@@ -918,7 +918,7 @@ fn install_scope(db: &Db, issues: &[&str]) -> crate::performance_attribution::Sc
 mod tests {
     #[test]
     fn a_stacked_gate_that_ran_past_the_lane_limit_sends_nobody_to_fix_code() {
-        let step = |timed_out: bool| crate::playbook::CommandResult { command: "npm test".into(), ok: false, seconds: 1800, output: "out".into(), skipped: false, timed_out };
+        let step = |timed_out: bool| crate::playbook::CommandResult { step: None, command: "npm test".into(), ok: false, seconds: 1800, output: "out".into(), skipped: false, timed_out };
         let gate = |timed_out: bool| super::GateResult { mode_authority: None, plan: None, skipped: None, passed: false, commit: "c".into(), results: vec![step(timed_out)], warnings: vec![], flaked: vec![], lane_run: None };
         let stopped = super::gate_failed(&gate(true), "its gate failed");
         assert!(stopped.starts_with("the gate did not finish at `npm test`") && !stopped.contains("Fix it"), "{stopped}");

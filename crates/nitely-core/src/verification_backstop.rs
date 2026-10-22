@@ -382,7 +382,7 @@ fn execute(db:&Db,repo:&Path,pb:&Playbook,head:&str,commands:&[String],actor:&Ac
             crate::project_modes::check_playbook_authority(db,&[],&pb)?;
             let command=playbook::expand(command,repo,wt,pb.integration_branch());
             let (ok,output,seconds)=playbook::run_shell_kind(&command,wt,"build")?;
-            results.push(playbook::CommandResult{command,ok,output,seconds,skipped:false,timed_out:false});
+            results.push(playbook::CommandResult{step:None,command,ok,output,seconds,skipped:false,timed_out:false});
             if !ok {passed=false;break;}
         }}
         turn.finish(passed);
@@ -705,7 +705,7 @@ mod tests {
         let base=git(&root,&["rev-parse","HEAD"]).unwrap().trim().to_string();
         let broken=change(&root,"value.txt","does not build");
         let issue=db.create_issue(&NewIssue{project:"APP".into(),title:"A change".into(),body:"b".into(),kind:"feature".into(),source:"codex".into(),evidence:"e".into(),..Default::default()},&Actor::Agent("codex:test".into())).unwrap();
-        let failed=playbook::CommandResult{command:"cargo run --release -p app -- install".into(),ok:false,seconds:3,output:"error[E0063]: missing field".into(),skipped:false,timed_out:false};
+        let failed=playbook::CommandResult{step:None,command:"cargo run --release -p app -- install".into(),ok:false,seconds:3,output:"error[E0063]: missing field".into(),skipped:false,timed_out:false};
         on_landed(&mut db,&root,&issue,&crate::land::Landed{head:Some(broken.clone()),landed_from:Some(base.clone()),after:vec![failed],..Default::default()}).unwrap();
         let h=health(&db,&root).unwrap().unwrap();
         assert!(h.status=="failed" && h.message.starts_with(&format!("Known broken at {}",short(&broken))),"{h:?}");

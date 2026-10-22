@@ -657,7 +657,7 @@ mod tests {
         let fast = project_plan(&db, &repo, &base, "HEAD", &undeclared).unwrap();
         assert_eq!(fast.depth, "Integration", "{:?}", fast.reasons);
         assert!(!fast.shadow && ["echo typed", "npm run build", "npm test"].iter().all(|c| fast.commands.iter().any(|x| x == c)), "{:?}", fast.commands);
-        assert!(checks_note(&crate::playbook::GateResult { mode_authority: None, passed: true, plan: Some(fast.clone()), skipped: None, commit: "abc".into(), results: vec![crate::playbook::CommandResult { command: "npm run build".into(), ok: true, seconds: 7, output: String::new(), skipped: false, timed_out: false }], warnings: vec![], flaked: vec![], lane_run: None }).unwrap().contains("`npm run build`: passed in 7 s"));
+        assert!(checks_note(&crate::playbook::GateResult { mode_authority: None, passed: true, plan: Some(fast.clone()), skipped: None, commit: "abc".into(), results: vec![crate::playbook::CommandResult { step: None, command: "npm run build".into(), ok: true, seconds: 7, output: String::new(), skipped: false, timed_out: false }], warnings: vec![], flaked: vec![], lane_run: None }).unwrap().contains("`npm run build`: passed in 7 s"));
         assert!(project_plan(&db, &repo, &base, "HEAD", &sensitive).unwrap().commands.is_empty(), "a declared sensitive change keeps the full gate");
         // The risk floors: a protected path, and a file the test map does not cover.
         for path in ["src/keys/key.ts", "notes.txt"] {

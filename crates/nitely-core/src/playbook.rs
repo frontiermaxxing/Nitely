@@ -326,7 +326,7 @@ pub(crate) fn refresh_setup(rules: &WorktreeRules, worktree: &Path, main: &Path,
         let (ok, output, seconds, flake) = run_retrying(&command, worktree, retries)?;
         let command = format!("{command} (setup again: a dependency file changed)");
         flakes.extend(flake.map(|f| Flake { command: command.clone(), ..f }));
-        results.push(CommandResult { command, ok, seconds, output, skipped: false, timed_out: false });
+        results.push(CommandResult { step: None, command, ok, seconds, output, skipped: false, timed_out: false });
         if !ok {
             return Ok((results, false));
         }
@@ -1409,6 +1409,17 @@ pub struct CommandResult {
     /// change, so the gate is not passed, but nobody is told to fix the code.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub timed_out: bool,
+    /// The gate step as the playbook writes it, before `{jobs}` or `{worktree}` are filled in: what
+    /// stays the same between an executed run and a pass answered from the record (NIT-557).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
+}
+
+impl CommandResult {
+    /// The step's identity: its playbook template, else (an older record) the command itself.
+    pub fn step_id(&self) -> &str {
+        self.step.as_deref().unwrap_or(&self.command)
+    }
 }
 
 impl GateResult {
@@ -1531,7 +1542,7 @@ pub fn start_task(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, 
     for command in &playbook.worktree.setup {
         let command = &expand(command, repo_root, &worktree, base);
         let (ok, output, seconds) = run_shell_kind(command, &worktree, "setup")?;
-        setup.push(CommandResult { command: command.clone(), ok, seconds, output, skipped: false, timed_out: false });
+        setup.push(CommandResult { step: None, command: command.clone(), ok, seconds, output, skipped: false, timed_out: false });
         if !ok {
             db.log_event(actor, Some(&issue.key), Some(&worktree_str), "setup_failed", &format!("{command} failed"))?;
             break;
@@ -1690,7 +1701,7 @@ fn run_gate_inner(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<
         let tree = if plan.is_some() {Some(git(worktree,&["rev-parse","HEAD^{tree}"])?.trim().to_string())} else {None};
         if let (Some(plan),Some(tree)) = (plan,&tree) {
             if let Some(run)=crate::verification::validated_pass(db,repo_root,tree,&plan.commands)? {
-                let results=plan.commands.iter().map(|c|CommandResult{command:c.clone(),ok:true,seconds:0,output:format!("passed on this same tree in lane run {run}, every selected test seen to run; not run again"),skipped:true,timed_out:false}).collect();
+                let results=plan.commands.iter().map(|c|CommandResult{step:None,command:c.clone(),ok:true,seconds:0,output:format!("passed on this same tree in lane run {run}, every selected test seen to run; not run again"),skipped:true,timed_out:false}).collect();
                 let mut gate=record_gate(db,issue_key,worktree,actor,&commit,results,true,vec![],playbook.unknown_warnings())?;
                 gate.lane_run=Some(run);
                 return Ok(gate);
@@ -1737,14 +1748,16 @@ fn run_gate_inner(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<
     for (command, skip) in steps {
         crate::project_modes::check_playbook_authority(db,yolo_keys,&playbook)?;
         if crate::project_yolo::all_enabled(db, yolo_keys)? { return crate::project_yolo::skipped_gate(db, worktree, yolo_keys, actor); }
+        // The template stays with the result, for what does not change between runs (NIT-557).
+        let template = command.clone();
         let command = expand(&command, repo_root, worktree, base);
         if let Some(why) = skip {
-            results.push(CommandResult { command, ok: true, seconds: 0, output: format!("skipped: {why}"), skipped: true, timed_out: false });
+            results.push(CommandResult { step: Some(template), command, ok: true, seconds: 0, output: format!("skipped: {why}"), skipped: true, timed_out: false });
             continue;
         }
         let (ok, output, seconds, flake) = run_retrying(&command, worktree, retries)?;
         flaked.extend(flake);
-        results.push(CommandResult { command, ok, seconds, output, skipped: false, timed_out: false });
+        results.push(CommandResult { step: Some(template), command, ok, seconds, output, skipped: false, timed_out: false });
         if !ok {
             passed = false;
             break;

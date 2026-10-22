@@ -605,7 +605,7 @@ pub(crate) fn after_land(root: &Path, pb: &Playbook, report: &mut Landed) {
         let command = playbook::expand(&step.run, root, root, &report.base);
         match crate::land_rules::after_step(step, files.as_deref()) {
             crate::land_rules::AfterStep::Skip(why) => {
-                report.after.push(playbook::CommandResult { command, ok: true, seconds: 0, output: format!("skipped: {why}"), skipped: true, timed_out: false });
+                report.after.push(playbook::CommandResult { step: None, command, ok: true, seconds: 0, output: format!("skipped: {why}"), skipped: true, timed_out: false });
                 continue;
             }
             // Run once the lock is released (`after_land_outside_lock`); it covers what it names.
@@ -616,8 +616,8 @@ pub(crate) fn after_land(root: &Path, pb: &Playbook, report: &mut Landed) {
             crate::land_rules::AfterStep::Run => {}
         }
         let result = match playbook::run_shell_kind(&command, root, "install") {
-            Ok((ok, output, seconds)) => playbook::CommandResult { command, ok, seconds, output, skipped: false, timed_out: false },
-            Err(e) => playbook::CommandResult { command, ok: false, seconds: 0, output: format!("{e:#}"), skipped: false, timed_out: false },
+            Ok((ok, output, seconds)) => playbook::CommandResult { step: None, command, ok, seconds, output, skipped: false, timed_out: false },
+            Err(e) => playbook::CommandResult { step: None, command, ok: false, seconds: 0, output: format!("{e:#}"), skipped: false, timed_out: false },
         };
         if result.ok {
             covered.push(step);
@@ -718,7 +718,7 @@ pub(crate) fn after_land_outside_lock(root: &Path, pb: &Playbook) -> Vec<playboo
                     Some(held) => held,
                     None => {
                         out.push(playbook::CommandResult {
-                            command: steps.iter().map(|s| s.run.as_str()).collect::<Vec<_>>().join("; "),
+                            step: None, command: steps.iter().map(|s| s.run.as_str()).collect::<Vec<_>>().join("; "),
                             ok: true,
                             seconds: 0,
                             output: "another land is running these steps; it runs them again at the newest commit once it is done".into(),
@@ -735,7 +735,7 @@ pub(crate) fn after_land_outside_lock(root: &Path, pb: &Playbook) -> Vec<playboo
             std::fs::remove_file(&pending).ok();
             match after_round(root, pb, &steps) {
                 Ok(ran) => out.extend(ran),
-                Err(e) => out.push(playbook::CommandResult { command: "preparing the after-land checkout".into(), ok: false, seconds: 0, output: format!("{e:#}"), skipped: false, timed_out: false }),
+                Err(e) => out.push(playbook::CommandResult { step: None, command: "preparing the after-land checkout".into(), ok: false, seconds: 0, output: format!("{e:#}"), skipped: false, timed_out: false }),
             }
             if !pending.exists() {
                 break;
@@ -770,7 +770,7 @@ pub(crate) fn after_land_soon(root: &Path, pb: &Playbook, key: Option<&str>) -> 
     let log = crate::paths::data_dir().join("jobs").join("land-after.log");
     match crate::submit_job::spawn_nitely(exe.as_deref().unwrap_or(Path::new("nitely")), &args, root, &log) {
         Ok(pid) => vec![playbook::CommandResult {
-            command: steps.iter().map(|s| s.run.as_str()).collect::<Vec<_>>().join("; "),
+            step: None, command: steps.iter().map(|s| s.run.as_str()).collect::<Vec<_>>().join("; "),
             ok: true,
             seconds: 0,
             output: format!("running in the background (process {pid}) once no land is waiting; what it does goes on the issue"),
@@ -860,12 +860,12 @@ fn after_round(root: &Path, pb: &Playbook, steps: &[&playbook::GateStep]) -> Res
         let command = playbook::expand(&step.run, root, &tree, base);
         let skip = files.as_deref().and_then(|f| step.skip_reason(f).ok().flatten());
         if let Some(why) = skip {
-            out.push(playbook::CommandResult { command, ok: true, seconds: 0, output: format!("skipped: {why}"), skipped: true, timed_out: false });
+            out.push(playbook::CommandResult { step: None, command, ok: true, seconds: 0, output: format!("skipped: {why}"), skipped: true, timed_out: false });
             continue;
         }
         out.push(match playbook::run_shell_kind(&command, &tree, "install") {
-            Ok((ok, output, seconds)) => playbook::CommandResult { command, ok, seconds, output, skipped: false, timed_out: false },
-            Err(e) => playbook::CommandResult { command, ok: false, seconds: 0, output: format!("{e:#}"), skipped: false, timed_out: false },
+            Ok((ok, output, seconds)) => playbook::CommandResult { step: None, command, ok, seconds, output, skipped: false, timed_out: false },
+            Err(e) => playbook::CommandResult { step: None, command, ok: false, seconds: 0, output: format!("{e:#}"), skipped: false, timed_out: false },
         });
     }
     Ok(out)
@@ -1730,7 +1730,7 @@ mod tests {
         let new = NewIssue { project: "NIT".into(), title: "Timed out".into(), kind: "bug".into(), body: "b".into(), evidence: "e".into(), source: "human".into(), allow_similar: true, ..Default::default() };
         let issue = f.db.create_issue(&new, &f.actor).unwrap();
         f.db.move_issue(&issue.key, "In Review", None, None, &f.actor).unwrap();
-        let step = |timed_out: bool| playbook::CommandResult { command: "cargo test".into(), ok: false, seconds: 1800, output: String::new(), skipped: false, timed_out };
+        let step = |timed_out: bool| playbook::CommandResult { step: None, command: "cargo test".into(), ok: false, seconds: 1800, output: String::new(), skipped: false, timed_out };
         let stopped = |timed_out: bool| -> Result<Landed> {
             let gate = GateResult { mode_authority: None, plan: None, skipped: None, passed: false, commit: "abc1234".into(), results: vec![step(timed_out)], warnings: vec![], flaked: vec![], lane_run: None };
             Ok(Landed { issue: issue.key.clone(), error: Some("the gate stopped".into()), gate: Some(gate), ..Default::default() })
