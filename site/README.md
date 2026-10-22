@@ -20,9 +20,9 @@ To publish it, copy the folder's contents to the web root behind nitely.net. It 
 file server with TLS, and long cache headers on `assets/`.
 
 Cloudflare caches the stylesheet and scripts for hours. After changing `styles.css` or
-`leaderboard.js`, raise the `?v=` number on their links in both pages, so visitors get the new file
+`leaderboard/leaderboard.js`, raise the `?v=` number on their links in both pages, so visitors get the new file
 at once.
 
-`leaderboard.html` reads the public board from `/v1/leaderboard/board/{week,30d,all}.json` on this
+`leaderboard/index.html` reads the public board from `/v1/leaderboard/board/{week,30d,all}.json` on this
 same site, so the web server proxies that one path (GET only) to the Leaderboard service
 (`server/leaderboard`). It renders every value as text and shows a link only when it is https.
