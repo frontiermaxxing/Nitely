@@ -253,6 +253,14 @@ impl Review {
 
 /// How severities are judged, word for word in a single and a batched review, so batching does not
 /// change what a P1 is.
+/// What is the change's to answer for and what is the base's (NIT-646). The second sentence is how
+/// a finding names the changed code that causes it, so one that cites only code the base brought
+/// in by a merge can be set aside without hiding a regression the change caused.
+const BASE_RULES: &str = "A defect that shows in code the change does not touch, but that the change causes, also cites the changed \
+line that causes it. A defect that is already on the base as it is, which this change neither causes nor worsens, is not \
+this change's: report it as `- [BASE] title: file, symbol: what goes wrong` instead, with no priority, and it is listed to \
+fix on the base without holding this change.";
+
 const SEVERITIES: &str = "using P0 for data loss or security, P1 for a definite bug in normal use, P2 for an edge case, P3 for a minor issue. \
 A P0 or P1 must name a concrete failure: the inputs or state that lead to a wrong result, data loss, a leak or a crash, and the \
 file and line that cause it. A risk with no such failure (\"what if\", a missing guard nothing reaches) is P2 at most, however \
@@ -538,7 +546,7 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
         if !self.focus.trim().is_empty() {
             p.push_str(&format!("\n{}\n", self.focus.trim()));
         }
-        p.push_str(&format!("\nReport each defect on its own line as:\n- [P0] title: file, symbol: what goes wrong and when\n{SEVERITIES}\n\n"));
+        p.push_str(&format!("\nReport each defect on its own line as:\n- [P0] title: file, symbol: what goes wrong and when\n{SEVERITIES}\n{BASE_RULES}\n\n"));
         p.push_str(&format!("Then end your reply with exactly these {} lines:\nVERDICT: <findings or clean>\n", 1 + self.flags.len()));
         for f in &self.flags {
             p.push_str(&format!("{}: <yes or no>\n", f.name));
@@ -586,6 +594,7 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
             }
         }
         let mut findings = parse_findings(text);
+        let base_findings = parse_base_findings(text);
         let code = worktree.map(CurrentCode::new);
         // A P0 or P1 that points at no file names no concrete failure: it counts as P2, and keeps
         // the priority it was raised at, which a later round can restore by citing the code (NIT-282).
@@ -619,7 +628,7 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
                     .collect()
             })
             .unwrap_or_default();
-        if verdict == "findings" && findings.is_empty() && !previous.iter().any(|r| r.status == "open") {
+        if verdict == "findings" && findings.is_empty() && base_findings.is_empty() && !previous.iter().any(|r| r.status == "open") {
             bail!("the {reviewer} review says it has findings but lists none as `- [Pn] ...`:\n{}", tail_lines(text));
         }
         for r in previous.iter().filter(|r| r.status != "fixed") {
@@ -644,7 +653,7 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
             .unwrap_or("")
             .to_string();
         let verdict = if findings.iter().any(|f| f.priority <= 1) { "changes" } else { "pass" };
-        Ok(Review { reviewer: reviewer.into(), verdict: verdict.into(), findings, flagged, summary, seconds, previous, note: String::new(), batch: None, tokens: None, reused: None, outside: vec![] })
+        Ok(Review { reviewer: reviewer.into(), verdict: verdict.into(), findings, flagged, summary, seconds, previous, note: String::new(), batch: None, tokens: None, reused: None, outside: base_findings })
     }
 
     /// The instructions for several changes reviewed in one call (docs/batching.md): one section
@@ -706,7 +715,7 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
         if !self.focus.trim().is_empty() {
             p.push_str(&format!("\n{}\n", self.focus.trim()));
         }
-        p.push_str(&format!("\nReport each defect on its own line as:\n- [P0] CHANGE <k>: title: file, symbol: what goes wrong and when\n{SEVERITIES}\n\n"));
+        p.push_str(&format!("\nReport each defect on its own line as:\n- [P0] CHANGE <k>: title: file, symbol: what goes wrong and when\n{SEVERITIES}\n{BASE_RULES} In a batch, `- [BASE] CHANGE <k>: ...`.\n\n"));
         p.push_str("Then end your reply with these lines for each change, change 1's first:\nVERDICT <k>: <findings or clean>\n");
         for f in &self.flags {
             p.push_str(&format!("{} <k>: <yes or no>\n", f.name));
@@ -734,13 +743,16 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
         for line in text.lines() {
             let l = line.replace("**", "");
             let t = l.trim().trim_start_matches('`');
-            if let Some(rest) = t.strip_prefix("- [P").or_else(|| t.strip_prefix("* [P")) {
+            let base_line = t.strip_prefix("- [BASE]").or_else(|| t.strip_prefix("* [BASE]")).map(|rest| ("BASE", rest));
+            if let Some(rest) = base_line.map(|(_, r)| format!("BASE]{r}")).or_else(|| t.strip_prefix("- [P").or_else(|| t.strip_prefix("* [P")).map(str::to_string)) {
+                let tag = if base_line.is_some() { "BASE" } else { "P" };
                 let Some((priority, body)) = rest.split_once(']') else { continue };
+                let priority = if tag == "BASE" { String::new() } else { priority.to_string() };
                 let body = body.trim();
                 match body.get(..7).filter(|w| w.eq_ignore_ascii_case("change ")).and_then(|_| body[7..].split_once(|c: char| !c.is_ascii_digit() && c != '#')) {
                     Some((k, said)) if index(k).is_some() => {
                         let said = said.trim_start_matches([':', ' ', '-', '\u{2013}', '\u{2014}']);
-                        parts[index(k).unwrap()].push(format!("- [P{priority}] {said}"));
+                        parts[index(k).unwrap()].push(format!("- [{tag}{priority}] {said}"));
                     }
                     _ => stray.push(body.to_string()),
                 }
@@ -1229,6 +1241,21 @@ pub fn parse_findings(text: &str) -> Vec<Finding> {
     out
 }
 
+/// The `- [BASE] ...` lines: defects the reviewer says are the base's own, not this change's
+/// (NIT-646). They hold nothing; P2 marks them as not blocking wherever they are shown.
+pub fn parse_base_findings(text: &str) -> Vec<Finding> {
+    let mut out: Vec<Finding> = Vec::new();
+    for line in text.lines() {
+        let l = line.trim_start();
+        let Some(rest) = l.strip_prefix("- [BASE]").or_else(|| l.strip_prefix("* [BASE]")) else { continue };
+        let text = rest.trim().to_string();
+        if !text.is_empty() && !out.iter().any(|f| f.text == text) {
+            out.push(Finding { priority: 2, text, carried: false, raised_as: None, now: None });
+        }
+    }
+    out
+}
+
 fn tail_lines(text: &str) -> String {
     let t = text.trim();
     let start = t.char_indices().rev().nth(800).map_or(0, |(i, _)| i);
@@ -1603,6 +1630,10 @@ VERDICT: findings\nMONEY_OR_RELEASE: no";
         assert_eq!(texts(&review.outside), ["Quick start loses the flag", "Main's tail is wrong"]);
         assert_eq!(review.verdict, "changes", "the change's own P1 still holds it");
 
+        // The reviewer can say a defect is the base's own, whenever it came in: it holds nothing.
+        let r = rules().parse("codex", "- [BASE] Old overflow: src/quick.rs:2, parse\nVERDICT: findings\nMONEY_OR_RELEASE: no", 1, None, Some(&dir)).unwrap();
+        assert_eq!((r.verdict.as_str(), r.findings.len(), texts(&r.outside)), ("pass", 0, vec!["Old overflow".to_string()]));
+
         // A carried finding the reviewer confirmed open stays, whatever its first citation says now.
         let carried = PreviousRound {
             findings: vec![Finding { priority: 1, text: "Quick start loses the flag: src/quick.rs:5, start".into(), carried: false, raised_as: None, now: None }],
@@ -1958,6 +1989,10 @@ VERDICT 1: findings\nMONEY_OR_RELEASE 1: no\nVERDICT 2: findings\nMONEY_OR_RELEA
         assert!(only_two.reviews[0].is_ok() && only_two.reviews[1].as_ref().unwrap_err().contains("without saying which change"), "{only_two:?}");
         let both = stray("- [P1] CHANGE 7: Leak: nowhere");
         assert!(both.reviews.iter().all(|r| r.is_err()), "{both:?}");
+        // A defect the reviewer says is the base's own goes to its change, and holds nothing (NIT-646).
+        let base = stray("- [BASE] CHANGE 2: Old leak: other.rs:4, keeps the token");
+        let two = base.reviews[1].as_ref().unwrap();
+        assert_eq!((two.verdict.as_str(), two.findings.len(), two.outside.len()), ("pass", 0, 1), "{base:?}");
         let no_verdict = rules.parse_batch("codex", "VERDICT 1: clean\nMONEY_OR_RELEASE 1: no\n", 1, &changes);
         assert!(no_verdict.reviews[0].is_ok() && no_verdict.reviews[1].as_ref().unwrap_err().contains("no VERDICT"), "{no_verdict:?}");
         // Its part unfinished (a flag unanswered) is the same.
