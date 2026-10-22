@@ -933,7 +933,7 @@ function FindingsCard(props: {
   // Each finding is decided on its own line: no key decides one for the card.
   props.keys.current = {};
   return (
-    <article className="inbox-detail decision-ask decision-findings">
+    <article className="inbox-detail decision-ask decision-finding-group">
       <div className="dd-context">
         <span className="dd-kind">Review findings</span>
         {issue && <span className="mono muted">{issue.key}</span>}
