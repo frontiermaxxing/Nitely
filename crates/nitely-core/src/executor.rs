@@ -1389,6 +1389,12 @@ pub fn wait(db: &Db, pending: Pending) -> Result<SuiteEvidence> {
                 if pending.every_log || result.command.contains("test") {
                     if let Some(log) = job.and_then(|j| gh(&["run", "view", "--repo", &pending.slug, "--job", &j.to_string(), "--log"], Duration::from_secs(120)).ok()) {
                         evidence.timings.extend(crate::test_budget::parse(&log));
+                        // What the job's runner said it ran, under its page, so the gate's evidence
+                        // check sees a CI run's tests as it sees a lane's (NIT-612).
+                        let ran = test_evidence(&log);
+                        if result.ok && !ran.is_empty() {
+                            result.output = format!("{}\n{ran}", result.output);
+                        }
                         evidence.logs.push((result.command.clone(), log));
                     }
                 }
@@ -1437,6 +1443,27 @@ pub fn wait(db: &Db, pending: Pending) -> Result<SuiteEvidence> {
             Err(e)
         }
     }
+}
+
+/// A line of `gh run view --log` as its job printed it: gh puts the job, the step and a timestamp
+/// before each line (`npm test<TAB>Run npm test<TAB>2026-10-22T01:02:03.4567890Z # pass 197`).
+pub(crate) fn log_text(line: &str) -> &str {
+    let text = line.rsplit('\t').next().unwrap_or(line);
+    let stamped = text.len() > 20 && text.as_bytes()[..4].iter().all(u8::is_ascii_digit) && text.as_bytes()[10] == b'T';
+    match text.find("Z ") {
+        Some(at) if stamped && at < 40 => &text[at + 2..],
+        _ => text,
+    }
+}
+
+/// The lines of a CI job's log that say what its tests did: TAP's totals (`# tests`, `# pass`,
+/// `# fail`) and cargo's `test result:` lines, as the runner printed them.
+pub(crate) fn test_evidence(log: &str) -> String {
+    log.lines()
+        .map(|l| log_text(l).trim())
+        .filter(|l| ["# tests ", "# pass ", "# fail ", "test result: "].iter().any(|p| l.starts_with(p)))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Stops a dispatched suite whose result no longer matters (the gate failed locally first): cancels
@@ -1729,6 +1756,22 @@ mod tests {
         }
         // Without ci_commands, the project has not opted in: nothing goes to CI.
         assert_eq!(run_in_ci(&Playbook::parse("[lanes]\n").unwrap(), "cargo test -p nitely-core"), None);
+    }
+
+    /// A CI job's log keeps the test totals its runner printed, under gh's job, step and timestamp
+    /// prefix, so the gate's evidence check sees the tests a CI run executed (NIT-612).
+    #[test]
+    fn a_ci_jobs_log_gives_the_test_totals_its_runner_printed() {
+        let log = "npm test\tRun npm test\t2026-10-22T01:02:03.4567890Z ok 197 - a workflow keeps runs apart\n\
+                   npm test\tRun npm test\t2026-10-22T01:02:03.5000000Z # tests 197\n\
+                   npm test\tRun npm test\t2026-10-22T01:02:03.5000001Z # pass 197\n\
+                   npm test\tRun npm test\t2026-10-22T01:02:03.5000002Z # fail 0\n\
+                   cargo\tRun cargo test\t2026-10-22T01:03:00.0000000Z test result: ok. 12 passed; 0 failed; 0 ignored\n\
+                   npm test\tPost\t2026-10-22T01:04:00.0000000Z Cleaning up # pass 9";
+        assert_eq!(test_evidence(log), "# tests 197\n# pass 197\n# fail 0\ntest result: ok. 12 passed; 0 failed; 0 ignored");
+        assert_eq!(log_text("# pass 3"), "# pass 3", "a line without gh's prefix stays as it is");
+        assert_eq!(log_text("job\tstep\tplain text"), "plain text");
+        assert_eq!(test_evidence("job\tstep\t2026-10-22T01:02:03Z nothing here"), "");
     }
 
     #[test]
